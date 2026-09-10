@@ -43,6 +43,8 @@ namespace CompetitiveRounds
             public string winner_steam_id, p1_steam_id, p2_steam_id;
             public string completed_at;
             public List<SeriesBetEntry> bets = new List<SeriesBetEntry>();
+            // Room rules (Sept 10): the series' frozen record (see MatchHistoryEntry).
+            public bool has_rules, rules_ff = true, rules_sc, rules_xp;
         }
 
         public class SeriesBetEntry
@@ -173,6 +175,10 @@ namespace CompetitiveRounds
             // Hide-gold utility toggle state. When true the leaderboard masks our gold.
             public bool hide_gold;
             public bool appear_offline;
+            // Room rules (Sept 10): the Same Cards preference for queue-matched
+            // rooms — flat bool, free JsonUtility parse (#73). Drives the
+            // Settings-tab toggle's label; the server reads it at issuance.
+            public bool pref_same_cards;
             // July 22 item 8: opt-in Discord display name on the leaderboard
             // detail. Flat scalars — JsonUtility parses them for free (#73).
             public string discord_display_name;
@@ -432,6 +438,10 @@ namespace CompetitiveRounds
             public string cards_display; // Comma-separated card names for display
             public string opp_cards_display; // Opponent's cards
             public string series_id; // For grouping matches into BO3 series
+            // Room rules (Sept 10): the series' frozen record; has_rules=false on
+            // rows without one (born before the record, casual) — the row then
+            // says nothing rather than something false.
+            public bool has_rules, rules_ff = true, rules_sc, rules_xp;
             // Sept 6 batch (Group 4 item c): the reporter-minted session id this game
             // was filed under (an opaque UUID, never a room identifier); "" on rows
             // without one. The Casual box groups consecutive games by it for the
@@ -2414,6 +2424,9 @@ namespace CompetitiveRounds
             public string left_label, right_label, score;
             public float left_rating_change, right_rating_change;
             public List<MultimodeBet> bets = new List<MultimodeBet>();
+            // Room rules (Sept 10): the record (2v2 / 1v2) or the FFA settings block.
+            public bool has_rules, rules_ff = true, rules_sc, rules_xp;
+            public FfaSettingsInfo ffa_settings;
         }
 
         public class MultimodeBet
@@ -2461,6 +2474,8 @@ namespace CompetitiveRounds
                                 left_rating_change = ExtractJsonFloat(chunk, "left_rating_change"),
                                 right_rating_change = ExtractJsonFloat(chunk, "right_rating_change"),
                             };
+                            ReadHistoryRules(chunk, out e.has_rules, out e.rules_ff, out e.rules_sc, out e.rules_xp);   // room rules (Sept 10)
+                            e.ffa_settings = ReadFfaSettings(chunk);
                             int bk = chunk.IndexOf("\"bets\":", StringComparison.Ordinal);
                             int bo = bk >= 0 ? chunk.IndexOf('[', bk) : -1;
                             int bc = bo >= 0 ? FindMatchingBracketStringAware(chunk, bo) : -1;
@@ -3610,6 +3625,23 @@ namespace CompetitiveRounds
                 Plugin.Log.LogInfo($"[HOME] set appear_offline {on}: ok={ok} resp={resp}");
                 callback?.Invoke(ok, resp);
                 if (ok) { FetchPlayerStats(steamId); FetchOnlinePlayers(); }
+            }));
+        }
+
+        /// <summary>Room rules (Sept 10): the Same Cards preference for
+        /// queue-matched rooms. HMAC over "pref_same_cards:{steam_id}:{1|0}";
+        /// the server also requires the verified Steam session. Re-fetches the
+        /// stats on success so the Settings-tab label reconciles with the
+        /// server truth (the toggle flips optimistically).</summary>
+        public static void SetPrefSameCards(string steamId, bool on, Action<bool, string> callback = null)
+        {
+            string sig = ComputeHmacHex($"pref_same_cards:{steamId}:{(on ? 1 : 0)}");
+            string url = $"{baseUrl}/api/v1/players/{steamId}/pref-same-cards?on={(on ? "true" : "false")}&sig={sig}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[SETTINGS] set pref_same_cards {on}: ok={ok} resp={resp}");
+                callback?.Invoke(ok, resp);
+                if (ok) FetchPlayerStats(steamId);
             }));
         }
 
@@ -6829,6 +6861,8 @@ namespace CompetitiveRounds
                                 // server has always sent this, the client just
                                 // never read it.
                                 e.completed_at = ExtractJsonString(parts[i], "completed_at");
+                                // Room rules (Sept 10): the record follows series_id in the same chunk.
+                                ReadHistoryRules(parts[i], out e.has_rules, out e.rules_ff, out e.rules_sc, out e.rules_xp);
                                 // Parse the bets array. Server inlines a 'bets' list into each series — each entry has
                                 // bettor_name / amount / payout / bet_on_name / won. We isolate this series's bets chunk
                                 // (from "bets" up to the next "series_id" boundary) so we don't accidentally pull bets
@@ -9181,6 +9215,7 @@ namespace CompetitiveRounds
             entry.cards_display = ExtractCardNames(chunk);
             entry.opp_cards_display = ExtractCardNames(chunk, "opponent_cards_picked");
             entry.series_id = ExtractJsonString(chunk, "series_id");
+            ReadHistoryRules(chunk, out entry.has_rules, out entry.rules_ff, out entry.rules_sc, out entry.rules_xp);   // room rules (Sept 10)
             entry.session_uuid = ExtractJsonString(chunk, "session_uuid");   // Sept 6 item c: JSON null reads as ""
             entry.sitting_head = chunk.Contains("\"sitting_head\":true") || chunk.Contains("\"sitting_head\": true");   // Sept 8 item 5: absent (old api) reads false
             entry.series_score = ExtractJsonString(chunk, "series_score");
@@ -9433,6 +9468,93 @@ namespace CompetitiveRounds
         public static string ExtractJsonStringPublic(string json, string key) => ExtractJsonString(json, key);
         public static int ExtractJsonIntPublic(string json, string key) => ExtractJsonInt(json, key);
         public static bool ExtractJsonBoolPublic(string json, string key) => ExtractJsonBool(json, key);
+
+        /// <summary>Room rules: the provenance ("lobby" | "queue") inside the
+        /// nested <c>rules</c> object of a ready / resolve payload. Null when the
+        /// payload carries no such object (an older server) or it is null. The
+        /// key search includes the closing quote, so <c>rules_prop</c> does not
+        /// match, and the value must open with a brace.</summary>
+        private static string ExtractRulesSrc(string json)
+        {
+            string o = ExtractNestedObject(json, "rules");
+            return o == null ? null : ExtractJsonString(o, "src");
+        }
+
+        /// <summary>Room rules: the nested object at <c>"key": {...}</c> as a
+        /// string slice, or null when the key is absent or its value is null /
+        /// a scalar / an array. A KEY, not a value: the match must be preceded
+        /// by '{' or ',' (whitespace skipped) and followed by ':' — an
+        /// opponent literally named "rules" is a value and never matches
+        /// (#156). Brace matching is string-aware.</summary>
+        internal static string ExtractNestedObject(string json, string key)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(json) || string.IsNullOrEmpty(key)) return null;
+                string needle = "\"" + key + "\"";
+                int from = 0;
+                while (true)
+                {
+                    int i = json.IndexOf(needle, from, StringComparison.Ordinal);
+                    if (i < 0) return null;
+                    from = i + needle.Length;
+                    int b = i - 1;
+                    while (b >= 0 && (json[b] == ' ' || json[b] == '\n' || json[b] == '\r' || json[b] == '\t')) b--;
+                    if (b >= 0 && json[b] != '{' && json[b] != ',') continue;   // a value, keep looking
+                    int a = i + needle.Length;
+                    while (a < json.Length && (json[a] == ' ' || json[a] == '\n' || json[a] == '\r' || json[a] == '\t')) a++;
+                    if (a >= json.Length || json[a] != ':') continue;
+                    int o = a + 1;
+                    while (o < json.Length && (json[o] == ' ' || json[o] == '\n' || json[o] == '\r' || json[o] == '\t')) o++;
+                    if (o >= json.Length || json[o] != '{') return null;      // null / scalar / array value
+                    int e = FindMatchingBraceStringAware(json, o);
+                    if (e <= o) return null;
+                    return json.Substring(o, e - o + 1);
+                }
+            }
+            catch { return null; }
+        }
+
+        /// <summary>Room rules: a history row's nested <c>rules</c> object
+        /// ({ff, sc[, xp]}) into the DTO's four fields. has=false when the row
+        /// carries none (a series born before the record, a casual game, an
+        /// older server): the row then says nothing rather than something
+        /// false. Absent keys read as the defaults.</summary>
+        internal static void ReadHistoryRules(string json, out bool has, out bool ff, out bool sc, out bool xp)
+        {
+            has = false; ff = true; sc = false; xp = false;
+            string o = ExtractNestedObject(json, "rules");
+            if (o == null) return;
+            has = true;
+            ff = !(o.Contains("\"ff\":false") || o.Contains("\"ff\": false"));
+            sc = o.Contains("\"sc\":true") || o.Contains("\"sc\": true");
+            xp = o.Contains("\"xp\":true") || o.Contains("\"xp\": true");
+        }
+
+        /// <summary>The FFA lobby settings block a history row carries — ONE
+        /// reader for the profile-card FFA rows and the Home-tab recent line
+        /// (the FFA recent list keeps its own inline parse of the same block).
+        /// Null when the row has none (a pre-config match, an older server).</summary>
+        public class FfaSettingsInfo
+        {
+            public int score_target, card_cap, initial_picks, card_candidates;
+            public bool same_card_rule, sudden_death;
+        }
+        internal static FfaSettingsInfo ReadFfaSettings(string json)
+        {
+            string so = ExtractNestedObject(json, "settings");
+            if (so == null) return null;
+            var s = new FfaSettingsInfo
+            {
+                score_target = ExtractJsonInt(so, "score_target"),
+                card_cap = ExtractJsonInt(so, "card_cap"),
+                initial_picks = ExtractJsonInt(so, "initial_picks"),
+                card_candidates = ExtractJsonInt(so, "card_candidates"),
+                same_card_rule = ExtractJsonBool(so, "same_card_rule"),
+                sudden_death = ExtractJsonBool(so, "sudden_death"),
+            };
+            return s.score_target > 0 ? s : null;
+        }
 
         /// <summary>Reads a flat array of strings ("xp_bonuses":["a","b"]) into a list.
         /// Quote-aware, so a label containing a comma can't split into two entries —
@@ -10834,7 +10956,7 @@ namespace CompetitiveRounds
                                 // the poll data nulled next (r3 §1.2 MEDIUM).
                                 RetainIssuedPair(room, response);
                                 LastPollData = null;
-                                Plugin.SetPendingRoom(room, region);
+                                Plugin.SetPendingRoom(room, region, ExtractJsonString(response, "rules_prop"), ExtractRulesSrc(response));
                                 Plugin.Log.LogInfo($"[QUEUE] Both ready! Joining room: {room} (region: {region ?? "auto"}) series={ActiveRankedSeriesId}");
                                 CompetitiveUI.ShowNotification("Both ready! Joining match...", Color.green, 5f);
                                 // Refresh the Live Ranked Series list immediately so spectators
@@ -10983,7 +11105,7 @@ namespace CompetitiveRounds
                             // poll data nulled next (r3 §1.2 MEDIUM).
                             RetainIssuedPair(room, response);
                             LastPollData = null;
-                            Plugin.SetPendingRoom(room, region);
+                            Plugin.SetPendingRoom(room, region, ExtractJsonString(response, "rules_prop"), ExtractRulesSrc(response));
                             Plugin.Log.LogInfo($"[QUEUE] Both ready! Joining room: {room} (region: {region ?? "auto"}) series={ActiveRankedSeriesId ?? "(none)"}");
                             CompetitiveUI.ShowNotification("Both ready! Joining match...", Color.green, 5f);
                             NativeUI.MarkDirty();
@@ -12194,6 +12316,8 @@ namespace CompetitiveRounds
             public List<TeamQueueMember> opponents = new List<TeamQueueMember>();
             public string room_name;
             public string room_region;
+            public string rules_prop;      // room rules (§4.6): the issued "ff=1;sc=0" string
+            public string rules_src;       // "lobby" | "queue"
             public int match_age_seconds;
             public bool my_ready;          // the polling player's own ready flag
         }
@@ -12620,6 +12744,8 @@ namespace CompetitiveRounds
                 team_assigned = ExtractJsonInt(response, "team_assigned"),
                 room_name = ExtractJsonString(response, "room_name"),
                 room_region = ExtractJsonString(response, "room_region"),
+                rules_prop = ExtractJsonString(response, "rules_prop"),
+                rules_src = ExtractRulesSrc(response),
                 match_age_seconds = ExtractJsonInt(response, "match_age_seconds"),
                 my_ready = ExtractJsonBool(response, "my_ready"),
             };
@@ -12686,7 +12812,7 @@ namespace CompetitiveRounds
                     try { PlayerColorCosmetic.PublishLocalProps(); } catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] pre-join pcolor publish: {ex.Message}"); }
                     try { TrailCosmetic.PublishLocalProps(); } catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] pre-join trail publish: {ex.Message}"); }
 
-                    Plugin.SetPendingRoom(data.room_name, data.room_region);
+                    Plugin.SetPendingRoom(data.room_name, data.room_region, data.rules_prop, data.rules_src);
                     Plugin.Log.LogInfo($"[TEAM-QUEUE] All ready! Room: {data.room_name} (region: {data.room_region ?? "auto"}) series={data.series_id} my_slot={slot}");
                     CompetitiveUI.ShowNotification("4/4 ready! Joining 2v2...", Color.green, 5f);
                     // Auto-close the F5 panel so testers don't sit on the queue screen
@@ -13330,6 +13456,8 @@ namespace CompetitiveRounds
             public bool color_decided;
             public TeamSeriesSlot t1a, t1b, t2a, t2b;
             public List<TeamSeriesMatch> matches = new List<TeamSeriesMatch>();
+            // Room rules (Sept 10): the series' frozen record (see MatchHistoryEntry).
+            public bool has_rules, rules_ff = true, rules_sc, rules_xp;
         }
 
         public static List<TeamSeriesPagedEntry> CachedTeamSeriesPaged { get; private set; } = new List<TeamSeriesPagedEntry>();
@@ -13400,6 +13528,7 @@ namespace CompetitiveRounds
                     t2b = ParseSeriesSlot(obj, "t2b"),
                     matches = ParseSeriesMatches(obj),
                 };
+                ReadHistoryRules(obj, out e.has_rules, out e.rules_ff, out e.rules_sc, out e.rules_xp);   // room rules (Sept 10)
                 list.Add(e);
             }
             return list;
@@ -14122,7 +14251,7 @@ namespace CompetitiveRounds
                         try { PlayerColorCosmetic.PublishLocalProps(); } catch (Exception ex) { Plugin.Log.LogWarning($"[1v2] pre-join pcolor publish: {ex.Message}"); }
                         try { TrailCosmetic.PublishLocalProps(); } catch (Exception ex) { Plugin.Log.LogWarning($"[1v2] pre-join trail publish: {ex.Message}"); }
 
-                        Plugin.SetPendingRoom(room, region);
+                        Plugin.SetPendingRoom(room, region, ExtractJsonString(resp, "rules_prop"), ExtractRulesSrc(resp));
                         Plugin.Log.LogInfo($"[1v2] All ready! Room: {room} (region: {region ?? "auto"}) series={ActiveOvt1v2SeriesId} side={OvtMySide} slot={slot}");
                         CompetitiveUI.ShowNotification(OvtMySide == 1
                             ? "3/3 ready! Joining 1v2 — you are the SOLO..."
@@ -14448,6 +14577,8 @@ namespace CompetitiveRounds
             public Dictionary<string, int> gold_by_steam = new Dictionary<string, int>();
             public Dictionary<string, int> xp_by_steam = new Dictionary<string, int>();
             public List<OvtRecentMatch> matches = new List<OvtRecentMatch>();
+            // Room rules (Sept 10): the series' frozen record (see MatchHistoryEntry).
+            public bool has_rules, rules_ff = true, rules_sc, rules_xp;
         }
         public static List<OvtRecentSeries> CachedOvtRecent = null;
         public static int CachedOvtRecentTotal = 0;
@@ -14627,6 +14758,8 @@ namespace CompetitiveRounds
                                 gold_by_steam = ParseSteamIntMap(head, "gold_by_steam"),
                                 xp_by_steam = ParseSteamIntMap(head, "xp_by_steam"),
                             };
+                            // Room rules (Sept 10): a series-level key (no match object carries one).
+                            ReadHistoryRules(sObj, out s.has_rules, out s.rules_ff, out s.rules_sc, out s.rules_xp);
                             // solo: {"steam_id":..,"display_name":..}
                             int soloK = head.IndexOf("\"solo\":");
                             int soloOpen = soloK >= 0 ? head.IndexOf('{', soloK) : -1;
@@ -14777,6 +14910,7 @@ namespace CompetitiveRounds
             public bool has_settings;
             public int score_target, card_cap, initial_picks, card_candidates;
             public bool same_card_rule;
+            public bool sudden_death;   // room rules (Sept 10): every setting shows
             public List<FfaRecentPlayer> players = new List<FfaRecentPlayer>();
         }
         public static List<FfaRecentMatch> CachedFfaRecent = null;
@@ -14798,6 +14932,8 @@ namespace CompetitiveRounds
             public bool won, has_rating_change;
             public float rating_change;
             public List<string> opponents = new List<string>();
+            // Room rules (Sept 10): the series' frozen record (see MatchHistoryEntry).
+            public bool has_rules, rules_ff = true, rules_sc, rules_xp;
         }
         public class PlayerOvtHistoryEntry
         {
@@ -14812,6 +14948,8 @@ namespace CompetitiveRounds
             // Aug 7. The REQUESTER's own seat, already oriented by the server, so
             // no solo/duo_a/duo_b resolution is needed here. Empty = not recorded.
             public string damage_dealt_timeline;
+            // Room rules (Sept 10): the series' frozen record incl. the solo extra pick (xp).
+            public bool has_rules, rules_ff = true, rules_sc, rules_xp;
         }
         public class PlayerFfaHistoryEntry
         {
@@ -14820,6 +14958,8 @@ namespace CompetitiveRounds
             public bool has_rating_change;
             public float rating_change;
             public List<string> participants = new List<string>();
+            // Room rules (Sept 10): the lobby settings block, null when unknown.
+            public FfaSettingsInfo ffa_settings;
         }
         public static readonly Dictionary<string, List<PlayerTeamHistoryEntry>> CachedPlayerTeamHistory
             = new Dictionary<string, List<PlayerTeamHistoryEntry>>();
@@ -16053,6 +16193,11 @@ namespace CompetitiveRounds
             public string steam_id, display_name;
             public int rating, rating_1v1, wait_seconds, preferred_team, preferred_side;
             public bool is_host, solo_extra_pick;
+            // Room rules (Sept 10): this seat's mod cannot play the lobby's
+            // CURRENT settings (rendered "update mod"); this seat has not yet
+            // echoed the current settings generation (absent = older server = true).
+            public bool needs_update;
+            public bool settings_seen = true;
         }
         public class HostLobbyOpenEntry
         {
@@ -16082,6 +16227,20 @@ namespace CompetitiveRounds
             public List<HostLobbyMemberEntry> Members;
             public string Status = "";        // "" | "lobby" | "leaving"
             public bool Polling;              // the 2s /lobby/state heartbeat armed
+
+            // Room rules (Sept 10, migration 306): the host's lobby-wide
+            // settings as the server last sent them, their generation, and
+            // the generation this seat echoes back on its next poll. Server-
+            // true, never a local flip: the rows render these, a write folds
+            // the server's echo on its ack, and a poll answer older than the
+            // last accepted generation is ignored (monotonic per lobby).
+            public bool FriendlyFire = true, SameCards = false;
+            public bool SettingsKnown;                 // a poll carried the fields (server >= migration 306)
+            public int SettingsVersion = -1;
+            private int seenSettingsVersion;
+            private string settingsLobbyId;
+            private bool settingsInFlight; private float settingsAt = -999f;
+            public bool SettingsInFlight => settingsInFlight && Time.realtimeSinceStartup - settingsAt < 25f;
 
             // Browser (with the FfaLobbiesUnavailable degradation, recon risk 6).
             public List<HostLobbyOpenEntry> CachedLobbies;
@@ -16414,6 +16573,19 @@ namespace CompetitiveRounds
                         NativeUI.MarkDirty();
                         return;
                     }
+                    // Room rules (migration 306): the lobby's CURRENT settings
+                    // need a newer mod than this one. Refused before any
+                    // mutation (NEW seats only), so there is no seat to keep
+                    // believing in — clear, explain, never retry.
+                    if (detail == "rules_unsupported")
+                    {
+                        ClearMembershipSilent();
+                        leaveIntent = false; leaveTarget = null;
+                        CompetitiveUI.ShowNotification(RulesDetailText(detail), new Color(1f, 0.7f, 0.3f), 7f);
+                        FetchLobbies(force: true);
+                        NativeUI.MarkDirty();
+                        return;
+                    }
                     if (wasRecovery && serverSpoke)
                     {
                         // The server judged our old membership: it's gone.
@@ -16446,6 +16618,8 @@ namespace CompetitiveRounds
                 OpenLobbyId = null;
                 IsHost = false; CanStart = false; HasPassword = false;
                 Members = null; MemberCount = 0;
+                FriendlyFire = true; SameCards = false; SettingsKnown = false;   // room rules die with the seat
+                SettingsVersion = -1; seenSettingsVersion = 0; settingsLobbyId = null; settingsInFlight = false;
                 Polling = false; confirmedMember = false;
                 ambiguousUntil = -999f; handoffUntil = -999f;
                 if (Status == "lobby") Status = "";
@@ -16480,7 +16654,10 @@ namespace CompetitiveRounds
                     if (!ok)
                     {
                         Plugin.Log.LogWarning($"[{label}-LOBBY] start failed: {resp}");
-                        CompetitiveUI.ShowNotification(DetailOr(resp, I18n.Tr("Couldn't start the game.")), new Color(1f, 0.6f, 0.2f), 5f);
+                        // Room rules: the two settings gates render as sentences, not tokens.
+                        string _detail = ExtractJsonString(resp ?? "", "detail");
+                        CompetitiveUI.ShowNotification(RulesDetailText(_detail)
+                            ?? DetailOr(resp, I18n.Tr("Couldn't start the game.")), new Color(1f, 0.6f, 0.2f), 5f);
                         NativeUI.MarkDirty();
                         return;
                     }
@@ -16753,7 +16930,7 @@ namespace CompetitiveRounds
                     lastPollAt = Time.unscaledTime;
                     int g = gen;
                     Plugin.Instance.StartCoroutine(GetRequest(
-                        $"{baseUrl}/api/v1/{mode}/lobby/state?steam_id={UnityWebRequest.EscapeURL(sid)}", (ok, resp) =>
+                        $"{baseUrl}/api/v1/{mode}/lobby/state?steam_id={UnityWebRequest.EscapeURL(sid)}&seen_settings_version={Math.Max(0, seenSettingsVersion)}", (ok, resp) =>
                     {
                         if (!ok || string.IsNullOrEmpty(resp)) return;
                         if (!Polling || g != gen) return;
@@ -16799,6 +16976,37 @@ namespace CompetitiveRounds
                     MemberCount = ExtractJsonInt(resp, "player_count");
                     int mx = ExtractJsonInt(resp, "max_players"); if (mx > 0) MaxPlayers = mx;
                     Status = "lobby";
+                    // Room rules (Sept 10): the host's settings + generation.
+                    // Absent (older server) -> not known: rows hidden, nothing
+                    // echoed. Accepted only when the generation is at/after the
+                    // last accepted one for THIS lobby, so a poll answer that
+                    // predates our own acked write never rolls it back.
+                    if (resp.IndexOf("\"settings_version\"", StringComparison.Ordinal) >= 0)
+                    {
+                        int ver = ExtractJsonInt(resp, "settings_version");
+                        if (!string.Equals(settingsLobbyId, OpenLobbyId, StringComparison.Ordinal))
+                        {
+                            settingsLobbyId = OpenLobbyId;
+                            SettingsVersion = -1; seenSettingsVersion = 0; SettingsKnown = false;
+                        }
+                        if (ver >= SettingsVersion)
+                        {
+                            bool ff = !(resp.Contains("\"friendly_fire\":false") || resp.Contains("\"friendly_fire\": false"));
+                            bool sc = resp.Contains("\"same_cards\":true") || resp.Contains("\"same_cards\": true");
+                            bool changed = SettingsKnown && ver > SettingsVersion && (ff != FriendlyFire || sc != SameCards);
+                            FriendlyFire = ff; SameCards = sc; SettingsVersion = ver; SettingsKnown = true;
+                            // Rendered by the refresh this poll marks dirty; echoed on the next poll.
+                            seenSettingsVersion = ver;
+                            if (changed && !IsHost)
+                            {
+                                string what = RoomRules.Summary(true, ff, sc);
+                                CompetitiveUI.ShowNotification(what.Length > 0
+                                    ? I18n.TrF("The host changed the lobby settings: {0}", what)
+                                    : I18n.Tr("The host reset the lobby settings to the defaults."),
+                                    new Color(0.6f, 0.9f, 1f), 5f);
+                            }
+                        }
+                    }
                     try
                     {
                         var members = new List<HostLobbyMemberEntry>();
@@ -16820,6 +17028,8 @@ namespace CompetitiveRounds
                                     preferred_side = ExtractJsonInt(obj, "preferred_side"),
                                     solo_extra_pick = ExtractJsonBool(obj, "solo_extra_pick"),
                                     is_host = ExtractJsonBool(obj, "is_host"),
+                                    needs_update = ExtractJsonBool(obj, "needs_update"),
+                                    settings_seen = !(obj.Contains("\"settings_seen\":false") || obj.Contains("\"settings_seen\": false")),
                                 });
                             }
                         }
@@ -17102,6 +17312,81 @@ namespace CompetitiveRounds
                         CompetitiveUI.ShowNotification(
                             KickRefusalText(resp) ?? DetailOr(resp, I18n.Tr("Couldn't kick that player.")),
                             new Color(1f, 0.6f, 0.2f), 5f);
+                    }
+                    NativeUI.MarkDirty();
+                }));
+            }
+
+            // ── Room rules (Sept 10, migration 306): host-only lobby settings ──
+
+            /// <summary>The settings-related refusal tokens as sentences; null
+            /// for anything else (callers fall back to the raw detail).</summary>
+            internal static string RulesDetailText(string detail)
+            {
+                switch (detail)
+                {
+                    case "rules_unsupported":
+                        return I18n.Tr("This lobby uses settings your mod version can't play - update the mod.");
+                    case "rules_need_update":
+                        return I18n.Tr("A player's mod is too old for these settings - they need to update, or turn the setting off.");
+                    case "settings_unseen":
+                        return I18n.Tr("A player hasn't received the new settings yet - try again in a moment.");
+                    default:
+                        return null;
+                }
+            }
+
+            /// <summary>Host-only write of ONE lobby setting (null = leave as
+            /// is). Signed with the actor HMAC over
+            /// 'lobby_settings:{steam}:{lobby}:{ff}:{sc}' (1 / 0 / '-' when not
+            /// sent), fenced to the lobby the seat belongs to NOW, single-
+            /// flight. The ack folds the server's echo (values + generation)
+            /// so the buttons flip on the ack, not on the next 2 s poll; a
+            /// refusal renders its token as a sentence.</summary>
+            public void SetRules(bool? friendlyFire, bool? sameCards)
+            {
+                string sid = MatchTracker.LocalSteamId;
+                if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
+                if (string.IsNullOrEmpty(OpenLobbyId)) return;
+                if (!IsHost)
+                {
+                    CompetitiveUI.ShowNotification(I18n.Tr("Only the host decides this."), new Color(0.6f, 0.6f, 0.6f), 3f);
+                    return;
+                }
+                if (SettingsInFlight) return;
+                if (friendlyFire == null && sameCards == null) return;
+                string lobbyAtSend = OpenLobbyId;
+                string ffTok = friendlyFire == null ? "-" : (friendlyFire.Value ? "1" : "0");
+                string scTok = sameCards == null ? "-" : (sameCards.Value ? "1" : "0");
+                string sig = ComputeHmacHex($"lobby_settings:{sid}:{lobbyAtSend}:{ffTok}:{scTok}");
+                string body = $"{{\"steam_id\":\"{sid}\",\"expected_lobby_id\":\"{lobbyAtSend}\""
+                    + (friendlyFire == null ? "" : $",\"friendly_fire\":{(friendlyFire.Value ? "true" : "false")}")
+                    + (sameCards == null ? "" : $",\"same_cards\":{(sameCards.Value ? "true" : "false")}")
+                    + $",\"sig\":\"{sig}\"}}";
+                settingsInFlight = true; settingsAt = Time.realtimeSinceStartup;
+                int g = gen;
+                Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/{mode}/lobby/settings", body, (ok, resp) =>
+                {
+                    settingsInFlight = false;
+                    if (g != gen || !string.Equals(lobbyAtSend, OpenLobbyId, StringComparison.Ordinal)) return;
+                    if (ok)
+                    {
+                        int ver = ExtractJsonInt(resp, "settings_version");
+                        if (ver >= SettingsVersion)
+                        {
+                            FriendlyFire = !(resp.Contains("\"friendly_fire\":false") || resp.Contains("\"friendly_fire\": false"));
+                            SameCards = resp.Contains("\"same_cards\":true") || resp.Contains("\"same_cards\": true");
+                            SettingsVersion = ver; seenSettingsVersion = ver; SettingsKnown = true;
+                            settingsLobbyId = OpenLobbyId;
+                        }
+                        Plugin.Log.LogInfo($"[{label}-LOBBY] settings ff={(FriendlyFire ? 1 : 0)} sc={(SameCards ? 1 : 0)} v{SettingsVersion}");
+                    }
+                    else
+                    {
+                        Plugin.Log.LogWarning($"[{label}-LOBBY] settings write failed: {resp}");
+                        string _detail = ExtractJsonString(resp ?? "", "detail");
+                        CompetitiveUI.ShowNotification(RulesDetailText(_detail)
+                            ?? DetailOr(resp, I18n.Tr("Couldn't change the lobby settings.")), new Color(1f, 0.6f, 0.2f), 5f);
                     }
                     NativeUI.MarkDirty();
                 }));
@@ -17821,6 +18106,7 @@ namespace CompetitiveRounds
                                     m.initial_picks = ExtractJsonInt(so, "initial_picks");
                                     m.card_candidates = ExtractJsonInt(so, "card_candidates");
                                     m.same_card_rule = ExtractJsonBool(so, "same_card_rule");
+                                    m.sudden_death = ExtractJsonBool(so, "sudden_death");
                                     m.has_settings = m.score_target > 0;
                                 }
                             }
@@ -18019,6 +18305,7 @@ namespace CompetitiveRounds
                                     completed_at = ExtractJsonString(obj, "completed_at"),
                                     opponents = ExtractStringListStringAware(obj, "opponents"),
                                 };
+                                ReadHistoryRules(obj, out entry.has_rules, out entry.rules_ff, out entry.rules_sc, out entry.rules_xp);   // room rules (Sept 10)
                                 entry.has_rating_change = TryExtractNullableJsonFloat(
                                     obj, "rating_change", out entry.rating_change);
                                 list.Add(entry);
@@ -18049,7 +18336,7 @@ namespace CompetitiveRounds
                         {
                             foreach (string obj in SliceTopLevelObjects(resp.Substring(open + 1, close - open - 1)))
                             {
-                                list.Add(new PlayerOvtHistoryEntry
+                                var oe = new PlayerOvtHistoryEntry
                                 {
                                     match_id = ExtractJsonString(obj, "match_id"),
                                     role = ExtractJsonString(obj, "role"),
@@ -18061,7 +18348,9 @@ namespace CompetitiveRounds
                                     gold_gained = ExtractJsonInt(obj, "gold_gained"),
                                     series_gold_gained = ExtractJsonInt(obj, "series_gold_gained"),
                                     damage_dealt_timeline = ExtractJsonString(obj, "damage_dealt_timeline"),
-                                });
+                                };
+                                ReadHistoryRules(obj, out oe.has_rules, out oe.rules_ff, out oe.rules_sc, out oe.rules_xp);   // room rules (Sept 10)
+                                list.Add(oe);
                             }
                         }
                         CachedPlayerOvtHistory[steamId] = list;
@@ -18100,6 +18389,7 @@ namespace CompetitiveRounds
                                     ended_at = ExtractJsonString(obj, "ended_at"),
                                     participants = ExtractStringListStringAware(obj, "participants"),
                                 };
+                                entry.ffa_settings = ReadFfaSettings(obj);   // room rules (Sept 10)
                                 entry.has_rating_change = TryExtractNullableJsonFloat(
                                     obj, "rating_change", out entry.rating_change);
                                 list.Add(entry);
@@ -21804,6 +22094,11 @@ namespace CompetitiveRounds
                         return;
                     }
                     spectateLeaseId = leaseId;
+                    // Room rules (§5.1, r1 H5): the observer binds its pending
+                    // room to the rules the grant carries, exactly as a fighter
+                    // does with its ready payload; null = the defaults are
+                    // expected (an FFA room, or one born before the record).
+                    RoomRules.StagePending(ExtractJsonString(resp, "rules_prop"), "grant");
                     // Cache the fighters' display metadata for the HUD
                     // (playtest #2b): clean DB names + title + elo, keyed by
                     // the roster steam order.

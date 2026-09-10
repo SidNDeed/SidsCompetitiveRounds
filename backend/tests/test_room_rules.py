@@ -166,7 +166,7 @@ def test_ffa_settings_block_reports_unknown_rather_than_a_plausible_default():
     assert main._ffa_settings_block(dict(full, score_target=None)) is None
     # every FFA history surface projects the same column list: three through
     # the shared fragment, ffa_recent through the inline list it always had
-    assert MAIN_SRC.count("{_FFA_SETTINGS_COLS}") == 3
+    assert MAIN_SRC.count("{_FFA_SETTINGS_COLS}") == 4
     assert _src("ffa_recent").count("l.same_card_rule, l.sudden_death, l.settings_known") == 1
 
 
@@ -337,12 +337,70 @@ def test_lobby_gates_and_settings_write():
     assert join.count('"rules_unsupported"') == 1
     state = _src("_lobby_state_impl")
     assert state.count("LEAST(CAST(:seen AS INTEGER), CAST(:cur AS INTEGER))") == 1
+    # a1 M4: the ack never moves backwards.
+    assert state.count("GREATEST(seen_settings_version,") == 1
+    # a1 H3 + M2: actor HMAC, verified session, mandatory always-compared fence.
+    assert settings.count("lobby_settings:{req.steam_id}:{req.expected_lobby_id}:{_ff_tok}:{_sc_tok}") == 1
+    assert settings.count('"session_required"') == 1
+    assert settings.count("if req.expected_lobby_id:") == 0
+    assert settings.count("str(lobby_id) != _exp_lid") == 1
+    # a1 M3: only a value set in the non-default direction is floor-gated.
+    assert settings.count("if req.friendly_fire is False or req.same_cards is True:") == 1
+    assert settings.count("_rules_nondefault(new_rules)") == 0
+    # a1 L1: the echo is bounded before the INTEGER cast (both lobby state routes).
+    assert MAIN_SRC.count("seen_settings_version: int = Query(0, ge=0, le=2147483647)") == 2
     paths = {r.path for r in main.app.routes}
     for p in ("/api/v1/team/lobby/settings", "/api/v1/ovt/lobby/settings",
               "/api/v1/players/{steam_id}/pref-same-cards"):
         assert p in paths, p
     pref = _src("set_pref_same_cards")
     assert "pref_same_cards:" in pref and '"session_required"' in pref
+
+
+def test_a1_issuance_relock_and_grant_shapes():
+    # The 1v1 issuance paths: both authoritative SELECTs carry rq.rules (a1
+    # H2), a resumed series keeps its record and NULL is never backfilled
+    # (a1 H4), ready refreshes the member version (a1 M1); the 2v2 relock
+    # re-stamps the series' own record and issuance writes only a carried
+    # record (a1 H5); the spectate grant judges the per-game floor before
+    # disclosure (a1 H1); the set report carries the record (a1 M5).
+    assert MAIN_SRC.count("rq.region_pings, rq.region_pings_at, rq.rules") == 2
+    assert MAIN_SRC.count("rq.region_pings, rq.region_pings_at\n") == 0
+    assert MAIN_SRC.count("series.rules = rules") == 0
+    for fn in ("queue_poll", "queue_ready"):
+        body = _src(fn)
+        assert body.count("_rules_normalize(series.rules)" if fn == "queue_poll"
+                          else "_rules_normalize(existing_series.rules)") == 1, fn
+        assert body.count("_rules_for_members(") == 1, fn
+    assert _src("queue_ready").count("SET ready = true, mod_version = :mv") == 1
+    relock = _src("_team_relock_existing_series")
+    assert relock.count("rules = CAST(:rules AS JSONB)") == 1
+    assert relock.count('_rules_json(srow["rules"]) if srow["rules"] is not None else None') == 1
+    fam = _src("_team_lock_family_pick")   # the locked family row the relock receives as srow
+    assert fam.count("ts.rules,") == 1
+    assert MAIN_SRC.count("CAST(:has_rules AS BOOLEAN)") == 1
+    assert MAIN_SRC.count('"has_rules": me["rules"] is not None') == 1
+    grant = _src("spectate_grant")
+    assert grant.count('max(int(game["protocol_min"] or 1), SPECTATE_PROTOCOL)') == 1
+    assert grant.index("_game_floor") < grant.index("token = secrets.token_urlsafe(24)")
+    assert grant.count('"proto": SPECTATE_PROTOCOL}') == 0
+    assert grant.count("min(int(req.client_protocol), 32767)") == 1
+    # The record rides the ONE games statement per set (the report tests pin
+    # the statement count), never a second lookup.
+    assert MAIN_SRC.count("_report_rules_by_game") == 0
+    for fn, needle in (("_report_load_1v1", '"rules": _rules_history(r["rules"])'),
+                       ("_report_load_team", '"rules": _rules_history(r["rules"])'),
+                       ("_report_load_ovt", '"rules": _rules_history(r["rules"], r["solo_extra_pick"])'),
+                       ("_report_load_ffa", '"settings": _ffa_settings_block(r)')):
+        assert _src(fn).count(needle) == 1, fn
+    assert _src("_report_game_json").count('for _k in ("rules", "settings"):') == 1
+    for sql, join in ((main._REPORT_1V1_SQL, "LEFT JOIN ranked_series rs ON rs.id = m.series_id"),
+                      (main._REPORT_TEAM_SQL, "LEFT JOIN team_series ts ON ts.id = tm.series_id"),
+                      (main._REPORT_OVT_SQL, "LEFT JOIN ovt_series os ON os.id = om.series_id"),
+                      (main._REPORT_FFA_SQL, "LEFT JOIN ffa_lobbies l ON l.id = fm.lobby_id")):
+        assert sql.count(join) == 1, join
+    assert main._REPORT_FFA_SQL.count("l.settings_known") == 1
+    assert "pref_same_cards=bool(player.pref_same_cards)" in MAIN_SRC
 
 
 def test_every_history_surface_reports_the_record():
@@ -408,9 +466,15 @@ def test_bot_ffa_settings_line_uses_the_in_game_labels():
     f = _bot_helper("_ffa_settings_summary")
     assert f(None) == ""
     assert f({"score_target": None}) == ""
+    # a1 L2: deviations from the canonical configuration only, like the
+    # in-game FFA rows — an all-default block is no line at all.
     assert f({"score_target": 7, "card_cap": 5, "initial_picks": 1, "card_candidates": 5,
-              "same_card_rule": True, "sudden_death": False}) == (
-        "First to 7 · Max cards 5 · Opening draws 1 · Card draw 5 · Same cards")
+              "same_card_rule": True, "sudden_death": False}) == "First to 7 · Same cards"
+    assert f({"score_target": 5, "card_cap": 5, "initial_picks": 1, "card_candidates": 5,
+              "same_card_rule": False, "sudden_death": False}) == ""
+    assert f({"score_target": 5, "card_cap": 3, "initial_picks": 2, "card_candidates": 4,
+              "same_card_rule": False, "sudden_death": False}) == (
+        "Max cards 3 · Opening draws 2 · Card draw 4")
     assert f({"score_target": 3, "sudden_death": True}) == "First to 3 · Sudden death"
     for fn in ("log_ffa_match_result", "cmd_game"):
         body = re.search(rf"^async def {fn}\(.*?(?=^(?:async )?def )", BOT_SRC, re.S | re.M).group(0)

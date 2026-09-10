@@ -308,6 +308,9 @@ class PlayerStatsResponse(BaseModel):
     # Appear-offline toggle: true when this player is hidden from the Home tab's
     # online/recently-online lists. Renders the Settings-tab toggle state.
     appear_offline: bool = False
+    # Room rules (migration 306): the Same Cards preference for queue-matched
+    # rooms — a flat bool the client's stats parse reads for free.
+    pref_same_cards: bool = False
     # Multi-equip map colors (v1.23+). The client cycles through this ordered list with
     # Left Shift in-game. Empty list → no equipped map colors → ArtHandler.NextArt falls
     # through to ROUNDS' vanilla random rotation. active_color_sku above is kept for

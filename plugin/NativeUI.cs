@@ -2902,6 +2902,7 @@ namespace CompetitiveRounds
         private static GameObject teamLobbyBrowserHost, ovtLobbyBrowserHost;
         private static GameObject teamLobbyCreateBtn, teamLobbyCreatePrivBtn, teamLobbyPrefBtn, teamLobbyStartBtn, teamLobbyLeaveBtn;
         private static GameObject ovtLobbyCreateBtn, ovtLobbyCreatePrivBtn, ovtLobbyStartBtn, ovtLobbyLeaveBtn;
+        private static GameObject teamLobbyRulesRow, teamLobbyFfBtn, teamLobbyScBtn, ovtLobbyRulesRow, ovtLobbyFfBtn, ovtLobbyScBtn;   // room rules (Sept 10): host-panel settings rows
         private static int teamLobbyPrefTeam = 0;   // 0 any, 1 orange, 2 blue — rides create/join
         private static GameObject ffaLbContainer, ffaRecentContainer, ffaRecentPrevBtn, ffaRecentNextBtn;
         private static List<GameObject> ffaLbSortBtns; private static string[] ffaLbSortKeys; private static object[] ffaLbHeaderTexts;
@@ -3874,16 +3875,36 @@ namespace CompetitiveRounds
         private static string FfaSettingsSummary(ApiClient.FfaRecentMatch m)
         {
             if(m==null||!m.has_settings)return "";
-            var bits=new List<string>(4);
+            return FfaSettingsSummaryBits(m.score_target,m.card_candidates,m.card_cap,m.initial_picks,m.same_card_rule,m.sudden_death);
+        }
+        /// <summary>The profile-card FFA rows and the Home-tab recent line read
+        /// the same block through ApiClient.ReadFfaSettings.</summary>
+        private static string FfaSettingsSummary(ApiClient.FfaSettingsInfo s)
+            =>s==null?"":FfaSettingsSummaryBits(s.score_target,s.card_candidates,s.card_cap,s.initial_picks,s.same_card_rule,s.sudden_death);
+        /// <summary>ONE definition of "which FFA settings are worth a word" for
+        /// every surface (#330): the deviations from the canonical
+        /// configuration plus the on toggles.</summary>
+        private static string FfaSettingsSummaryBits(int scoreTarget,int cardCandidates,int cardCap,int initialPicks,bool sameCard,bool sudden)
+        {
+            var bits=new List<string>(6);
             // "to N"/"cap N" stay literal: 2-letter connectors can never be
             // harvestable keys (#295c) and fold poorly into a template here.
-            if(m.score_target>0&&m.score_target!=5)bits.Add($"to {m.score_target}");
-            if(m.card_candidates>0&&m.card_candidates!=5)bits.Add(I18n.TrF("{0}-card draw",m.card_candidates));
-            if(m.card_cap>0&&m.card_cap!=5)bits.Add($"cap {m.card_cap}");
-            if(m.initial_picks>1)bits.Add(I18n.TrF("{0} opening picks",m.initial_picks));
-            if(m.same_card_rule)bits.Add(I18n.Tr("same-card"));
+            if(scoreTarget>0&&scoreTarget!=5)bits.Add($"to {scoreTarget}");
+            if(cardCandidates>0&&cardCandidates!=5)bits.Add(I18n.TrF("{0}-card draw",cardCandidates));
+            if(cardCap>0&&cardCap!=5)bits.Add($"cap {cardCap}");
+            if(initialPicks>1)bits.Add(I18n.TrF("{0} opening picks",initialPicks));
+            if(sameCard)bits.Add(I18n.Tr("same-card"));
+            if(sudden)bits.Add(I18n.Tr("sudden death"));
             if(bits.Count==0)return "";
             return $" <color=#777>-</color> <color=#C48CFF>{string.Join(", ",bits.ToArray())}</color>";
+        }
+        /// <summary>Room rules (Sept 10): a history row's non-default rules as a
+        /// tag — "" for the defaults and for rows without a record (a game
+        /// born before the record is unknown, not default).</summary>
+        private static string RulesTag(bool has,bool ff,bool sc,bool? xp=null)
+        {
+            string s=RoomRules.Summary(has,ff,sc,xp);
+            return s.Length>0?$"  <color=#7FD4FF>{s}</color>":"";
         }
 
         private static void BuildFfaRecentRowText(ApiClient.FfaRecentMatch match,FfaRecentMatchRow row)
@@ -5229,7 +5250,8 @@ namespace CompetitiveRounds
         private static void RenderHostLobbySection(ApiClient.HostLobbyClient cli,List<HostLobbyBrowserRow> rows,
             List<LobbyMemberRow> memberRows,Action<string> kickAction,
             GameObject browserHost,object headerTxt,object bodyTxt,bool team,
-            GameObject createBtn,GameObject createPrivBtn,GameObject startBtn,GameObject leaveBtn,GameObject prefBtn)
+            GameObject createBtn,GameObject createPrivBtn,GameObject startBtn,GameObject leaveBtn,GameObject prefBtn,
+            GameObject rulesRow,GameObject ffBtn,GameObject scBtn)
         {
             if(headerTxt==null||bodyTxt==null||browserHost==null)return;
             bool seated=!string.IsNullOrEmpty(cli.OpenLobbyId);
@@ -5275,6 +5297,20 @@ namespace CompetitiveRounds
                 }
             }
             if(leaveBtn!=null)leaveBtn.SetActive(seated||leaving);
+            // Room rules (§5.4): the host's settings row — seated, in a lobby
+            // whose server sends settings; the values are the server-true copy.
+            if(rulesRow!=null)
+            {
+                bool showRules=seated&&!leaving&&cli.SettingsKnown;
+                rulesRow.SetActive(showRules);
+                if(showRules)
+                {
+                    if(ffBtn!=null)UIFactory.SetTextRaw(UIFactory.GetButtonText(ffBtn),
+                        cli.FriendlyFire?I18n.Tr("Friendly fire: ON"):I18n.Tr("Friendly fire: OFF"));
+                    if(scBtn!=null)UIFactory.SetTextRaw(UIFactory.GetButtonText(scBtn),
+                        cli.SameCards?I18n.Tr("Same cards: ON"):I18n.Tr("Same cards: OFF"));
+                }
+            }
             string browseHdr=team?I18n.Tr("<b>Hosted 2v2 Lobbies</b>"):I18n.Tr("<b>Custom 1v2 Lobbies</b>");
             string seatedHdr=team?I18n.Tr("<b>Your 2v2 Lobby</b>"):I18n.Tr("<b>Your Custom 1v2 Lobby</b>");
             int newH;
@@ -5290,6 +5326,8 @@ namespace CompetitiveRounds
                         bool isMe=m.steam_id==MatchTracker.LocalSteamId;
                         string nameC=isMe?"<color=#88FF88>":"<color=#FFFFFF>";
                         string hostTag=m.is_host?"  <color=#FFD94D>"+I18n.Tr("HOST")+"</color>":"";
+                        // Room rules: a seat whose mod cannot play the lobby's current settings.
+                        string updTag=m.needs_update?"  <color=#FF6666>"+I18n.Tr("update mod")+"</color>":"";
                         // Aug 8 (Sid): claims render as "Team 1"/"Team 2" and
                         // "Solo"/"Duo" — same words as the selector buttons;
                         // nothing when unset/Any. Live from every state poll.
@@ -5308,7 +5346,7 @@ namespace CompetitiveRounds
                         string ratingStr=team&&m.rating>0
                             ?$"<color=#FFFFFF>2v2 {m.rating}</color>"
                             :$"<color=#DDDDDD>1v1 {m.rating_1v1}</color>";
-                        return $"{nameC}{FfaSafeRich(Trunc(m.display_name,18))}</color>  {ratingStr}{prefTag}{hostTag}  <color=#888>{waitStr}</color>";
+                        return $"{nameC}{FfaSafeRich(Trunc(m.display_name,18))}</color>  {ratingStr}{prefTag}{hostTag}{updTag}  <color=#888>{waitStr}</color>";
                     });
                 UIFactory.SetTextRaw(headerTxt,seatedHdr
                     +I18n.TrF("  <color=#888>({0}/{1}{2})</color>",Math.Max(n,cli.MemberCount),cli.MaxPlayers,
@@ -5583,6 +5621,15 @@ namespace CompetitiveRounds
             ovtLobbyLeaveBtn=UIFactory.CreateButton("O1HLeave",o1hCtl.transform,"Leave Lobby",16f,C_WHITE,new Color(0.5f,0.2f,0.2f,0.9f),
                 ()=>{ApiClient.OvtLobby.LeaveLobby();dirty=true;},sizeDelta:new Vector2(140,28));
             ovtLobbyLeaveBtn.SetActive(false);
+            // Room rules (Sept 10): the host's settings row — see the 2v2 panel.
+            var o1hRules=new GameObject("O1HRules");o1hRules.transform.SetParent(ovtHostPanel.transform,false);o1hRules.AddComponent<RectTransform>();
+            UIFactory.AddHLG(o1hRules,spacing:8);UIFactory.AddLE(o1hRules,prefH:34,minH:34,flexH:0);
+            ovtLobbyFfBtn=UIFactory.CreateButton("O1HFf",o1hRules.transform,"Friendly fire: ON",16f,C_WHITE,C_BTN,
+                ()=>{ApiClient.OvtLobby.SetRules(!ApiClient.OvtLobby.FriendlyFire,null);dirty=true;},sizeDelta:new Vector2(220,28));
+            ovtLobbyScBtn=UIFactory.CreateButton("O1HSc",o1hRules.transform,"Same cards: OFF",16f,C_WHITE,C_BTN,
+                ()=>{ApiClient.OvtLobby.SetRules(null,!ApiClient.OvtLobby.SameCards);dirty=true;},sizeDelta:new Vector2(220,28));
+            ovtLobbyRulesRow=o1hRules;
+            ovtLobbyRulesRow.SetActive(false);
             // QUEUE-flow escape (post-Start locks, legacy states) - kept from
             // the retired queue row; visibility managed by RefreshOneVTwoTab.
             ovtLeaveBtn=UIFactory.CreateButton("O1QLeave",o1hCtl.transform,"Leave Queue",16f,C_WHITE,new Color(0.5f,0.2f,0.2f,0.9f),
@@ -5791,7 +5838,8 @@ namespace CompetitiveRounds
             RenderHostLobbySection(ApiClient.OvtLobby,ovtLobbyBrowserRows,
                 ovtLobbyMemberRows,t=>ApiClient.OvtLobby.Kick(t),
                 ovtLobbyBrowserHost,txtOvtHostLobbyHeader,txtOvtHostLobbyBody,team:false,
-                ovtLobbyCreateBtn,ovtLobbyCreatePrivBtn,ovtLobbyStartBtn,ovtLobbyLeaveBtn,null);
+                ovtLobbyCreateBtn,ovtLobbyCreatePrivBtn,ovtLobbyStartBtn,ovtLobbyLeaveBtn,null,
+                ovtLobbyRulesRow,ovtLobbyFfBtn,ovtLobbyScBtn);
             // Aug 7 item 13: live 1v2 games straight from the spectate feed.
             RenderOvtLiveGames();
             // Split activity boards (server-ordered; role-scoped W/L).
@@ -5986,7 +6034,7 @@ namespace CompetitiveRounds
             string dt="";
             try{string d=!string.IsNullOrEmpty(s.completed_at)?s.completed_at:s.created_at;if(!string.IsNullOrEmpty(d)&&d.Length>=10)dt=DateFmt.Short(DateTime.Parse(d));}catch{}
             string statusTag=s.status=="completed"?"":"  "+I18n.Tr("<color=#888>(in progress)</color>");
-            string extraTag=s.solo_extra_pick?"  "+I18n.Tr("<color=#888>+pick</color>"):"";
+            string extraTag=(s.solo_extra_pick?"  "+I18n.Tr("<color=#888>+pick</color>"):"")+RulesTag(s.has_rules,s.rules_ff,s.rules_sc);   // room rules (Sept 10)
             string header=I18n.TrF("<color=#FFB347><b>{0}</b></color> <color=#888>vs</color> <color=#88AAFF>{1} + {2}</color>  <b>{3}-{4}</b>  <color=#999>{5}</color>",
                 Trunc(s.solo_name??"?",14),Trunc(s.duo_a_name??"?",14),Trunc(s.duo_b_name??"?",14),s.solo_wins,s.duo_wins,dt);
             int gameNo=0;
@@ -12905,6 +12953,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         private static GameObject menuMusicToggleBtn, musicCreditToggleBtn;
         private static object menuMusicToggleTxt, musicCreditToggleTxt;
         private static GameObject appearOfflineBtn; private static object appearOfflineTxt;
+        private static GameObject prefSameCardsBtn; private static object prefSameCardsTxt;   // room rules (Sept 10)
         private static GameObject showDiscordBtn; private static object showDiscordTxt;
         private static GameObject allowSpectatorsBtn; private static object allowSpectatorsTxt;
         // v1.32 items 7+8 toggle rows.
@@ -13694,6 +13743,30 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 },
                 "Hides you from the Home tab's online and recently-online lists.");
             appearOfflineTxt = UIFactory.GetButtonText(appearOfflineBtn);
+            /* Room rules (Sept 10): the Same Cards preference for queue-matched
+             * rooms (ranked 1v1, and the 2v2 / 1v2 auto-queue rooms, which have
+             * no host) — a room gets the rule only when EVERY player in it has
+             * this on, read when the room is issued, so a change while queued
+             * applies to the next room. Optimistic flip on the cached stats (a
+             * flat bool, free JsonUtility parse #73); the callback's stats
+             * re-fetch reconciles with the server truth, like Appear offline. */
+            prefSameCardsBtn = SettingsToggle(consentBox.transform, "SPrefSC", new Vector2(340, 28),
+                () =>
+                {
+                    var st = ApiClient.CachedPlayerStats;
+                    var id = MatchTracker.LocalSteamId;
+                    if (st == null || string.IsNullOrEmpty(id) || id == "unknown") return;
+                    Plugin.Log.LogInfo("[SETTINGS] same-cards preference toggled");
+                    st.pref_same_cards = !st.pref_same_cards;
+                    dirty = true;
+                    ApiClient.SetPrefSameCards(id, st.pref_same_cards, (ok, resp) =>
+                    {
+                        if (!ok) CompetitiveUI.ShowNotification(I18n.Tr("Couldn't change the Same cards preference - try again"), Color.yellow, 3f);
+                        dirty = true;
+                    });
+                },
+                "Queue games (ranked 1v1, and 2v2 / 1v2 auto-queue) deal everyone the same cards when every player in the room has this on. Applies from your next game.", 36f);
+            prefSameCardsTxt = UIFactory.GetButtonText(prefSameCardsBtn);
             /* Sept 6 (Sid, in-game mail): "Who can mail me" + the blocked-sender
              * list, side by side so both mail preferences live in one place. */
             MailUI.BuildSettingsRow(consentBox.transform);
@@ -14503,6 +14576,14 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                         ? "Appear offline (Home lists): <color=#88FF88>ON</color>"
                         : "Appear offline (Home lists): <color=#FF9966>OFF</color>");
             }
+            if (prefSameCardsTxt != null)
+            {
+                var stSc = ApiClient.CachedPlayerStats;
+                UIFactory.SetText(prefSameCardsTxt,
+                    stSc != null && stSc.pref_same_cards
+                        ? "Same cards in queue games: <color=#88FF88>ON</color>"
+                        : "Same cards in queue games: <color=#FF9966>OFF</color>");
+            }
             MailUI.RefreshSettingsRow();   // Sept 6 mail: preference label + blocked list
             if (showDiscordTxt != null)
             {
@@ -14730,7 +14811,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             string leftFit,rightFit;
             FitLabelPair(m.left_label??"?",m.right_label??"?",budget,out leftFit,out rightFit);
             string line=$"<color=#8899AA>{tag}</color> <color=#FFFFFF>{leftFit}</color>{wElo}"
-                      +$"  <b>{m.score}</b>  <color=#AAAAAA>{rightFit}</color>{lElo}\n";
+                      +$"  <b>{m.score}</b>  <color=#AAAAAA>{rightFit}</color>{lElo}"
+                      +(m.mode=="ffa"?FfaSettingsSummary(m.ffa_settings):RulesTag(m.has_rules,m.rules_ff,m.rules_sc,m.mode=="1v2"?(bool?)m.rules_xp:null))+"\n";
             if(m.bets!=null)
             {
                 foreach(var b in m.bets)
@@ -14832,7 +14914,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 // awful. Cap each NAME so the whole line fits the column; the
                 // element no longer word-wraps (overflow clips at the mask).
                 string wNameT=Trunc(wName,16), lNameT=Trunc(lName,16);
-                txt+=$"<color={wCol}>{wNameT}</color>{wRatingTag}{wElo}  <b>{wScore}-{lScore}</b>  <color={lCol}>{lNameT}</color>{lRatingTag}{lElo}\n";
+                txt+=$"<color={wCol}>{wNameT}</color>{wRatingTag}{wElo}  <b>{wScore}-{lScore}</b>  <color={lCol}>{lNameT}</color>{lRatingTag}{lElo}{RulesTag(s.has_rules,s.rules_ff,s.rules_sc)}\n";
                 // Bet sub-rows under each series. Indent + smaller font + green for winners,
                 // dim grey for losers. Show "AsteRiA bet 500g on Sid -> +505g" style.
                 if (s.bets != null && s.bets.Count > 0)
@@ -15163,7 +15245,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
 {string hitLine=s.bullets_fired>0?I18n.TrF("<color=#FF9988>Hit:</color> {0:F1}% ({1}/{2})",(float)s.bullets_hit*100f/s.bullets_fired,s.bullets_hit,s.bullets_fired):I18n.Tr("<color=#FF9988>Hit:</color> -");string blkLine=s.blocks_activated>0?I18n.TrF("<color=#99CCFF>Block:</color> {0:F1}% ({1}/{2})",(float)s.blocks_successful*100f/s.blocks_activated,s.blocks_successful,s.blocks_activated):I18n.Tr("<color=#99CCFF>Block:</color> -");UIFactory.SetText(txtAccuracy,$"{hitLine}\n{blkLine}");}RefreshHistory(hR,hC);RefreshSession();}
         private static void RefreshHistory(List<ApiClient.MatchHistoryEntry> ranked,List<ApiClient.MatchHistoryEntry> casual){/* Bug 263: while searching, the summary totals describe the UNFILTERED history — pages that don't exist under the filter (recon risk 1: the pager would advertise them and the prefetch-at-end trigger would loop). Use loaded counts only, and route the end-of-pages prefetch at the search cache instead. */bool hSearch=!string.IsNullOrEmpty(histSearch?.Trim());/* Review r1 find 5: the search stream is one chronological 400-row window split into two mode lists — an EMPTY category has no pager to reach older rows, so a mode whose matches sit beyond the window would falsely render as "none". Chain-fetch while either category is empty and rows remain (self-limiting: one in-flight fetch at a time; stops at loaded-all or first hit). */if(hSearch&&!ApiClient.MatchHistorySearchLoadedAll&&(ranked.Count==0||casual.Count==0))ApiClient.FetchMatchHistorySearch(MatchTracker.LocalSteamId,histSearch,append:true);CompetitiveUI.ClearCardHoverRegions();foreach(var r in rankedRows){r.root.SetActive(false);r.seriesGO.SetActive(false);}if(ranked.Count>0){var groups=GroupBySeries(ranked);int gpp=3,totalP=(groups.Count+gpp-1)/gpp;/* v1.33 lazy history (item 8): pager shows the FULL page count from the
  * server summary while only a window of matches is loaded; nearing the end
- * of the loaded window prefetches the next chunk. */int fullGroups=hSearch?groups.Count:Math.Max(groups.Count,ApiClient.HistoryTotalRankedGroups);int fullRankedP=Math.Max(totalP,(fullGroups+gpp-1)/gpp);rankedPage=Math.Max(0,Math.Min(rankedPage,totalP-1));if(rankedPage>=totalP-2){if(hSearch){if(!ApiClient.MatchHistorySearchLoadedAll)ApiClient.FetchMatchHistorySearch(MatchTracker.LocalSteamId,histSearch,append:true);}else if(!ApiClient.MatchHistoryLoadedAll)ApiClient.FetchMoreMatchHistory(MatchTracker.LocalSteamId);}int start=rankedPage*gpp,end=Math.Min(start+gpp,groups.Count);int ri=0;for(int g=start;g<end&&ri<rankedRows.Count;g++){var grp=groups[g];if(grp.matches.Count==0)continue;var first=grp.matches[0];if(grp.series_id!=null&&ri<rankedRows.Count){var row=rankedRows[ri];string score=first.series_score??"?-?";bool complete=false,won=false;try{var p=score.Split('-');int mw=int.Parse(p[0]),tw=int.Parse(p[1]);complete=mw>=2||tw>=2;won=mw>tw;}catch{}UIFactory.SetTextRaw(row.txtSeriesHead,ComposeOpponentCell(row.txtSeriesHead,first,s=>complete?I18n.TrF("Series {0} {1}  vs {2}",won?"W":"L",score,s):I18n.TrF("Series {0}  vs {1}  (in progress)",score,s),HIST_OPP_SERIES_PX,HIST_OPP_BUDGET_SERIES));UIFactory.SetColor(row.txtSeriesHead,complete?(won?C_GREEN:C_RED):C_GOLD);/* Sept 8: the series HEADER is the only place a ranked group renders the opponent's name — every game row under it is filled with indent:true, which nulls opponentSteamId and writes an empty name cell (FillRow below). Without this the hover profile card, which every other player-name surface registers, was unreachable for the whole Ranked History box while Casual (indent:false) and the leaderboard had it. One label = ONE player, which is what RegisterNameHover's contract requires; the 2v2/1v2/FFA history headers name 2-4 players in a single label and so cannot use it as-is. */ProfileCard.RegisterNameHover(row.txtSeriesHead,first.opponent_steam_id);/* The per-match row shows XP->gold (typically 4-5g/match); the series-win bonus (10-12g) was invisible because the history row never referenced series_gold_gained. Find the populated value across matches in this group (server sets it on the last-match-of-series row) and append to the elo line. */int grpSeriesGold=0;foreach(var mm in grp.matches)if(mm.series_gold_gained>grpSeriesGold)grpSeriesGold=mm.series_gold_gained;/* July 20 item 6: also show series gold when the elo delta is 0/absent — losers now
+ * of the loaded window prefetches the next chunk. */int fullGroups=hSearch?groups.Count:Math.Max(groups.Count,ApiClient.HistoryTotalRankedGroups);int fullRankedP=Math.Max(totalP,(fullGroups+gpp-1)/gpp);rankedPage=Math.Max(0,Math.Min(rankedPage,totalP-1));if(rankedPage>=totalP-2){if(hSearch){if(!ApiClient.MatchHistorySearchLoadedAll)ApiClient.FetchMatchHistorySearch(MatchTracker.LocalSteamId,histSearch,append:true);}else if(!ApiClient.MatchHistoryLoadedAll)ApiClient.FetchMoreMatchHistory(MatchTracker.LocalSteamId);}int start=rankedPage*gpp,end=Math.Min(start+gpp,groups.Count);int ri=0;for(int g=start;g<end&&ri<rankedRows.Count;g++){var grp=groups[g];if(grp.matches.Count==0)continue;var first=grp.matches[0];if(grp.series_id!=null&&ri<rankedRows.Count){var row=rankedRows[ri];string score=first.series_score??"?-?";bool complete=false,won=false;string _rulesTag=RulesTag(first.has_rules,first.rules_ff,first.rules_sc);/* room rules (Sept 10): series-constant, so the header carries it */try{var p=score.Split('-');int mw=int.Parse(p[0]),tw=int.Parse(p[1]);complete=mw>=2||tw>=2;won=mw>tw;}catch{}UIFactory.SetTextRaw(row.txtSeriesHead,ComposeOpponentCell(row.txtSeriesHead,first,s=>(complete?I18n.TrF("Series {0} {1}  vs {2}",won?"W":"L",score,s):I18n.TrF("Series {0}  vs {1}  (in progress)",score,s))+_rulesTag,HIST_OPP_SERIES_PX,HIST_OPP_BUDGET_SERIES));UIFactory.SetColor(row.txtSeriesHead,complete?(won?C_GREEN:C_RED):C_GOLD);/* Sept 8: the series HEADER is the only place a ranked group renders the opponent's name — every game row under it is filled with indent:true, which nulls opponentSteamId and writes an empty name cell (FillRow below). Without this the hover profile card, which every other player-name surface registers, was unreachable for the whole Ranked History box while Casual (indent:false) and the leaderboard had it. One label = ONE player, which is what RegisterNameHover's contract requires; the 2v2/1v2/FFA history headers name 2-4 players in a single label and so cannot use it as-is. */ProfileCard.RegisterNameHover(row.txtSeriesHead,first.opponent_steam_id);/* The per-match row shows XP->gold (typically 4-5g/match); the series-win bonus (10-12g) was invisible because the history row never referenced series_gold_gained. Find the populated value across matches in this group (server sets it on the last-match-of-series row) and append to the elo line. */int grpSeriesGold=0;foreach(var mm in grp.matches)if(mm.series_gold_gained>grpSeriesGold)grpSeriesGold=mm.series_gold_gained;/* July 20 item 6: also show series gold when the elo delta is 0/absent — losers now
  * earn series gold (tier multipliers) and their rows previously hid it entirely. */if(complete&&(first.series_rating_change!=0f||grpSeriesGold>0)){float rc=first.series_rating_change;string goldStr=grpSeriesGold>0?$" <color=#FFD94D>+{grpSeriesGold}g</color>":"";string eloStr=rc!=0f?I18n.TrF("{0} elo",RatingDeltaText(rc)):"";UIFactory.SetText(row.txtSeriesElo,(eloStr+goldStr).TrimStart());UIFactory.SetColor(row.txtSeriesElo,rc>0?C_GREEN:rc<0?C_RED:C_GOLD);}else UIFactory.SetText(row.txtSeriesElo,"");row.seriesGO.SetActive(true);foreach(var m in grp.matches){if(ri>=rankedRows.Count)break;FillRow(rankedRows[ri],m,true);/* Sept 8 item 5: ONE "Session" per sitting+opponent in this box, on the NEWEST game of the group; the server flags that row (sitting_head, 3 h gap rule = My Stats Session Info) -> ?sitting=<match uuid>. Rows without the flag (old api) get no button. */if(m.sitting_head)SetSessionButton(rankedRows[ri],"sitting",m.match_id);ri++;}}else{FillRow(rankedRows[ri],first,false);if(first.sitting_head)SetSessionButton(rankedRows[ri],"sitting",first.match_id);ri++;}}rPrev.SetActive(rankedPage>0);rNext.SetActive(rankedPage<totalP-1||(hSearch?!ApiClient.MatchHistorySearchLoadedAll:!ApiClient.MatchHistoryLoadedAll));UIFactory.SetText(txtRankedPage,fullRankedP>1?$"{rankedPage+1}/{fullRankedP}":"");}else{rPrev.SetActive(false);rNext.SetActive(false);UIFactory.SetText(txtRankedPage,"");}foreach(var r in casualRows)r.root.SetActive(false);if(casual.Count>0){int mpp=6,totalP=(casual.Count+mpp-1)/mpp;int fullCasual=hSearch?casual.Count:Math.Max(casual.Count,ApiClient.HistoryTotalCasual);int fullCasualP=Math.Max(totalP,(fullCasual+mpp-1)/mpp);casualPage=Math.Max(0,Math.Min(casualPage,totalP-1));if(casualPage>=totalP-2){if(hSearch){if(!ApiClient.MatchHistorySearchLoadedAll)ApiClient.FetchMatchHistorySearch(MatchTracker.LocalSteamId,histSearch,append:true);}else if(!ApiClient.MatchHistoryLoadedAll)ApiClient.FetchMoreMatchHistory(MatchTracker.LocalSteamId);}int start=casualPage*mpp,end=Math.Min(start+mpp,casual.Count);for(int i=start;i<end;i++){int ri=i-start;if(ri<casualRows.Count){FillRow(casualRows[ri],casual[i],false);/* Sept 8 item 5: ONE "Session" per sitting+opponent, on the NEWEST game of the group (server flag sitting_head) -> ?sitting=<match uuid>; the Sept 6 per-room session_uuid runs put a button on every quick-queue game. */if(casual[i].sitting_head)SetSessionButton(casualRows[ri],"sitting",casual[i].match_id);}}cPrev.SetActive(casualPage>0);cNext.SetActive(casualPage<totalP-1||(hSearch?!ApiClient.MatchHistorySearchLoadedAll:!ApiClient.MatchHistoryLoadedAll));UIFactory.SetText(txtCasualPage,fullCasualP>1?$"{casualPage+1}/{fullCasualP}":"");}else{cPrev.SetActive(false);cNext.SetActive(false);UIFactory.SetText(txtCasualPage,"");}}
 
         /// <summary>Half-point score format (item 4): each point is half a round, so
@@ -19948,7 +20030,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                     sb.Append("  ").Append(result).Append(' ').Append(entry.score??"?")
                       .Append(" w/ ").Append(FfaSafeRich(Trunc(entry.mate??"?",12)))
                       .Append(" vs ").Append(oppA).Append(" + ").Append(oppB)
-                      .Append(delta).Append("  <color=#888>")
+                      .Append(delta).Append(RulesTag(entry.has_rules,entry.rules_ff,entry.rules_sc)).Append("  <color=#888>")
                       .Append(ModeHistoryDate(entry.completed_at)).Append("</color>\n");
                 }
             }
@@ -19989,7 +20071,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                     int oGold=entry.gold_gained+entry.series_gold_gained;
                     string oGoldTag=oGold>0?$"  <color=#FFD94D>+{oGold}g</color>":"";
                     sb.Append("  ").Append(result).Append(' ').Append(entry.score??"?")
-                      .Append(' ').Append(matchup).Append(oGoldTag).Append("  <color=#888>")
+                      .Append(' ').Append(matchup).Append(oGoldTag).Append(RulesTag(entry.has_rules,entry.rules_ff,entry.rules_sc,entry.rules_xp)).Append("  <color=#888>")
                       .Append(ModeHistoryDate(entry.ended_at)).Append("</color>\n");
                 }
             }
@@ -20003,7 +20085,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                       .Append("</color> of ").Append(entry.player_count);
                     if(entry.has_rating_change)sb.Append("  ").Append(ModeHistoryDelta(entry.rating_change));
                     else sb.Append("  <color=#888>--</color>");
-                    sb.Append("  ").Append(entry.kills).Append("k  <color=#888>")
+                    sb.Append("  ").Append(entry.kills).Append("k").Append(FfaSettingsSummary(entry.ffa_settings)).Append("  <color=#888>")
                       .Append(ModeHistoryDate(entry.ended_at)).Append("</color>");
 
                     var participants=entry.participants;
@@ -26091,6 +26173,26 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 () => { ApiClient.TeamLobby.LeaveLobby(); dirty = true; },
                 sizeDelta: new Vector2(130, 26));
             teamLobbyLeaveBtn.SetActive(false);
+            // Room rules (Sept 10, ai-collab/sept10-batch/01-room-rules.md §5.4):
+            // the host's two lobby-wide settings on their own row, visible to
+            // every seated member (the state poll carries them), written by
+            // the host only — the server is the real gate (403); the toast is
+            // the courtesy. Hidden until seated in a lobby whose server sends
+            // settings. Values render from the server-true copy in
+            // RenderHostLobbySection, never from a local flip.
+            var thlRules = new GameObject("THLRules");
+            thlRules.transform.SetParent(tHostPanel.transform, false);
+            thlRules.AddComponent<RectTransform>();
+            UIFactory.AddHLG(thlRules, spacing: 8);
+            UIFactory.AddLE(thlRules, prefH: 32, minH: 32, flexH: 0);
+            teamLobbyFfBtn = UIFactory.CreateButton("THLFf", thlRules.transform, "Friendly fire: ON", 15f, C_WHITE, C_BTN,
+                () => { ApiClient.TeamLobby.SetRules(!ApiClient.TeamLobby.FriendlyFire, null); dirty = true; },
+                sizeDelta: new Vector2(200, 26));
+            teamLobbyScBtn = UIFactory.CreateButton("THLSc", thlRules.transform, "Same cards: OFF", 15f, C_WHITE, C_BTN,
+                () => { ApiClient.TeamLobby.SetRules(null, !ApiClient.TeamLobby.SameCards); dirty = true; },
+                sizeDelta: new Vector2(200, 26));
+            teamLobbyRulesRow = thlRules;
+            teamLobbyRulesRow.SetActive(false);
             teamLobbyBrowserHost = new GameObject("THLBrowser");
             teamLobbyBrowserHost.transform.SetParent(tHostPanel.transform, false);
             teamLobbyBrowserHost.AddComponent<RectTransform>();
@@ -26701,7 +26803,8 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             RenderHostLobbySection(ApiClient.TeamLobby, teamLobbyBrowserRows,
                 teamLobbyMemberRows, t => ApiClient.TeamLobby.Kick(t),
                 teamLobbyBrowserHost, txtTeamLobbyHeader, txtTeamLobbyBody, team: true,
-                teamLobbyCreateBtn, teamLobbyCreatePrivBtn, teamLobbyStartBtn, teamLobbyLeaveBtn, teamLobbyPrefBtn);
+                teamLobbyCreateBtn, teamLobbyCreatePrivBtn, teamLobbyStartBtn, teamLobbyLeaveBtn, teamLobbyPrefBtn,
+                teamLobbyRulesRow, teamLobbyFfBtn, teamLobbyScBtn);
 
             // DC grace banner. Driven by ApiClient.LastSeriesStateStatus etc. —
             // poll the most-recent series's state when we have one cached and
@@ -27008,7 +27111,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 // Compact header: one rich line — caret + outcome/score + date +
                 // your elo delta + your econ. The vs-line (line2) shows the teams.
                 UIFactory.SetTextRaw(hdr.txtLine1,
-                    $"{caret} {outcome} {winLine}  <color=#999>{dt}</color>{ratingDelta}{econ}");
+                    $"{caret} {outcome} {winLine}  <color=#999>{dt}</color>{ratingDelta}{econ}{RulesTag(s.has_rules,s.rules_ff,s.rules_sc)}");
                 UIFactory.SetTextRaw(hdr.txtLine2, vsLine);
                 var hl2 = (hdr.txtLine2 as Component)?.gameObject;
                 if (hl2 != null) hl2.SetActive(true);

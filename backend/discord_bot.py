@@ -6992,18 +6992,21 @@ def _rules_summary(rules):
 
 
 def _ffa_settings_summary(settings):
-    """An FFA game's lobby settings as one line (empty when the game predates
-    the record). The whole set, not only the non-defaults: an FFA lobby has
-    no single default configuration a reader could assume."""
+    """An FFA game's lobby settings as one line: the values that differ from
+    the canonical configuration (the lobby panel's defaults: first to 5, 5 max
+    cards, 1 opening draw, a 5-card draw) plus the on toggles, labelled as the
+    in-game FFA panel labels them — the same rule the in-game FFA rows use.
+    Empty when the game predates the record or was played under the canonical
+    configuration."""
     if not isinstance(settings, dict) or settings.get("score_target") is None:
         return ""
-    parts = [f"First to {settings.get('score_target')}"]
-    if settings.get("card_cap") is not None:
-        parts.append(f"Max cards {settings.get('card_cap')}")
-    if settings.get("initial_picks") is not None:
-        parts.append(f"Opening draws {settings.get('initial_picks')}")
-    if settings.get("card_candidates") is not None:
-        parts.append(f"Card draw {settings.get('card_candidates')}")
+    parts = []
+    canon = (("score_target", "First to", 5), ("card_cap", "Max cards", 5),
+             ("initial_picks", "Opening draws", 1), ("card_candidates", "Card draw", 5))
+    for key, label, default in canon:
+        v = settings.get(key)
+        if v is not None and v != default:
+            parts.append(f"{label} {v}")
     if settings.get("same_card_rule"):
         parts.append("Same cards")
     if settings.get("sudden_death"):

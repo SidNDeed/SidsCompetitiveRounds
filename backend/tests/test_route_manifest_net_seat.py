@@ -714,7 +714,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     exercised = [entry for entry in manifest if entry["classification"] == "sentinel-exercised"]
     static = [entry for entry in manifest if entry["classification"] == "statically-nonconsumer"]
     assert len(exercised) == 1
-    assert len(static) == 333   # Sept 6 Group 4: +22 mail and moderation routes and get_set_report (310 before)
+    assert len(static) == 336   # Sept 10 room rules: +3 (pref-same-cards, team/ovt lobby settings) (333 before)
     assert _manifest_id(exercised[0]) == SENTINEL_ROUTE
 
     actual_by_identity = {

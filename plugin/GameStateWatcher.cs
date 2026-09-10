@@ -4948,6 +4948,7 @@ namespace CompetitiveRounds
             if (RoomActors.LocalIsSpectator) return;
             try { NetworkReplicaDiagnostics.OnGameStarted(); } catch { }
             try { NetworkSeatTelemetry.OnMatchStarted(); } catch { }   // lag-332 W1
+            try { RoomRules.OnGameStart(); } catch { }                 // room rules: toast + per-game counters
             // Freeze the fighter roster at match start (design §3.2, Codex r1
             // find 1): from here, a later actor is a spectator (role prop) or
             // unauthorized — never a new fighter. Competitive rooms only; a
@@ -6338,6 +6339,7 @@ namespace CompetitiveRounds
             if (RoomActors.LocalIsSpectator) return;   // spectator: no tracking
             try { NetworkReplicaDiagnostics.OnGameStarted(); } catch { }
             try { NetworkSeatTelemetry.OnMatchStarted(); } catch { }   // lag-332 W1 (bundle-only in FFA)
+            try { RoomRules.OnGameStart(); } catch { }                 // room rules: per-game counters (FFA plays the defaults)
             // Roster freeze — same rule as OnMatchStarted (r1 find 1). Re-run
             // per game: FFA leavers shrink the roster between games.
             try

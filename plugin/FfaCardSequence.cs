@@ -108,6 +108,24 @@ namespace CompetitiveRounds
 
         public static bool ActiveThisGame => _active;
 
+        // ── mode indirection (room rules §6, Sept 10) ──────────────────────
+        // The engine serves two hosts: FFA (its own lobby config, cr_ffacfg)
+        // and the vanilla-pick modes (the room rules record, cr_rules — see
+        // VanillaCardSequence). Every mode-specific read goes through these
+        // three, so neither host can see the other's setting.
+        private static bool Vanilla() { try { return !FfaMode.EngineActive(); } catch { return true; } }
+        private static string ModeTag() => Vanilla() ? "vanilla" : "ffa";
+        /// <summary>The same-card rule in force for THIS room.</summary>
+        private static bool RuleOn() => Vanilla() ? RoomRules.SameCards : FfaMode.SameCardRule;
+        /// <summary>Candidates per set: the FFA lobby's knob, or vanilla's
+        /// five slots.</summary>
+        private static int CandidateCount()
+            => Vanilla() ? VanillaCardSequence.DealSize : Mathf.Clamp(FfaMode.CardCandidates, 1, 5);
+        /// <summary>Draws that are opening draws (identical for everyone, no
+        /// per-player tail substitution — §1c).</summary>
+        private static int OpeningDraws()
+            => Vanilla() ? VanillaCardSequence.OpeningDraws : FfaMode.InitialPicks;
+
         public static void PublishCapability()
         {
             try
@@ -173,7 +191,7 @@ namespace CompetitiveRounds
             try
             {
                 if (!PhotonNetwork.IsMasterClient || PhotonNetwork.CurrentRoom == null) return;
-                if (!FfaMode.SameCardRule) return;
+                if (!RuleOn()) return;
                 string room = PhotonNetwork.CurrentRoom.Name ?? "";
                 uint poolHash = ComputePoolHash();
                 if (poolHash == 0) return;
@@ -206,7 +224,7 @@ namespace CompetitiveRounds
             _active = false;
             try
             {
-                if (!FfaMode.SameCardRule) { _latchedGame = game; return; }
+                if (!RuleOn()) { _latchedGame = game; return; }
                 // RETRYABLE latch (round-2 find 3, timer bugs fixed per the
                 // wave-2 verification): ONE shared pending budget for the
                 // whole latch attempt — stamped at the FIRST pending
@@ -224,7 +242,7 @@ namespace CompetitiveRounds
                 {
                     _latchPendingSince = -1f;
                     _latchedGame = game;
-                    Plugin.Log.LogWarning($"[FFA-SEQ] same-card rule OFF this game — {why}");
+                    Plugin.Log.LogWarning($"[FFA-SEQ] same-card rule OFF this game (mode={ModeTag()}) — {why}");
                 }
                 int cap = RoomCapabilityState();
                 if (cap == 0)
@@ -281,7 +299,7 @@ namespace CompetitiveRounds
                 _genRng = new XorShift128(seed);
                 _usedNoRepeat.Clear();
                 _seq.Clear();
-                _candCount = Mathf.Clamp(FfaMode.CardCandidates, 1, 5);
+                _candCount = CandidateCount();
                 int players = 5;
                 // Fighter count (census): a spectator must not inflate the
                 // draw-sequence length K — every fighter computes K locally
@@ -292,7 +310,7 @@ namespace CompetitiveRounds
                 int k = Mathf.Clamp(4 * (players - 1) + 6, 16, 64);
                 for (int i = 0; i < k; i++) _seq.Add(GenerateNextSet());
                 _active = true;
-                Plugin.Log.LogInfo($"[FFA-SEQ] shared sequence ACTIVE for game {game}: seed {seed}, {k} sets × {_candCount}, pool {_pool.Length}, no-repeat {_noRepeat.Count}");
+                Plugin.Log.LogInfo($"[FFA-SEQ] shared sequence ACTIVE for game {game} (mode={ModeTag()}): seed {seed}, {k} sets × {_candCount}, pool {_pool.Length}, no-repeat {_noRepeat.Count}");
             }
             catch (Exception ex)
             {
@@ -474,7 +492,7 @@ namespace CompetitiveRounds
                 // offer in an opening hand is simply offered; picking it
                 // applies mechanically fine — the blacklist is a draft-
                 // variety rule, not an engine constraint.
-                bool openingDraw = consumed <= FfaMode.InitialPicks;
+                bool openingDraw = consumed <= OpeningDraws();
 
                 foreach (var nm in names)
                 {
@@ -584,6 +602,36 @@ namespace CompetitiveRounds
                 return true;
             }
             catch { return true; }
+        }
+
+        /// <summary>Menu-only diagnostic (VanillaCardSequence's self-test):
+        /// snapshot the live pool, generate <paramref name="sets"/> sets of
+        /// <paramref name="count"/> from <paramref name="seed"/> and return
+        /// them as text — null when the pool is unavailable or a set is short
+        /// or has a duplicate. Borrows the per-game statics and resets them
+        /// before and after; refuses to run in a room or beside a live game.</summary>
+        internal static string DryRun(uint seed, int count, int sets)
+        {
+            if (PhotonNetwork.InRoom || _active) return null;
+            try
+            {
+                OnGameStart();
+                if (!SnapshotPool()) return null;
+                _seed = seed;
+                _genRng = new XorShift128(seed);
+                _candCount = Mathf.Clamp(count, 1, 5);
+                var sb = new System.Text.StringBuilder();
+                for (int i = 0; i < sets; i++)
+                {
+                    var set = GenerateNextSet();
+                    if (set.Length != _candCount || new HashSet<string>(set).Count != set.Length) return null;
+                    if (i > 0) sb.Append(" | ");
+                    sb.Append(string.Join(",", set));
+                }
+                return sb.ToString();
+            }
+            catch { return null; }
+            finally { OnGameStart(); }
         }
 
         private static uint ComputePoolHash()

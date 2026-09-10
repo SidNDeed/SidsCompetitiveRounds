@@ -709,7 +709,7 @@
           ],
           "main",
           "get_player_stats",
-          "ba2c2326e29eec2cd62261b7b8cb4eff65891706"
+          "9d83fcffd1cbeba68d234b88fdf5f501efa9a6bd"
         ],
         [
           "/api/v1/players/{steam_id}/active-color",
@@ -2191,7 +2191,7 @@
           ],
           "main",
           "ovt_lobby_settings",
-          "9c5b003a6127ea5ab9a8c92a871bb50b4ed50040"
+          "9e8a22cdce97a9c72d4d90567237694960e6ecaa"
         ],
         [
           "/api/v1/ovt/lobby/start",
@@ -2209,7 +2209,7 @@
           ],
           "main",
           "ovt_lobby_state",
-          "27d3041373f22fc2fe48653bf8531b5c1389557a"
+          "1c5d0881e6c65c4300d3f28ffd1baba568838800"
         ],
         [
           "/api/v1/ovt/queue/join",
@@ -2326,7 +2326,7 @@
           ],
           "main",
           "queue_poll",
-          "cf5cd216a1aa970ea7e302b4cefb6a4fec00d8e0"
+          "65b18c9b068d53bc0ba87db95a7486df692cdd6a"
         ],
         [
           "/api/v1/queue/ready",
@@ -2335,7 +2335,7 @@
           ],
           "main",
           "queue_ready",
-          "586d42b74a58d0deea0eaa517e5c86c6ca8b2abb"
+          "51b96000384dec19c2b2bea1924ecfd75e34be26"
         ],
         [
           "/api/v1/queue/recent-joins",
@@ -2470,7 +2470,7 @@
           ],
           "main",
           "spectate_grant",
-          "cf52db0fc20b1158dcd85003b7662dd1beec5652"
+          "b5611f43e534be58de3d2cb8b308cf6819ff8925"
         ],
         [
           "/api/v1/spectate/heartbeat",
@@ -2587,7 +2587,7 @@
           ],
           "main",
           "team_lobby_settings",
-          "af03803b26c7c0b80d34cdf4e7774da4f1589150"
+          "5dda55acc0b7cde1f08d081aa68c12bd9325bd70"
         ],
         [
           "/api/v1/team/lobby/start",
@@ -2596,7 +2596,7 @@
           ],
           "main",
           "team_lobby_start",
-          "afa4224f8f9fec0cd5c2dbb7236bd3aa0b90cdff"
+          "c6216dba3f4b50ea79a08105fcaee6c20b53aff4"
         ],
         [
           "/api/v1/team/lobby/state",
@@ -2605,7 +2605,7 @@
           ],
           "main",
           "team_lobby_state",
-          "df32e192c04cc4feae57d0c4b87337b199aaba93"
+          "023f4ef7e77d3875b32ac4ac5bfd4221aebca62c"
         ],
         [
           "/api/v1/team/queue/count",
@@ -2659,7 +2659,7 @@
           ],
           "main",
           "team_queue_poll",
-          "022e958a076c0f8510786046da57798fc5fd08c0"
+          "ac2c65f32943ea0633789d903b922f52d80174ef"
         ],
         [
           "/api/v1/team/queue/preferred-team",
@@ -2918,7 +2918,7 @@
           ],
           "main",
           "get_set_report",
-          "65e152a6a004dce1a287d636452956a14b919129"
+          "b2b72dab885775cfb0ca7d5532d0226475c87aa2"
         ]
       ]
     },

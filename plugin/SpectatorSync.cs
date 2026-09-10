@@ -169,6 +169,20 @@ namespace CompetitiveRounds
                     LeaveToMenu("wrong room");
                     return;
                 }
+                // Room rules (§5.2, r1 H5): bind this room to the rules the
+                // grant carried (RoomRules.StagePending in the grant handler)
+                // exactly as a fighter binds to its ready payload. A mismatch
+                // ends the session: this seat would otherwise consume a
+                // friendly-fire verdict the fighters do not share (A2).
+                var rulesVerdict = RoomRules.LatchVerdict.Defaults;
+                try { rulesVerdict = RoomRules.LatchOnJoin(PhotonNetwork.CurrentRoom, "spectator"); }
+                catch (Exception rex) { Plugin.Log?.LogWarning($"[ROOM-RULES] spectator latch: {rex.Message}"); }
+                RoomRules.ClearPending();
+                if (rulesVerdict == RoomRules.LatchVerdict.Mismatch)
+                {
+                    LeaveToMenu("room rules mismatch");
+                    return;
+                }
                 Plugin.Log?.LogInfo($"[SPECTATE] in room as spectator (actors={PhotonNetwork.CurrentRoom?.PlayerCount ?? 0})");
                 // A spectator is kickable BY DESIGN (r10 find 3): honor the
                 // master's cooperative close for this session's lifetime.

@@ -374,7 +374,9 @@ def test_ready_dissolutions_reset_the_own_row_and_answer_dissolved():
     assert 'raise HTTPException(409, "match dissolved (participant banned)")' in src
     opp_read = src.index("FROM ranked_queue WHERE player_id = :oid")
     reciprocal = src.index("_queue_pair_reciprocal(entry, opp)")
-    ready_write = src.index("UPDATE ranked_queue SET ready = true WHERE player_id = :pid")
+    # Sept 10 (room rules a1 M1): the ready write also refreshes the member's
+    # mod version, so the series' rules record judges the version that plays.
+    ready_write = src.index("UPDATE ranked_queue SET ready = true, mod_version = :mv WHERE player_id = :pid")
     assert opp_read < reciprocal < ready_write
 
 

@@ -9150,6 +9150,7 @@ async def get_player_stats(
         active_player_effect_sku=active_player_effect_sku,
         hide_gold=bool(player.hide_gold),
         appear_offline=bool(player.appear_offline),
+        pref_same_cards=bool(player.pref_same_cards),   # room rules: the Settings-tab toggle's value
         active_nametag_skus=active_nametag_skus,
         last_match=stats["last_match"],
         recent_rating_history=history,
@@ -14737,7 +14738,7 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
                    rq.rating_deviation, rq.status, rq.matched_with,
                    rq.room_name, rq.room_region, rq.region, rq.home_region,
                    rq.ready, rq.joined_at, rq.matched_at,
-                   rq.region_pings, rq.region_pings_at
+                   rq.region_pings, rq.region_pings_at, rq.rules
             FROM ranked_queue rq
             JOIN players p ON rq.player_id = p.id
             WHERE p.steam_id = :sid
@@ -14966,15 +14967,18 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
                 # Room rules (migration 306): frozen HERE, before the stamp, so
                 # the rows, the ledger and the series carry ONE value. A
                 # resumed series keeps the rules it was born with (rules are
-                # constant across the games of one series); a new series, or
-                # one born before this release (NULL), takes the pair's
-                # preferences AND'ed with both seats' member-scoped versions
-                # (the caller judged by THIS request's header). The series
-                # read moves ahead of the stamp for that reason — it is a
-                # plain read under the pair locks already held.
+                # constant across the games of one series); one born before
+                # this release (NULL) played its earlier games under the
+                # defaults and keeps playing them — its history stays
+                # "unknown", never backfilled from today's preferences (a1
+                # H4). Only a NEW series takes the pair's preferences AND'ed
+                # with both seats' member-scoped versions (the caller judged
+                # by THIS request's header). The series read moves ahead of
+                # the stamp for that reason — it is a plain read under the
+                # pair locks already held.
                 series = await _find_current_active_series(db, my_pid, opp["player_id"], room_id=room_name)
                 _series_resolved = True
-                if series is not None and series.rules is not None:
+                if series is not None:
                     rules = _rules_normalize(series.rules)
                 else:
                     rules = await _rules_for_members(
@@ -15019,10 +15023,8 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
                 )
                 db.add(series)
                 await db.flush()
-            elif series.rules is None:
-                # Born before this release: adopt the room's frozen rules so
-                # the history line describes what this sitting plays.
-                series.rules = rules
+            # A series born before the record keeps rules NULL: its history
+            # says "unknown" rather than a record it never played under (a1 H4).
             # Bug 199: same stamp as /queue/ready's both_ready branch — a
             # resumed series is otherwise invisible on the live surfaces from
             # room-issue until its first scored point.
@@ -15334,12 +15336,14 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
         await db.commit()
         return {"status": "dissolved", "message": "Match dissolved - searching again"}
 
-    # Set ourselves as ready. (The member-scoped mod_version, migration 306,
-    # is refreshed by every poll's heartbeat — the issuing seat is judged by
-    # its own request header regardless.)
+    # Set ourselves as ready, and refresh the member-scoped mod_version
+    # (migration 306) in the same statement: the opponent's issuance reads
+    # THIS row's version when it decides Same Cards, and a downgrade between
+    # the last poll and this ready must not leave a capable-looking row
+    # behind (a1 M1). The issuing seat is judged by its own header regardless.
     await db.execute(
-        text("UPDATE ranked_queue SET ready = true WHERE player_id = :pid"),
-        {"pid": player.id},
+        text("UPDATE ranked_queue SET ready = true, mod_version = :mv WHERE player_id = :pid"),
+        {"pid": player.id, "mv": _request_mod_version(request)},
     )
 
     # Refresh matched_at so the opponent's ready timeout window resets from
@@ -15397,10 +15401,12 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
                 p1_pings_at=entry["region_pings_at"], p2_pings_at=opp["region_pings_at"])
             # Room rules (migration 306): same freeze as the poll's both-ready
             # branch — the series read moves ahead of the stamp; a resumed
-            # series keeps its rules, otherwise prefs AND member versions.
+            # series keeps its rules (NULL = born before the record = the
+            # defaults, never backfilled — a1 H4), only a NEW series takes
+            # prefs AND member versions.
             existing_series = await _find_current_active_series(db, player.id, opp["player_id"], room_id=room_name)
             _series_resolved = True
-            if existing_series is not None and existing_series.rules is not None:
+            if existing_series is not None:
                 rules = _rules_normalize(existing_series.rules)
             else:
                 rules = await _rules_for_members(
@@ -15444,8 +15450,7 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
             )
             db.add(existing_series)
             await db.flush()  # get the new series_id
-        elif existing_series.rules is None:
-            existing_series.rules = rules
+        # NULL rules on a resumed series stay NULL (a1 H4) — see the poll.
 
         # Bug 199: a RESUMED series carries a stale created_at and a stale
         # newest matches.ended_at, so without this stamp it stays invisible on
@@ -32552,15 +32557,22 @@ async def team_queue_poll(steam_id: str, request: Request,
                 # created_at is MATCH time and also had to cover the whole
                 # ready-up window, which made the deadline wrong by design.
                 # Room rules (migration 306): the record the rows were stamped
-                # with at match / Start time is copied onto the series in the
-                # same statement that issues the room — one value everywhere.
+                # with at match / Start / relock time is copied onto the series
+                # in the same statement that issues the room — one value
+                # everywhere. Only a row that CARRIES a record writes it (a
+                # lobby's settings win for an adopted series; a relock
+                # re-stamped the series' own record); a NULL row — the relock
+                # of a series born before the record — leaves the series'
+                # history unknown and plays the defaults (a1 H5).
                 rules = _rules_normalize(me["rules"])
                 await db.execute(
                     text("UPDATE team_series SET photon_room_id = :rn, region = :rr,"
-                         " room_issued_at = NOW(), rules = CAST(:rules AS JSONB)"
+                         " room_issued_at = NOW(),"
+                         " rules = CASE WHEN CAST(:has_rules AS BOOLEAN)"
+                         "              THEN CAST(:rules AS JSONB) ELSE rules END"
                          " WHERE id = :sid"),
                     {"rn": room_name, "rr": chosen_region, "sid": me["series_id"],
-                     "rules": _rules_json(rules)},
+                     "has_rules": me["rules"] is not None, "rules": _rules_json(rules)},
                 )
                 # Re-read so the response reflects the new room name.
                 me_re = await db.execute(
@@ -34334,6 +34346,7 @@ async def _team_lock_family_pick(db: AsyncSession, four_pids,
             SELECT ts.id, ts.status, ts.t1a_id, ts.t1b_id, ts.t2a_id, ts.t2b_id,
                    ts.t1_series_wins, ts.t2_series_wins, ts.dc_grace_until,
                    ts.invalidation_reason, ts.created_at, ts.room_issued_at,
+                   ts.rules,
                    (SELECT COUNT(*) FROM team_matches tm
                      WHERE tm.series_id = ts.id
                        AND tm.invalidated_at IS NULL) AS games,
@@ -34440,6 +34453,11 @@ async def _team_relock_existing_series(db: AsyncSession, srow, member_pids,
     The dc_manual_pending flag clears because play resumed — nothing is
     pending an admin call any more."""
     t1a, t1b = srow["t1a_id"], srow["t1b_id"]
+    # Room rules (migration 306, a1 H5): a relock is the SAME series, so the
+    # rows carry the series' own record again (rules are constant across the
+    # games of one series); a series born before the record (NULL) stays
+    # NULL — its rows then play the defaults and its history stays unknown.
+    _relock_rules = (_rules_json(srow["rules"]) if srow["rules"] is not None else None)
     for pid in member_pids:
         t = 1 if pid in (t1a, t1b) else 2
         await db.execute(
@@ -34448,10 +34466,11 @@ async def _team_relock_existing_series(db: AsyncSession, srow, member_pids,
                    SET status = 'matched',
                        series_id = :sid,
                        team_assigned = :t,
-                       matched_at = NOW()
+                       matched_at = NOW(),
+                       rules = CAST(:rules AS JSONB)
                  WHERE player_id = :pid
             """),
-            {"sid": srow["id"], "t": t, "pid": pid},
+            {"sid": srow["id"], "t": t, "pid": pid, "rules": _relock_rules},
         )
     await _lease_acquire_many(db, list(member_pids), "team", srow["id"],
                               LEASE_TTL_ASSEMBLY)
@@ -37943,7 +37962,8 @@ async def _lobby_state_impl(mode: str, steam_id: str, request: Request,
     await db.execute(text(
         f"UPDATE {cfg['queue']}"
         f"   SET last_polled = NOW(), mod_version = :mv,"
-        f"       seen_settings_version = LEAST(CAST(:seen AS INTEGER), CAST(:cur AS INTEGER))"
+        f"       seen_settings_version = GREATEST(seen_settings_version,"
+        f"                                        LEAST(CAST(:seen AS INTEGER), CAST(:cur AS INTEGER)))"
         f" WHERE player_id = :pid"
     ), {"pid": me["player_id"], "mv": _request_mod_version(request),
         "seen": max(0, int(seen_settings_version or 0)), "cur": _cur_ver})
@@ -38292,9 +38312,12 @@ class _LobbySettingsReq(BaseModel):
     _LobbyPrefsReq: a whole-row resend must not overwrite the sibling setting
     with a stale local copy)."""
     steam_id: str = Field(..., max_length=20)
-    expected_lobby_id: str | None = None
+    expected_lobby_id: str = Field(..., min_length=1, max_length=64)
     friendly_fire: bool | None = None
     same_cards: bool | None = None
+    # Actor HMAC over 'lobby_settings:{steam_id}:{expected_lobby_id}:{ff}:{sc}'
+    # (each value 1 / 0 / '-' when not sent) — design §4.2, a1 H3.
+    sig: str = Field(..., max_length=128)
 
 
 async def _lobby_settings_impl(mode: str, req: _LobbySettingsReq, request: Request,
@@ -38311,21 +38334,39 @@ async def _lobby_settings_impl(mode: str, req: _LobbySettingsReq, request: Reque
     rules_unsupported / rules_need_update); members who join afterwards are
     caught by the Start gate, and by the join-time refusal."""
     cfg = _lobby_cfg(mode)
+    if req.friendly_fire is None and req.same_cards is None:
+        raise HTTPException(422, "nothing to set")
+    # Actor HMAC + VERIFIED session (design §4.2 — the pref endpoint's
+    # contract; settings writes are never HMAC-only, residual F3), a1 H3.
+    if not MATCH_HMAC_SECRET:
+        raise HTTPException(status_code=503, detail="HMAC not configured")
+    _ff_tok = "-" if req.friendly_fire is None else ("1" if req.friendly_fire else "0")
+    _sc_tok = "-" if req.same_cards is None else ("1" if req.same_cards else "0")
+    _expected_sig = hmac.new(
+        MATCH_HMAC_SECRET.encode(),
+        f"lobby_settings:{req.steam_id}:{req.expected_lobby_id}:{_ff_tok}:{_sc_tok}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(req.sig, _expected_sig):
+        raise HTTPException(status_code=403, detail="Invalid signature")
     await _check_steam_session(request, req.steam_id, db)
+    if not _session_was_verified(request):
+        raise HTTPException(status_code=401, detail="session_required")
+    # The fence is mandatory and always compared (a1 M2): a delayed write
+    # meant for one lobby must not land on the next lobby this account hosts.
+    try:
+        _exp_lid = str(uuid.UUID(str(req.expected_lobby_id)))
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(422, "expected_lobby_id is not a valid id")
     _presence_touch(req.steam_id)
     me = await _lock_queue_group_for_player(db, cfg["queue"], req.steam_id)
     if me is None or me["status"] != "lobby" or me["series_id"] is None:
         await db.commit()
         raise HTTPException(409, "not_in_open_lobby")
     lobby_id = me["series_id"]
-    if req.expected_lobby_id:
-        try:
-            _exp_lid = str(uuid.UUID(str(req.expected_lobby_id)))
-        except (ValueError, AttributeError, TypeError):
-            raise HTTPException(422, "expected_lobby_id is not a valid id")
-        if str(lobby_id) != _exp_lid:
-            await db.commit()
-            raise HTTPException(409, "not_in_open_lobby")
+    if str(lobby_id) != _exp_lid:
+        await db.commit()
+        raise HTTPException(409, "not_in_open_lobby")
     # The lobby row is already held by the group lock above (lobby rows are
     # the parent of 'lobby' seats) — a plain read.
     lrow = (await db.execute(text(
@@ -38343,7 +38384,12 @@ async def _lobby_settings_impl(mode: str, req: _LobbySettingsReq, request: Reque
     new_ff = bool(lrow["friendly_fire"]) if req.friendly_fire is None else bool(req.friendly_fire)
     new_sc = bool(lrow["same_cards"]) if req.same_cards is None else bool(req.same_cards)
     new_rules = {"ff": new_ff, "sc": new_sc, "src": "lobby"}
-    if _rules_nondefault(new_rules):
+    # Only a value SET in the non-default direction needs every seat at the
+    # floor; reverting either setting to its default is always allowed, even
+    # while the other stays non-default and a member is below the floor —
+    # otherwise the host could never restore defaults one toggle at a time
+    # (a1 M3). Start re-judges the whole resulting record.
+    if req.friendly_fire is False or req.same_cards is True:
         if not _mod_version_at_least(_request_mod_version(request), ROOM_RULES_MIN_VERSION):
             await db.commit()
             raise HTTPException(409, "rules_unsupported")
@@ -38719,7 +38765,7 @@ async def team_lobby_join(req: _LobbyJoinReq, request: Request,
 
 @app.get("/api/v1/team/lobby/state", tags=["Team Queue"])
 async def team_lobby_state(steam_id: str = Query(...), request: Request = None,
-                           seen_settings_version: int = Query(0, ge=0),
+                           seen_settings_version: int = Query(0, ge=0, le=2147483647),
                            db: AsyncSession = Depends(get_db)):
     return await _lobby_state_impl("team", steam_id, request, db,
                                    seen_settings_version=seen_settings_version)
@@ -38942,7 +38988,7 @@ async def ovt_lobby_join(req: _LobbyJoinReq, request: Request,
 
 @app.get("/api/v1/ovt/lobby/state", tags=["1v2 Queue"])
 async def ovt_lobby_state(steam_id: str = Query(...), request: Request = None,
-                          seen_settings_version: int = Query(0, ge=0),
+                          seen_settings_version: int = Query(0, ge=0, le=2147483647),
                           db: AsyncSession = Depends(get_db)):
     return await _lobby_state_impl("ovt", steam_id, request, db,
                                    seen_settings_version=seen_settings_version)
@@ -47006,6 +47052,14 @@ async def spectate_grant(req: SpectateGrantBody, request: Request,
     """), {"gid": req.game_id})).mappings().first()
     if game is None or game["last_attest_at"] is None:
         raise HTTPException(status_code=404, detail="game_not_live")
+    # Room rules (addendum A3, a1 H1): the PER-GAME floor — a friendly-fire-
+    # OFF room raised it to SPECTATE_PROTOCOL_FF_OFF at attest — is judged
+    # here, before anything about the room is disclosed; the validation and
+    # heartbeat gates compare the lease against the same floor, so the lease
+    # below records the client's own protocol, not the global constant.
+    _game_floor = max(int(game["protocol_min"] or 1), SPECTATE_PROTOCOL)
+    if req.client_protocol < _game_floor:
+        raise HTTPException(status_code=426, detail="spectator_upgrade_required")
     # Aug 7 item 13: the grant enforces the same per-mode flag the games list
     # advertises — a crafted request must not watch a mode the UI hides.
     if game["mode"] not in _SPECTATE_WATCHABLE_MODES:
@@ -47077,7 +47131,9 @@ async def spectate_grant(req: SpectateGrantBody, request: Request,
            "gid": str(game["id"]), "sid": req.steam_id,
            "joinw": SPECTATE_JOIN_WINDOW_SECONDS,
            "hbw": SPECTATE_JOIN_WINDOW_SECONDS + SPECTATE_HEARTBEAT_TTL_SECONDS,
-           "proto": SPECTATE_PROTOCOL})
+           # The admitted protocol (>= the game floor, checked above), clamped
+           # to the column; the lease gates re-judge it against the floor.
+           "proto": max(SPECTATE_PROTOCOL, min(int(req.client_protocol), 32767))})
     # A replacement lease is a new authorization generation for this actor.
     # Retain the physical tombstone, but advance its causal fence once here;
     # repeated dead heartbeats must not keep refreshing it forever.
@@ -47467,9 +47523,11 @@ _REPORT_1V1_SQL = """
            m.p1_keys_pressed, m.p1_active_seconds, m.p1_damage_dealt, m.p1_deaths,
            m.p2_bullets_fired, m.p2_bullets_hit, m.p2_blocks_activated, m.p2_blocks_successful,
            m.p2_keys_pressed, m.p2_active_seconds, m.p2_damage_dealt, m.p2_deaths,
+           rs.rules AS rules,
            BOOL_AND(m.is_ranked) OVER () AS all_ranked,
            COUNT(*) OVER () AS total_rows
       FROM matches m
+      LEFT JOIN ranked_series rs ON rs.id = m.series_id
      WHERE {where} AND m.invalidated_at IS NULL
        AND CAST(:cpid AS uuid) IN (m.player1_id, m.player2_id)
      ORDER BY COALESCE(m.started_at, m.ended_at, m.created_at) DESC, m.created_at DESC
@@ -47523,8 +47581,10 @@ _REPORT_TEAM_SQL = """
            tm.t1a_id, tm.t1b_id, tm.t2a_id, tm.t2b_id,
            tm.t1_rounds_won, tm.t2_rounds_won, tm.t1_points_total, tm.t2_points_total,
            tm.t1a_end_stats, tm.t1b_end_stats, tm.t2a_end_stats, tm.t2b_end_stats,
+           ts.rules AS rules,
            COUNT(*) OVER () AS total_rows
       FROM team_matches tm
+      LEFT JOIN team_series ts ON ts.id = tm.series_id
      WHERE {where} AND tm.invalidated_at IS NULL
        AND CAST(:cpid AS uuid) IN (tm.t1a_id, tm.t1b_id, tm.t2a_id, tm.t2b_id)
      ORDER BY COALESCE(tm.started_at, tm.ended_at) DESC
@@ -47557,8 +47617,10 @@ _REPORT_OVT_SQL = """
            om.solo_rounds_won, om.duo_rounds_won, om.solo_points_total, om.duo_points_total,
            om.solo_damage_timeline, om.duo_a_damage_timeline, om.duo_b_damage_timeline,
            om.solo_end_stats, om.duo_a_end_stats, om.duo_b_end_stats,
+           os.rules AS rules, os.solo_extra_pick AS solo_extra_pick,
            COUNT(*) OVER () AS total_rows
       FROM ovt_matches om
+      LEFT JOIN ovt_series os ON os.id = om.series_id
      WHERE {where} AND om.invalidated_at IS NULL
        AND CAST(:cpid AS uuid) IN (om.solo_id, om.duo_a_id, om.duo_b_id)
      ORDER BY COALESCE(om.started_at, om.ended_at) DESC
@@ -47571,10 +47633,12 @@ _REPORT_OVT_WHERE = {
 # The FFA match row counts for the caller only when the caller PLAYED it: an
 # `absent` roster row is a frozen-roster ghost (left in an earlier game of the
 # sitting, #227) — the same predicate the profile card uses.
-_REPORT_FFA_SQL = """
+_REPORT_FFA_SQL = f"""
     SELECT fm.id, fm.started_at, fm.ended_at, fm.timeline,
-           COALESCE(fm.duration_seconds, fm.elapsed_seconds, 0) AS duration_s
+           COALESCE(fm.duration_seconds, fm.elapsed_seconds, 0) AS duration_s,
+           {_FFA_SETTINGS_COLS}
       FROM ffa_matches fm
+      LEFT JOIN ffa_lobbies l ON l.id = fm.lobby_id
      WHERE fm.id = CAST(:key AS uuid) AND fm.invalidated_at IS NULL
        AND EXISTS (SELECT 1 FROM ffa_match_players fpx
                     WHERE fpx.match_id = fm.id
@@ -47910,6 +47974,14 @@ def _report_game_json(game, sid_of, cards_by_match, sample_cap=_REPORT_SAMPLES_M
     }
     if picks_capped:
         out["picks_capped"] = True
+    # Room rules (migration 306): the record the game was played under, read
+    # from the SAME games statement as the game — `rules` for 1v1 / 2v2 / 1v2
+    # (null = a series born before the record, or a casual game with no
+    # series), `settings` for FFA (null = the lobby predates configurable
+    # settings). The loader that owns the mode puts exactly one key on the game.
+    for _k in ("rules", "settings"):
+        if _k in game:
+            out[_k] = game[_k]
     return out
 
 
@@ -47977,6 +48049,7 @@ async def _report_load_1v1(db, selector, key, cpid):
         games.append({
             "id": r["id"], "started_at": r["started_at"], "duration_s": r["duration_s"],
             "is_ranked": bool(r["is_ranked"]), "series_id": r["series_id"],
+            "rules": _rules_history(r["rules"]),
             "point_times": r["point_times"], "point_timeline": r["point_timeline"],
             "slots": [
                 _report_slot(r["player1_id"], r["p1_rounds_won"], r["p1_points_total"],
@@ -48027,7 +48100,8 @@ async def _report_load_team(db, selector, key, cpid):
             s["team"] = team
             slots.append(s)
         games.append({"id": r["id"], "started_at": r["started_at"], "duration_s": r["duration_s"],
-                      "series_id": r["series_id"], "slots": slots})
+                      "series_id": r["series_id"], "rules": _rules_history(r["rules"]),
+                      "slots": slots})
     return games, total
 
 
@@ -48050,7 +48124,9 @@ async def _report_load_ovt(db, selector, key, cpid):
             s["team"] = team
             slots.append(s)
         games.append({"id": r["id"], "started_at": r["started_at"], "duration_s": r["duration_s"],
-                      "series_id": r["series_id"], "slots": slots})
+                      "series_id": r["series_id"],
+                      "rules": _rules_history(r["rules"], r["solo_extra_pick"]),
+                      "slots": slots})
     return games, total
 
 
@@ -48082,7 +48158,7 @@ async def _report_load_ffa(db, key, cpid):
         s["color_hex"] = fp["color_hex"]
         slots.append(s)
     game = {"id": r["id"], "started_at": r["started_at"], "duration_s": r["duration_s"],
-            "ffa_timeline": r["timeline"], "slots": slots}
+            "ffa_timeline": r["timeline"], "settings": _ffa_settings_block(r), "slots": slots}
     return [game], slots
 
 

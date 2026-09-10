@@ -65,10 +65,11 @@ def _room_cols():
 
 
 def match_row(mid, p1, p2, *, minute, series_id=None, session_uuid=None, ranked=True,
-              telemetry=True, dur=120):
+              telemetry=True, dur=120, rules=None):
     t = T0 + timedelta(minutes=minute)
     row = {
         "id": mid, "is_ranked": ranked, "series_id": series_id, "session_uuid": session_uuid,
+        "rules": rules,   # the series record the games statement LEFT JOINs (migration 306)
         "started_at": t, "ended_at": t + timedelta(seconds=dur), "created_at": t,
         "invalidated_at": None, "duration_s": dur,
         "player1_id": p1, "player2_id": p2,
@@ -186,7 +187,14 @@ TEAM_TELE = [
 # 1; G (slot 2) is a frozen-roster ghost who did NOT play this game.
 FFA_TIMELINE = "0,0R,1,1R,0,0RG"
 FFA_MATCH = {"id": FFA1, "started_at": T0, "ended_at": T0 + timedelta(seconds=400),
-             "duration_s": 400, "invalidated_at": None, "timeline": FFA_TIMELINE, **_room_cols()}
+             "duration_s": 400, "invalidated_at": None, "timeline": FFA_TIMELINE, **_room_cols(),
+             # the lobby settings columns the games statement LEFT JOINs (a
+             # lobby that predates configurable settings: nothing known)
+             "score_target": None, "card_cap": None, "initial_picks": None, "card_candidates": None,
+             "same_card_rule": None, "sudden_death": None, "settings_known": False}
+# An FFA lobby played under a known configuration.
+FFA_SETTINGS_ROW = dict(FFA_MATCH, score_target=7, card_cap=5, initial_picks=1, card_candidates=5,
+                        same_card_rule=True, sudden_death=False, settings_known=True)
 
 
 def ffa_player(pid, slot, placement, **over):
@@ -278,6 +286,9 @@ class FakeDb:
             r["total_rows"] = len(rows)
             # the set-wide ranked flag rides every row like total_rows does
             r["all_ranked"] = all(bool(x.get("is_ranked", True)) for x in rows)   # team/ovt rows carry no flag
+            # the series record the games statement LEFT JOINs (migration 306):
+            # None unless the fixture row carries one
+            r.setdefault("rules", None)
             out.append(r)
         return out
 
@@ -790,6 +801,39 @@ def test_control_absent_flag_is_what_excludes_the_ghost(session_ok):
     played = [dict(p, absent=False) for p in FFA_PLAYERS]
     resp = _call(FakeDb(ffa_players=played), GHOST, match=FFA1)
     assert resp["kind"] == "ffa" and GHOST in {p["id"] for p in resp["players"]}
+
+
+def test_envelope_carries_the_room_rules_record(session_ok):
+    """Migration 306: every game carries the record it was played under, read
+    from the ONE games statement per set (no second lookup): `rules` from the
+    series row for 1v1 / 2v2 / 1v2 — null for a series born before the record
+    or a casual game with no series — and `settings` for FFA from the lobby
+    (null when the lobby predates configurable settings)."""
+    rec = {"ff": False, "sc": True, "src": "prefs"}
+    db = FakeDb(matches=[match_row(M1, PID_A, PID_B, minute=0, series_id=SERIES, rules=rec),
+                         match_row(M2, PID_B, PID_A, minute=5, series_id=SERIES)])
+    resp = _call(db, CALLER, series=SERIES)
+    by_id = {g["match_id"]: g for g in resp["games"]}
+    assert by_id[M1]["rules"] == {"ff": False, "sc": True}, "the src tag is not a history fact"
+    assert by_id[M2]["rules"] is None
+    assert all("settings" not in g for g in resp["games"])
+    assert db.count("FROM matches m") == 1, "the record rides the games statement, no second lookup"
+    assert "LEFT JOIN ranked_series rs ON rs.id = m.series_id" in next(
+        s for s, _ in db.statements if "FROM matches m" in s)
+
+    resp = _call(FakeDb(), CALLER, match=FFA1)
+    assert resp["games"][0]["settings"] is None and "rules" not in resp["games"][0]
+    resp = _call(FakeDb(ffa_match=FFA_SETTINGS_ROW), CALLER, match=FFA1)
+    assert resp["games"][0]["settings"] == {
+        "score_target": 7, "card_cap": 5, "initial_picks": 1, "card_candidates": 5,
+        "same_card_rule": True, "sudden_death": False}
+    assert "LEFT JOIN ffa_lobbies l ON l.id = fm.lobby_id" in " ".join(main._REPORT_FFA_SQL.split())
+
+    resp = _call(FakeDb(), CALLER, series=TEAM_SERIES)
+    assert all(g["rules"] is None for g in resp["games"]) and resp["games"]
+    assert "LEFT JOIN team_series ts ON ts.id = tm.series_id" in " ".join(main._REPORT_TEAM_SQL.split())
+    assert "LEFT JOIN ovt_series os ON os.id = om.series_id" in " ".join(main._REPORT_OVT_SQL.split())
+    assert "os.solo_extra_pick AS solo_extra_pick" in main._REPORT_OVT_SQL
 
 
 def test_ffa_envelope_carries_stored_damage_kills_and_score(session_ok):

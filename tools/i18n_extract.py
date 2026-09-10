@@ -109,6 +109,9 @@ FILES = [
     # Older omissions found by the same sweep: the minimised-chat suffix
     # (Sept 6 Group 2, bug 333) and the team-colour point announcements.
     "ChatOverlayTmp.cs", "TeamColorIdentity.cs",
+    # Room rules (Sept 10): the friendly-fire / same-cards summaries and the
+    # game-start toast, all at I18n.Tr/TrF sites.
+    "RoomRules.cs",
 ]
 
 # call(...) sites and which ARGUMENT POSITIONS carry display text (wave-2
