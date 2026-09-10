@@ -2183,6 +2183,7 @@
   "This account is not ready for mail yet - try again later.",
   "This account isn't registered as an artist.",
   "This is so sad. Please give this man a break",
+  "This lobby is no longer open - the setting was not changed.",
   "This lobby uses settings your mod version can't play - update the mod.",
   "This mod sends data to a private server run by the mod author to power the leaderboard and ranked matchmaking.\n\nWhat gets recorded if you allow:\n  • Your Steam ID and in-game display name\n  • Your Discord ID and username, ONLY if you link your Discord via the in-game link code\n  • Each match you play: rounds won, points, duration, cards picked, cards offered, opponent\n  • Your Glicko-2 rating history\n\nWhat you can do later:\n  • Revoke consent anytime (F5 → Settings → Revoke). Reporting stops.\n  • Delete your data (F5 → Settings → Delete my data). Steam ID, display name, and Discord link are scrubbed. Matches stay so other players' ratings and histories aren't disturbed. Deletion is IRREVERSIBLE — you cannot re-register this Steam ID later.\n\nChoose Allow to use the leaderboard. Choose Decline to run the mod fully offline.",
   "This release only ships a zip — opening the releases page to update manually",
@@ -2465,6 +2466,7 @@
   "bundled into the mod",
   "by hit %, block %, ranked DPS, keys/sec and build-type mix",
   "can't be altered in transit",
+  "card cap {0}",
   "casual",
   "casual FFA and 1v2 = recorded, not rated",
   "chat muted: {0}",
@@ -2499,6 +2501,7 @@
   "final 24h check-in",
   "finished series: result stands",
   "first team to 2 games",
+  "first to {0}",
   "fps",
   "game 1 starts",
   "game in last 45 min: wait",
@@ -11854,8 +11857,8 @@
    "kind": "Tr"
   },
   "Room settings did not match — left the room": {
-   "surface": "Plugin",
-   "location": "OnJoinedRankedRoom",
+   "surface": "Plugin, SpectatorSync",
+   "location": "OnJoinedRankedRoom, OnJoinedSpectatorRoom",
    "kind": "Tr"
   },
   "Rose": {
@@ -13603,6 +13606,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "This lobby is no longer open - the setting was not changed.": {
+   "surface": "ApiClient",
+   "location": "RulesDetailText",
+   "kind": "Tr"
+  },
   "This lobby uses settings your mod version can't play - update the mod.": {
    "surface": "ApiClient",
    "location": "RulesDetailText",
@@ -15013,6 +15021,11 @@
    "location": "BuildReportPipeline",
    "kind": "Tr"
   },
+  "card cap {0}": {
+   "surface": "NativeUI",
+   "location": "FfaSettingsSummaryBits",
+   "kind": "TrF"
+  },
   "casual": {
    "surface": "PostSessionReport",
    "location": "ComposeFfa, GameLine1",
@@ -15182,6 +15195,11 @@
    "surface": "InfoViz",
    "location": "BuildTeamFormat",
    "kind": "Tr"
+  },
+  "first to {0}": {
+   "surface": "NativeUI",
+   "location": "FfaSettingsSummaryBits",
+   "kind": "TrF"
   },
   "fps": {
    "surface": "SessionReportModel",

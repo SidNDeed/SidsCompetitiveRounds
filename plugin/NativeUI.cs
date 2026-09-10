@@ -3887,11 +3887,12 @@ namespace CompetitiveRounds
         private static string FfaSettingsSummaryBits(int scoreTarget,int cardCandidates,int cardCap,int initialPicks,bool sameCard,bool sudden)
         {
             var bits=new List<string>(6);
-            // "to N"/"cap N" stay literal: 2-letter connectors can never be
-            // harvestable keys (#295c) and fold poorly into a template here.
-            if(scoreTarget>0&&scoreTarget!=5)bits.Add($"to {scoreTarget}");
+            // Whole templates, never 2-letter connectors (#295c): "first to
+            // N" / "card cap N" are keys of their own (c1 L1 — the bare
+            // "to N" / "cap N" fragments leaked English into every locale).
+            if(scoreTarget>0&&scoreTarget!=5)bits.Add(I18n.TrF("first to {0}",scoreTarget));
             if(cardCandidates>0&&cardCandidates!=5)bits.Add(I18n.TrF("{0}-card draw",cardCandidates));
-            if(cardCap>0&&cardCap!=5)bits.Add($"cap {cardCap}");
+            if(cardCap>0&&cardCap!=5)bits.Add(I18n.TrF("card cap {0}",cardCap));
             if(initialPicks>1)bits.Add(I18n.TrF("{0} opening picks",initialPicks));
             if(sameCard)bits.Add(I18n.Tr("same-card"));
             if(sudden)bits.Add(I18n.Tr("sudden death"));
@@ -5286,8 +5287,9 @@ namespace CompetitiveRounds
                     // unacked, Start dims and no-ops (StartLobby carries the
                     // authoritative early-return) — a Start landing mid-write
                     // would freeze a value the host just changed (the ovt
-                    // extra-pick race).
-                    if(cli.PrefsInFlight)
+                    // extra-pick race). c1 H2: the room-rules settings write
+                    // is the same race — SavingInFlight covers both.
+                    if(cli.SavingInFlight)
                         UIFactory.SetTextRaw(UIFactory.GetButtonText(startBtn),
                             I18n.Tr("<b><color=#999999>Start (saving...)</color></b>"));
                     else
@@ -12954,6 +12956,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         private static object menuMusicToggleTxt, musicCreditToggleTxt;
         private static GameObject appearOfflineBtn; private static object appearOfflineTxt;
         private static GameObject prefSameCardsBtn; private static object prefSameCardsTxt;   // room rules (Sept 10)
+        private static bool prefSameCardsInFlight; private static float prefSameCardsAt;       // c1 M5: single-flight
         private static GameObject showDiscordBtn; private static object showDiscordTxt;
         private static GameObject allowSpectatorsBtn; private static object allowSpectatorsTxt;
         // v1.32 items 7+8 toggle rows.
@@ -13756,12 +13759,26 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     var st = ApiClient.CachedPlayerStats;
                     var id = MatchTracker.LocalSteamId;
                     if (st == null || string.IsNullOrEmpty(id) || id == "unknown") return;
+                    // c1 M5: single-flight — a click while the previous write
+                    // is unacked is dropped (15 s staleness so a lost callback
+                    // cannot wedge the toggle), so the value that persists is
+                    // the one the label shows; a failed write rolls the
+                    // optimistic flip back (a 401 must not leave a false label).
+                    if (prefSameCardsInFlight && Time.realtimeSinceStartup - prefSameCardsAt < 15f) return;
+                    prefSameCardsInFlight = true; prefSameCardsAt = Time.realtimeSinceStartup;
+                    bool before = st.pref_same_cards;
                     Plugin.Log.LogInfo("[SETTINGS] same-cards preference toggled");
-                    st.pref_same_cards = !st.pref_same_cards;
+                    st.pref_same_cards = !before;
                     dirty = true;
-                    ApiClient.SetPrefSameCards(id, st.pref_same_cards, (ok, resp) =>
+                    ApiClient.SetPrefSameCards(id, !before, (ok, resp) =>
                     {
-                        if (!ok) CompetitiveUI.ShowNotification(I18n.Tr("Couldn't change the Same cards preference - try again"), Color.yellow, 3f);
+                        prefSameCardsInFlight = false;
+                        if (!ok)
+                        {
+                            var cur = ApiClient.CachedPlayerStats;
+                            if (cur != null) cur.pref_same_cards = before;
+                            CompetitiveUI.ShowNotification(I18n.Tr("Couldn't change the Same cards preference - try again"), Color.yellow, 3f);
+                        }
                         dirty = true;
                     });
                 },

@@ -58,21 +58,33 @@ namespace CompetitiveRounds
     /// </summary>
     internal static class SpectatorSession
     {
-        /// <summary>Wire protocol version for the spectator role. Bumped when
-        /// the snapshot/lease contract changes incompatibly; a fighter room
-        /// can then refuse an incompatible spectator instead of admitting one
-        /// that would mis-render or mis-handshake.
+        /// <summary>WIRE protocol version for the spectator role: the value
+        /// stamped on the pre-join role property and carried as the first byte
+        /// of every request/snapshot event — a master closes a seat, and every
+        /// side drops an event, whose value differs. Bumped ONLY when the
+        /// snapshot/lease contract changes incompatibly; a fighter room can
+        /// then refuse an incompatible spectator instead of admitting one that
+        /// would mis-render or mis-handshake.
         /// 2 (Aug 10): the desync/safety batch — protocol-1 clients carry the
         /// PlayerDied/master-window RPC hazard, the poison roster-quarantine
         /// misfire and unregistered husk views, so mixed rooms are excluded
-        /// (design-review blocker 3). The server floor moves in lockstep.
-        /// 3 (Sept 10, room rules): this client honours friendly-fire OFF on
-        /// the observer seat (PoisonSync consumes the same verdict as the
-        /// fighters) and binds its pending room to the issued rules. The
-        /// server keeps its GLOBAL floor at 2 and raises the PER-GAME floor
-        /// (spectate_games.protocol_min) to 3 only for FF-OFF rooms, so
-        /// protocol-2 spectators keep every default-rules room (#337).</summary>
-        internal const int PROTOCOL = 3;
+        /// (design-review blocker 3). The server's global floor moves in
+        /// lockstep. The Sept 10 room-rules batch changed nothing on the wire
+        /// — what it advertises to the server is <see cref="CAPABILITY"/>.</summary>
+        internal const int PROTOCOL = 2;
+
+        /// <summary>CAPABILITY level advertised to the SERVER in the grant
+        /// request (`spectator_protocol`) and judged there against the game's
+        /// floor (spectate_games.protocol_min, GREATEST-only: the global floor
+        /// is 2, FF-OFF rooms raise theirs to 3). 3 (Sept 10, room rules):
+        /// this client honours friendly-fire OFF on the observer seat
+        /// (PoisonSync consumes the same verdict as the fighters) and binds
+        /// its pending room to the issued rules. Kept apart from
+        /// <see cref="PROTOCOL"/> on purpose (c1 H3): a level-2 spectator
+        /// keeps every default-rules room (#337) and speaks the same wire as a
+        /// level-3 master, so neither side closes the other over a capability
+        /// the room does not need — the server's grant is the only gate.</summary>
+        internal const int CAPABILITY = 3;
 
         /// <summary>Spectator seats per game. Rooms are created with
         /// MaxPlayers = fighters + SEAT_CAP. 4 was Sid's Aug 6 decision;
@@ -423,7 +435,7 @@ namespace CompetitiveRounds
                 };
                 if (!string.IsNullOrEmpty(localSteamId)) props["u_id"] = localSteamId;
                 PhotonNetwork.LocalPlayer.SetCustomProperties(props);
-                Plugin.Log?.LogInfo($"[SPECTATE] staged role pre-join (protocol {PROTOCOL}, state {state})");
+                Plugin.Log?.LogInfo($"[SPECTATE] staged role pre-join (protocol {PROTOCOL}, capability {CAPABILITY}, state {state})");
                 return true;
             }
             catch (Exception ex)

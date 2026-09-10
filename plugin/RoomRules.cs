@@ -113,38 +113,50 @@ namespace CompetitiveRounds
         public static LatchVerdict LatchOnJoin(Photon.Realtime.Room room, string seat)
         {
             string expected = PendingProp ?? DefaultProp;
+            // c1 H4: presence and value are tracked separately — only GENUINE
+            // absence may select the defaults; a present value that is not a
+            // string (or a null value) is a mismatch, never "absent".
+            bool present = false;
             string actual = null;
             try
             {
                 if (room != null && room.CustomProperties != null
                     && room.CustomProperties.TryGetValue(PropKey, out object v))
+                {
+                    present = true;
                     actual = v as string;
+                }
             }
-            catch { actual = null; }
+            catch { present = false; actual = null; }
 
-            if (actual == null)
+            // c1 M2: no room name in these lines — a spectator room's name is
+            // its join credential and these logs ride bug bundles; the seat
+            // and the two rule strings are what a diagnosis needs.
+            if (!present)
             {
                 if (expected == DefaultProp)
                 {
                     SetLatched(true, false, DefaultProp, PendingSrc);
-                    Plugin.Log.LogInfo($"[ROOM-RULES] {seat}: no {PropKey} on room '{room?.Name}' — defaults (expected defaults)");
+                    Plugin.Log.LogInfo($"[ROOM-RULES] {seat}: no {PropKey} on the room — defaults (expected defaults)");
                     return LatchVerdict.Defaults;
                 }
-                return Mismatch(seat, room, expected, "(absent)");
+                return Mismatch(seat, expected, "(absent)");
             }
+            if (actual == null)
+                return Mismatch(seat, expected, "(non-string)");
             if (!TryParse(actual, out bool ff, out bool sc) || actual != expected)
-                return Mismatch(seat, room, expected, actual);
+                return Mismatch(seat, expected, actual);
             SetLatched(ff, sc, actual, PendingSrc);
-            Plugin.Log.LogInfo($"[ROOM-RULES] {seat}: latched {actual} on room '{room?.Name}' (src={PendingSrc ?? "-"}) ff={(ff ? 1 : 0)} sc={(sc ? 1 : 0)}");
+            Plugin.Log.LogInfo($"[ROOM-RULES] {seat}: latched {actual} (src={PendingSrc ?? "-"}) ff={(ff ? 1 : 0)} sc={(sc ? 1 : 0)}");
             return LatchVerdict.Latched;
         }
 
-        private static LatchVerdict Mismatch(string seat, Photon.Realtime.Room room, string expected, string actual)
+        private static LatchVerdict Mismatch(string seat, string expected, string actual)
         {
             // Defaults are latched so that, for the frames before the leave
             // lands, nothing is suppressed that vanilla would not suppress.
             SetLatched(true, false, DefaultProp, null);
-            Plugin.Log.LogWarning($"[ROOM-RULES] mismatch pending={expected} room={actual} ('{room?.Name}', {seat}) — leaving");
+            Plugin.Log.LogWarning($"[ROOM-RULES] mismatch pending={expected} room={actual} ({seat}) — leaving");
             return LatchVerdict.Mismatch;
         }
 

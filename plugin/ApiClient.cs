@@ -16241,6 +16241,9 @@ namespace CompetitiveRounds
             private string settingsLobbyId;
             private bool settingsInFlight; private float settingsAt = -999f;
             public bool SettingsInFlight => settingsInFlight && Time.realtimeSinceStartup - settingsAt < 25f;
+            /// <summary>The host's own unacked write of EITHER kind (prefs or
+            /// room-rules settings): Start no-ops and dims while true (c1 H2).</summary>
+            public bool SavingInFlight => PrefsInFlight || SettingsInFlight;
 
             // Browser (with the FfaLobbiesUnavailable degradation, recon risk 6).
             public List<HostLobbyOpenEntry> CachedLobbies;
@@ -16640,7 +16643,12 @@ namespace CompetitiveRounds
                 // prefs write would freeze a value the host JUST changed (the
                 // ovt extra-pick race). The button renders dimmed
                 // "(saving...)" while this is true — this is its no-op half.
-                if (PrefsInFlight) return;
+                // c1 H2: the room-rules settings write is the same race with
+                // the same consequence (Start first = the OLD rules frozen,
+                // the write then refused not_in_open_lobby), so both
+                // in-flight windows gate Start — one predicate, shared with
+                // the button (SavingInFlight).
+                if (SavingInFlight) return;
                 if (actionInFlight && Time.realtimeSinceStartup - actionAt > 30f)
                     actionInFlight = false;
                 if (actionInFlight) return;
@@ -17331,6 +17339,8 @@ namespace CompetitiveRounds
                         return I18n.Tr("A player's mod is too old for these settings - they need to update, or turn the setting off.");
                     case "settings_unseen":
                         return I18n.Tr("A player hasn't received the new settings yet - try again in a moment.");
+                    case "not_in_open_lobby":
+                        return I18n.Tr("This lobby is no longer open - the setting was not changed.");
                     default:
                         return null;
                 }
@@ -17354,6 +17364,10 @@ namespace CompetitiveRounds
                     return;
                 }
                 if (SettingsInFlight) return;
+                // c1 H2: a Start (or leave) already in flight is closing this
+                // lobby — a settings write sent now can only be refused
+                // not_in_open_lobby. Dropped, not queued.
+                if (actionInFlight && Time.realtimeSinceStartup - actionAt < 30f) return;
                 if (friendlyFire == null && sameCards == null) return;
                 string lobbyAtSend = OpenLobbyId;
                 string ffTok = friendlyFire == null ? "-" : (friendlyFire.Value ? "1" : "0");
@@ -21761,7 +21775,7 @@ namespace CompetitiveRounds
                 + $"\"actor_number\":{actorNumber},"
                 + $"\"fighter_target\":{fighterTarget},"
                 + $"\"room_capacity\":{roomCapacity},"
-                + $"\"spectator_protocol\":{SpectatorSession.PROTOCOL},"
+                + $"\"spectator_protocol\":{SpectatorSession.CAPABILITY},"
                 + $"\"phase\":\"{Escape(phase)}\","
                 + $"\"roster\":\"{Escape(rosterCsv ?? "")}\""
                 + "}";
