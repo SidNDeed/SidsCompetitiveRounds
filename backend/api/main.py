@@ -13603,9 +13603,12 @@ def _region_agreed(a, b):
     has seen a client connected to — that is the only fact available here about
     whether a region still exists, and it is what stops a stale cache naming a
     retired region from winning by sorting first. With both corroborated or
-    neither, the tie goes to a fixed order: a coin flip made stable, not a
-    latency decision, and written down as such so nobody reads the result as a
-    preference. No latency measurement reaches this rung: rung 0 runs after
+    neither, the tie goes to a fixed order on the region code: a deterministic
+    tie-break, not a latency decision and not a coin flip — cold corroboration
+    lands the same pair the same way every time, and because code order
+    correlates with geography (the three US codes sort last) that is a bias,
+    written down as such (learning #597); rung 0 exists to correct it. No
+    latency measurement reaches this rung: rung 0 runs after
     it, on the answer this rung produced, and only when both seats sent a
     fresh map.
     """
@@ -13633,18 +13636,25 @@ def _region_agreed(a, b):
 # deliberately NOT declared on the RankedQueue ORM model — raw SQL on both
 # ends, the 296 pattern; migration 301 enumerates every writer and reader.
 #
-# What a client can and cannot do with its own map (#283): it writes only its
-# OWN row, so it can move the pair only to a region the OPPONENT measured
-# within 20 ms of that opponent's own baseline — at most a 20 ms cost to an
-# honest seat — or withhold the map and get today's ladder exactly. Nothing
-# here moves a match result, a rating, gold or another player's game beyond
-# that bound.
+# What a client's map decides (#283, re-stated for the bounded minimax rule of
+# 2026-09-09): a client writes only its OWN row, and the rung reads each
+# seat's bound — how far that seat may be moved — from that seat's map alone,
+# measured against the candidates the ladder's active rung was choosing
+# between, plus 20 ms. So one map alone settles only its own seat's bound: the
+# other seat is never sent, on its own numbers, to a region worse than the
+# worst of those candidates by more than 20 ms. Inside the bounds the pick is
+# made from both maps together and may be a shared region the ladder would
+# not have named — that is the purpose. Withholding the map, or measuring
+# none of the candidates, gets the ladder exactly. This code writes no match
+# result, rating or gold; what a map can change is the pair's room region, so
+# a seat's ping in that room can be anywhere up to its own bound, whichever
+# map put it there.
 
 REGION_PINGS_MAX_ENTRIES = 24
 REGION_PINGS_MAX_MS = 5000
 REGION_PINGS_MAX_AGE_S = 900           # accepted at join / poll
 REGION_PINGS_ISSUANCE_MAX_AGE_S = 180  # fresh enough to decide a room (7/3-1)
-REGION_PINGS_PARETO_MS = 20
+REGION_PINGS_MARGIN_MS = 20            # the candidate must beat the ladder's worst ping by more
 _REGION_PINGS_DIGITS_RE = _re.compile(r"^[0-9]{1,6}$")
 
 
@@ -13701,29 +13711,83 @@ def _region_pings_from_header(value):
     return _region_pings_validate(pings, int(age_txt))
 
 
-def _pick_region_by_pings(p1, p2, ladder_pick):
-    """Rung 0 of the room-region pick: pure and swap-invariant.
+def _pick_region_by_pings(p1, p2, ladder_pick, refs=()):
+    """Rung 0 of the room-region pick: BOUNDED MINIMAX. The verdict fields
+    (pick, why, worst_ms) are pure and swap-invariant; `detail` is seat-ordered.
 
-    Given both seats' clean maps and the ladder's answer L: the candidates are
-    the regions BOTH seats measured; the choice c minimises the pair's WORST
-    ping (tie: the sum; tie: fixed order by code). Each seat's baseline is its
-    own measurement of L when it has one, else its own best region; c is
-    accepted only when it costs NEITHER seat more than 20 ms over its own
-    baseline — a Pareto improvement within tolerance judged on each seat's
-    OWN numbers, never one seat's latency traded for the other's. Otherwise L
-    stands. Returns (pick, why, worst_ms): why is "pings" when c was taken,
-    else "no-maps" / "no-overlap" / "pareto"."""
+    Inputs: both seats' clean maps, the ladder's answer L, and `refs` — the
+    candidates the ladder's ACTIVE rung was choosing between
+    (_region_ladder_refs; L is always among them, and a signal a higher rung
+    outranked is not, so it cannot widen a bound). The rung may replace L with
+    the region c that minimises the pair's WORST ping (tie: the sum; tie: fixed
+    order by code), subject to what each seat's OWN map says:
+
+      * Each seat has a bound: the worst it measured among `refs`, plus
+        REGION_PINGS_MARGIN_MS. A seat that measured none of them has no bound
+        and the rung declines ("unbounded"). A region a seat measured above its
+        bound is not a candidate; with none left the rung declines ("bound").
+        So a seat is never sent, on its own numbers, to a region worse than
+        the worst of the ladder's candidates by more than the margin — and
+        because a seat's bound is read from that seat's map alone, the other
+        seat's map cannot enlarge it. Each map alone settles only its own
+        seat's bound; the pick inside the bounds is made from both maps
+        together, and it may be a region the ladder would not have named — a
+        shared compromise region is the purpose.
+      * c must beat L's worst ping by more than the margin ("margin" when it
+        does not); a seat that did not measure L scores it at the cap for that
+        comparison only. When c IS L the measurement confirms the ladder.
+
+    "Serves both" is the worst seat's ping (tournaments.py
+    _pick_region_for_players). The acceptance test this replaced — "costs
+    NEITHER seat more than 20 ms over its own baseline", the baseline being the
+    seat's ping to L, or its own best measured ping when it had not measured L
+    — left every cross-region pair observed on 2026-09-09 on
+    one seat's home, and cannot move a pair when no shared region lies within
+    20 ms of the home seat's home, which is the usual geography (learning
+    #597). This rule keeps that test's shape, each seat judged on its own
+    numbers, and widens the reference from L alone to the candidates the
+    ladder was choosing between.
+
+    Returns (pick, why, worst_ms, detail); why in pings / no-maps / no-overlap
+    / unbounded / bound / margin. detail is empty unless both maps share a
+    region; then it names the candidate the maps prefer, both seats' numbers
+    at it and at L ("-" where unmeasured) and both bounds, so the pick line
+    stays reconstructible after the queue rows are gone whenever the rung had
+    anything to weigh."""
     if not p1 or not p2:
-        return ladder_pick, "no-maps", None
+        return ladder_pick, "no-maps", None, ""
     common = sorted(set(p1) & set(p2))
     if not common:
-        return ladder_pick, "no-overlap", None
-    c = min(common, key=lambda r: (max(p1[r], p2[r]), p1[r] + p2[r], r))
-    base1 = p1[ladder_pick] if ladder_pick in p1 else min(p1.values())
-    base2 = p2[ladder_pick] if ladder_pick in p2 else min(p2.values())
-    if p1[c] <= base1 + REGION_PINGS_PARETO_MS and p2[c] <= base2 + REGION_PINGS_PARETO_MS:
-        return c, "pings", max(p1[c], p2[c])
-    return ladder_pick, "pareto", None
+        return ladder_pick, "no-overlap", None, ""
+    ref_set = {t for t in (ladder_pick, *refs) if t}
+
+    def key(r):
+        return (max(p1[r], p2[r]), p1[r] + p2[r], r)
+
+    def bound(p):
+        seen = [p[r] for r in ref_set if r in p]
+        return max(seen) + REGION_PINGS_MARGIN_MS if seen else None
+
+    b1, b2 = bound(p1), bound(p2)
+
+    def describe(c):
+        return (f"cand={c} cand_ms={p1[c]}/{p2[c]} "
+                f"ladder_ms={p1.get(ladder_pick, '-')}/{p2.get(ladder_pick, '-')} "
+                f"bound={'-' if b1 is None else b1}/{'-' if b2 is None else b2}")
+
+    if b1 is None or b2 is None:
+        return ladder_pick, "unbounded", None, describe(min(common, key=key))
+    cands = [r for r in common if p1[r] <= b1 and p2[r] <= b2]
+    if not cands:
+        return ladder_pick, "bound", None, describe(min(common, key=key))
+    c = min(cands, key=key)
+    worst_c = max(p1[c], p2[c])
+    if c == ladder_pick:
+        return c, "pings", worst_c, describe(c)
+    worst_l = max(p1.get(ladder_pick, REGION_PINGS_MAX_MS), p2.get(ladder_pick, REGION_PINGS_MAX_MS))
+    if worst_l - worst_c > REGION_PINGS_MARGIN_MS:
+        return c, "pings", worst_c, describe(c)
+    return ladder_pick, "margin", None, describe(c)
 
 
 def _region_pings_at_issuance(pings, pings_at, now):
@@ -13743,6 +13807,31 @@ def _region_pings_at_issuance(pings, pings_at, now):
     if now - pings_at > timedelta(seconds=REGION_PINGS_ISSUANCE_MAX_AGE_S):
         return None, "stale"
     return clean, "fresh"
+
+
+def _region_ladder_refs(my_region, opp_region, my_home, opp_home):
+    """The candidates the ladder's ACTIVE rung is choosing between, in the
+    ladder's own precedence (mirrors _pick_room_region): agreeing homes; else
+    the live regions; else the homes; else the "us" default. Only these may
+    bound a seat in rung 0 — a home the live rung outranked could not have
+    been chosen, so it must not widen how far a seat may be moved (design
+    review d2). Tokens are assumed validated; empties are dropped; order is
+    the caller's (my, opp) and duplicates collapse."""
+    mr, orr = my_region, opp_region
+    mh, oh = my_home, opp_home
+    if mh and mh == oh:
+        return (mh,)
+    if mr or orr:
+        pool = (mr, orr)
+    elif mh or oh:
+        pool = (mh, oh)
+    else:
+        return ("us",)
+    out = []
+    for t in pool:
+        if t and t not in out:
+            out.append(t)
+    return tuple(out)
 
 
 def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name="",
@@ -13785,10 +13874,15 @@ def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name="",
     relocated by where they used to be. Since Sept 7 (item 3) the measurement
     that settles it exists as RUNG 0, run after the ladder has answered: both
     seats' own ping maps (the kwargs; each with its stamp), taken within the
-    last 180 s, may replace the ladder's answer — but only by a region that
-    costs NEITHER seat more than 20 ms over its own measured baseline
-    (_pick_region_by_pings). A missing, stale or malformed map on either side
-    leaves the ladder's answer exactly as it was. The positional signature is
+    last 180 s, may replace the ladder's answer with the region that minimises
+    the pair's WORST ping, taken when it beats the ladder's worst by more than
+    20 ms and lies within each seat's own bound — the worst that seat measured
+    among the candidates the ladder's active rung was choosing between, plus
+    20 ms (_pick_region_by_pings — bounded minimax since 2026-09-09; the
+    earlier "costs neither seat more than 20 ms over its own baseline" test
+    left every cross-region pair observed that day on one seat's home,
+    learning #597). A missing, stale or malformed map on either side leaves
+    the ladder's answer exactly as it was. The positional signature is
     unchanged; `now` is injectable for tests only.
     """
     mr, orr = _region_token(my_region), _region_token(opp_region)
@@ -13806,20 +13900,29 @@ def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name="",
     else:
         ladder = _region_agreed(mr, orr) or _region_agreed(mh, oh) or "us"
     # Rung 0 (Sept 7 item 3): the pair's own ping maps, judged AFTER the ladder
-    # has answered — see _pick_region_by_pings for the acceptance rule. Both
-    # seats are treated identically, so the answer stays swap-invariant.
+    # has answered — see _pick_region_by_pings for the acceptance rule. The
+    # ACTIVE rung's candidates ride along as the reference set that bounds how
+    # far each seat may be moved; a signal a higher rung outranked could not
+    # have been chosen and must not widen a bound (design review d2). Both
+    # seats are treated identically, so the verdict stays swap-invariant.
     if now is None:
         now = datetime.now(timezone.utc)
     m1, s1 = _region_pings_at_issuance(p1_pings, p1_pings_at, now)
     m2, s2 = _region_pings_at_issuance(p2_pings, p2_pings_at, now)
     if m1 is None or m2 is None:
-        chosen, why, worst = ladder, ("stale" if "absent" not in (s1, s2) else "no-maps"), None
+        chosen, why, worst, detail = ladder, ("stale" if "absent" not in (s1, s2) else "no-maps"), None, ""
     else:
-        chosen, why, worst = _pick_region_by_pings(m1, m2, ladder)
+        chosen, why, worst, detail = _pick_region_by_pings(
+            m1, m2, ladder, refs=_region_ladder_refs(mr, orr, mh, oh))
+    # The decision line carries the candidate and both seats' numbers whenever
+    # the maps shared a region: the maps leave with the queue rows, so this
+    # print is the only record of what the rung saw (2026-09-09: a day of
+    # picks was not reconstructible).
+    tail = f" {detail}" if detail else ""
     if why == "pings":
-        print(f"[QUEUE-REGION] room={room_name} pick={chosen} rung=pings worst={worst} ladder={ladder}")
+        print(f"[QUEUE-REGION] room={room_name} pick={chosen} rung=pings worst={worst} ladder={ladder}{tail}")
     else:
-        print(f"[QUEUE-REGION] room={room_name} pick={chosen} rung=ladder why={why}")
+        print(f"[QUEUE-REGION] room={room_name} pick={chosen} rung=ladder why={why}{tail}")
     print(f"[QUEUE-REGION] room={room_name} chosen={chosen} "
           f"seen={'y' if _region_corroborated(chosen) else 'n'} "
           f"live=({mr},{orr}) home=({mh},{oh})")
