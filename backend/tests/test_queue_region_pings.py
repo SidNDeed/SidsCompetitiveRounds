@@ -606,6 +606,8 @@ def _queue_row(pid, steam, matched_with, pings, pings_at, now):
         "room_name": None, "room_region": None, "region": "us", "home_region": "us",
         "ready": True, "joined_at": now - timedelta(seconds=30), "matched_at": now - timedelta(seconds=5),
         "region_pings": pings, "region_pings_at": pings_at,
+        # migration 306: the re-reads project the frozen rules too
+        "rules": None,
     }
 
 
@@ -628,12 +630,15 @@ def issuance(monkeypatch):
     async def _none(*a, **k):
         return None
 
-    async def _stamp(db, my_pid, opp_pid, room_name, region):
+    async def _stamp(db, my_pid, opp_pid, room_name, region, rules=None):
+        # `rules` (migration 306) rides the same stamp; this fixture judges the
+        # REGION and records the rules only so a rules test can read them.
         stamps.append((my_pid, opp_pid, room_name, region))
         return True
 
     async def _series(db, a, b, room_id=None):
-        return SimpleNamespace(id=SERIES, player1_id=a, p1_series_wins=0, p2_series_wins=0)
+        return SimpleNamespace(id=SERIES, player1_id=a, p1_series_wins=0, p2_series_wins=0,
+                               rules=None)
 
     monkeypatch.setattr(main, "_strict_steam_session_ok", _true)
     monkeypatch.setattr(main, "_assert_no_service_subject", _none)
@@ -742,7 +747,9 @@ def test_queue_poll_writes_a_valid_header_through_the_heartbeat(issuance):
     assert "region_pings = CAST(:region_pings AS JSONB)" in sql
     assert "region_pings_at = CAST(:region_pings_at AS TIMESTAMPTZ)" in sql
     assert "NOW() - make_interval" not in sql, "the stamp is bound, never transaction-start arithmetic (r2 M1)"
-    assert set(params) == {"pid", "region_pings", "region_pings_at"}
+    # `mv` (migration 306): the seat's member-scoped mod_version rides the
+    # same heartbeat — the fake request carries no header, so it is None.
+    assert set(params) == {"pid", "region_pings", "region_pings_at", "mv"}
     assert params["pid"] == ME and params["region_pings"] == '{"eu":31,"us":42}'
     stamp = params["region_pings_at"]
     assert stamp.tzinfo is not None
@@ -756,8 +763,10 @@ def test_queue_poll_leaves_the_heartbeat_alone_without_a_valid_header(issuance, 
     _poll(session, headers)
     assert len(session.heartbeats) == 1
     sql, params = session.heartbeats[0]
-    assert sql == "UPDATE ranked_queue SET last_polled = NOW() WHERE player_id = :pid"
-    assert params == {"pid": ME}
+    # migration 306: the heartbeat also carries the seat's mod_version (None
+    # here — the fake request has no header); the ping columns stay untouched.
+    assert sql == "UPDATE ranked_queue SET last_polled = NOW(), mod_version = :mv WHERE player_id = :pid"
+    assert params == {"pid": ME, "mv": None}
     assert not any("region_pings" in s and s.startswith("UPDATE") for s, _ in session.statements), \
         "a poll never writes the columns without a valid header, and never NULLs them"
 

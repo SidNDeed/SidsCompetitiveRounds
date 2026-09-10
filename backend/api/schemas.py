@@ -682,6 +682,9 @@ class CardStatEntry(BaseModel):
 
 class MatchHistoryEntry(BaseModel):
     """One match in a player's history."""
+    # Room rules (migration 306): the series' frozen {ff, sc}; None when the
+    # series predates the record (the client renders nothing for None).
+    rules: dict | None = None
     match_id: UUID
     opponent_steam_id: str
     opponent_name: str
@@ -858,6 +861,11 @@ class QueuePollResponse(BaseModel):
     p2_steam_id: str | None = None
     p1_wins: int = 0
     p2_wins: int = 0
+    # Room rules (migration 306, ready_join only): the frozen {ff, sc, src}
+    # record and the exact `cr_rules` room-prop string the creator stamps and
+    # every joiner compares. Old clients ignore both; absent = defaults.
+    rules: dict | None = None
+    rules_prop: str | None = None
 
 
 class QueueDeclineRequest(BaseModel):
@@ -1196,6 +1204,9 @@ class TeamQueuePollResponse(BaseModel):
     room_region: str | None = None
     match_age_seconds: int = 0
     my_ready: bool = False  # the polling player's own ready flag
+    # Room rules (migration 306, ready_join only) — see QueuePollResponse.
+    rules: dict | None = None
+    rules_prop: str | None = None
 
 
 class TeamPlayerTelemetry(BaseModel):
@@ -1416,6 +1427,8 @@ class TeamStatsResponse(BaseModel):
 
 
 class TeamMatchHistoryEntry(BaseModel):
+    # Room rules (migration 306) — see MatchHistoryEntry.rules.
+    rules: dict | None = None
     match_id: UUID
     series_id: str
     ended_at: datetime

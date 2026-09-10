@@ -6460,6 +6460,12 @@ async def cmd_game(ctx, code: str):
         desc += f" · {dur // 60}:{dur % 60:02d}"
     if game.get("series_status"):
         desc += f" · series {game['series_status']}"
+    # Room rules batch: the rules (1v1/2v2/1v2) or lobby settings (FFA) the
+    # game was played under — the same record the F5 history shows.
+    _rules_line = (_ffa_settings_summary(game.get("settings")) if mode == "ffa"
+                   else _rules_summary(game.get("rules")))
+    if _rules_line:
+        desc += f"\n⚙ {_rules_line}"
     if game.get("invalidated"):
         desc += f"\n⚠ invalidated: {game.get('invalidation_reason') or 'admin'}"
     embed = discord.Embed(title=f"🎮 Game {game.get('code', norm[:12].upper())}",
@@ -6968,6 +6974,43 @@ def _series_tournament_tag(row):
         return False, ""
 
 
+def _rules_summary(rules):
+    """The non-default room rules a feed row carries, as one line. Empty when
+    every rule is the default, and empty for a row with no record: a series
+    born before rules were recorded is not 'default', it is unknown, and a
+    post says nothing rather than something false."""
+    if not isinstance(rules, dict):
+        return ""
+    parts = []
+    if rules.get("ff") is False:
+        parts.append("Friendly fire off")
+    if rules.get("sc") is True:
+        parts.append("Same cards")
+    if rules.get("xp") is True:
+        parts.append("Solo extra pick")
+    return " · ".join(parts)
+
+
+def _ffa_settings_summary(settings):
+    """An FFA game's lobby settings as one line (empty when the game predates
+    the record). The whole set, not only the non-defaults: an FFA lobby has
+    no single default configuration a reader could assume."""
+    if not isinstance(settings, dict) or settings.get("score_target") is None:
+        return ""
+    parts = [f"First to {settings.get('score_target')}"]
+    if settings.get("card_cap") is not None:
+        parts.append(f"Max cards {settings.get('card_cap')}")
+    if settings.get("initial_picks") is not None:
+        parts.append(f"Opening draws {settings.get('initial_picks')}")
+    if settings.get("card_candidates") is not None:
+        parts.append(f"Card draw {settings.get('card_candidates')}")
+    if settings.get("same_card_rule"):
+        parts.append("Same cards")
+    if settings.get("sudden_death"):
+        parts.append("Sudden death")
+    return " · ".join(parts)
+
+
 async def log_ffa_match_result(guild, m):
     if SERIES_LOG_CHANNEL_ID <= 0:
         return
@@ -7007,6 +7050,11 @@ async def log_ffa_match_result(guild, m):
     if t_flag and t_label:
         _desc = f"🏆 **{discord.utils.escape_markdown(t_label)}**\n{_desc}"
     embed.description = _desc
+    # Room rules batch: the lobby settings the game was played under, from
+    # the same record the F5 history shows.
+    _settings_line = _ffa_settings_summary(m.get("settings"))
+    if _settings_line:
+        embed.add_field(name="Settings", value=_settings_line, inline=False)
     # Bug 179 (Stan): carry the /game code so nobody has to open the game.
     _code = str(m.get("match_id") or "").replace("-", "")[:12].upper()
     _foot = f"{dur // 60}m{dur % 60:02d}s" if dur else ""
@@ -7389,6 +7437,11 @@ async def log_team_series_result(guild, s):
     embed.add_field(name="Losers",
                     value=f"{fmt_player(losers[0])}\n{fmt_player(losers[1])}",
                     inline=True)
+    # Room rules batch: only the non-defaults, so a vanilla series posts as
+    # it always has.
+    _rules_line = _rules_summary(s.get("rules"))
+    if _rules_line:
+        embed.add_field(name="Rules", value=_rules_line, inline=False)
     # Bug 179 (Stan): per-game /game codes in the footer.
     _codes = [c for c in (s.get("game_codes") or []) if c][:5]
     if _codes:
@@ -7491,6 +7544,11 @@ async def log_series_result(guild, s):
                     value=f"**{s['p1_rating']:.0f}** ({rc1s}) — {r1}\n{s1}", inline=True)
     embed.add_field(name=f"{rank_emoji(r2)} {s['p2_name']}" + (" 👑" if not p1_won else ""),
                     value=f"**{s['p2_rating']:.0f}** ({rc2s}) — {r2}\n{s2}", inline=True)
+    # Room rules batch: only the non-defaults, so a vanilla series posts as
+    # it always has.
+    _rules_line = _rules_summary(s.get("rules"))
+    if _rules_line:
+        embed.add_field(name="Rules", value=_rules_line, inline=False)
     # Bug 179 (Stan): the per-game /game codes, so nobody has to open the
     # game to inspect a result. Server sends them oldest-first.
     _codes = [c for c in (s.get("game_codes") or []) if c][:5]

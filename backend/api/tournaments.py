@@ -1712,7 +1712,12 @@ async def _activate_ready_matches(db: AsyncSession, tournament_id: uuid.UUID) ->
         # of the rule will accept a report against. Flushed first so the grant's
         # foreign key has its series row to point at. Deferred import per this
         # file's convention.
-        from main import _publish_pair_sitting  # noqa: PLC0415 — file convention
+        from main import _publish_pair_sitting, ROOM_RULES_DEFAULT  # noqa: PLC0415 — file convention
+        # Room rules (migration 306): a tournament room is formed by the
+        # bracket, not by a queue or a hosted lobby, so nobody chose a rule
+        # for it — it plays the vanilla defaults, and its history says so
+        # instead of reading as unknown. Written before the flush below.
+        series.rules = dict(ROOM_RULES_DEFAULT)
         await db.flush()
         await _publish_pair_sitting(db, series)
         # Server-issued Photon room name. Both clients pull this from

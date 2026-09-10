@@ -703,7 +703,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     )
 
     assert actual == expected
-    assert len(manifest) == 334   # Sept 6 Group 4: +22 mail and moderation routes and get_set_report (311 before)
+    assert len(manifest) == 337   # Sept 10 room rules: +3 (pref-same-cards, team/ovt lobby settings) (334 before)
     assert len({json.dumps(item, sort_keys=True) for item in expected}) == len(expected)
     assert all(
         entry["classification"] in {"sentinel-exercised", "statically-nonconsumer"}
