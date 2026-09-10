@@ -424,7 +424,7 @@ namespace CompetitiveRounds
                 DrawLeaderboardSearch();
                 DrawCardStatsSearch();   // Aug 31 — Card Stats card search
                 DrawHistorySearch();  // Bug 263 — My Stats opponent search
-                DrawShopSearch();     // v1.41 — Shop listing search
+                DrawShopSearch();     //  — Shop listing search
                 DrawInfoSearch();     // Aug 23 r2 — Info library article search
             }
             // The picker's own search field, alone: the picker is one of the surfaces
@@ -1839,7 +1839,7 @@ namespace CompetitiveRounds
             catch { /* search is best-effort cosmetic */ }
         }
 
-        // Shop search (v1.41) — 7th instance of the IMGUI-over-anchor clone,
+        // Shop search  — 7th instance of the IMGUI-over-anchor clone,
         // gated to tab 4, own focus flag feeding the T-chat mutex. Client-side
         // filter only (the shop catalogue is already fully cached).
         private static bool shopSearchFocused = false;
@@ -6651,7 +6651,7 @@ namespace CompetitiveRounds
                 || infoSearchFocused
                 // Aug 31: the Card Stats search field, same contract.
                 || cardStatsSearchFocused
-                // v1.41: the Shop search field, same contract.
+                //  the Shop search field, same contract.
                 || shopSearchFocused
                 // Sept 6: the mail composer's subject/body fields, same contract (design B-4).
                 || MailUI.AnyFieldFocused) { quickChatOpen = false; DwClose(); CloseChatInput(discardDraft: false); return; }

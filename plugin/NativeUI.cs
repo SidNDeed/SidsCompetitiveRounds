@@ -10625,7 +10625,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         private static object txtShopBalance, txtShopStatus;
         private static GameObject shopRowsContainer, shopTitlesHeader, shopTrailsHeader, shopColorsHeader, shopNametagsHeader, shopPColorsHeader, shopDancesHeader;
         private static GameObject shopCursorHeader, shopEffectsHeader, shopFacesHeader, shopOtherHeader, shopMusicHeader;
-        // v1.41 shop-as-cards: one grid container per section (the outer VLG keeps
+        //  shop-as-cards: one grid container per section (the outer VLG keeps
         // header -> grid -> header -> grid order; the grids reflow cards into N
         // columns). Grid prefH is computed per fill — GridLayoutGroup reports none.
         private static GameObject shopFacesGrid, shopNametagsGrid, shopColorsGrid, shopTitlesGrid, shopTrailsGrid, shopPColorsGrid;
@@ -11550,7 +11550,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             {
                 foreach (var it in rawItems)
                 {
-                    // Shop search (v1.41): client-side name/desc/artist/sku match,
+                    // Shop search : client-side name/desc/artist/sku match,
                     // applied at partition so every category shrinks together.
                     if (shopQ.Length > 0 && !ShopItemMatches(it, shopQ)) continue;
                     if (it.kind == "trail") trails.Add(it);
@@ -11842,7 +11842,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                         4 + rarityDisp.Length + (artistRaw.Length > 0 ? 5 : 0), 0,
                         out nameDisp, out artistDisp);
             UIFactory.SetTextRaw(r.txtName, $"<color={col}>{nameDisp}</color>  <color=#888>({rarityDisp})</color>");
-            /* v1.41 card layout: the byline is its OWN line under the picture,
+            /*  card layout: the byline is its OWN line under the picture,
              * not an inline name-line suffix. Music zeroes artistRaw above (the
              * server/catalog attribution is resolved in the music desc branch,
              * which overrides authorLine there). */
@@ -11917,7 +11917,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             }
             else if (r.artImg != null) TrackAnimatedThumb(r.artImg, null, 0f);
             if (r.artImgGO != null && r.artImgGO.activeSelf != showArt) r.artImgGO.SetActive(showArt);
-            /* v1.41: the picture slot is a FIXED 112px box on every card — no
+            /*  the picture slot is a FIXED 112px box on every card — no
              * per-kind row-height juggling anymore (the grid's cellSize owns the
              * card's footprint, so bigArt/tallPreview resizing is retired; the
              * nametag size previews now render inside the flexible desc area). */
@@ -12018,7 +12018,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     ? it.artist_name
                     : (albDesc != null ? albDesc.ArtistName ?? "" : "");
                 if (!string.IsNullOrEmpty(musArtist))
-                    authorLine = I18n.TrF("by {0}", HomeSan(musArtist));   // own line under the picture (v1.41)
+                    authorLine = I18n.TrF("by {0}", HomeSan(musArtist));   // own line under the picture 
                 mdesc += "  " + I18n.Tr("<color=#888>(click the row to preview tracks)</color>");
                 UIFactory.SetTextRaw(r.txtDesc, mdesc);
                 // Recycled row: restore any glow/typeface preview, same order
@@ -12048,7 +12048,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                         ? "  " + I18n.TrF("<color=#FFD94D>({0} of {1} left)</color>", left, it.stock_limit)
                         : "  " + I18n.Tr("<color=#FF6666>(SOLD OUT)</color>");
                 }
-                // v1.41: the face "equip in the character editor" note moved OFF
+                //  the face "equip in the character editor" note moved OFF
                 // the per-listing rows to one static line at the top of the shop.
                 if (it.kind == "dance")
                 {
@@ -12954,7 +12954,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             if (show)
             {
                 shopMusicTracksPanel.transform.SetParent(shopRowsContainer.transform, false);
-                /* v1.41 card grid: rows live INSIDE shopMusicGrid as cells, so the
+                /*  card grid: rows live INSIDE shopMusicGrid as cells, so the
                  * old "slot directly below the selected row" insertion is gone —
                  * the panel docks right under the whole music grid instead. */
                 shopMusicTracksPanel.transform.SetSiblingIndex(shopMusicGrid.transform.GetSiblingIndex() + 1);
