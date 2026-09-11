@@ -531,9 +531,11 @@ namespace CompetitiveRounds
                 "Internal: ranked was auto-disabled by a data-consent revoke, not by the user"
             );
 
-            // Sept 10 (Player Cards): a pack purchase writes "kind|ref|pay|price|unix"
+            // Sept 10 (Player Cards): a pack purchase writes "kind|ref|pay|price|unix|owner"
             // here BEFORE the request leaves and clears it after the committed
-            // answer was shown, so a lost answer is recovered instead of re-bought.
+            // answer was shown, so a lost answer is recovered instead of re-bought;
+            // owner is the Steam id that wrote it - another account on this PC
+            // neither recovers nor clears it (c4/c5).
             PcOpenIntent = Config.Bind(
                 "Internal", "PlayerCardsOpenIntent",
                 "",

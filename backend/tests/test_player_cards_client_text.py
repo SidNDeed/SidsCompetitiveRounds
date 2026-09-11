@@ -77,3 +77,32 @@ def test_the_pre_answer_fallbacks_are_the_servers_economy():
     assert m and (int(m.group(1)), int(m.group(2))) == (int(eco["pack_price_gold"]), int(eco["pack_price_shards"]))
     m = re.search(r"me\.paid_packs_per_day : (\d+), per = me != null \? me\.prints_per_pack : (\d+);", body)
     assert m and (int(m.group(1)), int(m.group(2))) == (int(eco["paid_packs_per_day"]), int(eco["prints_per_pack"]))
+
+
+def test_the_intent_and_answer_rules_are_pinned_in_the_client():
+    """Source-shape pins for the c4/c5 client rules (a repair without a
+    reverting test is decoration)."""
+    src = CLIENT.read_text(encoding="utf-8")
+    api = (ROOT / "plugin" / "ApiClient.cs").read_text(encoding="utf-8")
+    # a verified, owner-tagged intent gates every purchase and pack open
+    assert 'string v = $"{kind}|{reference}|{pay}|{price}|{unix}|{owner}";' in src
+    assert "if (string.IsNullOrEmpty(owner)) return false;" in src
+    assert "if (Plugin.PcOpenIntent.Value == v) return true;" in src
+    assert src.count("if (!WriteIntent(") == 2
+    # an unowned intent is discarded, never adopted; a foreign one fences for a day
+    assert "[PC] unowned intent discarded" in src and "INTENT_HARD_RETIRE_S" not in src
+    assert "INTENT_FOREIGN_EXPIRE_S = 86400f" in src and "< INTENT_FOREIGN_EXPIRE_S" in src
+    # only a committed answer, the not-found rule or the deleted account retires it
+    assert 'PcErrorStr(resp, "status")' in src and "if (http == 404)" in src and "if (http == 410)" in src
+    unparse = src[src.index("var a = ApiClient.ParsePcPackAnswer(resp);"):src.index('else if (a.status == "done")')]
+    assert "ClearIntent()" not in unparse and "checking again shortly" in unparse
+    assert 'return "http";   // a plain-string detail' in api
+    # the price gate keys on when the /pc/me that produced the cache LEFT
+    assert "ApiClient.PcMeDispatchedAt <= priceChangedAt" in src
+    assert "PcMeDispatchedAt = dispatched;" in api and "PcMeDispatchedAt = -1f;" in api
+    assert api.count("int epoch = _pcCacheEpoch;") == 4
+    # an empty binder after an identity edge is refetched
+    assert "if (view == View.Binder && ApiClient.CachedPcCollection == null && ApiClient.PcCollectionError == null)" in src
+    # tiles clip (TMP Masking), never paint over the neighbour; catalogue titles are translated
+    assert "UIFactory.SetOverflowMode(o, 2); UIFactory.SetWordWrap(o, false);" in src
+    assert "lines.Add(I18n.Tr(title));" in src and 'title.Length > 0 ? I18n.Tr(title) : ""' in src

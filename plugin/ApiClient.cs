@@ -2939,7 +2939,7 @@ namespace CompetitiveRounds
             _pcCacheEpoch++;
             CachedPcMe = null; CachedPcCollection = null;
             PcMeError = null; PcCollectionError = null;
-            PcMeFetchedAt = -1f; PcCollectionFetchedAt = -1f;
+            PcMeFetchedAt = -1f; PcMeDispatchedAt = -1f; PcCollectionFetchedAt = -1f;
             pcMeAttemptAt = -100f; pcCollAttemptAt = -100f;
             NativeUI.MarkDirty();
         }
@@ -3689,6 +3689,7 @@ namespace CompetitiveRounds
         public static PcMe CachedPcMe { get; private set; }
         public static PcCollection CachedPcCollection { get; private set; }
         public static float PcMeFetchedAt = -1f, PcCollectionFetchedAt = -1f;
+        public static float PcMeDispatchedAt = -1f;   // when the /pc/me that produced CachedPcMe LEFT (c5): the price gate keys on it
         public static string PcMeError { get; private set; }
         public static string PcCollectionError { get; private set; }
         private static bool pcMeInFlight, pcCollInFlight;
@@ -3711,6 +3712,7 @@ namespace CompetitiveRounds
             if (!force && Time.realtimeSinceStartup - pcMeAttemptAt < 10f) { callback?.Invoke(CachedPcMe != null, null); return; }
             if (pcMeInFlight) { callback?.Invoke(false, "in-flight"); return; }
             pcMeInFlight = true; pcMeAttemptAt = Time.realtimeSinceStartup;
+            float dispatched = pcMeAttemptAt;
             string url = PcUrl("me", steamId, $"pcread:{steamId}:me:-", null);
             int epoch = _pcCacheEpoch;
             Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
@@ -3726,7 +3728,7 @@ namespace CompetitiveRounds
                 if (ok)
                 {
                     var me = ParsePcMe(resp);
-                    if (me != null) { CachedPcMe = me; PcMeFetchedAt = Time.realtimeSinceStartup; PcMeError = null; }
+                    if (me != null) { CachedPcMe = me; PcMeFetchedAt = Time.realtimeSinceStartup; PcMeDispatchedAt = dispatched; PcMeError = null; }
                     else { PcMeError = "parse"; ok = false; }
                 }
                 else { PcMeError = resp; Plugin.Log.LogInfo($"[PC] me fetch failed: {PcShort(resp)}"); }

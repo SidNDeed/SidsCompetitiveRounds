@@ -44,6 +44,7 @@ namespace CompetitiveRounds
         private const float TILE_W = 236f, TILE_H = 184f;
         private const int MAX_PACK_ROWS = 12;
         private const float INTENT_NOT_FOUND_RETIRE_S = 600f;     // design §6: not-found after 10 min = never claimed
+        private const float INTENT_FOREIGN_EXPIRE_S = 86400f;      // c5: a fence nobody can lift is the wrong default (#276)
 
         private class Tile
         {
@@ -186,9 +187,14 @@ namespace CompetitiveRounds
             try { v = Plugin.PcOpenIntent?.Value; } catch { }
             if (string.IsNullOrEmpty(v)) return false;
             var parts = v.Split('|');
-            if (parts.Length < 6 || string.IsNullOrEmpty(parts[5])) return false;
+            if (parts.Length < 6 || string.IsNullOrEmpty(parts[5])) return false;   // unowned: ReadIntent discards it (c5)
             var id = LocalId();
-            return id != null && parts[5] != id;
+            if (id == null || parts[5] == id) return false;
+            // The fence expires after a day (c5, #276): a committed pack is still
+            // listed by its owner's /pc/me, an uncommitted one is past every
+            // retire window, and a fence nobody on this PC can lift is worse.
+            long unix; if (!long.TryParse(parts[4], out unix)) return false;
+            return DateTimeOffset.UtcNow.ToUnixTimeSeconds() - unix < INTENT_FOREIGN_EXPIRE_S;
         }
         private static string ForeignIntentText() => I18n.Tr("Another account's pack is still being resolved on this PC - sign in as that account to finish it");
         /// <summary>Persist the intent BEFORE the request leaves. False when the
@@ -196,8 +202,10 @@ namespace CompetitiveRounds
         /// purchase whose answer could not be recovered is the worse failure (c4).</summary>
         private static bool WriteIntent(string kind, string reference, string pay, int price)
         {
+            string owner = LocalId();
+            if (string.IsNullOrEmpty(owner)) return false;   // an intent without an owner is nobody's to recover (c5)
             long unix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            string v = $"{kind}|{reference}|{pay}|{price}|{unix}|{LocalId() ?? ""}";
+            string v = $"{kind}|{reference}|{pay}|{price}|{unix}|{owner}";
             try
             {
                 Plugin.PcOpenIntent.Value = v;
@@ -215,9 +223,10 @@ namespace CompetitiveRounds
             try { v = Plugin.PcOpenIntent?.Value; } catch { }
             if (string.IsNullOrEmpty(v)) return false;
             var parts = v.Split('|');
-            if (parts.Length < 5) { ClearIntent(); return false; }
-            // owner (sixth field): another identity's intent is left untouched (c4)
-            if (parts.Length >= 6 && !string.IsNullOrEmpty(parts[5]) && parts[5] != LocalId()) return false;
+            // owner (sixth field, c4/c5): an intent without one is nobody's -
+            // discarded, never adopted; another identity's is left untouched.
+            if (parts.Length < 6 || string.IsNullOrEmpty(parts[5])) { Plugin.Log.LogWarning("[PC] unowned intent discarded"); ClearIntent(); return false; }
+            if (parts[5] != LocalId()) return false;
             kind = parts[0]; reference = parts[1];
             long unix; if (!long.TryParse(parts[4], out unix)) unix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             ageS = (float)(DateTimeOffset.UtcNow.ToUnixTimeSeconds() - unix);
@@ -261,6 +270,8 @@ namespace CompetitiveRounds
             if (HasIntent()) MaybeRecover(false);
             if (!onTab) return;
             if (Time.unscaledTime >= meRefreshAt) { meRefreshAt = Time.unscaledTime + 30f; ApiClient.FetchPcMe(id, true); }
+            // the binder after an identity edge (c5): an empty cache without an error is refetched (throttled by ApiClient)
+            if (view == View.Binder && ApiClient.CachedPcCollection == null && ApiClient.PcCollectionError == null) ApiClient.FetchPcCollection(id);
             if (armedPrintId != null && Now - armedAt > 6f) { armedPrintId = null; NativeUI.MarkDirty(); }
             if (lastMsg != null && Now - lastMsgAt > 15f) { lastMsg = null; NativeUI.MarkDirty(); }
             if (openInFlight && Now - openAt > 25f) { openInFlight = false; NativeUI.MarkDirty(); }
@@ -460,7 +471,11 @@ namespace CompetitiveRounds
             // No Truncate at these heights (c4): a taller fallback font (Cyrillic,
             // Greek) must not blank a line — MailUI's rule.
             foreach (var o in new[] { t.txtName, t.txtTitle, t.txtL1, t.txtL2, t.txtL3, t.txtL4, t.txtMark, t.txtSign })
-                UIFactory.FitOneLine(o);
+            {
+                // TMP Masking (c5): a long line is clipped at its cell, never painted
+                // over the neighbour (Overflow) and never blanked (the c4 concern)
+                UIFactory.SetOverflowMode(o, 2); UIFactory.SetWordWrap(o, false);
+            }
             if (withActions)
             {
                 t.actions = new GameObject(name + "_a");
@@ -504,7 +519,7 @@ namespace CompetitiveRounds
             if (p.signed) mark += " | " + I18n.Tr("SIGNED");
             lines.Add(mark);
             string title = !string.IsNullOrEmpty(p.title) ? p.title : (p.rank_name ?? "");
-            if (title.Length > 0) lines.Add(title);
+            if (title.Length > 0) lines.Add(I18n.Tr(title));   // a catalogue value, never user text (c5)
             lines.Add(RatingLine(p));
             lines.Add(RankLine(p));
             string tc = p.top_card ?? "";
@@ -527,7 +542,7 @@ namespace CompetitiveRounds
             string name = SafeName(p);
             UIFactory.SetTextRaw(t.txtName, name);
             string title = !string.IsNullOrEmpty(p.title) ? p.title : (p.rank_name ?? "");
-            UIFactory.SetTextRaw(t.txtTitle, title);
+            UIFactory.SetTextRaw(t.txtTitle, title.Length > 0 ? I18n.Tr(title) : "");   // catalogue value (c5)
             UIFactory.SetTextRaw(t.txtL1, RatingLine(p));
             UIFactory.SetTextRaw(t.txtL2, RankLine(p));
             string tc = p.top_card ?? "";
@@ -824,9 +839,10 @@ namespace CompetitiveRounds
             if (openInFlight && Now - openAt < 25f) return;
             if (HasForeignIntent()) { Say(ForeignIntentText(), C_WARN); return; }
             if (HasIntent()) { Say(I18n.Tr("A pack is still being resolved - hold on"), C_WARN); MaybeRecover(true); return; }
-            if (priceChangedAt >= 0f && ApiClient.PcMeFetchedAt <= priceChangedAt)
+            if (priceChangedAt >= 0f && ApiClient.PcMeDispatchedAt <= priceChangedAt)
             {
-                // the price the server answered is not the one we hold: refresh first (c4)
+                // the price the server answered is not the one we hold: refresh first (c4);
+                // the /pc/me that produced the cache must have LEFT after the change (c5)
                 Say(I18n.Tr("Prices changed - refreshing them first"), C_WARN);
                 ApiClient.FetchPcMe(id, true);
                 return;
@@ -878,8 +894,8 @@ namespace CompetitiveRounds
                 var a = ApiClient.ParsePcPackAnswer(resp);
                 if (a == null)
                 {
-                    ClearIntent();
-                    Say(I18n.Tr("The pack answer could not be read - check your binder"), C_WARN);
+                    // not a committed answer: the intent stays and recovery re-asks (c5)
+                    Say(I18n.Tr("The pack answer could not be read - checking again shortly"), C_WARN);
                     Plugin.Log.LogWarning($"[PC] unparseable pack answer: {(resp != null && resp.Length > 200 ? resp.Substring(0, 200) : resp)}");
                 }
                 else if (a.status == "done")
@@ -928,9 +944,16 @@ namespace CompetitiveRounds
                             if (!recovery || age > INTENT_NOT_FOUND_RETIRE_S) { ClearIntent(); Say(recovery ? I18n.Tr("That pack purchase never went through - nothing was charged") : I18n.Tr("That pack is not available any more"), C_WARN); }
                             else Say(I18n.Tr("Still waiting for the server to record your pack - checking again shortly"), C_WARN);
                         }
+                        else if (http == 410)
+                        {
+                            // a plain 410 is the deleted account (a voided pack answers
+                            // a named code): nothing of it remains to recover (c5)
+                            ClearIntent(); Say(I18n.Tr("This account was deleted - there is no pack to recover"), C_WARN);
+                        }
                         // Any other HTTP failure leaves the server's decision
                         // unknown: the intent stays, however long it takes (c4);
-                        // only a committed answer or the not-found rule retires it.
+                        // only a committed answer, the not-found rule or the
+                        // deleted account retires it.
                         else Say(I18n.Tr("The server could not answer about your pack - checking again shortly"), C_WARN);
                         break;
                     default:
