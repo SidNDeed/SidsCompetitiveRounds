@@ -74,7 +74,7 @@ namespace CompetitiveRounds
         internal const int PROTOCOL = 2;
 
         /// <summary>CAPABILITY level advertised to the SERVER in the grant
-        /// request (`spectator_protocol`) and judged there against the game's
+        /// request (`client_protocol`) and judged there against the game's
         /// floor (spectate_games.protocol_min, GREATEST-only: the global floor
         /// is 2, FF-OFF rooms raise theirs to 3). 3 (Sept 10, room rules):
         /// this client honours friendly-fire OFF on the observer seat

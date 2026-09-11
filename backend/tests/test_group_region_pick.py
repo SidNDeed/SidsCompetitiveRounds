@@ -10,7 +10,7 @@ actually produces rather than the cell:
     written give sum(eu) = 30+30+90+90 = 240 and sum(ru) = 80+80+30+30 = 220,
     so the tie resolves on SUM (ru), not worst. Pick/why are unaffected
     (rue, bounded — and it is the "equal total, strictly lower worst"
-    departure). A sibling with genuinely equal totals exercises tie="worst".
+    departure). A sibling exercises the equal-total, lower-worst departure.
   * Last row (4x {us 60, ussc 35, usw 70}): the mutation "`>=` -> `>` on the
     majority arm fails this row" cannot — gain is 4 of 4 (2*4 > 4 holds
     under the strict form too) and the bounded arm admits ussc anyway
@@ -132,7 +132,7 @@ def test_row1_three_east_one_eu_stays_us():
 def test_row2_two_two_split_lexical_baseline_stands():
     pick, why, d = run(row2())
     assert (pick, why) == ("us", "baseline")
-    assert d["tie"] == "lexical"       # east maps carry no usw entry -> lexical bias
+    assert d["tie"] == "measured"      # east maps carry no usw entry -> only us is peer-measured
     assert d["baseline"] == "us"
     ussc = cand(d, "ussc")
     assert (ussc["gain"], ussc["max_regret"], ussc["admitted_by"]) == (2, 45, "majority")
@@ -149,31 +149,33 @@ def test_row3_three_west_one_east_stays_usw():
     assert (us["gain"], us["max_regret"], us["admitted_by"]) == (1, 60, None)
 
 
-def test_row4_eu_ru_tie_moves_to_rue_by_bound():
+def test_row4_eu_ru_tie_anchors_lexically_and_moves_to_rue_by_majority():
     pick, why, d = run(row4())
-    assert (pick, why) == ("rue", "bounded")
-    assert d["baseline"] == "ru"
-    # Maps as written: sum(eu)=240, sum(ru)=220 -> the tie resolves on sum
-    # (the table's "220/220 -> worst" cell miscounts eu; see module docstring).
-    assert d["tie"] == "sum"
-    rue = cand(d, "rue")
-    assert (rue["gain"], rue["max_regret"], rue["admitted_by"]) == (0, 10, "bounded")
-    # Equal total, strictly lower worst: the one departure the sum rule
-    # allows without lowering the total.
-    assert (rue["sum"], d["sum_b"]) == (220, 220)
-    assert (rue["worst"], d["worst_b"]) == (70, 80)
+    # Both tied homes are peer-measured, so the anchor is the lexical eu —
+    # never the numbers (ru's lower total used to make it the baseline and
+    # skip the gate). From eu, both ru and rue are majority moves (the two
+    # RU seats gain 60 / 50); rue wins the selection on the lower worst.
+    assert (d["baseline"], d["tie"]) == ("eu", "lexical")
+    assert (pick, why) == ("rue", "majority")
+    assert (d["sum_b"], d["worst_b"]) == (240, 90)
+    rue, ru = cand(d, "rue"), cand(d, "ru")
+    assert (rue["gain"], rue["max_regret"], rue["admitted_by"], rue["sum"], rue["worst"]) == (2, 40, "majority", 220, 70)
+    assert (ru["gain"], ru["max_regret"], ru["admitted_by"], ru["sum"], ru["worst"]) == (2, 50, "majority", 220, 80)
     assert (d["sum_pick"], d["worst_pick"]) == (220, 70)
 
 
-def test_row4_sibling_with_equal_totals_ties_on_worst():
+def test_row4_sibling_equal_total_candidate_loses_to_a_lower_total():
     eu = {"eu": 30, "rue": 70, "ru": 80}
     ru = {"ru": 40, "rue": 45, "eu": 90}
     members = [seat("eu1", "eu", eu), seat("eu2", "eu", eu),
                seat("ru1", "ru", ru), seat("ru2", "ru", ru)]
     pick, why, d = run(members)
-    assert d["baseline"] == "ru" and d["tie"] == "worst"   # sums 240/240, worsts 90/80
-    assert (pick, why) == ("rue", "bounded")
-    assert (cand(d, "rue")["sum"], d["sum_b"]) == (230, 240)
+    assert (d["baseline"], d["tie"]) == ("eu", "lexical")
+    assert (pick, why) == ("rue", "majority")
+    # ru: equal total (240 = 240) with a lower worst (80 < 90) — an admitted
+    # departure on its own, but rue's strictly lower total ranks first.
+    assert (cand(d, "ru")["sum"], cand(d, "ru")["worst"], d["sum_b"], d["worst_b"]) == (240, 80, 240, 90)
+    assert (cand(d, "rue")["sum"], d["sum_pick"]) == (230, 230)
 
 
 def test_row5_codex_c1_single_huge_gain_cannot_drag_three():
@@ -184,12 +186,16 @@ def test_row5_codex_c1_single_huge_gain_cannot_drag_three():
     assert (eu["sum"], d["sum_b"]) == (365, 530)   # would have moved it without the gate
 
 
-def test_row6_codex_c2_majority_admits_but_sum_refuses():
+def test_row6_codex_c2_lexical_anchor_then_the_sum_moves_it_to_us():
     pick, why, d = run(row6_codex_c2())
-    assert (pick, why) == ("us", "baseline")
-    assert d["baseline"] == "us" and d["tie"] == "sum"     # sums 220/760
-    eu = cand(d, "eu")
-    assert (eu["gain"], eu["admitted_by"], eu["sum"]) == (2, "majority", 760)
+    # Tie us/eu, both peer-measured -> the anchor is eu (lexical). From eu
+    # the K counterexample reads the other way round: us is a majority move
+    # (C/D gain 290 each; A/B pay 20, inside the bound too) with the far
+    # lower total, so the room goes to us — and eu is refused as before.
+    assert (d["baseline"], d["tie"]) == ("eu", "lexical")
+    assert (pick, why) == ("us", "majority")
+    us = cand(d, "us")
+    assert (us["gain"], us["max_regret"], us["admitted_by"], us["sum"], d["sum_b"]) == (2, 20, "majority", 220, 760)
 
 
 def test_row7_map_lacking_baseline_fails_quorum():
@@ -351,6 +357,45 @@ def test_three_way_home_tie_is_lexical_when_a_map_lacks_a_candidate():
     assert (pick, why) == ("eu", "baseline")
 
 
+def test_tie_anchor_is_never_numeric_codex_c2_h1():
+    # Three tied homes. usw has by far the lowest TOTAL (2001 vs 5020/5035)
+    # because one seat is 1 ms from it and 5000 ms from everything else; the
+    # old numeric tie-break made usw the baseline and the gate never judged
+    # the 980/985 ms the other two would pay. The anchor is lexical (eu);
+    # usw is then a departure a lone gainer cannot carry, and us — which
+    # costs nobody anything — takes the room.
+    members = [seat("A", "us", {"us": 10, "eu": 20, "usw": 1000}),
+               seat("B", "eu", {"us": 10, "eu": 15, "usw": 1000}),
+               seat("C", "usw", {"us": 5000, "eu": 5000, "usw": 1})]
+    pick, why, d = run(members)
+    assert (d["baseline"], d["tie"]) == ("eu", "lexical")
+    assert (pick, why) == ("us", "bounded")
+    usw, us = cand(d, "usw"), cand(d, "us")
+    assert (usw["sum"], usw["gain"], usw["max_regret"], usw["admitted_by"]) == (2001, 1, 985, None)
+    assert (us["sum"], us["gain"], us["max_regret"], us["admitted_by"]) == (5020, 0, 0, "bounded")
+
+
+def test_tie_prefers_a_home_some_other_member_measured():
+    # A names a home nobody else can reach; a tie with it falls to the home
+    # the other seat's map corroborates, whatever the letters say.
+    members = [seat("A", "aa", {"aa": 1, "us": 500}), seat("B", "us", {"us": 20, "eu": 100})]
+    pick, why, d = run(members)
+    assert (d["baseline"], d["tie"]) == ("us", "measured")
+    assert (pick, why) == ("us", "baseline")
+    # nobody measured anything: the filter has no evidence and the lexical bias stands
+    members = [seat("A", "us", None, age=None), seat("B", "eu", None, age=None)]
+    pick, why, d = run(members, legacy="usw")
+    assert (d["baseline"], d["tie"], why) == ("eu", "lexical", "quorum")
+
+
+def test_home_of_is_the_lowest_ping_code_after_cleaning():
+    assert region_pick.home_of({"us": 60, "eu": 35}) == "eu"
+    assert region_pick.home_of({"us": 50, "eu": 50}) == "eu"             # ties lexical
+    assert region_pick.home_of({"us": 60, "xx": 0, "eu": "35"}) == "us"  # garbage entries dropped
+    for empty in (None, {}, {"us": "60"}, "us=60", []):
+        assert region_pick.home_of(empty) is None, empty
+
+
 # ── R1 / R4 and the selection order ──────────────────────────────────────────
 
 def test_r1_baseline_wins_an_exact_tie_even_against_a_busier_region():
@@ -450,8 +495,9 @@ def test_detail_carries_every_documented_field(members):
 def test_docstring_carries_both_disclosure_sentences_together():
     doc = " ".join(pick_region_for_group.__doc__.split())
     first = ("A move needs either half the room to gain 20 ms or nobody to lose more "
-             "than 30 ms, and then happens only if it lowers the room's total ping — so a "
-             "majority can move a minority, but never by more than the majority gains.")
+             "than 30 ms, and then happens only if it lowers the room's total ping, or keeps "
+             "the total and lowers its worst ping — so a majority can move a minority, but "
+             "never by more than the majority gains.")
     second = "The room may be a region no member calls home."
     assert first in doc and second in doc
     assert doc.index(second) - (doc.index(first) + len(first)) <= 1   # side by side
@@ -482,11 +528,21 @@ def test_m1_companion_last_row_is_not_a_control_for_the_strict_arm(monkeypatch):
     assert (pick, why) == ("ussc", "majority")
 
 
-def test_m2_regret_bound_zero_flips_the_eu_ru_row():
-    assert run(row4())[:2] == ("rue", "bounded")
-    pick, why, d = run(row4(), regret_ms=0)
-    assert (pick, why) == ("ru", "baseline")
-    assert cand(d, "rue")["admitted_by"] is None and cand(d, "rue")["max_regret"] == 10
+def bounded_only():
+    """3 near + 1 far where the compromise costs the near seats 20 each and
+    only the far seat gains: admitted by the bound alone, never by count."""
+    near = {"us": 30, "ussc": 50}
+    return [seat("a", "us", near), seat("b", "us", near), seat("c", "us", near),
+            seat("d", "ussc", {"us": 200, "ussc": 60})]
+
+
+def test_m2_regret_bound_zero_flips_the_bounded_only_fixture():
+    pick, why, d = run(bounded_only())
+    assert (pick, why) == ("ussc", "bounded")
+    assert (cand(d, "ussc")["gain"], cand(d, "ussc")["max_regret"], d["sum_b"], d["sum_pick"]) == (1, 20, 290, 210)
+    pick, why, d = run(bounded_only(), regret_ms=0)
+    assert (pick, why) == ("us", "baseline")
+    assert cand(d, "ussc")["admitted_by"] is None
 
 
 def test_m3_dropping_the_quorum_guard_moves_a_room_with_a_stale_seat(monkeypatch):

@@ -16263,6 +16263,7 @@ namespace CompetitiveRounds
             private int seenSettingsVersion;
             private string settingsLobbyId;
             private bool settingsInFlight; private float settingsAt = -999f;
+            private int settingsReq;   // c2 H5: the latch's owner token — only the request that set it may clear it
             public bool SettingsInFlight => settingsInFlight && Time.realtimeSinceStartup - settingsAt < 25f;
             /// <summary>The host's own unacked write of EITHER kind (prefs or
             /// room-rules settings): Start no-ops and dims while true (c1 H2).</summary>
@@ -17409,9 +17410,14 @@ namespace CompetitiveRounds
                     + $",\"sig\":\"{sig}\"}}";
                 settingsInFlight = true; settingsAt = Time.realtimeSinceStartup;
                 int g = gen;
+                // c2 H5: the latch belongs to THIS request. A delayed response
+                // to an earlier lobby's write used to clear it before the
+                // generation guard below returned — releasing Start while the
+                // current lobby's own settings write was still outstanding.
+                int myReq = ++settingsReq;
                 Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/{mode}/lobby/settings", body, (ok, resp) =>
                 {
-                    settingsInFlight = false;
+                    if (myReq == settingsReq) settingsInFlight = false;
                     if (g != gen || !string.Equals(lobbyAtSend, OpenLobbyId, StringComparison.Ordinal)) return;
                     if (ok)
                     {
@@ -22079,7 +22085,11 @@ namespace CompetitiveRounds
             // callback stale — it then releases without beginning a session.
             // Consulted ONLY for broadcast-ticket dispatches (see above).
             int flowGenAtSend = BroadcastMode.SharedFlowGeneration;
-            string json = $"{{\"steam_id\":\"{Escape(sid)}\",\"game_id\":\"{Escape(gameId)}\",\"client_protocol\":{SpectatorSession.PROTOCOL}}}";
+            // c2 H6: the grant advertises CAPABILITY (3 — this client honours
+            // friendly-fire OFF on the observer seat), not the Photon wire
+            // PROTOCOL (2): an FF-OFF room raises its floor to 3 and answered
+            // 426 to every current client while the writer still sent 2.
+            string json = $"{{\"steam_id\":\"{Escape(sid)}\",\"game_id\":\"{Escape(gameId)}\",\"client_protocol\":{SpectatorSession.CAPABILITY}}}";
             var grantReq = PostRequest(
                 $"{baseUrl}/api/v1/spectate/grant", json,
                 (ok, resp) =>

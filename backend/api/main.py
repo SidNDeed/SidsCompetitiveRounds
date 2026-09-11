@@ -13768,17 +13768,23 @@ def _region_pings_from_header(value):
 # own ping map is stored in player_region_pings (migration 307) by the four
 # session-bound writer polls — the 2v2 / 1v2 / FFA queue polls and the 2v2 /
 # 1v2 lobby state poll — from the same X-Region-Pings header the 1v1 poll
-# carries, for the authenticated caller only, on a session of its own so a
-# refused store can never abort the poll it rides. At issuance _group_region
-# reads the members' committed rows, overlays the calling seat's own header
-# from THIS request (its store is on another session and may not be visible
-# yet), and hands the maps to the pure rule in region_pick.py: a move off
-# today's mode-of-homes baseline needs either half the room to gain 20 ms or
-# nobody to lose more than 30 ms, and then happens only if it lowers the
-# room's total ping — so a majority can move a minority, but never by more
-# than the majority gains. The room may be a region no member calls home.
-# The host's home has no role anywhere in the rule (Sid, 2026-09-10).
-from region_pick import pick_region_for_group as _pick_region_for_group
+# carries, for the authenticated caller only, as a DETACHED task with a
+# connection of its own (c2 H2: a poll never holds its own connection while
+# waiting for a second one, so a burst of polls cannot exhaust the pool
+# against itself), so a refused store can never abort the poll it rides.
+# At issuance _group_region reads the members' committed rows on the
+# caller's own session (a savepoint), overlays the calling seat's own header
+# from THIS request (its store may not have landed yet), takes each seat's
+# HOME from its own map (c2 H3: the queue row's region is the join-time
+# connection, which after a room elsewhere is that room's region), and
+# hands the maps to the pure rule in region_pick.py: a move off the
+# mode-of-homes baseline needs either half the room to gain 20 ms or nobody
+# to lose more than 30 ms, and then happens only if it lowers the room's
+# total ping, or keeps the total and lowers its worst ping — so a majority
+# can move a minority, but never by more than the majority gains. The room
+# may be a region no member calls home. The host's home has no role
+# anywhere in the rule (Sid, 2026-09-10).
+from region_pick import pick_region_for_group as _pick_region_for_group, home_of as _region_home_of
 
 REGION_GROUP_REGRET_MS = 30            # a cost nobody notices (v4 G); margin reuses REGION_PINGS_MARGIN_MS
 _REGION_PINGS_GEN_RE = _re.compile(r"^([0-9a-f]{8,32}):([0-9]{1,9})$")
@@ -13834,35 +13840,20 @@ def _region_pings_newer(gen, measured_at, old_gen, old_measured_at):
     return old_measured_at is None or old_measured_at < measured_at
 
 
-async def _region_pings_store(request, steam_id, label):
-    """The writers' half of the multiplayer region data path: parse THIS
-    request's X-Region-Pings (+ optional X-Region-Pings-Gen) header with the
-    1v1 poll's validator and store it for the authenticated caller's own
-    player row, on a session of its own. Returns (map, measured_at, gen) for
-    the issuance overlay — also when the store failed, since the overlay is
-    what the store would have written — or None when there is nothing valid
-    to store or the session was not verified (a soft-checked session is a
-    claim, not an identity; R1-7).
+_REGION_STORE_TASKS = set()
 
-    The store holds the identity advisory lock in SHARED mode, so it waits
-    out an in-flight delete-my-data for the same identity (the exclusive
-    form) and its re-evaluated `deleted_at IS NULL` then stores nothing
-    (R1-21). Every caller runs this BEFORE taking any queue-row lock: the
-    delete deletes the identity's queue rows under its exclusive lock, so a
-    writer that already held queue rows while waiting here would close a
-    cycle Postgres cannot see (the wait is across two sessions). Rows are
-    kept for at most one hour (janitor) — the consent copy's promise."""
-    try:
-        hdr = request.headers.get("X-Region-Pings") if request is not None else None
-        gen_hdr = request.headers.get("X-Region-Pings-Gen") if request is not None else None
-    except Exception:
-        return None
-    pings_json, age = _region_pings_from_header(hdr)
-    if pings_json is None or not _session_was_verified(request):
-        return None
-    gen = _region_pings_gen_from_header(gen_hdr)
-    measured_at = datetime.now(timezone.utc) - timedelta(seconds=age)
-    current = (_json.loads(pings_json), measured_at, gen)
+
+async def _region_pings_store_task(steam_id, label, pings_json, measured_at, gen):
+    """The store itself, DETACHED from the poll that carried the header (c2
+    H2): it runs on a connection of its own after the poll has moved on, so
+    the poll never holds one pool connection while waiting for another — a
+    burst of polls could otherwise wait on each other until pool_timeout and
+    fail every one of them. It holds the identity advisory lock in SHARED
+    mode, so it waits out an in-flight delete-my-data for the same identity
+    (the exclusive form) and its re-evaluated `deleted_at IS NULL` then
+    stores nothing (R1-21); waiting here blocks nobody, since no request
+    waits for this task. A failure is logged; the poll already acknowledged
+    the header, so the row is refreshed by the next sweep at the latest."""
     try:
         from database import async_session
         async with async_session() as sdb:
@@ -13876,6 +13867,37 @@ async def _region_pings_store(request, steam_id, label):
             await sdb.commit()
     except Exception as exc:
         print(f"[GROUP-REGION] {label} store failed for {steam_id}: {type(exc).__name__}: {exc}")
+
+
+async def _region_pings_store(request, steam_id, label):
+    """The writers' half of the multiplayer region data path: parse THIS
+    request's X-Region-Pings (+ optional X-Region-Pings-Gen) header with the
+    1v1 poll's validator and hand it to a detached store task for the
+    authenticated caller's own player row (_region_pings_store_task — the
+    poll does not wait for it). Returns (map, measured_at, gen) for the
+    issuance overlay — the overlay is what the store writes, so a pick this
+    poll decides sees the caller's own map whether or not the store has
+    landed — or None when there is nothing valid to store or the session was
+    not verified (a soft-checked session is a claim, not an identity; R1-7).
+    Rows are kept for at most one hour (janitor) — the consent copy's
+    promise."""
+    try:
+        hdr = request.headers.get("X-Region-Pings") if request is not None else None
+        gen_hdr = request.headers.get("X-Region-Pings-Gen") if request is not None else None
+    except Exception:
+        return None
+    pings_json, age = _region_pings_from_header(hdr)
+    if pings_json is None or not _session_was_verified(request):
+        return None
+    gen = _region_pings_gen_from_header(gen_hdr)
+    measured_at = datetime.now(timezone.utc) - timedelta(seconds=age)
+    current = (_json.loads(pings_json), measured_at, gen)
+    try:
+        task = asyncio.create_task(_region_pings_store_task(steam_id, label, pings_json, measured_at, gen))
+        _REGION_STORE_TASKS.add(task)
+        task.add_done_callback(_REGION_STORE_TASKS.discard)
+    except Exception as exc:
+        print(f"[GROUP-REGION] {label} store not scheduled for {steam_id}: {type(exc).__name__}: {exc}")
     return current
 
 
@@ -13906,28 +13928,67 @@ def _region_current(player_id, stored):
     return (player_id, stored[0], stored[1], stored[2])
 
 
-async def _group_region(rows, legacy_pick, label, *, current=None, room=""):
+_REGION_VOLUMES_CACHE = {"at": 0.0, "volumes": {}}
+REGION_VOLUMES_CACHE_S = 600
+
+
+async def _region_volumes(db):
+    """The rule's LAST tie-break: matches played per region over the last 45
+    days — tournaments._region_candidate_volumes, the count the tournament
+    region pick already uses (c2 M2; the process's 7-day sighting counts
+    stood in for it before). One query per process per
+    REGION_VOLUMES_CACHE_S, on the caller's session under a savepoint;
+    unavailable -> the last cached answer, or nothing (a tie-break only,
+    never liveness)."""
+    cache = _REGION_VOLUMES_CACHE
+    now = time.monotonic()
+    if cache["at"] and now - cache["at"] < REGION_VOLUMES_CACHE_S:
+        return cache["volumes"]
+    try:
+        from tournaments import _region_candidate_volumes
+        async with db.begin_nested():
+            vols = await _region_candidate_volumes(db)
+        cache["at"], cache["volumes"] = now, dict(vols)
+    except Exception as exc:
+        print(f"[GROUP-REGION] volumes unavailable: {type(exc).__name__}: {exc}")
+    return cache["volumes"]
+
+
+async def _group_region(db, rows, legacy_pick, label, *, current=None, room=""):
     """The room-region pick for a multiplayer issuance (region_pick.py holds
-    the rule; the block comment above, the data path). `rows` are the
-    members' queue rows in seat order (player_id, region = that seat's home);
+    the rule; the block comment above, the data path). `db` is the issuing
+    request's own session — the members' rows are read on it under a
+    savepoint (c2 H2: no second pool connection while the caller holds its
+    first, and its locks). `rows` are the members' queue rows in seat order;
     `legacy_pick` is the mode's answer before this rule and the fallback on
     any error; `current` = (player_id, map, measured_at, gen) is the calling
     seat's validated header from THIS request, overlaid when it would have
-    replaced the stored row. Liveness: a candidate must be in EVERY member's
-    map (the rule's intersection) — no region catalogue exists server-side,
-    so the members' own measured codes are the live set; volumes for the
-    last tie-break are the 7-day sighting counts of the corroboration
-    registry (v4 asked for 45-day volumes; none are kept). Never raises; one
-    [GROUP-REGION] line per issuance on EVERY branch, refusals included — the
-    maps outlive the queue rows by an hour at most, so the line is the
-    record of what the rule saw."""
+    replaced the stored row.
+
+    A seat's HOME is the lowest-ping code of its own map (region_pick.home_of;
+    stale or fresh — where a player is does not go stale within the hour the
+    rows live), and only without any map the queue row's region, which is
+    the join-time CONNECTION: after a room in another region, that room's
+    region, not a home (c2 H3).
+
+    Liveness: a candidate must be in EVERY member's map (the rule's
+    intersection). There is no server-side region allowlist BY DECISION (the
+    corroboration comment above _note_region_seen: Photon serves regions
+    ROUNDS' own selector does not list — hk and uae are in this project's
+    match history — and a list would refuse a room that was connecting
+    fine), so the members' own measured codes are the live set, and a home
+    no other member has measured never wins a baseline tie
+    (region_pick._baseline). Volumes for the last tie-break are the 45-day
+    match counts (_region_volumes). Never raises; one [GROUP-REGION] line
+    per issuance on EVERY branch, refusals included — the maps outlive the
+    queue rows by an hour at most, so the line is the record of what the
+    rule saw."""
     pick, why, detail = legacy_pick, "error", {}
     try:
         ids = [r["player_id"] for r in rows]
         stored = {}
-        from database import async_session
-        async with async_session() as rdb:
-            res = await rdb.execute(text(
+        async with db.begin_nested():
+            res = await db.execute(text(
                 "SELECT player_id, pings, measured_at, gen_nonce, gen_seq"
                 "  FROM player_region_pings WHERE player_id = ANY(:ids)"),
                 {"ids": ids})
@@ -13949,15 +14010,14 @@ async def _group_region(rows, legacy_pick, label, *, current=None, room=""):
                     pmap = None
             if at is not None and at.tzinfo is None:
                 at = at.replace(tzinfo=timezone.utc)
-            members.append({"id": str(r["player_id"]), "home": r["region"], "map": pmap,
+            home = _region_home_of(pmap) or r["region"]
+            members.append({"id": str(r["player_id"]), "home": home, "map": pmap,
                             "measured_at": at.timestamp() if at is not None else None})
         live = set()
         for m in members:
             if isinstance(m["map"], dict):
                 live |= set(m["map"])
-        mono = time.monotonic()
-        volumes = {tok: sum(1 for ts in seen.values() if mono - ts <= _REGION_SEEN_TTL_SECONDS)
-                   for tok, seen in _REGION_SEEN.items()}
+        volumes = await _region_volumes(db)
         pick, why, detail = _pick_region_for_group(
             members, live, volumes, legacy_pick,
             margin_ms=REGION_PINGS_MARGIN_MS, regret_ms=REGION_GROUP_REGRET_MS,
@@ -32795,7 +32855,7 @@ async def team_queue_poll(steam_id: str, request: Request,
                 # regions is the baseline — today's rule — and the members'
                 # own ping maps may move the room; see _group_region.
                 chosen_region = await _group_region(
-                    all_4, _region_mode_of(all_4), "team",
+                    db, all_4, _region_mode_of(all_4), "team",
                     current=_region_current(my_pid, _cur_pings), room=room_name)
                 await db.execute(
                     text("""UPDATE team_queue
@@ -35958,7 +36018,7 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
     # a policy — recorded deviation) and the members' own ping maps may move
     # the room; see _group_region.
     region = await _group_region(
-        lobby, _region_mode_of(lobby), "ovt",
+        db, lobby, _region_mode_of(lobby), "ovt",
         current=_region_current(me["player_id"], _cur_pings), room=room)
     series_id = uuid.uuid4()
     await _assert_no_service_subject(
@@ -39316,7 +39376,7 @@ async def ovt_lobby_start(req: _LobbyStartReq, request: Request,
     # Region (Sept 10, v4 group rule): the mode of the members' homes is the
     # baseline (was first-non-empty — recorded deviation), then their stored
     # ping maps; the host's home carries no weight. See _group_region.
-    region = await _group_region(live, _region_mode_of(live), "ovt-lobby", room=room)
+    region = await _group_region(db, live, _region_mode_of(live), "ovt-lobby", room=room)
     series_id = uuid.uuid4()
     await _assert_no_service_subject(
         db,
@@ -40063,7 +40123,7 @@ async def ffa_lobby_start(req: _FfaLobbyStartReq, request: Request, db: AsyncSes
     # Region (Sept 10, v4 group rule): mode of the members' homes as the
     # baseline, then their stored ping maps (FFA lobby members keep theirs
     # fresh through the FFA queue poll); see _group_region.
-    region = await _group_region(ordered, _region_mode_of(ordered), "ffa-lobby", room=room)
+    region = await _group_region(db, ordered, _region_mode_of(ordered), "ffa-lobby", room=room)
     await db.execute(text("""
         UPDATE ffa_lobbies
            SET status='active', photon_room_id=:room, region=:reg,
@@ -41067,7 +41127,7 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
     # Region (Sept 10, v4 group rule): mode of the members' homes as the
     # baseline, then their own ping maps; see _group_region.
     region = await _group_region(
-        ordered, _region_mode_of(ordered), "ffa",
+        db, ordered, _region_mode_of(ordered), "ffa",
         current=_region_current(me["player_id"], _cur_pings), room=room)
     lobby_id = uuid.uuid4()
     await _assert_no_service_subject(

@@ -4,7 +4,10 @@ PURE: stdlib only, no database, no import of main.py (main -> tournaments is
 already circular). The caller hands over each seat's ping map, the regions it
 considers real, the 45-day volumes (a tie-break, never liveness) and the
 mode's existing pick, and gets a verdict back. Design: v4 policy resolution
-(sum selection over the v3 baseline/quorum/gate), residuals R1, R3, R4.
+(sum selection over the v3 baseline/quorum/gate), residuals R1, R3, R4;
+Codex c2 (2026-09-11): the tie anchor is never numeric (peer-measured homes
+first, then lexical — H1), and a seat's home is the data path's business:
+main derives it from the seat's own map through ``home_of`` (H3).
 
 The three module-level ``_``-prefixed flags at the bottom of this header are
 TEST-ONLY mutation knobs. They default off, are read at call time, and exist
@@ -58,11 +61,16 @@ def _clean_map(raw):
 
 def _baseline(seats, legacy_pick):
     """B = the mode of the members' non-empty homes; legacy_pick when nobody
-    has one. Tie policy (R3, v4): among tied modal homes, when EVERY member
-    has a FRESH map containing EACH tied candidate, the lowest total ping,
-    then the lowest worst, then the lexically first code; otherwise the
-    lexically first code (a documented bias). Returns (B, tie) with tie in
-    "sum" / "worst" / "lexical" / None (no tie)."""
+    has one. Tie policy (R3 as revised by c2 H1): among tied modal homes,
+    first the ones at least one OTHER member's map contains (a home nobody
+    else can even reach is never the room's default), then the lexically
+    first code — never the numbers. A tied home that won on the members'
+    ping totals became the baseline WITHOUT passing the admission gate, and
+    the gate is what bounds what the rest of the room pays; from a
+    map-independent anchor every departure, the numerically best tied home
+    included, is judged by the same arithmetic. Returns (B, tie) with tie
+    None (no tie), "measured" (peer measurement alone decided) or
+    "lexical"."""
     homes = [s.home for s in seats if s.home]
     if not homes:
         return legacy_pick, None
@@ -71,17 +79,23 @@ def _baseline(seats, legacy_pick):
     tied = sorted(code for code, n in counts.items() if n == top)
     if len(tied) == 1:
         return tied[0], None
-    if all(s.fresh and all(code in s.map for code in tied) for s in seats):
-        def key(code):
-            return (sum(s.map[code] for s in seats), max(s.map[code] for s in seats), code)
-        ranked = sorted(tied, key=key)
-        best, runner_up = key(ranked[0]), key(ranked[1])
-        if best[0] < runner_up[0]:
-            return ranked[0], "sum"
-        if best[1] < runner_up[1]:
-            return ranked[0], "worst"
-        return ranked[0], "lexical"
-    return tied[0], "lexical"
+    measured = [code for code in tied
+                if any(s.map and code in s.map and s.home != code for s in seats)]
+    if len(measured) == 1:
+        return measured[0], "measured"
+    return (measured or tied)[0], "lexical"
+
+
+def home_of(raw_map):
+    """A seat's measured home: the lowest-ping code of its own map after
+    cleaning (ties lexical), or None without a usable map. The data path
+    (main._group_region) prefers this to the queue row's join-time
+    connection region, which after a room in another region is THAT room's
+    region, not where the player is (c2 H3)."""
+    clean = _clean_map(raw_map)
+    if not clean:
+        return None
+    return min(clean, key=lambda code: (clean[code], code))
 
 
 def pick_region_for_group(members, live_regions, volumes, legacy_pick, *,
@@ -91,23 +105,27 @@ def pick_region_for_group(members, live_regions, volumes, legacy_pick, *,
     Disclosure (both sentences travel together — docstring, log, changelog;
     stated at the production constants, margin 20 / regret 30): A move needs
     either half the room to gain 20 ms or nobody to lose more than 30 ms, and
-    then happens only if it lowers the room's total ping — so a majority can
-    move a minority, but never by more than the majority gains. The room may
-    be a region no member calls home.
+    then happens only if it lowers the room's total ping, or keeps the total
+    and lowers its worst ping — so a majority can move a minority, but never
+    by more than the majority gains. The room may be a region no member
+    calls home.
 
     Inputs. ``members``: seat-ordered dicts ``{"id", "home", "map",
-    "measured_at"}`` — ``map`` is ``{code: ms}`` or None, ``measured_at`` an
-    epoch float or None. ``live_regions``: the codes the server considers real
+    "measured_at"}`` — ``home`` is what the caller says the seat's home is
+    (main derives it from the seat's own map through ``home_of`` and only
+    without a map uses the queue row's region), ``map`` is ``{code: ms}`` or
+    None, ``measured_at`` an epoch float or None. ``live_regions``: the codes the server considers real
     (candidates must be in it; the baseline need not be). ``volumes``: code ->
     45-day volume, a tie-break only. ``legacy_pick``: the mode's existing pick,
     used only when no member has a home, or when this function fails.
 
     The rule.
       1. B (baseline) = the mode of the members' non-empty homes; the region
-         every member would get today. Tie among modal homes: if every member
-         has a fresh map containing each tied candidate, the lowest total
-         ping, then the lowest worst, then the lexically first code; otherwise
-         the lexically first code. ``detail["tie"]`` records which.
+         every member would get today. Tie among modal homes: the ones at
+         least one other member's map contains, then the lexically first
+         code — never the members' ping totals (c2 H1: a tied home must not
+         become the baseline on a ping advantage the gate never judged).
+         ``detail["tie"]`` records ``measured``, ``lexical`` or None.
       2. Quorum: every member has a FRESH map (``now - measured_at <=
          max_age_s``) that contains B. Otherwise the verdict is B,
          ``why="quorum"``, and ``detail["seats"]`` says per seat why
@@ -143,8 +161,10 @@ def pick_region_for_group(members, live_regions, volumes, legacy_pick, *,
         off B.
       * The room never leaves B for an equal total unless the worst seat
         strictly improves, and never on volume or code alone (R1).
-      * The host's home has no role anywhere (H); ties fall to numbers, then
-        to the documented lexical bias.
+      * The host's home has no role anywhere (H); a tie among modal homes
+        falls to peer measurement, then to the documented lexical bias —
+        never to the members' ping totals, so no tied home is ever the
+        baseline on numbers the gate did not judge.
 
     Never raises and never returns None: any exception inside the body yields
     ``(legacy_pick, "error", {"error": repr(exc)})``. Garbage map entries are

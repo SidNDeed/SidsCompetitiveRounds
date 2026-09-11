@@ -79,6 +79,9 @@ class _Rows:
     def fetchall(self):
         return list(self._rows)
 
+    def all(self):
+        return list(self._rows)
+
 
 class FakeSession:
     """One session per `async with`: records (sql, params), answers the
@@ -87,6 +90,12 @@ class FakeSession:
     def __init__(self, log, rows=(), fail=None):
         self.log, self.rows, self.fail = log, list(rows), fail
         self.committed = False
+        self.volume_rows = []      # answers the 45-day volumes query
+        self.nested = 0            # begin_nested() calls (savepoints)
+
+    def begin_nested(self):
+        self.nested += 1
+        return self
 
     async def __aenter__(self):
         return self
@@ -101,6 +110,8 @@ class FakeSession:
             raise self.fail
         if sql.startswith("SELECT player_id, pings"):
             return _Rows(self.rows)
+        if sql.startswith("SELECT region, COUNT(*) AS n FROM matches"):
+            return _Rows(self.volume_rows)
         return _Rows([])
 
     async def commit(self):
@@ -118,6 +129,16 @@ def _factory(monkeypatch, log, rows=(), fail=None):
     # main imports `async_session` from database at CALL time.
     monkeypatch.setattr(database, "async_session", make)
     return sessions
+
+
+async def _store(req, label):
+    """The writer's call, then the detached store task it scheduled (the
+    poll itself never waits for it — c2 H2)."""
+    cur = await main._region_pings_store(req, STEAM, label)
+    pending = list(main._REGION_STORE_TASKS)
+    if pending:
+        await asyncio.gather(*pending)
+    return cur
 
 
 # ── the generation header and the newer-map rule ─────────────────────────────
@@ -176,7 +197,7 @@ def test_upsert_sql_carries_the_same_rule_and_typed_binds():
 def test_store_writes_the_callers_map_under_the_shared_identity_lock(monkeypatch):
     log = []
     sessions = _factory(monkeypatch, log)
-    cur = _run(main._region_pings_store(_request("us=42,eu=31;age=12", "0123abcd:7"), STEAM, "team"))
+    cur = _run(_store(_request("us=42,eu=31;age=12", "0123abcd:7"), "team"))
     assert cur is not None
     pmap, at, gen = cur
     assert pmap == {"us": 42, "eu": 31} and gen == ("0123abcd", 7)
@@ -194,7 +215,7 @@ def test_store_writes_the_callers_map_under_the_shared_identity_lock(monkeypatch
 def test_store_without_a_generation_binds_nulls(monkeypatch):
     log = []
     _factory(monkeypatch, log)
-    cur = _run(main._region_pings_store(_request("us=42;age=0"), STEAM, "ovt"))
+    cur = _run(_store(_request("us=42;age=0"), "ovt"))
     assert cur[0] == {"us": 42} and cur[2] is None
     assert log[1][1]["gen_nonce"] is None and log[1][1]["gen_seq"] is None
     assert abs((_now() - cur[1]).total_seconds()) < 2
@@ -207,14 +228,14 @@ def test_store_is_silent_without_a_valid_header_or_a_verified_session(monkeypatc
                 None):
         log = []
         sessions = _factory(monkeypatch, log)
-        assert _run(main._region_pings_store(req, STEAM, "ffa")) is None
-        assert sessions == [] and log == []
+        assert _run(_store(req, "ffa")) is None
+        assert sessions == [] and log == [] and main._REGION_STORE_TASKS == set()
 
 
 def test_store_failure_is_logged_and_still_returns_the_overlay(monkeypatch, capsys):
     log = []
     _factory(monkeypatch, log, fail=RuntimeError("relation player_region_pings does not exist"))
-    cur = _run(main._region_pings_store(_request("us=42;age=0"), STEAM, "ffa"))
+    cur = _run(_store(_request("us=42;age=0"), "ffa"))
     assert cur is not None and cur[0] == {"us": 42}
     out = capsys.readouterr().out
     assert f"[GROUP-REGION] ffa store failed for {STEAM}: RuntimeError: relation player_region_pings" in out
@@ -234,10 +255,15 @@ def _stored(pid, pmap, age_s=5, gen=None):
 ROWS = [_row(A), _row(B), _row(C)]
 
 
+async def _no_volumes(db):
+    return {}
+
+
 def _pick(monkeypatch, rows, stored, current=None, fail=None, legacy="us"):
     log = []
-    _factory(monkeypatch, log, rows=stored, fail=fail)
-    return _run(main._group_region(rows, legacy, "team", current=current, room="team_x")), log
+    db = FakeSession(log, rows=stored, fail=fail)      # the ISSUING request's own session
+    monkeypatch.setattr(main, "_region_volumes", _no_volumes)
+    return _run(main._group_region(db, rows, legacy, "team", current=current, room="team_x")), log
 
 
 def _line(capsys):
@@ -246,7 +272,12 @@ def _line(capsys):
     return lines[0]
 
 
-def test_group_pick_moves_the_room_on_the_members_stored_maps(monkeypatch, capsys):
+def test_group_pick_takes_the_members_measured_homes_over_their_connection_regions(monkeypatch, capsys):
+    # Every queue row says us (the join-time connection); every seat's own
+    # map says eu is nearest. The home is the map's (c2 H3), so the baseline
+    # itself is eu — no departure needed, nothing for a stale connection
+    # region to anchor. The read is ONE statement on the caller's session,
+    # under a savepoint.
     pick, log = _pick(monkeypatch, ROWS, [_stored(A, NEAR), _stored(B, NEAR), _stored(C, NEAR)])
     assert pick == "eu"
     assert len(log) == 1
@@ -255,20 +286,38 @@ def test_group_pick_moves_the_room_on_the_members_stored_maps(monkeypatch, capsy
                    " FROM player_region_pings WHERE player_id = ANY(:ids)")
     assert params == {"ids": [A, B, C]}
     line = _line(capsys)
-    assert (" pick=eu why=majority baseline=us legacy=us n=3 sum_b=180 sum_pick=105"
-            " worst_b=60 worst_pick=35 gain=3 regret=-25 tie=- ") in line
-    assert line.endswith(f"members={A}:fresh:60/35,{B}:fresh:60/35,{C}:fresh:60/35")
+    assert (" pick=eu why=baseline baseline=eu legacy=us n=3 sum_b=105 sum_pick=105"
+            " worst_b=35 worst_pick=35 gain=0 regret=0 tie=- ") in line
+    assert line.endswith(f"members={A}:fresh:35/35,{B}:fresh:35/35,{C}:fresh:35/35")
+
+
+def test_group_pick_moves_the_room_to_a_region_nobody_calls_home(monkeypatch, capsys):
+    # Homes us, us, eu (from the maps); ussc costs the two US seats 25 each
+    # and saves the EU seat 145: admitted by the bound, and the total falls.
+    stored = [_stored(A, {"us": 30, "ussc": 55, "eu": 200}), _stored(B, {"us": 30, "ussc": 55, "eu": 200}),
+              _stored(C, {"eu": 30, "ussc": 55, "us": 200})]
+    pick, log = _pick(monkeypatch, ROWS, stored)
+    assert pick == "ussc"
+    line = _line(capsys)
+    assert (" pick=ussc why=bounded baseline=us legacy=us n=3 sum_b=260 sum_pick=165"
+            " worst_b=200 worst_pick=55 gain=1 regret=25 tie=- ") in line
+    assert line.endswith(f"members={A}:fresh:30/55,{B}:fresh:30/55,{C}:fresh:200/55")
 
 
 def test_group_pick_stays_on_the_baseline_without_quorum(monkeypatch, capsys):
-    pick, _ = _pick(monkeypatch, ROWS, [_stored(A, NEAR), _stored(B, NEAR)])    # C never measured
-    assert pick == "us"
+    # C never measured: its home is its queue row's region (us); the two
+    # measured seats' homes are eu, so the baseline is eu and C, whose cost
+    # there is unknown, gets it unmoved (quorum).
+    pick, _ = _pick(monkeypatch, ROWS, [_stored(A, NEAR), _stored(B, NEAR)])
+    assert pick == "eu"
     line = _line(capsys)
-    assert " pick=us why=quorum baseline=us legacy=us n=3 " in line and f"{C}:absent:-/-" in line
+    assert " pick=eu why=quorum baseline=eu legacy=us n=3 " in line and f"{C}:absent:-/-" in line
+    # a STALE map still says where C is (its home stays eu) but proves no cost
     stale = _stored(C, NEAR, age_s=main.REGION_PINGS_ISSUANCE_MAX_AGE_S + 5)
     pick, _ = _pick(monkeypatch, ROWS, [_stored(A, NEAR), _stored(B, NEAR), stale])
-    assert pick == "us"
-    assert f"{C}:stale:60/60" in _line(capsys)
+    assert pick == "eu"
+    line = _line(capsys)
+    assert " why=quorum baseline=eu " in line and f"{C}:stale:35/35" in line
 
 
 def test_group_pick_refuses_a_minority_gain_that_costs_the_others_over_the_bound(monkeypatch, capsys):
@@ -287,14 +336,17 @@ def test_group_pick_refuses_a_minority_gain_that_costs_the_others_over_the_bound
     assert "max_age_s=REGION_PINGS_ISSUANCE_MAX_AGE_S, now=time.time()" in src
 
 
-def test_group_pick_decodes_json_text_maps_and_naive_stamps(monkeypatch):
+def test_group_pick_decodes_json_text_maps_and_naive_stamps(monkeypatch, capsys):
     stored = [_stored(A, '{"eu":35,"us":60}'), _stored(B, '{"eu":35,"us":60}'), _stored(C, NEAR)]
     stored[2]["measured_at"] = stored[2]["measured_at"].replace(tzinfo=None)   # a naive UTC stamp
     pick, _ = _pick(monkeypatch, ROWS, stored)
     assert pick == "eu"
+    capsys.readouterr()
     stored[0]["pings"] = "{not json"
     pick, _ = _pick(monkeypatch, ROWS, stored)
-    assert pick == "us", "garbage text is an absent map, not an exception"
+    assert pick == "eu", "garbage text is an absent map (quorum), not an exception"
+    line = _line(capsys)
+    assert " why=quorum baseline=eu " in line and f"{A}:absent:-/-" in line
 
 
 def test_overlay_supplies_the_callers_own_uncommitted_header(monkeypatch, capsys):
@@ -302,10 +354,13 @@ def test_overlay_supplies_the_callers_own_uncommitted_header(monkeypatch, capsys
     current = (C, NEAR, _now() - timedelta(seconds=3), None)
     pick, _ = _pick(monkeypatch, ROWS, stored, current=current)
     assert pick == "eu"
-    assert f"{C}:fresh:60/35" in _line(capsys)
-    # the overlay is the caller's OWN seat only: a header for a seat outside the room changes nothing
+    assert f"{C}:fresh:35/35" in _line(capsys)
+    # the overlay is the caller's OWN seat only: a header for a seat outside
+    # the room changes nothing — C stays unmeasured and the verdict is the
+    # no-overlay one (eu by quorum)
     pick, _ = _pick(monkeypatch, ROWS, stored, current=(UUID(int=9), NEAR, _now(), None))
-    assert pick == "us"
+    assert pick == "eu" and " why=quorum " in _line(capsys)
+    assert _pick(monkeypatch, ROWS, stored)[0] == "eu"
 
 
 def test_overlay_applies_only_when_it_would_have_replaced_the_stored_row(monkeypatch):
@@ -336,6 +391,62 @@ def test_group_pick_never_returns_an_empty_region(monkeypatch):
     # nobody has a home and nobody measured: the legacy default carries
     rows = [_row(A, None), _row(B, None)]
     assert _pick(monkeypatch, rows, [], legacy="us")[0] == "us"
+
+
+def test_home_is_the_seats_own_map_not_its_connection_region(monkeypatch, capsys):
+    # Codex c2 H3: B's queue row says eu because B is still connected to the
+    # EU master from a previous room; B's own map says us (30 vs 150). Homes
+    # are us, us, eu — the baseline is us. With the rows as homes it would
+    # have been eu (2 of 3), moving A from 30 to 150 ms.
+    rows = [_row(A, "us"), _row(B, "eu"), _row(C, "eu")]
+    stored = [_stored(A, {"us": 30, "eu": 150}), _stored(B, {"us": 30, "eu": 150}),
+              _stored(C, {"eu": 30, "us": 150})]
+    pick, _ = _pick(monkeypatch, rows, stored)
+    assert pick == "us"
+    assert " pick=us why=baseline baseline=us legacy=us n=3 " in _line(capsys)
+    # no map at all: the row's region is all there is
+    pick, _ = _pick(monkeypatch, [_row(A, "eu"), _row(B, "eu"), _row(C, "us")], [])
+    assert pick == "eu" and " why=quorum baseline=eu " in _line(capsys)
+
+
+def test_volumes_are_the_45_day_match_counts_cached_per_process(monkeypatch, capsys):
+    main._REGION_VOLUMES_CACHE.update({"at": 0.0, "volumes": {}})
+    log = []
+    db = FakeSession(log)
+    db.volume_rows = [SimpleNamespace(region="us", n=7), SimpleNamespace(region="eu", n=3)]
+    assert _run(main._region_volumes(db)) == {"us": 7, "eu": 3}
+    assert len(log) == 1 and db.nested == 1
+    sql, params = log[0]
+    assert sql.startswith("SELECT region, COUNT(*) AS n FROM matches")
+    assert "make_interval(days => :live)" in sql and isinstance(params["live"], int) and params["live"] >= 30
+    assert _run(main._region_volumes(db)) == {"us": 7, "eu": 3} and len(log) == 1, "cached"
+    # unavailable: the cached answer stands and the line says so
+    main._REGION_VOLUMES_CACHE.update({"at": 0.0})
+    failing = FakeSession([], fail=RuntimeError("no matches table"))
+    assert _run(main._region_volumes(failing)) == {"us": 7, "eu": 3}
+    assert "[GROUP-REGION] volumes unavailable: RuntimeError: no matches table" in capsys.readouterr().out
+    main._REGION_VOLUMES_CACHE.update({"at": 0.0, "volumes": {}})
+    src = inspect.getsource(main._region_volumes)
+    assert "from tournaments import _region_candidate_volumes" in src and "async with db.begin_nested():" in src
+
+
+def test_store_and_reader_never_take_a_second_connection_under_the_request():
+    # c2 H2: the poll's dependency session already holds a pool connection;
+    # a nested `async with async_session()` waits for a second one while
+    # holding the first, and enough concurrent polls wait on each other until
+    # pool_timeout. The store is detached (its own task, nobody waits for
+    # it); the reader uses the caller's session under a savepoint.
+    store = inspect.getsource(main._region_pings_store)
+    assert "asyncio.create_task(_region_pings_store_task(" in store and "async_session" not in store
+    task = inspect.getsource(main._region_pings_store_task)
+    assert task.count("async with async_session() as sdb:") == 1
+    assert task.index("pg_advisory_xact_lock_shared") < task.index("_REGION_PINGS_UPSERT_SQL")
+    reader = inspect.getsource(main._group_region)
+    assert "async_session" not in reader and reader.count("async with db.begin_nested():") == 1
+    assert 'home = _region_home_of(pmap) or r["region"]' in reader
+    for name in ISSUERS:
+        norm = " ".join(inspect.getsource(getattr(main, name)).split()).replace("( ", "(")
+        assert norm.count("await _group_region(db, ") == 1, name
 
 
 def test_legacy_mode_is_deterministic_and_the_overlay_helper_is_shaped():

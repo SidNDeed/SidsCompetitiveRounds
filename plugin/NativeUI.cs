@@ -13760,11 +13760,14 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     var id = MatchTracker.LocalSteamId;
                     if (st == null || string.IsNullOrEmpty(id) || id == "unknown") return;
                     // c1 M5: single-flight — a click while the previous write
-                    // is unacked is dropped (15 s staleness so a lost callback
-                    // cannot wedge the toggle), so the value that persists is
+                    // is unacked is dropped (25 s staleness — past PostRequest's
+                    // 20 s transport timeout, so the latch cannot lapse while a
+                    // write is still in flight and let a second click overtake
+                    // it, c2 M1; a lost callback still cannot wedge the toggle),
+                    // so the value that persists is
                     // the one the label shows; a failed write rolls the
                     // optimistic flip back (a 401 must not leave a false label).
-                    if (prefSameCardsInFlight && Time.realtimeSinceStartup - prefSameCardsAt < 15f) return;
+                    if (prefSameCardsInFlight && Time.realtimeSinceStartup - prefSameCardsAt < 25f) return;
                     prefSameCardsInFlight = true; prefSameCardsAt = Time.realtimeSinceStartup;
                     bool before = st.pref_same_cards;
                     Plugin.Log.LogInfo("[SETTINGS] same-cards preference toggled");
