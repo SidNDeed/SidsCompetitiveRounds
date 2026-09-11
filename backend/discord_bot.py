@@ -370,6 +370,7 @@ async def on_ready():
     if not poll_ffa_live_bets.is_running(): poll_ffa_live_bets.start()
     if not poll_lobby_bets.is_running(): poll_lobby_bets.start()
     if not poll_gambler_pings.is_running(): poll_gambler_pings.start()
+    if not poll_pc_events.is_running(): poll_pc_events.start()
     if not poll_chat_catchup.is_running(): poll_chat_catchup.start()
     if not poll_tournaments.is_running(): poll_tournaments.start()
     if not nag_pending_async_matches.is_running(): nag_pending_async_matches.start()
@@ -8262,6 +8263,266 @@ async def _modcase_click(interaction, custom_id):
 # leave when the ack lands. A restart between send and ack can still duplicate
 # ONCE — the documented at-least-once trade-off.
 _channel_post_sent: dict = {}
+
+
+# ── Player Cards (Sept 10 batch, WP-F): /daily, /collection, /card + the notable-pull drain ──
+# Every read goes through the api's internal routes (X-Internal-Key rides on
+# the session); Discord identity resolves SERVER-side from players.discord_id
+# (the /link flow), so nothing here takes a steam id from a Discord user. The
+# api re-checks both parties' consent (pc_announce, the subject not opted
+# out, neither deleted, the print not discarded) when it hands events out.
+
+_PC_RARITY_EMOJI = {"legendary": "🟨", "epic": "🟪", "rare": "🟦", "uncommon": "🟩", "common": "⬜"}
+_PC_RARITY_COLOR = {"legendary": 0xF1C40F, "epic": 0x9B59B6, "rare": 0x3498DB, "uncommon": 0x2ECC71, "common": 0x95A5A6}
+_PC_LINK_HINT = "Link your Discord in-game first: F5 → Home tab → Get Link Code, then `/link YOUR_CODE` here."
+
+
+async def _pc_api(method, path, params=None, timeout=8.0):
+    """(status, body) for an internal Player Cards route. body is the JSON
+    whenever the api answered with one — its refusals are objects, e.g.
+    {"detail": {"error": "already_claimed", "next_reset_utc": ...}} — else
+    the text; (0, None) when the api did not answer at all. Unlike api_get a
+    non-200 keeps its status: the bot's answers differ by it."""
+    try:
+        fn = http_session.get if method == "GET" else http_session.post
+        async with fn(f"{API_BASE_URL}/api/v1{path}", params=params,
+                      timeout=aiohttp.ClientTimeout(total=timeout)) as r:
+            try:
+                body = await r.json(content_type=None)
+            except Exception:
+                body = await r.text()
+            if r.status != 200:
+                print(f"API {method} {path.split('?')[0]} -> HTTP {r.status}")
+            return r.status, body
+    except Exception as e:
+        print(f"API {method} error: {e}")
+        return 0, None
+
+
+def _pc_detail(body):
+    """The api's refusal as a dict: {"detail": {...}} -> that dict; a string
+    detail -> {"error": text}; anything else -> {}."""
+    if isinstance(body, dict):
+        d = body.get("detail", body)
+        if isinstance(d, dict):
+            return d
+        if isinstance(d, str):
+            return {"error": d}
+    return {}
+
+
+def _pc_when(iso):
+    """A Discord relative timestamp for an api ISO stamp, or 'later'."""
+    try:
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return f"<t:{int(dt.timestamp())}:R>"
+    except Exception:
+        return "later"
+
+
+def _pc_name(s):
+    return discord.utils.escape_markdown(str(s or "?"))
+
+
+def _pc_print_line(p):
+    """One binder line: rarity, name, pool rank, rating, flags."""
+    flags = ("✨ foil" if p.get("foil") else "") + (" ✒️ signed" if p.get("signed") else "")
+    rating = p.get("rating")
+    rt = f" · {int(rating)}" if isinstance(rating, (int, float)) else ""
+    return (f"{_PC_RARITY_EMOJI.get(p.get('rarity'), '')} **{_pc_name(p.get('subject_name'))}**"
+            f" #{p.get('pool_rank', '?')}{rt} {flags}").rstrip()
+
+
+def _pc_not_linked(ctx, target):
+    if target == ctx.author:
+        return f"❌ Not linked. {_PC_LINK_HINT}"
+    return f"❌ {discord.utils.escape_markdown(target.display_name)} is not linked."
+
+
+@bot.hybrid_command(name="daily", description="Claim today's free Player Cards pack (it opens in the mod)")
+async def cmd_pc_daily(ctx):
+    """One claim per UTC day, decided by the api's clock (the same claim the
+    mod's own Daily button makes); the pack itself opens in-game."""
+    await _maybe_defer(ctx)
+    status, body = await _pc_api("POST", "/internal/pc/daily", params={"discord_id": str(ctx.author.id)})
+    if status == 200 and isinstance(body, dict):
+        await ctx.send(f"🎴 Today's pack is yours — open it in-game (F5 → Collection). "
+                       f"Next one {_pc_when(body.get('next_reset_utc'))}.")
+        return
+    d = _pc_detail(body)
+    if status == 404 and d.get("error") == "not_linked":
+        await ctx.send(_pc_not_linked(ctx, ctx.author)); return
+    if status == 409 and d.get("error") == "already_claimed":
+        await ctx.send(f"🎴 Already claimed today — the next pack unlocks {_pc_when(d.get('next_reset_utc'))}.")
+        return
+    await ctx.send("❌ Couldn't claim today's pack right now — try again in a moment.")
+
+
+@bot.hybrid_command(name="collection", description="A Player Cards binder: counts by rarity and the best prints")
+@app_commands.describe(member="Whose binder (defaults to yours)")
+async def cmd_pc_collection(ctx, member: discord.Member = None):
+    """The owner's binder summary. Someone else's only while they keep it
+    public (the api answers 403 private otherwise); yours always."""
+    target = member or ctx.author
+    await _maybe_defer(ctx)
+    status, body = await _pc_api("GET", "/internal/pc/collection",
+                                 params={"discord_id": str(target.id), "viewer_discord_id": str(ctx.author.id)})
+    if status == 404:
+        await ctx.send(_pc_not_linked(ctx, target)); return
+    if status == 403:
+        await ctx.send(f"🔒 {discord.utils.escape_markdown(target.display_name)}'s binder is private."); return
+    if status != 200 or not isinstance(body, dict):
+        await ctx.send("❌ Couldn't fetch that binder right now."); return
+    counts = body.get("by_rarity") or {}
+    embed = discord.Embed(title=f"🎴  {body.get('owner_name') or target.display_name}  —  Collection",
+                          color=discord.Color.gold())
+    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.add_field(name="📚  Prints",
+                    value=f"**{int(body.get('count') or 0)}** prints · **{int(body.get('distinct_subjects') or 0)}** players",
+                    inline=True)
+    embed.add_field(name="🔹  Shards", value=f"**{int(body.get('shards') or 0)}**", inline=True)
+    embed.add_field(name="🏷️  By rarity",
+                    value="\n".join(f"{_PC_RARITY_EMOJI[r]} {r.title()}: **{int(counts.get(r, 0))}**"
+                                    for r in ("legendary", "epic", "rare", "uncommon", "common")),
+                    inline=False)
+    best = body.get("best") or []
+    if best:
+        embed.add_field(name="⭐  Best prints", value="\n".join(_pc_print_line(p) for p in best[:10])[:1024], inline=False)
+    else:
+        embed.add_field(name="⭐  Best prints", value="No prints yet — `/daily` claims today's free pack.", inline=False)
+    await ctx.send(embed=embed)
+
+
+@bot.hybrid_command(name="card", description="A player's own Player Card as the pool sees it right now")
+@app_commands.describe(member="Whose card (defaults to yours)")
+async def cmd_pc_card(ctx, member: discord.Member = None):
+    """The subject's card from the latest pool snapshot (pool rank, band,
+    rating, record, title) and how many prints of them are in circulation.
+    A player who opted out, or is not in the pool, has no card to show."""
+    target = member or ctx.author
+    await _maybe_defer(ctx)
+    status, body = await _pc_api("GET", "/internal/pc/card", params={"discord_id": str(target.id)})
+    d = _pc_detail(body)
+    if status == 404 and d.get("error") == "not_linked":
+        await ctx.send(_pc_not_linked(ctx, target)); return
+    if status == 404:
+        who = "You're" if target == ctx.author else f"{discord.utils.escape_markdown(target.display_name)} is"
+        await ctx.send(f"🎴 {who} not in the card pool right now (opted out, or no ranked games yet)."); return
+    if status != 200 or not isinstance(body, dict):
+        await ctx.send("❌ Couldn't fetch that card right now."); return
+    rarity = str(body.get("rarity") or "common")
+    embed = discord.Embed(title=f"{_PC_RARITY_EMOJI.get(rarity, '')}  {body.get('subject_name') or target.display_name}"
+                                f"  —  {rarity.title()}",
+                          color=_PC_RARITY_COLOR.get(rarity, 0x95A5A6))
+    embed.set_thumbnail(url=target.display_avatar.url)
+    rating = body.get("rating")
+    rank_name = body.get("rank_name") or (get_rank_name(rating) if isinstance(rating, (int, float)) else None)
+    embed.add_field(name="🏆  Pool rank", value=f"**#{body.get('pool_rank', '?')}**", inline=True)
+    embed.add_field(name="📈  Rating",
+                    value=(f"**{int(rating)}**" + (f"  {rank_emoji(rank_name)} {rank_name}" if rank_name else ""))
+                    if isinstance(rating, (int, float)) else "—", inline=True)
+    peak = body.get("peak_rating")
+    embed.add_field(name="⛰️  Peak", value=f"**{int(peak)}**" if isinstance(peak, (int, float)) else "—", inline=True)
+    embed.add_field(name="📊  Series record",
+                    value=f"**{int(body.get('series_wins') or 0)}**W / **{int(body.get('series_losses') or 0)}**L", inline=True)
+    br = body.get("board_rank")
+    embed.add_field(name="📋  Leaderboard", value=f"**#{int(br)}**" if br is not None else "—", inline=True)
+    embed.add_field(name="🃏  Top card", value=_pc_name(body.get("top_card")) if body.get("top_card") else "—", inline=True)
+    if body.get("title"):
+        embed.add_field(name="🎖️  Title", value=_pc_name(body.get("title")), inline=False)
+    circ = body.get("in_circulation") or {}
+    embed.add_field(name="🖨️  In circulation",
+                    value=(f"**{int(circ.get('prints') or 0)}** prints held by **{int(circ.get('holders') or 0)}** players"
+                           f" · ✨ {int(circ.get('foil') or 0)} foil · ✒️ {int(circ.get('signed') or 0)} signed"),
+                    inline=False)
+    embed.set_footer(text="Pool snapshot: taken daily at 00:05 UTC")
+    await ctx.send(embed=embed)
+
+
+_pc_events_sent = {}   # event id -> True once posted (a failed ack never re-posts; bounded below)
+
+
+def _pc_event_lines(events):
+    """One line per PRINT: a signed foil Legendary is one pull, not three
+    posts. Events without a print (none today) stand alone."""
+    groups, order = {}, []
+    for e in events:
+        key = e.get("print_id") or f"event:{e['id']}"
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(e)
+    lines = []
+    for key in order:
+        group = groups[key]
+        kinds = {e.get("kind") for e in group}
+        first = group[0]
+        puller = _pc_name(first.get("puller_name"))
+        subject = _pc_name(first.get("subject_name"))
+        p = first.get("print") or {}
+        rarity = str(p.get("rarity") or "")
+        bits = []
+        if "signed" in kinds:
+            bits.append("✒️ SIGNED")
+        if "foil" in kinds:
+            bits.append("✨ foil")
+        what = f"{_PC_RARITY_EMOJI.get(rarity, '🎴')} " + " ".join(bits + [rarity.title() if rarity else "card"])
+        rank = f" (#{p['pool_rank']} in the pool)" if p.get("pool_rank") else ""
+        if "self" in kinds:
+            lines.append(f"🪞 **{puller}** pulled their OWN card — a {what.strip()}{rank}!")
+        else:
+            lines.append(f"**{puller}** pulled a {what.strip()} **{subject}**{rank}!")
+        lines.append([int(e["id"]) for e in group])
+    return lines
+
+
+@tasks.loop(seconds=60)
+async def poll_pc_events():
+    """Notable pulls (Legendary, Epic, signed, foil, your own card) → the
+    leaderboard channel. Ack-after-send (#105): the api re-checks consent as
+    it hands events out, the bot posts, then acks what it posted; a bot
+    restart or a failed ack re-drives the rows, and the send memory keeps
+    the retry from posting twice. Order matters: a failed send stops the
+    batch, nothing behind it is acked."""
+    if http_session is None or not API_SECRET_KEY or not LEADERBOARD_CHANNEL_ID:
+        return
+    status, body = await _pc_api("GET", "/internal/pc/events/pending")
+    if status != 200 or not isinstance(body, dict) or not body.get("events"):
+        return
+    ch = bot.get_channel(LEADERBOARD_CHANNEL_ID)
+    if ch is None:
+        try:
+            ch = await bot.fetch_channel(LEADERBOARD_CHANNEL_ID)
+        except Exception:
+            ch = None
+    if ch is None:
+        print("[PC-EVENTS] leaderboard channel not found — leaving events queued")
+        return
+    lines = _pc_event_lines(body["events"])
+    sent = []
+    for text_line, ids in zip(lines[0::2], lines[1::2]):
+        try:
+            if any(i not in _pc_events_sent for i in ids):
+                await ch.send(text_line[:2000])
+                for i in ids:
+                    _pc_events_sent[i] = True
+            sent.extend(ids)
+        except Exception as ex:
+            print(f"[PC-EVENTS] send failed for {ids}: {ex} — retrying next tick")
+            break
+    if not sent:
+        return
+    st, _ = await _pc_api("POST", "/internal/pc/events/ack", params={"ids": ",".join(str(i) for i in sent)})
+    if st == 200:
+        for i in sent:
+            _pc_events_sent.pop(i, None)
+        print(f"[PC-EVENTS] posted and acked {len(sent)} event(s)")
+    else:
+        print(f"[PC-EVENTS] ack failed ({st}) — {len(sent)} event(s) re-driven next tick")
+        if len(_pc_events_sent) > 500:
+            _pc_events_sent.clear()   # bounded memory: a clear can double-post only across a long ack outage
 
 
 @tasks.loop(seconds=30)

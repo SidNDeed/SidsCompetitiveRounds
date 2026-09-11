@@ -241,11 +241,10 @@ GLICKO2_DEFAULT_VOLATILITY = float(os.getenv("GLICKO2_DEFAULT_VOLATILITY", "0.06
 # Sept 6 item d: every leaderboard hides players not seen for this many days
 # unless the caller passes include_inactive=true. players.last_seen is written
 # by the 60 s presence ping while the mod runs, so "seen" means "ran the mod".
-# 90 days; env-overridable. Kept an int on purpose: the parameterised boards
-# bind it as CAST(:active_days AS integer) inside make_interval (#448 -- typed
-# binds, never a string-built interval), and the parameter-less podium
-# statements below interpolate it through an f-string, which is safe only
-# because an int renders as digits. Must stay defined ABOVE _PODIUM_QUERY.
+# 90 days; env-overridable. Kept an int on purpose and ALWAYS bound as
+# CAST(:active_days AS integer) inside make_interval (#448 -- typed binds,
+# never a string-built interval) — the podium statements included, so every
+# board query is a static string the janitor self-test can read (r10).
 LEADERBOARD_ACTIVE_DAYS = int(os.environ.get("LEADERBOARD_ACTIVE_DAYS", "90"))
 
 # How long a pair's `active` ranked_series stays the "current" one for reuse.
@@ -452,7 +451,7 @@ _podium_cache: dict = {"at": 0.0, "ids": [], "map": {}}
 # titles and the doubled bonus follow the ACTIVE top 3 (a returning player's
 # first presence ping refreshes last_seen; the next 60 s refresh re-grants).
 # f-string: the constant is an int, so the interpolation renders digits only.
-_PODIUM_QUERY = f"""
+_PODIUM_QUERY = """
     WITH series_stats AS (
         SELECT sub.player_id, COUNT(*) AS total
         FROM (
@@ -481,7 +480,7 @@ _PODIUM_QUERY = f"""
     LEFT JOIN combined c ON c.player_id = p.id
     WHERE COALESCE(c.total, 0) >= 1
       AND p.deleted_at IS NULL
-      AND p.last_seen > NOW() - make_interval(days => {LEADERBOARD_ACTIVE_DAYS})
+      AND p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))
     ORDER BY gr.rating DESC
     LIMIT 3
 """
@@ -598,7 +597,8 @@ async def _podium_player_ids(db: AsyncSession) -> list:
     now = time.monotonic()
     if now - _podium_cache["at"] > 60:
         try:
-            rows = (await db.execute(text(_PODIUM_QUERY))).scalars().all()
+            rows = (await db.execute(text(_PODIUM_QUERY),
+                                     {"active_days": LEADERBOARD_ACTIVE_DAYS})).scalars().all()
             ids = [str(r) for r in rows]
             _podium_cache["ids"] = ids
             _podium_cache["map"] = {pid: i + 1 for i, pid in enumerate(ids)}
@@ -642,26 +642,26 @@ PODIUM_TITLES_FFA = {
 _podium_2v2_cache: dict = {"at": 0.0, "ids": [], "map": {}}
 _podium_ffa_cache: dict = {"at": 0.0, "ids": [], "map": {}}
 
-# Item d: both mode podiums carry the boards' activity filter too (f-string
-# over the int constant, see _PODIUM_QUERY).
-_PODIUM_2V2_QUERY = f"""
+# Item d: both mode podiums carry the boards' activity filter too (bound as
+# :active_days, see _PODIUM_QUERY).
+_PODIUM_2V2_QUERY = """
     SELECT p.id
       FROM glicko_ratings_2v2 g2
       JOIN players p ON p.id = g2.player_id
      WHERE COALESCE(g2.completed_series, 0) >= 1
        AND p.deleted_at IS NULL
-       AND p.last_seen > NOW() - make_interval(days => {LEADERBOARD_ACTIVE_DAYS})
+       AND p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))
      ORDER BY g2.rating DESC
      LIMIT 3
 """
 
-_PODIUM_FFA_QUERY = f"""
+_PODIUM_FFA_QUERY = """
     SELECT p.id
       FROM glicko_ratings_ffa g
       JOIN players p ON p.id = g.player_id
      WHERE COALESCE(g.games_played, 0) >= 1
        AND p.deleted_at IS NULL
-       AND p.last_seen > NOW() - make_interval(days => {LEADERBOARD_ACTIVE_DAYS})
+       AND p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))
      ORDER BY g.rating DESC
      LIMIT 3
 """
@@ -675,7 +675,7 @@ async def _grant_mode_podium_titles(sku: str, player_ids: list) -> None:
     await _sync_podium_holders(sku, player_ids)
 
 
-async def _mode_podium_map(db: AsyncSession, cache: dict, query: str, sku: str) -> dict:
+async def _mode_podium_map(db: AsyncSession, cache: dict, clause, sku: str) -> dict:
     """{str(player_id): 1|2|3} for one mode's podium. 60s TTL; a failure serves
     the stale copy and never raises.
 
@@ -689,7 +689,7 @@ async def _mode_podium_map(db: AsyncSession, cache: dict, query: str, sku: str) 
     if now - cache["at"] > 60:
         try:
             async with db.begin_nested():
-                rows = (await db.execute(text(query))).scalars().all()
+                rows = (await db.execute(clause, {"active_days": LEADERBOARD_ACTIVE_DAYS})).scalars().all()
             ids = [str(r) for r in rows]
             cache["ids"] = ids
             cache["map"] = {pid: i + 1 for i, pid in enumerate(ids)}
@@ -701,12 +701,12 @@ async def _mode_podium_map(db: AsyncSession, cache: dict, query: str, sku: str) 
 
 
 async def _podium_map_2v2(db: AsyncSession) -> dict:
-    return await _mode_podium_map(db, _podium_2v2_cache, _PODIUM_2V2_QUERY,
+    return await _mode_podium_map(db, _podium_2v2_cache, text(_PODIUM_2V2_QUERY),
                                   TITLE_PODIUM_2V2_SKU)
 
 
 async def _podium_map_ffa(db: AsyncSession) -> dict:
-    return await _mode_podium_map(db, _podium_ffa_cache, _PODIUM_FFA_QUERY,
+    return await _mode_podium_map(db, _podium_ffa_cache, text(_PODIUM_FFA_QUERY),
                                   TITLE_PODIUM_FFA_SKU)
 
 
@@ -1839,8 +1839,11 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
     and `+` concatenations over constants, names bound by an enclosing
     `for` over constant rows (tuples/lists, or a constant dict's `.items()`
     — the `{_qt}`/`{_lt}` lobby sweeps and the service-audit checks dict),
-    and single-assignment locals holding a constant. Each variant becomes
-    its own statement. Anything still unresolvable lands in `dynamic`, and
+    single-assignment locals holding a constant, and module-level
+    constants (`_module_consts`: bound once by an unconditional top-level
+    assignment and never rebound, declared global, stored-through or
+    mutated anywhere in the module — the `text(_X_SQL)` pattern). Each
+    variant becomes its own statement. Anything still unresolvable lands in `dynamic`, and
     the RUNNER TREATS THOSE AS FAILURES: an unverifiable janitor SQL site
     is precisely the coverage rot this test exists to prevent (Codex r1
     find 3).
@@ -1984,7 +1987,7 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
 
     def _analyze_bindings(fn_node):
         """Scope-aware binding census of the function subtree. Returns
-        (consts, loop_ok, disabled):
+        (consts, loop_ok, disabled, bound):
           consts:  name -> (scope_path, value_node, lineno) for names bound
                    EXACTLY ONCE anywhere in the subtree, by a plain
                    single-target assignment, and never blocked;
@@ -1992,7 +1995,9 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
                    targets (any number of loops);
           disabled: True when the subtree contains a binding form outside
                    the modelled subset (`match`, class definitions) — the
-                   caller then refuses ALL non-constant expansion.
+                   caller then refuses ALL non-constant expansion;
+          bound:   every name the subtree binds, blocks or loops over —
+                   the names that shadow a module-level constant here.
         BLOCKED (disqualified everywhere, Codex r2 finds 2-4 and r3 find 2):
         parameter names of the function or any nested def/lambda, nested def
         NAMES themselves, import and except-clause aliases, global/nonlocal
@@ -2120,7 +2125,113 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
             consts[n] = (scope, cond, value, lineno)
         loop_ok = {n for n, d in info.items()
                    if d["for_n"] >= 1 and not d["assigns"] and not d["blocked"]}
-        return consts, loop_ok, disabled[0]
+        return consts, loop_ok, disabled[0], set(info)
+
+    def _module_consts(tree):
+        """Module-level names a site may read as constants: bound EXACTLY
+        ONCE in the whole module, by an unconditional top-level single-target
+        assignment, and never otherwise bound, declared global/nonlocal,
+        stored-through, deleted or handed to a non-whitelisted method
+        anywhere in the module; a mutable literal (dict/list/set) further
+        needs every load in the module to be a whitelisted read-only
+        receiver — the census _analyze_bindings takes of a function, taken
+        of the module. A `match` statement blocks every name it mentions
+        (its binding forms are not modelled). Recorded with a NEGATIVE
+        lineno and the root scope/context: a module binding exists before
+        any function body the janitor runs, whatever the textual order (a
+        constant defined below its reader is still the value it reads),
+        and before any other module constant that reads it (a module that
+        read one before binding it would never have loaded). Values stay
+        AST nodes and resolve through the same evaluator, so an f-string
+        over other module constants expands, while an env-derived value
+        (`int(os.environ.get(...))`) refuses exactly as before — the
+        evaluator never invents a value the runtime would not use.
+        Motivation (r10): every `text(_X_SQL)` site and the lock-key
+        constant _publish_pair_sitting interpolates were `dynamic` for want
+        of this — synthetic self-test failures on real, static SQL."""
+        info: dict = {}
+        loads: dict = {}
+        safe_loads: set = set()
+        top: dict = {}
+
+        def _d(name):
+            return info.setdefault(name, {"assigns": 0, "blocked": False})
+
+        def _block_leaves(t):
+            for leaf in _ast.walk(t):
+                if isinstance(leaf, _ast.Name):
+                    _d(leaf.id)["blocked"] = True
+
+        for node in tree.body:
+            if isinstance(node, _ast.Assign) and len(node.targets) == 1 \
+                    and isinstance(node.targets[0], _ast.Name):
+                top.setdefault(node.targets[0].id, []).append(node.value)
+        for node in _ast.walk(tree):
+            if isinstance(node, _SCOPES):
+                if not isinstance(node, _ast.Lambda):
+                    _d(node.name)["blocked"] = True
+                for a in _arg_names(node):
+                    _d(a)["blocked"] = True
+                for tp in getattr(node, "type_params", ()):
+                    _d(tp.name)["blocked"] = True
+            elif isinstance(node, _ast.ClassDef):
+                _d(node.name)["blocked"] = True
+            elif hasattr(_ast, "Match") and isinstance(node, _ast.Match):
+                _block_leaves(node)
+            elif _TYPE_ALIAS is not None and isinstance(node, _TYPE_ALIAS):
+                if isinstance(node.name, _ast.Name):
+                    _d(node.name.id)["blocked"] = True
+            elif isinstance(node, (_ast.Global, _ast.Nonlocal)):
+                for n in node.names:
+                    _d(n)["blocked"] = True
+            elif isinstance(node, (_ast.Import, _ast.ImportFrom)):
+                for a in node.names:
+                    _d(a.asname or a.name.split(".")[0])["blocked"] = True
+            elif isinstance(node, _ast.ExceptHandler) and node.name:
+                _d(node.name)["blocked"] = True
+            elif isinstance(node, _ast.Assign):
+                if len(node.targets) == 1 and isinstance(node.targets[0], _ast.Name):
+                    _d(node.targets[0].id)["assigns"] += 1
+                else:
+                    for tgt in node.targets:
+                        _block_leaves(tgt)
+            elif isinstance(node, (_ast.AugAssign, _ast.AnnAssign, _ast.NamedExpr)):
+                _block_leaves(node.target)
+            elif isinstance(node, (_ast.For, _ast.AsyncFor)):
+                _block_leaves(node.target)
+            elif isinstance(node, _ast.withitem) and node.optional_vars:
+                _block_leaves(node.optional_vars)
+            elif isinstance(node, _ast.Delete):
+                for tgt in node.targets:
+                    _block_leaves(tgt)
+            elif isinstance(node, _ast.comprehension):
+                _block_leaves(node.target)
+            elif (isinstance(node, _ast.Call)
+                    and isinstance(node.func, _ast.Attribute)
+                    and isinstance(node.func.value, _ast.Name)):
+                if node.func.attr in _READONLY_METHODS:
+                    safe_loads.add(id(node.func.value))
+                else:
+                    _d(node.func.value.id)["blocked"] = True
+            elif isinstance(node, (_ast.Attribute, _ast.Subscript)) \
+                    and isinstance(node.ctx, (_ast.Store, _ast.Del)) \
+                    and isinstance(node.value, _ast.Name):
+                _d(node.value.id)["blocked"] = True
+            if isinstance(node, _ast.Name) and isinstance(node.ctx, _ast.Load):
+                loads.setdefault(node.id, []).append(node)
+        consts = {}
+        for n, values in top.items():
+            d = info.get(n, {"assigns": 0, "blocked": False})
+            if len(values) != 1 or d["assigns"] != 1 or d["blocked"]:
+                continue
+            value = values[0]
+            if isinstance(value, (_ast.Dict, _ast.List, _ast.Set)) and any(
+                    id(x) not in safe_loads for x in loads.get(n, [])):
+                continue   # escapes somewhere in the module — may be mutated
+            consts[n] = ((), (), value, -1)
+        return consts
+
+    mod_consts = {m: _module_consts(tree) for m, tree in trees.items()}
 
     def _string_variants(node, env, consts, site_scope, site_cond, site_line,
                          depth=0):
@@ -2158,7 +2269,9 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
                 bind_scope, bind_cond, value, bind_line = consts[node.id]
                 if bind_scope == site_scope[:len(bind_scope)] \
                         and bind_cond == site_cond[:len(bind_cond)] \
-                        and bind_line < site_line:
+                        and (bind_line < 0 or bind_line < site_line):
+                    # (a negative bind_line is a module constant: bound
+                    # before every site, other module constants included)
                     return _string_variants(value, env, consts, bind_scope,
                                             bind_cond, bind_line, depth + 1)
             return None
@@ -2207,9 +2320,10 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
     def _const_loop_rows(node, consts, loop_ok, site_scope, site_cond):
         """Rows of an enclosing constant-driven loop:
         `for a, b in (("x", "y"), ...)` with all-constant elements, or
-        `for a, b in d.items()` where d is a constant dict literal (inline
-        or via an unblocked single-assignment local, bound lexically before
-        the loop). Returns [{name: value}, ...] or None. Every target name
+        `for a, b in d.items()` where d is a constant dict literal (inline,
+        via an unblocked single-assignment local bound lexically before the
+        loop, or via a module constant). Returns [{name: value}, ...] or
+        None. Every target name
         must be in `loop_ok` (r2 find 3), the loop must be synchronous
         (r3 find 4), no nested for may rebind the same name (Python leaves
         the inner loop's LAST value bound afterwards — r3 find 4), and
@@ -2274,9 +2388,16 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
         """All text() SQL strings in one function: [(line, sql)] plus
         dynamic (statically unresolvable) call sites [line]."""
         found, dyn = [], []
-        consts, loop_ok, expansion_disabled = _analyze_bindings(fn_node)
+        consts, loop_ok, expansion_disabled, bound_here = _analyze_bindings(fn_node)
         if expansion_disabled:
             consts, loop_ok = {}, set()
+        else:
+            # Module constants sit UNDER the function's own bindings: a name
+            # the subtree binds, blocks or loops over shadows the module's
+            # (a local `q = ...` is a different value; a parameter or a
+            # `global q` makes the module value unknowable here).
+            consts = {**{n: v for n, v in mod_consts[mod].items() if n not in bound_here},
+                      **consts}
         mod_text_names = text_names[mod]
 
         def _text_sql_arg(node):
@@ -3325,6 +3446,20 @@ async def queue_cleanup_loop():
                     print(f"[QUEUE-CLEANUP] region maps: purged {len(_purged)} row(s) older than 1 hour")
         except Exception as e:
             print(f"[QUEUE-CLEANUP] region maps sweep error: {e}")
+        # Player Cards (Sept 10 batch): the daily pool snapshot (00:05 UTC;
+        # a first one when none exists) and the posted-events purge. Its own
+        # session and a try-lock — see _pc_snapshot_janitor_step.
+        try:
+            await _pc_snapshot_janitor_step()
+        except Exception as e:
+            print(f"[QUEUE-CLEANUP] player cards snapshot error: {e}")
+        # Player Cards (WP-D): re-derive any earned-pack grant a failed
+        # savepoint lost, and void the unopened packs of invalidated series
+        # (its own session, every PC_RECONCILE_EVERY_S).
+        try:
+            await _pc_reconcile_earned_packs()
+        except Exception as e:
+            print(f"[QUEUE-CLEANUP] player cards reconcile error: {e}")
         try:
             async with async_session() as db:
                 # 1v2 orphan sweep (July 17 round 3): the ovt cleanup paths
@@ -4528,6 +4663,9 @@ _RL_BUCKETS = _rl_defaultdict(_rl_deque)
 _RL_GLOBAL = (150, 10.0)     # 150 req / 10s per IP (a fast browser is ~10)
 _RL_SENSITIVE = (20, 10.0)   # 20 req / 10s for mutating / abuse-prone paths
 _RL_SENSITIVE_PREFIXES = (
+    # Player Cards (Sept 10 batch): every open / claim / discard / settings
+    # write and every private read. One literal prefix for the whole family.
+    "/api/v1/pc/",
     "/api/v1/achievements/unlock", "/api/v1/matches", "/api/v1/team/matches",
     "/api/v1/report-disconnect", "/api/v1/bets", "/api/v1/team-bets",
     "/api/v1/shop/purchase", "/api/v1/queue/join", "/api/v1/team/queue/join",
@@ -5479,6 +5617,11 @@ async def _check_anti_cheat(
                     if s is not None and s.invalidated_at is None:
                         s.invalidated_at = datetime.now(timezone.utc)
                         s.invalidation_reason = "short_duration_pattern_retro"
+                        # Player Cards (WP-D): its unopened earned packs go with it.
+                        try:
+                            await _pc_void_earned_packs(db, mode="1v1", series_id=s.id, label="retro-invalidate")
+                        except Exception as pcex:
+                            print(f"[PC-EARNED] void failed for retro 1v1 {s.id}: {pcex}")
                 await _reverse_match_gold_xp(db, prior)
 
     # 3. Inactive reporter (advisory — flag only, no auto-invalidate).
@@ -7074,6 +7217,17 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
                     await db.flush()
             except Exception as bex:
                 print(f"[BET-SETTLE] error settling for series {series.id}: {bex}")
+            # Player Cards (WP-D): the earned-pack roll for this completed
+            # ranked series — its own savepoint, so nothing here can touch
+            # the result; the janitor's reconciler re-derives a lost grant
+            # from the series row itself.
+            try:
+                async with db.begin_nested():
+                    await _pc_grant_earned_packs(
+                        db, mode="1v1", series_id=series.id, winner_ids=[series.winner_id],
+                        sweep=_pc_sweep(series.p1_series_wins, series.p2_series_wins), label="1v1-complete")
+            except Exception as pcex:
+                print(f"[PC-EARNED] 1v1 grant failed for series {series.id}: {pcex}")
         else:
             series_status = "active"
 
@@ -23404,6 +23558,1367 @@ async def get_inventory(steam_id: str, db: AsyncSession = Depends(get_db)):
     }
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Player Cards (Sept 10 batch, migration 308) — phase 1 server core.
+#
+# The rules live in player_cards.py (pure, tested on their own); this block
+# moves rows and money. Contract for every mutation and every private read:
+#   * mod HMAC over the canonical string (every term of the operation is in
+#     it) AND a STRICT verified Steam session for the acting steam id — 401
+#     session_required, always; HMAC-only is admitted for consented-public
+#     reads only (a public collection, the pool summary);
+#   * the intent row is the FIRST write (purchase nonce / the unopened pack's
+#     own row); a non-claimant answers from the committed row;
+#   * lock order: players row FOR NO KEY UPDATE → active edition FOR SHARE;
+#     every predicate re-read after the locks;
+#   * money and shards move as conditional deltas with RETURNING; a refused
+#     delta is a committed rejection, never a debit;
+#   * pre-debit rejections COMMIT as status='rejected' (nonce reusable only
+#     through a new intent) so a player can never be wedged;
+#   * prints are immutable after insert — the pc_prints_immutable trigger
+#     raises on any UPDATE that touches a frozen column.
+# The pool snapshot (daily 00:05 UTC, first one within a minute of boot) is
+# what rolls read; a rolled subject is re-checked against the LIVE pool inside
+# the transaction and re-rolled when it left (opt-out, ban, deletion).
+# ═══════════════════════════════════════════════════════════════════════════
+import player_cards as _pc
+
+_PC_POOL_MIN_MATCHES = 5   # the leaderboard's own default: board_rank means "rank on the board as shown"
+
+_PC_SNAPSHOT_SELECT_SQL = """
+    WITH pool AS (
+        SELECT p.id AS player_id, gr.rating, gr.peak_rating,
+               si.sku AS title_sku, si.name AS title_name, si.preview_color AS title_color
+          FROM players p
+          LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
+          LEFT JOIN shop_items si ON si.id = p.active_title_id
+         WHERE p.deleted_at IS NULL AND p.pc_opted_out_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)
+    ),
+    series AS (
+        SELECT s.player_id, SUM(s.won) AS wins, SUM(s.lost) AS losses, COUNT(*) AS total
+          FROM (
+              SELECT rs.player1_id AS player_id,
+                     CASE WHEN rs.winner_id = rs.player1_id THEN 1 ELSE 0 END AS won,
+                     CASE WHEN rs.winner_id = rs.player2_id THEN 1 ELSE 0 END AS lost
+                FROM ranked_series rs
+               WHERE rs.status = 'completed' AND rs.invalidated_at IS NULL
+              UNION ALL
+              SELECT rs.player2_id,
+                     CASE WHEN rs.winner_id = rs.player2_id THEN 1 ELSE 0 END,
+                     CASE WHEN rs.winner_id = rs.player1_id THEN 1 ELSE 0 END
+                FROM ranked_series rs
+               WHERE rs.status = 'completed' AND rs.invalidated_at IS NULL
+          ) s
+         GROUP BY s.player_id
+    ),
+    legacy AS (
+        SELECT p.id AS player_id, COUNT(m.id) AS total
+          FROM players p
+          JOIN matches m ON (m.player1_id = p.id OR m.player2_id = p.id)
+                        AND m.is_ranked = true AND m.series_id IS NULL
+         GROUP BY p.id
+    ),
+    top AS (
+        SELECT DISTINCT ON (mc.player_id) mc.player_id, mc.card_name
+          FROM (SELECT player_id, card_name, COUNT(*) AS n
+                  FROM match_cards GROUP BY player_id, card_name) mc
+         ORDER BY mc.player_id, mc.n DESC, mc.card_name
+    ),
+    board AS (
+        SELECT gr.player_id, ROW_NUMBER() OVER (ORDER BY gr.rating DESC) AS board_rank
+          FROM glicko_ratings gr
+          JOIN players p ON p.id = gr.player_id
+          LEFT JOIN series se ON se.player_id = p.id
+          LEFT JOIN legacy lg ON lg.player_id = p.id
+         WHERE p.deleted_at IS NULL
+           AND COALESCE(se.total, 0) + COALESCE(lg.total, 0) >= CAST(:min_matches AS integer)
+           AND p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))
+    )
+    SELECT pool.player_id,
+           ROW_NUMBER() OVER (ORDER BY (COALESCE(series.total, 0) > 0) DESC,
+                                       pool.rating DESC NULLS LAST,
+                                       pool.peak_rating DESC NULLS LAST,
+                                       pool.player_id) AS pool_rank,
+           pool.rating, pool.peak_rating, board.board_rank,
+           COALESCE(series.wins, 0) AS series_wins,
+           COALESCE(series.losses, 0) AS series_losses,
+           top.card_name AS top_card,
+           pool.title_sku, pool.title_name, pool.title_color
+      FROM pool
+      LEFT JOIN series ON series.player_id = pool.player_id
+      LEFT JOIN top ON top.player_id = pool.player_id
+      LEFT JOIN board ON board.player_id = pool.player_id
+     ORDER BY pool_rank
+"""
+
+_PC_MEMBER_INSERT_SQL = """
+    INSERT INTO pc_pool_members (snapshot_id, player_id, pool_rank, rarity, rating, peak_rating,
+                                 board_rank, series_wins, series_losses, top_card, title)
+    VALUES (CAST(:sid AS integer), CAST(:pid AS uuid), CAST(:rank AS integer), CAST(:rarity AS text),
+            CAST(:rating AS double precision), CAST(:peak AS double precision), CAST(:board AS integer),
+            CAST(:wins AS integer), CAST(:losses AS integer), CAST(:top AS text), CAST(:title AS text))
+"""
+
+_PC_LIVE_POOL_CHECK_SQL = """
+    SELECT 1 FROM players p
+     WHERE p.id = CAST(:pid AS uuid) AND p.deleted_at IS NULL AND p.pc_opted_out_at IS NULL
+       AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)
+"""
+
+_PC_MEMBER_AT_SQL = """
+    SELECT m.player_id, m.pool_rank, m.rarity, m.rating, m.peak_rating, m.board_rank,
+           m.series_wins, m.series_losses, m.top_card, m.title
+      FROM pc_pool_members m
+     WHERE m.snapshot_id = CAST(:sid AS integer) AND m.rarity = CAST(:rarity AS text)
+     ORDER BY m.pool_rank
+    OFFSET CAST(:k AS integer) LIMIT 1
+"""
+
+_PC_PRINT_INSERT_SQL = """
+    INSERT INTO pc_prints (card_id, owner_player_id, snapshot_id, rarity, foil, signed, pool_rank,
+                           rating, peak_rating, board_rank, series_wins, series_losses, top_card,
+                           title, source, pack_id, slot)
+    VALUES (CAST(:card AS uuid), CAST(:owner AS uuid), CAST(:sid AS integer), CAST(:rarity AS text),
+            CAST(:foil AS boolean), CAST(:signed AS boolean), CAST(:rank AS integer),
+            CAST(:rating AS double precision), CAST(:peak AS double precision), CAST(:board AS integer),
+            CAST(:wins AS integer), CAST(:losses AS integer), CAST(:top AS text), CAST(:title AS text),
+            CAST(:source AS text), CAST(:pack AS uuid), CAST(:slot AS smallint))
+    RETURNING id, minted_at
+"""
+
+_PC_PRINT_FACE_SELECT = """
+    SELECT pr.id AS print_id, pr.card_id, c.subject_player_id, c.edition_id, pr.owner_player_id,
+           pr.minted_at, pr.snapshot_id, pr.rarity, pr.foil, pr.signed, pr.pool_rank, pr.rating,
+           pr.peak_rating, pr.board_rank, pr.series_wins, pr.series_losses, pr.top_card, pr.title,
+           pr.source, pr.pack_id, pr.slot, pr.discarded_at, pr.discard_shards,
+           s.display_name AS subject_name, (s.deleted_at IS NOT NULL) AS subject_deleted
+      FROM pc_prints pr
+      JOIN pc_cards c ON c.id = pr.card_id
+      JOIN players s ON s.id = c.subject_player_id
+"""
+
+
+async def _pc_verified_actor(request, steam_id: str, sig: str, canon: str, db: AsyncSession):
+    """The acting player for a mutation or a private read: mod HMAC over the
+    canonical string (503 unconfigured, 403 invalid), a STRICT verified Steam
+    session for the claimed id (401 session_required), a live non-deleted
+    row (404 / 410), and no service account (403). Returns the Player row."""
+    if not MATCH_HMAC_SECRET:
+        raise HTTPException(status_code=503, detail="HMAC not configured")
+    expected = hmac.new(MATCH_HMAC_SECRET.encode(), canon.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(sig or "", expected):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    if not await _strict_steam_session_ok(request, steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
+    player = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
+    if player is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+    if player.deleted_at is not None:
+        raise HTTPException(status_code=410, detail="Account deleted")
+    await _assert_no_service_subject(db, affected_player_ids=[player.id], affected_steam_ids=[steam_id])
+    return player
+
+
+def _pc_hmac_ok(sig: str, canon: str) -> bool:
+    if not MATCH_HMAC_SECRET:
+        raise HTTPException(status_code=503, detail="HMAC not configured")
+    expected = hmac.new(MATCH_HMAC_SECRET.encode(), canon.encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(sig or "", expected)
+
+
+def _pc_iso(v):
+    try:
+        return v.isoformat() if v is not None else None
+    except Exception:
+        return None
+
+
+def _pc_num(v):
+    return float(v) if v is not None else None
+
+
+def _pc_print_dict(row) -> dict:
+    """The wire shape of one print: the frozen face plus the subject's
+    CURRENT display name (a rename propagates; delete-my-data's anonymised
+    name replaces it)."""
+    rating = _pc_num(row["rating"])
+    return {
+        "print_id": str(row["print_id"]),
+        "card_id": str(row["card_id"]),
+        "subject_player_id": str(row["subject_player_id"]),
+        "subject_name": row["subject_name"],
+        "subject_deleted": bool(row["subject_deleted"]),
+        "edition_id": int(row["edition_id"]),
+        "minted_at": _pc_iso(row["minted_at"]),
+        "rarity": row["rarity"],
+        "foil": bool(row["foil"]),
+        "signed": bool(row["signed"]),
+        "pool_rank": int(row["pool_rank"]),
+        "rating": rating,
+        "peak_rating": _pc_num(row["peak_rating"]),
+        "board_rank": int(row["board_rank"]) if row["board_rank"] is not None else None,
+        "series_wins": int(row["series_wins"] or 0),
+        "series_losses": int(row["series_losses"] or 0),
+        "top_card": row["top_card"],
+        "title": row["title"],
+        "rank_name": _rank_name_for(rating) if rating is not None else None,
+        "source": row["source"],
+        "slot": int(row["slot"]) if row["slot"] is not None else None,
+        "discarded": row["discarded_at"] is not None,
+    }
+
+
+async def _pc_prints_of_pack(db: AsyncSession, pack_id) -> list:
+    rows = (await db.execute(text(_PC_PRINT_FACE_SELECT + """
+     WHERE pr.pack_id = CAST(:pack AS uuid)
+     ORDER BY pr.slot
+    """), {"pack": pack_id})).mappings().all()
+    return [_pc_print_dict(r) for r in rows]
+
+
+async def _pc_take_snapshot(db: AsyncSession, *, reason: str) -> dict:
+    """One new pool snapshot from the live tables (the caller commits).
+    pool_rank = leaderboard order among players with a completed, non-
+    invalidated ranked series, then everyone else by rating / peak / id;
+    the band is fixed from the rank; board_rank is the leaderboard's own
+    rank under its default eligibility (5 matches, active window) or NULL;
+    the title is resolved exactly as the leaderboard resolves it (dynamic
+    rank / podium titles included) and frozen as text."""
+    rows = (await db.execute(text(_PC_SNAPSHOT_SELECT_SQL),
+                             {"min_matches": _PC_POOL_MIN_MATCHES,
+                              "active_days": LEADERBOARD_ACTIVE_DAYS})).mappings().all()
+    colors = await _rank_colors(db)
+    pmap, pmap2, pmapf = await _podium_maps_for(db, (r["title_sku"] for r in rows))
+    snap_id = (await db.execute(text(
+        "INSERT INTO pc_pool_snapshots (member_count) VALUES (CAST(:n AS integer)) RETURNING id"),
+        {"n": len(rows)})).scalar_one()
+    params = []
+    for r in rows:
+        rating = _pc_num(r["rating"])
+        pid_s = str(r["player_id"])
+        title, _c = _display_title_sync(colors, r["title_sku"], r["title_name"], r["title_color"], rating,
+                                        podium_pos=pmap.get(pid_s), podium_pos_2v2=pmap2.get(pid_s),
+                                        podium_pos_ffa=pmapf.get(pid_s))
+        rank = int(r["pool_rank"])
+        params.append({
+            "sid": snap_id, "pid": pid_s, "rank": rank, "rarity": _pc.rarity_for_rank(rank),
+            "rating": rating, "peak": _pc_num(r["peak_rating"]),
+            "board": int(r["board_rank"]) if r["board_rank"] is not None else None,
+            "wins": int(r["series_wins"] or 0), "losses": int(r["series_losses"] or 0),
+            "top": r["top_card"], "title": title,
+        })
+    if params:
+        await db.execute(text(_PC_MEMBER_INSERT_SQL), params)
+    await db.execute(text("""
+        DELETE FROM pc_pool_snapshots
+         WHERE id NOT IN (SELECT id FROM pc_pool_snapshots ORDER BY id DESC LIMIT CAST(:keep AS integer))
+    """), {"keep": int(_pc.PC_ECONOMY["snapshot_keep"])})
+    print(f"[PC-SNAPSHOT] id={snap_id} members={len(rows)} reason={reason}")
+    return {"snapshot_id": int(snap_id), "members": len(rows)}
+
+
+async def _pc_snapshot_janitor_step() -> None:
+    """Janitor: a pool snapshot when none exists (first boot after the
+    migration), then one per UTC day at or after 00:05 UTC. Keyed on the DB
+    clock and the durable MAX(taken_at) — restart-safe; an advisory try-lock
+    keeps two api processes from taking the same day's snapshot twice."""
+    from database import async_session
+    async with async_session() as db:
+        due = (await db.execute(text("""
+            SELECT (SELECT MAX(taken_at) FROM pc_pool_snapshots) AS last_at,
+                   now() AS db_now,
+                   (date_trunc('day', now() AT TIME ZONE 'UTC') + INTERVAL '5 minutes') AT TIME ZONE 'UTC' AS today_at
+        """))).mappings().one()
+        last_at, db_now, today_at = due["last_at"], due["db_now"], due["today_at"]
+        if last_at is not None and (db_now < today_at or last_at >= today_at):
+            return
+        got = (await db.execute(text("SELECT pg_try_advisory_xact_lock(hashtext('pc_snapshot'))"))).scalar_one()
+        if not got:
+            return
+        await _pc_take_snapshot(db, reason=("daily" if last_at is not None else "first"))
+        await db.execute(text("DELETE FROM pc_events WHERE created_at < NOW() - INTERVAL '7 days'"))
+        await db.commit()
+
+
+async def _pc_roll_prints(db: AsyncSession, snap_id: int, owner_pid, rng=None):
+    """Roll one pack's prints from snapshot ``snap_id``: per print an
+    independent band roll (fallback one band down, never up), a uniform
+    member of the band, then the live-pool re-check — a subject that left the
+    pool since the snapshot is re-rolled up to reroll_attempts times. Returns
+    (prints, None) or (None, reason) with reason pool_empty | pool_changed.
+    Nothing here writes; the caller debits and mints only on success."""
+    rng = rng or secrets.SystemRandom()
+    size_rows = (await db.execute(text("""
+        SELECT rarity, COUNT(*) AS n FROM pc_pool_members
+         WHERE snapshot_id = CAST(:sid AS integer) GROUP BY rarity
+    """), {"sid": snap_id})).mappings().all()
+    sizes = {r["rarity"]: int(r["n"]) for r in size_rows}
+    if not any(n > 0 for n in sizes.values()):
+        return None, "pool_empty"
+    prints = []
+    n_prints = int(_pc.PC_ECONOMY["prints_per_pack"])
+    attempts = 1 + int(_pc.PC_ECONOMY["reroll_attempts"])
+    for slot in range(1, n_prints + 1):
+        member = None
+        rolled = None
+        for _attempt in range(attempts):
+            roll = _pc.roll_slot(rng, sizes)
+            if roll is None:
+                return None, "pool_empty"
+            rolled, used, idx = roll
+            row = (await db.execute(text(_PC_MEMBER_AT_SQL),
+                                    {"sid": snap_id, "rarity": used, "k": idx})).mappings().first()
+            if row is None:
+                continue
+            live = (await db.execute(text(_PC_LIVE_POOL_CHECK_SQL), {"pid": str(row["player_id"])})).first()
+            if live is None:
+                continue
+            member = row
+            break
+        if member is None:
+            return None, "pool_changed"
+        foil, signed = _pc.roll_flags(rng)
+        prints.append({
+            "slot": slot, "rolled": rolled, "player_id": str(member["player_id"]),
+            "pool_rank": int(member["pool_rank"]), "rarity": member["rarity"],
+            "rating": _pc_num(member["rating"]), "peak_rating": _pc_num(member["peak_rating"]),
+            "board_rank": int(member["board_rank"]) if member["board_rank"] is not None else None,
+            "series_wins": int(member["series_wins"] or 0), "series_losses": int(member["series_losses"] or 0),
+            "top_card": member["top_card"], "title": member["title"],
+            "foil": bool(foil), "signed": bool(signed),
+        })
+    return prints, None
+
+
+async def _pc_mint(db: AsyncSession, owner_pid, edition_id: int, snap_id: int, pack_id, source: str,
+                   prints: list) -> list:
+    """Insert the rolled prints (the card row is created lazily on the first
+    print of a subject in this edition) and the notable-pull events. Returns
+    the stored result shape (ids + frozen face, no names)."""
+    out = []
+    owner_s = str(owner_pid)
+    for p in prints:
+        card_id = (await db.execute(text("""
+            INSERT INTO pc_cards (subject_player_id, edition_id, variant)
+            VALUES (CAST(:subj AS uuid), CAST(:ed AS integer), 'base')
+            ON CONFLICT (subject_player_id, edition_id, variant) DO UPDATE SET variant = EXCLUDED.variant
+            RETURNING id
+        """), {"subj": p["player_id"], "ed": edition_id})).scalar_one()
+        ins = (await db.execute(text(_PC_PRINT_INSERT_SQL), {
+            "card": str(card_id), "owner": owner_s, "sid": snap_id, "rarity": p["rarity"],
+            "foil": p["foil"], "signed": p["signed"], "rank": p["pool_rank"],
+            "rating": p["rating"], "peak": p["peak_rating"], "board": p["board_rank"],
+            "wins": p["series_wins"], "losses": p["series_losses"], "top": p["top_card"],
+            "title": p["title"], "source": source, "pack": str(pack_id), "slot": p["slot"],
+        })).mappings().one()
+        kinds = []
+        if p["rarity"] == "legendary":
+            kinds.append("legendary")
+        elif p["rarity"] == "epic":
+            kinds.append("epic")
+        if p["signed"]:
+            kinds.append("signed")
+        if p["foil"]:
+            kinds.append("foil")
+        if p["player_id"] == owner_s:
+            kinds.append("self")
+        for kind in kinds:
+            await db.execute(text("""
+                INSERT INTO pc_events (kind, player_id, subject_player_id, print_id)
+                VALUES (CAST(:kind AS text), CAST(:pid AS uuid), CAST(:subj AS uuid), CAST(:print AS uuid))
+            """), {"kind": kind, "pid": owner_s, "subj": p["player_id"], "print": str(ins["id"])})
+        out.append({
+            "print_id": str(ins["id"]), "card_id": str(card_id), "subject_player_id": p["player_id"],
+            "slot": p["slot"], "rarity": p["rarity"], "rolled": p["rolled"], "foil": p["foil"],
+            "signed": p["signed"], "pool_rank": p["pool_rank"], "rating": p["rating"],
+            "peak_rating": p["peak_rating"], "board_rank": p["board_rank"],
+            "series_wins": p["series_wins"], "series_losses": p["series_losses"],
+            "top_card": p["top_card"], "title": p["title"], "minted_at": _pc_iso(ins["minted_at"]),
+        })
+    return out
+
+
+async def _pc_pack_answer(db: AsyncSession, row) -> dict:
+    """The wire answer for a committed pack row (done / rejected / unopened)."""
+    status = row["status"]
+    base = {
+        "pack_id": str(row["id"]), "status": status, "source": row["source"],
+        "mode": row["mode"], "kind": row["kind"], "pay": row["pay"], "price": row["price"],
+        "reason": row["reject_reason"], "created_at": _pc_iso(row["created_at"]),
+        "opened_at": _pc_iso(row["opened_at"]),
+    }
+    if status == "done":
+        base["prints"] = await _pc_prints_of_pack(db, row["id"])
+    return base
+
+
+def _pc_reject_http(reason: str, extra: dict | None = None):
+    code = 402 if reason in ("insufficient_gold", "insufficient_shards") else 409
+    detail = {"error": reason, "status": "rejected"}
+    if extra:
+        detail.update(extra)
+    return HTTPException(status_code=code, detail=detail)
+
+
+def _pc_prices() -> dict:
+    return {"gold": int(_pc.PC_ECONOMY["pack_price_gold"]),
+            "shards": int(_pc.PC_ECONOMY["pack_price_shards"]),
+            "paid_packs_per_day": int(_pc.PC_ECONOMY["paid_packs_per_day"]),
+            "prints_per_pack": int(_pc.PC_ECONOMY["prints_per_pack"])}
+
+
+@app.post("/api/v1/pc/packs/open", tags=["Player Cards"])
+async def pc_open_pack(
+    request: Request,
+    steam_id: str = Query(...),
+    sig: str = Query(...),
+    nonce: str | None = Query(None, min_length=8, max_length=64),
+    pay: str | None = Query(None),
+    expected_price: int | None = Query(None, ge=0),
+    pack_id: str | None = Query(None, min_length=8, max_length=64),
+    db: AsyncSession = Depends(get_db),
+):
+    """Open a pack. Purchase: nonce + pay (gold | shards) + expected_price,
+    HMAC over pcopen:{steam}:{nonce}:{pay}:{expected_price}. Unopened pack
+    (daily / earned): pack_id, HMAC over pcopen:{steam}:pack:{pack_id}. The
+    claim is the first write; the answer of a repeated nonce / pack_id is the
+    committed row. Pre-debit rejections (price_changed, pool_empty,
+    daily_cap, pool_changed, insufficient_*) commit and never debit:
+    HTTP 409 / 402 with {"error", "status": "rejected", ...}."""
+    if pack_id:
+        canon = _pc.canon_open_pack(steam_id, pack_id)
+    else:
+        if not nonce or pay not in _pc.PACK_PAY or expected_price is None:
+            raise HTTPException(status_code=422, detail="nonce, pay and expected_price are required for a purchase")
+        canon = _pc.canon_open_purchase(steam_id, nonce, pay, int(expected_price))
+    player = await _pc_verified_actor(request, steam_id, sig, canon, db)
+    pid = str(player.id)
+
+    # ── 1. the claim (first write) ──
+    if pack_id:
+        try:
+            _ = uuid.UUID(pack_id)
+        except Exception:
+            raise HTTPException(status_code=404, detail="Pack not found")
+        claim = (await db.execute(text("""
+            UPDATE pc_packs SET status = 'opening'
+             WHERE id = CAST(:pack AS uuid) AND player_id = CAST(:pid AS uuid) AND status = 'unopened'
+            RETURNING id, source, mode, kind
+        """), {"pack": pack_id, "pid": pid})).mappings().first()
+        if claim is None:
+            row = (await db.execute(text("""
+                SELECT id, status, source, mode, kind, pay, price, reject_reason, created_at, opened_at
+                  FROM pc_packs WHERE id = CAST(:pack AS uuid) AND player_id = CAST(:pid AS uuid)
+            """), {"pack": pack_id, "pid": pid})).mappings().first()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Pack not found")
+            answer = await _pc_pack_answer(db, row)
+            if row["status"] == "done":
+                return answer
+            if row["status"] == "voided":
+                raise HTTPException(status_code=410, detail={"error": "voided", **answer})
+            raise HTTPException(status_code=409, detail={"error": "in_progress", **answer})
+        this_pack = str(claim["id"])
+        source = claim["source"]
+        price = 0
+    else:
+        price = int(_pc.PC_ECONOMY["pack_price_gold" if pay == "gold" else "pack_price_shards"])
+        claim = (await db.execute(text("""
+            INSERT INTO pc_packs (player_id, source, nonce, status, pay, price)
+            VALUES (CAST(:pid AS uuid), 'bought', CAST(:nonce AS text), 'pending', CAST(:pay AS text), CAST(:price AS integer))
+            ON CONFLICT (player_id, nonce) WHERE nonce IS NOT NULL DO NOTHING
+            RETURNING id
+        """), {"pid": pid, "nonce": nonce, "pay": pay, "price": price})).scalar_one_or_none()
+        if claim is None:
+            row = (await db.execute(text("""
+                SELECT id, status, source, mode, kind, pay, price, reject_reason, created_at, opened_at
+                  FROM pc_packs WHERE player_id = CAST(:pid AS uuid) AND nonce = CAST(:nonce AS text)
+            """), {"pid": pid, "nonce": nonce})).mappings().first()
+            if row is None:
+                raise HTTPException(status_code=409, detail={"error": "in_progress"})
+            answer = await _pc_pack_answer(db, row)
+            if row["status"] == "done":
+                return answer
+            if row["status"] == "rejected":
+                raise _pc_reject_http(row["reject_reason"] or "rejected", answer)
+            raise HTTPException(status_code=409, detail={"error": "in_progress", **answer})
+        this_pack = str(claim)
+        source = "bought"
+
+    async def _reject(reason: str, extra: dict | None = None):
+        """Commit the rejection (no debit happened) and answer 409 / 402."""
+        if source == "bought":
+            await db.execute(text("""
+                UPDATE pc_packs SET status = 'rejected', reject_reason = CAST(:reason AS text)
+                 WHERE id = CAST(:pack AS uuid)
+            """), {"reason": reason, "pack": this_pack})
+        else:
+            await db.execute(text("""
+                UPDATE pc_packs SET status = 'unopened' WHERE id = CAST(:pack AS uuid)
+            """), {"pack": this_pack})
+            await db.execute(text("""
+                INSERT INTO pc_open_attempts (pack_id, reject_reason)
+                VALUES (CAST(:pack AS uuid), CAST(:reason AS text))
+                ON CONFLICT (pack_id) DO UPDATE SET attempted_at = now(), reject_reason = EXCLUDED.reject_reason
+            """), {"pack": this_pack, "reason": reason})
+        await db.commit()
+        raise _pc_reject_http(reason, {"pack_id": this_pack, **(extra or {})})
+
+    # ── 2. locks: players row, then the active edition ──
+    await db.execute(text("SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE"), {"pid": pid})
+    edition = (await db.execute(text(
+        "SELECT id FROM pc_editions WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1 FOR SHARE"))).scalar_one_or_none()
+    if edition is None:
+        await _reject("no_edition")
+
+    # ── 3. predicates, re-read under the locks ──
+    if source == "bought" and int(expected_price) != price:
+        await _reject("price_changed", {"price": price})
+    snap_id = (await db.execute(text(
+        "SELECT id FROM pc_pool_snapshots ORDER BY id DESC LIMIT 1"))).scalar_one_or_none()
+    if snap_id is None:
+        await _reject("pool_empty")
+    if source == "bought":
+        paid_today = (await db.execute(text("""
+            SELECT COUNT(*) FROM pc_packs
+             WHERE player_id = CAST(:pid AS uuid) AND source = 'bought' AND status = 'done'
+               AND (opened_at AT TIME ZONE 'UTC')::date = (now() AT TIME ZONE 'UTC')::date
+        """), {"pid": pid})).scalar_one()
+        if int(paid_today) >= int(_pc.PC_ECONOMY["paid_packs_per_day"]):
+            await _reject("daily_cap", {"cap": int(_pc.PC_ECONOMY["paid_packs_per_day"])})
+
+    # ── 4. the roll (reads only) ──
+    prints, why = await _pc_roll_prints(db, int(snap_id), player.id)
+    if prints is None:
+        await _reject(why)
+
+    # ── 5. the debit: a conditional delta with RETURNING, never negative ──
+    if source == "bought":
+        if pay == "gold":
+            paid = (await db.execute(text("""
+                UPDATE players SET gold_spent = COALESCE(gold_spent, 0) + CAST(:amt AS integer)
+                 WHERE id = CAST(:pid AS uuid)
+                   AND COALESCE(gold_earned, 0) - COALESCE(gold_spent, 0) >= CAST(:amt AS integer)
+                RETURNING id
+            """), {"amt": price, "pid": pid})).scalar_one_or_none()
+            if paid is None:
+                await _reject("insufficient_gold", {"price": price})
+            db.add(GoldTransaction(player_id=player.id, amount=-price, reason="pc_pack", reference_id=this_pack))
+            db.expire(player, ["gold_spent"])
+        else:
+            paid = (await db.execute(text("""
+                UPDATE players SET pc_shards = pc_shards - CAST(:amt AS integer)
+                 WHERE id = CAST(:pid AS uuid) AND pc_shards >= CAST(:amt AS integer)
+                RETURNING id
+            """), {"amt": price, "pid": pid})).scalar_one_or_none()
+            if paid is None:
+                await _reject("insufficient_shards", {"price": price})
+
+    # ── 6. mint, record, commit ──
+    stored = await _pc_mint(db, player.id, int(edition), int(snap_id), this_pack, source, prints)
+    await db.execute(text("""
+        UPDATE pc_packs SET status = 'done', result = CAST(:result AS jsonb), snapshot_id = CAST(:sid AS integer),
+                            opened_at = now()
+         WHERE id = CAST(:pack AS uuid)
+    """), {"result": _json.dumps({"prints": stored}), "sid": int(snap_id), "pack": this_pack})
+    await db.commit()
+    print(f"[PC-OPEN] player={steam_id} pack={this_pack} source={source} pay={pay} price={price} "
+          f"snapshot={snap_id} rarities={','.join(p['rarity'] for p in stored)}"
+          f"{' foil' if any(p['foil'] for p in stored) else ''}{' signed' if any(p['signed'] for p in stored) else ''}")
+    row = (await db.execute(text("""
+        SELECT id, status, source, mode, kind, pay, price, reject_reason, created_at, opened_at
+          FROM pc_packs WHERE id = CAST(:pack AS uuid)
+    """), {"pack": this_pack})).mappings().one()
+    return await _pc_pack_answer(db, row)
+
+
+@app.get("/api/v1/pc/packs/result", tags=["Player Cards"])
+async def pc_pack_result(
+    request: Request,
+    steam_id: str = Query(...),
+    sig: str = Query(...),
+    nonce: str | None = Query(None, min_length=8, max_length=64),
+    pack_id: str | None = Query(None, min_length=8, max_length=64),
+    db: AsyncSession = Depends(get_db),
+):
+    """Result recovery for a persisted intent: the committed pack row for the
+    caller's nonce or pack_id (HMAC over pcresult:{steam}:{nonce|pack_id},
+    strict session). 404 when no such row exists — a purchase whose claim
+    never committed (the client may retire the nonce)."""
+    ref = pack_id or nonce
+    if not ref:
+        raise HTTPException(status_code=422, detail="nonce or pack_id required")
+    player = await _pc_verified_actor(request, steam_id, sig, _pc.canon_result(steam_id, ref), db)
+    if pack_id:
+        try:
+            _ = uuid.UUID(pack_id)
+        except Exception:
+            raise HTTPException(status_code=404, detail="Pack not found")
+        row = (await db.execute(text("""
+            SELECT id, status, source, mode, kind, pay, price, reject_reason, created_at, opened_at
+              FROM pc_packs WHERE id = CAST(:pack AS uuid) AND player_id = CAST(:pid AS uuid)
+        """), {"pack": pack_id, "pid": str(player.id)})).mappings().first()
+    else:
+        row = (await db.execute(text("""
+            SELECT id, status, source, mode, kind, pay, price, reject_reason, created_at, opened_at
+              FROM pc_packs WHERE player_id = CAST(:pid AS uuid) AND nonce = CAST(:nonce AS text)
+        """), {"pid": str(player.id), "nonce": nonce})).mappings().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Pack not found")
+    answer = await _pc_pack_answer(db, row)
+    if row["status"] == "unopened":
+        att = (await db.execute(text(
+            "SELECT reject_reason, attempted_at FROM pc_open_attempts WHERE pack_id = CAST(:pack AS uuid)"),
+            {"pack": str(row["id"])})).mappings().first()
+        if att is not None:
+            answer["last_attempt"] = {"reason": att["reject_reason"], "at": _pc_iso(att["attempted_at"])}
+    return answer
+
+
+@app.post("/api/v1/pc/daily", tags=["Player Cards"])
+async def pc_daily_claim(
+    request: Request,
+    steam_id: str = Query(...),
+    sig: str = Query(...),
+    nonce: str = Query(..., min_length=8, max_length=64),
+    db: AsyncSession = Depends(get_db),
+):
+    """Claim today's free pack (HMAC over pcdaily:{steam}:{nonce}, strict
+    session). The day is the DB's UTC date — the client never supplies it;
+    the claim row is the idempotency key (409 already_claimed with the next
+    reset). The pack is inserted unopened and opened through /pc/packs/open."""
+    player = await _pc_verified_actor(request, steam_id, sig, _pc.canon_daily(steam_id, nonce), db)
+    return await _pc_claim_daily(db, player, via="mod")
+
+
+async def _pc_claim_daily(db: AsyncSession, player, *, via: str) -> dict:
+    """The daily claim for a resolved, live player (the mod's /pc/daily and
+    the bot's /daily share it): player lock, the claim row keyed on the DB's
+    UTC date, the unopened pack, commit. 409 already_claimed otherwise."""
+    pid = str(player.id)
+    steam_id = player.steam_id
+    await db.execute(text("SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE"), {"pid": pid})
+    claimed = (await db.execute(text("""
+        INSERT INTO pc_daily_claims (player_id, claimed_on)
+        VALUES (CAST(:pid AS uuid), (now() AT TIME ZONE 'UTC')::date)
+        ON CONFLICT (player_id, claimed_on) DO NOTHING
+        RETURNING claimed_on
+    """), {"pid": pid})).scalar_one_or_none()
+    reset = (await db.execute(text(
+        "SELECT (date_trunc('day', now() AT TIME ZONE 'UTC') + INTERVAL '1 day') AT TIME ZONE 'UTC'"))).scalar_one()
+    if claimed is None:
+        existing = (await db.execute(text("""
+            SELECT c.pack_id, p.status FROM pc_daily_claims c
+              LEFT JOIN pc_packs p ON p.id = c.pack_id
+             WHERE c.player_id = CAST(:pid AS uuid) AND c.claimed_on = (now() AT TIME ZONE 'UTC')::date
+        """), {"pid": pid})).mappings().first()
+        await db.rollback()
+        raise HTTPException(status_code=409, detail={
+            "error": "already_claimed", "next_reset_utc": _pc_iso(reset),
+            "pack_id": str(existing["pack_id"]) if existing and existing["pack_id"] else None,
+            "pack_status": existing["status"] if existing else None,
+        })
+    pack = (await db.execute(text("""
+        INSERT INTO pc_packs (player_id, source, reference_id, status)
+        VALUES (CAST(:pid AS uuid), 'daily', CAST(:day AS text), 'unopened')
+        RETURNING id
+    """), {"pid": pid, "day": str(claimed)})).scalar_one()
+    await db.execute(text("""
+        UPDATE pc_daily_claims SET pack_id = CAST(:pack AS uuid)
+         WHERE player_id = CAST(:pid AS uuid) AND claimed_on = CAST(:day AS date)
+    """), {"pack": str(pack), "pid": pid, "day": str(claimed)})
+    await db.commit()
+    print(f"[PC-DAILY] player={steam_id} day={claimed} pack={pack} via={via}")
+    return {"status": "claimed", "pack_id": str(pack), "claimed_on": str(claimed), "next_reset_utc": _pc_iso(reset)}
+
+
+@app.post("/api/v1/pc/prints/discard", tags=["Player Cards"])
+async def pc_discard_print(
+    request: Request,
+    steam_id: str = Query(...),
+    sig: str = Query(...),
+    print_id: str = Query(..., min_length=8, max_length=64),
+    db: AsyncSession = Depends(get_db),
+):
+    """Discard ONE print for shards (HMAC over pcdiscard:{steam}:{print_id},
+    strict session): the owner check and the discard are one conditional
+    UPDATE under the player lock; the shard value is the print's rarity."""
+    player = await _pc_verified_actor(request, steam_id, sig, _pc.canon_discard(steam_id, print_id), db)
+    pid = str(player.id)
+    try:
+        _ = uuid.UUID(print_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Print not found")
+    await db.execute(text("SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE"), {"pid": pid})
+    rarity = (await db.execute(text(
+        "SELECT rarity FROM pc_prints WHERE id = CAST(:print AS uuid) AND owner_player_id = CAST(:pid AS uuid) AND discarded_at IS NULL"),
+        {"print": print_id, "pid": pid})).scalar_one_or_none()
+    if rarity is None:
+        await db.rollback()
+        raise HTTPException(status_code=404, detail={"error": "not_owned"})
+    value = _pc.shards_for(rarity)
+    done = (await db.execute(text("""
+        UPDATE pc_prints SET discarded_at = now(), discard_shards = CAST(:value AS integer)
+         WHERE id = CAST(:print AS uuid) AND owner_player_id = CAST(:pid AS uuid) AND discarded_at IS NULL
+        RETURNING id
+    """), {"value": value, "print": print_id, "pid": pid})).scalar_one_or_none()
+    if done is None:
+        await db.rollback()
+        raise HTTPException(status_code=404, detail={"error": "not_owned"})
+    shards = (await db.execute(text("""
+        UPDATE players SET pc_shards = pc_shards + CAST(:value AS integer)
+         WHERE id = CAST(:pid AS uuid) RETURNING pc_shards
+    """), {"value": value, "pid": pid})).scalar_one()
+    await db.commit()
+    print(f"[PC-DISCARD] player={steam_id} print={print_id} rarity={rarity} shards=+{value} balance={shards}")
+    return {"status": "discarded", "print_id": print_id, "rarity": rarity, "shards_gained": value, "shards": int(shards)}
+
+
+_PC_SETTINGS_SQL = {
+    "opted_out": """
+        UPDATE players SET pc_opted_out_at = CASE WHEN CAST(:value AS integer) = 1 THEN COALESCE(pc_opted_out_at, now()) ELSE NULL END,
+                           pc_settings_revision = pc_settings_revision + 1
+         WHERE id = CAST(:pid AS uuid) AND pc_settings_revision = CAST(:rev AS integer)
+        RETURNING pc_settings_revision
+    """,
+    "collection_public": """
+        UPDATE players SET pc_collection_public = (CAST(:value AS integer) = 1),
+                           pc_settings_revision = pc_settings_revision + 1
+         WHERE id = CAST(:pid AS uuid) AND pc_settings_revision = CAST(:rev AS integer)
+        RETURNING pc_settings_revision
+    """,
+    "announce": """
+        UPDATE players SET pc_announce = (CAST(:value AS integer) = 1),
+                           pc_settings_revision = pc_settings_revision + 1
+         WHERE id = CAST(:pid AS uuid) AND pc_settings_revision = CAST(:rev AS integer)
+        RETURNING pc_settings_revision
+    """,
+}
+
+
+async def _pc_settings_of(db: AsyncSession, pid: str) -> dict:
+    row = (await db.execute(text("""
+        SELECT pc_opted_out_at, pc_collection_public, pc_announce, pc_settings_revision, pc_shards
+          FROM players WHERE id = CAST(:pid AS uuid)
+    """), {"pid": pid})).mappings().one()
+    return {
+        "opted_out": row["pc_opted_out_at"] is not None,
+        "collection_public": bool(row["pc_collection_public"]),
+        "announce": bool(row["pc_announce"]),
+        "revision": int(row["pc_settings_revision"]),
+        "shards": int(row["pc_shards"] or 0),
+    }
+
+
+@app.post("/api/v1/pc/settings", tags=["Player Cards"])
+async def pc_set_setting(
+    request: Request,
+    steam_id: str = Query(...),
+    sig: str = Query(...),
+    nonce: str = Query(..., min_length=8, max_length=64),
+    revision: int = Query(..., ge=0),
+    key: str = Query(...),
+    value: int = Query(..., ge=0, le=1),
+    db: AsyncSession = Depends(get_db),
+):
+    """One Player Cards setting (opted_out | collection_public | announce),
+    HMAC over pcset:{steam}:{nonce}:{revision}:{key}:{value}, strict session.
+    Compare-and-set on pc_settings_revision: a stale revision is refused
+    (409 stale_revision with the current settings) and never applied."""
+    if key not in _pc.SETTINGS_KEYS:
+        raise HTTPException(status_code=422, detail="unknown setting")
+    player = await _pc_verified_actor(request, steam_id, sig,
+                                      _pc.canon_settings(steam_id, nonce, int(revision), key, int(value)), db)
+    pid = str(player.id)
+    await db.execute(text("SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE"), {"pid": pid})
+    new_rev = (await db.execute(text(_PC_SETTINGS_SQL[key]),
+                                {"value": int(value), "pid": pid, "rev": int(revision)})).scalar_one_or_none()
+    if new_rev is None:
+        current = await _pc_settings_of(db, pid)
+        await db.rollback()
+        raise HTTPException(status_code=409, detail={"error": "stale_revision", **current})
+    await db.commit()
+    print(f"[PC-SETTINGS] player={steam_id} {key}={value} rev={new_rev}")
+    return await _pc_settings_of(db, pid)
+
+
+@app.get("/api/v1/pc/me", tags=["Player Cards"])
+async def pc_me(
+    request: Request,
+    steam_id: str = Query(...),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """The caller's own Player Cards state (HMAC over pcread:{steam}:me:-,
+    strict session): settings + revision, shards, prices and the daily cap,
+    today's paid-pack count, the daily claim state, unopened packs, and the
+    pool snapshot in force."""
+    player = await _pc_verified_actor(request, steam_id, sig, _pc.canon_read(steam_id, "me", "-"), db)
+    pid = str(player.id)
+    settings = await _pc_settings_of(db, pid)
+    today = (await db.execute(text("""
+        SELECT (SELECT COUNT(*) FROM pc_packs
+                 WHERE player_id = CAST(:pid AS uuid) AND source = 'bought' AND status = 'done'
+                   AND (opened_at AT TIME ZONE 'UTC')::date = (now() AT TIME ZONE 'UTC')::date) AS paid_today,
+               (SELECT pack_id FROM pc_daily_claims
+                 WHERE player_id = CAST(:pid AS uuid) AND claimed_on = (now() AT TIME ZONE 'UTC')::date) AS daily_pack,
+               (date_trunc('day', now() AT TIME ZONE 'UTC') + INTERVAL '1 day') AT TIME ZONE 'UTC' AS next_reset,
+               (SELECT COUNT(*) FROM pc_prints WHERE owner_player_id = CAST(:pid AS uuid) AND discarded_at IS NULL) AS prints
+    """), {"pid": pid})).mappings().one()
+    unopened = (await db.execute(text("""
+        SELECT id, source, mode, kind, reference_id, created_at FROM pc_packs
+         WHERE player_id = CAST(:pid AS uuid) AND status = 'unopened'
+         ORDER BY created_at
+    """), {"pid": pid})).mappings().all()
+    snap = (await db.execute(text(
+        "SELECT id, taken_at, member_count FROM pc_pool_snapshots ORDER BY id DESC LIMIT 1"))).mappings().first()
+    daily_claimed = today["daily_pack"] is not None or (await db.execute(text("""
+        SELECT 1 FROM pc_daily_claims WHERE player_id = CAST(:pid AS uuid) AND claimed_on = (now() AT TIME ZONE 'UTC')::date
+    """), {"pid": pid})).first() is not None
+    return {
+        "settings": {k: settings[k] for k in ("opted_out", "collection_public", "announce", "revision")},
+        "shards": settings["shards"],
+        "prices": _pc_prices(),
+        "paid_today": int(today["paid_today"] or 0),
+        "prints": int(today["prints"] or 0),
+        "daily": {"claimed": bool(daily_claimed),
+                  "pack_id": str(today["daily_pack"]) if today["daily_pack"] else None,
+                  "next_reset_utc": _pc_iso(today["next_reset"])},
+        "unopened": [{"pack_id": str(u["id"]), "source": u["source"], "mode": u["mode"], "kind": u["kind"],
+                      "reference_id": u["reference_id"], "created_at": _pc_iso(u["created_at"])} for u in unopened],
+        "pool": ({"snapshot_id": int(snap["id"]), "taken_at": _pc_iso(snap["taken_at"]),
+                  "member_count": int(snap["member_count"])} if snap else None),
+    }
+
+
+@app.get("/api/v1/pc/collection", tags=["Player Cards"])
+async def pc_collection(
+    request: Request,
+    steam_id: str = Query(...),
+    sig: str = Query(...),
+    subject: str | None = Query(None, max_length=32),
+    db: AsyncSession = Depends(get_db),
+):
+    """A binder. Own (subject omitted or the caller): HMAC over
+    pcread:{steam}:collection:{subject|-} + strict session. Another player's:
+    HMAC only, and only while their collection is public (403 private).
+    Live prints only, ordered subject → rarity (rarest first) → mint date."""
+    target = subject or "-"
+    canon = _pc.canon_read(steam_id, "collection", target)
+    if subject and subject != steam_id:
+        if not _pc_hmac_ok(sig, canon):
+            raise HTTPException(status_code=403, detail="Invalid signature")
+        owner = (await db.execute(text("""
+            SELECT id, display_name, pc_collection_public FROM players
+             WHERE steam_id = CAST(:sid AS text) AND deleted_at IS NULL
+        """), {"sid": subject})).mappings().first()
+        if owner is None:
+            raise HTTPException(status_code=404, detail="Player not found")
+        if not owner["pc_collection_public"]:
+            raise HTTPException(status_code=403, detail={"error": "private"})
+        owner_pid, owner_name, public = str(owner["id"]), owner["display_name"], True
+    else:
+        player = await _pc_verified_actor(request, steam_id, sig, canon, db)
+        owner_pid, owner_name = str(player.id), player.display_name
+        public = bool(getattr(player, "pc_collection_public", True))
+    rows = (await db.execute(text(_PC_PRINT_FACE_SELECT + """
+     WHERE pr.owner_player_id = CAST(:owner AS uuid) AND pr.discarded_at IS NULL
+     ORDER BY s.display_name, c.subject_player_id,
+              CASE pr.rarity WHEN 'legendary' THEN 0 WHEN 'epic' THEN 1 WHEN 'rare' THEN 2 WHEN 'uncommon' THEN 3 ELSE 4 END,
+              pr.minted_at, pr.id
+    """), {"owner": owner_pid})).mappings().all()
+    prints = [_pc_print_dict(r) for r in rows]
+    counts = {k: 0 for k in _pc.RARITIES}
+    for p in prints:
+        counts[p["rarity"]] = counts.get(p["rarity"], 0) + 1
+    return {"owner_steam_id": subject or steam_id, "owner_name": owner_name, "public": public,
+            "count": len(prints), "by_rarity": counts, "prints": prints}
+
+
+@app.get("/api/v1/pc/card", tags=["Player Cards"])
+async def pc_card_face(
+    request: Request,
+    steam_id: str = Query(...),
+    sig: str = Query(...),
+    print_id: str = Query(..., min_length=8, max_length=64),
+    db: AsyncSession = Depends(get_db),
+):
+    """One print's face (HMAC over pcread:{steam}:card:{print_id}). The owner
+    reads it with a strict session; anyone else only while the owner's
+    collection is public (403 private). Discarded prints are gone (404)."""
+    canon = _pc.canon_read(steam_id, "card", print_id)
+    if not _pc_hmac_ok(sig, canon):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    try:
+        _ = uuid.UUID(print_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Print not found")
+    row = (await db.execute(text(_PC_PRINT_FACE_SELECT + """
+      JOIN players o ON o.id = pr.owner_player_id
+     WHERE pr.id = CAST(:print AS uuid) AND pr.discarded_at IS NULL
+    """), {"print": print_id})).mappings().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Print not found")
+    owner = (await db.execute(text(
+        "SELECT steam_id, display_name, pc_collection_public FROM players WHERE id = CAST(:pid AS uuid)"),
+        {"pid": str(row["owner_player_id"])})).mappings().one()
+    if owner["steam_id"] == steam_id:
+        await _pc_verified_actor(request, steam_id, sig, canon, db)
+    elif not owner["pc_collection_public"]:
+        raise HTTPException(status_code=403, detail={"error": "private"})
+    face = _pc_print_dict(row)
+    face["owner_steam_id"] = owner["steam_id"]
+    face["owner_name"] = owner["display_name"]
+    return face
+
+
+@app.get("/api/v1/pc/pool", tags=["Player Cards"])
+async def pc_pool_summary(db: AsyncSession = Depends(get_db)):
+    """Public pool summary from the snapshot in force: taken_at, member
+    count, members per band, the collectible top 40 (rank, name, band, board
+    rank) and the prices — what the leaderboard already shows, no more."""
+    snap = (await db.execute(text(
+        "SELECT id, taken_at, member_count FROM pc_pool_snapshots ORDER BY id DESC LIMIT 1"))).mappings().first()
+    if snap is None:
+        return {"snapshot": None, "bands": {}, "top": [], "prices": _pc_prices()}
+    bands = {r["rarity"]: int(r["n"]) for r in (await db.execute(text("""
+        SELECT rarity, COUNT(*) AS n FROM pc_pool_members WHERE snapshot_id = CAST(:sid AS integer) GROUP BY rarity
+    """), {"sid": int(snap["id"])})).mappings().all()}
+    top = (await db.execute(text("""
+        SELECT m.pool_rank, m.rarity, m.board_rank, m.rating, p.display_name, p.steam_id
+          FROM pc_pool_members m JOIN players p ON p.id = m.player_id
+         WHERE m.snapshot_id = CAST(:sid AS integer) AND m.pool_rank <= CAST(:top AS integer)
+         ORDER BY m.pool_rank
+    """), {"sid": int(snap["id"]), "top": int(_pc.PC_ECONOMY["band_max_rank"]["uncommon"])})).mappings().all()
+    return {
+        "snapshot": {"snapshot_id": int(snap["id"]), "taken_at": _pc_iso(snap["taken_at"]),
+                     "member_count": int(snap["member_count"])},
+        "bands": {k: bands.get(k, 0) for k in _pc.RARITIES},
+        "top": [{"pool_rank": int(t["pool_rank"]), "rarity": t["rarity"], "display_name": t["display_name"],
+                 "steam_id": t["steam_id"], "board_rank": (int(t["board_rank"]) if t["board_rank"] is not None else None),
+                 "rating": _pc_num(t["rating"])} for t in top],
+        "prices": _pc_prices(),
+    }
+
+
+@app.post("/api/v1/admin/pc/snapshot", tags=["Admin"])
+async def admin_pc_snapshot(
+    request: Request,
+    admin_steam_id: str = Query(...),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Take a pool snapshot now (admin HMAC over the admin canonical for
+    action 'pc_snapshot', target 'pool'); writes an AdminAction row."""
+    await _require_admin(db, admin_steam_id, "pc_snapshot", "pool", sig)
+    got = (await db.execute(text("SELECT pg_try_advisory_xact_lock(hashtext('pc_snapshot'))"))).scalar_one()
+    if not got:
+        raise HTTPException(status_code=409, detail={"error": "snapshot_in_progress"})
+    summary = await _pc_take_snapshot(db, reason="admin")
+    db.add(AdminAction(admin_steam_id=admin_steam_id, action="pc_snapshot", target_steam_id="pool",
+                       details=summary))
+    await db.commit()
+    return {"status": "ok", **summary}
+
+
+# ── Player Cards: the Discord bot's internal routes (X-Internal-Key) ──────
+# The bot is a singleton on the primary; these answer only to the shared
+# internal key. Discord identity resolves through players.discord_id (the
+# /link flow); nothing here accepts a steam id from the bot's users.
+
+_PC_EVENTS_SKIP_SQL = """
+    UPDATE pc_events e SET posted_at = now()
+      FROM players pl, players su
+     WHERE e.posted_at IS NULL AND pl.id = e.player_id AND su.id = e.subject_player_id
+       AND NOT (pl.deleted_at IS NULL AND su.deleted_at IS NULL
+                AND pl.pc_announce AND su.pc_announce AND su.pc_opted_out_at IS NULL
+                AND (e.print_id IS NULL OR EXISTS (SELECT 1 FROM pc_prints pr WHERE pr.id = e.print_id AND pr.discarded_at IS NULL)))
+"""
+
+_PC_EVENTS_PENDING_SQL = """
+    SELECT e.id, e.kind, e.created_at, e.print_id,
+           pl.display_name AS puller_name, pl.steam_id AS puller_steam_id, pl.discord_id AS puller_discord_id,
+           su.display_name AS subject_name, su.steam_id AS subject_steam_id,
+           pr.rarity, pr.foil, pr.signed, pr.pool_rank, pr.rating, pr.title
+      FROM pc_events e
+      JOIN players pl ON pl.id = e.player_id
+      JOIN players su ON su.id = e.subject_player_id
+      LEFT JOIN pc_prints pr ON pr.id = e.print_id
+     WHERE e.posted_at IS NULL
+       AND pl.deleted_at IS NULL AND su.deleted_at IS NULL
+       AND pl.pc_announce AND su.pc_announce AND su.pc_opted_out_at IS NULL
+       AND (pr.id IS NULL OR pr.discarded_at IS NULL)
+     ORDER BY e.id
+     LIMIT 20
+"""
+
+
+async def _pc_player_by_discord(db: AsyncSession, discord_id: str):
+    row = (await db.execute(select(Player).where(Player.discord_id == str(discord_id)))).scalar_one_or_none()
+    if row is None or row.deleted_at is not None:
+        raise HTTPException(status_code=404, detail={"error": "not_linked"})
+    return row
+
+
+@app.get("/api/v1/internal/pc/events/pending", tags=["Internal"])
+async def internal_pc_events_pending(
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Unposted notable pulls, re-checked NOW against both parties' consent
+    (pc_announce for puller and subject, the subject not opted out, neither
+    deleted, the print not discarded): events that fail the re-check are
+    marked posted without being handed out. The bot acks what it posted."""
+    _require_internal_key(x_internal_key)
+    await db.execute(text(_PC_EVENTS_SKIP_SQL))
+    await db.commit()
+    rows = (await db.execute(text(_PC_EVENTS_PENDING_SQL))).mappings().all()
+    return {"events": [{
+        "id": int(r["id"]), "kind": r["kind"], "created_at": _pc_iso(r["created_at"]),
+        "puller_name": r["puller_name"], "puller_steam_id": r["puller_steam_id"],
+        "puller_discord_id": r["puller_discord_id"],
+        "subject_name": r["subject_name"], "subject_steam_id": r["subject_steam_id"],
+        "print": ({"print_id": str(r["print_id"]), "rarity": r["rarity"], "foil": bool(r["foil"]),
+                   "signed": bool(r["signed"]), "pool_rank": int(r["pool_rank"]),
+                   "rating": _pc_num(r["rating"]), "title": r["title"]} if r["rarity"] is not None else None),
+    } for r in rows]}
+
+
+@app.post("/api/v1/internal/pc/events/ack", tags=["Internal"])
+async def internal_pc_events_ack(
+    ids: str = Query(..., max_length=2000),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Mark posted: a comma-separated list of event ids the bot delivered."""
+    _require_internal_key(x_internal_key)
+    try:
+        id_list = [int(s) for s in ids.split(",") if s.strip()]
+    except ValueError:
+        raise HTTPException(status_code=422, detail="ids must be integers")
+    if not id_list:
+        return {"acked": 0}
+    n = (await db.execute(text("""
+        UPDATE pc_events SET posted_at = now()
+         WHERE id = ANY(CAST(:ids AS bigint[])) AND posted_at IS NULL
+        RETURNING id
+    """), {"ids": id_list})).fetchall()
+    await db.commit()
+    return {"acked": len(n)}
+
+
+@app.post("/api/v1/internal/pc/daily", tags=["Internal"])
+async def internal_pc_daily(
+    discord_id: str = Query(..., max_length=32),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """The bot's /daily: claim today's pack for the linked player (the pack
+    opens in the mod). Same claim as /pc/daily."""
+    _require_internal_key(x_internal_key)
+    player = await _pc_player_by_discord(db, discord_id)
+    await _assert_no_service_subject(db, affected_player_ids=[player.id])
+    return await _pc_claim_daily(db, player, via="discord")
+
+
+@app.get("/api/v1/internal/pc/collection", tags=["Internal"])
+async def internal_pc_collection(
+    discord_id: str = Query(..., max_length=32),
+    viewer_discord_id: str | None = Query(None, max_length=32),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """The bot's /collection [@user]: the owner's binder summary (counts by
+    rarity, the ten best prints). Someone else's binder only while it is
+    public (403 private); the owner always sees their own."""
+    _require_internal_key(x_internal_key)
+    owner = await _pc_player_by_discord(db, discord_id)
+    if (viewer_discord_id is None or str(viewer_discord_id) != str(owner.discord_id)) \
+            and not bool(getattr(owner, "pc_collection_public", True)):
+        raise HTTPException(status_code=403, detail={"error": "private"})
+    pid = str(owner.id)
+    rows = (await db.execute(text(_PC_PRINT_FACE_SELECT + """
+     WHERE pr.owner_player_id = CAST(:owner AS uuid) AND pr.discarded_at IS NULL
+     ORDER BY CASE pr.rarity WHEN 'legendary' THEN 0 WHEN 'epic' THEN 1 WHEN 'rare' THEN 2 WHEN 'uncommon' THEN 3 ELSE 4 END,
+              pr.signed DESC, pr.foil DESC, pr.pool_rank, pr.minted_at
+    """), {"owner": pid})).mappings().all()
+    prints = [_pc_print_dict(r) for r in rows]
+    counts = {k: 0 for k in _pc.RARITIES}
+    for p in prints:
+        counts[p["rarity"]] = counts.get(p["rarity"], 0) + 1
+    return {"owner_name": owner.display_name, "owner_steam_id": owner.steam_id, "count": len(prints),
+            "by_rarity": counts, "distinct_subjects": len({p["subject_player_id"] for p in prints}),
+            "best": prints[:10], "shards": int(getattr(owner, "pc_shards", 0) or 0)}
+
+
+@app.get("/api/v1/internal/pc/card", tags=["Internal"])
+async def internal_pc_card(
+    discord_id: str = Query(..., max_length=32),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """The bot's /card @user: the subject's card as the pool sees it now
+    (latest snapshot: pool rank, band, rating, record, title) and how many
+    prints of them are in circulation. A subject who opted out or is not in
+    the pool answers 404 not_in_pool."""
+    _require_internal_key(x_internal_key)
+    subject = await _pc_player_by_discord(db, discord_id)
+    if getattr(subject, "pc_opted_out_at", None) is not None:
+        raise HTTPException(status_code=404, detail={"error": "not_in_pool"})
+    row = (await db.execute(text("""
+        SELECT m.pool_rank, m.rarity, m.rating, m.peak_rating, m.board_rank, m.series_wins, m.series_losses,
+               m.top_card, m.title, s.taken_at
+          FROM pc_pool_members m JOIN pc_pool_snapshots s ON s.id = m.snapshot_id
+         WHERE m.player_id = CAST(:pid AS uuid) AND m.snapshot_id = (SELECT MAX(id) FROM pc_pool_snapshots)
+    """), {"pid": str(subject.id)})).mappings().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail={"error": "not_in_pool"})
+    circ = (await db.execute(text("""
+        SELECT COUNT(*) AS prints, COUNT(DISTINCT pr.owner_player_id) AS holders,
+               COALESCE(SUM(CASE WHEN pr.foil THEN 1 ELSE 0 END), 0) AS foil,
+               COALESCE(SUM(CASE WHEN pr.signed THEN 1 ELSE 0 END), 0) AS signed
+          FROM pc_prints pr JOIN pc_cards c ON c.id = pr.card_id
+         WHERE c.subject_player_id = CAST(:pid AS uuid) AND pr.discarded_at IS NULL
+    """), {"pid": str(subject.id)})).mappings().one()
+    rating = _pc_num(row["rating"])
+    return {
+        "subject_name": subject.display_name, "subject_steam_id": subject.steam_id,
+        "pool_rank": int(row["pool_rank"]), "rarity": row["rarity"], "rating": rating,
+        "peak_rating": _pc_num(row["peak_rating"]),
+        "board_rank": int(row["board_rank"]) if row["board_rank"] is not None else None,
+        "series_wins": int(row["series_wins"] or 0), "series_losses": int(row["series_losses"] or 0),
+        "top_card": row["top_card"], "title": row["title"],
+        "rank_name": _rank_name_for(rating) if rating is not None else None,
+        "snapshot_at": _pc_iso(row["taken_at"]),
+        "in_circulation": {"prints": int(circ["prints"] or 0), "holders": int(circ["holders"] or 0),
+                           "foil": int(circ["foil"] or 0), "signed": int(circ["signed"] or 0)},
+    }
+
+
+# ── Player Cards: earned packs (WP-D) ────────────────────────────────────────
+# One deterministic roll per (mode, series) — player_cards.earned_pack_kind,
+# HMAC(secret, "mode:series") — the sweep odds INSTEAD of the win odds on a
+# 2-0 (FFA: every round to the winner, nobody else any). The completion hooks
+# call _pc_grant_earned_packs inside their own savepoint and insert one
+# unopened pack per winner, idempotent on (player_id, 'earned', reference).
+# Reversal / invalidation voids the unopened packs of that series (opened
+# outcomes stay, by policy). A cursor-based reconciler re-derives any grant a
+# failed savepoint lost from the durable completion rows — same roll, same
+# insert — re-scanning 24 h behind its high-water mark and never before the
+# instant the feature started, and voids the unopened packs of every series
+# invalidated by any path (the class guarantee behind the inline voids).
+
+_PC_EARNED_INSERT_SQL = """
+    INSERT INTO pc_packs (player_id, source, mode, kind, reference_id, status)
+    VALUES (CAST(:pid AS uuid), 'earned', CAST(:mode AS text), CAST(:kind AS text), CAST(:ref AS text), 'unopened')
+    ON CONFLICT (player_id, source, reference_id) WHERE reference_id IS NOT NULL DO NOTHING
+    RETURNING id
+"""
+
+# The reconciler's scans: every completion newer than :since, its winners and
+# whether it was a sweep, from the rows the result itself is kept in. No LIMIT
+# on purpose — a capped page anchored 24 h behind a cursor that only advances
+# to the page's newest row can stall on a busy day; the window is the bound.
+_PC_RECONCILE_SQL = {
+    "1v1": """
+        SELECT rs.id AS ref, rs.completed_at, rs.winner_id AS w1, NULL::uuid AS w2,
+               (LEAST(rs.p1_series_wins, rs.p2_series_wins) = 0
+                AND GREATEST(rs.p1_series_wins, rs.p2_series_wins) >= 2) AS sweep
+          FROM ranked_series rs
+         WHERE rs.status = 'completed' AND rs.invalidated_at IS NULL AND rs.winner_id IS NOT NULL
+           AND rs.completed_at > CAST(:since AS timestamptz)
+         ORDER BY rs.completed_at
+    """,
+    "team": """
+        SELECT ts.id AS ref, ts.completed_at,
+               CASE WHEN ts.winner_team = 1 THEN ts.t1a_id ELSE ts.t2a_id END AS w1,
+               CASE WHEN ts.winner_team = 1 THEN ts.t1b_id ELSE ts.t2b_id END AS w2,
+               (LEAST(ts.t1_series_wins, ts.t2_series_wins) = 0
+                AND GREATEST(ts.t1_series_wins, ts.t2_series_wins) >= 2) AS sweep
+          FROM team_series ts
+         WHERE ts.status = 'completed' AND ts.invalidated_at IS NULL AND ts.winner_team IN (1, 2)
+           AND ts.completed_at > CAST(:since AS timestamptz)
+         ORDER BY ts.completed_at
+    """,
+    "ovt": """
+        SELECT os.id AS ref, os.completed_at,
+               CASE WHEN os.winner_side = 1 THEN os.solo_id ELSE os.duo_a_id END AS w1,
+               CASE WHEN os.winner_side = 1 THEN NULL::uuid ELSE os.duo_b_id END AS w2,
+               (LEAST(os.solo_series_wins, os.duo_series_wins) = 0
+                AND GREATEST(os.solo_series_wins, os.duo_series_wins) >= 2) AS sweep
+          FROM ovt_series os
+         WHERE os.status = 'completed' AND os.invalidated_at IS NULL AND os.winner_side IN (1, 2)
+           AND os.completed_at > CAST(:since AS timestamptz)
+         ORDER BY os.completed_at
+    """,
+    "ffa": """
+        SELECT fm.id AS ref, fm.ended_at AS completed_at, fm.winner_id AS w1, NULL::uuid AS w2,
+               (NOT EXISTS (SELECT 1 FROM ffa_match_players fp
+                             WHERE fp.match_id = fm.id AND fp.player_id <> fm.winner_id AND fp.rounds_won > 0)
+                AND EXISTS (SELECT 1 FROM ffa_match_players fw
+                             WHERE fw.match_id = fm.id AND fw.player_id = fm.winner_id AND fw.rounds_won > 0)) AS sweep
+          FROM ffa_matches fm
+         WHERE fm.is_ranked AND fm.invalidated_at IS NULL AND fm.winner_id IS NOT NULL
+           AND fm.ended_at > CAST(:since AS timestamptz)
+         ORDER BY fm.ended_at
+    """,
+}
+
+# The reconciler's voids: an invalidated series (any path, including one
+# whose inline void failed or one added later) loses its still-unopened
+# earned packs. Joined on the reference text _pc_earned_ref writes,
+# "<mode>:<series uuid>"; invalidated rows are few, so the join is cheap.
+_PC_VOID_SWEEP_SQL = {
+    "1v1": """
+        UPDATE pc_packs p SET status = 'voided', voided_at = now()
+          FROM ranked_series s
+         WHERE p.source = 'earned' AND p.status = 'unopened' AND p.mode = '1v1'
+           AND p.reference_id = CONCAT('1v1:', CAST(s.id AS text))
+           AND s.invalidated_at IS NOT NULL
+        RETURNING p.id
+    """,
+    "team": """
+        UPDATE pc_packs p SET status = 'voided', voided_at = now()
+          FROM team_series s
+         WHERE p.source = 'earned' AND p.status = 'unopened' AND p.mode = 'team'
+           AND p.reference_id = CONCAT('team:', CAST(s.id AS text))
+           AND s.invalidated_at IS NOT NULL
+        RETURNING p.id
+    """,
+    "ovt": """
+        UPDATE pc_packs p SET status = 'voided', voided_at = now()
+          FROM ovt_series s
+         WHERE p.source = 'earned' AND p.status = 'unopened' AND p.mode = 'ovt'
+           AND p.reference_id = CONCAT('ovt:', CAST(s.id AS text))
+           AND s.invalidated_at IS NOT NULL
+        RETURNING p.id
+    """,
+    "ffa": """
+        UPDATE pc_packs p SET status = 'voided', voided_at = now()
+          FROM ffa_matches s
+         WHERE p.source = 'earned' AND p.status = 'unopened' AND p.mode = 'ffa'
+           AND p.reference_id = CONCAT('ffa:', CAST(s.id AS text))
+           AND s.invalidated_at IS NOT NULL
+        RETURNING p.id
+    """,
+}
+
+_pc_reconcile_last_monotonic = 0.0
+PC_RECONCILE_EVERY_S = 600
+
+
+def _pc_earned_ref(mode: str, series_id) -> str:
+    return f"{mode}:{series_id}"
+
+
+def _pc_sweep(a, b) -> bool:
+    """A 2-0: the loser took no game and the winner took the series."""
+    try:
+        a, b = int(a or 0), int(b or 0)
+    except (TypeError, ValueError):
+        return False
+    return min(a, b) == 0 and max(a, b) >= 2
+
+
+def _pc_ffa_sweep(report) -> bool:
+    """FFA: every round to the winner and none to anybody else — the same
+    definition the reconciler's scan applies to ffa_match_players."""
+    try:
+        mine = [int(p.rounds_won or 0) for p in report.players if p.steam_id == report.winner_steam_id]
+        others = [int(p.rounds_won or 0) for p in report.players if p.steam_id != report.winner_steam_id]
+    except (TypeError, ValueError, AttributeError):
+        return False
+    return bool(mine) and mine[0] > 0 and bool(others) and all(n == 0 for n in others)
+
+
+async def _pc_grant_earned_packs(db: AsyncSession, *, mode: str, series_id, winner_ids, sweep: bool,
+                                 label: str) -> list:
+    """Inside the caller's savepoint (or the reconciler's transaction). One
+    roll for the series; an unopened pack per winner when it hits, idempotent
+    on (player, 'earned', reference). Returns the pack ids inserted."""
+    if not MATCH_HMAC_SECRET:
+        return []
+    ref = _pc_earned_ref(mode, series_id)
+    kind = _pc.earned_pack_kind(MATCH_HMAC_SECRET.encode(), mode, str(series_id), sweep=bool(sweep))
+    if kind is None:
+        return []
+    out = []
+    for pid in winner_ids:
+        if pid is None:
+            continue
+        got = (await db.execute(text(_PC_EARNED_INSERT_SQL),
+                                {"pid": str(pid), "mode": mode, "kind": kind, "ref": ref})).scalar_one_or_none()
+        if got is not None:
+            out.append(str(got))
+            print(f"[PC-EARNED] {label} mode={mode} ref={ref} kind={kind} player={pid} pack={got}")
+    return out
+
+
+async def _pc_void_earned_packs(db: AsyncSession, *, mode: str, series_id, label: str) -> int:
+    """Reversal / invalidation: the series' unopened earned packs are voided;
+    an opened pack's prints stay (irreversible by policy)."""
+    rows = (await db.execute(text("""
+        UPDATE pc_packs SET status = 'voided', voided_at = now()
+         WHERE source = 'earned' AND reference_id = CAST(:ref AS text) AND status = 'unopened'
+        RETURNING id
+    """), {"ref": _pc_earned_ref(mode, series_id)})).fetchall()
+    if rows:
+        print(f"[PC-EARNED] {label} voided {len(rows)} unopened pack(s) for {mode}:{series_id}")
+    return len(rows)
+
+
+async def _pc_reconcile_earned_packs(force: bool = False) -> None:
+    """Janitor, every PC_RECONCILE_EVERY_S: per source, re-derive the grants
+    of every completion newer than max(cursor - 24 h, started_at) and move
+    the cursor to the newest completion seen; then void the unopened packs
+    of every invalidated series. The first run only plants the cursor
+    (nothing before the feature's start is back-filled). Idempotent: the
+    same deterministic roll, the same ON CONFLICT insert; a voided pack keeps
+    its reference row, so it is never re-granted."""
+    global _pc_reconcile_last_monotonic
+    now_mono = time.monotonic()
+    if not force and now_mono - _pc_reconcile_last_monotonic < PC_RECONCILE_EVERY_S:
+        return
+    _pc_reconcile_last_monotonic = now_mono
+    from database import async_session
+    async with async_session() as db:
+        for source, scan_sql in _PC_RECONCILE_SQL.items():
+            planted = (await db.execute(text("""
+                INSERT INTO pc_reconcile_cursors (source, cursor_at) VALUES (CAST(:src AS text), now())
+                ON CONFLICT (source) DO NOTHING RETURNING source
+            """), {"src": source})).first()
+            if planted is not None:
+                await db.commit()
+                continue
+            cur = (await db.execute(text("""
+                SELECT GREATEST(cursor_at - INTERVAL '24 hours', started_at) AS since
+                  FROM pc_reconcile_cursors WHERE source = CAST(:src AS text) FOR UPDATE
+            """), {"src": source})).mappings().one()
+            rows = (await db.execute(text(scan_sql), {"since": cur["since"]})).mappings().all()
+            granted = 0
+            newest = None
+            for r in rows:
+                granted += len(await _pc_grant_earned_packs(
+                    db, mode=source, series_id=r["ref"], winner_ids=[r["w1"], r["w2"]],
+                    sweep=bool(r["sweep"]), label="reconcile"))
+                if newest is None or r["completed_at"] > newest:
+                    newest = r["completed_at"]
+            if newest is not None:
+                await db.execute(text("""
+                    UPDATE pc_reconcile_cursors SET cursor_at = GREATEST(cursor_at, CAST(:at AS timestamptz))
+                     WHERE source = CAST(:src AS text)
+                """), {"at": newest, "src": source})
+            await db.commit()
+            if granted:
+                print(f"[PC-EARNED] reconcile source={source} scanned={len(rows)} granted={granted}")
+        for vsource, void_sql in _PC_VOID_SWEEP_SQL.items():
+            voided = (await db.execute(text(void_sql))).fetchall()
+            if voided:
+                print(f"[PC-EARNED] reconcile voided {len(voided)} unopened pack(s) of invalidated {vsource} series")
+        await db.commit()
+
+
 @app.post("/api/v1/shop/purchase", tags=["Shop"])
 async def purchase_item(
     request: Request,
@@ -29103,6 +30618,18 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # deleted_at after it is granted, so no store in flight recreates the row
     # once this transaction commits.
     await db.execute(text("DELETE FROM player_region_pings WHERE player_id = :pid"), {"pid": pid})
+    # Player Cards (migration 308): the player's OWN events (as puller or
+    # subject), prints, daily claims, packs (open attempts cascade) and pool
+    # memberships; shards zeroed and the subject opted out. Prints of this
+    # player held by OTHERS stay — they are the holders' rows, and the face
+    # renders the anonymised name from here on (nothing on a print is
+    # personal data beyond the player id).
+    await db.execute(text("DELETE FROM pc_events WHERE player_id = :pid OR subject_player_id = :pid"), {"pid": pid})
+    await db.execute(text("DELETE FROM pc_prints WHERE owner_player_id = :pid"), {"pid": pid})
+    await db.execute(text("DELETE FROM pc_daily_claims WHERE player_id = :pid"), {"pid": pid})
+    await db.execute(text("DELETE FROM pc_packs WHERE player_id = :pid"), {"pid": pid})
+    await db.execute(text("DELETE FROM pc_pool_members WHERE player_id = :pid"), {"pid": pid})
+    await db.execute(text("UPDATE players SET pc_shards = 0, pc_opted_out_at = COALESCE(pc_opted_out_at, NOW()) WHERE id = :pid"), {"pid": pid})
     # Music ratings (design-v4-report M15). EXPLICIT delete per the #437 audit
     # rule: this endpoint ANONYMIZES the players row rather than deleting it,
     # so music_ratings' ON DELETE CASCADE never fires — an ondelete clause is
@@ -31844,6 +33371,12 @@ async def admin_reverse_series(req: _AdminReverseSeriesReq, db: AsyncSession = D
 
     series.invalidated_at = datetime.now(timezone.utc)
     series.invalidation_reason = req.reason[:64]
+    # Player Cards (WP-D): the series' unopened earned packs are voided with
+    # the result (an opened pack's prints stay — irreversible by policy).
+    try:
+        await _pc_void_earned_packs(db, mode="1v1", series_id=series.id, label="admin-reverse")
+    except Exception as pcex:
+        print(f"[PC-EARNED] void failed for 1v1 {series.id}: {pcex}")
 
     # Aug 9 bet audit find 1: unsettled bets on the voided result are
     # refunded (the 2v2 twin has always done this via its reconcile; the 1v1
@@ -33926,6 +35459,16 @@ async def _complete_team_series_with_ratings(
             await db.flush()
     except Exception as bex:
         print(f"[TEAM-DC-COMPLETE] bet settle error for {series_uuid}: {bex}")
+    # Player Cards (WP-D): a forfeit / admin completion grants the WIN roll
+    # and never a sweep — the same line the series gold draws.
+    try:
+        async with db.begin_nested():
+            await _pc_grant_earned_packs(
+                db, mode="team", series_id=series_uuid,
+                winner_ids=([t1a_id, t1b_id] if winner_team == 1 else [t2a_id, t2b_id]),
+                sweep=False, label=f"team-{reason}")
+    except Exception as pcex:
+        print(f"[PC-EARNED] team grant failed for {series_uuid} ({reason}): {pcex}")
 
     # Free the queue rows.
     await _lock_queue_rows_ordered(db, "team_queue", gids)
@@ -34381,6 +35924,11 @@ async def admin_reverse_team_series(req: _AdminReverseTeamSeriesReq, db: AsyncSe
                invalidated_at = NOW(), invalidation_reason = :rsn
          WHERE id = :sid
     """), {"sid": sid, "rsn": (req.reason or "admin_reverse")[:64]})
+    # Player Cards (WP-D): the series' unopened earned packs go with the result.
+    try:
+        await _pc_void_earned_packs(db, mode="team", series_id=sid, label="admin-reverse")
+    except Exception as pcex:
+        print(f"[PC-EARNED] void failed for team {sid}: {pcex}")
     # Unsettled bets on the now-voided result are refunded (settled bets are
     # deliberately untouched — winnings clawback is a separate policy call).
     await _reconcile_team_series_bets(db, sid, "admin_reverse")
@@ -35382,7 +36930,7 @@ def _ovt_difficulty_mult(is_solo: bool, extra_pick: bool,
 _ovt_podium_cache: dict = {"at": 0.0, "ids": []}
 
 # Item d: activity filter as on /ovt/leaderboard (f-string over the int).
-_OVT_PODIUM_QUERY = f"""
+_OVT_PODIUM_QUERY = """
     WITH per_player AS (
         SELECT pid, SUM(played) AS games, SUM(won) AS wins
         FROM (
@@ -35401,7 +36949,7 @@ _OVT_PODIUM_QUERY = f"""
       FROM per_player pp
       JOIN players p ON p.id = pp.pid
      WHERE p.deleted_at IS NULL AND pp.games >= 1
-       AND p.last_seen > NOW() - make_interval(days => {LEADERBOARD_ACTIVE_DAYS})
+       AND p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))
      ORDER BY pp.games DESC, pp.wins::float / NULLIF(pp.games, 0) DESC NULLS LAST
      LIMIT 3
 """
@@ -35418,7 +36966,8 @@ async def _ovt_podium_ids(db: AsyncSession) -> list:
             # otherwise abort that transaction and 500 the report (#235). The
             # savepoint is what makes "serve the stale copy" actually work.
             async with db.begin_nested():
-                rows = (await db.execute(text(_OVT_PODIUM_QUERY))).scalars().all()
+                rows = (await db.execute(text(_OVT_PODIUM_QUERY),
+                                         {"active_days": LEADERBOARD_ACTIVE_DAYS})).scalars().all()
             _ovt_podium_cache["ids"] = [str(r) for r in rows]
         except Exception as ex:
             print(f"[OVT-PODIUM] cache refresh failed: {ex}")
@@ -36531,6 +38080,16 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
         await db.execute(text(
             "UPDATE ovt_series SET status='completed', winner_side=:ws, completed_at=NOW() WHERE id=:sid"
         ), {"ws": winner_side, "sid": series_uuid})
+        # Player Cards (WP-D): the earned-pack roll for the completed series
+        # (own savepoint; reconciled from the series row if it is lost).
+        try:
+            async with db.begin_nested():
+                await _pc_grant_earned_packs(
+                    db, mode="ovt", series_id=series_uuid,
+                    winner_ids=([solo_id] if winner_side == 1 else [duo_a_id, duo_b_id]),
+                    sweep=_pc_sweep(solo_wins, duo_wins), label="ovt-complete")
+        except Exception as pcex:
+            print(f"[PC-EARNED] ovt grant failed for {series_uuid}: {pcex}")
         await _lock_queue_rows_ordered(
             db, "ovt_queue", [solo_id, duo_a_id, duo_b_id])
         await db.execute(text("DELETE FROM ovt_queue WHERE series_id = :sid"), {"sid": series_uuid})
@@ -42020,6 +43579,17 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                                 db, _ach_pid, "ffa_half_point_heartbreak")
     except Exception as _ach_ex:
         print(f"[FFA-ACH] achievement evaluation failed (report unaffected): {_ach_ex}")
+    # Player Cards (WP-D): the earned-pack roll for a RANKED FFA match — a
+    # sweep is every round to the winner and none to anybody else (own
+    # savepoint; reconciled from the match row if it is lost).
+    if rated:
+        try:
+            async with db.begin_nested():
+                await _pc_grant_earned_packs(
+                    db, mode="ffa", series_id=match_id, winner_ids=[id_by_steam[report.winner_steam_id]],
+                    sweep=_pc_ffa_sweep(report), label="ffa-complete")
+        except Exception as pcex:
+            print(f"[PC-EARNED] ffa grant failed for {match_id}: {pcex}")
 
     # Settle FFA bets. Codex round-2 review finds 3+4: keyed by the game's
     # REAL identity (the _rN suffix inside the HMAC-covered room id), never
@@ -44634,6 +46204,17 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
                 await db.flush()
         except Exception as gex:
             print(f"[TEAM-ECON] series-bonus gold failed for {series_uuid}: {gex}")
+        # Player Cards (WP-D): the earned-pack roll for the completed series
+        # (own savepoint; reconciled from the series row if it is lost).
+        try:
+            async with db.begin_nested():
+                await _pc_grant_earned_packs(
+                    db, mode="team", series_id=series_uuid,
+                    winner_ids=([series["t1a_id"], series["t1b_id"]] if winner_team == 1
+                                else [series["t2a_id"], series["t2b_id"]]),
+                    sweep=_pc_sweep(new_t1w, new_t2w), label="team-complete")
+        except Exception as pcex:
+            print(f"[PC-EARNED] team grant failed for {series_uuid}: {pcex}")
 
         # Free the queue rows so all 4 can re-queue.
         await _lock_queue_rows_ordered(

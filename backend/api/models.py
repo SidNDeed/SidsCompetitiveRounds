@@ -62,6 +62,15 @@ class Player(Base):
     # player's gold from everyone. Unlocked by purchasing sku 'util_hide_gold',
     # toggled via /hide-gold. The player still sees their own real balance.
     hide_gold = Column(Boolean, nullable=False, default=False)
+    # Player Cards (migration 308). Opt-OUT model: a player is in the card
+    # pool unless pc_opted_out_at is set. The two flags gate the Discord
+    # surfaces; pc_settings_revision is the compare-and-set counter every
+    # settings write carries; pc_shards is the closed discard currency.
+    pc_opted_out_at = Column(DateTime(timezone=True), nullable=True)
+    pc_collection_public = Column(Boolean, nullable=False, default=True)
+    pc_announce = Column(Boolean, nullable=False, default=True)
+    pc_settings_revision = Column(Integer, nullable=False, default=0)
+    pc_shards = Column(Integer, nullable=False, default=0)
     # Appear-offline privacy toggle (migration 126): when true, the player is
     # excluded from the Home tab's online / recently-online lists. The
     # anonymous online COUNT still includes them (it carries no identity).
