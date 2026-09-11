@@ -597,8 +597,9 @@ def test_an_earned_packs_series_must_still_stand_at_open():
 
 
 def test_the_pending_drain_page_is_one_contract():
-    # c5 F: the api names its page size; the bot holds a full page's last
-    # print group for the next page (test_player_cards_bot pins that side)
+    # c5/c6 F: the api names its page size, and a page is the first N unposted
+    # events plus every other unposted event of the same prints (the bot side
+    # and the SQL shape are pinned in test_player_cards_bot)
     assert main._PC_EVENTS_PAGE == 20
     assert f"LIMIT {main._PC_EVENTS_PAGE}" in " ".join(main._PC_EVENTS_PENDING_SQL.split())
     assert '"page_size": _PC_EVENTS_PAGE' in inspect.getsource(main.internal_pc_events_pending)

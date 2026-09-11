@@ -454,9 +454,11 @@ def test_a_later_run_rederives_the_grants_and_advances_each_cursor_to_its_newest
 def test_a_busy_identity_holds_the_cursor_at_that_completion(monkeypatch):
     # c5 B: the cursor moves no further than the OLDEST completion whose
     # grant was skipped as identity-busy, however far the scan reached, so
-    # that completion is inside the next window
+    # that completion is inside the next window (times relative to now: the
+    # hold is bounded by wall-clock age, c6 B)
     _kind(monkeypatch, "win")
-    t1, t2 = T0 + timedelta(minutes=5), T0 + timedelta(minutes=9)
+    now = datetime.now(timezone.utc)
+    t1, t2 = now - timedelta(minutes=9), now - timedelta(minutes=5)
     db = _reconciler(monkeypatch, _scan_script(**{
         "FROM ranked_series rs": [[{"ref": S1, "completed_at": t2, "w1": P1, "w2": None, "sweep": False},
                                    {"ref": S2, "completed_at": t1, "w1": P2, "w2": None, "sweep": False}]],
@@ -467,6 +469,23 @@ def test_a_busy_identity_holds_the_cursor_at_that_completion(monkeypatch):
     moves = db.sent("UPDATE pc_reconcile_cursors SET cursor_at")
     assert [(p["src"], p["at"]) for _, p in moves] == [("1v1", t1)]
     assert db.committed == 5
+
+
+def test_a_busy_hold_older_than_the_bound_is_released(monkeypatch):
+    # c6 B: the hold keeps the scan window bounded — a completion whose
+    # recipient stayed busy for longer than PC_RECONCILE_HOLD_MAX_S is let go
+    # and the cursor advances past it
+    _kind(monkeypatch, "win")
+    old = datetime.now(timezone.utc) - timedelta(seconds=main.PC_RECONCILE_HOLD_MAX_S + 3600)
+    db = _reconciler(monkeypatch, _scan_script(**{
+        "FROM ranked_series rs": [[{"ref": S1, "completed_at": old, "w1": P1, "w2": None, "sweep": False}]],
+        "pg_try_advisory_xact_lock_shared": [[{"held": False}]],
+    }))
+    _run(main._pc_reconcile_earned_packs(force=True))
+    assert db.sent("INSERT INTO pc_packs") == []
+    moves = db.sent("UPDATE pc_reconcile_cursors SET cursor_at")
+    assert [(p["src"], p["at"]) for _, p in moves] == [("1v1", old)]
+    assert main.PC_RECONCILE_HOLD_MAX_S == 7 * 86400
 
 
 def test_the_cursor_window_and_the_void_sweep_are_pinned_in_the_sql():

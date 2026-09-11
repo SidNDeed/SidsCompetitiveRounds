@@ -249,6 +249,113 @@ def test_a_module_constant_resolves_to_its_import_time_value_never_the_site_loop
     async def root(db):
         await db.execute(text(Q))
     ''',
+    # c6 E: the namespace VALUE under other spellings, aliases made by other
+    # binding forms, escapes the census cannot follow, an indirect exec
+    '''
+    Q = "SELECT 1"
+    def flip():
+        flip.__globals__["Q"] = "SELECT 9"
+    async def root(db):
+        await db.execute(text(Q))
+    ''',
+    '''
+    import sys
+    Q = "SELECT 1"
+    def flip():
+        sys.modules.get(__name__).Q = "SELECT 9"
+    async def root(db):
+        await db.execute(text(Q))
+    ''',
+    '''
+    import sys
+    Q = "SELECT 1"
+    def flip():
+        sys._getframe().f_globals["Q"] = "SELECT 9"
+    async def root(db):
+        await db.execute(text(Q))
+    ''',
+    '''
+    import sys
+    Q = "SELECT 1"
+    def flip():
+        vars(sys.modules[__name__])["Q"] = "SELECT 9"
+    async def root(db):
+        await db.execute(text(Q))
+    ''',
+    '''
+    Q = "SELECT 1"
+    def flip(ns=globals()):
+        ns["Q"] = "SELECT 9"
+    async def root(db):
+        await db.execute(text(Q))
+    ''',
+    '''
+    Q = "SELECT 1"
+    def flip():
+        for ns in (globals(),):
+            ns["Q"] = "SELECT 9"
+    async def root(db):
+        await db.execute(text(Q))
+    ''',
+    '''
+    Q = "SELECT 1"
+    def flip():
+        a, ns = 1, globals()
+        ns["Q"] = "SELECT 9"
+    async def root(db):
+        await db.execute(text(Q))
+    ''',
+    '''
+    Q = "SELECT 1"
+    def flip():
+        other(*(globals(),))
+    async def root(db):
+        await db.execute(text(Q))
+    ''',
+    '''
+    Q = "SELECT 1"
+    def ns():
+        return globals()
+    def flip():
+        ns()["Q"] = "SELECT 9"
+    async def root(db):
+        await db.execute(text(Q))
+    ''',
+    '''
+    Q = "SELECT 1"
+    ns = lambda: globals()
+    def flip():
+        ns()["Q"] = "SELECT 9"
+    async def root(db):
+        await db.execute(text(Q))
+    ''',
+    '''
+    Q = "SELECT 1"
+    class Box:
+        pass
+    def flip():
+        b = Box()
+        b.ns = globals()
+        b.ns["Q"] = "SELECT 9"
+    async def root(db):
+        await db.execute(text(Q))
+    ''',
+    '''
+    import builtins
+    Q = "SELECT 1"
+    def flip():
+        builtins.exec("Q = 'SELECT 9'")
+    async def root(db):
+        await db.execute(text(Q))
+    ''',
+    '''
+    Q = "SELECT 1"
+    run = exec
+    def flip():
+        run("Q = 'SELECT 9'")
+    async def root(db):
+        await db.execute(text(Q))
+    ''',
 ])
 def test_a_module_name_that_could_change_stays_dynamic(src):
     sqls, dyn = _sqls(src)
@@ -279,6 +386,20 @@ def test_a_constant_key_namespace_store_of_another_name_leaves_the_constant_reso
     def flip():
         globals()["OTHER"] = 1
         setattr(obj, "Q", 2)
+    async def root(db):
+        await db.execute(text(Q))
+    ''')
+    assert sqls == ["SELECT 1"] and dyn == [], (sqls, dyn)
+    # ... and the ordinary idioms around it stay ordinary (c6 E): a method
+    # on a plain object, vars() of a plain object, a plain dict store
+    sqls, dyn = _sqls('''
+    Q = "SELECT 1"
+    class Box:
+        def snapshot(self):
+            return dict(vars(self))
+    def flip(obj, d):
+        obj.update(x=1)
+        d["Q"] = 2
     async def root(db):
         await db.execute(text(Q))
     ''')

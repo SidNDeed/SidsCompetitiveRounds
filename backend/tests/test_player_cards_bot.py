@@ -89,11 +89,14 @@ def test_a_private_binder_is_read_by_its_token_and_the_balance_only_when_sent():
     assert 'if "shards" in body:' in coll
 
 
-def test_a_full_page_holds_its_last_print_group_for_the_next_page():
-    # c5 F: a full page may cut one print's events in two; the bot holds the
-    # last group, unacked, and the api names the page size it applies
+def test_a_page_never_cuts_a_prints_group_in_two():
+    # c6 F: the api's page is the first N unposted events PLUS every other
+    # unposted event of the same prints; the bot holds nothing back (the c5
+    # consumer-side hold could keep the wrong group)
     src = _fn(BOT_SRC, "poll_pc_events")
-    assert 'page = body.get("page_size")' in src and "lines = lines[:-2]" in src
-    assert 'len(body["events"]) >= page and len(lines) > 2' in src
-    assert src.index("lines = lines[:-2]") < src.index("for text_line, ids in zip(lines[0::2], lines[1::2])")
+    assert "page_size" not in src and "lines[:-2]" not in src
+    sql = " ".join(MAIN_SRC[MAIN_SRC.index("_PC_EVENTS_PENDING_SQL = "):].split("\n\n\n")[0].split())
+    assert "WITH page AS ( SELECT e.id, e.print_id FROM pc_events e WHERE e.posted_at IS NULL ORDER BY e.id LIMIT 20 )" in sql
+    assert ("WHERE e.posted_at IS NULL AND (e.id IN (SELECT id FROM page) OR (e.print_id IS NOT NULL "
+            "AND e.print_id IN (SELECT print_id FROM page WHERE print_id IS NOT NULL)))") in sql
     assert '"page_size": _PC_EVENTS_PAGE' in MAIN_SRC and "_PC_EVENTS_PAGE = 20" in MAIN_SRC

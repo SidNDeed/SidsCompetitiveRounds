@@ -2164,9 +2164,13 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
                     _d(leaf.id)["blocked"] = True
 
         # Constructs that can rebind a module name without a Name store (c3
-        # D, c5 E): the census either blocks the exact name (a constant key)
-        # or gives the whole module up (`opaque`) — never explains around
-        # them.
+        # D, c5 E, c6 E): the census either blocks the exact name (a constant
+        # key on the namespace itself) or gives the whole module up (`opaque`)
+        # — never explains around them. The rule is about the namespace
+        # VALUE, never a spelling: every expression that denotes a namespace
+        # the module's names may live in, every name bound to one (or to
+        # something holding one) by ANY binding form, and every escape of
+        # one into something the census cannot follow.
         opaque = [None]
         imported = set()
         for node in _ast.walk(tree):
@@ -2174,47 +2178,94 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
                 for a in node.names:
                     imported.add(a.asname or a.name.split(".")[0])
 
-        def _namespace_call(n):
-            return (isinstance(n, _ast.Call) and isinstance(n.func, _ast.Name)
-                    and n.func.id in ("globals", "vars", "locals"))
-
         def _const_str(n):
             return isinstance(n, _ast.Constant) and isinstance(n.value, str)
 
-        # Every expression that denotes a namespace the module's names may
-        # live in — the namespace calls, `<x>.modules[...]`, a namespace's
-        # `.__dict__`, `<x>.import_module(...)` — and every name bound to one
-        # of those, transitively (c5 E: `ns = globals(); ns["Q"] = ...`).
-        aliases = set()
+        NS_ATTRS = ("__dict__", "__globals__", "f_globals", "f_locals", "__builtins__")
+        DYNAMIC = ("exec", "eval", "__import__")
+        aliases = set()    # names bound to a namespace itself
+        derived = set()    # names bound to something that holds or came out of one
 
-        def _namespace_expr(n):
-            if _namespace_call(n):
-                return True
+        def _direct(n):
+            """The expression IS a namespace: globals()/locals(), vars() of
+            nothing or of a namespace, an alias, `<x>.modules[...]` and its
+            .get()/.setdefault()/.pop(), `<x>.import_module(...)`, the
+            __dict__ / __globals__ / frame globals of ANYTHING, a lambda
+            whose body is one, a call of an alias (a lambda alias)."""
+            if isinstance(n, _ast.Call):
+                f = n.func
+                if isinstance(f, _ast.Name):
+                    if f.id in ("globals", "locals"):
+                        return True
+                    if f.id == "vars":
+                        return not n.args or _direct(n.args[0])
+                    return f.id in aliases
+                if isinstance(f, _ast.Attribute):
+                    return f.attr == "import_module" or (isinstance(f.value, _ast.Attribute) and f.value.attr == "modules")
+                return _direct(f)
             if isinstance(n, _ast.Name):
                 return n.id in aliases
             if isinstance(n, _ast.Attribute):
-                return n.attr == "__dict__" and _namespace_expr(n.value)
+                return n.attr in NS_ATTRS
             if isinstance(n, _ast.Subscript):
-                return ((isinstance(n.value, _ast.Attribute) and n.value.attr == "modules")
-                        or _namespace_expr(n.value))
-            if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Attribute):
-                return n.func.attr == "import_module"
+                return isinstance(n.value, _ast.Attribute) and n.value.attr == "modules"
+            if isinstance(n, _ast.Lambda):
+                return _direct(n.body)
             return False
 
+        def _through(n):
+            """A namespace, or something reached THROUGH one: an item, an
+            attribute, a call on it, a name bound to such a thing."""
+            if _direct(n):
+                return True
+            if isinstance(n, _ast.Name):
+                return n.id in derived
+            if isinstance(n, (_ast.Attribute, _ast.Subscript)):
+                return _through(n.value)
+            if isinstance(n, _ast.Call):
+                return _through(n.func)
+            if isinstance(n, _ast.Lambda):
+                return _contains(n.body)
+            return False
+
+        def _contains(n):
+            return n is not None and any(_through(sub) for sub in _ast.walk(n))
+
+        def _bindings(node):
+            """(target, value) pairs of every binding form: assignments of
+            every kind, loop and comprehension targets, `with ... as`, and a
+            function's parameter defaults (c6 E)."""
+            if isinstance(node, _ast.Assign):
+                return [(tg, node.value) for tg in node.targets]
+            if isinstance(node, (_ast.AnnAssign, _ast.AugAssign)):
+                return [(node.target, node.value)] if node.value is not None else []
+            if isinstance(node, _ast.NamedExpr):
+                return [(node.target, node.value)]
+            if isinstance(node, (_ast.For, _ast.AsyncFor, _ast.comprehension)):
+                return [(node.target, node.iter)]
+            if isinstance(node, _ast.withitem):
+                return [(node.optional_vars, node.context_expr)] if node.optional_vars is not None else []
+            if isinstance(node, _SCOPES):
+                a = node.args
+                pos = list(getattr(a, "posonlyargs", [])) + list(a.args)
+                pairs = list(zip(pos[len(pos) - len(a.defaults):], a.defaults)) if a.defaults else []
+                pairs += [(k, d) for k, d in zip(a.kwonlyargs, a.kw_defaults) if d is not None]
+                return [(_ast.Name(id=arg.arg, ctx=_ast.Store()), d) for arg, d in pairs]
+            return []
+
         while True:
-            grown = len(aliases)
+            before = (len(aliases), len(derived))
             for node in _ast.walk(tree):
-                targets = []
-                if isinstance(node, _ast.Assign):
-                    targets = node.targets
-                elif isinstance(node, (_ast.AnnAssign, _ast.NamedExpr)):
-                    targets = [node.target]
-                if targets and getattr(node, "value", None) is not None and _namespace_expr(node.value):
-                    for tgt in targets:
-                        for leaf in _ast.walk(tgt):
-                            if isinstance(leaf, _ast.Name):
-                                aliases.add(leaf.id)
-            if len(aliases) == grown:
+                for tg, value in _bindings(node):
+                    if not _contains(value):
+                        continue
+                    if any(isinstance(leaf, (_ast.Attribute, _ast.Subscript)) for leaf in _ast.walk(tg)):
+                        opaque[0] = "namespace escape"   # stored into an object the census cannot follow (c6 E)
+                    if _direct(value) and isinstance(tg, _ast.Name):
+                        aliases.add(tg.id)
+                    else:
+                        derived.update(leaf.id for leaf in _ast.walk(tg) if isinstance(leaf, _ast.Name))
+            if (len(aliases), len(derived)) == before:
                 break
 
         for node in tree.body:
@@ -2224,9 +2275,9 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
 
         def _module_wide(node):
             """Rules that reach the module from ANY scope: a rebinding by
-            string or attribute through a namespace expression, a construct
-            that may do anything, a mutation of an object a module name
-            holds, and the load census."""
+            string or attribute through a namespace, an escape of one, a
+            construct that may do anything, a mutation of an object a module
+            name holds, and the load census."""
             if isinstance(node, (_ast.Global, _ast.Nonlocal)):
                 for n in node.names:
                     _d(n)["blocked"] = True
@@ -2237,38 +2288,43 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
                     _d(a.asname or a.name.split(".")[0])["blocked"] = True
             elif isinstance(node, _ast.NamedExpr):
                 _block_leaves(node.target)   # a walrus binds the ENCLOSING scope (a default, a comprehension)
+            elif isinstance(node, (_ast.Return, _ast.Yield, _ast.YieldFrom)) and _contains(node.value):
+                opaque[0] = "namespace escape"   # handed to a caller the census cannot follow (c6 E)
+            elif hasattr(_ast, "Match") and isinstance(node, _ast.Match) and _contains(node.subject):
+                opaque[0] = "namespace escape"
             elif isinstance(node, _ast.Subscript) and isinstance(node.ctx, (_ast.Store, _ast.Del)) \
-                    and _namespace_expr(node.value):
+                    and _through(node.value):
                 # globals()["Q"] = ... rebinds a module name by STRING (c3 D):
-                # a constant key blocks that name, anything else the module.
-                if _const_str(node.slice) and not (isinstance(node.value, _ast.Call) and node.value.args):
+                # a constant key on the namespace ITSELF blocks that name,
+                # anything else (a variable key, an item of the namespace,
+                # a derived name) the module.
+                if _direct(node.value) and _const_str(node.slice):
                     _d(node.slice.value)["blocked"] = True
                 else:
                     opaque[0] = "namespace store"
             elif isinstance(node, _ast.Attribute) and isinstance(node.ctx, (_ast.Store, _ast.Del)) \
-                    and _namespace_expr(node.value):
-                _d(node.attr)["blocked"] = True   # sys.modules[__name__].Q = ... / ns.Q = ... (c5 E)
+                    and _through(node.value):
+                if _direct(node.value):
+                    _d(node.attr)["blocked"] = True   # sys.modules[__name__].Q = ... / m.Q = ... (c5 E)
+                else:
+                    opaque[0] = "namespace store"
             elif isinstance(node, _ast.Call) and isinstance(node.func, _ast.Attribute) \
-                    and _namespace_expr(node.func.value):
+                    and _through(node.func.value) and not _direct(node):
                 opaque[0] = "namespace method"   # globals().update(...) et al.
-            elif isinstance(node, _ast.Call) and isinstance(node.func, _ast.Name) \
-                    and node.func.id in ("exec", "eval", "__import__"):
-                opaque[0] = node.func.id
             elif isinstance(node, _ast.Call) and isinstance(node.func, _ast.Name) \
                     and node.func.id == "setattr":
                 tgt = node.args[0] if node.args else None
                 attr = node.args[1] if len(node.args) > 1 else None
-                if isinstance(tgt, (_ast.Subscript, _ast.Call)) or _namespace_expr(tgt) \
+                if isinstance(tgt, (_ast.Subscript, _ast.Call)) or _through(tgt) \
                         or (isinstance(tgt, _ast.Name) and tgt.id in imported):
                     # setattr(sys.modules[__name__], ...) / setattr(<module>, ...)
                     if _const_str(attr):
                         _d(attr.value)["blocked"] = True
                     else:
                         opaque[0] = "setattr"
-            elif isinstance(node, _ast.Call) and (
-                    any(_namespace_expr(a.value if isinstance(a, _ast.Starred) else a) for a in node.args)
-                    or any(_namespace_expr(k.value) for k in node.keywords)):
-                opaque[0] = "namespace argument"   # the callee may write into it (c5 E)
+            elif isinstance(node, _ast.Call) and not _direct(node) and (
+                    any(_contains(a) for a in node.args) or any(_contains(k.value) for k in node.keywords)):
+                opaque[0] = "namespace argument"   # the callee may write into it (c5/c6 E)
             elif (isinstance(node, _ast.Call)
                     and isinstance(node.func, _ast.Attribute)
                     and isinstance(node.func.value, _ast.Name)):
@@ -2282,6 +2338,11 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
                 _d(node.value.id)["blocked"] = True
             if isinstance(node, _ast.Name) and isinstance(node.ctx, _ast.Load):
                 loads.setdefault(node.id, []).append(node)
+                if node.id in DYNAMIC or node.id == "__builtins__":
+                    opaque[0] = node.id   # exec / eval / __import__: called or handed around (c3 D, c6 E)
+            elif isinstance(node, _ast.Attribute) and node.attr in DYNAMIC \
+                    and isinstance(node.value, _ast.Name) and node.value.id in imported:
+                opaque[0] = node.attr   # builtins.exec(...) and the like (c6 E)
 
         def _module_binding(node):
             """Name stores that bind the MODULE's names: only outside a
@@ -24769,8 +24830,14 @@ _PC_EVENTS_SKIP_SQL = """
                 AND (e.print_id IS NULL OR EXISTS (SELECT 1 FROM pc_prints pr WHERE pr.id = e.print_id AND pr.discarded_at IS NULL)))
 """
 
-_PC_EVENTS_PAGE = 20   # one page of the pending drain; the bot holds a full page's last print group for the next page (c5 F)
+_PC_EVENTS_PAGE = 20   # the first N unposted events of a page; every other unposted event of the same prints rides along (c6 F)
 _PC_EVENTS_PENDING_SQL = """
+    WITH page AS (
+        SELECT e.id, e.print_id FROM pc_events e
+         WHERE e.posted_at IS NULL
+         ORDER BY e.id
+         LIMIT 20
+    )
     SELECT e.id, e.kind, e.created_at, e.print_id,
            pl.display_name AS puller_name, pl.steam_id AS puller_steam_id, pl.discord_id AS puller_discord_id,
            su.display_name AS subject_name, su.steam_id AS subject_steam_id,
@@ -24780,11 +24847,12 @@ _PC_EVENTS_PENDING_SQL = """
       JOIN players su ON su.id = e.subject_player_id
       LEFT JOIN pc_prints pr ON pr.id = e.print_id
      WHERE e.posted_at IS NULL
+       AND (e.id IN (SELECT id FROM page)
+            OR (e.print_id IS NOT NULL AND e.print_id IN (SELECT print_id FROM page WHERE print_id IS NOT NULL)))
        AND pl.deleted_at IS NULL AND su.deleted_at IS NULL
        AND pl.pc_announce AND su.pc_announce AND su.pc_opted_out_at IS NULL
        AND (pr.id IS NULL OR pr.discarded_at IS NULL)
      ORDER BY e.id
-     LIMIT 20
 """
 
 
@@ -24803,7 +24871,10 @@ async def internal_pc_events_pending(
     """Unposted notable pulls, re-checked NOW against both parties' consent
     (pc_announce for puller and subject, the subject not opted out, neither
     deleted, the print not discarded): events that fail the re-check are
-    marked posted without being handed out. The bot acks what it posted."""
+    marked posted without being handed out. The bot acks what it posted. A
+    page is the first _PC_EVENTS_PAGE unposted events plus every other
+    unposted event of the same prints, so one print's group is never cut in
+    two by the page boundary (c6 F)."""
     _require_internal_key(x_internal_key)
     await db.execute(text(_PC_EVENTS_SKIP_SQL))
     await db.commit()
@@ -25066,6 +25137,7 @@ _PC_SERIES_STANDING_SQL = {
 
 _pc_reconcile_last_monotonic = 0.0
 PC_RECONCILE_EVERY_S = 600
+PC_RECONCILE_HOLD_MAX_S = 7 * 86400   # a busy-identity hold on the cursor is released after this (c6 B)
 
 
 def _pc_earned_ref(mode: str, series_id) -> str:
@@ -25195,7 +25267,8 @@ async def _pc_reconcile_earned_packs(force: bool = False) -> None:
     of every completion newer than max(cursor - 24 h, started_at) and move
     the cursor to the newest completion seen — or no further than the oldest
     completion whose grant was skipped as identity-busy, so that one stays
-    inside the next window however far the scan reached (c5 B); then void
+    inside the next window however far the scan reached (c5 B), for at most
+    PC_RECONCILE_HOLD_MAX_S so the scan stays bounded (c6 B); then void
     the unopened packs of every invalidated series. The first run plants the
     cursor at this process's start and scans from it (nothing earlier is
     back-filled). Without the match secret there is no deterministic roll:
@@ -25243,6 +25316,12 @@ async def _pc_reconcile_earned_packs(force: bool = False) -> None:
                     newest = r["completed_at"]
                 if busy and (hold is None or r["completed_at"] < hold):
                     hold = r["completed_at"]
+            if hold is not None and (datetime.now(timezone.utc) - hold).total_seconds() > PC_RECONCILE_HOLD_MAX_S:
+                # Released past the bound (c6 B): the window stays bounded; an
+                # identity busy for that long is a stuck transaction to find,
+                # not a grant to keep the whole scan waiting for.
+                print(f"[PC-EARNED] reconcile source={source}: hold at {hold} released after {PC_RECONCILE_HOLD_MAX_S} s")
+                hold = None
             if newest is not None:
                 at = newest if hold is None else min(newest, hold)
                 await db.execute(text("""
