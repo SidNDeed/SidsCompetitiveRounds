@@ -87,3 +87,13 @@ def test_a_private_binder_is_read_by_its_token_and_the_balance_only_when_sent():
     coll = _fn(BOT_SRC, "cmd_pc_collection")
     assert 'status == 403 and _pc_detail(body).get("error") == "private"' in coll
     assert 'if "shards" in body:' in coll
+
+
+def test_a_full_page_holds_its_last_print_group_for_the_next_page():
+    # c5 F: a full page may cut one print's events in two; the bot holds the
+    # last group, unacked, and the api names the page size it applies
+    src = _fn(BOT_SRC, "poll_pc_events")
+    assert 'page = body.get("page_size")' in src and "lines = lines[:-2]" in src
+    assert 'len(body["events"]) >= page and len(lines) > 2' in src
+    assert src.index("lines = lines[:-2]") < src.index("for text_line, ids in zip(lines[0::2], lines[1::2])")
+    assert '"page_size": _PC_EVENTS_PAGE' in MAIN_SRC and "_PC_EVENTS_PAGE = 20" in MAIN_SRC

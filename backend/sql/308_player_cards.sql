@@ -19,6 +19,11 @@ ALTER TABLE players ADD COLUMN IF NOT EXISTS pc_collection_public BOOLEAN NOT NU
 ALTER TABLE players ADD COLUMN IF NOT EXISTS pc_announce BOOLEAN NOT NULL DEFAULT true;
 ALTER TABLE players ADD COLUMN IF NOT EXISTS pc_settings_revision INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE players ADD COLUMN IF NOT EXISTS pc_shards INTEGER NOT NULL DEFAULT 0;
+-- A ban withdraws the binder and the announcements (design v4 §11 G5); bans
+-- that predate these columns get the same state here (the ban writer does it
+-- for every later ban, repeat bans included).
+UPDATE players p SET pc_collection_public = false, pc_announce = false
+  FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL;
 
 -- Editions: exactly one active row (ended_at IS NULL) at any time.
 CREATE TABLE IF NOT EXISTS pc_editions (

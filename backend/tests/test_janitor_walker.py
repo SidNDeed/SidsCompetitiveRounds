@@ -82,6 +82,32 @@ def test_a_local_binding_or_parameter_shadows_the_module_constant():
     assert sqls == [] and len(dyn) == 1
 
 
+def test_a_module_constant_resolves_to_its_import_time_value_never_the_site_loops():
+    # c3 D1 / c5 E: a module constant that reads a name a SITE loop rebinds
+    # keeps its import-time value — resolved against the MODULE's names, not
+    # the site's shadowed view of them
+    sqls, dyn = _sqls('''
+    T = "missing"
+    Q = f"SELECT * FROM {T}"
+    async def root(db):
+        for T in ("players",):
+            await db.execute(text(Q))
+    ''')
+    assert sqls == ["SELECT * FROM missing"] and dyn == [], (sqls, dyn)
+    # a binding inside ANOTHER function (a parameter, a loop target) binds
+    # that scope's name, never the module's (c5 E)
+    sqls, dyn = _sqls('''
+    T = "players"
+    Q = f"SELECT * FROM {T}"
+    def other(T):
+        for T in ("x",):
+            pass
+    async def root(db):
+        await db.execute(text(Q))
+    ''')
+    assert sqls == ["SELECT * FROM players"] and dyn == [], (sqls, dyn)
+
+
 @pytest.mark.parametrize("src", [
     # declared global (and stored) in another function
     '''
@@ -144,15 +170,6 @@ def test_a_local_binding_or_parameter_shadows_the_module_constant():
         for k, sql in D.items():
             await db.execute(text(sql))
     ''',
-    # c3 D1: a module constant reads a name a SITE loop rebinds — its value
-    # is the import-time one, never the loop row's
-    '''
-    T = "missing"
-    Q = f"SELECT * FROM {T}"
-    async def root(db):
-        for T in ("players",):
-            await db.execute(text(Q))
-    ''',
     # c3 D3: a star import may rebind anything
     '''
     Q = "SELECT 1"
@@ -195,6 +212,40 @@ def test_a_local_binding_or_parameter_shadows_the_module_constant():
     Q = "SELECT 1"
     def flip():
         exec("Q = 'SELECT 9'")
+    async def root(db):
+        await db.execute(text(Q))
+    ''',
+    # c5 E: a name bound to the namespace (transitively) is the namespace;
+    # a namespace handed to a callee may be written by it
+    '''
+    Q = "SELECT 1"
+    def flip():
+        ns = globals()
+        ns["Q"] = "SELECT 9"
+    async def root(db):
+        await db.execute(text(Q))
+    ''',
+    '''
+    import sys
+    Q = "SELECT 1"
+    def flip():
+        m = sys.modules[__name__]
+        m.Q = "SELECT 9"
+    async def root(db):
+        await db.execute(text(Q))
+    ''',
+    '''
+    import sys
+    Q = "SELECT 1"
+    def flip():
+        sys.modules[__name__].__dict__["Q"] = "SELECT 9"
+    async def root(db):
+        await db.execute(text(Q))
+    ''',
+    '''
+    Q = "SELECT 1"
+    def flip():
+        other(globals())
     async def root(db):
         await db.execute(text(Q))
     ''',

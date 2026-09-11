@@ -8503,6 +8503,11 @@ async def poll_pc_events():
         print("[PC-EVENTS] leaderboard channel not found — leaving events queued")
         return
     lines = _pc_event_lines(body["events"])
+    page = body.get("page_size")
+    if isinstance(page, int) and len(body["events"]) >= page and len(lines) > 2:
+        # A full page may cut one print's events in two (c5 F): its last
+        # group waits, unacked, for the next page, where the rest joins it.
+        lines = lines[:-2]
     sent = []
     for text_line, ids in zip(lines[0::2], lines[1::2]):
         try:

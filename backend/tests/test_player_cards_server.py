@@ -535,6 +535,11 @@ def test_every_player_route_takes_the_shared_identity_lock_before_the_player_rea
     actor = inspect.getsource(main._pc_verified_actor)
     assert actor.index("pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))") \
         < actor.index("select(Player).where(Player.steam_id == steam_id)")
+    # ... and before the session proof (c5 A): the ban's session purge runs
+    # under the exclusive form, so a session read under the shared lock is
+    # one the purge has not yet removed or one it never will
+    assert actor.index("pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))") \
+        < actor.index("_strict_steam_session_ok(request, steam_id, db)")
     daily = inspect.getsource(main._pc_claim_daily)
     assert daily.index("pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))") \
         < daily.index("SELECT deleted_at FROM players WHERE id = CAST(:pid AS uuid)") \
@@ -551,9 +556,52 @@ def test_a_held_packs_failed_open_answers_its_own_unopened_state():
 
 def test_a_ban_withdraws_the_binder_and_the_announcements():
     src = _main_code()
-    upd = "UPDATE players SET pc_collection_public = false, pc_announce = false WHERE steam_id = :sid"
-    assert src.count(upd) == 1
-    assert src.index("db.add(PlayerBan(steam_id=target_steam_id") < src.index(upd)
+    head = '"UPDATE players SET pc_collection_public = false, pc_announce = false, "'
+    tail = '"pc_settings_revision = pc_settings_revision + 1 WHERE steam_id = :sid"'
+    assert src.count(head) == 1 and src.count(tail) == 1
+    start = src.index("async def _apply_ban_core(")
+    ban = src[start:src.index("\nasync def ", start + 10)]
+    # under the exclusive identity lock, right after the session purge and
+    # BEFORE the already_banned early return (c5 F: a repeat ban withdraws
+    # what a ban predating the feature never touched); the revision advances
+    # so a settings compare-and-set read before the ban is refused as stale
+    assert ban.index("pg_advisory_xact_lock(hashtext(") < ban.index("DELETE FROM steam_sessions") \
+        < ban.index(head) < ban.index(tail) < ban.index('"already_banned"')
+    assert ban.index('"already_banned"') < ban.index("db.add(PlayerBan(steam_id=target_steam_id")
+    # the Discord daily path has no session to purge: it refuses an active ban itself (c5)
+    daily = inspect.getsource(main._pc_claim_daily)
+    assert daily.index("SELECT deleted_at FROM players WHERE id = CAST(:pid AS uuid)") \
+        < daily.index("_is_banned(db, steam_id)") < daily.index("FOR NO KEY UPDATE")
+    assert 'status_code=403, detail={"error": "banned"}' in daily
+    # bans that predate the columns get the same state from the migration
+    mig = (Path(__file__).resolve().parents[1] / "sql" / "308_player_cards.sql").read_text(encoding="utf-8")
+    assert ("UPDATE players p SET pc_collection_public = false, pc_announce = false\n"
+            "  FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL;") in mig
+
+
+def test_an_earned_packs_series_must_still_stand_at_open():
+    # c5 B: a plain read (no lock, no new lock-order edge) before the claim;
+    # an invalidated or missing series voids the pack and answers 410 voided
+    src = inspect.getsource(main.pc_open_pack)
+    claim = src.index("UPDATE pc_packs SET status = 'opening'")
+    guard = src.index("_PC_SERIES_STANDING_SQL.items()")
+    assert guard < claim
+    body = src[guard:claim]
+    assert "SET status = 'voided', voided_at = now()" in body and '"error": "voided"' in body
+    assert "status_code=410" in body and "await db.commit()" in body
+    assert 'held["source"] == "earned"' in src[:guard]
+    assert set(main._PC_SERIES_STANDING_SQL) == {"1v1", "team", "ovt", "ffa"}
+    for mode, sql in main._PC_SERIES_STANDING_SQL.items():
+        assert sql.startswith("SELECT invalidated_at FROM ") and "FOR " not in sql, mode
+        assert sql.split(" FROM ")[1].split(" ")[0] == main._PC_RECONCILE_LOCK_SQL[mode].split(" FROM ")[1].split(" ")[0]
+
+
+def test_the_pending_drain_page_is_one_contract():
+    # c5 F: the api names its page size; the bot holds a full page's last
+    # print group for the next page (test_player_cards_bot pins that side)
+    assert main._PC_EVENTS_PAGE == 20
+    assert f"LIMIT {main._PC_EVENTS_PAGE}" in " ".join(main._PC_EVENTS_PENDING_SQL.split())
+    assert '"page_size": _PC_EVENTS_PAGE' in inspect.getsource(main.internal_pc_events_pending)
 
 
 def test_the_shard_balance_is_answered_to_its_owner_only():

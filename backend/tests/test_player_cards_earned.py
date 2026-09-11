@@ -306,8 +306,11 @@ def test_grant_skips_a_deleted_or_busy_recipient_and_the_reconcilers_roll_is_reu
     assert db.sent("pg_try_advisory_xact_lock_shared") == [] and db.sent("INSERT INTO pc_packs") == []
     # identity lock held elsewhere (a deletion or another identity writer): left to the reconciler
     db = Session({**LIVE, "pg_try_advisory_xact_lock_shared": [[{"held": False}]]})
-    assert _run(main._pc_grant_earned_packs(db, mode="1v1", series_id=S1, winner_ids=[P1], sweep=False, label="t")) == []
+    busy = []
+    assert _run(main._pc_grant_earned_packs(db, mode="1v1", series_id=S1, winner_ids=[P1], sweep=False, label="t",
+                                            busy=busy)) == []
     assert db.sent("INSERT INTO pc_packs") == [] and db.sent("SELECT deleted_at FROM players") == []
+    assert busy == [P1]   # reported back: the reconciler holds its cursor at that completion (c5 B)
     # deleted between the two reads (the lock was free because the deletion already committed)
     db = Session({**LIVE, "SELECT deleted_at FROM players": [[{"deleted_at": T0}]]})
     assert _run(main._pc_grant_earned_packs(db, mode="1v1", series_id=S1, winner_ids=[P1], sweep=False, label="t")) == []
@@ -357,11 +360,22 @@ def test_the_first_run_plants_the_cursors_at_the_process_start_and_scans_from_it
     assert len(db.sent("UPDATE pc_packs p SET status = 'voided'")) == 4
 
 
-def test_no_secret_leaves_every_cursor_untouched(monkeypatch):
+def test_no_secret_plants_the_cursors_and_sweeps_the_voids_but_grants_nothing(monkeypatch):
+    # c5 B: the cursors anchor at THIS process's start even without the
+    # secret (a later process that has it scans from here, not from its own
+    # start), and a series invalidated meanwhile still loses its packs; only
+    # the scan and the grants wait for the secret
     db = _reconciler(monkeypatch, {})
     monkeypatch.setattr(main, "MATCH_HMAC_SECRET", "")
     _run(main._pc_reconcile_earned_packs(force=True))
-    assert db.log == [] and db.committed == 0   # no plant, no scan, no move (c3 B)
+    plants = db.sent("INSERT INTO pc_reconcile_cursors")
+    assert [p["src"] for _, p in plants] == ["1v1", "team", "ovt", "ffa"]
+    assert all(p["start"] == main._PROCESS_STARTED_WALL for _, p in plants)
+    assert db.sent("SELECT GREATEST(cursor_at") == []
+    assert [p for sql, p in db.log if "> CAST(:since AS timestamptz)" in sql] == []
+    assert db.sent("UPDATE pc_reconcile_cursors SET cursor_at") == [] and db.sent("INSERT INTO pc_packs") == []
+    assert len(db.sent("UPDATE pc_packs p SET status = 'voided'")) == 4
+    assert db.committed == 5
 
 
 def _scan_script(**extra):
@@ -435,6 +449,24 @@ def test_a_later_run_rederives_the_grants_and_advances_each_cursor_to_its_newest
     assert "GREATEST(cursor_at, CAST(:at AS timestamptz))" in moves[0][0]
     assert db.committed == 5
     assert len(db.sent("UPDATE pc_packs p SET status = 'voided'")) == 4
+
+
+def test_a_busy_identity_holds_the_cursor_at_that_completion(monkeypatch):
+    # c5 B: the cursor moves no further than the OLDEST completion whose
+    # grant was skipped as identity-busy, however far the scan reached, so
+    # that completion is inside the next window
+    _kind(monkeypatch, "win")
+    t1, t2 = T0 + timedelta(minutes=5), T0 + timedelta(minutes=9)
+    db = _reconciler(monkeypatch, _scan_script(**{
+        "FROM ranked_series rs": [[{"ref": S1, "completed_at": t2, "w1": P1, "w2": None, "sweep": False},
+                                   {"ref": S2, "completed_at": t1, "w1": P2, "w2": None, "sweep": False}]],
+        "pg_try_advisory_xact_lock_shared": [[{"held": True}], [{"held": False}]],   # P1 granted, P2 busy
+    }))
+    _run(main._pc_reconcile_earned_packs(force=True))
+    assert [(p["mode"], p["pid"]) for _, p in db.sent("INSERT INTO pc_packs")] == [("1v1", str(P1))]
+    moves = db.sent("UPDATE pc_reconcile_cursors SET cursor_at")
+    assert [(p["src"], p["at"]) for _, p in moves] == [("1v1", t1)]
+    assert db.committed == 5
 
 
 def test_the_cursor_window_and_the_void_sweep_are_pinned_in_the_sql():

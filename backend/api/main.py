@@ -2164,8 +2164,9 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
                     _d(leaf.id)["blocked"] = True
 
         # Constructs that can rebind a module name without a Name store (c3
-        # D): the census either blocks the exact name (a constant key) or
-        # gives the whole module up (`opaque`) — never explains around them.
+        # D, c5 E): the census either blocks the exact name (a constant key)
+        # or gives the whole module up (`opaque`) — never explains around
+        # them.
         opaque = [None]
         imported = set()
         for node in _ast.walk(tree):
@@ -2180,18 +2181,116 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
         def _const_str(n):
             return isinstance(n, _ast.Constant) and isinstance(n.value, str)
 
+        # Every expression that denotes a namespace the module's names may
+        # live in — the namespace calls, `<x>.modules[...]`, a namespace's
+        # `.__dict__`, `<x>.import_module(...)` — and every name bound to one
+        # of those, transitively (c5 E: `ns = globals(); ns["Q"] = ...`).
+        aliases = set()
+
+        def _namespace_expr(n):
+            if _namespace_call(n):
+                return True
+            if isinstance(n, _ast.Name):
+                return n.id in aliases
+            if isinstance(n, _ast.Attribute):
+                return n.attr == "__dict__" and _namespace_expr(n.value)
+            if isinstance(n, _ast.Subscript):
+                return ((isinstance(n.value, _ast.Attribute) and n.value.attr == "modules")
+                        or _namespace_expr(n.value))
+            if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Attribute):
+                return n.func.attr == "import_module"
+            return False
+
+        while True:
+            grown = len(aliases)
+            for node in _ast.walk(tree):
+                targets = []
+                if isinstance(node, _ast.Assign):
+                    targets = node.targets
+                elif isinstance(node, (_ast.AnnAssign, _ast.NamedExpr)):
+                    targets = [node.target]
+                if targets and getattr(node, "value", None) is not None and _namespace_expr(node.value):
+                    for tgt in targets:
+                        for leaf in _ast.walk(tgt):
+                            if isinstance(leaf, _ast.Name):
+                                aliases.add(leaf.id)
+            if len(aliases) == grown:
+                break
+
         for node in tree.body:
             if isinstance(node, _ast.Assign) and len(node.targets) == 1 \
                     and isinstance(node.targets[0], _ast.Name):
                 top.setdefault(node.targets[0].id, []).append(node.value)
-        for node in _ast.walk(tree):
+
+        def _module_wide(node):
+            """Rules that reach the module from ANY scope: a rebinding by
+            string or attribute through a namespace expression, a construct
+            that may do anything, a mutation of an object a module name
+            holds, and the load census."""
+            if isinstance(node, (_ast.Global, _ast.Nonlocal)):
+                for n in node.names:
+                    _d(n)["blocked"] = True
+            elif isinstance(node, (_ast.Import, _ast.ImportFrom)):
+                for a in node.names:
+                    if a.name == "*":
+                        opaque[0] = "import *"   # may rebind ANY module name (c3 D)
+                    _d(a.asname or a.name.split(".")[0])["blocked"] = True
+            elif isinstance(node, _ast.NamedExpr):
+                _block_leaves(node.target)   # a walrus binds the ENCLOSING scope (a default, a comprehension)
+            elif isinstance(node, _ast.Subscript) and isinstance(node.ctx, (_ast.Store, _ast.Del)) \
+                    and _namespace_expr(node.value):
+                # globals()["Q"] = ... rebinds a module name by STRING (c3 D):
+                # a constant key blocks that name, anything else the module.
+                if _const_str(node.slice) and not (isinstance(node.value, _ast.Call) and node.value.args):
+                    _d(node.slice.value)["blocked"] = True
+                else:
+                    opaque[0] = "namespace store"
+            elif isinstance(node, _ast.Attribute) and isinstance(node.ctx, (_ast.Store, _ast.Del)) \
+                    and _namespace_expr(node.value):
+                _d(node.attr)["blocked"] = True   # sys.modules[__name__].Q = ... / ns.Q = ... (c5 E)
+            elif isinstance(node, _ast.Call) and isinstance(node.func, _ast.Attribute) \
+                    and _namespace_expr(node.func.value):
+                opaque[0] = "namespace method"   # globals().update(...) et al.
+            elif isinstance(node, _ast.Call) and isinstance(node.func, _ast.Name) \
+                    and node.func.id in ("exec", "eval", "__import__"):
+                opaque[0] = node.func.id
+            elif isinstance(node, _ast.Call) and isinstance(node.func, _ast.Name) \
+                    and node.func.id == "setattr":
+                tgt = node.args[0] if node.args else None
+                attr = node.args[1] if len(node.args) > 1 else None
+                if isinstance(tgt, (_ast.Subscript, _ast.Call)) or _namespace_expr(tgt) \
+                        or (isinstance(tgt, _ast.Name) and tgt.id in imported):
+                    # setattr(sys.modules[__name__], ...) / setattr(<module>, ...)
+                    if _const_str(attr):
+                        _d(attr.value)["blocked"] = True
+                    else:
+                        opaque[0] = "setattr"
+            elif isinstance(node, _ast.Call) and (
+                    any(_namespace_expr(a.value if isinstance(a, _ast.Starred) else a) for a in node.args)
+                    or any(_namespace_expr(k.value) for k in node.keywords)):
+                opaque[0] = "namespace argument"   # the callee may write into it (c5 E)
+            elif (isinstance(node, _ast.Call)
+                    and isinstance(node.func, _ast.Attribute)
+                    and isinstance(node.func.value, _ast.Name)):
+                if node.func.attr in _READONLY_METHODS:
+                    safe_loads.add(id(node.func.value))
+                else:
+                    _d(node.func.value.id)["blocked"] = True
+            elif isinstance(node, (_ast.Attribute, _ast.Subscript)) \
+                    and isinstance(node.ctx, (_ast.Store, _ast.Del)) \
+                    and isinstance(node.value, _ast.Name):
+                _d(node.value.id)["blocked"] = True
+            if isinstance(node, _ast.Name) and isinstance(node.ctx, _ast.Load):
+                loads.setdefault(node.id, []).append(node)
+
+        def _module_binding(node):
+            """Name stores that bind the MODULE's names: only outside a
+            function, lambda or class body (c5 E) — inside one they bind
+            that scope's names, and a `global` declaration (blocked above)
+            is the only way back to the module."""
             if isinstance(node, _SCOPES):
                 if not isinstance(node, _ast.Lambda):
                     _d(node.name)["blocked"] = True
-                for a in _arg_names(node):
-                    _d(a)["blocked"] = True
-                for tp in getattr(node, "type_params", ()):
-                    _d(tp.name)["blocked"] = True
             elif isinstance(node, _ast.ClassDef):
                 _d(node.name)["blocked"] = True
             elif hasattr(_ast, "Match") and isinstance(node, _ast.Match):
@@ -2204,14 +2303,6 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
             elif _TYPE_ALIAS is not None and isinstance(node, _TYPE_ALIAS):
                 if isinstance(node.name, _ast.Name):
                     _d(node.name.id)["blocked"] = True
-            elif isinstance(node, (_ast.Global, _ast.Nonlocal)):
-                for n in node.names:
-                    _d(n)["blocked"] = True
-            elif isinstance(node, (_ast.Import, _ast.ImportFrom)):
-                for a in node.names:
-                    if a.name == "*":
-                        opaque[0] = "import *"   # may rebind ANY module name (c3 D)
-                    _d(a.asname or a.name.split(".")[0])["blocked"] = True
             elif isinstance(node, _ast.ExceptHandler) and node.name:
                 _d(node.name)["blocked"] = True
             elif isinstance(node, _ast.Assign):
@@ -2220,7 +2311,7 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
                 else:
                     for tgt in node.targets:
                         _block_leaves(tgt)
-            elif isinstance(node, (_ast.AugAssign, _ast.AnnAssign, _ast.NamedExpr)):
+            elif isinstance(node, (_ast.AugAssign, _ast.AnnAssign)):
                 _block_leaves(node.target)
             elif isinstance(node, (_ast.For, _ast.AsyncFor)):
                 _block_leaves(node.target)
@@ -2231,44 +2322,18 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
                     _block_leaves(tgt)
             elif isinstance(node, _ast.comprehension):
                 _block_leaves(node.target)
-            elif (isinstance(node, _ast.Call)
-                    and isinstance(node.func, _ast.Attribute)
-                    and isinstance(node.func.value, _ast.Name)):
-                if node.func.attr in _READONLY_METHODS:
-                    safe_loads.add(id(node.func.value))
-                else:
-                    _d(node.func.value.id)["blocked"] = True
-            elif isinstance(node, _ast.Subscript) and isinstance(node.ctx, (_ast.Store, _ast.Del)) \
-                    and _namespace_call(node.value):
-                # globals()["Q"] = ... rebinds a module name by STRING (c3 D):
-                # a constant key blocks that name, anything else the module.
-                if _const_str(node.slice) and not node.value.args:
-                    _d(node.slice.value)["blocked"] = True
-                else:
-                    opaque[0] = "namespace store"
-            elif isinstance(node, _ast.Call) and isinstance(node.func, _ast.Attribute) \
-                    and _namespace_call(node.func.value):
-                opaque[0] = "namespace method"   # globals().update(...) et al.
-            elif isinstance(node, _ast.Call) and isinstance(node.func, _ast.Name) \
-                    and node.func.id in ("exec", "eval", "__import__"):
-                opaque[0] = node.func.id
-            elif isinstance(node, _ast.Call) and isinstance(node.func, _ast.Name) \
-                    and node.func.id == "setattr":
-                tgt = node.args[0] if node.args else None
-                attr = node.args[1] if len(node.args) > 1 else None
-                if isinstance(tgt, (_ast.Subscript, _ast.Call)) \
-                        or (isinstance(tgt, _ast.Name) and tgt.id in imported):
-                    # setattr(sys.modules[__name__], ...) / setattr(<module>, ...)
-                    if _const_str(attr):
-                        _d(attr.value)["blocked"] = True
-                    else:
-                        opaque[0] = "setattr"
-            elif isinstance(node, (_ast.Attribute, _ast.Subscript)) \
-                    and isinstance(node.ctx, (_ast.Store, _ast.Del)) \
-                    and isinstance(node.value, _ast.Name):
-                _d(node.value.id)["blocked"] = True
-            if isinstance(node, _ast.Name) and isinstance(node.ctx, _ast.Load):
-                loads.setdefault(node.id, []).append(node)
+
+        # An explicit stack, not recursion: a long elif chain nests one If
+        # per branch and a module this size has chains deeper than is safe.
+        stack = [(tree, False)]
+        while stack:
+            node, local = stack.pop()
+            _module_wide(node)
+            if not local:
+                _module_binding(node)
+            inner = local or isinstance(node, _SCOPES) or isinstance(node, _ast.ClassDef)
+            for child in _ast.iter_child_nodes(node):
+                stack.append((child, inner))
         if opaque[0]:
             return {}
         consts = {}
@@ -2284,6 +2349,7 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
         return consts
 
     mod_consts = {m: _module_consts(tree) for m, tree in trees.items()}
+    _module_view = [None]   # the module whose constants a module-constant recursion resolves against (c5 E)
 
     def _string_variants(node, env, consts, site_scope, site_cond, site_line,
                          depth=0):
@@ -2325,9 +2391,13 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
                     # (a negative bind_line is a module constant: bound
                     # before every site, other module constants included)
                     # A module constant was evaluated at import time, outside
-                    # every loop: it resolves under an EMPTY env, never the
-                    # site's loop row (c3 D).
-                    return _string_variants(value, {} if bind_line < 0 else env, consts,
+                    # every loop and against the MODULE's names: it resolves
+                    # under an EMPTY env, never the site's loop row (c3 D),
+                    # and against the module's own constants, not the site's
+                    # shadowed view of them (c5 E).
+                    return _string_variants(value, {} if bind_line < 0 else env,
+                                            _module_view[0] if bind_line < 0 and _module_view[0] is not None
+                                            else consts,
                                             bind_scope, bind_cond, bind_line, depth + 1)
             return None
         if isinstance(node, _ast.IfExp):
@@ -2443,6 +2513,7 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
         """All text() SQL strings in one function: [(line, sql)] plus
         dynamic (statically unresolvable) call sites [line]."""
         found, dyn = [], []
+        _module_view[0] = mod_consts[mod]
         consts, loop_ok, expansion_disabled, bound_here = _analyze_bindings(fn_node)
         if expansion_disabled:
             consts, loop_ok = {}, set()
@@ -23777,15 +23848,17 @@ async def _pc_verified_actor(request, steam_id: str, sig: str, canon: str, db: A
     expected = hmac.new(MATCH_HMAC_SECRET.encode(), canon.encode(), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(sig or "", expected):
         raise HTTPException(status_code=403, detail="Invalid signature")
+    # Identity serialization (c3 A, c5 A): the identity advisory lock in its
+    # SHARED form, held to the end of this transaction and taken BEFORE the
+    # session proof. delete_player_data and the ban writer hold the exclusive
+    # form across their purges (the pc_* sweep and anonymisation; the session
+    # purge and the consent withdrawal), so the session and the row read
+    # below either predate such a transaction — which then waits for this
+    # one and purges after it — or follow its commit and see the purge (401 /
+    # 410). Taken before the first write of every Player Cards route (#282).
+    await db.execute(text("SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))"), {"sid": steam_id})
     if not await _strict_steam_session_ok(request, steam_id, db):
         raise HTTPException(status_code=401, detail="session_required")
-    # Deletion serialization (c3 A): the identity advisory lock in its SHARED
-    # form, held to the end of this transaction. delete_player_data holds the
-    # exclusive form across its pc_* sweep and the anonymisation, so the row
-    # read below either predates a deletion (whose sweep then removes what
-    # this request writes) or follows its commit and sees deleted_at (410).
-    # Taken before the first write of every Player Cards route (#282).
-    await db.execute(text("SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))"), {"sid": steam_id})
     player = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
     if player is None:
         raise HTTPException(status_code=404, detail="Player not found")
@@ -24106,6 +24179,40 @@ async def pc_open_pack(
             _ = uuid.UUID(pack_id)
         except Exception:
             raise HTTPException(status_code=404, detail="Pack not found")
+        # An EARNED pack's series must still stand (c5 B): read before the
+        # claim, no lock (see _PC_SERIES_STANDING_SQL). A pack whose series
+        # was invalidated — or is gone — is voided here and answered as such.
+        held = (await db.execute(text("""
+            SELECT source, mode, reference_id FROM pc_packs
+             WHERE id = CAST(:pack AS uuid) AND player_id = CAST(:pid AS uuid) AND status = 'unopened'
+        """), {"pack": pack_id, "pid": pid})).mappings().first()
+        if held is not None and held["source"] == "earned":
+            ref_text = str(held["reference_id"] or "")
+            series_ref = ref_text.split(":", 1)[1] if ":" in ref_text else ""
+            checked, standing = False, None
+            for standing_mode, standing_sql in _PC_SERIES_STANDING_SQL.items():
+                if standing_mode != held["mode"]:
+                    continue
+                try:
+                    _ = uuid.UUID(series_ref)
+                except Exception:
+                    break
+                checked = True
+                standing = (await db.execute(text(standing_sql), {"ref": series_ref})).mappings().first()
+            if checked and (standing is None or standing["invalidated_at"] is not None):
+                await db.execute(text("""
+                    UPDATE pc_packs SET status = 'voided', voided_at = now()
+                     WHERE id = CAST(:pack AS uuid) AND status = 'unopened'
+                """), {"pack": pack_id})
+                await db.commit()
+                row = (await db.execute(text("""
+                    SELECT id, status, source, mode, kind, pay, price, reject_reason, created_at, opened_at
+                      FROM pc_packs WHERE id = CAST(:pack AS uuid) AND player_id = CAST(:pid AS uuid)
+                """), {"pack": pack_id, "pid": pid})).mappings().first()
+                answer = await _pc_pack_answer(db, row) if row is not None else {"pack_id": pack_id}
+                print(f"[PC-OPEN] player={steam_id} pack={pack_id}: earned pack of an invalidated "
+                      f"{held['mode']} series voided at open")
+                raise HTTPException(status_code=410, detail={"error": "voided", **answer})
         claim = (await db.execute(text("""
             UPDATE pc_packs SET status = 'opening'
              WHERE id = CAST(:pack AS uuid) AND player_id = CAST(:pid AS uuid) AND status = 'unopened'
@@ -24319,6 +24426,11 @@ async def _pc_claim_daily(db: AsyncSession, player, *, via: str) -> dict:
     if gone is not None:
         await db.rollback()
         raise HTTPException(status_code=410, detail="Account deleted")
+    if (await _is_banned(db, steam_id)) is not None:
+        # A ban withdraws this path too (c5): the mod's routes are closed by
+        # the ban's session purge; this one has no session to purge.
+        await db.rollback()
+        raise HTTPException(status_code=403, detail={"error": "banned"})
     await db.execute(text("SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE"), {"pid": pid})
     claimed = (await db.execute(text("""
         INSERT INTO pc_daily_claims (player_id, claimed_on)
@@ -24657,6 +24769,7 @@ _PC_EVENTS_SKIP_SQL = """
                 AND (e.print_id IS NULL OR EXISTS (SELECT 1 FROM pc_prints pr WHERE pr.id = e.print_id AND pr.discarded_at IS NULL)))
 """
 
+_PC_EVENTS_PAGE = 20   # one page of the pending drain; the bot holds a full page's last print group for the next page (c5 F)
 _PC_EVENTS_PENDING_SQL = """
     SELECT e.id, e.kind, e.created_at, e.print_id,
            pl.display_name AS puller_name, pl.steam_id AS puller_steam_id, pl.discord_id AS puller_discord_id,
@@ -24703,7 +24816,7 @@ async def internal_pc_events_pending(
         "print": ({"print_id": str(r["print_id"]), "rarity": r["rarity"], "foil": bool(r["foil"]),
                    "signed": bool(r["signed"]), "pool_rank": int(r["pool_rank"]),
                    "rating": _pc_num(r["rating"]), "title": r["title"]} if r["rarity"] is not None else None),
-    } for r in rows]}
+    } for r in rows], "page_size": _PC_EVENTS_PAGE}
 
 
 @app.post("/api/v1/internal/pc/events/ack", tags=["Internal"])
@@ -24939,6 +25052,18 @@ _PC_RECONCILE_LOCK_SQL = {
     "ffa": "SELECT invalidated_at FROM ffa_matches WHERE id = CAST(:ref AS uuid) FOR SHARE",
 }
 
+# The open route's standing check (c5 B): a plain read, no lock — it closes
+# the window between an invalidation and the void sweep (whatever the sweep's
+# cadence); the residual race, a reversal committing between this read and
+# the open's commit, is the inline one — the reversal's void then finds the
+# pack done.
+_PC_SERIES_STANDING_SQL = {
+    "1v1": "SELECT invalidated_at FROM ranked_series WHERE id = CAST(:ref AS uuid)",
+    "team": "SELECT invalidated_at FROM team_series WHERE id = CAST(:ref AS uuid)",
+    "ovt": "SELECT invalidated_at FROM ovt_series WHERE id = CAST(:ref AS uuid)",
+    "ffa": "SELECT invalidated_at FROM ffa_matches WHERE id = CAST(:ref AS uuid)",
+}
+
 _pc_reconcile_last_monotonic = 0.0
 PC_RECONCILE_EVERY_S = 600
 
@@ -24968,7 +25093,7 @@ def _pc_ffa_sweep(report) -> bool:
 
 
 async def _pc_grant_earned_packs(db: AsyncSession, *, mode: str, series_id, winner_ids, sweep: bool,
-                                 label: str, kind: str | None = None) -> list:
+                                 label: str, kind: str | None = None, busy: list | None = None) -> list:
     """Inside the caller's savepoint (or the reconciler's transaction). One
     roll for the series (the reconciler passes the roll it already made); an
     unopened pack per live winner when it hits, idempotent on (player,
@@ -25000,6 +25125,8 @@ async def _pc_grant_earned_packs(db: AsyncSession, *, mode: str, series_id, winn
             {"sid": who["steam_id"]})).scalar_one_or_none()
         if not held:
             print(f"[PC-EARNED] {label} mode={mode} ref={ref} player={pid}: identity busy, left to the reconciler")
+            if busy is not None:
+                busy.append(pid)   # the reconciler holds its cursor at this completion (c5 B)
             continue
         gone = (await db.execute(text(
             "SELECT deleted_at FROM players WHERE id = CAST(:pid AS uuid)"), {"pid": str(pid)})).scalar_one_or_none()
@@ -25026,18 +25153,19 @@ async def _pc_void_earned_packs(db: AsyncSession, *, mode: str, series_id, label
     return len(rows)
 
 
-async def _pc_reconcile_one(db: AsyncSession, source: str, r) -> int:
+async def _pc_reconcile_one(db: AsyncSession, source: str, r) -> tuple:
     """One scanned completion (c3 B): the same deterministic roll first — a
     miss costs nothing further; on a hit, every STORED winner without a pack
     row for this reference is granted, and only after the series row is
     share-locked and re-read as still valid. A winner the inline hook
     already answered (unopened, voided, opening, done) is never revisited,
-    so inline and reconcile can never name two recipient sets. Returns the
-    number of packs inserted."""
+    so inline and reconcile can never name two recipient sets. Returns
+    (packs inserted, whether a recipient was skipped as identity-busy) —
+    the caller holds its cursor at a skipped completion (c5 B)."""
     ref = _pc_earned_ref(source, r["ref"])
     kind = _pc.earned_pack_kind(MATCH_HMAC_SECRET.encode(), source, str(r["ref"]), sweep=bool(r["sweep"]))
     if kind is None:
-        return 0
+        return 0, False
     missing = []
     for pid in (r["w1"], r["w2"]):
         if pid is None:
@@ -25049,23 +25177,31 @@ async def _pc_reconcile_one(db: AsyncSession, source: str, r) -> int:
         if have is None:
             missing.append(pid)
     if not missing:
-        return 0
+        return 0, False
     for lock_source, lock_sql in _PC_RECONCILE_LOCK_SQL.items():
         if lock_source != source:
             continue
         still = (await db.execute(text(lock_sql), {"ref": str(r["ref"])})).mappings().first()
         if still is None or still["invalidated_at"] is not None:
-            return 0
-    return len(await _pc_grant_earned_packs(db, mode=source, series_id=r["ref"], winner_ids=missing,
-                                            sweep=bool(r["sweep"]), label="reconcile", kind=kind))
+            return 0, False
+    busy: list = []
+    got = await _pc_grant_earned_packs(db, mode=source, series_id=r["ref"], winner_ids=missing,
+                                       sweep=bool(r["sweep"]), label="reconcile", kind=kind, busy=busy)
+    return len(got), bool(busy)
 
 
 async def _pc_reconcile_earned_packs(force: bool = False) -> None:
     """Janitor, every PC_RECONCILE_EVERY_S: per source, re-derive the grants
     of every completion newer than max(cursor - 24 h, started_at) and move
-    the cursor to the newest completion seen; then void the unopened packs
-    of every invalidated series. The first run plants the cursor at this
-    process's start and scans from it (nothing earlier is back-filled).
+    the cursor to the newest completion seen — or no further than the oldest
+    completion whose grant was skipped as identity-busy, so that one stays
+    inside the next window however far the scan reached (c5 B); then void
+    the unopened packs of every invalidated series. The first run plants the
+    cursor at this process's start and scans from it (nothing earlier is
+    back-filled). Without the match secret there is no deterministic roll:
+    the cursors are still planted (a later process with the secret then
+    scans from THIS one's start, not its own) and the void sweeps still run
+    (they need no secret); only the scan and the grants wait (c5 B).
     Idempotent: the same deterministic roll, the same ON CONFLICT insert; a
     voided pack keeps its reference row, so it is never re-granted; a series
     the inline hook already answered is never revisited (_pc_reconcile_one)."""
@@ -25075,10 +25211,7 @@ async def _pc_reconcile_earned_packs(force: bool = False) -> None:
         return
     _pc_reconcile_last_monotonic = now_mono
     if not MATCH_HMAC_SECRET:
-        # No secret, no deterministic roll — and no cursor movement, so the
-        # completions of the outage are re-derived once it is back (c3 B).
-        print("[PC-EARNED] reconcile skipped: MATCH_HMAC_SECRET not configured")
-        return
+        print("[PC-EARNED] reconcile: MATCH_HMAC_SECRET not configured - cursors planted, grants deferred, voids swept")
     from database import async_session
     async with async_session() as db:
         for source, scan_sql in _PC_RECONCILE_SQL.items():
@@ -25092,6 +25225,9 @@ async def _pc_reconcile_earned_packs(force: bool = False) -> None:
                 VALUES (CAST(:src AS text), CAST(:start AS timestamptz), CAST(:start AS timestamptz))
                 ON CONFLICT (source) DO NOTHING
             """), {"src": source, "start": _PROCESS_STARTED_WALL})
+            if not MATCH_HMAC_SECRET:
+                await db.commit()
+                continue
             cur = (await db.execute(text("""
                 SELECT GREATEST(cursor_at - INTERVAL '24 hours', started_at) AS since
                   FROM pc_reconcile_cursors WHERE source = CAST(:src AS text) FOR UPDATE
@@ -25099,18 +25235,24 @@ async def _pc_reconcile_earned_packs(force: bool = False) -> None:
             rows = (await db.execute(text(scan_sql), {"since": cur["since"]})).mappings().all()
             granted = 0
             newest = None
+            hold = None   # the oldest completion a busy identity left to a later pass
             for r in rows:
-                granted += await _pc_reconcile_one(db, source, r)
+                n, busy = await _pc_reconcile_one(db, source, r)
+                granted += n
                 if newest is None or r["completed_at"] > newest:
                     newest = r["completed_at"]
+                if busy and (hold is None or r["completed_at"] < hold):
+                    hold = r["completed_at"]
             if newest is not None:
+                at = newest if hold is None else min(newest, hold)
                 await db.execute(text("""
                     UPDATE pc_reconcile_cursors SET cursor_at = GREATEST(cursor_at, CAST(:at AS timestamptz))
                      WHERE source = CAST(:src AS text)
-                """), {"at": newest, "src": source})
+                """), {"at": at, "src": source})
             await db.commit()
-            if granted:
-                print(f"[PC-EARNED] reconcile source={source} scanned={len(rows)} granted={granted}")
+            if granted or hold is not None:
+                print(f"[PC-EARNED] reconcile source={source} scanned={len(rows)} granted={granted}"
+                      + (f" held_at={hold}" if hold is not None else ""))
         for vsource, void_sql in _PC_VOID_SWEEP_SQL.items():
             voided = (await db.execute(text(void_sql))).fetchall()
             if voided:
@@ -33297,6 +33439,17 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
         # The candidate scans additionally exclude active bans (round-16) and
         # the issuance branches re-check all members (round-17) — those stay
         # as defense-in-depth around this serialization.
+    # Player Cards (design v4 §11 G5, c3 J, c5 F): the binder goes private
+    # and the player's pulls stop being announced (the events drain re-checks
+    # pc_announce); the pool excludes active bans by its own predicate. Runs
+    # under the identity lock BEFORE the already_banned early return, like
+    # the session purge, so a repeat ban withdraws what a ban predating the
+    # feature never touched; pc_settings_revision advances so a settings
+    # compare-and-set read before this transaction is refused as stale.
+    await db.execute(text(
+        "UPDATE players SET pc_collection_public = false, pc_announce = false, "
+        "pc_settings_revision = pc_settings_revision + 1 WHERE steam_id = :sid"),
+        {"sid": target_steam_id})
     existing = await _is_banned(db, target_steam_id)
     if existing is not None:   # round-15 find 3: "" is an ACTIVE ban too
         return {"status": "already_banned", "reason": existing}
@@ -33306,12 +33459,6 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
     # audit details, response — carries this exact value.
     _ban_reason = ((reason or "").strip() or "violation")[:256]
     db.add(PlayerBan(steam_id=target_steam_id, reason=_ban_reason, banned_by_steam_id=admin_steam_id))
-    # Player Cards (design v4 §11 G5, c3 J): the binder goes private and the
-    # player's pulls stop being announced (the events drain re-checks
-    # pc_announce); the pool excludes active bans by its own predicate.
-    await db.execute(text(
-        "UPDATE players SET pc_collection_public = false, pc_announce = false WHERE steam_id = :sid"),
-        {"sid": target_steam_id})
     db.add(AdminAction(
         admin_steam_id=admin_steam_id, action="ban", target_steam_id=target_steam_id,
         # The NORMALIZED reason (round-16 find 6): audit and ban row must
