@@ -4341,6 +4341,7 @@ namespace CompetitiveRounds
                 // clears (I10 ordering), so in-flight responses that captured
                 // the old epoch at dispatch land into the void.
                 try { ApiClient.OnLocalIdentityChanged(); } catch { }
+                try { PlayerCardsUI.OnIdentityChanged(); } catch { }
                 try { MusicEntitlements.OnIdentityChanged(); } catch { }
                 try { MusicRatings.OnIdentityChanged(); } catch { }
                 _identityRefetchPending = true;
@@ -4355,6 +4356,7 @@ namespace CompetitiveRounds
                 // MusicEntitlements needs no clear here — its identity gate
                 // already rejects anonymous snapshots outright.
                 try { ApiClient.OnLocalIdentityChanged(); } catch { }
+                try { PlayerCardsUI.OnIdentityChanged(); } catch { }
                 _identityRefetchPending = true;
             }
             if (_identityRefetchPending && newResolved)

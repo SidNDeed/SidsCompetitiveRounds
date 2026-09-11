@@ -64,3 +64,16 @@ def test_client_prints_per_pack_and_prices_come_from_the_server():
     body = src[src.index("private static void RefreshInfo"):src.index("// ── actions")]
     assert re.search(r"TrF\(\"- Buy one for \{0\} gold or \{1\} shards, up to \{2\} paid packs a day\.\", gold, shards, cap\)", body)
     assert re.search(r"TrF\(\"Each pack holds \{0\} cards\.", body)
+
+
+def test_the_pre_answer_fallbacks_are_the_servers_economy():
+    """Before /pc/me answers, RefreshInfo renders fixed fallbacks; they must
+    equal PC_ECONOMY too, or a retune shows stale numbers on a failed fetch
+    (c4 LOW)."""
+    eco = _economy()
+    src = CLIENT.read_text(encoding="utf-8")
+    body = src[src.index("private static void RefreshInfo"):src.index("// ── actions")]
+    m = re.search(r"me\.price_gold : (\d+), shards = me != null \? me\.price_shards : (\d+);", body)
+    assert m and (int(m.group(1)), int(m.group(2))) == (int(eco["pack_price_gold"]), int(eco["pack_price_shards"]))
+    m = re.search(r"me\.paid_packs_per_day : (\d+), per = me != null \? me\.prints_per_pack : (\d+);", body)
+    assert m and (int(m.group(1)), int(m.group(2))) == (int(eco["paid_packs_per_day"]), int(eco["prints_per_pack"]))

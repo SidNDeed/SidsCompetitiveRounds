@@ -2935,6 +2935,12 @@ namespace CompetitiveRounds
             _shopCacheEpoch++;
             CachedShopItems = null;
             CachedInventory = null;
+            // Player Cards (c4): the same rule — the epoch first, then the clears.
+            _pcCacheEpoch++;
+            CachedPcMe = null; CachedPcCollection = null;
+            PcMeError = null; PcCollectionError = null;
+            PcMeFetchedAt = -1f; PcCollectionFetchedAt = -1f;
+            pcMeAttemptAt = -100f; pcCollAttemptAt = -100f;
             NativeUI.MarkDirty();
         }
 
@@ -3687,6 +3693,7 @@ namespace CompetitiveRounds
         public static string PcCollectionError { get; private set; }
         private static bool pcMeInFlight, pcCollInFlight;
         private static float pcMeAttemptAt = -100f, pcCollAttemptAt = -100f;   // the throttle keys on the last ATTEMPT, so a failing fetch is not re-fired by every repaint
+        private static int _pcCacheEpoch;   // advanced on every identity edge (c4): a landing from an older epoch never touches the cache
 
         private static string PcUrl(string path, string steamId, string canon, string extraQuery)
         {
@@ -3705,9 +3712,17 @@ namespace CompetitiveRounds
             if (pcMeInFlight) { callback?.Invoke(false, "in-flight"); return; }
             pcMeInFlight = true; pcMeAttemptAt = Time.realtimeSinceStartup;
             string url = PcUrl("me", steamId, $"pcread:{steamId}:me:-", null);
+            int epoch = _pcCacheEpoch;
             Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
             {
                 pcMeInFlight = false;
+                if (epoch != _pcCacheEpoch)
+                {
+                    // dispatched for a previous identity: never repaint the cache (c4)
+                    Plugin.Log.LogInfo("[PC] me answer dropped: identity changed");
+                    try { callback?.Invoke(false, "stale-identity"); } catch { }
+                    return;
+                }
                 if (ok)
                 {
                     var me = ParsePcMe(resp);
@@ -3729,9 +3744,16 @@ namespace CompetitiveRounds
             if (pcCollInFlight) { callback?.Invoke(false, "in-flight"); return; }
             pcCollInFlight = true; pcCollAttemptAt = Time.realtimeSinceStartup;
             string url = PcUrl("collection", steamId, $"pcread:{steamId}:collection:-", null);
+            int epoch = _pcCacheEpoch;
             Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
             {
                 pcCollInFlight = false;
+                if (epoch != _pcCacheEpoch)
+                {
+                    Plugin.Log.LogInfo("[PC] collection answer dropped: identity changed");
+                    try { callback?.Invoke(false, "stale-identity"); } catch { }
+                    return;
+                }
                 if (ok)
                 {
                     var col = ParsePcCollection(resp);
@@ -3799,10 +3821,11 @@ namespace CompetitiveRounds
         public static void PcDiscard(string steamId, string printId, Action<bool, string> callback)
         {
             string url = PcUrl("prints/discard", steamId, $"pcdiscard:{steamId}:{printId}", $"print_id={printId}");
+            int epoch = _pcCacheEpoch;
             Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
             {
                 Plugin.Log.LogInfo($"[PC] discard {printId} ok={ok} resp={PcShort(resp)}");
-                if (ok && CachedPcMe != null)
+                if (ok && epoch == _pcCacheEpoch && CachedPcMe != null)
                 {
                     string sh = PcTopLevel(resp, "shards");
                     if (sh != null) CachedPcMe.shards = PcInt(sh);
@@ -3819,10 +3842,11 @@ namespace CompetitiveRounds
         {
             string url = PcUrl("settings", steamId, $"pcset:{steamId}:{nonce}:{revision}:{key}:{value}",
                 $"nonce={nonce}&revision={revision}&key={key}&value={value}");
+            int epoch = _pcCacheEpoch;
             Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
             {
                 Plugin.Log.LogInfo($"[PC] set {key}={value} rev={revision} ok={ok} resp={PcShort(resp)}");
-                if (ok && CachedPcMe != null) PcApplySettings(CachedPcMe, resp);
+                if (ok && epoch == _pcCacheEpoch && CachedPcMe != null) PcApplySettings(CachedPcMe, resp);
                 try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] settings callback threw: {cex.Message}"); }
             }));
         }
@@ -4102,7 +4126,7 @@ namespace CompetitiveRounds
                 string e = PcTopLevel(detail, "error");
                 return e != null ? (PcStr(e) ?? "http") : "http";
             }
-            return PcStr(detail) ?? "http";
+            return "http";   // a plain-string detail (FastAPI's default) is not a named code (c4)
         }
 
         /// <summary>HTTP status of a failed call's "HTTP <code>: ..." line, 0 when none.</summary>
@@ -4124,6 +4148,18 @@ namespace CompetitiveRounds
             if (detail == null || !detail.StartsWith("{", StringComparison.Ordinal)) return -1;
             string v = PcTopLevel(detail, key);
             return v == null || v == "null" ? -1 : PcInt(v);
+        }
+        /// <summary>A string field of a failed call's detail object (e.g. the
+        /// committed `status` of a rejection); null when absent.</summary>
+        public static string PcErrorStr(string resp, string key)
+        {
+            if (string.IsNullOrEmpty(resp)) return null;
+            int b = resp.IndexOf('{');
+            if (b < 0) return null;
+            string detail = PcTopLevel(resp.Substring(b), "detail");
+            if (detail == null || !detail.StartsWith("{", StringComparison.Ordinal)) return null;
+            string v = PcTopLevel(detail, key);
+            return v == null || v == "null" ? null : PcStr(v);
         }
         // ── end Player Cards ─────────────────────────────────────────────────
 

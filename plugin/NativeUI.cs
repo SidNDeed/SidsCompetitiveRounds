@@ -8421,7 +8421,12 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             Vector2 p = Input.mousePosition;
             return p.x >= min.x && p.x <= max.x && p.y >= min.y && p.y <= max.y;
         }
-        public static void ShowInfoPopup(string title, string body)
+        public static void ShowInfoPopup(string title, string body) => ShowInfoPopup(title, body, false);
+        /// <summary>Raw variant (c4): title and body are set through SetTextRaw,
+        /// so a user-authored name never passes I18n.Tr (#602). Callers
+        /// translate their own labels line by line.</summary>
+        public static void ShowInfoPopupRaw(string title, string body) => ShowInfoPopup(title, body, true);
+        private static void ShowInfoPopup(string title, string body, bool raw)
         {
             try
             {
@@ -8468,12 +8473,14 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 boxRT.sizeDelta = new Vector2(960, popupH);
                 UIFactory.AddVLG(box, spacing: 10, padL: 30, padR: 30, padT: 22, padB: 20);
 
-                UIFactory.CreateText("IPTitle", box.transform, title ?? "",
+                var titleTxt = UIFactory.CreateText("IPTitle", box.transform, raw ? "" : (title ?? ""),
                     34f, C_GOLD, UIFactory.AlignMidCenter, sizeDelta: new Vector2(900, 46));
+                if (raw) UIFactory.SetTextRaw(titleTxt, title ?? "");
                 var sv = UIFactory.CreateScrollView("IPScroll", box.transform, spacing: 0);
                 UIFactory.AddLE(sv.scrollGO, flexH: 1, prefH: 880);
-                var bodyTxt = UIFactory.CreateText("IPBody", sv.content.transform, body ?? "",
+                var bodyTxt = UIFactory.CreateText("IPBody", sv.content.transform, raw ? "" : (body ?? ""),
                     24f, C_LABEL, UIFactory.AlignTopLeft, sizeDelta: new Vector2(890, 860));
+                if (raw) UIFactory.SetTextRaw(bodyTxt, body ?? "");
                 UIFactory.SetWordWrap(bodyTxt, true);
                 UIFactory.SetTextAutoHeight(bodyTxt);
                 UIFactory.CreateText("IPHint", box.transform, "<color=#888>click anywhere to close</color>",

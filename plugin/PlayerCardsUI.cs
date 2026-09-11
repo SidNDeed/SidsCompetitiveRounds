@@ -44,11 +44,10 @@ namespace CompetitiveRounds
         private const float TILE_W = 236f, TILE_H = 184f;
         private const int MAX_PACK_ROWS = 12;
         private const float INTENT_NOT_FOUND_RETIRE_S = 600f;     // design §6: not-found after 10 min = never claimed
-        private const float INTENT_HARD_RETIRE_S = 3600f;         // an intent that keeps failing for an hour is shown and dropped
 
         private class Tile
         {
-            public GameObject root, actions, btnDiscard, btnDupes;
+            public GameObject root, actions, btnView, btnDiscard, btnDupes;
             public object txtName, txtTitle, txtL1, txtL2, txtL3, txtL4, txtMark, txtSign, btnDiscardTxt, btnDupesTxt;
             public ApiClient.PcPrint print;   // the row's CURRENT binding — callbacks read this, never a captured print (#265)
             public int dupes;
@@ -86,6 +85,11 @@ namespace CompetitiveRounds
         private static GameObject btnBeCard, btnPublic, btnAnnounce;
         private static object btnBeCardTxt, btnPublicTxt, btnAnnounceTxt;
         private static bool setInFlight; private static float setAt;
+        // identity fence (c4): every callback captures uiEpoch at dispatch and
+        // returns when an identity edge advanced it; priceChangedAt gates a
+        // repeat purchase until /pc/me has answered after a price_changed.
+        private static int uiEpoch;
+        private static float priceChangedAt = -1f;
 
         // ── helpers ──────────────────────────────────────────────────────────
         private static string LocalId()
@@ -171,12 +175,37 @@ namespace CompetitiveRounds
         }
 
         // ── open intent (persisted BEFORE the request, cleared AFTER the answer) ──
-        private static bool HasIntent() { try { return Plugin.PcOpenIntent != null && !string.IsNullOrEmpty(Plugin.PcOpenIntent.Value); } catch { return false; } }
-        private static void WriteIntent(string kind, string reference, string pay, int price)
+        /// <summary>An intent of the CURRENT identity exists. An intent of
+        /// another identity is neither recovered nor cleared here (c4).</summary>
+        private static bool HasIntent() { string k, r; float a; return ReadIntent(out k, out r, out a); }
+        /// <summary>The stored intent belongs to another identity (c4): it stays
+        /// untouched for that identity and blocks a purchase on this one.</summary>
+        private static bool HasForeignIntent()
+        {
+            string v = null;
+            try { v = Plugin.PcOpenIntent?.Value; } catch { }
+            if (string.IsNullOrEmpty(v)) return false;
+            var parts = v.Split('|');
+            if (parts.Length < 6 || string.IsNullOrEmpty(parts[5])) return false;
+            var id = LocalId();
+            return id != null && parts[5] != id;
+        }
+        private static string ForeignIntentText() => I18n.Tr("Another account's pack is still being resolved on this PC - sign in as that account to finish it");
+        /// <summary>Persist the intent BEFORE the request leaves. False when the
+        /// config write did not take: the caller must not send the request — a
+        /// purchase whose answer could not be recovered is the worse failure (c4).</summary>
+        private static bool WriteIntent(string kind, string reference, string pay, int price)
         {
             long unix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            try { Plugin.PcOpenIntent.Value = $"{kind}|{reference}|{pay}|{price}|{unix}"; }
+            string v = $"{kind}|{reference}|{pay}|{price}|{unix}|{LocalId() ?? ""}";
+            try
+            {
+                Plugin.PcOpenIntent.Value = v;
+                if (Plugin.PcOpenIntent.Value == v) return true;
+            }
             catch (Exception ex) { Plugin.Log.LogWarning($"[PC] intent write failed: {ex.Message}"); }
+            try { Plugin.PcOpenIntent.Value = ""; } catch { }
+            return false;
         }
         private static void ClearIntent() { try { if (Plugin.PcOpenIntent != null) Plugin.PcOpenIntent.Value = ""; } catch { } }
         private static bool ReadIntent(out string kind, out string reference, out float ageS)
@@ -187,11 +216,28 @@ namespace CompetitiveRounds
             if (string.IsNullOrEmpty(v)) return false;
             var parts = v.Split('|');
             if (parts.Length < 5) { ClearIntent(); return false; }
+            // owner (sixth field): another identity's intent is left untouched (c4)
+            if (parts.Length >= 6 && !string.IsNullOrEmpty(parts[5]) && parts[5] != LocalId()) return false;
             kind = parts[0]; reference = parts[1];
             long unix; if (!long.TryParse(parts[4], out unix)) unix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             ageS = (float)(DateTimeOffset.UtcNow.ToUnixTimeSeconds() - unix);
             if ((kind != "buy" && kind != "pack") || string.IsNullOrEmpty(reference)) { ClearIntent(); return false; }
             return true;
+        }
+
+        /// <summary>Identity edge (c4): nothing of the previous identity's
+        /// Player Cards state survives — the last pack, the message, the armed
+        /// discard, the in-flight flags — and every in-flight callback lands
+        /// into the void (uiEpoch). The persisted intent is per identity and is
+        /// left alone. Called from the edge that clears ApiClient's caches.</summary>
+        internal static void OnIdentityChanged()
+        {
+            uiEpoch++;
+            lastPack = null; lastMsg = null;
+            openInFlight = claimInFlight = recoverInFlight = discardInFlight = setInFlight = false;
+            discardQueue.Clear(); armedPrintId = null; priceChangedAt = -1f;
+            recoverAt = 0f; meRefreshAt = 0f;
+            try { NativeUI.MarkDirty(); } catch { }
         }
 
         // ── NativeUI entry points ────────────────────────────────────────────
@@ -221,6 +267,17 @@ namespace CompetitiveRounds
             if (claimInFlight && Now - claimAt > 25f) { claimInFlight = false; NativeUI.MarkDirty(); }
         }
 
+        private static void ViewButton(int i, GameObject b)
+        {
+            if (UIFactory.tLE != null)
+            {
+                var el = b.GetComponent(UIFactory.tLE);
+                if (el != null) UnityEngine.Object.Destroy(el as UnityEngine.Object);
+            }
+            UIFactory.AddLE(b, prefH: 26, minH: 26, flexW: 1, flexH: 0);
+            viewBtns[i] = b; viewTxts[i] = UIFactory.GetButtonText(b);
+        }
+
         internal static void BuildInto(Transform parent)
         {
             view = View.Open; binderPage = 0; armedPrintId = null;
@@ -246,20 +303,14 @@ namespace CompetitiveRounds
             bar.AddComponent<RectTransform>();
             UIFactory.AddHLG(bar, spacing: 6, forceExpandH: true);
             UIFactory.AddLE(bar, prefH: 30, minH: 30, flexH: 0);
-            string[] names = { "Open Packs", "Binder", "Get packs" };
-            for (int i = 0; i < 3; i++)
-            {
-                int idx = i;
-                var b = UIFactory.CreateButton($"PcView{i}", bar.transform, names[i], 14f, C_LABEL, C_BTN,
-                    () => { view = (View)idx; NativeUI.MarkDirty(); }, sizeDelta: new Vector2(0, 26));
-                if (UIFactory.tLE != null)
-                {
-                    var el = b.GetComponent(UIFactory.tLE);
-                    if (el != null) UnityEngine.Object.Destroy(el as UnityEngine.Object);
-                }
-                UIFactory.AddLE(b, prefH: 26, minH: 26, flexW: 1, flexH: 0);
-                viewBtns[i] = b; viewTxts[i] = UIFactory.GetButtonText(b);
-            }
+            // Three literal sites (c4): a label must sit AT a harvested
+            // CreateButton call for the key catalogue to carry it.
+            ViewButton(0, UIFactory.CreateButton("PcView0", bar.transform, "Open Packs", 14f, C_LABEL, C_BTN,
+                () => { view = (View)0; NativeUI.MarkDirty(); }, sizeDelta: new Vector2(0, 26)));
+            ViewButton(1, UIFactory.CreateButton("PcView1", bar.transform, "Binder", 14f, C_LABEL, C_BTN,
+                () => { view = (View)1; NativeUI.MarkDirty(); }, sizeDelta: new Vector2(0, 26)));
+            ViewButton(2, UIFactory.CreateButton("PcView2", bar.transform, "Get packs", 14f, C_LABEL, C_BTN,
+                () => { view = (View)2; NativeUI.MarkDirty(); }, sizeDelta: new Vector2(0, 26)));
             txtStatus = UIFactory.CreateText("PcStatus", tabRoot.transform, "", 14f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(1000, 22));
 
             BuildOpenView(tabRoot.transform);
@@ -406,6 +457,10 @@ namespace CompetitiveRounds
             t.txtL4 = UIFactory.CreateText(name + "_4", inner.transform, "", 11f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(w, 16));
             t.txtMark = UIFactory.CreateText(name + "_m", inner.transform, "", 12f, C_GOLD, UIFactory.AlignMidLeft, sizeDelta: new Vector2(w, 16));
             t.txtSign = UIFactory.CreateText(name + "_s", inner.transform, "", 13f, C_SIGN, UIFactory.AlignMidCenter, sizeDelta: new Vector2(w, 18));
+            // No Truncate at these heights (c4): a taller fallback font (Cyrillic,
+            // Greek) must not blank a line — MailUI's rule.
+            foreach (var o in new[] { t.txtName, t.txtTitle, t.txtL1, t.txtL2, t.txtL3, t.txtL4, t.txtMark, t.txtSign })
+                UIFactory.FitOneLine(o);
             if (withActions)
             {
                 t.actions = new GameObject(name + "_a");
@@ -414,13 +469,52 @@ namespace CompetitiveRounds
                 UIFactory.AddHLG(t.actions, spacing: 4, forceExpandH: true);
                 UIFactory.AddLE(t.actions, prefH: 22, flexH: 0);
                 var tile = t;
-                t.btnDiscard = UIFactory.CreateButton(name + "_d", t.actions.transform, "Discard", 11f, C_WHITE, C_DANGER, () => OnDiscardClick(tile, false), sizeDelta: new Vector2(80, 20));
+                t.btnView = UIFactory.CreateButton(name + "_v", t.actions.transform, "View", 11f, C_WHITE, C_BTN, () => ShowCard(tile), sizeDelta: new Vector2(46, 20));
+                t.btnDiscard = UIFactory.CreateButton(name + "_d", t.actions.transform, "Discard", 11f, C_WHITE, C_DANGER, () => OnDiscardClick(tile, false), sizeDelta: new Vector2(76, 20));
                 t.btnDiscardTxt = UIFactory.GetButtonText(t.btnDiscard);
                 t.btnDupes = UIFactory.CreateButton(name + "_dd", t.actions.transform, "", 11f, C_WHITE, C_DANGER, () => OnDiscardClick(tile, true), sizeDelta: new Vector2(84, 20));
                 t.btnDupesTxt = UIFactory.GetButtonText(t.btnDupes);
             }
             t.root.SetActive(false);
             return t;
+        }
+
+        private static string RatingLine(ApiClient.PcPrint p)
+        {
+            // a subject without a recorded peak (null on the wire) peaks at their rating (c4)
+            float peak = p.peak_rating > 0f ? Mathf.Max(p.rating, p.peak_rating) : p.rating;
+            return I18n.TrF("Rating {0} | peak {1}", Mathf.RoundToInt(p.rating), Mathf.RoundToInt(peak));
+        }
+
+        private static string RankLine(ApiClient.PcPrint p) => p.board_rank > 0
+            ? I18n.TrF("Rank #{0} | {1}W {2}L", p.board_rank, p.series_wins, p.series_losses)
+            : I18n.TrF("Unranked | {0}W {1}L", p.series_wins, p.series_losses);   // off the board = "Unranked" (design v4 §2)
+
+        /// <summary>Design v4 §10 "tile actions: view": the full card in the
+        /// info popup. Raw body — the subject's name never passes I18n.Tr
+        /// (#602); the labels are translated line by line.</summary>
+        private static void ShowCard(Tile t)
+        {
+            var p = t?.print;
+            if (p == null) return;
+            string name = SafeName(p);
+            var lines = new List<string>();
+            string mark = RarityLabel(p.rarity);
+            if (p.foil) mark += " | " + I18n.Tr("FOIL");
+            if (p.signed) mark += " | " + I18n.Tr("SIGNED");
+            lines.Add(mark);
+            string title = !string.IsNullOrEmpty(p.title) ? p.title : (p.rank_name ?? "");
+            if (title.Length > 0) lines.Add(title);
+            lines.Add(RatingLine(p));
+            lines.Add(RankLine(p));
+            string tc = p.top_card ?? "";
+            try { tc = GameStateWatcher.StripRichText(tc); } catch { }
+            if (tc.Length > 0) lines.Add(I18n.TrF("Top card: {0}", tc));
+            lines.Add(I18n.TrF("Pool #{0} | Ed. {1} | {2}", p.pool_rank, p.edition_id ?? "", DateOnly(p.minted_at).Replace('-', '/')));
+            lines.Add(I18n.TrF("Print {0}", p.print_id ?? ""));
+            if (p.signed) lines.Add("~ " + name + " ~");
+            try { NativeUI.ShowInfoPopupRaw(name, string.Join("\n\n", lines.ToArray())); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[PC] card view failed: {ex.Message}"); }
         }
 
         private static void FillTile(Tile t, ApiClient.PcPrint p, int dupes)
@@ -434,10 +528,8 @@ namespace CompetitiveRounds
             UIFactory.SetTextRaw(t.txtName, name);
             string title = !string.IsNullOrEmpty(p.title) ? p.title : (p.rank_name ?? "");
             UIFactory.SetTextRaw(t.txtTitle, title);
-            UIFactory.SetTextRaw(t.txtL1, I18n.TrF("Rating {0} | peak {1}", Mathf.RoundToInt(p.rating), Mathf.RoundToInt(p.peak_rating)));
-            UIFactory.SetTextRaw(t.txtL2, p.board_rank > 0
-                ? I18n.TrF("Rank #{0} | {1}W {2}L", p.board_rank, p.series_wins, p.series_losses)
-                : I18n.TrF("Record {0}W {1}L", p.series_wins, p.series_losses));
+            UIFactory.SetTextRaw(t.txtL1, RatingLine(p));
+            UIFactory.SetTextRaw(t.txtL2, RankLine(p));
             string tc = p.top_card ?? "";
             try { tc = GameStateWatcher.StripRichText(tc); } catch { }
             if (tc.Length > 18) tc = tc.Substring(0, 18);
@@ -693,6 +785,7 @@ namespace CompetitiveRounds
             if (id == null || me == null) { if (id != null) ApiClient.FetchPcMe(id, true); return; }
             if (!SessionReady) { Say(ReasonText("session_required"), C_WARN); return; }
             if (openInFlight || (claimInFlight && Now - claimAt < 25f)) return;
+            if (HasForeignIntent()) { Say(ForeignIntentText(), C_WARN); return; }
             if (HasIntent()) { Say(I18n.Tr("A pack is still being resolved - hold on"), C_WARN); MaybeRecover(true); return; }
             if (me.daily_claimed)
             {
@@ -702,8 +795,10 @@ namespace CompetitiveRounds
             }
             claimInFlight = true; claimAt = Now;
             NativeUI.MarkDirty();
+            int ep = uiEpoch;
             ApiClient.PcClaimDaily(id, NewNonce(), (ok, resp) =>
             {
+                if (ep != uiEpoch) return;   // identity changed meanwhile (c4)
                 claimInFlight = false;
                 if (ok)
                 {
@@ -727,14 +822,27 @@ namespace CompetitiveRounds
             if (id == null || me == null) { if (id != null) ApiClient.FetchPcMe(id, true); return; }
             if (!SessionReady) { Say(ReasonText("session_required"), C_WARN); return; }
             if (openInFlight && Now - openAt < 25f) return;
+            if (HasForeignIntent()) { Say(ForeignIntentText(), C_WARN); return; }
             if (HasIntent()) { Say(I18n.Tr("A pack is still being resolved - hold on"), C_WARN); MaybeRecover(true); return; }
+            if (priceChangedAt >= 0f && ApiClient.PcMeFetchedAt <= priceChangedAt)
+            {
+                // the price the server answered is not the one we hold: refresh first (c4)
+                Say(I18n.Tr("Prices changed - refreshing them first"), C_WARN);
+                ApiClient.FetchPcMe(id, true);
+                return;
+            }
             if (me.paid_today >= me.paid_packs_per_day) { Say(ReasonText("daily_cap")); return; }
             int price = pay == "gold" ? me.price_gold : me.price_shards;
             string nonce = NewNonce();
-            WriteIntent("buy", nonce, pay, price);
+            if (!WriteIntent("buy", nonce, pay, price))
+            {
+                Say(I18n.Tr("Could not record the purchase on this PC - nothing was sent to the server"), C_WARN);
+                return;
+            }
             openInFlight = true; openAt = Now; lastMsg = null;
             NativeUI.MarkDirty();
-            ApiClient.PcOpenPack(id, nonce, pay, price, (ok, resp) => { openInFlight = false; HandleAnswer(ok, resp, false); });
+            int ep = uiEpoch;
+            ApiClient.PcOpenPack(id, nonce, pay, price, (ok, resp) => { if (ep != uiEpoch) return; openInFlight = false; HandleAnswer(ok, resp, false); });
         }
 
         private static void BeginOpenHeld(string packId)
@@ -743,11 +851,17 @@ namespace CompetitiveRounds
             if (id == null || string.IsNullOrEmpty(packId)) return;
             if (!SessionReady) { Say(ReasonText("session_required"), C_WARN); return; }
             if (openInFlight && Now - openAt < 25f) return;
+            if (HasForeignIntent()) { Say(ForeignIntentText(), C_WARN); return; }
             if (HasIntent()) { Say(I18n.Tr("A pack is still being resolved - hold on"), C_WARN); MaybeRecover(true); return; }
-            WriteIntent("pack", packId, "-", 0);
+            if (!WriteIntent("pack", packId, "-", 0))
+            {
+                Say(I18n.Tr("Could not record the pack open on this PC - nothing was sent to the server"), C_WARN);
+                return;
+            }
             openInFlight = true; openAt = Now; lastMsg = null;
             NativeUI.MarkDirty();
-            ApiClient.PcOpenUnopened(id, packId, (ok, resp) => { openInFlight = false; HandleAnswer(ok, resp, false); });
+            int ep = uiEpoch;
+            ApiClient.PcOpenUnopened(id, packId, (ok, resp) => { if (ep != uiEpoch) return; openInFlight = false; HandleAnswer(ok, resp, false); });
         }
 
         /// <summary>One handler for the open call and for result recovery. A
@@ -775,7 +889,12 @@ namespace CompetitiveRounds
                     try { CompetitiveUI.ShowNotification(I18n.TrF("Pack opened - {0} new cards", a.prints.Count), C_OK, 3f); } catch { }
                     if (view == View.Binder) view = View.Open;
                 }
-                else if (a.status == "rejected") { ClearIntent(); Say(ReasonText(a.reason ?? "http"), C_WARN); }
+                else if (a.status == "rejected")
+                {
+                    ClearIntent();
+                    if (a.reason == "price_changed") priceChangedAt = Now;   // the refetch below re-arms BeginBuy (c4)
+                    Say(ReasonText(a.reason ?? "http"), C_WARN);
+                }
                 else if (a.status == "unopened")
                 {
                     ClearIntent();
@@ -809,19 +928,22 @@ namespace CompetitiveRounds
                             if (!recovery || age > INTENT_NOT_FOUND_RETIRE_S) { ClearIntent(); Say(recovery ? I18n.Tr("That pack purchase never went through - nothing was charged") : I18n.Tr("That pack is not available any more"), C_WARN); }
                             else Say(I18n.Tr("Still waiting for the server to record your pack - checking again shortly"), C_WARN);
                         }
-                        else if (age > INTENT_HARD_RETIRE_S)
-                        {
-                            ClearIntent();
-                            Say(I18n.Tr("Your pack could not be resolved for an hour - check your binder and gold; contact Sid on Discord if something is missing"), C_WARN);
-                        }
-                        else Say(ReasonText(code), C_WARN);
+                        // Any other HTTP failure leaves the server's decision
+                        // unknown: the intent stays, however long it takes (c4);
+                        // only a committed answer or the not-found rule retires it.
+                        else Say(I18n.Tr("The server could not answer about your pack - checking again shortly"), C_WARN);
                         break;
                     default:
-                        // A named rejection is a committed row: the nonce is spent
-                        // and nothing was charged.
-                        ClearIntent();
-                        Say(ReasonText(code), C_WARN);
-                        break;
+                        {
+                            // A named code retires the intent only when it is the
+                            // COMMITTED row's own state (rejected / unopened /
+                            // voided); anything else keeps it for recovery (c4).
+                            string st = ApiClient.PcErrorStr(resp, "status");
+                            if (st == "rejected" || st == "unopened" || st == "voided") ClearIntent();
+                            if (code == "price_changed") priceChangedAt = Now;   // the refetch below re-arms BeginBuy (c4)
+                            Say(ReasonText(code), C_WARN);
+                            break;
+                        }
                 }
             }
             if (id != null)
@@ -844,8 +966,9 @@ namespace CompetitiveRounds
             recoverAt = Time.unscaledTime + 15f;
             recoverInFlight = true;
             Plugin.Log.LogInfo($"[PC] recovering {kind} intent (age {age:F0}s)");
+            int ep = uiEpoch;
             ApiClient.PcPackResult(id, kind == "buy" ? reference : null, kind == "pack" ? reference : null,
-                (ok, resp) => { recoverInFlight = false; HandleAnswer(ok, resp, true); });
+                (ok, resp) => { if (ep != uiEpoch) return; recoverInFlight = false; HandleAnswer(ok, resp, true); });
         }
 
         private static void OnDiscardClick(Tile t, bool dupes)
@@ -880,8 +1003,10 @@ namespace CompetitiveRounds
         {
             if (discardQueue.Count == 0) { FinishDiscard(id, null); return; }
             string pid = discardQueue[0]; discardQueue.RemoveAt(0);
+            int ep = uiEpoch;
             ApiClient.PcDiscard(id, pid, (ok, resp) =>
             {
+                if (ep != uiEpoch) return;   // identity changed meanwhile (c4)
                 if (ok)
                 {
                     discardDone++;
@@ -897,9 +1022,13 @@ namespace CompetitiveRounds
         private static void FinishDiscard(string id, string errorCode)
         {
             discardInFlight = false; discardQueue.Clear();
-            if (discardDone > 0)
+            // One line for both halves: what was discarded stays reported when
+            // the next discard fails (c4).
+            if (discardDone > 0 && errorCode != null)
+                Say(I18n.TrF("Discarded {0} card(s) for {1} shards; then: {2}", discardDone, discardShards, ReasonText(errorCode)), C_WARN);
+            else if (discardDone > 0)
                 Say(I18n.TrF("Discarded {0} card(s) for {1} shards", discardDone, discardShards), C_OK);
-            if (errorCode != null) Say(ReasonText(errorCode), C_WARN);
+            else if (errorCode != null) Say(ReasonText(errorCode), C_WARN);
             if (id != null) { ApiClient.FetchPcCollection(id, true); ApiClient.FetchPcMe(id, true); }
             NativeUI.MarkDirty();
         }
@@ -1010,8 +1139,10 @@ namespace CompetitiveRounds
             ApplySetting(me, key, after);
             NativeUI.MarkDirty();
             Plugin.Log.LogInfo($"[PC] setting {key} -> {(after ? 1 : 0)} (rev {revision})");
+            int ep = uiEpoch;
             ApiClient.PcSetSetting(id, NewNonce(), revision, key, after ? 1 : 0, (ok, resp) =>
             {
+                if (ep != uiEpoch) return;   // identity changed meanwhile (c4)
                 setInFlight = false;
                 if (!ok)
                 {
