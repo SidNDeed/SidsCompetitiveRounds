@@ -44,7 +44,9 @@ namespace CompetitiveRounds
         private const float TILE_W = 236f, TILE_H = 184f;
         private const int MAX_PACK_ROWS = 12;
         private const float INTENT_NOT_FOUND_RETIRE_S = 600f;     // design §6: not-found after 10 min = never claimed
-        private const float INTENT_FOREIGN_EXPIRE_S = 86400f;      // c5: a fence nobody can lift is the wrong default (#276)
+        private const char INTENT_SEP = '~';                      // c6: one journal entry per owner, joined by '~'
+        private const int INTENT_MAX_ENTRIES = 8;                 // c6: bound on the entries kept on one PC
+        private const int UNPARSEABLE_RETIRE_STRIKES = 3;         // c6: a 2xx the client cannot read, this many times running, retires the intent
 
         private class Tile
         {
@@ -80,6 +82,7 @@ namespace CompetitiveRounds
         // state
         private static bool openInFlight, claimInFlight, recoverInFlight;
         private static float openAt, claimAt, recoverAt, tickAt, meRefreshAt;
+        private static int unparseableStrikes;   // consecutive 2xx answers the client could not read (c6)
         private static ApiClient.PcPackAnswer lastPack;
         private static string lastMsg; private static Color lastMsgColor; private static float lastMsgAt;
         // settings rows
@@ -176,62 +179,101 @@ namespace CompetitiveRounds
         }
 
         // ── open intent (persisted BEFORE the request, cleared AFTER the answer) ──
-        /// <summary>An intent of the CURRENT identity exists. An intent of
-        /// another identity is neither recovered nor cleared here (c4).</summary>
+        // One entry PER OWNER (c6): "kind|ref|pay|price|unix|owner" entries joined
+        // by INTENT_SEP. Another account on this PC neither recovers, clears nor
+        // overwrites an entry that is not its own, so no fence and no expiry are
+        // needed - the c5 fence traded a lock-out against a loss; a journal keyed
+        // by owner has neither. Malformed or unowned entries are nobody's: dropped.
+        /// <summary>An intent of the CURRENT identity exists.</summary>
         private static bool HasIntent() { string k, r; float a; return ReadIntent(out k, out r, out a); }
-        /// <summary>The stored intent belongs to another identity (c4): it stays
-        /// untouched for that identity and blocks a purchase on this one.</summary>
-        private static bool HasForeignIntent()
+        /// <summary>Every well-formed owned entry; <paramref name="dirty"/> when a
+        /// malformed one was dropped (the caller rewrites the journal).</summary>
+        private static List<string[]> ReadIntents(out bool dirty)
         {
+            var list = new List<string[]>(); dirty = false;
             string v = null;
             try { v = Plugin.PcOpenIntent?.Value; } catch { }
-            if (string.IsNullOrEmpty(v)) return false;
-            var parts = v.Split('|');
-            if (parts.Length < 6 || string.IsNullOrEmpty(parts[5])) return false;   // unowned: ReadIntent discards it (c5)
-            var id = LocalId();
-            if (id == null || parts[5] == id) return false;
-            // The fence expires after a day (c5, #276): a committed pack is still
-            // listed by its owner's /pc/me, an uncommitted one is past every
-            // retire window, and a fence nobody on this PC can lift is worse.
-            long unix; if (!long.TryParse(parts[4], out unix)) return false;
-            return DateTimeOffset.UtcNow.ToUnixTimeSeconds() - unix < INTENT_FOREIGN_EXPIRE_S;
+            if (string.IsNullOrEmpty(v)) return list;
+            foreach (var raw in v.Split(INTENT_SEP))
+            {
+                if (raw.Length == 0) continue;
+                var parts = raw.Split('|');
+                long unix;
+                bool ok = parts.Length == 6 && (parts[0] == "buy" || parts[0] == "pack") && parts[1].Length > 0
+                          && long.TryParse(parts[4], out unix) && parts[5].Length > 0;
+                if (!ok) { dirty = true; Plugin.Log.LogWarning("[PC] malformed or unowned intent discarded"); continue; }
+                list.Add(parts);
+            }
+            return list;
         }
-        private static string ForeignIntentText() => I18n.Tr("Another account's pack is still being resolved on this PC - sign in as that account to finish it");
-        /// <summary>Persist the intent BEFORE the request leaves. False when the
-        /// config write did not take: the caller must not send the request — a
-        /// purchase whose answer could not be recovered is the worse failure (c4).</summary>
+        private static string JoinIntents(List<string[]> list)
+        {
+            var sb = new System.Text.StringBuilder();
+            foreach (var p in list) { if (sb.Length > 0) sb.Append(INTENT_SEP); sb.Append(string.Join("|", p)); }
+            return sb.ToString();
+        }
+        /// <summary>Write the journal and read it back; false when the write did not take.</summary>
+        private static bool WriteIntents(List<string[]> list)
+        {
+            string v = JoinIntents(list);
+            try
+            {
+                if (Plugin.PcOpenIntent == null) return false;
+                Plugin.PcOpenIntent.Value = v;
+                return Plugin.PcOpenIntent.Value == v;
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[PC] intent write failed: {ex.Message}"); return false; }
+        }
+        /// <summary>Persist THIS identity's intent BEFORE the request leaves. False
+        /// when the config write did not take: the caller must not send the request -
+        /// a purchase whose answer could not be recovered is the worse failure (c4).
+        /// Other owners' entries are carried unchanged; the oldest goes only past
+        /// INTENT_MAX_ENTRIES.</summary>
         private static bool WriteIntent(string kind, string reference, string pay, int price)
         {
             string owner = LocalId();
             if (string.IsNullOrEmpty(owner)) return false;   // an intent without an owner is nobody's to recover (c5)
-            long unix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            string v = $"{kind}|{reference}|{pay}|{price}|{unix}|{owner}";
-            try
+            bool dirty;
+            var list = ReadIntents(out dirty);
+            list.RemoveAll(p => p[5] == owner);
+            while (list.Count >= INTENT_MAX_ENTRIES)
             {
-                Plugin.PcOpenIntent.Value = v;
-                if (Plugin.PcOpenIntent.Value == v) return true;
+                int oldest = 0;
+                for (int i = 1; i < list.Count; i++) if (long.Parse(list[i][4]) < long.Parse(list[oldest][4])) oldest = i;
+                list.RemoveAt(oldest);
             }
-            catch (Exception ex) { Plugin.Log.LogWarning($"[PC] intent write failed: {ex.Message}"); }
-            try { Plugin.PcOpenIntent.Value = ""; } catch { }
-            return false;
+            long unix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            list.Add(new[] { kind, reference, pay, price.ToString(), unix.ToString(), owner });
+            return WriteIntents(list);
         }
-        private static void ClearIntent() { try { if (Plugin.PcOpenIntent != null) Plugin.PcOpenIntent.Value = ""; } catch { } }
+        /// <summary>Retire THIS identity's entry only.</summary>
+        private static void ClearIntent()
+        {
+            string owner = LocalId();
+            bool dirty;
+            var list = ReadIntents(out dirty);
+            int n = list.RemoveAll(p => owner != null && p[5] == owner);
+            if (n > 0 || dirty) WriteIntents(list);
+        }
+        /// <summary>This identity's entry, if any. Another identity's entries are left
+        /// untouched (c4/c6); malformed ones are dropped on the way (c5).</summary>
         private static bool ReadIntent(out string kind, out string reference, out float ageS)
         {
             kind = null; reference = null; ageS = 0f;
-            string v = null;
-            try { v = Plugin.PcOpenIntent?.Value; } catch { }
-            if (string.IsNullOrEmpty(v)) return false;
-            var parts = v.Split('|');
-            // owner (sixth field, c4/c5): an intent without one is nobody's -
-            // discarded, never adopted; another identity's is left untouched.
-            if (parts.Length < 6 || string.IsNullOrEmpty(parts[5])) { Plugin.Log.LogWarning("[PC] unowned intent discarded"); ClearIntent(); return false; }
-            if (parts[5] != LocalId()) return false;
-            kind = parts[0]; reference = parts[1];
-            long unix; if (!long.TryParse(parts[4], out unix)) unix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            ageS = (float)(DateTimeOffset.UtcNow.ToUnixTimeSeconds() - unix);
-            if ((kind != "buy" && kind != "pack") || string.IsNullOrEmpty(reference)) { ClearIntent(); return false; }
-            return true;
+            bool dirty;
+            var list = ReadIntents(out dirty);
+            if (dirty) WriteIntents(list);
+            string owner = LocalId();
+            if (owner == null) return false;
+            foreach (var p in list)
+            {
+                if (p[5] != owner) continue;
+                kind = p[0]; reference = p[1];
+                long unix = long.Parse(p[4]);
+                ageS = (float)(DateTimeOffset.UtcNow.ToUnixTimeSeconds() - unix);
+                return true;
+            }
+            return false;
         }
 
         /// <summary>Identity edge (c4): nothing of the previous identity's
@@ -245,7 +287,7 @@ namespace CompetitiveRounds
             lastPack = null; lastMsg = null;
             openInFlight = claimInFlight = recoverInFlight = discardInFlight = setInFlight = false;
             discardQueue.Clear(); armedPrintId = null; priceChangedAt = -1f;
-            recoverAt = 0f; meRefreshAt = 0f;
+            recoverAt = 0f; meRefreshAt = 0f; unparseableStrikes = 0;
             try { NativeUI.MarkDirty(); } catch { }
         }
 
@@ -800,7 +842,6 @@ namespace CompetitiveRounds
             if (id == null || me == null) { if (id != null) ApiClient.FetchPcMe(id, true); return; }
             if (!SessionReady) { Say(ReasonText("session_required"), C_WARN); return; }
             if (openInFlight || (claimInFlight && Now - claimAt < 25f)) return;
-            if (HasForeignIntent()) { Say(ForeignIntentText(), C_WARN); return; }
             if (HasIntent()) { Say(I18n.Tr("A pack is still being resolved - hold on"), C_WARN); MaybeRecover(true); return; }
             if (me.daily_claimed)
             {
@@ -837,7 +878,6 @@ namespace CompetitiveRounds
             if (id == null || me == null) { if (id != null) ApiClient.FetchPcMe(id, true); return; }
             if (!SessionReady) { Say(ReasonText("session_required"), C_WARN); return; }
             if (openInFlight && Now - openAt < 25f) return;
-            if (HasForeignIntent()) { Say(ForeignIntentText(), C_WARN); return; }
             if (HasIntent()) { Say(I18n.Tr("A pack is still being resolved - hold on"), C_WARN); MaybeRecover(true); return; }
             if (priceChangedAt >= 0f && ApiClient.PcMeDispatchedAt <= priceChangedAt)
             {
@@ -867,7 +907,6 @@ namespace CompetitiveRounds
             if (id == null || string.IsNullOrEmpty(packId)) return;
             if (!SessionReady) { Say(ReasonText("session_required"), C_WARN); return; }
             if (openInFlight && Now - openAt < 25f) return;
-            if (HasForeignIntent()) { Say(ForeignIntentText(), C_WARN); return; }
             if (HasIntent()) { Say(I18n.Tr("A pack is still being resolved - hold on"), C_WARN); MaybeRecover(true); return; }
             if (!WriteIntent("pack", packId, "-", 0))
             {
@@ -892,11 +931,22 @@ namespace CompetitiveRounds
             if (ok)
             {
                 var a = ApiClient.ParsePcPackAnswer(resp);
+                if (a != null) unparseableStrikes = 0;
                 if (a == null)
                 {
-                    // not a committed answer: the intent stays and recovery re-asks (c5)
-                    Say(I18n.Tr("The pack answer could not be read - checking again shortly"), C_WARN);
-                    Plugin.Log.LogWarning($"[PC] unparseable pack answer: {(resp != null && resp.Length > 200 ? resp.Substring(0, 200) : resp)}");
+                    // A 2xx the client cannot read (c5/c6): the server answered from
+                    // a committed row, so the intent's job - no second purchase of a
+                    // pack in flight - is done. One or two are given to a transient
+                    // truncation; the third retires the intent and points at the
+                    // binder, where the prints are. Gold is never at stake here.
+                    unparseableStrikes++;
+                    Plugin.Log.LogWarning($"[PC] unparseable pack answer ({unparseableStrikes}): {(resp != null && resp.Length > 200 ? resp.Substring(0, 200) : resp)}");
+                    if (unparseableStrikes >= UNPARSEABLE_RETIRE_STRIKES)
+                    {
+                        unparseableStrikes = 0; ClearIntent();
+                        Say(I18n.Tr("Your pack was opened but its answer could not be read - check your binder"), C_WARN);
+                    }
+                    else Say(I18n.Tr("The pack answer could not be read - checking again shortly"), C_WARN);
                 }
                 else if (a.status == "done")
                 {

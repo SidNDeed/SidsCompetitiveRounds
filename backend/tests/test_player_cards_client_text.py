@@ -80,22 +80,27 @@ def test_the_pre_answer_fallbacks_are_the_servers_economy():
 
 
 def test_the_intent_and_answer_rules_are_pinned_in_the_client():
-    """Source-shape pins for the c4/c5 client rules (a repair without a
+    """Source-shape pins for the c4/c5/c6 client rules (a repair without a
     reverting test is decoration)."""
     src = CLIENT.read_text(encoding="utf-8")
     api = (ROOT / "plugin" / "ApiClient.cs").read_text(encoding="utf-8")
-    # a verified, owner-tagged intent gates every purchase and pack open
-    assert 'string v = $"{kind}|{reference}|{pay}|{price}|{unix}|{owner}";' in src
+    # a verified, owner-keyed journal entry gates every purchase and pack open
+    assert "private const char INTENT_SEP = '~';" in src and "INTENT_MAX_ENTRIES = 8" in src
     assert "if (string.IsNullOrEmpty(owner)) return false;" in src
-    assert "if (Plugin.PcOpenIntent.Value == v) return true;" in src
+    assert "return Plugin.PcOpenIntent.Value == v;" in src
     assert src.count("if (!WriteIntent(") == 2
-    # an unowned intent is discarded, never adopted; a foreign one fences for a day
-    assert "[PC] unowned intent discarded" in src and "INTENT_HARD_RETIRE_S" not in src
-    assert "INTENT_FOREIGN_EXPIRE_S = 86400f" in src and "< INTENT_FOREIGN_EXPIRE_S" in src
-    # only a committed answer, the not-found rule or the deleted account retires it
+    # one entry per owner: another account's entry is neither read, cleared nor overwritten
+    assert "list.RemoveAll(p => p[5] == owner);" in src and "if (p[5] != owner) continue;" in src
+    assert "int n = list.RemoveAll(p => owner != null && p[5] == owner);" in src
+    assert "HasForeignIntent" not in src and "ForeignIntentText" not in src and "INTENT_FOREIGN_EXPIRE_S" not in src
+    # a malformed or unowned entry (bad timestamp included) is nobody's
+    assert "long.TryParse(parts[4], out unix)" in src and "malformed or unowned intent discarded" in src
+    assert "INTENT_HARD_RETIRE_S" not in src
+    # only a committed answer, the not-found rule, the deleted account or three
+    # unreadable 2xx answers retire it
     assert 'PcErrorStr(resp, "status")' in src and "if (http == 404)" in src and "if (http == 410)" in src
-    unparse = src[src.index("var a = ApiClient.ParsePcPackAnswer(resp);"):src.index('else if (a.status == "done")')]
-    assert "ClearIntent()" not in unparse and "checking again shortly" in unparse
+    assert "UNPARSEABLE_RETIRE_STRIKES = 3" in src and "unparseableStrikes >= UNPARSEABLE_RETIRE_STRIKES" in src
+    assert "if (a != null) unparseableStrikes = 0;" in src and "meRefreshAt = 0f; unparseableStrikes = 0;" in src
     assert 'return "http";   // a plain-string detail' in api
     # the price gate keys on when the /pc/me that produced the cache LEFT
     assert "ApiClient.PcMeDispatchedAt <= priceChangedAt" in src
@@ -106,3 +111,11 @@ def test_the_intent_and_answer_rules_are_pinned_in_the_client():
     # tiles clip (TMP Masking), never paint over the neighbour; catalogue titles are translated
     assert "UIFactory.SetOverflowMode(o, 2); UIFactory.SetWordWrap(o, false);" in src
     assert "lines.Add(I18n.Tr(title));" in src and 'title.Length > 0 ? I18n.Tr(title) : ""' in src
+    # the i18n source follows the client text (c6 L)
+    blob = (ROOT / "tools" / "i18n_source.json").read_text(encoding="utf-8")
+    for key in ("The pack answer could not be read - checking again shortly",
+                "Your pack was opened but its answer could not be read - check your binder",
+                "This account was deleted - there is no pack to recover"):
+        assert key in blob, key
+    assert "Another account's pack is still being resolved" not in blob
+    assert '"kind|ref|pay|price|unix|owner"' in (ROOT / "plugin" / "Plugin.cs").read_text(encoding="utf-8")

@@ -540,7 +540,6 @@
   "Announcement",
   "Anonymizes your Steam ID, display name, and Discord link. Matches stay so other players' Elo and histories aren't affected. You will no longer appear on leaderboards.\n<b><color=#FF8888>IRREVERSIBLE:</color></b> this Steam ID can never re-register. Future matches from this account will show as [Deleted User] and won't count toward stats.",
   "Another Round",
-  "Another account's pack is still being resolved on this PC - sign in as that account to finish it",
   "Anti-cheat",
   "Apex",
   "Appear offline (Home lists): <color=#88FF88>ON</color>",
@@ -2540,6 +2539,7 @@
   "Your no-show penalty: <color=#FFCC44>{0}%</color>",
   "Your opponent is banned from the mod - leaving match.",
   "Your opponent never joined. Returning to menu - you stay ready, and the server forfeits the match to you if they don't show.",
+  "Your pack was opened but its answer could not be read - check your binder",
   "Your personal breakdown appears here once gold data loads.",
   "Your pick missed the cutoff - no card this round.",
   "Your picks",
@@ -5505,11 +5505,6 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
-  },
-  "Another account's pack is still being resolved on this PC - sign in as that account to finish it": {
-   "surface": "PlayerCardsUI",
-   "location": "ForeignIntentText",
-   "kind": "Tr"
   },
   "Anti-cheat": {
    "surface": "InfoLibrary",
@@ -15505,6 +15500,11 @@
    "surface": "GameStateWatcher",
    "location": "PollRoomState",
    "kind": "ShowNotification"
+  },
+  "Your pack was opened but its answer could not be read - check your binder": {
+   "surface": "PlayerCardsUI",
+   "location": "HandleAnswer",
+   "kind": "Tr"
   },
   "Your personal breakdown appears here once gold data loads.": {
    "surface": "InfoViz",
