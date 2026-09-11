@@ -51,6 +51,9 @@
   "+{0} more",
   "+{0} more bets",
   "+{0} more lines",
+  "- Buy one for {0} gold or {1} shards, up to {2} paid packs a day.",
+  "- One free pack every day (resets at midnight UTC). Claim it on the Open Packs page or with /daily in Discord.",
+  "- Ranked wins: every ranked 1v1 series you win rolls a 20% chance of a pack (a 2-0 sweep: 100%). 2v2, 1v2 and FFA wins roll 10% (a sweep: 50%). Earned packs wait here until you open them.",
   "0 in queue",
   "100g each - the hardest pay 300g, 500g or 1000g",
   "1V1 BETTING WINDOW",
@@ -416,6 +419,7 @@
   "A bright orange mouse cursor.",
   "A bright, sunny yellow.",
   "A burning crown of fire. ANIMATED.",
+  "A card shows its player as the leaderboard did on the day it was pulled - name, title, rating, record and rank - and never changes afterwards (a renamed player shows their new name). Anyone with the mod can be pulled unless they turn it off in Settings; your own settings for being a card, a public binder and pull announcements live there too.",
   "A clean white line. The basics.",
   "A clean white mouse cursor.",
   "A cool cyan mouse cursor.",
@@ -435,6 +439,8 @@
   "A hot pink mouse cursor.",
   "A light, warm skin tone.",
   "A muted, earthy olive green.",
+  "A pack is still being resolved - hold on",
+  "A pack is still being resolved - it will be checked again shortly",
   "A player hasn't received the new settings yet - try again in a moment.",
   "A player in this game has spectating disabled.",
   "A player's mod is too old for these settings - they need to update, or turn the setting off.",
@@ -528,6 +534,9 @@
   "Animated cosmetics: <color=#88FF88>ON</color>",
   "Animated cosmetics: <color=#FF9966>OFF</color>",
   "Animated cosmetics: prismatic/chrome body colors, prism trail, player effects, map-skin shimmer, animated faces. Off = everything freezes on a static frame.",
+  "Announce my pulls: <color=#888>...</color>",
+  "Announce my pulls: <color=#88FF88>ON</color>",
+  "Announce my pulls: <color=#FF9966>OFF</color>",
   "Announcement",
   "Anonymizes your Steam ID, display name, and Discord link. Matches stay so other players' Elo and histories aren't affected. You will no longer appear on leaderboards.\n<b><color=#FF8888>IRREVERSIBLE:</color></b> this Steam ID can never re-register. Future matches from this account will show as [Deleted User] and won't count toward stats.",
   "Another Round",
@@ -692,6 +701,8 @@
   "Card Win Rate",
   "Card draw:",
   "Card picks close in {0}s",
+  "Card pool: no snapshot yet",
+  "Card pool: {0} players (snapshot {1}) - {2} cards in your binder",
   "Cards",
   "Cards:",
   "Cards: <color=#88FF88>FULL</color>",
@@ -744,6 +755,10 @@
   "Chromatic aberration: <color=#FF9966>OFF</color>",
   "Chromatic aberration: the RGB color-fringing that pulses on shots/hits/deaths. Off = crisp edges, tiny FPS gain. Visual only, local only.",
   "Chrome",
+  "Claim today's free pack",
+  "Claimed - the next one unlocks in {0}",
+  "Claimed for today",
+  "Claiming...",
   "Clamp ObjectPool init-spawn to 4 in-match — reduces frame stutter from new pool allocation.",
   "Clean House",
   "Clean Trail",
@@ -751,6 +766,8 @@
   "Clear",
   "Clear Search",
   "Click <b>Search Random</b> to start finding a 2v2.",
+  "Click Discard again to discard that card for shards",
+  "Click Dupes again to discard every other copy of that card",
   "Click MAIN MENU again to leave the match.",
   "Click a player",
   "Click again to forfeit",
@@ -760,6 +777,7 @@
   "Clutch",
   "Cobalt",
   "Cold violet and cyan motes swirl in a dark halo.",
+  "Collection",
   "Collector",
   "Colorize your name in cyan.",
   "Colorize your name in gold.",
@@ -862,6 +880,7 @@
   "Cyan Name",
   "DOT TICKS VS THE BLOCK WINDOW",
   "DPS",
+  "Daily limit reached - paid packs reset at midnight UTC",
   "Damage",
   "Damage dealt (cumulative per game)",
   "Damage types & buffs",
@@ -922,6 +941,8 @@
   "Disable",
   "Discard",
   "Discard this draft?",
+  "Discarded {0} card(s) for {1} shards",
+  "Discarding a card gives shards by its rarity: Common 5, Uncommon 15, Rare 40, Epic 150, Legendary 600. Shards buy packs. Discards are one card at a time; the Dupes button discards every other copy of that exact card.",
   "Disco Fever",
   "Discord",
   "Discord Link",
@@ -941,6 +962,7 @@
   "Duo -",
   "Duo Leaderboard",
   "Duo {0}W/{1}L",
+  "Dupes ({0})",
   "Dusk",
   "Dusky pink burning into crimson. Two-color gradient.",
   "Dusty rose blocks on a warm dim backdrop.",
@@ -954,12 +976,15 @@
   "EVERYTHING TRAVELS THROUGH PHOTON",
   "Each letter of your name in a different color of the rainbow.",
   "Each level costs more XP than the last (level^1.5). Every gold dot is a level-up: 100g each through 50, 500g after.",
+  "Each pack holds {0} cards. A card's rarity is its player's rank in the card pool on the day of the pull: Legendary = #1, Epic #2-10, Rare #11-20, Uncommon #21-40, Common #41 and below. Odds per card: Common 60%, Uncommon 25%, Rare 11%, Epic 3.5%, Legendary 0.5%. Every card also rolls Foil (1 in 200) and Signed (1 in 2000) on its own.",
   "Each player's worst ranked 1v1 opponents - minimum 3 series, top 5",
   "Each seat simulates its own replicas. Damage is computed on the shooter's seat and relayed as a final number.",
   "Each unlocks once per account and pays on the spot: most pay 100g; the hardest pay 300g, 500g or 1000g.",
   "Earned",
   "Earned by {0} player  <color=#888>(in the order they got it - click again to close)</color>",
   "Earned by {0} players  <color=#888>(in the order they got it - click again to close)</color>",
+  "Earned pack (ranked win)",
+  "Earned pack (sweep)",
   "Ears for those who feel very lucky",
   "Earth Gradient",
   "Eats damage",
@@ -987,6 +1012,7 @@
   "English",
   "Enter a denial reason first.",
   "Enter a whole number from 1 to 2000 gold for this bet.",
+  "Epic",
   "Equip",
   "Evergreen forest at dusk.",
   "Every finished game pays XP, XP converts to Gold at 100 XP = 1 Gold, and ranked play multiplies the base rewards below by your opponent's rank tier. This is the pay table - exact numbers, mode by mode. (Tournament podium prizes are separate; see <color=#7FD4FF>Deadlines & forfeits</color>.)\n\n<color=#FFD94D><b>THE TIER MULTIPLIER</b></color>\n\nIn ranked play, base rewards are multiplied by the OPPONENT'S rank tier - <color=#7FE87F>win or lose. Playing up always pays.</color>\n\n<color=#7FD4FF>Beginner</color> (under 1500) - x1.0\n<color=#7FD4FF>Intermediate</color> (1500 or more) - x1.5\n<color=#7FD4FF>Advanced</color> (1675 or more) - x2.0\n<color=#7FD4FF>Master</color> (1980 or more) - x2.5\n<color=#7FD4FF>Grand Master</color> (2330 or more) - x3.0\n\nIt applies to XP and to series Gold, and an opponent with no rating on record counts as 1500 (x1.5). Which rating is 'the opponent's': their 1v1 rating in 1v1, the opposing team's average 2v2 rating in 2v2, the opposing seat's average 1v1 rating in 1v2, and your opponents' average FFA rating in FFA.\n\n<color=#FFD94D><b>1v1</b></color>\n\nPer game, multipliers stack, then the total truncates to a whole number:\n\n- Base <color=#7FE87F>250 XP</color> per finished game, casual included.\n- Game win: x1.5. Ranked: x1.5. Opponent tier: x1.0 to x3.0 (ranked only).\n- A shutout win (opponent on 0 rounds) adds +100 XP flat, after the multipliers.\n\nExact examples: casual loss 250, casual win 375; ranked loss vs a Beginner 375; ranked win vs a Beginner 562, vs an Intermediate 843, vs a Grand Master 1687 (+100 more if 5-0).\n\nSeries Gold, ranked BO3 only - casual play creates no series and pays none:\n\n- Loser: 5 x opponent tier, truncated. Winner: double that.\n- Winner doubles AGAIN if the beaten player currently sits in the leaderboard top 3.\n- +2 flat on top for a 2-0 sweep.\n- Winner/loser by opponent tier, before podium and sweep: Beginner 10/5, Intermediate 14/7, Advanced 20/10, Master 24/12, Grand Master 30/15.\n\n<color=#FFD94D><b>2v2</b></color>\n\n- Per game: 600 XP x the opposing team's tier, then x1.5 if your team won the game.\n- Default all-1500 lobby: 900 XP for a loss, 1350 for a win.\n- Series Gold: 50 (each winner) or 25 (each loser), x the opposing team's tier. Default lobby: 75/37.\n\n<color=#FFD94D><b>1v2</b></color>\n\nBase 500 XP per game, x1.5 on a win, then a per-seat difficulty multiplier:\n\n- Solo seat: x1.5.\n- Solo playing WITHOUT the extra-pick handicap: another x1.20.\n- Duo seats facing a buffed solo (extra pick on): x1.10.\n- Opponent tier, read from the opposing seat's average 1v1 rating - 1v2 has no rating of its own.\n- Opponent currently in the 1v2 leaderboard top 3: x1.35, win or lose.\n- The whole product is capped at x4.0; the x1.5 win bonus applies on top of the cap.\n\nDefaults with extra pick on: the solo earns 1125 XP for a loss and 1687 for a win; each duo member 825/1237.\n\nSeries Gold: 40 (winning side) or 20 (losing side), x opponent tier only - the seat, handicap and podium factors live on XP. Default: 60/30.\n\n<color=#FFD94D><b>FFA - THE METER</b></color>\n\nFFA pays for FIGHTING, not for time in the lobby. The formula, in readable form:\n\n- The work unit is <color=#7FD4FF>battles</color>: every decisive round scored by anyone in the game. <color=#FF6666>Camping adds nothing to the pool</color>, and the last-place cut it earns is the smallest share of what everyone else generated.\n- A pace ceiling caps how fast battles cash in. For a lobby of P players, one battle is expected about every 3.08 + 6.54 x P seconds (P counted as at least 3 and at most 6 here), and the game pays at most TWICE that pace across the game's elapsed time on the server's clock - stalling or point-farming cannot outrun it.\n- The base rate is 3.5 Gold per player-minute, +5% for every player above 4. A 10-player FFA is the best Gold rate in the game.\n- Placement shapes your cut of the pool: 1st place earns 1.666x the lobby average, last place 0.334x - about a 5x spread. Players sharing a place share the same cut.\n- A stronger field multiplies the pot: your opponents' average tier divided by 1.5, so a default 1500 field is exactly x1.0. Casual lobbies take the bottom factor (about x0.667) and never touch ratings.\n- The pool is a Gold amount. 55% pays directly as Placement Gold (minimum 1). The other 45% pays as XP at 100 XP per point of pool (minimum 50 XP), which drips back as Gold through the normal conversion.\n- Placement itself sorts by points, then all round wins earned (spent ones included), then kills where the lobby's kill tiebreak is active; remaining ties share a place.\n- Ghosts and graced early leavers are unpaid and unrated for that game: leaving before the field scored 2 half points, while your own tally (points, half points, kills) is still zero, takes you out of it entirely.\n\n<color=#FFD94D><b>LEVELS AND THE XP-TO-GOLD DRIP</b></color>\n\n- XP converts at <color=#7FE87F>100 XP = 1 Gold</color>, paid every time your running total crosses a hundred mark. Every mode's XP - tournament prizes included - feeds the same total.\n- Climbing into level L costs 100 x L^1.5 XP, truncated: level 2 costs 282, level 5 costs 1118, level 10 costs 3162, level 50 costs 35355, level 100 costs 100000. Max level is 100.\n- Entering a multiple-of-5 level pays bonus Gold: <color=#7FE87F>100g for levels 5 through 50, 500g for 55 through 100</color> - 6000g lifetime if you reach the cap. It lands the moment any XP award dings the level - any mode, tournament prizes included; a ding during an FFA game shows up inside that game's +g number.\n\n<color=#FFD94D><b>ACHIEVEMENT GOLD</b></color>\n\nEvery achievement pays <color=#7FE87F>100g</color> unless listed here:\n\n- <color=#7FD4FF>1000g</color> - Sid Slayer, Stan Slayer, Grand Master (reach 2330), Touch Grass, Babel.\n- <color=#7FD4FF>500g</color> - Master (reach 1980), Tag Team Sweep, Rise from the Ashes, Casual Conqueror, Twins!, Immortal, Hostile Takeover, Bodycount.\n- <color=#7FD4FF>300g</color> - Stacked Deck, Flawless, Silly Drill, Into the Deep End, Century Club, Unstoppable, Party Crasher, Heartbreak, Dragoman.\n\nThe FFA shutouts nest: one 5-0 win in a 5-player lobby pays Clean House (100g) + Party Crasher (300g) + Hostile Takeover (500g) in a single game. The translator achievements (Rosetta, Dragoman, Babel) trigger at 10, 100 and 1000 approved live strings.\n\n<color=#8A8A93>Outside matches: Discord server boosters are paid 2000g monthly, and community artists earn a 30% royalty (rounded down to whole Gold) when another player buys their item - gifts pay none.</color>",
@@ -1034,6 +1060,7 @@
   "FIRST TO {0}   -   {1} OPENING DRAW   -   {2}-CARD HAND",
   "FIRST TO {0}   -   {1} OPENING DRAWS   -   {2}-CARD HAND",
   "FLAG",
+  "FOIL",
   "FPS",
   "FPS counter: <color=#88FF88>ON</color>",
   "FPS counter: <color=#FF9966>OFF</color>",
@@ -1079,6 +1106,8 @@
   "Forfeit recorded - the match will be resolved shortly.",
   "Fragile Perfection",
   "Frames per second, top-left corner. Handy for checking whether a setting actually helped.",
+  "Free daily pack",
+  "Free pack",
   "Free-for-all for 3-10 players. Every player is their own team.\nStandard ROUNDS scoring - first to {0} points takes the game.\n\n<color=#FFD94D><b>HOW TO PLAY</b></color>\n\n- There is no Elo band. Joining a lobby is consent to play.\n\n- Create a lobby, or join an open one from the browser.\n  The HOST presses Start once at least 3 players are in\n  (up to 10). Several lobbies can be open at once.\n\n- If the host leaves, the longest-waiting member becomes\n  the new host automatically.\n\n- After each point, everyone except the point winner\n  picks a card at the same time.\n\n- The pick timer is shown on screen. A pick landing\n  near the end grants everyone a little extra time.\n  When your timer hits zero, your highlighted card is\n  picked for you automatically - walking away never\n  skips your pick. Only a pick that misses the window\n  entirely (a freeze, a crash, or the final split\n  second) yields no card, with a toast saying so.\n\n- You hold up to {1} cards.\n  Picking one more replaces your oldest card.\n\n<color=#FFD94D><b>HOST SETTINGS</b></color>\n\n- The host can tune the lobby before starting: score\n  target (3-10), opening draws, cards offered per\n  draw (1-5), max cards held (3-5 ranked, up to 6\n  casual), the Same Cards rule, and ranked/casual.\n\n- Same Cards rule: everyone's Nth card draw offers the\n  SAME candidates, in the same order - if you and a rival\n  were offered identical cards all game, no result can be\n  blamed on draw luck. One-copy cards (like Phoenix)\n  appear at most once per game for everyone.\n\n- After a settings change the lobby cannot start for 60\n  seconds (and briefly after someone new joins), so\n  everyone can read what changed. Casual lobbies pay\n  reduced rewards and never touch ratings.\n\n<color=#FFD94D><b>RATING</b></color>\n\n- FFA is ranked with its own Glicko rating.\n\n- Placement uses points, then all round wins earned\n  (spent ones included), then kills.\n  Remaining ties share a place using competition\n  order: 1, 2, 2, 4.\n\n- Your rating is scored against the players placed\n  nearest to you (up to 4 of them), so one game can't\n  swing your rating several times harder in a 10-player\n  lobby than in a 3-player one. One extra comparison\n  can join those four: the biggest 250+ rating gap\n  that finished upside down outside them.\n\n- A tied placement counts as a draw. New ratings move\n  fast and settle down as you play more.\n\n<color=#FFD94D><b>REWARDS</b></color>\n\n- Pay is metered on the FIGHTING, not on flat per-game\n  numbers: decisive rounds are the work unit, and\n  elapsed time caps how fast they cash in - stall\n  tactics are held to a bounded edge, and longer,\n  bigger games pay more.\n\n- Bigger lobbies pay a better rate per minute, and a\n  10-player FFA is the best gold rate in the game.\n\n- Your placement shapes your share: 1st earns about\n  five times last place's cut. Part pays as XP, part as\n  Placement Gold, and a stronger opposing field\n  multiplies the pot (the usual tier bonus).\n\n- XP converts to Gold at 100 XP = 1 Gold, and level-ups\n  pay their usual bonus Gold. A level-up landing during\n  a game shows up inside that game's +g number - that is\n  how a last place can occasionally out-earn the winner.\n\n- Spectators can bet Gold on FFA lobbies from this tab.\n\n<color=#FFD94D><b>READING THE RECENT FFAS LIST</b></color>\n\n<color=#7FD4FF>Dots + N(P)</color> - Full points won.\n<color=#7FD4FF>Half dots + N(H)</color> - Round wins that\n  did not become one of that player's full points.\n<color=#7FD4FF>Nk</color> - Kills.\n<color=#7FD4FF>+xp +g</color> - That game's XP and Gold\n  (including any level-up bonus).\n<color=#7FD4FF>Green/red number</color> - FFA rating change.\n<color=#7FD4FF>Cards</color> - The hand held at game end.\n  <color=#FF6666>+N replaced</color> counts picks that were\n  pushed out by the card cap - hover the line to see\n  every pick in order.\n\n<color=#FFD94D><b>LEADERBOARD COLUMNS</b></color>\n\n<color=#7FD4FF>Rank</color> - Position in the currently selected sort.\n<color=#7FD4FF>Player</color> - The player's display name.\n<color=#7FD4FF>Rating</color> - The player's separate FFA Glicko rating.\n<color=#7FD4FF>Games</color> - Recorded FFA games played.\n<color=#7FD4FF>Wins</color> - Games finished in 1st place.\n<color=#7FD4FF>Top3</color> - Games finished in 1st, 2nd, or 3rd.\n<color=#7FD4FF>AvgPl</color> - Average finishing place. Lower is\n  better - 1.0 means winning every game.\n<color=#7FD4FF>WR</color> - Share of games won outright.\n\n<color=#FFD94D><b>GOTCHAS</b></color>\n\n- Leaving mid-game is recorded. A leaver keeps their\n  tallies and is placed and rated for the game they\n  left - unless they left before the field had scored\n  2 half points while their own tally was still zero,\n  in which case that game does not rate them.",
   "Friendly fire off",
   "Friendly fire: OFF",
@@ -1151,6 +1180,7 @@
   "Grant Artist...",
   "Grant Translator...",
   "Grant a translation role - find the player",
+  "Grant data consent first (Settings)",
   "Graphs {0}/{1}",
   "Green Cursor",
   "Green Name",
@@ -1215,12 +1245,16 @@
   "How much damage?",
   "How stats are tracked",
   "How the mod counts your combat and match stats, in plain terms.\n\n<color=#FFD94D><b>HIT %</b></color>\n\n- The denominator counts BULLETS fired, not clicks.\n  One Buckshot click counts every pellet; bursts and\n  charge volleys multiply it too.\n- Clicks during reload or cooldown don't count, and\n  card-spawned shooters never count.\n- The numerator counts direct, unblocked hits on\n  enemies only. Self-hits, teammates, poison and burn\n  ticks, explosions and thorns never count.\n\n<color=#FFD94D><b>BLOCK SUCCESS</b></color>\n\n- One OFF-COOLDOWN block activation = one attempt\n  (right-clicks during cooldown don't count), and at\n  most ONE success no matter how many bullets that\n  block absorbs.\n- Echo repeats and Shield Charge dashes belong to the\n  right-click that started them - they never add\n  attempts.\n- Abyssal / Shields Up auto-blocks are not attempts,\n  though an auto-block absorbing within the right-click's\n  short credit window can claim its success.\n- Blocking your OWN reflected bullet DOES count as a\n  success.\n\n<color=#FFD94D><b>RAGE QUIT % VS LEAVE %</b></color>\n\n- Rage Quit % (Compare tab) is about your OPPONENTS,\n  not about you: how often the other player quits\n  mid-game in your CASUAL 1v1s, counting unmodded\n  quickplay opponents too. Higher is better - it means\n  more of them walked out on you.\n- Your own casual leaves are NOT this number.\n- The leaderboard's Leave column IS about you: the\n  RANKED formula, your ranked DCs divided by ranked\n  series wins + losses + DCs.\n\n<color=#FFD94D><b>AVG GAME LENGTH</b></color>\n\n- The clock starts when the first round's movement\n  begins (after the initial picks) and includes every\n  later card pick and transition until game over.\n\n<color=#FFD94D><b>WHAT FEEDS LIFETIME STATS</b></color>\n\n- Lifetime Hit/Block/Keys stats accumulate from 1v1\n  games only (ranked + casual), and only from the match\n  reporter's own side.\n- 2v2 and FFA record the same stats per game (visible\n  on each game's row) but they don't feed the lifetime\n  percentages.\n- FFA / 2v2 / 1v2 metrics in Compare come from their\n  own tables.\n\n<color=#FFD94D><b>TIMELINE GRAPHS</b></color>\n\n- Graphs sample every 3-5 seconds (longer games\n  compress older samples), so graph ratios can differ\n  slightly from the exact totals.",
+  "How to get packs",
   "How tournaments run",
   "However, this is if you only use Silence. Other Refresh activators can disrupt the every-other pattern: hit your opponent with a bullet (non-Conditional damage) and you receive a successful Refresh AND reset RefreshValid to false. Depending on where in the pattern you put your shot, you can snag an extra Refresh (the second and third sequences above).\n\nSadly, this is not the end of the document, because the ROUNDS developers saw fit to introduce another mechanic. I do hope you, dear reader, appreciate the relative ease with which you get to possess this information as compared to the hours of madness I spent obtaining it.",
   "Huge",
   "Huge Name",
   "Huge main",
   "Hypno-spiral eyes. Completely unhinged.",
+  "I can be a Player Card: <color=#888>...</color>",
+  "I can be a Player Card: <color=#88FF88>ON</color>",
+  "I can be a Player Card: <color=#FF9966>OFF</color>",
   "I play with a competitive framework mod called Sid's Competitive Rounds",
   "I'm ready",
   "Icy blue trail fading to white. Two-color gradient.",
@@ -1313,6 +1347,7 @@
   "Left tournament signup",
   "Left your FFA lobby - you joined a competitive game",
   "Left your game to join the queued match - no leave will be recorded.",
+  "Legendary",
   "Lemon",
   "Less than 5",
   "Level 1",
@@ -1338,6 +1373,7 @@
   "Loading recent series...",
   "Loading shop sales...",
   "Loading the reviewed cosmetic...",
+  "Loading your binder...",
   "Loading your dances - try E again in a second.",
   "Loading...",
   "Locks the map to ROUNDS' Gold palette (warm yellow).",
@@ -1461,6 +1497,9 @@
   "Mute the author of which message?",
   "Mutes game audio while the window is unfocused during online play. The menu stays audible; sound returns the moment you tab back in.",
   "My Stats",
+  "My collection is public: <color=#888>...</color>",
+  "My collection is public: <color=#88FF88>ON</color>",
+  "My collection is public: <color=#FF9966>OFF</color>",
   "NETWORK",
   "NOT LIVE YET - your view starts at the next round",
   "NOT RECORDED",
@@ -1497,8 +1536,11 @@
   "No Refresh",
   "No achievement data.",
   "No active tournament",
+  "No answer from the server - try again in a moment",
+  "No answer from the server - your pack will be checked again shortly",
   "No articles match your search.",
   "No blocked senders.",
+  "No cards yet - open a pack",
   "No games recorded for this session yet.",
   "No games this session",
   "No games together yet",
@@ -1512,10 +1554,13 @@
   "No server-issued chat lines are in this session's log.\n\nOnly messages this client received from the server can be deleted - the request keys on the server's row id, which a local echo does not carry.",
   "No server-issued chat lines are in this session's log.\n\nPick a message the author sent; the mute lands on whatever platform identity wrote it (Steam, Discord, Twitch or YouTube).",
   "Nobody in a ROUNDS match is the host. Every game runs through Photon's cloud servers, every player simulates the fight locally, and each shooter is the referee of their own bullets. This page is how all of that fits together.\n\n<color=#FFD94D><b>HOW A CONNECTION HAPPENS</b></color>\n\n- Your client first talks to a Photon name server, pings the 15 regions (us, eu, asia, au and the rest), and picks the best one. The result is cached between launches.\n- It then connects to that region's master server, which handles matchmaking. Joining or creating a room hands you off to a game server in that region, and the room lives THERE: all traffic is you, up to Photon, down to the other players. There is never a direct link between players' PCs.\n- Quickplay only matches players in your current region. If you sit alone in a search for 15 seconds, the game hops regions on its own, trading a little ping for a bigger player pool.\n\n<color=#FFD94D><b>ROOM CODES AND CROSS-REGION PLAY</b></color>\n\nA private room code is 6 letters: the FIRST letter encodes the host's region, the other 5 are random. Joining by code reads that letter and moves you to the host's region before searching, which is why friends on different continents can always join each other. Steam invites carry the region the same way. Mod queue rooms skip all of this: the server names the room and picks ONE region for everyone it matched, so a queued pair can never split across regions.\n\n<color=#FFD94D><b>THE MASTER CLIENT</b></color>\n\nOne player in every room is the master client - initially whoever created the room (in 1v1, the orange player). The master is not a host; their machine just gets the tie-breaking jobs:\n\n- rolls the next map and announces it,\n- announces every point and round result - every client applies the master's score verbatim, so the scoreboard cannot disagree between screens,\n- owns and physically simulates the crates, saws and moving platforms; everyone else receives their positions as a stream, and your pushes on a crate are sent to the master as requests.\n\nIf the master leaves, Photon appoints a new one - though in vanilla 1v1 that hardly matters, because any player leaving ends the match for everyone.\n\n<color=#FFD94D><b>WHAT TRAVELS THE WIRE, WHAT STAYS LOCAL</b></color>\n\n- <color=#7FD4FF>Player movement</color> - streamed. Your machine sends your position, inputs and velocity up to 30 times a second, and the other players' copies of you replay that stream. A remote copy of a player never reads input.\n- <color=#7FD4FF>Blocks</color> - instant on your own screen, relayed to everyone else as an event. Their copy of your shield turns on when the event arrives.\n- <color=#7FD4FF>Bullets</color> - spawned once, then simulated separately on every machine, frame by frame, with no mid-flight correction (a few guided cards excepted). The bullet on your screen and the same bullet on theirs are two slowly diverging copies.\n- <color=#7FD4FF>Damage</color> - computed once, on the shooter's machine, and sent as a final number. Health is never re-synchronized; screens agree only because everyone applies the same damage events. <color=#8A8A93>(The one exception is the mod's poison sync, where the VICTIM's client judges the ticks - see <color=#7FD4FF>Poison & damage over time</color>.)</color>\n\n<color=#FFD94D><b>DAMAGE AUTHORITY</b></color>\n\nOnly a bullet's owner can declare a hit. When the shooter's copy of their bullet touches you, their machine checks its copy of your shield and your position, rules blocked or not, and broadcasts the result. Your machine applies it without a vote.\n\nEverything defensive you do therefore counts only once it has ARRIVED on the shooter's screen. Press block, and it protects you there about half your ping plus half theirs later than it protected you at home. This one rule explains the classics: 'I blocked on time and still got hit' - your press had not reached them yet (see <color=#7FD4FF>Blocking</color>); and 'I got hit around the corner' - on their screen you were not behind the corner yet, because their copy of your position runs late by the same delay plus up to one 33 ms movement tick. The consolation is symmetry: your bullets are ruled on YOUR screen.\n\n<color=#FFD94D><b>WHAT PING ACTUALLY MEASURES</b></color>\n\nThe ping number (the mod shows it in the corner overlay, next to your region) is the round trip between YOU and the Photon server - not between you and your opponent. The delay you feel against another player is roughly half your ping plus half theirs, plus up to one 33 ms movement tick. Two players at 40 ms each play a tighter game than a 20 ms player against a 150 ms player, even though that 20 looks beautiful.\n\n<color=#FFD94D><b>WHAT FRAME RATE CHANGES</b></color>\n\n- Bullets integrate their movement once per rendered frame, so different frame rates produce slightly different trajectories for the SAME bullet on different machines - a small but structural divergence.\n- Player movement runs on a fixed physics step and is far less frame-rate sensitive.\n- The extreme case is the Grow card, whose damage compounds per frame on the shooter's machine (see <color=#7FD4FF>Grow</color>).\n- Below about 30 FPS your machine drains the incoming movement stream slower than it arrives, so enemy copies get visibly choppier.\n- <color=#8A8A93>A game can feel awful while both FPS and ping graphs read flat - stutter in the replicated stream is invisible to both numbers.</color>",
+  "Nobody is in the card pool right now - try again later",
   "Noobie",
   "Northern Lights",
   "Not allowed.",
+  "Not enough gold for a pack",
   "Not enough players to continue the FFA - returning to menu.",
+  "Not enough shards for a pack",
   "Not found - it may have been deleted.",
   "Not great. Not terrible.",
   "Not in queue.",
@@ -1540,18 +1585,27 @@
   "On Fire",
   "On-screen pop-ups for incoming chat and XP/level notifications. The chat log on the Home tab updates either way.",
   "One copy, full flight, bars on a log scale. The mod pins every eligible Grow bullet to the same 120 FPS growth clock: about x3.1.",
+  "One free pack a day (resets at midnight UTC) - also /daily in Discord",
   "One of the recipients could not be found.",
   "One solo player faces a duo in a best-of-3 series.\n\n<color=#FFD94D><b>HOW TO PLAY</b></color>\n\n- This is a consent queue with no Elo band and no ready-up.\n- The server assigns one solo and two duo players.\n- Solo Extra Initial Pick is optional: the solo draws\n  2 cards on the opening pick. In the random queue any\n  player's opt-in turns it on; in a hosted lobby the\n  host's setting decides.\n\n<color=#FFD94D><b>SCORING</b></color>\n\n- The first side to win 2 games wins the series.\n- 1v2 is an UNRANKED beta. No rating is applied yet.\n- Games are recorded and will count when ranked play launches.\n\n<color=#FFD94D><b>REWARDS</b></color>\n\n- Base XP is 500 per game, x1.5 on a win - then a\n  difficulty multiplier scales it, capped at x4\n  (the win bonus sits on top of the cap):\n  the solo earns x1.5 (and x1.20 more when the extra\n  pick is off), a duo facing a buffed solo earns x1.10,\n  and the opponents' rating tier multiplies up to x3.\n  Facing a top-3 1v2 player adds x1.35, win or lose.\n- Series end: 40 base Gold per winner, 20 per loser,\n  scaled by the opponents' rating tier.\n- Game XP converts to Gold at 100 XP = 1 Gold, and\n  level-ups pay their usual bonus Gold.\n\n<color=#FFD94D><b>LEADERBOARD COLUMNS</b></color>\n\n- The tab has separate Solo and Duo boards.\n- You appear only on boards for roles you have played.\n<color=#7FD4FF>Rank</color> - Activity order: wins, then WR, then games.\n<color=#7FD4FF>Player</color> - The player's display name.\n<color=#7FD4FF>W-L</color> - Games won and lost in that role only.\n<color=#7FD4FF>WR</color> - Win rate for games in that role.\n- These are activity boards. They are not sorted by Gold.\n\n<color=#FFD94D><b>GOTCHAS</b></color>\n\n- Leaving while locked with no games played cancels the\n  series; a leave mid-game leaves the result to the\n  normal match report. The beta has no leave counter.",
   "Online",
   "Only the host can change lobby settings.",
   "Only the host can kick players.",
   "Only the host decides this.",
+  "Open",
   "Open Report Form",
   "Open Tier List Folder",
   "Open Upload Folder",
+  "Open a pack",
+  "Open for {0} gold",
+  "Open for {0} shards",
   "Open the Info library",
+  "Open today's free pack",
+  "Open with gold",
+  "Open with shards",
   "Opening draws:",
   "Opening the upload folder - drop a 512x512 transparent PNG (or a GIF) in there.",
+  "Opening your pack...",
   "Opp:",
   "Opponent Block Rate",
   "Opponent Blocks",
@@ -1578,6 +1632,10 @@
   "PLAYER 1",
   "PLAYER 2",
   "Pacifist",
+  "Pack",
+  "Pack opened - {0} new cards",
+  "Packs waiting to be opened",
+  "Page {0} of {1}",
   "Page {0}/{1}",
   "Pale icy blue, like a winter sky.",
   "Pale luminous yellow name with a matching glow halo. Mimics the classic Steam-name color trick.",
@@ -1635,6 +1693,10 @@
   "Play a tournament through to the end without forfeiting a single match",
   "Play your first ranked match here",
   "Player",
+  "Player Cards",
+  "Player Cards are not enabled on this server yet",
+  "Player Cards are not open yet - no edition is running",
+  "Player Cards need your Steam sign-in - try again in a moment",
   "Player Nemesis",
   "Player removed from the lobby.",
   "Player {0}",
@@ -1648,6 +1710,7 @@
   "Poison's mouth",
   "Poison's weeping",
   "Poisoner",
+  "Pool #{0} | Ed. {1} | {2}",
   "Porcelain",
   "Portal session failed - are you signed in to Steam?",
   "Posted to Discord - good luck!",
@@ -1720,6 +1783,7 @@
   "Rampage",
   "Random Queue",
   "Rank #{0} of {1}",
+  "Rank #{0} | {1}W {2}L",
   "Rank: <b><color={0}>{1}</color></b>",
   "Ranked",
   "Ranked (series)",
@@ -1751,6 +1815,7 @@
   "Rates",
   "Rating",
   "Rating History  ({0} Elo, {1} rating updates)",
+  "Rating {0} | peak {1}",
   "Ratings & Rewards",
   "Ratings (Glicko-2)",
   "Ratings, gold and the series result all settle when someone takes their 2nd game.",
@@ -1769,6 +1834,7 @@
   "Reconnect to Match",
   "Record removal failed: {0}",
   "Record removed.",
+  "Record {0}W {1}L",
   "Records",
   "Red Cursor",
   "Red Name",
@@ -1854,6 +1920,7 @@
   "SHOP",
   "SID'S COMPETITIVE ROUNDS",
   "SIGNAL, FLAG, HUMAN REVIEW",
+  "SIGNED",
   "SIGNED REPORT",
   "SPACE",
   "SPACE (hold, in a lobby) - ready up / join",
@@ -2046,6 +2113,7 @@
   "Steam ID copied to clipboard",
   "Steam ID not ready yet — try again in a few seconds",
   "Steam identity is not available yet",
+  "Steam identity not ready yet",
   "Steam session not accepted — queue polling stopped; the server will clear your seat shortly. Try again in a moment.",
   "Steam sign-in is required to view session reports",
   "Steam sign-in still pending - try again in a moment.",
@@ -2056,6 +2124,8 @@
   "Still leaving the FFA queue — try again in a moment.",
   "Still leaving the queue — try again in a moment.",
   "Still leaving — try again in a moment.",
+  "Still opening - checking again shortly",
+  "Still waiting for the server to record your pack - checking again shortly",
   "Stitched Grin",
   "Stock",
   "Stop",
@@ -2075,6 +2145,8 @@
   "Sunburst Halo",
   "Sunset",
   "Sunset Gradient",
+  "Sure? Discard",
+  "Sure? Discard dupes",
   "Sustained Power",
   "Swallow RayHitBulletSound NREs from destroyed parents.",
   "Swallow ScreenEdgeBounce NREs from destroyed bullets.",
@@ -2128,7 +2200,12 @@
   "Thanks!",
   "That FFA lobby is private — enter its password.",
   "That amounts to all my current understanding of Conditional damage. My model of what is going on behind the scenes is entirely a construction (I have not seen the source code), but it correctly predicts all currently tested behaviour, and I have been thorough. Still, there are limits: I do not know whether the RefreshValid bool is held by the attacker or the target - that is, whether every player has a cap on the Refreshes they can trigger for themselves, or every target has a cap on the Refreshes they can trigger for others. In a 1v1 this makes no difference, but in an FFA it would. If only there was a free-to-play type gamemode I could use to test this feature out!\n\n<color=#FFD94D><b>CONCLUSION</b></color>\n\nNow, as beautifully complex as this system is, I do have to ask how on earth the developers thought it would be a good idea. What is it supposed to be balancing? Why does the amount of damage dictate Refreshes? How was anyone supposed to know any of this? Questions only the warped mind who dreamt up this system can answer.\n\nI do appreciate the subtleties of the system, but from a gameplay perspective it is abominable. No real human is going to accurately calculate their RefreshValid state in the middle of a fight - that is, if you ever actually get a build where this information matters. The chances that my findings here will affect your next 30 matches range from low to non-existent. At the end of the day, the player experience this system produces is one of confusion, frustration, and randomness. Yet, all of that said, I would not want it changed. Why? Because if it was, the last week of my life would have been wasted.\n\nThank you for reading my ramblings. I hope you will at least find the table useful.\n\n<color=#8A8A93>Related reading: <color=#7FD4FF>Blocking</color> covers what a block actually does and which cards ride it; <color=#7FD4FF>Poison & damage over time</color> covers how tick damage lands and syncs.</color>",
+  "That card is no longer in your collection",
   "That game is no longer live.",
+  "That pack is not available any more",
+  "That pack is still opening - hold on",
+  "That pack purchase never went through - nothing was charged",
+  "That pack was voided - the series it came from was reversed",
   "That player could not be found.",
   "That {0} lobby is private — enter its password.",
   "That's you - pick someone else.",
@@ -2160,6 +2237,10 @@
   "The mod changes vanilla gameplay only where every player agreed to it. This page explains exactly how it decides, and what is guaranteed when you play with non-modded people.\n\n<color=#FFD94D><b>THE GUARANTEE</b></color>\n\n<color=#7FE87F>A non-modded player always gets pure vanilla gameplay, and any gate that can't prove a change is safe leaves it off.</color> Whole-room changes fail closed for everyone identically. The one per-player feature is poison sync, which follows the poisoned player - an unmodded victim's poison stays vanilla.\n\nIf the mod can't prove a feature is safe to run, it runs vanilla.\n\n<color=#FFD94D><b>HOW ROOMS ARE CLASSIFIED</b></color>\n\nMode-tied gameplay runs only in rooms the mod itself created, and the room's name says which mode issued it:\n\n- <color=#7FD4FF>ranked_</color> - 1v1 ranked queue rooms\n- <color=#7FD4FF>team_</color> (or the 2v2 room marker) - 2v2 rooms\n- <color=#7FD4FF>sct-</color> - sync tournament rooms\n- <color=#7FD4FF>ovt_</color> - 1v2 rooms\n- <color=#7FD4FF>ffa_</color> - FFA rooms, and only while the FFA lobby engine is actually active\n\nA public quickplay room or a normal 6-character room code matches none of these, so every mode-tied gameplay change stays off there.\n\n<color=#FFD94D><b>CAPABILITY GATES</b></color>\n\nChanges to the shared simulation go a step further: each player's mod advertises a capability tag BEFORE joining the room, so any client that can even see you has already received your tag. Then:\n\n- <color=#7FD4FF>Grow normalization</color>, <color=#7FD4FF>FFA map-object scaling</color> and the <color=#7FD4FF>FFA same-card dealer</color> require EVERY fighter's tag. <color=#7FE87F>One vanilla player, one outdated mod, or one player whose mod disabled itself switches the feature off for the whole room - symmetrically, on every screen at once.</color> Nobody plays by a different rule than their opponent.\n- <color=#7FD4FF>Poison sync</color> activates per victim, in any online room: a current victim's own client judges their poison; an unmodded victim's poison stays vanilla. The mixed-room details live in <color=#7FD4FF>Poison & damage over time</color>.\n- Spectators never count toward or against these checks.\n- If a feature's patch fails to install, that client never advertises the tag. If any other BepInEx mod is detected at startup, the whole mod disables itself and revokes its tags - full vanilla behavior.\n\n<color=#FFD94D><b>TWO KINDS OF FIXES</b></color>\n\nNot everything is gated, and the distinction matters:\n\n<color=#7FD4FF>Crash prevention</color> - always on, everywhere, quickplay included. These guards stop vanilla bugs like the frozen-inputs-at-match-found crash, the permanently dead Escape key, and the Phoenix revive crash. They change no rule: each one replaces a crash or a broken state with what the game intended.\n\n<color=#7FD4FF>Gameplay changes</color> - gated as above. Mode logic needs its mod-issued room; Grow and the FFA features need the full-room capability check; poison authority is per-victim as described.\n\nBetween the two sits a band of local repairs (re-registering vanilla's own broken bullet effects, clearing a stuck auto-fire flag between games) that run in any game - but these only repair your own screen's bookkeeping toward what the bullet's owner already decided. They never change a rule, and can't create a disagreement vanilla didn't already have. The full inventory is in <color=#7FD4FF>Bug fixes the mod ships</color>.\n\n<color=#FFD94D><b>QUICKPLAY WITH THE MOD</b></color>\n\nPlaying quickplay or a room code with the mod installed, you get vanilla rules plus tracking: your casual results and stats still record, and achievements can still unlock. <color=#8A8A93>A recovery guard can also restart a dead quickplay search for you - that is connection plumbing, not gameplay.</color>\n\nTwo fairness fixes can reach quickplay and room-code games: <color=#7FD4FF>Grow normalization</color> (every fighter current, everyone's Ranked on at connect - both sides always agree on it) and the per-victim poison sync, which follows the poisoned player wherever they play (see <color=#7FD4FF>Poison & damage over time</color> for the mixed-room details).\n\n<color=#7FE87F>And your opponent never has to know the mod is there unless you talk to them: the only things a non-modded player can ever see of it are nametag styling and quick-chat messages you send</color> (see <color=#7FD4FF>What unmodded players see</color>).",
   "The mod never rebinds anything - every vanilla control works exactly as it always has, and the competitive keys are added AROUND them. The board below shows every key that does something during competitive play: gold keys belong to the mod, blue keys to the base game, purple to both.",
   "The mod ships 50 achievements. Each unlocks exactly once per account and pays gold on the spot - <color=#7FE87F>100 gold</color> by default, up to <color=#7FE87F>1000</color> for the hardest; every line below shows its payout. Browse them under <color=#7FD4FF>My Stats - Achievements</color> in the F5 menu: each row shows the condition, your unlock date, the percentage of known mod players who have it, and its gold. Click a row to see who has earned it (the first 500, in unlock order).\n\n<color=#FFD94D><b>HOW THEY ARE CHECKED</b></color>\n\n- Two checkers exist. 14 achievements are judged by your own game the moment a game ends; the other 36 are judged by the server - most when a match, series or rating update lands, the three translator tiers when translation work is approved. <color=#8A8A93>Server-side unlocks can pop a moment after the game - that's normal.</color>\n- Client-checked achievements need a real online game. Sandbox, offline play and spectating never award anything.\n- Every condition tracker is per-game and resets when a new game starts - a rematch is a clean slate, so damage taken in game 1 can't spoil Untouchable in game 2. (Streak counters, by design, are the exception: they span games.)\n- The input trackers (Pacifist, Immovable Object, Grounded) only sample your keys while you are alive and fighting. Card picks, the pick phase and time spent dead never count against you, and neither does typing in the mod's chat or the F5 menu.\n- Client-checked achievements run in 1v1, 2v2 and 1v2 games. They never fire from FFA games - FFA has its own six, checked by the server.\n- A client-checked <color=#7FD4FF>sweep</color> means you win with the opponent on 0 rounds. In a room set to a shorter round target, a 3-0 still counts. <color=#FF6666>The server-checked 5-0 achievements demand the opponent on 0 with at least 5 rounds won.</color>\n\n<color=#FFD94D><b>CLIENT-CHECKED: PRECISION RUNS</b></color>\n\n- <color=#7FD4FF>Untouchable</color> - win a game in which your health never dropped, even once. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Pacifist</color> - win without ever holding the fire button during live combat. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Immovable Object</color> - win without ever holding a movement or jump key during live combat. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Grounded</color> - win without ever holding a jump key (Space, W, Up). <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Instinct</color> - win with 3 or more card picks, taking the pre-highlighted left-most card on every pick without ever moving the selection. <color=#8A8A93>Only checked in queue and sync-tournament rooms - room-code games, async tournament matches included, skip it.</color> <color=#7FE87F>100g</color>\n\n<color=#FFD94D><b>CLIENT-CHECKED: SWEEPS AND STUNTS</b></color>\n\n- <color=#7FD4FF>Silent Assassin</color> - sweep with Sneaky (or Sneaky Bullets) in your build. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Total Mayhem</color> - sweep with Mayhem in your build. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Fragile Perfection</color> - sweep with Glass Cannon in your build. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>No Escape</color> - sweep with Chase in your build. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Rise from the Ashes</color> - sweep with Phoenix in your build, without dying and without a Phoenix revive ever firing. <color=#7FE87F>500g</color>\n- <color=#7FD4FF>The Comeback Kid</color> - win after the rounds ever stood at you 0, opponent 4 or more. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Stacked Deck</color> - finish a game holding 5 or more copies of one card. No win required. <color=#7FE87F>300g</color>\n- <color=#7FD4FF>God Build</color> - win with Shields Up in your build, ending the game on a gun with 1 ammo or less that reloads in 1 second or less. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Into the Deep End</color> - take Abyssal Countdown as your FIRST pick of the game, trigger it in every round, and win. <color=#7FE87F>300g</color>\n\n<color=#FFD94D><b>SERVER-CHECKED 1v1 BUILDS</b></color>\n\nJudged from the reported match. You must be the game's winner unless a line says otherwise.\n\n- <color=#7FD4FF>Bullet Hell</color> - win 5-0 with Barrage in your build. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Spray and Pray</color> - win 5-0 with Spray. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Demolitionist</color> - win 5-0 with Explosive Bullet. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Controlled Burst</color> - win 5-0 with Burst. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Field Medic</color> - win 5-0 with Healing Field. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Double Nova</color> - win with 2 or more Supernovas. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Lumberjack</color> - win with 2 or more Saws. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Pristine Perfection</color> - win with 2 or more copies of Pristine Perseverance. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Living on the Edge</color> - win with 2 or more Glass Cannons. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Silly Drill</color> - win with Sneaky and Drill together. <color=#7FE87F>300g</color>\n- <color=#7FD4FF>Sustained Power</color> - win with Empower and Healing Field together. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Collector</color> - win with 4 or more copies of any one card. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Clutch</color> - win after the score ever stood at 0 points for you against 6 or more for the opponent - that is, down 0-3 in rounds. <color=#7FE87F>100g</color>\n- <color=#7FD4FF>Twins!</color> - both players finish with exactly 5 cards each and identical builds, copy counts included. Both unlock it; nobody needs to win. <color=#7FE87F>500g</color>",
+  "The pack answer could not be read - check your binder",
+  "The pack is still yours to open",
+  "The pack price changed - check the new price and try again",
+  "The pool changed while your pack was opening - nothing was charged, try again",
   "The report could not be read",
   "The report details are too long.",
   "The report details contain characters that are not allowed.",
@@ -2168,6 +2249,7 @@
   "The rule book for what gets recorded and what gets thrown away: games, series, disconnects, bets. If a result looks missing, the reason is almost always on this page.\n\n<color=#FFD94D><b>NEVER RECORDED AT ALL</b></color>\n\n- Data consent off: the mod runs fully offline. Nothing is ever sent except a version check.\n- Offline, practice and sandbox games: never reported by the client, and refused by the server as a backstop.\n- Spectator seats submit no match record and no persistent stats. (The mod keeps local diagnostics in its own log — frames, connection facts — and sends nothing automatically; they leave your PC only inside a bug report you choose to attach logs to.)\n\n<color=#FFD94D><b>RANKED OR CASUAL</b></color>\n\n- Either player's Ranked toggle off in a room-code game - it plays as CASUAL. Still fully recorded with stats and XP; it never touches rating (see <color=#7FD4FF>How games are tracked</color>).\n- Opponent has never run the mod - always casual, never upgraded. (A live unfinished series from an earlier sitting is the one thing that keeps ranked status across a gap.)\n- Toggling Ranked off MID-SERIES does not void the series. The running best-of-3 is your consent record; its games stay ranked.\n- A game reported as casual is UPGRADED to ranked when the server can see both players are modded, both have Ranked on, and the sitting is live.\n- A ranked-banned participant forces a 1v1 casual at report time - even in a queue room, even mid-series. (The other modes shut banned players out at the door instead.)\n- Mod-issued rooms are consented by definition; queueing is consent. The ranked queue, 2v2 and tournaments rate; ranked FFA lobbies rate while casual ones don't; 1v2 records without rating.\n\n<color=#FFD94D><b>DISCONNECTS - 1V1</b></color>\n\n- You leave a game to join a queued ranked match - the game you left is canceled: nothing recorded, no leave logged.\n- Opponent DCs at 4-4 - you get the win, recorded 5-4.\n- Opponent DCs while you hold 4 rounds - you get the win at the standing score.\n- Any other DC - <color=#FF6666>the game is canceled and no result is recorded</color>, even when the leaver was ahead. Nobody gets a free win and nobody eats an unfair loss (the leave itself can still be logged - see below).\n- Ranked leave %: a DC is logged against the leaver when the CURRENT game had meaningful play (2 or more points scored, or a completed round) and neither side was at 4 rounds. One DC per player per series. The stat is your DCs divided by your ranked series played plus your DCs.\n- Casual rage quits: ANY mid-game leave in a casual 1v1 is logged, even at 4-0. It feeds the Rage Quit % stat (how often opponents walk out on you) - never rating. (A survivor already at 4 rounds still takes the casual win and its XP.)\n\n<color=#FFD94D><b>DISCONNECTS - 2V2 AND FFA</b></color>\n\n- 2v2: a team DCs while the other team leads the series and the abandoned game had 2 or more points - the leading team takes the whole series, with full ratings and rewards.\n- Any other 2v2 DC - the series PAUSES for manual admin resolution instead of auto-deciding. If the same four re-queue within about 30 minutes, the matcher puts them back on the same series with the score kept.\n- FFA keeps playing when someone leaves, as long as 2 or more remain (a game that drops under 3 players before the field scored 2 half points is cancelled instead). The leaver's tallies are frozen, and they are still placed and rated for the game they left during - <color=#FF6666>leaving at 0 points does not dodge the loss</color>.\n- FFA early-leave grace: a leaver who left before the field had scored 2 half points, with a zero tally of their own, is unrated for that game - nothing was decided yet.\n- An FFA player who left in an EARLIER game rides later reports as absent, excluded from those games' ratings and rewards.\n\n<color=#FFD94D><b>SERIES: RESUME, STALL, EXPIRE</b></color>\n\n- <color=#7FE87F>An undecided best-of-3 resumes with no time limit.</color> Meet the same opponent tomorrow or next week and game 1 still stands. An expiry existed once - leavers waited it out to bank rating, so it was removed.\n- Rating moves ONLY when a series completes (first to 2 game wins). Games of a series that never completes keep their match rows, XP and gold; the rating change just never happens.\n- A series with no game recorded 30 minutes after it was created is abandoned and its bets are refunded.\n- A mid-series stall of an hour refunds the bets, but the series itself stays active and resumable.\n- Tournament series are exempt from this pruning - the bracket owns their lifecycle. A tournament match decided by forfeit can't be bet on.\n\n<color=#FFD94D><b>THROWN OUT AFTER THE FACT</b></color>\n\n- The one AUTOMATIC invalidation in the whole mod: a repeated pattern of implausibly short matches between the same two players inside a short window. The current match AND the earlier short ones are invalidated together, their gold and XP reversed, their series voided.\n- Admin reversal: an admin can void a series - rating changes subtracted, gold clawed back, every match in it invalidated, unsettled bets refunded. Invalidated matches disappear from every board and stat.\n- Quarantine (2v2 and FFA): a report that arrives for a lobby that's no longer active isn't deleted - it's held for admin review, and an admin can still accept it into the record or discard it.\n\n<color=#FFD94D><b>IF THE REPORT CAN'T SEND</b></color>\n\n- A failed report goes to a persistent outbox: retried in the background and saved to disk, so it's re-sent on your next launch even if you quit right after the game. You'll see 'Couldn't record the match - retrying in the background', then 'Match recorded' when it lands.\n- 1v1 reporter crashes before the report exists - the surviving opponent's disconnect path usually records the result instead.\n- FFA elects its reporter among the players still present, so a crashed reporter is never elected. A winner who quits before the report is still recorded from their frozen tallies.\n- A 2v2 game that ends without its series id retries the lookup and defers the send; if that also fails, the game is not recorded.",
   "The same actions in a different order",
   "The selected cosmetic is still loading.",
+  "The server refused that - try again in a moment",
   "The server refused this request ({0}).",
   "The subject contains characters that are not allowed.",
   "The subject is too long ({0} characters max).",
@@ -2209,6 +2291,7 @@
   "To pick the best server region for a match, the mod measures your ping to each Photon region and sends the result to the server, where it is kept for at most one hour.",
   "To: {0}",
   "To: {0} and {1} others",
+  "Today's free pack is already claimed",
   "Too many messages - try again in {0} hours.",
   "Too many messages - try again in {0} minutes.",
   "Too many messages - try again in {0} seconds.",
@@ -2217,6 +2300,7 @@
   "Top Pickers",
   "Top Streaks",
   "Top Winners",
+  "Top card: {0}",
   "Top cards (all modes)",
   "Top of the food chain",
   "Total Mayhem",
@@ -2287,6 +2371,7 @@
   "Update failed — couldn't start the updater. Update manually from GitHub.",
   "Update failed — that release has no download attached. Update manually from GitHub.",
   "Update failed — the download didn't finish. Try again.",
+  "Update the mod first",
   "Update the mod to use mail.",
   "Updates",
   "Upload a Cosmetic...",
@@ -2319,6 +2404,7 @@
   "WINNERS FINAL",
   "Waiting for all 3 players to connect — hang tight...",
   "Waiting for opponent...",
+  "Waiting for your Steam sign-in - Player Cards need it",
   "Waiting for {0} ({1:F0})...",
   "Warm coral-orange body color.",
   "Warm cream + tan palette.",
@@ -2428,14 +2514,18 @@
   "Your FFA lobby closed.",
   "Your FFA match continued without you - you've been removed from it.",
   "Your Hit Rate",
+  "Your Player Cards settings changed elsewhere - refreshed, try again",
   "Your block list is full - unblock someone first.",
   "Your game is dropping frames (worst {0} ms)",
+  "Your last pack",
+  "Your last pack ({0}) - {1}",
   "Your match (R{0}{1}): vs <color=#FFDE88>{2}</color>",
   "Your message was removed and you are muted for {0} minutes (auto-moderation).",
   "Your name fades from warm amber into deep pink.",
   "Your no-show penalty: <color=#FFCC44>{0}%</color>",
   "Your opponent is banned from the mod - leaving match.",
   "Your opponent never joined. Returning to menu - you stay ready, and the server forfeits the match to you if they don't show.",
+  "Your pack could not be resolved for an hour - check your binder and gold; contact Sid on Discord if something is missing",
   "Your personal breakdown appears here once gold data loads.",
   "Your pick missed the cutoff - no card this round.",
   "Your picks",
@@ -2463,6 +2553,8 @@
   "blocking: 0 damage + 2x return impulse",
   "both",
   "both Ranked",
+  "bought with gold",
+  "bought with shards",
   "brand new (+/- 350)",
   "bundled into the mod",
   "by hit %, block %, ranked DPS, keys/sec and build-type mix",
@@ -2484,6 +2576,7 @@
   "date ->",
   "days since first rating update ->",
   "default orange / blue",
+  "discarding...",
   "discord.gg/comp-rounds",
   "dmg",
   "dmg/s",
@@ -2491,6 +2584,8 @@
   "duo",
   "duo: the whole right half",
   "earn gold by playing",
+  "earned - ranked win",
+  "earned - sweep",
   "edge check: 0.1s; block window: 0.3s",
   "enabled?",
   "epic",
@@ -2504,6 +2599,7 @@
   "first team to 2 games",
   "first to {0}",
   "fps",
+  "free daily pack",
   "game 1 starts",
   "game in last 45 min: wait",
   "game server relay",
@@ -2652,12 +2748,14 @@
   "{0} active players (90d)",
   "{0} and {1} more",
   "{0} can now translate {1}.",
+  "{0} cards",
   "{0} d ago",
   "{0} days ago",
   "{0} dps",
   "{0} elo",
   "{0} games    {1}W - {2}L    {3}",
   "{0} games  {1} wins  Top3 {2}%  Avg place {3}",
+  "{0} gold",
   "{0} h ago",
   "{0} half-point events",
   "{0} item(s), {1} cop(ies) out there.",
@@ -2668,6 +2766,7 @@
   "{0} min ago",
   "{0} months ago",
   "{0} of {1} left",
+  "{0} of {1} paid packs today - {2} cards each",
   "{0} of {1} players",
   "{0} opening picks",
   "{0} picked {1}",
@@ -2678,6 +2777,7 @@
   "{0} ready! Joining...",
   "{0} searching",
   "{0} series played",
+  "{0} shards",
   "{0} total",
   "{0} tracks",
   "{0} tracks - {1} - {2}",
@@ -2946,6 +3046,21 @@
    "surface": "CompetitiveUI, NativeUI",
    "location": "DrawWideTooltip, FlowTipColumns, HoverCardLines",
    "kind": "TrF"
+  },
+  "- Buy one for {0} gold or {1} shards, up to {2} paid packs a day.": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshInfo",
+   "kind": "TrF"
+  },
+  "- One free pack every day (resets at midnight UTC). Claim it on the Open Packs page or with /daily in Discord.": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshInfo",
+   "kind": "Tr"
+  },
+  "- Ranked wins: every ranked 1v1 series you win rolls a 20% chance of a pack (a 2-0 sweep: 100%). 2v2, 1v2 and FFA wins roll 10% (a sweep: 50%). Earned packs wait here until you open them.": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshInfo",
+   "kind": "Tr"
   },
   "0 in queue": {
    "surface": "NativeUI",
@@ -4772,6 +4887,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "A card shows its player as the leaderboard did on the day it was pulled - name, title, rating, record and rank - and never changes afterwards (a renamed player shows their new name). Anyone with the mod can be pulled unless they turn it off in Settings; your own settings for being a card, a public binder and pull announcements live there too.": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshInfo",
+   "kind": "Tr"
+  },
   "A clean white line. The basics.": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -4866,6 +4986,16 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "A pack is still being resolved - hold on": {
+   "surface": "PlayerCardsUI",
+   "location": "BeginBuy, BeginOpenHeld, ClaimDaily",
+   "kind": "Tr"
+  },
+  "A pack is still being resolved - it will be checked again shortly": {
+   "surface": "PlayerCardsUI",
+   "location": "Refresh",
+   "kind": "Tr"
   },
   "A player hasn't received the new settings yet - try again in a moment.": {
    "surface": "ApiClient",
@@ -5331,6 +5461,21 @@
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
    "kind": "SettingsToggle"
+  },
+  "Announce my pulls: <color=#888>...</color>": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshSettingsRows",
+   "kind": "SetText"
+  },
+  "Announce my pulls: <color=#88FF88>ON</color>": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshSettingsRows",
+   "kind": "SetText"
+  },
+  "Announce my pulls: <color=#FF9966>OFF</color>": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshSettingsRows",
+   "kind": "SetText"
   },
   "Announcement": {
    "surface": "MailUI",
@@ -6152,6 +6297,16 @@
    "location": "RefreshFfaPickBanner",
    "kind": "TrF"
   },
+  "Card pool: no snapshot yet": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshOpen",
+   "kind": "Tr"
+  },
+  "Card pool: {0} players (snapshot {1}) - {2} cards in your binder": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshOpen",
+   "kind": "TrF"
+  },
   "Cards": {
    "surface": "NativeUI, TabStatsOverlay",
    "location": "BuildCompareTab, EnsureLocaleStrings",
@@ -6412,6 +6567,26 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Claim today's free pack": {
+   "surface": "PlayerCardsUI",
+   "location": "BuildOpenView, RefreshOpen",
+   "kind": "CreateButton, SetText"
+  },
+  "Claimed - the next one unlocks in {0}": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshOpen",
+   "kind": "TrF"
+  },
+  "Claimed for today": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshOpen",
+   "kind": "Tr"
+  },
+  "Claiming...": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshOpen",
+   "kind": "SetText"
+  },
   "Clamp ObjectPool init-spawn to 4 in-match — reduces frame stutter from new pool allocation.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
@@ -6446,6 +6621,16 @@
    "surface": "NativeUI",
    "location": "BuildTeamTab",
    "kind": "CreateText"
+  },
+  "Click Discard again to discard that card for shards": {
+   "surface": "PlayerCardsUI",
+   "location": "OnDiscardClick",
+   "kind": "Tr"
+  },
+  "Click Dupes again to discard every other copy of that card": {
+   "surface": "PlayerCardsUI",
+   "location": "OnDiscardClick",
+   "kind": "Tr"
   },
   "Click MAIN MENU again to leave the match.": {
    "surface": "EscMenuLeaveGuard",
@@ -6492,6 +6677,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Collection": {
+   "surface": "NativeUI",
+   "location": "(file scope)",
+   "kind": "Tr"
+  },
   "Collector": {
    "surface": "ApiClient",
    "location": "AchievementDefs",
@@ -6533,9 +6723,9 @@
    "kind": "shop"
   },
   "Common": {
-   "surface": "NativeUI",
-   "location": "RefreshCardStats",
-   "kind": "TrC fallback"
+   "surface": "NativeUI, PlayerCardsUI",
+   "location": "RarityLabel, RefreshCardStats",
+   "kind": "Tr, TrC fallback"
   },
   "Common\u0004card rarity": {
    "surface": "NativeUI",
@@ -7002,6 +7192,11 @@
    "location": "BuildCells1v1, BuildCells2v2Game, BuildCellsFfaGame",
    "kind": "Tr"
   },
+  "Daily limit reached - paid packs reset at midnight UTC": {
+   "surface": "PlayerCardsUI",
+   "location": "ReasonText",
+   "kind": "Tr"
+  },
   "Damage": {
    "surface": "SessionReportModel, TabStatsOverlay",
    "location": "BuildTotals, EnsureLocaleStrings",
@@ -7293,13 +7488,23 @@
    "kind": "CreateButton"
   },
   "Discard": {
-   "surface": "MailUI, NativeUI",
-   "location": "BuildAdminQuarantineRow, BuildComposerView",
-   "kind": "CreateButton, Tr"
+   "surface": "MailUI, NativeUI, PlayerCardsUI",
+   "location": "BuildAdminQuarantineRow, BuildComposerView, CreateTile +1",
+   "kind": "CreateButton, SetText, Tr"
   },
   "Discard this draft?": {
    "surface": "MailUI",
    "location": "DiscardCurrent",
+   "kind": "Tr"
+  },
+  "Discarded {0} card(s) for {1} shards": {
+   "surface": "PlayerCardsUI",
+   "location": "FinishDiscard",
+   "kind": "TrF"
+  },
+  "Discarding a card gives shards by its rarity: Common 5, Uncommon 15, Rare 40, Epic 150, Legendary 600. Shards buy packs. Discards are one card at a time; the Dupes button discards every other copy of that exact card.": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshInfo",
    "kind": "Tr"
   },
   "Disco Fever": {
@@ -7397,6 +7602,11 @@
    "location": "OvtLine, OvtRecordHead",
    "kind": "TrF"
   },
+  "Dupes ({0})": {
+   "surface": "PlayerCardsUI",
+   "location": "FillTile",
+   "kind": "TrF"
+  },
   "Dusk": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -7462,6 +7672,11 @@
    "location": "BuildXpCurve",
    "kind": "Tr"
   },
+  "Each pack holds {0} cards. A card's rarity is its player's rank in the card pool on the day of the pull: Legendary = #1, Epic #2-10, Rare #11-20, Uncommon #21-40, Common #41 and below. Odds per card: Common 60%, Uncommon 25%, Rare 11%, Epic 3.5%, Legendary 0.5%. Every card also rolls Foil (1 in 200) and Signed (1 in 2000) on its own.": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshInfo",
+   "kind": "TrF"
+  },
   "Each player's worst ranked 1v1 opponents - minimum 3 series, top 5": {
    "surface": "NativeUI",
    "location": "BuildComparePlayerNemesisPanel",
@@ -7491,6 +7706,16 @@
    "surface": "NativeUI",
    "location": "RefreshAchievements",
    "kind": "TrF"
+  },
+  "Earned pack (ranked win)": {
+   "surface": "PlayerCardsUI",
+   "location": "PackLabel",
+   "kind": "Tr"
+  },
+  "Earned pack (sweep)": {
+   "surface": "PlayerCardsUI",
+   "location": "PackLabel",
+   "kind": "Tr"
   },
   "Ears for those who feel very lucky": {
    "surface": "shop catalog",
@@ -7627,6 +7852,11 @@
    "location": "SubmitCustomBet",
    "kind": "ShowNotification"
   },
+  "Epic": {
+   "surface": "PlayerCardsUI",
+   "location": "RarityLabel",
+   "kind": "Tr"
+  },
   "Equip": {
    "surface": "NativeUI",
    "location": "ApplyShopRow",
@@ -7733,8 +7963,8 @@
    "kind": "Tr"
   },
   "FFA": {
-   "surface": "InfoLibrary, NativeUI, ProfileCard +1",
-   "location": "(file scope), KindLabel, ModeName",
+   "surface": "InfoLibrary, NativeUI, PlayerCardsUI +2",
+   "location": "(file scope), KindLabel, ModeLabel +1",
    "kind": "Tr"
   },
   "FFA (placed above / below)": {
@@ -7860,6 +8090,11 @@
   "FLAG": {
    "surface": "InfoViz",
    "location": "BuildAnticheatPipeline",
+   "kind": "Tr"
+  },
+  "FOIL": {
+   "surface": "PlayerCardsUI",
+   "location": "FillTile",
    "kind": "Tr"
   },
   "FPS": {
@@ -8086,6 +8321,16 @@
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
    "kind": "SettingsToggle"
+  },
+  "Free daily pack": {
+   "surface": "PlayerCardsUI",
+   "location": "PackLabel",
+   "kind": "Tr"
+  },
+  "Free pack": {
+   "surface": "PlayerCardsUI",
+   "location": "BuildOpenView",
+   "kind": "CreateText"
   },
   "Free-for-all for 3-10 players. Every player is their own team.\nStandard ROUNDS scoring - first to {0} points takes the game.\n\n<color=#FFD94D><b>HOW TO PLAY</b></color>\n\n- There is no Elo band. Joining a lobby is consent to play.\n\n- Create a lobby, or join an open one from the browser.\n  The HOST presses Start once at least 3 players are in\n  (up to 10). Several lobbies can be open at once.\n\n- If the host leaves, the longest-waiting member becomes\n  the new host automatically.\n\n- After each point, everyone except the point winner\n  picks a card at the same time.\n\n- The pick timer is shown on screen. A pick landing\n  near the end grants everyone a little extra time.\n  When your timer hits zero, your highlighted card is\n  picked for you automatically - walking away never\n  skips your pick. Only a pick that misses the window\n  entirely (a freeze, a crash, or the final split\n  second) yields no card, with a toast saying so.\n\n- You hold up to {1} cards.\n  Picking one more replaces your oldest card.\n\n<color=#FFD94D><b>HOST SETTINGS</b></color>\n\n- The host can tune the lobby before starting: score\n  target (3-10), opening draws, cards offered per\n  draw (1-5), max cards held (3-5 ranked, up to 6\n  casual), the Same Cards rule, and ranked/casual.\n\n- Same Cards rule: everyone's Nth card draw offers the\n  SAME candidates, in the same order - if you and a rival\n  were offered identical cards all game, no result can be\n  blamed on draw luck. One-copy cards (like Phoenix)\n  appear at most once per game for everyone.\n\n- After a settings change the lobby cannot start for 60\n  seconds (and briefly after someone new joins), so\n  everyone can read what changed. Casual lobbies pay\n  reduced rewards and never touch ratings.\n\n<color=#FFD94D><b>RATING</b></color>\n\n- FFA is ranked with its own Glicko rating.\n\n- Placement uses points, then all round wins earned\n  (spent ones included), then kills.\n  Remaining ties share a place using competition\n  order: 1, 2, 2, 4.\n\n- Your rating is scored against the players placed\n  nearest to you (up to 4 of them), so one game can't\n  swing your rating several times harder in a 10-player\n  lobby than in a 3-player one. One extra comparison\n  can join those four: the biggest 250+ rating gap\n  that finished upside down outside them.\n\n- A tied placement counts as a draw. New ratings move\n  fast and settle down as you play more.\n\n<color=#FFD94D><b>REWARDS</b></color>\n\n- Pay is metered on the FIGHTING, not on flat per-game\n  numbers: decisive rounds are the work unit, and\n  elapsed time caps how fast they cash in - stall\n  tactics are held to a bounded edge, and longer,\n  bigger games pay more.\n\n- Bigger lobbies pay a better rate per minute, and a\n  10-player FFA is the best gold rate in the game.\n\n- Your placement shapes your share: 1st earns about\n  five times last place's cut. Part pays as XP, part as\n  Placement Gold, and a stronger opposing field\n  multiplies the pot (the usual tier bonus).\n\n- XP converts to Gold at 100 XP = 1 Gold, and level-ups\n  pay their usual bonus Gold. A level-up landing during\n  a game shows up inside that game's +g number - that is\n  how a last place can occasionally out-earn the winner.\n\n- Spectators can bet Gold on FFA lobbies from this tab.\n\n<color=#FFD94D><b>READING THE RECENT FFAS LIST</b></color>\n\n<color=#7FD4FF>Dots + N(P)</color> - Full points won.\n<color=#7FD4FF>Half dots + N(H)</color> - Round wins that\n  did not become one of that player's full points.\n<color=#7FD4FF>Nk</color> - Kills.\n<color=#7FD4FF>+xp +g</color> - That game's XP and Gold\n  (including any level-up bonus).\n<color=#7FD4FF>Green/red number</color> - FFA rating change.\n<color=#7FD4FF>Cards</color> - The hand held at game end.\n  <color=#FF6666>+N replaced</color> counts picks that were\n  pushed out by the card cap - hover the line to see\n  every pick in order.\n\n<color=#FFD94D><b>LEADERBOARD COLUMNS</b></color>\n\n<color=#7FD4FF>Rank</color> - Position in the currently selected sort.\n<color=#7FD4FF>Player</color> - The player's display name.\n<color=#7FD4FF>Rating</color> - The player's separate FFA Glicko rating.\n<color=#7FD4FF>Games</color> - Recorded FFA games played.\n<color=#7FD4FF>Wins</color> - Games finished in 1st place.\n<color=#7FD4FF>Top3</color> - Games finished in 1st, 2nd, or 3rd.\n<color=#7FD4FF>AvgPl</color> - Average finishing place. Lower is\n  better - 1.0 means winning every game.\n<color=#7FD4FF>WR</color> - Share of games won outright.\n\n<color=#FFD94D><b>GOTCHAS</b></color>\n\n- Leaving mid-game is recorded. A leaver keeps their\n  tallies and is placed and rated for the game they\n  left - unless they left before the field had scored\n  2 half points while their own tally was still zero,\n  in which case that game does not rate them.": {
    "surface": "ModeInfoText",
@@ -8447,6 +8692,11 @@
    "location": "BuildAdminTab",
    "kind": "Tr"
   },
+  "Grant data consent first (Settings)": {
+   "surface": "PlayerCardsUI",
+   "location": "ReasonText",
+   "kind": "Tr"
+  },
   "Graphs {0}/{1}": {
    "surface": "PostSessionReport",
    "location": "BuildGraphPages",
@@ -8767,6 +9017,11 @@
    "location": "(file scope)",
    "kind": "Tr"
   },
+  "How to get packs": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshInfo",
+   "kind": "Tr"
+  },
   "How tournaments run": {
    "surface": "InfoLibrary",
    "location": "(file scope)",
@@ -8796,6 +9051,21 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "I can be a Player Card: <color=#888>...</color>": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshSettingsRows",
+   "kind": "SetText"
+  },
+  "I can be a Player Card: <color=#88FF88>ON</color>": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshSettingsRows",
+   "kind": "SetText"
+  },
+  "I can be a Player Card: <color=#FF9966>OFF</color>": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshSettingsRows",
+   "kind": "SetText"
   },
   "I play with a competitive framework mod called Sid's Competitive Rounds": {
    "surface": "QuickChat",
@@ -9257,6 +9527,11 @@
    "location": "PollRoomState",
    "kind": "ShowNotification"
   },
+  "Legendary": {
+   "surface": "PlayerCardsUI",
+   "location": "RarityLabel",
+   "kind": "Tr"
+  },
   "Lemon": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -9382,14 +9657,19 @@
    "location": "StartCosmeticPlacementAdjustment",
    "kind": "ShowNotification"
   },
+  "Loading your binder...": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshBinder",
+   "kind": "Tr"
+  },
   "Loading your dances - try E again in a second.": {
    "surface": "CompetitiveUI",
    "location": "DrawDanceWheel",
    "kind": "Tr"
   },
   "Loading...": {
-   "surface": "MailUI, NativeUI, SessionReportView",
-   "location": "BuildCompareCardLeaders, BuildCompareCardMetric, BuildCompareCardPickers +19",
+   "surface": "MailUI, NativeUI, PlayerCardsUI +1",
+   "location": "BuildCompareCardLeaders, BuildCompareCardMetric, BuildCompareCardPickers +20",
    "kind": "CreateButton, CreateText, SetText +1"
   },
   "Locks the map to ROUNDS' Gold palette (warm yellow).": {
@@ -9997,6 +10277,21 @@
    "location": "(file scope)",
    "kind": "Tr"
   },
+  "My collection is public: <color=#888>...</color>": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshSettingsRows",
+   "kind": "SetText"
+  },
+  "My collection is public: <color=#88FF88>ON</color>": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshSettingsRows",
+   "kind": "SetText"
+  },
+  "My collection is public: <color=#FF9966>OFF</color>": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshSettingsRows",
+   "kind": "SetText"
+  },
   "NETWORK": {
    "surface": "CompetitiveUI",
    "location": "BugChoiceLabel",
@@ -10177,6 +10472,16 @@
    "location": "RefreshTournaments",
    "kind": "Tr"
   },
+  "No answer from the server - try again in a moment": {
+   "surface": "PlayerCardsUI",
+   "location": "ReasonText",
+   "kind": "Tr"
+  },
+  "No answer from the server - your pack will be checked again shortly": {
+   "surface": "PlayerCardsUI",
+   "location": "HandleAnswer",
+   "kind": "Tr"
+  },
   "No articles match your search.": {
    "surface": "NativeUI",
    "location": "BuildInfoTab",
@@ -10186,6 +10491,11 @@
    "surface": "MailUI",
    "location": "RefreshSettingsRow",
    "kind": "CreateText"
+  },
+  "No cards yet - open a pack": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshBinder",
+   "kind": "Tr"
   },
   "No games recorded for this session yet.": {
    "surface": "PostSessionReport",
@@ -10252,6 +10562,11 @@
    "location": "(file scope)",
    "kind": "Tr"
   },
+  "Nobody is in the card pool right now - try again later": {
+   "surface": "PlayerCardsUI",
+   "location": "ReasonText",
+   "kind": "Tr"
+  },
   "Noobie": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -10267,10 +10582,20 @@
    "location": "ErrorDetail",
    "kind": "Tr"
   },
+  "Not enough gold for a pack": {
+   "surface": "PlayerCardsUI",
+   "location": "ReasonText",
+   "kind": "Tr"
+  },
   "Not enough players to continue the FFA - returning to menu.": {
    "surface": "FfaMode",
    "location": "EndSittingBelowMinimum, FfaDoStartGame",
    "kind": "ShowNotification"
+  },
+  "Not enough shards for a pack": {
+   "surface": "PlayerCardsUI",
+   "location": "ReasonText",
+   "kind": "Tr"
   },
   "Not found - it may have been deleted.": {
    "surface": "MailClient",
@@ -10392,6 +10717,11 @@
    "location": "BuildGrowCurve",
    "kind": "Tr"
   },
+  "One free pack a day (resets at midnight UTC) - also /daily in Discord": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshOpen",
+   "kind": "Tr"
+  },
   "One of the recipients could not be found.": {
    "surface": "MailClient",
    "location": "ErrorDetail",
@@ -10422,6 +10752,11 @@
    "location": "BuildOneVTwoTab, SetRules",
    "kind": "Tr"
   },
+  "Open": {
+   "surface": "PlayerCardsUI",
+   "location": "BuildOpenView",
+   "kind": "CreateButton"
+  },
   "Open Report Form": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
@@ -10437,10 +10772,40 @@
    "location": "BuildArtistTab",
    "kind": "CreateButton"
   },
+  "Open a pack": {
+   "surface": "PlayerCardsUI",
+   "location": "BuildOpenView",
+   "kind": "CreateText"
+  },
+  "Open for {0} gold": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshOpen",
+   "kind": "TrF"
+  },
+  "Open for {0} shards": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshOpen",
+   "kind": "TrF"
+  },
   "Open the Info library": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
    "kind": "CreateButton"
+  },
+  "Open today's free pack": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshOpen",
+   "kind": "SetText"
+  },
+  "Open with gold": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshOpen",
+   "kind": "Tr"
+  },
+  "Open with shards": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshOpen",
+   "kind": "Tr"
   },
   "Opening draws:": {
    "surface": "NativeUI",
@@ -10451,6 +10816,11 @@
    "surface": "NativeUI",
    "location": "StartCosmeticUpload",
    "kind": "ShowNotification"
+  },
+  "Opening your pack...": {
+   "surface": "PlayerCardsUI",
+   "location": "Refresh",
+   "kind": "Tr"
   },
   "Opp:": {
    "surface": "NativeUI",
@@ -10581,6 +10951,26 @@
    "surface": "ApiClient, shop catalog",
    "location": "AchievementDefs, cosmetic name/description",
    "kind": "shop, table"
+  },
+  "Pack": {
+   "surface": "PlayerCardsUI",
+   "location": "PackLabel",
+   "kind": "Tr"
+  },
+  "Pack opened - {0} new cards": {
+   "surface": "PlayerCardsUI",
+   "location": "HandleAnswer",
+   "kind": "TrF"
+  },
+  "Packs waiting to be opened": {
+   "surface": "PlayerCardsUI",
+   "location": "BuildOpenView",
+   "kind": "CreateText"
+  },
+  "Page {0} of {1}": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshBinder",
+   "kind": "TrF"
   },
   "Page {0}/{1}": {
    "surface": "NativeUI, SessionReportView",
@@ -10867,6 +11257,26 @@
    "location": "BuildCompareNemesisPanel, BuildFfaTab, BuildLeaderboardTab +5",
    "kind": "Tr"
   },
+  "Player Cards": {
+   "surface": "NativeUI, PlayerCardsUI",
+   "location": "BuildInto, BuildSettingsRows, BuildShopTab",
+   "kind": "CreateButton, CreateText"
+  },
+  "Player Cards are not enabled on this server yet": {
+   "surface": "PlayerCardsUI",
+   "location": "Refresh",
+   "kind": "Tr"
+  },
+  "Player Cards are not open yet - no edition is running": {
+   "surface": "PlayerCardsUI",
+   "location": "ReasonText",
+   "kind": "Tr"
+  },
+  "Player Cards need your Steam sign-in - try again in a moment": {
+   "surface": "PlayerCardsUI",
+   "location": "ReasonText",
+   "kind": "Tr"
+  },
   "Player Nemesis": {
    "surface": "NativeUI",
    "location": "TrMetric",
@@ -10931,6 +11341,11 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "Pool #{0} | Ed. {1} | {2}": {
+   "surface": "PlayerCardsUI",
+   "location": "FillTile",
+   "kind": "TrF"
   },
   "Porcelain": {
    "surface": "shop catalog",
@@ -11292,6 +11707,11 @@
    "location": "TryFormatStanding",
    "kind": "TrF"
   },
+  "Rank #{0} | {1}W {2}L": {
+   "surface": "PlayerCardsUI",
+   "location": "FillTile",
+   "kind": "TrF"
+  },
   "Rank: <b><color={0}>{1}</color></b>": {
    "surface": "NativeUI, PostSessionReport",
    "location": "ComposeFfaMiniPanel, ComposePlayerPanel1v1, ComposePlayerPanelCompact +2",
@@ -11413,9 +11833,9 @@
    "kind": "shop"
   },
   "Rare": {
-   "surface": "NativeUI",
-   "location": "RefreshCardStats",
-   "kind": "TrC fallback"
+   "surface": "NativeUI, PlayerCardsUI",
+   "location": "RarityLabel, RefreshCardStats",
+   "kind": "Tr, TrC fallback"
   },
   "Rare\u0004card rarity": {
    "surface": "NativeUI",
@@ -11445,6 +11865,11 @@
   "Rating History  ({0} Elo, {1} rating updates)": {
    "surface": "NativeUI",
    "location": "BuildFormGraph",
+   "kind": "TrF"
+  },
+  "Rating {0} | peak {1}": {
+   "surface": "PlayerCardsUI",
+   "location": "FillTile",
    "kind": "TrF"
   },
   "Ratings & Rewards": {
@@ -11536,6 +11961,11 @@
    "surface": "NativeUI",
    "location": "BuildCompareRecordsPanel",
    "kind": "Tr"
+  },
+  "Record {0}W {1}L": {
+   "surface": "PlayerCardsUI",
+   "location": "FillTile",
+   "kind": "TrF"
   },
   "Records": {
    "surface": "NativeUI",
@@ -11960,6 +12390,11 @@
   "SIGNAL, FLAG, HUMAN REVIEW": {
    "surface": "InfoViz",
    "location": "BuildAnticheatPipeline",
+   "kind": "Tr"
+  },
+  "SIGNED": {
+   "surface": "PlayerCardsUI",
+   "location": "FillTile",
    "kind": "Tr"
   },
   "SIGNED REPORT": {
@@ -12922,6 +13357,11 @@
    "location": "ErrorMessage",
    "kind": "Tr"
   },
+  "Steam identity not ready yet": {
+   "surface": "PlayerCardsUI",
+   "location": "Refresh",
+   "kind": "Tr"
+  },
   "Steam session not accepted — queue polling stopped; the server will clear your seat shortly. Try again in a moment.": {
    "surface": "ApiClient",
    "location": "UpdateQueuePoll",
@@ -12971,6 +13411,16 @@
    "surface": "ApiClient",
    "location": "ActionPreflight, FfaLobbyActionPreflight",
    "kind": "ShowNotification, Tr"
+  },
+  "Still opening - checking again shortly": {
+   "surface": "PlayerCardsUI",
+   "location": "HandleAnswer",
+   "kind": "Tr"
+  },
+  "Still waiting for the server to record your pack - checking again shortly": {
+   "surface": "PlayerCardsUI",
+   "location": "HandleAnswer",
+   "kind": "Tr"
   },
   "Stitched Grin": {
    "surface": "shop catalog",
@@ -13066,6 +13516,16 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "Sure? Discard": {
+   "surface": "PlayerCardsUI",
+   "location": "FillTile",
+   "kind": "SetText"
+  },
+  "Sure? Discard dupes": {
+   "surface": "PlayerCardsUI",
+   "location": "FillTile",
+   "kind": "Tr"
   },
   "Sustained Power": {
    "surface": "ApiClient",
@@ -13332,9 +13792,34 @@
    "location": "(file scope)",
    "kind": "Tr"
   },
+  "That card is no longer in your collection": {
+   "surface": "PlayerCardsUI",
+   "location": "ReasonText",
+   "kind": "Tr"
+  },
   "That game is no longer live.": {
    "surface": "ApiClient",
    "location": "RequestSpectateGrantCore",
+   "kind": "Tr"
+  },
+  "That pack is not available any more": {
+   "surface": "PlayerCardsUI",
+   "location": "HandleAnswer",
+   "kind": "Tr"
+  },
+  "That pack is still opening - hold on": {
+   "surface": "PlayerCardsUI",
+   "location": "ReasonText",
+   "kind": "Tr"
+  },
+  "That pack purchase never went through - nothing was charged": {
+   "surface": "PlayerCardsUI",
+   "location": "HandleAnswer",
+   "kind": "Tr"
+  },
+  "That pack was voided - the series it came from was reversed": {
+   "surface": "PlayerCardsUI",
+   "location": "ReasonText",
    "kind": "Tr"
   },
   "That player could not be found.": {
@@ -13492,6 +13977,26 @@
    "location": "(file scope)",
    "kind": "Tr"
   },
+  "The pack answer could not be read - check your binder": {
+   "surface": "PlayerCardsUI",
+   "location": "HandleAnswer",
+   "kind": "Tr"
+  },
+  "The pack is still yours to open": {
+   "surface": "PlayerCardsUI",
+   "location": "HandleAnswer",
+   "kind": "Tr"
+  },
+  "The pack price changed - check the new price and try again": {
+   "surface": "PlayerCardsUI",
+   "location": "ReasonText",
+   "kind": "Tr"
+  },
+  "The pool changed while your pack was opening - nothing was charged, try again": {
+   "surface": "PlayerCardsUI",
+   "location": "ReasonText",
+   "kind": "Tr"
+  },
   "The report could not be read": {
    "surface": "SessionReportView",
    "location": "ErrorMessage",
@@ -13531,6 +14036,11 @@
    "surface": "NativeUI",
    "location": "StartCosmeticPlacementAdjustment",
    "kind": "ShowNotification"
+  },
+  "The server refused that - try again in a moment": {
+   "surface": "PlayerCardsUI",
+   "location": "ReasonText",
+   "kind": "Tr"
   },
   "The server refused this request ({0}).": {
    "surface": "MailClient",
@@ -13737,6 +14247,11 @@
    "location": "PaintComposer",
    "kind": "TrF"
   },
+  "Today's free pack is already claimed": {
+   "surface": "PlayerCardsUI",
+   "location": "ReasonText",
+   "kind": "Tr"
+  },
   "Too many messages - try again in {0} hours.": {
    "surface": "MailClient",
    "location": "RateLimitText",
@@ -13776,6 +14291,11 @@
    "surface": "NativeUI",
    "location": "TrMetric",
    "kind": "Tr"
+  },
+  "Top card: {0}": {
+   "surface": "PlayerCardsUI",
+   "location": "FillTile",
+   "kind": "TrF"
   },
   "Top cards (all modes)": {
    "surface": "PostSessionReport",
@@ -13998,9 +14518,9 @@
    "kind": "AppendSystemChatLine"
   },
   "Uncommon": {
-   "surface": "NativeUI",
-   "location": "RefreshCardStats",
-   "kind": "TrC fallback"
+   "surface": "NativeUI, PlayerCardsUI",
+   "location": "RarityLabel, RefreshCardStats",
+   "kind": "Tr, TrC fallback"
   },
   "Uncommon\u0004card rarity": {
    "surface": "NativeUI",
@@ -14126,6 +14646,11 @@
    "surface": "ApiClient",
    "location": "DoAutoUpdate",
    "kind": "ShowNotification"
+  },
+  "Update the mod first": {
+   "surface": "PlayerCardsUI",
+   "location": "ReasonText",
+   "kind": "Tr"
   },
   "Update the mod to use mail.": {
    "surface": "MailClient",
@@ -14286,6 +14811,11 @@
    "surface": "NativeUI",
    "location": "BuildRankedRow, RefreshQueueUI",
    "kind": "CreateText, Tr"
+  },
+  "Waiting for your Steam sign-in - Player Cards need it": {
+   "surface": "PlayerCardsUI",
+   "location": "Refresh",
+   "kind": "Tr"
   },
   "Waiting for {0} ({1:F0})...": {
    "surface": "NativeUI",
@@ -14832,6 +15362,11 @@
    "location": "PaintPairGraph",
    "kind": "Tr"
   },
+  "Your Player Cards settings changed elsewhere - refreshed, try again": {
+   "surface": "PlayerCardsUI",
+   "location": "ReasonText",
+   "kind": "Tr"
+  },
   "Your block list is full - unblock someone first.": {
    "surface": "MailClient",
    "location": "ErrorDetail",
@@ -14840,6 +15375,16 @@
   "Your game is dropping frames (worst {0} ms)": {
    "surface": "LagNotices",
    "location": "LineFor",
+   "kind": "TrF"
+  },
+  "Your last pack": {
+   "surface": "PlayerCardsUI",
+   "location": "BuildOpenView",
+   "kind": "CreateText"
+  },
+  "Your last pack ({0}) - {1}": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshOpen",
    "kind": "TrF"
   },
   "Your match (R{0}{1}): vs <color=#FFDE88>{2}</color>": {
@@ -14871,6 +15416,11 @@
    "surface": "GameStateWatcher",
    "location": "PollRoomState",
    "kind": "ShowNotification"
+  },
+  "Your pack could not be resolved for an hour - check your binder and gold; contact Sid on Discord if something is missing": {
+   "surface": "PlayerCardsUI",
+   "location": "HandleAnswer",
+   "kind": "Tr"
   },
   "Your personal breakdown appears here once gold data loads.": {
    "surface": "InfoViz",
@@ -15007,6 +15557,16 @@
    "location": "BuildWhenCounts",
    "kind": "Tr"
   },
+  "bought with gold": {
+   "surface": "PlayerCardsUI",
+   "location": "PackSourceLabel",
+   "kind": "Tr"
+  },
+  "bought with shards": {
+   "surface": "PlayerCardsUI",
+   "location": "PackSourceLabel",
+   "kind": "Tr"
+  },
   "brand new (+/- 350)": {
    "surface": "InfoViz",
    "location": "BuildGlickoRd",
@@ -15112,6 +15672,11 @@
    "location": "BuildVisibilitySeats",
    "kind": "Tr"
   },
+  "discarding...": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshBinder",
+   "kind": "Tr"
+  },
   "discord.gg/comp-rounds": {
    "surface": "QuickChat",
    "location": "Phrases",
@@ -15145,6 +15710,16 @@
   "earn gold by playing": {
    "surface": "InfoViz",
    "location": "BuildCosmeticsFlow",
+   "kind": "Tr"
+  },
+  "earned - ranked win": {
+   "surface": "PlayerCardsUI",
+   "location": "PackSourceLabel",
+   "kind": "Tr"
+  },
+  "earned - sweep": {
+   "surface": "PlayerCardsUI",
+   "location": "PackSourceLabel",
    "kind": "Tr"
   },
   "edge check: 0.1s; block window: 0.3s": {
@@ -15210,6 +15785,11 @@
   "fps": {
    "surface": "SessionReportModel",
    "location": "Build",
+   "kind": "Tr"
+  },
+  "free daily pack": {
+   "surface": "PlayerCardsUI",
+   "location": "PackSourceLabel",
    "kind": "Tr"
   },
   "game 1 starts": {
@@ -15952,6 +16532,11 @@
    "location": "BuildAdminTab",
    "kind": "TrF"
   },
+  "{0} cards": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshBinder",
+   "kind": "TrF"
+  },
   "{0} d ago": {
    "surface": "ProfileCard",
    "location": "Ago",
@@ -15980,6 +16565,11 @@
   "{0} games  {1} wins  Top3 {2}%  Avg place {3}": {
    "surface": "PostSessionReport",
    "location": "ComposeFfaMiniPanel",
+   "kind": "TrF"
+  },
+  "{0} gold": {
+   "surface": "PlayerCardsUI",
+   "location": "Refresh",
    "kind": "TrF"
   },
   "{0} h ago": {
@@ -16032,6 +16622,11 @@
    "location": "RefreshArtistTab",
    "kind": "TrF"
   },
+  "{0} of {1} paid packs today - {2} cards each": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshOpen",
+   "kind": "TrF"
+  },
   "{0} of {1} players": {
    "surface": "NativeUI",
    "location": "RefreshLeaderboard",
@@ -16080,6 +16675,11 @@
   "{0} series played": {
    "surface": "PostSessionReport",
    "location": "ComposePlayerPanelCompact",
+   "kind": "TrF"
+  },
+  "{0} shards": {
+   "surface": "PlayerCardsUI",
+   "location": "Refresh",
    "kind": "TrF"
   },
   "{0} total": {

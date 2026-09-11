@@ -2007,6 +2007,7 @@ namespace CompetitiveRounds
             MaybeRefreshOvtTab();
             MaybeRefreshFfaTab();
             MaybeRefreshHomeTab();
+            PlayerCardsUI.MaybeTick(currentTab==TAB_COLLECTION);
             MaybeRefreshInfoGold();
             MaybeRefreshCompareRecords();
             MaybeRefreshMusicTab();
@@ -2441,7 +2442,7 @@ namespace CompetitiveRounds
             tIndRow.SetActive(false);
             tournamentIndRow = tIndRow;
             BuildTabBar(content.transform);
-            tabPanels=new GameObject[NUM_TABS];tabPanels[0]=BuildMyStatsTab(content.transform);tabPanels[1]=BuildLeaderboardTab(content.transform);tabPanels[2]=BuildCardStatsTab(content.transform);tabPanels[3]=BuildAchievementsTab(content.transform);tabPanels[4]=BuildShopTab(content.transform);tabPanels[5]=BuildSettingsTab(content.transform);tabPanels[6]=BuildAdminTab(content.transform);tabPanels[7]=BuildTournamentsTab(content.transform);tabPanels[8]=BuildTeamTab(content.transform);tabPanels[9]=BuildCompareTab(content.transform);tabPanels[10]=BuildArtistTab(content.transform);tabPanels[11]=BuildOneVTwoTab(content.transform,11);tabPanels[12]=BuildFfaTab(content.transform,12);tabPanels[13]=BuildHomeTab(content.transform);tabPanels[14]=BuildBannedTab(content.transform);tabPanels[15]=BuildInfoTab(content.transform);BuildUtilityPopup(pageGO.transform);/* Sept 7 item 1: Music (16) and Mail (17) are popup bodies, not tabs — their slots stay null and SwitchTab null-skips them */
+            tabPanels=new GameObject[NUM_TABS];tabPanels[0]=BuildMyStatsTab(content.transform);tabPanels[1]=BuildLeaderboardTab(content.transform);tabPanels[2]=BuildCardStatsTab(content.transform);tabPanels[3]=BuildAchievementsTab(content.transform);tabPanels[4]=BuildShopTab(content.transform);tabPanels[5]=BuildSettingsTab(content.transform);tabPanels[6]=BuildAdminTab(content.transform);tabPanels[7]=BuildTournamentsTab(content.transform);tabPanels[8]=BuildTeamTab(content.transform);tabPanels[9]=BuildCompareTab(content.transform);tabPanels[10]=BuildArtistTab(content.transform);tabPanels[11]=BuildOneVTwoTab(content.transform,11);tabPanels[12]=BuildFfaTab(content.transform,12);tabPanels[13]=BuildHomeTab(content.transform);tabPanels[14]=BuildBannedTab(content.transform);tabPanels[15]=BuildInfoTab(content.transform);tabPanels[TAB_COLLECTION]=BuildCollectionTab(content.transform);BuildUtilityPopup(pageGO.transform);/* Sept 7 item 1: Music (16) and Mail (17) are popup bodies, not tabs — their slots stay null and SwitchTab null-skips them */
             // (The [ID] button's position is set in CreateHistoryRow itself, so
             // it cannot desync from tab-build ordering.)
 
@@ -2692,11 +2693,12 @@ namespace CompetitiveRounds
         // i18n: expression-bodied property (NOT a static readonly field) so the
         // I18n.Tr calls run at ACCESS time — after I18nCatalogues.Install() — and
         // re-evaluate after a language switch (which rebuilds the page).
-        private static string[] TAB_NAMES=>new[]{I18n.Tr("My Stats"),I18n.Tr("Leaderboard"),I18n.Tr("Card Stats"),I18n.Tr("Achievements"),I18n.Tr("Shop"),I18n.Tr("Settings"),I18n.Tr("Admin"),I18n.Tr("Tournaments"),I18n.Tr("2v2"),I18n.Tr("Compare"),I18n.Tr("Artist"),I18n.Tr("1v2"),I18n.Tr("FFA"),I18n.Tr("Home"),I18n.Tr("Banned"),I18n.Tr("Info"),I18n.Tr("Music"),I18n.Tr("Mail")};
-        private const int NUM_TABS=18;   // Aug 7 item 7: 14 = Banned (Admin sub-tab); Aug 23: 15 = Info (Settings sub-tab); Sept 2: 16 = Music; Sept 6: 17 = Mail; Sept 7: 16 and 17 became header-icon popups (indices kept, panels null)
+        private static string[] TAB_NAMES=>new[]{I18n.Tr("My Stats"),I18n.Tr("Leaderboard"),I18n.Tr("Card Stats"),I18n.Tr("Achievements"),I18n.Tr("Shop"),I18n.Tr("Settings"),I18n.Tr("Admin"),I18n.Tr("Tournaments"),I18n.Tr("2v2"),I18n.Tr("Compare"),I18n.Tr("Artist"),I18n.Tr("1v2"),I18n.Tr("FFA"),I18n.Tr("Home"),I18n.Tr("Banned"),I18n.Tr("Info"),I18n.Tr("Music"),I18n.Tr("Mail"),I18n.Tr("Collection")};
+        private const int NUM_TABS=19;   // Sept 10: 18 = Collection (Player Cards, Shop sub-tab). Aug 7 item 7: 14 = Banned (Admin sub-tab); Aug 23: 15 = Info (Settings sub-tab); Sept 2: 16 = Music; Sept 6: 17 = Mail; Sept 7: 16 and 17 became header-icon popups (indices kept, panels null)
         private const int TAB_HOME=13;
         private const int TAB_BANNED=14;
         private const int TAB_INFO=15;   // Aug 23 (Sid): the explainer library — Settings group sub-tab
+        internal const int TAB_COLLECTION=18;   // Sept 10 (Player Cards): the Collection tab - Shop group sub-tab, body in PlayerCardsUI.cs
         internal const int TAB_MAIL=17;  // Sept 6 (Sid): in-game mail (MailUI.cs). Sept 7 item 1: a header-icon popup with no tab slot — the index is kept so every other tab keeps its meaning
         // Top bar order per Sid's spec (July 12 round 2): Multiplayer right after
         // Tournaments; Settings last; Admin gated. Sub-tabs: Compare under
@@ -2708,7 +2710,7 @@ namespace CompetitiveRounds
         private static string[] GROUP_LABELS=>new[]{I18n.Tr("Home"),I18n.Tr("My Stats"),I18n.Tr("Leaderboard"),I18n.Tr("Tournaments"),I18n.Tr("Multiplayer"),I18n.Tr("Shop"),I18n.Tr("Admin"),I18n.Tr("Settings")};
         // Sept 7 item 1: Music (16) and Mail (17) left the bar — both open as
         // popups from the header icons (BuildUtilityStrip / OpenUtilityPopup).
-        private static readonly int[][] GROUP_MEMBERS={new[]{13},new[]{0,2,3},new[]{1,9},new[]{7},new[]{8,11,12},new[]{4,10},new[]{6,14},new[]{5,15}};
+        private static readonly int[][] GROUP_MEMBERS={new[]{13},new[]{0,2,3},new[]{1,9},new[]{7},new[]{8,11,12},new[]{4,10,18},new[]{6,14},new[]{5,15}};
         private const int GROUP_ADMIN=6;   // GROUP_LABELS index of the admin-gated slot (6 since the Music and Mail slots left the bar, Sept 7)
         private static int GroupOf(int tabIdx){for(int g=0;g<GROUP_MEMBERS.Length;g++)for(int m=0;m<GROUP_MEMBERS[g].Length;m++)if(GROUP_MEMBERS[g][m]==tabIdx)return g;return 0;}
         /* Aug 7 item 7: the Banned sub-tab is ADMIN-only (its only fetch is the
@@ -6466,7 +6468,7 @@ another kind does, land on that kind. Mirrors the sub-tab buttons' own switch
 statements; the branch's force fetch below is shared. Entries older than 45s are
 ignored (review MEDIUM: a failed refresh retains the previous list indefinitely,
 and switching on a stale snapshot lands on a completed match's kind — the 20s
-poll makes fresh data the norm, so staleness fails NEUTRAL). */try{var mine=ApiClient.CachedMyActiveTournamentMatches;if(mine!=null){bool currentHasLive=false;string otherKind=null;float nowRt=Time.realtimeSinceStartup;foreach(var am in mine){if(am==null)continue;if(nowRt-am.fetched_at_realtime>45f)continue;if(am.status!="ready"&&am.status!="active"&&am.status!="scheduled")continue;if(string.IsNullOrEmpty(am.kind))continue;if(am.kind==ApiClient.TournamentKind)currentHasLive=true;else otherKind=am.kind;}if(!currentHasLive&&otherKind!=null)ApiClient.TournamentKind=otherKind;}}catch{}ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();ApiClient.FetchActiveSeries();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown"){ApiClient.FetchPlayerTournaments(_msid);ApiClient.FetchMyBets(_msid);}}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}if(idx==9){if(ApiClient.CachedLeaderboard==null)ApiClient.FetchLeaderboard();}if(idx==10){var _asid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_asid)&&_asid!="unknown"&&ApiClient.IsArtist){ApiClient.FetchArtistItems(_asid);ApiClient.FetchMySubmissions(_asid);ApiClient.FetchArtistSales(_asid);}}if(idx==11){ovtTabRefreshAt=Time.unscaledTime+30f;ovtRecentRefreshAt=Time.unscaledTime+10f;ApiClient.FetchOvtLeaderboard();ApiClient.FetchOvtLeaderboard(200,"solo");ApiClient.FetchOvtLeaderboard(200,"duo");ApiClient.FetchOvtRecent(ovtRecentPageReq);}if(idx==12){ffaLbRefreshAt=Time.unscaledTime+30f;ffaRecentRefreshAt=Time.unscaledTime+10f;ffaBetRefreshAt=Time.unscaledTime+10f;ApiClient.FetchFfaLeaderboard(200,ffaLbSortReq);ApiClient.FetchFfaRecent(ffaRecentPageReq,5);ApiClient.FetchFfaRecent(ffaRecentCasPageReq,5,false);ApiClient.FetchFfaBettable(MatchTracker.LocalSteamId);ApiClient.UpdateFfaQueueList(force:true);}if(idx==TAB_HOME){homeTabRefreshAt=Time.unscaledTime+15f;ApiClient.FetchOnlinePlayers();ApiClient.FetchNewestCosmetics();ApiClient.FetchReleaseNotes();}dirty=true;}
+poll makes fresh data the norm, so staleness fails NEUTRAL). */try{var mine=ApiClient.CachedMyActiveTournamentMatches;if(mine!=null){bool currentHasLive=false;string otherKind=null;float nowRt=Time.realtimeSinceStartup;foreach(var am in mine){if(am==null)continue;if(nowRt-am.fetched_at_realtime>45f)continue;if(am.status!="ready"&&am.status!="active"&&am.status!="scheduled")continue;if(string.IsNullOrEmpty(am.kind))continue;if(am.kind==ApiClient.TournamentKind)currentHasLive=true;else otherKind=am.kind;}if(!currentHasLive&&otherKind!=null)ApiClient.TournamentKind=otherKind;}}catch{}ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();ApiClient.FetchActiveSeries();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown"){ApiClient.FetchPlayerTournaments(_msid);ApiClient.FetchMyBets(_msid);}}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}if(idx==9){if(ApiClient.CachedLeaderboard==null)ApiClient.FetchLeaderboard();}if(idx==10){var _asid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_asid)&&_asid!="unknown"&&ApiClient.IsArtist){ApiClient.FetchArtistItems(_asid);ApiClient.FetchMySubmissions(_asid);ApiClient.FetchArtistSales(_asid);}}if(idx==11){ovtTabRefreshAt=Time.unscaledTime+30f;ovtRecentRefreshAt=Time.unscaledTime+10f;ApiClient.FetchOvtLeaderboard();ApiClient.FetchOvtLeaderboard(200,"solo");ApiClient.FetchOvtLeaderboard(200,"duo");ApiClient.FetchOvtRecent(ovtRecentPageReq);}if(idx==12){ffaLbRefreshAt=Time.unscaledTime+30f;ffaRecentRefreshAt=Time.unscaledTime+10f;ffaBetRefreshAt=Time.unscaledTime+10f;ApiClient.FetchFfaLeaderboard(200,ffaLbSortReq);ApiClient.FetchFfaRecent(ffaRecentPageReq,5);ApiClient.FetchFfaRecent(ffaRecentCasPageReq,5,false);ApiClient.FetchFfaBettable(MatchTracker.LocalSteamId);ApiClient.UpdateFfaQueueList(force:true);}if(idx==TAB_COLLECTION)PlayerCardsUI.OnTabEntered();if(idx==TAB_HOME){homeTabRefreshAt=Time.unscaledTime+15f;ApiClient.FetchOnlinePlayers();ApiClient.FetchNewestCosmetics();ApiClient.FetchReleaseNotes();}dirty=true;}
 
         // ── Home tab (v1.33) — splash/landing page: big logo, latest release
         // notes (GitHub), newest cosmetics, online/recently-online players,
@@ -9540,7 +9542,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         }
 
         private static void RefreshData(){string id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchPlayerStats(id);ApiClient.FetchMatchHistory(id);ApiClient.FetchAchievements(id);ApiClient.FetchTeamStats(id);}if(currentTab==1){ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();}if(currentTab==8){ApiClient.FetchTeamLeaderboard(200,ApiClient.CachedTeamLeaderboardSort??"rating");/* 342 review M2 + r5 L1: manual refresh on the 2v2 board (tab 8) */}if(currentTab==2){ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);LoadCardTiersForCurrentFilter();}}
-        private static void RefreshCurrentTab(){RefreshQueueUI();RefreshVersionStatus();RefreshServerBanner();RefreshAlertBanner();RefreshTournamentGameIndicator();RefreshTopLeftName();/* Aug 31 r1 find 6: every tab keeps the header name current (change-guarded). *//* Admin/Artist button visibility - the async checks can flip on late. */UpdateTabBarVisual();switch(currentTab){case 0:RefreshMyStats();break;case 1:RefreshLeaderboard();RefreshRecentSeries();RefreshLiveSeries();break;case 2:RefreshCardStats();break;case 3:RefreshAchievements();break;case 4:RefreshShop();break;case 5:RefreshSettings();break;case 6:RefreshAdmin();break;case 7:RefreshTournaments();break;case 8:RefreshTeamTab();break;case 9:RefreshCompare();break;case 10:RefreshArtistTab();break;case 11:RefreshOneVTwoTab();break;case 12:RefreshFfaTab();break;case 13:RefreshHomeTab();break;case 14:RefreshBannedTab();break;}if(utilKind!=UtilKind.None)RefreshUtilityPopup();/* Sept 7 item 1: a dirty repaint reaches the open popup, not only the tab beneath */}
+        private static void RefreshCurrentTab(){RefreshQueueUI();RefreshVersionStatus();RefreshServerBanner();RefreshAlertBanner();RefreshTournamentGameIndicator();RefreshTopLeftName();/* Aug 31 r1 find 6: every tab keeps the header name current (change-guarded). *//* Admin/Artist button visibility - the async checks can flip on late. */UpdateTabBarVisual();switch(currentTab){case 0:RefreshMyStats();break;case 1:RefreshLeaderboard();RefreshRecentSeries();RefreshLiveSeries();break;case 2:RefreshCardStats();break;case 3:RefreshAchievements();break;case 4:RefreshShop();break;case 5:RefreshSettings();break;case 6:RefreshAdmin();break;case 7:RefreshTournaments();break;case 8:RefreshTeamTab();break;case 9:RefreshCompare();break;case 10:RefreshArtistTab();break;case 11:RefreshOneVTwoTab();break;case 12:RefreshFfaTab();break;case 13:RefreshHomeTab();break;case 14:RefreshBannedTab();break;case TAB_COLLECTION:PlayerCardsUI.Refresh();break;}if(utilKind!=UtilKind.None)RefreshUtilityPopup();/* Sept 7 item 1: a dirty repaint reaches the open popup, not only the tab beneath */}
 
         // Match IDs for which we've already auto-enabled ranked. Prevents the
         // every-refresh toggle from re-firing and re-posting /toggle-ranked
@@ -10678,6 +10680,20 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         private static GameObject shopMusicStash, shopMusicTracksPanel;
         private static object shopMusicTracksHint;
 
+        // Sept 10 (Player Cards): the Collection tab. NativeUI owns the panel
+        // and the Shop-group sub-tab anchor; PlayerCardsUI builds the body.
+        private static GameObject BuildCollectionTab(Transform parent)
+        {
+            var panel = new GameObject("Collection");
+            panel.transform.SetParent(parent, false);
+            panel.AddComponent<RectTransform>();
+            UIFactory.AddVLG(panel, spacing: 6, padL: 20, padR: 20, padT: 10, padB: 10);
+            UIFactory.AddLE(panel, flexH: 1);
+            MakeSubTabAnchor(TAB_COLLECTION, panel.transform, true);
+            PlayerCardsUI.BuildInto(panel.transform);
+            return panel;
+        }
+
         private static GameObject BuildShopTab(Transform parent)
         {
             var panel = new GameObject("Shop");
@@ -10704,6 +10720,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             txtShopBalance = UIFactory.CreateText("SHBal", header.transform,
                 "Balance: -", 18f, C_GOLD, UIFactory.AlignMidRight, sizeDelta: new Vector2(320, 30));
             UIFactory.SetBold(txtShopBalance, true);
+            // Sept 10 (Player Cards): the Shop tile deep-links to the Collection tab.
+            UIFactory.CreateButton("SHPcLink", header.transform, "Player Cards", 14f, C_WHITE, C_BTN, () => SwitchTab(TAB_COLLECTION), sizeDelta: new Vector2(150, 26));
 
             txtShopStatus = UIFactory.CreateText("SHStatus", panel.transform,
                 "", 14f, C_LABEL, sizeDelta: new Vector2(900, 22));
@@ -13787,6 +13805,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 },
                 "Queue games (ranked 1v1, and 2v2 / 1v2 auto-queue) deal everyone the same cards when every player in the room has this on. Applies from your next game.", 36f);
             prefSameCardsTxt = UIFactory.GetButtonText(prefSameCardsBtn);
+            PlayerCardsUI.BuildSettingsRows(consentBox.transform);   // Sept 10 (Player Cards): the three consent toggles, design v4 section 12
             /* Sept 6 (Sid, in-game mail): "Who can mail me" + the blocked-sender
              * list, side by side so both mail preferences live in one place. */
             MailUI.BuildSettingsRow(consentBox.transform);
@@ -14605,6 +14624,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                         : "Same cards in queue games: <color=#FF9966>OFF</color>");
             }
             MailUI.RefreshSettingsRow();   // Sept 6 mail: preference label + blocked list
+            PlayerCardsUI.RefreshSettingsRows();
             if (showDiscordTxt != null)
             {
                 var stSd = ApiClient.CachedPlayerStats;

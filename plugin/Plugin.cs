@@ -88,6 +88,8 @@ namespace CompetitiveRounds
         // that should survive a perf-master flip (map note, settings tab).
         internal static ConfigEntry<bool> ScreenShakeEnabled;      // legacy, migration source only
         internal static ConfigEntry<string> ScreenShakeStrength;
+        // Sept 10 (Player Cards): the persisted pack-open intent (PlayerCardsUI).
+        internal static ConfigEntry<string> PcOpenIntent;
         internal static ConfigEntry<bool> MapLightingEnabled;
         internal static ConfigEntry<bool> MapShadowsEnabled;
         internal static ConfigEntry<bool> AnimatedCosmetics;
@@ -162,6 +164,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<string> BroadcastTestOpenTab;        // broadcast seat only — "tab[:shopScroll]" opens the F5 overlay there
         internal static ConfigEntry<string> BroadcastTestQuit;           // broadcast seat only — any new non-empty value quits the game (Sept 6)
         internal static ConfigEntry<string> BroadcastTestGstatsSentinel; // broadcast seat only — any new value runs the cr_gstats W1-sentinel self-test once
+        internal static ConfigEntry<string> BroadcastTestPlayerCards;   // broadcast seat only — any new value seeds synthetic Player Card tiles (Sept 10)
         internal static ConfigEntry<bool> BroadcastTestSilence;          // broadcast seat only, offline/sandbox — apply 3s of silence to a bot for indicator verification
         internal static ConfigEntry<string> BroadcastTestQuickChatWheel; // broadcast seat only — pin the quick-chat wheel open for layout screenshots
         internal static ConfigEntry<string> BroadcastTestDance;         // broadcast seat only — "wheel" | "preview:<sku>" | "play:<idx>" dance verification
@@ -526,6 +529,15 @@ namespace CompetitiveRounds
                 "Ranked", "DisabledByConsentRevoke",
                 false,
                 "Internal: ranked was auto-disabled by a data-consent revoke, not by the user"
+            );
+
+            // Sept 10 (Player Cards): a pack purchase writes "kind|ref|pay|price|unix"
+            // here BEFORE the request leaves and clears it after the committed
+            // answer was shown, so a lost answer is recovered instead of re-bought.
+            PcOpenIntent = Config.Bind(
+                "Internal", "PlayerCardsOpenIntent",
+                "",
+                "Internal: a Player Cards pack open that has not been answered yet. Do not edit."
             );
 
             ShowNotifications = Config.Bind(
@@ -1052,6 +1064,10 @@ namespace CompetitiveRounds
             BroadcastTestQuit = Config.Bind(
                 "Broadcast", "TestQuit", "",
                 "Broadcast seat only: set to any value that differs from the value at launch (e.g. quit-<timestamp>) to quit the game — Application.Quit, then a hard exit if the process is still alive 8 s later. Clear it afterwards; the value present at launch is the baseline and never fires."
+            );
+            BroadcastTestPlayerCards = Config.Bind(
+                "Broadcast", "TestPlayerCards", "",
+                "Broadcast seat only: set to any value that differs from the previous one to fill the Collection tab's reveal strip with five synthetic Player Cards (layout screenshots on a seat whose server has no Player Cards yet). No server call, nothing persisted."
             );
             BroadcastTestGstatsSentinel = Config.Bind(
                 "Broadcast", "TestGstatsSentinel", "",
@@ -2195,6 +2211,21 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogWarning($"[GSTATS-SENTINEL] FAIL: lever threw {ex.Message}"); }
         }
 
+        // Sept 10: synthetic Player Card tiles (PlayerCardsUI.DevSeedTiles), same
+        // once-per-distinct-value grammar and identity gate as the sentinel lever.
+        private static string _lastTestPlayerCards;
+        private void TickTestPlayerCards()
+        {
+            if (Plugin.BroadcastTestPlayerCards == null || !BroadcastMode.IsBroadcastIdentity) return;
+            string raw = (Plugin.BroadcastTestPlayerCards.Value ?? "").Trim();
+            if (_lastTestPlayerCards == null) { _lastTestPlayerCards = raw; return; }
+            if (raw == _lastTestPlayerCards) return;
+            _lastTestPlayerCards = raw;
+            if (raw.Length == 0) return;
+            try { PlayerCardsUI.DevSeedTiles(raw.ToLowerInvariant()); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[PC] FAIL: tiles lever threw {ex.Message}"); }
+        }
+
         // Broadcast-seat UI verification lever: "tab[:shopScroll]". Applied once
         // per distinct value (re-applied after a change), identity-gated.
         private static string _lastTestOpenTab;
@@ -2796,6 +2827,7 @@ namespace CompetitiveRounds
             try { SpectatorTeardownProbe.Tick(); } catch { }
             try { EmojiSprites.Tick(); } catch { }   // bug 333 step 2: 1 Hz self-throttled; decode only at a safe menu state
             try { TickTestGstatsSentinel(); } catch { }
+            try { TickTestPlayerCards(); } catch { }
             try { TickTestSilence(); } catch { }
             try { TickTestQuickChatWheel(); } catch { }
             try { TickTestDance(); } catch { }

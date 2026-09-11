@@ -3645,6 +3645,488 @@ namespace CompetitiveRounds
             }));
         }
 
+        // ── Player Cards (Sept 10 batch, WP-E) ──────────────────────────────
+        // Every route takes QUERY parameters; `sig` is the HMAC over the canon
+        // string the server builds from the same terms (player_cards.py). The
+        // strict Steam session rides as X-Session-Token (StampVersionHeader
+        // attaches it on every request), so a missing session answers 401
+        // session_required and the UI says so instead of retrying.
+        public class PcPrint
+        {
+            public string print_id, card_id, subject_player_id, subject_name, edition_id, minted_at, rarity, top_card, title, rank_name, source;
+            public bool subject_deleted, foil, signed, discarded;
+            public int pool_rank, board_rank, series_wins, series_losses, slot;
+            public float rating, peak_rating;
+        }
+        public class PcUnopened { public string pack_id, source, mode, kind, reference_id, created_at; }
+        public class PcMe
+        {
+            public bool opted_out, collection_public, announce, daily_claimed;
+            public int revision, shards, price_gold, price_shards, paid_packs_per_day, prints_per_pack, paid_today, prints, pool_member_count;
+            public string daily_pack_id, next_reset_utc, pool_taken_at;
+            public List<PcUnopened> unopened = new List<PcUnopened>();
+        }
+        public class PcPackAnswer
+        {
+            public string pack_id, status, source, mode, kind, pay, reason, created_at, opened_at, last_attempt_reason;
+            public int price;
+            public List<PcPrint> prints = new List<PcPrint>();
+        }
+        public class PcCollection
+        {
+            public string owner_steam_id, owner_name;
+            public bool is_public;
+            public int count;
+            public List<PcPrint> prints = new List<PcPrint>();
+        }
+
+        public static PcMe CachedPcMe { get; private set; }
+        public static PcCollection CachedPcCollection { get; private set; }
+        public static float PcMeFetchedAt = -1f, PcCollectionFetchedAt = -1f;
+        public static string PcMeError { get; private set; }
+        public static string PcCollectionError { get; private set; }
+        private static bool pcMeInFlight, pcCollInFlight;
+        private static float pcMeAttemptAt = -100f, pcCollAttemptAt = -100f;   // the throttle keys on the last ATTEMPT, so a failing fetch is not re-fired by every repaint
+
+        private static string PcUrl(string path, string steamId, string canon, string extraQuery)
+        {
+            string sig = ComputeHmacHex(canon);
+            string url = $"{baseUrl}/api/v1/pc/{path}?steam_id={steamId}&sig={sig}";
+            if (!string.IsNullOrEmpty(extraQuery)) url += "&" + extraQuery;
+            return url;
+        }
+
+        /// <summary>Own state: settings + revision, shards, prices, the daily
+        /// claim, unopened packs. Throttled to one fetch per 10 s unless forced.</summary>
+        public static void FetchPcMe(string steamId, bool force = false, Action<bool, string> callback = null)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") { callback?.Invoke(false, "no-id"); return; }
+            if (!force && Time.realtimeSinceStartup - pcMeAttemptAt < 10f) { callback?.Invoke(CachedPcMe != null, null); return; }
+            if (pcMeInFlight) { callback?.Invoke(false, "in-flight"); return; }
+            pcMeInFlight = true; pcMeAttemptAt = Time.realtimeSinceStartup;
+            string url = PcUrl("me", steamId, $"pcread:{steamId}:me:-", null);
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
+            {
+                pcMeInFlight = false;
+                if (ok)
+                {
+                    var me = ParsePcMe(resp);
+                    if (me != null) { CachedPcMe = me; PcMeFetchedAt = Time.realtimeSinceStartup; PcMeError = null; }
+                    else { PcMeError = "parse"; ok = false; }
+                }
+                else { PcMeError = resp; Plugin.Log.LogInfo($"[PC] me fetch failed: {PcShort(resp)}"); }
+                try { NativeUI.MarkDirty(); } catch { }
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] me callback threw: {cex.Message}"); }
+            }, detailedErrors: true, sessionAware: true));
+        }
+
+        /// <summary>Own binder (live prints, server-ordered subject → rarity →
+        /// mint date). Throttled to one fetch per 20 s unless forced.</summary>
+        public static void FetchPcCollection(string steamId, bool force = false, Action<bool, string> callback = null)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") { callback?.Invoke(false, "no-id"); return; }
+            if (!force && Time.realtimeSinceStartup - pcCollAttemptAt < 20f) { callback?.Invoke(CachedPcCollection != null, null); return; }
+            if (pcCollInFlight) { callback?.Invoke(false, "in-flight"); return; }
+            pcCollInFlight = true; pcCollAttemptAt = Time.realtimeSinceStartup;
+            string url = PcUrl("collection", steamId, $"pcread:{steamId}:collection:-", null);
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
+            {
+                pcCollInFlight = false;
+                if (ok)
+                {
+                    var col = ParsePcCollection(resp);
+                    if (col != null) { CachedPcCollection = col; PcCollectionFetchedAt = Time.realtimeSinceStartup; PcCollectionError = null; }
+                    else { PcCollectionError = "parse"; ok = false; }
+                }
+                else { PcCollectionError = resp; Plugin.Log.LogInfo($"[PC] collection fetch failed: {PcShort(resp)}"); }
+                try { NativeUI.MarkDirty(); } catch { }
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] collection callback threw: {cex.Message}"); }
+            }, detailedErrors: true, sessionAware: true));
+        }
+
+        /// <summary>Buy and open a pack. The caller persists its intent (nonce,
+        /// pay, price) BEFORE this call and clears it only after the answer is
+        /// shown; a repeated nonce answers the committed row.</summary>
+        public static void PcOpenPack(string steamId, string nonce, string pay, int expectedPrice, Action<bool, string> callback)
+        {
+            string url = PcUrl("packs/open", steamId, $"pcopen:{steamId}:{nonce}:{pay}:{expectedPrice}",
+                $"nonce={nonce}&pay={pay}&expected_price={expectedPrice}");
+            Plugin.Log.LogInfo($"[PC] open pack pay={pay} price={expectedPrice} nonce={nonce.Substring(0, Math.Min(8, nonce.Length))}");
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[PC] open pack answer ok={ok} resp={PcShort(resp)}");
+                if (ok) { FetchPlayerStats(steamId, true); }
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] open callback threw: {cex.Message}"); }
+            }));
+        }
+
+        /// <summary>Open a pack the player already holds (daily / earned).</summary>
+        public static void PcOpenUnopened(string steamId, string packId, Action<bool, string> callback)
+        {
+            string url = PcUrl("packs/open", steamId, $"pcopen:{steamId}:pack:{packId}", $"pack_id={packId}");
+            Plugin.Log.LogInfo($"[PC] open held pack {packId}");
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[PC] open held pack answer ok={ok} resp={PcShort(resp)}");
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] open callback threw: {cex.Message}"); }
+            }));
+        }
+
+        /// <summary>Result recovery for a persisted intent: exactly one of
+        /// nonce / packId. 404 = no such claim ever committed.</summary>
+        public static void PcPackResult(string steamId, string nonce, string packId, Action<bool, string> callback)
+        {
+            string reference = !string.IsNullOrEmpty(packId) ? packId : nonce;
+            string q = !string.IsNullOrEmpty(packId) ? $"pack_id={packId}" : $"nonce={nonce}";
+            string url = PcUrl("packs/result", steamId, $"pcresult:{steamId}:{reference}", q);
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[PC] pack result ok={ok} resp={PcShort(resp)}");
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] result callback threw: {cex.Message}"); }
+            }, detailedErrors: true, sessionAware: true));
+        }
+
+        public static void PcClaimDaily(string steamId, string nonce, Action<bool, string> callback)
+        {
+            string url = PcUrl("daily", steamId, $"pcdaily:{steamId}:{nonce}", $"nonce={nonce}");
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[PC] daily claim ok={ok} resp={PcShort(resp)}");
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] daily callback threw: {cex.Message}"); }
+            }));
+        }
+
+        public static void PcDiscard(string steamId, string printId, Action<bool, string> callback)
+        {
+            string url = PcUrl("prints/discard", steamId, $"pcdiscard:{steamId}:{printId}", $"print_id={printId}");
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[PC] discard {printId} ok={ok} resp={PcShort(resp)}");
+                if (ok && CachedPcMe != null)
+                {
+                    string sh = PcTopLevel(resp, "shards");
+                    if (sh != null) CachedPcMe.shards = PcInt(sh);
+                }
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] discard callback threw: {cex.Message}"); }
+            }));
+        }
+
+        /// <summary>Compare-and-set one setting: the revision the caller read
+        /// must still be current (409 stale_revision otherwise). The answer is
+        /// the full settings row and is written into the cache before the
+        /// callback runs.</summary>
+        public static void PcSetSetting(string steamId, string nonce, int revision, string key, int value, Action<bool, string> callback)
+        {
+            string url = PcUrl("settings", steamId, $"pcset:{steamId}:{nonce}:{revision}:{key}:{value}",
+                $"nonce={nonce}&revision={revision}&key={key}&value={value}");
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[PC] set {key}={value} rev={revision} ok={ok} resp={PcShort(resp)}");
+                if (ok && CachedPcMe != null) PcApplySettings(CachedPcMe, resp);
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] settings callback threw: {cex.Message}"); }
+            }));
+        }
+
+        // ── parsing (depth-aware: the shared helpers search the whole text,
+        //    and "shards" / "status" / "reason" recur inside nested objects) ──
+        private static string PcShort(string s) => s == null ? "null" : (s.Length > 160 ? s.Substring(0, 160) + "..." : s);
+
+        /// <summary>Raw value of `key` at the TOP level of the first JSON
+        /// object in `json` (depth 1), or null.</summary>
+        internal static string PcTopLevel(string json, string key)
+        {
+            if (string.IsNullOrEmpty(json) || string.IsNullOrEmpty(key)) return null;
+            int n = json.Length;
+            int start = json.IndexOf('{');
+            if (start < 0) return null;
+            string needle = "\"" + key + "\"";
+            int depth = 0; bool inStr = false;
+            for (int i = start; i < n; i++)
+            {
+                char c = json[i];
+                if (inStr) { if (c == '\\') i++; else if (c == '"') inStr = false; continue; }
+                if (c == '"')
+                {
+                    if (depth == 1 && string.CompareOrdinal(json, i, needle, 0, needle.Length) == 0)
+                    {
+                        int j = i + needle.Length;
+                        while (j < n && (json[j] == ' ' || json[j] == '\t' || json[j] == '\r' || json[j] == '\n')) j++;
+                        if (j < n && json[j] == ':')
+                        {
+                            j++;
+                            while (j < n && (json[j] == ' ' || json[j] == '\t' || json[j] == '\r' || json[j] == '\n')) j++;
+                            return PcRawValue(json, j);
+                        }
+                    }
+                    inStr = true; continue;
+                }
+                if (c == '{' || c == '[') depth++;
+                else if (c == '}' || c == ']') { depth--; if (depth <= 0) return null; }
+            }
+            return null;
+        }
+
+        private static string PcRawValue(string json, int j)
+        {
+            int n = json.Length;
+            if (j >= n) return null;
+            char c = json[j];
+            if (c == '"')
+            {
+                int k = j + 1;
+                while (k < n) { if (json[k] == '\\') { k += 2; continue; } if (json[k] == '"') break; k++; }
+                return json.Substring(j, Math.Min(n, k + 1) - j);
+            }
+            if (c == '{' || c == '[')
+            {
+                int d = 0; bool s = false;
+                for (int k = j; k < n; k++)
+                {
+                    char ch = json[k];
+                    if (s) { if (ch == '\\') k++; else if (ch == '"') s = false; continue; }
+                    if (ch == '"') { s = true; continue; }
+                    if (ch == '{' || ch == '[') d++;
+                    else if (ch == '}' || ch == ']') { d--; if (d == 0) return json.Substring(j, k + 1 - j); }
+                }
+                return null;
+            }
+            int e = j;
+            while (e < n && json[e] != ',' && json[e] != '}' && json[e] != ']') e++;
+            return json.Substring(j, e - j).Trim();
+        }
+
+        /// <summary>A raw JSON string token → its value (quotes stripped,
+        /// escapes decoded); a non-string raw token comes back as-is; null /
+        /// "null" → null.</summary>
+        internal static string PcStr(string raw)
+        {
+            if (raw == null || raw == "null") return null;
+            if (raw.Length < 2 || raw[0] != '"') return raw;
+            var sb = new StringBuilder(raw.Length);
+            for (int i = 1; i < raw.Length - 1; i++)
+            {
+                char c = raw[i];
+                if (c != '\\' || i + 1 >= raw.Length - 1) { sb.Append(c); continue; }
+                char e = raw[++i];
+                switch (e)
+                {
+                    case 'n': sb.Append('\n'); break;
+                    case 'r': sb.Append('\r'); break;
+                    case 't': sb.Append('\t'); break;
+                    case 'b': sb.Append('\b'); break;
+                    case 'f': sb.Append('\f'); break;
+                    case 'u':
+                        if (i + 4 < raw.Length)
+                        {
+                            int cp;
+                            if (int.TryParse(raw.Substring(i + 1, 4), System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out cp))
+                            { sb.Append((char)cp); i += 4; }
+                        }
+                        break;
+                    default: sb.Append(e); break;
+                }
+            }
+            return sb.ToString();
+        }
+        internal static int PcInt(string raw)
+        {
+            if (string.IsNullOrEmpty(raw) || raw == "null") return 0;
+            string s = PcStr(raw);
+            int v; if (int.TryParse(s, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out v)) return v;
+            float f; if (float.TryParse(s, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out f)) return (int)f;
+            return 0;
+        }
+        internal static float PcFloat(string raw)
+        {
+            if (string.IsNullOrEmpty(raw) || raw == "null") return 0f;
+            float f; return float.TryParse(PcStr(raw), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out f) ? f : 0f;
+        }
+        internal static bool PcBool(string raw) => raw == "true";
+        /// <summary>`true` when the top-level key is present and not JSON null.</summary>
+        internal static bool PcHas(string json, string key) { string r = PcTopLevel(json, key); return r != null && r != "null"; }
+
+        internal static PcPrint ParsePcPrint(string obj)
+        {
+            if (string.IsNullOrEmpty(obj)) return null;
+            var p = new PcPrint
+            {
+                print_id = PcStr(PcTopLevel(obj, "print_id")),
+                card_id = PcStr(PcTopLevel(obj, "card_id")),
+                subject_player_id = PcStr(PcTopLevel(obj, "subject_player_id")),
+                subject_name = PcStr(PcTopLevel(obj, "subject_name")),
+                subject_deleted = PcBool(PcTopLevel(obj, "subject_deleted")),
+                edition_id = PcStr(PcTopLevel(obj, "edition_id")),
+                minted_at = PcStr(PcTopLevel(obj, "minted_at")),
+                rarity = PcStr(PcTopLevel(obj, "rarity")) ?? "common",
+                foil = PcBool(PcTopLevel(obj, "foil")),
+                signed = PcBool(PcTopLevel(obj, "signed")),
+                pool_rank = PcInt(PcTopLevel(obj, "pool_rank")),
+                rating = PcFloat(PcTopLevel(obj, "rating")),
+                peak_rating = PcFloat(PcTopLevel(obj, "peak_rating")),
+                board_rank = PcInt(PcTopLevel(obj, "board_rank")),
+                series_wins = PcInt(PcTopLevel(obj, "series_wins")),
+                series_losses = PcInt(PcTopLevel(obj, "series_losses")),
+                top_card = PcStr(PcTopLevel(obj, "top_card")),
+                title = PcStr(PcTopLevel(obj, "title")),
+                rank_name = PcStr(PcTopLevel(obj, "rank_name")),
+                source = PcStr(PcTopLevel(obj, "source")),
+                slot = PcInt(PcTopLevel(obj, "slot")),
+                discarded = PcBool(PcTopLevel(obj, "discarded")),
+            };
+            return string.IsNullOrEmpty(p.print_id) ? null : p;
+        }
+
+        private static List<PcPrint> ParsePcPrints(string arrayRaw)
+        {
+            var list = new List<PcPrint>();
+            if (string.IsNullOrEmpty(arrayRaw) || arrayRaw == "null") return list;
+            foreach (var o in SliceTopLevelObjects(arrayRaw))
+            {
+                var p = ParsePcPrint(o);
+                if (p != null) list.Add(p);
+            }
+            return list;
+        }
+
+        private static void PcApplySettings(PcMe me, string settingsObj)
+        {
+            if (me == null || string.IsNullOrEmpty(settingsObj)) return;
+            if (PcHas(settingsObj, "opted_out")) me.opted_out = PcBool(PcTopLevel(settingsObj, "opted_out"));
+            if (PcHas(settingsObj, "collection_public")) me.collection_public = PcBool(PcTopLevel(settingsObj, "collection_public"));
+            if (PcHas(settingsObj, "announce")) me.announce = PcBool(PcTopLevel(settingsObj, "announce"));
+            if (PcHas(settingsObj, "revision")) me.revision = PcInt(PcTopLevel(settingsObj, "revision"));
+            if (PcHas(settingsObj, "shards")) me.shards = PcInt(PcTopLevel(settingsObj, "shards"));
+        }
+
+        internal static PcMe ParsePcMe(string json)
+        {
+            if (string.IsNullOrEmpty(json)) return null;
+            string settings = PcTopLevel(json, "settings");
+            if (settings == null) return null;
+            var me = new PcMe();
+            PcApplySettings(me, settings);
+            me.shards = PcInt(PcTopLevel(json, "shards"));
+            string prices = PcTopLevel(json, "prices") ?? "";
+            me.price_gold = PcInt(PcTopLevel(prices, "gold"));
+            me.price_shards = PcInt(PcTopLevel(prices, "shards"));
+            me.paid_packs_per_day = PcInt(PcTopLevel(prices, "paid_packs_per_day"));
+            me.prints_per_pack = PcInt(PcTopLevel(prices, "prints_per_pack"));
+            me.paid_today = PcInt(PcTopLevel(json, "paid_today"));
+            me.prints = PcInt(PcTopLevel(json, "prints"));
+            string daily = PcTopLevel(json, "daily") ?? "";
+            me.daily_claimed = PcBool(PcTopLevel(daily, "claimed"));
+            me.daily_pack_id = PcStr(PcTopLevel(daily, "pack_id"));
+            me.next_reset_utc = PcStr(PcTopLevel(daily, "next_reset_utc"));
+            string pool = PcTopLevel(json, "pool");
+            if (pool != null && pool != "null")
+            {
+                me.pool_member_count = PcInt(PcTopLevel(pool, "member_count"));
+                me.pool_taken_at = PcStr(PcTopLevel(pool, "taken_at"));
+            }
+            string un = PcTopLevel(json, "unopened");
+            if (!string.IsNullOrEmpty(un) && un != "null")
+                foreach (var o in SliceTopLevelObjects(un))
+                {
+                    var u = new PcUnopened
+                    {
+                        pack_id = PcStr(PcTopLevel(o, "pack_id")),
+                        source = PcStr(PcTopLevel(o, "source")),
+                        mode = PcStr(PcTopLevel(o, "mode")),
+                        kind = PcStr(PcTopLevel(o, "kind")),
+                        reference_id = PcStr(PcTopLevel(o, "reference_id")),
+                        created_at = PcStr(PcTopLevel(o, "created_at")),
+                    };
+                    if (!string.IsNullOrEmpty(u.pack_id)) me.unopened.Add(u);
+                }
+            return me;
+        }
+
+        internal static PcPackAnswer ParsePcPackAnswer(string json)
+        {
+            if (string.IsNullOrEmpty(json)) return null;
+            var a = new PcPackAnswer
+            {
+                pack_id = PcStr(PcTopLevel(json, "pack_id")),
+                status = PcStr(PcTopLevel(json, "status")),
+                source = PcStr(PcTopLevel(json, "source")),
+                mode = PcStr(PcTopLevel(json, "mode")),
+                kind = PcStr(PcTopLevel(json, "kind")),
+                pay = PcStr(PcTopLevel(json, "pay")),
+                price = PcInt(PcTopLevel(json, "price")),
+                reason = PcStr(PcTopLevel(json, "reason")),
+                created_at = PcStr(PcTopLevel(json, "created_at")),
+                opened_at = PcStr(PcTopLevel(json, "opened_at")),
+            };
+            if (string.IsNullOrEmpty(a.status)) return null;
+            a.prints = ParsePcPrints(PcTopLevel(json, "prints"));
+            string att = PcTopLevel(json, "last_attempt");
+            if (!string.IsNullOrEmpty(att) && att != "null") a.last_attempt_reason = PcStr(PcTopLevel(att, "reason"));
+            return a;
+        }
+
+        internal static PcCollection ParsePcCollection(string json)
+        {
+            if (string.IsNullOrEmpty(json)) return null;
+            string prints = PcTopLevel(json, "prints");
+            if (prints == null) return null;
+            var c = new PcCollection
+            {
+                owner_steam_id = PcStr(PcTopLevel(json, "owner_steam_id")),
+                owner_name = PcStr(PcTopLevel(json, "owner_name")),
+                is_public = PcBool(PcTopLevel(json, "public")),
+                count = PcInt(PcTopLevel(json, "count")),
+                prints = ParsePcPrints(prints),
+            };
+            return c;
+        }
+
+        /// <summary>The machine-readable reason of a failed Player Cards call:
+        /// the body's `error` (a 4xx detail object), the detail string itself
+        /// ("session_required"), "session_required" for any 401, the transport
+        /// sentinels ("no-consent", "outdated"), "http" for another status, or
+        /// "transport" when no status arrived (timeout, no connection) — the
+        /// one case where a persisted open intent must stay for recovery.</summary>
+        public static string PcErrorCode(string resp)
+        {
+            if (string.IsNullOrEmpty(resp)) return "transport";
+            if (resp == "no-consent" || resp == "outdated") return resp;
+            if (resp.StartsWith("HTTP 401", StringComparison.Ordinal)) return "session_required";
+            if (!resp.StartsWith("HTTP ", StringComparison.Ordinal)) return "transport";
+            int b = resp.IndexOf('{');
+            if (b < 0) return "http";
+            string body = resp.Substring(b);
+            string detail = PcTopLevel(body, "detail");
+            if (detail == null) return "http";
+            if (detail.StartsWith("{", StringComparison.Ordinal))
+            {
+                string e = PcTopLevel(detail, "error");
+                return e != null ? (PcStr(e) ?? "http") : "http";
+            }
+            return PcStr(detail) ?? "http";
+        }
+
+        /// <summary>HTTP status of a failed call's "HTTP <code>: ..." line, 0 when none.</summary>
+        public static int PcHttpCode(string resp)
+        {
+            if (string.IsNullOrEmpty(resp) || !resp.StartsWith("HTTP ", StringComparison.Ordinal)) return 0;
+            int e = 5; while (e < resp.Length && char.IsDigit(resp[e])) e++;
+            int v; return int.TryParse(resp.Substring(5, e - 5), out v) ? v : 0;
+        }
+
+        /// <summary>An integer field of a failed call's detail object (e.g. the
+        /// new `price` on price_changed, `cap` on daily_cap); -1 when absent.</summary>
+        public static int PcErrorInt(string resp, string key)
+        {
+            if (string.IsNullOrEmpty(resp)) return -1;
+            int b = resp.IndexOf('{');
+            if (b < 0) return -1;
+            string detail = PcTopLevel(resp.Substring(b), "detail");
+            if (detail == null || !detail.StartsWith("{", StringComparison.Ordinal)) return -1;
+            string v = PcTopLevel(detail, key);
+            return v == null || v == "null" ? -1 : PcInt(v);
+        }
+        // ── end Player Cards ─────────────────────────────────────────────────
+
         /// <summary>July 22 item 8: opt-IN "show my Discord on the leaderboard"
         /// toggle. HMAC over "show_discord:{steam_id}:{1|0}".</summary>
         public static void SetShowDiscord(string steamId, bool on, Action<bool, string> callback = null)
