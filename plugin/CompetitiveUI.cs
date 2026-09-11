@@ -7652,13 +7652,6 @@ namespace CompetitiveRounds
             GUI.DrawTexture(new Rect(0, 0, Screen.width, Screen.height), bg,
                 ScaleMode.StretchToFill, true, 0, new Color(0, 0, 0, 0.78f), 0, 0);
 
-            float w = 680, h = 420;
-            float x = (Screen.width - w) / 2f;
-            float y = (Screen.height - h) / 2f;
-
-            GUI.DrawTexture(new Rect(x, y, w, h), bg, ScaleMode.StretchToFill, true, 0,
-                new Color(0.10f, 0.11f, 0.16f, 0.97f), 0, 0);
-
             if (consentTitleStyle == null)
                 consentTitleStyle = new GUIStyle(GUI.skin.label) { fontSize = 22, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
             if (consentBodyStyle == null)
@@ -7671,9 +7664,6 @@ namespace CompetitiveRounds
             // (Tr is throw-free by construction — dictionary TryGetValue chains
             // with an English passthrough — so no try/catch is needed on an
             // IMGUI path; a literal argument is REQUIRED for the extractor.)
-            GUI.Label(new Rect(x, y + 14, w, 30),
-                I18n.Tr("Competitive ROUNDS — Data Consent"), consentTitleStyle);
-
             string body = I18n.Tr(
                 "This mod sends data to a private server run by the mod author to power the leaderboard " +
                 "and ranked matchmaking.\n\n" +
@@ -7688,6 +7678,25 @@ namespace CompetitiveRounds
                 "are scrubbed. Matches stay so other players' ratings and histories aren't disturbed. " +
                 "Deletion is IRREVERSIBLE — you cannot re-register this Steam ID later.\n\n" +
                 "Choose Allow to use the leaderboard. Choose Decline to run the mod fully offline.");
+            // Sept 10 WP-B (01-room-rules §9): the region sentence is its OWN
+            // catalogue key, appended after the body, so the body's existing
+            // translations stay valid.
+            body += "\n\n" + I18n.Tr("To pick the best server region for a match, the mod measures your ping to each Photon region and sends the result to the server, where it is kept for at most one hour.");
+
+            // The panel is sized to its text (translations run longer than the
+            // English) so the body is never clipped against the buttons: the
+            // body rect is h - 120 tall and starts 50 px down, the buttons sit
+            // 56 px above the bottom edge.
+            float w = 680;
+            float bodyH = consentBodyStyle.CalcHeight(new GUIContent(body), w - 48);
+            float h = Mathf.Clamp(bodyH + 136f, 420f, Screen.height - 40f);
+            float x = (Screen.width - w) / 2f;
+            float y = (Screen.height - h) / 2f;
+
+            GUI.DrawTexture(new Rect(x, y, w, h), bg, ScaleMode.StretchToFill, true, 0,
+                new Color(0.10f, 0.11f, 0.16f, 0.97f), 0, 0);
+            GUI.Label(new Rect(x, y + 14, w, 30),
+                I18n.Tr("Competitive ROUNDS — Data Consent"), consentTitleStyle);
             GUI.Label(new Rect(x + 24, y + 50, w - 48, h - 120), body, consentBodyStyle);
 
             string allowLabel = I18n.Tr("Allow data reporting");

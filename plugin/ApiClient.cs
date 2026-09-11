@@ -12467,6 +12467,7 @@ namespace CompetitiveRounds
                         CurrentTeamQueueType = qt;
                         IsTeamQueuePolling = true;
                         teamQueuePollTimer = 0f;
+                        RegionPingSweep.NoteJoinQueue();   // Sept 10 WP-B: fresh map for the poll header
                         Plugin.Log.LogInfo($"[TEAM-QUEUE] Joined 2v2 {qt} queue");
                         string msg = qt == "manual" ? "Searching for custom 2v2 lobby..." : "Searching for 2v2 match...";
                         CompetitiveUI.ShowNotification(msg, new Color(0.4f, 0.8f, 1f));
@@ -12620,15 +12621,24 @@ namespace CompetitiveRounds
             if (teamQueuePollTimer < TEAM_QUEUE_POLL_INTERVAL) return;
             teamQueuePollTimer = 0f;
             int gen = teamGen;
+            // Sept 10 WP-B: the seat's own ping map rides once per sweep per
+            // lifecycle (ack-keyed; see RegionPingSweep.PollHeaders) so the
+            // room's region is picked from every member's map, not the mode of
+            // homes. The server stores it before any queue-row lock.
+            string rpFamily = $"team#{gen}", rpPings, rpGen;
+            int rpRev = RegionPingSweep.PollHeaders(rpFamily, out rpPings, out rpGen);
             Plugin.Instance.StartCoroutine(GetRequest(
                 $"{baseUrl}/api/v1/team/queue/poll/{steamId}",
                 (success, response) =>
                 {
+                    if (success && rpRev >= 0) RegionPingSweep.NotePollHeadersAcked(rpFamily, rpRev);
                     // gen check: see UpdateQueuePoll (Codex verify finding 4).
                     if (!success || !IsTeamQueuePolling || gen != teamGen) return;
                     try { ParseTeamQueuePoll(response); }
                     catch (Exception ex) { Plugin.Log.LogError($"[TEAM-QUEUE] poll parse: {ex.Message}"); }
-                }
+                },
+                extraHeaderName: rpPings != null ? "X-Region-Pings" : null, extraHeaderValue: rpPings,
+                extraHeader2Name: rpGen != null ? "X-Region-Pings-Gen" : null, extraHeader2Value: rpGen
             ));
         }
 
@@ -14058,6 +14068,7 @@ namespace CompetitiveRounds
                     // them into the queue on a bare not_in_queue (#238).
                     _ovtConsentQueueJoined = true;
                     IsOvtQueuePolling = true; OvtQueueStatus = "searching"; UpdateOvtQueueList(force: true); NativeUI.MarkDirty();
+                    RegionPingSweep.NoteJoinQueue();   // Sept 10 WP-B: fresh map for the poll header
                 }
                 else Plugin.Log.LogWarning($"[1v2] join failed: {resp}");
             }));
@@ -14146,8 +14157,12 @@ namespace CompetitiveRounds
             if (!force && Time.unscaledTime - _ovtLastPollAt < 2f) return;
             _ovtLastPollAt = Time.unscaledTime;
             int gen = ovtGen;
+            // Sept 10 WP-B: own ping map, once per sweep per lifecycle (see the 2v2 poll).
+            string rpFamily = $"ovt#{gen}", rpPings, rpGen;
+            int rpRev = RegionPingSweep.PollHeaders(rpFamily, out rpPings, out rpGen);
             Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/ovt/queue/poll/{sid}", (ok, resp) =>
             {
+                if (ok && rpRev >= 0) RegionPingSweep.NotePollHeadersAcked(rpFamily, rpRev);
                 if (!ok || string.IsNullOrEmpty(resp)) return;
                 if (!IsOvtQueuePolling) return;   // left/locked while the request was in flight
                 if (gen != ovtGen) return;        // stale lifecycle (Codex verify finding 4)
@@ -14308,7 +14323,8 @@ namespace CompetitiveRounds
                     }
                 }
                 NativeUI.MarkDirty();
-            }));
+            }, extraHeaderName: rpPings != null ? "X-Region-Pings" : null, extraHeaderValue: rpPings,
+               extraHeader2Name: rpGen != null ? "X-Region-Pings-Gen" : null, extraHeader2Value: rpGen));
         }
 
         /// <summary>GET /ovt/queue/list — who's in the 1v2 lobby, with the
@@ -15167,7 +15183,7 @@ namespace CompetitiveRounds
             Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/ffa/queue/join", body, (ok, resp) =>
             {
                 if (gen != ffaGen) { Plugin.Log.LogInfo("[FFA] stale join ack ignored (lifecycle moved on)"); return; }
-                if (ok) { IsFfaQueuePolling = true; FfaQueueStatus = "searching"; UpdateFfaQueueList(force: true); NativeUI.MarkDirty(); }
+                if (ok) { IsFfaQueuePolling = true; FfaQueueStatus = "searching"; UpdateFfaQueueList(force: true); NativeUI.MarkDirty(); RegionPingSweep.NoteJoinQueue(); }
                 else Plugin.Log.LogWarning($"[FFA] join failed: {resp}");
             }));
         }
@@ -15264,6 +15280,7 @@ namespace CompetitiveRounds
                 _ffaLeaveIntent = false;
                 IsFfaQueuePolling = true; FfaQueueStatus = "lobby";
                 Plugin.Log.LogInfo($"[FFA-LOBBY] enrolled in lobby {OpenFfaLobbyId} (recovery={wasRecovery})");
+                RegionPingSweep.NoteJoinQueue();   // Sept 10 WP-B: fresh map for the poll header
                 // Level-triggered room exclusion (impl review find 3), now
                 // competitive-only (bug #132 — a casual game may carry an open
                 // seat): if a COMPETITIVE game finished connecting while the
@@ -15363,6 +15380,7 @@ namespace CompetitiveRounds
                         OpenFfaLobbyId = intendedLobbyId;
                     _ffaAmbiguousPollUntil = Time.unscaledTime + 90f;
                     IsFfaQueuePolling = true;
+                    RegionPingSweep.NoteJoinQueue();   // Sept 10 WP-B: fresh map for the poll header
                     UpdateFfaQueuePoll(force: true);
                 }
                 else
@@ -15670,8 +15688,12 @@ namespace CompetitiveRounds
             if (!force && Time.unscaledTime - _ffaLastPollAt < 2f) return;
             _ffaLastPollAt = Time.unscaledTime;
             int gen = ffaGen;
+            // Sept 10 WP-B: own ping map, once per sweep per lifecycle (see the 2v2 poll).
+            string rpFamily = $"ffa#{gen}", rpPings, rpGen;
+            int rpRev = RegionPingSweep.PollHeaders(rpFamily, out rpPings, out rpGen);
             Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/ffa/queue/poll/{sid}", (ok, resp) =>
             {
+                if (ok && rpRev >= 0) RegionPingSweep.NotePollHeadersAcked(rpFamily, rpRev);
                 if (!ok || string.IsNullOrEmpty(resp)) return;
                 if (!IsFfaQueuePolling) return;
                 if (gen != ffaGen) return;
@@ -16088,7 +16110,8 @@ namespace CompetitiveRounds
                     }
                 }
                 NativeUI.MarkDirty();
-            }));
+            }, extraHeaderName: rpPings != null ? "X-Region-Pings" : null, extraHeaderValue: rpPings,
+               extraHeader2Name: rpGen != null ? "X-Region-Pings-Gen" : null, extraHeader2Value: rpGen));
         }
 
         // Suppression key for countdown-window ready_join re-fires (the poll
@@ -16505,6 +16528,7 @@ namespace CompetitiveRounds
                     confirmedMember = true;
                     ambiguousUntil = -999f; handoffUntil = -999f;
                     Status = "lobby"; Polling = true; lastPollAt = -999f;
+                    RegionPingSweep.NoteJoinQueue();   // Sept 10 WP-B: fresh map for the heartbeat header
                     // The seat CONVERTED any searching row in this mode — a
                     // still-armed queue poll would now see 'lobby' forever, so
                     // the state heartbeat takes over cleanly here.
@@ -16606,6 +16630,7 @@ namespace CompetitiveRounds
                             OpenLobbyId = intendedLobbyId;
                         ambiguousUntil = Time.unscaledTime + 90f;
                         Polling = true; lastPollAt = -999f;
+                        RegionPingSweep.NoteJoinQueue();   // Sept 10 WP-B: fresh map for the heartbeat header
                     }
                     else
                         CompetitiveUI.ShowNotification(DetailOr(resp, I18n.Tr("Couldn't join that lobby.")), new Color(1f, 0.6f, 0.2f), 5f);
@@ -16937,13 +16962,18 @@ namespace CompetitiveRounds
                     if (Time.unscaledTime - lastPollAt < 2f) return;
                     lastPollAt = Time.unscaledTime;
                     int g = gen;
+                    // Sept 10 WP-B: own ping map, once per sweep per lifecycle (see the 2v2 poll).
+                    string rpFamily = $"{mode}-lobby#{g}", rpPings, rpGen;
+                    int rpRev = RegionPingSweep.PollHeaders(rpFamily, out rpPings, out rpGen);
                     Plugin.Instance.StartCoroutine(GetRequest(
                         $"{baseUrl}/api/v1/{mode}/lobby/state?steam_id={UnityWebRequest.EscapeURL(sid)}&seen_settings_version={Math.Max(0, seenSettingsVersion)}", (ok, resp) =>
                     {
+                        if (ok && rpRev >= 0) RegionPingSweep.NotePollHeadersAcked(rpFamily, rpRev);
                         if (!ok || string.IsNullOrEmpty(resp)) return;
                         if (!Polling || g != gen) return;
                         HandleState(resp);
-                    }));
+                    }, extraHeaderName: rpPings != null ? "X-Region-Pings" : null, extraHeaderValue: rpPings,
+                       extraHeader2Name: rpGen != null ? "X-Region-Pings-Gen" : null, extraHeader2Value: rpGen));
                 }
                 catch (Exception ex) { Plugin.Log.LogWarning($"[{label}-LOBBY] tick: {ex.Message}"); }
             }
@@ -19839,9 +19869,13 @@ namespace CompetitiveRounds
         /// <param name="extraHeaderName">Sept 7 item 3: one optional caller-named
         /// request header (the 1v1 queue poll's X-Region-Pings), stamped only when
         /// both name and value are given. Every other caller passes nothing.</param>
+        /// <param name="extraHeader2Name">Sept 10 WP-B: a second optional pair
+        /// (the multiplayer polls' X-Region-Pings-Gen beside X-Region-Pings),
+        /// stamped under the same rule as the first.</param>
         private static IEnumerator GetRequest(string url, Action<bool, string> callback,
             bool detailedErrors = false, bool sessionAware = false,
-            string extraHeaderName = null, string extraHeaderValue = null)
+            string extraHeaderName = null, string extraHeaderValue = null,
+            string extraHeader2Name = null, string extraHeader2Value = null)
         {
             if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
             if (SensitiveTransportBlocked(url, null, callback)) yield break;
@@ -19851,6 +19885,8 @@ namespace CompetitiveRounds
                 StampVersionHeader(request);
                 if (!string.IsNullOrEmpty(extraHeaderName) && extraHeaderValue != null)
                     request.SetRequestHeader(extraHeaderName, extraHeaderValue);
+                if (!string.IsNullOrEmpty(extraHeader2Name) && extraHeader2Value != null)
+                    request.SetRequestHeader(extraHeader2Name, extraHeader2Value);
                 // Capture the token this request rides out with (same pattern
                 // as PostRequest): the compare inside HandleSessionReject
                 // guards the race where a slow 401 lands after a newer
