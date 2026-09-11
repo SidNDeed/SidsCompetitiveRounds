@@ -68,3 +68,22 @@ def test_refusals_are_read_by_status_and_token():
     assert "status == 403" in coll and "private" in coll
     card = _fn(BOT_SRC, "cmd_pc_card")
     assert "not in the card pool" in card
+
+
+def test_events_are_grouped_by_the_nested_print_id():
+    start = BOT_SRC.index("def _pc_event_lines(")
+    lines = BOT_SRC[start:BOT_SRC.index("async def ", start)]
+    assert 'key = (e.get("print") or {}).get("print_id") or e.get("print_id") or f"event:{e[\'id\']}"' in lines
+    # the api's shape: print_id lives under "print"
+    assert '"print": ({"print_id": str(r["print_id"])' in MAIN_SRC
+
+
+def test_api_names_in_embed_titles_are_escaped():
+    assert "_pc_name(body.get('owner_name') or target.display_name)" in _fn(BOT_SRC, "cmd_pc_collection")
+    assert "_pc_name(body.get('subject_name') or target.display_name)" in _fn(BOT_SRC, "cmd_pc_card")
+
+
+def test_a_private_binder_is_read_by_its_token_and_the_balance_only_when_sent():
+    coll = _fn(BOT_SRC, "cmd_pc_collection")
+    assert 'status == 403 and _pc_detail(body).get("error") == "private"' in coll
+    assert 'if "shards" in body:' in coll

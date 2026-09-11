@@ -5,8 +5,8 @@ predicate so titles, the doubled bonus and "#N of M" follow the board.
 
 Source-shape tests in the style of test_queue_ready_strict.py: they prove the
 statements carry the TYPED bind (CAST(:active_days AS integer) inside
-make_interval) or, for the parameter-less podium statements, the interpolated
-int -- and never a string-concatenated interval (learning #448).
+make_interval) -- the podium statements bind the same typed :active_days --
+and never a string-concatenated interval (learning #448).
 """
 
 import inspect

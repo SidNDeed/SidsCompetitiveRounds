@@ -731,6 +731,9 @@ class FakeDb:
             return _Res([(1,)] * n)
         if "FROM rank_role_colors" in sql:
             return _Res([])
+        # the ban core withdraws the Player Cards binder and announcements (c3 J)
+        if "UPDATE players SET pc_collection_public = false, pc_announce = false WHERE steam_id = :sid" in sql:
+            return _Res()
         raise AssertionError(f"unexpected statement: {sql[:120]}")
 
 

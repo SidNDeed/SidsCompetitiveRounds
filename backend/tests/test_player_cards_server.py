@@ -273,8 +273,13 @@ def test_janitor_takes_the_first_snapshot_when_none_exists(monkeypatch):
     today = datetime(2026, 9, 11, 0, 5, tzinfo=timezone.utc)
     db, taken = _janitor(monkeypatch, _due_row(None, today - timedelta(hours=3), today))
     _run(main._pc_snapshot_janitor_step())
-    assert taken == ["first"] and db.committed == 1
+    assert taken == ["first"] and db.committed == 2   # retention, then the snapshot
     assert db.count("DELETE FROM pc_events WHERE created_at < NOW() - INTERVAL '7 days'") == 1
+    # the due state is read before the lock and AGAIN under it (c3 F)
+    order = [sql[:40] for sql, _ in db.log]
+    due_reads = [i for i, s in enumerate(order) if s == "SELECT (SELECT MAX(taken_at) FROM pc_poo"]
+    assert len(due_reads) == 2
+    assert due_reads[0] < order.index("SELECT pg_try_advisory_xact_lock(hashtex") < due_reads[1]
 
 
 def test_janitor_takes_one_per_day_at_or_after_0005_utc(monkeypatch):
@@ -288,14 +293,35 @@ def test_janitor_takes_one_per_day_at_or_after_0005_utc(monkeypatch):
     db, taken = _janitor(monkeypatch, _due_row(yesterday, today - timedelta(minutes=2), today))
     _run(main._pc_snapshot_janitor_step())
     assert taken == [] and db.count("pg_try_advisory_xact_lock") == 0
-    # already done today: last snapshot after 00:05 today
+    # already done today: last snapshot after 00:05 today — retention still runs (c3 F)
     db, taken = _janitor(monkeypatch, _due_row(today + timedelta(seconds=30), today + timedelta(hours=5), today))
     _run(main._pc_snapshot_janitor_step())
-    assert taken == []
-    # lock held elsewhere: nothing
+    assert taken == [] and db.count("DELETE FROM pc_events") == 1 and db.committed == 1
+    # lock held elsewhere: no snapshot (retention alone committed)
     db, taken = _janitor(monkeypatch, _due_row(yesterday, today + timedelta(minutes=1), today), lock=False)
     _run(main._pc_snapshot_janitor_step())
-    assert taken == [] and db.committed == 0
+    assert taken == [] and db.committed == 1
+
+
+def test_janitor_rereads_the_due_state_under_the_lock(monkeypatch):
+    """A snapshot another taker committed between the pre-lock read and the
+    lock is not doubled (c3 F)."""
+    today = datetime(2026, 9, 11, 0, 5, tzinfo=timezone.utc)
+    yesterday = today - timedelta(days=1)
+    db = Scripted({"SELECT (SELECT MAX(taken_at)": [
+        _due_row(yesterday, today + timedelta(minutes=1), today),            # due before the lock
+        _due_row(today + timedelta(seconds=30), today + timedelta(minutes=1), today),   # taken meanwhile
+    ], "pg_try_advisory_xact_lock": [True]})
+    monkeypatch.setattr(database, "async_session", lambda: db)
+    taken = []
+
+    async def _take(_db, *, reason):
+        taken.append(reason)
+        return {}
+
+    monkeypatch.setattr(main, "_pc_take_snapshot", _take)
+    _run(main._pc_snapshot_janitor_step())
+    assert taken == [] and db.count("pg_try_advisory_xact_lock") == 1 and db.committed == 1
 
 
 # ── the wire shape ───────────────────────────────────────────────────────────
@@ -450,7 +476,10 @@ def test_janitor_runs_the_snapshot_step_and_the_prefix_is_rate_limited():
     assert loop.count("await _pc_snapshot_janitor_step()") == 1
     step = inspect.getsource(main._pc_snapshot_janitor_step)
     assert "pg_try_advisory_xact_lock(hashtext('pc_snapshot'))" in step
-    assert "INTERVAL '5 minutes'" in step and "MAX(taken_at)" in step
+    assert step.count("await _pc_snapshot_due(db)") == 2   # before the lock and under it (c3 F)
+    assert step.index("DELETE FROM pc_events") < step.index("_pc_snapshot_due(db)")   # retention first, always
+    due = inspect.getsource(main._pc_snapshot_due)
+    assert "INTERVAL '5 minutes'" in due and "MAX(taken_at)" in due
     assert "/api/v1/pc/" in main._RL_SENSITIVE_PREFIXES
 
 
@@ -469,6 +498,9 @@ def test_delete_my_data_purges_every_player_cards_table_between_the_lock_and_the
     positions = [src.index(s) for s in order]
     assert positions == sorted(positions)
     assert lock < positions[0] and positions[-1] < gone
+    # the snapshot takers' lock, blocking form, before the pool_members sweep (c3 I)
+    snap_lock = src.index("pg_advisory_xact_lock(hashtext('pc_snapshot'))")
+    assert lock < snap_lock < positions[4]
     # prints and claims (which reference packs) go before packs
     assert positions[1] < positions[3] and positions[2] < positions[3]
 
@@ -495,3 +527,67 @@ def test_route_inventory_of_phase_one():
         ("/api/v1/internal/pc/daily", ("POST",)), ("/api/v1/internal/pc/collection", ("GET",)),
         ("/api/v1/internal/pc/card", ("GET",)),
     }
+
+
+# ── c3 repairs ───────────────────────────────────────────────────────────────
+
+def test_every_player_route_takes_the_shared_identity_lock_before_the_player_read():
+    actor = inspect.getsource(main._pc_verified_actor)
+    assert actor.index("pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))") \
+        < actor.index("select(Player).where(Player.steam_id == steam_id)")
+    daily = inspect.getsource(main._pc_claim_daily)
+    assert daily.index("pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))") \
+        < daily.index("SELECT deleted_at FROM players WHERE id = CAST(:pid AS uuid)") \
+        < daily.index("FOR NO KEY UPDATE")
+
+
+def test_a_held_packs_failed_open_answers_its_own_unopened_state():
+    src = inspect.getsource(main.pc_open_pack)
+    rej = src[src.index("async def _reject("):src.index("# ── 2. locks")]
+    assert 'if source == "bought":\n            raise _pc_reject_http(reason, {"pack_id": this_pack' in rej
+    assert '"status": "unopened", "pack_id": this_pack, "source": source' in rej and '"last_attempt"' in rej
+    assert rej.index("await db.commit()") < rej.index('"status": "unopened"')
+
+
+def test_a_ban_withdraws_the_binder_and_the_announcements():
+    src = _main_code()
+    upd = "UPDATE players SET pc_collection_public = false, pc_announce = false WHERE steam_id = :sid"
+    assert src.count(upd) == 1
+    assert src.index("db.add(PlayerBan(steam_id=target_steam_id") < src.index(upd)
+
+
+def test_the_shard_balance_is_answered_to_its_owner_only():
+    src = inspect.getsource(main.internal_pc_collection)
+    assert 'is_owner = viewer_discord_id is not None and str(viewer_discord_id) == str(owner.discord_id)' in src
+    body = src[src.index("answer = {"):]
+    assert body.index("if is_owner:") < body.index('answer["shards"]')
+    assert "shards" not in src[src.index("answer = {"):src.index("if is_owner:")]
+
+
+def test_the_void_predicates_have_their_index():
+    mig = (Path(__file__).resolve().parents[1] / "sql" / "308_player_cards.sql").read_text(encoding="utf-8")
+    assert ("CREATE INDEX IF NOT EXISTS pc_packs_earned_unopened_ref ON pc_packs (reference_id) "
+            "WHERE source = 'earned' AND status = 'unopened';") in mig
+
+
+def test_snapshot_board_rank_mirrors_the_live_leaderboard():
+    sql = main._PC_SNAPSHOT_SELECT_SQL
+    board_series = sql[sql.index("board_series AS ("):sql.index("board AS (")]
+    assert "rs.status = 'completed'" in board_series and "invalidated_at" not in board_series
+    board = sql[sql.index("board AS ("):sql.index("SELECT pool.player_id")]
+    assert "ROW_NUMBER() OVER (ORDER BY gr.rating DESC, p.id) AS board_rank" in board
+    assert "LEFT JOIN board_series se ON se.player_id = p.id" in board
+    # the card's own record still excludes invalidated series
+    series = sql[sql.index("series AS ("):sql.index("legacy AS (")]
+    assert series.count("rs.invalidated_at IS NULL") == 2
+    live = inspect.getsource(main.get_leaderboard)
+    assert "ROW_NUMBER() OVER (ORDER BY gr.rating DESC, p.id) AS rank" in live
+    assert live.count("ORDER BY gr.rating DESC, p.id") == 2
+
+
+def test_titles_and_rank_names_resolve_against_the_rounded_rating():
+    assert main._pc_board_rating(1979.6) == 1980.0 and main._pc_board_rating(1978.5) == 1979.0
+    assert main._pc_board_rating(1500.4) == 1500.0 and main._pc_board_rating(None) is None
+    snap = inspect.getsource(main._pc_take_snapshot)
+    assert "_pc_board_rating(rating)," in snap
+    assert _main_code().count("_rank_name_for(_pc_board_rating(rating))") == 2

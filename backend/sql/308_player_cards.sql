@@ -86,6 +86,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS pc_packs_player_nonce ON pc_packs (player_id, 
 CREATE UNIQUE INDEX IF NOT EXISTS pc_packs_player_source_ref ON pc_packs (player_id, source, reference_id) WHERE reference_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS pc_packs_player_status ON pc_packs (player_id, status);
 CREATE INDEX IF NOT EXISTS pc_packs_paid_day ON pc_packs (player_id, opened_at) WHERE source = 'bought' AND status = 'done';
+-- The earned-pack void predicates (a reversal, a retro-invalidation, the
+-- reconciler's sweep) probe by reference: a partial index on exactly the
+-- rows they can touch.
+CREATE INDEX IF NOT EXISTS pc_packs_earned_unopened_ref ON pc_packs (reference_id) WHERE source = 'earned' AND status = 'unopened';
 
 -- The last open attempt of an unopened pack (a pre-debit rejection returns
 -- the pack to 'unopened' and records why here).

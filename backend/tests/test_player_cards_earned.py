@@ -152,7 +152,14 @@ def test_the_1v2_roll_follows_the_completed_update_and_the_winning_side():
     assert body.index("if series_done:") < upd < at
     call = body[at:at + 400]
     assert 'mode="ovt", series_id=series_uuid' in call
-    assert "[solo_id] if winner_side == 1 else [duo_a_id, duo_b_id]" in call
+    assert "[slot_solo] if winner_side == 1 else [slot_da, slot_db]" in call
+    # the STORED slots (c3 B): initialised from the row, re-pointed at the
+    # report's ids only on the game-1 realignment
+    init = body.index('slot_solo, slot_da, slot_db = series["solo_id"], series["duo_a_id"], series["duo_b_id"]')
+    realign = body.index("slot_solo, slot_da, slot_db = solo_id, duo_a_id, duo_b_id")
+    prior = body.index("prior_games = ")
+    assert init < prior < realign < at
+    assert "if prior_games == 0:" in body[prior:realign]
     assert "sweep=_pc_sweep(solo_wins, duo_wins)" in call
 
 
@@ -187,7 +194,9 @@ def test_reversal_and_retro_invalidation_void_the_unopened_packs():
     assert SRC.count("_pc_void_earned_packs(") == 4
     for body in (one, team, retro):
         at = body.index("_pc_void_earned_packs(")
-        assert "try:" in body[at - 80:at] and "except Exception as pcex:" in body[at:at + 260]
+        pre = body[at - 170:at]
+        assert "try:" in pre and "async with db.begin_nested():" in pre, pre   # its own savepoint (c3 C, #235)
+        assert "except Exception as pcex:" in body[at:at + 260]
 
 
 def test_the_janitor_runs_the_reconciler_fail_soft_after_the_snapshot_step():
@@ -230,6 +239,15 @@ def test_earned_reference_is_mode_and_series_the_reconciler_can_rebuild():
     assert main._pc_earned_ref("ffa", str(S1)) == main._pc_earned_ref("ffa", S1)
 
 
+# A live, unlocked recipient (c3 A/I): the grant helper reads the steam id,
+# takes the shared identity try-lock and re-reads deleted_at under it.
+LIVE = {
+    "SELECT steam_id, deleted_at FROM players": [[{"steam_id": "s-live", "deleted_at": None}]],
+    "pg_try_advisory_xact_lock_shared": [[{"held": True}]],
+    "SELECT deleted_at FROM players": [[{"deleted_at": None}]],
+}
+
+
 def _kind(monkeypatch, value):
     calls = []
 
@@ -244,10 +262,16 @@ def _kind(monkeypatch, value):
 def test_grant_inserts_one_unopened_pack_per_winner_from_one_roll(monkeypatch):
     monkeypatch.setattr(main, "MATCH_HMAC_SECRET", "s3cret")
     calls = _kind(monkeypatch, "sweep")
-    db = Session({"INSERT INTO pc_packs": [[{"id": "k1"}], [{"id": "k2"}]]})
+    db = Session({"INSERT INTO pc_packs": [[{"id": "k1"}], [{"id": "k2"}]], **LIVE})
     out = _run(main._pc_grant_earned_packs(db, mode="team", series_id=S1, winner_ids=[P1, None, P2],
                                            sweep=1, label="t"))
     assert out == ["k1", "k2"]
+    # per winner: identity try-lock by steam id, deleted_at re-read, then the insert
+    locks = db.sent("pg_try_advisory_xact_lock_shared")
+    assert [p["sid"] for _, p in locks] == ["s-live", "s-live"]
+    order = [sql[:32] for sql, _ in db.log]
+    assert order.index("SELECT pg_try_advisory_xact_lock") < order.index("SELECT deleted_at FROM players W") \
+        < order.index("INSERT INTO pc_packs (player_id,")
     assert calls == [(b"s3cret", "team", str(S1), True)]
     ins = db.sent("INSERT INTO pc_packs")
     assert [p["pid"] for _, p in ins] == [str(P1), str(P2)]
@@ -267,10 +291,33 @@ def test_grant_is_inert_without_the_secret_or_on_a_miss_and_idempotent_on_a_repl
     assert _run(main._pc_grant_earned_packs(db, mode="1v1", series_id=S1, winner_ids=[P1], sweep=False, label="t")) == []
     assert db.log == []
     _kind(monkeypatch, "win")
-    replay = Session({"INSERT INTO pc_packs": [[]]})   # the conflict clause returned no row
+    replay = Session({"INSERT INTO pc_packs": [[]], **LIVE})   # the conflict clause returned no row
     assert _run(main._pc_grant_earned_packs(replay, mode="1v1", series_id=S1, winner_ids=[P1], sweep=False,
                                             label="t")) == []
     assert len(replay.sent("INSERT INTO pc_packs")) == 1
+
+
+def test_grant_skips_a_deleted_or_busy_recipient_and_the_reconcilers_roll_is_reused(monkeypatch):
+    monkeypatch.setattr(main, "MATCH_HMAC_SECRET", "s3cret")
+    calls = _kind(monkeypatch, "win")
+    # deleted before the lock: no lock, no insert
+    db = Session({"SELECT steam_id, deleted_at FROM players": [[{"steam_id": "s", "deleted_at": T0}]]})
+    assert _run(main._pc_grant_earned_packs(db, mode="1v1", series_id=S1, winner_ids=[P1], sweep=False, label="t")) == []
+    assert db.sent("pg_try_advisory_xact_lock_shared") == [] and db.sent("INSERT INTO pc_packs") == []
+    # identity lock held elsewhere (a deletion or another identity writer): left to the reconciler
+    db = Session({**LIVE, "pg_try_advisory_xact_lock_shared": [[{"held": False}]]})
+    assert _run(main._pc_grant_earned_packs(db, mode="1v1", series_id=S1, winner_ids=[P1], sweep=False, label="t")) == []
+    assert db.sent("INSERT INTO pc_packs") == [] and db.sent("SELECT deleted_at FROM players") == []
+    # deleted between the two reads (the lock was free because the deletion already committed)
+    db = Session({**LIVE, "SELECT deleted_at FROM players": [[{"deleted_at": T0}]]})
+    assert _run(main._pc_grant_earned_packs(db, mode="1v1", series_id=S1, winner_ids=[P1], sweep=False, label="t")) == []
+    assert db.sent("INSERT INTO pc_packs") == []
+    # a roll handed in is not re-rolled
+    n = len(calls)
+    db = Session({**LIVE, "INSERT INTO pc_packs": [[{"id": "k"}]]})
+    assert _run(main._pc_grant_earned_packs(db, mode="1v1", series_id=S1, winner_ids=[P1], sweep=False, label="t",
+                                            kind="sweep")) == ["k"]
+    assert len(calls) == n and db.sent("INSERT INTO pc_packs")[0][1]["kind"] == "sweep"
 
 
 def test_void_touches_only_that_series_unopened_earned_packs():
@@ -292,30 +339,89 @@ def _reconciler(monkeypatch, script):
     return db
 
 
-def test_the_first_run_only_plants_the_cursors(monkeypatch):
-    db = _reconciler(monkeypatch, {"INSERT INTO pc_reconcile_cursors": [[{"source": "x"}]]})
+def test_the_first_run_plants_the_cursors_at_the_process_start_and_scans_from_it(monkeypatch):
+    db = _reconciler(monkeypatch, {"SELECT GREATEST(cursor_at": [[{"since": T0}]]})
     _run(main._pc_reconcile_earned_packs(force=True))
     plants = db.sent("INSERT INTO pc_reconcile_cursors")
     assert [p["src"] for _, p in plants] == ["1v1", "team", "ovt", "ffa"]
-    assert "ON CONFLICT (source) DO NOTHING RETURNING source" in plants[0][0]
-    assert db.sent("SELECT GREATEST(cursor_at") == [] and db.sent("INSERT INTO pc_packs") == []
-    assert db.committed == 5   # one per planted source, one for the void sweep
+    # cursor_at AND started_at = this process's start (c3 B): a completion
+    # between api readiness and the first tick is inside the first window
+    assert all(p["start"] == main._PROCESS_STARTED_WALL for _, p in plants)
+    assert "(source, cursor_at, started_at)" in plants[0][0] and "ON CONFLICT (source) DO NOTHING" in plants[0][0]
+    # the same pass scans every source from the planted cursor
+    scans = [p for sql, p in db.log if "> CAST(:since AS timestamptz)" in sql]
+    assert [p["since"] for p in scans] == [T0] * 4
+    assert db.sent("INSERT INTO pc_packs") == []
+    assert db.committed == 5   # one per source, one for the void sweep
     # the sweep still runs — a series invalidated before the cursor existed still loses its packs
     assert len(db.sent("UPDATE pc_packs p SET status = 'voided'")) == 4
+
+
+def test_no_secret_leaves_every_cursor_untouched(monkeypatch):
+    db = _reconciler(monkeypatch, {})
+    monkeypatch.setattr(main, "MATCH_HMAC_SECRET", "")
+    _run(main._pc_reconcile_earned_packs(force=True))
+    assert db.log == [] and db.committed == 0   # no plant, no scan, no move (c3 B)
+
+
+def _scan_script(**extra):
+    return {
+        "INSERT INTO pc_reconcile_cursors": [[]],
+        "SELECT GREATEST(cursor_at": [[{"since": T0}]],
+        "SELECT 1 FROM pc_packs": [[]],                      # no pack row yet for that winner
+        "SELECT invalidated_at FROM": [[{"invalidated_at": None}]],   # still valid under the share lock
+        **LIVE,
+        "INSERT INTO pc_packs": [[{"id": "k"}]],
+        **extra,
+    }
+
+
+def test_a_series_the_inline_hook_answered_is_never_revisited(monkeypatch):
+    _kind(monkeypatch, "win")
+    db = _reconciler(monkeypatch, _scan_script(**{
+        "FROM ranked_series rs": [[{"ref": S1, "completed_at": T0, "w1": P1, "w2": None, "sweep": False}]],
+        "SELECT 1 FROM pc_packs": [[{"?column?": 1}]],
+    }))
+    _run(main._pc_reconcile_earned_packs(force=True))
+    assert len(db.sent("SELECT 1 FROM pc_packs")) == 1
+    assert db.sent("FOR SHARE") == [] and db.sent("INSERT INTO pc_packs") == []
+
+
+def test_a_series_invalidated_under_the_share_lock_is_not_granted(monkeypatch):
+    _kind(monkeypatch, "win")
+    db = _reconciler(monkeypatch, _scan_script(**{
+        "FROM ranked_series rs": [[{"ref": S1, "completed_at": T0, "w1": P1, "w2": None, "sweep": False}]],
+        "SELECT invalidated_at FROM": [[{"invalidated_at": T0}]],
+    }))
+    _run(main._pc_reconcile_earned_packs(force=True))
+    (sql, p), = db.sent("FOR SHARE")
+    assert sql == "SELECT invalidated_at FROM ranked_series WHERE id = CAST(:ref AS uuid) FOR SHARE" and p == {"ref": str(S1)}
+    assert db.sent("INSERT INTO pc_packs") == []
+
+
+def test_a_miss_costs_no_lookup_at_all(monkeypatch):
+    _kind(monkeypatch, None)
+    db = _reconciler(monkeypatch, _scan_script(**{
+        "FROM ranked_series rs": [[{"ref": S1, "completed_at": T0, "w1": P1, "w2": None, "sweep": False}]],
+    }))
+    _run(main._pc_reconcile_earned_packs(force=True))
+    assert db.sent("SELECT 1 FROM pc_packs") == [] and db.sent("FOR SHARE") == []
 
 
 def test_a_later_run_rederives_the_grants_and_advances_each_cursor_to_its_newest_row(monkeypatch):
     calls = _kind(monkeypatch, "win")
     t1, t2 = T0 + timedelta(minutes=5), T0 + timedelta(minutes=9)
-    db = _reconciler(monkeypatch, {
-        "INSERT INTO pc_reconcile_cursors": [[]],
-        "SELECT GREATEST(cursor_at": [[{"since": T0}]],
+    db = _reconciler(monkeypatch, _scan_script(**{
         "FROM ranked_series rs": [[{"ref": S1, "completed_at": t2, "w1": P1, "w2": None, "sweep": True},
                                    {"ref": S2, "completed_at": t1, "w1": P2, "w2": None, "sweep": False}]],
         "FROM team_series ts": [[{"ref": S2, "completed_at": t1, "w1": P1, "w2": P2, "sweep": False}]],
-        "INSERT INTO pc_packs": [[{"id": "k"}]],
-    })
+    }))
     _run(main._pc_reconcile_earned_packs(force=True))
+    # per hit: an existence check per stored winner, then the series row's
+    # share lock and its invalidated_at re-read, then the insert (c3 B)
+    assert [p["pid"] for _, p in db.sent("SELECT 1 FROM pc_packs")] == [str(P1), str(P2), str(P1), str(P2)]
+    assert [(sql.split(" FROM ")[1].split(" ")[0], p["ref"]) for sql, p in db.sent("FOR SHARE")] == \
+        [("ranked_series", str(S1)), ("ranked_series", str(S2)), ("team_series", str(S2))]
     # every scan window starts where the cursor row says
     scans = [p for sql, p in db.log if "> CAST(:since AS timestamptz)" in sql]
     assert [p["since"] for p in scans] == [T0] * 4

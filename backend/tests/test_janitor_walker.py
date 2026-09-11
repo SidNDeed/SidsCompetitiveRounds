@@ -3,6 +3,7 @@ statically. The live inventory must have no `dynamic` site — each one is a
 synthetic self-test FAILURE at boot — the Player Cards janitor steps must be
 in the reachable set, and module-level constants resolve under exactly the
 rules the walker documents (Sept 10 batch, walker r10)."""
+import sys
 import textwrap
 
 import pytest
@@ -143,7 +144,91 @@ def test_a_local_binding_or_parameter_shadows_the_module_constant():
         for k, sql in D.items():
             await db.execute(text(sql))
     ''',
+    # c3 D1: a module constant reads a name a SITE loop rebinds — its value
+    # is the import-time one, never the loop row's
+    '''
+    T = "missing"
+    Q = f"SELECT * FROM {T}"
+    async def root(db):
+        for T in ("players",):
+            await db.execute(text(Q))
+    ''',
+    # c3 D3: a star import may rebind anything
+    '''
+    Q = "SELECT 1"
+    from x import *
+    async def root(db):
+        await db.execute(text(Q))
+    ''',
+    # c3 D4: indirect namespace stores — a constant key, a variable key, a
+    # method on the namespace dict, setattr on the module object, exec
+    '''
+    Q = "SELECT 1"
+    def flip():
+        globals()["Q"] = "SELECT 9"
+    async def root(db):
+        await db.execute(text(Q))
+    ''',
+    '''
+    Q = "SELECT 1"
+    def flip(k):
+        globals()[k] = "SELECT 9"
+    async def root(db):
+        await db.execute(text(Q))
+    ''',
+    '''
+    Q = "SELECT 1"
+    def flip():
+        globals().update(Q="SELECT 9")
+    async def root(db):
+        await db.execute(text(Q))
+    ''',
+    '''
+    import sys
+    Q = "SELECT 1"
+    def flip():
+        setattr(sys.modules[__name__], "Q", "SELECT 9")
+    async def root(db):
+        await db.execute(text(Q))
+    ''',
+    '''
+    Q = "SELECT 1"
+    def flip():
+        exec("Q = 'SELECT 9'")
+    async def root(db):
+        await db.execute(text(Q))
+    ''',
 ])
 def test_a_module_name_that_could_change_stays_dynamic(src):
     sqls, dyn = _sqls(src)
     assert sqls == [] and len(dyn) == 1, (sqls, dyn)
+
+
+@pytest.mark.skipif(sys.version_info < (3, 10), reason="match statements")
+def test_a_module_level_match_capture_rebinds_by_name_string():
+    # c3 D2: MatchAs / MatchStar / MatchMapping bind names as STRINGS, not Name stores
+    for pattern in ("case [Q]:", "case [*Q]:", "case {**Q}:"):
+        sqls, dyn = _sqls(f'''
+        import sys
+        Q = "SELECT 1"
+        match sys.argv:
+            {pattern}
+                pass
+        async def root(db):
+            await db.execute(text(Q))
+        ''')
+        assert sqls == [] and len(dyn) == 1, (pattern, sqls, dyn)
+
+
+def test_a_constant_key_namespace_store_of_another_name_leaves_the_constant_resolvable():
+    # negative control (#391): main.py stores globals()["_ffa_gather_*"]; the
+    # live inventory must stay green
+    sqls, dyn = _sqls('''
+    Q = "SELECT 1"
+    def flip():
+        globals()["OTHER"] = 1
+        setattr(obj, "Q", 2)
+    async def root(db):
+        await db.execute(text(Q))
+    ''')
+    assert sqls == ["SELECT 1"] and dyn == [], (sqls, dyn)

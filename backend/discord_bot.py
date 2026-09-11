@@ -8371,18 +8371,19 @@ async def cmd_pc_collection(ctx, member: discord.Member = None):
                                  params={"discord_id": str(target.id), "viewer_discord_id": str(ctx.author.id)})
     if status == 404:
         await ctx.send(_pc_not_linked(ctx, target)); return
-    if status == 403:
+    if status == 403 and _pc_detail(body).get("error") == "private":   # by token, not status alone (c3 G)
         await ctx.send(f"🔒 {discord.utils.escape_markdown(target.display_name)}'s binder is private."); return
     if status != 200 or not isinstance(body, dict):
         await ctx.send("❌ Couldn't fetch that binder right now."); return
     counts = body.get("by_rarity") or {}
-    embed = discord.Embed(title=f"🎴  {body.get('owner_name') or target.display_name}  —  Collection",
+    embed = discord.Embed(title=f"🎴  {_pc_name(body.get('owner_name') or target.display_name)}  —  Collection",
                           color=discord.Color.gold())
     embed.set_thumbnail(url=target.display_avatar.url)
     embed.add_field(name="📚  Prints",
                     value=f"**{int(body.get('count') or 0)}** prints · **{int(body.get('distinct_subjects') or 0)}** players",
                     inline=True)
-    embed.add_field(name="🔹  Shards", value=f"**{int(body.get('shards') or 0)}**", inline=True)
+    if "shards" in body:   # the api sends the balance to its owner only (c3 G)
+        embed.add_field(name="🔹  Shards", value=f"**{int(body.get('shards') or 0)}**", inline=True)
     embed.add_field(name="🏷️  By rarity",
                     value="\n".join(f"{_PC_RARITY_EMOJI[r]} {r.title()}: **{int(counts.get(r, 0))}**"
                                     for r in ("legendary", "epic", "rare", "uncommon", "common")),
@@ -8413,7 +8414,7 @@ async def cmd_pc_card(ctx, member: discord.Member = None):
     if status != 200 or not isinstance(body, dict):
         await ctx.send("❌ Couldn't fetch that card right now."); return
     rarity = str(body.get("rarity") or "common")
-    embed = discord.Embed(title=f"{_PC_RARITY_EMOJI.get(rarity, '')}  {body.get('subject_name') or target.display_name}"
+    embed = discord.Embed(title=f"{_PC_RARITY_EMOJI.get(rarity, '')}  {_pc_name(body.get('subject_name') or target.display_name)}"
                                 f"  —  {rarity.title()}",
                           color=_PC_RARITY_COLOR.get(rarity, 0x95A5A6))
     embed.set_thumbnail(url=target.display_avatar.url)
@@ -8449,7 +8450,8 @@ def _pc_event_lines(events):
     posts. Events without a print (none today) stand alone."""
     groups, order = {}, []
     for e in events:
-        key = e.get("print_id") or f"event:{e['id']}"
+        # The api nests the print under "print" (c3 G): one line per print.
+        key = (e.get("print") or {}).get("print_id") or e.get("print_id") or f"event:{e['id']}"
         if key not in groups:
             groups[key] = []
             order.append(key)
