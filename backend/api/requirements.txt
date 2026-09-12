@@ -16,3 +16,5 @@ pydantic==2.9.2
 # Image.open and ImageSequence.Iterator all present — those are the exact
 # APIs main.py calls.
 pillow==11.3.0
+# UAX#29 grapheme clusters (\X) for the Player Cards face renderer (pc_face.py).
+regex==2026.9.3

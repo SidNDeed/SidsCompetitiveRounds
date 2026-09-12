@@ -123,6 +123,16 @@ namespace CompetitiveRounds
         /// <summary>Restore one player to their pre-tint colors. Called when re-equipping
         /// (so the new baseline detection runs against vanilla state) and when the
         /// global cosmetic toggle flips off mid-match.</summary>
+        /// <summary>Portrait spike / renderer entry: tint an offscreen rig exactly like a
+        /// live body (same sniff + apply path). Pair with RevertPlayer(actor) at teardown.</summary>
+        private static bool _portraitApply;   // v22 section 3.4: a portrait shows the EQUIPPED cosmetics whatever the local visibility toggle says
+        internal static void ApplyForPortrait(Transform rigRoot, int actor, string sku, string colorHex)
+        {
+            _portraitApply = true;
+            try { ApplyToPlayer(rigRoot, actor, sku, colorHex); }
+            finally { _portraitApply = false; }
+        }
+
         public static void RevertPlayer(int actor)
         {
             if (animByActor.TryGetValue(actor, out var st))
@@ -363,7 +373,7 @@ namespace CompetitiveRounds
         {
             if (playerRoot == null) return;
             // Setting off → revert any existing tint on this player and bail.
-            if (Plugin.ShowPlayerColors != null && !Plugin.ShowPlayerColors.Value)
+            if (!_portraitApply && Plugin.ShowPlayerColors != null && !Plugin.ShowPlayerColors.Value)
             {
                 RevertPlayer(actor);
                 return;

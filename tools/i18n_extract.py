@@ -70,7 +70,7 @@ FILES = [
     "FfaMode.cs", "ModeInfoText.cs", "TabStatsOverlay.cs", "GameStateWatcher.cs",
     "MatchTracker.cs", "VanillaFixes.cs", "QuickChat.cs",
     # Player Cards (Sept 10): the Collection tab + Settings rows.
-    "PlayerCardsUI.cs",
+    "PlayerCardsUI.cs", "PcLabels.cs",
     # Spectator mode (Aug 6 item 13) — new files with user-visible Tr() text.
     "SpectatorHud.cs", "SpectatorJoiner.cs", "SpectatorSync.cs",
     # Esc-menu leave confirm (Aug 12, DC #1).
@@ -416,7 +416,10 @@ CTX_SITES = [
 # A context is a short noun phrase. No braces, no '<', no quotes: the server
 # validator reads the whole msgctxt as the source, so a brace or a tag inside
 # the context would become a hole/tag every translation had to reproduce.
-CTX_OK = re.compile(r"[A-Za-z][A-Za-z0-9 _/-]{1,59}")
+# The dot is admitted because the Player Cards identifiers ARE dotted
+# (`pc.band.common`, §1.3) and a dot carries neither a hole nor a tag into the
+# msgctxt — which is the whole reason braces, '<' and quotes are excluded.
+CTX_OK = re.compile(r"[A-Za-z][A-Za-z0-9 ._/-]{1,59}")
 
 
 class ExtractError(Exception):

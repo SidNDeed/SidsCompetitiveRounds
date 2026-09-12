@@ -31,6 +31,22 @@ namespace CompetitiveRounds
 
         // actorNumber → the spawned aura GameObject (destroyed on cleanup).
         private static readonly Dictionary<int, GameObject> auraByActor = new Dictionary<int, GameObject>();
+        // The Material each aura's renderer was given. `new Material(...)` makes
+        // a native object this code owns: Unity cleans up only the copy it
+        // makes itself when `.material` is READ, never one that was assigned in.
+        // Destroying the aura GameObject left it resident, once per aura, for
+        // the life of the process.
+        private static readonly Dictionary<int, Material> auraMatByActor = new Dictionary<int, Material>();
+
+        /// <summary>Destroy the aura material this actor owns, if any. Safe to
+        /// call when there is none.</summary>
+        private static void DropAuraMaterial(int actor)
+        {
+            Material m;
+            if (!auraMatByActor.TryGetValue(actor, out m)) return;
+            auraMatByActor.Remove(actor);
+            try { if (m != null) UnityEngine.Object.Destroy(m); } catch { }
+        }
         // actorNumber → sku currently applied, so we can skip redundant re-spawns.
         private static readonly Dictionary<int, string> skuByActor = new Dictionary<int, string>();
 
@@ -77,7 +93,10 @@ namespace CompetitiveRounds
         {
             foreach (var kv in auraByActor)
                 try { if (kv.Value != null) UnityEngine.Object.Destroy(kv.Value); } catch { }
+            foreach (var kv in auraMatByActor)
+                try { if (kv.Value != null) UnityEngine.Object.Destroy(kv.Value); } catch { }
             auraByActor.Clear();
+            auraMatByActor.Clear();
             skuByActor.Clear();
         }
 
@@ -256,6 +275,33 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>Portrait spike / renderer entry: attach the aura to an offscreen rig and,
+        /// when unlit is set, replace its material with the camera-independent unlit build
+        /// (learning #139: the scene's lit particle material renders nothing on an isolated
+        /// RenderTexture camera). ClearForPortrait tears it down.</summary>
+        private static bool _portraitApply;   // v22 section 3.4: the portrait ignores the local visibility toggle
+        internal static void ApplyForPortrait(Transform rigRoot, int actor, string sku, bool unlit)
+        {
+            _portraitApply = true;
+            try { ApplyToPlayer(rigRoot, actor, sku); }
+            finally { _portraitApply = false; }
+            if (!unlit) return;
+            GameObject go;
+            if (!auraByActor.TryGetValue(actor, out go) || go == null) return;
+            var psr = go.GetComponent<ParticleSystemRenderer>();
+            var mat = BuildUnlitPreviewMaterial(sku);
+            if (psr != null && mat != null) psr.material = mat;
+        }
+
+        internal static void ClearForPortrait(Transform rigRoot, int actor)
+        {
+            if (rigRoot != null) { ApplyToPlayer(rigRoot, actor, ""); return; }
+            GameObject go;
+            if (auraByActor.TryGetValue(actor, out go)) { try { if (go != null) UnityEngine.Object.Destroy(go); } catch { } auraByActor.Remove(actor); }
+            DropAuraMaterial(actor);
+            skuByActor.Remove(actor);
+        }
+
         // ── Apply ───────────────────────────────────────────────────
         private static void ApplyToPlayer(Transform playerRoot, int actor, string sku)
         {
@@ -267,10 +313,11 @@ namespace CompetitiveRounds
                 try { if (old != null) UnityEngine.Object.Destroy(old); } catch { }
                 auraByActor.Remove(actor);
             }
+            DropAuraMaterial(actor);
             skuByActor.Remove(actor);
 
             if (string.IsNullOrEmpty(sku)) return;
-            if (Plugin.ShowPlayerColors != null && !Plugin.ShowPlayerColors.Value) return;
+            if (!_portraitApply && Plugin.ShowPlayerColors != null && !Plugin.ShowPlayerColors.Value) return;
 
             try
             {
@@ -288,7 +335,7 @@ namespace CompetitiveRounds
                 if (psr != null)
                 {
                     var mat = BuildMaterialForSku(playerRoot, sku);
-                    if (mat != null) psr.material = mat;
+                    if (mat != null) { psr.material = mat; auraMatByActor[actor] = mat; }
                     psr.sortingFudge = -2f;  // draw just behind the body so the aura haloes it
                     psr.renderMode = ParticleSystemRenderMode.Billboard;
                 }

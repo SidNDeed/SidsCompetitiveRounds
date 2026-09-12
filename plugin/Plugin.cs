@@ -165,6 +165,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<string> BroadcastTestQuit;           // broadcast seat only — any new non-empty value quits the game (Sept 6)
         internal static ConfigEntry<string> BroadcastTestGstatsSentinel; // broadcast seat only — any new value runs the cr_gstats W1-sentinel self-test once
         internal static ConfigEntry<string> BroadcastTestPlayerCards;   // broadcast seat only — any new value seeds synthetic Player Card tiles (Sept 10)
+        internal static ConfigEntry<int> PortraitPreset;                 // Player Cards (v22 section 6): -1 = follow the selected character, 0-9 = playerFaces[n]
         internal static ConfigEntry<bool> BroadcastTestSilence;          // broadcast seat only, offline/sandbox — apply 3s of silence to a bot for indicator verification
         internal static ConfigEntry<string> BroadcastTestQuickChatWheel; // broadcast seat only — pin the quick-chat wheel open for layout screenshots
         internal static ConfigEntry<string> BroadcastTestDance;         // broadcast seat only — "wheel" | "preview:<sku>" | "play:<idx>" dance verification
@@ -1071,6 +1072,10 @@ namespace CompetitiveRounds
             BroadcastTestPlayerCards = Config.Bind(
                 "Broadcast", "TestPlayerCards", "",
                 "Broadcast seat only: set to any value that differs from the previous one to fill the Collection tab's reveal strip with five synthetic Player Cards (layout screenshots on a seat whose server has no Player Cards yet). No server call, nothing persisted."
+            );
+            PortraitPreset = Config.Bind(
+                "Player Cards", "PortraitPreset", -1,
+                "Which character your card picture shows: -1 follows the character you have selected, 0-9 pins that saved preset slot (the button counts them from 1). Changing it re-renders the picture next time the Collection tab or Settings is open."
             );
             BroadcastTestGstatsSentinel = Config.Bind(
                 "Broadcast", "TestGstatsSentinel", "",
@@ -2225,6 +2230,16 @@ namespace CompetitiveRounds
             if (raw == _lastTestPlayerCards) return;
             _lastTestPlayerCards = raw;
             if (raw.Length == 0) return;
+            if (raw.StartsWith("portrait:", StringComparison.OrdinalIgnoreCase)) { PortraitRender.DevRun(raw.Substring(9)); return; }   // portrait renderer (v22 section 5.7)
+            if (raw.StartsWith("shot:", StringComparison.OrdinalIgnoreCase)) { PortraitRender.DevShot(raw.Substring(5)); return; }        // window capture from this seat (#622)
+            if (raw.StartsWith("ui:", StringComparison.OrdinalIgnoreCase))
+            {
+                // open the mod page on a tab so the seat can screenshot its own UI
+                string what = raw.Substring(3).Trim().ToLowerInvariant();
+                if (what == "close") { try { NativeUI.Close(); } catch { } return; }
+                NativeUI.DevOpenTab(what == "settings" ? 5 : NativeUI.TAB_COLLECTION);
+                return;
+            }
             try { PlayerCardsUI.DevSeedTiles(raw.ToLowerInvariant()); }
             catch (Exception ex) { Plugin.Log.LogWarning($"[PC] FAIL: tiles lever threw {ex.Message}"); }
         }

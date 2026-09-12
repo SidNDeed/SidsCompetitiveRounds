@@ -1,0 +1,106 @@
+{
+  "version": 1,
+  "canvas": {
+    "card": [750, 1050],
+    "tile": [375, 525],
+    "corner_radius": 40,
+    "bleed": 24,
+    "safe": [40, 40, 710, 1010]
+  },
+  "portrait_bg": "#0C0F20",
+  "rects": {
+    "header": [54, 38, 696, 132],
+    "name": [54, 38, 490, 132],
+    "chips": [502, 38, 696, 132],
+    "portrait": [80, 150, 670, 740],
+    "badge": [58, 642, 178, 754],
+    "badge_mark": [92, 654, 144, 722],
+    "badge_label": [62, 728, 174, 750],
+    "autograph": [190, 636, 640, 744],
+    "seal": [540, 630, 660, 750],
+    "seal_label": [556, 668, 644, 700],
+    "stats": [54, 758, 696, 972],
+    "stat_rank_label": [76, 776, 300, 796],
+    "stat_rating_label": [450, 776, 674, 796],
+    "stat_pool_label": [76, 896, 236, 916],
+    "stat_board_label": [295, 896, 455, 916],
+    "stat_record_label": [514, 896, 674, 916],
+    "stat_title_value": [76, 806, 456, 846],
+    "stat_rating_value": [476, 806, 674, 866],
+    "stat_pool_value": [76, 926, 236, 958],
+    "stat_board_value": [295, 926, 455, 958],
+    "stat_record_value": [514, 926, 674, 958],
+    "footer": [54, 978, 696, 1010]
+  },
+  "radii": {
+    "portrait": 28,
+    "badge": 20,
+    "stats": 18,
+    "seal": 60,
+    "chip": 22
+  },
+  "anchors": {
+    "name": [54, 85],
+    "badge_label": [118, 739],
+    "autograph": [390, 689],
+    "seal": [600, 690],
+    "seal_label": [600, 684],
+    "stat_rank_label": [76, 786],
+    "stat_rating_label": [674, 786],
+    "stat_title_value": [76, 826],
+    "stat_rating_value": [674, 836],
+    "stat_pool_label": [76, 906],
+    "stat_board_label": [375, 906],
+    "stat_record_label": [674, 906],
+    "stat_pool_value": [76, 942],
+    "stat_board_value": [375, 942],
+    "stat_record_value": [674, 942],
+    "footer_left": [60, 992],
+    "footer_right": [690, 992]
+  },
+  "layer_order": [
+    "Base_<band>",
+    "portrait",
+    "Frame_<band>",
+    "Plates_<band>",
+    "FoilOverlay*FoilMask",
+    "stats_text",
+    "BadgeFrame",
+    "badge_text",
+    "autograph",
+    "SignedSeal",
+    "signed_text",
+    "chips",
+    "name",
+    "footer"
+  ],
+  "colours": {
+    "card": [18, 20, 26],
+    "panel": [24, 26, 33],
+    "sub": [44, 47, 58],
+    "label": [179, 179, 191],
+    "dim": [128, 128, 140],
+    "white": [255, 255, 255],
+    "sign": [255, 242, 191],
+    "gold": [255, 200, 80],
+    "bands": {
+      "common": [128, 133, 148],
+      "uncommon": [77, 184, 97],
+      "rare": [64, 140, 250],
+      "epic": [158, 82, 235],
+      "legendary": [255, 184, 46]
+    }
+  },
+  "materials": {
+    "rim_width": {
+      "common": 12,
+      "uncommon": 13,
+      "rare": 15,
+      "epic": 14,
+      "legendary": 12
+    },
+    "foil_global_opacity": 0.4,
+    "foil_cycle": "cyan-magenta",
+    "grain_crc32_seeded": true
+  }
+}

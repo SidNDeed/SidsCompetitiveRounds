@@ -51,7 +51,7 @@ PC_ECONOMY = {
 }
 
 PACK_PAY = ("gold", "shards")
-SETTINGS_KEYS = ("opted_out", "collection_public", "announce")
+SETTINGS_KEYS = ("opted_out", "collection_public", "announce", "portrait_source")
 
 
 def rarity_for_rank(pool_rank: int) -> str:
@@ -155,6 +155,12 @@ def canon_discard(steam_id: str, print_id: str) -> str:
 
 def canon_settings(steam_id: str, nonce: str, revision: int, key: str, value: int) -> str:
     return f"pcset:{steam_id}:{nonce}:{revision}:{key}:{value}"
+
+
+def canon_portrait(steam_id: str, nonce: str, upload_sha256: str, descriptor: str) -> str:
+    """The portrait writer's signed line: the server hashes the RECEIVED body
+    itself (upload_sha256), so a body cannot be swapped under a signature."""
+    return f"pcport:{steam_id}:{nonce}:{upload_sha256}:{descriptor}"
 
 
 def canon_read(steam_id: str, what: str, target: str) -> str:

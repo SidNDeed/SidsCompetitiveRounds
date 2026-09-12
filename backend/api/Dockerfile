@@ -6,6 +6,21 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Player Cards renderer fonts. The font FILES are not in the repo (gitignored,
+# ~30 MB); fetch_fonts.py pulls each one from a COMMIT-pinned URL and verifies
+# it against fonts.lock.json, so every build of a given ref uses identical
+# bytes. That is a requirement, not hygiene: the public face route is immutable
+# per revision, so a font whose bytes moved under a fixed face_rev would serve
+# two different pictures from one cache key.
+#
+# Own layer, above the code copy and keyed on the lock, so a rebuild that
+# changes only Python does not re-download 30 MB. A hash mismatch returns 1 and
+# FAILS the build on purpose: main.py imports the renderer inside a try, so a
+# fontless image boots happily and answers 503 on every face route -- the
+# feature would ship completely inert with clean logs (#438). Fail at build.
+COPY assets/fonts/fetch_fonts.py assets/fonts/fonts.lock.json ./assets/fonts/
+RUN python assets/fonts/fetch_fonts.py
+
 # Copy application code
 COPY . .
 

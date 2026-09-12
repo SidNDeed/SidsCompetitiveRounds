@@ -791,6 +791,11 @@ class HealthResponse(BaseModel):
     status: str = "ok"
     version: str = "1.0.0"
     database: str = "connected"
+    # Player Cards face renderer identity (design v22 §2.2): the deploy step
+    # asserts it EQUAL on both boxes, or the two would render different bytes
+    # under one face key. pc_raqm: complex-script shaping available.
+    pc_renderer_fp: str | None = None
+    pc_raqm: bool | None = None
     # Which ROLE answered. Before this, /health was byte-identical on the
     # primary and on the read standby -- same status, same version, same
     # database -- so nothing on the network could tell a box that SKIPS writes

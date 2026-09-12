@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -38,10 +39,13 @@ namespace CompetitiveRounds
 
         private enum View { Open, Binder, Info }
         private static View view = View.Open;
-        private const int TILES_PER_ROW = 4, BINDER_ROWS = 8;   // 4 x 236 px fits a 1280-wide layout
+        private const int TILES_PER_ROW = 5, BINDER_ROWS = 2;   // 5 x 236 px fits the 1240-wide binder column
         private const int REVEAL_TILES = 5;                     // one pack = five prints
         private const int PAGE = TILES_PER_ROW * BINDER_ROWS;
-        private const float TILE_W = 236f, TILE_H = 184f;
+        // The tile IS the server-rendered face (375x525, v22 section 1.6): 236 x 330
+        // keeps its 5:7. The text block below is what a tile shows when no face
+        // could be had (an api without the renderer, a refused fetch).
+        private const float TILE_W = 236f, TILE_H = 330f;
         private const int MAX_PACK_ROWS = 12;
         private const float INTENT_NOT_FOUND_RETIRE_S = 600f;     // design §6: not-found after 10 min = never claimed
         private const char INTENT_SEP = '~';                      // c6: one journal entry per owner, joined by '~'
@@ -51,6 +55,8 @@ namespace CompetitiveRounds
         private class Tile
         {
             public GameObject root, actions, btnView, btnDiscard, btnDupes;
+            public GameObject face, textBlock;   // exactly one of the two is active
+            public int bindSeq;                  // v22 section 5.2: a face answer that misses this paints nothing
             public object txtName, txtTitle, txtL1, txtL2, txtL3, txtL4, txtMark, txtSign, btnDiscardTxt, btnDupesTxt;
             public ApiClient.PcPrint print;   // the row's CURRENT binding — callbacks read this, never a captured print (#265)
             public int dupes;
@@ -86,13 +92,18 @@ namespace CompetitiveRounds
         private static ApiClient.PcPackAnswer lastPack;
         private static string lastMsg; private static Color lastMsgColor; private static float lastMsgAt;
         // settings rows
-        private static GameObject btnBeCard, btnPublic, btnAnnounce;
-        private static object btnBeCardTxt, btnPublicTxt, btnAnnounceTxt;
+        private static GameObject btnBeCard, btnPublic, btnAnnounce, btnPicture, btnPreset, presetPreview;
+        private static object btnBeCardTxt, btnPublicTxt, btnAnnounceTxt, btnPictureTxt, btnPresetTxt;
+        private static int previewShown = -1;   // PortraitRender.PreviewSerial the preview sprite was made from
+        private static Sprite previewSprite;
         private static bool setInFlight; private static float setAt;
         // identity fence (c4): every callback captures uiEpoch at dispatch and
         // returns when an identity edge advanced it; priceChangedAt gates a
         // repeat purchase until /pc/me has answered after a price_changed.
         private static int uiEpoch;
+        /// <summary>Advances on every identity edge (and on a consent revoke): a
+        /// callback that captured an older value commits nothing.</summary>
+        internal static int Epoch => uiEpoch;
         private static float priceChangedAt = -1f;
 
         // ── helpers ──────────────────────────────────────────────────────────
@@ -111,14 +122,28 @@ namespace CompetitiveRounds
             NativeUI.MarkDirty();
         }
 
+        /* The name arrives as the server's PUBLIC RENDER NAME (v22 2.4): the
+         * producer tag set already stripped to a fixed point, controls already
+         * normalised, and null when nothing readable is left. So it is DRAWN,
+         * not re-processed.
+         *
+         * It used to go through StripRichText, the blanket <.*?> matcher --
+         * which is what turns the name "AC<DC>Fan" into "ACFan" (bug 259, and
+         * the lesson is recorded beside that method). The server keeps those
+         * brackets on purpose and the card draws them; this made the tile
+         * disagree with the picture on it.
+         *
+         * An empty name is not a deleted account. The server answers null for
+         * a name that projects to nothing at all -- the Steam-ID constructor
+         * fallback among them -- and a live player with no name got the
+         * deletion label while the face beside it drew the neutral one. */
         private static string SafeName(ApiClient.PcPrint p)
         {
             if (p == null) return "";
-            if (p.subject_deleted && string.IsNullOrEmpty(p.subject_name)) return I18n.Tr("[deleted]");
             string n = p.subject_name ?? "";
-            try { n = GameStateWatcher.StripRichText(n); } catch { }
+            if (n.Length == 0) return I18n.Tr(p.subject_deleted ? "[deleted]" : "Unnamed player");
             if (n.Length > 24) n = n.Substring(0, 24);
-            return string.IsNullOrEmpty(n) ? I18n.Tr("[deleted]") : n;
+            return n;
         }
 
         private static int RarityOrder(string r)
@@ -284,14 +309,46 @@ namespace CompetitiveRounds
         internal static void OnIdentityChanged()
         {
             uiEpoch++;
+            try { HideCardPopup(); } catch { }
+            try { PlayerCardFaces.Clear(); } catch { }
+            try { PortraitRender.OnIdentityChanged(); } catch { }
             lastPack = null; lastMsg = null;
             openInFlight = claimInFlight = recoverInFlight = discardInFlight = setInFlight = false;
+            portraitWaitUntil = -1f; portraitWaitedAt = -100f; pendingVisit = false;
+            // the previous account's character, as a Sprite over a texture
+            // PortraitRender has just destroyed
+            if (previewSprite != null) { try { UnityEngine.Object.Destroy(previewSprite); } catch { } previewSprite = null; }
+            previewShown = -1;
+            if (presetPreview != null) { try { PlayerCardFaces.SetFace(presetPreview, null); } catch { } }
             discardQueue.Clear(); armedPrintId = null; priceChangedAt = -1f;
             recoverAt = 0f; meRefreshAt = 0f; unparseableStrikes = 0;
             try { NativeUI.MarkDirty(); } catch { }
         }
 
         // ── NativeUI entry points ────────────────────────────────────────────
+        private static bool pendingVisit;
+
+        /// <summary>Every close path of the F5 page (#369). Two jobs:
+        ///
+        /// the full-screen card popup is a persistent overlay child, so a close
+        /// that did not hide it left it painting over live gameplay and eating
+        /// the clicks meant for the game; and reopening the page with Collection
+        /// ALREADY current never re-entered the tab, so a character changed
+        /// while the page was closed was never checked or uploaded. Arming the
+        /// visit here is what makes the next open a visit.</summary>
+        internal static void OnOverlayClosed()
+        {
+            try { HideCardPopup(); } catch { }
+            pendingVisit = true;
+        }
+
+        /// <summary>The card view is a full-screen uGUI surface: it owns input
+        /// while it is up (CompetitiveUI's single ModalBlockInput writer reads
+        /// this), and its own backdrop carries bypassModalBlock so the dismiss
+        /// still runs. Without it, a backdrop click closed the popup AND
+        /// reached the armed Discard beneath in the same click (#141/#200).</summary>
+        internal static bool CardPopupOpen { get { return cardPopupGO != null; } }
+
         internal static void OnTabEntered()
         {
             var id = LocalId();
@@ -300,17 +357,36 @@ namespace CompetitiveRounds
             ApiClient.FetchPcMe(id, true);
             ApiClient.FetchPcCollection(id);
             meRefreshAt = Time.unscaledTime + 30f;
+            try { PortraitRender.OnTabVisit(); } catch { }   // v22 §3.1: one picture check per visit
             MaybeRecover(true);
         }
 
-        internal static void MaybeTick(bool onTab)
+        /// <param name="onTab">the Collection tab is the current one</param>
+        /// <param name="onSettings">the Settings tab is the current one — the
+        /// picture and preset controls and the preview live THERE, not on
+        /// Collection. The portrait ticker used to run on Collection only, so
+        /// cycling the preset from Settings relabelled the button, debounced a
+        /// refresh, and then nothing ever came to act on it: no render, no
+        /// preview, no upload, and no error either.</param>
+        internal static void MaybeTick(bool onTab, bool onSettings)
         {
             if (Time.unscaledTime < tickAt) return;
             tickAt = Time.unscaledTime + 2f;
             var id = LocalId();
             if (id == null) return;
             if (HasIntent()) MaybeRecover(false);
-            if (!onTab) return;
+            if (onTab && pendingVisit) { pendingVisit = false; OnTabEntered(); }
+            if (!onTab && !onSettings) return;
+            try { PlayerCardFaces.Tick(); } catch { }
+            try { PortraitRender.Tick(); } catch (Exception ex) { Plugin.Log.LogWarning($"[PC] portrait tick threw: {ex.Message}"); }
+            if (onSettings)
+            {
+                // The preset row draws from these two and the renderer refuses
+                // without them; Settings has no fetch chain of its own.
+                if (ApiClient.CachedPcMe == null) ApiClient.FetchPcMe(id, false);
+                if (ApiClient.CachedPlayerStats == null) ApiClient.FetchPlayerStats(id);
+                return;
+            }
             if (Time.unscaledTime >= meRefreshAt) { meRefreshAt = Time.unscaledTime + 30f; ApiClient.FetchPcMe(id, true); }
             // the binder after an identity edge (c5): an empty cache without an error is refetched (throttled by ApiClient)
             if (view == View.Binder && ApiClient.CachedPcCollection == null && ApiClient.PcCollectionError == null) ApiClient.FetchPcCollection(id);
@@ -501,15 +577,27 @@ namespace CompetitiveRounds
             var inner = UIFactory.CreatePanel(name + "_in", t.root.transform, C_CARD);
             UIFactory.AddVLG(inner, spacing: 1, padL: 6, padR: 6, padT: 4, padB: 4);
             UIFactory.AddLE(inner, flexH: 1);
+            // The face slot: an Image the fetched sprite is set on, aspect-preserving
+            // and click-through (the tile's own buttons keep every click).
+            t.face = UIFactory.CreatePanel(name + "_f", inner.transform, C_CARD);
+            UIFactory.AddLE(t.face, flexH: 1, flexW: 1);
+            PlayerCardFaces.SetFace(t.face, null);
+            t.face.SetActive(false);
+            t.textBlock = new GameObject(name + "_tb");
+            t.textBlock.transform.SetParent(inner.transform, false);
+            t.textBlock.AddComponent<RectTransform>();
+            UIFactory.AddVLG(t.textBlock, spacing: 1);
+            UIFactory.AddLE(t.textBlock, flexH: 1);
+            var tb = t.textBlock.transform;
             float w = TILE_W - 18f;
-            t.txtName = UIFactory.CreateText(name + "_n", inner.transform, "", 15f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(w, 20));
-            t.txtTitle = UIFactory.CreateText(name + "_t", inner.transform, "", 12f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(w, 16));
-            t.txtL1 = UIFactory.CreateText(name + "_1", inner.transform, "", 12f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(w, 16));
-            t.txtL2 = UIFactory.CreateText(name + "_2", inner.transform, "", 12f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(w, 16));
-            t.txtL3 = UIFactory.CreateText(name + "_3", inner.transform, "", 12f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(w, 16));
-            t.txtL4 = UIFactory.CreateText(name + "_4", inner.transform, "", 11f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(w, 16));
-            t.txtMark = UIFactory.CreateText(name + "_m", inner.transform, "", 12f, C_GOLD, UIFactory.AlignMidLeft, sizeDelta: new Vector2(w, 16));
-            t.txtSign = UIFactory.CreateText(name + "_s", inner.transform, "", 13f, C_SIGN, UIFactory.AlignMidCenter, sizeDelta: new Vector2(w, 18));
+            t.txtName = UIFactory.CreateText(name + "_n", tb, "", 15f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(w, 20));
+            t.txtTitle = UIFactory.CreateText(name + "_t", tb, "", 12f, C_SUB, UIFactory.AlignMidLeft, sizeDelta: new Vector2(w, 16));
+            t.txtL1 = UIFactory.CreateText(name + "_1", tb, "", 12f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(w, 16));
+            t.txtL2 = UIFactory.CreateText(name + "_2", tb, "", 12f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(w, 16));
+            t.txtL3 = UIFactory.CreateText(name + "_3", tb, "", 12f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(w, 16));
+            t.txtL4 = UIFactory.CreateText(name + "_4", tb, "", 11f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(w, 16));
+            t.txtMark = UIFactory.CreateText(name + "_m", tb, "", 12f, C_GOLD, UIFactory.AlignMidLeft, sizeDelta: new Vector2(w, 16));
+            t.txtSign = UIFactory.CreateText(name + "_s", tb, "", 13f, C_SIGN, UIFactory.AlignMidCenter, sizeDelta: new Vector2(w, 18));
             // No Truncate at these heights (c4): a taller fallback font (Cyrillic,
             // Greek) must not blank a line — MailUI's rule.
             foreach (var o in new[] { t.txtName, t.txtTitle, t.txtL1, t.txtL2, t.txtL3, t.txtL4, t.txtMark, t.txtSign })
@@ -550,15 +638,106 @@ namespace CompetitiveRounds
         /// <summary>Design v4 §10 "tile actions: view": the full card in the
         /// info popup. Raw body — the subject's name never passes I18n.Tr
         /// (#602); the labels are translated line by line.</summary>
+        private static GameObject cardPopupGO, cardPopupImg;
+        private static int cardPopupSeq;
+
+        /// <summary>The card view (v22 §5.6): the print's own 750x1050 face at fit
+        /// height on the mod's overlay canvas, click anywhere to close. A print with
+        /// no face revision, or a face that could not be had, falls back to the text
+        /// popup below.</summary>
         private static void ShowCard(Tile t)
         {
             var p = t?.print;
             if (p == null) return;
-            string name = SafeName(p);
-            var lines = new List<string>();
+            if (string.IsNullOrEmpty(p.face_rev)) { ShowCardText(p); return; }
+            try
+            {
+                HideCardPopup();
+                var overlay = NativeUI.OverlayRoot;
+                if (overlay == null) { ShowCardText(p); return; }
+                cardPopupGO = new GameObject("CR_PcCard");
+                cardPopupGO.hideFlags = HideFlags.HideAndDontSave;
+                cardPopupGO.transform.SetParent(overlay, false);
+                var rt = cardPopupGO.AddComponent<RectTransform>();
+                rt.anchorMin = Vector2.zero; rt.anchorMax = Vector2.one;
+                rt.offsetMin = Vector2.zero; rt.offsetMax = Vector2.zero;
+                var bd = UIFactory.CreatePanel("BD", cardPopupGO.transform, new Color(0f, 0f, 0f, 0.72f));
+                var bdRT = bd.GetComponent<RectTransform>();
+                bdRT.anchorMin = Vector2.zero; bdRT.anchorMax = Vector2.one;
+                bdRT.offsetMin = Vector2.zero; bdRT.offsetMax = Vector2.zero;
+                var bdClick = bd.AddComponent<ClickHandler>();
+                bdClick.bypassModalBlock = true;
+                bdClick.onClick = () => { if (ClickGuard.Claim(bd)) HideCardPopup(); };
+                var img = UIFactory.CreatePanel("Face", cardPopupGO.transform, C_CARD);
+                var irt = img.GetComponent<RectTransform>();
+                irt.anchorMin = new Vector2(0.5f, 0.5f); irt.anchorMax = new Vector2(0.5f, 0.5f);
+                irt.pivot = new Vector2(0.5f, 0.5f);
+                float h = 1010f;
+                try
+                {
+                    var crt = overlay.GetComponent<RectTransform>();
+                    if (crt != null && crt.rect.height > 200f) h = Mathf.Min(1010f, crt.rect.height - 40f);
+                }
+                catch { }
+                irt.sizeDelta = new Vector2(h * PlayerCardFaces.CARD_W / PlayerCardFaces.CARD_H, h);
+                cardPopupImg = img;
+                PlayerCardFaces.SetFace(img, null);
+                int seq = ++cardPopupSeq, ep = uiEpoch, gen = PlayerCardFaces.Generation;
+                var hit = PlayerCardFaces.Cached(p.print_id, p.face_rev, p.face_locale, "card");
+                if (hit != null) { PlayerCardFaces.SetFace(img, hit); return; }
+                var print = p;
+                PlayerCardFaces.Get(p.print_id, p.face_rev, p.face_locale, "card", spr =>
+                {
+                    if (seq != cardPopupSeq || ep != uiEpoch || gen != PlayerCardFaces.Generation) return;
+                    if (spr == null) { HideCardPopup(); ShowCardText(print); return; }
+                    if (cardPopupImg != null) PlayerCardFaces.SetFace(cardPopupImg, spr);
+                });
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[PC] card view failed: {ex.Message}");
+                HideCardPopup();
+                ShowCardText(p);
+            }
+        }
+
+        internal static void HideCardPopup()
+        {
+            cardPopupSeq++;
+            cardPopupImg = null;
+            if (cardPopupGO != null) { try { UnityEngine.Object.Destroy(cardPopupGO); } catch { } cardPopupGO = null; }
+        }
+
+        /// <summary>The rarity strip a card shows wherever it is drawn: band,
+        /// FOIL, SIGNED, and the pull's own copy count.
+        ///
+        /// One function because two call sites drew this strip and only one of
+        /// them would have gained the copy count -- the popup and the tile would
+        /// then disagree about the same print. `dup_at_pull` is the count the
+        /// server took at mint, sequentially, BEFORE this slot's own insert
+        /// (v22 7): 0 is NEW, n is DUPLICATE +n. The collection grid carries no
+        /// such field and an answer from an api that predates it carries -1;
+        /// both say nothing here rather than calling every card new.</summary>
+        private static string MarkLine(ApiClient.PcPrint p)
+        {
             string mark = RarityLabel(p.rarity);
             if (p.foil) mark += " | " + I18n.Tr("FOIL");
             if (p.signed) mark += " | " + I18n.Tr("SIGNED");
+            // Contextual keys: bare "NEW" and "DUPLICATE" agree with "card" in
+            // most of the locales we carry, and the same two English words are
+            // reused elsewhere with a different gender and number -- the card
+            // rarity column learned this already (Sept 6 item e).
+            if (p.dup_at_pull == 0) mark += " | " + I18n.TrC("pack open", "NEW");
+            else if (p.dup_at_pull > 0) mark += " | " + I18n.TrCF("pack open", "DUPLICATE +{0}", p.dup_at_pull);
+            return mark;
+        }
+
+        private static void ShowCardText(ApiClient.PcPrint p)
+        {
+            if (p == null) return;
+            string name = SafeName(p);
+            var lines = new List<string>();
+            string mark = MarkLine(p);
             lines.Add(mark);
             string title = !string.IsNullOrEmpty(p.title) ? p.title : (p.rank_name ?? "");
             if (title.Length > 0) lines.Add(I18n.Tr(title));   // a catalogue value, never user text (c5)
@@ -578,9 +757,11 @@ namespace CompetitiveRounds
         {
             if (t == null || t.root == null) return;
             t.print = p; t.dupes = dupes;
-            if (p == null) { t.root.SetActive(false); return; }
+            t.bindSeq++;
+            if (p == null) { ShowTileText(t); t.root.SetActive(false); return; }
             t.root.SetActive(true);
             UIFactory.SetImageColor(t.root, FrameColor(p.rarity, p.foil));
+            BindFace(t, p);
             string name = SafeName(p);
             UIFactory.SetTextRaw(t.txtName, name);
             string title = !string.IsNullOrEmpty(p.title) ? p.title : (p.rank_name ?? "");
@@ -592,9 +773,7 @@ namespace CompetitiveRounds
             if (tc.Length > 18) tc = tc.Substring(0, 18);
             UIFactory.SetTextRaw(t.txtL3, tc.Length > 0 ? I18n.TrF("Top card: {0}", tc) : "");
             UIFactory.SetTextRaw(t.txtL4, I18n.TrF("Pool #{0} | Ed. {1} | {2}", p.pool_rank, p.edition_id ?? "", DateOnly(p.minted_at).Replace('-', '/')));
-            string mark = RarityLabel(p.rarity);
-            if (p.foil) mark += " | " + I18n.Tr("FOIL");
-            if (p.signed) mark += " | " + I18n.Tr("SIGNED");
+            string mark = MarkLine(p);
             UIFactory.SetTextRaw(t.txtMark, mark);
             UIFactory.SetTextRaw(t.txtSign, p.signed ? "<i>~ " + name + " ~</i>" : "");
             if (t.actions != null)
@@ -609,6 +788,41 @@ namespace CompetitiveRounds
                     UIFactory.SetTextRaw(t.btnDupesTxt, armedD ? I18n.Tr("Sure? Discard dupes") : I18n.TrF("Dupes ({0})", dupes - 1));
                 }
             }
+        }
+
+        /// <summary>The face of this print at tile size, if the server has one:
+        /// the cache paints it now, else the fetch paints it when it lands AND the
+        /// binding still holds (tile sequence, print id, UI epoch, cache
+        /// generation). Until then — and for good on a failure — the text block
+        /// shows, so a tile is never blank.</summary>
+        private static void BindFace(Tile t, ApiClient.PcPrint p)
+        {
+            if (string.IsNullOrEmpty(p.face_rev)) { ShowTileText(t); return; }
+            var hit = PlayerCardFaces.Cached(p.print_id, p.face_rev, p.face_locale, "tile");
+            if (hit != null) { ShowTileFace(t, hit); return; }
+            ShowTileText(t);
+            int seq = t.bindSeq, ep = uiEpoch, gen = PlayerCardFaces.Generation;
+            var tile = t; string pid = p.print_id;
+            PlayerCardFaces.Get(p.print_id, p.face_rev, p.face_locale, "tile", spr =>
+            {
+                if (spr == null || seq != tile.bindSeq || ep != uiEpoch || gen != PlayerCardFaces.Generation) return;
+                if (tile.print == null || tile.print.print_id != pid) return;
+                ShowTileFace(tile, spr);
+            });
+        }
+
+        private static void ShowTileFace(Tile t, Sprite spr)
+        {
+            if (t.face == null) return;
+            PlayerCardFaces.SetFace(t.face, spr);
+            t.face.SetActive(true);
+            if (t.textBlock != null) t.textBlock.SetActive(false);
+        }
+
+        private static void ShowTileText(Tile t)
+        {
+            if (t.face != null) { PlayerCardFaces.SetFace(t.face, null); t.face.SetActive(false); }
+            if (t.textBlock != null) t.textBlock.SetActive(true);
         }
 
         // ── repaint ──────────────────────────────────────────────────────────
@@ -872,11 +1086,63 @@ namespace CompetitiveRounds
             });
         }
 
+        // A deadline, not a flag. Clearing it was the coroutine's last act, and
+        // that coroutine is hosted on a behaviour ROUNDS destroys at a scene
+        // change: the clear never ran, WaitForPortrait then answered "a wait is
+        // already running" to every later click, and Buy and Open did nothing
+        // at all for the rest of the process with no message and no error
+        // (#508). One second past the coroutine's own cap, so in the normal
+        // case the coroutine still clears it first.
+        private static float portraitWaitUntil = -1f;
+        private static bool PortraitWaiting { get { return Time.realtimeSinceStartup <= portraitWaitUntil; } }
+        // When the last wait finished. The coroutine's last act is to call the
+        // action that asked for the wait, and that action asks again — so
+        // without this, a condition still true at the cap waits forever, five
+        // seconds at a time, and the player's click never becomes anything.
+        private static float portraitWaitedAt = -100f;
+        private const float PORTRAIT_WAIT_ONCE = 10f;
+
+        /// <summary>A pack opened while this client is still preparing its
+        /// character picture would reveal against the initial disc, so the open
+        /// waits — at most five seconds, then goes regardless (v22 §5.5).</summary>
+        private static bool WaitForPortrait(Action go)
+        {
+            if (PortraitWaiting) return true;              // a wait is already running
+            if (Now - portraitWaitedAt < PORTRAIT_WAIT_ONCE) return false;   // one wait per action
+            if (!PortraitRender.Preparing || Plugin.Instance == null) return false;
+            portraitWaitUntil = Time.realtimeSinceStartup + 6f;
+            Say(I18n.Tr("Preparing your card picture..."));
+            Plugin.Instance.StartCoroutine(PortraitWaitCo(uiEpoch, go));
+            return true;
+        }
+
+        private static IEnumerator PortraitWaitCo(int ep, Action go)
+        {
+            float t0 = Now;
+            while (PortraitRender.Preparing && Now - t0 < 5f) yield return null;
+            portraitWaitUntil = -1f; portraitWaitedAt = Now;
+            if (ep != uiEpoch) yield break;
+            // The click authorised an action on a surface the player was
+            // LOOKING at. Five seconds later they may have closed the page or
+            // moved to another tab, and spending gold or opening a pack there
+            // is not something they can see, undo, or connect to anything they
+            // did. Refusing costs one more click when they come back.
+            if (!NativeUI.PlayerCardsVisible)
+            {
+                Say(I18n.Tr("The picture was not ready in time - try again"), C_WARN);
+                NativeUI.MarkDirty();
+                yield break;
+            }
+            lastMsg = null;
+            try { go(); } catch (Exception ex) { Plugin.Log.LogWarning($"[PC] open after portrait threw: {ex.Message}"); }
+        }
+
         private static void BeginBuy(string pay)
         {
             var id = LocalId(); var me = ApiClient.CachedPcMe;
             if (id == null || me == null) { if (id != null) ApiClient.FetchPcMe(id, true); return; }
             if (!SessionReady) { Say(ReasonText("session_required"), C_WARN); return; }
+            if (WaitForPortrait(() => BeginBuy(pay))) return;
             if (openInFlight && Now - openAt < 25f) return;
             if (HasIntent()) { Say(I18n.Tr("A pack is still being resolved - hold on"), C_WARN); MaybeRecover(true); return; }
             if (priceChangedAt >= 0f && ApiClient.PcMeDispatchedAt <= priceChangedAt)
@@ -906,6 +1172,7 @@ namespace CompetitiveRounds
             var id = LocalId();
             if (id == null || string.IsNullOrEmpty(packId)) return;
             if (!SessionReady) { Say(ReasonText("session_required"), C_WARN); return; }
+            if (WaitForPortrait(() => BeginOpenHeld(packId))) return;
             if (openInFlight && Now - openAt < 25f) return;
             if (HasIntent()) { Say(I18n.Tr("A pack is still being resolved - hold on"), C_WARN); MaybeRecover(true); return; }
             if (!WriteIntent("pack", packId, "-", 0))
@@ -1124,12 +1391,14 @@ namespace CompetitiveRounds
                     edition_id = "1", minted_at = "2026-09-11T00:00:00", rarity = rar[i], foil = i == 1, signed = i == 0,
                     pool_rank = i == 0 ? 1 : i * 9, rating = 1850 - i * 120, peak_rating = 1900 - i * 100, board_rank = i == 0 ? 1 : i * 9,
                     series_wins = 60 - i * 8, series_losses = 12 + i * 3, top_card = "Bombs Away", title = i == 0 ? "Grandmaster" : "", rank_name = "Diamond", source = "bought", slot = i,
+                    dup_at_pull = i == 0 ? 0 : (i == 3 ? 2 : -1),   // one NEW, one DUPLICATE +2, the rest silent
                 });
             lastPack = a;
             view = mode == "binder" ? View.Binder : (mode == "info" ? View.Info : View.Open);
             Plugin.Log.LogInfo("[PC] synthetic tiles seeded (dev lever)");
             NativeUI.MarkDirty();
         }
+
 
         // ── Settings tab rows (design v4 §12 wording) ─────────────────────────
         internal static void BuildSettingsRows(Transform parent)
@@ -1144,6 +1413,129 @@ namespace CompetitiveRounds
             btnAnnounce = SettingsRow(parent, "SPcAnn", () => ToggleSetting("announce"),
                 "Rare pulls may be posted to the Discord announcements channel with your name.", 18f);
             btnAnnounceTxt = UIFactory.GetButtonText(btnAnnounce);
+            // The picture rows (design v22 §3.1, §3.4). "None" keeps the card's
+            // initial disc; the preset decides WHICH character is drawn.
+            btnPicture = SettingsRow(parent, "SPcPic", TogglePortraitSource,
+                "Your card can show your in-game character - the same body, face, colour and effect you play with, drawn by this PC and sent once. Set it to None and your card keeps a plain initial instead.", 36f);
+            btnPictureTxt = UIFactory.GetButtonText(btnPicture);
+            btnPreset = SettingsRow(parent, "SPcPre", CyclePreset,
+                "Which character your picture shows: Follow uses the one you have selected in the character menu, or pin a saved preset.", 18f);
+            btnPresetTxt = UIFactory.GetButtonText(btnPreset);
+            presetPreview = UIFactory.CreatePanel("SPcPrev", parent, C_CARD);
+            UIFactory.AddLE(presetPreview, prefW: 118, minW: 118, prefH: 118, minH: 118, flexW: 0, flexH: 0);
+            PlayerCardFaces.SetFace(presetPreview, null);
+        }
+
+        private static string PresetLabel()
+        {
+            int v = PortraitRender.CurrentPreset();
+            // v is the slot INDEX; players count slots from one.
+            return v < 0 ? I18n.Tr("Follow my character") : I18n.TrF("Preset {0}", v + 1);
+        }
+
+        /// <summary>The picture setting is a CAS write like every other one,
+        /// with the portrait_source key: 1 = the in-game character, 0 = none.
+        ///
+        /// A None write does NOT remove the stored picture. The server sets the
+        /// source column and nothing else — "the initial disc everywhere from
+        /// the next render on; nothing is removed" — so the hash and descriptor
+        /// it holds are still the ones this client uploaded. Clearing them
+        /// locally made None→game look like a client with no picture at all,
+        /// and it re-rendered and re-uploaded a portrait the server already
+        /// had, instead of simply showing it again.</summary>
+        private static void TogglePortraitSource() { TogglePortraitSource(false); }
+
+        /// <param name="fromRetry">this IS the one delayed re-send, so it does
+        /// not schedule another. One retry, not a loop that argues with the
+        /// server for as long as a delivery lease lives.</param>
+        private static void TogglePortraitSource(bool fromRetry)
+        {
+            var id = LocalId(); var me = ApiClient.CachedPcMe;
+            if (id == null) return;
+            if (me == null) { ApiClient.FetchPcMe(id, true); return; }
+            if (!SessionReady) { try { CompetitiveUI.ShowNotification(ReasonText("session_required"), C_WARN, 3f); } catch { } return; }
+            if (setInFlight && Now - setAt < 25f) return;
+            setInFlight = true; setAt = Now;
+            string before = me.portrait_source;
+            bool toGame = before != "game";
+            me.portrait_source = toGame ? "game" : "none";
+            NativeUI.MarkDirty();
+            int revision = me.revision, ep = uiEpoch;
+            Plugin.Log.LogInfo($"[PC] setting portrait_source -> {(toGame ? 1 : 0)} (rev {revision})");
+            ApiClient.PcSetSetting(id, NewNonce(), revision, "portrait_source", toGame ? 1 : 0, (ok, resp) =>
+            {
+                if (ep != uiEpoch) return;
+                setInFlight = false;
+                if (ok)
+                {
+                    // the picture the cards show changed: every cached face is stale
+                    try { PlayerCardFaces.Clear(); } catch { }
+                    ApiClient.FetchPcCollection(id, true);
+                    if (toGame) PortraitRender.RequestRefresh("setting");
+                }
+                else
+                {
+                    var cur = ApiClient.CachedPcMe;
+                    if (cur != null) cur.portrait_source = before;
+                    string code = ApiClient.PcErrorCode(resp);
+                    if (code == "stale_revision") ApiClient.FetchPcMe(id, true);
+                    // retry_after is not a refusal: a card of this player's is
+                    // mid-delivery under the picture being turned off, and the
+                    // server is naming the moment it will be free. The rollback
+                    // above is honest — the picture IS still on until the write
+                    // lands — and the same toggle is re-sent once when the wait
+                    // elapses. Without it the toggle silently does nothing and
+                    // the player is left to guess and click again.
+                    if (code == "retry_after" && !fromRetry && !toGame && Plugin.Instance != null)
+                    {
+                        int wait = 3;
+                        try
+                        {
+                            // the field is inside FastAPI's `detail` object, read
+                            // the way the portrait upload reads its own
+                            var m = System.Text.RegularExpressions.Regex.Match(resp ?? "", "\"retry_after\"\\s*:\\s*(\\d+)");
+                            if (m.Success) wait = Mathf.Clamp(int.Parse(m.Groups[1].Value), 1, 120);
+                        }
+                        catch { }
+                        Say(I18n.TrF("A card is being delivered - retrying in {0}s", wait));
+                        Plugin.Instance.StartCoroutine(SourceRetryCo(ep, wait));
+                        NativeUI.MarkDirty();
+                        return;
+                    }
+                    try { CompetitiveUI.ShowNotification(ReasonText(code), Color.yellow, 3f); } catch { }
+                }
+                NativeUI.MarkDirty();
+            });
+        }
+
+        /// <summary>The ONE delayed re-send of a None write the server asked
+        /// for. It re-reads the setting first: the rollback restored "game", so
+        /// "game" is the state this retry is still trying to leave. Anything
+        /// else means the player got there another way in the meantime, and
+        /// toggling from there would turn the picture back ON.</summary>
+        private static IEnumerator SourceRetryCo(int ep, int secs)
+        {
+            yield return new WaitForSecondsRealtime(secs);
+            if (ep != uiEpoch || setInFlight) yield break;
+            var cur = ApiClient.CachedPcMe;
+            if (cur == null || cur.portrait_source != "game") yield break;
+            TogglePortraitSource(true);
+        }
+
+        /// <summary>Follow → 1 → … → 10 → Follow. Local only (the picture itself is
+        /// what reaches the server), debounced by the renderer.</summary>
+        private static void CyclePreset()
+        {
+            try
+            {
+                var cfg = Plugin.PortraitPreset;
+                if (cfg == null) return;
+                // -1 → 0 → … → 9 → -1
+                cfg.Value = ((Mathf.Clamp(cfg.Value, -1, 9) + 2) % 11) - 1;
+                PortraitRender.RequestRefresh("preset");
+                NativeUI.MarkDirty();
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[PC] preset cycle threw: {ex.Message}"); }
         }
 
         private static GameObject SettingsRow(Transform parent, string name, UnityEngine.Events.UnityAction onClick, string desc, float descH)
@@ -1182,6 +1574,34 @@ namespace CompetitiveRounds
             UIFactory.SetText(btnAnnounceTxt, me.announce
                 ? "Announce my pulls: <color=#88FF88>ON</color>"
                 : "Announce my pulls: <color=#FF9966>OFF</color>");
+            RefreshPictureRows(me);
+        }
+
+        private static void RefreshPictureRows(ApiClient.PcMe me)
+        {
+            if (btnPictureTxt == null) return;
+            bool game = me == null || me.portrait_source == "game";
+            string state = game
+                ? "Card picture: <color=#88FF88>In-game character</color>"
+                : "Card picture: <color=#FF9966>None</color>";
+            string note = PortraitRender.LastResult;
+            if (game && !string.IsNullOrEmpty(note)) state += "  <color=#888>(" + note + ")</color>";
+            UIFactory.SetTextRaw(btnPictureTxt, state);
+            UIFactory.SetTextRaw(btnPresetTxt, I18n.Tr("Character preset") + ": <color=#CCCCCC>" + PresetLabel() + "</color>");
+            if (btnPreset != null) btnPreset.SetActive(game);
+            if (presetPreview != null)
+            {
+                bool show = game && PortraitRender.PreviewTex != null;
+                presetPreview.SetActive(show);
+                if (show && previewShown != PortraitRender.PreviewSerial)
+                {
+                    previewShown = PortraitRender.PreviewSerial;
+                    var old = previewSprite;
+                    previewSprite = PlayerCardFaces.SpriteOf(PortraitRender.PreviewTex);
+                    PlayerCardFaces.SetFace(presetPreview, previewSprite);
+                    if (old != null) { try { UnityEngine.Object.Destroy(old); } catch { } }
+                }
+            }
         }
 
         private static bool SettingValue(ApiClient.PcMe me, string key)

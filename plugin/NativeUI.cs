@@ -1335,6 +1335,10 @@ namespace CompetitiveRounds
 
         private static GameObject pageGO,overlayCanvasGO,mainMenuGroup;
         private static bool isOpen,pageBuilt,dirty=true,inGameMode;
+        /// <summary>The Player Cards tab is on screen right now — the fence a
+        /// delayed action consults before spending anything on the player's
+        /// behalf.</summary>
+        internal static bool PlayerCardsVisible{get{return isOpen&&pageBuilt&&currentTab==TAB_COLLECTION&&pageGO!=null&&pageGO.activeInHierarchy;}}
         private static int currentTab;
         // Exposed for CompetitiveUI's card hover tooltip — only render when
         // My Stats (tab 0) is actually showing, otherwise the registered
@@ -1803,7 +1807,7 @@ namespace CompetitiveRounds
         /// bypassModalBlock and the IMGUI amount prompt renders independent
         /// of IsOpen — either surviving a close can stake real gold over
         /// live combat).</summary>
-        private static void TeardownOverlaySurfaces(){try{ProfileCard.Teardown();}catch{}/* Sept 6 item a: the hover profile card, pinned or not, closes on every page close/recovery path (#369) */try{HideTournamentBetsPopup();}catch{}try{HideRecentTournamentsPopup();}catch{}try{CancelCustomBet();}catch{}try{TrailPreview.Stop();}catch{}try{PlayerEffectCosmetic.StopPreview();}catch{}try{DanceEmotes.StopPreview();}catch{}try{MusicEngine.StopPreviewAndRestore();}catch{}/* music preview restores the pre-preview owner (generation-fenced, safe always) — THE canonical call site, per the module contract */try{HideInfoPopup();}catch{}try{HideCardPreview();}catch{}/* Aug 6 review find 3: an Escape with the picker dropdown open left a full-screen raycast-blocking dim over live gameplay and PickerOpen stuck true forever. */try{HidePicker();}catch{}try{SessionReportView.Close();}catch{}/* Sept 6 item c: the session report closes on EVERY close path (#369) */try{CloseUtilityPopup();}catch{}/* Sept 7 item 1: the mail/music popup, its child prompts and the report modal close on EVERY close path (#369) */try{MailUI.OnOverlayClosed();}catch{}/* Sept 6 mail: composer text focus + report modal released on EVERY close path (design B-4) */SetClickBlocker(false);SetMenuFade(false);/* fade must never survive a close (Sid2 in-game bleed hunt) */try{EventSystemGuard.OnCaptureEnd();}catch{}/* nav-submit ownership released on EVERY close path (Aug 30 r2 HIGH) */}
+        private static void TeardownOverlaySurfaces(){try{ProfileCard.Teardown();}catch{}try{PlayerCardsUI.OnOverlayClosed();}catch{}/* Sept 12 (Player Cards): the full-screen card view is a persistent overlay child — it closes on EVERY close path (#369), and the next open counts as a tab visit */try{PlayerCardFaces.Clear();}catch{}/* Sept 6 item a: the hover profile card, pinned or not, closes on every page close/recovery path (#369) */try{HideTournamentBetsPopup();}catch{}try{HideRecentTournamentsPopup();}catch{}try{CancelCustomBet();}catch{}try{TrailPreview.Stop();}catch{}try{PlayerEffectCosmetic.StopPreview();}catch{}try{DanceEmotes.StopPreview();}catch{}try{MusicEngine.StopPreviewAndRestore();}catch{}/* music preview restores the pre-preview owner (generation-fenced, safe always) — THE canonical call site, per the module contract */try{HideInfoPopup();}catch{}try{HideCardPreview();}catch{}/* Aug 6 review find 3: an Escape with the picker dropdown open left a full-screen raycast-blocking dim over live gameplay and PickerOpen stuck true forever. */try{HidePicker();}catch{}try{SessionReportView.Close();}catch{}/* Sept 6 item c: the session report closes on EVERY close path (#369) */try{CloseUtilityPopup();}catch{}/* Sept 7 item 1: the mail/music popup, its child prompts and the report modal close on EVERY close path (#369) */try{MailUI.OnOverlayClosed();}catch{}/* Sept 6 mail: composer text focus + report modal released on EVERY close path (design B-4) */SetClickBlocker(false);SetMenuFade(false);/* fade must never survive a close (Sid2 in-game bleed hunt) */try{EventSystemGuard.OnCaptureEnd();}catch{}/* nav-submit ownership released on EVERY close path (Aug 30 r2 HIGH) */}
 
         public static void Close(){showcaseOwned=false;pendingInfoScroll=-1f;PageGeneration++;/* any close — operator or automation — revokes showcase ownership (Aug 30) */if(pageGO!=null)pageGO.SetActive(false);isOpen=false;TeardownOverlaySurfaces();Plugin.Log.LogInfo("[NATIVE] Closed competitive page");}
 
@@ -2007,7 +2011,7 @@ namespace CompetitiveRounds
             MaybeRefreshOvtTab();
             MaybeRefreshFfaTab();
             MaybeRefreshHomeTab();
-            PlayerCardsUI.MaybeTick(currentTab==TAB_COLLECTION);
+            PlayerCardsUI.MaybeTick(currentTab==TAB_COLLECTION,currentTab==TAB_SETTINGS);
             MaybeRefreshInfoGold();
             MaybeRefreshCompareRecords();
             MaybeRefreshMusicTab();
@@ -2331,6 +2335,8 @@ namespace CompetitiveRounds
             foreach(var b in all){if(tp==null)break;try{var tc=b.GetComponentInChildren(tt,true);if(tc==null)continue;if((tp.GetValue(tc)as string??"").Trim().ToUpper()=="QUIT"){mainMenuGroup=b.transform.parent.gameObject;Plugin.Log.LogInfo($"[NATIVE] Found main menu group: {mainMenuGroup.name}");return;}}catch{}}
             Plugin.Log.LogWarning("[NATIVE] Could not find QUIT button");}
         private static Transform FindCanvasAbove(Transform from){Transform c=from;while(c!=null){if(UIFactory.tCanvas!=null&&c.GetComponent(UIFactory.tCanvas)!=null){Plugin.Log.LogInfo($"[NATIVE] Found Canvas: {c.gameObject.name}");return c;}c=c.parent;}return from.parent??from;}
+        /// <summary>The mod's overlay canvas (sorting order 30000) for a popup built outside NativeUI (the Player Cards card view).</summary>
+        internal static Transform OverlayRoot { get { EnsureOverlayCanvas(); return overlayCanvasGO != null ? overlayCanvasGO.transform : null; } }
         private static void EnsureOverlayCanvas(){if(overlayCanvasGO!=null)return;overlayCanvasGO=new GameObject("CR_OverlayCanvas");overlayCanvasGO.hideFlags=HideFlags.HideAndDontSave;UnityEngine.Object.DontDestroyOnLoad(overlayCanvasGO);if(UIFactory.tCanvas!=null){var cv=overlayCanvasGO.AddComponent(UIFactory.tCanvas);var bf=BindingFlags.Public|BindingFlags.Instance;UIFactory.tCanvas.GetProperty("renderMode",bf)?.SetValue(cv,Enum.ToObject(UIFactory.tCanvas.GetProperty("renderMode",bf).PropertyType,0));UIFactory.tCanvas.GetProperty("sortingOrder",bf)?.SetValue(cv,30000);}if(UIFactory.tCanvasScaler!=null){var sc=overlayCanvasGO.AddComponent(UIFactory.tCanvasScaler);var bf=BindingFlags.Public|BindingFlags.Instance;var smp=UIFactory.tCanvasScaler.GetProperty("uiScaleMode",bf);if(smp!=null)smp.SetValue(sc,Enum.ToObject(smp.PropertyType,1));UIFactory.tCanvasScaler.GetProperty("referenceResolution",bf)?.SetValue(sc,new Vector2(1920,1080));}if(UIFactory.tGR!=null)overlayCanvasGO.AddComponent(UIFactory.tGR);Plugin.Log.LogInfo("[NATIVE] Created persistent overlay Canvas");}
 
         private static void BuildPage(Transform canvasParent)
@@ -2698,6 +2704,7 @@ namespace CompetitiveRounds
         private const int TAB_HOME=13;
         private const int TAB_BANNED=14;
         private const int TAB_INFO=15;   // Aug 23 (Sid): the explainer library — Settings group sub-tab
+        internal const int TAB_SETTINGS=5;      // the picture/preset controls and the portrait preview live here, not on Collection
         internal const int TAB_COLLECTION=18;   // Sept 10 (Player Cards): the Collection tab - Shop group sub-tab, body in PlayerCardsUI.cs
         internal const int TAB_MAIL=17;  // Sept 6 (Sid): in-game mail (MailUI.cs). Sept 7 item 1: a header-icon popup with no tab slot — the index is kept so every other tab keeps its meaning
         // Top bar order per Sid's spec (July 12 round 2): Multiplayer right after
@@ -6457,6 +6464,15 @@ namespace CompetitiveRounds
                 if (p != null && sr != null) p.SetValue(sr, 1f - Mathf.Clamp01(t01));
             }
             catch { }
+        }
+
+        /// <summary>Broadcast-seat dev lever only: open the page on a named tab so a
+        /// screenshot can be taken from inside the game (this seat cannot be captured
+        /// from outside, #622). Never user navigation.</summary>
+        internal static void DevOpenTab(int idx)
+        {
+            try { Open(); SwitchTab(idx); MarkDirty(); }
+            catch (Exception ex) { Plugin.Log.LogWarning("[NATIVE] dev open tab threw: " + ex.Message); }
         }
 
         private static void SwitchTab(int idx){if(idx!=currentTab){/* Music design F13: leaving a tab terminates any live shop music preview. Generation-fenced and safe always, so a stale/no-preview call is a no-op. */try{MusicEngine.StopPreviewAndRestore();}catch{}}currentTab=idx;PageGeneration++;CompetitiveUI.ClearCardHoverRegions();ProfileCard.ClearHoverTargets();/* Sept 6 item a (review a-M2): name targets die with the tab, not with every list refresh */for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();ApiClient.FetchActiveSeries();ApiClient.FetchRankTiers();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();ApiClient.FetchNewestCosmetics();/* Aug 7 item 10: the New chip needs the newest cache; Home used to be its only fetch site */}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchAdminRecentSeries(id);ApiClient.FetchAdminQuarantine(id);ApiClient.FetchAdminActions(id,25,0,"","",null);}}if(idx==TAB_BANNED){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin)ApiClient.FetchBannedUsers(id);}if(idx==7){/* Participant-first sub-tab (Aug 30, owner: "still no Forfeit button in

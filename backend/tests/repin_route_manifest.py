@@ -1,4 +1,10 @@
-"""Re-pin route fingerprints in route_manifest_net_seat.json from the GATE's own code path.
+"""Re-pin the fingerprints in route_manifest_net_seat.json from the GATE's own code path.
+
+Both families: the route rows AND the `entry_points` section (middleware,
+exception handlers, the lifespan). The section was outside this tool until now,
+so the only way to move an entry-point sha was to paste one in by hand -- the
+exact thing the route half refuses to do, on a set whose whole point is that a
+request path outside the routing table is still a reviewed surface.
 
 Learning #596: a previous re-pin tool computed a fingerprint a second way, the
 manifest carried a value the gate never produces, and the gate failed closed on
@@ -45,11 +51,27 @@ def rows(doc):
     return out
 
 
+def entry_rows(doc):
+    """{(module, name, section): sha} out of a manifest document."""
+    out = {}
+    for section, rows_ in (doc.get("entry_points") or {}).items():
+        for module, name, sha in rows_:
+            out[(module, name, section)] = sha
+    return out
+
+
 def head_manifest():
+    """The manifest at HEAD, as (route rows, entry-point rows).
+
+    BOTH halves: the baseline is what "MOVED vs HEAD" is measured against, and
+    a baseline that covered only the routes reported every entry point as
+    unmoved — including one the author had just re-pinned, which is exactly
+    the case a reviewer runs this to catch."""
     try:
         txt = subprocess.run(["git", "-C", str(REPO), "show", f"HEAD:{MANIFEST_REL}"],
                              capture_output=True, text=True, check=True).stdout
-        return rows(json.loads(txt)), "HEAD"
+        head = json.loads(txt)
+        return (rows(head), entry_rows(head)), "HEAD"
     except Exception:
         return None, "disk"
 
@@ -67,7 +89,8 @@ def main():
     doc = json.loads(raw)
     baseline, baseline_name = head_manifest()
     if baseline is None:
-        baseline = rows(doc)
+        baseline = (rows(doc), entry_rows(doc))
+    baseline, entry_baseline = baseline
 
     missing = [k for k in rows(doc) if k not in live]
     if missing:
@@ -88,11 +111,41 @@ def main():
                 r[4] = live[k]
                 written += 1
 
+    # ── the entry points: same seam, same rule ──────────────────────────
+    # `_entry_point_sha` is the function the gate asserts against, so this
+    # cannot compute the value a second way (#596). The identity SET is not
+    # re-pinned: a middleware or handler appearing or leaving is a review item,
+    # and answering it by rewriting the manifest is how the gate stops meaning
+    # anything.
+    live_eps = gate._entry_point_sections()
+    eps = doc["entry_points"]
+    if sorted(eps) != sorted(live_eps):
+        print("REFUSING: entry-point sections %s vs live %s" % (sorted(eps), sorted(live_eps)))
+        return 1
+    ep_moved = []
+    for section, rows_ in eps.items():
+        recorded = [(m, n) for m, n, _ in rows_]
+        if recorded != live_eps[section]:
+            print("REFUSING: %s identities changed: manifest %s vs live %s"
+                  % (section, recorded, live_eps[section]))
+            return 1
+        for row in rows_:
+            now = gate._entry_point_sha(row[0], row[1])
+            was = entry_baseline.get((row[0], row[1], section))
+            if was != now:
+                ep_moved.append((row[0] + "." + row[1], was, now))
+            if row[2] != now:
+                row[2] = now
+                written += 1
+
     print("manifest rows      : %d" % sum(len(g["routes"]) for g in doc["groups"]))
     print("fingerprinted      : %d" % len(rows(doc)))
     print("rows rewritten now : %d" % written)
     print("MOVED vs %-9s : %d" % (baseline_name, len(moved)))
     for name, old, new in sorted(moved):
+        print("   %-42s %s -> %s" % (name, (old or "none")[:8], new[:8]))
+    print("ENTRY POINTS moved vs %-4s: %d" % (baseline_name, len(ep_moved)))
+    for name, old, new in sorted(ep_moved):
         print("   %-42s %s -> %s" % (name, (old or "none")[:8], new[:8]))
 
     if "--write" in sys.argv:

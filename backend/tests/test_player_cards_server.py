@@ -517,6 +517,7 @@ def test_route_inventory_of_phase_one():
         ("/api/v1/pc/daily", ("POST",)), ("/api/v1/pc/prints/discard", ("POST",)),
         ("/api/v1/pc/settings", ("POST",)), ("/api/v1/pc/me", ("GET",)),
         ("/api/v1/pc/collection", ("GET",)), ("/api/v1/pc/card", ("GET",)), ("/api/v1/pc/pool", ("GET",)),
+        ("/api/v1/pc/portrait", ("POST",)),
     }
     admin = [r for r in main.app.routes if getattr(r, "path", "") == "/api/v1/admin/pc/snapshot"]
     assert len(admin) == 1 and "_require_admin(db, admin_steam_id, \"pc_snapshot\", \"pool\", sig)" in inspect.getsource(main.admin_pc_snapshot)
@@ -526,6 +527,11 @@ def test_route_inventory_of_phase_one():
         ("/api/v1/internal/pc/events/pending", ("GET",)), ("/api/v1/internal/pc/events/ack", ("POST",)),
         ("/api/v1/internal/pc/daily", ("POST",)), ("/api/v1/internal/pc/collection", ("GET",)),
         ("/api/v1/internal/pc/card", ("GET",)),
+        ("/api/v1/internal/pc/lease", ("POST",)), ("/api/v1/internal/pc/lease/{lease_id}", ("GET",)),
+        ("/api/v1/internal/pc/lease/{lease_id}", ("DELETE",)),
+        ("/api/v1/internal/pc/face/print/{print_id}/{locale}", ("GET",)),
+        ("/api/v1/internal/pc/face/preview/{player_ref}/{locale}", ("GET",)),
+        ("/api/v1/internal/pc/face/back", ("GET",)),
     }
 
 

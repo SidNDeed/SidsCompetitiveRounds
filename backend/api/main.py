@@ -4849,6 +4849,8 @@ from collections import deque as _rl_deque, defaultdict as _rl_defaultdict
 _RL_BUCKETS = _rl_defaultdict(_rl_deque)
 _RL_GLOBAL = (150, 10.0)     # 150 req / 10s per IP (a fast browser is ~10)
 _RL_SENSITIVE = (20, 10.0)   # 20 req / 10s for mutating / abuse-prone paths
+_RL_FACE = (120, 10.0)       # the public Player Cards face route: its own bucket (v22 §2.2)
+_RL_FACE_PREFIX = "/api/v1/pc-face/"
 _RL_SENSITIVE_PREFIXES = (
     # Player Cards (Sept 10 batch): every open / claim / discard / settings
     # write and every private read. One literal prefix for the whole family.
@@ -4962,9 +4964,15 @@ async def rate_limit_gate(request: Request, call_next):
             pass
     ip = request.client.host if request.client else "unknown"
     now = _rl_time.monotonic()
-    sensitive = any(path.startswith(p) for p in _RL_SENSITIVE_PREFIXES)
-    limit, window = _RL_SENSITIVE if sensitive else _RL_GLOBAL
-    key = f"{ip}|{'s' if sensitive else 'g'}"
+    if path.startswith(_RL_FACE_PREFIX):
+        # The public face route: read-only, offline, its own bucket (v22 §2.2).
+        sensitive = False
+        limit, window = _RL_FACE
+        key = f"{ip}|f"
+    else:
+        sensitive = any(path.startswith(p) for p in _RL_SENSITIVE_PREFIXES)
+        limit, window = _RL_SENSITIVE if sensitive else _RL_GLOBAL
+        key = f"{ip}|{'s' if sensitive else 'g'}"
     dq = _RL_BUCKETS[key]
     cutoff = now - window
     while dq and dq[0] < cutoff:
@@ -5518,7 +5526,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
     """Check if the API and database are operational."""
     try:
         await db.execute(text("SELECT 1"))
-        return HealthResponse(status="ok", database="connected", replica=IS_REPLICA)
+        return HealthResponse(status="ok", database="connected", replica=IS_REPLICA,
+                              pc_renderer_fp=_pc_renderer_fp(), pc_raqm=_pc_raqm())
     except Exception:
         # Report the role even when the database is unreachable: "which box is
         # this" is exactly the question being asked when things are degraded.
@@ -23770,6 +23779,12 @@ async def get_inventory(steam_id: str, db: AsyncSession = Depends(get_db)):
 # the transaction and re-rolled when it left (opt-out, ban, deletion).
 # ═══════════════════════════════════════════════════════════════════════════
 import player_cards as _pc
+import pc_portrait as _pcp
+try:
+    import pc_face as _pcf
+except Exception as _pcf_ex:  # Pillow / regex / fonts missing: face routes answer 503, everything else boots
+    _pcf = None
+    print(f"[PC-FACE] renderer unavailable: {_pcf_ex}")
 
 _PC_POOL_MIN_MATCHES = 5   # the leaderboard's own default: board_rank means "rank on the board as shown"
 
@@ -23892,7 +23907,10 @@ _PC_PRINT_FACE_SELECT = """
            pr.minted_at, pr.snapshot_id, pr.rarity, pr.foil, pr.signed, pr.pool_rank, pr.rating,
            pr.peak_rating, pr.board_rank, pr.series_wins, pr.series_losses, pr.top_card, pr.title,
            pr.source, pr.pack_id, pr.slot, pr.discarded_at, pr.discard_shards,
-           s.display_name AS subject_name, (s.deleted_at IS NOT NULL) AS subject_deleted
+           s.display_name AS subject_name, (s.deleted_at IS NOT NULL) AS subject_deleted,
+           (s.pc_opted_out_at IS NOT NULL) AS subject_opted_out,
+           s.pc_portrait_source AS portrait_source, s.pc_game_portrait_hash AS portrait_hash,
+           EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = s.steam_id AND b.unbanned_at IS NULL) AS subject_banned
       FROM pc_prints pr
       JOIN pc_cards c ON c.id = pr.card_id
       JOIN players s ON s.id = c.subject_player_id
@@ -23957,16 +23975,40 @@ def _pc_board_rating(rating):
     return float(math.floor(r + 0.5)) if r >= 0 else -float(math.floor(-r + 0.5))
 
 
-def _pc_print_dict(row) -> dict:
+# The immutable built-in neutral label. Byte-identical with the DLL's own
+# constant (v22 §2.4 step 3): it is what a client shows when the api it is
+# talking to said nothing, so the two must not be able to differ.
+_PC_NEUTRAL_NAME = "Unnamed player"
+
+
+def _pc_neutral_name(ctx=None) -> str:
+    """The label a card shows instead of a name.
+
+    With a render context it is that locale's effective `pc.unnamed` — the
+    SAME string the face draws, so a payload and its picture cannot disagree.
+    Without one it is the built-in, which is also what the client falls back
+    to; the answer is then the same string by construction rather than by two
+    translations happening to match."""
+    label = (ctx or {}).get("labels", {}).get("pc.unnamed")
+    return label or _PC_NEUTRAL_NAME
+
+
+def _pc_print_dict(row, ctx=None) -> dict:
     """The wire shape of one print: the frozen face plus the subject's
     CURRENT display name (a rename propagates; delete-my-data's anonymised
-    name replaces it)."""
+    name replaces it). With a face context (a locale's labels, the renderer
+    fingerprint, the rank colours) the print also carries its `face_rev`,
+    the key of its rendered face in that locale (v22 §2.2)."""
     rating = _pc_num(row["rating"])
-    return {
+    d = {
         "print_id": str(row["print_id"]),
         "card_id": str(row["card_id"]),
         "subject_player_id": str(row["subject_player_id"]),
-        "subject_name": row["subject_name"],
+        # The neutral label, not null, whenever this answer knows which locale
+        # it is in: the face draws the label and the payload used to carry
+        # nothing, so the tile and its picture named the same card differently.
+        "subject_name": (_pcp.public_render_name(row["subject_name"])
+                         or (_pc_neutral_name(ctx) if ctx is not None else None)),
         "subject_deleted": bool(row["subject_deleted"]),
         "edition_id": int(row["edition_id"]),
         "minted_at": _pc_iso(row["minted_at"]),
@@ -23986,14 +24028,54 @@ def _pc_print_dict(row) -> dict:
         "slot": int(row["slot"]) if row["slot"] is not None else None,
         "discarded": row["discarded_at"] is not None,
     }
+    if ctx is not None:
+        d["face_rev"] = _pc_face_inputs(row, ctx)[3]
+    return d
 
 
-async def _pc_prints_of_pack(db: AsyncSession, pack_id) -> list:
+async def _pc_prints_of_pack(db: AsyncSession, pack_id, ctx=None) -> list:
     rows = (await db.execute(text(_PC_PRINT_FACE_SELECT + """
      WHERE pr.pack_id = CAST(:pack AS uuid)
      ORDER BY pr.slot
     """), {"pack": pack_id})).mappings().all()
-    return [_pc_print_dict(r) for r in rows]
+    prints = [_pc_print_dict(r, ctx) for r in rows]
+    # The copies the opener already held when each slot was minted (v22 §7).
+    # It is a fact about the PULL, not about the print, so it is not a column
+    # on pc_prints and cannot come out of the select above: the mint wrote it
+    # into this pack's stored answer, and this is where it rejoins the wire.
+    # Read ONCE for the pack, and keyed by print id — the stored answer and the
+    # table are two orderings of the same rows, and a positional join can
+    # attribute a count to the wrong card. Absent for a pack opened before the
+    # field existed: the key is then omitted, and the client states nothing
+    # rather than calling every card new.
+    stored = await _pc_pack_result(db, pack_id)
+    for p in prints:
+        dup = _pc_pack_dup_at_pull(stored, p["print_id"])
+        if dup is not None:
+            p["dup_at_pull"] = dup
+    return prints
+
+
+async def _pc_pack_result(db: AsyncSession, pack_id) -> dict:
+    """The pack row's stored answer JSON, or {} when there is none."""
+    raw = (await db.execute(text(
+        "SELECT result FROM pc_packs WHERE id = CAST(:pack AS uuid)"),
+        {"pack": pack_id})).scalar_one_or_none()
+    if isinstance(raw, (str, bytes, bytearray)):
+        try:
+            raw = _json.loads(raw)
+        except ValueError:
+            return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _pc_pack_dup_at_pull(stored: dict, print_id: str):
+    """`dup_at_pull` for one print id out of a stored pack answer, or None."""
+    for slot in (stored or {}).get("prints") or ():
+        if isinstance(slot, dict) and str(slot.get("print_id")) == str(print_id):
+            value = slot.get("dup_at_pull")
+            return None if value is None else int(value)
+    return None
 
 
 async def _pc_take_snapshot(db: AsyncSession, *, reason: str) -> dict:
@@ -24067,6 +24149,10 @@ async def _pc_snapshot_janitor_step() -> None:
         # Retention first and unconditionally: an admin snapshot taken before
         # each daily step must not starve it (c3 F).
         await db.execute(text("DELETE FROM pc_events WHERE created_at < NOW() - INTERVAL '7 days'"))
+        # Portraits (310): a lease past `until` is dead by definition; a nonce
+        # older than a day can never be replayed (its session proof expired).
+        await db.execute(text("DELETE FROM pc_delivery_leases WHERE until < NOW() - INTERVAL '1 hour'"))
+        await db.execute(text("DELETE FROM pc_portrait_nonces WHERE used_at < NOW() - INTERVAL '1 day'"))
         await db.commit()
         if await _pc_snapshot_due(db) is None:
             return
@@ -24144,6 +24230,18 @@ async def _pc_mint(db: AsyncSession, owner_pid, edition_id: int, snap_id: int, p
             ON CONFLICT (subject_player_id, edition_id, variant) DO UPDATE SET variant = EXCLUDED.variant
             RETURNING id
         """), {"subj": p["player_id"], "ed": edition_id})).scalar_one()
+        # How many of this exact card the opener already holds, counted BEFORE
+        # this slot is inserted (v22 §7). The loop is sequential inside one
+        # transaction, so two identical slots in one pack read 0 and then 1 —
+        # "counted sequentially at mint" — and a discarded copy is not held.
+        dup_at_pull = int((await db.execute(text("""
+            SELECT COUNT(*) FROM pc_prints pr JOIN pc_cards c ON c.id = pr.card_id
+             WHERE pr.owner_player_id = CAST(:owner AS uuid) AND pr.discarded_at IS NULL
+               AND c.subject_player_id = CAST(:subj AS uuid)
+               AND pr.rarity = CAST(:rarity AS text)
+               AND pr.foil = CAST(:foil AS boolean) AND pr.signed = CAST(:signed AS boolean)
+        """), {"owner": owner_s, "subj": p["player_id"], "rarity": p["rarity"],
+               "foil": bool(p["foil"]), "signed": bool(p["signed"])})).scalar_one())
         ins = (await db.execute(text(_PC_PRINT_INSERT_SQL), {
             "card": str(card_id), "owner": owner_s, "sid": snap_id, "rarity": p["rarity"],
             "foil": p["foil"], "signed": p["signed"], "rank": p["pool_rank"],
@@ -24164,10 +24262,13 @@ async def _pc_mint(db: AsyncSession, owner_pid, edition_id: int, snap_id: int, p
             kinds.append("self")
         for kind in kinds:
             await db.execute(text("""
-                INSERT INTO pc_events (kind, player_id, subject_player_id, print_id)
-                VALUES (CAST(:kind AS text), CAST(:pid AS uuid), CAST(:subj AS uuid), CAST(:print AS uuid))
-            """), {"kind": kind, "pid": owner_s, "subj": p["player_id"], "print": str(ins["id"])})
+                INSERT INTO pc_events (kind, player_id, subject_player_id, print_id, dup_at_pull)
+                VALUES (CAST(:kind AS text), CAST(:pid AS uuid), CAST(:subj AS uuid), CAST(:print AS uuid),
+                        CAST(:dup AS integer))
+            """), {"kind": kind, "pid": owner_s, "subj": p["player_id"], "print": str(ins["id"]),
+                   "dup": dup_at_pull})
         out.append({
+            "dup_at_pull": dup_at_pull,
             "print_id": str(ins["id"]), "card_id": str(card_id), "subject_player_id": p["player_id"],
             "slot": p["slot"], "rarity": p["rarity"], "rolled": p["rolled"], "foil": p["foil"],
             "signed": p["signed"], "pool_rank": p["pool_rank"], "rating": p["rating"],
@@ -24178,8 +24279,11 @@ async def _pc_mint(db: AsyncSession, owner_pid, edition_id: int, snap_id: int, p
     return out
 
 
-async def _pc_pack_answer(db: AsyncSession, row) -> dict:
-    """The wire answer for a committed pack row (done / rejected / unopened)."""
+async def _pc_pack_answer(db: AsyncSession, row, ctx=None) -> dict:
+    """The wire answer for a committed pack row (done / rejected / unopened).
+    With a face context the prints carry `face_rev` and the five faces are
+    pre-rendered best effort in that locale (v22 §2.2: an optimisation,
+    never a guarantee — the face route renders on demand)."""
     status = row["status"]
     base = {
         "pack_id": str(row["id"]), "status": status, "source": row["source"],
@@ -24187,8 +24291,12 @@ async def _pc_pack_answer(db: AsyncSession, row) -> dict:
         "reason": row["reject_reason"], "created_at": _pc_iso(row["created_at"]),
         "opened_at": _pc_iso(row["opened_at"]),
     }
+    if ctx is not None:
+        base["locale"] = ctx["locale"]   # the locale the prints' face_rev values are keyed under
     if status == "done":
-        base["prints"] = await _pc_prints_of_pack(db, row["id"])
+        base["prints"] = await _pc_prints_of_pack(db, row["id"], ctx)
+        if ctx is not None:
+            _pc_schedule_prerender([p["print_id"] for p in base["prints"]], ctx["locale"])
     return base
 
 
@@ -24225,6 +24333,13 @@ async def pc_open_pack(
     committed row. Pre-debit rejections (price_changed, pool_empty,
     daily_cap, pool_changed, insufficient_*) commit and never debit:
     HTTP 409 / 402 with {"error", "status": "rejected", ...}."""
+    # BEFORE any money moves. This route commits a debit and then builds an
+    # answer that projects names and keys faces; a box whose coverage manifest
+    # or renderer fingerprint is unavailable used to charge the player, mint
+    # the prints and raise 500 on the way out, and the recovery route raised
+    # the same 500. A precondition is only a precondition if it is checked
+    # where refusing is still free.
+    _pc_require_renderer()
     if pack_id:
         canon = _pc.canon_open_pack(steam_id, pack_id)
     else:
@@ -24270,7 +24385,7 @@ async def pc_open_pack(
                     SELECT id, status, source, mode, kind, pay, price, reject_reason, created_at, opened_at
                       FROM pc_packs WHERE id = CAST(:pack AS uuid) AND player_id = CAST(:pid AS uuid)
                 """), {"pack": pack_id, "pid": pid})).mappings().first()
-                answer = await _pc_pack_answer(db, row) if row is not None else {"pack_id": pack_id}
+                answer = await _pc_pack_answer(db, row, await _pc_face_ctx(db, _pc_locale(request))) if row is not None else {"pack_id": pack_id}
                 print(f"[PC-OPEN] player={steam_id} pack={pack_id}: earned pack of an invalidated "
                       f"{held['mode']} series voided at open")
                 raise HTTPException(status_code=410, detail={"error": "voided", **answer})
@@ -24286,7 +24401,7 @@ async def pc_open_pack(
             """), {"pack": pack_id, "pid": pid})).mappings().first()
             if row is None:
                 raise HTTPException(status_code=404, detail="Pack not found")
-            answer = await _pc_pack_answer(db, row)
+            answer = await _pc_pack_answer(db, row, await _pc_face_ctx(db, _pc_locale(request)))
             if row["status"] == "done":
                 return answer
             if row["status"] == "voided":
@@ -24310,7 +24425,7 @@ async def pc_open_pack(
             """), {"pid": pid, "nonce": nonce})).mappings().first()
             if row is None:
                 raise HTTPException(status_code=409, detail={"error": "in_progress"})
-            answer = await _pc_pack_answer(db, row)
+            answer = await _pc_pack_answer(db, row, await _pc_face_ctx(db, _pc_locale(request)))
             if row["status"] == "done":
                 return answer
             if row["status"] == "rejected":
@@ -24411,7 +24526,7 @@ async def pc_open_pack(
         SELECT id, status, source, mode, kind, pay, price, reject_reason, created_at, opened_at
           FROM pc_packs WHERE id = CAST(:pack AS uuid)
     """), {"pack": this_pack})).mappings().one()
-    return await _pc_pack_answer(db, row)
+    return await _pc_pack_answer(db, row, await _pc_face_ctx(db, _pc_locale(request)))
 
 
 @app.get("/api/v1/pc/packs/result", tags=["Player Cards"])
@@ -24447,7 +24562,7 @@ async def pc_pack_result(
         """), {"pid": str(player.id), "nonce": nonce})).mappings().first()
     if row is None:
         raise HTTPException(status_code=404, detail="Pack not found")
-    answer = await _pc_pack_answer(db, row)
+    answer = await _pc_pack_answer(db, row, await _pc_face_ctx(db, _pc_locale(request)))
     if row["status"] == "unopened":
         att = (await db.execute(text(
             "SELECT reject_reason, attempted_at FROM pc_open_attempts WHERE pack_id = CAST(:pack AS uuid)"),
@@ -24560,6 +24675,9 @@ async def pc_discard_print(
     if done is None:
         await db.rollback()
         raise HTTPException(status_code=404, detail={"error": "not_owned"})
+    # A discarded print is dead: every delivery lease naming it dies with it,
+    # so a bot send acquired for it re-validates and drops the bytes (r18 H1).
+    await db.execute(text("DELETE FROM pc_delivery_leases WHERE print_id = CAST(:print AS uuid)"), {"print": print_id})
     shards = (await db.execute(text("""
         UPDATE players SET pc_shards = pc_shards + CAST(:value AS integer)
          WHERE id = CAST(:pid AS uuid) RETURNING pc_shards
@@ -24588,12 +24706,21 @@ _PC_SETTINGS_SQL = {
          WHERE id = CAST(:pid AS uuid) AND pc_settings_revision = CAST(:rev AS integer)
         RETURNING pc_settings_revision
     """,
+    # 1 = the in-game character (the default), 0 = None: the initial disc
+    # everywhere from the next render on; nothing is removed (v22 §3.1).
+    "portrait_source": """
+        UPDATE players SET pc_portrait_source = CASE WHEN CAST(:value AS integer) = 1 THEN 'game' ELSE 'none' END,
+                           pc_settings_revision = pc_settings_revision + 1
+         WHERE id = CAST(:pid AS uuid) AND pc_settings_revision = CAST(:rev AS integer)
+        RETURNING pc_settings_revision
+    """,
 }
 
 
 async def _pc_settings_of(db: AsyncSession, pid: str) -> dict:
     row = (await db.execute(text("""
-        SELECT pc_opted_out_at, pc_collection_public, pc_announce, pc_settings_revision, pc_shards
+        SELECT pc_opted_out_at, pc_collection_public, pc_announce, pc_settings_revision, pc_shards,
+               pc_portrait_source, pc_game_portrait_descriptor, pc_game_portrait_hash, pc_game_portrait_locked_until
           FROM players WHERE id = CAST(:pid AS uuid)
     """), {"pid": pid})).mappings().one()
     return {
@@ -24602,7 +24729,26 @@ async def _pc_settings_of(db: AsyncSession, pid: str) -> dict:
         "announce": bool(row["pc_announce"]),
         "revision": int(row["pc_settings_revision"]),
         "shards": int(row["pc_shards"] or 0),
+        # The portrait unit (310): source none|game, the descriptor and hash of
+        # the stored upload (NULL = the initial disc), the admin lock.
+        "portrait_source": row["pc_portrait_source"] or "game",
+        "portrait_descriptor": row["pc_game_portrait_descriptor"],
+        "portrait_hash": row["pc_game_portrait_hash"],
+        "portrait_locked_until": _pc_iso(row["pc_game_portrait_locked_until"]),
     }
+
+
+def _pc_setting_revokes_picture(key, value):
+    """True when this settings write withdraws the subject's picture, and so
+    must take the identity lock EXCLUSIVE and wait out any live delivery lease
+    rather than commit under a send already in flight.
+
+    Two writes do: switching the portrait source to none, and opting out of
+    Player Cards altogether — `portrait_for` answers ("none", None) for an
+    opted-out subject exactly as it does for source=none. Named, because it
+    decides whether a writer waits, and an inline expression that knew about
+    the first and not the second is how the second got missed."""
+    return (key == "portrait_source" and int(value) == 0) or (key == "opted_out" and int(value) == 1)
 
 
 @app.post("/api/v1/pc/settings", tags=["Player Cards"])
@@ -24622,10 +24768,26 @@ async def pc_set_setting(
     (409 stale_revision with the current settings) and never applied."""
     if key not in _pc.SETTINGS_KEYS:
         raise HTTPException(status_code=422, detail="unknown setting")
-    player = await _pc_verified_actor(request, steam_id, sig,
-                                      _pc.canon_settings(steam_id, nonce, int(revision), key, int(value)), db)
+    canon = _pc.canon_settings(steam_id, nonce, int(revision), key, int(value))
+    none_write = _pc_setting_revokes_picture(key, value)
+    if none_write:
+        # The None writer takes the identity lock EXCLUSIVE before the shared
+        # read half (r18 H2): lease acquisition takes the same lock, so no
+        # lease is granted between this re-read and this commit. Signature
+        # first, so an unsigned request never holds the lock.
+        if not _pc_hmac_ok(sig, canon):
+            raise HTTPException(status_code=403, detail="Invalid signature")
+        await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))"), {"sid": steam_id})
+    player = await _pc_verified_actor(request, steam_id, sig, canon, db)
     pid = str(player.id)
     await db.execute(text("SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE"), {"pid": pid})
+    if none_write:
+        # A live delivery lease means a bot send acquired under the previous
+        # picture may still be in flight: refuse with the wait (v22 §3.1).
+        wait = await _pc_lease_wait(db, pid)
+        if wait is not None:
+            await db.rollback()
+            raise HTTPException(status_code=409, detail={"error": "retry_after", "retry_after": wait})
     new_rev = (await db.execute(text(_PC_SETTINGS_SQL[key]),
                                 {"value": int(value), "pid": pid, "rev": int(revision)})).scalar_one_or_none()
     if new_rev is None:
@@ -24671,8 +24833,13 @@ async def pc_me(
         SELECT 1 FROM pc_daily_claims WHERE player_id = CAST(:pid AS uuid) AND claimed_on = (now() AT TIME ZONE 'UTC')::date
     """), {"pid": pid})).first() is not None
     return {
-        "settings": {k: settings[k] for k in ("opted_out", "collection_public", "announce", "revision")},
+        "settings": {k: settings[k] for k in ("opted_out", "collection_public", "announce", "revision",
+                                              "portrait_source")},
         "shards": settings["shards"],
+        "portrait_source": settings["portrait_source"],
+        "portrait_descriptor": settings["portrait_descriptor"],
+        "portrait_hash": settings["portrait_hash"],
+        "portrait_locked_until": settings["portrait_locked_until"],
         "prices": _pc_prices(),
         "paid_today": int(today["paid_today"] or 0),
         "prints": int(today["prints"] or 0),
@@ -24722,11 +24889,13 @@ async def pc_collection(
               CASE pr.rarity WHEN 'legendary' THEN 0 WHEN 'epic' THEN 1 WHEN 'rare' THEN 2 WHEN 'uncommon' THEN 3 ELSE 4 END,
               pr.minted_at, pr.id
     """), {"owner": owner_pid})).mappings().all()
-    prints = [_pc_print_dict(r) for r in rows]
+    ctx = await _pc_face_ctx(db, _pc_locale(request))
+    prints = [_pc_print_dict(r, ctx) for r in rows]
     counts = {k: 0 for k in _pc.RARITIES}
     for p in prints:
         counts[p["rarity"]] = counts.get(p["rarity"], 0) + 1
-    return {"owner_steam_id": subject or steam_id, "owner_name": owner_name, "public": public,
+    return {"owner_name": _pcp.public_render_name(owner_name) or _pc_neutral_name(ctx),
+            "public": public, "locale": ctx["locale"],
             "count": len(prints), "by_rarity": counts, "prints": prints}
 
 
@@ -24761,9 +24930,9 @@ async def pc_card_face(
         await _pc_verified_actor(request, steam_id, sig, canon, db)
     elif not owner["pc_collection_public"]:
         raise HTTPException(status_code=403, detail={"error": "private"})
-    face = _pc_print_dict(row)
-    face["owner_steam_id"] = owner["steam_id"]
-    face["owner_name"] = owner["display_name"]
+    ctx = await _pc_face_ctx(db, _pc_locale(request))
+    face = _pc_print_dict(row, ctx)
+    face["owner_name"] = _pcp.public_render_name(owner["display_name"]) or _pc_neutral_name(ctx)
     return face
 
 
@@ -24780,7 +24949,7 @@ async def pc_pool_summary(db: AsyncSession = Depends(get_db)):
         SELECT rarity, COUNT(*) AS n FROM pc_pool_members WHERE snapshot_id = CAST(:sid AS integer) GROUP BY rarity
     """), {"sid": int(snap["id"])})).mappings().all()}
     top = (await db.execute(text("""
-        SELECT m.pool_rank, m.rarity, m.board_rank, m.rating, p.display_name, p.steam_id
+        SELECT m.pool_rank, m.rarity, m.board_rank, m.rating, p.display_name
           FROM pc_pool_members m JOIN players p ON p.id = m.player_id
          WHERE m.snapshot_id = CAST(:sid AS integer) AND m.pool_rank <= CAST(:top AS integer)
          ORDER BY m.pool_rank
@@ -24789,8 +24958,9 @@ async def pc_pool_summary(db: AsyncSession = Depends(get_db)):
         "snapshot": {"snapshot_id": int(snap["id"]), "taken_at": _pc_iso(snap["taken_at"]),
                      "member_count": int(snap["member_count"])},
         "bands": {k: bands.get(k, 0) for k in _pc.RARITIES},
-        "top": [{"pool_rank": int(t["pool_rank"]), "rarity": t["rarity"], "display_name": t["display_name"],
-                 "steam_id": t["steam_id"], "board_rank": (int(t["board_rank"]) if t["board_rank"] is not None else None),
+        "top": [{"pool_rank": int(t["pool_rank"]), "rarity": t["rarity"],
+                 "display_name": _pcp.public_render_name(t["display_name"]) or _pc_neutral_name(),
+                 "board_rank": (int(t["board_rank"]) if t["board_rank"] is not None else None),
                  "rating": _pc_num(t["rating"])} for t in top],
         "prices": _pc_prices(),
     }
@@ -24839,8 +25009,8 @@ _PC_EVENTS_PENDING_SQL = """
          LIMIT 20
     )
     SELECT e.id, e.kind, e.created_at, e.print_id,
-           pl.display_name AS puller_name, pl.steam_id AS puller_steam_id, pl.discord_id AS puller_discord_id,
-           su.display_name AS subject_name, su.steam_id AS subject_steam_id,
+           pl.display_name AS puller_name, pl.id AS puller_ref,
+           su.display_name AS subject_name, su.id AS subject_ref, e.dup_at_pull,
            pr.rarity, pr.foil, pr.signed, pr.pool_rank, pr.rating, pr.title
       FROM pc_events e
       JOIN players pl ON pl.id = e.player_id
@@ -24881,9 +25051,13 @@ async def internal_pc_events_pending(
     rows = (await db.execute(text(_PC_EVENTS_PENDING_SQL))).mappings().all()
     return {"events": [{
         "id": int(r["id"]), "kind": r["kind"], "created_at": _pc_iso(r["created_at"]),
-        "puller_name": r["puller_name"], "puller_steam_id": r["puller_steam_id"],
-        "puller_discord_id": r["puller_discord_id"],
-        "subject_name": r["subject_name"], "subject_steam_id": r["subject_steam_id"],
+        # No Steam ID, Discord ID, name or avatar field: the digest names the
+        # two parties and the lease needs the subject's row reference (v22 §8).
+        "puller_name": _pcp.public_render_name(r["puller_name"]) or _pc_neutral_name(),
+        "puller_ref": str(r["puller_ref"]),
+        "subject_name": _pcp.public_render_name(r["subject_name"]) or _pc_neutral_name(),
+        "subject_ref": str(r["subject_ref"]),
+        "dup_at_pull": int(r["dup_at_pull"]) if r["dup_at_pull"] is not None else None,
         "print": ({"print_id": str(r["print_id"]), "rarity": r["rarity"], "foil": bool(r["foil"]),
                    "signed": bool(r["signed"]), "pool_rank": int(r["pool_rank"]),
                    "rating": _pc_num(r["rating"]), "title": r["title"]} if r["rarity"] is not None else None),
@@ -24893,24 +25067,41 @@ async def internal_pc_events_pending(
 @app.post("/api/v1/internal/pc/events/ack", tags=["Internal"])
 async def internal_pc_events_ack(
     ids: str = Query(..., max_length=2000),
+    leases: str | None = Query(None, max_length=4000),
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Mark posted: a comma-separated list of event ids the bot delivered."""
+    """Mark posted: a comma-separated list of event ids the bot delivered.
+    The ack also releases the delivery leases it names (`leases`, comma-
+    separated lease ids) and every lease naming one of the acked events."""
     _require_internal_key(x_internal_key)
     try:
         id_list = [int(s) for s in ids.split(",") if s.strip()]
     except ValueError:
         raise HTTPException(status_code=422, detail="ids must be integers")
-    if not id_list:
-        return {"acked": 0}
-    n = (await db.execute(text("""
-        UPDATE pc_events SET posted_at = now()
-         WHERE id = ANY(CAST(:ids AS bigint[])) AND posted_at IS NULL
-        RETURNING id
-    """), {"ids": id_list})).fetchall()
+    lease_ids = [s.strip() for s in (leases or "").split(",") if s.strip()]
+    if any(not _pcp.print_id_ok(x) for x in lease_ids):
+        raise HTTPException(status_code=422, detail="leases must be canonical uuids")
+    if not id_list and not lease_ids:
+        return {"acked": 0, "released": 0}
+    released = 0
+    if id_list:
+        released += len((await db.execute(text(
+            "DELETE FROM pc_delivery_leases WHERE event_ids && CAST(:ids AS bigint[]) RETURNING id"),
+            {"ids": id_list})).fetchall())
+    if lease_ids:
+        released += len((await db.execute(text(
+            "DELETE FROM pc_delivery_leases WHERE id = ANY(CAST(:ids AS uuid[])) RETURNING id"),
+            {"ids": lease_ids})).fetchall())
+    n = []
+    if id_list:
+        n = (await db.execute(text("""
+            UPDATE pc_events SET posted_at = now()
+             WHERE id = ANY(CAST(:ids AS bigint[])) AND posted_at IS NULL
+            RETURNING id
+        """), {"ids": id_list})).fetchall()
     await db.commit()
-    return {"acked": len(n)}
+    return {"acked": len(n), "released": released}
 
 
 @app.post("/api/v1/internal/pc/daily", tags=["Internal"])
@@ -24931,12 +25122,14 @@ async def internal_pc_daily(
 async def internal_pc_collection(
     discord_id: str = Query(..., max_length=32),
     viewer_discord_id: str | None = Query(None, max_length=32),
+    locale: str | None = Query(None, max_length=16),
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
     db: AsyncSession = Depends(get_db),
 ):
     """The bot's /collection [@user]: the owner's binder summary (counts by
-    rarity, the ten best prints). Someone else's binder only while it is
-    public (403 private); the owner always sees their own."""
+    rarity, the ten best prints with their face keys in the interaction's
+    locale). Someone else's binder only while it is public (403 private);
+    the owner always sees their own."""
     _require_internal_key(x_internal_key)
     owner = await _pc_player_by_discord(db, discord_id)
     is_owner = viewer_discord_id is not None and str(viewer_discord_id) == str(owner.discord_id)
@@ -24948,11 +25141,13 @@ async def internal_pc_collection(
      ORDER BY CASE pr.rarity WHEN 'legendary' THEN 0 WHEN 'epic' THEN 1 WHEN 'rare' THEN 2 WHEN 'uncommon' THEN 3 ELSE 4 END,
               pr.signed DESC, pr.foil DESC, pr.pool_rank, pr.minted_at
     """), {"owner": pid})).mappings().all()
-    prints = [_pc_print_dict(r) for r in rows]
+    ctx = await _pc_face_ctx(db, _pcp.effective_locale(locale, set(I18N_LANGS)))
+    prints = [_pc_print_dict(r, ctx) for r in rows]
     counts = {k: 0 for k in _pc.RARITIES}
     for p in prints:
         counts[p["rarity"]] = counts.get(p["rarity"], 0) + 1
-    answer = {"owner_name": owner.display_name, "owner_steam_id": owner.steam_id, "count": len(prints),
+    answer = {"owner_name": _pcp.public_render_name(owner.display_name) or _pc_neutral_name(),
+              "owner_ref": str(owner.id), "locale": ctx["locale"], "count": len(prints),
               "by_rarity": counts, "distinct_subjects": len({p["subject_player_id"] for p in prints}),
               "best": prints[:10]}
     if is_owner:
@@ -24992,7 +25187,8 @@ async def internal_pc_card(
     """), {"pid": str(subject.id)})).mappings().one()
     rating = _pc_num(row["rating"])
     return {
-        "subject_name": subject.display_name, "subject_steam_id": subject.steam_id,
+        "subject_name": _pcp.public_render_name(subject.display_name) or _pc_neutral_name(),
+        "player_ref": str(subject.id),
         "pool_rank": int(row["pool_rank"]), "rarity": row["rarity"], "rating": rating,
         "peak_rating": _pc_num(row["peak_rating"]),
         "board_rank": int(row["board_rank"]) if row["board_rank"] is not None else None,
@@ -25003,6 +25199,787 @@ async def internal_pc_card(
         "in_circulation": {"prints": int(circ["prints"] or 0), "holders": int(circ["holders"] or 0),
                            "foil": int(circ["foil"] or 0), "signed": int(circ["signed"] or 0)},
     }
+
+
+# ── Player Cards: portraits, delivery leases and faces ──────────────────────
+# Design: ai-collab/sept10-batch/21-player-cards-look-v22.md §1.7, §2.2, §3,
+# §6, §8 as amended by look-r18-dispositions.md. Pure helpers live in
+# pc_portrait.py, pixels in pc_face.py. Every route here is answered by the
+# PRIMARY only (§2.2 routing): the face route is not on the edge's routed
+# list and the bot calls the primary's local api.
+import functools as _functools
+from fastapi.responses import Response as _PcResponse
+
+PC_FACE_CACHE_DIR = os.getenv("PC_FACE_CACHE_DIR", "/var/cache/pc-faces")
+_pc_face_cache = _pcp.FaceCache(PC_FACE_CACHE_DIR)
+_pc_back_cache = {"bytes": None}
+
+
+def _pc_renderer_fp():
+    if _pcf is None:
+        return None
+    try:
+        return _pcf.renderer_fingerprint()
+    except Exception as ex:
+        print(f"[PC-FACE] fingerprint failed: {ex}")
+        return None
+
+
+def _pc_raqm():
+    """Whether the renderer is actually SHAPING with raqm.
+
+    `runtime_provenance()` has no top-level "raqm" key — it reports capability
+    under features.raqm.available and the engine actually in use under
+    layout_engine — so reading the top level answered false on every image ever
+    built, including the compliant ones this is meant to certify. The engine in
+    use is the honest answer: a build where Pillow reports the feature but
+    falls back to basic layout draws different pixels."""
+    if _pcf is None:
+        return False
+    try:
+        return _pcf.runtime_provenance().get("layout_engine") == "raqm"
+    except Exception:
+        return False
+
+
+def _pc_served_locales():
+    return set(I18N_LANGS)
+
+
+def _pc_locale(request):
+    """EffectivePcLocale of the request's informational X-Locale header
+    (never signed; unknown or absent → en)."""
+    try:
+        return _pcp.effective_locale(request.headers.get("X-Locale"), _pc_served_locales())
+    except Exception:
+        return "en"
+
+
+def _pc_hex_rgb(hex_color):
+    try:
+        h = (hex_color or "").lstrip("#")
+        if len(h) != 6:
+            return None
+        return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+    except ValueError:
+        return None
+
+
+async def _pc_labels(db: AsyncSession, locale: str) -> dict:
+    """The effective pc.* projection of one locale: the identifier's English
+    unless a client-namespace entry under the COMPOSITE msgctxt
+    (english + U+0004 + identifier) serves a target the pack would serve —
+    any state for a non-sensitive key, approved only for a sensitive one.
+    ONE definition for the pack, the renderer and cat_rev (v22 §1.3, §2.2);
+    every value single-line."""
+    builtin = dict(_pcf.ENGLISH) if _pcf is not None else {}
+    labels = dict(builtin)
+    if locale == "en" or not labels:
+        return labels
+    ctxs = [f"{eng}\x04{ident}" for ident, eng in labels.items()]
+    rows = (await db.execute(text(
+        "SELECT k.msgctxt, e.target FROM i18n_entries e"
+        " JOIN i18n_keys k ON k.key_id = e.key_id"
+        " WHERE e.language_code = CAST(:lang AS text) AND k.retired_at IS NULL"
+        "   AND k.namespace = 'client'"
+        "   AND (k.sensitive IS FALSE OR e.state = 'approved')"
+        "   AND k.msgctxt = ANY(CAST(:ctxs AS text[]))"
+    ), {"lang": locale, "ctxs": ctxs})).mappings().all()
+    by_ctx = {r["msgctxt"]: r["target"] for r in rows}
+    for ident, eng in list(labels.items()):
+        t = by_ctx.get(f"{eng}\x04{ident}")
+        if t and t.strip():
+            # A catalogue entry can hold any validator-legal string, and these
+            # are drawn on the card: a target carrying a code point no renderer
+            # font has a glyph for would put tofu on the face under a revision
+            # that says the pixels are right. The coverage removal applies
+            # here for the same reason it applies to a name (r17 H5); a target
+            # that empties under it falls back to the built-in English, which
+            # is drawable by construction.
+            projected = _pcp.coverage_strip(_pcp.single_line(t))
+            labels[ident] = projected or builtin[ident]
+    # §2.4 step 3: the neutral label is the one string a card shows when the
+    # name FAILED this exact predicate, so a target that fails it too cannot be
+    # the answer. `coverage_project` is the predicate — empty, Steam-ID-shaped,
+    # or nothing but joiners — and a target that does not pass falls back to
+    # the built-in, which passes by construction. Without this, an approved
+    # `pc.unnamed` reading `7656119...` was drawn on the face as the name of a
+    # player who has none.
+    if "pc.unnamed" in labels:
+        labels["pc.unnamed"] = (_pcp.coverage_project(labels["pc.unnamed"])
+                                or builtin.get("pc.unnamed") or _PC_NEUTRAL_NAME)
+    return labels
+
+
+async def _pc_face_ctx(db: AsyncSession, locale: str) -> dict:
+    """Everything a face key needs besides the print row, computed once per
+    request: the locale, the renderer fingerprint, the effective labels and
+    their cat_rev, the rank colours."""
+    labels = await _pc_labels(db, locale)
+    colors = await _rank_colors(db)
+    # NOT `or "0" * 16`. A renderer that cannot fingerprint itself used to key
+    # every face under a constant, so two builds with different pixels shared
+    # one `face_rev` and one `immutable` URL — the cache then served whichever
+    # build wrote the file first, for a year. None means "this box cannot key a
+    # face", `_pc_face_inputs` turns that into `face_rev = None`, and the face
+    # routes refuse (`_pc_require_renderer`).
+    return {"locale": locale, "renderer_fp": _pc_renderer_fp(), "labels": labels,
+            "cat_rev": _pcp.cat_rev(labels), "colors": colors}
+
+
+def _pc_renderer_unavailable():
+    """Why this box cannot serve Player Cards faces, or None when it can."""
+    if _pcf is None:
+        return "image_processing_unavailable"
+    if _pc_renderer_fp() is None:
+        return "renderer_fingerprint_unavailable"
+    if _pcp.coverage_ready() is not None:
+        return "name_coverage_unavailable"
+    if not _pc_raqm():
+        # The coverage projection admits Arabic, Hebrew, Thai, Devanagari,
+        # Bengali, Tamil, Georgian and Armenian because the renderer carries
+        # fonts for them (§1.3) — and those scripts are only READABLE through a
+        # shaper: without raqm the letters arrive unjoined, and the right-to-
+        # left ones in logical order. Pillow falls back to the BASIC engine
+        # silently, so the choice is between refusing and serving a picture of
+        # a name nobody wrote.
+        return "text_shaping_unavailable"
+    return None
+
+
+def _pc_require_renderer():
+    """503 unless this box can draw AND key a face. Called by every route that
+    renders one, and by the pack writer BEFORE it takes payment."""
+    reason = _pc_renderer_unavailable()
+    if reason is not None:
+        raise HTTPException(status_code=503, detail=reason)
+
+
+def _pc_face_inputs(row, ctx):
+    """(spec, portrait_kind, portrait_hash, face_rev) of one print row in the
+    context's locale. The spec is exactly what pc_face.render_face draws; the
+    rev covers every input of it (v22 §2.2)."""
+    labels = ctx["labels"]
+    kind, phash = _pcp.portrait_for(row)
+    name = _pcp.public_render_name(row["subject_name"])
+    rating = _pc_num(row["rating"])
+    board_rating = _pc_board_rating(rating) if rating is not None else None
+    rank_name = _rank_name_for(board_rating) if rating is not None else None
+    title = row["title"] or rank_name
+    title_hex = (ctx["colors"].get(rank_name) or _rank_fallback_color(rank_name)) if rank_name else None
+    band = row["rarity"]
+    foil, signed = bool(row["foil"]), bool(row["signed"])
+    # (no `unranked` local: the spec's `rating` is None for exactly that case,
+    # and the rev is now derived from the spec)
+    minted = row["minted_at"]
+    spec = {
+        "band": band, "name": name or "", "title": title, "title_rgb": _pc_hex_rgb(title_hex),
+        "rating": int(board_rating) if board_rating is not None else None,
+        "pool_rank": int(row["pool_rank"]),
+        "board_rank": int(row["board_rank"]) if row["board_rank"] is not None else None,
+        "wins": int(row["series_wins"] or 0), "losses": int(row["series_losses"] or 0),
+        "foil": foil, "signed": signed,
+        "edition_label": f"{labels.get('pc.edition', 'Edition')} {int(row['edition_id'])}",
+        "minted_on": minted.strftime("%Y-%m-%d") if minted is not None else "",
+        "print_short": "#" + str(row["print_id"]).replace("-", "")[:6],
+        "top_card": bool(row["top_card"]),
+    }
+    # AFTER the spec, and over the spec: the key is derived from the argument
+    # the renderer draws from, so a field added above is in the key with it.
+    # No fingerprint, no revision: a key computed from a placeholder is a
+    # promise about pixels this box cannot make. Every payload already carries
+    # `face_rev: null` on an api without the renderer and the client reads it
+    # as "no face for this print", so the answer degrades instead of lying.
+    rev = (None if ctx["renderer_fp"] is None
+           else _pcp.face_rev(ctx["renderer_fp"], ctx["cat_rev"], spec, kind, phash))
+    return spec, kind, phash, rev
+
+
+async def _pc_face_row(db: AsyncSession, print_id: str):
+    return (await db.execute(text(_PC_PRINT_FACE_SELECT + " WHERE pr.id = CAST(:id AS uuid)"),
+                             {"id": print_id})).mappings().first()
+
+
+async def _pc_portrait_bytes(db: AsyncSession, phash):
+    if not phash:
+        return None
+    data = (await db.execute(text("SELECT bytes FROM pc_portraits WHERE hash = CAST(:h AS text)"),
+                             {"h": phash})).scalar_one_or_none()
+    return bytes(data) if data is not None else None
+
+
+def _pc_png_response(data: bytes, cache_control: str):
+    return _PcResponse(content=data, media_type="image/png",
+                       headers={"Cache-Control": cache_control, "Content-Length": str(len(data))})
+
+
+async def _pc_render_face(db: AsyncSession, row, ctx: dict, size: str, want=None):
+    """(face_rev, bytes) of one print's face at one size in the context's
+    locale — the cached file, else one shared render. With `want`, a
+    revision mismatch answers None bytes (the caller 404s) before any
+    render: the row read is the liveness AND revision check."""
+    spec, kind, phash, rev = _pc_face_inputs(row, ctx)
+    if want is not None and want != rev:
+        return rev, None
+    key = _pcp.face_key(str(row["print_id"]), rev, ctx["locale"], size)
+    pbytes = await _pc_portrait_bytes(db, phash)
+    data = await _pc_face_cache.get_or_render(
+        key, _functools.partial(_pcf.render_face, spec, ctx["labels"], pbytes, size))
+    return rev, data
+
+
+def _pc_schedule_prerender(print_ids, locale):
+    """Best effort, after the caller's commit: warm the cache for the faces a
+    pack open just minted, in the locale the client sent (§2.2)."""
+    if _pcf is None or not print_ids:
+        return
+    try:
+        asyncio.get_running_loop().create_task(_pc_prerender(list(print_ids), locale))
+    except RuntimeError:
+        pass
+
+
+async def _pc_prerender(print_ids, locale):
+    from database import async_session
+    try:
+        async with async_session() as db:
+            ctx = await _pc_face_ctx(db, locale)
+            for pid in print_ids:
+                row = await _pc_face_row(db, pid)
+                if row is None or row["discarded_at"] is not None:
+                    continue
+                for size in _pcp.SIZES:
+                    await _pc_render_face(db, row, ctx, size)
+    except Exception as ex:
+        print(f"[PC-FACE] pre-render failed locale={locale}: {ex}")
+
+
+# The columns `_pcp.portrait_for` reads, and nothing else. Acquire and
+# revalidation both select exactly this and both call that one function, so
+# "what this lease authorises" has a single definition (#341). `p` is the
+# players row in both statements.
+_PC_PORTRAIT_RESOLVE_COLS = """
+               (p.deleted_at IS NOT NULL) AS subject_deleted, (p.pc_opted_out_at IS NOT NULL) AS subject_opted_out,
+               p.pc_portrait_source AS portrait_source, p.pc_game_portrait_hash AS portrait_hash,
+               EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL) AS subject_banned
+"""
+
+# A print is deliverable under a lease only while it exists, is not discarded,
+# and depicts the subject the lease names.
+_PC_LEASE_PRINT_OK = """
+               (l.print_id IS NULL OR EXISTS (
+                    SELECT 1 FROM pc_prints pr JOIN pc_cards c ON c.id = pr.card_id
+                     WHERE pr.id = l.print_id AND pr.discarded_at IS NULL
+                       AND c.subject_player_id = l.subject_id)) AS print_deliverable
+"""
+
+
+async def _pc_lease_wait(db: AsyncSession, pid: str):
+    """Seconds until the subject's latest LIVE delivery lease expires, or
+    None when no live lease exists."""
+    left = (await db.execute(text("""
+        SELECT CEIL(EXTRACT(EPOCH FROM (MAX(until) - now()))) FROM pc_delivery_leases
+         WHERE subject_id = CAST(:pid AS uuid) AND until > now()
+    """), {"pid": pid})).scalar_one_or_none()
+    if left is None:
+        return None
+    return max(1, int(left))
+
+
+async def _pc_lock_portrait_blobs(db: AsyncSession, pid: str, *extra):
+    """Take the portrait-blob locks P for this player, BEFORE the row lock R.
+    Returns the hash the row currently holds (None when it holds none).
+
+    The order is V → I → C → P → R, and P's key is a value that lives IN the
+    row — which is why the row was being read first, with FOR NO KEY UPDATE,
+    and P taken after. That is R → P, and it is a cycle as soon as two players
+    share a portrait: one deletion holds R(A) and waits for P(H) while the
+    other holds P(H) and waits for R(A) to refund A's lobby bet. PostgreSQL
+    breaks the cycle by aborting one of them — in a transaction that is moving
+    gold.
+
+    So the key is read WITHOUT a lock, P is taken on what that read saw, and
+    the caller takes R afterwards and confirms the value did not move. Under
+    the identity lock every caller of this already holds, no other writer for
+    this player can move it, so the confirmation is a guard against a caller
+    that forgot the identity lock rather than against a race."""
+    old = (await db.execute(text(
+        "SELECT pc_game_portrait_hash FROM players WHERE id = CAST(:pid AS uuid)"),
+        {"pid": pid})).scalar_one_or_none()
+    for h in sorted({x for x in (old,) + tuple(extra) if x}):
+        await db.execute(text("SELECT pg_advisory_xact_lock(CAST(:cls AS integer), hashtext(CAST(:h AS text)))"),
+                         {"cls": _pcp.PC_P_LOCK_CLASS, "h": h})
+    return old
+
+
+async def _pc_clear_portrait_unit(db: AsyncSession, pid: str, lock_days, source):
+    """Under the caller's identity lock: clear the game portrait unit (I → P →
+    R), lock further uploads for lock_days when given, force the source when
+    given, and delete the previous blob when no row references it any more.
+    Returns (previous_hash, locked_until)."""
+    old = await _pc_lock_portrait_blobs(db, pid)
+    held = (await db.execute(text(
+        "SELECT pc_game_portrait_hash FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE"),
+        {"pid": pid})).scalar_one_or_none()
+    if held != old:
+        # Only reachable without the identity lock; refusing is the honest
+        # answer, because P is now held on a hash this row no longer names.
+        await db.rollback()
+        raise HTTPException(status_code=409, detail={"error": "subject_busy", "retry_after": 2})
+    sets = ["pc_game_portrait_hash = NULL", "pc_game_portrait_descriptor = NULL", "pc_game_portrait_at = NULL"]
+    params = {"pid": pid}
+    # Three meanings, and 0 is not None: None leaves an existing lock alone
+    # (the deletion path), 0 CLEARS it, N sets it. Folding 0 into None left an
+    # admin who cleared for seven days and then cleared with zero looking at a
+    # subject whose uploads stayed 403 until the old lock ran out — which is
+    # the opposite of what they asked for, and what the route's own docstring
+    # promises ("0 = no lock").
+    if lock_days is not None:
+        if int(lock_days) > 0:
+            sets.append("pc_game_portrait_locked_until = now() + make_interval(days => CAST(:days AS integer))")
+            params["days"] = int(lock_days)
+        else:
+            sets.append("pc_game_portrait_locked_until = NULL")
+    if source is not None:
+        sets.append("pc_portrait_source = CAST(:src AS text)")
+        params["src"] = source
+    locked = (await db.execute(text(
+        "UPDATE players SET " + ", ".join(sets) +
+        " WHERE id = CAST(:pid AS uuid) RETURNING pc_game_portrait_locked_until"), params)).scalar_one_or_none()
+    if old:
+        await db.execute(text("""
+            DELETE FROM pc_portraits WHERE hash = CAST(:h AS text)
+               AND NOT EXISTS (SELECT 1 FROM players WHERE pc_game_portrait_hash = CAST(:h AS text))
+        """), {"h": old})
+    return old, locked
+
+
+@app.post("/api/v1/pc/portrait", tags=["Player Cards"])
+async def pc_portrait_upload(
+    request: Request,
+    steam_id: str = Query(...),
+    sig: str = Query(...),
+    nonce: str = Query(..., min_length=8, max_length=64),
+    descriptor: str = Query(..., min_length=8, max_length=_pcp.DESCRIPTOR_MAX_BYTES),
+    db: AsyncSession = Depends(get_db),
+):
+    """The portrait writer (v22 §3.2): the player's own client uploads ONE
+    1180x1180 RGBA PNG of its in-game character as a raw image/png body,
+    signed over pcport:{steam}:{nonce}:{upload_sha256}:{descriptor} where the
+    server hashes the received body ITSELF. Order: transport and container
+    before any database work (411 / 413 / 415 / 400 / 422); decode, coverage
+    and canonicalisation in the render pool; the identity lock EXCLUSIVE and
+    the row re-read under it (403 refused / locked, 200 same BEFORE the 30 s
+    pacing 409, 422 descriptor_mismatch); the single-use nonce; the per-hash
+    P locks sorted → INSERT ... ON CONFLICT DO NOTHING → the bound row write
+    → the guarded delete of the previous blob."""
+    _pc_require_renderer()
+    cl = request.headers.get("content-length")
+    if cl is None or "chunked" in (request.headers.get("transfer-encoding") or "").lower():
+        raise HTTPException(status_code=411, detail="length_required")
+    try:
+        declared = int(cl)
+    except ValueError:
+        raise HTTPException(status_code=411, detail="length_required")
+    if declared > _pcp.PC_PORTRAIT_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="portrait_too_large")
+    if not (request.headers.get("content-type") or "").lower().startswith("image/png"):
+        raise HTTPException(status_code=415, detail="image/png required")
+    body = await request.body()
+    if len(body) != declared:
+        raise HTTPException(status_code=400, detail="length_mismatch")
+    try:
+        ihdr = _pcf.png_ihdr(body)
+    except ValueError:
+        raise HTTPException(status_code=422, detail={"error": "portrait_invalid"})
+    if tuple(ihdr) != (_pcp.PORTRAIT_SIZE, _pcp.PORTRAIT_SIZE, 8, 6, 0):
+        raise HTTPException(status_code=422, detail={"error": "portrait_invalid"})
+    parts = _pcp.descriptor_parse(descriptor)
+    if parts is None:
+        raise HTTPException(status_code=422, detail={"error": "descriptor_invalid"})
+    upload_sha256 = hashlib.sha256(body).hexdigest()
+    canon = _pcp.canon_portrait(steam_id, nonce, upload_sha256, descriptor)
+    if not _pc_hmac_ok(sig, canon):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    # 1. decode, coverage, canonicalise — in the pool; the slot is the worker's
+    #    to release, so a timeout here never frees a slot early (r18 M5).
+    try:
+        canonical, info = await _pcp.in_pool(_pcf.prepare_portrait, body, budget=_pcp.DECODE_BUDGET_S)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=422, detail={"error": "portrait_invalid", "reason": "decode_timeout"})
+    except ValueError as ex:
+        # The renderer applies the cap to the CANONICAL encoding as well, and
+        # says so by name. Folding that into "invalid" told a client whose
+        # picture was merely too big to re-encode that its picture was broken,
+        # and made the 413 below unreachable — a status the client's retry
+        # path distinguishes (r18 M6).
+        if str(ex) == "portrait_too_large":
+            raise HTTPException(status_code=413, detail="portrait_too_large")
+        reason = str(ex) if str(ex) in ("portrait_invalid", "portrait_coverage") else "portrait_invalid"
+        raise HTTPException(status_code=422, detail={"error": reason})
+    del body
+    if len(canonical) > _pcp.PC_PORTRAIT_MAX_BYTES:   # r18 M6: belt and braces
+        raise HTTPException(status_code=413, detail="portrait_too_large")
+    portrait_hash = info["sha256"]
+    # 2. identity lock I, EXCLUSIVE (this writer mutates); the actor gate's
+    #    shared form and its row read then run under it — the re-read.
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))"), {"sid": steam_id})
+    player = await _pc_verified_actor(request, steam_id, sig, canon, db)
+    pid = str(player.id)
+    # P before R (the order is V → I → C → P → R): both the blob this upload
+    # replaces and the one it writes, under the identity lock taken above.
+    seen_old = await _pc_lock_portrait_blobs(db, pid, portrait_hash)
+    row = (await db.execute(text("""
+        SELECT p.pc_opted_out_at, p.pc_game_portrait_hash, p.pc_game_portrait_descriptor,
+               EXTRACT(EPOCH FROM (now() - p.pc_game_portrait_at)) AS since_last,
+               EXTRACT(EPOCH FROM (p.pc_game_portrait_locked_until - now())) AS lock_left,
+               p.pc_game_portrait_locked_until,
+               p.active_player_color_id, p.active_player_effect_id,
+               EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL) AS banned
+          FROM players p WHERE p.id = CAST(:pid AS uuid) AND p.deleted_at IS NULL
+           FOR NO KEY UPDATE
+    """), {"pid": pid})).mappings().first()
+    if row is not None and row["pc_game_portrait_hash"] != seen_old:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail={"error": "subject_busy", "retry_after": 2})
+    if row is None or row["banned"] or row["pc_opted_out_at"] is not None:
+        await db.rollback()
+        raise HTTPException(status_code=403, detail={"error": "portrait_refused"})
+    if row["lock_left"] is not None and float(row["lock_left"]) > 0:
+        await db.rollback()
+        raise HTTPException(status_code=403, detail={"error": "portrait_locked",
+                                                     "locked_until": _pc_iso(row["pc_game_portrait_locked_until"])})
+    if row["pc_game_portrait_descriptor"] == descriptor and row["pc_game_portrait_hash"] == portrait_hash:
+        await db.rollback()   # same bytes, same inputs: nothing to write — before pacing (r18 H8)
+        return {"applied": False, "reason": "same", "portrait_hash": portrait_hash,
+                "portrait_descriptor": descriptor}
+    if row["since_last"] is not None and float(row["since_last"]) < _pcp.PACING_SECONDS:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail={
+            "error": "retry_after",
+            "retry_after": max(1, int(_pcp.PACING_SECONDS - float(row["since_last"])) + 1)})
+    # From the LOCKED row, not from `player`. That ORM object was loaded before
+    # the row lock was taken, so an equip committing in between was invisible:
+    # the descriptor was checked against the cosmetics the subject used to
+    # wear, accepted, and stored as the description of a picture that no longer
+    # matches what the player has on.
+    color_sku = effect_sku = None
+    if row["active_player_color_id"]:
+        color_sku = (await db.execute(select(ShopItem.sku).where(
+            ShopItem.id == row["active_player_color_id"]))).scalar_one_or_none()
+    if row["active_player_effect_id"]:
+        effect_sku = (await db.execute(select(ShopItem.sku).where(
+            ShopItem.id == row["active_player_effect_id"]))).scalar_one_or_none()
+    if (color_sku or "") != parts["color"] or (effect_sku or "") != parts["effect"]:
+        await db.rollback()   # the client re-checks after its next stats answer
+        raise HTTPException(status_code=422, detail={"error": "descriptor_mismatch"})
+    used = (await db.execute(text("""
+        INSERT INTO pc_portrait_nonces (player_id, nonce) VALUES (CAST(:pid AS uuid), CAST(:nonce AS text))
+        ON CONFLICT DO NOTHING RETURNING nonce
+    """), {"pid": pid, "nonce": nonce})).scalar_one_or_none()
+    if used is None:
+        await db.rollback()
+        raise HTTPException(status_code=403, detail={"error": "nonce_replayed"})
+    # 3. the blob, the bound row write, the guarded delete of the previous
+    #    blob. The per-hash locks P were taken before the row lock R, above.
+    old = row["pc_game_portrait_hash"]
+    await db.execute(text("""
+        INSERT INTO pc_portraits (hash, bytes, content_type, width, height)
+        VALUES (CAST(:h AS text), CAST(:b AS bytea), 'image/png', CAST(:w AS integer), CAST(:hh AS integer))
+        ON CONFLICT (hash) DO NOTHING
+    """), {"h": portrait_hash, "b": canonical, "w": int(info["width"]), "hh": int(info["height"])})
+    at = (await db.execute(text("""
+        UPDATE players SET pc_game_portrait_hash = CAST(:h AS text),
+                           pc_game_portrait_descriptor = CAST(:d AS text),
+                           pc_game_portrait_at = now()
+         WHERE id = CAST(:pid AS uuid) AND deleted_at IS NULL
+        RETURNING pc_game_portrait_at
+    """), {"h": portrait_hash, "d": descriptor, "pid": pid})).scalar_one_or_none()
+    if at is None:
+        await db.rollback()
+        raise HTTPException(status_code=403, detail={"error": "portrait_refused"})
+    if old and old != portrait_hash:
+        await db.execute(text("""
+            DELETE FROM pc_portraits WHERE hash = CAST(:h AS text)
+               AND NOT EXISTS (SELECT 1 FROM players WHERE pc_game_portrait_hash = CAST(:h AS text))
+        """), {"h": old})
+    await db.commit()
+    print(f"[PC-PORTRAIT] player={steam_id} applied hash={portrait_hash[:12]} bytes={len(canonical)} "
+          f"coverage={info['coverage']:.3f} replaced={bool(old and old != portrait_hash)}")
+    return {"applied": True, "portrait_hash": portrait_hash, "portrait_descriptor": descriptor,
+            "portrait_at": _pc_iso(at)}
+
+
+@app.post("/api/v1/admin/pc/portrait/clear", tags=["Admin"])
+async def admin_pc_portrait_clear(payload: dict = Body(...), db: AsyncSession = Depends(get_db)):
+    """Admin-HMAC canonical admin:{admin}:pc_portrait_clear:{steam_id}:{lock_days}.
+    Clears the target's game portrait unit (I → P → R), deletes the blob when
+    unreferenced, locks uploads for lock_days (0 = no lock) and waits out live
+    delivery leases like the None write (409 retry_after)."""
+    admin_id = str(payload.get("admin_steam_id", ""))[:20]
+    steam_id = str(payload.get("steam_id", ""))[:20]
+    try:
+        lock_days = int(payload.get("lock_days", 0))
+    except (TypeError, ValueError):
+        lock_days = 0
+    lock_days = max(0, min(lock_days, 3650))
+    _sig = payload.get("signature")
+    if not isinstance(_sig, str) or not _sig.isascii():
+        _sig = ""
+    await _require_admin(db, admin_id, "pc_portrait_clear", f"{steam_id}:{lock_days}", _sig)
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))"), {"sid": steam_id})
+    pid = (await db.execute(text(
+        "SELECT id FROM players WHERE steam_id = CAST(:sid AS text) AND deleted_at IS NULL"),
+        {"sid": steam_id})).scalar_one_or_none()
+    if pid is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+    wait = await _pc_lease_wait(db, str(pid))
+    if wait is not None:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail={"error": "retry_after", "retry_after": wait})
+    old, locked = await _pc_clear_portrait_unit(db, str(pid), lock_days=lock_days, source=None)
+    await db.commit()
+    print(f"[PC-PORTRAIT] admin clear target={steam_id} by={admin_id} lock_days={lock_days} had_blob={bool(old)}")
+    return {"cleared": True, "had_portrait": bool(old), "locked_until": _pc_iso(locked)}
+
+
+@app.post("/api/v1/internal/pc/lease", tags=["Internal"])
+async def internal_pc_lease(
+    payload: dict = Body(...),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """The ONE delivery lease (v22 §6, r18 H1/H2): taken under the subject's
+    identity lock (try-lock: 409 subject_busy while a None write, an admin
+    clear or another acquisition holds it), it names the subject, optionally
+    the print and the events, and the portrait hash the resolver answered
+    under that lock. Live until `until`; the bot re-validates it right before
+    its send and the ack or a DELETE releases it."""
+    _require_internal_key(x_internal_key)
+    subject_ref = str(payload.get("subject_ref", ""))[:40]
+    if not _pcp.print_id_ok(subject_ref):
+        raise HTTPException(status_code=422, detail="subject_ref must be a canonical uuid")
+    print_id = payload.get("print_id")
+    if print_id is not None:
+        print_id = str(print_id)[:40]
+        if not _pcp.print_id_ok(print_id):
+            raise HTTPException(status_code=422, detail="print_id must be a canonical uuid")
+    raw_ids = payload.get("event_ids") or []
+    try:
+        event_ids = [int(x) for x in raw_ids][:200]
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="event_ids must be integers")
+    steam = (await db.execute(text(
+        "SELECT steam_id FROM players WHERE id = CAST(:pid AS uuid) AND deleted_at IS NULL"),
+        {"pid": subject_ref})).scalar_one_or_none()
+    if steam is None:
+        raise HTTPException(status_code=404, detail={"error": "not_found"})
+    got = (await db.execute(text("SELECT pg_try_advisory_xact_lock(hashtext(CAST(:sid AS text)))"),
+                            {"sid": steam})).scalar_one()
+    if not got:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail={"error": "subject_busy", "retry_after": 2})
+    sub = (await db.execute(text(
+        "SELECT" + _PC_PORTRAIT_RESOLVE_COLS + "FROM players p WHERE p.id = CAST(:pid AS uuid)"),
+        {"pid": subject_ref})).mappings().first()
+    if sub is None or sub["subject_deleted"]:
+        await db.rollback()
+        raise HTTPException(status_code=404, detail={"error": "not_found"})
+    if print_id is not None:
+        # The lease names a subject and a print, and the picture it authorises
+        # is the SUBJECT's. A print depicting someone else is not this
+        # subject's to lease — the caller holding the print (its owner) is not
+        # the person in it, and the two are routinely different people.
+        depicts = (await db.execute(text("""
+            SELECT 1 FROM pc_prints pr JOIN pc_cards c ON c.id = pr.card_id
+             WHERE pr.id = CAST(:print AS uuid) AND pr.discarded_at IS NULL
+               AND c.subject_player_id = CAST(:pid AS uuid)
+        """), {"print": print_id, "pid": subject_ref})).scalar_one_or_none()
+        if depicts is None:
+            await db.rollback()
+            raise HTTPException(status_code=404, detail={"error": "print_not_of_subject"})
+    kind, phash = _pcp.portrait_for(sub)
+    lease = (await db.execute(text("""
+        INSERT INTO pc_delivery_leases (subject_id, print_id, event_ids, portrait_hash, until)
+        VALUES (CAST(:sid AS uuid), CAST(:print AS uuid), CAST(:ids AS bigint[]), CAST(:h AS text),
+                now() + make_interval(secs => CAST(:secs AS double precision)))
+        RETURNING id, until
+    """), {"sid": subject_ref, "print": print_id, "ids": event_ids, "h": phash,
+           "secs": float(_pcp.LEASE_SECONDS)})).mappings().one()
+    await db.commit()
+    return {"lease_id": str(lease["id"]), "until": _pc_iso(lease["until"]),
+            "portrait_kind": kind, "portrait_hash": phash}
+
+
+@app.get("/api/v1/internal/pc/lease/{lease_id}", tags=["Internal"])
+async def internal_pc_lease_check(
+    lease_id: str,
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """200 while the lease still authorises what it was taken for; 404
+    lease_gone otherwise — the bot then drops the bytes unsent.
+
+    "Still authorises" is re-resolved, not assumed: the subject's row is read
+    again through the same columns and the same `portrait_for` the acquire
+    used, and the answer must still be the picture the lease recorded. A ban,
+    a full opt-out, a deletion or a switch to `none` all move that resolution
+    and revoke the lease without having to find its row — which is what makes
+    this safe against the writer that cannot see it (a discard of a print of
+    ANOTHER subject commits under a different identity lock and never
+    conflicts with the acquisition). The DELETEs those writers do are a
+    cleanup, no longer the guarantee."""
+    _require_internal_key(x_internal_key)
+    if not _pcp.print_id_ok(lease_id):
+        raise HTTPException(status_code=404, detail={"error": "lease_gone"})
+    row = (await db.execute(text(
+        "SELECT l.until, (l.until > now()) AS unexpired, l.portrait_hash AS leased_hash,"
+        + _PC_PORTRAIT_RESOLVE_COLS + "," + _PC_LEASE_PRINT_OK +
+        """FROM pc_delivery_leases l JOIN players p ON p.id = l.subject_id
+            WHERE l.id = CAST(:id AS uuid)"""),
+        {"id": lease_id})).mappings().first()
+    if row is None or not row["unexpired"] or row["subject_deleted"] or not row["print_deliverable"]:
+        raise HTTPException(status_code=404, detail={"error": "lease_gone"})
+    _, now_hash = _pcp.portrait_for(row)
+    if now_hash != row["leased_hash"]:
+        raise HTTPException(status_code=404, detail={"error": "lease_gone"})
+    return {"lease_id": lease_id, "until": _pc_iso(row["until"]), "live": True}
+
+
+@app.delete("/api/v1/internal/pc/lease/{lease_id}", tags=["Internal"])
+async def internal_pc_lease_release(
+    lease_id: str,
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    _require_internal_key(x_internal_key)
+    if not _pcp.print_id_ok(lease_id):
+        return {"released": 0}
+    n = (await db.execute(text("DELETE FROM pc_delivery_leases WHERE id = CAST(:id AS uuid) RETURNING id"),
+                          {"id": lease_id})).fetchall()
+    await db.commit()
+    return {"released": len(n)}
+
+
+@app.get("/api/v1/pc-face/{print_id}/{rev}/{locale}/{size}.png", tags=["Player Cards"])
+async def pc_face_png(print_id: str, rev: str, locale: str, size: str, db: AsyncSession = Depends(get_db)):
+    """The public face route (v22 §2.2): read-only and offline. Validation
+    before anything else (any other shape → 404, no render, no cache entry);
+    one row read in one snapshot — discarded → 404, computed rev ≠ requested
+    → 404 (the client re-reads its collection); only then the disk cache,
+    else one shared render. Every 200 is immutable."""
+    key = _pcp.face_key(print_id, rev, locale, size)
+    if key is None or (locale != "en" and locale not in _pc_served_locales()):
+        raise HTTPException(status_code=404, detail="Not found")
+    _pc_require_renderer()
+    row = await _pc_face_row(db, print_id)
+    if row is None or row["discarded_at"] is not None:
+        raise HTTPException(status_code=404, detail="Not found")
+    ctx = await _pc_face_ctx(db, locale)
+    _rev, data = await _pc_render_face(db, row, ctx, size, want=rev)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    return _pc_png_response(data, "public, max-age=31536000, immutable")
+
+
+@app.get("/api/v1/internal/pc/face/print/{print_id}/{locale}", tags=["Internal"])
+async def internal_pc_face_print(
+    print_id: str, locale: str,
+    size: str = Query("card"),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """The bot's picture source for a live print: its CURRENT revision,
+    resolved by the same read as the public route (discarded → 404); the
+    locale falls back to en here (no public cache key is involved)."""
+    _require_internal_key(x_internal_key)
+    _pc_require_renderer()
+    if not _pcp.print_id_ok(print_id) or size not in _pcp.SIZES:
+        raise HTTPException(status_code=404, detail="Not found")
+    loc = _pcp.effective_locale(locale, _pc_served_locales())
+    row = await _pc_face_row(db, print_id)
+    if row is None or row["discarded_at"] is not None:
+        raise HTTPException(status_code=404, detail="Not found")
+    ctx = await _pc_face_ctx(db, loc)
+    rev, data = await _pc_render_face(db, row, ctx, size)
+    resp = _pc_png_response(data, "private, max-age=60")
+    resp.headers["X-Face-Rev"] = rev
+    return resp
+
+
+@app.get("/api/v1/internal/pc/face/preview/{player_ref}/{locale}", tags=["Internal"])
+async def internal_pc_face_preview(
+    player_ref: str, locale: str,
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """The /card preview: the subject as the pool sees them now, drawn as an
+    unminted face. Re-applies the /card gate itself (opt-out, pool
+    membership, live ban → 404); cached under a preview_rev over every drawn
+    field for at most 60 s; never immutable."""
+    _require_internal_key(x_internal_key)
+    _pc_require_renderer()
+    if not _pcp.print_id_ok(player_ref):
+        raise HTTPException(status_code=404, detail={"error": "not_in_pool"})
+    loc = _pcp.effective_locale(locale, _pc_served_locales())
+    sub = (await db.execute(text("""
+        SELECT p.display_name, (p.deleted_at IS NOT NULL) AS subject_deleted,
+               (p.pc_opted_out_at IS NOT NULL) AS subject_opted_out,
+               p.pc_portrait_source AS portrait_source, p.pc_game_portrait_hash AS portrait_hash,
+               EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL) AS subject_banned
+          FROM players p WHERE p.id = CAST(:pid AS uuid)
+    """), {"pid": player_ref})).mappings().first()
+    if sub is None or sub["subject_deleted"] or sub["subject_opted_out"] or sub["subject_banned"]:
+        raise HTTPException(status_code=404, detail={"error": "not_in_pool"})
+    member = (await db.execute(text("""
+        SELECT m.pool_rank, m.rarity, m.rating, m.board_rank, m.series_wins, m.series_losses, m.top_card, m.title
+          FROM pc_pool_members m
+         WHERE m.player_id = CAST(:pid AS uuid) AND m.snapshot_id = (SELECT MAX(id) FROM pc_pool_snapshots)
+    """), {"pid": player_ref})).mappings().first()
+    if member is None:
+        raise HTTPException(status_code=404, detail={"error": "not_in_pool"})
+    ctx = await _pc_face_ctx(db, loc)
+    labels = ctx["labels"]
+    kind, phash = _pcp.portrait_for(sub)
+    name = _pcp.public_render_name(sub["display_name"])
+    rating = _pc_num(member["rating"])
+    board_rating = _pc_board_rating(rating) if rating is not None else None
+    rank_name = _rank_name_for(board_rating) if rating is not None else None
+    title = member["title"] or rank_name
+    title_hex = (ctx["colors"].get(rank_name) or _rank_fallback_color(rank_name)) if rank_name else None
+    spec = {
+        "band": member["rarity"], "name": name or "", "title": title, "title_rgb": _pc_hex_rgb(title_hex),
+        "rating": int(board_rating) if board_rating is not None else None,
+        "pool_rank": int(member["pool_rank"]),
+        "board_rank": int(member["board_rank"]) if member["board_rank"] is not None else None,
+        "wins": int(member["series_wins"] or 0), "losses": int(member["series_losses"] or 0),
+        "foil": False, "signed": False,
+        "edition_label": labels.get("pc.preview_footer", "Preview"), "minted_on": "", "print_short": "",
+        "top_card": bool(member["top_card"]),
+    }
+    rev = _pcp.preview_rev(ctx["renderer_fp"], ctx["cat_rev"], spec, kind, phash)
+    bucket = int(time.time() // _pcp.PREVIEW_TTL_S)
+    key = f"preview/{player_ref}/{rev}/{loc}/{bucket}.png"
+    pbytes = await _pc_portrait_bytes(db, phash)
+    data = await _pc_face_cache.get_or_render(
+        key, _functools.partial(_pcf.render_face, spec, labels, pbytes, "card"))
+    return _pc_png_response(data, "private, max-age=60")
+
+
+@app.get("/api/v1/internal/pc/face/back", tags=["Internal"])
+async def internal_pc_face_back(x_internal_key: str | None = Header(None, alias="X-Internal-Key")):
+    """The canonical Back.png of §1.4 from the server bundle, so the bot
+    image carries no assets."""
+    _require_internal_key(x_internal_key)
+    _pc_require_renderer()
+    if _pc_back_cache["bytes"] is None:
+        path = os.path.join(_pcf.ASSETS_DIR, "Back.png")
+        try:
+            with open(path, "rb") as f:
+                _pc_back_cache["bytes"] = f.read()
+        except OSError:
+            _pc_back_cache["bytes"] = await _pcp.in_pool(_pcf.render_back)
+    return _pc_png_response(_pc_back_cache["bytes"], "private, max-age=86400")
 
 
 # ── Player Cards: earned packs (WP-D) ────────────────────────────────────────
@@ -31055,6 +32032,13 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     await db.execute(text("SELECT pg_advisory_xact_lock(hashtext('pc_snapshot'))"))
     await db.execute(text("DELETE FROM pc_pool_members WHERE player_id = :pid"), {"pid": pid})
     await db.execute(text("UPDATE players SET pc_shards = 0, pc_opted_out_at = COALESCE(pc_opted_out_at, NOW()) WHERE id = :pid"), {"pid": pid})
+    # Portraits (migration 310): every delivery lease of this subject dies
+    # (a bot send in flight re-validates and drops the bytes), the writer's
+    # nonces go, then the game portrait unit is cleared under the per-hash P
+    # lock and the blob deleted when nothing else references it (I → P → R).
+    await db.execute(text("DELETE FROM pc_delivery_leases WHERE subject_id = :pid"), {"pid": pid})
+    await db.execute(text("DELETE FROM pc_portrait_nonces WHERE player_id = :pid"), {"pid": pid})
+    await _pc_clear_portrait_unit(db, str(pid), lock_days=None, source="none")
     # Music ratings (design-v4-report M15). EXPLICIT delete per the #437 audit
     # rule: this endpoint ANONYMIZES the players row rather than deleting it,
     # so music_ratings' ON DELETE CASCADE never fires — an ondelete clause is
@@ -33529,6 +34513,14 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
         "UPDATE players SET pc_collection_public = false, pc_announce = false, "
         "pc_settings_revision = pc_settings_revision + 1 WHERE steam_id = :sid"),
         {"sid": target_steam_id})
+    # A ban must not wait on a Discord send, so it revokes instead: a lease of
+    # this subject is deleted here, and any the DELETE cannot see is revoked
+    # anyway because revalidation re-resolves the picture and a banned subject
+    # resolves to none. The residual is one revalidation-to-send gap, bounded
+    # by the bot's lease reserve.
+    await db.execute(text(
+        "DELETE FROM pc_delivery_leases WHERE subject_id IN "
+        "(SELECT id FROM players WHERE steam_id = :sid)"), {"sid": target_steam_id})
     existing = await _is_banned(db, target_steam_id)
     if existing is not None:   # round-15 find 3: "" is an ACTIVE ban too
         return {"status": "already_banned", "reason": existing}

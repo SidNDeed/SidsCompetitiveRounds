@@ -88,3 +88,10 @@ _cm.txt
 
 # Local analysis scratch (review-agent caches) — never publish
 *.pkl
+
+# Player Cards renderer fonts: fetched by backend/api/assets/fonts/fetch_fonts.py, pinned by fonts.lock.json
+backend/api/assets/fonts/*.ttf
+backend/api/assets/fonts/*.otf
+backend/api/assets/fonts/*.ttc
+backend/api/assets/fonts/*.part
+backend/tests/_out/

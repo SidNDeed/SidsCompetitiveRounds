@@ -318,6 +318,11 @@ namespace CompetitiveRounds
             // no occlusion test, so the Card Stats rows under it stayed live and a
             // backdrop click could open ANOTHER preview instead of dismissing this one.
             || NativeUI.CardPreviewOpen
+            // Sept 12 (Player Cards): the full-screen card view raises its own
+            // uGUI backdrop over the binder. Without this term the backdrop
+            // click that dismissed it ALSO reached the armed Discard on the
+            // tile beneath, in the same click (#141/#200).
+            || PlayerCardsUI.CardPopupOpen
             || !Plugin.DataConsentAsked;
         private static bool AnyModalOwnsInput => OtherModalOwnsInput || NativeUI.UtilityPopupOpen;
 
@@ -337,6 +342,7 @@ namespace CompetitiveRounds
                NativeUI.UtilityPopupOpen || NativeUI.InfoPopupOpen
             || NativeUI.TournBetsPopupOpen || NativeUI.RecentTournPopupOpen
             || NativeUI.CardPreviewOpen
+            || PlayerCardsUI.CardPopupOpen
             // Sept 8 r1b L2: the language chooser is a backdrop modal too (Home has the
             // ranked-hint callout + caret as page IMGUI).
             || NativeUI.LangPromptOpen;

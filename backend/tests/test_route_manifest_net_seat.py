@@ -481,7 +481,12 @@ def _middleware_entry_points():
             key = _binding_key(dispatch)
             if key is not None:
                 keys.append(key)
-    return sorted(set(keys))
+    # SORTED, not `sorted(set(...))`. How many times a dispatch is registered
+    # is part of what the app does to a request: registering the rate-limit
+    # gate twice sends every request through the limiter twice, so a nominal
+    # 20-per-10-seconds starts refusing at 11 — and a set erased the second
+    # registration, leaving the manifest unmoved and this gate silent.
+    return sorted(keys)
 
 
 def _exception_handler_entry_points():
@@ -703,7 +708,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     )
 
     assert actual == expected
-    assert len(manifest) == 352   # Sept 10 Player Cards: +15 (pc/*, admin/pc/snapshot, internal/pc/*); room rules: +3 (334 before)
+    assert len(manifest) == 361   # portraits: +9 (the writer, the admin clear, the lease triple, four face routes; 352 before); Sept 10 Player Cards: +15 (pc/*, admin/pc/snapshot, internal/pc/*); room rules: +3 (334 before)
     assert len({json.dumps(item, sort_keys=True) for item in expected}) == len(expected)
     assert all(
         entry["classification"] in {"sentinel-exercised", "statically-nonconsumer"}
@@ -714,7 +719,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     exercised = [entry for entry in manifest if entry["classification"] == "sentinel-exercised"]
     static = [entry for entry in manifest if entry["classification"] == "statically-nonconsumer"]
     assert len(exercised) == 1
-    assert len(static) == 351   # Sept 10 Player Cards: +15; room rules: +3 (333 before)
+    assert len(static) == 360   # portraits: +9 (351 before); Sept 10 Player Cards: +15; room rules: +3 (333 before)
     assert _manifest_id(exercised[0]) == SENTINEL_ROUTE
 
     actual_by_identity = {
@@ -1176,6 +1181,47 @@ def test_the_indexed_segment_is_the_source_the_interpreter_would_show():
     assert short != _segment("glicko2", node.name), (
         "a one-line-short slice compared equal -- this control proves nothing"
     )
+
+
+# str.splitlines() breaks on eleven separators. Python's tokenizer breaks on
+# three. Everything in this file that turns a line number into source text
+# indexes a splitlines() list with an ast line number, so one character from
+# the difference anywhere in a file silently shifts every binding below it.
+_SPLITLINES_ONLY = "\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+
+
+def test_no_api_source_contains_a_line_break_only_str_splitlines_sees():
+    """The precondition every segment in this file rests on.
+
+    Found in the field: pc_portrait.py wrote its control-character class with
+    the characters themselves, so the two separators inside it put ast and
+    splitlines() two lines apart and the index handed back the wrong source
+    for every binding below. The fidelity control above caught it, but only
+    for the bindings it compares -- the fingerprints went on covering shifted
+    text either way. Write these as escapes (`\\u2028`), never as themselves.
+
+    NEGATIVE CONTROL: a constructed source carrying one must be flagged, or
+    this reads as "no file has one" when it may mean the scan never fires.
+    """
+    offenders = []
+    for path in sorted(API_DIR.glob("*.py")):
+        with path.open(encoding="utf-8", newline="") as handle:
+            source = handle.read()
+        for index, character in enumerate(source):
+            if character in _SPLITLINES_ONLY:
+                offenders.append("%s:%d U+%04X"
+                                 % (path.name, source.count("\n", 0, index) + 1,
+                                    ord(character)))
+    assert not offenders, (
+        "these characters are line breaks to str.splitlines() and not to the "
+        "tokenizer, so every segment below them is indexed off by one: %s"
+        % ", ".join(offenders[:10]))
+
+    planted = "x = 1\u2028y = 2\n"
+    assert any(c in _SPLITLINES_ONLY for c in planted), "the detector is inert"
+    assert len(planted.splitlines()) != len(planted.split("\n")) - 1, (
+        "the constructed counterexample does not actually shift the count, so "
+        "an always-empty scan would pass this test")
 
 
 def test_request_key_counterexample_is_rejected():

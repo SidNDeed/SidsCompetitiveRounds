@@ -22,7 +22,14 @@ namespace CompetitiveRounds
         public static LeaderboardData CachedLeaderboard { get; private set; }
         public static PlayerStatsData CachedPlayerStats { get; private set; }
         public static List<CardStatData> CachedCardStats { get; private set; }
-        public static bool IsLoading { get; private set; } = false;
+        // A deadline, not a latch. Every writer of this flag cleared it inside
+        // a callback owned by a coroutine host ROUNDS destroys at a scene
+        // change; one lost callback and every non-forced refresh after it was
+        // refused for the life of the process. The value is only ever "a fetch
+        // started recently", so an expiry is the whole meaning of it.
+        private static float _loadingUntil = -1f;
+        private const float LOADING_BUDGET = 30f;   // GetRequest times out at 20 s
+        public static bool IsLoading { get { return Time.realtimeSinceStartup <= _loadingUntil; } }
         public static string LastError { get; private set; } = "";
 
         // Version check
@@ -2937,6 +2944,11 @@ namespace CompetitiveRounds
             CachedInventory = null;
             // Player Cards (c4): the same rule — the epoch first, then the clears.
             _pcCacheEpoch++;
+            // The previous account's stats are the previous account's: display
+            // name, equipped cosmetics, gold. The revoke path already cleared
+            // them; an account switch did not, so the new identity briefly wore
+            // the old one's name and cosmetics.
+            CachedPlayerStats = null;
             CachedPcMe = null; CachedPcCollection = null;
             PcMeError = null; PcCollectionError = null;
             PcMeFetchedAt = -1f; PcMeDispatchedAt = -1f; PcCollectionFetchedAt = -1f;
@@ -3660,8 +3672,15 @@ namespace CompetitiveRounds
         public class PcPrint
         {
             public string print_id, card_id, subject_player_id, subject_name, edition_id, minted_at, rarity, top_card, title, rank_name, source;
+            public string face_rev;   // v22 §2.2: the server's face revision; null on an api without the renderer
+            public string face_locale = "en";   // the locale the answer keyed face_rev under (set by the parsers)
             public bool subject_deleted, foil, signed, discarded;
             public int pool_rank, board_rank, series_wins, series_losses, slot;
+            // v22 7: copies of this exact card the opener held BEFORE this slot,
+            // counted at mint. 0 is NEW and -1 is ABSENT -- an answer from an api
+            // that predates the field, where the reveal strip states nothing
+            // rather than announcing every card new.
+            public int dup_at_pull = -1;
             public float rating, peak_rating;
         }
         public class PcUnopened { public string pack_id, source, mode, kind, reference_id, created_at; }
@@ -3670,17 +3689,22 @@ namespace CompetitiveRounds
             public bool opted_out, collection_public, announce, daily_claimed;
             public int revision, shards, price_gold, price_shards, paid_packs_per_day, prints_per_pack, paid_today, prints, pool_member_count;
             public string daily_pack_id, next_reset_utc, pool_taken_at;
+            // v22 §3: the portrait unit — source "game" | "none", the stored
+            // hash + the descriptor of its inputs, and an admin lock's end.
+            public string portrait_source = "game", portrait_hash, portrait_descriptor, portrait_locked_until;
             public List<PcUnopened> unopened = new List<PcUnopened>();
         }
         public class PcPackAnswer
         {
             public string pack_id, status, source, mode, kind, pay, reason, created_at, opened_at, last_attempt_reason;
+            public string locale = "en";   // the locale this answer keyed its prints' face_rev under
             public int price;
             public List<PcPrint> prints = new List<PcPrint>();
         }
         public class PcCollection
         {
             public string owner_steam_id, owner_name;
+            public string locale = "en";   // the locale the server keyed the faces under (v22 §2.2)
             public bool is_public;
             public int count;
             public List<PcPrint> prints = new List<PcPrint>();
@@ -3695,6 +3719,15 @@ namespace CompetitiveRounds
         private static bool pcMeInFlight, pcCollInFlight;
         private static float pcMeAttemptAt = -100f, pcCollAttemptAt = -100f;   // the throttle keys on the last ATTEMPT, so a failing fetch is not re-fired by every repaint
         private static int _pcCacheEpoch;   // advanced on every identity edge (c4): a landing from an older epoch never touches the cache
+
+        /// <summary>The identity/consent generation. It is bumped by
+        /// OnLocalIdentityChanged and by the consent revoke, BEFORE either
+        /// clears anything, so any answer dispatched under the previous account
+        /// or the previous consent state can be recognised and dropped. The
+        /// Player Cards reads have always fenced on it; it is the same edge for
+        /// every other read, which is why it is named here rather than left as
+        /// a Player Cards detail.</summary>
+        internal static int IdentityEpoch { get { return _pcCacheEpoch; } }
 
         private static string PcUrl(string path, string steamId, string canon, string extraQuery)
         {
@@ -3743,18 +3776,51 @@ namespace CompetitiveRounds
         {
             if (string.IsNullOrEmpty(steamId) || steamId == "unknown") { callback?.Invoke(false, "no-id"); return; }
             if (!force && Time.realtimeSinceStartup - pcCollAttemptAt < 20f) { callback?.Invoke(CachedPcCollection != null, null); return; }
-            if (pcCollInFlight) { callback?.Invoke(false, "in-flight"); return; }
+            if (pcCollInFlight)
+            {
+                // A forced read is DEMAND, not a poll: it is what a pack open
+                // and a picture change ask for, and the answer already on the
+                // wire predates the thing that made them ask. Dropping it left
+                // the binder showing the collection from before the pack, with
+                // nothing left to come and correct it. The demand is remembered
+                // and re-issued when the older answer lands.
+                if (force) pcCollForceAgain = true;
+                callback?.Invoke(false, "in-flight");
+                return;
+            }
             pcCollInFlight = true; pcCollAttemptAt = Time.realtimeSinceStartup;
             string url = PcUrl("collection", steamId, $"pcread:{steamId}:collection:-", null);
             int epoch = _pcCacheEpoch;
+            // The prints carry a face_locale and the faces are cached by it, so
+            // the answer describes the language it was ASKED in. Committing one
+            // asked in the previous language leaves every face keyed to a locale
+            // the player no longer reads, and nothing re-asks.
+            string locale = I18n.Locale;
+            string who = steamId;
             Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
             {
                 pcCollInFlight = false;
+                bool again = pcCollForceAgain; pcCollForceAgain = false;
                 if (epoch != _pcCacheEpoch)
                 {
                     Plugin.Log.LogInfo("[PC] collection answer dropped: identity changed");
                     try { callback?.Invoke(false, "stale-identity"); } catch { }
                     return;
+                }
+                if (locale != I18n.Locale)
+                {
+                    Plugin.Log.LogInfo("[PC] collection answer dropped: language changed while it was in flight");
+                    try { PlayerCardFaces.Clear(); } catch { }
+                    pcCollAttemptAt = -100f;
+                    FetchPcCollection(who, true, callback);
+                    return;
+                }
+                if (again)
+                {
+                    // something demanded a fresh read while this one was on the
+                    // wire: let this answer land, then go again
+                    pcCollAttemptAt = -100f;
+                    try { Plugin.Instance.StartCoroutine(RefetchCollectionNextFrame(who)); } catch { }
                 }
                 if (ok)
                 {
@@ -3766,6 +3832,14 @@ namespace CompetitiveRounds
                 try { NativeUI.MarkDirty(); } catch { }
                 try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] collection callback threw: {cex.Message}"); }
             }, detailedErrors: true, sessionAware: true));
+        }
+
+        private static bool pcCollForceAgain;
+
+        private static IEnumerator RefetchCollectionNextFrame(string steamId)
+        {
+            yield return null;                       // let this answer commit first
+            FetchPcCollection(steamId, true);
         }
 
         /// <summary>Buy and open a pack. The caller persists its intent (nonce,
@@ -3851,6 +3925,167 @@ namespace CompetitiveRounds
                 if (ok && epoch == _pcCacheEpoch && CachedPcMe != null) PcApplySettings(CachedPcMe, resp);
                 try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] settings callback threw: {cex.Message}"); }
             }));
+        }
+
+        // ── Player Cards faces + the portrait writer (design v22 §2.2 / §3.2) ──
+        public const int PC_FACE_MAX_BYTES = 4 * 1024 * 1024;
+        public const int PC_TILE_MAX_BYTES = 1024 * 1024;
+
+        /// <summary>The public face route of one print at one size ("card" =
+        /// 750x1050, "tile" = 375x525): immutable per (print, face_rev, locale).
+        /// The locale is the one the server keyed the binder answer under, so
+        /// the key it built and the key fetched here agree.</summary>
+        public static string PcFaceUrl(string printId, string faceRev, string locale, string size)
+            => $"{baseUrl}/api/v1/pc-face/{printId}/{faceRev}/{(string.IsNullOrEmpty(locale) ? "en" : locale)}/{size}.png";
+
+        /// <summary>The portrait writer: the 1180x1180 RGBA PNG rides as the raw
+        /// body; the signed line carries the body's own SHA-256 and the
+        /// descriptor of its inputs, so neither can be swapped under it.</summary>
+        public static void PcPortraitUpload(string steamId, string nonce, string descriptor, byte[] png, Action<bool, string> callback)
+        {
+            if (Plugin.Instance == null || png == null || png.Length == 0) { callback?.Invoke(false, "not ready"); return; }
+            string sha;
+            using (var h = SHA256.Create()) sha = BitConverter.ToString(h.ComputeHash(png)).Replace("-", "").ToLowerInvariant();
+            string url = PcUrl("portrait", steamId, $"pcport:{steamId}:{nonce}:{sha}:{descriptor}",
+                $"nonce={nonce}&descriptor={UnityWebRequest.EscapeURL(descriptor)}");
+            Plugin.Instance.StartCoroutine(PostBytes(url, png, "image/png", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[PC] portrait upload bytes={png.Length} ok={ok} resp={PcShort(resp)}");
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] portrait callback threw: {cex.Message}"); }
+            }));
+        }
+
+        /// <summary>GET a small PNG: an exact Content-Length, the byte cap and the
+        /// PNG signature are all required, else (false, null).</summary>
+        public static void FetchBytes(string url, int cap, Action<bool, byte[], long> callback)
+        {
+            if (Plugin.Instance == null) { callback?.Invoke(false, null, 0); return; }
+            Plugin.Instance.StartCoroutine(GetBytes(url, cap, callback));
+        }
+
+        /// <summary>(ok, bytes, HTTP status): 426 stands for the version gate,
+        /// 0 for no answer at all.</summary>
+        /// <summary>A download that stops at a byte cap instead of discovering
+        /// it afterwards.
+        ///
+        /// The default DownloadHandlerBuffer reads the WHOLE body into memory
+        /// and only then hands it over, and `.data` allocates a second copy of
+        /// it; the cap was applied after both. A response with no
+        /// Content-Length (chunked) or a Content-Length that lies is therefore
+        /// bounded by nothing this client controls, on a route it reaches many
+        /// times per binder page. Here the cap is enforced on the way IN:
+        /// returning false from ReceiveData aborts the transfer, so the most
+        /// that is ever held is the cap plus one chunk.</summary>
+        private sealed class CappedDownload : DownloadHandlerScript
+        {
+            private readonly int _cap;
+            private byte[] _buf = new byte[0];
+            private int _len;
+            internal bool Refused { get; private set; }
+
+            internal CappedDownload(int cap) : base(new byte[64 * 1024]) { _cap = cap; }
+
+            protected override void ReceiveContentLengthHeader(ulong contentLength)
+            {
+                if (contentLength > (ulong)_cap) { Refused = true; return; }
+                if (contentLength > 0 && _buf.Length == 0) _buf = new byte[(int)contentLength];
+            }
+
+            protected override bool ReceiveData(byte[] data, int dataLength)
+            {
+                if (Refused) return false;
+                if (data == null || dataLength <= 0) return true;
+                if ((long)_len + dataLength > _cap) { Refused = true; _buf = new byte[0]; _len = 0; return false; }
+                if (_buf.Length < _len + dataLength)
+                {
+                    int want = _buf.Length == 0 ? 64 * 1024 : _buf.Length * 2;
+                    if (want < _len + dataLength) want = _len + dataLength;
+                    if (want > _cap) want = _cap;
+                    Array.Resize(ref _buf, want);
+                }
+                Buffer.BlockCopy(data, 0, _buf, _len, dataLength);
+                _len += dataLength;
+                return true;
+            }
+
+            protected override byte[] GetData() { return Taken(); }
+
+            /// <summary>The exact bytes received, or null if none or refused.
+            /// Sized to the content, so no caller sees trailing zeroes.</summary>
+            internal byte[] Taken()
+            {
+                if (Refused || _len == 0) return null;
+                if (_buf.Length != _len) Array.Resize(ref _buf, _len);
+                return _buf;
+            }
+
+            internal int Received { get { return _len; } }
+        }
+
+        private static IEnumerator GetBytes(string url, int cap, Action<bool, byte[], long> callback)
+        {
+            if (ConsentBlocksRequest(url)) { callback(false, null, 0); yield break; }
+            NoteAttempt();
+            using (var request = UnityWebRequest.Get(url))
+            {
+                var handler = new CappedDownload(cap);
+                request.downloadHandler = handler;
+                StampVersionHeader(request);
+                request.timeout = 20;
+                yield return request.SendWebRequest();
+
+                if (HandleVersionGate(request)) { callback(false, null, 426); yield break; }
+                bool success = request.result == UnityWebRequest.Result.Success;
+                NoteResult(success, request.responseCode);
+                byte[] data = null;
+                if (handler.Refused)
+                {
+                    Plugin.Log.LogWarning($"[HTTP] body over the {cap}-byte cap; transfer stopped");
+                    success = false;
+                }
+                else if (success)
+                {
+                    try
+                    {
+                        data = handler.Taken();
+                        long declared = -1;
+                        string cl = request.GetResponseHeader("Content-Length");
+                        if (string.IsNullOrEmpty(cl) || !long.TryParse(cl.Trim(), out declared)) declared = -1;
+                        bool png = data != null && data.Length >= 8
+                                   && data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E && data[3] == 0x47
+                                   && data[4] == 0x0D && data[5] == 0x0A && data[6] == 0x1A && data[7] == 0x0A;
+                        if (data == null || data.Length == 0 || data.Length > cap || declared != data.Length || !png) { success = false; data = null; }
+                    }
+                    catch { success = false; data = null; }
+                }
+                callback(success, data, request.responseCode);
+            }
+        }
+
+        /// <summary>POST a raw binary body (the portrait): PostRequest's twin with
+        /// an explicit content type — same consent, version-gate and session
+        /// handling, same "HTTP &lt;code&gt;: &lt;body&gt;" error format.</summary>
+        private static IEnumerator PostBytes(string url, byte[] body, string contentType, Action<bool, string> callback)
+        {
+            if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
+            NoteAttempt();
+            using (var request = new UnityWebRequest(url, "POST"))
+            {
+                request.uploadHandler = new UploadHandlerRaw(body);
+                request.downloadHandler = new DownloadHandlerBuffer();
+                request.SetRequestHeader("Content-Type", contentType);
+                StampVersionHeader(request);
+                string _sentTok = SteamAuth.SessionToken;
+                request.timeout = 30;
+
+                yield return request.SendWebRequest();
+
+                if (HandleVersionGate(request)) { callback(false, "outdated"); yield break; }
+                HandleSessionReject(request, _sentTok);
+                bool success = request.result == UnityWebRequest.Result.Success;
+                NoteResult(success, request.responseCode);
+                callback(success, success ? request.downloadHandler.text : FormatRequestError(request));
+            }
         }
 
         // ── parsing (depth-aware: the shared helpers search the whole text,
@@ -3962,6 +4197,15 @@ namespace CompetitiveRounds
             float f; if (float.TryParse(s, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out f)) return (int)f;
             return 0;
         }
+        /// <summary>`PcInt` with an explicit ABSENT answer. `PcInt` reads a
+        /// missing key and a present 0 as the same value, which is right for a
+        /// count and wrong for a field whose 0 is a statement ("NEW") and whose
+        /// absence is "this api never said".</summary>
+        internal static int PcIntOr(string raw, int fallback)
+        {
+            if (string.IsNullOrEmpty(raw) || raw == "null") return fallback;
+            return PcInt(raw);
+        }
         internal static float PcFloat(string raw)
         {
             if (string.IsNullOrEmpty(raw) || raw == "null") return 0f;
@@ -3998,18 +4242,20 @@ namespace CompetitiveRounds
                 source = PcStr(PcTopLevel(obj, "source")),
                 slot = PcInt(PcTopLevel(obj, "slot")),
                 discarded = PcBool(PcTopLevel(obj, "discarded")),
+                face_rev = PcStr(PcTopLevel(obj, "face_rev")),
+                dup_at_pull = PcIntOr(PcTopLevel(obj, "dup_at_pull"), -1),
             };
             return string.IsNullOrEmpty(p.print_id) ? null : p;
         }
 
-        private static List<PcPrint> ParsePcPrints(string arrayRaw)
+        private static List<PcPrint> ParsePcPrints(string arrayRaw, string faceLocale = "en")
         {
             var list = new List<PcPrint>();
             if (string.IsNullOrEmpty(arrayRaw) || arrayRaw == "null") return list;
             foreach (var o in SliceTopLevelObjects(arrayRaw))
             {
                 var p = ParsePcPrint(o);
-                if (p != null) list.Add(p);
+                if (p != null) { p.face_locale = string.IsNullOrEmpty(faceLocale) ? "en" : faceLocale; list.Add(p); }
             }
             return list;
         }
@@ -4022,6 +4268,7 @@ namespace CompetitiveRounds
             if (PcHas(settingsObj, "announce")) me.announce = PcBool(PcTopLevel(settingsObj, "announce"));
             if (PcHas(settingsObj, "revision")) me.revision = PcInt(PcTopLevel(settingsObj, "revision"));
             if (PcHas(settingsObj, "shards")) me.shards = PcInt(PcTopLevel(settingsObj, "shards"));
+            if (PcHas(settingsObj, "portrait_source")) me.portrait_source = PcStr(PcTopLevel(settingsObj, "portrait_source")) ?? "game";
         }
 
         internal static PcMe ParsePcMe(string json)
@@ -4039,6 +4286,10 @@ namespace CompetitiveRounds
             me.prints_per_pack = PcInt(PcTopLevel(prices, "prints_per_pack"));
             me.paid_today = PcInt(PcTopLevel(json, "paid_today"));
             me.prints = PcInt(PcTopLevel(json, "prints"));
+            if (PcHas(json, "portrait_source")) me.portrait_source = PcStr(PcTopLevel(json, "portrait_source")) ?? "game";
+            me.portrait_hash = PcHas(json, "portrait_hash") ? PcStr(PcTopLevel(json, "portrait_hash")) : null;
+            me.portrait_descriptor = PcHas(json, "portrait_descriptor") ? PcStr(PcTopLevel(json, "portrait_descriptor")) : null;
+            me.portrait_locked_until = PcHas(json, "portrait_locked_until") ? PcStr(PcTopLevel(json, "portrait_locked_until")) : null;
             string daily = PcTopLevel(json, "daily") ?? "";
             me.daily_claimed = PcBool(PcTopLevel(daily, "claimed"));
             me.daily_pack_id = PcStr(PcTopLevel(daily, "pack_id"));
@@ -4084,7 +4335,8 @@ namespace CompetitiveRounds
                 opened_at = PcStr(PcTopLevel(json, "opened_at")),
             };
             if (string.IsNullOrEmpty(a.status)) return null;
-            a.prints = ParsePcPrints(PcTopLevel(json, "prints"));
+            a.locale = PcStr(PcTopLevel(json, "locale")) ?? "en";
+            a.prints = ParsePcPrints(PcTopLevel(json, "prints"), a.locale);
             string att = PcTopLevel(json, "last_attempt");
             if (!string.IsNullOrEmpty(att) && att != "null") a.last_attempt_reason = PcStr(PcTopLevel(att, "reason"));
             return a;
@@ -4099,9 +4351,10 @@ namespace CompetitiveRounds
             {
                 owner_steam_id = PcStr(PcTopLevel(json, "owner_steam_id")),
                 owner_name = PcStr(PcTopLevel(json, "owner_name")),
+                locale = PcStr(PcTopLevel(json, "locale")) ?? "en",
                 is_public = PcBool(PcTopLevel(json, "public")),
                 count = PcInt(PcTopLevel(json, "count")),
-                prints = ParsePcPrints(prints),
+                prints = ParsePcPrints(prints, PcStr(PcTopLevel(json, "locale")) ?? "en"),
             };
             return c;
         }
@@ -7250,12 +7503,12 @@ namespace CompetitiveRounds
         // the bottom of the board off. The tab already pages locally at 100/page.
         public static void FetchLeaderboard(int limit = 500, int minMatches = 1)
         {
-            IsLoading = true;
+            _loadingUntil = Time.realtimeSinceStartup + LOADING_BUDGET;
             Plugin.Instance.StartCoroutine(GetRequest(
                 $"{baseUrl}/api/v1/leaderboard?limit={limit}&min_matches={minMatches}{InactiveQuery()}",
                 (success, response) =>
                 {
-                    IsLoading = false;
+                    _loadingUntil = -1f;
                     if (success)
                     {
                         try
@@ -7459,12 +7712,24 @@ namespace CompetitiveRounds
             if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
             if (!force && IsLoading) return; // Don't stack requests
 
-            IsLoading = true;
+            // The answer arrives seconds later, and in that window the player
+            // can switch accounts or withdraw consent. Both edges advance the
+            // epoch BEFORE they clear anything, so an answer carrying the old
+            // epoch is recognisable: it used to repopulate the stats that edge
+            // had just cleared, and then publish that account's cosmetics into
+            // the Photon room under the current one.
+            int epoch = IdentityEpoch;
+            _loadingUntil = Time.realtimeSinceStartup + LOADING_BUDGET;
             Plugin.Instance.StartCoroutine(GetRequest(
                 $"{baseUrl}/api/v1/players/{steamId}",
                 (success, response) =>
                 {
-                    IsLoading = false;
+                    _loadingUntil = -1f;
+                    if (epoch != IdentityEpoch || !Plugin.DataConsentGranted)
+                    {
+                        Plugin.Log.LogInfo("[STATS] answer dropped: identity or consent changed while it was in flight");
+                        return;
+                    }
                     if (success)
                     {
                         try
@@ -9225,7 +9490,7 @@ namespace CompetitiveRounds
 
         public static void FetchCardStats(int limit = 30, string steamId = null, string sortBy = "times_picked", string isRanked = null)
         {
-            IsLoading = true;
+            _loadingUntil = Time.realtimeSinceStartup + LOADING_BUDGET;
             string url = $"{baseUrl}/api/v1/cards?limit={limit}&sort_by={sortBy}&min_picks=1";
             if (!string.IsNullOrEmpty(steamId) && steamId != "unknown")
                 url += $"&steam_id={steamId}";
@@ -9236,7 +9501,7 @@ namespace CompetitiveRounds
                 url,
                 (success, response) =>
                 {
-                    IsLoading = false;
+                    _loadingUntil = -1f;
                     if (success)
                     {
                         try
@@ -20095,6 +20360,9 @@ namespace CompetitiveRounds
         private static void StampVersionHeader(UnityWebRequest req)
         {
             try { req.SetRequestHeader("X-Mod-Version", Plugin.ModVersion ?? "0.0.0"); } catch { }
+            // v22 §1.3: the mod's locale, informational only (never signed); the
+            // server folds it to a locale it serves, else English.
+            try { req.SetRequestHeader("X-Locale", string.IsNullOrEmpty(I18n.Locale) ? "en" : I18n.Locale); } catch { }
             try
             {
                 if (!string.IsNullOrEmpty(SteamAuth.SessionToken))
@@ -20239,6 +20507,15 @@ namespace CompetitiveRounds
                 // outranks in-flight fetches AND writes, own intent cleared.
                 try { MusicRatings.OnConsentRevoked(); } catch { }
                 CachedActiveSeries = null;
+                // Player Cards [v22 section 5.1]: a revoke outranks every in-flight
+                // Player Cards answer — the PC epoch advances FIRST, then the caches
+                // and every decoded face go, so no binder can paint a subject whose
+                // data may since have been deleted.
+                _pcCacheEpoch++;
+                CachedPcMe = null; CachedPcCollection = null;
+                try { PlayerCardFaces.Clear(); } catch { }
+                try { PlayerCardsUI.OnIdentityChanged(); } catch { }
+                try { PortraitRender.OnIdentityChanged(); } catch { }
                 ChatClient.Disconnect();
                 // Flip ranked off — if the user is in queue, server rejects further polls (410)
                 // and the queue entry expires via the cleanup cron. No more match reports will

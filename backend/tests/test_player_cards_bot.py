@@ -26,7 +26,8 @@ def test_the_three_commands_and_the_drain_loop_exist_once():
 def test_every_internal_route_the_bot_calls_is_registered_by_the_api():
     paths = set(re.findall(r'"/internal/pc/[a-z/]+"', BOT_SRC))
     assert paths == {'"/internal/pc/daily"', '"/internal/pc/collection"', '"/internal/pc/card"',
-                     '"/internal/pc/events/pending"', '"/internal/pc/events/ack"'}
+                     '"/internal/pc/events/pending"', '"/internal/pc/events/ack"',
+                     '"/internal/pc/lease"', '"/internal/pc/face/back"'}
     for p in paths:
         full = '"/api/v1' + p[1:]
         assert (f"@app.get({full}" in MAIN_SRC) or (f"@app.post({full}" in MAIN_SRC), p
@@ -35,12 +36,22 @@ def test_every_internal_route_the_bot_calls_is_registered_by_the_api():
     assert '_pc_api("POST", "/internal/pc/events/ack"' in BOT_SRC and '@app.post("/api/v1/internal/pc/events/ack"' in MAIN_SRC
     for read in ("collection", "card", "events/pending"):
         assert f'_pc_api("GET", "/internal/pc/{read}"' in BOT_SRC and f'@app.get("/api/v1/internal/pc/{read}"' in MAIN_SRC
+    # the lease and face routes (v22 section 6): the bot's f-string paths against the api's registrations
+    assert '_pc_api("POST", "/internal/pc/lease"' in BOT_SRC and '@app.post("/api/v1/internal/pc/lease"' in MAIN_SRC
+    assert BOT_SRC.count('f"/internal/pc/lease/{lease_id}"') == 2
+    assert '@app.get("/api/v1/internal/pc/lease/{lease_id}"' in MAIN_SRC and '@app.delete("/api/v1/internal/pc/lease/{lease_id}"' in MAIN_SRC
+    assert BOT_SRC.count('f"/internal/pc/face/print/{') == 2 and '@app.get("/api/v1/internal/pc/face/print/{print_id}/{locale}"' in MAIN_SRC
+    assert BOT_SRC.count('f"/internal/pc/face/preview/{') == 1 and '@app.get("/api/v1/internal/pc/face/preview/{player_ref}/{locale}"' in MAIN_SRC
+    assert '_pc_api_bytes("/internal/pc/face/back")' in BOT_SRC and '@app.get("/api/v1/internal/pc/face/back"' in MAIN_SRC
 
 
 def test_the_drain_posts_then_acks_and_stops_on_a_failed_send():
     src = _fn(BOT_SRC, "poll_pc_events")
-    assert src.index("await ch.send(") < src.index('"/internal/pc/events/ack"'), "ack-after-send (#105)"
-    assert src.count("break") == 1 and "retrying next tick" in src
+    assert src.index("await _pc_send_face(ch.send") < src.index('"/internal/pc/events/ack"'), "ack-after-send (#105)"
+    # two breaks, and each says why: a failed send stops the tick to keep the
+    # order, and so does a print group still waiting for its picture
+    assert src.count("break") == 2 and "retrying next tick" in src
+    assert "yet (try" in src
     assert "LEADERBOARD_CHANNEL_ID" in src and "if not sent:\n        return" in src
     assert "_pc_events_sent.pop(i, None)" in src, "the send memory is released only by a successful ack"
 

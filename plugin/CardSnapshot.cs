@@ -1002,7 +1002,7 @@ namespace CompetitiveRounds
         /// are "Default"/"Player"/etc). Even a false positive is benign:
         /// the park position keeps the clone outside every live frustum
         /// (the tier-export harness relies on position isolation alone).</summary>
-        private static int PickIsolationLayer()
+        internal static int PickIsolationLayer()
         {
             try
             {
@@ -1013,7 +1013,7 @@ namespace CompetitiveRounds
             return 31;
         }
 
-        private static void SetLayerRecursive(GameObject root, int layer)
+        internal static void SetLayerRecursive(GameObject root, int layer)
         {
             try
             {
