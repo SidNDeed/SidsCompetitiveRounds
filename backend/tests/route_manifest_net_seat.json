@@ -664,7 +664,7 @@
           ],
           "main",
           "pc_daily_claim",
-          "b08edc4a6ac44a497afaeb4884ff52e193678de9"
+          "46df9d8c35c7872822bcde3a6c54e75d6bf5020b"
         ],
         [
           "/api/v1/pc/me",
@@ -2900,7 +2900,7 @@
           ],
           "main",
           "internal_pc_daily",
-          "dadf518bb9b66f9c5d79b7a8ed9864bc59867f5e"
+          "7e02264ef5677e41df02a55697c7bc86b9f64804"
         ],
         [
           "/api/v1/internal/pc/events/ack",

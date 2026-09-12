@@ -24636,7 +24636,7 @@ async def _pc_claim_daily(db: AsyncSession, player, *, via: str) -> dict:
     await db.execute(text("""
         UPDATE pc_daily_claims SET pack_id = CAST(:pack AS uuid)
          WHERE player_id = CAST(:pid AS uuid) AND claimed_on = CAST(:day AS date)
-    """), {"pack": str(pack), "pid": pid, "day": str(claimed)})
+    """), {"pack": str(pack), "pid": pid, "day": claimed})
     await db.commit()
     print(f"[PC-DAILY] player={steam_id} day={claimed} pack={pack} via={via}")
     return {"status": "claimed", "pack_id": str(pack), "claimed_on": str(claimed), "next_reset_utc": _pc_iso(reset)}

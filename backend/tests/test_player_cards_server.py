@@ -550,6 +550,13 @@ def test_every_player_route_takes_the_shared_identity_lock_before_the_player_rea
     assert daily.index("pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))") \
         < daily.index("SELECT deleted_at FROM players WHERE id = CAST(:pid AS uuid)") \
         < daily.index("FOR NO KEY UPDATE")
+    # asyncpg encodes a date-typed parameter client-side, so the claim UPDATE
+    # binds the date object RETURNING gave back, never its string form (the
+    # string 500'd the first live claim on 2026-09-12: "invalid input for
+    # query argument $3 ... 'str' object has no attribute 'toordinal'").
+    assert "claimed_on = CAST(:day AS date)" in daily
+    assert '{"pack": str(pack), "pid": pid, "day": claimed}' in daily
+    assert '{"pack": str(pack), "pid": pid, "day": str(claimed)}' not in daily
 
 
 def test_a_held_packs_failed_open_answers_its_own_unopened_state():
