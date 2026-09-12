@@ -186,3 +186,15 @@ def test_the_font_binaries_stay_out_of_the_repository():
         assert "backend/api/assets/fonts/*%s" % suffix in ignore, (
             "%s files under the renderer's font directory are no longer "
             "gitignored" % suffix)
+
+def test_the_image_installs_the_text_shaper_the_renderer_loads_at_runtime():
+    """Pillow's wheel bundles libraqm but loads libfribidi at runtime. Without
+    the package the renderer runs the basic engine, health reports
+    pc_raqm=false and every face route refuses with text_shaping_unavailable
+    -- production on 2026-09-12: both boxes healthy, first pack open refused."""
+    df = _read(DOCKERFILE)
+    apt = re.search(r"^RUN .*apt-get install .*libfribidi0.*$", df, re.M)
+    assert apt, "the Dockerfile installs no libfribidi0, so the renderer cannot shape text"
+    copy_all = re.search(r"^COPY \. \.\s*$", df, re.M)
+    assert copy_all and apt.start() < copy_all.start(), (
+        "the shaper layer must sit above the code copy so a code-only rebuild reuses it")

@@ -2,6 +2,16 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# Text shaping for the Player Cards renderer. Pillow's manylinux wheel bundles
+# libraqm and HarfBuzz but loads libfribidi at RUNTIME, so without this package
+# the renderer falls back to Pillow's "basic" layout engine, /api/v1/health
+# reports pc_raqm=false, and _pc_require_renderer refuses every face route --
+# pack open, portrait upload, the public face and the bot's bytes -- with
+# text_shaping_unavailable. That is what production did on 2026-09-12: both
+# boxes healthy, fonts present, first pack open refused. The release train now
+# asserts pc_raqm on both boxes; test_pc_deploy_wiring.py holds this line.
+RUN apt-get update && apt-get install -y --no-install-recommends libfribidi0 && rm -rf /var/lib/apt/lists/*
+
 # Install dependencies first (cached layer)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
