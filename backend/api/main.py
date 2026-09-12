@@ -13821,7 +13821,8 @@ async def _lock_queue_group_for_player(
 
 
 def compute_elo_range(wait_seconds: int) -> int:
-    """Stepped elo range expansion based on wait time."""
+    """Stepped elo range expansion based on wait time — the 2v2 team queue's
+    ladder. The 1v1 ranked queue uses compute_ranked_window (uncapped)."""
     if wait_seconds >= 120:
         return 800
     elif wait_seconds >= 60:
@@ -13830,6 +13831,90 @@ def compute_elo_range(wait_seconds: int) -> int:
         return 200
     else:
         return 100
+
+
+RANKED_WINDOW_UNCAPPED_SECONDS = 120
+RANKED_WINDOW_LEGACY_CAP = 800
+RANKED_REJOIN_GRACE_SECONDS = 30
+
+
+def compute_ranked_window(wait_seconds: int) -> int | None:
+    """1v1 ranked window: the stepped ladder until RANKED_WINDOW_UNCAPPED_SECONDS,
+    then None = no rating bound at all (Sept 12). The +/-800 cap manufactured
+    empty searches: 589 of the 652 players seen in the fortnight before sat at
+    1400-1600, so a 2500 seat had eight possible partners and the queue said
+    nothing about why. The bilateral rule is unchanged — the OTHER seat's own
+    clock decides its own window — so a wide pair still needs both seats past
+    the uncap; the rejoin grace below keeps that clock from restarting."""
+    if wait_seconds >= RANKED_WINDOW_UNCAPPED_SECONDS:
+        return None
+    elif wait_seconds >= 60:
+        return 400
+    elif wait_seconds >= 30:
+        return 200
+    else:
+        return 100
+
+
+def _ranked_window_binds(my_rating, elo_range):
+    """(my_uncapped, rmin, rmax) for the candidate scan. None = no bound: the
+    bounds stay bound (typed floats the driver never infers) and the switch
+    short-circuits them in SQL. Executed by a test with a negative control,
+    so an inverted switch is a failing test and not a shape."""
+    if elo_range is None:
+        return True, my_rating, my_rating
+    return False, my_rating - elo_range, my_rating + elo_range
+
+
+# Sept 12: the wait clock of a seat that just LEFT the 1v1 queue, kept for
+# RANKED_REJOIN_GRACE_SECONDS so a rejoin continues the ladder instead of
+# restarting it. Process-local like _presence_seen — the api runs ONE uvicorn
+# worker by contract (Dockerfile + compose both pin it) — and a lost entry
+# (restart, grace elapsed) costs exactly the previous behaviour, a fresh clock.
+_ranked_recent_leaves: dict = {}   # player_id -> (wait clock, left_at)
+
+
+def _ranked_note_leave(player_id, joined_at, now=None) -> None:
+    """Record the leaver's wait clock (wait_since when a rejoin kept one, else
+    joined_at); prune entries past the grace. The leave calls this BEFORE its
+    commit: the value is the row's own clock, so a rolled-back leave leaves a
+    note that says what the surviving row says."""
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(seconds=RANKED_REJOIN_GRACE_SECONDS)
+    for pid in [p for p, (_j, left) in _ranked_recent_leaves.items() if left < cutoff]:
+        _ranked_recent_leaves.pop(pid, None)
+    if joined_at is None:
+        return
+    _ranked_recent_leaves[player_id] = (joined_at, now)
+
+
+def _ranked_peek_rejoin_clock(player_id, now=None):
+    """The leaver's (wait clock, left_at) entry when the leave is inside the
+    grace, else None (and the entry is dropped). A peek never consumes: the
+    join hands the entry back to _ranked_forget_leave after its own commit,
+    so a failed join retries with the clock intact. A clock already past the
+    30-minute cap is not handed back — the poll would only expire that seat
+    on its first tick."""
+    now = now or datetime.now(timezone.utc)
+    entry = _ranked_recent_leaves.get(player_id)
+    if entry is None:
+        return None
+    joined_at, left_at = entry
+    if (now - left_at).total_seconds() > RANKED_REJOIN_GRACE_SECONDS:
+        _ranked_recent_leaves.pop(player_id, None)
+        return None
+    if (now - joined_at).total_seconds() >= QUEUE_EXPIRE_MINUTES * 60:
+        _ranked_recent_leaves.pop(player_id, None)
+        return None
+    return entry
+
+
+def _ranked_forget_leave(player_id, entry) -> None:
+    """Consume the entry a committed join used — only while it is still the
+    entry recorded. A leave that landed between that commit and this call
+    wrote a newer one, which the next rejoin is entitled to."""
+    if entry is not None and _ranked_recent_leaves.get(player_id) is entry:
+        _ranked_recent_leaves.pop(player_id, None)
 
 
 async def _enrollment_identity_gate(db: AsyncSession, steam_id: str) -> None:
@@ -14713,6 +14798,13 @@ async def _queue_join_upsert(db: AsyncSession, *, player_id, steam_id, display_n
     as the seat's own last-seen version; a rejoin also clears `rules`, which
     only ever means something next to a stamped room_name.
 
+    joined_at is always now here and stays the row's insert time — the
+    cross-queue eviction (_evict_other_queue_searching, joined_before) reads
+    it as its fence. The Sept 12 rejoin grace lives in wait_since (migration
+    309, NULL = joined_at), written by queue_join AFTER this statement; the
+    conflict branch clears it, so a join over a live row restarts the clock
+    exactly as it did before that release.
+
     Raw SQL rather than the ORM upsert it replaced (Sept 7 item 3): the two
     ping columns are not declared on RankedQueue (migration 301), and an ORM
     statement cannot carry an undeclared column (#346). The column list and
@@ -14752,6 +14844,7 @@ async def _queue_join_upsert(db: AsyncSession, *, player_id, steam_id, display_n
             room_region = NULL,
             ready = false,
             joined_at = EXCLUDED.joined_at,
+            wait_since = NULL,
             matched_at = NULL,
             last_polled = EXCLUDED.last_polled,
             region_pings = EXCLUDED.region_pings,
@@ -14849,7 +14942,29 @@ async def queue_join(req: QueueJoinRequest, request: Request, db: AsyncSession =
         home_region=_home_region, ranked_only=req.ranked_only,
         region_pings=_pings_json, region_pings_age=_pings_age,
         mod_version=_request_mod_version(request))
+    # Sept 12: a seat that left inside RANKED_REJOIN_GRACE_SECONDS keeps its
+    # wait clock, so the ladder (and its uncap) continues. The clock lives in
+    # wait_since (migration 309): joined_at stays the row's insert time, which
+    # the cross-queue eviction reads as its fence (joined_before) — a
+    # backdated joined_at would make this fresh row evictable by an older
+    # cross-mode join. Looked up AFTER the upsert: a leave of this seat still
+    # in flight holds the row lock the INSERT waits on and records its note
+    # before it commits, so the note is there by the time the INSERT
+    # proceeds. Consumed only after this commit (a failed join retries with
+    # the clock intact), and only while it is still the entry this join used
+    # — a leave landing in between writes a newer one, which the next rejoin
+    # is entitled to.
+    _kept = _ranked_peek_rejoin_clock(player.id)
+    if _kept is not None:
+        await db.execute(
+            text("UPDATE ranked_queue SET wait_since = CAST(:wait_since AS timestamptz) "
+                 "WHERE player_id = :pid"),
+            {"pid": player.id, "wait_since": _kept[0]},
+        )
+        print(f"[QUEUE-REJOIN] {req.steam_id} keeps its wait clock "
+              f"({int((datetime.now(timezone.utc) - _kept[0]).total_seconds())}s so far)")
     await db.commit()
+    _ranked_forget_leave(player.id, _kept)
 
     return {"status": "searching", "message": "Joined ranked queue"}
 
@@ -14882,10 +14997,20 @@ async def queue_leave(request: Request, steam_id: str = Query(...), db: AsyncSes
         # once and hand a ReadySent seat a "matched" it cannot act on until the
         # ready timeout. The partner typically stays unmatchable for one poll
         # interval (~3 s); a refused or absent poll delays its release.
-        await db.execute(
-            text("DELETE FROM ranked_queue WHERE player_id = :pid"),
+        _left = await db.execute(
+            text("DELETE FROM ranked_queue WHERE player_id = :pid "
+                 "RETURNING COALESCE(wait_since, joined_at)"),
             {"pid": player.id},
         )
+        _left_row = _left.first()
+        # Sept 12: keep the wait clock for RANKED_REJOIN_GRACE_SECONDS so a
+        # rejoin continues the ladder. Recorded BEFORE the commit: a join of
+        # this seat already waiting on the row lock proceeds the instant the
+        # commit lands and must find the note there. The value is the row's
+        # own clock, so a rolled-back leave leaves a note that says what the
+        # surviving row says — nothing a join could not have read itself.
+        if _left_row is not None:
+            _ranked_note_leave(player.id, _left_row[0])
         await db.commit()
 
     return {"status": "left", "message": "Left ranked queue"}
@@ -15482,7 +15607,7 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
             SELECT rq.player_id, rq.steam_id, rq.display_name, rq.rating,
                    rq.rating_deviation, rq.status, rq.matched_with,
                    rq.room_name, rq.room_region, rq.region, rq.home_region,
-                   rq.ready, rq.joined_at, rq.matched_at,
+                   rq.ready, rq.joined_at, rq.wait_since, rq.matched_at,
                    rq.region_pings, rq.region_pings_at, rq.rules
             FROM ranked_queue rq
             JOIN players p ON rq.player_id = p.id
@@ -15527,7 +15652,7 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
                 SELECT rq.player_id, rq.steam_id, rq.display_name, rq.rating,
                        rq.rating_deviation, rq.status, rq.matched_with,
                        rq.room_name, rq.room_region, rq.region, rq.home_region,
-                       rq.ready, rq.joined_at, rq.matched_at,
+                       rq.ready, rq.joined_at, rq.wait_since, rq.matched_at,
                        rq.region_pings, rq.region_pings_at, rq.rules
                 FROM ranked_queue rq
                 JOIN players p ON rq.player_id = p.id
@@ -15548,7 +15673,9 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
         raise HTTPException(status_code=503, detail="queue_contended")
 
     now = datetime.now(timezone.utc)
-    wait_seconds = int((now - entry["joined_at"]).total_seconds())
+    # Sept 12: the wait clock a rejoin kept (wait_since, migration 309), else
+    # the insert time — joined_at itself stays the cross-queue eviction's fence.
+    wait_seconds = int((now - (entry["wait_since"] or entry["joined_at"])).total_seconds())
     my_pid = entry["player_id"]
 
     # Heartbeat — update last_polled so cleanup knows we're alive. With a valid
@@ -15870,10 +15997,11 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
                          {"pid": my_pid})
         await db.commit()
         return QueuePollResponse(status="not_in_queue", wait_time=0)
-    elo_range = compute_elo_range(wait_seconds)
+    elo_range = compute_ranked_window(wait_seconds)
     my_rating = entry["rating"]
-    min_rating = my_rating - elo_range
-    max_rating = my_rating + elo_range
+    # None = uncapped (>= RANKED_WINDOW_UNCAPPED_SECONDS): the bounds are still
+    # bound (typed floats) but the my_uncapped switch short-circuits them in SQL.
+    my_uncapped, min_rating, max_rating = _ranked_window_binds(my_rating, elo_range)
 
     # Find best candidate (SKIP LOCKED prevents race conditions)
     # Bilateral range check: OUR range must include them AND THEIR range must include us
@@ -15883,21 +16011,28 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
             FROM ranked_queue
             WHERE status = 'searching'
               AND player_id != :pid
-              AND rating BETWEEN :rmin AND :rmax
-              AND :my_rating BETWEEN
-                  rating - (CASE
-                      WHEN EXTRACT(EPOCH FROM (now() - joined_at)) >= 120 THEN 800
-                      WHEN EXTRACT(EPOCH FROM (now() - joined_at)) >= 60 THEN 400
-                      WHEN EXTRACT(EPOCH FROM (now() - joined_at)) >= 30 THEN 200
-                      ELSE 100
-                  END)
-                  AND
-                  rating + (CASE
-                      WHEN EXTRACT(EPOCH FROM (now() - joined_at)) >= 120 THEN 800
-                      WHEN EXTRACT(EPOCH FROM (now() - joined_at)) >= 60 THEN 400
-                      WHEN EXTRACT(EPOCH FROM (now() - joined_at)) >= 30 THEN 200
-                      ELSE 100
-                  END)
+              -- a seat that stopped polling is not a partner (Sept 12). The
+              -- janitor sweeps it at 30 s and a live client polls every 3 s.
+              AND last_polled > NOW() - INTERVAL '15 seconds'
+              -- MY window (Sept 12) -- the stepped ladder until the uncap
+              -- second, then ANY rating; the my_uncapped switch decides.
+              AND (CAST(:my_uncapped AS boolean) OR rating BETWEEN :rmin AND :rmax)
+              -- THEIR window off THEIR wait clock (bilateral; wait_since when
+              -- a rejoin kept it) -- the same ladder, and no bound once they
+              -- have waited 120 s themselves.
+              AND (EXTRACT(EPOCH FROM (now() - COALESCE(wait_since, joined_at))) >= 120
+                   OR :my_rating BETWEEN
+                      rating - (CASE
+                          WHEN EXTRACT(EPOCH FROM (now() - COALESCE(wait_since, joined_at))) >= 60 THEN 400
+                          WHEN EXTRACT(EPOCH FROM (now() - COALESCE(wait_since, joined_at))) >= 30 THEN 200
+                          ELSE 100
+                      END)
+                      AND
+                      rating + (CASE
+                          WHEN EXTRACT(EPOCH FROM (now() - COALESCE(wait_since, joined_at))) >= 60 THEN 400
+                          WHEN EXTRACT(EPOCH FROM (now() - COALESCE(wait_since, joined_at))) >= 30 THEN 200
+                          ELSE 100
+                      END))
               AND player_id NOT IN (
                   SELECT blocked_id FROM queue_blocks
                   WHERE blocker_id = :pid AND expires_at > now()
@@ -15923,7 +16058,7 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
             LIMIT 1
             FOR UPDATE SKIP LOCKED
         """),
-        {"pid": my_pid, "rmin": min_rating, "rmax": max_rating,
+        {"pid": my_pid, "rmin": min_rating, "rmax": max_rating, "my_uncapped": my_uncapped,
          "my_rating": my_rating, "service_ids": sorted(SPECTATE_BROADCAST_STEAM_IDS)},
     )
     opp = candidate.mappings().first()
@@ -15972,7 +16107,12 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
         status="searching",
         wait_time=wait_seconds,
         queue_size=queue_size,
-        elo_range=elo_range,
+        # Wire compatibility: clients before the uncap print elo_range verbatim
+        # in the searching strip, so an uncapped window still reports the old
+        # cap to them; elo_unbounded is the real signal (the next client prints
+        # an infinity sign from it).
+        elo_range=elo_range if elo_range is not None else RANKED_WINDOW_LEGACY_CAP,
+        elo_unbounded=(elo_range is None),
     )
 
 

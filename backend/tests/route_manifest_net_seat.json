@@ -2398,7 +2398,7 @@
           ],
           "main",
           "queue_join",
-          "c8c55f66dcc746d9f15aff1eb13201edd01900e6"
+          "58758e63e0214c5c106ad1db3f6ae3d7d6c22c1c"
         ],
         [
           "/api/v1/queue/leave",
@@ -2407,7 +2407,7 @@
           ],
           "main",
           "queue_leave",
-          "5abf3233dc5ce5cca4ea7389e7d7676e1265f154"
+          "75b6e5919c400dd86f555d9ad93c0a312577f6c3"
         ],
         [
           "/api/v1/queue/poll/{steam_id}",
@@ -2416,7 +2416,7 @@
           ],
           "main",
           "queue_poll",
-          "147a133991cae077038b061953233d6687f4ad77"
+          "e963defd08c6899916c712e36c3bb6ff50f89cd3"
         ],
         [
           "/api/v1/queue/ready",
@@ -2749,7 +2749,7 @@
           ],
           "main",
           "team_queue_poll",
-          "35d0e9266ab8dceac0af77f0eb6978ce94b27ed5"
+          "82207fb97e7f0e1ec19ed8d58db22e9807d8aa60"
         ],
         [
           "/api/v1/team/queue/preferred-team",

@@ -10938,6 +10938,7 @@ namespace CompetitiveRounds
             public int wait_time;
             public int queue_size;
             public int elo_range;
+            public bool elo_unbounded;   // Sept 12: no rating bound after 120 s (the strip prints an infinity sign)
             public string opponent_steam_id;
             public string opponent_name;
             public float opponent_rating;
@@ -12061,6 +12062,7 @@ namespace CompetitiveRounds
                                 wait_time = ExtractJsonInt(response, "wait_time"),
                                 queue_size = ExtractJsonInt(response, "queue_size"),
                                 elo_range = ExtractJsonInt(response, "elo_range"),
+                                elo_unbounded = ExtractJsonBool(response, "elo_unbounded"),
                             };
                             NativeUI.MarkDirty();
                         }

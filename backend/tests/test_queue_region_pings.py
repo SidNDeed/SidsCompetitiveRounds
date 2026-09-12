@@ -604,7 +604,7 @@ def _queue_row(pid, steam, matched_with, pings, pings_at, now):
         "player_id": pid, "steam_id": steam, "display_name": steam, "rating": 1500.0,
         "rating_deviation": 350.0, "status": "matched", "matched_with": matched_with,
         "room_name": None, "room_region": None, "region": "us", "home_region": "us",
-        "ready": True, "joined_at": now - timedelta(seconds=30), "matched_at": now - timedelta(seconds=5),
+        "ready": True, "joined_at": now - timedelta(seconds=30), "wait_since": None, "matched_at": now - timedelta(seconds=5),
         "region_pings": pings, "region_pings_at": pings_at,
         # migration 306: the re-reads project the frozen rules too
         "rules": None,

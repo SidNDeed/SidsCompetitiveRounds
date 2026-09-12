@@ -864,6 +864,9 @@ class QueuePollResponse(BaseModel):
     wait_time: int = 0
     queue_size: int = 0
     elo_range: int = 0
+    # Sept 12: the 1v1 window has no rating bound after 120 s; elo_range then
+    # carries the old cap for clients that print it verbatim.
+    elo_unbounded: bool = False
     opponent_steam_id: str | None = None
     opponent_name: str | None = None
     opponent_rating: float | None = None
