@@ -44,6 +44,12 @@ class Player(Base):
     # default TRUE; a player hides via the Settings toggle.
     discord_display_name = Column(String(64), nullable=True)
     show_discord = Column(Boolean, nullable=False, default=True)
+    # Migration 306: Same Cards preference for queue-matched rooms (1v1, and
+    # the auto-queue 2v2 / 1v2 rooms, which have no host). A room gets the rule
+    # only when EVERY member has this on; read at issuance, so a change while
+    # queued applies to the next room. Written by the pref-same-cards endpoint
+    # (verified session required).
+    pref_same_cards = Column(Boolean, nullable=False, default=False)
     # Spectator opt-out (migration 194). TRUE = this player's live games may
     # be listed/spectated. Grant + heartbeat both recheck it (design §6.7).
     allow_spectators = Column(Boolean, nullable=False, default=True)
@@ -56,6 +62,15 @@ class Player(Base):
     # player's gold from everyone. Unlocked by purchasing sku 'util_hide_gold',
     # toggled via /hide-gold. The player still sees their own real balance.
     hide_gold = Column(Boolean, nullable=False, default=False)
+    # Player Cards (migration 308). Opt-OUT model: a player is in the card
+    # pool unless pc_opted_out_at is set. The two flags gate the Discord
+    # surfaces; pc_settings_revision is the compare-and-set counter every
+    # settings write carries; pc_shards is the closed discard currency.
+    pc_opted_out_at = Column(DateTime(timezone=True), nullable=True)
+    pc_collection_public = Column(Boolean, nullable=False, default=True)
+    pc_announce = Column(Boolean, nullable=False, default=True)
+    pc_settings_revision = Column(Integer, nullable=False, default=0)
+    pc_shards = Column(Integer, nullable=False, default=0)
     # Appear-offline privacy toggle (migration 126): when true, the player is
     # excluded from the Home tab's online / recently-online lists. The
     # anonymous online COUNT still includes them (it carries no identity).
@@ -428,6 +443,11 @@ class RankedSeries(Base):
     # Private rooms (set by /series/preflight when room name doesn't start
     # with "ranked_") — bets are locked, not surfaced on Live Ranked Games.
     is_private = Column(Boolean, nullable=False, default=False)
+    # Migration 306: the frozen room rules {"ff": bool, "sc": bool} this series
+    # was issued with (NULL = issued before the release; "unknown"). Declared so
+    # the issuance mint sites can assign it through the ORM — an assignment to
+    # an undeclared column is a silent no-op (#346).
+    rules = Column(JSONB, nullable=True)
     # NOT DECLARED HERE ON PURPOSE: ranked_series.last_activity_at (migration
     # 215, bug 199). It exists in the DB and is read by the liveness predicates
     # in GET /series/active and POST /bets, but it is written ONLY through raw
@@ -606,6 +626,12 @@ class RankedQueue(Base):
     joined_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     matched_at = Column(DateTime(timezone=True), nullable=True)
     last_polled = Column(DateTime(timezone=True), nullable=True, default=lambda: datetime.now(timezone.utc))
+    # Migration 306 (room rules): the version THIS seat's own last authenticated
+    # poll advertised, and the frozen {ff, sc} record stamped at issuance next
+    # to room_name. Writers: queue_poll / queue_ready (mod_version),
+    # _queue_stamp_room_reciprocal (rules). Readers: the same two endpoints.
+    mod_version = Column(String(16), nullable=True)
+    rules = Column(JSONB, nullable=True)
 
 
 class QueueBlock(Base):
@@ -993,6 +1019,15 @@ class TeamQueue(Base):
     matched_at = Column(DateTime(timezone=True), nullable=True)
     last_polled = Column(DateTime(timezone=True), nullable=True, default=lambda: datetime.now(timezone.utc))
     queue_type = Column(String(8), nullable=False, default="auto")
+    # Migration 306 (room rules). mod_version = this seat's own last poll;
+    # seen_settings_version = the lobby settings generation this member last
+    # RENDERED (Start waits for every member's echo); rules = the frozen
+    # {ff, sc} record (copied from the lobby row at Start, or computed from
+    # the four members' preferences at a queue match) that issuance copies
+    # onto team_series.
+    mod_version = Column(String(16), nullable=True)
+    seen_settings_version = Column(Integer, nullable=False, default=0)
+    rules = Column(JSONB, nullable=True)
 
 
 class TeamSeries(Base):
@@ -1020,6 +1055,9 @@ class TeamSeries(Base):
     invalidation_reason = Column(String(64), nullable=True)
     spawn_confirmations = Column(SmallInteger, nullable=False, default=0)
     spawn_confirmed_by = Column(JSONB, nullable=False, default=list)
+    # Migration 306: frozen room rules {"ff", "sc"} copied from the four
+    # team_queue rows at room issuance (NULL = pre-release series).
+    rules = Column(JSONB, nullable=True)
 
 
 class TeamMatch(Base):

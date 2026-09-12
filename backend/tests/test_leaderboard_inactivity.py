@@ -5,8 +5,8 @@ predicate so titles, the doubled bonus and "#N of M" follow the board.
 
 Source-shape tests in the style of test_queue_ready_strict.py: they prove the
 statements carry the TYPED bind (CAST(:active_days AS integer) inside
-make_interval) or, for the parameter-less podium statements, the interpolated
-int -- and never a string-concatenated interval (learning #448).
+make_interval) -- the podium statements bind the same typed :active_days --
+and never a string-concatenated interval (learning #448).
 """
 
 import inspect
@@ -80,15 +80,25 @@ def test_every_board_binds_the_typed_predicate_in_page_and_count():
         _no_string_interval(src, name)
 
 
-def test_podium_queries_interpolate_the_int_and_bind_nothing():
-    rendered = f"make_interval(days => {main.LEADERBOARD_ACTIVE_DAYS})"
+def test_podium_queries_bind_the_active_window_like_every_board():
+    """Walker r10 (Sept 10): the podium statements are static strings —
+    the env int is a bind, never an f-string — so the janitor self-test can
+    read them, and every site that executes one passes the bind (an
+    unbound :active_days would 500 the podium)."""
     for name, q in PODIUMS.items():
-        assert rendered in q, name
-        assert "p.last_seen > NOW() - " + rendered in q, name
-        # parameter-less statements: an unbound :name here would 500 the podium
-        assert ":active_days" not in q and ":include_inactive" not in q, name
+        assert BIND_PRED in q, name
+        assert "p.last_seen > NOW() - " + BIND_PRED in q, name
+        assert ":include_inactive" not in q, name
         assert "LIMIT 3" in q, name
         _no_string_interval(q, name)
+    sites = "".join(inspect.getsource(f) for f in (main._podium_player_ids, main._mode_podium_map,
+                                                   main._ovt_podium_ids))
+    assert sites.count(DAYS_BIND) == 3
+    # the mode podium map executes the clause its caller built (a text()
+    # site the self-test can inventory), and both callers build one
+    assert "db.execute(clause, {" in inspect.getsource(main._mode_podium_map)
+    assert "text(_PODIUM_2V2_QUERY)" in inspect.getsource(main._podium_map_2v2)
+    assert "text(_PODIUM_FFA_QUERY)" in inspect.getsource(main._podium_map_ffa)
 
 
 def test_player_stats_standings_apply_the_same_predicate_by_bind():

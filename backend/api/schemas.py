@@ -308,6 +308,9 @@ class PlayerStatsResponse(BaseModel):
     # Appear-offline toggle: true when this player is hidden from the Home tab's
     # online/recently-online lists. Renders the Settings-tab toggle state.
     appear_offline: bool = False
+    # Room rules (migration 306): the Same Cards preference for queue-matched
+    # rooms — a flat bool the client's stats parse reads for free.
+    pref_same_cards: bool = False
     # Multi-equip map colors (v1.23+). The client cycles through this ordered list with
     # Left Shift in-game. Empty list → no equipped map colors → ArtHandler.NextArt falls
     # through to ROUNDS' vanilla random rotation. active_color_sku above is kept for
@@ -682,6 +685,9 @@ class CardStatEntry(BaseModel):
 
 class MatchHistoryEntry(BaseModel):
     """One match in a player's history."""
+    # Room rules (migration 306): the series' frozen {ff, sc}; None when the
+    # series predates the record (the client renders nothing for None).
+    rules: dict | None = None
     match_id: UUID
     opponent_steam_id: str
     opponent_name: str
@@ -785,6 +791,11 @@ class HealthResponse(BaseModel):
     status: str = "ok"
     version: str = "1.0.0"
     database: str = "connected"
+    # Player Cards face renderer identity (design v22 §2.2): the deploy step
+    # asserts it EQUAL on both boxes, or the two would render different bytes
+    # under one face key. pc_raqm: complex-script shaping available.
+    pc_renderer_fp: str | None = None
+    pc_raqm: bool | None = None
     # Which ROLE answered. Before this, /health was byte-identical on the
     # primary and on the read standby -- same status, same version, same
     # database -- so nothing on the network could tell a box that SKIPS writes
@@ -858,6 +869,11 @@ class QueuePollResponse(BaseModel):
     p2_steam_id: str | None = None
     p1_wins: int = 0
     p2_wins: int = 0
+    # Room rules (migration 306, ready_join only): the frozen {ff, sc, src}
+    # record and the exact `cr_rules` room-prop string the creator stamps and
+    # every joiner compares. Old clients ignore both; absent = defaults.
+    rules: dict | None = None
+    rules_prop: str | None = None
 
 
 class QueueDeclineRequest(BaseModel):
@@ -1196,6 +1212,9 @@ class TeamQueuePollResponse(BaseModel):
     room_region: str | None = None
     match_age_seconds: int = 0
     my_ready: bool = False  # the polling player's own ready flag
+    # Room rules (migration 306, ready_join only) — see QueuePollResponse.
+    rules: dict | None = None
+    rules_prop: str | None = None
 
 
 class TeamPlayerTelemetry(BaseModel):
@@ -1416,6 +1435,8 @@ class TeamStatsResponse(BaseModel):
 
 
 class TeamMatchHistoryEntry(BaseModel):
+    # Room rules (migration 306) — see MatchHistoryEntry.rules.
+    rules: dict | None = None
     match_id: UUID
     series_id: str
     ended_at: datetime

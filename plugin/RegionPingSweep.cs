@@ -37,7 +37,8 @@ namespace CompetitiveRounds
     ///    5 min at the main menu, the ONE trigger that requires a Photon
     ///    connection (an idle player has no consumer for the map); every 90 s
     ///    while a 1v1 queue lifecycle is live AND polling (searching, matched
-    ///    or ready-sent) — connected or not; at JoinQueue when the last map
+    ///    or ready-sent) or a 2v2 / 1v2 / FFA queue or hosted lobby is polling
+    ///    (Sept 10 WP-B) — connected or not; at every queue or lobby join when the last map
     ///    is older than 60 s (serves the NEXT upload — a join never waits on
     ///    pings). Never started while PUN's RegionHandler is pinging, and a
     ///    running sweep yields to it (the worker waits in 50 ms steps behind
@@ -57,6 +58,17 @@ namespace CompetitiveRounds
         public static Dictionary<string, int> LastMap;      // null until a sweep publishes
         public static float LastCompletedAt = -1f;          // Time.realtimeSinceStartup; < 0 = never
         public static int Revision;                         // bumps on every publication
+
+        // Sept 10 WP-B: the multiplayer polls (2v2 / 1v2 / FFA queue, 2v2 / 1v2
+        // lobby state) carry the map ONCE per publication per lifecycle under a
+        // per-process generation — X-Region-Pings-Gen: <nonce>:<Revision> — so
+        // the server orders a seat's sweeps by generation rather than by
+        // arrival, and a re-send after a failed poll is a no-op there. Ack-
+        // keyed: the pair rides until the poll it rode on succeeds
+        // (PollHeaders / NotePollHeadersAcked). The 1v1 poll keeps its own
+        // every-poll header (UpdateQueuePoll), which the 1v1 issuance re-stamps.
+        public static readonly string SessionNonce = Guid.NewGuid().ToString("N").Substring(0, 16);
+        static readonly Dictionary<string, int> ackedRevision = new Dictionary<string, int>();
 
         const float DEADLINE_S = 8f;
         const float POLL_S = 0.25f;
@@ -224,7 +236,7 @@ namespace CompetitiveRounds
                 return;
             }
 
-            // (b) + 7/3-1 + D1: cadence. 90 s while the 1v1 queue is live, else 5 min.
+            // (b) + 7/3-1 + D1: cadence. 90 s while a queue or hosted lobby is live, else 5 min.
             bool queueLive = QueueLive();
             float cadence = queueLive ? QUEUE_CADENCE_S : MENU_CADENCE_S;
             float anchor = Math.Max(lastTriggerRt, LastCompletedAt);
@@ -298,6 +310,42 @@ namespace CompetitiveRounds
             }
             sb.Append(";age=").Append(age);
             return sb.ToString();
+        }
+
+        /// <summary>Header pair for one multiplayer poll: the current map
+        /// (PollHeaderValue) and its generation (SessionNonce:Revision), unless
+        /// this family — a mode plus its lifecycle generation, e.g. "team#3" —
+        /// already had this revision acknowledged. Returns the revision the
+        /// caller passes to NotePollHeadersAcked once the poll succeeds, or -1
+        /// with both outputs null when nothing should ride this poll.</summary>
+        public static int PollHeaders(string family, out string pings, out string gen)
+        {
+            pings = null; gen = null;
+            try
+            {
+                string v = PollHeaderValue();
+                if (v == null) return -1;
+                int rev = Revision;
+                int acked;
+                if (ackedRevision.TryGetValue(family, out acked) && acked == rev) return -1;
+                pings = v;
+                gen = SessionNonce + ":" + rev;
+                return rev;
+            }
+            catch { pings = null; gen = null; return -1; }
+        }
+
+        /// <summary>The poll that carried revision <paramref name="rev"/> for
+        /// <paramref name="family"/> came back ok: stop re-sending it. A newer
+        /// publication (Revision != rev) rides the next poll regardless.</summary>
+        public static void NotePollHeadersAcked(string family, int rev)
+        {
+            try
+            {
+                if (ackedRevision.Count > 64) ackedRevision.Clear();   // lifecycle keys accrue; a re-send is harmless
+                ackedRevision[family] = rev;
+            }
+            catch { }
         }
 
         static int AgeSeconds()
@@ -766,16 +814,22 @@ namespace CompetitiveRounds
             TryStart("catalog");
         }
 
-        /// <summary>True while a 1v1 queue lifecycle is live AND polling. The
-        /// poll header is this map's only delivery channel, so a sweep with
-        /// polling off would serve nothing; the conjunction also means a
-        /// CurrentQueueState left non-Idle cannot license sweeps on its own.
-        /// Matched/ReadySent are in because the room is issued at the ready
-        /// branch (main.py:15192), up to READY_TIMEOUT_SECONDS after the match.</summary>
+        /// <summary>True while a queue or hosted-lobby lifecycle is live AND
+        /// polling: the 1v1 queue (searching, matched or ready-sent — the room
+        /// is issued at the ready branch, main.py:15192, up to
+        /// READY_TIMEOUT_SECONDS after the match) or, since Sept 10 WP-B, the
+        /// 2v2 / 1v2 / FFA queue polls and the 2v2 / 1v2 lobby-state heartbeat
+        /// (their X-Region-Pings header is the map's only path to the room
+        /// pick). A sweep with polling off would serve nothing; the conjunction
+        /// also means a CurrentQueueState left non-Idle cannot license sweeps
+        /// on its own. TryStart still refuses inside a live room (an FFA lobby
+        /// seat waiting in a casual game keeps its last map).</summary>
         static bool QueueLive()
         {
             try
             {
+                if (ApiClient.IsTeamQueuePolling || ApiClient.IsOvtQueuePolling || ApiClient.IsFfaQueuePolling) return true;
+                if (ApiClient.TeamLobby.Polling || ApiClient.OvtLobby.Polling) return true;
                 if (!ApiClient.IsQueuePolling) return false;
                 var qs = ApiClient.CurrentQueueState;
                 return qs == ApiClient.QueueState.Searching

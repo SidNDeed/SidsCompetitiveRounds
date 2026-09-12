@@ -241,11 +241,10 @@ GLICKO2_DEFAULT_VOLATILITY = float(os.getenv("GLICKO2_DEFAULT_VOLATILITY", "0.06
 # Sept 6 item d: every leaderboard hides players not seen for this many days
 # unless the caller passes include_inactive=true. players.last_seen is written
 # by the 60 s presence ping while the mod runs, so "seen" means "ran the mod".
-# 90 days; env-overridable. Kept an int on purpose: the parameterised boards
-# bind it as CAST(:active_days AS integer) inside make_interval (#448 -- typed
-# binds, never a string-built interval), and the parameter-less podium
-# statements below interpolate it through an f-string, which is safe only
-# because an int renders as digits. Must stay defined ABOVE _PODIUM_QUERY.
+# 90 days; env-overridable. Kept an int on purpose and ALWAYS bound as
+# CAST(:active_days AS integer) inside make_interval (#448 -- typed binds,
+# never a string-built interval) — the podium statements included, so every
+# board query is a static string the janitor self-test can read (r10).
 LEADERBOARD_ACTIVE_DAYS = int(os.environ.get("LEADERBOARD_ACTIVE_DAYS", "90"))
 
 # How long a pair's `active` ranked_series stays the "current" one for reuse.
@@ -451,8 +450,9 @@ _podium_cache: dict = {"at": 0.0, "ids": [], "map": {}}
 # Item d: the same LEADERBOARD_ACTIVE_DAYS filter the boards apply, so the
 # titles and the doubled bonus follow the ACTIVE top 3 (a returning player's
 # first presence ping refreshes last_seen; the next 60 s refresh re-grants).
-# f-string: the constant is an int, so the interpolation renders digits only.
-_PODIUM_QUERY = f"""
+# The window is the typed bind CAST(:active_days AS integer) inside
+# make_interval — never interpolated (c3 E).
+_PODIUM_QUERY = """
     WITH series_stats AS (
         SELECT sub.player_id, COUNT(*) AS total
         FROM (
@@ -481,7 +481,7 @@ _PODIUM_QUERY = f"""
     LEFT JOIN combined c ON c.player_id = p.id
     WHERE COALESCE(c.total, 0) >= 1
       AND p.deleted_at IS NULL
-      AND p.last_seen > NOW() - make_interval(days => {LEADERBOARD_ACTIVE_DAYS})
+      AND p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))
     ORDER BY gr.rating DESC
     LIMIT 3
 """
@@ -598,7 +598,8 @@ async def _podium_player_ids(db: AsyncSession) -> list:
     now = time.monotonic()
     if now - _podium_cache["at"] > 60:
         try:
-            rows = (await db.execute(text(_PODIUM_QUERY))).scalars().all()
+            rows = (await db.execute(text(_PODIUM_QUERY),
+                                     {"active_days": LEADERBOARD_ACTIVE_DAYS})).scalars().all()
             ids = [str(r) for r in rows]
             _podium_cache["ids"] = ids
             _podium_cache["map"] = {pid: i + 1 for i, pid in enumerate(ids)}
@@ -642,26 +643,26 @@ PODIUM_TITLES_FFA = {
 _podium_2v2_cache: dict = {"at": 0.0, "ids": [], "map": {}}
 _podium_ffa_cache: dict = {"at": 0.0, "ids": [], "map": {}}
 
-# Item d: both mode podiums carry the boards' activity filter too (f-string
-# over the int constant, see _PODIUM_QUERY).
-_PODIUM_2V2_QUERY = f"""
+# Item d: both mode podiums carry the boards' activity filter too (bound as
+# :active_days, see _PODIUM_QUERY).
+_PODIUM_2V2_QUERY = """
     SELECT p.id
       FROM glicko_ratings_2v2 g2
       JOIN players p ON p.id = g2.player_id
      WHERE COALESCE(g2.completed_series, 0) >= 1
        AND p.deleted_at IS NULL
-       AND p.last_seen > NOW() - make_interval(days => {LEADERBOARD_ACTIVE_DAYS})
+       AND p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))
      ORDER BY g2.rating DESC
      LIMIT 3
 """
 
-_PODIUM_FFA_QUERY = f"""
+_PODIUM_FFA_QUERY = """
     SELECT p.id
       FROM glicko_ratings_ffa g
       JOIN players p ON p.id = g.player_id
      WHERE COALESCE(g.games_played, 0) >= 1
        AND p.deleted_at IS NULL
-       AND p.last_seen > NOW() - make_interval(days => {LEADERBOARD_ACTIVE_DAYS})
+       AND p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))
      ORDER BY g.rating DESC
      LIMIT 3
 """
@@ -675,7 +676,7 @@ async def _grant_mode_podium_titles(sku: str, player_ids: list) -> None:
     await _sync_podium_holders(sku, player_ids)
 
 
-async def _mode_podium_map(db: AsyncSession, cache: dict, query: str, sku: str) -> dict:
+async def _mode_podium_map(db: AsyncSession, cache: dict, clause, sku: str) -> dict:
     """{str(player_id): 1|2|3} for one mode's podium. 60s TTL; a failure serves
     the stale copy and never raises.
 
@@ -689,7 +690,7 @@ async def _mode_podium_map(db: AsyncSession, cache: dict, query: str, sku: str) 
     if now - cache["at"] > 60:
         try:
             async with db.begin_nested():
-                rows = (await db.execute(text(query))).scalars().all()
+                rows = (await db.execute(clause, {"active_days": LEADERBOARD_ACTIVE_DAYS})).scalars().all()
             ids = [str(r) for r in rows]
             cache["ids"] = ids
             cache["map"] = {pid: i + 1 for i, pid in enumerate(ids)}
@@ -701,12 +702,12 @@ async def _mode_podium_map(db: AsyncSession, cache: dict, query: str, sku: str) 
 
 
 async def _podium_map_2v2(db: AsyncSession) -> dict:
-    return await _mode_podium_map(db, _podium_2v2_cache, _PODIUM_2V2_QUERY,
+    return await _mode_podium_map(db, _podium_2v2_cache, text(_PODIUM_2V2_QUERY),
                                   TITLE_PODIUM_2V2_SKU)
 
 
 async def _podium_map_ffa(db: AsyncSession) -> dict:
-    return await _mode_podium_map(db, _podium_ffa_cache, _PODIUM_FFA_QUERY,
+    return await _mode_podium_map(db, _podium_ffa_cache, text(_PODIUM_FFA_QUERY),
                                   TITLE_PODIUM_FFA_SKU)
 
 
@@ -1839,8 +1840,11 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
     and `+` concatenations over constants, names bound by an enclosing
     `for` over constant rows (tuples/lists, or a constant dict's `.items()`
     — the `{_qt}`/`{_lt}` lobby sweeps and the service-audit checks dict),
-    and single-assignment locals holding a constant. Each variant becomes
-    its own statement. Anything still unresolvable lands in `dynamic`, and
+    single-assignment locals holding a constant, and module-level
+    constants (`_module_consts`: bound once by an unconditional top-level
+    assignment and never rebound, declared global, stored-through or
+    mutated anywhere in the module — the `text(_X_SQL)` pattern). Each
+    variant becomes its own statement. Anything still unresolvable lands in `dynamic`, and
     the RUNNER TREATS THOSE AS FAILURES: an unverifiable janitor SQL site
     is precisely the coverage rot this test exists to prevent (Codex r1
     find 3).
@@ -1984,7 +1988,7 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
 
     def _analyze_bindings(fn_node):
         """Scope-aware binding census of the function subtree. Returns
-        (consts, loop_ok, disabled):
+        (consts, loop_ok, disabled, bound):
           consts:  name -> (scope_path, value_node, lineno) for names bound
                    EXACTLY ONCE anywhere in the subtree, by a plain
                    single-target assignment, and never blocked;
@@ -1992,7 +1996,9 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
                    targets (any number of loops);
           disabled: True when the subtree contains a binding form outside
                    the modelled subset (`match`, class definitions) — the
-                   caller then refuses ALL non-constant expansion.
+                   caller then refuses ALL non-constant expansion;
+          bound:   every name the subtree binds, blocks or loops over —
+                   the names that shadow a module-level constant here.
         BLOCKED (disqualified everywhere, Codex r2 finds 2-4 and r3 find 2):
         parameter names of the function or any nested def/lambda, nested def
         NAMES themselves, import and except-clause aliases, global/nonlocal
@@ -2120,7 +2126,291 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
             consts[n] = (scope, cond, value, lineno)
         loop_ok = {n for n, d in info.items()
                    if d["for_n"] >= 1 and not d["assigns"] and not d["blocked"]}
-        return consts, loop_ok, disabled[0]
+        return consts, loop_ok, disabled[0], set(info)
+
+    def _module_consts(tree):
+        """Module-level names a site may read as constants: bound EXACTLY
+        ONCE in the whole module, by an unconditional top-level single-target
+        assignment, and never otherwise bound, declared global/nonlocal,
+        stored-through, deleted or handed to a non-whitelisted method
+        anywhere in the module; a mutable literal (dict/list/set) further
+        needs every load in the module to be a whitelisted read-only
+        receiver — the census _analyze_bindings takes of a function, taken
+        of the module. A `match` statement blocks every name it mentions
+        (its binding forms are not modelled). Recorded with a NEGATIVE
+        lineno and the root scope/context: a module binding exists before
+        any function body the janitor runs, whatever the textual order (a
+        constant defined below its reader is still the value it reads),
+        and before any other module constant that reads it (a module that
+        read one before binding it would never have loaded). Values stay
+        AST nodes and resolve through the same evaluator, so an f-string
+        over other module constants expands, while an env-derived value
+        (`int(os.environ.get(...))`) refuses exactly as before — the
+        evaluator never invents a value the runtime would not use.
+        Motivation (r10): every `text(_X_SQL)` site and the lock-key
+        constant _publish_pair_sitting interpolates were `dynamic` for want
+        of this — synthetic self-test failures on real, static SQL."""
+        info: dict = {}
+        loads: dict = {}
+        safe_loads: set = set()
+        top: dict = {}
+
+        def _d(name):
+            return info.setdefault(name, {"assigns": 0, "blocked": False})
+
+        def _block_leaves(t):
+            for leaf in _ast.walk(t):
+                if isinstance(leaf, _ast.Name):
+                    _d(leaf.id)["blocked"] = True
+
+        # Constructs that can rebind a module name without a Name store (c3
+        # D, c5 E, c6 E): the census either blocks the exact name (a constant
+        # key on the namespace itself) or gives the whole module up (`opaque`)
+        # — never explains around them. The rule is about the namespace
+        # VALUE, never a spelling: every expression that denotes a namespace
+        # the module's names may live in, every name bound to one (or to
+        # something holding one) by ANY binding form, and every escape of
+        # one into something the census cannot follow.
+        opaque = [None]
+        imported = set()
+        for node in _ast.walk(tree):
+            if isinstance(node, (_ast.Import, _ast.ImportFrom)):
+                for a in node.names:
+                    imported.add(a.asname or a.name.split(".")[0])
+
+        def _const_str(n):
+            return isinstance(n, _ast.Constant) and isinstance(n.value, str)
+
+        NS_ATTRS = ("__dict__", "__globals__", "f_globals", "f_locals", "__builtins__")
+        DYNAMIC = ("exec", "eval", "__import__")
+        aliases = set()    # names bound to a namespace itself
+        derived = set()    # names bound to something that holds or came out of one
+
+        def _direct(n):
+            """The expression IS a namespace: globals()/locals(), vars() of
+            nothing or of a namespace, an alias, `<x>.modules[...]` and its
+            .get()/.setdefault()/.pop(), `<x>.import_module(...)`, the
+            __dict__ / __globals__ / frame globals of ANYTHING, a lambda
+            whose body is one, a call of an alias (a lambda alias)."""
+            if isinstance(n, _ast.Call):
+                f = n.func
+                if isinstance(f, _ast.Name):
+                    if f.id in ("globals", "locals"):
+                        return True
+                    if f.id == "vars":
+                        return not n.args or _direct(n.args[0])
+                    return f.id in aliases
+                if isinstance(f, _ast.Attribute):
+                    return f.attr == "import_module" or (isinstance(f.value, _ast.Attribute) and f.value.attr == "modules")
+                return _direct(f)
+            if isinstance(n, _ast.Name):
+                return n.id in aliases
+            if isinstance(n, _ast.Attribute):
+                return n.attr in NS_ATTRS
+            if isinstance(n, _ast.Subscript):
+                return isinstance(n.value, _ast.Attribute) and n.value.attr == "modules"
+            if isinstance(n, _ast.Lambda):
+                return _direct(n.body)
+            return False
+
+        def _through(n):
+            """A namespace, or something reached THROUGH one: an item, an
+            attribute, a call on it, a name bound to such a thing."""
+            if _direct(n):
+                return True
+            if isinstance(n, _ast.Name):
+                return n.id in derived
+            if isinstance(n, (_ast.Attribute, _ast.Subscript)):
+                return _through(n.value)
+            if isinstance(n, _ast.Call):
+                return _through(n.func)
+            if isinstance(n, _ast.Lambda):
+                return _contains(n.body)
+            return False
+
+        def _contains(n):
+            return n is not None and any(_through(sub) for sub in _ast.walk(n))
+
+        def _bindings(node):
+            """(target, value) pairs of every binding form: assignments of
+            every kind, loop and comprehension targets, `with ... as`, and a
+            function's parameter defaults (c6 E)."""
+            if isinstance(node, _ast.Assign):
+                return [(tg, node.value) for tg in node.targets]
+            if isinstance(node, (_ast.AnnAssign, _ast.AugAssign)):
+                return [(node.target, node.value)] if node.value is not None else []
+            if isinstance(node, _ast.NamedExpr):
+                return [(node.target, node.value)]
+            if isinstance(node, (_ast.For, _ast.AsyncFor, _ast.comprehension)):
+                return [(node.target, node.iter)]
+            if isinstance(node, _ast.withitem):
+                return [(node.optional_vars, node.context_expr)] if node.optional_vars is not None else []
+            if isinstance(node, _SCOPES):
+                a = node.args
+                pos = list(getattr(a, "posonlyargs", [])) + list(a.args)
+                pairs = list(zip(pos[len(pos) - len(a.defaults):], a.defaults)) if a.defaults else []
+                pairs += [(k, d) for k, d in zip(a.kwonlyargs, a.kw_defaults) if d is not None]
+                return [(_ast.Name(id=arg.arg, ctx=_ast.Store()), d) for arg, d in pairs]
+            return []
+
+        while True:
+            before = (len(aliases), len(derived))
+            for node in _ast.walk(tree):
+                for tg, value in _bindings(node):
+                    if not _contains(value):
+                        continue
+                    if any(isinstance(leaf, (_ast.Attribute, _ast.Subscript)) for leaf in _ast.walk(tg)):
+                        opaque[0] = "namespace escape"   # stored into an object the census cannot follow (c6 E)
+                    if _direct(value) and isinstance(tg, _ast.Name):
+                        aliases.add(tg.id)
+                    else:
+                        derived.update(leaf.id for leaf in _ast.walk(tg) if isinstance(leaf, _ast.Name))
+            if (len(aliases), len(derived)) == before:
+                break
+
+        for node in tree.body:
+            if isinstance(node, _ast.Assign) and len(node.targets) == 1 \
+                    and isinstance(node.targets[0], _ast.Name):
+                top.setdefault(node.targets[0].id, []).append(node.value)
+
+        def _module_wide(node):
+            """Rules that reach the module from ANY scope: a rebinding by
+            string or attribute through a namespace, an escape of one, a
+            construct that may do anything, a mutation of an object a module
+            name holds, and the load census."""
+            if isinstance(node, (_ast.Global, _ast.Nonlocal)):
+                for n in node.names:
+                    _d(n)["blocked"] = True
+            elif isinstance(node, (_ast.Import, _ast.ImportFrom)):
+                for a in node.names:
+                    if a.name == "*":
+                        opaque[0] = "import *"   # may rebind ANY module name (c3 D)
+                    _d(a.asname or a.name.split(".")[0])["blocked"] = True
+            elif isinstance(node, _ast.NamedExpr):
+                _block_leaves(node.target)   # a walrus binds the ENCLOSING scope (a default, a comprehension)
+            elif isinstance(node, (_ast.Return, _ast.Yield, _ast.YieldFrom)) and _contains(node.value):
+                opaque[0] = "namespace escape"   # handed to a caller the census cannot follow (c6 E)
+            elif hasattr(_ast, "Match") and isinstance(node, _ast.Match) and _contains(node.subject):
+                opaque[0] = "namespace escape"
+            elif isinstance(node, _ast.Subscript) and isinstance(node.ctx, (_ast.Store, _ast.Del)) \
+                    and _through(node.value):
+                # globals()["Q"] = ... rebinds a module name by STRING (c3 D):
+                # a constant key on the namespace ITSELF blocks that name,
+                # anything else (a variable key, an item of the namespace,
+                # a derived name) the module.
+                if _direct(node.value) and _const_str(node.slice):
+                    _d(node.slice.value)["blocked"] = True
+                else:
+                    opaque[0] = "namespace store"
+            elif isinstance(node, _ast.Attribute) and isinstance(node.ctx, (_ast.Store, _ast.Del)) \
+                    and _through(node.value):
+                if _direct(node.value):
+                    _d(node.attr)["blocked"] = True   # sys.modules[__name__].Q = ... / m.Q = ... (c5 E)
+                else:
+                    opaque[0] = "namespace store"
+            elif isinstance(node, _ast.Call) and isinstance(node.func, _ast.Attribute) \
+                    and _through(node.func.value) and not _direct(node):
+                opaque[0] = "namespace method"   # globals().update(...) et al.
+            elif isinstance(node, _ast.Call) and isinstance(node.func, _ast.Name) \
+                    and node.func.id == "setattr":
+                tgt = node.args[0] if node.args else None
+                attr = node.args[1] if len(node.args) > 1 else None
+                if isinstance(tgt, (_ast.Subscript, _ast.Call)) or _through(tgt) \
+                        or (isinstance(tgt, _ast.Name) and tgt.id in imported):
+                    # setattr(sys.modules[__name__], ...) / setattr(<module>, ...)
+                    if _const_str(attr):
+                        _d(attr.value)["blocked"] = True
+                    else:
+                        opaque[0] = "setattr"
+            elif isinstance(node, _ast.Call) and not _direct(node) and (
+                    any(_contains(a) for a in node.args) or any(_contains(k.value) for k in node.keywords)):
+                opaque[0] = "namespace argument"   # the callee may write into it (c5/c6 E)
+            elif (isinstance(node, _ast.Call)
+                    and isinstance(node.func, _ast.Attribute)
+                    and isinstance(node.func.value, _ast.Name)):
+                if node.func.attr in _READONLY_METHODS:
+                    safe_loads.add(id(node.func.value))
+                else:
+                    _d(node.func.value.id)["blocked"] = True
+            elif isinstance(node, (_ast.Attribute, _ast.Subscript)) \
+                    and isinstance(node.ctx, (_ast.Store, _ast.Del)) \
+                    and isinstance(node.value, _ast.Name):
+                _d(node.value.id)["blocked"] = True
+            if isinstance(node, _ast.Name) and isinstance(node.ctx, _ast.Load):
+                loads.setdefault(node.id, []).append(node)
+                if node.id in DYNAMIC or node.id == "__builtins__":
+                    opaque[0] = node.id   # exec / eval / __import__: called or handed around (c3 D, c6 E)
+            elif isinstance(node, _ast.Attribute) and node.attr in DYNAMIC \
+                    and isinstance(node.value, _ast.Name) and node.value.id in imported:
+                opaque[0] = node.attr   # builtins.exec(...) and the like (c6 E)
+
+        def _module_binding(node):
+            """Name stores that bind the MODULE's names: only outside a
+            function, lambda or class body (c5 E) — inside one they bind
+            that scope's names, and a `global` declaration (blocked above)
+            is the only way back to the module."""
+            if isinstance(node, _SCOPES):
+                if not isinstance(node, _ast.Lambda):
+                    _d(node.name)["blocked"] = True
+            elif isinstance(node, _ast.ClassDef):
+                _d(node.name)["blocked"] = True
+            elif hasattr(_ast, "Match") and isinstance(node, _ast.Match):
+                _block_leaves(node)
+                for leaf in _ast.walk(node):   # capture patterns bind by NAME STRING (c3 D)
+                    if isinstance(leaf, (_ast.MatchAs, _ast.MatchStar)) and leaf.name:
+                        _d(leaf.name)["blocked"] = True
+                    elif isinstance(leaf, _ast.MatchMapping) and leaf.rest:
+                        _d(leaf.rest)["blocked"] = True
+            elif _TYPE_ALIAS is not None and isinstance(node, _TYPE_ALIAS):
+                if isinstance(node.name, _ast.Name):
+                    _d(node.name.id)["blocked"] = True
+            elif isinstance(node, _ast.ExceptHandler) and node.name:
+                _d(node.name)["blocked"] = True
+            elif isinstance(node, _ast.Assign):
+                if len(node.targets) == 1 and isinstance(node.targets[0], _ast.Name):
+                    _d(node.targets[0].id)["assigns"] += 1
+                else:
+                    for tgt in node.targets:
+                        _block_leaves(tgt)
+            elif isinstance(node, (_ast.AugAssign, _ast.AnnAssign)):
+                _block_leaves(node.target)
+            elif isinstance(node, (_ast.For, _ast.AsyncFor)):
+                _block_leaves(node.target)
+            elif isinstance(node, _ast.withitem) and node.optional_vars:
+                _block_leaves(node.optional_vars)
+            elif isinstance(node, _ast.Delete):
+                for tgt in node.targets:
+                    _block_leaves(tgt)
+            elif isinstance(node, _ast.comprehension):
+                _block_leaves(node.target)
+
+        # An explicit stack, not recursion: a long elif chain nests one If
+        # per branch and a module this size has chains deeper than is safe.
+        stack = [(tree, False)]
+        while stack:
+            node, local = stack.pop()
+            _module_wide(node)
+            if not local:
+                _module_binding(node)
+            inner = local or isinstance(node, _SCOPES) or isinstance(node, _ast.ClassDef)
+            for child in _ast.iter_child_nodes(node):
+                stack.append((child, inner))
+        if opaque[0]:
+            return {}
+        consts = {}
+        for n, values in top.items():
+            d = info.get(n, {"assigns": 0, "blocked": False})
+            if len(values) != 1 or d["assigns"] != 1 or d["blocked"]:
+                continue
+            value = values[0]
+            if isinstance(value, (_ast.Dict, _ast.List, _ast.Set)) and any(
+                    id(x) not in safe_loads for x in loads.get(n, [])):
+                continue   # escapes somewhere in the module — may be mutated
+            consts[n] = ((), (), value, -1)
+        return consts
+
+    mod_consts = {m: _module_consts(tree) for m, tree in trees.items()}
+    _module_view = [None]   # the module whose constants a module-constant recursion resolves against (c5 E)
 
     def _string_variants(node, env, consts, site_scope, site_cond, site_line,
                          depth=0):
@@ -2158,9 +2448,18 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
                 bind_scope, bind_cond, value, bind_line = consts[node.id]
                 if bind_scope == site_scope[:len(bind_scope)] \
                         and bind_cond == site_cond[:len(bind_cond)] \
-                        and bind_line < site_line:
-                    return _string_variants(value, env, consts, bind_scope,
-                                            bind_cond, bind_line, depth + 1)
+                        and (bind_line < 0 or bind_line < site_line):
+                    # (a negative bind_line is a module constant: bound
+                    # before every site, other module constants included)
+                    # A module constant was evaluated at import time, outside
+                    # every loop and against the MODULE's names: it resolves
+                    # under an EMPTY env, never the site's loop row (c3 D),
+                    # and against the module's own constants, not the site's
+                    # shadowed view of them (c5 E).
+                    return _string_variants(value, {} if bind_line < 0 else env,
+                                            _module_view[0] if bind_line < 0 and _module_view[0] is not None
+                                            else consts,
+                                            bind_scope, bind_cond, bind_line, depth + 1)
             return None
         if isinstance(node, _ast.IfExp):
             tv = None
@@ -2207,9 +2506,10 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
     def _const_loop_rows(node, consts, loop_ok, site_scope, site_cond):
         """Rows of an enclosing constant-driven loop:
         `for a, b in (("x", "y"), ...)` with all-constant elements, or
-        `for a, b in d.items()` where d is a constant dict literal (inline
-        or via an unblocked single-assignment local, bound lexically before
-        the loop). Returns [{name: value}, ...] or None. Every target name
+        `for a, b in d.items()` where d is a constant dict literal (inline,
+        via an unblocked single-assignment local bound lexically before the
+        loop, or via a module constant). Returns [{name: value}, ...] or
+        None. Every target name
         must be in `loop_ok` (r2 find 3), the loop must be synchronous
         (r3 find 4), no nested for may rebind the same name (Python leaves
         the inner loop's LAST value bound afterwards — r3 find 4), and
@@ -2274,9 +2574,17 @@ def _janitor_sql_from_sources(sources: dict, roots) -> dict:
         """All text() SQL strings in one function: [(line, sql)] plus
         dynamic (statically unresolvable) call sites [line]."""
         found, dyn = [], []
-        consts, loop_ok, expansion_disabled = _analyze_bindings(fn_node)
+        _module_view[0] = mod_consts[mod]
+        consts, loop_ok, expansion_disabled, bound_here = _analyze_bindings(fn_node)
         if expansion_disabled:
             consts, loop_ok = {}, set()
+        else:
+            # Module constants sit UNDER the function's own bindings: a name
+            # the subtree binds, blocks or loops over shadows the module's
+            # (a local `q = ...` is a different value; a parameter or a
+            # `global q` makes the module value unknowable here).
+            consts = {**{n: v for n, v in mod_consts[mod].items() if n not in bound_here},
+                      **consts}
         mod_text_names = text_names[mod]
 
         def _text_sql_arg(node):
@@ -3304,6 +3612,41 @@ async def queue_cleanup_loop():
                 await db.commit()
         except Exception as e:
             print(f"[QUEUE-CLEANUP] 1v1 sweep error: {e}")
+        # Multiplayer region maps (migration 307, Sept 10): a row outlives its
+        # last write by ONE HOUR at most — the consent copy's promise; the
+        # rule itself reads only maps under 180 s old. SKIP LOCKED so the
+        # sweep never waits behind a live upsert. Static literal on purpose:
+        # the boot self-test EXPLAINs it (deploy the migration before the api).
+        try:
+            async with async_session() as db:
+                _purged = (await db.execute(
+                    text("""DELETE FROM player_region_pings
+                        WHERE player_id IN (
+                            SELECT player_id FROM player_region_pings
+                            WHERE received_at < NOW() - INTERVAL '1 hour'
+                            FOR UPDATE SKIP LOCKED
+                        )
+                        RETURNING player_id""")
+                )).fetchall()
+                await db.commit()
+                if _purged:
+                    print(f"[QUEUE-CLEANUP] region maps: purged {len(_purged)} row(s) older than 1 hour")
+        except Exception as e:
+            print(f"[QUEUE-CLEANUP] region maps sweep error: {e}")
+        # Player Cards (Sept 10 batch): the daily pool snapshot (00:05 UTC;
+        # a first one when none exists) and the posted-events purge. Its own
+        # session and a try-lock — see _pc_snapshot_janitor_step.
+        try:
+            await _pc_snapshot_janitor_step()
+        except Exception as e:
+            print(f"[QUEUE-CLEANUP] player cards snapshot error: {e}")
+        # Player Cards (WP-D): re-derive any earned-pack grant a failed
+        # savepoint lost, and void the unopened packs of invalidated series
+        # (its own session, every PC_RECONCILE_EVERY_S).
+        try:
+            await _pc_reconcile_earned_packs()
+        except Exception as e:
+            print(f"[QUEUE-CLEANUP] player cards reconcile error: {e}")
         try:
             async with async_session() as db:
                 # 1v2 orphan sweep (July 17 round 3): the ovt cleanup paths
@@ -4506,7 +4849,12 @@ from collections import deque as _rl_deque, defaultdict as _rl_defaultdict
 _RL_BUCKETS = _rl_defaultdict(_rl_deque)
 _RL_GLOBAL = (150, 10.0)     # 150 req / 10s per IP (a fast browser is ~10)
 _RL_SENSITIVE = (20, 10.0)   # 20 req / 10s for mutating / abuse-prone paths
+_RL_FACE = (120, 10.0)       # the public Player Cards face route: its own bucket (v22 §2.2)
+_RL_FACE_PREFIX = "/api/v1/pc-face/"
 _RL_SENSITIVE_PREFIXES = (
+    # Player Cards (Sept 10 batch): every open / claim / discard / settings
+    # write and every private read. One literal prefix for the whole family.
+    "/api/v1/pc/",
     "/api/v1/achievements/unlock", "/api/v1/matches", "/api/v1/team/matches",
     "/api/v1/report-disconnect", "/api/v1/bets", "/api/v1/team-bets",
     "/api/v1/shop/purchase", "/api/v1/queue/join", "/api/v1/team/queue/join",
@@ -4616,9 +4964,15 @@ async def rate_limit_gate(request: Request, call_next):
             pass
     ip = request.client.host if request.client else "unknown"
     now = _rl_time.monotonic()
-    sensitive = any(path.startswith(p) for p in _RL_SENSITIVE_PREFIXES)
-    limit, window = _RL_SENSITIVE if sensitive else _RL_GLOBAL
-    key = f"{ip}|{'s' if sensitive else 'g'}"
+    if path.startswith(_RL_FACE_PREFIX):
+        # The public face route: read-only, offline, its own bucket (v22 §2.2).
+        sensitive = False
+        limit, window = _RL_FACE
+        key = f"{ip}|f"
+    else:
+        sensitive = any(path.startswith(p) for p in _RL_SENSITIVE_PREFIXES)
+        limit, window = _RL_SENSITIVE if sensitive else _RL_GLOBAL
+        key = f"{ip}|{'s' if sensitive else 'g'}"
     dq = _RL_BUCKETS[key]
     cutoff = now - window
     while dq and dq[0] < cutoff:
@@ -5172,7 +5526,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
     """Check if the API and database are operational."""
     try:
         await db.execute(text("SELECT 1"))
-        return HealthResponse(status="ok", database="connected", replica=IS_REPLICA)
+        return HealthResponse(status="ok", database="connected", replica=IS_REPLICA,
+                              pc_renderer_fp=_pc_renderer_fp(), pc_raqm=_pc_raqm())
     except Exception:
         # Report the role even when the database is unreachable: "which box is
         # this" is exactly the question being asked when things are degraded.
@@ -5458,6 +5813,12 @@ async def _check_anti_cheat(
                     if s is not None and s.invalidated_at is None:
                         s.invalidated_at = datetime.now(timezone.utc)
                         s.invalidation_reason = "short_duration_pattern_retro"
+                        # Player Cards (WP-D): its unopened earned packs go with it.
+                        try:
+                            async with db.begin_nested():   # (#235)
+                                await _pc_void_earned_packs(db, mode="1v1", series_id=s.id, label="retro-invalidate")
+                        except Exception as pcex:
+                            print(f"[PC-EARNED] void failed for retro 1v1 {s.id}: {pcex}")
                 await _reverse_match_gold_xp(db, prior)
 
     # 3. Inactive reporter (advisory — flag only, no auto-invalidate).
@@ -6858,10 +7219,16 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
             # their delayed report can still mint here: pre-existing HEAD
             # behavior, stated in the guard's docstring; a durable
             # report-to-match binding is the named follow-up.)
-            # Create new series — p1/p2 order matches first match's order
+            # Create new series — p1/p2 order matches first match's order.
+            # Room rules (migration 306): a series born at report time takes
+            # the room's frozen record from the issuance ledger; a room the
+            # server never issued (or issued before this release) played the
+            # vanilla defaults by construction.
             series = RankedSeries(
                 player1_id=p1.id,
                 player2_id=p2.id,
+                rules=((await _rules_from_room_ledger(db, report.photon_room_id, p1.id, p2.id))
+                       or dict(ROOM_RULES_DEFAULT)),
             )
             db.add(series)
             await db.flush()
@@ -7047,6 +7414,17 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
                     await db.flush()
             except Exception as bex:
                 print(f"[BET-SETTLE] error settling for series {series.id}: {bex}")
+            # Player Cards (WP-D): the earned-pack roll for this completed
+            # ranked series — its own savepoint, so nothing here can touch
+            # the result; the janitor's reconciler re-derives a lost grant
+            # from the series row itself.
+            try:
+                async with db.begin_nested():
+                    await _pc_grant_earned_packs(
+                        db, mode="1v1", series_id=series.id, winner_ids=[series.winner_id],
+                        sweep=_pc_sweep(series.p1_series_wins, series.p2_series_wins), label="1v1-complete")
+            except Exception as pcex:
+                print(f"[PC-EARNED] 1v1 grant failed for series {series.id}: {pcex}")
         else:
             series_status = "active"
 
@@ -7361,7 +7739,7 @@ async def get_leaderboard(
             LEFT JOIN legacy_stats ls ON ls.player_id = p.id
         )
         SELECT
-            ROW_NUMBER() OVER (ORDER BY gr.rating DESC) AS rank,
+            ROW_NUMBER() OVER (ORDER BY gr.rating DESC, p.id) AS rank,
             p.id::text AS player_id,
             p.steam_id,
             p.display_name,
@@ -7388,7 +7766,7 @@ async def get_leaderboard(
         WHERE COALESCE(c.total, 0) >= :min_matches
           AND p.deleted_at IS NULL
           AND ((p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))) OR CAST(:include_inactive AS boolean))
-        ORDER BY gr.rating DESC
+        ORDER BY gr.rating DESC, p.id
         LIMIT :limit OFFSET :offset
     """)
 
@@ -9144,6 +9522,7 @@ async def get_player_stats(
         active_player_effect_sku=active_player_effect_sku,
         hide_gold=bool(player.hide_gold),
         appear_offline=bool(player.appear_offline),
+        pref_same_cards=bool(player.pref_same_cards),   # room rules: the Settings-tab toggle's value
         active_nametag_skus=active_nametag_skus,
         last_match=stats["last_match"],
         recent_rating_history=history,
@@ -9763,6 +10142,8 @@ async def get_player_matches(
             m.winner_id,
             m.is_ranked,
             m.session_uuid,
+            -- Room rules (migration 306): the series' frozen record.
+            rs.rules AS series_rules,
             -- Sept 8 item 5. ONE Session button per (sitting, opponent) in each box,
             -- on the newest valid game of the group. The partition keys on the
             -- opponent by the same CASE the projection uses (there is no opponent
@@ -9948,6 +10329,7 @@ async def get_player_matches(
             series_id=series_id_str,
             series_score=series_score_str,
             series_rating_change=series_rc,
+            rules=_rules_history(row["series_rules"]),
             xp_gained=row["xp_gained"] or 0,
             gold_gained=row["gold_gained"] or 0,
             series_gold_gained=row["series_gold_gained"] or 0,
@@ -10066,7 +10448,8 @@ async def get_match_by_code(code: str, db: AsyncSession = Depends(get_db)):
                p1.steam_id AS p1_sid, p1.display_name AS p1_name,
                p2.steam_id AS p2_sid, p2.display_name AS p2_name,
                rs.p1_rating_change AS s_p1_rc, rs.p2_rating_change AS s_p2_rc,
-               rs.player1_id AS s_p1_id, rs.status AS series_status
+               rs.player1_id AS s_p1_id, rs.status AS series_status,
+               rs.rules AS series_rules
           FROM matches m
           JOIN players p1 ON p1.id = m.player1_id
           JOIN players p2 ON p2.id = m.player2_id
@@ -10142,6 +10525,7 @@ async def get_match_by_code(code: str, db: AsyncSession = Depends(get_db)):
             "point_timeline": row["point_timeline"],
             "point_times": row["point_times"],
             "series_status": row["series_status"],
+            "rules": _rules_history(row["series_rules"]),
             "players": [_side1v1(1), _side1v1(2)],
         }
 
@@ -10161,7 +10545,7 @@ async def get_match_by_code(code: str, db: AsyncSession = Depends(get_db)):
                s.t1a_xp_earned, s.t1b_xp_earned, s.t2a_xp_earned, s.t2b_xp_earned,
                s.t1a_id AS s_t1a_id, s.t1b_id AS s_t1b_id,
                s.t2a_id AS s_t2a_id, s.t2b_id AS s_t2b_id,
-               s.status AS series_status
+               s.status AS series_status, s.rules AS series_rules
           FROM team_matches m
           JOIN players pa ON pa.id = m.t1a_id
           JOIN players pb ON pb.id = m.t1b_id
@@ -10229,6 +10613,7 @@ async def get_match_by_code(code: str, db: AsyncSession = Depends(get_db)):
             "t1_rounds_won": row["t1_rounds_won"], "t2_rounds_won": row["t2_rounds_won"],
             "winner_team": row["winner_team"],
             "series_status": row["series_status"],
+            "rules": _rules_history(row["series_rules"]),
             "players": [_side2v2("t1a", 1), _side2v2("t1b", 1),
                         _side2v2("t2a", 2), _side2v2("t2b", 2)],
         }
@@ -10247,7 +10632,7 @@ async def get_match_by_code(code: str, db: AsyncSession = Depends(get_db)):
                s.solo_gold_earned, s.duo_a_gold_earned, s.duo_b_gold_earned,
                s.solo_xp_earned, s.duo_a_xp_earned, s.duo_b_xp_earned,
                s.solo_id AS s_solo_id, s.duo_a_id AS s_duo_a_id, s.duo_b_id AS s_duo_b_id,
-               s.status AS series_status
+               s.status AS series_status, s.rules AS series_rules, s.solo_extra_pick AS series_extra_pick
           FROM ovt_matches m
           JOIN players ps ON ps.id = m.solo_id
           JOIN players pa ON pa.id = m.duo_a_id
@@ -10300,6 +10685,7 @@ async def get_match_by_code(code: str, db: AsyncSession = Depends(get_db)):
             "solo_rounds_won": row["solo_rounds_won"], "duo_rounds_won": row["duo_rounds_won"],
             "winner_side": row["winner_side"],
             "series_status": row["series_status"],
+            "rules": _rules_history(row["series_rules"], row["series_extra_pick"]),
             "players": [_side1v2("solo", 1), _side1v2("duo_a", 2), _side1v2("duo_b", 2)],
         }
 
@@ -10309,12 +10695,14 @@ async def get_match_by_code(code: str, db: AsyncSession = Depends(get_db)):
     # putting FFA last preserves the pre-existing behaviour of the other three.
     # The WHERE expression is byte-identical to the shortcode index created in
     # migration 163; changing one without the other silently drops to a seq scan.
-    row = (await db.execute(text("""
+    row = (await db.execute(text(f"""
         SELECT m.id, m.ended_at, m.invalidated_at, m.invalidation_reason, m.is_ranked,
                m.duration_seconds, m.player_count, m.timeline, m.photon_room_id,
-               m.winner_id, pw.steam_id AS winner_sid
+               m.winner_id, pw.steam_id AS winner_sid,
+               {_FFA_SETTINGS_COLS}
           FROM ffa_matches m
           LEFT JOIN players pw ON pw.id = m.winner_id
+          LEFT JOIN ffa_lobbies l ON l.id = m.lobby_id
          WHERE LEFT(REPLACE(m.id::text,'-',''),12) = :c
          LIMIT 1"""), {"c": code12})).mappings().first()
     if row is not None:
@@ -10364,6 +10752,9 @@ async def get_match_by_code(code: str, db: AsyncSession = Depends(get_db)):
             "photon_room_id": row["photon_room_id"],
             "winner_steam_id": row["winner_sid"],
             "series_status": None,
+            # The lobby's settings this game was played under (the block
+            # /ffa/recent emits); None when unknown.
+            "settings": _ffa_settings_block(row),
             "players": [{
                 "steam_id": r["steam_id"], "name": r["display_name"],
                 "placement": int(r["placement"]),
@@ -12715,7 +13106,8 @@ async def _queue_reset_to_searching(db: AsyncSession, pid) -> None:
     await db.execute(text("""
         UPDATE ranked_queue
            SET status = 'searching', matched_with = NULL,
-               room_name = NULL, room_region = NULL, ready = false, matched_at = NULL
+               room_name = NULL, room_region = NULL, ready = false, matched_at = NULL,
+               rules = NULL
          WHERE player_id = :pid"""), {"pid": pid})
 
 
@@ -12729,7 +13121,8 @@ async def _queue_reset_partner_if_reciprocal(db: AsyncSession, my_pid, partner_p
     res = await db.execute(text("""
         UPDATE ranked_queue
            SET status = 'searching', matched_with = NULL,
-               room_name = NULL, room_region = NULL, ready = false, matched_at = NULL
+               room_name = NULL, room_region = NULL, ready = false, matched_at = NULL,
+               rules = NULL
          WHERE player_id = :partner AND status = 'matched'
            AND matched_with = :me AND room_name IS NULL
          RETURNING player_id"""), {"partner": partner_pid, "me": my_pid})
@@ -12748,20 +13141,28 @@ async def _queue_delete_partner_if_reciprocal(db: AsyncSession, my_pid, partner_
     return res.first() is not None
 
 
-async def _queue_stamp_room_reciprocal(db: AsyncSession, my_pid, opp_pid, room_name, region) -> bool:
+async def _queue_stamp_room_reciprocal(db: AsyncSession, my_pid, opp_pid, room_name, region,
+                                       rules=None) -> bool:
     """Stamp the issued room on BOTH rows of a reciprocal, both-ready, room-less
     pair in ONE conditional statement and prove it with RETURNING: exactly the
     two expected player_ids updated = the pair was intact under the locks.
     Anything else = dissolved; the caller resets only its own row in the same
-    transaction (which also undoes a one-row partial stamp)."""
+    transaction (which also undoes a one-row partial stamp).
+
+    `rules` (migration 306) is the frozen {ff, sc} record for this room; it is
+    stamped next to room_name on both rows and on the ledger row, so every
+    later reader (the poll replay, the series mint, the late-series fallback
+    at report time) sees the same value. None → the defaults."""
     res = await db.execute(text("""
         UPDATE ranked_queue
-           SET room_name = :room, room_region = :region
+           SET room_name = :room, room_region = :region,
+               rules = CAST(:rules AS JSONB)
          WHERE player_id IN (:a, :b)
            AND status = 'matched' AND ready = true AND room_name IS NULL
            AND ((player_id = :a AND matched_with = :b)
              OR (player_id = :b AND matched_with = :a))
-         RETURNING player_id"""), {"room": room_name, "region": region, "a": my_pid, "b": opp_pid})
+         RETURNING player_id"""), {"room": room_name, "region": region, "a": my_pid, "b": opp_pid,
+                                   "rules": _rules_json(rules)})
     updated = {r[0] for r in res.fetchall()}
     if updated != {my_pid, opp_pid}:
         return False
@@ -12774,9 +13175,10 @@ async def _queue_stamp_room_reciprocal(db: AsyncSession, my_pid, opp_pid, room_n
     # collision would be a reused name and the FIRST issuance is the one that
     # sent two players somewhere.
     await db.execute(text(
-        "INSERT INTO issued_room_regions (room_name, region, player1_id, player2_id) "
-        "VALUES (:room, :region, :a, :b) ON CONFLICT (room_name) DO NOTHING"
-    ), {"room": room_name, "region": region or "", "a": my_pid, "b": opp_pid})
+        "INSERT INTO issued_room_regions (room_name, region, player1_id, player2_id, rules) "
+        "VALUES (:room, :region, :a, :b, CAST(:rules AS JSONB)) ON CONFLICT (room_name) DO NOTHING"
+    ), {"room": room_name, "region": region or "", "a": my_pid, "b": opp_pid,
+        "rules": _rules_json(rules)})
     # The pair is stored because the region alone did not say who the room was
     # issued TO, so any accepted report naming it fed the map (r14 HIGH).
     #
@@ -13603,9 +14005,12 @@ def _region_agreed(a, b):
     has seen a client connected to — that is the only fact available here about
     whether a region still exists, and it is what stops a stale cache naming a
     retired region from winning by sorting first. With both corroborated or
-    neither, the tie goes to a fixed order: a coin flip made stable, not a
-    latency decision, and written down as such so nobody reads the result as a
-    preference. No latency measurement reaches this rung: rung 0 runs after
+    neither, the tie goes to a fixed order on the region code: a deterministic
+    tie-break, not a latency decision and not a coin flip — cold corroboration
+    lands the same pair the same way every time, and because code order
+    correlates with geography (the three US codes sort last) that is a bias,
+    written down as such (learning #597); rung 0 exists to correct it. No
+    latency measurement reaches this rung: rung 0 runs after
     it, on the answer this rung produced, and only when both seats sent a
     fresh map.
     """
@@ -13633,18 +14038,25 @@ def _region_agreed(a, b):
 # deliberately NOT declared on the RankedQueue ORM model — raw SQL on both
 # ends, the 296 pattern; migration 301 enumerates every writer and reader.
 #
-# What a client can and cannot do with its own map (#283): it writes only its
-# OWN row, so it can move the pair only to a region the OPPONENT measured
-# within 20 ms of that opponent's own baseline — at most a 20 ms cost to an
-# honest seat — or withhold the map and get today's ladder exactly. Nothing
-# here moves a match result, a rating, gold or another player's game beyond
-# that bound.
+# What a client's map decides (#283, re-stated for the bounded minimax rule of
+# 2026-09-09): a client writes only its OWN row, and the rung reads each
+# seat's bound — how far that seat may be moved — from that seat's map alone,
+# measured against the candidates the ladder's active rung was choosing
+# between, plus 20 ms. So one map alone settles only its own seat's bound: the
+# other seat is never sent, on its own numbers, to a region worse than the
+# worst of those candidates by more than 20 ms. Inside the bounds the pick is
+# made from both maps together and may be a shared region the ladder would
+# not have named — that is the purpose. Withholding the map, or measuring
+# none of the candidates, gets the ladder exactly. This code writes no match
+# result, rating or gold; what a map can change is the pair's room region, so
+# a seat's ping in that room can be anywhere up to its own bound, whichever
+# map put it there.
 
 REGION_PINGS_MAX_ENTRIES = 24
 REGION_PINGS_MAX_MS = 5000
 REGION_PINGS_MAX_AGE_S = 900           # accepted at join / poll
 REGION_PINGS_ISSUANCE_MAX_AGE_S = 180  # fresh enough to decide a room (7/3-1)
-REGION_PINGS_PARETO_MS = 20
+REGION_PINGS_MARGIN_MS = 20            # the candidate must beat the ladder's worst ping by more
 _REGION_PINGS_DIGITS_RE = _re.compile(r"^[0-9]{1,6}$")
 
 
@@ -13701,29 +14113,362 @@ def _region_pings_from_header(value):
     return _region_pings_validate(pings, int(age_txt))
 
 
-def _pick_region_by_pings(p1, p2, ladder_pick):
-    """Rung 0 of the room-region pick: pure and swap-invariant.
+# ── Multiplayer room region (2v2 / 1v2 / FFA rooms and hosted lobbies) ──────
+# Sept 10 batch — ai-collab/sept10-batch/02-region-v4.md (policy) over
+# ai-collab/sept9-plans/02-multiplayer-region.md §2 (data path). Each member's
+# own ping map is stored in player_region_pings (migration 307) by the four
+# session-bound writer polls — the 2v2 / 1v2 / FFA queue polls and the 2v2 /
+# 1v2 lobby state poll — from the same X-Region-Pings header the 1v1 poll
+# carries, for the authenticated caller only, as a DETACHED task with a
+# connection of its own (c2 H2: a poll never holds its own connection while
+# waiting for a second one, so a burst of polls cannot exhaust the pool
+# against itself), so a refused store can never abort the poll it rides.
+# At issuance _group_region reads the members' committed rows on the
+# caller's own session (a savepoint), overlays the calling seat's own header
+# from THIS request (its store may not have landed yet), takes each seat's
+# HOME from its own map (c2 H3: the queue row's region is the join-time
+# connection, which after a room elsewhere is that room's region), and
+# hands the maps to the pure rule in region_pick.py: a move off the
+# mode-of-homes baseline needs either half the room to gain 20 ms or nobody
+# to lose more than 30 ms, and then happens only if it lowers the room's
+# total ping, or keeps the total and lowers its worst ping — so a majority
+# can move a minority, but never by more than the majority gains. The room
+# may be a region no member calls home. The host's home has no role
+# anywhere in the rule (Sid, 2026-09-10).
+from region_pick import pick_region_for_group as _pick_region_for_group, home_of as _region_home_of
 
-    Given both seats' clean maps and the ladder's answer L: the candidates are
-    the regions BOTH seats measured; the choice c minimises the pair's WORST
-    ping (tie: the sum; tie: fixed order by code). Each seat's baseline is its
-    own measurement of L when it has one, else its own best region; c is
-    accepted only when it costs NEITHER seat more than 20 ms over its own
-    baseline — a Pareto improvement within tolerance judged on each seat's
-    OWN numbers, never one seat's latency traded for the other's. Otherwise L
-    stands. Returns (pick, why, worst_ms): why is "pings" when c was taken,
-    else "no-maps" / "no-overlap" / "pareto"."""
+REGION_GROUP_REGRET_MS = 30            # a cost nobody notices (v4 G); margin reuses REGION_PINGS_MARGIN_MS
+_REGION_PINGS_GEN_RE = _re.compile(r"^([0-9a-f]{8,32}):([0-9]{1,9})$")
+
+# The Python twin of this WHERE is _region_pings_newer; test_group_region_issuance
+# pins both. Resolving the row by the AUTHENTICATED steam id inside the statement
+# is what makes "a writer stores only for the caller's own player id" structural,
+# and `deleted_at IS NULL` is re-evaluated after the shared identity lock is
+# granted, so a store that waited out delete-my-data stores nothing (R1-21).
+_REGION_PINGS_UPSERT_SQL = """
+    INSERT INTO player_region_pings (player_id, pings, measured_at, received_at, gen_nonce, gen_seq)
+    SELECT p.id, CAST(:pings AS JSONB), CAST(:measured_at AS TIMESTAMPTZ), NOW(),
+           CAST(:gen_nonce AS TEXT), CAST(:gen_seq AS INTEGER)
+      FROM players p
+     WHERE p.steam_id = CAST(:sid AS TEXT) AND p.deleted_at IS NULL
+    ON CONFLICT (player_id) DO UPDATE
+       SET pings = EXCLUDED.pings, measured_at = EXCLUDED.measured_at, received_at = NOW(),
+           gen_nonce = EXCLUDED.gen_nonce, gen_seq = EXCLUDED.gen_seq
+     WHERE (EXCLUDED.gen_nonce IS NOT NULL
+            AND (player_region_pings.gen_nonce IS DISTINCT FROM EXCLUDED.gen_nonce
+                 OR player_region_pings.gen_seq < EXCLUDED.gen_seq))
+        OR (EXCLUDED.gen_nonce IS NULL AND player_region_pings.measured_at < EXCLUDED.measured_at)
+"""
+
+
+def _region_pings_gen_from_header(value):
+    """`X-Region-Pings-Gen: <nonce>:<seq>` -> (nonce, seq), else None. The
+    nonce is random per client process (8..32 lowercase hex), the seq counts
+    that process's sweeps. Optional: a client that sends none is ordered by
+    measured_at alone (see _region_pings_newer)."""
+    if not value or not isinstance(value, str) or len(value) > 48:
+        return None
+    m = _REGION_PINGS_GEN_RE.match(value.strip())
+    if not m:
+        return None
+    return m.group(1), int(m.group(2))
+
+
+def _region_pings_newer(gen, measured_at, old_gen, old_measured_at):
+    """Whether a map (gen, measured_at) REPLACES a stored one — the Python
+    twin of the upsert's WHERE in _REGION_PINGS_UPSERT_SQL; the issuance
+    overlay applies the caller's header only when this says the store would
+    have kept it. A new nonce always wins, the same nonce needs a greater seq,
+    and a map without a generation falls back to a strictly newer
+    measured_at. measured_at is derived from the header's age at RECEIPT, so
+    a request delayed in transit can look newer than the sweep that followed
+    it; the generation exists so the order of sweeps, not of arrivals,
+    decides (design r2, R1-20)."""
+    if gen is not None:
+        if old_gen is None or old_gen[0] != gen[0]:
+            return True
+        return old_gen[1] < gen[1]
+    return old_measured_at is None or old_measured_at < measured_at
+
+
+_REGION_STORE_TASKS = set()
+
+
+async def _region_pings_store_task(steam_id, label, pings_json, measured_at, gen):
+    """The store itself, DETACHED from the poll that carried the header (c2
+    H2): it runs on a connection of its own after the poll has moved on, so
+    the poll never holds one pool connection while waiting for another — a
+    burst of polls could otherwise wait on each other until pool_timeout and
+    fail every one of them. It holds the identity advisory lock in SHARED
+    mode, so it waits out an in-flight delete-my-data for the same identity
+    (the exclusive form) and its re-evaluated `deleted_at IS NULL` then
+    stores nothing (R1-21); waiting here blocks nobody, since no request
+    waits for this task. A failure is logged; the poll already acknowledged
+    the header, so the row is refreshed by the next sweep at the latest."""
+    try:
+        from database import async_session
+        async with async_session() as sdb:
+            await sdb.execute(
+                text("SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))"),
+                {"sid": steam_id})
+            await sdb.execute(text(_REGION_PINGS_UPSERT_SQL), {
+                "sid": steam_id, "pings": pings_json, "measured_at": measured_at,
+                "gen_nonce": gen[0] if gen else None,
+                "gen_seq": gen[1] if gen else None})
+            await sdb.commit()
+    except Exception as exc:
+        print(f"[GROUP-REGION] {label} store failed for {steam_id}: {type(exc).__name__}: {exc}")
+
+
+async def _region_pings_store(request, steam_id, label):
+    """The writers' half of the multiplayer region data path: parse THIS
+    request's X-Region-Pings (+ optional X-Region-Pings-Gen) header with the
+    1v1 poll's validator and hand it to a detached store task for the
+    authenticated caller's own player row (_region_pings_store_task — the
+    poll does not wait for it). Returns (map, measured_at, gen) for the
+    issuance overlay — the overlay is what the store writes, so a pick this
+    poll decides sees the caller's own map whether or not the store has
+    landed — or None when there is nothing valid to store or the session was
+    not verified (a soft-checked session is a claim, not an identity; R1-7).
+    Rows are kept for at most one hour (janitor) — the consent copy's
+    promise."""
+    try:
+        hdr = request.headers.get("X-Region-Pings") if request is not None else None
+        gen_hdr = request.headers.get("X-Region-Pings-Gen") if request is not None else None
+    except Exception:
+        return None
+    pings_json, age = _region_pings_from_header(hdr)
+    if pings_json is None or not _session_was_verified(request):
+        return None
+    gen = _region_pings_gen_from_header(gen_hdr)
+    measured_at = datetime.now(timezone.utc) - timedelta(seconds=age)
+    current = (_json.loads(pings_json), measured_at, gen)
+    try:
+        task = asyncio.create_task(_region_pings_store_task(steam_id, label, pings_json, measured_at, gen))
+        _REGION_STORE_TASKS.add(task)
+        task.add_done_callback(_REGION_STORE_TASKS.discard)
+    except Exception as exc:
+        print(f"[GROUP-REGION] {label} store not scheduled for {steam_id}: {type(exc).__name__}: {exc}")
+    return current
+
+
+def _region_mode_of(rows, default="us"):
+    """Today's multiplayer pick made deterministic: the most common non-empty
+    home region among the rows, ties to the lexically first code (the old
+    `max(set(...), key=count)` broke ties by set order, i.e. by the process's
+    hash seed; 1v2's first-non-empty seat-order bias is retired with it —
+    recorded deviation, R1-22), `default` when nobody has one. The v4 rule
+    recomputes its own baseline from the same homes with the R3 tie policy;
+    this value is the fallback the rule returns on any error."""
+    counts = {}
+    for r in rows:
+        home = r["region"] if "region" in r else None
+        if home:
+            counts[home] = counts.get(home, 0) + 1
+    if not counts:
+        return default
+    top = max(counts.values())
+    return min(code for code, n in counts.items() if n == top)
+
+
+def _region_current(player_id, stored):
+    """The `current` overlay for _group_region from a writer's own store
+    result: (player_id, map, measured_at, gen), or None."""
+    if not stored:
+        return None
+    return (player_id, stored[0], stored[1], stored[2])
+
+
+_REGION_VOLUMES_CACHE = {"at": 0.0, "volumes": {}}
+REGION_VOLUMES_CACHE_S = 600
+
+
+async def _region_volumes(db):
+    """The rule's LAST tie-break: matches played per region over the last 45
+    days — tournaments._region_candidate_volumes, the count the tournament
+    region pick already uses (c2 M2; the process's 7-day sighting counts
+    stood in for it before). One query per process per
+    REGION_VOLUMES_CACHE_S, on the caller's session under a savepoint;
+    unavailable -> the last cached answer, or nothing (a tie-break only,
+    never liveness)."""
+    cache = _REGION_VOLUMES_CACHE
+    now = time.monotonic()
+    if cache["at"] and now - cache["at"] < REGION_VOLUMES_CACHE_S:
+        return cache["volumes"]
+    try:
+        from tournaments import _region_candidate_volumes
+        async with db.begin_nested():
+            vols = await _region_candidate_volumes(db)
+        cache["at"], cache["volumes"] = now, dict(vols)
+    except Exception as exc:
+        print(f"[GROUP-REGION] volumes unavailable: {type(exc).__name__}: {exc}")
+    return cache["volumes"]
+
+
+async def _group_region(db, rows, legacy_pick, label, *, current=None, room=""):
+    """The room-region pick for a multiplayer issuance (region_pick.py holds
+    the rule; the block comment above, the data path). `db` is the issuing
+    request's own session — the members' rows are read on it under a
+    savepoint (c2 H2: no second pool connection while the caller holds its
+    first, and its locks). `rows` are the members' queue rows in seat order;
+    `legacy_pick` is the mode's answer before this rule and the fallback on
+    any error; `current` = (player_id, map, measured_at, gen) is the calling
+    seat's validated header from THIS request, overlaid when it would have
+    replaced the stored row.
+
+    A seat's HOME is the lowest-ping code of its own map (region_pick.home_of;
+    stale or fresh — where a player is does not go stale within the hour the
+    rows live), and only without any map the queue row's region, which is
+    the join-time CONNECTION: after a room in another region, that room's
+    region, not a home (c2 H3).
+
+    Liveness: a candidate must be in EVERY member's map (the rule's
+    intersection). There is no server-side region allowlist BY DECISION (the
+    corroboration comment above _note_region_seen: Photon serves regions
+    ROUNDS' own selector does not list — hk and uae are in this project's
+    match history — and a list would refuse a room that was connecting
+    fine), so the members' own measured codes are the live set, and a home
+    no other member has measured never wins a baseline tie
+    (region_pick._baseline). Volumes for the last tie-break are the 45-day
+    match counts (_region_volumes). Never raises; one [GROUP-REGION] line
+    per issuance on EVERY branch, refusals included — the maps outlive the
+    queue rows by an hour at most, so the line is the record of what the
+    rule saw."""
+    pick, why, detail = legacy_pick, "error", {}
+    try:
+        ids = [r["player_id"] for r in rows]
+        stored = {}
+        async with db.begin_nested():
+            res = await db.execute(text(
+                "SELECT player_id, pings, measured_at, gen_nonce, gen_seq"
+                "  FROM player_region_pings WHERE player_id = ANY(:ids)"),
+                {"ids": ids})
+            for r in res.mappings():
+                gen = (r["gen_nonce"], r["gen_seq"]) if r["gen_nonce"] is not None else None
+                stored[r["player_id"]] = (r["pings"], r["measured_at"], gen)
+        if current is not None:
+            cpid, cmap, cat, cgen = current
+            old = stored.get(cpid)
+            if old is None or _region_pings_newer(cgen, cat, old[2], old[1]):
+                stored[cpid] = (cmap, cat, cgen)
+        members = []
+        for r in rows:
+            pmap, at, _gen = stored.get(r["player_id"], (None, None, None))
+            if isinstance(pmap, (str, bytes)):
+                try:
+                    pmap = _json.loads(pmap)
+                except ValueError:
+                    pmap = None
+            if at is not None and at.tzinfo is None:
+                at = at.replace(tzinfo=timezone.utc)
+            home = _region_home_of(pmap) or r["region"]
+            members.append({"id": str(r["player_id"]), "home": home, "map": pmap,
+                            "measured_at": at.timestamp() if at is not None else None})
+        live = set()
+        for m in members:
+            if isinstance(m["map"], dict):
+                live |= set(m["map"])
+        volumes = await _region_volumes(db)
+        pick, why, detail = _pick_region_for_group(
+            members, live, volumes, legacy_pick,
+            margin_ms=REGION_PINGS_MARGIN_MS, regret_ms=REGION_GROUP_REGRET_MS,
+            max_age_s=REGION_PINGS_ISSUANCE_MAX_AGE_S, now=time.time())
+    except Exception as exc:
+        pick, why, detail = legacy_pick, "error", {"error": f"{type(exc).__name__}: {exc}"}
+
+    def _c(v):
+        return "-" if v is None else v
+    seats = detail.get("seats") or []
+    members_txt = ",".join(
+        f"{s.get('id')}:{s.get('state')}:{_c(s.get('cost_b'))}/{_c(s.get('cost_pick'))}"
+        for s in seats) or "-"
+    print(f"[GROUP-REGION] {label} room={room} pick={pick} why={why} "
+          f"baseline={_c(detail.get('baseline'))} legacy={legacy_pick} n={_c(detail.get('n'))} "
+          f"sum_b={_c(detail.get('sum_b'))} sum_pick={_c(detail.get('sum_pick'))} "
+          f"worst_b={_c(detail.get('worst_b'))} worst_pick={_c(detail.get('worst_pick'))} "
+          f"gain={_c(detail.get('gain'))} regret={_c(detail.get('max_regret'))} "
+          f"tie={_c(detail.get('tie'))} members={members_txt}"
+          + (f" error={detail.get('error')}" if why == "error" else ""))
+    return pick or legacy_pick or "us"
+
+
+def _pick_region_by_pings(p1, p2, ladder_pick, refs=()):
+    """Rung 0 of the room-region pick: BOUNDED MINIMAX. The verdict fields
+    (pick, why, worst_ms) are pure and swap-invariant; `detail` is seat-ordered.
+
+    Inputs: both seats' clean maps, the ladder's answer L, and `refs` — the
+    candidates the ladder's ACTIVE rung was choosing between
+    (_region_ladder_refs; L is always among them, and a signal a higher rung
+    outranked is not, so it cannot widen a bound). The rung may replace L with
+    the region c that minimises the pair's WORST ping (tie: the sum; tie: fixed
+    order by code), subject to what each seat's OWN map says:
+
+      * Each seat has a bound: the worst it measured among `refs`, plus
+        REGION_PINGS_MARGIN_MS. A seat that measured none of them has no bound
+        and the rung declines ("unbounded"). A region a seat measured above its
+        bound is not a candidate; with none left the rung declines ("bound").
+        So a seat is never sent, on its own numbers, to a region worse than
+        the worst of the ladder's candidates by more than the margin — and
+        because a seat's bound is read from that seat's map alone, the other
+        seat's map cannot enlarge it. Each map alone settles only its own
+        seat's bound; the pick inside the bounds is made from both maps
+        together, and it may be a region the ladder would not have named — a
+        shared compromise region is the purpose.
+      * c must beat L's worst ping by more than the margin ("margin" when it
+        does not); a seat that did not measure L scores it at the cap for that
+        comparison only. When c IS L the measurement confirms the ladder.
+
+    "Serves both" is the worst seat's ping (tournaments.py
+    _pick_region_for_players). The acceptance test this replaced — "costs
+    NEITHER seat more than 20 ms over its own baseline", the baseline being the
+    seat's ping to L, or its own best measured ping when it had not measured L
+    — left every cross-region pair observed on 2026-09-09 on
+    one seat's home, and cannot move a pair when no shared region lies within
+    20 ms of the home seat's home, which is the usual geography (learning
+    #597). This rule keeps that test's shape, each seat judged on its own
+    numbers, and widens the reference from L alone to the candidates the
+    ladder was choosing between.
+
+    Returns (pick, why, worst_ms, detail); why in pings / no-maps / no-overlap
+    / unbounded / bound / margin. detail is empty unless both maps share a
+    region; then it names the candidate the maps prefer, both seats' numbers
+    at it and at L ("-" where unmeasured) and both bounds, so the pick line
+    stays reconstructible after the queue rows are gone whenever the rung had
+    anything to weigh."""
     if not p1 or not p2:
-        return ladder_pick, "no-maps", None
+        return ladder_pick, "no-maps", None, ""
     common = sorted(set(p1) & set(p2))
     if not common:
-        return ladder_pick, "no-overlap", None
-    c = min(common, key=lambda r: (max(p1[r], p2[r]), p1[r] + p2[r], r))
-    base1 = p1[ladder_pick] if ladder_pick in p1 else min(p1.values())
-    base2 = p2[ladder_pick] if ladder_pick in p2 else min(p2.values())
-    if p1[c] <= base1 + REGION_PINGS_PARETO_MS and p2[c] <= base2 + REGION_PINGS_PARETO_MS:
-        return c, "pings", max(p1[c], p2[c])
-    return ladder_pick, "pareto", None
+        return ladder_pick, "no-overlap", None, ""
+    ref_set = {t for t in (ladder_pick, *refs) if t}
+
+    def key(r):
+        return (max(p1[r], p2[r]), p1[r] + p2[r], r)
+
+    def bound(p):
+        seen = [p[r] for r in ref_set if r in p]
+        return max(seen) + REGION_PINGS_MARGIN_MS if seen else None
+
+    b1, b2 = bound(p1), bound(p2)
+
+    def describe(c):
+        return (f"cand={c} cand_ms={p1[c]}/{p2[c]} "
+                f"ladder_ms={p1.get(ladder_pick, '-')}/{p2.get(ladder_pick, '-')} "
+                f"bound={'-' if b1 is None else b1}/{'-' if b2 is None else b2}")
+
+    if b1 is None or b2 is None:
+        return ladder_pick, "unbounded", None, describe(min(common, key=key))
+    cands = [r for r in common if p1[r] <= b1 and p2[r] <= b2]
+    if not cands:
+        return ladder_pick, "bound", None, describe(min(common, key=key))
+    c = min(cands, key=key)
+    worst_c = max(p1[c], p2[c])
+    if c == ladder_pick:
+        return c, "pings", worst_c, describe(c)
+    worst_l = max(p1.get(ladder_pick, REGION_PINGS_MAX_MS), p2.get(ladder_pick, REGION_PINGS_MAX_MS))
+    if worst_l - worst_c > REGION_PINGS_MARGIN_MS:
+        return c, "pings", worst_c, describe(c)
+    return ladder_pick, "margin", None, describe(c)
 
 
 def _region_pings_at_issuance(pings, pings_at, now):
@@ -13743,6 +14488,31 @@ def _region_pings_at_issuance(pings, pings_at, now):
     if now - pings_at > timedelta(seconds=REGION_PINGS_ISSUANCE_MAX_AGE_S):
         return None, "stale"
     return clean, "fresh"
+
+
+def _region_ladder_refs(my_region, opp_region, my_home, opp_home):
+    """The candidates the ladder's ACTIVE rung is choosing between, in the
+    ladder's own precedence (mirrors _pick_room_region): agreeing homes; else
+    the live regions; else the homes; else the "us" default. Only these may
+    bound a seat in rung 0 — a home the live rung outranked could not have
+    been chosen, so it must not widen how far a seat may be moved (design
+    review d2). Tokens are assumed validated; empties are dropped; order is
+    the caller's (my, opp) and duplicates collapse."""
+    mr, orr = my_region, opp_region
+    mh, oh = my_home, opp_home
+    if mh and mh == oh:
+        return (mh,)
+    if mr or orr:
+        pool = (mr, orr)
+    elif mh or oh:
+        pool = (mh, oh)
+    else:
+        return ("us",)
+    out = []
+    for t in pool:
+        if t and t not in out:
+            out.append(t)
+    return tuple(out)
 
 
 def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name="",
@@ -13785,10 +14555,15 @@ def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name="",
     relocated by where they used to be. Since Sept 7 (item 3) the measurement
     that settles it exists as RUNG 0, run after the ladder has answered: both
     seats' own ping maps (the kwargs; each with its stamp), taken within the
-    last 180 s, may replace the ladder's answer — but only by a region that
-    costs NEITHER seat more than 20 ms over its own measured baseline
-    (_pick_region_by_pings). A missing, stale or malformed map on either side
-    leaves the ladder's answer exactly as it was. The positional signature is
+    last 180 s, may replace the ladder's answer with the region that minimises
+    the pair's WORST ping, taken when it beats the ladder's worst by more than
+    20 ms and lies within each seat's own bound — the worst that seat measured
+    among the candidates the ladder's active rung was choosing between, plus
+    20 ms (_pick_region_by_pings — bounded minimax since 2026-09-09; the
+    earlier "costs neither seat more than 20 ms over its own baseline" test
+    left every cross-region pair observed that day on one seat's home,
+    learning #597). A missing, stale or malformed map on either side leaves
+    the ladder's answer exactly as it was. The positional signature is
     unchanged; `now` is injectable for tests only.
     """
     mr, orr = _region_token(my_region), _region_token(opp_region)
@@ -13806,20 +14581,29 @@ def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name="",
     else:
         ladder = _region_agreed(mr, orr) or _region_agreed(mh, oh) or "us"
     # Rung 0 (Sept 7 item 3): the pair's own ping maps, judged AFTER the ladder
-    # has answered — see _pick_region_by_pings for the acceptance rule. Both
-    # seats are treated identically, so the answer stays swap-invariant.
+    # has answered — see _pick_region_by_pings for the acceptance rule. The
+    # ACTIVE rung's candidates ride along as the reference set that bounds how
+    # far each seat may be moved; a signal a higher rung outranked could not
+    # have been chosen and must not widen a bound (design review d2). Both
+    # seats are treated identically, so the verdict stays swap-invariant.
     if now is None:
         now = datetime.now(timezone.utc)
     m1, s1 = _region_pings_at_issuance(p1_pings, p1_pings_at, now)
     m2, s2 = _region_pings_at_issuance(p2_pings, p2_pings_at, now)
     if m1 is None or m2 is None:
-        chosen, why, worst = ladder, ("stale" if "absent" not in (s1, s2) else "no-maps"), None
+        chosen, why, worst, detail = ladder, ("stale" if "absent" not in (s1, s2) else "no-maps"), None, ""
     else:
-        chosen, why, worst = _pick_region_by_pings(m1, m2, ladder)
+        chosen, why, worst, detail = _pick_region_by_pings(
+            m1, m2, ladder, refs=_region_ladder_refs(mr, orr, mh, oh))
+    # The decision line carries the candidate and both seats' numbers whenever
+    # the maps shared a region: the maps leave with the queue rows, so this
+    # print is the only record of what the rung saw (2026-09-09: a day of
+    # picks was not reconstructible).
+    tail = f" {detail}" if detail else ""
     if why == "pings":
-        print(f"[QUEUE-REGION] room={room_name} pick={chosen} rung=pings worst={worst} ladder={ladder}")
+        print(f"[QUEUE-REGION] room={room_name} pick={chosen} rung=pings worst={worst} ladder={ladder}{tail}")
     else:
-        print(f"[QUEUE-REGION] room={room_name} pick={chosen} rung=ladder why={why}")
+        print(f"[QUEUE-REGION] room={room_name} pick={chosen} rung=ladder why={why}{tail}")
     print(f"[QUEUE-REGION] room={room_name} chosen={chosen} "
           f"seen={'y' if _region_corroborated(chosen) else 'n'} "
           f"live=({mr},{orr}) home=({mh},{oh})")
@@ -13828,8 +14612,12 @@ def _pick_room_region(my_region, my_home, opp_region, opp_home, room_name="",
 
 async def _queue_join_upsert(db: AsyncSession, *, player_id, steam_id, display_name,
                              rating, rating_deviation, region, home_region, ranked_only,
-                             region_pings, region_pings_age) -> None:
+                             region_pings, region_pings_age, mod_version=None) -> None:
     """The 1v1 queue row, written by ONE INSERT ... ON CONFLICT DO UPDATE.
+
+    `mod_version` (migration 306) is THIS request's header, stamped on the row
+    as the seat's own last-seen version; a rejoin also clears `rules`, which
+    only ever means something next to a stamped room_name.
 
     Raw SQL rather than the ORM upsert it replaced (Sept 7 item 3): the two
     ping columns are not declared on RankedQueue (migration 301), and an ORM
@@ -13847,15 +14635,19 @@ async def _queue_join_upsert(db: AsyncSession, *, player_id, steam_id, display_n
             (player_id, steam_id, display_name, rating, rating_deviation,
              region, home_region, ranked_only, status, matched_with, room_name,
              room_region, ready, joined_at, matched_at, last_polled,
+             mod_version, rules,
              region_pings, region_pings_at)
         VALUES
             (:pid, :sid, :name, :rating, :rd,
              :region, :home_region, :ranked_only, 'searching', NULL, NULL,
              NULL, false, :now, NULL, :now,
+             :mv, NULL,
              CAST(:region_pings AS JSONB),
              NOW() - make_interval(secs => :region_pings_age))
         ON CONFLICT (player_id) DO UPDATE SET
             status = 'searching',
+            mod_version = EXCLUDED.mod_version,
+            rules = NULL,
             rating = EXCLUDED.rating,
             rating_deviation = EXCLUDED.rating_deviation,
             region = EXCLUDED.region,
@@ -13876,6 +14668,7 @@ async def _queue_join_upsert(db: AsyncSession, *, player_id, steam_id, display_n
         "region": region, "home_region": home_region, "ranked_only": bool(ranked_only),
         "now": now,
         "region_pings": region_pings, "region_pings_age": region_pings_age,
+        "mv": mod_version,
     })
 
 
@@ -13960,7 +14753,8 @@ async def queue_join(req: QueueJoinRequest, request: Request, db: AsyncSession =
         db, player_id=player.id, steam_id=req.steam_id, display_name=player.display_name,
         rating=cur_rating, rating_deviation=cur_rd, region=req.region,
         home_region=_home_region, ranked_only=req.ranked_only,
-        region_pings=_pings_json, region_pings_age=_pings_age)
+        region_pings=_pings_json, region_pings_age=_pings_age,
+        mod_version=_request_mod_version(request))
     await db.commit()
 
     return {"status": "searching", "message": "Joined ranked queue"}
@@ -14595,7 +15389,7 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
                    rq.rating_deviation, rq.status, rq.matched_with,
                    rq.room_name, rq.room_region, rq.region, rq.home_region,
                    rq.ready, rq.joined_at, rq.matched_at,
-                   rq.region_pings, rq.region_pings_at
+                   rq.region_pings, rq.region_pings_at, rq.rules
             FROM ranked_queue rq
             JOIN players p ON rq.player_id = p.id
             WHERE p.steam_id = :sid
@@ -14640,7 +15434,7 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
                        rq.rating_deviation, rq.status, rq.matched_with,
                        rq.room_name, rq.room_region, rq.region, rq.home_region,
                        rq.ready, rq.joined_at, rq.matched_at,
-                       rq.region_pings, rq.region_pings_at
+                       rq.region_pings, rq.region_pings_at, rq.rules
                 FROM ranked_queue rq
                 JOIN players p ON rq.player_id = p.id
                 WHERE p.steam_id = :sid
@@ -14667,6 +15461,10 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
     # X-Region-Pings header the SAME statement also refreshes the map (typed
     # binds, #275/#448); the fragment is chosen in code, never by a NULL test
     # on a bound parameter (#448). A poll never NULLs the columns.
+    # Room rules (migration 306): the same heartbeat refreshes this row's
+    # member-scoped mod_version from THIS request's header, so issuance reads
+    # each seat's own last request — never players.mod_version.
+    _mv = _request_mod_version(request)
     if _hdr_pings is not None:
         # Impl review r1 M1 (7/3-1): issuance in THIS request must see what the
         # statement writes. `entry` is the snapshot taken under the locks
@@ -14687,18 +15485,19 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
         await db.execute(
             text("""UPDATE ranked_queue
                        SET last_polled = NOW(),
+                           mod_version = :mv,
                            region_pings = CAST(:region_pings AS JSONB),
                            region_pings_at = CAST(:region_pings_at AS TIMESTAMPTZ)
                      WHERE player_id = :pid"""),
-            {"pid": my_pid, "region_pings": _hdr_pings, "region_pings_at": _hdr_stamp},
+            {"pid": my_pid, "mv": _mv, "region_pings": _hdr_pings, "region_pings_at": _hdr_stamp},
         )
         entry = dict(entry)
         entry["region_pings"] = _hdr_pings
         entry["region_pings_at"] = _hdr_stamp
     else:
         await db.execute(
-            text("UPDATE ranked_queue SET last_polled = NOW() WHERE player_id = :pid"),
-            {"pid": my_pid},
+            text("UPDATE ranked_queue SET last_polled = NOW(), mod_version = :mv WHERE player_id = :pid"),
+            {"pid": my_pid, "mv": _mv},
         )
 
     # Check for expiry (only applies to searching state)
@@ -14768,6 +15567,8 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
         # Both ready — generate room if not already done
         if my_ready and opp_ready:
             room_just_generated = not room_name
+            series = None
+            _series_resolved = False
             # Aug 15 item 5 companion: the response must carry the region the
             # ROWS actually got. On the ISSUING poll, entry[] is the pre-stamp
             # snapshot (room_region still NULL), so deriving the response from
@@ -14814,12 +15615,32 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
                     p1_pings=entry["region_pings"], p2_pings=opp["region_pings"],
                     p1_pings_at=entry["region_pings_at"], p2_pings_at=opp["region_pings_at"])
                 _region_out = chosen_region
+                # Room rules (migration 306): frozen HERE, before the stamp, so
+                # the rows, the ledger and the series carry ONE value. A
+                # resumed series keeps the rules it was born with (rules are
+                # constant across the games of one series); one born before
+                # this release (NULL) played its earlier games under the
+                # defaults and keeps playing them — its history stays
+                # "unknown", never backfilled from today's preferences (a1
+                # H4). Only a NEW series takes the pair's preferences AND'ed
+                # with both seats' member-scoped versions (the caller judged
+                # by THIS request's header). The series read moves ahead of
+                # the stamp for that reason — it is a plain read under the
+                # pair locks already held.
+                series = await _find_current_active_series(db, my_pid, opp["player_id"], room_id=room_name)
+                _series_resolved = True
+                if series is not None:
+                    rules = _rules_normalize(series.rules)
+                else:
+                    rules = await _rules_for_members(
+                        db, [my_pid, opp["player_id"]], "ranked_queue",
+                        request=request, my_pid=my_pid)
                 # v1.40.1: ONE conditional stamp over both rows, proven by
                 # RETURNING — both 'matched', both ready, both room-less, each
                 # pointing at the other. A short count = the pair dissolved under
                 # us: reset only our row (the same transaction undoes any one-row
                 # partial stamp) and answer searching.
-                if not await _queue_stamp_room_reciprocal(db, my_pid, opp["player_id"], room_name, chosen_region):
+                if not await _queue_stamp_room_reciprocal(db, my_pid, opp["player_id"], room_name, chosen_region, rules=rules):
                     print(f"[QUEUE-POLL] {steam_id} room stamp not reciprocal — dissolving own row")
                     await _queue_reset_to_searching(db, my_pid)
                     await db.commit()
@@ -14831,21 +15652,30 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
                 await _queue_reset_to_searching(db, my_pid)
                 await db.commit()
                 return QueuePollResponse(status="searching", wait_time=wait_seconds)
+            else:
+                # Replay of the issued room: the rules are whatever the stamp
+                # froze on the row — never recomputed (a preference change
+                # after issuance applies to the NEXT room).
+                rules = _rules_normalize(entry["rules"])
             # Find-or-create the series row so this poll path matches /queue/ready's
             # both_ready branch — previously this branch created the ROOM but no
             # series, so the row was born at first match report (already 1-0 →
             # permanently bet-locked, bug #36) and the client never got a
             # series_id for live-points.
-            series = await _find_current_active_series(db, my_pid, opp["player_id"], room_id=room_name)
+            if not _series_resolved:
+                series = await _find_current_active_series(db, my_pid, opp["player_id"], room_id=room_name)
             if series is None:
                 series = RankedSeries(
                     player1_id=my_pid, player2_id=opp["player_id"],
                     p1_series_wins=0, p2_series_wins=0,
                     live_p1_points=0, live_p2_points=0,
                     status="active",
+                    rules=rules,
                 )
                 db.add(series)
                 await db.flush()
+            # A series born before the record keeps rules NULL: its history
+            # says "unknown" rather than a record it never played under (a1 H4).
             # Bug 199: same stamp as /queue/ready's both_ready branch — a
             # resumed series is otherwise invisible on the live surfaces from
             # room-issue until its first scored point.
@@ -14863,6 +15693,10 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
             if room_just_generated:
                 await _evict_other_queue_searching(
                     db, [my_pid, opp["player_id"]], "ranked_queue", "a 1v1 match")
+            # Room rules §4.5: a non-default room is revealed only to a request
+            # at or above the floor (409 otherwise — the state above is already
+            # committed; this seat simply never learns the room).
+            _rules_admit(request, rules)
             # Bug 200: carry the resumed BO3 tally, same shape as the
             # /queue/ready both_ready branch and the preflight "exists"
             # response — this poll path hands over a series id just like they
@@ -14881,6 +15715,8 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
                 p2_steam_id=(opp["steam_id"] if series.player1_id == my_pid else steam_id),
                 p1_wins=series.p1_series_wins,
                 p2_wins=series.p2_series_wins,
+                rules=_rules_payload(rules, "queue"),
+                rules_prop=_rules_prop(rules),
             )
 
         # Room already set (by /ready endpoint) but we see it on poll
@@ -14888,6 +15724,9 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
             series = await _find_current_active_series(db, my_pid, opp["player_id"], room_id=room_name)
             sid_str = str(series.id) if series is not None else None
             await db.commit()
+            # Room rules: the row's frozen record, gated like every reveal.
+            rules = _rules_normalize(entry["rules"])
+            _rules_admit(request, rules)
             # Bug 200: this branch hands over a series_id too, so it must carry
             # the resumed tally for the same reason the branch above does.
             # Round-2 review proved it currently UNREACHABLE (room_name is
@@ -14911,6 +15750,8 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
                              (opp["steam_id"] if series.player1_id == my_pid else steam_id)),
                 p1_wins=(0 if series is None else series.p1_series_wins),
                 p2_wins=(0 if series is None else series.p2_series_wins),
+                rules=_rules_payload(rules, "queue"),
+                rules_prop=_rules_prop(rules),
             )
 
         # Waiting for ready-up
@@ -15091,7 +15932,7 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
     entry_result = await db.execute(
         text("""
             SELECT player_id, status, matched_with, room_name, room_region, region,
-                   home_region, ready, region_pings, region_pings_at
+                   home_region, ready, region_pings, region_pings_at, rules
             FROM ranked_queue WHERE player_id = :pid
         """),
         {"pid": player.id},
@@ -15126,7 +15967,7 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
     # without the caller having marked itself ready.
     opp_result = await db.execute(
         text("""
-            SELECT player_id, steam_id, ready, room_name, region, home_region,
+            SELECT player_id, steam_id, ready, room_name, region, home_region, rules,
                    region_pings, region_pings_at, status, matched_with
             FROM ranked_queue WHERE player_id = :oid
         """),
@@ -15146,10 +15987,14 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
         await db.commit()
         return {"status": "dissolved", "message": "Match dissolved - searching again"}
 
-    # Set ourselves as ready.
+    # Set ourselves as ready, and refresh the member-scoped mod_version
+    # (migration 306) in the same statement: the opponent's issuance reads
+    # THIS row's version when it decides Same Cards, and a downgrade between
+    # the last poll and this ready must not leave a capable-looking row
+    # behind (a1 M1). The issuing seat is judged by its own header regardless.
     await db.execute(
-        text("UPDATE ranked_queue SET ready = true WHERE player_id = :pid"),
-        {"pid": player.id},
+        text("UPDATE ranked_queue SET ready = true, mod_version = :mv WHERE player_id = :pid"),
+        {"pid": player.id, "mv": _request_mod_version(request)},
     )
 
     # Refresh matched_at so the opponent's ready timeout window resets from
@@ -15174,6 +16019,8 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
         # Both ready — generate room if not already done
         room_name = entry["room_name"] or opp["room_name"]
         room_generated = False
+        existing_series = None
+        _series_resolved = False
         if not room_name:
             # ALL-member ban recheck at room issuance (round-17 find 2) —
             # same dissolution as the poll's both-ready branch, under the
@@ -15203,9 +16050,22 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
                 opp["region"], opp["home_region"], room_name,
                 p1_pings=entry["region_pings"], p2_pings=opp["region_pings"],
                 p1_pings_at=entry["region_pings_at"], p2_pings_at=opp["region_pings_at"])
+            # Room rules (migration 306): same freeze as the poll's both-ready
+            # branch — the series read moves ahead of the stamp; a resumed
+            # series keeps its rules (NULL = born before the record = the
+            # defaults, never backfilled — a1 H4), only a NEW series takes
+            # prefs AND member versions.
+            existing_series = await _find_current_active_series(db, player.id, opp["player_id"], room_id=room_name)
+            _series_resolved = True
+            if existing_series is not None:
+                rules = _rules_normalize(existing_series.rules)
+            else:
+                rules = await _rules_for_members(
+                    db, [player.id, opp["player_id"]], "ranked_queue",
+                    request=request, my_pid=player.id)
             # v1.40.1: ONE conditional stamp over both rows, RETURNING-proven —
             # same helper and same dissolution rule as the poll's both-ready branch.
-            if not await _queue_stamp_room_reciprocal(db, player.id, opp["player_id"], room_name, chosen_region):
+            if not await _queue_stamp_room_reciprocal(db, player.id, opp["player_id"], room_name, chosen_region, rules=rules):
                 print(f"[QUEUE-READY] {steam_id} room stamp not reciprocal — dissolving own row")
                 await _queue_reset_to_searching(db, player.id)
                 await db.commit()
@@ -15218,13 +16078,18 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
             return {"status": "dissolved", "message": "Match dissolved - searching again"}
         else:
             chosen_region = entry["room_region"] or entry["region"] or "us"
+            # Replay: the frozen record from whichever row carries the room
+            # (both were stamped in one statement; ours may be the un-stamped
+            # side only when the partner issued and we re-readied — read theirs).
+            rules = _rules_normalize(entry["rules"] if entry["room_name"] else opp["rules"])
 
         # Pre-create the ranked_series row so /series/active returns it BEFORE game 1
         # ends. submit_match's existing find-or-create logic will reuse it whether the
         # match report's p1/p2 ordering matches our ordering or not. Skip if a row
         # already exists (e.g., re-ready after a brief disconnect) — shared helper,
         # activity-based recency so an interrupted BO3 resumes instead of forking.
-        existing_series = await _find_current_active_series(db, player.id, opp["player_id"], room_id=room_name)
+        if not _series_resolved:
+            existing_series = await _find_current_active_series(db, player.id, opp["player_id"], room_id=room_name)
         if existing_series is None:
             existing_series = RankedSeries(
                 player1_id=player.id,
@@ -15232,9 +16097,11 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
                 p1_series_wins=0, p2_series_wins=0,
                 live_p1_points=0, live_p2_points=0,
                 status="active",
+                rules=rules,
             )
             db.add(existing_series)
             await db.flush()  # get the new series_id
+        # NULL rules on a resumed series stay NULL (a1 H4) — see the poll.
 
         # Bug 199: a RESUMED series carries a stale created_at and a stale
         # newest matches.ended_at, so without this stamp it stays invisible on
@@ -15265,6 +16132,8 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
         # perspective with ONE shared helper rather than a second copy (#330).
         _s_p1 = steam_id if existing_series.player1_id == player.id else opp["steam_id"]
         _s_p2 = opp["steam_id"] if existing_series.player1_id == player.id else steam_id
+        # Room rules §4.5: gate the reveal on THIS request's version.
+        _rules_admit(request, rules)
         return {
             "status": "both_ready",
             "room_name": room_name,
@@ -15274,6 +16143,8 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
             "p2_steam_id": _s_p2,
             "p1_wins": existing_series.p1_series_wins,
             "p2_wins": existing_series.p2_series_wins,
+            "rules": _rules_payload(rules, "queue"),
+            "rules_prop": _rules_prop(rules),
         }
 
     await db.commit()
@@ -16517,6 +17388,7 @@ async def get_recent_series(
             rs.p1_rating_change,
             rs.p2_rating_change,
             rs.completed_at,
+            rs.rules,
             p1.steam_id AS p1_steam_id,
             p1.display_name AS p1_name,
             p1.discord_id AS p1_discord_id,
@@ -16659,6 +17531,9 @@ async def get_recent_series(
             "winner_name": row["winner_name"],
             "winner_steam_id": row["winner_steam_id"],
             "completed_at": row["completed_at"].isoformat() if row["completed_at"] else None,
+            # Room rules (migration 306): {ff, sc} or None when unknown; the
+            # Discord bot renders a Rules field from non-defaults.
+            "rules": _rules_history(row["rules"]),
             "bets": bets_by_series.get(row["series_id"], []),
             # Aug 14 contract fields — see the batched lookup above. 2v2/FFA
             # series cannot be tournament-bound today, and their feeds are
@@ -17351,7 +18226,7 @@ async def get_recent_multimode_series(
     t_rows = (await db.execute(text("""
         SELECT s.id, s.completed_at, s.winner_team,
                s.t1_series_wins, s.t2_series_wins,
-               s.t1a_rating_change, s.t2a_rating_change,
+               s.t1a_rating_change, s.t2a_rating_change, s.rules,
                p1a.display_name AS t1a_name, p1b.display_name AS t1b_name,
                p2a.display_name AS t2a_name, p2b.display_name AS t2b_name
           FROM team_series s
@@ -17386,6 +18261,7 @@ async def get_recent_multimode_series(
                      else (str(r["t2_series_wins"]) + "-" + str(r["t1_series_wins"])),
             "left_rating_change": (r["t1a_rating_change"] if won1 else r["t2a_rating_change"]),
             "right_rating_change": (r["t2a_rating_change"] if won1 else r["t1a_rating_change"]),
+            "rules": _rules_history(r["rules"]),
             "bets": [{
                 "bettor_name": b["bettor_name"], "bettor_steam_id": b["bettor_steam_id"],
                 "bet_on_label": (t1 if b["bet_on_team"] == 1 else t2),
@@ -17399,7 +18275,7 @@ async def get_recent_multimode_series(
     # -- 1v2 (no bet table exists; unranked beta, so no deltas) --
     for r in (await db.execute(text("""
         SELECT s.id, s.completed_at, s.winner_side,
-               s.solo_series_wins, s.duo_series_wins,
+               s.solo_series_wins, s.duo_series_wins, s.rules, s.solo_extra_pick,
                ps.display_name AS solo_name,
                pa.display_name AS duo_a_name, pb.display_name AS duo_b_name
           FROM ovt_series s
@@ -17420,17 +18296,20 @@ async def get_recent_multimode_series(
             "score": (str(r["solo_series_wins"]) + "-" + str(r["duo_series_wins"])) if solo_won
                      else (str(r["duo_series_wins"]) + "-" + str(r["solo_series_wins"])),
             "left_rating_change": None, "right_rating_change": None,
+            "rules": _rules_history(r["rules"], r["solo_extra_pick"]),
             "bets": [],
         })
 
     # -- FFA (per GAME, because bets are per game) --
-    f_rows = (await db.execute(text("""
+    f_rows = (await db.execute(text(f"""
         SELECT m.id, m.ended_at, m.player_count, m.lobby_id, m.photon_room_id,
                pw.display_name AS winner_name,
                (SELECT fmp.rating_change FROM ffa_match_players fmp
-                 WHERE fmp.match_id = m.id AND fmp.player_id = m.winner_id) AS winner_change
+                 WHERE fmp.match_id = m.id AND fmp.player_id = m.winner_id) AS winner_change,
+               {_FFA_SETTINGS_COLS}
           FROM ffa_matches m
           LEFT JOIN players pw ON pw.id = m.winner_id
+          LEFT JOIN ffa_lobbies l ON l.id = m.lobby_id
          WHERE m.invalidated_at IS NULL AND m.is_ranked = TRUE AND m.ended_at >= :cut
          ORDER BY m.ended_at DESC LIMIT :lim
     """), {"cut": cutoff, "lim": limit})).mappings().all()
@@ -17461,6 +18340,7 @@ async def get_recent_multimode_series(
             "right_label": str(r["player_count"]) + "-player FFA",
             "score": "#1 of " + str(r["player_count"]),
             "left_rating_change": r["winner_change"], "right_rating_change": None,
+            "settings": _ffa_settings_block(r),
             "bets": [{
                 "bettor_name": b["bettor_name"], "bettor_steam_id": b["bettor_steam_id"],
                 "bet_on_label": b["target_name"],
@@ -22875,6 +23755,2567 @@ async def get_inventory(steam_id: str, db: AsyncSession = Depends(get_db)):
     }
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Player Cards (Sept 10 batch, migration 308) — phase 1 server core.
+#
+# The rules live in player_cards.py (pure, tested on their own); this block
+# moves rows and money. Contract for every mutation and every private read:
+#   * mod HMAC over the canonical string (every term of the operation is in
+#     it) AND a STRICT verified Steam session for the acting steam id — 401
+#     session_required, always; HMAC-only is admitted for consented-public
+#     reads only (a public collection, the pool summary);
+#   * the intent row is the FIRST write (purchase nonce / the unopened pack's
+#     own row); a non-claimant answers from the committed row;
+#   * lock order: players row FOR NO KEY UPDATE → active edition FOR SHARE;
+#     every predicate re-read after the locks;
+#   * money and shards move as conditional deltas with RETURNING; a refused
+#     delta is a committed rejection, never a debit;
+#   * pre-debit rejections COMMIT as status='rejected' (nonce reusable only
+#     through a new intent) so a player can never be wedged;
+#   * prints are immutable after insert — the pc_prints_immutable trigger
+#     raises on any UPDATE that touches a frozen column.
+# The pool snapshot (daily 00:05 UTC, first one within a minute of boot) is
+# what rolls read; a rolled subject is re-checked against the LIVE pool inside
+# the transaction and re-rolled when it left (opt-out, ban, deletion).
+# ═══════════════════════════════════════════════════════════════════════════
+import player_cards as _pc
+import pc_portrait as _pcp
+try:
+    import pc_face as _pcf
+except Exception as _pcf_ex:  # Pillow / regex / fonts missing: face routes answer 503, everything else boots
+    _pcf = None
+    print(f"[PC-FACE] renderer unavailable: {_pcf_ex}")
+
+_PC_POOL_MIN_MATCHES = 5   # the leaderboard's own default: board_rank means "rank on the board as shown"
+
+# board_rank (c3 F): eligibility is the LIVE leaderboard's own count — every
+# completed series, an invalidated one included, plus legacy matches — with
+# its tie-breaker (rating, then player id); the card's W/L (`series`) is the
+# truthful record and excludes invalidated series, as pool_rank's
+# has-a-series rule does (design v4 §2).
+_PC_SNAPSHOT_SELECT_SQL = """
+    WITH pool AS (
+        SELECT p.id AS player_id, gr.rating, gr.peak_rating,
+               si.sku AS title_sku, si.name AS title_name, si.preview_color AS title_color
+          FROM players p
+          LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
+          LEFT JOIN shop_items si ON si.id = p.active_title_id
+         WHERE p.deleted_at IS NULL AND p.pc_opted_out_at IS NULL
+           AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)
+    ),
+    series AS (
+        SELECT s.player_id, SUM(s.won) AS wins, SUM(s.lost) AS losses, COUNT(*) AS total
+          FROM (
+              SELECT rs.player1_id AS player_id,
+                     CASE WHEN rs.winner_id = rs.player1_id THEN 1 ELSE 0 END AS won,
+                     CASE WHEN rs.winner_id = rs.player2_id THEN 1 ELSE 0 END AS lost
+                FROM ranked_series rs
+               WHERE rs.status = 'completed' AND rs.invalidated_at IS NULL
+              UNION ALL
+              SELECT rs.player2_id,
+                     CASE WHEN rs.winner_id = rs.player2_id THEN 1 ELSE 0 END,
+                     CASE WHEN rs.winner_id = rs.player1_id THEN 1 ELSE 0 END
+                FROM ranked_series rs
+               WHERE rs.status = 'completed' AND rs.invalidated_at IS NULL
+          ) s
+         GROUP BY s.player_id
+    ),
+    legacy AS (
+        SELECT p.id AS player_id, COUNT(m.id) AS total
+          FROM players p
+          JOIN matches m ON (m.player1_id = p.id OR m.player2_id = p.id)
+                        AND m.is_ranked = true AND m.series_id IS NULL
+         GROUP BY p.id
+    ),
+    top AS (
+        SELECT DISTINCT ON (mc.player_id) mc.player_id, mc.card_name
+          FROM (SELECT player_id, card_name, COUNT(*) AS n
+                  FROM match_cards GROUP BY player_id, card_name) mc
+         ORDER BY mc.player_id, mc.n DESC, mc.card_name
+    ),
+    board_series AS (
+        SELECT s.player_id, COUNT(*) AS total
+          FROM (SELECT rs.player1_id AS player_id FROM ranked_series rs WHERE rs.status = 'completed'
+                UNION ALL
+                SELECT rs.player2_id FROM ranked_series rs WHERE rs.status = 'completed') s
+         GROUP BY s.player_id
+    ),
+    board AS (
+        SELECT gr.player_id, ROW_NUMBER() OVER (ORDER BY gr.rating DESC, p.id) AS board_rank
+          FROM glicko_ratings gr
+          JOIN players p ON p.id = gr.player_id
+          LEFT JOIN board_series se ON se.player_id = p.id
+          LEFT JOIN legacy lg ON lg.player_id = p.id
+         WHERE p.deleted_at IS NULL
+           AND COALESCE(se.total, 0) + COALESCE(lg.total, 0) >= CAST(:min_matches AS integer)
+           AND p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))
+    )
+    SELECT pool.player_id,
+           ROW_NUMBER() OVER (ORDER BY (COALESCE(series.total, 0) > 0) DESC,
+                                       pool.rating DESC NULLS LAST,
+                                       pool.peak_rating DESC NULLS LAST,
+                                       pool.player_id) AS pool_rank,
+           pool.rating, pool.peak_rating, board.board_rank,
+           COALESCE(series.wins, 0) AS series_wins,
+           COALESCE(series.losses, 0) AS series_losses,
+           top.card_name AS top_card,
+           pool.title_sku, pool.title_name, pool.title_color
+      FROM pool
+      LEFT JOIN series ON series.player_id = pool.player_id
+      LEFT JOIN top ON top.player_id = pool.player_id
+      LEFT JOIN board ON board.player_id = pool.player_id
+     ORDER BY pool_rank
+"""
+
+_PC_MEMBER_INSERT_SQL = """
+    INSERT INTO pc_pool_members (snapshot_id, player_id, pool_rank, rarity, rating, peak_rating,
+                                 board_rank, series_wins, series_losses, top_card, title)
+    VALUES (CAST(:sid AS integer), CAST(:pid AS uuid), CAST(:rank AS integer), CAST(:rarity AS text),
+            CAST(:rating AS double precision), CAST(:peak AS double precision), CAST(:board AS integer),
+            CAST(:wins AS integer), CAST(:losses AS integer), CAST(:top AS text), CAST(:title AS text))
+"""
+
+_PC_LIVE_POOL_CHECK_SQL = """
+    SELECT 1 FROM players p
+     WHERE p.id = CAST(:pid AS uuid) AND p.deleted_at IS NULL AND p.pc_opted_out_at IS NULL
+       AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)
+"""
+
+_PC_MEMBER_AT_SQL = """
+    SELECT m.player_id, m.pool_rank, m.rarity, m.rating, m.peak_rating, m.board_rank,
+           m.series_wins, m.series_losses, m.top_card, m.title
+      FROM pc_pool_members m
+     WHERE m.snapshot_id = CAST(:sid AS integer) AND m.rarity = CAST(:rarity AS text)
+     ORDER BY m.pool_rank
+    OFFSET CAST(:k AS integer) LIMIT 1
+"""
+
+_PC_PRINT_INSERT_SQL = """
+    INSERT INTO pc_prints (card_id, owner_player_id, snapshot_id, rarity, foil, signed, pool_rank,
+                           rating, peak_rating, board_rank, series_wins, series_losses, top_card,
+                           title, source, pack_id, slot)
+    VALUES (CAST(:card AS uuid), CAST(:owner AS uuid), CAST(:sid AS integer), CAST(:rarity AS text),
+            CAST(:foil AS boolean), CAST(:signed AS boolean), CAST(:rank AS integer),
+            CAST(:rating AS double precision), CAST(:peak AS double precision), CAST(:board AS integer),
+            CAST(:wins AS integer), CAST(:losses AS integer), CAST(:top AS text), CAST(:title AS text),
+            CAST(:source AS text), CAST(:pack AS uuid), CAST(:slot AS smallint))
+    RETURNING id, minted_at
+"""
+
+_PC_PRINT_FACE_SELECT = """
+    SELECT pr.id AS print_id, pr.card_id, c.subject_player_id, c.edition_id, pr.owner_player_id,
+           pr.minted_at, pr.snapshot_id, pr.rarity, pr.foil, pr.signed, pr.pool_rank, pr.rating,
+           pr.peak_rating, pr.board_rank, pr.series_wins, pr.series_losses, pr.top_card, pr.title,
+           pr.source, pr.pack_id, pr.slot, pr.discarded_at, pr.discard_shards,
+           s.display_name AS subject_name, (s.deleted_at IS NOT NULL) AS subject_deleted,
+           (s.pc_opted_out_at IS NOT NULL) AS subject_opted_out,
+           s.pc_portrait_source AS portrait_source, s.pc_game_portrait_hash AS portrait_hash,
+           EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = s.steam_id AND b.unbanned_at IS NULL) AS subject_banned
+      FROM pc_prints pr
+      JOIN pc_cards c ON c.id = pr.card_id
+      JOIN players s ON s.id = c.subject_player_id
+"""
+
+
+async def _pc_verified_actor(request, steam_id: str, sig: str, canon: str, db: AsyncSession):
+    """The acting player for a mutation or a private read: mod HMAC over the
+    canonical string (503 unconfigured, 403 invalid), a STRICT verified Steam
+    session for the claimed id (401 session_required), a live non-deleted
+    row (404 / 410), and no service account (403). Returns the Player row."""
+    if not MATCH_HMAC_SECRET:
+        raise HTTPException(status_code=503, detail="HMAC not configured")
+    expected = hmac.new(MATCH_HMAC_SECRET.encode(), canon.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(sig or "", expected):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    # Identity serialization (c3 A, c5 A): the identity advisory lock in its
+    # SHARED form, held to the end of this transaction and taken BEFORE the
+    # session proof. delete_player_data and the ban writer hold the exclusive
+    # form across their purges (the pc_* sweep and anonymisation; the session
+    # purge and the consent withdrawal), so the session and the row read
+    # below either predate such a transaction — which then waits for this
+    # one and purges after it — or follow its commit and see the purge (401 /
+    # 410). Taken before the first write of every Player Cards route (#282).
+    await db.execute(text("SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))"), {"sid": steam_id})
+    if not await _strict_steam_session_ok(request, steam_id, db):
+        raise HTTPException(status_code=401, detail="session_required")
+    player = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
+    if player is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+    if player.deleted_at is not None:
+        raise HTTPException(status_code=410, detail="Account deleted")
+    await _assert_no_service_subject(db, affected_player_ids=[player.id], affected_steam_ids=[steam_id])
+    return player
+
+
+def _pc_hmac_ok(sig: str, canon: str) -> bool:
+    if not MATCH_HMAC_SECRET:
+        raise HTTPException(status_code=503, detail="HMAC not configured")
+    expected = hmac.new(MATCH_HMAC_SECRET.encode(), canon.encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(sig or "", expected)
+
+
+def _pc_iso(v):
+    try:
+        return v.isoformat() if v is not None else None
+    except Exception:
+        return None
+
+
+def _pc_num(v):
+    return float(v) if v is not None else None
+
+
+def _pc_board_rating(rating):
+    """The rating the leaderboard resolves titles and rank names against —
+    ROUND(rating::numeric, 0), half away from zero as PostgreSQL rounds
+    (c3 F); None stays None."""
+    if rating is None:
+        return None
+    r = float(rating)
+    return float(math.floor(r + 0.5)) if r >= 0 else -float(math.floor(-r + 0.5))
+
+
+# The immutable built-in neutral label. Byte-identical with the DLL's own
+# constant (v22 §2.4 step 3): it is what a client shows when the api it is
+# talking to said nothing, so the two must not be able to differ.
+_PC_NEUTRAL_NAME = "Unnamed player"
+
+
+def _pc_neutral_name(ctx=None) -> str:
+    """The label a card shows instead of a name.
+
+    With a render context it is that locale's effective `pc.unnamed` — the
+    SAME string the face draws, so a payload and its picture cannot disagree.
+    Without one it is the built-in, which is also what the client falls back
+    to; the answer is then the same string by construction rather than by two
+    translations happening to match."""
+    label = (ctx or {}).get("labels", {}).get("pc.unnamed")
+    return label or _PC_NEUTRAL_NAME
+
+
+def _pc_print_dict(row, ctx=None) -> dict:
+    """The wire shape of one print: the frozen face plus the subject's
+    CURRENT display name (a rename propagates; delete-my-data's anonymised
+    name replaces it). With a face context (a locale's labels, the renderer
+    fingerprint, the rank colours) the print also carries its `face_rev`,
+    the key of its rendered face in that locale (v22 §2.2)."""
+    rating = _pc_num(row["rating"])
+    d = {
+        "print_id": str(row["print_id"]),
+        "card_id": str(row["card_id"]),
+        "subject_player_id": str(row["subject_player_id"]),
+        # The neutral label, not null, whenever this answer knows which locale
+        # it is in: the face draws the label and the payload used to carry
+        # nothing, so the tile and its picture named the same card differently.
+        "subject_name": (_pcp.public_render_name(row["subject_name"])
+                         or (_pc_neutral_name(ctx) if ctx is not None else None)),
+        "subject_deleted": bool(row["subject_deleted"]),
+        "edition_id": int(row["edition_id"]),
+        "minted_at": _pc_iso(row["minted_at"]),
+        "rarity": row["rarity"],
+        "foil": bool(row["foil"]),
+        "signed": bool(row["signed"]),
+        "pool_rank": int(row["pool_rank"]),
+        "rating": rating,
+        "peak_rating": _pc_num(row["peak_rating"]),
+        "board_rank": int(row["board_rank"]) if row["board_rank"] is not None else None,
+        "series_wins": int(row["series_wins"] or 0),
+        "series_losses": int(row["series_losses"] or 0),
+        "top_card": row["top_card"],
+        "title": row["title"],
+        "rank_name": _rank_name_for(_pc_board_rating(rating)) if rating is not None else None,
+        "source": row["source"],
+        "slot": int(row["slot"]) if row["slot"] is not None else None,
+        "discarded": row["discarded_at"] is not None,
+    }
+    if ctx is not None:
+        d["face_rev"] = _pc_face_inputs(row, ctx)[3]
+    return d
+
+
+async def _pc_prints_of_pack(db: AsyncSession, pack_id, ctx=None) -> list:
+    rows = (await db.execute(text(_PC_PRINT_FACE_SELECT + """
+     WHERE pr.pack_id = CAST(:pack AS uuid)
+     ORDER BY pr.slot
+    """), {"pack": pack_id})).mappings().all()
+    prints = [_pc_print_dict(r, ctx) for r in rows]
+    # The copies the opener already held when each slot was minted (v22 §7).
+    # It is a fact about the PULL, not about the print, so it is not a column
+    # on pc_prints and cannot come out of the select above: the mint wrote it
+    # into this pack's stored answer, and this is where it rejoins the wire.
+    # Read ONCE for the pack, and keyed by print id — the stored answer and the
+    # table are two orderings of the same rows, and a positional join can
+    # attribute a count to the wrong card. Absent for a pack opened before the
+    # field existed: the key is then omitted, and the client states nothing
+    # rather than calling every card new.
+    stored = await _pc_pack_result(db, pack_id)
+    for p in prints:
+        dup = _pc_pack_dup_at_pull(stored, p["print_id"])
+        if dup is not None:
+            p["dup_at_pull"] = dup
+    return prints
+
+
+async def _pc_pack_result(db: AsyncSession, pack_id) -> dict:
+    """The pack row's stored answer JSON, or {} when there is none."""
+    raw = (await db.execute(text(
+        "SELECT result FROM pc_packs WHERE id = CAST(:pack AS uuid)"),
+        {"pack": pack_id})).scalar_one_or_none()
+    if isinstance(raw, (str, bytes, bytearray)):
+        try:
+            raw = _json.loads(raw)
+        except ValueError:
+            return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def _pc_pack_dup_at_pull(stored: dict, print_id: str):
+    """`dup_at_pull` for one print id out of a stored pack answer, or None."""
+    for slot in (stored or {}).get("prints") or ():
+        if isinstance(slot, dict) and str(slot.get("print_id")) == str(print_id):
+            value = slot.get("dup_at_pull")
+            return None if value is None else int(value)
+    return None
+
+
+async def _pc_take_snapshot(db: AsyncSession, *, reason: str) -> dict:
+    """One new pool snapshot from the live tables (the caller commits).
+    pool_rank = leaderboard order among players with a completed, non-
+    invalidated ranked series, then everyone else by rating / peak / id;
+    the band is fixed from the rank; board_rank is the leaderboard's own
+    rank under its default eligibility (5 matches, active window) or NULL;
+    the title is resolved exactly as the leaderboard resolves it (dynamic
+    rank / podium titles included) and frozen as text."""
+    rows = (await db.execute(text(_PC_SNAPSHOT_SELECT_SQL),
+                             {"min_matches": _PC_POOL_MIN_MATCHES,
+                              "active_days": LEADERBOARD_ACTIVE_DAYS})).mappings().all()
+    colors = await _rank_colors(db)
+    pmap, pmap2, pmapf = await _podium_maps_for(db, (r["title_sku"] for r in rows))
+    snap_id = (await db.execute(text(
+        "INSERT INTO pc_pool_snapshots (member_count) VALUES (CAST(:n AS integer)) RETURNING id"),
+        {"n": len(rows)})).scalar_one()
+    params = []
+    for r in rows:
+        rating = _pc_num(r["rating"])
+        pid_s = str(r["player_id"])
+        title, _c = _display_title_sync(colors, r["title_sku"], r["title_name"], r["title_color"],
+                                        _pc_board_rating(rating),
+                                        podium_pos=pmap.get(pid_s), podium_pos_2v2=pmap2.get(pid_s),
+                                        podium_pos_ffa=pmapf.get(pid_s))
+        rank = int(r["pool_rank"])
+        params.append({
+            "sid": snap_id, "pid": pid_s, "rank": rank, "rarity": _pc.rarity_for_rank(rank),
+            "rating": rating, "peak": _pc_num(r["peak_rating"]),
+            "board": int(r["board_rank"]) if r["board_rank"] is not None else None,
+            "wins": int(r["series_wins"] or 0), "losses": int(r["series_losses"] or 0),
+            "top": r["top_card"], "title": title,
+        })
+    if params:
+        await db.execute(text(_PC_MEMBER_INSERT_SQL), params)
+    await db.execute(text("""
+        DELETE FROM pc_pool_snapshots
+         WHERE id NOT IN (SELECT id FROM pc_pool_snapshots ORDER BY id DESC LIMIT CAST(:keep AS integer))
+    """), {"keep": int(_pc.PC_ECONOMY["snapshot_keep"])})
+    print(f"[PC-SNAPSHOT] id={snap_id} members={len(rows)} reason={reason}")
+    return {"snapshot_id": int(snap_id), "members": len(rows)}
+
+
+async def _pc_snapshot_due(db: AsyncSession):
+    """'first' when no snapshot exists, 'daily' when the last one predates
+    today's 00:05 UTC and that time has passed, else None — from the DB
+    clock and the durable MAX(taken_at), so it is restart-safe."""
+    due = (await db.execute(text("""
+        SELECT (SELECT MAX(taken_at) FROM pc_pool_snapshots) AS last_at,
+               now() AS db_now,
+               (date_trunc('day', now() AT TIME ZONE 'UTC') + INTERVAL '5 minutes') AT TIME ZONE 'UTC' AS today_at
+    """))).mappings().one()
+    last_at, db_now, today_at = due["last_at"], due["db_now"], due["today_at"]
+    if last_at is None:
+        return "first"
+    if db_now < today_at or last_at >= today_at:
+        return None
+    return "daily"
+
+
+async def _pc_snapshot_janitor_step() -> None:
+    """Janitor: event retention on every step, then a pool snapshot when
+    none exists (first boot after the migration) or one per UTC day at or
+    after 00:05 UTC. An advisory try-lock keeps two api processes from
+    taking the same day's snapshot twice, and the due state is re-read under
+    it (c3 F): a snapshot committed by another taker between the two reads
+    is not doubled."""
+    from database import async_session
+    async with async_session() as db:
+        # Retention first and unconditionally: an admin snapshot taken before
+        # each daily step must not starve it (c3 F).
+        await db.execute(text("DELETE FROM pc_events WHERE created_at < NOW() - INTERVAL '7 days'"))
+        # Portraits (310): a lease past `until` is dead by definition; a nonce
+        # older than a day can never be replayed (its session proof expired).
+        await db.execute(text("DELETE FROM pc_delivery_leases WHERE until < NOW() - INTERVAL '1 hour'"))
+        await db.execute(text("DELETE FROM pc_portrait_nonces WHERE used_at < NOW() - INTERVAL '1 day'"))
+        await db.commit()
+        if await _pc_snapshot_due(db) is None:
+            return
+        got = (await db.execute(text("SELECT pg_try_advisory_xact_lock(hashtext('pc_snapshot'))"))).scalar_one()
+        if not got:
+            return
+        reason = await _pc_snapshot_due(db)
+        if reason is None:
+            return
+        await _pc_take_snapshot(db, reason=reason)
+        await db.commit()
+
+
+async def _pc_roll_prints(db: AsyncSession, snap_id: int, owner_pid, rng=None):
+    """Roll one pack's prints from snapshot ``snap_id``: per print an
+    independent band roll (fallback one band down, never up), a uniform
+    member of the band, then the live-pool re-check — a subject that left the
+    pool since the snapshot is re-rolled up to reroll_attempts times. Returns
+    (prints, None) or (None, reason) with reason pool_empty | pool_changed.
+    Nothing here writes; the caller debits and mints only on success."""
+    rng = rng or secrets.SystemRandom()
+    size_rows = (await db.execute(text("""
+        SELECT rarity, COUNT(*) AS n FROM pc_pool_members
+         WHERE snapshot_id = CAST(:sid AS integer) GROUP BY rarity
+    """), {"sid": snap_id})).mappings().all()
+    sizes = {r["rarity"]: int(r["n"]) for r in size_rows}
+    if not any(n > 0 for n in sizes.values()):
+        return None, "pool_empty"
+    prints = []
+    n_prints = int(_pc.PC_ECONOMY["prints_per_pack"])
+    attempts = 1 + int(_pc.PC_ECONOMY["reroll_attempts"])
+    for slot in range(1, n_prints + 1):
+        member = None
+        rolled = None
+        for _attempt in range(attempts):
+            roll = _pc.roll_slot(rng, sizes)
+            if roll is None:
+                return None, "pool_empty"
+            rolled, used, idx = roll
+            row = (await db.execute(text(_PC_MEMBER_AT_SQL),
+                                    {"sid": snap_id, "rarity": used, "k": idx})).mappings().first()
+            if row is None:
+                continue
+            live = (await db.execute(text(_PC_LIVE_POOL_CHECK_SQL), {"pid": str(row["player_id"])})).first()
+            if live is None:
+                continue
+            member = row
+            break
+        if member is None:
+            return None, "pool_changed"
+        foil, signed = _pc.roll_flags(rng)
+        prints.append({
+            "slot": slot, "rolled": rolled, "player_id": str(member["player_id"]),
+            "pool_rank": int(member["pool_rank"]), "rarity": member["rarity"],
+            "rating": _pc_num(member["rating"]), "peak_rating": _pc_num(member["peak_rating"]),
+            "board_rank": int(member["board_rank"]) if member["board_rank"] is not None else None,
+            "series_wins": int(member["series_wins"] or 0), "series_losses": int(member["series_losses"] or 0),
+            "top_card": member["top_card"], "title": member["title"],
+            "foil": bool(foil), "signed": bool(signed),
+        })
+    return prints, None
+
+
+async def _pc_mint(db: AsyncSession, owner_pid, edition_id: int, snap_id: int, pack_id, source: str,
+                   prints: list) -> list:
+    """Insert the rolled prints (the card row is created lazily on the first
+    print of a subject in this edition) and the notable-pull events. Returns
+    the stored result shape (ids + frozen face, no names)."""
+    out = []
+    owner_s = str(owner_pid)
+    for p in prints:
+        card_id = (await db.execute(text("""
+            INSERT INTO pc_cards (subject_player_id, edition_id, variant)
+            VALUES (CAST(:subj AS uuid), CAST(:ed AS integer), 'base')
+            ON CONFLICT (subject_player_id, edition_id, variant) DO UPDATE SET variant = EXCLUDED.variant
+            RETURNING id
+        """), {"subj": p["player_id"], "ed": edition_id})).scalar_one()
+        # How many of this exact card the opener already holds, counted BEFORE
+        # this slot is inserted (v22 §7). The loop is sequential inside one
+        # transaction, so two identical slots in one pack read 0 and then 1 —
+        # "counted sequentially at mint" — and a discarded copy is not held.
+        dup_at_pull = int((await db.execute(text("""
+            SELECT COUNT(*) FROM pc_prints pr JOIN pc_cards c ON c.id = pr.card_id
+             WHERE pr.owner_player_id = CAST(:owner AS uuid) AND pr.discarded_at IS NULL
+               AND c.subject_player_id = CAST(:subj AS uuid)
+               AND pr.rarity = CAST(:rarity AS text)
+               AND pr.foil = CAST(:foil AS boolean) AND pr.signed = CAST(:signed AS boolean)
+        """), {"owner": owner_s, "subj": p["player_id"], "rarity": p["rarity"],
+               "foil": bool(p["foil"]), "signed": bool(p["signed"])})).scalar_one())
+        ins = (await db.execute(text(_PC_PRINT_INSERT_SQL), {
+            "card": str(card_id), "owner": owner_s, "sid": snap_id, "rarity": p["rarity"],
+            "foil": p["foil"], "signed": p["signed"], "rank": p["pool_rank"],
+            "rating": p["rating"], "peak": p["peak_rating"], "board": p["board_rank"],
+            "wins": p["series_wins"], "losses": p["series_losses"], "top": p["top_card"],
+            "title": p["title"], "source": source, "pack": str(pack_id), "slot": p["slot"],
+        })).mappings().one()
+        kinds = []
+        if p["rarity"] == "legendary":
+            kinds.append("legendary")
+        elif p["rarity"] == "epic":
+            kinds.append("epic")
+        if p["signed"]:
+            kinds.append("signed")
+        if p["foil"]:
+            kinds.append("foil")
+        if p["player_id"] == owner_s:
+            kinds.append("self")
+        for kind in kinds:
+            await db.execute(text("""
+                INSERT INTO pc_events (kind, player_id, subject_player_id, print_id, dup_at_pull)
+                VALUES (CAST(:kind AS text), CAST(:pid AS uuid), CAST(:subj AS uuid), CAST(:print AS uuid),
+                        CAST(:dup AS integer))
+            """), {"kind": kind, "pid": owner_s, "subj": p["player_id"], "print": str(ins["id"]),
+                   "dup": dup_at_pull})
+        out.append({
+            "dup_at_pull": dup_at_pull,
+            "print_id": str(ins["id"]), "card_id": str(card_id), "subject_player_id": p["player_id"],
+            "slot": p["slot"], "rarity": p["rarity"], "rolled": p["rolled"], "foil": p["foil"],
+            "signed": p["signed"], "pool_rank": p["pool_rank"], "rating": p["rating"],
+            "peak_rating": p["peak_rating"], "board_rank": p["board_rank"],
+            "series_wins": p["series_wins"], "series_losses": p["series_losses"],
+            "top_card": p["top_card"], "title": p["title"], "minted_at": _pc_iso(ins["minted_at"]),
+        })
+    return out
+
+
+async def _pc_pack_answer(db: AsyncSession, row, ctx=None) -> dict:
+    """The wire answer for a committed pack row (done / rejected / unopened).
+    With a face context the prints carry `face_rev` and the five faces are
+    pre-rendered best effort in that locale (v22 §2.2: an optimisation,
+    never a guarantee — the face route renders on demand)."""
+    status = row["status"]
+    base = {
+        "pack_id": str(row["id"]), "status": status, "source": row["source"],
+        "mode": row["mode"], "kind": row["kind"], "pay": row["pay"], "price": row["price"],
+        "reason": row["reject_reason"], "created_at": _pc_iso(row["created_at"]),
+        "opened_at": _pc_iso(row["opened_at"]),
+    }
+    if ctx is not None:
+        base["locale"] = ctx["locale"]   # the locale the prints' face_rev values are keyed under
+    if status == "done":
+        base["prints"] = await _pc_prints_of_pack(db, row["id"], ctx)
+        if ctx is not None:
+            _pc_schedule_prerender([p["print_id"] for p in base["prints"]], ctx["locale"])
+    return base
+
+
+def _pc_reject_http(reason: str, extra: dict | None = None):
+    code = 402 if reason in ("insufficient_gold", "insufficient_shards") else 409
+    detail = {"error": reason, "status": "rejected"}
+    if extra:
+        detail.update(extra)
+    return HTTPException(status_code=code, detail=detail)
+
+
+def _pc_prices() -> dict:
+    return {"gold": int(_pc.PC_ECONOMY["pack_price_gold"]),
+            "shards": int(_pc.PC_ECONOMY["pack_price_shards"]),
+            "paid_packs_per_day": int(_pc.PC_ECONOMY["paid_packs_per_day"]),
+            "prints_per_pack": int(_pc.PC_ECONOMY["prints_per_pack"])}
+
+
+@app.post("/api/v1/pc/packs/open", tags=["Player Cards"])
+async def pc_open_pack(
+    request: Request,
+    steam_id: str = Query(...),
+    sig: str = Query(...),
+    nonce: str | None = Query(None, min_length=8, max_length=64),
+    pay: str | None = Query(None),
+    expected_price: int | None = Query(None, ge=0),
+    pack_id: str | None = Query(None, min_length=8, max_length=64),
+    db: AsyncSession = Depends(get_db),
+):
+    """Open a pack. Purchase: nonce + pay (gold | shards) + expected_price,
+    HMAC over pcopen:{steam}:{nonce}:{pay}:{expected_price}. Unopened pack
+    (daily / earned): pack_id, HMAC over pcopen:{steam}:pack:{pack_id}. The
+    claim is the first write; the answer of a repeated nonce / pack_id is the
+    committed row. Pre-debit rejections (price_changed, pool_empty,
+    daily_cap, pool_changed, insufficient_*) commit and never debit:
+    HTTP 409 / 402 with {"error", "status": "rejected", ...}."""
+    # BEFORE any money moves. This route commits a debit and then builds an
+    # answer that projects names and keys faces; a box whose coverage manifest
+    # or renderer fingerprint is unavailable used to charge the player, mint
+    # the prints and raise 500 on the way out, and the recovery route raised
+    # the same 500. A precondition is only a precondition if it is checked
+    # where refusing is still free.
+    _pc_require_renderer()
+    if pack_id:
+        canon = _pc.canon_open_pack(steam_id, pack_id)
+    else:
+        if not nonce or pay not in _pc.PACK_PAY or expected_price is None:
+            raise HTTPException(status_code=422, detail="nonce, pay and expected_price are required for a purchase")
+        canon = _pc.canon_open_purchase(steam_id, nonce, pay, int(expected_price))
+    player = await _pc_verified_actor(request, steam_id, sig, canon, db)
+    pid = str(player.id)
+
+    # ── 1. the claim (first write) ──
+    if pack_id:
+        try:
+            _ = uuid.UUID(pack_id)
+        except Exception:
+            raise HTTPException(status_code=404, detail="Pack not found")
+        # An EARNED pack's series must still stand (c5 B): read before the
+        # claim, no lock (see _PC_SERIES_STANDING_SQL). A pack whose series
+        # was invalidated — or is gone — is voided here and answered as such.
+        held = (await db.execute(text("""
+            SELECT source, mode, reference_id FROM pc_packs
+             WHERE id = CAST(:pack AS uuid) AND player_id = CAST(:pid AS uuid) AND status = 'unopened'
+        """), {"pack": pack_id, "pid": pid})).mappings().first()
+        if held is not None and held["source"] == "earned":
+            ref_text = str(held["reference_id"] or "")
+            series_ref = ref_text.split(":", 1)[1] if ":" in ref_text else ""
+            checked, standing = False, None
+            for standing_mode, standing_sql in _PC_SERIES_STANDING_SQL.items():
+                if standing_mode != held["mode"]:
+                    continue
+                try:
+                    _ = uuid.UUID(series_ref)
+                except Exception:
+                    break
+                checked = True
+                standing = (await db.execute(text(standing_sql), {"ref": series_ref})).mappings().first()
+            if checked and (standing is None or standing["invalidated_at"] is not None):
+                await db.execute(text("""
+                    UPDATE pc_packs SET status = 'voided', voided_at = now()
+                     WHERE id = CAST(:pack AS uuid) AND status = 'unopened'
+                """), {"pack": pack_id})
+                await db.commit()
+                row = (await db.execute(text("""
+                    SELECT id, status, source, mode, kind, pay, price, reject_reason, created_at, opened_at
+                      FROM pc_packs WHERE id = CAST(:pack AS uuid) AND player_id = CAST(:pid AS uuid)
+                """), {"pack": pack_id, "pid": pid})).mappings().first()
+                answer = await _pc_pack_answer(db, row, await _pc_face_ctx(db, _pc_locale(request))) if row is not None else {"pack_id": pack_id}
+                print(f"[PC-OPEN] player={steam_id} pack={pack_id}: earned pack of an invalidated "
+                      f"{held['mode']} series voided at open")
+                raise HTTPException(status_code=410, detail={"error": "voided", **answer})
+        claim = (await db.execute(text("""
+            UPDATE pc_packs SET status = 'opening'
+             WHERE id = CAST(:pack AS uuid) AND player_id = CAST(:pid AS uuid) AND status = 'unopened'
+            RETURNING id, source, mode, kind
+        """), {"pack": pack_id, "pid": pid})).mappings().first()
+        if claim is None:
+            row = (await db.execute(text("""
+                SELECT id, status, source, mode, kind, pay, price, reject_reason, created_at, opened_at
+                  FROM pc_packs WHERE id = CAST(:pack AS uuid) AND player_id = CAST(:pid AS uuid)
+            """), {"pack": pack_id, "pid": pid})).mappings().first()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Pack not found")
+            answer = await _pc_pack_answer(db, row, await _pc_face_ctx(db, _pc_locale(request)))
+            if row["status"] == "done":
+                return answer
+            if row["status"] == "voided":
+                raise HTTPException(status_code=410, detail={"error": "voided", **answer})
+            raise HTTPException(status_code=409, detail={"error": "in_progress", **answer})
+        this_pack = str(claim["id"])
+        source = claim["source"]
+        price = 0
+    else:
+        price = int(_pc.PC_ECONOMY["pack_price_gold" if pay == "gold" else "pack_price_shards"])
+        claim = (await db.execute(text("""
+            INSERT INTO pc_packs (player_id, source, nonce, status, pay, price)
+            VALUES (CAST(:pid AS uuid), 'bought', CAST(:nonce AS text), 'pending', CAST(:pay AS text), CAST(:price AS integer))
+            ON CONFLICT (player_id, nonce) WHERE nonce IS NOT NULL DO NOTHING
+            RETURNING id
+        """), {"pid": pid, "nonce": nonce, "pay": pay, "price": price})).scalar_one_or_none()
+        if claim is None:
+            row = (await db.execute(text("""
+                SELECT id, status, source, mode, kind, pay, price, reject_reason, created_at, opened_at
+                  FROM pc_packs WHERE player_id = CAST(:pid AS uuid) AND nonce = CAST(:nonce AS text)
+            """), {"pid": pid, "nonce": nonce})).mappings().first()
+            if row is None:
+                raise HTTPException(status_code=409, detail={"error": "in_progress"})
+            answer = await _pc_pack_answer(db, row, await _pc_face_ctx(db, _pc_locale(request)))
+            if row["status"] == "done":
+                return answer
+            if row["status"] == "rejected":
+                raise _pc_reject_http(row["reject_reason"] or "rejected", answer)
+            raise HTTPException(status_code=409, detail={"error": "in_progress", **answer})
+        this_pack = str(claim)
+        source = "bought"
+
+    async def _reject(reason: str, extra: dict | None = None):
+        """Commit the rejection (no debit happened) and answer 409 / 402."""
+        if source == "bought":
+            await db.execute(text("""
+                UPDATE pc_packs SET status = 'rejected', reject_reason = CAST(:reason AS text)
+                 WHERE id = CAST(:pack AS uuid)
+            """), {"reason": reason, "pack": this_pack})
+        else:
+            await db.execute(text("""
+                UPDATE pc_packs SET status = 'unopened' WHERE id = CAST(:pack AS uuid)
+            """), {"pack": this_pack})
+            await db.execute(text("""
+                INSERT INTO pc_open_attempts (pack_id, reject_reason)
+                VALUES (CAST(:pack AS uuid), CAST(:reason AS text))
+                ON CONFLICT (pack_id) DO UPDATE SET attempted_at = now(), reject_reason = EXCLUDED.reject_reason
+            """), {"pack": this_pack, "reason": reason})
+        await db.commit()
+        if source == "bought":
+            raise _pc_reject_http(reason, {"pack_id": this_pack, **(extra or {})})
+        # A held pack (daily / earned) stays the player's: the answer is the
+        # committed row's own state — unopened, the attempt recorded — the
+        # same shape /pc/packs/result reports for it (c3 A).
+        raise HTTPException(status_code=409, detail={
+            "error": reason, "status": "unopened", "pack_id": this_pack, "source": source,
+            "last_attempt": {"reason": reason, "at": _pc_iso(datetime.now(timezone.utc))},
+            **(extra or {})})
+
+    # ── 2. locks: players row, then the active edition ──
+    await db.execute(text("SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE"), {"pid": pid})
+    edition = (await db.execute(text(
+        "SELECT id FROM pc_editions WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1 FOR SHARE"))).scalar_one_or_none()
+    if edition is None:
+        await _reject("no_edition")
+
+    # ── 3. predicates, re-read under the locks ──
+    if source == "bought" and int(expected_price) != price:
+        await _reject("price_changed", {"price": price})
+    snap_id = (await db.execute(text(
+        "SELECT id FROM pc_pool_snapshots ORDER BY id DESC LIMIT 1"))).scalar_one_or_none()
+    if snap_id is None:
+        await _reject("pool_empty")
+    if source == "bought":
+        paid_today = (await db.execute(text("""
+            SELECT COUNT(*) FROM pc_packs
+             WHERE player_id = CAST(:pid AS uuid) AND source = 'bought' AND status = 'done'
+               AND (opened_at AT TIME ZONE 'UTC')::date = (now() AT TIME ZONE 'UTC')::date
+        """), {"pid": pid})).scalar_one()
+        if int(paid_today) >= int(_pc.PC_ECONOMY["paid_packs_per_day"]):
+            await _reject("daily_cap", {"cap": int(_pc.PC_ECONOMY["paid_packs_per_day"])})
+
+    # ── 4. the roll (reads only) ──
+    prints, why = await _pc_roll_prints(db, int(snap_id), player.id)
+    if prints is None:
+        await _reject(why)
+
+    # ── 5. the debit: a conditional delta with RETURNING, never negative ──
+    if source == "bought":
+        if pay == "gold":
+            paid = (await db.execute(text("""
+                UPDATE players SET gold_spent = COALESCE(gold_spent, 0) + CAST(:amt AS integer)
+                 WHERE id = CAST(:pid AS uuid)
+                   AND COALESCE(gold_earned, 0) - COALESCE(gold_spent, 0) >= CAST(:amt AS integer)
+                RETURNING id
+            """), {"amt": price, "pid": pid})).scalar_one_or_none()
+            if paid is None:
+                await _reject("insufficient_gold", {"price": price})
+            db.add(GoldTransaction(player_id=player.id, amount=-price, reason="pc_pack", reference_id=this_pack))
+            db.expire(player, ["gold_spent"])
+        else:
+            paid = (await db.execute(text("""
+                UPDATE players SET pc_shards = pc_shards - CAST(:amt AS integer)
+                 WHERE id = CAST(:pid AS uuid) AND pc_shards >= CAST(:amt AS integer)
+                RETURNING id
+            """), {"amt": price, "pid": pid})).scalar_one_or_none()
+            if paid is None:
+                await _reject("insufficient_shards", {"price": price})
+
+    # ── 6. mint, record, commit ──
+    stored = await _pc_mint(db, player.id, int(edition), int(snap_id), this_pack, source, prints)
+    await db.execute(text("""
+        UPDATE pc_packs SET status = 'done', result = CAST(:result AS jsonb), snapshot_id = CAST(:sid AS integer),
+                            opened_at = now()
+         WHERE id = CAST(:pack AS uuid)
+    """), {"result": _json.dumps({"prints": stored}), "sid": int(snap_id), "pack": this_pack})
+    await db.commit()
+    print(f"[PC-OPEN] player={steam_id} pack={this_pack} source={source} pay={pay} price={price} "
+          f"snapshot={snap_id} rarities={','.join(p['rarity'] for p in stored)}"
+          f"{' foil' if any(p['foil'] for p in stored) else ''}{' signed' if any(p['signed'] for p in stored) else ''}")
+    row = (await db.execute(text("""
+        SELECT id, status, source, mode, kind, pay, price, reject_reason, created_at, opened_at
+          FROM pc_packs WHERE id = CAST(:pack AS uuid)
+    """), {"pack": this_pack})).mappings().one()
+    return await _pc_pack_answer(db, row, await _pc_face_ctx(db, _pc_locale(request)))
+
+
+@app.get("/api/v1/pc/packs/result", tags=["Player Cards"])
+async def pc_pack_result(
+    request: Request,
+    steam_id: str = Query(...),
+    sig: str = Query(...),
+    nonce: str | None = Query(None, min_length=8, max_length=64),
+    pack_id: str | None = Query(None, min_length=8, max_length=64),
+    db: AsyncSession = Depends(get_db),
+):
+    """Result recovery for a persisted intent: the committed pack row for the
+    caller's nonce or pack_id (HMAC over pcresult:{steam}:{nonce|pack_id},
+    strict session). 404 when no such row exists — a purchase whose claim
+    never committed (the client may retire the nonce)."""
+    ref = pack_id or nonce
+    if not ref:
+        raise HTTPException(status_code=422, detail="nonce or pack_id required")
+    player = await _pc_verified_actor(request, steam_id, sig, _pc.canon_result(steam_id, ref), db)
+    if pack_id:
+        try:
+            _ = uuid.UUID(pack_id)
+        except Exception:
+            raise HTTPException(status_code=404, detail="Pack not found")
+        row = (await db.execute(text("""
+            SELECT id, status, source, mode, kind, pay, price, reject_reason, created_at, opened_at
+              FROM pc_packs WHERE id = CAST(:pack AS uuid) AND player_id = CAST(:pid AS uuid)
+        """), {"pack": pack_id, "pid": str(player.id)})).mappings().first()
+    else:
+        row = (await db.execute(text("""
+            SELECT id, status, source, mode, kind, pay, price, reject_reason, created_at, opened_at
+              FROM pc_packs WHERE player_id = CAST(:pid AS uuid) AND nonce = CAST(:nonce AS text)
+        """), {"pid": str(player.id), "nonce": nonce})).mappings().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Pack not found")
+    answer = await _pc_pack_answer(db, row, await _pc_face_ctx(db, _pc_locale(request)))
+    if row["status"] == "unopened":
+        att = (await db.execute(text(
+            "SELECT reject_reason, attempted_at FROM pc_open_attempts WHERE pack_id = CAST(:pack AS uuid)"),
+            {"pack": str(row["id"])})).mappings().first()
+        if att is not None:
+            answer["last_attempt"] = {"reason": att["reject_reason"], "at": _pc_iso(att["attempted_at"])}
+    return answer
+
+
+@app.post("/api/v1/pc/daily", tags=["Player Cards"])
+async def pc_daily_claim(
+    request: Request,
+    steam_id: str = Query(...),
+    sig: str = Query(...),
+    nonce: str = Query(..., min_length=8, max_length=64),
+    db: AsyncSession = Depends(get_db),
+):
+    """Claim today's free pack (HMAC over pcdaily:{steam}:{nonce}, strict
+    session). The day is the DB's UTC date — the client never supplies it;
+    the claim row is the idempotency key (409 already_claimed with the next
+    reset). The pack is inserted unopened and opened through /pc/packs/open."""
+    player = await _pc_verified_actor(request, steam_id, sig, _pc.canon_daily(steam_id, nonce), db)
+    return await _pc_claim_daily(db, player, via="mod")
+
+
+async def _pc_claim_daily(db: AsyncSession, player, *, via: str) -> dict:
+    """The daily claim for a resolved, live player (the mod's /pc/daily and
+    the bot's /daily share it): player lock, the claim row keyed on the DB's
+    UTC date, the unopened pack, commit. 409 already_claimed otherwise."""
+    pid = str(player.id)
+    steam_id = player.steam_id
+    # The bot's /daily enters here below the actor helper: the same shared
+    # identity lock and a deleted_at re-read under it (c3 A).
+    await db.execute(text("SELECT pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))"), {"sid": steam_id})
+    gone = (await db.execute(text("SELECT deleted_at FROM players WHERE id = CAST(:pid AS uuid)"),
+                             {"pid": pid})).scalar_one_or_none()
+    if gone is not None:
+        await db.rollback()
+        raise HTTPException(status_code=410, detail="Account deleted")
+    if (await _is_banned(db, steam_id)) is not None:
+        # A ban withdraws this path too (c5): the mod's routes are closed by
+        # the ban's session purge; this one has no session to purge.
+        await db.rollback()
+        raise HTTPException(status_code=403, detail={"error": "banned"})
+    await db.execute(text("SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE"), {"pid": pid})
+    claimed = (await db.execute(text("""
+        INSERT INTO pc_daily_claims (player_id, claimed_on)
+        VALUES (CAST(:pid AS uuid), (now() AT TIME ZONE 'UTC')::date)
+        ON CONFLICT (player_id, claimed_on) DO NOTHING
+        RETURNING claimed_on
+    """), {"pid": pid})).scalar_one_or_none()
+    reset = (await db.execute(text(
+        "SELECT (date_trunc('day', now() AT TIME ZONE 'UTC') + INTERVAL '1 day') AT TIME ZONE 'UTC'"))).scalar_one()
+    if claimed is None:
+        existing = (await db.execute(text("""
+            SELECT c.pack_id, p.status FROM pc_daily_claims c
+              LEFT JOIN pc_packs p ON p.id = c.pack_id
+             WHERE c.player_id = CAST(:pid AS uuid) AND c.claimed_on = (now() AT TIME ZONE 'UTC')::date
+        """), {"pid": pid})).mappings().first()
+        await db.rollback()
+        raise HTTPException(status_code=409, detail={
+            "error": "already_claimed", "next_reset_utc": _pc_iso(reset),
+            "pack_id": str(existing["pack_id"]) if existing and existing["pack_id"] else None,
+            "pack_status": existing["status"] if existing else None,
+        })
+    pack = (await db.execute(text("""
+        INSERT INTO pc_packs (player_id, source, reference_id, status)
+        VALUES (CAST(:pid AS uuid), 'daily', CAST(:day AS text), 'unopened')
+        RETURNING id
+    """), {"pid": pid, "day": str(claimed)})).scalar_one()
+    await db.execute(text("""
+        UPDATE pc_daily_claims SET pack_id = CAST(:pack AS uuid)
+         WHERE player_id = CAST(:pid AS uuid) AND claimed_on = CAST(:day AS date)
+    """), {"pack": str(pack), "pid": pid, "day": str(claimed)})
+    await db.commit()
+    print(f"[PC-DAILY] player={steam_id} day={claimed} pack={pack} via={via}")
+    return {"status": "claimed", "pack_id": str(pack), "claimed_on": str(claimed), "next_reset_utc": _pc_iso(reset)}
+
+
+@app.post("/api/v1/pc/prints/discard", tags=["Player Cards"])
+async def pc_discard_print(
+    request: Request,
+    steam_id: str = Query(...),
+    sig: str = Query(...),
+    print_id: str = Query(..., min_length=8, max_length=64),
+    db: AsyncSession = Depends(get_db),
+):
+    """Discard ONE print for shards (HMAC over pcdiscard:{steam}:{print_id},
+    strict session): the owner check and the discard are one conditional
+    UPDATE under the player lock; the shard value is the print's rarity."""
+    player = await _pc_verified_actor(request, steam_id, sig, _pc.canon_discard(steam_id, print_id), db)
+    pid = str(player.id)
+    try:
+        _ = uuid.UUID(print_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Print not found")
+    await db.execute(text("SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE"), {"pid": pid})
+    rarity = (await db.execute(text(
+        "SELECT rarity FROM pc_prints WHERE id = CAST(:print AS uuid) AND owner_player_id = CAST(:pid AS uuid) AND discarded_at IS NULL"),
+        {"print": print_id, "pid": pid})).scalar_one_or_none()
+    if rarity is None:
+        await db.rollback()
+        raise HTTPException(status_code=404, detail={"error": "not_owned"})
+    value = _pc.shards_for(rarity)
+    done = (await db.execute(text("""
+        UPDATE pc_prints SET discarded_at = now(), discard_shards = CAST(:value AS integer)
+         WHERE id = CAST(:print AS uuid) AND owner_player_id = CAST(:pid AS uuid) AND discarded_at IS NULL
+        RETURNING id
+    """), {"value": value, "print": print_id, "pid": pid})).scalar_one_or_none()
+    if done is None:
+        await db.rollback()
+        raise HTTPException(status_code=404, detail={"error": "not_owned"})
+    # A discarded print is dead: every delivery lease naming it dies with it,
+    # so a bot send acquired for it re-validates and drops the bytes (r18 H1).
+    await db.execute(text("DELETE FROM pc_delivery_leases WHERE print_id = CAST(:print AS uuid)"), {"print": print_id})
+    shards = (await db.execute(text("""
+        UPDATE players SET pc_shards = pc_shards + CAST(:value AS integer)
+         WHERE id = CAST(:pid AS uuid) RETURNING pc_shards
+    """), {"value": value, "pid": pid})).scalar_one()
+    await db.commit()
+    print(f"[PC-DISCARD] player={steam_id} print={print_id} rarity={rarity} shards=+{value} balance={shards}")
+    return {"status": "discarded", "print_id": print_id, "rarity": rarity, "shards_gained": value, "shards": int(shards)}
+
+
+_PC_SETTINGS_SQL = {
+    "opted_out": """
+        UPDATE players SET pc_opted_out_at = CASE WHEN CAST(:value AS integer) = 1 THEN COALESCE(pc_opted_out_at, now()) ELSE NULL END,
+                           pc_settings_revision = pc_settings_revision + 1
+         WHERE id = CAST(:pid AS uuid) AND pc_settings_revision = CAST(:rev AS integer)
+        RETURNING pc_settings_revision
+    """,
+    "collection_public": """
+        UPDATE players SET pc_collection_public = (CAST(:value AS integer) = 1),
+                           pc_settings_revision = pc_settings_revision + 1
+         WHERE id = CAST(:pid AS uuid) AND pc_settings_revision = CAST(:rev AS integer)
+        RETURNING pc_settings_revision
+    """,
+    "announce": """
+        UPDATE players SET pc_announce = (CAST(:value AS integer) = 1),
+                           pc_settings_revision = pc_settings_revision + 1
+         WHERE id = CAST(:pid AS uuid) AND pc_settings_revision = CAST(:rev AS integer)
+        RETURNING pc_settings_revision
+    """,
+    # 1 = the in-game character (the default), 0 = None: the initial disc
+    # everywhere from the next render on; nothing is removed (v22 §3.1).
+    "portrait_source": """
+        UPDATE players SET pc_portrait_source = CASE WHEN CAST(:value AS integer) = 1 THEN 'game' ELSE 'none' END,
+                           pc_settings_revision = pc_settings_revision + 1
+         WHERE id = CAST(:pid AS uuid) AND pc_settings_revision = CAST(:rev AS integer)
+        RETURNING pc_settings_revision
+    """,
+}
+
+
+async def _pc_settings_of(db: AsyncSession, pid: str) -> dict:
+    row = (await db.execute(text("""
+        SELECT pc_opted_out_at, pc_collection_public, pc_announce, pc_settings_revision, pc_shards,
+               pc_portrait_source, pc_game_portrait_descriptor, pc_game_portrait_hash, pc_game_portrait_locked_until
+          FROM players WHERE id = CAST(:pid AS uuid)
+    """), {"pid": pid})).mappings().one()
+    return {
+        "opted_out": row["pc_opted_out_at"] is not None,
+        "collection_public": bool(row["pc_collection_public"]),
+        "announce": bool(row["pc_announce"]),
+        "revision": int(row["pc_settings_revision"]),
+        "shards": int(row["pc_shards"] or 0),
+        # The portrait unit (310): source none|game, the descriptor and hash of
+        # the stored upload (NULL = the initial disc), the admin lock.
+        "portrait_source": row["pc_portrait_source"] or "game",
+        "portrait_descriptor": row["pc_game_portrait_descriptor"],
+        "portrait_hash": row["pc_game_portrait_hash"],
+        "portrait_locked_until": _pc_iso(row["pc_game_portrait_locked_until"]),
+    }
+
+
+def _pc_setting_revokes_picture(key, value):
+    """True when this settings write withdraws the subject's picture, and so
+    must take the identity lock EXCLUSIVE and wait out any live delivery lease
+    rather than commit under a send already in flight.
+
+    Two writes do: switching the portrait source to none, and opting out of
+    Player Cards altogether — `portrait_for` answers ("none", None) for an
+    opted-out subject exactly as it does for source=none. Named, because it
+    decides whether a writer waits, and an inline expression that knew about
+    the first and not the second is how the second got missed."""
+    return (key == "portrait_source" and int(value) == 0) or (key == "opted_out" and int(value) == 1)
+
+
+@app.post("/api/v1/pc/settings", tags=["Player Cards"])
+async def pc_set_setting(
+    request: Request,
+    steam_id: str = Query(...),
+    sig: str = Query(...),
+    nonce: str = Query(..., min_length=8, max_length=64),
+    revision: int = Query(..., ge=0),
+    key: str = Query(...),
+    value: int = Query(..., ge=0, le=1),
+    db: AsyncSession = Depends(get_db),
+):
+    """One Player Cards setting (opted_out | collection_public | announce),
+    HMAC over pcset:{steam}:{nonce}:{revision}:{key}:{value}, strict session.
+    Compare-and-set on pc_settings_revision: a stale revision is refused
+    (409 stale_revision with the current settings) and never applied."""
+    if key not in _pc.SETTINGS_KEYS:
+        raise HTTPException(status_code=422, detail="unknown setting")
+    canon = _pc.canon_settings(steam_id, nonce, int(revision), key, int(value))
+    none_write = _pc_setting_revokes_picture(key, value)
+    if none_write:
+        # The None writer takes the identity lock EXCLUSIVE before the shared
+        # read half (r18 H2): lease acquisition takes the same lock, so no
+        # lease is granted between this re-read and this commit. Signature
+        # first, so an unsigned request never holds the lock.
+        if not _pc_hmac_ok(sig, canon):
+            raise HTTPException(status_code=403, detail="Invalid signature")
+        await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))"), {"sid": steam_id})
+    player = await _pc_verified_actor(request, steam_id, sig, canon, db)
+    pid = str(player.id)
+    await db.execute(text("SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE"), {"pid": pid})
+    if none_write:
+        # A live delivery lease means a bot send acquired under the previous
+        # picture may still be in flight: refuse with the wait (v22 §3.1).
+        wait = await _pc_lease_wait(db, pid)
+        if wait is not None:
+            await db.rollback()
+            raise HTTPException(status_code=409, detail={"error": "retry_after", "retry_after": wait})
+    new_rev = (await db.execute(text(_PC_SETTINGS_SQL[key]),
+                                {"value": int(value), "pid": pid, "rev": int(revision)})).scalar_one_or_none()
+    if new_rev is None:
+        current = await _pc_settings_of(db, pid)
+        await db.rollback()
+        raise HTTPException(status_code=409, detail={"error": "stale_revision", **current})
+    await db.commit()
+    print(f"[PC-SETTINGS] player={steam_id} {key}={value} rev={new_rev}")
+    return await _pc_settings_of(db, pid)
+
+
+@app.get("/api/v1/pc/me", tags=["Player Cards"])
+async def pc_me(
+    request: Request,
+    steam_id: str = Query(...),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """The caller's own Player Cards state (HMAC over pcread:{steam}:me:-,
+    strict session): settings + revision, shards, prices and the daily cap,
+    today's paid-pack count, the daily claim state, unopened packs, and the
+    pool snapshot in force."""
+    player = await _pc_verified_actor(request, steam_id, sig, _pc.canon_read(steam_id, "me", "-"), db)
+    pid = str(player.id)
+    settings = await _pc_settings_of(db, pid)
+    today = (await db.execute(text("""
+        SELECT (SELECT COUNT(*) FROM pc_packs
+                 WHERE player_id = CAST(:pid AS uuid) AND source = 'bought' AND status = 'done'
+                   AND (opened_at AT TIME ZONE 'UTC')::date = (now() AT TIME ZONE 'UTC')::date) AS paid_today,
+               (SELECT pack_id FROM pc_daily_claims
+                 WHERE player_id = CAST(:pid AS uuid) AND claimed_on = (now() AT TIME ZONE 'UTC')::date) AS daily_pack,
+               (date_trunc('day', now() AT TIME ZONE 'UTC') + INTERVAL '1 day') AT TIME ZONE 'UTC' AS next_reset,
+               (SELECT COUNT(*) FROM pc_prints WHERE owner_player_id = CAST(:pid AS uuid) AND discarded_at IS NULL) AS prints
+    """), {"pid": pid})).mappings().one()
+    unopened = (await db.execute(text("""
+        SELECT id, source, mode, kind, reference_id, created_at FROM pc_packs
+         WHERE player_id = CAST(:pid AS uuid) AND status = 'unopened'
+         ORDER BY created_at
+    """), {"pid": pid})).mappings().all()
+    snap = (await db.execute(text(
+        "SELECT id, taken_at, member_count FROM pc_pool_snapshots ORDER BY id DESC LIMIT 1"))).mappings().first()
+    daily_claimed = today["daily_pack"] is not None or (await db.execute(text("""
+        SELECT 1 FROM pc_daily_claims WHERE player_id = CAST(:pid AS uuid) AND claimed_on = (now() AT TIME ZONE 'UTC')::date
+    """), {"pid": pid})).first() is not None
+    return {
+        "settings": {k: settings[k] for k in ("opted_out", "collection_public", "announce", "revision",
+                                              "portrait_source")},
+        "shards": settings["shards"],
+        "portrait_source": settings["portrait_source"],
+        "portrait_descriptor": settings["portrait_descriptor"],
+        "portrait_hash": settings["portrait_hash"],
+        "portrait_locked_until": settings["portrait_locked_until"],
+        "prices": _pc_prices(),
+        "paid_today": int(today["paid_today"] or 0),
+        "prints": int(today["prints"] or 0),
+        "daily": {"claimed": bool(daily_claimed),
+                  "pack_id": str(today["daily_pack"]) if today["daily_pack"] else None,
+                  "next_reset_utc": _pc_iso(today["next_reset"])},
+        "unopened": [{"pack_id": str(u["id"]), "source": u["source"], "mode": u["mode"], "kind": u["kind"],
+                      "reference_id": u["reference_id"], "created_at": _pc_iso(u["created_at"])} for u in unopened],
+        "pool": ({"snapshot_id": int(snap["id"]), "taken_at": _pc_iso(snap["taken_at"]),
+                  "member_count": int(snap["member_count"])} if snap else None),
+    }
+
+
+@app.get("/api/v1/pc/collection", tags=["Player Cards"])
+async def pc_collection(
+    request: Request,
+    steam_id: str = Query(...),
+    sig: str = Query(...),
+    subject: str | None = Query(None, max_length=32),
+    db: AsyncSession = Depends(get_db),
+):
+    """A binder. Own (subject omitted or the caller): HMAC over
+    pcread:{steam}:collection:{subject|-} + strict session. Another player's:
+    HMAC only, and only while their collection is public (403 private).
+    Live prints only, ordered subject → rarity (rarest first) → mint date."""
+    target = subject or "-"
+    canon = _pc.canon_read(steam_id, "collection", target)
+    if subject and subject != steam_id:
+        if not _pc_hmac_ok(sig, canon):
+            raise HTTPException(status_code=403, detail="Invalid signature")
+        owner = (await db.execute(text("""
+            SELECT id, display_name, pc_collection_public FROM players
+             WHERE steam_id = CAST(:sid AS text) AND deleted_at IS NULL
+        """), {"sid": subject})).mappings().first()
+        if owner is None:
+            raise HTTPException(status_code=404, detail="Player not found")
+        if not owner["pc_collection_public"]:
+            raise HTTPException(status_code=403, detail={"error": "private"})
+        owner_pid, owner_name, public = str(owner["id"]), owner["display_name"], True
+    else:
+        player = await _pc_verified_actor(request, steam_id, sig, canon, db)
+        owner_pid, owner_name = str(player.id), player.display_name
+        public = bool(getattr(player, "pc_collection_public", True))
+    rows = (await db.execute(text(_PC_PRINT_FACE_SELECT + """
+     WHERE pr.owner_player_id = CAST(:owner AS uuid) AND pr.discarded_at IS NULL
+     ORDER BY s.display_name, c.subject_player_id,
+              CASE pr.rarity WHEN 'legendary' THEN 0 WHEN 'epic' THEN 1 WHEN 'rare' THEN 2 WHEN 'uncommon' THEN 3 ELSE 4 END,
+              pr.minted_at, pr.id
+    """), {"owner": owner_pid})).mappings().all()
+    ctx = await _pc_face_ctx(db, _pc_locale(request))
+    prints = [_pc_print_dict(r, ctx) for r in rows]
+    counts = {k: 0 for k in _pc.RARITIES}
+    for p in prints:
+        counts[p["rarity"]] = counts.get(p["rarity"], 0) + 1
+    return {"owner_name": _pcp.public_render_name(owner_name) or _pc_neutral_name(ctx),
+            "public": public, "locale": ctx["locale"],
+            "count": len(prints), "by_rarity": counts, "prints": prints}
+
+
+@app.get("/api/v1/pc/card", tags=["Player Cards"])
+async def pc_card_face(
+    request: Request,
+    steam_id: str = Query(...),
+    sig: str = Query(...),
+    print_id: str = Query(..., min_length=8, max_length=64),
+    db: AsyncSession = Depends(get_db),
+):
+    """One print's face (HMAC over pcread:{steam}:card:{print_id}). The owner
+    reads it with a strict session; anyone else only while the owner's
+    collection is public (403 private). Discarded prints are gone (404)."""
+    canon = _pc.canon_read(steam_id, "card", print_id)
+    if not _pc_hmac_ok(sig, canon):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    try:
+        _ = uuid.UUID(print_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Print not found")
+    row = (await db.execute(text(_PC_PRINT_FACE_SELECT + """
+      JOIN players o ON o.id = pr.owner_player_id
+     WHERE pr.id = CAST(:print AS uuid) AND pr.discarded_at IS NULL
+    """), {"print": print_id})).mappings().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Print not found")
+    owner = (await db.execute(text(
+        "SELECT steam_id, display_name, pc_collection_public FROM players WHERE id = CAST(:pid AS uuid)"),
+        {"pid": str(row["owner_player_id"])})).mappings().one()
+    if owner["steam_id"] == steam_id:
+        await _pc_verified_actor(request, steam_id, sig, canon, db)
+    elif not owner["pc_collection_public"]:
+        raise HTTPException(status_code=403, detail={"error": "private"})
+    ctx = await _pc_face_ctx(db, _pc_locale(request))
+    face = _pc_print_dict(row, ctx)
+    face["owner_name"] = _pcp.public_render_name(owner["display_name"]) or _pc_neutral_name(ctx)
+    return face
+
+
+@app.get("/api/v1/pc/pool", tags=["Player Cards"])
+async def pc_pool_summary(db: AsyncSession = Depends(get_db)):
+    """Public pool summary from the snapshot in force: taken_at, member
+    count, members per band, the collectible top 40 (rank, name, band, board
+    rank) and the prices — what the leaderboard already shows, no more."""
+    snap = (await db.execute(text(
+        "SELECT id, taken_at, member_count FROM pc_pool_snapshots ORDER BY id DESC LIMIT 1"))).mappings().first()
+    if snap is None:
+        return {"snapshot": None, "bands": {}, "top": [], "prices": _pc_prices()}
+    bands = {r["rarity"]: int(r["n"]) for r in (await db.execute(text("""
+        SELECT rarity, COUNT(*) AS n FROM pc_pool_members WHERE snapshot_id = CAST(:sid AS integer) GROUP BY rarity
+    """), {"sid": int(snap["id"])})).mappings().all()}
+    top = (await db.execute(text("""
+        SELECT m.pool_rank, m.rarity, m.board_rank, m.rating, p.display_name
+          FROM pc_pool_members m JOIN players p ON p.id = m.player_id
+         WHERE m.snapshot_id = CAST(:sid AS integer) AND m.pool_rank <= CAST(:top AS integer)
+         ORDER BY m.pool_rank
+    """), {"sid": int(snap["id"]), "top": int(_pc.PC_ECONOMY["band_max_rank"]["uncommon"])})).mappings().all()
+    return {
+        "snapshot": {"snapshot_id": int(snap["id"]), "taken_at": _pc_iso(snap["taken_at"]),
+                     "member_count": int(snap["member_count"])},
+        "bands": {k: bands.get(k, 0) for k in _pc.RARITIES},
+        "top": [{"pool_rank": int(t["pool_rank"]), "rarity": t["rarity"],
+                 "display_name": _pcp.public_render_name(t["display_name"]) or _pc_neutral_name(),
+                 "board_rank": (int(t["board_rank"]) if t["board_rank"] is not None else None),
+                 "rating": _pc_num(t["rating"])} for t in top],
+        "prices": _pc_prices(),
+    }
+
+
+@app.post("/api/v1/admin/pc/snapshot", tags=["Admin"])
+async def admin_pc_snapshot(
+    request: Request,
+    admin_steam_id: str = Query(...),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Take a pool snapshot now (admin HMAC over the admin canonical for
+    action 'pc_snapshot', target 'pool'); writes an AdminAction row."""
+    await _require_admin(db, admin_steam_id, "pc_snapshot", "pool", sig)
+    got = (await db.execute(text("SELECT pg_try_advisory_xact_lock(hashtext('pc_snapshot'))"))).scalar_one()
+    if not got:
+        raise HTTPException(status_code=409, detail={"error": "snapshot_in_progress"})
+    summary = await _pc_take_snapshot(db, reason="admin")
+    db.add(AdminAction(admin_steam_id=admin_steam_id, action="pc_snapshot", target_steam_id="pool",
+                       details=summary))
+    await db.commit()
+    return {"status": "ok", **summary}
+
+
+# ── Player Cards: the Discord bot's internal routes (X-Internal-Key) ──────
+# The bot is a singleton on the primary; these answer only to the shared
+# internal key. Discord identity resolves through players.discord_id (the
+# /link flow); nothing here accepts a steam id from the bot's users.
+
+_PC_EVENTS_SKIP_SQL = """
+    UPDATE pc_events e SET posted_at = now()
+      FROM players pl, players su
+     WHERE e.posted_at IS NULL AND pl.id = e.player_id AND su.id = e.subject_player_id
+       AND NOT (pl.deleted_at IS NULL AND su.deleted_at IS NULL
+                AND pl.pc_announce AND su.pc_announce AND su.pc_opted_out_at IS NULL
+                AND (e.print_id IS NULL OR EXISTS (SELECT 1 FROM pc_prints pr WHERE pr.id = e.print_id AND pr.discarded_at IS NULL)))
+"""
+
+_PC_EVENTS_PAGE = 20   # the first N unposted events of a page; every other unposted event of the same prints rides along (c6 F)
+_PC_EVENTS_PENDING_SQL = """
+    WITH page AS (
+        SELECT e.id, e.print_id FROM pc_events e
+         WHERE e.posted_at IS NULL
+         ORDER BY e.id
+         LIMIT 20
+    )
+    SELECT e.id, e.kind, e.created_at, e.print_id,
+           pl.display_name AS puller_name, pl.id AS puller_ref,
+           su.display_name AS subject_name, su.id AS subject_ref, e.dup_at_pull,
+           pr.rarity, pr.foil, pr.signed, pr.pool_rank, pr.rating, pr.title
+      FROM pc_events e
+      JOIN players pl ON pl.id = e.player_id
+      JOIN players su ON su.id = e.subject_player_id
+      LEFT JOIN pc_prints pr ON pr.id = e.print_id
+     WHERE e.posted_at IS NULL
+       AND (e.id IN (SELECT id FROM page)
+            OR (e.print_id IS NOT NULL AND e.print_id IN (SELECT print_id FROM page WHERE print_id IS NOT NULL)))
+       AND pl.deleted_at IS NULL AND su.deleted_at IS NULL
+       AND pl.pc_announce AND su.pc_announce AND su.pc_opted_out_at IS NULL
+       AND (pr.id IS NULL OR pr.discarded_at IS NULL)
+     ORDER BY e.id
+"""
+
+
+async def _pc_player_by_discord(db: AsyncSession, discord_id: str):
+    row = (await db.execute(select(Player).where(Player.discord_id == str(discord_id)))).scalar_one_or_none()
+    if row is None or row.deleted_at is not None:
+        raise HTTPException(status_code=404, detail={"error": "not_linked"})
+    return row
+
+
+@app.get("/api/v1/internal/pc/events/pending", tags=["Internal"])
+async def internal_pc_events_pending(
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Unposted notable pulls, re-checked NOW against both parties' consent
+    (pc_announce for puller and subject, the subject not opted out, neither
+    deleted, the print not discarded): events that fail the re-check are
+    marked posted without being handed out. The bot acks what it posted. A
+    page is the first _PC_EVENTS_PAGE unposted events plus every other
+    unposted event of the same prints, so one print's group is never cut in
+    two by the page boundary (c6 F)."""
+    _require_internal_key(x_internal_key)
+    await db.execute(text(_PC_EVENTS_SKIP_SQL))
+    await db.commit()
+    rows = (await db.execute(text(_PC_EVENTS_PENDING_SQL))).mappings().all()
+    return {"events": [{
+        "id": int(r["id"]), "kind": r["kind"], "created_at": _pc_iso(r["created_at"]),
+        # No Steam ID, Discord ID, name or avatar field: the digest names the
+        # two parties and the lease needs the subject's row reference (v22 §8).
+        "puller_name": _pcp.public_render_name(r["puller_name"]) or _pc_neutral_name(),
+        "puller_ref": str(r["puller_ref"]),
+        "subject_name": _pcp.public_render_name(r["subject_name"]) or _pc_neutral_name(),
+        "subject_ref": str(r["subject_ref"]),
+        "dup_at_pull": int(r["dup_at_pull"]) if r["dup_at_pull"] is not None else None,
+        "print": ({"print_id": str(r["print_id"]), "rarity": r["rarity"], "foil": bool(r["foil"]),
+                   "signed": bool(r["signed"]), "pool_rank": int(r["pool_rank"]),
+                   "rating": _pc_num(r["rating"]), "title": r["title"]} if r["rarity"] is not None else None),
+    } for r in rows], "page_size": _PC_EVENTS_PAGE}
+
+
+@app.post("/api/v1/internal/pc/events/ack", tags=["Internal"])
+async def internal_pc_events_ack(
+    ids: str = Query(..., max_length=2000),
+    leases: str | None = Query(None, max_length=4000),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Mark posted: a comma-separated list of event ids the bot delivered.
+    The ack also releases the delivery leases it names (`leases`, comma-
+    separated lease ids) and every lease naming one of the acked events."""
+    _require_internal_key(x_internal_key)
+    try:
+        id_list = [int(s) for s in ids.split(",") if s.strip()]
+    except ValueError:
+        raise HTTPException(status_code=422, detail="ids must be integers")
+    lease_ids = [s.strip() for s in (leases or "").split(",") if s.strip()]
+    if any(not _pcp.print_id_ok(x) for x in lease_ids):
+        raise HTTPException(status_code=422, detail="leases must be canonical uuids")
+    if not id_list and not lease_ids:
+        return {"acked": 0, "released": 0}
+    released = 0
+    if id_list:
+        released += len((await db.execute(text(
+            "DELETE FROM pc_delivery_leases WHERE event_ids && CAST(:ids AS bigint[]) RETURNING id"),
+            {"ids": id_list})).fetchall())
+    if lease_ids:
+        released += len((await db.execute(text(
+            "DELETE FROM pc_delivery_leases WHERE id = ANY(CAST(:ids AS uuid[])) RETURNING id"),
+            {"ids": lease_ids})).fetchall())
+    n = []
+    if id_list:
+        n = (await db.execute(text("""
+            UPDATE pc_events SET posted_at = now()
+             WHERE id = ANY(CAST(:ids AS bigint[])) AND posted_at IS NULL
+            RETURNING id
+        """), {"ids": id_list})).fetchall()
+    await db.commit()
+    return {"acked": len(n), "released": released}
+
+
+@app.post("/api/v1/internal/pc/daily", tags=["Internal"])
+async def internal_pc_daily(
+    discord_id: str = Query(..., max_length=32),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """The bot's /daily: claim today's pack for the linked player (the pack
+    opens in the mod). Same claim as /pc/daily."""
+    _require_internal_key(x_internal_key)
+    player = await _pc_player_by_discord(db, discord_id)
+    await _assert_no_service_subject(db, affected_player_ids=[player.id])
+    return await _pc_claim_daily(db, player, via="discord")
+
+
+@app.get("/api/v1/internal/pc/collection", tags=["Internal"])
+async def internal_pc_collection(
+    discord_id: str = Query(..., max_length=32),
+    viewer_discord_id: str | None = Query(None, max_length=32),
+    locale: str | None = Query(None, max_length=16),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """The bot's /collection [@user]: the owner's binder summary (counts by
+    rarity, the ten best prints with their face keys in the interaction's
+    locale). Someone else's binder only while it is public (403 private);
+    the owner always sees their own."""
+    _require_internal_key(x_internal_key)
+    owner = await _pc_player_by_discord(db, discord_id)
+    is_owner = viewer_discord_id is not None and str(viewer_discord_id) == str(owner.discord_id)
+    if not is_owner and not bool(getattr(owner, "pc_collection_public", True)):
+        raise HTTPException(status_code=403, detail={"error": "private"})
+    pid = str(owner.id)
+    rows = (await db.execute(text(_PC_PRINT_FACE_SELECT + """
+     WHERE pr.owner_player_id = CAST(:owner AS uuid) AND pr.discarded_at IS NULL
+     ORDER BY CASE pr.rarity WHEN 'legendary' THEN 0 WHEN 'epic' THEN 1 WHEN 'rare' THEN 2 WHEN 'uncommon' THEN 3 ELSE 4 END,
+              pr.signed DESC, pr.foil DESC, pr.pool_rank, pr.minted_at
+    """), {"owner": pid})).mappings().all()
+    ctx = await _pc_face_ctx(db, _pcp.effective_locale(locale, set(I18N_LANGS)))
+    prints = [_pc_print_dict(r, ctx) for r in rows]
+    counts = {k: 0 for k in _pc.RARITIES}
+    for p in prints:
+        counts[p["rarity"]] = counts.get(p["rarity"], 0) + 1
+    answer = {"owner_name": _pcp.public_render_name(owner.display_name) or _pc_neutral_name(),
+              "owner_ref": str(owner.id), "locale": ctx["locale"], "count": len(prints),
+              "by_rarity": counts, "distinct_subjects": len({p["subject_player_id"] for p in prints}),
+              "best": prints[:10]}
+    if is_owner:
+        # The shard balance is the owner's alone — never in another viewer's answer (c3 G).
+        answer["shards"] = int(getattr(owner, "pc_shards", 0) or 0)
+    return answer
+
+
+@app.get("/api/v1/internal/pc/card", tags=["Internal"])
+async def internal_pc_card(
+    discord_id: str = Query(..., max_length=32),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """The bot's /card @user: the subject's card as the pool sees it now
+    (latest snapshot: pool rank, band, rating, record, title) and how many
+    prints of them are in circulation. A subject who opted out or is not in
+    the pool answers 404 not_in_pool."""
+    _require_internal_key(x_internal_key)
+    subject = await _pc_player_by_discord(db, discord_id)
+    if getattr(subject, "pc_opted_out_at", None) is not None:
+        raise HTTPException(status_code=404, detail={"error": "not_in_pool"})
+    row = (await db.execute(text("""
+        SELECT m.pool_rank, m.rarity, m.rating, m.peak_rating, m.board_rank, m.series_wins, m.series_losses,
+               m.top_card, m.title, s.taken_at
+          FROM pc_pool_members m JOIN pc_pool_snapshots s ON s.id = m.snapshot_id
+         WHERE m.player_id = CAST(:pid AS uuid) AND m.snapshot_id = (SELECT MAX(id) FROM pc_pool_snapshots)
+    """), {"pid": str(subject.id)})).mappings().first()
+    if row is None:
+        raise HTTPException(status_code=404, detail={"error": "not_in_pool"})
+    circ = (await db.execute(text("""
+        SELECT COUNT(*) AS prints, COUNT(DISTINCT pr.owner_player_id) AS holders,
+               COALESCE(SUM(CASE WHEN pr.foil THEN 1 ELSE 0 END), 0) AS foil,
+               COALESCE(SUM(CASE WHEN pr.signed THEN 1 ELSE 0 END), 0) AS signed
+          FROM pc_prints pr JOIN pc_cards c ON c.id = pr.card_id
+         WHERE c.subject_player_id = CAST(:pid AS uuid) AND pr.discarded_at IS NULL
+    """), {"pid": str(subject.id)})).mappings().one()
+    rating = _pc_num(row["rating"])
+    return {
+        "subject_name": _pcp.public_render_name(subject.display_name) or _pc_neutral_name(),
+        "player_ref": str(subject.id),
+        "pool_rank": int(row["pool_rank"]), "rarity": row["rarity"], "rating": rating,
+        "peak_rating": _pc_num(row["peak_rating"]),
+        "board_rank": int(row["board_rank"]) if row["board_rank"] is not None else None,
+        "series_wins": int(row["series_wins"] or 0), "series_losses": int(row["series_losses"] or 0),
+        "top_card": row["top_card"], "title": row["title"],
+        "rank_name": _rank_name_for(_pc_board_rating(rating)) if rating is not None else None,
+        "snapshot_at": _pc_iso(row["taken_at"]),
+        "in_circulation": {"prints": int(circ["prints"] or 0), "holders": int(circ["holders"] or 0),
+                           "foil": int(circ["foil"] or 0), "signed": int(circ["signed"] or 0)},
+    }
+
+
+# ── Player Cards: portraits, delivery leases and faces ──────────────────────
+# Design: ai-collab/sept10-batch/21-player-cards-look-v22.md §1.7, §2.2, §3,
+# §6, §8 as amended by look-r18-dispositions.md. Pure helpers live in
+# pc_portrait.py, pixels in pc_face.py. Every route here is answered by the
+# PRIMARY only (§2.2 routing): the face route is not on the edge's routed
+# list and the bot calls the primary's local api.
+import functools as _functools
+from fastapi.responses import Response as _PcResponse
+
+PC_FACE_CACHE_DIR = os.getenv("PC_FACE_CACHE_DIR", "/var/cache/pc-faces")
+_pc_face_cache = _pcp.FaceCache(PC_FACE_CACHE_DIR)
+_pc_back_cache = {"bytes": None}
+
+
+def _pc_renderer_fp():
+    if _pcf is None:
+        return None
+    try:
+        return _pcf.renderer_fingerprint()
+    except Exception as ex:
+        print(f"[PC-FACE] fingerprint failed: {ex}")
+        return None
+
+
+def _pc_raqm():
+    """Whether the renderer is actually SHAPING with raqm.
+
+    `runtime_provenance()` has no top-level "raqm" key — it reports capability
+    under features.raqm.available and the engine actually in use under
+    layout_engine — so reading the top level answered false on every image ever
+    built, including the compliant ones this is meant to certify. The engine in
+    use is the honest answer: a build where Pillow reports the feature but
+    falls back to basic layout draws different pixels."""
+    if _pcf is None:
+        return False
+    try:
+        return _pcf.runtime_provenance().get("layout_engine") == "raqm"
+    except Exception:
+        return False
+
+
+def _pc_served_locales():
+    return set(I18N_LANGS)
+
+
+def _pc_locale(request):
+    """EffectivePcLocale of the request's informational X-Locale header
+    (never signed; unknown or absent → en)."""
+    try:
+        return _pcp.effective_locale(request.headers.get("X-Locale"), _pc_served_locales())
+    except Exception:
+        return "en"
+
+
+def _pc_hex_rgb(hex_color):
+    try:
+        h = (hex_color or "").lstrip("#")
+        if len(h) != 6:
+            return None
+        return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+    except ValueError:
+        return None
+
+
+async def _pc_labels(db: AsyncSession, locale: str) -> dict:
+    """The effective pc.* projection of one locale: the identifier's English
+    unless a client-namespace entry under the COMPOSITE msgctxt
+    (english + U+0004 + identifier) serves a target the pack would serve —
+    any state for a non-sensitive key, approved only for a sensitive one.
+    ONE definition for the pack, the renderer and cat_rev (v22 §1.3, §2.2);
+    every value single-line."""
+    builtin = dict(_pcf.ENGLISH) if _pcf is not None else {}
+    labels = dict(builtin)
+    if locale == "en" or not labels:
+        return labels
+    ctxs = [f"{eng}\x04{ident}" for ident, eng in labels.items()]
+    rows = (await db.execute(text(
+        "SELECT k.msgctxt, e.target FROM i18n_entries e"
+        " JOIN i18n_keys k ON k.key_id = e.key_id"
+        " WHERE e.language_code = CAST(:lang AS text) AND k.retired_at IS NULL"
+        "   AND k.namespace = 'client'"
+        "   AND (k.sensitive IS FALSE OR e.state = 'approved')"
+        "   AND k.msgctxt = ANY(CAST(:ctxs AS text[]))"
+    ), {"lang": locale, "ctxs": ctxs})).mappings().all()
+    by_ctx = {r["msgctxt"]: r["target"] for r in rows}
+    for ident, eng in list(labels.items()):
+        t = by_ctx.get(f"{eng}\x04{ident}")
+        if t and t.strip():
+            # A catalogue entry can hold any validator-legal string, and these
+            # are drawn on the card: a target carrying a code point no renderer
+            # font has a glyph for would put tofu on the face under a revision
+            # that says the pixels are right. The coverage removal applies
+            # here for the same reason it applies to a name (r17 H5); a target
+            # that empties under it falls back to the built-in English, which
+            # is drawable by construction.
+            projected = _pcp.coverage_strip(_pcp.single_line(t))
+            labels[ident] = projected or builtin[ident]
+    # §2.4 step 3: the neutral label is the one string a card shows when the
+    # name FAILED this exact predicate, so a target that fails it too cannot be
+    # the answer. `coverage_project` is the predicate — empty, Steam-ID-shaped,
+    # or nothing but joiners — and a target that does not pass falls back to
+    # the built-in, which passes by construction. Without this, an approved
+    # `pc.unnamed` reading `7656119...` was drawn on the face as the name of a
+    # player who has none.
+    if "pc.unnamed" in labels:
+        labels["pc.unnamed"] = (_pcp.coverage_project(labels["pc.unnamed"])
+                                or builtin.get("pc.unnamed") or _PC_NEUTRAL_NAME)
+    return labels
+
+
+async def _pc_face_ctx(db: AsyncSession, locale: str) -> dict:
+    """Everything a face key needs besides the print row, computed once per
+    request: the locale, the renderer fingerprint, the effective labels and
+    their cat_rev, the rank colours."""
+    labels = await _pc_labels(db, locale)
+    colors = await _rank_colors(db)
+    # NOT `or "0" * 16`. A renderer that cannot fingerprint itself used to key
+    # every face under a constant, so two builds with different pixels shared
+    # one `face_rev` and one `immutable` URL — the cache then served whichever
+    # build wrote the file first, for a year. None means "this box cannot key a
+    # face", `_pc_face_inputs` turns that into `face_rev = None`, and the face
+    # routes refuse (`_pc_require_renderer`).
+    return {"locale": locale, "renderer_fp": _pc_renderer_fp(), "labels": labels,
+            "cat_rev": _pcp.cat_rev(labels), "colors": colors}
+
+
+def _pc_renderer_unavailable():
+    """Why this box cannot serve Player Cards faces, or None when it can."""
+    if _pcf is None:
+        return "image_processing_unavailable"
+    if _pc_renderer_fp() is None:
+        return "renderer_fingerprint_unavailable"
+    if _pcp.coverage_ready() is not None:
+        return "name_coverage_unavailable"
+    if not _pc_raqm():
+        # The coverage projection admits Arabic, Hebrew, Thai, Devanagari,
+        # Bengali, Tamil, Georgian and Armenian because the renderer carries
+        # fonts for them (§1.3) — and those scripts are only READABLE through a
+        # shaper: without raqm the letters arrive unjoined, and the right-to-
+        # left ones in logical order. Pillow falls back to the BASIC engine
+        # silently, so the choice is between refusing and serving a picture of
+        # a name nobody wrote.
+        return "text_shaping_unavailable"
+    return None
+
+
+def _pc_require_renderer():
+    """503 unless this box can draw AND key a face. Called by every route that
+    renders one, and by the pack writer BEFORE it takes payment."""
+    reason = _pc_renderer_unavailable()
+    if reason is not None:
+        raise HTTPException(status_code=503, detail=reason)
+
+
+def _pc_face_inputs(row, ctx):
+    """(spec, portrait_kind, portrait_hash, face_rev) of one print row in the
+    context's locale. The spec is exactly what pc_face.render_face draws; the
+    rev covers every input of it (v22 §2.2)."""
+    labels = ctx["labels"]
+    kind, phash = _pcp.portrait_for(row)
+    name = _pcp.public_render_name(row["subject_name"])
+    rating = _pc_num(row["rating"])
+    board_rating = _pc_board_rating(rating) if rating is not None else None
+    rank_name = _rank_name_for(board_rating) if rating is not None else None
+    title = row["title"] or rank_name
+    title_hex = (ctx["colors"].get(rank_name) or _rank_fallback_color(rank_name)) if rank_name else None
+    band = row["rarity"]
+    foil, signed = bool(row["foil"]), bool(row["signed"])
+    # (no `unranked` local: the spec's `rating` is None for exactly that case,
+    # and the rev is now derived from the spec)
+    minted = row["minted_at"]
+    spec = {
+        "band": band, "name": name or "", "title": title, "title_rgb": _pc_hex_rgb(title_hex),
+        "rating": int(board_rating) if board_rating is not None else None,
+        "pool_rank": int(row["pool_rank"]),
+        "board_rank": int(row["board_rank"]) if row["board_rank"] is not None else None,
+        "wins": int(row["series_wins"] or 0), "losses": int(row["series_losses"] or 0),
+        "foil": foil, "signed": signed,
+        "edition_label": f"{labels.get('pc.edition', 'Edition')} {int(row['edition_id'])}",
+        "minted_on": minted.strftime("%Y-%m-%d") if minted is not None else "",
+        "print_short": "#" + str(row["print_id"]).replace("-", "")[:6],
+        "top_card": bool(row["top_card"]),
+    }
+    # AFTER the spec, and over the spec: the key is derived from the argument
+    # the renderer draws from, so a field added above is in the key with it.
+    # No fingerprint, no revision: a key computed from a placeholder is a
+    # promise about pixels this box cannot make. Every payload already carries
+    # `face_rev: null` on an api without the renderer and the client reads it
+    # as "no face for this print", so the answer degrades instead of lying.
+    rev = (None if ctx["renderer_fp"] is None
+           else _pcp.face_rev(ctx["renderer_fp"], ctx["cat_rev"], spec, kind, phash))
+    return spec, kind, phash, rev
+
+
+async def _pc_face_row(db: AsyncSession, print_id: str):
+    return (await db.execute(text(_PC_PRINT_FACE_SELECT + " WHERE pr.id = CAST(:id AS uuid)"),
+                             {"id": print_id})).mappings().first()
+
+
+async def _pc_portrait_bytes(db: AsyncSession, phash):
+    if not phash:
+        return None
+    data = (await db.execute(text("SELECT bytes FROM pc_portraits WHERE hash = CAST(:h AS text)"),
+                             {"h": phash})).scalar_one_or_none()
+    return bytes(data) if data is not None else None
+
+
+def _pc_png_response(data: bytes, cache_control: str):
+    return _PcResponse(content=data, media_type="image/png",
+                       headers={"Cache-Control": cache_control, "Content-Length": str(len(data))})
+
+
+async def _pc_render_face(db: AsyncSession, row, ctx: dict, size: str, want=None):
+    """(face_rev, bytes) of one print's face at one size in the context's
+    locale — the cached file, else one shared render. With `want`, a
+    revision mismatch answers None bytes (the caller 404s) before any
+    render: the row read is the liveness AND revision check."""
+    spec, kind, phash, rev = _pc_face_inputs(row, ctx)
+    if want is not None and want != rev:
+        return rev, None
+    key = _pcp.face_key(str(row["print_id"]), rev, ctx["locale"], size)
+    pbytes = await _pc_portrait_bytes(db, phash)
+    data = await _pc_face_cache.get_or_render(
+        key, _functools.partial(_pcf.render_face, spec, ctx["labels"], pbytes, size))
+    return rev, data
+
+
+def _pc_schedule_prerender(print_ids, locale):
+    """Best effort, after the caller's commit: warm the cache for the faces a
+    pack open just minted, in the locale the client sent (§2.2)."""
+    if _pcf is None or not print_ids:
+        return
+    try:
+        asyncio.get_running_loop().create_task(_pc_prerender(list(print_ids), locale))
+    except RuntimeError:
+        pass
+
+
+async def _pc_prerender(print_ids, locale):
+    from database import async_session
+    try:
+        async with async_session() as db:
+            ctx = await _pc_face_ctx(db, locale)
+            for pid in print_ids:
+                row = await _pc_face_row(db, pid)
+                if row is None or row["discarded_at"] is not None:
+                    continue
+                for size in _pcp.SIZES:
+                    await _pc_render_face(db, row, ctx, size)
+    except Exception as ex:
+        print(f"[PC-FACE] pre-render failed locale={locale}: {ex}")
+
+
+# The columns `_pcp.portrait_for` reads, and nothing else. Acquire and
+# revalidation both select exactly this and both call that one function, so
+# "what this lease authorises" has a single definition (#341). `p` is the
+# players row in both statements.
+_PC_PORTRAIT_RESOLVE_COLS = """
+               (p.deleted_at IS NOT NULL) AS subject_deleted, (p.pc_opted_out_at IS NOT NULL) AS subject_opted_out,
+               p.pc_portrait_source AS portrait_source, p.pc_game_portrait_hash AS portrait_hash,
+               EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL) AS subject_banned
+"""
+
+# A print is deliverable under a lease only while it exists, is not discarded,
+# and depicts the subject the lease names.
+_PC_LEASE_PRINT_OK = """
+               (l.print_id IS NULL OR EXISTS (
+                    SELECT 1 FROM pc_prints pr JOIN pc_cards c ON c.id = pr.card_id
+                     WHERE pr.id = l.print_id AND pr.discarded_at IS NULL
+                       AND c.subject_player_id = l.subject_id)) AS print_deliverable
+"""
+
+
+async def _pc_lease_wait(db: AsyncSession, pid: str):
+    """Seconds until the subject's latest LIVE delivery lease expires, or
+    None when no live lease exists."""
+    left = (await db.execute(text("""
+        SELECT CEIL(EXTRACT(EPOCH FROM (MAX(until) - now()))) FROM pc_delivery_leases
+         WHERE subject_id = CAST(:pid AS uuid) AND until > now()
+    """), {"pid": pid})).scalar_one_or_none()
+    if left is None:
+        return None
+    return max(1, int(left))
+
+
+async def _pc_lock_portrait_blobs(db: AsyncSession, pid: str, *extra):
+    """Take the portrait-blob locks P for this player, BEFORE the row lock R.
+    Returns the hash the row currently holds (None when it holds none).
+
+    The order is V → I → C → P → R, and P's key is a value that lives IN the
+    row — which is why the row was being read first, with FOR NO KEY UPDATE,
+    and P taken after. That is R → P, and it is a cycle as soon as two players
+    share a portrait: one deletion holds R(A) and waits for P(H) while the
+    other holds P(H) and waits for R(A) to refund A's lobby bet. PostgreSQL
+    breaks the cycle by aborting one of them — in a transaction that is moving
+    gold.
+
+    So the key is read WITHOUT a lock, P is taken on what that read saw, and
+    the caller takes R afterwards and confirms the value did not move. Under
+    the identity lock every caller of this already holds, no other writer for
+    this player can move it, so the confirmation is a guard against a caller
+    that forgot the identity lock rather than against a race."""
+    old = (await db.execute(text(
+        "SELECT pc_game_portrait_hash FROM players WHERE id = CAST(:pid AS uuid)"),
+        {"pid": pid})).scalar_one_or_none()
+    for h in sorted({x for x in (old,) + tuple(extra) if x}):
+        await db.execute(text("SELECT pg_advisory_xact_lock(CAST(:cls AS integer), hashtext(CAST(:h AS text)))"),
+                         {"cls": _pcp.PC_P_LOCK_CLASS, "h": h})
+    return old
+
+
+async def _pc_clear_portrait_unit(db: AsyncSession, pid: str, lock_days, source):
+    """Under the caller's identity lock: clear the game portrait unit (I → P →
+    R), lock further uploads for lock_days when given, force the source when
+    given, and delete the previous blob when no row references it any more.
+    Returns (previous_hash, locked_until)."""
+    old = await _pc_lock_portrait_blobs(db, pid)
+    held = (await db.execute(text(
+        "SELECT pc_game_portrait_hash FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE"),
+        {"pid": pid})).scalar_one_or_none()
+    if held != old:
+        # Only reachable without the identity lock; refusing is the honest
+        # answer, because P is now held on a hash this row no longer names.
+        await db.rollback()
+        raise HTTPException(status_code=409, detail={"error": "subject_busy", "retry_after": 2})
+    sets = ["pc_game_portrait_hash = NULL", "pc_game_portrait_descriptor = NULL", "pc_game_portrait_at = NULL"]
+    params = {"pid": pid}
+    # Three meanings, and 0 is not None: None leaves an existing lock alone
+    # (the deletion path), 0 CLEARS it, N sets it. Folding 0 into None left an
+    # admin who cleared for seven days and then cleared with zero looking at a
+    # subject whose uploads stayed 403 until the old lock ran out — which is
+    # the opposite of what they asked for, and what the route's own docstring
+    # promises ("0 = no lock").
+    if lock_days is not None:
+        if int(lock_days) > 0:
+            sets.append("pc_game_portrait_locked_until = now() + make_interval(days => CAST(:days AS integer))")
+            params["days"] = int(lock_days)
+        else:
+            sets.append("pc_game_portrait_locked_until = NULL")
+    if source is not None:
+        sets.append("pc_portrait_source = CAST(:src AS text)")
+        params["src"] = source
+    locked = (await db.execute(text(
+        "UPDATE players SET " + ", ".join(sets) +
+        " WHERE id = CAST(:pid AS uuid) RETURNING pc_game_portrait_locked_until"), params)).scalar_one_or_none()
+    if old:
+        await db.execute(text("""
+            DELETE FROM pc_portraits WHERE hash = CAST(:h AS text)
+               AND NOT EXISTS (SELECT 1 FROM players WHERE pc_game_portrait_hash = CAST(:h AS text))
+        """), {"h": old})
+    return old, locked
+
+
+@app.post("/api/v1/pc/portrait", tags=["Player Cards"])
+async def pc_portrait_upload(
+    request: Request,
+    steam_id: str = Query(...),
+    sig: str = Query(...),
+    nonce: str = Query(..., min_length=8, max_length=64),
+    descriptor: str = Query(..., min_length=8, max_length=_pcp.DESCRIPTOR_MAX_BYTES),
+    db: AsyncSession = Depends(get_db),
+):
+    """The portrait writer (v22 §3.2): the player's own client uploads ONE
+    1180x1180 RGBA PNG of its in-game character as a raw image/png body,
+    signed over pcport:{steam}:{nonce}:{upload_sha256}:{descriptor} where the
+    server hashes the received body ITSELF. Order: transport and container
+    before any database work (411 / 413 / 415 / 400 / 422); decode, coverage
+    and canonicalisation in the render pool; the identity lock EXCLUSIVE and
+    the row re-read under it (403 refused / locked, 200 same BEFORE the 30 s
+    pacing 409, 422 descriptor_mismatch); the single-use nonce; the per-hash
+    P locks sorted → INSERT ... ON CONFLICT DO NOTHING → the bound row write
+    → the guarded delete of the previous blob."""
+    _pc_require_renderer()
+    cl = request.headers.get("content-length")
+    if cl is None or "chunked" in (request.headers.get("transfer-encoding") or "").lower():
+        raise HTTPException(status_code=411, detail="length_required")
+    try:
+        declared = int(cl)
+    except ValueError:
+        raise HTTPException(status_code=411, detail="length_required")
+    if declared > _pcp.PC_PORTRAIT_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="portrait_too_large")
+    if not (request.headers.get("content-type") or "").lower().startswith("image/png"):
+        raise HTTPException(status_code=415, detail="image/png required")
+    body = await request.body()
+    if len(body) != declared:
+        raise HTTPException(status_code=400, detail="length_mismatch")
+    try:
+        ihdr = _pcf.png_ihdr(body)
+    except ValueError:
+        raise HTTPException(status_code=422, detail={"error": "portrait_invalid"})
+    if tuple(ihdr) != (_pcp.PORTRAIT_SIZE, _pcp.PORTRAIT_SIZE, 8, 6, 0):
+        raise HTTPException(status_code=422, detail={"error": "portrait_invalid"})
+    parts = _pcp.descriptor_parse(descriptor)
+    if parts is None:
+        raise HTTPException(status_code=422, detail={"error": "descriptor_invalid"})
+    upload_sha256 = hashlib.sha256(body).hexdigest()
+    canon = _pcp.canon_portrait(steam_id, nonce, upload_sha256, descriptor)
+    if not _pc_hmac_ok(sig, canon):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    # 1. decode, coverage, canonicalise — in the pool; the slot is the worker's
+    #    to release, so a timeout here never frees a slot early (r18 M5).
+    try:
+        canonical, info = await _pcp.in_pool(_pcf.prepare_portrait, body, budget=_pcp.DECODE_BUDGET_S)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=422, detail={"error": "portrait_invalid", "reason": "decode_timeout"})
+    except ValueError as ex:
+        # The renderer applies the cap to the CANONICAL encoding as well, and
+        # says so by name. Folding that into "invalid" told a client whose
+        # picture was merely too big to re-encode that its picture was broken,
+        # and made the 413 below unreachable — a status the client's retry
+        # path distinguishes (r18 M6).
+        if str(ex) == "portrait_too_large":
+            raise HTTPException(status_code=413, detail="portrait_too_large")
+        reason = str(ex) if str(ex) in ("portrait_invalid", "portrait_coverage") else "portrait_invalid"
+        raise HTTPException(status_code=422, detail={"error": reason})
+    del body
+    if len(canonical) > _pcp.PC_PORTRAIT_MAX_BYTES:   # r18 M6: belt and braces
+        raise HTTPException(status_code=413, detail="portrait_too_large")
+    portrait_hash = info["sha256"]
+    # 2. identity lock I, EXCLUSIVE (this writer mutates); the actor gate's
+    #    shared form and its row read then run under it — the re-read.
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))"), {"sid": steam_id})
+    player = await _pc_verified_actor(request, steam_id, sig, canon, db)
+    pid = str(player.id)
+    # P before R (the order is V → I → C → P → R): both the blob this upload
+    # replaces and the one it writes, under the identity lock taken above.
+    seen_old = await _pc_lock_portrait_blobs(db, pid, portrait_hash)
+    row = (await db.execute(text("""
+        SELECT p.pc_opted_out_at, p.pc_game_portrait_hash, p.pc_game_portrait_descriptor,
+               EXTRACT(EPOCH FROM (now() - p.pc_game_portrait_at)) AS since_last,
+               EXTRACT(EPOCH FROM (p.pc_game_portrait_locked_until - now())) AS lock_left,
+               p.pc_game_portrait_locked_until,
+               p.active_player_color_id, p.active_player_effect_id,
+               EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL) AS banned
+          FROM players p WHERE p.id = CAST(:pid AS uuid) AND p.deleted_at IS NULL
+           FOR NO KEY UPDATE
+    """), {"pid": pid})).mappings().first()
+    if row is not None and row["pc_game_portrait_hash"] != seen_old:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail={"error": "subject_busy", "retry_after": 2})
+    if row is None or row["banned"] or row["pc_opted_out_at"] is not None:
+        await db.rollback()
+        raise HTTPException(status_code=403, detail={"error": "portrait_refused"})
+    if row["lock_left"] is not None and float(row["lock_left"]) > 0:
+        await db.rollback()
+        raise HTTPException(status_code=403, detail={"error": "portrait_locked",
+                                                     "locked_until": _pc_iso(row["pc_game_portrait_locked_until"])})
+    if row["pc_game_portrait_descriptor"] == descriptor and row["pc_game_portrait_hash"] == portrait_hash:
+        await db.rollback()   # same bytes, same inputs: nothing to write — before pacing (r18 H8)
+        return {"applied": False, "reason": "same", "portrait_hash": portrait_hash,
+                "portrait_descriptor": descriptor}
+    if row["since_last"] is not None and float(row["since_last"]) < _pcp.PACING_SECONDS:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail={
+            "error": "retry_after",
+            "retry_after": max(1, int(_pcp.PACING_SECONDS - float(row["since_last"])) + 1)})
+    # From the LOCKED row, not from `player`. That ORM object was loaded before
+    # the row lock was taken, so an equip committing in between was invisible:
+    # the descriptor was checked against the cosmetics the subject used to
+    # wear, accepted, and stored as the description of a picture that no longer
+    # matches what the player has on.
+    color_sku = effect_sku = None
+    if row["active_player_color_id"]:
+        color_sku = (await db.execute(select(ShopItem.sku).where(
+            ShopItem.id == row["active_player_color_id"]))).scalar_one_or_none()
+    if row["active_player_effect_id"]:
+        effect_sku = (await db.execute(select(ShopItem.sku).where(
+            ShopItem.id == row["active_player_effect_id"]))).scalar_one_or_none()
+    if (color_sku or "") != parts["color"] or (effect_sku or "") != parts["effect"]:
+        await db.rollback()   # the client re-checks after its next stats answer
+        raise HTTPException(status_code=422, detail={"error": "descriptor_mismatch"})
+    used = (await db.execute(text("""
+        INSERT INTO pc_portrait_nonces (player_id, nonce) VALUES (CAST(:pid AS uuid), CAST(:nonce AS text))
+        ON CONFLICT DO NOTHING RETURNING nonce
+    """), {"pid": pid, "nonce": nonce})).scalar_one_or_none()
+    if used is None:
+        await db.rollback()
+        raise HTTPException(status_code=403, detail={"error": "nonce_replayed"})
+    # 3. the blob, the bound row write, the guarded delete of the previous
+    #    blob. The per-hash locks P were taken before the row lock R, above.
+    old = row["pc_game_portrait_hash"]
+    await db.execute(text("""
+        INSERT INTO pc_portraits (hash, bytes, content_type, width, height)
+        VALUES (CAST(:h AS text), CAST(:b AS bytea), 'image/png', CAST(:w AS integer), CAST(:hh AS integer))
+        ON CONFLICT (hash) DO NOTHING
+    """), {"h": portrait_hash, "b": canonical, "w": int(info["width"]), "hh": int(info["height"])})
+    at = (await db.execute(text("""
+        UPDATE players SET pc_game_portrait_hash = CAST(:h AS text),
+                           pc_game_portrait_descriptor = CAST(:d AS text),
+                           pc_game_portrait_at = now()
+         WHERE id = CAST(:pid AS uuid) AND deleted_at IS NULL
+        RETURNING pc_game_portrait_at
+    """), {"h": portrait_hash, "d": descriptor, "pid": pid})).scalar_one_or_none()
+    if at is None:
+        await db.rollback()
+        raise HTTPException(status_code=403, detail={"error": "portrait_refused"})
+    if old and old != portrait_hash:
+        await db.execute(text("""
+            DELETE FROM pc_portraits WHERE hash = CAST(:h AS text)
+               AND NOT EXISTS (SELECT 1 FROM players WHERE pc_game_portrait_hash = CAST(:h AS text))
+        """), {"h": old})
+    await db.commit()
+    print(f"[PC-PORTRAIT] player={steam_id} applied hash={portrait_hash[:12]} bytes={len(canonical)} "
+          f"coverage={info['coverage']:.3f} replaced={bool(old and old != portrait_hash)}")
+    return {"applied": True, "portrait_hash": portrait_hash, "portrait_descriptor": descriptor,
+            "portrait_at": _pc_iso(at)}
+
+
+@app.post("/api/v1/admin/pc/portrait/clear", tags=["Admin"])
+async def admin_pc_portrait_clear(payload: dict = Body(...), db: AsyncSession = Depends(get_db)):
+    """Admin-HMAC canonical admin:{admin}:pc_portrait_clear:{steam_id}:{lock_days}.
+    Clears the target's game portrait unit (I → P → R), deletes the blob when
+    unreferenced, locks uploads for lock_days (0 = no lock) and waits out live
+    delivery leases like the None write (409 retry_after)."""
+    admin_id = str(payload.get("admin_steam_id", ""))[:20]
+    steam_id = str(payload.get("steam_id", ""))[:20]
+    try:
+        lock_days = int(payload.get("lock_days", 0))
+    except (TypeError, ValueError):
+        lock_days = 0
+    lock_days = max(0, min(lock_days, 3650))
+    _sig = payload.get("signature")
+    if not isinstance(_sig, str) or not _sig.isascii():
+        _sig = ""
+    await _require_admin(db, admin_id, "pc_portrait_clear", f"{steam_id}:{lock_days}", _sig)
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))"), {"sid": steam_id})
+    pid = (await db.execute(text(
+        "SELECT id FROM players WHERE steam_id = CAST(:sid AS text) AND deleted_at IS NULL"),
+        {"sid": steam_id})).scalar_one_or_none()
+    if pid is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+    wait = await _pc_lease_wait(db, str(pid))
+    if wait is not None:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail={"error": "retry_after", "retry_after": wait})
+    old, locked = await _pc_clear_portrait_unit(db, str(pid), lock_days=lock_days, source=None)
+    await db.commit()
+    print(f"[PC-PORTRAIT] admin clear target={steam_id} by={admin_id} lock_days={lock_days} had_blob={bool(old)}")
+    return {"cleared": True, "had_portrait": bool(old), "locked_until": _pc_iso(locked)}
+
+
+@app.post("/api/v1/internal/pc/lease", tags=["Internal"])
+async def internal_pc_lease(
+    payload: dict = Body(...),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """The ONE delivery lease (v22 §6, r18 H1/H2): taken under the subject's
+    identity lock (try-lock: 409 subject_busy while a None write, an admin
+    clear or another acquisition holds it), it names the subject, optionally
+    the print and the events, and the portrait hash the resolver answered
+    under that lock. Live until `until`; the bot re-validates it right before
+    its send and the ack or a DELETE releases it."""
+    _require_internal_key(x_internal_key)
+    subject_ref = str(payload.get("subject_ref", ""))[:40]
+    if not _pcp.print_id_ok(subject_ref):
+        raise HTTPException(status_code=422, detail="subject_ref must be a canonical uuid")
+    print_id = payload.get("print_id")
+    if print_id is not None:
+        print_id = str(print_id)[:40]
+        if not _pcp.print_id_ok(print_id):
+            raise HTTPException(status_code=422, detail="print_id must be a canonical uuid")
+    raw_ids = payload.get("event_ids") or []
+    try:
+        event_ids = [int(x) for x in raw_ids][:200]
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="event_ids must be integers")
+    steam = (await db.execute(text(
+        "SELECT steam_id FROM players WHERE id = CAST(:pid AS uuid) AND deleted_at IS NULL"),
+        {"pid": subject_ref})).scalar_one_or_none()
+    if steam is None:
+        raise HTTPException(status_code=404, detail={"error": "not_found"})
+    got = (await db.execute(text("SELECT pg_try_advisory_xact_lock(hashtext(CAST(:sid AS text)))"),
+                            {"sid": steam})).scalar_one()
+    if not got:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail={"error": "subject_busy", "retry_after": 2})
+    sub = (await db.execute(text(
+        "SELECT" + _PC_PORTRAIT_RESOLVE_COLS + "FROM players p WHERE p.id = CAST(:pid AS uuid)"),
+        {"pid": subject_ref})).mappings().first()
+    if sub is None or sub["subject_deleted"]:
+        await db.rollback()
+        raise HTTPException(status_code=404, detail={"error": "not_found"})
+    if print_id is not None:
+        # The lease names a subject and a print, and the picture it authorises
+        # is the SUBJECT's. A print depicting someone else is not this
+        # subject's to lease — the caller holding the print (its owner) is not
+        # the person in it, and the two are routinely different people.
+        depicts = (await db.execute(text("""
+            SELECT 1 FROM pc_prints pr JOIN pc_cards c ON c.id = pr.card_id
+             WHERE pr.id = CAST(:print AS uuid) AND pr.discarded_at IS NULL
+               AND c.subject_player_id = CAST(:pid AS uuid)
+        """), {"print": print_id, "pid": subject_ref})).scalar_one_or_none()
+        if depicts is None:
+            await db.rollback()
+            raise HTTPException(status_code=404, detail={"error": "print_not_of_subject"})
+    kind, phash = _pcp.portrait_for(sub)
+    lease = (await db.execute(text("""
+        INSERT INTO pc_delivery_leases (subject_id, print_id, event_ids, portrait_hash, until)
+        VALUES (CAST(:sid AS uuid), CAST(:print AS uuid), CAST(:ids AS bigint[]), CAST(:h AS text),
+                now() + make_interval(secs => CAST(:secs AS double precision)))
+        RETURNING id, until
+    """), {"sid": subject_ref, "print": print_id, "ids": event_ids, "h": phash,
+           "secs": float(_pcp.LEASE_SECONDS)})).mappings().one()
+    await db.commit()
+    return {"lease_id": str(lease["id"]), "until": _pc_iso(lease["until"]),
+            "portrait_kind": kind, "portrait_hash": phash}
+
+
+@app.get("/api/v1/internal/pc/lease/{lease_id}", tags=["Internal"])
+async def internal_pc_lease_check(
+    lease_id: str,
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """200 while the lease still authorises what it was taken for; 404
+    lease_gone otherwise — the bot then drops the bytes unsent.
+
+    "Still authorises" is re-resolved, not assumed: the subject's row is read
+    again through the same columns and the same `portrait_for` the acquire
+    used, and the answer must still be the picture the lease recorded. A ban,
+    a full opt-out, a deletion or a switch to `none` all move that resolution
+    and revoke the lease without having to find its row — which is what makes
+    this safe against the writer that cannot see it (a discard of a print of
+    ANOTHER subject commits under a different identity lock and never
+    conflicts with the acquisition). The DELETEs those writers do are a
+    cleanup, no longer the guarantee."""
+    _require_internal_key(x_internal_key)
+    if not _pcp.print_id_ok(lease_id):
+        raise HTTPException(status_code=404, detail={"error": "lease_gone"})
+    row = (await db.execute(text(
+        "SELECT l.until, (l.until > now()) AS unexpired, l.portrait_hash AS leased_hash,"
+        + _PC_PORTRAIT_RESOLVE_COLS + "," + _PC_LEASE_PRINT_OK +
+        """FROM pc_delivery_leases l JOIN players p ON p.id = l.subject_id
+            WHERE l.id = CAST(:id AS uuid)"""),
+        {"id": lease_id})).mappings().first()
+    if row is None or not row["unexpired"] or row["subject_deleted"] or not row["print_deliverable"]:
+        raise HTTPException(status_code=404, detail={"error": "lease_gone"})
+    _, now_hash = _pcp.portrait_for(row)
+    if now_hash != row["leased_hash"]:
+        raise HTTPException(status_code=404, detail={"error": "lease_gone"})
+    return {"lease_id": lease_id, "until": _pc_iso(row["until"]), "live": True}
+
+
+@app.delete("/api/v1/internal/pc/lease/{lease_id}", tags=["Internal"])
+async def internal_pc_lease_release(
+    lease_id: str,
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    _require_internal_key(x_internal_key)
+    if not _pcp.print_id_ok(lease_id):
+        return {"released": 0}
+    n = (await db.execute(text("DELETE FROM pc_delivery_leases WHERE id = CAST(:id AS uuid) RETURNING id"),
+                          {"id": lease_id})).fetchall()
+    await db.commit()
+    return {"released": len(n)}
+
+
+@app.get("/api/v1/pc-face/{print_id}/{rev}/{locale}/{size}.png", tags=["Player Cards"])
+async def pc_face_png(print_id: str, rev: str, locale: str, size: str, db: AsyncSession = Depends(get_db)):
+    """The public face route (v22 §2.2): read-only and offline. Validation
+    before anything else (any other shape → 404, no render, no cache entry);
+    one row read in one snapshot — discarded → 404, computed rev ≠ requested
+    → 404 (the client re-reads its collection); only then the disk cache,
+    else one shared render. Every 200 is immutable."""
+    key = _pcp.face_key(print_id, rev, locale, size)
+    if key is None or (locale != "en" and locale not in _pc_served_locales()):
+        raise HTTPException(status_code=404, detail="Not found")
+    _pc_require_renderer()
+    row = await _pc_face_row(db, print_id)
+    if row is None or row["discarded_at"] is not None:
+        raise HTTPException(status_code=404, detail="Not found")
+    ctx = await _pc_face_ctx(db, locale)
+    _rev, data = await _pc_render_face(db, row, ctx, size, want=rev)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    return _pc_png_response(data, "public, max-age=31536000, immutable")
+
+
+@app.get("/api/v1/internal/pc/face/print/{print_id}/{locale}", tags=["Internal"])
+async def internal_pc_face_print(
+    print_id: str, locale: str,
+    size: str = Query("card"),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """The bot's picture source for a live print: its CURRENT revision,
+    resolved by the same read as the public route (discarded → 404); the
+    locale falls back to en here (no public cache key is involved)."""
+    _require_internal_key(x_internal_key)
+    _pc_require_renderer()
+    if not _pcp.print_id_ok(print_id) or size not in _pcp.SIZES:
+        raise HTTPException(status_code=404, detail="Not found")
+    loc = _pcp.effective_locale(locale, _pc_served_locales())
+    row = await _pc_face_row(db, print_id)
+    if row is None or row["discarded_at"] is not None:
+        raise HTTPException(status_code=404, detail="Not found")
+    ctx = await _pc_face_ctx(db, loc)
+    rev, data = await _pc_render_face(db, row, ctx, size)
+    resp = _pc_png_response(data, "private, max-age=60")
+    resp.headers["X-Face-Rev"] = rev
+    return resp
+
+
+@app.get("/api/v1/internal/pc/face/preview/{player_ref}/{locale}", tags=["Internal"])
+async def internal_pc_face_preview(
+    player_ref: str, locale: str,
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """The /card preview: the subject as the pool sees them now, drawn as an
+    unminted face. Re-applies the /card gate itself (opt-out, pool
+    membership, live ban → 404); cached under a preview_rev over every drawn
+    field for at most 60 s; never immutable."""
+    _require_internal_key(x_internal_key)
+    _pc_require_renderer()
+    if not _pcp.print_id_ok(player_ref):
+        raise HTTPException(status_code=404, detail={"error": "not_in_pool"})
+    loc = _pcp.effective_locale(locale, _pc_served_locales())
+    sub = (await db.execute(text("""
+        SELECT p.display_name, (p.deleted_at IS NOT NULL) AS subject_deleted,
+               (p.pc_opted_out_at IS NOT NULL) AS subject_opted_out,
+               p.pc_portrait_source AS portrait_source, p.pc_game_portrait_hash AS portrait_hash,
+               EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL) AS subject_banned
+          FROM players p WHERE p.id = CAST(:pid AS uuid)
+    """), {"pid": player_ref})).mappings().first()
+    if sub is None or sub["subject_deleted"] or sub["subject_opted_out"] or sub["subject_banned"]:
+        raise HTTPException(status_code=404, detail={"error": "not_in_pool"})
+    member = (await db.execute(text("""
+        SELECT m.pool_rank, m.rarity, m.rating, m.board_rank, m.series_wins, m.series_losses, m.top_card, m.title
+          FROM pc_pool_members m
+         WHERE m.player_id = CAST(:pid AS uuid) AND m.snapshot_id = (SELECT MAX(id) FROM pc_pool_snapshots)
+    """), {"pid": player_ref})).mappings().first()
+    if member is None:
+        raise HTTPException(status_code=404, detail={"error": "not_in_pool"})
+    ctx = await _pc_face_ctx(db, loc)
+    labels = ctx["labels"]
+    kind, phash = _pcp.portrait_for(sub)
+    name = _pcp.public_render_name(sub["display_name"])
+    rating = _pc_num(member["rating"])
+    board_rating = _pc_board_rating(rating) if rating is not None else None
+    rank_name = _rank_name_for(board_rating) if rating is not None else None
+    title = member["title"] or rank_name
+    title_hex = (ctx["colors"].get(rank_name) or _rank_fallback_color(rank_name)) if rank_name else None
+    spec = {
+        "band": member["rarity"], "name": name or "", "title": title, "title_rgb": _pc_hex_rgb(title_hex),
+        "rating": int(board_rating) if board_rating is not None else None,
+        "pool_rank": int(member["pool_rank"]),
+        "board_rank": int(member["board_rank"]) if member["board_rank"] is not None else None,
+        "wins": int(member["series_wins"] or 0), "losses": int(member["series_losses"] or 0),
+        "foil": False, "signed": False,
+        "edition_label": labels.get("pc.preview_footer", "Preview"), "minted_on": "", "print_short": "",
+        "top_card": bool(member["top_card"]),
+    }
+    rev = _pcp.preview_rev(ctx["renderer_fp"], ctx["cat_rev"], spec, kind, phash)
+    bucket = int(time.time() // _pcp.PREVIEW_TTL_S)
+    key = f"preview/{player_ref}/{rev}/{loc}/{bucket}.png"
+    pbytes = await _pc_portrait_bytes(db, phash)
+    data = await _pc_face_cache.get_or_render(
+        key, _functools.partial(_pcf.render_face, spec, labels, pbytes, "card"))
+    return _pc_png_response(data, "private, max-age=60")
+
+
+@app.get("/api/v1/internal/pc/face/back", tags=["Internal"])
+async def internal_pc_face_back(x_internal_key: str | None = Header(None, alias="X-Internal-Key")):
+    """The canonical Back.png of §1.4 from the server bundle, so the bot
+    image carries no assets."""
+    _require_internal_key(x_internal_key)
+    _pc_require_renderer()
+    if _pc_back_cache["bytes"] is None:
+        path = os.path.join(_pcf.ASSETS_DIR, "Back.png")
+        try:
+            with open(path, "rb") as f:
+                _pc_back_cache["bytes"] = f.read()
+        except OSError:
+            _pc_back_cache["bytes"] = await _pcp.in_pool(_pcf.render_back)
+    return _pc_png_response(_pc_back_cache["bytes"], "private, max-age=86400")
+
+
+# ── Player Cards: earned packs (WP-D) ────────────────────────────────────────
+# One deterministic roll per (mode, series) — player_cards.earned_pack_kind,
+# HMAC(secret, "mode:series") — the sweep odds INSTEAD of the win odds on a
+# 2-0 (FFA: every round to the winner, nobody else any). The completion hooks
+# call _pc_grant_earned_packs inside their own savepoint and insert one
+# unopened pack per winner, idempotent on (player_id, 'earned', reference).
+# Reversal / invalidation voids the unopened packs of that series (opened
+# outcomes stay, by policy). A cursor-based reconciler re-derives any grant a
+# failed savepoint lost from the durable completion rows — same roll, same
+# insert — re-scanning 24 h behind its high-water mark and never before the
+# instant the feature started, and voids the unopened packs of every series
+# invalidated by any path (the class guarantee behind the inline voids).
+
+_PC_EARNED_INSERT_SQL = """
+    INSERT INTO pc_packs (player_id, source, mode, kind, reference_id, status)
+    VALUES (CAST(:pid AS uuid), 'earned', CAST(:mode AS text), CAST(:kind AS text), CAST(:ref AS text), 'unopened')
+    ON CONFLICT (player_id, source, reference_id) WHERE reference_id IS NOT NULL DO NOTHING
+    RETURNING id
+"""
+
+# The reconciler's scans: every completion newer than :since, its winners and
+# whether it was a sweep, from the rows the result itself is kept in. No LIMIT
+# on purpose — a capped page anchored 24 h behind a cursor that only advances
+# to the page's newest row can stall on a busy day; the window is the bound.
+_PC_RECONCILE_SQL = {
+    "1v1": """
+        SELECT rs.id AS ref, rs.completed_at, rs.winner_id AS w1, NULL::uuid AS w2,
+               (LEAST(rs.p1_series_wins, rs.p2_series_wins) = 0
+                AND GREATEST(rs.p1_series_wins, rs.p2_series_wins) >= 2) AS sweep
+          FROM ranked_series rs
+         WHERE rs.status = 'completed' AND rs.invalidated_at IS NULL AND rs.winner_id IS NOT NULL
+           AND rs.completed_at > CAST(:since AS timestamptz)
+         ORDER BY rs.completed_at
+    """,
+    "team": """
+        SELECT ts.id AS ref, ts.completed_at,
+               CASE WHEN ts.winner_team = 1 THEN ts.t1a_id ELSE ts.t2a_id END AS w1,
+               CASE WHEN ts.winner_team = 1 THEN ts.t1b_id ELSE ts.t2b_id END AS w2,
+               (LEAST(ts.t1_series_wins, ts.t2_series_wins) = 0
+                AND GREATEST(ts.t1_series_wins, ts.t2_series_wins) >= 2) AS sweep
+          FROM team_series ts
+         WHERE ts.status = 'completed' AND ts.invalidated_at IS NULL AND ts.winner_team IN (1, 2)
+           AND ts.completed_at > CAST(:since AS timestamptz)
+         ORDER BY ts.completed_at
+    """,
+    "ovt": """
+        SELECT os.id AS ref, os.completed_at,
+               CASE WHEN os.winner_side = 1 THEN os.solo_id ELSE os.duo_a_id END AS w1,
+               CASE WHEN os.winner_side = 1 THEN NULL::uuid ELSE os.duo_b_id END AS w2,
+               (LEAST(os.solo_series_wins, os.duo_series_wins) = 0
+                AND GREATEST(os.solo_series_wins, os.duo_series_wins) >= 2) AS sweep
+          FROM ovt_series os
+         WHERE os.status = 'completed' AND os.invalidated_at IS NULL AND os.winner_side IN (1, 2)
+           AND os.completed_at > CAST(:since AS timestamptz)
+         ORDER BY os.completed_at
+    """,
+    "ffa": """
+        SELECT fm.id AS ref, fm.ended_at AS completed_at, fm.winner_id AS w1, NULL::uuid AS w2,
+               (NOT EXISTS (SELECT 1 FROM ffa_match_players fp
+                             WHERE fp.match_id = fm.id AND fp.player_id <> fm.winner_id AND fp.rounds_won > 0)
+                AND EXISTS (SELECT 1 FROM ffa_match_players fw
+                             WHERE fw.match_id = fm.id AND fw.player_id = fm.winner_id AND fw.rounds_won > 0)) AS sweep
+          FROM ffa_matches fm
+         WHERE fm.is_ranked AND fm.invalidated_at IS NULL AND fm.winner_id IS NOT NULL
+           AND fm.ended_at > CAST(:since AS timestamptz)
+         ORDER BY fm.ended_at
+    """,
+}
+
+# The reconciler's voids: an invalidated series (any path, including one
+# whose inline void failed or one added later) loses its still-unopened
+# earned packs. Joined on the reference text _pc_earned_ref writes,
+# "<mode>:<series uuid>"; invalidated rows are few, so the join is cheap.
+_PC_VOID_SWEEP_SQL = {
+    "1v1": """
+        UPDATE pc_packs p SET status = 'voided', voided_at = now()
+          FROM ranked_series s
+         WHERE p.source = 'earned' AND p.status = 'unopened' AND p.mode = '1v1'
+           AND p.reference_id = CONCAT('1v1:', CAST(s.id AS text))
+           AND s.invalidated_at IS NOT NULL
+        RETURNING p.id
+    """,
+    "team": """
+        UPDATE pc_packs p SET status = 'voided', voided_at = now()
+          FROM team_series s
+         WHERE p.source = 'earned' AND p.status = 'unopened' AND p.mode = 'team'
+           AND p.reference_id = CONCAT('team:', CAST(s.id AS text))
+           AND s.invalidated_at IS NOT NULL
+        RETURNING p.id
+    """,
+    "ovt": """
+        UPDATE pc_packs p SET status = 'voided', voided_at = now()
+          FROM ovt_series s
+         WHERE p.source = 'earned' AND p.status = 'unopened' AND p.mode = 'ovt'
+           AND p.reference_id = CONCAT('ovt:', CAST(s.id AS text))
+           AND s.invalidated_at IS NOT NULL
+        RETURNING p.id
+    """,
+    "ffa": """
+        UPDATE pc_packs p SET status = 'voided', voided_at = now()
+          FROM ffa_matches s
+         WHERE p.source = 'earned' AND p.status = 'unopened' AND p.mode = 'ffa'
+           AND p.reference_id = CONCAT('ffa:', CAST(s.id AS text))
+           AND s.invalidated_at IS NOT NULL
+        RETURNING p.id
+    """,
+}
+
+# The reconciler's series-row share locks (c3 B): a reversal's UPDATE of the
+# same row waits for the reconciler's commit and then voids what it granted;
+# the reconciler re-reads invalidated_at under the lock before it grants.
+_PC_RECONCILE_LOCK_SQL = {
+    "1v1": "SELECT invalidated_at FROM ranked_series WHERE id = CAST(:ref AS uuid) FOR SHARE",
+    "team": "SELECT invalidated_at FROM team_series WHERE id = CAST(:ref AS uuid) FOR SHARE",
+    "ovt": "SELECT invalidated_at FROM ovt_series WHERE id = CAST(:ref AS uuid) FOR SHARE",
+    "ffa": "SELECT invalidated_at FROM ffa_matches WHERE id = CAST(:ref AS uuid) FOR SHARE",
+}
+
+# The open route's standing check (c5 B): a plain read, no lock — it closes
+# the window between an invalidation and the void sweep (whatever the sweep's
+# cadence); the residual race, a reversal committing between this read and
+# the open's commit, is the inline one — the reversal's void then finds the
+# pack done.
+_PC_SERIES_STANDING_SQL = {
+    "1v1": "SELECT invalidated_at FROM ranked_series WHERE id = CAST(:ref AS uuid)",
+    "team": "SELECT invalidated_at FROM team_series WHERE id = CAST(:ref AS uuid)",
+    "ovt": "SELECT invalidated_at FROM ovt_series WHERE id = CAST(:ref AS uuid)",
+    "ffa": "SELECT invalidated_at FROM ffa_matches WHERE id = CAST(:ref AS uuid)",
+}
+
+_pc_reconcile_last_monotonic = 0.0
+PC_RECONCILE_EVERY_S = 600
+PC_RECONCILE_HOLD_MAX_S = 7 * 86400   # a busy-identity hold on the cursor is released after this (c6 B)
+
+
+def _pc_earned_ref(mode: str, series_id) -> str:
+    return f"{mode}:{series_id}"
+
+
+def _pc_sweep(a, b) -> bool:
+    """A 2-0: the loser took no game and the winner took the series."""
+    try:
+        a, b = int(a or 0), int(b or 0)
+    except (TypeError, ValueError):
+        return False
+    return min(a, b) == 0 and max(a, b) >= 2
+
+
+def _pc_ffa_sweep(report) -> bool:
+    """FFA: every round to the winner and none to anybody else — the same
+    definition the reconciler's scan applies to ffa_match_players."""
+    try:
+        mine = [int(p.rounds_won or 0) for p in report.players if p.steam_id == report.winner_steam_id]
+        others = [int(p.rounds_won or 0) for p in report.players if p.steam_id != report.winner_steam_id]
+    except (TypeError, ValueError, AttributeError):
+        return False
+    return bool(mine) and mine[0] > 0 and bool(others) and all(n == 0 for n in others)
+
+
+async def _pc_grant_earned_packs(db: AsyncSession, *, mode: str, series_id, winner_ids, sweep: bool,
+                                 label: str, kind: str | None = None, busy: list | None = None) -> list:
+    """Inside the caller's savepoint (or the reconciler's transaction). One
+    roll for the series (the reconciler passes the roll it already made); an
+    unopened pack per live winner when it hits, idempotent on (player,
+    'earned', reference). Returns the pack ids inserted."""
+    if not MATCH_HMAC_SECRET:
+        return []
+    ref = _pc_earned_ref(mode, series_id)
+    if kind is None:
+        kind = _pc.earned_pack_kind(MATCH_HMAC_SECRET.encode(), mode, str(series_id), sweep=bool(sweep))
+    if kind is None:
+        return []
+    out = []
+    for pid in winner_ids:
+        if pid is None:
+            continue
+        # Deletion serialization (c3 A/I): the recipient's identity lock in
+        # its shared NON-blocking form — this runs inside completion
+        # transactions that already hold series rows, and the blocking form
+        # would invert delete_player_data's identity-then-series order —
+        # then deleted_at re-read under it. A lock held elsewhere or a deleted
+        # recipient skips the grant; the reconciler retries a live one.
+        who = (await db.execute(text(
+            "SELECT steam_id, deleted_at FROM players WHERE id = CAST(:pid AS uuid)"),
+            {"pid": str(pid)})).mappings().first()
+        if who is None or who["deleted_at"] is not None:
+            continue
+        held = (await db.execute(text(
+            "SELECT pg_try_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))"),
+            {"sid": who["steam_id"]})).scalar_one_or_none()
+        if not held:
+            print(f"[PC-EARNED] {label} mode={mode} ref={ref} player={pid}: identity busy, left to the reconciler")
+            if busy is not None:
+                busy.append(pid)   # the reconciler holds its cursor at this completion (c5 B)
+            continue
+        gone = (await db.execute(text(
+            "SELECT deleted_at FROM players WHERE id = CAST(:pid AS uuid)"), {"pid": str(pid)})).scalar_one_or_none()
+        if gone is not None:
+            continue
+        got = (await db.execute(text(_PC_EARNED_INSERT_SQL),
+                                {"pid": str(pid), "mode": mode, "kind": kind, "ref": ref})).scalar_one_or_none()
+        if got is not None:
+            out.append(str(got))
+            print(f"[PC-EARNED] {label} mode={mode} ref={ref} kind={kind} player={pid} pack={got}")
+    return out
+
+
+async def _pc_void_earned_packs(db: AsyncSession, *, mode: str, series_id, label: str) -> int:
+    """Reversal / invalidation: the series' unopened earned packs are voided;
+    an opened pack's prints stay (irreversible by policy)."""
+    rows = (await db.execute(text("""
+        UPDATE pc_packs SET status = 'voided', voided_at = now()
+         WHERE source = 'earned' AND reference_id = CAST(:ref AS text) AND status = 'unopened'
+        RETURNING id
+    """), {"ref": _pc_earned_ref(mode, series_id)})).fetchall()
+    if rows:
+        print(f"[PC-EARNED] {label} voided {len(rows)} unopened pack(s) for {mode}:{series_id}")
+    return len(rows)
+
+
+async def _pc_reconcile_one(db: AsyncSession, source: str, r) -> tuple:
+    """One scanned completion (c3 B): the same deterministic roll first — a
+    miss costs nothing further; on a hit, every STORED winner without a pack
+    row for this reference is granted, and only after the series row is
+    share-locked and re-read as still valid. A winner the inline hook
+    already answered (unopened, voided, opening, done) is never revisited,
+    so inline and reconcile can never name two recipient sets. Returns
+    (packs inserted, whether a recipient was skipped as identity-busy) —
+    the caller holds its cursor at a skipped completion (c5 B)."""
+    ref = _pc_earned_ref(source, r["ref"])
+    kind = _pc.earned_pack_kind(MATCH_HMAC_SECRET.encode(), source, str(r["ref"]), sweep=bool(r["sweep"]))
+    if kind is None:
+        return 0, False
+    missing = []
+    for pid in (r["w1"], r["w2"]):
+        if pid is None:
+            continue
+        have = (await db.execute(text("""
+            SELECT 1 FROM pc_packs
+             WHERE player_id = CAST(:pid AS uuid) AND source = 'earned' AND reference_id = CAST(:ref AS text)
+        """), {"pid": str(pid), "ref": ref})).scalar_one_or_none()
+        if have is None:
+            missing.append(pid)
+    if not missing:
+        return 0, False
+    for lock_source, lock_sql in _PC_RECONCILE_LOCK_SQL.items():
+        if lock_source != source:
+            continue
+        still = (await db.execute(text(lock_sql), {"ref": str(r["ref"])})).mappings().first()
+        if still is None or still["invalidated_at"] is not None:
+            return 0, False
+    busy: list = []
+    got = await _pc_grant_earned_packs(db, mode=source, series_id=r["ref"], winner_ids=missing,
+                                       sweep=bool(r["sweep"]), label="reconcile", kind=kind, busy=busy)
+    return len(got), bool(busy)
+
+
+async def _pc_reconcile_earned_packs(force: bool = False) -> None:
+    """Janitor, every PC_RECONCILE_EVERY_S: per source, re-derive the grants
+    of every completion newer than max(cursor - 24 h, started_at) and move
+    the cursor to the newest completion seen — or no further than the oldest
+    completion whose grant was skipped as identity-busy, so that one stays
+    inside the next window however far the scan reached (c5 B), for at most
+    PC_RECONCILE_HOLD_MAX_S so the scan stays bounded (c6 B); then void
+    the unopened packs of every invalidated series. The first run plants the
+    cursor at this process's start and scans from it (nothing earlier is
+    back-filled). Without the match secret there is no deterministic roll:
+    the cursors are still planted (a later process with the secret then
+    scans from THIS one's start, not its own) and the void sweeps still run
+    (they need no secret); only the scan and the grants wait (c5 B).
+    Idempotent: the same deterministic roll, the same ON CONFLICT insert; a
+    voided pack keeps its reference row, so it is never re-granted; a series
+    the inline hook already answered is never revisited (_pc_reconcile_one)."""
+    global _pc_reconcile_last_monotonic
+    now_mono = time.monotonic()
+    if not force and now_mono - _pc_reconcile_last_monotonic < PC_RECONCILE_EVERY_S:
+        return
+    _pc_reconcile_last_monotonic = now_mono
+    if not MATCH_HMAC_SECRET:
+        print("[PC-EARNED] reconcile: MATCH_HMAC_SECRET not configured - cursors planted, grants deferred, voids swept")
+    from database import async_session
+    async with async_session() as db:
+        for source, scan_sql in _PC_RECONCILE_SQL.items():
+            # The first run plants the cursor at this PROCESS's start (not at
+            # "now") and scans from it in the same pass: a completion between
+            # api readiness and the first tick whose inline grant failed is
+            # inside the window (c3 B). Nothing before the feature's first
+            # process is back-filled — the old api had no inline hooks.
+            await db.execute(text("""
+                INSERT INTO pc_reconcile_cursors (source, cursor_at, started_at)
+                VALUES (CAST(:src AS text), CAST(:start AS timestamptz), CAST(:start AS timestamptz))
+                ON CONFLICT (source) DO NOTHING
+            """), {"src": source, "start": _PROCESS_STARTED_WALL})
+            if not MATCH_HMAC_SECRET:
+                await db.commit()
+                continue
+            cur = (await db.execute(text("""
+                SELECT GREATEST(cursor_at - INTERVAL '24 hours', started_at) AS since
+                  FROM pc_reconcile_cursors WHERE source = CAST(:src AS text) FOR UPDATE
+            """), {"src": source})).mappings().one()
+            rows = (await db.execute(text(scan_sql), {"since": cur["since"]})).mappings().all()
+            granted = 0
+            newest = None
+            hold = None   # the oldest completion a busy identity left to a later pass
+            for r in rows:
+                n, busy = await _pc_reconcile_one(db, source, r)
+                granted += n
+                if newest is None or r["completed_at"] > newest:
+                    newest = r["completed_at"]
+                if busy and (hold is None or r["completed_at"] < hold):
+                    hold = r["completed_at"]
+            if hold is not None and (datetime.now(timezone.utc) - hold).total_seconds() > PC_RECONCILE_HOLD_MAX_S:
+                # Released past the bound (c6 B): the window stays bounded; an
+                # identity busy for that long is a stuck transaction to find,
+                # not a grant to keep the whole scan waiting for.
+                print(f"[PC-EARNED] reconcile source={source}: hold at {hold} released after {PC_RECONCILE_HOLD_MAX_S} s")
+                hold = None
+            if newest is not None:
+                at = newest if hold is None else min(newest, hold)
+                await db.execute(text("""
+                    UPDATE pc_reconcile_cursors SET cursor_at = GREATEST(cursor_at, CAST(:at AS timestamptz))
+                     WHERE source = CAST(:src AS text)
+                """), {"at": at, "src": source})
+            await db.commit()
+            if granted or hold is not None:
+                print(f"[PC-EARNED] reconcile source={source} scanned={len(rows)} granted={granted}"
+                      + (f" held_at={hold}" if hold is not None else ""))
+        for vsource, void_sql in _PC_VOID_SWEEP_SQL.items():
+            voided = (await db.execute(text(void_sql))).fetchall()
+            if voided:
+                print(f"[PC-EARNED] reconcile voided {len(voided)} unopened pack(s) of invalidated {vsource} series")
+        await db.commit()
+
+
 @app.post("/api/v1/shop/purchase", tags=["Shop"])
 async def purchase_item(
     request: Request,
@@ -23761,6 +27202,42 @@ async def set_show_discord(
     player.show_discord = bool(on)
     await db.commit()
     return {"status": "set", "show_discord": player.show_discord}
+
+
+@app.post("/api/v1/players/{steam_id}/pref-same-cards", tags=["Players"])
+async def set_pref_same_cards(
+    steam_id: str,
+    request: Request,
+    on: bool = Query(..., description="Same Cards preference for queue-matched rooms"),
+    sig: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Room rules (migration 306): the Same Cards preference for queue-matched
+    rooms — 1v1, and the auto-queue 2v2 / 1v2 rooms that have no host. A room
+    gets the rule only when EVERY member has this on; it is read at issuance,
+    so a change while queued applies to the next room. HMAC signs
+    'pref_same_cards:{steam_id}:{1|0}' AND the request must carry a VERIFIED
+    Steam session (settings writes are not HMAC-only — residual F3)."""
+    if not MATCH_HMAC_SECRET:
+        raise HTTPException(status_code=503, detail="HMAC not configured")
+    expected = hmac.new(
+        MATCH_HMAC_SECRET.encode(),
+        f"pref_same_cards:{steam_id}:{1 if on else 0}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(sig, expected):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    await _check_steam_session(request, steam_id, db)
+    if not _session_was_verified(request):
+        raise HTTPException(status_code=401, detail="session_required")
+
+    player = (await db.execute(select(Player).where(Player.steam_id == steam_id))).scalar_one_or_none()
+    if player is None:
+        raise HTTPException(status_code=404, detail="Player not found")
+
+    player.pref_same_cards = bool(on)
+    await db.commit()
+    return {"status": "set", "pref_same_cards": player.pref_same_cards}
 
 
 @app.post("/api/v1/players/{steam_id}/color-toggle", tags=["Shop"])
@@ -24963,6 +28440,9 @@ async def series_preflight(
         live_p1_points=0, live_p2_points=0,
         status="active",
         is_private=is_priv,
+        # Room rules (migration 306): a rematch in a queue room keeps that
+        # room's frozen record (the ledger); any other room plays vanilla.
+        rules=((await _rules_from_room_ledger(db, room_id, p1.id, p2.id)) or dict(ROOM_RULES_DEFAULT)),
     )
     db.add(series)
     await db.flush()
@@ -28449,7 +31929,7 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
       - discord_id, discord_username → NULL
       - ranked_enabled → false (drops from matchmaking immediately)
       - deleted_at stamped so the row is hidden from leaderboards
-      - personal-only rows (achievements, link codes, 1v1/2v2/1v2 queue
+      - personal-only rows (achievements, link codes, region ping maps, 1v1/2v2/1v2 queue
         entries, blocks, Steam sessions) deleted
 
     Requires an HMAC signature over "delete:{steam_id}" using the mod secret,
@@ -28528,6 +32008,37 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # Drop purely personal rows — no cross-player impact.
     await db.execute(text("DELETE FROM player_achievements WHERE player_id = :pid"), {"pid": pid})
     await db.execute(text("DELETE FROM link_codes WHERE player_id = :pid"), {"pid": pid})
+    # Region ping maps (migration 307): explicit, the same rule as
+    # music_ratings below — this row is anonymised, not deleted, so the
+    # table's CASCADE never fires. The identity advisory lock above is the
+    # exclusive form; a writer holds the shared form and re-evaluates
+    # deleted_at after it is granted, so no store in flight recreates the row
+    # once this transaction commits.
+    await db.execute(text("DELETE FROM player_region_pings WHERE player_id = :pid"), {"pid": pid})
+    # Player Cards (migration 308): the player's OWN events (as puller or
+    # subject), prints, daily claims, packs (open attempts cascade) and pool
+    # memberships; shards zeroed and the subject opted out. Prints of this
+    # player held by OTHERS stay — they are the holders' rows, and the face
+    # renders the anonymised name from here on (nothing on a print is
+    # personal data beyond the player id).
+    await db.execute(text("DELETE FROM pc_events WHERE player_id = :pid OR subject_player_id = :pid"), {"pid": pid})
+    await db.execute(text("DELETE FROM pc_prints WHERE owner_player_id = :pid"), {"pid": pid})
+    await db.execute(text("DELETE FROM pc_daily_claims WHERE player_id = :pid"), {"pid": pid})
+    await db.execute(text("DELETE FROM pc_packs WHERE player_id = :pid"), {"pid": pid})
+    # The pool snapshot's own lock, blocking form (the takers hold the try
+    # form for their whole transaction and no identity lock — no cycle): a
+    # snapshot in flight commits its member rows before this sweep runs, so
+    # none of this player's survives it (c3 I). Order: identity -> pc_snapshot.
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext('pc_snapshot'))"))
+    await db.execute(text("DELETE FROM pc_pool_members WHERE player_id = :pid"), {"pid": pid})
+    await db.execute(text("UPDATE players SET pc_shards = 0, pc_opted_out_at = COALESCE(pc_opted_out_at, NOW()) WHERE id = :pid"), {"pid": pid})
+    # Portraits (migration 310): every delivery lease of this subject dies
+    # (a bot send in flight re-validates and drops the bytes), the writer's
+    # nonces go, then the game portrait unit is cleared under the per-hash P
+    # lock and the blob deleted when nothing else references it (I → P → R).
+    await db.execute(text("DELETE FROM pc_delivery_leases WHERE subject_id = :pid"), {"pid": pid})
+    await db.execute(text("DELETE FROM pc_portrait_nonces WHERE player_id = :pid"), {"pid": pid})
+    await _pc_clear_portrait_unit(db, str(pid), lock_days=None, source="none")
     # Music ratings (design-v4-report M15). EXPLICIT delete per the #437 audit
     # rule: this endpoint ANONYMIZES the players row rather than deleting it,
     # so music_ratings' ON DELETE CASCADE never fires — an ondelete clause is
@@ -30991,6 +34502,25 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
         # The candidate scans additionally exclude active bans (round-16) and
         # the issuance branches re-check all members (round-17) — those stay
         # as defense-in-depth around this serialization.
+    # Player Cards (design v4 §11 G5, c3 J, c5 F): the binder goes private
+    # and the player's pulls stop being announced (the events drain re-checks
+    # pc_announce); the pool excludes active bans by its own predicate. Runs
+    # under the identity lock BEFORE the already_banned early return, like
+    # the session purge, so a repeat ban withdraws what a ban predating the
+    # feature never touched; pc_settings_revision advances so a settings
+    # compare-and-set read before this transaction is refused as stale.
+    await db.execute(text(
+        "UPDATE players SET pc_collection_public = false, pc_announce = false, "
+        "pc_settings_revision = pc_settings_revision + 1 WHERE steam_id = :sid"),
+        {"sid": target_steam_id})
+    # A ban must not wait on a Discord send, so it revokes instead: a lease of
+    # this subject is deleted here, and any the DELETE cannot see is revoked
+    # anyway because revalidation re-resolves the picture and a banned subject
+    # resolves to none. The residual is one revalidation-to-send gap, bounded
+    # by the bot's lease reserve.
+    await db.execute(text(
+        "DELETE FROM pc_delivery_leases WHERE subject_id IN "
+        "(SELECT id FROM players WHERE steam_id = :sid)"), {"sid": target_steam_id})
     existing = await _is_banned(db, target_steam_id)
     if existing is not None:   # round-15 find 3: "" is an ACTIVE ban too
         return {"status": "already_banned", "reason": existing}
@@ -31269,6 +34799,13 @@ async def admin_reverse_series(req: _AdminReverseSeriesReq, db: AsyncSession = D
 
     series.invalidated_at = datetime.now(timezone.utc)
     series.invalidation_reason = req.reason[:64]
+    # Player Cards (WP-D): the series' unopened earned packs are voided with
+    # the result (an opened pack's prints stay — irreversible by policy).
+    try:
+        async with db.begin_nested():   # a failed void must not abort the reversal (#235)
+            await _pc_void_earned_packs(db, mode="1v1", series_id=series.id, label="admin-reverse")
+    except Exception as pcex:
+        print(f"[PC-EARNED] void failed for 1v1 {series.id}: {pcex}")
 
     # Aug 9 bet audit find 1: unsettled bets on the voided result are
     # refunded (the 2v2 twin has always done this via its reconcile; the 1v1
@@ -31776,10 +35313,16 @@ async def team_queue_join(req: TeamQueueJoinRequest, request: Request, db: Async
         matched_at=None,
         last_polled=datetime.now(timezone.utc),
         queue_type=qtype,
+        # Room rules (migration 306): this seat's own last-seen version; the
+        # frozen record only ever means something next to a match.
+        mod_version=_request_mod_version(request),
+        rules=None,
     ).on_conflict_do_update(
         index_elements=[TeamQueue.player_id],
         set_={
             "status": "searching",
+            "mod_version": _request_mod_version(request),
+            "rules": None,
             "rating": rating_2v2,
             "rating_deviation": rd_2v2,
             "completed_series": completed,
@@ -32016,6 +35559,9 @@ async def team_queue_poll(steam_id: str, request: Request,
 
     await _check_steam_session(request, steam_id, db)
     _presence_touch(steam_id)
+    # Region map store (migration 307) — before any queue-row lock, see
+    # _region_pings_store; the result rides into this poll's own issuance.
+    _cur_pings = await _region_pings_store(request, steam_id, "team")
 
     # Discover and lock either just the searching caller or the entire existing
     # series group. The old self-FOR-UPDATE followed by bulk four-row writes was
@@ -32036,7 +35582,8 @@ async def team_queue_poll(steam_id: str, request: Request,
                    -- selected, so the CALLER's manual-queue team choice fell
                    -- to None and filled arbitrarily while the other three
                    -- honored theirs.
-                   tq.preferred_team, tq.manual_pick_enabled
+                   tq.preferred_team, tq.manual_pick_enabled,
+                   tq.rules
             FROM team_queue tq
             JOIN players p ON tq.player_id = p.id
             WHERE p.steam_id = :sid
@@ -32054,10 +35601,11 @@ async def team_queue_poll(steam_id: str, request: Request,
     wait_seconds = int((now - me["joined_at"]).total_seconds())
     my_pid = me["player_id"]
 
-    # Heartbeat
+    # Heartbeat — also refreshes this seat's member-scoped mod_version
+    # (migration 306) from THIS request's header.
     await db.execute(
-        text("UPDATE team_queue SET last_polled = NOW() WHERE player_id = :pid"),
-        {"pid": my_pid},
+        text("UPDATE team_queue SET last_polled = NOW(), mod_version = :mv WHERE player_id = :pid"),
+        {"pid": my_pid, "mv": _request_mod_version(request)},
     )
 
     # Searching expiry
@@ -32265,12 +35813,12 @@ async def team_queue_poll(steam_id: str, request: Request,
                     return TeamQueuePollResponse(
                         status="not_in_queue" if _hosted else "searching")
                 room_name = f"team_{uuid_mod.uuid4().hex[:12]}"
-                # Pick region by mode of the 4 region values; fallback to 'us'.
-                regions = [p["region"] for p in all_4 if p["region"]]
-                if regions:
-                    chosen_region = max(set(regions), key=regions.count)
-                else:
-                    chosen_region = "us"
+                # Region (Sept 10, v4 group rule): the mode of the four home
+                # regions is the baseline — today's rule — and the members'
+                # own ping maps may move the room; see _group_region.
+                chosen_region = await _group_region(
+                    db, all_4, _region_mode_of(all_4), "team",
+                    current=_region_current(my_pid, _cur_pings), room=room_name)
                 await db.execute(
                     text("""UPDATE team_queue
                            SET room_name = :rn, room_region = :rr
@@ -32280,10 +35828,23 @@ async def team_queue_poll(steam_id: str, request: Request,
                 # room_issued_at anchors the assembly deadline (migration 170):
                 # created_at is MATCH time and also had to cover the whole
                 # ready-up window, which made the deadline wrong by design.
+                # Room rules (migration 306): the record the rows were stamped
+                # with at match / Start / relock time is copied onto the series
+                # in the same statement that issues the room — one value
+                # everywhere. Only a row that CARRIES a record writes it (a
+                # lobby's settings win for an adopted series; a relock
+                # re-stamped the series' own record); a NULL row — the relock
+                # of a series born before the record — leaves the series'
+                # history unknown and plays the defaults (a1 H5).
+                rules = _rules_normalize(me["rules"])
                 await db.execute(
                     text("UPDATE team_series SET photon_room_id = :rn, region = :rr,"
-                         " room_issued_at = NOW() WHERE id = :sid"),
-                    {"rn": room_name, "rr": chosen_region, "sid": me["series_id"]},
+                         " room_issued_at = NOW(),"
+                         " rules = CASE WHEN CAST(:has_rules AS BOOLEAN)"
+                         "              THEN CAST(:rules AS JSONB) ELSE rules END"
+                         " WHERE id = :sid"),
+                    {"rn": room_name, "rr": chosen_region, "sid": me["series_id"],
+                     "has_rules": me["rules"] is not None, "rules": _rules_json(rules)},
                 )
                 # Re-read so the response reflects the new room name.
                 me_re = await db.execute(
@@ -32296,6 +35857,7 @@ async def team_queue_poll(steam_id: str, request: Request,
             else:
                 room_out = me["room_name"]
                 region_out = me["room_region"]
+                rules = _rules_normalize(me["rules"])
 
             await db.commit()
             # Room just issued — all four are committed to a 2v2 game; drop
@@ -32304,6 +35866,9 @@ async def team_queue_poll(steam_id: str, request: Request,
             if room_generated_2v2:
                 await _evict_other_queue_searching(
                     db, [p["player_id"] for p in all_4], "team_queue", "a 2v2 match")
+            # Room rules §4.5: a non-default room is revealed only to a
+            # request at or above the floor.
+            _rules_admit(request, rules)
             return TeamQueuePollResponse(
                 status="ready_join",
                 series_id=str(me["series_id"]),
@@ -32314,6 +35879,8 @@ async def team_queue_poll(steam_id: str, request: Request,
                 room_region=region_out,
                 match_age_seconds=int((now - me["matched_at"]).total_seconds()) if me["matched_at"] else 0,
                 my_ready=bool(me["ready"]),
+                rules=_rules_payload(rules),
+                rules_prop=_rules_prop(rules),
             )
 
         # Matched but not all-ready
@@ -32623,17 +36190,26 @@ async def team_queue_poll(steam_id: str, request: Request,
     series_id = uuid_mod.uuid4()
     await _assert_no_service_subject(
         db, affected_player_ids=team1_ids_sorted + team2_ids_sorted)
+    # Room rules (migration 306): a queue-matched room has no host — friendly
+    # fire stays ON; Same Cards only when all four prefer it AND every seat's
+    # own last request was at or above the floor (the caller judged by this
+    # request's header). Frozen onto the four rows below and the series row.
+    _m_rules = await _rules_for_members(
+        db, team1_ids_sorted + team2_ids_sorted, "team_queue",
+        request=request, my_pid=my_pid)
     await db.execute(
         text("""
             INSERT INTO team_series (id, t1a_id, t1b_id, t2a_id, t2b_id,
-                                     status, was_auto_balanced, created_at)
-            VALUES (:sid, :t1a, :t1b, :t2a, :t2b, 'active', :wab, NOW())
+                                     status, was_auto_balanced, created_at, rules)
+            VALUES (:sid, :t1a, :t1b, :t2a, :t2b, 'active', :wab, NOW(),
+                    CAST(:rules AS JSONB))
         """),
         {
             "sid": series_id,
             "t1a": team1_ids_sorted[0], "t1b": team1_ids_sorted[1],
             "t2a": team2_ids_sorted[0], "t2b": team2_ids_sorted[1],
             "wab": was_auto_balanced,
+            "rules": _rules_json(_m_rules),
         },
     )
     team1_ids = team1_ids_sorted
@@ -32673,7 +36249,8 @@ async def team_queue_poll(steam_id: str, request: Request,
                 team_assigned = CASE WHEN player_id = ANY(:t1) THEN 1 ELSE 2 END,
                 matched_at = :mat,
                 ready = false,
-                room_name = NULL, room_region = NULL
+                room_name = NULL, room_region = NULL,
+                rules = CAST(:rules AS JSONB)
             WHERE player_id = ANY(:all4)
         """),
         {
@@ -32681,6 +36258,7 @@ async def team_queue_poll(steam_id: str, request: Request,
             "t1": team1_ids,
             "mat": matched_at,
             "all4": team1_ids + team2_ids,
+            "rules": _rules_json(_m_rules),
         },
     )
     # Lease all four in the same transaction as the lock (migration 174).
@@ -33128,6 +36706,9 @@ async def _complete_team_series_with_ratings(
                        completed_at=NOW(), invalidation_reason=:rsn WHERE id=:sid"""),
             {"wt": winner_team, "rsn": reason, "sid": series_uuid},
         )
+        # Player Cards: no inline roll on this branch (a slot may be unfilled);
+        # the row stays valid with winner_team set, so the reconciler grants
+        # the populated winners from it within PC_RECONCILE_EVERY_S (c3 C).
         await _lock_queue_rows_ordered(db, "team_queue", [g for g in gids if g is not None])
         await db.execute(text("DELETE FROM team_queue WHERE series_id = :sid"), {"sid": series_uuid})
         return {}
@@ -33310,6 +36891,16 @@ async def _complete_team_series_with_ratings(
             await db.flush()
     except Exception as bex:
         print(f"[TEAM-DC-COMPLETE] bet settle error for {series_uuid}: {bex}")
+    # Player Cards (WP-D): a forfeit / admin completion grants the WIN roll
+    # and never a sweep — the same line the series gold draws.
+    try:
+        async with db.begin_nested():
+            await _pc_grant_earned_packs(
+                db, mode="team", series_id=series_uuid,
+                winner_ids=([t1a_id, t1b_id] if winner_team == 1 else [t2a_id, t2b_id]),
+                sweep=False, label=f"team-{reason}")
+    except Exception as pcex:
+        print(f"[PC-EARNED] team grant failed for {series_uuid} ({reason}): {pcex}")
 
     # Free the queue rows.
     await _lock_queue_rows_ordered(db, "team_queue", gids)
@@ -33765,6 +37356,12 @@ async def admin_reverse_team_series(req: _AdminReverseTeamSeriesReq, db: AsyncSe
                invalidated_at = NOW(), invalidation_reason = :rsn
          WHERE id = :sid
     """), {"sid": sid, "rsn": (req.reason or "admin_reverse")[:64]})
+    # Player Cards (WP-D): the series' unopened earned packs go with the result.
+    try:
+        async with db.begin_nested():   # a failed void must not abort the reversal (#235)
+            await _pc_void_earned_packs(db, mode="team", series_id=sid, label="admin-reverse")
+    except Exception as pcex:
+        print(f"[PC-EARNED] void failed for team {sid}: {pcex}")
     # Unsettled bets on the now-voided result are refunded (settled bets are
     # deliberately untouched — winnings clawback is a separate policy call).
     await _reconcile_team_series_bets(db, sid, "admin_reverse")
@@ -34040,6 +37637,7 @@ async def _team_lock_family_pick(db: AsyncSession, four_pids,
             SELECT ts.id, ts.status, ts.t1a_id, ts.t1b_id, ts.t2a_id, ts.t2b_id,
                    ts.t1_series_wins, ts.t2_series_wins, ts.dc_grace_until,
                    ts.invalidation_reason, ts.created_at, ts.room_issued_at,
+                   ts.rules,
                    (SELECT COUNT(*) FROM team_matches tm
                      WHERE tm.series_id = ts.id
                        AND tm.invalidated_at IS NULL) AS games,
@@ -34146,6 +37744,11 @@ async def _team_relock_existing_series(db: AsyncSession, srow, member_pids,
     The dc_manual_pending flag clears because play resumed — nothing is
     pending an admin call any more."""
     t1a, t1b = srow["t1a_id"], srow["t1b_id"]
+    # Room rules (migration 306, a1 H5): a relock is the SAME series, so the
+    # rows carry the series' own record again (rules are constant across the
+    # games of one series); a series born before the record (NULL) stays
+    # NULL — its rows then play the defaults and its history stays unknown.
+    _relock_rules = (_rules_json(srow["rules"]) if srow["rules"] is not None else None)
     for pid in member_pids:
         t = 1 if pid in (t1a, t1b) else 2
         await db.execute(
@@ -34154,10 +37757,11 @@ async def _team_relock_existing_series(db: AsyncSession, srow, member_pids,
                    SET status = 'matched',
                        series_id = :sid,
                        team_assigned = :t,
-                       matched_at = NOW()
+                       matched_at = NOW(),
+                       rules = CAST(:rules AS JSONB)
                  WHERE player_id = :pid
             """),
-            {"sid": srow["id"], "t": t, "pid": pid},
+            {"sid": srow["id"], "t": t, "pid": pid, "rules": _relock_rules},
         )
     await _lease_acquire_many(db, list(member_pids), "team", srow["id"],
                               LEASE_TTL_ASSEMBLY)
@@ -34552,7 +38156,7 @@ async def team_series_continuation(req: _TeamContinuationReq, db: AsyncSession =
     # Otherwise require a recent COMPLETED series for the same four (proves this is a
     # real rematch of an ongoing sitting, not a fabricated pairing).
     prior = (await db.execute(text("""
-        SELECT id, completed_at, t1a_id, t1b_id, t2a_id, t2b_id, photon_room_id
+        SELECT id, completed_at, t1a_id, t1b_id, t2a_id, t2b_id, photon_room_id, rules
           FROM team_series
          WHERE status = 'completed'
            AND t1a_id = ANY(:ids) AND t1b_id = ANY(:ids)
@@ -34597,15 +38201,21 @@ async def team_series_continuation(req: _TeamContinuationReq, db: AsyncSession =
     new_id = uuid.uuid4()
     await _assert_no_service_subject(
         db, affected_player_ids=list(id_by_steam.values()))
+    _c_rules = _rules_normalize(prior["rules"])
+    # Room rules (r1): a continuation is the SAME sitting in the SAME room,
+    # so the new series carries the prior's frozen record — nobody re-chose
+    # anything. A prior born before the record existed played the defaults.
     await db.execute(text("""
         INSERT INTO team_series (id, t1a_id, t1b_id, t2a_id, t2b_id,
-                                 status, was_auto_balanced, photon_room_id, region, created_at)
-        VALUES (:sid, :t1a, :t1b, :t2a, :t2b, 'active', false, :room, :region, NOW())
+                                 status, was_auto_balanced, photon_room_id, region, created_at, rules)
+        VALUES (:sid, :t1a, :t1b, :t2a, :t2b, 'active', false, :room, :region, NOW(),
+                CAST(:rules AS JSONB))
     """), {
         "sid": new_id,
         "t1a": id_by_steam[t1[0]], "t1b": id_by_steam[t1[1]],
         "t2a": id_by_steam[t2[0]], "t2b": id_by_steam[t2[1]],
         "room": (req.room_id or "")[:64], "region": (req.region or "")[:8] or None,
+        "rules": _rules_json(_c_rules),
     })
     # Aug 8 (Sid): a continuation is the SAME sitting — INHERIT the prior
     # series' frozen colour identity (side-swapped when the split flipped)
@@ -34658,7 +38268,8 @@ async def team_series_continuation(req: _TeamContinuationReq, db: AsyncSession =
     return {"series_id": str(new_id), "status": "created",
             "t1_color_name": _cc[0], "t1_color_hex": _cc[1],
             "t2_color_name": _cc[2], "t2_color_hex": _cc[3],
-            "color_decided": _cc_decided}
+            "color_decided": _cc_decided,
+            "rules": _rules_payload(_c_rules), "rules_prop": _rules_prop(_c_rules)}
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -34752,7 +38363,7 @@ def _ovt_difficulty_mult(is_solo: bool, extra_pick: bool,
 _ovt_podium_cache: dict = {"at": 0.0, "ids": []}
 
 # Item d: activity filter as on /ovt/leaderboard (f-string over the int).
-_OVT_PODIUM_QUERY = f"""
+_OVT_PODIUM_QUERY = """
     WITH per_player AS (
         SELECT pid, SUM(played) AS games, SUM(won) AS wins
         FROM (
@@ -34771,7 +38382,7 @@ _OVT_PODIUM_QUERY = f"""
       FROM per_player pp
       JOIN players p ON p.id = pp.pid
      WHERE p.deleted_at IS NULL AND pp.games >= 1
-       AND p.last_seen > NOW() - make_interval(days => {LEADERBOARD_ACTIVE_DAYS})
+       AND p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))
      ORDER BY pp.games DESC, pp.wins::float / NULLIF(pp.games, 0) DESC NULLS LAST
      LIMIT 3
 """
@@ -34788,7 +38399,8 @@ async def _ovt_podium_ids(db: AsyncSession) -> list:
             # otherwise abort that transaction and 500 the report (#235). The
             # savepoint is what makes "serve the stale copy" actually work.
             async with db.begin_nested():
-                rows = (await db.execute(text(_OVT_PODIUM_QUERY))).scalars().all()
+                rows = (await db.execute(text(_OVT_PODIUM_QUERY),
+                                         {"active_days": LEADERBOARD_ACTIVE_DAYS})).scalars().all()
             _ovt_podium_cache["ids"] = [str(r) for r in rows]
         except Exception as ex:
             print(f"[OVT-PODIUM] cache refresh failed: {ex}")
@@ -34888,10 +38500,13 @@ async def ovt_queue_join(req: _OvtQueueJoinReq, request: Request, db: AsyncSessi
     await db.execute(text("""
         INSERT INTO ovt_queue (player_id, steam_id, display_name, rating, rating_deviation,
                                completed_series, fallback_rating, region, queue_type,
-                               preferred_side, solo_extra_pick, status, joined_at, last_polled)
-        VALUES (:pid, :sid, :dn, :r, :rd, :cs, :fr, :reg, 'manual', :side, :sep, 'searching', NOW(), NOW())
+                               preferred_side, solo_extra_pick, status, joined_at, last_polled,
+                               mod_version)
+        VALUES (:pid, :sid, :dn, :r, :rd, :cs, :fr, :reg, 'manual', :side, :sep, 'searching', NOW(), NOW(),
+                :mv)
         ON CONFLICT (player_id) DO UPDATE SET
             display_name = EXCLUDED.display_name, region = EXCLUDED.region,
+            mod_version = EXCLUDED.mod_version,
             preferred_side = EXCLUDED.preferred_side, solo_extra_pick = EXCLUDED.solo_extra_pick,
             -- Bug #109 (same contract as the FFA join): rejoin of a SEARCHING
             -- row resets the search clock and rating snapshot; LOCKED rows
@@ -34909,7 +38524,7 @@ async def ovt_queue_join(req: _OvtQueueJoinReq, request: Request, db: AsyncSessi
                              THEN NOW() ELSE ovt_queue.joined_at END
     """), {"pid": player.id, "sid": req.steam_id, "dn": req.display_name[:64], "r": rating,
            "rd": rd, "cs": cs, "fr": fallback, "reg": (req.region or "")[:8] or None,
-           "side": side, "sep": req.solo_extra_pick})
+           "side": side, "sep": req.solo_extra_pick, "mv": _request_mod_version(request)})
     await db.commit()
     n = (await db.execute(text("SELECT COUNT(*) FROM ovt_queue WHERE status = 'searching'"))).scalar() or 0
     return {"status": "ok", "queue_count": int(n), "preferred_side": side}
@@ -35103,6 +38718,9 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
     STEAM_AUTH_ENFORCE fully arms)."""
     await _check_steam_session(request, steam_id, db)
     _presence_touch(steam_id)
+    # Region map store (migration 307) — before any queue-row lock, see
+    # _region_pings_store; the result rides into this poll's own issuance.
+    _cur_pings = await _region_pings_store(request, steam_id, "ovt")
     locked = await _lock_queue_group_for_player(db, "ovt_queue", steam_id)
     if locked is None:
         return {"status": "not_in_queue", "queue_count": 0}
@@ -35116,8 +38734,8 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
     await _assert_no_service_subject(
         db, affected_player_ids=[me["player_id"]], affected_steam_ids=[steam_id])
     await db.execute(
-        text("UPDATE ovt_queue SET last_polled = NOW() WHERE player_id = :pid"),
-        {"pid": me["player_id"]},
+        text("UPDATE ovt_queue SET last_polled = NOW(), mod_version = :mv WHERE player_id = :pid"),
+        {"pid": me["player_id"], "mv": _request_mod_version(request)},
     )
 
     # Prune ghosts: a crashed/killed client stops polling but its 'searching'
@@ -35316,7 +38934,7 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
             n = (await db.execute(text("SELECT COUNT(*) FROM ovt_queue WHERE status = 'searching'"))).scalar() or 0
             return {"status": "searching", "queue_count": int(n)}
         await db.commit()
-        return await _ovt_poll_locked_payload(db, me["series_id"], steam_id)
+        return await _ovt_poll_locked_payload(db, me["series_id"], steam_id, request=request)
 
     # Try to lock. Only the lowest current Steam ID attempts, so the three
     # clients don't race to create three series. Fresh-poll filter: a row
@@ -35376,17 +38994,32 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
         await db.commit()
         return {"status": "searching", "queue_count": len(rows)}
     extra_pick = any(bool(r["solo_extra_pick"]) for r in lobby)
-    region = next((r["region"] for r in lobby if r["region"]), "us")
     room = f"ovt_{uuid.uuid4().hex[:12]}"
+    # Region (Sept 10, v4 group rule): the mode of the trio's homes is the
+    # baseline (the first-non-empty seat-order bias this replaced was never
+    # a policy — recorded deviation) and the members' own ping maps may move
+    # the room; see _group_region.
+    region = await _group_region(
+        db, lobby, _region_mode_of(lobby), "ovt",
+        current=_region_current(me["player_id"], _cur_pings), room=room)
     series_id = uuid.uuid4()
     await _assert_no_service_subject(
         db, affected_player_ids=[r["player_id"] for r in lobby])
+    # Room rules (migration 306): queue-locked trio, no host — friendly fire
+    # ON, Same Cards only when all three prefer it AND every seat's own last
+    # request was at or above the floor. Frozen onto the series row; the
+    # locked payload reads it from there.
+    _lobby_rules = await _rules_for_members(
+        db, [r["player_id"] for r in lobby], "ovt_queue",
+        request=request, my_pid=me["player_id"])
     await db.execute(text("""
         INSERT INTO ovt_series (id, solo_id, duo_a_id, duo_b_id, status, is_ranked,
-                                solo_extra_pick, photon_room_id, region, created_at)
-        VALUES (:sid, :solo, :da, :db, 'active', false, :sep, :room, :reg, NOW())
+                                solo_extra_pick, photon_room_id, region, created_at, rules)
+        VALUES (:sid, :solo, :da, :db, 'active', false, :sep, :room, :reg, NOW(),
+                CAST(:rules AS JSONB))
     """), {"sid": series_id, "solo": solo["player_id"], "da": duo[0]["player_id"],
-           "db": duo[1]["player_id"], "sep": extra_pick, "room": room, "reg": (region or "us")[:8]})
+           "db": duo[1]["player_id"], "sep": extra_pick, "room": room, "reg": (region or "us")[:8],
+           "rules": _rules_json(_lobby_rules)})
     for r in lobby:
         this_side = 1 if r["player_id"] == solo["player_id"] else 2
         await db.execute(text("""
@@ -35402,10 +39035,11 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
     # Post-commit, own transaction: a locked trio is out of every other queue.
     await _evict_other_queue_searching(
         db, [r["player_id"] for r in lobby], "ovt_queue", "a 1v2 lobby")
-    return await _ovt_poll_locked_payload(db, series_id, steam_id)
+    return await _ovt_poll_locked_payload(db, series_id, steam_id, request=request)
 
 
-async def _ovt_poll_locked_payload(db: AsyncSession, series_id, steam_id: str) -> dict:
+async def _ovt_poll_locked_payload(db: AsyncSession, series_id, steam_id: str,
+                                   request=None) -> dict:
     s = (await db.execute(text("""
         SELECT s.*, ps.steam_id AS solo_sid, ps.display_name AS solo_name,
                pa.steam_id AS da_sid, pa.display_name AS da_name,
@@ -35419,12 +39053,18 @@ async def _ovt_poll_locked_payload(db: AsyncSession, series_id, steam_id: str) -
     if s is None:
         return {"status": "searching", "queue_count": 0}
     my_side = 1 if s["solo_sid"] == steam_id else 2
+    # Room rules (migration 306): the record frozen on the series row at lock
+    # / Start; revealed only to a request at or above the floor (§4.5).
+    _rules = _rules_normalize(s["rules"])
+    _rules_admit(request, _rules)
     return {
         "status": "ready_join",
         "series_id": str(series_id),
         "side_assigned": my_side,
         "room_name": s["photon_room_id"],
         "room_region": s["region"],
+        "rules": _rules_payload(_rules),
+        "rules_prop": _rules_prop(_rules),
         "solo_extra_pick": bool(s["solo_extra_pick"]),
         "solo": {"steam_id": s["solo_sid"], "display_name": s["solo_name"]},
         "duo": [
@@ -35501,7 +39141,7 @@ async def ovt_series_continuation(req: _TeamContinuationReq, db: AsyncSession = 
     # match pipeline would silently stop recording (review finding).
     prior = (await db.execute(text("""
         SELECT completed_at, created_at, solo_id, duo_a_id, duo_b_id, solo_extra_pick,
-               photon_room_id
+               photon_room_id, rules
           FROM ovt_series
          WHERE status IN ('completed', 'canceled', 'cancelled')
            AND solo_id = ANY(:ids) AND duo_a_id = ANY(:ids) AND duo_b_id = ANY(:ids)
@@ -35529,16 +39169,23 @@ async def ovt_series_continuation(req: _TeamContinuationReq, db: AsyncSession = 
         db,
         affected_player_ids=[prior["solo_id"], prior["duo_a_id"], prior["duo_b_id"]],
     )
+    _c_rules = _rules_normalize(prior["rules"])
+    # Room rules (r1): a continuation is the SAME sitting in the SAME room,
+    # so the new series carries the prior's frozen record — nobody re-chose
+    # anything. A prior born before the record existed played the defaults.
     await db.execute(text("""
         INSERT INTO ovt_series (id, solo_id, duo_a_id, duo_b_id, status, is_ranked,
-                                solo_extra_pick, photon_room_id, region, created_at)
-        VALUES (:sid, :solo, :da, :db, 'active', false, :sep, :room, :region, NOW())
+                                solo_extra_pick, photon_room_id, region, created_at, rules)
+        VALUES (:sid, :solo, :da, :db, 'active', false, :sep, :room, :region, NOW(),
+                CAST(:rules AS JSONB))
     """), {"sid": new_id, "solo": prior["solo_id"], "da": prior["duo_a_id"], "db": prior["duo_b_id"],
            "sep": bool(prior["solo_extra_pick"]), "room": (req.room_id or "")[:64],
-           "region": (req.region or "")[:8] or None})
+           "region": (req.region or "")[:8] or None,
+           "rules": _rules_json(_c_rules)})
     await db.commit()
     print(f"[OVT-CONTINUATION] created {new_id} for {steams} room={req.room_id}")
-    return {"series_id": str(new_id), "status": "created"}
+    return {"series_id": str(new_id), "status": "created",
+            "rules": _rules_payload(_c_rules), "rules_prop": _rules_prop(_c_rules)}
 
 
 @app.post("/api/v1/ovt/matches", response_model=OvtMatchResponse, tags=["1v2 Matches"])
@@ -35647,6 +39294,9 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
     # a series, rewrite the series row's slot ids to the report's ordering —
     # under the row lock, before any accumulator applies. Mid-series drift
     # (should be impossible: sides are fixed per sitting) is logged only.
+    # The slot ids the series ROW carries from here on (c3 B): the report's
+    # after a game-1 realignment, the stored ones otherwise.
+    slot_solo, slot_da, slot_db = series["solo_id"], series["duo_a_id"], series["duo_b_id"]
     if (solo_id, duo_a_id, duo_b_id) != (series["solo_id"], series["duo_a_id"], series["duo_b_id"]):
         prior_games = (await db.execute(text(
             "SELECT COUNT(*) FROM ovt_matches WHERE series_id = :sid"
@@ -35658,6 +39308,7 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
             """), {"solo": solo_id, "da": duo_a_id, "db": duo_b_id, "sid": series_uuid})
             print(f"[OVT] series {series_uuid} slots realigned to report ordering "
                   f"(solo={report.solo.steam_id})")
+            slot_solo, slot_da, slot_db = solo_id, duo_a_id, duo_b_id
         else:
             print(f"[OVT] WARNING: series {series_uuid} slot ordering differs from "
                   f"report mid-series (game {prior_games + 1}) — leaving as-is")
@@ -35866,6 +39517,19 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
         await db.execute(text(
             "UPDATE ovt_series SET status='completed', winner_side=:ws, completed_at=NOW() WHERE id=:sid"
         ), {"ws": winner_side, "sid": series_uuid})
+        # Player Cards (WP-D): the earned-pack roll for the completed series
+        # (own savepoint; reconciled from the series row if it is lost).
+        # Recipients are the STORED slots: the reconciler re-derives from the
+        # same row, so both name the same players even under a mid-series
+        # drift the row keeps as-is (c3 B).
+        try:
+            async with db.begin_nested():
+                await _pc_grant_earned_packs(
+                    db, mode="ovt", series_id=series_uuid,
+                    winner_ids=([slot_solo] if winner_side == 1 else [slot_da, slot_db]),   # STORED slots (c3 B)
+                    sweep=_pc_sweep(solo_wins, duo_wins), label="ovt-complete")
+        except Exception as pcex:
+            print(f"[PC-EARNED] ovt grant failed for {series_uuid}: {pcex}")
         await _lock_queue_rows_ordered(
             db, "ovt_queue", [solo_id, duo_a_id, duo_b_id])
         await db.execute(text("DELETE FROM ovt_queue WHERE series_id = :sid"), {"sid": series_uuid})
@@ -36057,7 +39721,7 @@ async def ovt_recent(
     series_rows = (await db.execute(text("""
         SELECT s.id AS series_id, s.status, s.winner_side,
                s.created_at, s.completed_at,
-               s.solo_series_wins, s.duo_series_wins, s.solo_extra_pick,
+               s.solo_series_wins, s.duo_series_wins, s.solo_extra_pick, s.rules,
                s.solo_id, s.duo_a_id, s.duo_b_id,
                s.solo_gold_earned, s.duo_a_gold_earned, s.duo_b_gold_earned,
                s.solo_xp_earned, s.duo_a_xp_earned, s.duo_b_xp_earned,
@@ -36173,6 +39837,7 @@ async def ovt_recent(
             "solo_wins": int(r["solo_series_wins"] or 0),
             "duo_wins": int(r["duo_series_wins"] or 0),
             "solo_extra_pick": bool(r["solo_extra_pick"]),
+            "rules": _rules_history(r["rules"], r["solo_extra_pick"]),
             "solo": {
                 "steam_id": r["solo_sid"],
                 "display_name": r["solo_name"] or "Player",
@@ -36469,6 +40134,254 @@ FFA_CONFIG_DEFAULTS = {
     # FFA_SUDDEN_DEATH_MIN_VERSION above (round-1 CRITICAL 1).
     "sudden_death": False,
 }
+
+# ── Room rules (Sept 10 batch, ai-collab/sept10-batch/01-room-rules.md) ──────
+# Every server-issued 1v1 / 2v2 / 1v2 room carries a rules record {ff, sc}:
+# friendly fire (default ON, which is today's behaviour) and the Same Cards
+# rule (default OFF). Decided BEFORE the room exists (host knobs on the 2v2 /
+# 1v2 lobby rows; players.pref_same_cards for queue-matched rooms, which have
+# no host), frozen at issuance onto the issuance record AND the series row,
+# delivered in the ready/resolve payload, stamped by whichever member creates
+# the Photon room as the room prop `cr_rules`, and never changed inside a
+# room. FFA keeps its own config set (ffa_lobbies.same_card_rule).
+#
+# ⚠ SHIP COUPLING — ROOM_RULES_MIN_VERSION MUST equal the version that ships
+# the client half (the cr_rules stamp + latch, the DoDamage friendly-fire
+# gate, the vanilla-pick Same Cards seam). A room whose frozen rules are
+# NON-DEFAULT is revealed only to requests at or above it (409
+# rules_unsupported otherwise); default-rules rooms are served to every client
+# exactly as before this release. Bump it in the SAME commit as the version
+# bump, like FFA_SUDDEN_DEATH_MIN_VERSION.
+ROOM_RULES_MIN_VERSION = "1.41.0"
+ROOM_RULES_DEFAULT = {"ff": True, "sc": False}
+# Queue tables whose rows carry a member-scoped mod_version (closed set — the
+# name is interpolated into SQL, learning #188).
+_ROOM_RULES_QUEUE_TABLES = ("ranked_queue", "team_queue", "ovt_queue")
+
+
+def _rules_normalize(raw) -> dict:
+    """{ff, sc} from a JSONB value / dict / JSON text / None. Missing or
+    malformed keys fall to the defaults — the conservative direction for both
+    (FF ON is vanilla; SC OFF is a private roll)."""
+    out = dict(ROOM_RULES_DEFAULT)
+    if isinstance(raw, (str, bytes)):
+        try:
+            raw = _json.loads(raw)
+        except Exception:
+            raw = None
+    if isinstance(raw, dict):
+        for k in ("ff", "sc"):
+            v = raw.get(k)
+            if isinstance(v, bool):
+                out[k] = v
+        # Provenance, frozen with the record: "lobby" (host-decided) or
+        # "queue" (preference-decided). Informational for the client.
+        if raw.get("src") in ("lobby", "queue"):
+            out["src"] = raw["src"]
+    return out
+
+
+def _rules_json(rules) -> str:
+    """Canonical JSON text for a CAST(:rules AS JSONB) bind (#275/#448 —
+    bind parameters are typed at the SQL side, never inferred)."""
+    r = _rules_normalize(rules)
+    doc = {"ff": r["ff"], "sc": r["sc"]}
+    if r.get("src"):
+        doc["src"] = r["src"]
+    return _json.dumps(doc, separators=(",", ":"), sort_keys=True)
+
+
+def _rules_prop(rules) -> str:
+    """The exact string the creator stamps as the Photon room prop and every
+    joiner compares against its pending value: keys in fixed order, 0/1, no
+    spaces. Produced HERE only; the client never re-derives it."""
+    r = _rules_normalize(rules)
+    return f"ff={1 if r['ff'] else 0};sc={1 if r['sc'] else 0}"
+
+
+def _rules_nondefault(rules) -> bool:
+    """True when the record differs from vanilla on ff or sc (provenance is
+    not a rule)."""
+    r = _rules_normalize(rules)
+    return (r["ff"], r["sc"]) != (ROOM_RULES_DEFAULT["ff"], ROOM_RULES_DEFAULT["sc"])
+
+
+def _rules_payload(rules, src: str | None = None) -> dict:
+    """The `rules` object every ready/resolve payload carries next to the
+    region. `src` is provenance ("lobby" | "queue"); when omitted the record's
+    own frozen provenance is used, then "queue"."""
+    r = _rules_normalize(rules)
+    return {"ff": r["ff"], "sc": r["sc"], "src": src or r.get("src") or "queue"}
+
+
+def _mod_version_at_least(version, floor: str) -> bool:
+    """Member-scoped floor test. None / garbage → False: the unhandled case
+    fails toward the DEFAULT rules, never toward revealing a non-default room
+    to a client that cannot honour it (#276)."""
+    if not version:
+        return False
+    try:
+        return _parse_version(str(version)) >= _parse_version(floor)
+    except Exception:
+        return False
+
+
+def _request_mod_version(request):
+    """The X-Mod-Version the version_gate middleware parsed for THIS request
+    (request.state.mod_version); None when absent."""
+    try:
+        return getattr(request.state, "mod_version", None) if request is not None else None
+    except Exception:
+        return None
+
+
+def _rules_admit(request, rules) -> None:
+    """Per-request admission (01-room-rules §4.5). A response that reveals the
+    NAME of a room whose frozen rules are non-default is served only to a
+    request at or above ROOM_RULES_MIN_VERSION; any other request gets 409
+    rules_unsupported and never learns the room, so it never joins — the room
+    proceeds under the existing no-show / abandon path. Default-rules rooms
+    are never refused. The check is on the REQUEST, not a member row, so two
+    clients on one account are each judged by their own header."""
+    if not _rules_nondefault(rules):
+        return
+    if _mod_version_at_least(_request_mod_version(request), ROOM_RULES_MIN_VERSION):
+        return
+    raise HTTPException(status_code=409, detail="rules_unsupported")
+
+
+def _rules_for_queue_match(prefs, versions) -> dict:
+    """Queue-matched rooms (no host): Same Cards is ON only when EVERY member
+    has players.pref_same_cards on AND every member's OWN last request was at
+    or above the floor. Friendly fire is fixed ON (Sid, answer C). An empty
+    roster can never vote yes."""
+    prefs = list(prefs)
+    versions = list(versions)
+    sc = (bool(prefs) and all(bool(p) for p in prefs)
+          and bool(versions)
+          and all(_mod_version_at_least(v, ROOM_RULES_MIN_VERSION) for v in versions))
+    return {"ff": True, "sc": sc, "src": "queue"}
+
+
+def _rules_from_lobby_row(lrow) -> dict:
+    """Host-decided rules on a 2v2 / 1v2 lobby row (friendly_fire /
+    same_cards, migration 306). A row read without the columns → defaults."""
+    try:
+        return {"ff": bool(lrow["friendly_fire"]), "sc": bool(lrow["same_cards"]),
+                "src": "lobby"}
+    except Exception:
+        return dict(ROOM_RULES_DEFAULT, src="lobby")
+
+
+async def _rules_members(db, player_ids, queue_table: str) -> dict:
+    """player_id -> (pref_same_cards, that row's own mod_version) for a set of
+    queue rows. Reads the ROW's version (the seat's own last poll), never
+    players.mod_version (a global last-write-wins value). A member without a
+    row is reported as (False, None) — it can never vote yes."""
+    if queue_table not in _ROOM_RULES_QUEUE_TABLES:
+        raise ValueError(f"refusing rules read for unknown table {queue_table!r}")
+    ids = [uuid.UUID(str(x)) for x in player_ids]
+    out = {str(pid): (False, None) for pid in ids}
+    if not ids:
+        return out
+    rows = (await db.execute(text(f"""
+        SELECT q.player_id, p.pref_same_cards AS pref, q.mod_version AS mv
+          FROM {queue_table} q
+          JOIN players p ON p.id = q.player_id
+         WHERE q.player_id = ANY(CAST(:ids AS uuid[]))
+    """), {"ids": ids})).mappings().fetchall()
+    for r in rows:
+        out[str(r["player_id"])] = (bool(r["pref"]), r["mv"])
+    return out
+
+
+async def _rules_for_members(db, player_ids, queue_table: str, request=None,
+                             my_pid=None) -> dict:
+    """Queue-matched rules for a roster: the calling seat is judged by THIS
+    request's header (its row may lag one poll); every other seat by its own
+    row. Returns the {ff, sc} record to freeze."""
+    members = await _rules_members(db, player_ids, queue_table)
+    prefs, versions = [], []
+    for pid, (pref, mv) in members.items():
+        prefs.append(pref)
+        if my_pid is not None and pid == str(my_pid) and request is not None:
+            versions.append(_request_mod_version(request) or mv)
+        else:
+            versions.append(mv)
+    return _rules_for_queue_match(prefs, versions)
+
+
+async def _rules_from_room_ledger(db, room_name, pa=None, pb=None):
+    """Frozen rules for an already-issued 1v1 room, from the issued_room_regions
+    ledger (survives the queue rows) — the late-series-creation fallback.
+
+    The report names the room as the client saw it, which may carry the
+    `_<HHmmss>_r<n>` rematch suffix the issuance never had, so both candidate
+    names are tried — the match path's region read does the same. When the
+    pair is known the row must also be THEIR issuance: a room name is not
+    unique across time, and another pair's record must not lend them its
+    rules. The newest issuance wins when several match."""
+    rooms = _issued_room_candidates(room_name)
+    if not rooms:
+        return None
+    params = {"room_full": rooms[0], "room_base": rooms[-1]}
+    pair_sql = ""
+    if pa is not None and pb is not None:
+        pair_sql = (" AND ((player1_id = :pa AND player2_id = :pb)"
+                    " OR (player1_id = :pb AND player2_id = :pa))")
+        params["pa"], params["pb"] = pa, pb
+    # No try/except: a failed statement aborts the caller's transaction, so
+    # swallowing it here would only move the failure to a later, unrelated
+    # line. The column exists before this code runs (migration-only SHA).
+    row = (await db.execute(text(
+        "SELECT rules FROM issued_room_regions"
+        " WHERE (room_name = :room_full OR room_name = :room_base)"
+        + pair_sql +
+        " ORDER BY issued_at DESC LIMIT 1"
+    ), params)).first()
+    if row is None or row[0] is None:
+        return None
+    return _rules_normalize(row[0])
+
+
+def _rules_history(raw, extra_pick=None):
+    """The `rules` object every history row carries (01-room-rules §4.7):
+    None for a series born before this release (unknown — the client renders
+    nothing rather than defaults it cannot vouch for), else {ff, sc}, plus
+    `xp` (the 1v2 solo extra pick) when the mode has one — so "all game
+    settings" holds for every mode; FFA's settings live in its own block."""
+    if raw is None:
+        return None
+    r = _rules_normalize(raw)
+    out = {"ff": r["ff"], "sc": r["sc"]}
+    if extra_pick is not None:
+        out["xp"] = bool(extra_pick)
+    return out
+
+
+def _ffa_settings_block(row):
+    """The FFA `settings` object (score_target, card_cap, initial_picks,
+    card_candidates, same_card_rule, sudden_death) from a row that LEFT JOINs
+    ffa_lobbies l with those columns plus settings_known. None when the match
+    has no lobby row or the lobby predates configurable settings —
+    settings_known is FALSE for lobbies migration 176 gave DEFAULT values they
+    were never played under (early games were first-to-3), so report unknown
+    rather than a plausible lie. ONE definition for every FFA history surface
+    (#330)."""
+    if row["score_target"] is None or not row["settings_known"]:
+        return None
+    return {
+        "score_target": int(row["score_target"]),
+        "card_cap": int(row["card_cap"]),
+        "initial_picks": int(row["initial_picks"]),
+        "card_candidates": int(row["card_candidates"]),
+        "same_card_rule": bool(row["same_card_rule"]),
+        "sudden_death": bool(row["sudden_death"]),
+    }
+
+
+_FFA_SETTINGS_COLS = ("l.score_target, l.card_cap, l.initial_picks,"
+                      " l.card_candidates, l.same_card_rule, l.sudden_death, l.settings_known")
 
 
 def _ffa_lobby_config(lobby) -> dict:
@@ -37000,6 +40913,7 @@ async def _lobby_live_members(db: AsyncSession, mode: str, lobby_id):
     return (await db.execute(text(f"""
         SELECT player_id, steam_id, display_name, rating, rating_deviation,
                completed_series, fallback_rating, region, joined_at,
+               mod_version, seen_settings_version,
                {'preferred_team' if mode == 'team' else 'preferred_side, solo_extra_pick'}
           FROM {cfg['queue']}
          WHERE series_id = :lid AND status = 'lobby'
@@ -37044,7 +40958,8 @@ async def _lobby_snapshot_fields(db: AsyncSession, mode: str, player_id) -> dict
     return {"r": _fb, "rd": GLICKO2_DEFAULT_RD, "cs": 0, "fr": _fb}
 
 
-async def _lobby_enroll_caller(db: AsyncSession, mode: str, player, req, lobby_id) -> None:
+async def _lobby_enroll_caller(db: AsyncSession, mode: str, player, req, lobby_id,
+                               mod_version=None) -> None:
     """Move the caller's queue row into `lobby_id` under the already-held lobby
     lock. Direct port of _ffa_lobby_enroll_caller, including its CAS ladder:
     only a MISSING row or a 'searching' row may become a lobby membership. A
@@ -37091,10 +41006,11 @@ async def _lobby_enroll_caller(db: AsyncSession, mode: str, player, req, lobby_i
             _re_sep_sql = ", solo_extra_pick = :sep" if mode == "ovt" else ""
             await db.execute(text(
                 f"UPDATE {q} SET last_polled = NOW(), display_name = :dn,"
+                f"       mod_version = :mv,"
                 f"       {_re_pref_col} = :pref{_re_sep_sql}"
                 f" WHERE player_id = :pid"
             ), {"pid": player.id, "dn": (req.display_name or "Player")[:64],
-                "pref": _re_pref,
+                "pref": _re_pref, "mv": mod_version,
                 **({"sep": bool(getattr(req, "solo_extra_pick", False))} if mode == "ovt" else {})})
             return
         raise HTTPException(409, "Leave your current lobby first")
@@ -37123,14 +41039,16 @@ async def _lobby_enroll_caller(db: AsyncSession, mode: str, player, req, lobby_i
             INSERT INTO {q} (player_id, steam_id, display_name, rating, rating_deviation,
                              completed_series, fallback_rating, region, status, series_id,
                              queue_type, {_pref_col},
-                             {'solo_extra_pick, ' if mode == 'ovt' else ''}joined_at, last_polled)
+                             {'solo_extra_pick, ' if mode == 'ovt' else ''}joined_at, last_polled,
+                             mod_version, seen_settings_version)
             VALUES (:pid, :sid, :dn, :r, :rd, :cs, :fr, :reg, 'lobby', :lid,
-                    'manual', :pref, {':sep, ' if mode == 'ovt' else ''}NOW(), NOW())
+                    'manual', :pref, {':sep, ' if mode == 'ovt' else ''}NOW(), NOW(),
+                    :mv, 0)
             ON CONFLICT (player_id) DO NOTHING
             RETURNING player_id
         """), {"pid": player.id, "sid": req.steam_id, "dn": (req.display_name or "Player")[:64],
                "reg": (req.region or "")[:8] or None, "lid": lobby_id,
-               "pref": _pref_val, "sep": _sep_val, **snap})).scalar()
+               "pref": _pref_val, "sep": _sep_val, "mv": mod_version, **snap})).scalar()
         if inserted is None:
             raise HTTPException(409, "Your queue state just changed — try again")
     else:
@@ -37143,12 +41061,13 @@ async def _lobby_enroll_caller(db: AsyncSession, mode: str, player, req, lobby_i
                    completed_series=:cs, fallback_rating=:fr, queue_type='manual',
                    {_pref_col}=:pref,
                    {'solo_extra_pick=:sep,' if mode == 'ovt' else ''}
+                   mod_version=:mv, seen_settings_version=0,
                    joined_at=NOW(), last_polled=NOW()
              WHERE player_id=:pid AND status='searching'
             RETURNING player_id
         """), {"pid": player.id, "dn": (req.display_name or "Player")[:64],
                "reg": (req.region or "")[:8] or None, "lid": lobby_id,
-               "pref": _pref_val, "sep": _sep_val, **snap})).scalar()
+               "pref": _pref_val, "sep": _sep_val, "mv": mod_version, **snap})).scalar()
         if flipped is None:
             raise HTTPException(409, "Your queue state just changed — try again")
     # Open-lobby seat: short lease renewed by this member's own poll. Taken on
@@ -37204,7 +41123,8 @@ async def _lobby_create_impl(mode: str, req: _LobbyCreateReq, request: Request,
                                       host_player_id, created_at, password_hash)
         VALUES (:lid, 'open', 0, '{{}}', :host, NOW(), :pw)
     """), {"lid": lobby_id, "host": player.id, "pw": _pw})
-    await _lobby_enroll_caller(db, mode, player, req, lobby_id)
+    await _lobby_enroll_caller(db, mode, player, req, lobby_id,
+                               mod_version=_request_mod_version(request))
     await db.commit()
     print(f"[{cfg['label']}-LOBBY] {req.steam_id} opened lobby {lobby_id}"
           f"{' (private)' if _pw else ''}")
@@ -37237,7 +41157,7 @@ async def _lobby_join_impl(mode: str, req: _LobbyJoinReq, request: Request,
     # Lobby-first lock, then prune/count/enroll under it: without the lock two
     # joins at capacity-1 would both pass the count check.
     lrow = (await db.execute(text(
-        f"SELECT id, status, password_hash, kicked_steam_ids"
+        f"SELECT id, status, password_hash, kicked_steam_ids, friendly_fire, same_cards"
         f"  FROM {cfg['lobbies']} WHERE id = :lid FOR UPDATE"
     ), {"lid": lobby_id})).mappings().first()
     if lrow is None or lrow["status"] != "open":
@@ -37263,7 +41183,8 @@ async def _lobby_join_impl(mode: str, req: _LobbyJoinReq, request: Request,
     if any(m["player_id"] == player.id for m in live):
         # Idempotent rejoin — short-circuit so the capacity check can't 409
         # our own existing seat.
-        await _lobby_enroll_caller(db, mode, player, req, lobby_id)
+        await _lobby_enroll_caller(db, mode, player, req, lobby_id,
+                                   mod_version=_request_mod_version(request))
         await db.commit()
         # Eviction runs on this path too: if the FIRST enrollment's
         # best-effort eviction failed, the recovery rejoin is the only later
@@ -37274,7 +41195,16 @@ async def _lobby_join_impl(mode: str, req: _LobbyJoinReq, request: Request,
                 "player_count": len(live), "max_players": cfg["players"]}
     if len(live) >= cfg["players"]:
         raise HTTPException(409, "That lobby is full")
-    await _lobby_enroll_caller(db, mode, player, req, lobby_id)
+    # Room rules (migration 306): a lobby whose CURRENT settings are
+    # non-default needs a client that can play them. Refused before any
+    # mutation, for NEW seats only (a seated member whose host flipped a
+    # rule afterwards is the Start gate's business, so a recovery rejoin is
+    # never turned away). Token is client contract ("update the mod").
+    if (_rules_nondefault(_rules_from_lobby_row(lrow))
+            and not _mod_version_at_least(_request_mod_version(request), ROOM_RULES_MIN_VERSION)):
+        raise HTTPException(409, "rules_unsupported")
+    await _lobby_enroll_caller(db, mode, player, req, lobby_id,
+                               mod_version=_request_mod_version(request))
     await db.commit()
     print(f"[{cfg['label']}-LOBBY] {req.steam_id} joined lobby {lobby_id} "
           f"({len(live) + 1}/{cfg['players']})")
@@ -37285,22 +41215,33 @@ async def _lobby_join_impl(mode: str, req: _LobbyJoinReq, request: Request,
 
 
 async def _lobby_state_impl(mode: str, steam_id: str, request: Request,
-                            db: AsyncSession) -> dict:
+                            db: AsyncSession, seen_settings_version: int = 0) -> dict:
     """Rich state for the caller's open lobby. Separate from the mode's
     /queue/poll because that response model is shared with the auto-queue and
     silently strips unknown fields. Read-only apart from the heartbeat: the
     effective host is DERIVED here, never persisted (only leave/start/deletion
-    persist it)."""
+    persist it).
+
+    `seen_settings_version` (migration 306) is the client's echo of the
+    settings_version it last RENDERED for this lobby; the heartbeat records
+    it (capped at the lobby's current version — nobody has seen the future)
+    together with the seat's member-scoped mod_version, and Start refuses
+    until every capable seat has echoed the current value."""
     cfg = _lobby_cfg(mode)
     await _check_steam_session(request, steam_id, db)
     _presence_touch(steam_id)
+    # Region map store (migration 307) — before any queue-row lock, see
+    # _region_pings_store. Lobby members poll only here for minutes, so this
+    # is where their maps stay fresh for the Start that follows.
+    await _region_pings_store(request, steam_id, f"{mode}-lobby")
     me = await _lock_queue_group_for_player(db, cfg["queue"], steam_id)
     if me is None or me["status"] != "lobby" or me["series_id"] is None:
         await db.commit()
         return {"status": "not_in_lobby"}
     lobby_id = me["series_id"]
     lrow = (await db.execute(text(
-        f"SELECT id, status, host_player_id, created_at, password_hash"
+        f"SELECT id, status, host_player_id, created_at, password_hash,"
+        f"       friendly_fire, same_cards, settings_version"
         f"  FROM {cfg['lobbies']} WHERE id = :lid"
     ), {"lid": lobby_id})).mappings().first()
     if lrow is None or lrow["status"] != "open":
@@ -37339,13 +41280,36 @@ async def _lobby_state_impl(mode: str, steam_id: str, request: Request,
         await db.commit()
         print(f"[LEASE] open {mode} lobby seat expired for {steam_id} (lobby {lobby_id})")
         return {"status": "not_in_lobby"}
+    _cur_ver = int(lrow["settings_version"] or 0)
     await db.execute(text(
-        f"UPDATE {cfg['queue']} SET last_polled = NOW() WHERE player_id = :pid"
-    ), {"pid": me["player_id"]})
+        f"UPDATE {cfg['queue']}"
+        f"   SET last_polled = NOW(), mod_version = :mv,"
+        f"       seen_settings_version = GREATEST(seen_settings_version,"
+        f"                                        LEAST(CAST(:seen AS INTEGER), CAST(:cur AS INTEGER)))"
+        f" WHERE player_id = :pid"
+    ), {"pid": me["player_id"], "mv": _request_mod_version(request),
+        "seen": max(0, int(seen_settings_version or 0)), "cur": _cur_ver})
     live = await _lobby_live_members(db, mode, lobby_id)
     host_id = _lobby_effective_host(lrow["host_player_id"], live)
     now_utc = datetime.now(timezone.utc)
     await db.commit()
+    _rules = _rules_from_lobby_row(lrow)
+    _nondefault = _rules_nondefault(_rules)
+
+    def _member_flags(m) -> dict:
+        # Rendered by the host panel: who still needs to update for the
+        # current rules, who has not yet seen the latest settings.
+        _mv = m["mod_version"]
+        if m["player_id"] == me["player_id"]:
+            _mv = _request_mod_version(request) or _mv
+        _ok = _mod_version_at_least(_mv, ROOM_RULES_MIN_VERSION)
+        _seen = (int(m["seen_settings_version"] or 0) >= _cur_ver) if _ok else True
+        if m["player_id"] == me["player_id"]:
+            # This very response renders the current settings.
+            _seen = True
+        return {"needs_update": bool(_nondefault and not _ok),
+                "settings_seen": bool(_seen)}
+
     return {
         "status": "lobby",
         "lobby_id": str(lobby_id),
@@ -37355,6 +41319,12 @@ async def _lobby_state_impl(mode: str, steam_id: str, request: Request,
         "is_host": host_id == me["player_id"],
         "has_password": bool(lrow["password_hash"]),
         "can_start": (host_id == me["player_id"] and len(live) == cfg["players"]),
+        # Room rules (migration 306): the host's lobby-wide settings and their
+        # generation; the client echoes settings_version back on its next
+        # poll once it has rendered these values.
+        "friendly_fire": bool(_rules["ff"]),
+        "same_cards": bool(_rules["sc"]),
+        "settings_version": _cur_ver,
         "members": [{
             "steam_id": m["steam_id"],
             "display_name": m["display_name"],
@@ -37365,6 +41335,7 @@ async def _lobby_state_impl(mode: str, steam_id: str, request: Request,
                else {"preferred_side": m["preferred_side"],
                      "solo_extra_pick": bool(m["solo_extra_pick"])}),
             "wait_seconds": int((now_utc - m["joined_at"]).total_seconds()) if m["joined_at"] else 0,
+            **_member_flags(m),
         } for m in live],
     }
 
@@ -37539,10 +41510,17 @@ async def _lobby_resolve_impl(mode: str, steam_id: str, request: Request,
                                queue seat it never asked for."""
     cfg = _lobby_cfg(mode)
     await _check_steam_session(request, steam_id, db)
+    # Room rules (migration 306): the frozen record rides along when the row
+    # names a room — 2v2 rows carry it themselves; a 1v2 'ready_join' row's
+    # series_id names the ovt_series row that does (a 'lobby' row's
+    # series_id names a lobby, so the subselect is NULL there, harmlessly).
+    _rules_col = ("q.rules" if mode == "team"
+                  else "(SELECT s.rules FROM ovt_series s WHERE s.id = q.series_id)")
     row = (await db.execute(text(
-        f"SELECT status, series_id, room_name, room_region,"
-        f"       {'team_assigned' if mode == 'team' else 'side_assigned'} AS assigned"
-        f"  FROM {cfg['queue']} WHERE steam_id = :sid"
+        f"SELECT q.status, q.series_id, q.room_name, q.room_region,"
+        f"       q.{'team_assigned' if mode == 'team' else 'side_assigned'} AS assigned,"
+        f"       {_rules_col} AS rules"
+        f"  FROM {cfg['queue']} q WHERE q.steam_id = :sid"
     ), {"sid": steam_id})).mappings().first()
     if row is None:
         await db.commit()
@@ -37554,6 +41532,13 @@ async def _lobby_resolve_impl(mode: str, steam_id: str, request: Request,
         "room_region": row["room_region"],
         ("team_assigned" if mode == "team" else "side_assigned"): row["assigned"],
     }
+    if row["room_name"]:
+        # A reveal of a room name is gated like every other (§4.5) and
+        # carries the record the client must stamp / compare.
+        _rr = _rules_normalize(row["rules"])
+        _rules_admit(request, _rr)
+        out["rules"] = _rules_payload(_rr)
+        out["rules_prop"] = _rules_prop(_rr)
     if row["status"] == "lobby" and row["series_id"] is not None:
         lstat = (await db.execute(text(
             f"SELECT status FROM {cfg['lobbies']} WHERE id = :lid"
@@ -37641,6 +41626,126 @@ async def _lobby_prefs_impl(mode: str, req: _LobbyPrefsReq, request: Request,
         out["preferred_side"] = stored["preferred_side"]
         out["solo_extra_pick"] = bool(stored["solo_extra_pick"])
     return out
+
+
+class _LobbySettingsReq(BaseModel):
+    """Room rules (migration 306): the host's lobby-wide settings. Every field
+    optional — only what the client SENDS is patched (same contract as
+    _LobbyPrefsReq: a whole-row resend must not overwrite the sibling setting
+    with a stale local copy)."""
+    steam_id: str = Field(..., max_length=20)
+    expected_lobby_id: str = Field(..., min_length=1, max_length=64)
+    friendly_fire: bool | None = None
+    same_cards: bool | None = None
+    # Actor HMAC over 'lobby_settings:{steam_id}:{expected_lobby_id}:{ff}:{sc}'
+    # (each value 1 / 0 / '-' when not sent) — design §4.2, a1 H3.
+    sig: str = Field(..., max_length=128)
+
+
+async def _lobby_settings_impl(mode: str, req: _LobbySettingsReq, request: Request,
+                               db: AsyncSession) -> dict:
+    """Host-only PATCH of the lobby's friendly-fire / Same Cards settings
+    while the lobby is OPEN. A real change bumps settings_version, so every
+    member's next state poll re-renders the values and echoes the new version
+    — Start is refused until every capable seat has (see _lobby_start_common).
+    Start then freezes the record onto the roster and the series; nothing
+    changes it inside a room (settings are constant once the room exists).
+
+    Set-time gate: a non-default setting needs the host's own client AND
+    every seated member at or above ROOM_RULES_MIN_VERSION (409
+    rules_unsupported / rules_need_update); members who join afterwards are
+    caught by the Start gate, and by the join-time refusal."""
+    cfg = _lobby_cfg(mode)
+    if req.friendly_fire is None and req.same_cards is None:
+        raise HTTPException(422, "nothing to set")
+    # Actor HMAC + VERIFIED session (design §4.2 — the pref endpoint's
+    # contract; settings writes are never HMAC-only, residual F3), a1 H3.
+    if not MATCH_HMAC_SECRET:
+        raise HTTPException(status_code=503, detail="HMAC not configured")
+    _ff_tok = "-" if req.friendly_fire is None else ("1" if req.friendly_fire else "0")
+    _sc_tok = "-" if req.same_cards is None else ("1" if req.same_cards else "0")
+    _expected_sig = hmac.new(
+        MATCH_HMAC_SECRET.encode(),
+        f"lobby_settings:{req.steam_id}:{req.expected_lobby_id}:{_ff_tok}:{_sc_tok}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(req.sig, _expected_sig):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+    await _check_steam_session(request, req.steam_id, db)
+    if not _session_was_verified(request):
+        raise HTTPException(status_code=401, detail="session_required")
+    # The fence is mandatory and always compared (a1 M2): a delayed write
+    # meant for one lobby must not land on the next lobby this account hosts.
+    try:
+        _exp_lid = str(uuid.UUID(str(req.expected_lobby_id)))
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(422, "expected_lobby_id is not a valid id")
+    _presence_touch(req.steam_id)
+    me = await _lock_queue_group_for_player(db, cfg["queue"], req.steam_id)
+    if me is None or me["status"] != "lobby" or me["series_id"] is None:
+        await db.commit()
+        raise HTTPException(409, "not_in_open_lobby")
+    lobby_id = me["series_id"]
+    if str(lobby_id) != _exp_lid:
+        await db.commit()
+        raise HTTPException(409, "not_in_open_lobby")
+    # The lobby row is already held by the group lock above (lobby rows are
+    # the parent of 'lobby' seats) — a plain read.
+    lrow = (await db.execute(text(
+        f"SELECT id, status, host_player_id, friendly_fire, same_cards, settings_version"
+        f"  FROM {cfg['lobbies']} WHERE id = :lid"
+    ), {"lid": lobby_id})).mappings().first()
+    if lrow is None or lrow["status"] != "open":
+        await db.commit()
+        raise HTTPException(409, "not_in_open_lobby")
+    live = await _lobby_live_members(db, mode, lobby_id)
+    host_id = _lobby_effective_host(lrow["host_player_id"], live)
+    if host_id != me["player_id"]:
+        await db.commit()
+        raise HTTPException(403, "Only the lobby host can change the settings")
+    new_ff = bool(lrow["friendly_fire"]) if req.friendly_fire is None else bool(req.friendly_fire)
+    new_sc = bool(lrow["same_cards"]) if req.same_cards is None else bool(req.same_cards)
+    new_rules = {"ff": new_ff, "sc": new_sc, "src": "lobby"}
+    # Only a value SET in the non-default direction needs every seat at the
+    # floor; reverting either setting to its default is always allowed, even
+    # while the other stays non-default and a member is below the floor —
+    # otherwise the host could never restore defaults one toggle at a time
+    # (a1 M3). Start re-judges the whole resulting record.
+    if req.friendly_fire is False or req.same_cards is True:
+        if not _mod_version_at_least(_request_mod_version(request), ROOM_RULES_MIN_VERSION):
+            await db.commit()
+            raise HTTPException(409, "rules_unsupported")
+        for _m in live:
+            if _m["player_id"] == me["player_id"]:
+                continue
+            if not _mod_version_at_least(_m["mod_version"], ROOM_RULES_MIN_VERSION):
+                await db.commit()
+                raise HTTPException(409, "rules_need_update")
+    changed = (new_ff != bool(lrow["friendly_fire"])) or (new_sc != bool(lrow["same_cards"]))
+    stored = lrow
+    if changed:
+        stored = (await db.execute(text(f"""
+            UPDATE {cfg['lobbies']}
+               SET friendly_fire = :ff, same_cards = :sc,
+                   settings_version = settings_version + 1
+             WHERE id = :lid AND status = 'open'
+            RETURNING friendly_fire, same_cards, settings_version
+        """), {"ff": new_ff, "sc": new_sc, "lid": lobby_id})).mappings().first()
+        if stored is None:
+            await db.commit()
+            raise HTTPException(409, "not_in_open_lobby")
+        # The host's client rendered what it just sent: its own echo is
+        # current, so a Start right after the click is not refused for the
+        # host's own seat. A settings click is also a live human.
+        await db.execute(text(
+            f"UPDATE {cfg['queue']} SET seen_settings_version = :v, last_polled = NOW()"
+            f" WHERE player_id = :pid"
+        ), {"v": int(stored["settings_version"]), "pid": me["player_id"]})
+    await db.commit()
+    return {"status": "ok",
+            "friendly_fire": bool(stored["friendly_fire"]),
+            "same_cards": bool(stored["same_cards"]),
+            "settings_version": int(stored["settings_version"] or 0)}
 
 
 async def _lobby_browser_titles(db: AsyncSession, steam_ids) -> dict:
@@ -37846,10 +41951,12 @@ async def _lobby_kick_impl(mode: str, req: _LobbyKickReq, request: Request,
     return {"status": "kicked"}
 
 
-async def _lobby_start_common(db: AsyncSession, mode: str, steam_id: str):
+async def _lobby_start_common(db: AsyncSession, mode: str, steam_id: str, request=None):
     """Shared Start preamble: refresh own liveness, take the group lock,
-    re-read the lobby, prune stale + BANNED seats, verify host and count.
-    Returns (me, lobby_row, live_members) or raises."""
+    re-read the lobby, prune stale + BANNED seats, verify host and count,
+    then the room-rules gates (migration 306). Returns (me, lobby_row,
+    live_members) or raises. `request` lets the host be judged by its own
+    header for the rules gate (its row may lag a poll)."""
     cfg = _lobby_cfg(mode)
     # Refresh our own liveness FIRST: an authenticated Start is proof the
     # host's client is alive even if its polls lagged a redeploy.
@@ -37862,7 +41969,8 @@ async def _lobby_start_common(db: AsyncSession, mode: str, steam_id: str):
         raise HTTPException(409, "You're not in an open lobby")
     lobby_id = me["series_id"]
     lrow = (await db.execute(text(
-        f"SELECT id, status, host_player_id FROM {cfg['lobbies']} WHERE id = :lid"
+        f"SELECT id, status, host_player_id, friendly_fire, same_cards, settings_version"
+        f"  FROM {cfg['lobbies']} WHERE id = :lid"
     ), {"lid": lobby_id})).mappings().first()
     if lrow is None or lrow["status"] != "open":
         raise HTTPException(409, "That lobby is no longer open")
@@ -37912,6 +42020,27 @@ async def _lobby_start_common(db: AsyncSession, mode: str, steam_id: str):
         await _fail(HTTPException(
             409, f"Need exactly {cfg['players']} players to start "
                  f"({len(live)} in the lobby)"))
+    # Room rules (migration 306): Start freezes the host's settings onto this
+    # roster, so every seat must be able to play them. Two refusals, distinct
+    # tokens the client renders: `rules_need_update` — the rules are
+    # non-default and a seat's own last request was below the floor (that
+    # player updates, or the host reverts the setting); `settings_unseen` — a
+    # seat at/above the floor has not yet echoed the CURRENT settings_version
+    # from its lobby-state poll (a rule changed a moment ago; retry in a
+    # second). Seats below the floor cannot render settings, so the echo is
+    # not asked of them — with default rules they simply play vanilla. The
+    # host is judged by this request's header.
+    _rules = _rules_from_lobby_row(lrow)
+    _cur_ver = int(lrow["settings_version"] or 0)
+    for _m in live:
+        _mv = _m["mod_version"]
+        if request is not None and _m["player_id"] == me["player_id"]:
+            _mv = _request_mod_version(request) or _mv
+        _new_enough = _mod_version_at_least(_mv, ROOM_RULES_MIN_VERSION)
+        if _rules_nondefault(_rules) and not _new_enough:
+            await _fail(HTTPException(409, "rules_need_update"))
+        if _new_enough and int(_m["seen_settings_version"] or 0) < _cur_ver:
+            await _fail(HTTPException(409, "settings_unseen"))
     return me, lrow, live
 
 
@@ -37958,8 +42087,10 @@ async def team_lobby_join(req: _LobbyJoinReq, request: Request,
 
 @app.get("/api/v1/team/lobby/state", tags=["Team Queue"])
 async def team_lobby_state(steam_id: str = Query(...), request: Request = None,
+                           seen_settings_version: int = Query(0, ge=0, le=2147483647),
                            db: AsyncSession = Depends(get_db)):
-    return await _lobby_state_impl("team", steam_id, request, db)
+    return await _lobby_state_impl("team", steam_id, request, db,
+                                   seen_settings_version=seen_settings_version)
 
 
 @app.get("/api/v1/team/lobby/resolve", tags=["Team Queue"])
@@ -37972,6 +42103,13 @@ async def team_lobby_resolve(steam_id: str = Query(...), request: Request = None
 async def team_lobby_prefs(req: _LobbyPrefsReq, request: Request,
                            db: AsyncSession = Depends(get_db)):
     return await _lobby_prefs_impl("team", req, request, db)
+
+
+@app.post("/api/v1/team/lobby/settings", tags=["Team Queue"])
+async def team_lobby_settings(req: _LobbySettingsReq, request: Request,
+                              db: AsyncSession = Depends(get_db)):
+    """Host-only lobby settings (friendly fire / Same Cards), migration 306."""
+    return await _lobby_settings_impl("team", req, request, db)
 
 
 @app.post("/api/v1/team/lobby/leave", tags=["Team Queue"])
@@ -38004,8 +42142,9 @@ async def team_lobby_start(req: _LobbyStartReq, request: Request,
     / report pipeline downstream is the existing shipped machinery."""
     await _check_steam_session(request, req.steam_id, db)
     _presence_touch(req.steam_id)
-    me, lrow, live = await _lobby_start_common(db, "team", req.steam_id)
+    me, lrow, live = await _lobby_start_common(db, "team", req.steam_id, request=request)
     lobby_id = me["series_id"]
+    _lobby_rules = _rules_from_lobby_row(lrow)
     # Team assignment: honor preferred_team exactly as the MANUAL auto-queue
     # does (joining a host lobby IS the consent, so this is the manual path,
     # never the Elo balancer). Members with no preference fill the gaps.
@@ -38088,24 +42227,35 @@ async def team_lobby_start(req: _LobbyStartReq, request: Request,
         series_id = uuid.uuid4()
         await db.execute(text("""
             INSERT INTO team_series (id, t1a_id, t1b_id, t2a_id, t2b_id,
-                                     status, was_auto_balanced, created_at)
-            VALUES (:sid, :t1a, :t1b, :t2a, :t2b, 'active', false, NOW())
+                                     status, was_auto_balanced, created_at, rules)
+            VALUES (:sid, :t1a, :t1b, :t2a, :t2b, 'active', false, NOW(),
+                    CAST(:rules AS JSONB))
         """), {"sid": series_id,
                "t1a": team1_ids[0], "t1b": team1_ids[1],
-               "t2a": team2_ids[0], "t2b": team2_ids[1]})
+               "t2a": team2_ids[0], "t2b": team2_ids[1],
+               "rules": _rules_json(_lobby_rules)})
         # Aug 8 (Sid): body-colour team identity, decided once, persisted here.
         await _stamp_team_series_colors(db, series_id, team1_ids, team2_ids)
     all4 = team1_ids + team2_ids
+    # Room rules (migration 306): the HOST's lobby settings, verified playable
+    # by the whole roster in _lobby_start_common, frozen onto the four rows
+    # here; the issuing poll copies them onto the series (an ADOPTED series
+    # takes this lobby's settings — the members consented to what the lobby
+    # panel showed them, not to a previous sitting's record).
     await db.execute(text("""
         UPDATE team_queue
            SET status='matched', series_id=:sid,
                team_assigned = CASE WHEN player_id = ANY(:t1) THEN 1 ELSE 2 END,
                matched_at = NOW(), ready = false,
-               room_name = NULL, room_region = NULL
+               room_name = NULL, room_region = NULL,
+               rules = CAST(:rules AS JSONB)
          WHERE player_id = ANY(:all4)
-    """), {"sid": series_id, "t1": team1_ids, "all4": all4})
-    regions = [m["region"] for m in live if m["region"]]
-    region = max(set(regions), key=regions.count) if regions else None
+    """), {"sid": series_id, "t1": team1_ids, "all4": all4,
+           "rules": _rules_json(_lobby_rules)})
+    # Placeholder on the series row until the poll's relock issues the room
+    # (and decides the region through _group_region): the members' home mode,
+    # deterministic, None when nobody has one.
+    region = _region_mode_of(live, default=None)
     await _lobby_activate(db, "team", lobby_id, series_id, all4, region, None)
     # Lobby-phase wagers resolve against the roster we just froze (migration
     # 207). Never raises — a bet problem must not fail a Start — and only
@@ -38162,8 +42312,10 @@ async def ovt_lobby_join(req: _LobbyJoinReq, request: Request,
 
 @app.get("/api/v1/ovt/lobby/state", tags=["1v2 Queue"])
 async def ovt_lobby_state(steam_id: str = Query(...), request: Request = None,
+                          seen_settings_version: int = Query(0, ge=0, le=2147483647),
                           db: AsyncSession = Depends(get_db)):
-    return await _lobby_state_impl("ovt", steam_id, request, db)
+    return await _lobby_state_impl("ovt", steam_id, request, db,
+                                   seen_settings_version=seen_settings_version)
 
 
 @app.get("/api/v1/ovt/lobby/resolve", tags=["1v2 Queue"])
@@ -38176,6 +42328,13 @@ async def ovt_lobby_resolve(steam_id: str = Query(...), request: Request = None,
 async def ovt_lobby_prefs(req: _LobbyPrefsReq, request: Request,
                           db: AsyncSession = Depends(get_db)):
     return await _lobby_prefs_impl("ovt", req, request, db)
+
+
+@app.post("/api/v1/ovt/lobby/settings", tags=["1v2 Queue"])
+async def ovt_lobby_settings(req: _LobbySettingsReq, request: Request,
+                             db: AsyncSession = Depends(get_db)):
+    """Host-only lobby settings (friendly fire / Same Cards), migration 306."""
+    return await _lobby_settings_impl("ovt", req, request, db)
 
 
 @app.post("/api/v1/ovt/lobby/leave", tags=["1v2 Queue"])
@@ -38198,8 +42357,9 @@ async def ovt_lobby_start(req: _LobbyStartReq, request: Request,
     'ready_join' — exactly the state the 1v2 auto-lock produces."""
     await _check_steam_session(request, req.steam_id, db)
     _presence_touch(req.steam_id)
-    me, lrow, live = await _lobby_start_common(db, "ovt", req.steam_id)
+    me, lrow, live = await _lobby_start_common(db, "ovt", req.steam_id, request=request)
     lobby_id = me["series_id"]
+    _lobby_rules = _rules_from_lobby_row(lrow)
     # Sides: first member who wants solo takes it, else the earliest joiner —
     # identical rule to the 1v2 auto-lock.
     solo = next((m for m in live if m["preferred_side"] == 1), None) or live[0]
@@ -38211,8 +42371,11 @@ async def ovt_lobby_start(req: _LobbyStartReq, request: Request,
     # QUEUE's auto-lock keeps its OR (no host exists there).
     extra_pick = bool(next(
         (m["solo_extra_pick"] for m in live if m["player_id"] == me["player_id"]), False))
-    region = next((m["region"] for m in live if m["region"]), "us")
     room = f"ovt_{uuid.uuid4().hex[:12]}"
+    # Region (Sept 10, v4 group rule): the mode of the members' homes is the
+    # baseline (was first-non-empty — recorded deviation), then their stored
+    # ping maps; the host's home carries no weight. See _group_region.
+    region = await _group_region(db, live, _region_mode_of(live), "ovt-lobby", room=room)
     series_id = uuid.uuid4()
     await _assert_no_service_subject(
         db,
@@ -38220,11 +42383,12 @@ async def ovt_lobby_start(req: _LobbyStartReq, request: Request,
     )
     await db.execute(text("""
         INSERT INTO ovt_series (id, solo_id, duo_a_id, duo_b_id, status, is_ranked,
-                                solo_extra_pick, photon_room_id, region, created_at)
-        VALUES (:sid, :solo, :da, :db, 'active', false, :sep, :room, :reg, NOW())
+                                solo_extra_pick, photon_room_id, region, created_at, rules)
+        VALUES (:sid, :solo, :da, :db, 'active', false, :sep, :room, :reg, NOW(),
+                CAST(:rules AS JSONB))
     """), {"sid": series_id, "solo": solo["player_id"], "da": duo[0]["player_id"],
            "db": duo[1]["player_id"], "sep": extra_pick, "room": room,
-           "reg": (region or "us")[:8]})
+           "reg": (region or "us")[:8], "rules": _rules_json(_lobby_rules)})
     for m in live:
         this_side = 1 if m["player_id"] == solo["player_id"] else 2
         await db.execute(text("""
@@ -38240,8 +42404,12 @@ async def ovt_lobby_start(req: _LobbyStartReq, request: Request,
     print(f"[1v2-LOBBY] host {req.steam_id} started lobby {lobby_id} "
           f"series {series_id} room {room} solo={solo['steam_id']}")
     await _evict_other_queue_searching(db, ids, "ovt_queue", "a 1v2 lobby")
+    # Room rules §4.5/§4.6: the inline reveal carries the frozen record (the
+    # host passed the set-time and Start gates, so this admit is a formality).
+    _rules_admit(request, _lobby_rules)
     return {"status": "ok", "series_id": str(series_id), "lobby_id": str(lobby_id),
-            "room_name": room, "room_region": (region or "us")[:8]}
+            "room_name": room, "room_region": (region or "us")[:8],
+            "rules": _rules_payload(_lobby_rules), "rules_prop": _rules_prop(_lobby_rules)}
 
 
 # ── FFA host lobbies (July 29 redesign — Sid's spec) ───────────────────────
@@ -38950,9 +43118,11 @@ async def ffa_lobby_start(req: _FfaLobbyStartReq, request: Request, db: AsyncSes
         print(f"[FFA-LOBBY] lobby {lobby_id}: sudden_death disabled — "
               f"not every member's own queue-stamped version clears {FFA_SUDDEN_DEATH_MIN_VERSION}")
 
-    regions = [r["region"] for r in ordered if r["region"]]
-    region = max(set(regions), key=regions.count) if regions else "us"
     room = f"ffa_{uuid.uuid4().hex[:12]}"
+    # Region (Sept 10, v4 group rule): mode of the members' homes as the
+    # baseline, then their stored ping maps (FFA lobby members keep theirs
+    # fresh through the FFA queue poll); see _group_region.
+    region = await _group_region(db, ordered, _region_mode_of(ordered), "ffa-lobby", room=room)
     await db.execute(text("""
         UPDATE ffa_lobbies
            SET status='active', photon_room_id=:room, region=:reg,
@@ -39508,6 +43678,9 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
     row eternally fresh and repeatedly elect it into doomed lobbies."""
     await _check_steam_session(request, steam_id, db)
     _presence_touch(steam_id)
+    # Region map store (migration 307) — before any queue-row lock, see
+    # _region_pings_store; the result rides into this poll's own issuance.
+    _cur_pings = await _region_pings_store(request, steam_id, "ffa")
     locked = await _lock_queue_group_for_player(db, "ffa_queue", steam_id)
     if locked is None:
         return {"status": "not_in_queue", "queue_count": 0}
@@ -39949,9 +44122,12 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
     _kt_floor = _parse_version(FFA_KILLS_TIEBREAK_MIN_VERSION)
     _kills_tiebreak = len(_kt_vals) == len(ordered) and all(
         _parse_version((v or "0").lstrip("vV")) >= _kt_floor for v in _kt_vals)
-    regions = [r["region"] for r in lobby_rows if r["region"]]
-    region = max(set(regions), key=regions.count) if regions else "us"
     room = f"ffa_{uuid.uuid4().hex[:12]}"
+    # Region (Sept 10, v4 group rule): mode of the members' homes as the
+    # baseline, then their own ping maps; see _group_region.
+    region = await _group_region(
+        db, ordered, _region_mode_of(ordered), "ffa",
+        current=_region_current(me["player_id"], _cur_pings), room=room)
     lobby_id = uuid.uuid4()
     await _assert_no_service_subject(
         db, affected_player_ids=[r["player_id"] for r in ordered])
@@ -40843,6 +45019,17 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                                 db, _ach_pid, "ffa_half_point_heartbreak")
     except Exception as _ach_ex:
         print(f"[FFA-ACH] achievement evaluation failed (report unaffected): {_ach_ex}")
+    # Player Cards (WP-D): the earned-pack roll for a RANKED FFA match — a
+    # sweep is every round to the winner and none to anybody else (own
+    # savepoint; reconciled from the match row if it is lost).
+    if rated:
+        try:
+            async with db.begin_nested():
+                await _pc_grant_earned_packs(
+                    db, mode="ffa", series_id=match_id, winner_ids=[id_by_steam[report.winner_steam_id]],
+                    sweep=_pc_ffa_sweep(report), label="ffa-complete")
+        except Exception as pcex:
+            print(f"[PC-EARNED] ffa grant failed for {match_id}: {pcex}")
 
     # Settle FFA bets. Codex round-2 review finds 3+4: keyed by the game's
     # REAL identity (the _rN suffix inside the HMAC-covered room id), never
@@ -41147,15 +45334,8 @@ async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1,
              # configurable-lobby feature: migration 176 gave them DEFAULT
              # values they were never played under (early games were
              # first-to-3), so report unknown rather than a plausible lie.
-             "settings": (None if (m["score_target"] is None
-                                   or not m["settings_known"]) else {
-                 "score_target": int(m["score_target"]),
-                 "card_cap": int(m["card_cap"]),
-                 "initial_picks": int(m["initial_picks"]),
-                 "card_candidates": int(m["card_candidates"]),
-                 "same_card_rule": bool(m["same_card_rule"]),
-                 "sudden_death": bool(m["sudden_death"]),
-             }),
+             # ONE definition, shared with every other FFA history surface.
+             "settings": _ffa_settings_block(m),
              "players": players_by_match.get(m["id"], [])}
             for m in matches
         ],
@@ -42584,12 +46764,14 @@ async def player_ffa_history(steam_id: str, limit: int = Query(15, ge=1, le=50),
                              db: AsyncSession = Depends(get_db)):
     """This player's recent FFA games: player count, placement, rating delta,
     date, and the other participants (name list, placement order)."""
-    rows = (await db.execute(text("""
+    rows = (await db.execute(text(f"""
         SELECT m.id AS match_id, m.player_count, m.ended_at, fmp.placement,
-               fmp.rating_change, fmp.kills, fmp.rounds_won, fmp.points_total
+               fmp.rating_change, fmp.kills, fmp.rounds_won, fmp.points_total,
+               {_FFA_SETTINGS_COLS}
           FROM ffa_match_players fmp
           JOIN ffa_matches m ON m.id = fmp.match_id
           JOIN players p ON p.id = fmp.player_id
+          LEFT JOIN ffa_lobbies l ON l.id = m.lobby_id
          WHERE p.steam_id = :sid AND m.invalidated_at IS NULL
          ORDER BY m.ended_at DESC
          LIMIT :lim
@@ -42613,6 +46795,8 @@ async def player_ffa_history(steam_id: str, limit: int = Query(15, ge=1, le=50),
          "kills": int(r["kills"] or 0), "rounds_won": int(r["rounds_won"] or 0),
          "points_total": int(r["points_total"] or 0),
          "ended_at": r["ended_at"].isoformat() if r["ended_at"] else None,
+         # The lobby's settings block, same shape as /ffa/recent (§4.7).
+         "settings": _ffa_settings_block(r),
          "participants": parts.get(r["match_id"], [])}
         for r in rows
     ]}
@@ -42625,7 +46809,7 @@ async def player_team_history(steam_id: str, limit: int = Query(10, ge=1, le=30)
     series score, own rating delta, date."""
     rows = (await db.execute(text("""
         SELECT ts.id, ts.completed_at, ts.winner_team,
-               ts.t1_series_wins, ts.t2_series_wins,
+               ts.t1_series_wins, ts.t2_series_wins, ts.rules,
                ts.t1a_id, ts.t1b_id, ts.t2a_id, ts.t2b_id,
                ts.t1a_rating_change, ts.t1b_rating_change, ts.t2a_rating_change, ts.t2b_rating_change,
                pa.display_name AS n1a, pb.display_name AS n1b,
@@ -42659,6 +46843,7 @@ async def player_team_history(steam_id: str, limit: int = Query(10, ge=1, le=30)
             "mate": mate or "?", "opponents": [o or "?" for o in opps],
             "rating_change": float(my_rc) if my_rc is not None else None,
             "completed_at": r["completed_at"].isoformat() if r["completed_at"] else None,
+            "rules": _rules_history(r["rules"]),
         })
     return {"series": games}
 
@@ -42672,6 +46857,9 @@ async def player_ovt_history(steam_id: str, limit: int = Query(10, ge=1, le=30),
         SELECT m.id, m.ended_at, m.winner_side,
                m.solo_rounds_won AS solo_rounds, m.duo_rounds_won AS duo_rounds,
                m.solo_id, m.duo_a_id, m.duo_b_id,
+               -- Room rules (migration 306) + the solo extra pick, folded into
+               -- one `rules` object so every 1v2 setting is on the row.
+               s.rules AS series_rules, s.solo_extra_pick AS series_extra_pick,
                ps.display_name AS solo_name, pa.display_name AS duo_a_name,
                pb.display_name AS duo_b_name, me.id AS my_id,
                -- Bug #129: the per-game reward, so My Stats' 1v2 history can show
@@ -42696,6 +46884,7 @@ async def player_ovt_history(steam_id: str, limit: int = Query(10, ge=1, le=30),
                     ELSE m.duo_b_damage_timeline END AS my_damage_timeline
           FROM ovt_matches m
           JOIN players me ON me.steam_id = :sid
+          LEFT JOIN ovt_series s ON s.id = m.series_id
           LEFT JOIN players ps ON ps.id = m.solo_id
           LEFT JOIN players pa ON pa.id = m.duo_a_id
           LEFT JOIN players pb ON pb.id = m.duo_b_id
@@ -42719,6 +46908,7 @@ async def player_ovt_history(steam_id: str, limit: int = Query(10, ge=1, le=30),
             # NULL, not "", when unrecorded — a row with no timeline must
             # register no hover graph rather than an empty one.
             "damage_dealt_timeline": r["my_damage_timeline"],
+            "rules": _rules_history(r["series_rules"], r["series_extra_pick"]),
         })
     return {"games": games}
 
@@ -43454,6 +47644,17 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
                 await db.flush()
         except Exception as gex:
             print(f"[TEAM-ECON] series-bonus gold failed for {series_uuid}: {gex}")
+        # Player Cards (WP-D): the earned-pack roll for the completed series
+        # (own savepoint; reconciled from the series row if it is lost).
+        try:
+            async with db.begin_nested():
+                await _pc_grant_earned_packs(
+                    db, mode="team", series_id=series_uuid,
+                    winner_ids=([series["t1a_id"], series["t1b_id"]] if winner_team == 1
+                                else [series["t2a_id"], series["t2b_id"]]),
+                    sweep=_pc_sweep(new_t1w, new_t2w), label="team-complete")
+        except Exception as pcex:
+            print(f"[PC-EARNED] team grant failed for {series_uuid}: {pcex}")
 
         # Free the queue rows so all 4 can re-queue.
         await _lock_queue_rows_ordered(
@@ -43715,6 +47916,7 @@ async def get_player_team_matches(
             p2b.steam_id AS t2b_sid, p2b.display_name AS t2b_name,
             ts.t1_series_wins, ts.t2_series_wins, ts.winner_team AS series_winner_team,
             ts.t1a_id AS s_t1a, ts.t1b_id AS s_t1b,
+            ts.rules AS series_rules,
             CASE
                 WHEN :pid IN (ts.t1a_id, ts.t1b_id) THEN
                     CASE WHEN ts.t1a_id = :pid THEN ts.t1a_rating_change ELSE ts.t1b_rating_change END
@@ -43806,6 +48008,7 @@ async def get_player_team_matches(
             series_score=series_score,
             series_rating_change=rating_change,
             fps_by_player=fps_by_steam,
+            rules=_rules_history(r["series_rules"]),
         ))
     return entries
 
@@ -43821,6 +48024,7 @@ async def team_series_recent(minutes: int = Query(5, ge=1, le=60), db: AsyncSess
             s.completed_at,
             s.t1_series_wins, s.t2_series_wins, s.winner_team,
             s.t1a_rating_change, s.t1b_rating_change, s.t2a_rating_change, s.t2b_rating_change,
+            s.rules,
             p1a.steam_id AS t1a_sid, p1a.display_name AS t1a_name, p1a.discord_id AS t1a_did,
             p1b.steam_id AS t1b_sid, p1b.display_name AS t1b_name, p1b.discord_id AS t1b_did,
             p2a.steam_id AS t2a_sid, p2a.display_name AS t2a_name, p2a.discord_id AS t2a_did,
@@ -43859,6 +48063,8 @@ async def team_series_recent(minutes: int = Query(5, ge=1, le=60), db: AsyncSess
             "completed_at": r["completed_at"].isoformat() if r["completed_at"] else None,
             "winner_team": r["winner_team"],
             "t1_series_wins": r["t1_series_wins"], "t2_series_wins": r["t2_series_wins"],
+            # Room rules (migration 306) — the bot renders a Rules field.
+            "rules": _rules_history(r["rules"]),
             "t1a": {"steam_id": r["t1a_sid"], "name": r["t1a_name"], "discord_id": r["t1a_did"],
                     "rating": float(r["t1a_rating"]) if r["t1a_rating"] is not None else 1500.0,
                     "rating_change": float(r["t1a_rating_change"] or 0)},
@@ -43916,7 +48122,7 @@ async def team_all_series_paged(
 
     series_q = text("""
         SELECT s.id AS series_id, s.completed_at, s.created_at,
-               s.t1_series_wins, s.t2_series_wins, s.winner_team,
+               s.t1_series_wins, s.t2_series_wins, s.winner_team, s.rules,
                s.t1a_id, s.t1b_id, s.t2a_id, s.t2b_id,
                s.t1a_rating_change, s.t1b_rating_change, s.t2a_rating_change, s.t2b_rating_change,
                s.t1a_gold_earned, s.t1b_gold_earned, s.t2a_gold_earned, s.t2b_gold_earned,
@@ -44098,6 +48304,7 @@ async def team_all_series_paged(
             "completed_at": r["completed_at"].isoformat() if r["completed_at"] else None,
             "winner_team": r["winner_team"],
             "t1_series_wins": r["t1_series_wins"], "t2_series_wins": r["t2_series_wins"],
+            "rules": _rules_history(r["rules"]),
             "t1a": slot("t1a"), "t1b": slot("t1b"),
             "t2a": slot("t2a"), "t2b": slot("t2b"),
             "t1_color_name": _tc.get("t1_color_name") or "",
@@ -44524,6 +48731,34 @@ BROADCAST_BATTLE_DEFER_SECONDS = 300
 # deploy and the client release, grants are refused (client_protocol < 2)
 # and spectating is dark; migration 210 revokes the then-open leases.
 SPECTATE_PROTOCOL = 2
+# Room rules (migration 306, addendum A3): a room playing friendly fire OFF
+# needs a spectator that renders suppressed teammate hits (client
+# SpectatorSession.PROTOCOL 3). The GLOBAL floor above stays 2 so old
+# spectators keep every default-rules room; the attest handler raises the
+# PER-GAME floor (spectate_games.protocol_min, GREATEST — never lowered) to
+# this value for FF-OFF rooms only, and the existing lease/heartbeat gates do
+# the refusing (#337).
+SPECTATE_PROTOCOL_FF_OFF = 3
+
+
+async def _rules_for_spectated_room(db: AsyncSession, mode: str, room_name: str):
+    """The frozen rules of a spectated room by its Photon room name: the
+    issuance ledger for a 1v1 queue room, the newest series row for a 2v2 /
+    1v2 room (a room name is reused across a continuation). None for FFA
+    (its settings live on the FFA lobby) and for rooms with no record."""
+    table = {"2v2": "team_series", "1v2": "ovt_series"}.get(mode)
+    if mode == "1v1":
+        # A queue room's record lives on the issuance ledger, not the series.
+        return await _rules_from_room_ledger(db, room_name)
+    if table is None or not room_name:
+        return None
+    row = (await db.execute(text(
+        f"SELECT rules FROM {table} WHERE photon_room_id = :room"
+        f" ORDER BY created_at DESC LIMIT 1"
+    ), {"room": room_name})).first()
+    if row is None or row[0] is None:
+        return None
+    return _rules_normalize(row[0])
 SPECTATE_JOIN_WINDOW_SECONDS = 60
 SPECTATE_HEARTBEAT_TTL_SECONDS = 60
 
@@ -45266,6 +49501,16 @@ async def spectate_participant_attest(req: SpectateAttestBody, request: Request,
                "ref": derived_ref[:64], "battle": is_battle,
                "proto": SPECTATE_PROTOCOL,
                "gid": str(game["id"])})
+
+    # Room rules (addendum A3): friendly fire OFF raises THIS game's protocol
+    # floor so spectators below it are refused/evicted by the existing gates;
+    # default-rules rooms keep the global floor. GREATEST — never lowered.
+    _room_rules = await _rules_for_spectated_room(db, req.mode, req.room_name)
+    if _room_rules is not None and not _room_rules["ff"]:
+        await db.execute(text(
+            "UPDATE spectate_games SET protocol_min = GREATEST(protocol_min, :p)"
+            " WHERE id = :gid"
+        ), {"p": SPECTATE_PROTOCOL_FF_OFF, "gid": str(game["id"])})
 
     await db.execute(text("""
         INSERT INTO spectate_attestations
@@ -46164,6 +50409,14 @@ async def spectate_grant(req: SpectateGrantBody, request: Request,
     """), {"gid": req.game_id})).mappings().first()
     if game is None or game["last_attest_at"] is None:
         raise HTTPException(status_code=404, detail="game_not_live")
+    # Room rules (addendum A3, a1 H1): the PER-GAME floor — a friendly-fire-
+    # OFF room raised it to SPECTATE_PROTOCOL_FF_OFF at attest — is judged
+    # here, before anything about the room is disclosed; the validation and
+    # heartbeat gates compare the lease against the same floor, so the lease
+    # below records the client's own protocol, not the global constant.
+    _game_floor = max(int(game["protocol_min"] or 1), SPECTATE_PROTOCOL)
+    if req.client_protocol < _game_floor:
+        raise HTTPException(status_code=426, detail="spectator_upgrade_required")
     # Aug 7 item 13: the grant enforces the same per-mode flag the games list
     # advertises — a crafted request must not watch a mode the UI hides.
     if game["mode"] not in _SPECTATE_WATCHABLE_MODES:
@@ -46235,7 +50488,9 @@ async def spectate_grant(req: SpectateGrantBody, request: Request,
            "gid": str(game["id"]), "sid": req.steam_id,
            "joinw": SPECTATE_JOIN_WINDOW_SECONDS,
            "hbw": SPECTATE_JOIN_WINDOW_SECONDS + SPECTATE_HEARTBEAT_TTL_SECONDS,
-           "proto": SPECTATE_PROTOCOL})
+           # The admitted protocol (>= the game floor, checked above), clamped
+           # to the column; the lease gates re-judge it against the floor.
+           "proto": max(SPECTATE_PROTOCOL, min(int(req.client_protocol), 32767))})
     # A replacement lease is a new authorization generation for this actor.
     # Retain the physical tombstone, but advance its causal fence once here;
     # repeated dead heartbeats must not keep refreshing it forever.
@@ -46246,6 +50501,12 @@ async def spectate_grant(req: SpectateGrantBody, request: Request,
     """), {"room": game["room_name"], "region": game["room_region"] or "",
             "sid": req.steam_id})
     await db.commit()
+    # Room rules (01-room-rules §4.6, r1): the spectator client binds its
+    # pending room to the rules the server issued, as a player client does,
+    # so an absent or stale `cr_rules` property is judged against this rather
+    # than accepted blind. None when the room has no record: a game born
+    # before this release, or an FFA room, whose settings live on the FFA lobby.
+    _g_rules = await _rules_for_spectated_room(db, game["mode"], game["room_name"])
     # The ONLY place the room credential leaves the server (§6.2).
     return {
         "lease_id": lease_id,
@@ -46255,6 +50516,7 @@ async def spectate_grant(req: SpectateGrantBody, request: Request,
         "join_expires_in": SPECTATE_JOIN_WINDOW_SECONDS,
         "heartbeat_interval": 15,
         "protocol": SPECTATE_PROTOCOL,
+        "rules_prop": _rules_prop(_g_rules) if _g_rules is not None else None,
     }
 
 
@@ -46618,9 +50880,11 @@ _REPORT_1V1_SQL = """
            m.p1_keys_pressed, m.p1_active_seconds, m.p1_damage_dealt, m.p1_deaths,
            m.p2_bullets_fired, m.p2_bullets_hit, m.p2_blocks_activated, m.p2_blocks_successful,
            m.p2_keys_pressed, m.p2_active_seconds, m.p2_damage_dealt, m.p2_deaths,
+           rs.rules AS rules,
            BOOL_AND(m.is_ranked) OVER () AS all_ranked,
            COUNT(*) OVER () AS total_rows
       FROM matches m
+      LEFT JOIN ranked_series rs ON rs.id = m.series_id
      WHERE {where} AND m.invalidated_at IS NULL
        AND CAST(:cpid AS uuid) IN (m.player1_id, m.player2_id)
      ORDER BY COALESCE(m.started_at, m.ended_at, m.created_at) DESC, m.created_at DESC
@@ -46674,8 +50938,10 @@ _REPORT_TEAM_SQL = """
            tm.t1a_id, tm.t1b_id, tm.t2a_id, tm.t2b_id,
            tm.t1_rounds_won, tm.t2_rounds_won, tm.t1_points_total, tm.t2_points_total,
            tm.t1a_end_stats, tm.t1b_end_stats, tm.t2a_end_stats, tm.t2b_end_stats,
+           ts.rules AS rules,
            COUNT(*) OVER () AS total_rows
       FROM team_matches tm
+      LEFT JOIN team_series ts ON ts.id = tm.series_id
      WHERE {where} AND tm.invalidated_at IS NULL
        AND CAST(:cpid AS uuid) IN (tm.t1a_id, tm.t1b_id, tm.t2a_id, tm.t2b_id)
      ORDER BY COALESCE(tm.started_at, tm.ended_at) DESC
@@ -46708,8 +50974,10 @@ _REPORT_OVT_SQL = """
            om.solo_rounds_won, om.duo_rounds_won, om.solo_points_total, om.duo_points_total,
            om.solo_damage_timeline, om.duo_a_damage_timeline, om.duo_b_damage_timeline,
            om.solo_end_stats, om.duo_a_end_stats, om.duo_b_end_stats,
+           os.rules AS rules, os.solo_extra_pick AS solo_extra_pick,
            COUNT(*) OVER () AS total_rows
       FROM ovt_matches om
+      LEFT JOIN ovt_series os ON os.id = om.series_id
      WHERE {where} AND om.invalidated_at IS NULL
        AND CAST(:cpid AS uuid) IN (om.solo_id, om.duo_a_id, om.duo_b_id)
      ORDER BY COALESCE(om.started_at, om.ended_at) DESC
@@ -46722,10 +50990,12 @@ _REPORT_OVT_WHERE = {
 # The FFA match row counts for the caller only when the caller PLAYED it: an
 # `absent` roster row is a frozen-roster ghost (left in an earlier game of the
 # sitting, #227) — the same predicate the profile card uses.
-_REPORT_FFA_SQL = """
+_REPORT_FFA_SQL = f"""
     SELECT fm.id, fm.started_at, fm.ended_at, fm.timeline,
-           COALESCE(fm.duration_seconds, fm.elapsed_seconds, 0) AS duration_s
+           COALESCE(fm.duration_seconds, fm.elapsed_seconds, 0) AS duration_s,
+           {_FFA_SETTINGS_COLS}
       FROM ffa_matches fm
+      LEFT JOIN ffa_lobbies l ON l.id = fm.lobby_id
      WHERE fm.id = CAST(:key AS uuid) AND fm.invalidated_at IS NULL
        AND EXISTS (SELECT 1 FROM ffa_match_players fpx
                     WHERE fpx.match_id = fm.id
@@ -47061,6 +51331,14 @@ def _report_game_json(game, sid_of, cards_by_match, sample_cap=_REPORT_SAMPLES_M
     }
     if picks_capped:
         out["picks_capped"] = True
+    # Room rules (migration 306): the record the game was played under, read
+    # from the SAME games statement as the game — `rules` for 1v1 / 2v2 / 1v2
+    # (null = a series born before the record, or a casual game with no
+    # series), `settings` for FFA (null = the lobby predates configurable
+    # settings). The loader that owns the mode puts exactly one key on the game.
+    for _k in ("rules", "settings"):
+        if _k in game:
+            out[_k] = game[_k]
     return out
 
 
@@ -47128,6 +51406,7 @@ async def _report_load_1v1(db, selector, key, cpid):
         games.append({
             "id": r["id"], "started_at": r["started_at"], "duration_s": r["duration_s"],
             "is_ranked": bool(r["is_ranked"]), "series_id": r["series_id"],
+            "rules": _rules_history(r["rules"]),
             "point_times": r["point_times"], "point_timeline": r["point_timeline"],
             "slots": [
                 _report_slot(r["player1_id"], r["p1_rounds_won"], r["p1_points_total"],
@@ -47178,7 +51457,8 @@ async def _report_load_team(db, selector, key, cpid):
             s["team"] = team
             slots.append(s)
         games.append({"id": r["id"], "started_at": r["started_at"], "duration_s": r["duration_s"],
-                      "series_id": r["series_id"], "slots": slots})
+                      "series_id": r["series_id"], "rules": _rules_history(r["rules"]),
+                      "slots": slots})
     return games, total
 
 
@@ -47201,7 +51481,9 @@ async def _report_load_ovt(db, selector, key, cpid):
             s["team"] = team
             slots.append(s)
         games.append({"id": r["id"], "started_at": r["started_at"], "duration_s": r["duration_s"],
-                      "series_id": r["series_id"], "slots": slots})
+                      "series_id": r["series_id"],
+                      "rules": _rules_history(r["rules"], r["solo_extra_pick"]),
+                      "slots": slots})
     return games, total
 
 
@@ -47233,7 +51515,7 @@ async def _report_load_ffa(db, key, cpid):
         s["color_hex"] = fp["color_hex"]
         slots.append(s)
     game = {"id": r["id"], "started_at": r["started_at"], "duration_s": r["duration_s"],
-            "ffa_timeline": r["timeline"], "slots": slots}
+            "ffa_timeline": r["timeline"], "settings": _ffa_settings_block(r), "slots": slots}
     return [game], slots
 
 

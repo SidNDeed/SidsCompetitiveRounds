@@ -3413,7 +3413,28 @@ namespace CompetitiveRounds
         }
     }
 
-    /// <summary>Aug 6 item 10 — FFA sudden death.
+    /// <summary>The damage-rules gate: ONE bool Prefix on the 9-arg
+    /// <c>HealthHandler.DoDamage</c> carrying two independent suppressors —
+    /// (b) friendly fire OFF (room rules, Sept 10: a teammate's hit in a room whose
+    /// frozen record says ff=0 moves no health, <see cref="RoomRules.SuppressTeammateDamage"/>;
+    /// knockback and sound stay vanilla — Sid, answer E) and (a) Aug 6 item 10 —
+    /// FFA sudden death. Rule (b) is evaluated first: two static reads, and the only
+    /// rule that can fire outside FFA. Unattributed damage (null attacker: out of
+    /// bounds, environment) is suppressed by neither and is counted per game inside
+    /// RoomRules.</para>
+    ///
+    /// <para>Sibling prefixes on the same method, and what happens to each when this
+    /// gate returns false (#352: HarmonyX runs EVERY prefix even after one returns
+    /// false — nothing here makes a sibling not run): CombatTelemetry.DamageStampPatch
+    /// (void Prefix stamping pre-hit health + a Postfix that RETRACTS the stamp when
+    /// health did not drop) — safe by construction; Spectator_NonLethalDamage_Patch
+    /// (Priority.First, forces lethal=false on the observer seat) — argument mutation
+    /// only; PoisonGhostPatch.BeforeDoDamage (mutates ref ignoreBlock for poison ticks)
+    /// — argument mutation only, no state that assumes the hit landed;
+    /// EndScreenKillPatch.BeforeTransitionDamage (bool Prefix) — an independent
+    /// suppressor, order irrelevant because both only AND into __runOriginal. No
+    /// [HarmonyPriority] is declared: none is needed for correctness, and one would
+    /// only invite the false belief that it gates the siblings.</para>
     ///
     /// <para>When the lobby option is on and someone is at match point, every player
     /// EXCEPT the match-point player(s) has friendly fire disabled: damage between two
@@ -3452,13 +3473,21 @@ namespace CompetitiveRounds
             typeof(bool),
             typeof(HealthHandler.DamageSource)
         })]
-    internal static class FfaSuddenDeathPatch
+    internal static class DamageRulesGate
     {
         [HarmonyPrefix]
         private static bool BeforeDoDamage(HealthHandler __instance, Player damagingPlayer)
         {
             try
             {
+                // (b) friendly fire OFF — the verdict is computed once per hit
+                // here and consumed identically by both PoisonSync branches.
+                if (!RoomRules.FriendlyFire)
+                {
+                    var ffVictim = __instance != null ? __instance.GetComponent<Player>() : null;
+                    if (RoomRules.SuppressTeammateDamage(damagingPlayer, ffVictim)) return false;
+                }
+                // (a) FFA sudden death (unchanged)
                 if (damagingPlayer == null) return true;      // out-of-bounds etc.
                 if (!FfaMode.SuddenDeath) return true;        // cheapest gate first
                 var victim = __instance != null ? __instance.GetComponent<Player>() : null;
@@ -3473,7 +3502,7 @@ namespace CompetitiveRounds
             }
             catch (Exception ex)
             {
-                VanillaFixSupport.LogError("FfaSuddenDeath", ex);
+                VanillaFixSupport.LogError("DamageRulesGate", ex);
                 return true;   // never let this patch eat a legitimate hit
             }
         }
@@ -3482,7 +3511,7 @@ namespace CompetitiveRounds
         private static Exception Cleanup(MethodBase original, Exception exception)
         {
             if (original != null) return exception;
-            return VanillaFixSupport.Cleanup("FfaSuddenDeath", exception);
+            return VanillaFixSupport.Cleanup("DamageRulesGate", exception);
         }
     }
 

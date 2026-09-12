@@ -104,11 +104,22 @@ services:
       # every client without a verified session. Narrow and safe: no honest
       # client can produce the case it refuses.
       LIVE_POINTS_REFUSE_MISMATCHED_SEAT: ${LIVE_POINTS_REFUSE_MISMATCHED_SEAT:-}
+      # PC_FACE_CACHE_DIR: where rendered Player Cards faces are cached on
+      # disk. It must name the mount below — a face render costs ~100 ms and
+      # the cache is what keeps a binder page off the renderer. The code
+      # carries the same path as its fallback so a test process and a
+      # one-off container still work; this mapping is what the CONTAINER
+      # actually gets (#438/#443: nothing reaches the process unless it is
+      # named here).
+      PC_FACE_CACHE_DIR: ${PC_FACE_CACHE_DIR:-/var/cache/pc-faces}
     volumes:
       # Bind-mount bug-report logs to the host so they survive container
       # rebuilds. Without this, every `docker compose up -d --build api`
       # nukes the writable layer and submitted log_filename rows orphan.
       - ./bug-reports:/opt/competitive-rounds/bug-reports
+      # The face cache survives a rebuild the same way: a named volume, so
+      # a deploy does not re-render every face the next binder asks for.
+      - pc-faces:/var/cache/pc-faces
     ports:
       - "${API_PORT:-8443}:8000"
     security_opt:
@@ -168,4 +179,6 @@ services:
 
 volumes:
   pgdata:
+    driver: local
+  pc-faces:
     driver: local

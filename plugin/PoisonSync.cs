@@ -969,7 +969,17 @@ namespace CompetitiveRounds
                 try
                 {
                     var cds = view.GetComponent<CharacterData>();
-                    if (cds != null)
+                    // Room rules (§5.3, addendum A2): a teammate's tick in a
+                    // friendly-fire-OFF room moves no health on the fighter
+                    // seats — the DoDamage gate skips the whole body, DealtDamage
+                    // included — so the observer consumes the SAME verdict and
+                    // renders nothing: no health change, no bar tick, no
+                    // lifesteal credit. Consumed (not deferred): the tick is
+                    // accounted for exactly as on a fighter seat.
+                    bool ffSuppressed = false;
+                    try { ffSuppressed = cds != null && RoomRules.SuppressTeammateDamage(attacker, view.GetComponent<Player>()); }
+                    catch { ffSuppressed = false; }
+                    if (cds != null && !ffSuppressed)
                     {
                         // Bug 216: an accepted verdict is authenticated above
                         // as coming from THIS victim's owner. Do not veto it on
@@ -1105,6 +1115,11 @@ namespace CompetitiveRounds
             // ignoreBlock: true — the block decision was already made, once, by
             // the only client entitled to make it. Re-checking here would
             // reintroduce the per-replica disagreement this file exists to remove.
+            // Room rules (§5.3): a teammate's tick in a friendly-fire-OFF room
+            // is refused inside DoDamage by DamageRulesGate (the attacker rides
+            // the call), so this seat and the observer seat above reach the
+            // same verdict from the same predicate; hpBefore/Applied below
+            // then read "no movement", which is the truth.
             hh.DoDamage(rec.Slice, Vector2.zero, rec.Color, null, attacker,
                         healthRemoval: true, lethal: rec.Lethal, ignoreBlock: true,
                         damageSource: (HealthHandler.DamageSource)rec.DamageSource);

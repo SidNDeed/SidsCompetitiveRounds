@@ -169,7 +169,30 @@ namespace CompetitiveRounds
                     LeaveToMenu("wrong room");
                     return;
                 }
+                // Room rules (§5.2, r1 H5): bind this room to the rules the
+                // grant carried (RoomRules.StagePending in the grant handler)
+                // exactly as a fighter binds to its ready payload. A mismatch
+                // ends the session: this seat would otherwise consume a
+                // friendly-fire verdict the fighters do not share (A2).
+                var rulesVerdict = RoomRules.LatchVerdict.Defaults;
+                try { rulesVerdict = RoomRules.LatchOnJoin(PhotonNetwork.CurrentRoom, "spectator"); }
+                catch (Exception rex) { Plugin.Log?.LogWarning($"[ROOM-RULES] spectator latch: {rex.Message}"); }
+                RoomRules.ClearPending();
+                if (rulesVerdict == RoomRules.LatchVerdict.Mismatch)
+                {
+                    // c1 M3: the same critical toast the fighter path shows —
+                    // a silent return to the menu reads as a crash.
+                    try { CompetitiveUI.ShowNotificationCritical(I18n.Tr("Room settings did not match — left the room"), new Color(1f, 0.4f, 0.4f), 8f); } catch { }
+                    LeaveToMenu("room rules mismatch");
+                    return;
+                }
                 Plugin.Log?.LogInfo($"[SPECTATE] in room as spectator (actors={PhotonNetwork.CurrentRoom?.PlayerCount ?? 0})");
+                // c1 M1: the observer seat never runs the fighters' match-start
+                // hooks (both return for a spectator), so the once-per-room
+                // rules toast and the per-game counter reset are driven from
+                // here (entry) and from the observed game boundary
+                // (OnGameOverObserved).
+                try { RoomRules.OnGameStart(); } catch { }
                 // A spectator is kickable BY DESIGN (r10 find 3): honor the
                 // master's cooperative close for this session's lifetime.
                 // Fighters keep the flag false — see Plugin.Awake's note.
@@ -1312,6 +1335,9 @@ namespace CompetitiveRounds
             try
             {
                 if (!SpectatorSession.IsLocalSpectator || SpectatorSession.LeaveRequested) return;
+                // c1 M1: the observed game boundary — the per-game rules
+                // counters roll over here for this seat (see the entry hook).
+                try { RoomRules.OnGameStart(); } catch { }
                 // Pre-activation the boundary machinery owns every body and
                 // the screen is covered anyway — nothing to flush and nothing
                 // that would be seen.

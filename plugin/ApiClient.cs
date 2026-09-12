@@ -22,7 +22,14 @@ namespace CompetitiveRounds
         public static LeaderboardData CachedLeaderboard { get; private set; }
         public static PlayerStatsData CachedPlayerStats { get; private set; }
         public static List<CardStatData> CachedCardStats { get; private set; }
-        public static bool IsLoading { get; private set; } = false;
+        // A deadline, not a latch. Every writer of this flag cleared it inside
+        // a callback owned by a coroutine host ROUNDS destroys at a scene
+        // change; one lost callback and every non-forced refresh after it was
+        // refused for the life of the process. The value is only ever "a fetch
+        // started recently", so an expiry is the whole meaning of it.
+        private static float _loadingUntil = -1f;
+        private const float LOADING_BUDGET = 30f;   // GetRequest times out at 20 s
+        public static bool IsLoading { get { return Time.realtimeSinceStartup <= _loadingUntil; } }
         public static string LastError { get; private set; } = "";
 
         // Version check
@@ -43,6 +50,8 @@ namespace CompetitiveRounds
             public string winner_steam_id, p1_steam_id, p2_steam_id;
             public string completed_at;
             public List<SeriesBetEntry> bets = new List<SeriesBetEntry>();
+            // Room rules (Sept 10): the series' frozen record (see MatchHistoryEntry).
+            public bool has_rules, rules_ff = true, rules_sc, rules_xp;
         }
 
         public class SeriesBetEntry
@@ -173,6 +182,10 @@ namespace CompetitiveRounds
             // Hide-gold utility toggle state. When true the leaderboard masks our gold.
             public bool hide_gold;
             public bool appear_offline;
+            // Room rules (Sept 10): the Same Cards preference for queue-matched
+            // rooms — flat bool, free JsonUtility parse (#73). Drives the
+            // Settings-tab toggle's label; the server reads it at issuance.
+            public bool pref_same_cards;
             // July 22 item 8: opt-in Discord display name on the leaderboard
             // detail. Flat scalars — JsonUtility parses them for free (#73).
             public string discord_display_name;
@@ -432,6 +445,10 @@ namespace CompetitiveRounds
             public string cards_display; // Comma-separated card names for display
             public string opp_cards_display; // Opponent's cards
             public string series_id; // For grouping matches into BO3 series
+            // Room rules (Sept 10): the series' frozen record; has_rules=false on
+            // rows without one (born before the record, casual) — the row then
+            // says nothing rather than something false.
+            public bool has_rules, rules_ff = true, rules_sc, rules_xp;
             // Sept 6 batch (Group 4 item c): the reporter-minted session id this game
             // was filed under (an opaque UUID, never a room identifier); "" on rows
             // without one. The Casual box groups consecutive games by it for the
@@ -2414,6 +2431,9 @@ namespace CompetitiveRounds
             public string left_label, right_label, score;
             public float left_rating_change, right_rating_change;
             public List<MultimodeBet> bets = new List<MultimodeBet>();
+            // Room rules (Sept 10): the record (2v2 / 1v2) or the FFA settings block.
+            public bool has_rules, rules_ff = true, rules_sc, rules_xp;
+            public FfaSettingsInfo ffa_settings;
         }
 
         public class MultimodeBet
@@ -2461,6 +2481,8 @@ namespace CompetitiveRounds
                                 left_rating_change = ExtractJsonFloat(chunk, "left_rating_change"),
                                 right_rating_change = ExtractJsonFloat(chunk, "right_rating_change"),
                             };
+                            ReadHistoryRules(chunk, out e.has_rules, out e.rules_ff, out e.rules_sc, out e.rules_xp);   // room rules (Sept 10)
+                            e.ffa_settings = ReadFfaSettings(chunk);
                             int bk = chunk.IndexOf("\"bets\":", StringComparison.Ordinal);
                             int bo = bk >= 0 ? chunk.IndexOf('[', bk) : -1;
                             int bc = bo >= 0 ? FindMatchingBracketStringAware(chunk, bo) : -1;
@@ -2920,6 +2942,17 @@ namespace CompetitiveRounds
             _shopCacheEpoch++;
             CachedShopItems = null;
             CachedInventory = null;
+            // Player Cards (c4): the same rule — the epoch first, then the clears.
+            _pcCacheEpoch++;
+            // The previous account's stats are the previous account's: display
+            // name, equipped cosmetics, gold. The revoke path already cleared
+            // them; an account switch did not, so the new identity briefly wore
+            // the old one's name and cosmetics.
+            CachedPlayerStats = null;
+            CachedPcMe = null; CachedPcCollection = null;
+            PcMeError = null; PcCollectionError = null;
+            PcMeFetchedAt = -1f; PcMeDispatchedAt = -1f; PcCollectionFetchedAt = -1f;
+            pcMeAttemptAt = -100f; pcCollAttemptAt = -100f;
             NativeUI.MarkDirty();
         }
 
@@ -3612,6 +3645,778 @@ namespace CompetitiveRounds
                 if (ok) { FetchPlayerStats(steamId); FetchOnlinePlayers(); }
             }));
         }
+
+        /// <summary>Room rules (Sept 10): the Same Cards preference for
+        /// queue-matched rooms. HMAC over "pref_same_cards:{steam_id}:{1|0}";
+        /// the server also requires the verified Steam session. Re-fetches the
+        /// stats on success so the Settings-tab label reconciles with the
+        /// server truth (the toggle flips optimistically).</summary>
+        public static void SetPrefSameCards(string steamId, bool on, Action<bool, string> callback = null)
+        {
+            string sig = ComputeHmacHex($"pref_same_cards:{steamId}:{(on ? 1 : 0)}");
+            string url = $"{baseUrl}/api/v1/players/{steamId}/pref-same-cards?on={(on ? "true" : "false")}&sig={sig}";
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[SETTINGS] set pref_same_cards {on}: ok={ok} resp={resp}");
+                callback?.Invoke(ok, resp);
+                if (ok) FetchPlayerStats(steamId);
+            }));
+        }
+
+        // ── Player Cards (Sept 10 batch, WP-E) ──────────────────────────────
+        // Every route takes QUERY parameters; `sig` is the HMAC over the canon
+        // string the server builds from the same terms (player_cards.py). The
+        // strict Steam session rides as X-Session-Token (StampVersionHeader
+        // attaches it on every request), so a missing session answers 401
+        // session_required and the UI says so instead of retrying.
+        public class PcPrint
+        {
+            public string print_id, card_id, subject_player_id, subject_name, edition_id, minted_at, rarity, top_card, title, rank_name, source;
+            public string face_rev;   // v22 §2.2: the server's face revision; null on an api without the renderer
+            public string face_locale = "en";   // the locale the answer keyed face_rev under (set by the parsers)
+            public bool subject_deleted, foil, signed, discarded;
+            public int pool_rank, board_rank, series_wins, series_losses, slot;
+            // v22 7: copies of this exact card the opener held BEFORE this slot,
+            // counted at mint. 0 is NEW and -1 is ABSENT -- an answer from an api
+            // that predates the field, where the reveal strip states nothing
+            // rather than announcing every card new.
+            public int dup_at_pull = -1;
+            public float rating, peak_rating;
+        }
+        public class PcUnopened { public string pack_id, source, mode, kind, reference_id, created_at; }
+        public class PcMe
+        {
+            public bool opted_out, collection_public, announce, daily_claimed;
+            public int revision, shards, price_gold, price_shards, paid_packs_per_day, prints_per_pack, paid_today, prints, pool_member_count;
+            public string daily_pack_id, next_reset_utc, pool_taken_at;
+            // v22 §3: the portrait unit — source "game" | "none", the stored
+            // hash + the descriptor of its inputs, and an admin lock's end.
+            public string portrait_source = "game", portrait_hash, portrait_descriptor, portrait_locked_until;
+            public List<PcUnopened> unopened = new List<PcUnopened>();
+        }
+        public class PcPackAnswer
+        {
+            public string pack_id, status, source, mode, kind, pay, reason, created_at, opened_at, last_attempt_reason;
+            public string locale = "en";   // the locale this answer keyed its prints' face_rev under
+            public int price;
+            public List<PcPrint> prints = new List<PcPrint>();
+        }
+        public class PcCollection
+        {
+            public string owner_steam_id, owner_name;
+            public string locale = "en";   // the locale the server keyed the faces under (v22 §2.2)
+            public bool is_public;
+            public int count;
+            public List<PcPrint> prints = new List<PcPrint>();
+        }
+
+        public static PcMe CachedPcMe { get; private set; }
+        public static PcCollection CachedPcCollection { get; private set; }
+        public static float PcMeFetchedAt = -1f, PcCollectionFetchedAt = -1f;
+        public static float PcMeDispatchedAt = -1f;   // when the /pc/me that produced CachedPcMe LEFT (c5): the price gate keys on it
+        public static string PcMeError { get; private set; }
+        public static string PcCollectionError { get; private set; }
+        private static bool pcMeInFlight, pcCollInFlight;
+        private static float pcMeAttemptAt = -100f, pcCollAttemptAt = -100f;   // the throttle keys on the last ATTEMPT, so a failing fetch is not re-fired by every repaint
+        private static int _pcCacheEpoch;   // advanced on every identity edge (c4): a landing from an older epoch never touches the cache
+
+        /// <summary>The identity/consent generation. It is bumped by
+        /// OnLocalIdentityChanged and by the consent revoke, BEFORE either
+        /// clears anything, so any answer dispatched under the previous account
+        /// or the previous consent state can be recognised and dropped. The
+        /// Player Cards reads have always fenced on it; it is the same edge for
+        /// every other read, which is why it is named here rather than left as
+        /// a Player Cards detail.</summary>
+        internal static int IdentityEpoch { get { return _pcCacheEpoch; } }
+
+        private static string PcUrl(string path, string steamId, string canon, string extraQuery)
+        {
+            string sig = ComputeHmacHex(canon);
+            string url = $"{baseUrl}/api/v1/pc/{path}?steam_id={steamId}&sig={sig}";
+            if (!string.IsNullOrEmpty(extraQuery)) url += "&" + extraQuery;
+            return url;
+        }
+
+        /// <summary>Own state: settings + revision, shards, prices, the daily
+        /// claim, unopened packs. Throttled to one fetch per 10 s unless forced.</summary>
+        public static void FetchPcMe(string steamId, bool force = false, Action<bool, string> callback = null)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") { callback?.Invoke(false, "no-id"); return; }
+            if (!force && Time.realtimeSinceStartup - pcMeAttemptAt < 10f) { callback?.Invoke(CachedPcMe != null, null); return; }
+            if (pcMeInFlight) { callback?.Invoke(false, "in-flight"); return; }
+            pcMeInFlight = true; pcMeAttemptAt = Time.realtimeSinceStartup;
+            float dispatched = pcMeAttemptAt;
+            string url = PcUrl("me", steamId, $"pcread:{steamId}:me:-", null);
+            int epoch = _pcCacheEpoch;
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
+            {
+                pcMeInFlight = false;
+                if (epoch != _pcCacheEpoch)
+                {
+                    // dispatched for a previous identity: never repaint the cache (c4)
+                    Plugin.Log.LogInfo("[PC] me answer dropped: identity changed");
+                    try { callback?.Invoke(false, "stale-identity"); } catch { }
+                    return;
+                }
+                if (ok)
+                {
+                    var me = ParsePcMe(resp);
+                    if (me != null) { CachedPcMe = me; PcMeFetchedAt = Time.realtimeSinceStartup; PcMeDispatchedAt = dispatched; PcMeError = null; }
+                    else { PcMeError = "parse"; ok = false; }
+                }
+                else { PcMeError = resp; Plugin.Log.LogInfo($"[PC] me fetch failed: {PcShort(resp)}"); }
+                try { NativeUI.MarkDirty(); } catch { }
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] me callback threw: {cex.Message}"); }
+            }, detailedErrors: true, sessionAware: true));
+        }
+
+        /// <summary>Own binder (live prints, server-ordered subject → rarity →
+        /// mint date). Throttled to one fetch per 20 s unless forced.</summary>
+        public static void FetchPcCollection(string steamId, bool force = false, Action<bool, string> callback = null)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") { callback?.Invoke(false, "no-id"); return; }
+            if (!force && Time.realtimeSinceStartup - pcCollAttemptAt < 20f) { callback?.Invoke(CachedPcCollection != null, null); return; }
+            if (pcCollInFlight)
+            {
+                // A forced read is DEMAND, not a poll: it is what a pack open
+                // and a picture change ask for, and the answer already on the
+                // wire predates the thing that made them ask. Dropping it left
+                // the binder showing the collection from before the pack, with
+                // nothing left to come and correct it. The demand is remembered
+                // and re-issued when the older answer lands.
+                if (force) pcCollForceAgain = true;
+                callback?.Invoke(false, "in-flight");
+                return;
+            }
+            pcCollInFlight = true; pcCollAttemptAt = Time.realtimeSinceStartup;
+            string url = PcUrl("collection", steamId, $"pcread:{steamId}:collection:-", null);
+            int epoch = _pcCacheEpoch;
+            // The prints carry a face_locale and the faces are cached by it, so
+            // the answer describes the language it was ASKED in. Committing one
+            // asked in the previous language leaves every face keyed to a locale
+            // the player no longer reads, and nothing re-asks.
+            string locale = I18n.Locale;
+            string who = steamId;
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
+            {
+                pcCollInFlight = false;
+                bool again = pcCollForceAgain; pcCollForceAgain = false;
+                if (epoch != _pcCacheEpoch)
+                {
+                    Plugin.Log.LogInfo("[PC] collection answer dropped: identity changed");
+                    try { callback?.Invoke(false, "stale-identity"); } catch { }
+                    return;
+                }
+                if (locale != I18n.Locale)
+                {
+                    Plugin.Log.LogInfo("[PC] collection answer dropped: language changed while it was in flight");
+                    try { PlayerCardFaces.Clear(); } catch { }
+                    pcCollAttemptAt = -100f;
+                    FetchPcCollection(who, true, callback);
+                    return;
+                }
+                if (again)
+                {
+                    // something demanded a fresh read while this one was on the
+                    // wire: let this answer land, then go again
+                    pcCollAttemptAt = -100f;
+                    try { Plugin.Instance.StartCoroutine(RefetchCollectionNextFrame(who)); } catch { }
+                }
+                if (ok)
+                {
+                    var col = ParsePcCollection(resp);
+                    if (col != null) { CachedPcCollection = col; PcCollectionFetchedAt = Time.realtimeSinceStartup; PcCollectionError = null; }
+                    else { PcCollectionError = "parse"; ok = false; }
+                }
+                else { PcCollectionError = resp; Plugin.Log.LogInfo($"[PC] collection fetch failed: {PcShort(resp)}"); }
+                try { NativeUI.MarkDirty(); } catch { }
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] collection callback threw: {cex.Message}"); }
+            }, detailedErrors: true, sessionAware: true));
+        }
+
+        private static bool pcCollForceAgain;
+
+        private static IEnumerator RefetchCollectionNextFrame(string steamId)
+        {
+            yield return null;                       // let this answer commit first
+            FetchPcCollection(steamId, true);
+        }
+
+        /// <summary>Buy and open a pack. The caller persists its intent (nonce,
+        /// pay, price) BEFORE this call and clears it only after the answer is
+        /// shown; a repeated nonce answers the committed row.</summary>
+        public static void PcOpenPack(string steamId, string nonce, string pay, int expectedPrice, Action<bool, string> callback)
+        {
+            string url = PcUrl("packs/open", steamId, $"pcopen:{steamId}:{nonce}:{pay}:{expectedPrice}",
+                $"nonce={nonce}&pay={pay}&expected_price={expectedPrice}");
+            Plugin.Log.LogInfo($"[PC] open pack pay={pay} price={expectedPrice} nonce={nonce.Substring(0, Math.Min(8, nonce.Length))}");
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[PC] open pack answer ok={ok} resp={PcShort(resp)}");
+                if (ok) { FetchPlayerStats(steamId, true); }
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] open callback threw: {cex.Message}"); }
+            }));
+        }
+
+        /// <summary>Open a pack the player already holds (daily / earned).</summary>
+        public static void PcOpenUnopened(string steamId, string packId, Action<bool, string> callback)
+        {
+            string url = PcUrl("packs/open", steamId, $"pcopen:{steamId}:pack:{packId}", $"pack_id={packId}");
+            Plugin.Log.LogInfo($"[PC] open held pack {packId}");
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[PC] open held pack answer ok={ok} resp={PcShort(resp)}");
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] open callback threw: {cex.Message}"); }
+            }));
+        }
+
+        /// <summary>Result recovery for a persisted intent: exactly one of
+        /// nonce / packId. 404 = no such claim ever committed.</summary>
+        public static void PcPackResult(string steamId, string nonce, string packId, Action<bool, string> callback)
+        {
+            string reference = !string.IsNullOrEmpty(packId) ? packId : nonce;
+            string q = !string.IsNullOrEmpty(packId) ? $"pack_id={packId}" : $"nonce={nonce}";
+            string url = PcUrl("packs/result", steamId, $"pcresult:{steamId}:{reference}", q);
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[PC] pack result ok={ok} resp={PcShort(resp)}");
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] result callback threw: {cex.Message}"); }
+            }, detailedErrors: true, sessionAware: true));
+        }
+
+        public static void PcClaimDaily(string steamId, string nonce, Action<bool, string> callback)
+        {
+            string url = PcUrl("daily", steamId, $"pcdaily:{steamId}:{nonce}", $"nonce={nonce}");
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[PC] daily claim ok={ok} resp={PcShort(resp)}");
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] daily callback threw: {cex.Message}"); }
+            }));
+        }
+
+        public static void PcDiscard(string steamId, string printId, Action<bool, string> callback)
+        {
+            string url = PcUrl("prints/discard", steamId, $"pcdiscard:{steamId}:{printId}", $"print_id={printId}");
+            int epoch = _pcCacheEpoch;
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[PC] discard {printId} ok={ok} resp={PcShort(resp)}");
+                if (ok && epoch == _pcCacheEpoch && CachedPcMe != null)
+                {
+                    string sh = PcTopLevel(resp, "shards");
+                    if (sh != null) CachedPcMe.shards = PcInt(sh);
+                }
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] discard callback threw: {cex.Message}"); }
+            }));
+        }
+
+        /// <summary>Compare-and-set one setting: the revision the caller read
+        /// must still be current (409 stale_revision otherwise). The answer is
+        /// the full settings row and is written into the cache before the
+        /// callback runs.</summary>
+        public static void PcSetSetting(string steamId, string nonce, int revision, string key, int value, Action<bool, string> callback)
+        {
+            string url = PcUrl("settings", steamId, $"pcset:{steamId}:{nonce}:{revision}:{key}:{value}",
+                $"nonce={nonce}&revision={revision}&key={key}&value={value}");
+            int epoch = _pcCacheEpoch;
+            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[PC] set {key}={value} rev={revision} ok={ok} resp={PcShort(resp)}");
+                if (ok && epoch == _pcCacheEpoch && CachedPcMe != null) PcApplySettings(CachedPcMe, resp);
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] settings callback threw: {cex.Message}"); }
+            }));
+        }
+
+        // ── Player Cards faces + the portrait writer (design v22 §2.2 / §3.2) ──
+        public const int PC_FACE_MAX_BYTES = 4 * 1024 * 1024;
+        public const int PC_TILE_MAX_BYTES = 1024 * 1024;
+
+        /// <summary>The public face route of one print at one size ("card" =
+        /// 750x1050, "tile" = 375x525): immutable per (print, face_rev, locale).
+        /// The locale is the one the server keyed the binder answer under, so
+        /// the key it built and the key fetched here agree.</summary>
+        public static string PcFaceUrl(string printId, string faceRev, string locale, string size)
+            => $"{baseUrl}/api/v1/pc-face/{printId}/{faceRev}/{(string.IsNullOrEmpty(locale) ? "en" : locale)}/{size}.png";
+
+        /// <summary>The portrait writer: the 1180x1180 RGBA PNG rides as the raw
+        /// body; the signed line carries the body's own SHA-256 and the
+        /// descriptor of its inputs, so neither can be swapped under it.</summary>
+        public static void PcPortraitUpload(string steamId, string nonce, string descriptor, byte[] png, Action<bool, string> callback)
+        {
+            if (Plugin.Instance == null || png == null || png.Length == 0) { callback?.Invoke(false, "not ready"); return; }
+            string sha;
+            using (var h = SHA256.Create()) sha = BitConverter.ToString(h.ComputeHash(png)).Replace("-", "").ToLowerInvariant();
+            string url = PcUrl("portrait", steamId, $"pcport:{steamId}:{nonce}:{sha}:{descriptor}",
+                $"nonce={nonce}&descriptor={UnityWebRequest.EscapeURL(descriptor)}");
+            Plugin.Instance.StartCoroutine(PostBytes(url, png, "image/png", (ok, resp) =>
+            {
+                Plugin.Log.LogInfo($"[PC] portrait upload bytes={png.Length} ok={ok} resp={PcShort(resp)}");
+                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] portrait callback threw: {cex.Message}"); }
+            }));
+        }
+
+        /// <summary>GET a small PNG: an exact Content-Length, the byte cap and the
+        /// PNG signature are all required, else (false, null).</summary>
+        public static void FetchBytes(string url, int cap, Action<bool, byte[], long> callback)
+        {
+            if (Plugin.Instance == null) { callback?.Invoke(false, null, 0); return; }
+            Plugin.Instance.StartCoroutine(GetBytes(url, cap, callback));
+        }
+
+        /// <summary>(ok, bytes, HTTP status): 426 stands for the version gate,
+        /// 0 for no answer at all.</summary>
+        /// <summary>A download that stops at a byte cap instead of discovering
+        /// it afterwards.
+        ///
+        /// The default DownloadHandlerBuffer reads the WHOLE body into memory
+        /// and only then hands it over, and `.data` allocates a second copy of
+        /// it; the cap was applied after both. A response with no
+        /// Content-Length (chunked) or a Content-Length that lies is therefore
+        /// bounded by nothing this client controls, on a route it reaches many
+        /// times per binder page. Here the cap is enforced on the way IN:
+        /// returning false from ReceiveData aborts the transfer, so the most
+        /// that is ever held is the cap plus one chunk.</summary>
+        private sealed class CappedDownload : DownloadHandlerScript
+        {
+            private readonly int _cap;
+            private byte[] _buf = new byte[0];
+            private int _len;
+            internal bool Refused { get; private set; }
+
+            internal CappedDownload(int cap) : base(new byte[64 * 1024]) { _cap = cap; }
+
+            protected override void ReceiveContentLengthHeader(ulong contentLength)
+            {
+                if (contentLength > (ulong)_cap) { Refused = true; return; }
+                if (contentLength > 0 && _buf.Length == 0) _buf = new byte[(int)contentLength];
+            }
+
+            protected override bool ReceiveData(byte[] data, int dataLength)
+            {
+                if (Refused) return false;
+                if (data == null || dataLength <= 0) return true;
+                if ((long)_len + dataLength > _cap) { Refused = true; _buf = new byte[0]; _len = 0; return false; }
+                if (_buf.Length < _len + dataLength)
+                {
+                    int want = _buf.Length == 0 ? 64 * 1024 : _buf.Length * 2;
+                    if (want < _len + dataLength) want = _len + dataLength;
+                    if (want > _cap) want = _cap;
+                    Array.Resize(ref _buf, want);
+                }
+                Buffer.BlockCopy(data, 0, _buf, _len, dataLength);
+                _len += dataLength;
+                return true;
+            }
+
+            protected override byte[] GetData() { return Taken(); }
+
+            /// <summary>The exact bytes received, or null if none or refused.
+            /// Sized to the content, so no caller sees trailing zeroes.</summary>
+            internal byte[] Taken()
+            {
+                if (Refused || _len == 0) return null;
+                if (_buf.Length != _len) Array.Resize(ref _buf, _len);
+                return _buf;
+            }
+
+            internal int Received { get { return _len; } }
+        }
+
+        private static IEnumerator GetBytes(string url, int cap, Action<bool, byte[], long> callback)
+        {
+            if (ConsentBlocksRequest(url)) { callback(false, null, 0); yield break; }
+            NoteAttempt();
+            using (var request = UnityWebRequest.Get(url))
+            {
+                var handler = new CappedDownload(cap);
+                request.downloadHandler = handler;
+                StampVersionHeader(request);
+                request.timeout = 20;
+                yield return request.SendWebRequest();
+
+                if (HandleVersionGate(request)) { callback(false, null, 426); yield break; }
+                bool success = request.result == UnityWebRequest.Result.Success;
+                NoteResult(success, request.responseCode);
+                byte[] data = null;
+                if (handler.Refused)
+                {
+                    Plugin.Log.LogWarning($"[HTTP] body over the {cap}-byte cap; transfer stopped");
+                    success = false;
+                }
+                else if (success)
+                {
+                    try
+                    {
+                        data = handler.Taken();
+                        long declared = -1;
+                        string cl = request.GetResponseHeader("Content-Length");
+                        if (string.IsNullOrEmpty(cl) || !long.TryParse(cl.Trim(), out declared)) declared = -1;
+                        bool png = data != null && data.Length >= 8
+                                   && data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E && data[3] == 0x47
+                                   && data[4] == 0x0D && data[5] == 0x0A && data[6] == 0x1A && data[7] == 0x0A;
+                        if (data == null || data.Length == 0 || data.Length > cap || declared != data.Length || !png) { success = false; data = null; }
+                    }
+                    catch { success = false; data = null; }
+                }
+                callback(success, data, request.responseCode);
+            }
+        }
+
+        /// <summary>POST a raw binary body (the portrait): PostRequest's twin with
+        /// an explicit content type — same consent, version-gate and session
+        /// handling, same "HTTP &lt;code&gt;: &lt;body&gt;" error format.</summary>
+        private static IEnumerator PostBytes(string url, byte[] body, string contentType, Action<bool, string> callback)
+        {
+            if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
+            NoteAttempt();
+            using (var request = new UnityWebRequest(url, "POST"))
+            {
+                request.uploadHandler = new UploadHandlerRaw(body);
+                request.downloadHandler = new DownloadHandlerBuffer();
+                request.SetRequestHeader("Content-Type", contentType);
+                StampVersionHeader(request);
+                string _sentTok = SteamAuth.SessionToken;
+                request.timeout = 30;
+
+                yield return request.SendWebRequest();
+
+                if (HandleVersionGate(request)) { callback(false, "outdated"); yield break; }
+                HandleSessionReject(request, _sentTok);
+                bool success = request.result == UnityWebRequest.Result.Success;
+                NoteResult(success, request.responseCode);
+                callback(success, success ? request.downloadHandler.text : FormatRequestError(request));
+            }
+        }
+
+        // ── parsing (depth-aware: the shared helpers search the whole text,
+        //    and "shards" / "status" / "reason" recur inside nested objects) ──
+        private static string PcShort(string s) => s == null ? "null" : (s.Length > 160 ? s.Substring(0, 160) + "..." : s);
+
+        /// <summary>Raw value of `key` at the TOP level of the first JSON
+        /// object in `json` (depth 1), or null.</summary>
+        internal static string PcTopLevel(string json, string key)
+        {
+            if (string.IsNullOrEmpty(json) || string.IsNullOrEmpty(key)) return null;
+            int n = json.Length;
+            int start = json.IndexOf('{');
+            if (start < 0) return null;
+            string needle = "\"" + key + "\"";
+            int depth = 0; bool inStr = false;
+            for (int i = start; i < n; i++)
+            {
+                char c = json[i];
+                if (inStr) { if (c == '\\') i++; else if (c == '"') inStr = false; continue; }
+                if (c == '"')
+                {
+                    if (depth == 1 && string.CompareOrdinal(json, i, needle, 0, needle.Length) == 0)
+                    {
+                        int j = i + needle.Length;
+                        while (j < n && (json[j] == ' ' || json[j] == '\t' || json[j] == '\r' || json[j] == '\n')) j++;
+                        if (j < n && json[j] == ':')
+                        {
+                            j++;
+                            while (j < n && (json[j] == ' ' || json[j] == '\t' || json[j] == '\r' || json[j] == '\n')) j++;
+                            return PcRawValue(json, j);
+                        }
+                    }
+                    inStr = true; continue;
+                }
+                if (c == '{' || c == '[') depth++;
+                else if (c == '}' || c == ']') { depth--; if (depth <= 0) return null; }
+            }
+            return null;
+        }
+
+        private static string PcRawValue(string json, int j)
+        {
+            int n = json.Length;
+            if (j >= n) return null;
+            char c = json[j];
+            if (c == '"')
+            {
+                int k = j + 1;
+                while (k < n) { if (json[k] == '\\') { k += 2; continue; } if (json[k] == '"') break; k++; }
+                return json.Substring(j, Math.Min(n, k + 1) - j);
+            }
+            if (c == '{' || c == '[')
+            {
+                int d = 0; bool s = false;
+                for (int k = j; k < n; k++)
+                {
+                    char ch = json[k];
+                    if (s) { if (ch == '\\') k++; else if (ch == '"') s = false; continue; }
+                    if (ch == '"') { s = true; continue; }
+                    if (ch == '{' || ch == '[') d++;
+                    else if (ch == '}' || ch == ']') { d--; if (d == 0) return json.Substring(j, k + 1 - j); }
+                }
+                return null;
+            }
+            int e = j;
+            while (e < n && json[e] != ',' && json[e] != '}' && json[e] != ']') e++;
+            return json.Substring(j, e - j).Trim();
+        }
+
+        /// <summary>A raw JSON string token → its value (quotes stripped,
+        /// escapes decoded); a non-string raw token comes back as-is; null /
+        /// "null" → null.</summary>
+        internal static string PcStr(string raw)
+        {
+            if (raw == null || raw == "null") return null;
+            if (raw.Length < 2 || raw[0] != '"') return raw;
+            var sb = new StringBuilder(raw.Length);
+            for (int i = 1; i < raw.Length - 1; i++)
+            {
+                char c = raw[i];
+                if (c != '\\' || i + 1 >= raw.Length - 1) { sb.Append(c); continue; }
+                char e = raw[++i];
+                switch (e)
+                {
+                    case 'n': sb.Append('\n'); break;
+                    case 'r': sb.Append('\r'); break;
+                    case 't': sb.Append('\t'); break;
+                    case 'b': sb.Append('\b'); break;
+                    case 'f': sb.Append('\f'); break;
+                    case 'u':
+                        if (i + 4 < raw.Length)
+                        {
+                            int cp;
+                            if (int.TryParse(raw.Substring(i + 1, 4), System.Globalization.NumberStyles.HexNumber, System.Globalization.CultureInfo.InvariantCulture, out cp))
+                            { sb.Append((char)cp); i += 4; }
+                        }
+                        break;
+                    default: sb.Append(e); break;
+                }
+            }
+            return sb.ToString();
+        }
+        internal static int PcInt(string raw)
+        {
+            if (string.IsNullOrEmpty(raw) || raw == "null") return 0;
+            string s = PcStr(raw);
+            int v; if (int.TryParse(s, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out v)) return v;
+            float f; if (float.TryParse(s, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out f)) return (int)f;
+            return 0;
+        }
+        /// <summary>`PcInt` with an explicit ABSENT answer. `PcInt` reads a
+        /// missing key and a present 0 as the same value, which is right for a
+        /// count and wrong for a field whose 0 is a statement ("NEW") and whose
+        /// absence is "this api never said".</summary>
+        internal static int PcIntOr(string raw, int fallback)
+        {
+            if (string.IsNullOrEmpty(raw) || raw == "null") return fallback;
+            return PcInt(raw);
+        }
+        internal static float PcFloat(string raw)
+        {
+            if (string.IsNullOrEmpty(raw) || raw == "null") return 0f;
+            float f; return float.TryParse(PcStr(raw), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out f) ? f : 0f;
+        }
+        internal static bool PcBool(string raw) => raw == "true";
+        /// <summary>`true` when the top-level key is present and not JSON null.</summary>
+        internal static bool PcHas(string json, string key) { string r = PcTopLevel(json, key); return r != null && r != "null"; }
+
+        internal static PcPrint ParsePcPrint(string obj)
+        {
+            if (string.IsNullOrEmpty(obj)) return null;
+            var p = new PcPrint
+            {
+                print_id = PcStr(PcTopLevel(obj, "print_id")),
+                card_id = PcStr(PcTopLevel(obj, "card_id")),
+                subject_player_id = PcStr(PcTopLevel(obj, "subject_player_id")),
+                subject_name = PcStr(PcTopLevel(obj, "subject_name")),
+                subject_deleted = PcBool(PcTopLevel(obj, "subject_deleted")),
+                edition_id = PcStr(PcTopLevel(obj, "edition_id")),
+                minted_at = PcStr(PcTopLevel(obj, "minted_at")),
+                rarity = PcStr(PcTopLevel(obj, "rarity")) ?? "common",
+                foil = PcBool(PcTopLevel(obj, "foil")),
+                signed = PcBool(PcTopLevel(obj, "signed")),
+                pool_rank = PcInt(PcTopLevel(obj, "pool_rank")),
+                rating = PcFloat(PcTopLevel(obj, "rating")),
+                peak_rating = PcFloat(PcTopLevel(obj, "peak_rating")),
+                board_rank = PcInt(PcTopLevel(obj, "board_rank")),
+                series_wins = PcInt(PcTopLevel(obj, "series_wins")),
+                series_losses = PcInt(PcTopLevel(obj, "series_losses")),
+                top_card = PcStr(PcTopLevel(obj, "top_card")),
+                title = PcStr(PcTopLevel(obj, "title")),
+                rank_name = PcStr(PcTopLevel(obj, "rank_name")),
+                source = PcStr(PcTopLevel(obj, "source")),
+                slot = PcInt(PcTopLevel(obj, "slot")),
+                discarded = PcBool(PcTopLevel(obj, "discarded")),
+                face_rev = PcStr(PcTopLevel(obj, "face_rev")),
+                dup_at_pull = PcIntOr(PcTopLevel(obj, "dup_at_pull"), -1),
+            };
+            return string.IsNullOrEmpty(p.print_id) ? null : p;
+        }
+
+        private static List<PcPrint> ParsePcPrints(string arrayRaw, string faceLocale = "en")
+        {
+            var list = new List<PcPrint>();
+            if (string.IsNullOrEmpty(arrayRaw) || arrayRaw == "null") return list;
+            foreach (var o in SliceTopLevelObjects(arrayRaw))
+            {
+                var p = ParsePcPrint(o);
+                if (p != null) { p.face_locale = string.IsNullOrEmpty(faceLocale) ? "en" : faceLocale; list.Add(p); }
+            }
+            return list;
+        }
+
+        private static void PcApplySettings(PcMe me, string settingsObj)
+        {
+            if (me == null || string.IsNullOrEmpty(settingsObj)) return;
+            if (PcHas(settingsObj, "opted_out")) me.opted_out = PcBool(PcTopLevel(settingsObj, "opted_out"));
+            if (PcHas(settingsObj, "collection_public")) me.collection_public = PcBool(PcTopLevel(settingsObj, "collection_public"));
+            if (PcHas(settingsObj, "announce")) me.announce = PcBool(PcTopLevel(settingsObj, "announce"));
+            if (PcHas(settingsObj, "revision")) me.revision = PcInt(PcTopLevel(settingsObj, "revision"));
+            if (PcHas(settingsObj, "shards")) me.shards = PcInt(PcTopLevel(settingsObj, "shards"));
+            if (PcHas(settingsObj, "portrait_source")) me.portrait_source = PcStr(PcTopLevel(settingsObj, "portrait_source")) ?? "game";
+        }
+
+        internal static PcMe ParsePcMe(string json)
+        {
+            if (string.IsNullOrEmpty(json)) return null;
+            string settings = PcTopLevel(json, "settings");
+            if (settings == null) return null;
+            var me = new PcMe();
+            PcApplySettings(me, settings);
+            me.shards = PcInt(PcTopLevel(json, "shards"));
+            string prices = PcTopLevel(json, "prices") ?? "";
+            me.price_gold = PcInt(PcTopLevel(prices, "gold"));
+            me.price_shards = PcInt(PcTopLevel(prices, "shards"));
+            me.paid_packs_per_day = PcInt(PcTopLevel(prices, "paid_packs_per_day"));
+            me.prints_per_pack = PcInt(PcTopLevel(prices, "prints_per_pack"));
+            me.paid_today = PcInt(PcTopLevel(json, "paid_today"));
+            me.prints = PcInt(PcTopLevel(json, "prints"));
+            if (PcHas(json, "portrait_source")) me.portrait_source = PcStr(PcTopLevel(json, "portrait_source")) ?? "game";
+            me.portrait_hash = PcHas(json, "portrait_hash") ? PcStr(PcTopLevel(json, "portrait_hash")) : null;
+            me.portrait_descriptor = PcHas(json, "portrait_descriptor") ? PcStr(PcTopLevel(json, "portrait_descriptor")) : null;
+            me.portrait_locked_until = PcHas(json, "portrait_locked_until") ? PcStr(PcTopLevel(json, "portrait_locked_until")) : null;
+            string daily = PcTopLevel(json, "daily") ?? "";
+            me.daily_claimed = PcBool(PcTopLevel(daily, "claimed"));
+            me.daily_pack_id = PcStr(PcTopLevel(daily, "pack_id"));
+            me.next_reset_utc = PcStr(PcTopLevel(daily, "next_reset_utc"));
+            string pool = PcTopLevel(json, "pool");
+            if (pool != null && pool != "null")
+            {
+                me.pool_member_count = PcInt(PcTopLevel(pool, "member_count"));
+                me.pool_taken_at = PcStr(PcTopLevel(pool, "taken_at"));
+            }
+            string un = PcTopLevel(json, "unopened");
+            if (!string.IsNullOrEmpty(un) && un != "null")
+                foreach (var o in SliceTopLevelObjects(un))
+                {
+                    var u = new PcUnopened
+                    {
+                        pack_id = PcStr(PcTopLevel(o, "pack_id")),
+                        source = PcStr(PcTopLevel(o, "source")),
+                        mode = PcStr(PcTopLevel(o, "mode")),
+                        kind = PcStr(PcTopLevel(o, "kind")),
+                        reference_id = PcStr(PcTopLevel(o, "reference_id")),
+                        created_at = PcStr(PcTopLevel(o, "created_at")),
+                    };
+                    if (!string.IsNullOrEmpty(u.pack_id)) me.unopened.Add(u);
+                }
+            return me;
+        }
+
+        internal static PcPackAnswer ParsePcPackAnswer(string json)
+        {
+            if (string.IsNullOrEmpty(json)) return null;
+            var a = new PcPackAnswer
+            {
+                pack_id = PcStr(PcTopLevel(json, "pack_id")),
+                status = PcStr(PcTopLevel(json, "status")),
+                source = PcStr(PcTopLevel(json, "source")),
+                mode = PcStr(PcTopLevel(json, "mode")),
+                kind = PcStr(PcTopLevel(json, "kind")),
+                pay = PcStr(PcTopLevel(json, "pay")),
+                price = PcInt(PcTopLevel(json, "price")),
+                reason = PcStr(PcTopLevel(json, "reason")),
+                created_at = PcStr(PcTopLevel(json, "created_at")),
+                opened_at = PcStr(PcTopLevel(json, "opened_at")),
+            };
+            if (string.IsNullOrEmpty(a.status)) return null;
+            a.locale = PcStr(PcTopLevel(json, "locale")) ?? "en";
+            a.prints = ParsePcPrints(PcTopLevel(json, "prints"), a.locale);
+            string att = PcTopLevel(json, "last_attempt");
+            if (!string.IsNullOrEmpty(att) && att != "null") a.last_attempt_reason = PcStr(PcTopLevel(att, "reason"));
+            return a;
+        }
+
+        internal static PcCollection ParsePcCollection(string json)
+        {
+            if (string.IsNullOrEmpty(json)) return null;
+            string prints = PcTopLevel(json, "prints");
+            if (prints == null) return null;
+            var c = new PcCollection
+            {
+                owner_steam_id = PcStr(PcTopLevel(json, "owner_steam_id")),
+                owner_name = PcStr(PcTopLevel(json, "owner_name")),
+                locale = PcStr(PcTopLevel(json, "locale")) ?? "en",
+                is_public = PcBool(PcTopLevel(json, "public")),
+                count = PcInt(PcTopLevel(json, "count")),
+                prints = ParsePcPrints(prints, PcStr(PcTopLevel(json, "locale")) ?? "en"),
+            };
+            return c;
+        }
+
+        /// <summary>The machine-readable reason of a failed Player Cards call:
+        /// the body's `error` (a 4xx detail object), the detail string itself
+        /// ("session_required"), "session_required" for any 401, the transport
+        /// sentinels ("no-consent", "outdated"), "http" for another status, or
+        /// "transport" when no status arrived (timeout, no connection) — the
+        /// one case where a persisted open intent must stay for recovery.</summary>
+        public static string PcErrorCode(string resp)
+        {
+            if (string.IsNullOrEmpty(resp)) return "transport";
+            if (resp == "no-consent" || resp == "outdated") return resp;
+            if (resp.StartsWith("HTTP 401", StringComparison.Ordinal)) return "session_required";
+            if (!resp.StartsWith("HTTP ", StringComparison.Ordinal)) return "transport";
+            int b = resp.IndexOf('{');
+            if (b < 0) return "http";
+            string body = resp.Substring(b);
+            string detail = PcTopLevel(body, "detail");
+            if (detail == null) return "http";
+            if (detail.StartsWith("{", StringComparison.Ordinal))
+            {
+                string e = PcTopLevel(detail, "error");
+                return e != null ? (PcStr(e) ?? "http") : "http";
+            }
+            return "http";   // a plain-string detail (FastAPI's default) is not a named code (c4)
+        }
+
+        /// <summary>HTTP status of a failed call's "HTTP <code>: ..." line, 0 when none.</summary>
+        public static int PcHttpCode(string resp)
+        {
+            if (string.IsNullOrEmpty(resp) || !resp.StartsWith("HTTP ", StringComparison.Ordinal)) return 0;
+            int e = 5; while (e < resp.Length && char.IsDigit(resp[e])) e++;
+            int v; return int.TryParse(resp.Substring(5, e - 5), out v) ? v : 0;
+        }
+
+        /// <summary>An integer field of a failed call's detail object (e.g. the
+        /// new `price` on price_changed, `cap` on daily_cap); -1 when absent.</summary>
+        public static int PcErrorInt(string resp, string key)
+        {
+            if (string.IsNullOrEmpty(resp)) return -1;
+            int b = resp.IndexOf('{');
+            if (b < 0) return -1;
+            string detail = PcTopLevel(resp.Substring(b), "detail");
+            if (detail == null || !detail.StartsWith("{", StringComparison.Ordinal)) return -1;
+            string v = PcTopLevel(detail, key);
+            return v == null || v == "null" ? -1 : PcInt(v);
+        }
+        /// <summary>A string field of a failed call's detail object (e.g. the
+        /// committed `status` of a rejection); null when absent.</summary>
+        public static string PcErrorStr(string resp, string key)
+        {
+            if (string.IsNullOrEmpty(resp)) return null;
+            int b = resp.IndexOf('{');
+            if (b < 0) return null;
+            string detail = PcTopLevel(resp.Substring(b), "detail");
+            if (detail == null || !detail.StartsWith("{", StringComparison.Ordinal)) return null;
+            string v = PcTopLevel(detail, key);
+            return v == null || v == "null" ? null : PcStr(v);
+        }
+        // ── end Player Cards ─────────────────────────────────────────────────
 
         /// <summary>July 22 item 8: opt-IN "show my Discord on the leaderboard"
         /// toggle. HMAC over "show_discord:{steam_id}:{1|0}".</summary>
@@ -6698,12 +7503,12 @@ namespace CompetitiveRounds
         // the bottom of the board off. The tab already pages locally at 100/page.
         public static void FetchLeaderboard(int limit = 500, int minMatches = 1)
         {
-            IsLoading = true;
+            _loadingUntil = Time.realtimeSinceStartup + LOADING_BUDGET;
             Plugin.Instance.StartCoroutine(GetRequest(
                 $"{baseUrl}/api/v1/leaderboard?limit={limit}&min_matches={minMatches}{InactiveQuery()}",
                 (success, response) =>
                 {
-                    IsLoading = false;
+                    _loadingUntil = -1f;
                     if (success)
                     {
                         try
@@ -6829,6 +7634,8 @@ namespace CompetitiveRounds
                                 // server has always sent this, the client just
                                 // never read it.
                                 e.completed_at = ExtractJsonString(parts[i], "completed_at");
+                                // Room rules (Sept 10): the record follows series_id in the same chunk.
+                                ReadHistoryRules(parts[i], out e.has_rules, out e.rules_ff, out e.rules_sc, out e.rules_xp);
                                 // Parse the bets array. Server inlines a 'bets' list into each series — each entry has
                                 // bettor_name / amount / payout / bet_on_name / won. We isolate this series's bets chunk
                                 // (from "bets" up to the next "series_id" boundary) so we don't accidentally pull bets
@@ -6905,12 +7712,24 @@ namespace CompetitiveRounds
             if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
             if (!force && IsLoading) return; // Don't stack requests
 
-            IsLoading = true;
+            // The answer arrives seconds later, and in that window the player
+            // can switch accounts or withdraw consent. Both edges advance the
+            // epoch BEFORE they clear anything, so an answer carrying the old
+            // epoch is recognisable: it used to repopulate the stats that edge
+            // had just cleared, and then publish that account's cosmetics into
+            // the Photon room under the current one.
+            int epoch = IdentityEpoch;
+            _loadingUntil = Time.realtimeSinceStartup + LOADING_BUDGET;
             Plugin.Instance.StartCoroutine(GetRequest(
                 $"{baseUrl}/api/v1/players/{steamId}",
                 (success, response) =>
                 {
-                    IsLoading = false;
+                    _loadingUntil = -1f;
+                    if (epoch != IdentityEpoch || !Plugin.DataConsentGranted)
+                    {
+                        Plugin.Log.LogInfo("[STATS] answer dropped: identity or consent changed while it was in flight");
+                        return;
+                    }
                     if (success)
                     {
                         try
@@ -8671,7 +9490,7 @@ namespace CompetitiveRounds
 
         public static void FetchCardStats(int limit = 30, string steamId = null, string sortBy = "times_picked", string isRanked = null)
         {
-            IsLoading = true;
+            _loadingUntil = Time.realtimeSinceStartup + LOADING_BUDGET;
             string url = $"{baseUrl}/api/v1/cards?limit={limit}&sort_by={sortBy}&min_picks=1";
             if (!string.IsNullOrEmpty(steamId) && steamId != "unknown")
                 url += $"&steam_id={steamId}";
@@ -8682,7 +9501,7 @@ namespace CompetitiveRounds
                 url,
                 (success, response) =>
                 {
-                    IsLoading = false;
+                    _loadingUntil = -1f;
                     if (success)
                     {
                         try
@@ -9181,6 +10000,7 @@ namespace CompetitiveRounds
             entry.cards_display = ExtractCardNames(chunk);
             entry.opp_cards_display = ExtractCardNames(chunk, "opponent_cards_picked");
             entry.series_id = ExtractJsonString(chunk, "series_id");
+            ReadHistoryRules(chunk, out entry.has_rules, out entry.rules_ff, out entry.rules_sc, out entry.rules_xp);   // room rules (Sept 10)
             entry.session_uuid = ExtractJsonString(chunk, "session_uuid");   // Sept 6 item c: JSON null reads as ""
             entry.sitting_head = chunk.Contains("\"sitting_head\":true") || chunk.Contains("\"sitting_head\": true");   // Sept 8 item 5: absent (old api) reads false
             entry.series_score = ExtractJsonString(chunk, "series_score");
@@ -9433,6 +10253,93 @@ namespace CompetitiveRounds
         public static string ExtractJsonStringPublic(string json, string key) => ExtractJsonString(json, key);
         public static int ExtractJsonIntPublic(string json, string key) => ExtractJsonInt(json, key);
         public static bool ExtractJsonBoolPublic(string json, string key) => ExtractJsonBool(json, key);
+
+        /// <summary>Room rules: the provenance ("lobby" | "queue") inside the
+        /// nested <c>rules</c> object of a ready / resolve payload. Null when the
+        /// payload carries no such object (an older server) or it is null. The
+        /// key search includes the closing quote, so <c>rules_prop</c> does not
+        /// match, and the value must open with a brace.</summary>
+        private static string ExtractRulesSrc(string json)
+        {
+            string o = ExtractNestedObject(json, "rules");
+            return o == null ? null : ExtractJsonString(o, "src");
+        }
+
+        /// <summary>Room rules: the nested object at <c>"key": {...}</c> as a
+        /// string slice, or null when the key is absent or its value is null /
+        /// a scalar / an array. A KEY, not a value: the match must be preceded
+        /// by '{' or ',' (whitespace skipped) and followed by ':' — an
+        /// opponent literally named "rules" is a value and never matches
+        /// (#156). Brace matching is string-aware.</summary>
+        internal static string ExtractNestedObject(string json, string key)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(json) || string.IsNullOrEmpty(key)) return null;
+                string needle = "\"" + key + "\"";
+                int from = 0;
+                while (true)
+                {
+                    int i = json.IndexOf(needle, from, StringComparison.Ordinal);
+                    if (i < 0) return null;
+                    from = i + needle.Length;
+                    int b = i - 1;
+                    while (b >= 0 && (json[b] == ' ' || json[b] == '\n' || json[b] == '\r' || json[b] == '\t')) b--;
+                    if (b >= 0 && json[b] != '{' && json[b] != ',') continue;   // a value, keep looking
+                    int a = i + needle.Length;
+                    while (a < json.Length && (json[a] == ' ' || json[a] == '\n' || json[a] == '\r' || json[a] == '\t')) a++;
+                    if (a >= json.Length || json[a] != ':') continue;
+                    int o = a + 1;
+                    while (o < json.Length && (json[o] == ' ' || json[o] == '\n' || json[o] == '\r' || json[o] == '\t')) o++;
+                    if (o >= json.Length || json[o] != '{') return null;      // null / scalar / array value
+                    int e = FindMatchingBraceStringAware(json, o);
+                    if (e <= o) return null;
+                    return json.Substring(o, e - o + 1);
+                }
+            }
+            catch { return null; }
+        }
+
+        /// <summary>Room rules: a history row's nested <c>rules</c> object
+        /// ({ff, sc[, xp]}) into the DTO's four fields. has=false when the row
+        /// carries none (a series born before the record, a casual game, an
+        /// older server): the row then says nothing rather than something
+        /// false. Absent keys read as the defaults.</summary>
+        internal static void ReadHistoryRules(string json, out bool has, out bool ff, out bool sc, out bool xp)
+        {
+            has = false; ff = true; sc = false; xp = false;
+            string o = ExtractNestedObject(json, "rules");
+            if (o == null) return;
+            has = true;
+            ff = !(o.Contains("\"ff\":false") || o.Contains("\"ff\": false"));
+            sc = o.Contains("\"sc\":true") || o.Contains("\"sc\": true");
+            xp = o.Contains("\"xp\":true") || o.Contains("\"xp\": true");
+        }
+
+        /// <summary>The FFA lobby settings block a history row carries — ONE
+        /// reader for the profile-card FFA rows and the Home-tab recent line
+        /// (the FFA recent list keeps its own inline parse of the same block).
+        /// Null when the row has none (a pre-config match, an older server).</summary>
+        public class FfaSettingsInfo
+        {
+            public int score_target, card_cap, initial_picks, card_candidates;
+            public bool same_card_rule, sudden_death;
+        }
+        internal static FfaSettingsInfo ReadFfaSettings(string json)
+        {
+            string so = ExtractNestedObject(json, "settings");
+            if (so == null) return null;
+            var s = new FfaSettingsInfo
+            {
+                score_target = ExtractJsonInt(so, "score_target"),
+                card_cap = ExtractJsonInt(so, "card_cap"),
+                initial_picks = ExtractJsonInt(so, "initial_picks"),
+                card_candidates = ExtractJsonInt(so, "card_candidates"),
+                same_card_rule = ExtractJsonBool(so, "same_card_rule"),
+                sudden_death = ExtractJsonBool(so, "sudden_death"),
+            };
+            return s.score_target > 0 ? s : null;
+        }
 
         /// <summary>Reads a flat array of strings ("xp_bonuses":["a","b"]) into a list.
         /// Quote-aware, so a label containing a comma can't split into two entries —
@@ -10834,7 +11741,7 @@ namespace CompetitiveRounds
                                 // the poll data nulled next (r3 §1.2 MEDIUM).
                                 RetainIssuedPair(room, response);
                                 LastPollData = null;
-                                Plugin.SetPendingRoom(room, region);
+                                Plugin.SetPendingRoom(room, region, ExtractJsonString(response, "rules_prop"), ExtractRulesSrc(response));
                                 Plugin.Log.LogInfo($"[QUEUE] Both ready! Joining room: {room} (region: {region ?? "auto"}) series={ActiveRankedSeriesId}");
                                 CompetitiveUI.ShowNotification("Both ready! Joining match...", Color.green, 5f);
                                 // Refresh the Live Ranked Series list immediately so spectators
@@ -10983,7 +11890,7 @@ namespace CompetitiveRounds
                             // poll data nulled next (r3 §1.2 MEDIUM).
                             RetainIssuedPair(room, response);
                             LastPollData = null;
-                            Plugin.SetPendingRoom(room, region);
+                            Plugin.SetPendingRoom(room, region, ExtractJsonString(response, "rules_prop"), ExtractRulesSrc(response));
                             Plugin.Log.LogInfo($"[QUEUE] Both ready! Joining room: {room} (region: {region ?? "auto"}) series={ActiveRankedSeriesId ?? "(none)"}");
                             CompetitiveUI.ShowNotification("Both ready! Joining match...", Color.green, 5f);
                             NativeUI.MarkDirty();
@@ -12194,6 +13101,8 @@ namespace CompetitiveRounds
             public List<TeamQueueMember> opponents = new List<TeamQueueMember>();
             public string room_name;
             public string room_region;
+            public string rules_prop;      // room rules (§4.6): the issued "ff=1;sc=0" string
+            public string rules_src;       // "lobby" | "queue"
             public int match_age_seconds;
             public bool my_ready;          // the polling player's own ready flag
         }
@@ -12343,6 +13252,7 @@ namespace CompetitiveRounds
                         CurrentTeamQueueType = qt;
                         IsTeamQueuePolling = true;
                         teamQueuePollTimer = 0f;
+                        RegionPingSweep.NoteJoinQueue();   // Sept 10 WP-B: fresh map for the poll header
                         Plugin.Log.LogInfo($"[TEAM-QUEUE] Joined 2v2 {qt} queue");
                         string msg = qt == "manual" ? "Searching for custom 2v2 lobby..." : "Searching for 2v2 match...";
                         CompetitiveUI.ShowNotification(msg, new Color(0.4f, 0.8f, 1f));
@@ -12496,15 +13406,24 @@ namespace CompetitiveRounds
             if (teamQueuePollTimer < TEAM_QUEUE_POLL_INTERVAL) return;
             teamQueuePollTimer = 0f;
             int gen = teamGen;
+            // Sept 10 WP-B: the seat's own ping map rides once per sweep per
+            // lifecycle (ack-keyed; see RegionPingSweep.PollHeaders) so the
+            // room's region is picked from every member's map, not the mode of
+            // homes. The server stores it before any queue-row lock.
+            string rpFamily = $"team#{gen}", rpPings, rpGen;
+            int rpRev = RegionPingSweep.PollHeaders(rpFamily, out rpPings, out rpGen);
             Plugin.Instance.StartCoroutine(GetRequest(
                 $"{baseUrl}/api/v1/team/queue/poll/{steamId}",
                 (success, response) =>
                 {
+                    if (success && rpRev >= 0) RegionPingSweep.NotePollHeadersAcked(rpFamily, rpRev);
                     // gen check: see UpdateQueuePoll (Codex verify finding 4).
                     if (!success || !IsTeamQueuePolling || gen != teamGen) return;
                     try { ParseTeamQueuePoll(response); }
                     catch (Exception ex) { Plugin.Log.LogError($"[TEAM-QUEUE] poll parse: {ex.Message}"); }
-                }
+                },
+                extraHeaderName: rpPings != null ? "X-Region-Pings" : null, extraHeaderValue: rpPings,
+                extraHeader2Name: rpGen != null ? "X-Region-Pings-Gen" : null, extraHeader2Value: rpGen
             ));
         }
 
@@ -12620,6 +13539,8 @@ namespace CompetitiveRounds
                 team_assigned = ExtractJsonInt(response, "team_assigned"),
                 room_name = ExtractJsonString(response, "room_name"),
                 room_region = ExtractJsonString(response, "room_region"),
+                rules_prop = ExtractJsonString(response, "rules_prop"),
+                rules_src = ExtractRulesSrc(response),
                 match_age_seconds = ExtractJsonInt(response, "match_age_seconds"),
                 my_ready = ExtractJsonBool(response, "my_ready"),
             };
@@ -12686,7 +13607,7 @@ namespace CompetitiveRounds
                     try { PlayerColorCosmetic.PublishLocalProps(); } catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] pre-join pcolor publish: {ex.Message}"); }
                     try { TrailCosmetic.PublishLocalProps(); } catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] pre-join trail publish: {ex.Message}"); }
 
-                    Plugin.SetPendingRoom(data.room_name, data.room_region);
+                    Plugin.SetPendingRoom(data.room_name, data.room_region, data.rules_prop, data.rules_src);
                     Plugin.Log.LogInfo($"[TEAM-QUEUE] All ready! Room: {data.room_name} (region: {data.room_region ?? "auto"}) series={data.series_id} my_slot={slot}");
                     CompetitiveUI.ShowNotification("4/4 ready! Joining 2v2...", Color.green, 5f);
                     // Auto-close the F5 panel so testers don't sit on the queue screen
@@ -13330,6 +14251,8 @@ namespace CompetitiveRounds
             public bool color_decided;
             public TeamSeriesSlot t1a, t1b, t2a, t2b;
             public List<TeamSeriesMatch> matches = new List<TeamSeriesMatch>();
+            // Room rules (Sept 10): the series' frozen record (see MatchHistoryEntry).
+            public bool has_rules, rules_ff = true, rules_sc, rules_xp;
         }
 
         public static List<TeamSeriesPagedEntry> CachedTeamSeriesPaged { get; private set; } = new List<TeamSeriesPagedEntry>();
@@ -13400,6 +14323,7 @@ namespace CompetitiveRounds
                     t2b = ParseSeriesSlot(obj, "t2b"),
                     matches = ParseSeriesMatches(obj),
                 };
+                ReadHistoryRules(obj, out e.has_rules, out e.rules_ff, out e.rules_sc, out e.rules_xp);   // room rules (Sept 10)
                 list.Add(e);
             }
             return list;
@@ -13929,6 +14853,7 @@ namespace CompetitiveRounds
                     // them into the queue on a bare not_in_queue (#238).
                     _ovtConsentQueueJoined = true;
                     IsOvtQueuePolling = true; OvtQueueStatus = "searching"; UpdateOvtQueueList(force: true); NativeUI.MarkDirty();
+                    RegionPingSweep.NoteJoinQueue();   // Sept 10 WP-B: fresh map for the poll header
                 }
                 else Plugin.Log.LogWarning($"[1v2] join failed: {resp}");
             }));
@@ -14017,8 +14942,12 @@ namespace CompetitiveRounds
             if (!force && Time.unscaledTime - _ovtLastPollAt < 2f) return;
             _ovtLastPollAt = Time.unscaledTime;
             int gen = ovtGen;
+            // Sept 10 WP-B: own ping map, once per sweep per lifecycle (see the 2v2 poll).
+            string rpFamily = $"ovt#{gen}", rpPings, rpGen;
+            int rpRev = RegionPingSweep.PollHeaders(rpFamily, out rpPings, out rpGen);
             Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/ovt/queue/poll/{sid}", (ok, resp) =>
             {
+                if (ok && rpRev >= 0) RegionPingSweep.NotePollHeadersAcked(rpFamily, rpRev);
                 if (!ok || string.IsNullOrEmpty(resp)) return;
                 if (!IsOvtQueuePolling) return;   // left/locked while the request was in flight
                 if (gen != ovtGen) return;        // stale lifecycle (Codex verify finding 4)
@@ -14122,7 +15051,7 @@ namespace CompetitiveRounds
                         try { PlayerColorCosmetic.PublishLocalProps(); } catch (Exception ex) { Plugin.Log.LogWarning($"[1v2] pre-join pcolor publish: {ex.Message}"); }
                         try { TrailCosmetic.PublishLocalProps(); } catch (Exception ex) { Plugin.Log.LogWarning($"[1v2] pre-join trail publish: {ex.Message}"); }
 
-                        Plugin.SetPendingRoom(room, region);
+                        Plugin.SetPendingRoom(room, region, ExtractJsonString(resp, "rules_prop"), ExtractRulesSrc(resp));
                         Plugin.Log.LogInfo($"[1v2] All ready! Room: {room} (region: {region ?? "auto"}) series={ActiveOvt1v2SeriesId} side={OvtMySide} slot={slot}");
                         CompetitiveUI.ShowNotification(OvtMySide == 1
                             ? "3/3 ready! Joining 1v2 — you are the SOLO..."
@@ -14179,7 +15108,8 @@ namespace CompetitiveRounds
                     }
                 }
                 NativeUI.MarkDirty();
-            }));
+            }, extraHeaderName: rpPings != null ? "X-Region-Pings" : null, extraHeaderValue: rpPings,
+               extraHeader2Name: rpGen != null ? "X-Region-Pings-Gen" : null, extraHeader2Value: rpGen));
         }
 
         /// <summary>GET /ovt/queue/list — who's in the 1v2 lobby, with the
@@ -14448,6 +15378,8 @@ namespace CompetitiveRounds
             public Dictionary<string, int> gold_by_steam = new Dictionary<string, int>();
             public Dictionary<string, int> xp_by_steam = new Dictionary<string, int>();
             public List<OvtRecentMatch> matches = new List<OvtRecentMatch>();
+            // Room rules (Sept 10): the series' frozen record (see MatchHistoryEntry).
+            public bool has_rules, rules_ff = true, rules_sc, rules_xp;
         }
         public static List<OvtRecentSeries> CachedOvtRecent = null;
         public static int CachedOvtRecentTotal = 0;
@@ -14627,6 +15559,8 @@ namespace CompetitiveRounds
                                 gold_by_steam = ParseSteamIntMap(head, "gold_by_steam"),
                                 xp_by_steam = ParseSteamIntMap(head, "xp_by_steam"),
                             };
+                            // Room rules (Sept 10): a series-level key (no match object carries one).
+                            ReadHistoryRules(sObj, out s.has_rules, out s.rules_ff, out s.rules_sc, out s.rules_xp);
                             // solo: {"steam_id":..,"display_name":..}
                             int soloK = head.IndexOf("\"solo\":");
                             int soloOpen = soloK >= 0 ? head.IndexOf('{', soloK) : -1;
@@ -14777,6 +15711,7 @@ namespace CompetitiveRounds
             public bool has_settings;
             public int score_target, card_cap, initial_picks, card_candidates;
             public bool same_card_rule;
+            public bool sudden_death;   // room rules (Sept 10): every setting shows
             public List<FfaRecentPlayer> players = new List<FfaRecentPlayer>();
         }
         public static List<FfaRecentMatch> CachedFfaRecent = null;
@@ -14798,6 +15733,8 @@ namespace CompetitiveRounds
             public bool won, has_rating_change;
             public float rating_change;
             public List<string> opponents = new List<string>();
+            // Room rules (Sept 10): the series' frozen record (see MatchHistoryEntry).
+            public bool has_rules, rules_ff = true, rules_sc, rules_xp;
         }
         public class PlayerOvtHistoryEntry
         {
@@ -14812,6 +15749,8 @@ namespace CompetitiveRounds
             // Aug 7. The REQUESTER's own seat, already oriented by the server, so
             // no solo/duo_a/duo_b resolution is needed here. Empty = not recorded.
             public string damage_dealt_timeline;
+            // Room rules (Sept 10): the series' frozen record incl. the solo extra pick (xp).
+            public bool has_rules, rules_ff = true, rules_sc, rules_xp;
         }
         public class PlayerFfaHistoryEntry
         {
@@ -14820,6 +15759,8 @@ namespace CompetitiveRounds
             public bool has_rating_change;
             public float rating_change;
             public List<string> participants = new List<string>();
+            // Room rules (Sept 10): the lobby settings block, null when unknown.
+            public FfaSettingsInfo ffa_settings;
         }
         public static readonly Dictionary<string, List<PlayerTeamHistoryEntry>> CachedPlayerTeamHistory
             = new Dictionary<string, List<PlayerTeamHistoryEntry>>();
@@ -15027,7 +15968,7 @@ namespace CompetitiveRounds
             Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/ffa/queue/join", body, (ok, resp) =>
             {
                 if (gen != ffaGen) { Plugin.Log.LogInfo("[FFA] stale join ack ignored (lifecycle moved on)"); return; }
-                if (ok) { IsFfaQueuePolling = true; FfaQueueStatus = "searching"; UpdateFfaQueueList(force: true); NativeUI.MarkDirty(); }
+                if (ok) { IsFfaQueuePolling = true; FfaQueueStatus = "searching"; UpdateFfaQueueList(force: true); NativeUI.MarkDirty(); RegionPingSweep.NoteJoinQueue(); }
                 else Plugin.Log.LogWarning($"[FFA] join failed: {resp}");
             }));
         }
@@ -15124,6 +16065,7 @@ namespace CompetitiveRounds
                 _ffaLeaveIntent = false;
                 IsFfaQueuePolling = true; FfaQueueStatus = "lobby";
                 Plugin.Log.LogInfo($"[FFA-LOBBY] enrolled in lobby {OpenFfaLobbyId} (recovery={wasRecovery})");
+                RegionPingSweep.NoteJoinQueue();   // Sept 10 WP-B: fresh map for the poll header
                 // Level-triggered room exclusion (impl review find 3), now
                 // competitive-only (bug #132 — a casual game may carry an open
                 // seat): if a COMPETITIVE game finished connecting while the
@@ -15223,6 +16165,7 @@ namespace CompetitiveRounds
                         OpenFfaLobbyId = intendedLobbyId;
                     _ffaAmbiguousPollUntil = Time.unscaledTime + 90f;
                     IsFfaQueuePolling = true;
+                    RegionPingSweep.NoteJoinQueue();   // Sept 10 WP-B: fresh map for the poll header
                     UpdateFfaQueuePoll(force: true);
                 }
                 else
@@ -15530,8 +16473,12 @@ namespace CompetitiveRounds
             if (!force && Time.unscaledTime - _ffaLastPollAt < 2f) return;
             _ffaLastPollAt = Time.unscaledTime;
             int gen = ffaGen;
+            // Sept 10 WP-B: own ping map, once per sweep per lifecycle (see the 2v2 poll).
+            string rpFamily = $"ffa#{gen}", rpPings, rpGen;
+            int rpRev = RegionPingSweep.PollHeaders(rpFamily, out rpPings, out rpGen);
             Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/ffa/queue/poll/{sid}", (ok, resp) =>
             {
+                if (ok && rpRev >= 0) RegionPingSweep.NotePollHeadersAcked(rpFamily, rpRev);
                 if (!ok || string.IsNullOrEmpty(resp)) return;
                 if (!IsFfaQueuePolling) return;
                 if (gen != ffaGen) return;
@@ -15948,7 +16895,8 @@ namespace CompetitiveRounds
                     }
                 }
                 NativeUI.MarkDirty();
-            }));
+            }, extraHeaderName: rpPings != null ? "X-Region-Pings" : null, extraHeaderValue: rpPings,
+               extraHeader2Name: rpGen != null ? "X-Region-Pings-Gen" : null, extraHeader2Value: rpGen));
         }
 
         // Suppression key for countdown-window ready_join re-fires (the poll
@@ -16053,6 +17001,11 @@ namespace CompetitiveRounds
             public string steam_id, display_name;
             public int rating, rating_1v1, wait_seconds, preferred_team, preferred_side;
             public bool is_host, solo_extra_pick;
+            // Room rules (Sept 10): this seat's mod cannot play the lobby's
+            // CURRENT settings (rendered "update mod"); this seat has not yet
+            // echoed the current settings generation (absent = older server = true).
+            public bool needs_update;
+            public bool settings_seen = true;
         }
         public class HostLobbyOpenEntry
         {
@@ -16082,6 +17035,24 @@ namespace CompetitiveRounds
             public List<HostLobbyMemberEntry> Members;
             public string Status = "";        // "" | "lobby" | "leaving"
             public bool Polling;              // the 2s /lobby/state heartbeat armed
+
+            // Room rules (Sept 10, migration 306): the host's lobby-wide
+            // settings as the server last sent them, their generation, and
+            // the generation this seat echoes back on its next poll. Server-
+            // true, never a local flip: the rows render these, a write folds
+            // the server's echo on its ack, and a poll answer older than the
+            // last accepted generation is ignored (monotonic per lobby).
+            public bool FriendlyFire = true, SameCards = false;
+            public bool SettingsKnown;                 // a poll carried the fields (server >= migration 306)
+            public int SettingsVersion = -1;
+            private int seenSettingsVersion;
+            private string settingsLobbyId;
+            private bool settingsInFlight; private float settingsAt = -999f;
+            private int settingsReq;   // c2 H5: the latch's owner token — only the request that set it may clear it
+            public bool SettingsInFlight => settingsInFlight && Time.realtimeSinceStartup - settingsAt < 25f;
+            /// <summary>The host's own unacked write of EITHER kind (prefs or
+            /// room-rules settings): Start no-ops and dims while true (c1 H2).</summary>
+            public bool SavingInFlight => PrefsInFlight || SettingsInFlight;
 
             // Browser (with the FfaLobbiesUnavailable degradation, recon risk 6).
             public List<HostLobbyOpenEntry> CachedLobbies;
@@ -16343,6 +17314,7 @@ namespace CompetitiveRounds
                     confirmedMember = true;
                     ambiguousUntil = -999f; handoffUntil = -999f;
                     Status = "lobby"; Polling = true; lastPollAt = -999f;
+                    RegionPingSweep.NoteJoinQueue();   // Sept 10 WP-B: fresh map for the heartbeat header
                     // The seat CONVERTED any searching row in this mode — a
                     // still-armed queue poll would now see 'lobby' forever, so
                     // the state heartbeat takes over cleanly here.
@@ -16414,6 +17386,19 @@ namespace CompetitiveRounds
                         NativeUI.MarkDirty();
                         return;
                     }
+                    // Room rules (migration 306): the lobby's CURRENT settings
+                    // need a newer mod than this one. Refused before any
+                    // mutation (NEW seats only), so there is no seat to keep
+                    // believing in — clear, explain, never retry.
+                    if (detail == "rules_unsupported")
+                    {
+                        ClearMembershipSilent();
+                        leaveIntent = false; leaveTarget = null;
+                        CompetitiveUI.ShowNotification(RulesDetailText(detail), new Color(1f, 0.7f, 0.3f), 7f);
+                        FetchLobbies(force: true);
+                        NativeUI.MarkDirty();
+                        return;
+                    }
                     if (wasRecovery && serverSpoke)
                     {
                         // The server judged our old membership: it's gone.
@@ -16431,6 +17416,7 @@ namespace CompetitiveRounds
                             OpenLobbyId = intendedLobbyId;
                         ambiguousUntil = Time.unscaledTime + 90f;
                         Polling = true; lastPollAt = -999f;
+                        RegionPingSweep.NoteJoinQueue();   // Sept 10 WP-B: fresh map for the heartbeat header
                     }
                     else
                         CompetitiveUI.ShowNotification(DetailOr(resp, I18n.Tr("Couldn't join that lobby.")), new Color(1f, 0.6f, 0.2f), 5f);
@@ -16446,6 +17432,8 @@ namespace CompetitiveRounds
                 OpenLobbyId = null;
                 IsHost = false; CanStart = false; HasPassword = false;
                 Members = null; MemberCount = 0;
+                FriendlyFire = true; SameCards = false; SettingsKnown = false;   // room rules die with the seat
+                SettingsVersion = -1; seenSettingsVersion = 0; settingsLobbyId = null; settingsInFlight = false;
                 Polling = false; confirmedMember = false;
                 ambiguousUntil = -999f; handoffUntil = -999f;
                 if (Status == "lobby") Status = "";
@@ -16466,7 +17454,12 @@ namespace CompetitiveRounds
                 // prefs write would freeze a value the host JUST changed (the
                 // ovt extra-pick race). The button renders dimmed
                 // "(saving...)" while this is true — this is its no-op half.
-                if (PrefsInFlight) return;
+                // c1 H2: the room-rules settings write is the same race with
+                // the same consequence (Start first = the OLD rules frozen,
+                // the write then refused not_in_open_lobby), so both
+                // in-flight windows gate Start — one predicate, shared with
+                // the button (SavingInFlight).
+                if (SavingInFlight) return;
                 if (actionInFlight && Time.realtimeSinceStartup - actionAt > 30f)
                     actionInFlight = false;
                 if (actionInFlight) return;
@@ -16480,7 +17473,10 @@ namespace CompetitiveRounds
                     if (!ok)
                     {
                         Plugin.Log.LogWarning($"[{label}-LOBBY] start failed: {resp}");
-                        CompetitiveUI.ShowNotification(DetailOr(resp, I18n.Tr("Couldn't start the game.")), new Color(1f, 0.6f, 0.2f), 5f);
+                        // Room rules: the two settings gates render as sentences, not tokens.
+                        string _detail = ExtractJsonString(resp ?? "", "detail");
+                        CompetitiveUI.ShowNotification(RulesDetailText(_detail)
+                            ?? DetailOr(resp, I18n.Tr("Couldn't start the game.")), new Color(1f, 0.6f, 0.2f), 5f);
                         NativeUI.MarkDirty();
                         return;
                     }
@@ -16752,13 +17748,18 @@ namespace CompetitiveRounds
                     if (Time.unscaledTime - lastPollAt < 2f) return;
                     lastPollAt = Time.unscaledTime;
                     int g = gen;
+                    // Sept 10 WP-B: own ping map, once per sweep per lifecycle (see the 2v2 poll).
+                    string rpFamily = $"{mode}-lobby#{g}", rpPings, rpGen;
+                    int rpRev = RegionPingSweep.PollHeaders(rpFamily, out rpPings, out rpGen);
                     Plugin.Instance.StartCoroutine(GetRequest(
-                        $"{baseUrl}/api/v1/{mode}/lobby/state?steam_id={UnityWebRequest.EscapeURL(sid)}", (ok, resp) =>
+                        $"{baseUrl}/api/v1/{mode}/lobby/state?steam_id={UnityWebRequest.EscapeURL(sid)}&seen_settings_version={Math.Max(0, seenSettingsVersion)}", (ok, resp) =>
                     {
+                        if (ok && rpRev >= 0) RegionPingSweep.NotePollHeadersAcked(rpFamily, rpRev);
                         if (!ok || string.IsNullOrEmpty(resp)) return;
                         if (!Polling || g != gen) return;
                         HandleState(resp);
-                    }));
+                    }, extraHeaderName: rpPings != null ? "X-Region-Pings" : null, extraHeaderValue: rpPings,
+                       extraHeader2Name: rpGen != null ? "X-Region-Pings-Gen" : null, extraHeader2Value: rpGen));
                 }
                 catch (Exception ex) { Plugin.Log.LogWarning($"[{label}-LOBBY] tick: {ex.Message}"); }
             }
@@ -16799,6 +17800,37 @@ namespace CompetitiveRounds
                     MemberCount = ExtractJsonInt(resp, "player_count");
                     int mx = ExtractJsonInt(resp, "max_players"); if (mx > 0) MaxPlayers = mx;
                     Status = "lobby";
+                    // Room rules (Sept 10): the host's settings + generation.
+                    // Absent (older server) -> not known: rows hidden, nothing
+                    // echoed. Accepted only when the generation is at/after the
+                    // last accepted one for THIS lobby, so a poll answer that
+                    // predates our own acked write never rolls it back.
+                    if (resp.IndexOf("\"settings_version\"", StringComparison.Ordinal) >= 0)
+                    {
+                        int ver = ExtractJsonInt(resp, "settings_version");
+                        if (!string.Equals(settingsLobbyId, OpenLobbyId, StringComparison.Ordinal))
+                        {
+                            settingsLobbyId = OpenLobbyId;
+                            SettingsVersion = -1; seenSettingsVersion = 0; SettingsKnown = false;
+                        }
+                        if (ver >= SettingsVersion)
+                        {
+                            bool ff = !(resp.Contains("\"friendly_fire\":false") || resp.Contains("\"friendly_fire\": false"));
+                            bool sc = resp.Contains("\"same_cards\":true") || resp.Contains("\"same_cards\": true");
+                            bool changed = SettingsKnown && ver > SettingsVersion && (ff != FriendlyFire || sc != SameCards);
+                            FriendlyFire = ff; SameCards = sc; SettingsVersion = ver; SettingsKnown = true;
+                            // Rendered by the refresh this poll marks dirty; echoed on the next poll.
+                            seenSettingsVersion = ver;
+                            if (changed && !IsHost)
+                            {
+                                string what = RoomRules.Summary(true, ff, sc);
+                                CompetitiveUI.ShowNotification(what.Length > 0
+                                    ? I18n.TrF("The host changed the lobby settings: {0}", what)
+                                    : I18n.Tr("The host reset the lobby settings to the defaults."),
+                                    new Color(0.6f, 0.9f, 1f), 5f);
+                            }
+                        }
+                    }
                     try
                     {
                         var members = new List<HostLobbyMemberEntry>();
@@ -16820,6 +17852,8 @@ namespace CompetitiveRounds
                                     preferred_side = ExtractJsonInt(obj, "preferred_side"),
                                     solo_extra_pick = ExtractJsonBool(obj, "solo_extra_pick"),
                                     is_host = ExtractJsonBool(obj, "is_host"),
+                                    needs_update = ExtractJsonBool(obj, "needs_update"),
+                                    settings_seen = !(obj.Contains("\"settings_seen\":false") || obj.Contains("\"settings_seen\": false")),
                                 });
                             }
                         }
@@ -17102,6 +18136,92 @@ namespace CompetitiveRounds
                         CompetitiveUI.ShowNotification(
                             KickRefusalText(resp) ?? DetailOr(resp, I18n.Tr("Couldn't kick that player.")),
                             new Color(1f, 0.6f, 0.2f), 5f);
+                    }
+                    NativeUI.MarkDirty();
+                }));
+            }
+
+            // ── Room rules (Sept 10, migration 306): host-only lobby settings ──
+
+            /// <summary>The settings-related refusal tokens as sentences; null
+            /// for anything else (callers fall back to the raw detail).</summary>
+            internal static string RulesDetailText(string detail)
+            {
+                switch (detail)
+                {
+                    case "rules_unsupported":
+                        return I18n.Tr("This lobby uses settings your mod version can't play - update the mod.");
+                    case "rules_need_update":
+                        return I18n.Tr("A player's mod is too old for these settings - they need to update, or turn the setting off.");
+                    case "settings_unseen":
+                        return I18n.Tr("A player hasn't received the new settings yet - try again in a moment.");
+                    case "not_in_open_lobby":
+                        return I18n.Tr("This lobby is no longer open - the setting was not changed.");
+                    default:
+                        return null;
+                }
+            }
+
+            /// <summary>Host-only write of ONE lobby setting (null = leave as
+            /// is). Signed with the actor HMAC over
+            /// 'lobby_settings:{steam}:{lobby}:{ff}:{sc}' (1 / 0 / '-' when not
+            /// sent), fenced to the lobby the seat belongs to NOW, single-
+            /// flight. The ack folds the server's echo (values + generation)
+            /// so the buttons flip on the ack, not on the next 2 s poll; a
+            /// refusal renders its token as a sentence.</summary>
+            public void SetRules(bool? friendlyFire, bool? sameCards)
+            {
+                string sid = MatchTracker.LocalSteamId;
+                if (string.IsNullOrEmpty(sid) || sid == "unknown") return;
+                if (string.IsNullOrEmpty(OpenLobbyId)) return;
+                if (!IsHost)
+                {
+                    CompetitiveUI.ShowNotification(I18n.Tr("Only the host decides this."), new Color(0.6f, 0.6f, 0.6f), 3f);
+                    return;
+                }
+                if (SettingsInFlight) return;
+                // c1 H2: a Start (or leave) already in flight is closing this
+                // lobby — a settings write sent now can only be refused
+                // not_in_open_lobby. Dropped, not queued.
+                if (actionInFlight && Time.realtimeSinceStartup - actionAt < 30f) return;
+                if (friendlyFire == null && sameCards == null) return;
+                string lobbyAtSend = OpenLobbyId;
+                string ffTok = friendlyFire == null ? "-" : (friendlyFire.Value ? "1" : "0");
+                string scTok = sameCards == null ? "-" : (sameCards.Value ? "1" : "0");
+                string sig = ComputeHmacHex($"lobby_settings:{sid}:{lobbyAtSend}:{ffTok}:{scTok}");
+                string body = $"{{\"steam_id\":\"{sid}\",\"expected_lobby_id\":\"{lobbyAtSend}\""
+                    + (friendlyFire == null ? "" : $",\"friendly_fire\":{(friendlyFire.Value ? "true" : "false")}")
+                    + (sameCards == null ? "" : $",\"same_cards\":{(sameCards.Value ? "true" : "false")}")
+                    + $",\"sig\":\"{sig}\"}}";
+                settingsInFlight = true; settingsAt = Time.realtimeSinceStartup;
+                int g = gen;
+                // c2 H5: the latch belongs to THIS request. A delayed response
+                // to an earlier lobby's write used to clear it before the
+                // generation guard below returned — releasing Start while the
+                // current lobby's own settings write was still outstanding.
+                int myReq = ++settingsReq;
+                Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/{mode}/lobby/settings", body, (ok, resp) =>
+                {
+                    if (myReq == settingsReq) settingsInFlight = false;
+                    if (g != gen || !string.Equals(lobbyAtSend, OpenLobbyId, StringComparison.Ordinal)) return;
+                    if (ok)
+                    {
+                        int ver = ExtractJsonInt(resp, "settings_version");
+                        if (ver >= SettingsVersion)
+                        {
+                            FriendlyFire = !(resp.Contains("\"friendly_fire\":false") || resp.Contains("\"friendly_fire\": false"));
+                            SameCards = resp.Contains("\"same_cards\":true") || resp.Contains("\"same_cards\": true");
+                            SettingsVersion = ver; seenSettingsVersion = ver; SettingsKnown = true;
+                            settingsLobbyId = OpenLobbyId;
+                        }
+                        Plugin.Log.LogInfo($"[{label}-LOBBY] settings ff={(FriendlyFire ? 1 : 0)} sc={(SameCards ? 1 : 0)} v{SettingsVersion}");
+                    }
+                    else
+                    {
+                        Plugin.Log.LogWarning($"[{label}-LOBBY] settings write failed: {resp}");
+                        string _detail = ExtractJsonString(resp ?? "", "detail");
+                        CompetitiveUI.ShowNotification(RulesDetailText(_detail)
+                            ?? DetailOr(resp, I18n.Tr("Couldn't change the lobby settings.")), new Color(1f, 0.6f, 0.2f), 5f);
                     }
                     NativeUI.MarkDirty();
                 }));
@@ -17821,6 +18941,7 @@ namespace CompetitiveRounds
                                     m.initial_picks = ExtractJsonInt(so, "initial_picks");
                                     m.card_candidates = ExtractJsonInt(so, "card_candidates");
                                     m.same_card_rule = ExtractJsonBool(so, "same_card_rule");
+                                    m.sudden_death = ExtractJsonBool(so, "sudden_death");
                                     m.has_settings = m.score_target > 0;
                                 }
                             }
@@ -18019,6 +19140,7 @@ namespace CompetitiveRounds
                                     completed_at = ExtractJsonString(obj, "completed_at"),
                                     opponents = ExtractStringListStringAware(obj, "opponents"),
                                 };
+                                ReadHistoryRules(obj, out entry.has_rules, out entry.rules_ff, out entry.rules_sc, out entry.rules_xp);   // room rules (Sept 10)
                                 entry.has_rating_change = TryExtractNullableJsonFloat(
                                     obj, "rating_change", out entry.rating_change);
                                 list.Add(entry);
@@ -18049,7 +19171,7 @@ namespace CompetitiveRounds
                         {
                             foreach (string obj in SliceTopLevelObjects(resp.Substring(open + 1, close - open - 1)))
                             {
-                                list.Add(new PlayerOvtHistoryEntry
+                                var oe = new PlayerOvtHistoryEntry
                                 {
                                     match_id = ExtractJsonString(obj, "match_id"),
                                     role = ExtractJsonString(obj, "role"),
@@ -18061,7 +19183,9 @@ namespace CompetitiveRounds
                                     gold_gained = ExtractJsonInt(obj, "gold_gained"),
                                     series_gold_gained = ExtractJsonInt(obj, "series_gold_gained"),
                                     damage_dealt_timeline = ExtractJsonString(obj, "damage_dealt_timeline"),
-                                });
+                                };
+                                ReadHistoryRules(obj, out oe.has_rules, out oe.rules_ff, out oe.rules_sc, out oe.rules_xp);   // room rules (Sept 10)
+                                list.Add(oe);
                             }
                         }
                         CachedPlayerOvtHistory[steamId] = list;
@@ -18100,6 +19224,7 @@ namespace CompetitiveRounds
                                     ended_at = ExtractJsonString(obj, "ended_at"),
                                     participants = ExtractStringListStringAware(obj, "participants"),
                                 };
+                                entry.ffa_settings = ReadFfaSettings(obj);   // room rules (Sept 10)
                                 entry.has_rating_change = TryExtractNullableJsonFloat(
                                     obj, "rating_change", out entry.rating_change);
                                 list.Add(entry);
@@ -19235,6 +20360,9 @@ namespace CompetitiveRounds
         private static void StampVersionHeader(UnityWebRequest req)
         {
             try { req.SetRequestHeader("X-Mod-Version", Plugin.ModVersion ?? "0.0.0"); } catch { }
+            // v22 §1.3: the mod's locale, informational only (never signed); the
+            // server folds it to a locale it serves, else English.
+            try { req.SetRequestHeader("X-Locale", string.IsNullOrEmpty(I18n.Locale) ? "en" : I18n.Locale); } catch { }
             try
             {
                 if (!string.IsNullOrEmpty(SteamAuth.SessionToken))
@@ -19379,6 +20507,15 @@ namespace CompetitiveRounds
                 // outranks in-flight fetches AND writes, own intent cleared.
                 try { MusicRatings.OnConsentRevoked(); } catch { }
                 CachedActiveSeries = null;
+                // Player Cards [v22 section 5.1]: a revoke outranks every in-flight
+                // Player Cards answer — the PC epoch advances FIRST, then the caches
+                // and every decoded face go, so no binder can paint a subject whose
+                // data may since have been deleted.
+                _pcCacheEpoch++;
+                CachedPcMe = null; CachedPcCollection = null;
+                try { PlayerCardFaces.Clear(); } catch { }
+                try { PlayerCardsUI.OnIdentityChanged(); } catch { }
+                try { PortraitRender.OnIdentityChanged(); } catch { }
                 ChatClient.Disconnect();
                 // Flip ranked off — if the user is in queue, server rejects further polls (410)
                 // and the queue entry expires via the cleanup cron. No more match reports will
@@ -19535,9 +20672,13 @@ namespace CompetitiveRounds
         /// <param name="extraHeaderName">Sept 7 item 3: one optional caller-named
         /// request header (the 1v1 queue poll's X-Region-Pings), stamped only when
         /// both name and value are given. Every other caller passes nothing.</param>
+        /// <param name="extraHeader2Name">Sept 10 WP-B: a second optional pair
+        /// (the multiplayer polls' X-Region-Pings-Gen beside X-Region-Pings),
+        /// stamped under the same rule as the first.</param>
         private static IEnumerator GetRequest(string url, Action<bool, string> callback,
             bool detailedErrors = false, bool sessionAware = false,
-            string extraHeaderName = null, string extraHeaderValue = null)
+            string extraHeaderName = null, string extraHeaderValue = null,
+            string extraHeader2Name = null, string extraHeader2Value = null)
         {
             if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
             if (SensitiveTransportBlocked(url, null, callback)) yield break;
@@ -19547,6 +20688,8 @@ namespace CompetitiveRounds
                 StampVersionHeader(request);
                 if (!string.IsNullOrEmpty(extraHeaderName) && extraHeaderValue != null)
                     request.SetRequestHeader(extraHeaderName, extraHeaderValue);
+                if (!string.IsNullOrEmpty(extraHeader2Name) && extraHeader2Value != null)
+                    request.SetRequestHeader(extraHeader2Name, extraHeader2Value);
                 // Capture the token this request rides out with (same pattern
                 // as PostRequest): the compare inside HandleSessionReject
                 // guards the race where a slow 401 lands after a newer
@@ -21471,7 +22614,7 @@ namespace CompetitiveRounds
                 + $"\"actor_number\":{actorNumber},"
                 + $"\"fighter_target\":{fighterTarget},"
                 + $"\"room_capacity\":{roomCapacity},"
-                + $"\"spectator_protocol\":{SpectatorSession.PROTOCOL},"
+                + $"\"spectator_protocol\":{SpectatorSession.CAPABILITY},"
                 + $"\"phase\":\"{Escape(phase)}\","
                 + $"\"roster\":\"{Escape(rosterCsv ?? "")}\""
                 + "}";
@@ -21739,7 +22882,11 @@ namespace CompetitiveRounds
             // callback stale — it then releases without beginning a session.
             // Consulted ONLY for broadcast-ticket dispatches (see above).
             int flowGenAtSend = BroadcastMode.SharedFlowGeneration;
-            string json = $"{{\"steam_id\":\"{Escape(sid)}\",\"game_id\":\"{Escape(gameId)}\",\"client_protocol\":{SpectatorSession.PROTOCOL}}}";
+            // c2 H6: the grant advertises CAPABILITY (3 — this client honours
+            // friendly-fire OFF on the observer seat), not the Photon wire
+            // PROTOCOL (2): an FF-OFF room raises its floor to 3 and answered
+            // 426 to every current client while the writer still sent 2.
+            string json = $"{{\"steam_id\":\"{Escape(sid)}\",\"game_id\":\"{Escape(gameId)}\",\"client_protocol\":{SpectatorSession.CAPABILITY}}}";
             var grantReq = PostRequest(
                 $"{baseUrl}/api/v1/spectate/grant", json,
                 (ok, resp) =>
@@ -21804,6 +22951,11 @@ namespace CompetitiveRounds
                         return;
                     }
                     spectateLeaseId = leaseId;
+                    // Room rules (§5.1, r1 H5): the observer binds its pending
+                    // room to the rules the grant carries, exactly as a fighter
+                    // does with its ready payload; null = the defaults are
+                    // expected (an FFA room, or one born before the record).
+                    RoomRules.StagePending(ExtractJsonString(resp, "rules_prop"), "grant");
                     // Cache the fighters' display metadata for the HUD
                     // (playtest #2b): clean DB names + title + elo, keyed by
                     // the roster steam order.

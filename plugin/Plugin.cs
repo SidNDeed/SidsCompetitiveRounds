@@ -88,6 +88,8 @@ namespace CompetitiveRounds
         // that should survive a perf-master flip (map note, settings tab).
         internal static ConfigEntry<bool> ScreenShakeEnabled;      // legacy, migration source only
         internal static ConfigEntry<string> ScreenShakeStrength;
+        // Sept 10 (Player Cards): the persisted pack-open intent (PlayerCardsUI).
+        internal static ConfigEntry<string> PcOpenIntent;
         internal static ConfigEntry<bool> MapLightingEnabled;
         internal static ConfigEntry<bool> MapShadowsEnabled;
         internal static ConfigEntry<bool> AnimatedCosmetics;
@@ -162,6 +164,8 @@ namespace CompetitiveRounds
         internal static ConfigEntry<string> BroadcastTestOpenTab;        // broadcast seat only — "tab[:shopScroll]" opens the F5 overlay there
         internal static ConfigEntry<string> BroadcastTestQuit;           // broadcast seat only — any new non-empty value quits the game (Sept 6)
         internal static ConfigEntry<string> BroadcastTestGstatsSentinel; // broadcast seat only — any new value runs the cr_gstats W1-sentinel self-test once
+        internal static ConfigEntry<string> BroadcastTestPlayerCards;   // broadcast seat only — any new value seeds synthetic Player Card tiles (Sept 10)
+        internal static ConfigEntry<int> PortraitPreset;                 // Player Cards (v22 section 6): -1 = follow the selected character, 0-9 = playerFaces[n]
         internal static ConfigEntry<bool> BroadcastTestSilence;          // broadcast seat only, offline/sandbox — apply 3s of silence to a bot for indicator verification
         internal static ConfigEntry<string> BroadcastTestQuickChatWheel; // broadcast seat only — pin the quick-chat wheel open for layout screenshots
         internal static ConfigEntry<string> BroadcastTestDance;         // broadcast seat only — "wheel" | "preview:<sku>" | "play:<idx>" dance verification
@@ -276,7 +280,23 @@ namespace CompetitiveRounds
         public static string PendingRankedRoom => pendingRankedRoom;
         public static string PendingRankedRegion => pendingRankedRegion;
 
+        /// <summary>Two-argument form: a caller that carries no issued rules
+        /// (tournament dispatch, FFA lobby, an older server). Re-staging the
+        /// SAME room (the tournament region resolve) keeps whatever rules were
+        /// staged with it; a different room starts from "defaults expected".</summary>
         public static void SetPendingRoom(string roomName, string region = null)
+        {
+            bool sameRoom = roomName != null && string.Equals(roomName, pendingRankedRoom, StringComparison.Ordinal);
+            SetPendingRoom(roomName, region,
+                           sameRoom ? RoomRules.PendingProp : null,
+                           sameRoom ? RoomRules.PendingSrc : null);
+        }
+
+        /// <summary>Room rules (01-room-rules §5.1): the rules the server issued
+        /// for this room ride the pending tuple and die with it — cleared exactly
+        /// when the pending room is cleared, never earlier. A null prop means
+        /// "the defaults are expected" (see RoomRules.LatchOnJoin).</summary>
+        public static void SetPendingRoom(string roomName, string region, string rulesProp, string rulesSrc)
         {
             // §2c identity fence (Codex mod-r1 F4): the broadcast service
             // account never stages a FIGHTER room. Every auto-join dispatch
@@ -287,7 +307,8 @@ namespace CompetitiveRounds
             if (BroadcastMode.FenceBlocksFighterPath("pending-fighter-room")) return;
             pendingRankedRoom = roomName;
             pendingRankedRegion = region;
-            Log.LogInfo($"[QUEUE] Pending ranked room set: {roomName} (region: {region ?? "auto"})");
+            RoomRules.StagePending(rulesProp, rulesSrc);
+            Log.LogInfo($"[QUEUE] Pending ranked room set: {roomName} (region: {region ?? "auto"}, rules: {rulesProp ?? "default"}{(rulesSrc != null ? " src=" + rulesSrc : "")})");
         }
 
         public static void ClearPendingRoom()
@@ -295,6 +316,7 @@ namespace CompetitiveRounds
             pendingRankedRoom = null;
             pendingRankedRegion = null;
             pendingRoomLeaving = false;
+            RoomRules.ClearPending();
         }
 
         // 2v2 slot 0-3 the server-side balancer assigned to us. Set when the
@@ -508,6 +530,18 @@ namespace CompetitiveRounds
                 "Ranked", "DisabledByConsentRevoke",
                 false,
                 "Internal: ranked was auto-disabled by a data-consent revoke, not by the user"
+            );
+
+            // Sept 10 (Player Cards): a pack purchase writes an entry
+            // "kind|ref|pay|price|unix|owner" here BEFORE the request leaves and
+            // clears it after the committed answer was shown, so a lost answer is
+            // recovered instead of re-bought. One entry per owner (the Steam id
+            // that wrote it), joined by '~': another account on this PC neither
+            // recovers, clears nor overwrites it (c4/c5/c6).
+            PcOpenIntent = Config.Bind(
+                "Internal", "PlayerCardsOpenIntent",
+                "",
+                "Internal: a Player Cards pack open that has not been answered yet. Do not edit."
             );
 
             ShowNotifications = Config.Bind(
@@ -1034,6 +1068,14 @@ namespace CompetitiveRounds
             BroadcastTestQuit = Config.Bind(
                 "Broadcast", "TestQuit", "",
                 "Broadcast seat only: set to any value that differs from the value at launch (e.g. quit-<timestamp>) to quit the game — Application.Quit, then a hard exit if the process is still alive 8 s later. Clear it afterwards; the value present at launch is the baseline and never fires."
+            );
+            BroadcastTestPlayerCards = Config.Bind(
+                "Broadcast", "TestPlayerCards", "",
+                "Broadcast seat only: set to any value that differs from the previous one to fill the Collection tab's reveal strip with five synthetic Player Cards (layout screenshots on a seat whose server has no Player Cards yet). No server call, nothing persisted."
+            );
+            PortraitPreset = Config.Bind(
+                "Player Cards", "PortraitPreset", -1,
+                "Which character your card picture shows: -1 follows the character you have selected, 0-9 pins that saved preset slot (the button counts them from 1). Changing it re-renders the picture next time the Collection tab or Settings is open."
             );
             BroadcastTestGstatsSentinel = Config.Bind(
                 "Broadcast", "TestGstatsSentinel", "",
@@ -1768,9 +1810,11 @@ namespace CompetitiveRounds
                 }
                 Plugin.Log.LogInfo($"[QUEUE-JOINER] Connected! JoinOrCreate: {capturedRoom}");
                 // 2v2 rooms have a `team_` prefix (set by /team/queue/ready
-                // server-side). Bump MaxPlayers to 4 + flag the room as
-                // friendly-fire-on so a Harmony patch can read it during
-                // ProjectileCollision and let teammate shots through.
+                // server-side). Bump MaxPlayers to 4 and stamp `cr_ff`, the
+                // 2v2 ROOM MARKER (GameStateWatcher reads it for ranked
+                // detection, #65). It has never meant "friendly fire" — no
+                // ProjectileCollision patch exists; the friendly-fire rule
+                // rides `cr_rules` (RoomRules), stamped further down.
                 bool is2v2 = capturedRoom != null && capturedRoom.StartsWith("team_");
                 // 1v2: ovt_ rooms hold 3. Review CRITICAL — without this the
                 // room was created MaxPlayers=2 (the 1v1 default) and the
@@ -1788,6 +1832,19 @@ namespace CompetitiveRounds
                     { "C2", capturedRoom }
                 };
                 if (is2v2) roomProps["cr_ff"] = true;
+                // Room rules (§5.2): the creator stamps the string the server
+                // issued for this room; every joiner compares it with its own
+                // issued string (RoomRules.LatchOnJoin) and leaves on a
+                // mismatch. Not stamped when nothing was issued — tournament
+                // rooms play the defaults, an FFA room carries its settings on
+                // its own property, an older server sends none — and a joiner
+                // of such a room expects the defaults and accepts an absent
+                // property only then.
+                // Read here, inside the pending-room guard above: the tuple is
+                // still staged (it is cleared only once InRoom is confirmed),
+                // so this is the string issued for THIS pending incarnation.
+                string rulesToStamp = RoomRules.PropToStamp();
+                if (!string.IsNullOrEmpty(rulesToStamp)) roomProps[RoomRules.PropKey] = rulesToStamp;
                 // July 22 item 3: solo-extra-pick flag rides the ROOM
                 // props (design doc: room-prop carrier) — all 3 clients
                 // got it in the lock payload, so whichever creates the
@@ -1835,6 +1892,27 @@ namespace CompetitiveRounds
         private void OnJoinedRankedRoom(string roomName)
         {
             Plugin.Log.LogInfo($"[QUEUE] In ranked room: {roomName}!");
+            // Room rules (§5.2): compare the room's stamped rules with the
+            // issued expectation BEFORE the pending tuple is cleared. A
+            // mismatch is terminal for this seat: leave now (the joiner's own
+            // abort-to-menu lever), and the existing abandon / no-show paths
+            // settle the sitting. Nothing is played under rules this seat was
+            // not admitted to.
+            var rulesVerdict = RoomRules.LatchVerdict.Defaults;
+            try { rulesVerdict = RoomRules.LatchOnJoin(PhotonNetwork.CurrentRoom, "fighter"); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[ROOM-RULES] latch threw: {ex.Message}"); }
+            if (rulesVerdict == RoomRules.LatchVerdict.Mismatch)
+            {
+                try { CompetitiveUI.ShowNotificationCritical(I18n.Tr("Room settings did not match — left the room"), new Color(1f, 0.4f, 0.4f), 8f); } catch { }
+                Plugin.ClearPendingRoom();
+                joinInitiated = false;
+                state = JoinState.Idle;
+                stateTimer = 0f;
+                joinAttempts = 0;
+                try { GameStateWatcher.LeavingForRanked = false; } catch { }
+                try { NetworkConnectionHandler.instance.NetworkRestart(); } catch { }
+                return;
+            }
             Plugin.ClearPendingRoom();
             joinInitiated = false;
             state = JoinState.Idle;
@@ -2139,6 +2217,31 @@ namespace CompetitiveRounds
             if (raw.Length == 0) return;
             try { GameStateWatcher.DevGstatsSentinelTest(); }
             catch (Exception ex) { Plugin.Log.LogWarning($"[GSTATS-SENTINEL] FAIL: lever threw {ex.Message}"); }
+        }
+
+        // Sept 10: synthetic Player Card tiles (PlayerCardsUI.DevSeedTiles), same
+        // once-per-distinct-value grammar and identity gate as the sentinel lever.
+        private static string _lastTestPlayerCards;
+        private void TickTestPlayerCards()
+        {
+            if (Plugin.BroadcastTestPlayerCards == null || !BroadcastMode.IsBroadcastIdentity) return;
+            string raw = (Plugin.BroadcastTestPlayerCards.Value ?? "").Trim();
+            if (_lastTestPlayerCards == null) { _lastTestPlayerCards = raw; return; }
+            if (raw == _lastTestPlayerCards) return;
+            _lastTestPlayerCards = raw;
+            if (raw.Length == 0) return;
+            if (raw.StartsWith("portrait:", StringComparison.OrdinalIgnoreCase)) { PortraitRender.DevRun(raw.Substring(9)); return; }   // portrait renderer (v22 section 5.7)
+            if (raw.StartsWith("shot:", StringComparison.OrdinalIgnoreCase)) { PortraitRender.DevShot(raw.Substring(5)); return; }        // window capture from this seat (#622)
+            if (raw.StartsWith("ui:", StringComparison.OrdinalIgnoreCase))
+            {
+                // open the mod page on a tab so the seat can screenshot its own UI
+                string what = raw.Substring(3).Trim().ToLowerInvariant();
+                if (what == "close") { try { NativeUI.Close(); } catch { } return; }
+                NativeUI.DevOpenTab(what == "settings" ? 5 : NativeUI.TAB_COLLECTION);
+                return;
+            }
+            try { PlayerCardsUI.DevSeedTiles(raw.ToLowerInvariant()); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[PC] FAIL: tiles lever threw {ex.Message}"); }
         }
 
         // Broadcast-seat UI verification lever: "tab[:shopScroll]". Applied once
@@ -2716,6 +2819,9 @@ namespace CompetitiveRounds
              * toggle path without a click. Self-gating: one run per process,
              * and it returns immediately unless the cfg lever is on. */
             try { UIFactory.EnsureWeightSelfTest(); } catch { }
+            // [SC-SELFTEST] (room rules §6): the vanilla-mode Same Cards seams
+            // against the live game, once per process, only with its cfg lever.
+            try { VanillaCardSequence.EnsureSelfTest(); } catch { }
 
             // SCR Broadcast director + §2c identity fence (design §3a). Runs
             // from THIS persistent tick — never a coroutine host that
@@ -2739,6 +2845,7 @@ namespace CompetitiveRounds
             try { SpectatorTeardownProbe.Tick(); } catch { }
             try { EmojiSprites.Tick(); } catch { }   // bug 333 step 2: 1 Hz self-throttled; decode only at a safe menu state
             try { TickTestGstatsSentinel(); } catch { }
+            try { TickTestPlayerCards(); } catch { }
             try { TickTestSilence(); } catch { }
             try { TickTestQuickChatWheel(); } catch { }
             try { TickTestDance(); } catch { }
@@ -4042,6 +4149,8 @@ namespace CompetitiveRounds
             // room. Idempotent.
             try { H2HSummary.Invalidate(); } catch { }
             try { GameStateWatcher.ClearSessionUuid(); } catch { }   // Sept 6 item c: the id dies with the room
+            try { RoomRules.ResetLatched(); } catch { }              // room rules die with the room (§5.2)
+            try { VanillaCardSequence.OnRoomLeft(); } catch { }      // and the vanilla-mode card sequence with them (§6)
             // lag-332 W1 (impl-review r5 MEDIUM 7): a disconnect that produces no
             // OnLeftRoom must still close the room/game telemetry — first
             // statement, before any early return below. Idempotent: with no
@@ -4668,6 +4777,8 @@ namespace CompetitiveRounds
             // statement (same reason as OnDisconnected). Idempotent.
             try { H2HSummary.Invalidate(); } catch { }
             try { GameStateWatcher.ClearSessionUuid(); } catch { }   // Sept 6 item c: the id dies with the room
+            try { RoomRules.ResetLatched(); } catch { }              // room rules die with the room (§5.2)
+            try { VanillaCardSequence.OnRoomLeft(); } catch { }      // and the vanilla-mode card sequence with them (§6)
             // A teardown window is bound to the room it was opened in. Without
             // this a seat that leaves between the round call-in and the call-in
             // of new players carries the open window across the room boundary
@@ -7390,6 +7501,9 @@ namespace CompetitiveRounds
             return best;
         }
 
+        // Room rules (Sept 10): the friendly-fire GATE is DamageRulesGate
+        // (VanillaFixes.cs) reading RoomRules.FriendlyFire; this probe stays
+        // the opt-in per-hit trace it always was (cr_ff = the 2v2 marker).
         // FF-DIAG: in 2v2 rooms (cr_ff Photon room property = true), log when a teammate's
         // damage REACHES TakeDamage. If we see it: the team-filter is downstream of TakeDamage
         // (we'd patch HealthHandler.CallTakeDamage's bail-out). If we DON'T: filter is upstream

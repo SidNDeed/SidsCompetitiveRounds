@@ -731,6 +731,13 @@ class FakeDb:
             return _Res([(1,)] * n)
         if "FROM rank_role_colors" in sql:
             return _Res([])
+        # the ban core withdraws the Player Cards binder and announcements (c3 J)
+        if "UPDATE players SET pc_collection_public = false, pc_announce = false, pc_settings_revision" in sql:
+            return _Res()
+        # ...and revokes any delivery lease of the banned subject, so a face
+        # send already acquired cannot post their picture after the ban
+        if "DELETE FROM pc_delivery_leases WHERE subject_id IN" in sql:
+            return _Res()
         raise AssertionError(f"unexpected statement: {sql[:120]}")
 
 

@@ -33,23 +33,30 @@ from that room was reported and accepted", and it is published only once that
 report has committed.
 
 AND WHEN CORROBORATION CANNOT DECIDE, `min(a, b)` settles the LADDER's answer
-— the alphabet, chosen because no latency measurement reaches that rung and a
-stable coin flip is better than one that depends on which seat asked. That is written down as a
-coin flip rather than a preference, and a test below pins that it is not
-described as anything else.
+— code order, chosen because no latency measurement reaches that rung and a
+deterministic tie-break is better than one that depends on which seat asked.
+It is not a coin flip: with cold corroboration the same pair lands the same
+way every time, and because code order correlates with geography it is a
+bias (learning #597) that rung 0 exists to correct. A test below pins that the
+changelog describes the fallback as the fixed order it is.
 
 What none of this claims: that the chosen region is the BEST one for a
 cross-region pair. Steering on a stored home region was refused because an
 untimestamped best-region cache steers a player who relocated by where they
 used to be. A real measurement now exists as rung 0
 (`_pick_region_by_pings`): when BOTH seats have sent a ping map no older
-than 180 s it may replace the ladder's answer, but only with a region that
-costs NEITHER seat more than 20 ms over that seat's own measured baseline.
-That is a bound, not a best -- and whenever either map is absent, stale or
-malformed (a client without the ping sweep sends none at all), whenever the
-two maps share no region, and whenever no candidate clears that bound, the
-ladder decides the room by itself, which is why the ladder is what every
-test in this file is about. Rung 0 has its own file,
+than 180 s it may replace the ladder's answer with the region that minimises
+the pair's WORST ping, taken when it beats the ladder's worst by more than
+20 ms and lies within each seat's own bound -- the worst that seat measured
+among the candidates the ladder's active rung was choosing between, plus
+20 ms (bounded minimax since 2026-09-09; the earlier "costs neither seat more
+than 20 ms over its own baseline" test left every cross-region pair observed
+that day on one seat's home, learning #597). Whenever either map is absent, stale or malformed (a client
+without the ping sweep sends none at all), whenever the two maps share no
+region, whenever a seat measured none of the ladder's candidates or every
+shared region lies above a bound, and whenever the gain is inside the
+margin, the ladder decides the room by itself, which is why the ladder is
+what every test in this file is about. Rung 0 has its own file,
 test_queue_region_pings.py.
 """
 

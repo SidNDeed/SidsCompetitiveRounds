@@ -2,7 +2,7 @@
 Competitive ROUNDS Discord Bot
 Environment: DISCORD_TOKEN, API_BASE_URL, LEADERBOARD_CHANNEL, SERIES_LOG_CHANNEL
 """
-import os, asyncio, aiohttp, discord, json, io, threading, re
+import os, asyncio, aiohttp, discord, json, io, threading, re, time
 import random, ssl as ssl_mod
 import urllib.parse
 from typing import Literal
@@ -370,6 +370,7 @@ async def on_ready():
     if not poll_ffa_live_bets.is_running(): poll_ffa_live_bets.start()
     if not poll_lobby_bets.is_running(): poll_lobby_bets.start()
     if not poll_gambler_pings.is_running(): poll_gambler_pings.start()
+    if not poll_pc_events.is_running(): poll_pc_events.start()
     if not poll_chat_catchup.is_running(): poll_chat_catchup.start()
     if not poll_tournaments.is_running(): poll_tournaments.start()
     if not nag_pending_async_matches.is_running(): nag_pending_async_matches.start()
@@ -6460,6 +6461,12 @@ async def cmd_game(ctx, code: str):
         desc += f" · {dur // 60}:{dur % 60:02d}"
     if game.get("series_status"):
         desc += f" · series {game['series_status']}"
+    # Room rules batch: the rules (1v1/2v2/1v2) or lobby settings (FFA) the
+    # game was played under — the same record the F5 history shows.
+    _rules_line = (_ffa_settings_summary(game.get("settings")) if mode == "ffa"
+                   else _rules_summary(game.get("rules")))
+    if _rules_line:
+        desc += f"\n⚙ {_rules_line}"
     if game.get("invalidated"):
         desc += f"\n⚠ invalidated: {game.get('invalidation_reason') or 'admin'}"
     embed = discord.Embed(title=f"🎮 Game {game.get('code', norm[:12].upper())}",
@@ -6968,6 +6975,46 @@ def _series_tournament_tag(row):
         return False, ""
 
 
+def _rules_summary(rules):
+    """The non-default room rules a feed row carries, as one line. Empty when
+    every rule is the default, and empty for a row with no record: a series
+    born before rules were recorded is not 'default', it is unknown, and a
+    post says nothing rather than something false."""
+    if not isinstance(rules, dict):
+        return ""
+    parts = []
+    if rules.get("ff") is False:
+        parts.append("Friendly fire off")
+    if rules.get("sc") is True:
+        parts.append("Same cards")
+    if rules.get("xp") is True:
+        parts.append("Solo extra pick")
+    return " · ".join(parts)
+
+
+def _ffa_settings_summary(settings):
+    """An FFA game's lobby settings as one line: the values that differ from
+    the canonical configuration (the lobby panel's defaults: first to 5, 5 max
+    cards, 1 opening draw, a 5-card draw) plus the on toggles, labelled as the
+    in-game FFA panel labels them — the same rule the in-game FFA rows use.
+    Empty when the game predates the record or was played under the canonical
+    configuration."""
+    if not isinstance(settings, dict) or settings.get("score_target") is None:
+        return ""
+    parts = []
+    canon = (("score_target", "First to", 5), ("card_cap", "Max cards", 5),
+             ("initial_picks", "Opening draws", 1), ("card_candidates", "Card draw", 5))
+    for key, label, default in canon:
+        v = settings.get(key)
+        if v is not None and v != default:
+            parts.append(f"{label} {v}")
+    if settings.get("same_card_rule"):
+        parts.append("Same cards")
+    if settings.get("sudden_death"):
+        parts.append("Sudden death")
+    return " · ".join(parts)
+
+
 async def log_ffa_match_result(guild, m):
     if SERIES_LOG_CHANNEL_ID <= 0:
         return
@@ -7007,6 +7054,11 @@ async def log_ffa_match_result(guild, m):
     if t_flag and t_label:
         _desc = f"🏆 **{discord.utils.escape_markdown(t_label)}**\n{_desc}"
     embed.description = _desc
+    # Room rules batch: the lobby settings the game was played under, from
+    # the same record the F5 history shows.
+    _settings_line = _ffa_settings_summary(m.get("settings"))
+    if _settings_line:
+        embed.add_field(name="Settings", value=_settings_line, inline=False)
     # Bug 179 (Stan): carry the /game code so nobody has to open the game.
     _code = str(m.get("match_id") or "").replace("-", "")[:12].upper()
     _foot = f"{dur // 60}m{dur % 60:02d}s" if dur else ""
@@ -7389,6 +7441,11 @@ async def log_team_series_result(guild, s):
     embed.add_field(name="Losers",
                     value=f"{fmt_player(losers[0])}\n{fmt_player(losers[1])}",
                     inline=True)
+    # Room rules batch: only the non-defaults, so a vanilla series posts as
+    # it always has.
+    _rules_line = _rules_summary(s.get("rules"))
+    if _rules_line:
+        embed.add_field(name="Rules", value=_rules_line, inline=False)
     # Bug 179 (Stan): per-game /game codes in the footer.
     _codes = [c for c in (s.get("game_codes") or []) if c][:5]
     if _codes:
@@ -7491,6 +7548,11 @@ async def log_series_result(guild, s):
                     value=f"**{s['p1_rating']:.0f}** ({rc1s}) — {r1}\n{s1}", inline=True)
     embed.add_field(name=f"{rank_emoji(r2)} {s['p2_name']}" + (" 👑" if not p1_won else ""),
                     value=f"**{s['p2_rating']:.0f}** ({rc2s}) — {r2}\n{s2}", inline=True)
+    # Room rules batch: only the non-defaults, so a vanilla series posts as
+    # it always has.
+    _rules_line = _rules_summary(s.get("rules"))
+    if _rules_line:
+        embed.add_field(name="Rules", value=_rules_line, inline=False)
     # Bug 179 (Stan): the per-game /game codes, so nobody has to open the
     # game to inspect a result. Server sends them oldest-first.
     _codes = [c for c in (s.get("game_codes") or []) if c][:5]
@@ -8201,6 +8263,529 @@ async def _modcase_click(interaction, custom_id):
 # leave when the ack lands. A restart between send and ack can still duplicate
 # ONCE — the documented at-least-once trade-off.
 _channel_post_sent: dict = {}
+
+
+# ── Player Cards (Sept 10 batch, WP-F): /daily, /collection, /card + the notable-pull drain ──
+# Every read goes through the api's internal routes (X-Internal-Key rides on
+# the session); Discord identity resolves SERVER-side from players.discord_id
+# (the /link flow), so nothing here takes a steam id from a Discord user. The
+# api re-checks both parties' consent (pc_announce, the subject not opted
+# out, neither deleted, the print not discarded) when it hands events out.
+
+_PC_RARITY_EMOJI = {"legendary": "🟨", "epic": "🟪", "rare": "🟦", "uncommon": "🟩", "common": "⬜"}
+_PC_RARITY_COLOR = {"legendary": 0xF1C40F, "epic": 0x9B59B6, "rare": 0x3498DB, "uncommon": 0x2ECC71, "common": 0x95A5A6}
+_PC_LINK_HINT = "Link your Discord in-game first: F5 → Home tab → Get Link Code, then `/link YOUR_CODE` here."
+
+
+async def _pc_api(method, path, params=None, timeout=8.0, payload=None):
+    """(status, body) for an internal Player Cards route. body is the JSON
+    whenever the api answered with one — its refusals are objects, e.g.
+    {"detail": {"error": "already_claimed", "next_reset_utc": ...}} — else
+    the text; (0, None) when the api did not answer at all. Unlike api_get a
+    non-200 keeps its status: the bot's answers differ by it."""
+    try:
+        fn = {"GET": http_session.get, "POST": http_session.post, "DELETE": http_session.delete}[method]
+        async with fn(f"{API_BASE_URL}/api/v1{path}", params=params, json=payload,
+                      timeout=aiohttp.ClientTimeout(total=timeout)) as r:
+            try:
+                body = await r.json(content_type=None)
+            except Exception:
+                body = await r.text()
+            if r.status != 200:
+                print(f"API {method} {path.split('?')[0]} -> HTTP {r.status}")
+            return r.status, body
+    except Exception as e:
+        print(f"API {method} error: {e}")
+        return 0, None
+
+
+def _pc_detail(body):
+    """The api's refusal as a dict: {"detail": {...}} -> that dict; a string
+    detail -> {"error": text}; anything else -> {}."""
+    if isinstance(body, dict):
+        d = body.get("detail", body)
+        if isinstance(d, dict):
+            return d
+        if isinstance(d, str):
+            return {"error": d}
+    return {}
+
+
+def _pc_when(iso):
+    """A Discord relative timestamp for an api ISO stamp, or 'later'."""
+    try:
+        dt = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return f"<t:{int(dt.timestamp())}:R>"
+    except Exception:
+        return "later"
+
+
+def _pc_name(s):
+    return discord.utils.escape_markdown(str(s or "?"))
+
+
+def _pc_print_line(p):
+    """One binder line: rarity, name, pool rank, rating, flags."""
+    flags = ("✨ foil" if p.get("foil") else "") + (" ✒️ signed" if p.get("signed") else "")
+    rating = p.get("rating")
+    rt = f" · {int(rating)}" if isinstance(rating, (int, float)) else ""
+    return (f"{_PC_RARITY_EMOJI.get(p.get('rarity'), '')} **{_pc_name(p.get('subject_name'))}**"
+            f" #{p.get('pool_rank', '?')}{rt} {flags}").rstrip()
+
+
+def _pc_not_linked(ctx, target):
+    if target == ctx.author:
+        return f"❌ Not linked. {_PC_LINK_HINT}"
+    return f"❌ {discord.utils.escape_markdown(target.display_name)} is not linked."
+
+
+# ── Player Cards faces on Discord (design v22 §6, r18 H1/H2) ──────────────
+# The bot's ONLY picture source is the api's internal byte routes; it never
+# fetches a Steam or Discord avatar and sets no thumbnail or author icon.
+# Every portrait-bearing send runs under ONE delivery lease: acquire (under
+# the subject's identity lock, api-side) → fetch the bytes → re-validate the
+# lease right before the send → send under deadline = until − reserve →
+# release. A lease that is gone (deletion, ban, discard, expiry) drops the
+# bytes: the text still goes out, the picture does not.
+_PC_FACE_MAX_BYTES = 4 * 1024 * 1024
+_PC_LEASE_RESERVE_S = 3.0
+_pc_back_bytes_cache = {"bytes": None, "at": 0.0}
+
+
+def _pc_locale_of(ctx):
+    """The interaction's locale as the api's primary subtag (en, uk, sv…)."""
+    loc = ""
+    try:
+        if getattr(ctx, "interaction", None) is not None and ctx.interaction.locale:
+            loc = str(ctx.interaction.locale)
+    except Exception:
+        loc = ""
+    if not loc:
+        try:
+            loc = str(ctx.guild.preferred_locale) if ctx.guild else ""
+        except Exception:
+            loc = ""
+    primary = (loc or "en").replace("_", "-").split("-")[0].lower()[:3]
+    return primary or "en"
+
+
+async def _pc_api_bytes(path, params=None, timeout=10.0):
+    """(status, bytes|None) for an internal byte route: an exact Content-Length
+    is required, the body is refused over _PC_FACE_MAX_BYTES or when shorter
+    or longer than declared."""
+    try:
+        async with http_session.get(f"{API_BASE_URL}/api/v1{path}", params=params,
+                                    timeout=aiohttp.ClientTimeout(total=timeout)) as r:
+            if r.status != 200:
+                print(f"API GET {path.split('?')[0]} -> HTTP {r.status}")
+                return r.status, None
+            cl = r.headers.get("Content-Length")
+            if cl is None:
+                return r.status, None
+            declared = int(cl)
+            if declared <= 0 or declared > _PC_FACE_MAX_BYTES:
+                return r.status, None
+            # `read(n)` answers UP TO n bytes. A body that arrives in more
+            # than one buffer — which is every face over a few kilobytes —
+            # returns its first chunk, and the exact-length check then throws
+            # away a perfectly good picture. readexactly() consumes the whole
+            # declared body or raises; the single byte after it is what proves
+            # the body is not LONGER than declared.
+            try:
+                data = await r.content.readexactly(declared)
+            except asyncio.IncompleteReadError:
+                return r.status, None
+            if await r.content.read(1):
+                return r.status, None
+            return r.status, data
+    except Exception as e:
+        print(f"API bytes error: {e}")
+        return 0, None
+
+
+async def _pc_back_bytes():
+    """The canonical back from the api, cached for an hour."""
+    now = time.monotonic()
+    if _pc_back_bytes_cache["bytes"] is None or now - _pc_back_bytes_cache["at"] > 3600:
+        st, data = await _pc_api_bytes("/internal/pc/face/back")
+        if st == 200 and data:
+            _pc_back_bytes_cache["bytes"], _pc_back_bytes_cache["at"] = data, now
+    return _pc_back_bytes_cache["bytes"]
+
+
+async def _pc_lease(subject_ref, print_id=None, event_ids=None):
+    """(lease_id, deadline, transient) — deadline on the monotonic clock,
+    `until` minus the reserve — or (None, None, transient) when no lease could
+    be taken: the send then carries no picture.
+
+    `transient` distinguishes "not right now" from "not ever". 409 means the
+    subject's identity lock is held by a writer for a moment; 0 means the api
+    did not answer at all; a 5xx is the api's own problem. A caller that can
+    come back later should. 404 and 422 are answers about the subject or the
+    pair itself and do not improve with waiting."""
+    if not subject_ref:
+        return None, None, False
+    payload = {"subject_ref": str(subject_ref)}
+    if print_id:
+        payload["print_id"] = str(print_id)
+    if event_ids:
+        payload["event_ids"] = [int(i) for i in event_ids]
+    st, body = await _pc_api("POST", "/internal/pc/lease", payload=payload)
+    if st != 200 or not isinstance(body, dict) or not body.get("lease_id"):
+        return None, None, (st == 409 or st == 0 or st >= 500)
+    try:
+        until = datetime.fromisoformat(str(body.get("until")).replace("Z", "+00:00"))
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        left = (until - datetime.now(timezone.utc)).total_seconds()
+    except Exception:
+        left = 30.0
+    return str(body["lease_id"]), time.monotonic() + (left - _PC_LEASE_RESERVE_S), False
+
+
+def _pc_lease_left(deadline):
+    """Seconds left on a lease's monotonic deadline; <= 0 means it is gone.
+
+    There is no floor. Flooring an expired deadline to a second starts a send
+    the lease no longer covers, which is how a picture arrives after the write
+    that withdrew it."""
+    return -1.0 if deadline is None else deadline - time.monotonic()
+
+
+async def _pc_best_face(body, locale):
+    """(face_bytes, lease) for a binder answer's best print, or (None, lease).
+
+    The lease names THE PLAYER IN THE PICTURE and that print. The binder's
+    owner is not the subject — a binder is mostly other people's cards — and
+    the lease carries the subject's permission, their ban state and their
+    portrait, none of which the owner can give for them. The api refuses the
+    pair outright when the print does not depict the subject named."""
+    best = body.get("best") or []
+    if not (best and best[0].get("print_id") and best[0].get("subject_player_id")):
+        return None, (None, None)
+    lease = await _pc_lease(best[0]["subject_player_id"], print_id=best[0]["print_id"])
+    if not lease[0]:
+        return None, lease
+    st, face = await _pc_api_bytes(f"/internal/pc/face/print/{best[0]['print_id']}/{locale}",
+                                   params={"size": "card"})
+    if st != 200:
+        await _pc_lease_release(lease[0])
+        return None, (None, None)
+    return face, lease
+
+
+async def _pc_lease_live(lease_id):
+    st, _ = await _pc_api("GET", f"/internal/pc/lease/{lease_id}", timeout=4.0)
+    return st == 200
+
+
+async def _pc_lease_release(lease_id):
+    if lease_id:
+        await _pc_api("DELETE", f"/internal/pc/lease/{lease_id}", timeout=4.0)
+
+
+async def _pc_send_face(sender, content=None, embed=None, face=None, lease=(None, None), filename="card.png"):
+    """ONE send under the lease: the lease is re-validated immediately before
+    the send and the bytes are dropped when it is gone; the send runs under
+    the lease's deadline; the lease is released afterwards, sent or not.
+    Without a lease (or without bytes) the text goes out alone."""
+    # `lease` is `_pc_lease`'s answer: (lease_id, deadline) and, since the
+    # drain needed to know WHY a lease was refused, a third field this does
+    # not use. Sliced rather than unpacked, so one caller's shape is not the
+    # other's contract.
+    lease_id, deadline = (tuple(lease) + (None, None))[:2] if lease else (None, None)
+    kwargs = {}
+    if content:
+        kwargs["content"] = content
+    if embed is not None:
+        kwargs["embed"] = embed
+    attach = face is not None and lease_id is not None
+    # The picture may only go out INSIDE the lease. Checked before the
+    # revalidation and again after it, because the revalidation is itself a
+    # network call and can spend the rest of the budget.
+    if attach and _pc_lease_left(deadline) <= 0:
+        attach = False
+    if attach and not await _pc_lease_live(lease_id):
+        attach = False
+    if attach and _pc_lease_left(deadline) <= 0:
+        attach = False
+    if attach:
+        if embed is not None:
+            embed.set_image(url=f"attachment://{filename}")
+        kwargs["file"] = discord.File(io.BytesIO(face), filename=filename)
+    try:
+        budget = _pc_lease_left(deadline) if attach else 45.0
+        await asyncio.wait_for(sender(**kwargs), timeout=budget)
+    finally:
+        await _pc_lease_release(lease_id)
+
+
+@bot.hybrid_command(name="daily", description="Claim today's free Player Cards pack (it opens in the mod)")
+async def cmd_pc_daily(ctx):
+    """One claim per UTC day, decided by the api's clock (the same claim the
+    mod's own Daily button makes); the pack itself opens in-game."""
+    await _maybe_defer(ctx)
+    status, body = await _pc_api("POST", "/internal/pc/daily", params={"discord_id": str(ctx.author.id)})
+    if status == 200 and isinstance(body, dict):
+        text_line = (f"🎴 Today's pack is yours — open it in-game (F5 → Collection). "
+                     f"Next one {_pc_when(body.get('next_reset_utc'))}.")
+        back = await _pc_back_bytes()   # the canonical back rides along (§6); no lease: it is nobody's picture
+        if back:
+            await ctx.send(content=text_line, file=discord.File(io.BytesIO(back), filename="pack.png"))
+        else:
+            await ctx.send(text_line)
+        return
+    d = _pc_detail(body)
+    if status == 404 and d.get("error") == "not_linked":
+        await ctx.send(_pc_not_linked(ctx, ctx.author)); return
+    if status == 409 and d.get("error") == "already_claimed":
+        await ctx.send(f"🎴 Already claimed today — the next pack unlocks {_pc_when(d.get('next_reset_utc'))}.")
+        return
+    await ctx.send("❌ Couldn't claim today's pack right now — try again in a moment.")
+
+
+@bot.hybrid_command(name="collection", description="A Player Cards binder: counts by rarity and the best prints")
+@app_commands.describe(member="Whose binder (defaults to yours)")
+async def cmd_pc_collection(ctx, member: discord.Member = None):
+    """The owner's binder summary. Someone else's only while they keep it
+    public (the api answers 403 private otherwise); yours always."""
+    target = member or ctx.author
+    await _maybe_defer(ctx)
+    locale = _pc_locale_of(ctx)
+    # The binder and its best print's PICTURE are read together, and re-read
+    # ONCE when the picture turns out to be gone. A discard between the list
+    # and the byte GET used to leave the reply naming a print that no longer
+    # exists, with the generic back where its face should be — the list is the
+    # stale thing there, not just the image.
+    face, lease = None, (None, None)
+    for attempt in (0, 1):
+        status, body = await _pc_api("GET", "/internal/pc/collection",
+                                     params={"discord_id": str(target.id), "viewer_discord_id": str(ctx.author.id),
+                                             "locale": locale})
+        if status == 404:
+            await ctx.send(_pc_not_linked(ctx, target)); return
+        if status == 403 and _pc_detail(body).get("error") == "private":   # by token, not status alone (c3 G)
+            await ctx.send(f"🔒 {discord.utils.escape_markdown(target.display_name)}'s binder is private."); return
+        if status != 200 or not isinstance(body, dict):
+            await ctx.send("❌ Couldn't fetch that binder right now."); return
+        face, lease = await _pc_best_face(body, locale)
+        if face is not None or attempt:
+            break
+        if not ((body.get("best") or [{}])[0].get("print_id")):
+            break                      # nothing to picture: a re-read cannot help
+    counts = body.get("by_rarity") or {}
+    embed = discord.Embed(title=f"🎴  {_pc_name(body.get('owner_name') or target.display_name)}  —  Collection",
+                          color=discord.Color.gold())
+    embed.add_field(name="📚  Prints",
+                    value=f"**{int(body.get('count') or 0)}** prints · **{int(body.get('distinct_subjects') or 0)}** players",
+                    inline=True)
+    if "shards" in body:   # the api sends the balance to its owner only (c3 G)
+        embed.add_field(name="🔹  Shards", value=f"**{int(body.get('shards') or 0)}**", inline=True)
+    embed.add_field(name="🏷️  By rarity",
+                    value="\n".join(f"{_PC_RARITY_EMOJI[r]} {r.title()}: **{int(counts.get(r, 0))}**"
+                                    for r in ("legendary", "epic", "rare", "uncommon", "common")),
+                    inline=False)
+    best = body.get("best") or []
+    if best:
+        embed.add_field(name="⭐  Best prints", value="\n".join(_pc_print_line(p) for p in best[:10])[:1024], inline=False)
+    else:
+        embed.add_field(name="⭐  Best prints", value="No prints yet — `/daily` claims today's free pack.", inline=False)
+    if face is None:
+        await _pc_lease_release(lease[0])
+        back = await _pc_back_bytes()
+        if back:
+            embed.set_image(url="attachment://pack.png")
+            await ctx.send(embed=embed, file=discord.File(io.BytesIO(back), filename="pack.png"))
+        else:
+            await ctx.send(embed=embed)
+        return
+    await _pc_send_face(ctx.send, embed=embed, face=face, lease=lease)
+
+
+@bot.hybrid_command(name="card", description="A player's own Player Card as the pool sees it right now")
+@app_commands.describe(member="Whose card (defaults to yours)")
+async def cmd_pc_card(ctx, member: discord.Member = None):
+    """The subject's card from the latest pool snapshot (pool rank, band,
+    rating, record, title) and how many prints of them are in circulation.
+    A player who opted out, or is not in the pool, has no card to show."""
+    target = member or ctx.author
+    await _maybe_defer(ctx)
+    status, body = await _pc_api("GET", "/internal/pc/card", params={"discord_id": str(target.id)})
+    d = _pc_detail(body)
+    if status == 404 and d.get("error") == "not_linked":
+        await ctx.send(_pc_not_linked(ctx, target)); return
+    if status == 404:
+        who = "You're" if target == ctx.author else f"{discord.utils.escape_markdown(target.display_name)} is"
+        await ctx.send(f"🎴 {who} not in the card pool right now (opted out, or no ranked games yet)."); return
+    if status != 200 or not isinstance(body, dict):
+        await ctx.send("❌ Couldn't fetch that card right now."); return
+    rarity = str(body.get("rarity") or "common")
+    embed = discord.Embed(title=f"{_PC_RARITY_EMOJI.get(rarity, '')}  {_pc_name(body.get('subject_name') or target.display_name)}"
+                                f"  —  {rarity.title()}",
+                          color=_PC_RARITY_COLOR.get(rarity, 0x95A5A6))
+    rating = body.get("rating")
+    rank_name = body.get("rank_name") or (get_rank_name(rating) if isinstance(rating, (int, float)) else None)
+    embed.add_field(name="🏆  Pool rank", value=f"**#{body.get('pool_rank', '?')}**", inline=True)
+    embed.add_field(name="📈  Rating",
+                    value=(f"**{int(rating)}**" + (f"  {rank_emoji(rank_name)} {rank_name}" if rank_name else ""))
+                    if isinstance(rating, (int, float)) else "—", inline=True)
+    peak = body.get("peak_rating")
+    embed.add_field(name="⛰️  Peak", value=f"**{int(peak)}**" if isinstance(peak, (int, float)) else "—", inline=True)
+    embed.add_field(name="📊  Series record",
+                    value=f"**{int(body.get('series_wins') or 0)}**W / **{int(body.get('series_losses') or 0)}**L", inline=True)
+    br = body.get("board_rank")
+    embed.add_field(name="📋  Leaderboard", value=f"**#{int(br)}**" if br is not None else "—", inline=True)
+    embed.add_field(name="🃏  Top card", value=_pc_name(body.get("top_card")) if body.get("top_card") else "—", inline=True)
+    if body.get("title"):
+        embed.add_field(name="🎖️  Title", value=_pc_name(body.get("title")), inline=False)
+    circ = body.get("in_circulation") or {}
+    embed.add_field(name="🖨️  In circulation",
+                    value=(f"**{int(circ.get('prints') or 0)}** prints held by **{int(circ.get('holders') or 0)}** players"
+                           f" · ✨ {int(circ.get('foil') or 0)} foil · ✒️ {int(circ.get('signed') or 0)} signed"),
+                    inline=False)
+    embed.set_footer(text="Pool snapshot: taken daily at 00:05 UTC")
+    # The preview face (the subject as the pool sees them now) under a lease
+    # naming the subject; the route re-applies the /card gate itself.
+    face, lease = None, (None, None)
+    if body.get("player_ref"):
+        lease = await _pc_lease(body["player_ref"])
+        if lease[0]:
+            st, face = await _pc_api_bytes(f"/internal/pc/face/preview/{body['player_ref']}/{_pc_locale_of(ctx)}")
+            if st != 200:
+                face = None
+    if face is None:
+        await _pc_lease_release(lease[0])
+        await ctx.send(embed=embed)
+        return
+    await _pc_send_face(ctx.send, embed=embed, face=face, lease=lease)
+
+
+_pc_events_sent = {}   # event id -> True once posted (a failed ack never re-posts; bounded below)
+_pc_face_tries = {}    # first event id of a print group -> ticks spent waiting for its picture
+_PC_FACE_TRIES = 3     # ~90 s at this loop's 30 s period, then the line posts without one
+
+
+def _pc_event_lines(events):
+    """One line per PRINT: a signed foil Legendary is one pull, not three
+    posts. Events without a print (none today) stand alone."""
+    groups, order = {}, []
+    for e in events:
+        # The api nests the print under "print" (c3 G): one line per print.
+        key = (e.get("print") or {}).get("print_id") or e.get("print_id") or f"event:{e['id']}"
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(e)
+    lines = []
+    for key in order:
+        group = groups[key]
+        kinds = {e.get("kind") for e in group}
+        first = group[0]
+        puller = _pc_name(first.get("puller_name"))
+        subject = _pc_name(first.get("subject_name"))
+        p = first.get("print") or {}
+        rarity = str(p.get("rarity") or "")
+        bits = []
+        if "signed" in kinds:
+            bits.append("✒️ SIGNED")
+        if "foil" in kinds:
+            bits.append("✨ foil")
+        what = f"{_PC_RARITY_EMOJI.get(rarity, '🎴')} " + " ".join(bits + [rarity.title() if rarity else "card"])
+        rank = f" (#{p['pool_rank']} in the pool)" if p.get("pool_rank") else ""
+        # The copy line states only what the EVENT carries (v22 §6/§7): the
+        # number of this card the opener already held when the slot was minted.
+        # NULL is a row that predates the column — no line at all, rather than
+        # a guess dressed up as a fact.
+        dup = first.get("dup_at_pull")
+        copy = ""
+        if isinstance(dup, int):
+            copy = "  ·  NEW to the binder" if dup == 0 else f"  ·  Duplicate · copy {dup + 1}"
+        if "self" in kinds:
+            lines.append(f"🪞 **{puller}** pulled their OWN card — a {what.strip()}{rank}!{copy}")
+        else:
+            lines.append(f"**{puller}** pulled a {what.strip()} **{subject}**{rank}!{copy}")
+        lines.append([int(e["id"]) for e in group])
+    return lines
+
+
+@tasks.loop(seconds=60)
+async def poll_pc_events():
+    """Notable pulls (Legendary, Epic, signed, foil, your own card) → the
+    leaderboard channel. Ack-after-send (#105): the api re-checks consent as
+    it hands events out, the bot posts, then acks what it posted; a bot
+    restart or a failed ack re-drives the rows, and the send memory keeps
+    the retry from posting twice. Order matters: a failed send stops the
+    batch, nothing behind it is acked."""
+    if http_session is None or not API_SECRET_KEY or not LEADERBOARD_CHANNEL_ID:
+        return
+    status, body = await _pc_api("GET", "/internal/pc/events/pending")
+    if status != 200 or not isinstance(body, dict) or not body.get("events"):
+        return
+    ch = bot.get_channel(LEADERBOARD_CHANNEL_ID)
+    if ch is None:
+        try:
+            ch = await bot.fetch_channel(LEADERBOARD_CHANNEL_ID)
+        except Exception:
+            ch = None
+    if ch is None:
+        print("[PC-EVENTS] leaderboard channel not found — leaving events queued")
+        return
+    lines = _pc_event_lines(body["events"])   # whole print groups: the api's page never cuts one (c6 F)
+    by_id = {int(e["id"]): e for e in body["events"]}
+    sent, leases = [], []
+    for text_line, ids in zip(lines[0::2], lines[1::2]):
+        try:
+            if any(i not in _pc_events_sent for i in ids):
+                # The print's face under ONE lease per print group, naming the
+                # subject, the print and the events (v22 §6). No lease or no
+                # bytes: the line still posts, without the picture.
+                first = by_id.get(ids[0], {})
+                p = first.get("print") or {}
+                face, lease, again = None, (None, None), False
+                if p.get("print_id") and first.get("subject_ref"):
+                    lease = await _pc_lease(first["subject_ref"], print_id=p["print_id"], event_ids=ids)
+                    again = bool(lease[2])
+                    if lease[0]:
+                        st, face = await _pc_api_bytes(f"/internal/pc/face/print/{p['print_id']}/en",
+                                                       params={"size": "card"})
+                        if st != 200:
+                            face = None
+                            again = st == 0 or st == 409 or st >= 500
+                # "Busy for two seconds" is not "has no picture". A transient
+                # refusal leaves the group QUEUED and unacked so the next tick
+                # can post it properly — but only so many times: an api that
+                # stays busy must not mean the pull is never announced at all.
+                if face is None and again and _pc_face_tries.get(ids[0], 0) < _PC_FACE_TRIES:
+                    _pc_face_tries[ids[0]] = _pc_face_tries.get(ids[0], 0) + 1
+                    await _pc_lease_release(lease[0])
+                    print(f"[PC-EVENTS] no picture for {ids[0]} yet (try {_pc_face_tries[ids[0]]}) — next tick")
+                    break
+                _pc_face_tries.pop(ids[0], None)
+                if lease[0]:
+                    leases.append(lease[0])
+                await _pc_send_face(ch.send, content=text_line[:2000], face=face, lease=lease)
+                for i in ids:
+                    _pc_events_sent[i] = True
+            sent.extend(ids)
+        except Exception as ex:
+            print(f"[PC-EVENTS] send failed for {ids}: {ex} — retrying next tick")
+            break
+    if not sent:
+        return
+    st, _ = await _pc_api("POST", "/internal/pc/events/ack",
+                          params={"ids": ",".join(str(i) for i in sent), "leases": ",".join(leases)})
+    if st == 200:
+        for i in sent:
+            _pc_events_sent.pop(i, None)
+        print(f"[PC-EVENTS] posted and acked {len(sent)} event(s)")
+    else:
+        print(f"[PC-EVENTS] ack failed ({st}) — {len(sent)} event(s) re-driven next tick")
+        if len(_pc_events_sent) > 500:
+            _pc_events_sent.clear()   # bounded memory: a clear can double-post only across a long ack outage
+    if len(_pc_face_tries) > 500:
+        _pc_face_tries.clear()        # bounded the same way; a clear only grants more tries
 
 
 @tasks.loop(seconds=30)
