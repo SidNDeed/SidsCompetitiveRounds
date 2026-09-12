@@ -2240,6 +2240,13 @@ namespace CompetitiveRounds
                 NativeUI.DevOpenTab(what == "settings" ? 5 : NativeUI.TAB_COLLECTION);
                 return;
             }
+            if (raw.StartsWith("act:", StringComparison.OrdinalIgnoreCase))
+            {
+                // press a real button (daily claim / first waiting pack / a binder tile's card / a view) — live api, this seat's identity
+                try { PlayerCardsUI.DevAct(raw.Substring(4).Trim().ToLowerInvariant()); }
+                catch (Exception ex) { Plugin.Log.LogWarning($"[PC] FAIL: act lever threw {ex.Message}"); }
+                return;
+            }
             try { PlayerCardsUI.DevSeedTiles(raw.ToLowerInvariant()); }
             catch (Exception ex) { Plugin.Log.LogWarning($"[PC] FAIL: tiles lever threw {ex.Message}"); }
         }

@@ -1399,6 +1399,44 @@ namespace CompetitiveRounds
             NativeUI.MarkDirty();
         }
 
+        /// <summary>Broadcast-seat lever `act:<what>` (identity-gated by the
+        /// caller): presses the REAL buttons against the live api, because a
+        /// synthetic click never reaches the overlay (#420). "daily" is the
+        /// daily button (claim, or open the claimed pack), "open" the first
+        /// waiting pack, "card:N" the Nth binder tile's card view, and
+        /// "view:open|binder|info" the view switch, with nothing seeded.</summary>
+        internal static void DevAct(string what)
+        {
+            what = what ?? "";
+            if (what == "daily") { ClaimDaily(); Plugin.Log.LogInfo("[PC] act: daily"); return; }
+            if (what == "open")
+            {
+                var me = ApiClient.CachedPcMe;
+                if (me == null || me.unopened == null || me.unopened.Count == 0) { Plugin.Log.LogInfo("[PC] act: open - no pack waiting"); return; }
+                Plugin.Log.LogInfo("[PC] act: open " + me.unopened[0].pack_id);
+                BeginOpenHeld(me.unopened[0].pack_id);
+                return;
+            }
+            if (what.StartsWith("card:"))
+            {
+                int n;
+                if (!int.TryParse(what.Substring(5), out n) || binderTiles == null || n < 0 || n >= binderTiles.Length || binderTiles[n] == null || binderTiles[n].print == null)
+                { Plugin.Log.LogInfo("[PC] act: card - no such tile"); return; }
+                Plugin.Log.LogInfo("[PC] act: card " + n + " " + binderTiles[n].print.print_id);
+                ShowCard(binderTiles[n]);
+                return;
+            }
+            if (what.StartsWith("view:"))
+            {
+                string v = what.Substring(5);
+                view = v == "binder" ? View.Binder : (v == "info" ? View.Info : View.Open);
+                Plugin.Log.LogInfo("[PC] act: view " + view);
+                NativeUI.MarkDirty();
+                return;
+            }
+            Plugin.Log.LogInfo("[PC] act: unknown '" + what + "'");
+        }
+
 
         // ── Settings tab rows (design v4 §12 wording) ─────────────────────────
         internal static void BuildSettingsRows(Transform parent)
