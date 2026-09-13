@@ -42,7 +42,6 @@ PREVIEW_TTL_S = 60                       # /card preview cache life (§2.2)
 # lock space) and from every other *_LOCK_CLASS in main.py (asserted by test).
 PC_P_LOCK_CLASS = 770902
 
-SOURCES = ("none", "game")
 SIZES = ("card", "tile")
 
 # ── the descriptor (§3.4, r18 H4) ─────────────────────────────────────────
@@ -369,13 +368,12 @@ def preview_rev(renderer_fp, cat_rev_, spec, portrait_kind, portrait_hash):
 # ── the resolver (§3.2, read-only, one function for every caller) ──────────
 def portrait_for(row):
     """(kind, hash_or_none) from a mapping with subject_deleted, subject_banned,
-    subject_opted_out, portrait_source, portrait_hash and steam_portrait_hash.
-    Never reads more. Under `game` the uploaded rig wins, else the Steam
-    profile picture, else no picture (Steam pictures design v2 §1); a row
-    without the steam column (an old SELECT) simply has no fallback."""
-    if row.get("subject_deleted") or row.get("subject_banned") or row.get("subject_opted_out"):
-        return ("none", None)
-    if (row.get("portrait_source") or "game") != "game":
+    portrait_hash and steam_portrait_hash. Never reads more. The uploaded rig
+    wins, else the Steam profile picture, else no picture (Steam pictures
+    design v2 §1); there is no player-chosen source since 2026-09-13 — every
+    card carries whichever picture exists. A row without the steam column
+    (an old SELECT) simply has no fallback."""
+    if row.get("subject_deleted") or row.get("subject_banned"):
         return ("none", None)
     h = row.get("portrait_hash")
     if h:

@@ -51,7 +51,9 @@ PC_ECONOMY = {
 }
 
 PACK_PAY = ("gold", "shards")
-SETTINGS_KEYS = ("opted_out", "collection_public", "announce", "portrait_source")
+# No opt-out and no picture choice (2026-09-13): every registered player is
+# a card and every card carries a picture; deleting all data is the one exit.
+SETTINGS_KEYS = ("collection_public", "announce")
 
 
 def rarity_for_rank(pool_rank: int) -> str:

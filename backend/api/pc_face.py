@@ -1075,13 +1075,30 @@ def _fit_text(text: str, box_width: float, sizes: Iterable[int], base_role: str,
     return "".join(clusters) + "...", floor
 
 
-def _name_fit(name: str, size: str) -> tuple[str, int]:
+# The name shrinks before it is cut: from 58 px down to the floor in steps of
+# two, scaled at the tile. The tile used to stop at 56 (28 px drawn) and cut
+# nearly every real name to eleven characters ("Twenty Char..."); its floor is
+# now its own, lower one, and the budget is whatever the chips actually leave
+# free rather than the layout rect's constant (2026-09-13, bug #361 feedback).
+NAME_SIZE_MAX = 58
+NAME_SIZE_MIN_CARD = 34
+NAME_SIZE_MIN_TILE = 40
+NAME_LEFT = 54               # anchors.name x in face_layout_v1
+NAME_RIGHT_DEFAULT = 490     # the layout's name rect right edge: the budget when no chip edge is known
+NAME_CHIP_GAP = 24           # card px kept clear between the name and the nearest chip
+
+
+def _name_fit(name: str, size: str, right_edge: float | None = None) -> tuple[str, int]:
+    """(fitted text, font px) for the name at `size`. `right_edge`, when
+    given, is the x the name may not cross (the nearest chip's left edge less
+    the gap, in that size's pixels); without it the layout rect applies."""
     if size not in ("card", "tile"):
         raise ValueError("size")
     scale = 1.0 if size == "card" else 0.5
-    maximum, minimum = (58, 34) if size == "card" else (58, 56)
-    sizes = [max(1, int(round(value * scale))) for value in range(maximum, minimum - 1, -2)]
-    return _fit_text(str(name), (490 - 54) * scale, sizes, "black")
+    minimum = NAME_SIZE_MIN_CARD if size == "card" else NAME_SIZE_MIN_TILE
+    sizes = [max(1, int(round(value * scale))) for value in range(NAME_SIZE_MAX, minimum - 1, -2)]
+    right = NAME_RIGHT_DEFAULT * scale if right_edge is None else float(right_edge)
+    return _fit_text(str(name), max(1.0, right - NAME_LEFT * scale), sizes, "black")
 
 
 def fit_name(name: str, size: str) -> str:
@@ -1274,7 +1291,9 @@ def _draw_fitted(image: Image.Image, xy: tuple[int, int], text: str, box_width: 
 
 def _draw_chip(image: Image.Image, x_right: int, y: int, full: str, short: str,
                colour: tuple[int, int, int], text_colour: tuple[int, int, int],
-               scale: float, tile: bool) -> None:
+               scale: float, tile: bool) -> int:
+    """Draw one right-anchored chip; returns its LEFT edge x, which is what
+    the name's budget is measured against."""
     height = _scale_value(44, scale)
     padding = _scale_value(20, scale)
     max_width = _scale_value(194, scale)
@@ -1304,6 +1323,7 @@ def _draw_chip(image: Image.Image, x_right: int, y: int, full: str, short: str,
     )
     _draw_text(image, (x_right - width / 2, y + height / 2 + _scale_value(1, scale)),
                label, font_size, _rgba(text_colour), "mm", "bold")
+    return x_right - width
 
 
 def _draw_badge(image: Image.Image, band_colour: tuple[int, int, int], labels: dict[str, str],
@@ -1441,14 +1461,16 @@ def render_face(spec: dict, labels: dict, portrait_png: bytes | None, size: str)
 
     chip_text = (0, 0, 0) if _luminance(colour) > 150 else (255, 255, 255)
     right = _scale_value(696, scale)
-    _draw_chip(body, right, _scale_value(38, scale), effective[f"pc.band.{band}"],
-               effective[f"pc.band_short.{band}"], colour, chip_text, scale, size == "tile")
+    chip_left = _draw_chip(body, right, _scale_value(38, scale), effective[f"pc.band.{band}"],
+                           effective[f"pc.band_short.{band}"], colour, chip_text, scale, size == "tile")
     if bool(spec.get("foil")):
-        _draw_chip(body, right, _scale_value(88, scale), effective["pc.foil"],
-                   effective["pc.foil_short"], (255, 255, 255), (20, 20, 24),
-                   scale, size == "tile")
+        # The foil chip sits in the name's row too (88..132 against a name
+        # centred on 85), so the nearer of the two edges bounds the name.
+        chip_left = min(chip_left, _draw_chip(body, right, _scale_value(88, scale), effective["pc.foil"],
+                                              effective["pc.foil_short"], (255, 255, 255), (20, 20, 24),
+                                              scale, size == "tile"))
 
-    fitted_name, name_size = _name_fit(display_name, size)
+    fitted_name, name_size = _name_fit(display_name, size, chip_left - _scale_value(NAME_CHIP_GAP, scale))
     subtitle = "" if spec.get("subtitle") is None else str(spec["subtitle"]).strip()
     # A shop title the player wears sits under the name as a subtitle; the
     # name moves up to make the room (the RANK slot below draws the tier and

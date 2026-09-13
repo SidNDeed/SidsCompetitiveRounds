@@ -82,6 +82,11 @@ API_SECRET_KEY = os.getenv("API_SECRET_KEY", "")
 # bet buttons (100/500/2000g per player). Bets fire via /api/v1/discord-bets
 # which requires the user to have linked their Discord account in-game first.
 LIVE_BETS_CHANNEL_ID = int(os.getenv("LIVE_BETS_CHANNEL", "1456460424831701074"))
+# Player Cards notable pulls (Legendary, Epic, signed, foil, your own card)
+# post to gambler chat — the live-bets channel — rather than the leaderboard
+# (2026-09-13). Unset or empty = the live-bets channel; compose passes the
+# key through so .env can move it without a rebuild of this default.
+PC_EVENTS_CHANNEL_ID = int(os.getenv("PC_EVENTS_CHANNEL") or LIVE_BETS_CHANNEL_ID)
 # ── Gambler role: ping on every new open bet + self-serve opt-in/out ──────
 # Sid created a "Gambler" role in the guild. Members opt in to get pinged
 # whenever a new ranked match opens for betting. Opt-in/out is available BOTH
@@ -8712,21 +8717,22 @@ def _pc_event_lines(events):
 
 @tasks.loop(seconds=60)
 async def poll_pc_events():
-    """Notable pulls (Legendary, Epic, signed, foil, your own card) → the
-    leaderboard channel. Ack-after-send (#105): the api re-checks consent as
-    it hands events out, the bot posts, then acks what it posted; a bot
-    restart or a failed ack re-drives the rows, and the send memory keeps
-    the retry from posting twice. Order matters: a failed send stops the
-    batch, nothing behind it is acked."""
-    if http_session is None or not API_SECRET_KEY or not LEADERBOARD_CHANNEL_ID:
+    """Notable pulls (Legendary, Epic, signed, foil, your own card) → gambler
+    chat (PC_EVENTS_CHANNEL_ID, the live-bets channel by default). Ack-after-
+    send (#105): the api re-checks the announce settings as it hands events
+    out, the bot posts, then acks what it posted; a bot restart or a failed
+    ack re-drives the rows, and the send memory keeps the retry from posting
+    twice. Order matters: a failed send stops the batch, nothing behind it
+    is acked."""
+    if http_session is None or not API_SECRET_KEY or not PC_EVENTS_CHANNEL_ID:
         return
     status, body = await _pc_api("GET", "/internal/pc/events/pending")
     if status != 200 or not isinstance(body, dict) or not body.get("events"):
         return
-    ch = bot.get_channel(LEADERBOARD_CHANNEL_ID)
+    ch = bot.get_channel(PC_EVENTS_CHANNEL_ID)
     if ch is None:
         try:
-            ch = await bot.fetch_channel(LEADERBOARD_CHANNEL_ID)
+            ch = await bot.fetch_channel(PC_EVENTS_CHANNEL_ID)
         except Exception:
             ch = None
     if ch is None:

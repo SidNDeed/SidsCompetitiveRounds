@@ -4,8 +4,8 @@
 -- schema_sql and it is idempotent (a second run changes nothing). Apply it
 -- with the migrate: verb BEFORE deploying any api SHA older than the Sept 12
 -- batch's code SHA once a Steam picture has been stored, because the older
--- code neither clears the Steam unit when a player opts out, chooses None or
--- deletes their data, nor ages the derived-face cache, so a picture stored
+-- code neither clears the Steam unit when a player deletes their data, nor
+-- ages the derived-face cache, so a picture stored
 -- by the newer code would stay referenced (and keep rendering into faces)
 -- for as long as the older code ran.
 --   1. every player's Steam unit is withdrawn: hash, reference and failure

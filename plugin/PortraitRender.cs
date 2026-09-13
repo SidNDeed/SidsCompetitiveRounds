@@ -150,6 +150,7 @@ namespace CompetitiveRounds
             if (Rendering) { Plugin.Log.LogInfo("[PORTRAIT] busy; ignoring '" + spec + "'"); return; }
             if (Plugin.Instance == null) { Plugin.Log.LogWarning("[PORTRAIT] no Plugin.Instance"); return; }
             if (spec.Equals("upload", StringComparison.OrdinalIgnoreCase)) { Start("lever", true); return; }   // the production path once (v22 §5.7)
+            if (spec.Equals("preview", StringComparison.OrdinalIgnoreCase)) { Start("lever-preview", false); return; }   // the same path without the upload: fills the Settings preview (2026-09-13)
             Plugin.Instance.StartCoroutine(Run(spec, _renderClaim.Take(Plugin.Instance, DEV_BUDGET)));
         }
 
@@ -243,7 +244,6 @@ namespace CompetitiveRounds
             _pendingCheck = false;
             if (_checkedVisit == _visitId) return;
             _checkedVisit = _visitId;
-            if (me.portrait_source != "game") { LastResult = "no picture (setting)"; return; }
             if (!string.IsNullOrEmpty(me.portrait_locked_until)) { LastResult = "picture locked"; return; }
             string want = BuildDescriptor(CurrentPreset());
             // A refused capture leaves LastResult saying why and does NOT
@@ -251,7 +251,14 @@ namespace CompetitiveRounds
             // spin; the next visit (or a preset change) tries again, which is
             // what makes "art not loaded yet" self-correcting.
             if (want == null) return;
-            if (!string.IsNullOrEmpty(me.portrait_hash) && me.portrait_descriptor == want) { LastResult = "picture current"; return; }
+            if (!string.IsNullOrEmpty(me.portrait_hash) && me.portrait_descriptor == want)
+            {
+                LastResult = "picture current";
+                // The Settings preview still wants a picture to show (2026-09-13):
+                // a render without an upload, once per visit like the check.
+                if (PreviewTex == null) Start("preview", false);
+                return;
+            }
             Start("visit", true);
         }
 
@@ -270,19 +277,17 @@ namespace CompetitiveRounds
         /// or an in-flight upload, as ONE value captured before the first yield
         /// and compared after each one.
         ///
-        /// It was identity + UI epoch + in-match, which is three of the seven:
-        /// switching the picture setting to None, changing the preset, or a new
-        /// tab visit all rode through a yield and uploaded the capture taken
-        /// under the old value. Pairs of ad-hoc checks are exactly how the
-        /// fourth one gets forgotten, so there is now one key and one
-        /// comparison.</summary>
+        /// It was identity + UI epoch + in-match, which is three of the six:
+        /// changing the preset or a new tab visit rode through a yield and
+        /// uploaded the capture taken under the old value. Pairs of ad-hoc
+        /// checks are exactly how the next one gets forgotten, so there is one
+        /// key and one comparison. (The picture setting was a term until
+        /// 2026-09-13; there is no such setting any more.)</summary>
         private static string StateKey()
         {
-            var me = ApiClient.CachedPcMe;
             return (MatchTracker.LocalSteamId ?? "")
                  + "|" + PlayerCardsUI.Epoch
                  + "|" + _visitId
-                 + "|" + (me != null ? (me.portrait_source ?? "?") : "?")
                  + "|" + CurrentPreset()
                  + "|" + (AnimatedOn() ? 1 : 0)
                  + "|" + (GameStateWatcher.IsInMatch ? 1 : 0);

@@ -147,6 +147,9 @@ services:
       QUEUE_BEACON_CHANNEL: ${QUEUE_BEACON_CHANNEL}
       CHAT_CHANNEL: ${CHAT_CHANNEL:-1492022404829020230}
       RELEASES_CHANNEL: ${RELEASES_CHANNEL:-1498731888813277294}
+      # Player Cards notable pulls; empty = the bot's default (gambler chat,
+      # i.e. the live-bets channel). Passed through so .env can move it.
+      PC_EVENTS_CHANNEL: ${PC_EVENTS_CHANNEL:-}
       API_SECRET_KEY: ${API_SECRET_KEY}
       # FAQ auto-responder channel scoping (unset = global; see discord_bot.py)
       FAQ_CHANNEL_ALLOWLIST: ${FAQ_CHANNEL_ALLOWLIST:-}

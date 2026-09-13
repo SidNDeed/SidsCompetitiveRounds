@@ -373,7 +373,7 @@ def test_the_sept12_i18n_migrations_recompute_from_the_sync_tool_and_match_the_b
                         r"'(?P<hash>[0-9a-f]{40})', (?P<sens>TRUE|FALSE), (?P<ctx>E'(?:[^'\\]|\\.|'')*'|NULL)\)", re.S)
     rows = list(row_re.finditer(values))
     expected = int(re.search(r"v_expected INT := (\d+);", keys_sql).group(1))
-    assert len(rows) == expected == 18 and len({m.group("id") for m in rows}) == 18
+    assert len(rows) == expected == 25 and len({m.group("id") for m in rows}) == 25
     english = {}
     for m in rows:
         rec = recs[m.group("id")]   # every key is a live client string the extractor knows
@@ -398,8 +398,8 @@ def test_the_sept12_i18n_migrations_recompute_from_the_sync_tool_and_match_the_b
         seeds_sql = fh.read()
     seed_re = re.compile(r"\('([0-9a-f]{16})', '(es|ru|uk|sv)', '([0-9a-f]{40})', (E'(?:[^'\\]|\\.|'')*')\)")
     seeds = seed_re.findall(seeds_sql[seeds_sql.index("INSERT INTO _seed313"):seeds_sql.index("INSERT INTO i18n_proposals")])
-    assert len(seeds) == 72 and len({(k, lang) for k, lang, _h, _t in seeds}) == 72
-    assert "of 72 seed pairs" in seeds_sql and "(18 keys x es/ru/uk/sv)" in seeds_sql
+    assert len(seeds) == 100 and len({(k, lang) for k, lang, _h, _t in seeds}) == 100
+    assert "of 100 seed pairs" in seeds_sql and "(25 keys x es/ru/uk/sv)" in seeds_sql
     for key_id, lang, source_hash, target in seeds:
         assert key_id in english and source_hash == recs[key_id]["source_hash"], key_id
         assert catalogue[lang][english[key_id]] == _pg_e(target), (key_id, lang)   # the seed IS the bundled text

@@ -52,7 +52,10 @@ def test_the_drain_posts_then_acks_and_stops_on_a_failed_send():
     # order, and so does a print group still waiting for its picture
     assert src.count("break") == 2 and "retrying next tick" in src
     assert "yet (try" in src
-    assert "LEADERBOARD_CHANNEL_ID" in src and "if not sent:\n        return" in src
+    # 2026-09-13: every Player Cards post goes to the gambler chat (the live-bets
+    # channel) unless PC_EVENTS_CHANNEL names another; never the leaderboard channel
+    assert "PC_EVENTS_CHANNEL_ID" in src and "LEADERBOARD_CHANNEL_ID" not in src and "if not sent:\n        return" in src
+    assert 'PC_EVENTS_CHANNEL_ID = int(os.getenv("PC_EVENTS_CHANNEL") or LIVE_BETS_CHANNEL_ID)' in BOT_SRC
     assert "_pc_events_sent.pop(i, None)" in src, "the send memory is released only by a successful ack"
 
 

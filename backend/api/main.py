@@ -23819,7 +23819,7 @@ _PC_SNAPSHOT_SELECT_SQL = """
           FROM players p
           LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
           LEFT JOIN shop_items si ON si.id = p.active_title_id
-         WHERE p.deleted_at IS NULL AND p.pc_opted_out_at IS NULL
+         WHERE p.deleted_at IS NULL
            AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)
     ),
     series AS (
@@ -23896,8 +23896,22 @@ _PC_MEMBER_INSERT_SQL = """
 
 _PC_LIVE_POOL_CHECK_SQL = """
     SELECT 1 FROM players p
-     WHERE p.id = CAST(:pid AS uuid) AND p.deleted_at IS NULL AND p.pc_opted_out_at IS NULL
+     WHERE p.id = CAST(:pid AS uuid) AND p.deleted_at IS NULL
        AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)
+"""
+
+# The rolled subject's identity lock in its SHARED, non-blocking form (#612),
+# taken before the live re-check and held to the open's commit. The data
+# deletion endpoint holds the same lock EXCLUSIVE while it removes every
+# print of the subject's card (2026-09-13), so a roll that cannot take this
+# has met a deletion in flight and is re-rolled like a subject that left the
+# pool, and a deletion that arrives after the roll waits for the mint to
+# commit and then deletes the new print with the rest. The other exclusive
+# takers of a subject's identity lock (a delivery lease acquire, the
+# deletion) wait out an open's commit; the open itself never waits on them.
+_PC_SUBJECT_HOLD_SQL = """
+    SELECT pg_try_advisory_xact_lock_shared(hashtext(p.steam_id)) AS held
+      FROM players p WHERE p.id = CAST(:pid AS uuid)
 """
 
 _PC_MEMBER_AT_SQL = """
@@ -23929,8 +23943,8 @@ def _pc_portrait_resolve_cols(alias: str) -> str:
     (#341). The Steam picture hash rides the same fragment (Steam pictures
     design v2 §1): a reader that bypasses this is a failing test, not a NULL."""
     return f"""
-               ({alias}.deleted_at IS NOT NULL) AS subject_deleted, ({alias}.pc_opted_out_at IS NOT NULL) AS subject_opted_out,
-               {alias}.pc_portrait_source AS portrait_source, {alias}.pc_game_portrait_hash AS portrait_hash,
+               ({alias}.deleted_at IS NOT NULL) AS subject_deleted,
+               {alias}.pc_game_portrait_hash AS portrait_hash,
                {alias}.pc_steam_portrait_hash AS steam_portrait_hash,
                EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = {alias}.steam_id AND b.unbanned_at IS NULL) AS subject_banned
 """
@@ -24243,6 +24257,9 @@ async def _pc_roll_prints(db: AsyncSession, snap_id: int, owner_pid, rng=None):
                                     {"sid": snap_id, "rarity": used, "k": idx})).mappings().first()
             if row is None:
                 continue
+            held = (await db.execute(text(_PC_SUBJECT_HOLD_SQL), {"pid": str(row["player_id"])})).scalar_one_or_none()
+            if not held:
+                continue   # a deletion holds the subject: re-roll, as for a subject that left the pool
             live = (await db.execute(text(_PC_LIVE_POOL_CHECK_SQL), {"pid": str(row["player_id"])})).first()
             if live is None:
                 continue
@@ -24805,17 +24822,6 @@ async def pc_discard_print(
 
 
 _PC_SETTINGS_SQL = {
-    "opted_out": """
-        UPDATE players SET pc_opted_out_at = CASE WHEN CAST(:value AS integer) = 1 THEN COALESCE(pc_opted_out_at, now()) ELSE NULL END,
-                           pc_steam_portrait_hash = CASE WHEN CAST(:value AS integer) = 1 THEN NULL ELSE pc_steam_portrait_hash END,
-                           pc_steam_avatar_ref = CASE WHEN CAST(:value AS integer) = 1 THEN NULL ELSE pc_steam_avatar_ref END,
-                           pc_steam_portrait_fail = CASE WHEN CAST(:value AS integer) = 1 THEN 0 ELSE pc_steam_portrait_fail END,
-                           pc_steam_attempt = CASE WHEN CAST(:value AS integer) = 1 THEN pc_steam_attempt + 1 ELSE pc_steam_attempt END,
-                           pc_steam_portrait_next_at = CASE WHEN CAST(:value AS integer) = 1 THEN pc_steam_portrait_next_at ELSE NULL END,
-                           pc_settings_revision = pc_settings_revision + 1
-         WHERE id = CAST(:pid AS uuid) AND pc_settings_revision = CAST(:rev AS integer)
-        RETURNING pc_settings_revision
-    """,
     "collection_public": """
         UPDATE players SET pc_collection_public = (CAST(:value AS integer) = 1),
                            pc_settings_revision = pc_settings_revision + 1
@@ -24828,59 +24834,27 @@ _PC_SETTINGS_SQL = {
          WHERE id = CAST(:pid AS uuid) AND pc_settings_revision = CAST(:rev AS integer)
         RETURNING pc_settings_revision
     """,
-    # 1 = the in-game character (the default; the Steam profile picture until
-    # this PC has sent it), 0 = None: the emblem plate everywhere from the next
-    # render on. The rig's picture is kept (v22 §3.1); the Steam unit is
-    # cleared, its blob released to the janitor and the attempt id advanced
-    # (v3 §6, v4 §1). The way BACK to the character clears the Steam schedule
-    # so the next sweep touch (or a pack open's priming) fetches again at once
-    # rather than at the old refresh date.
-    "portrait_source": """
-        UPDATE players SET pc_portrait_source = CASE WHEN CAST(:value AS integer) = 1 THEN 'game' ELSE 'none' END,
-                           pc_steam_portrait_hash = CASE WHEN CAST(:value AS integer) = 1 THEN pc_steam_portrait_hash ELSE NULL END,
-                           pc_steam_avatar_ref = CASE WHEN CAST(:value AS integer) = 1 THEN pc_steam_avatar_ref ELSE NULL END,
-                           pc_steam_portrait_fail = CASE WHEN CAST(:value AS integer) = 1 THEN pc_steam_portrait_fail ELSE 0 END,
-                           pc_steam_attempt = CASE WHEN CAST(:value AS integer) = 1 THEN pc_steam_attempt ELSE pc_steam_attempt + 1 END,
-                           pc_steam_portrait_next_at = CASE WHEN CAST(:value AS integer) = 1 THEN NULL ELSE pc_steam_portrait_next_at END,
-                           pc_settings_revision = pc_settings_revision + 1
-         WHERE id = CAST(:pid AS uuid) AND pc_settings_revision = CAST(:rev AS integer)
-        RETURNING pc_settings_revision
-    """,
 }
 
 
 async def _pc_settings_of(db: AsyncSession, pid: str) -> dict:
     row = (await db.execute(text("""
-        SELECT pc_opted_out_at, pc_collection_public, pc_announce, pc_settings_revision, pc_shards,
-               pc_portrait_source, pc_game_portrait_descriptor, pc_game_portrait_hash, pc_game_portrait_locked_until
+        SELECT pc_collection_public, pc_announce, pc_settings_revision, pc_shards,
+               pc_game_portrait_descriptor, pc_game_portrait_hash, pc_game_portrait_locked_until
           FROM players WHERE id = CAST(:pid AS uuid)
     """), {"pid": pid})).mappings().one()
     return {
-        "opted_out": row["pc_opted_out_at"] is not None,
         "collection_public": bool(row["pc_collection_public"]),
         "announce": bool(row["pc_announce"]),
         "revision": int(row["pc_settings_revision"]),
         "shards": int(row["pc_shards"] or 0),
-        # The portrait unit (310): source none|game, the descriptor and hash of
-        # the stored upload (NULL = the initial disc), the admin lock.
-        "portrait_source": row["pc_portrait_source"] or "game",
+        # The portrait unit (310): the descriptor and hash of the stored
+        # upload (NULL = the initial disc), the admin lock. No source column
+        # is read: since 2026-09-13 every card carries a picture.
         "portrait_descriptor": row["pc_game_portrait_descriptor"],
         "portrait_hash": row["pc_game_portrait_hash"],
         "portrait_locked_until": _pc_iso(row["pc_game_portrait_locked_until"]),
     }
-
-
-def _pc_setting_revokes_picture(key, value):
-    """True when this settings write withdraws the subject's picture, and so
-    must take the identity lock EXCLUSIVE and wait out any live delivery lease
-    rather than commit under a send already in flight.
-
-    Two writes do: switching the portrait source to none, and opting out of
-    Player Cards altogether — `portrait_for` answers ("none", None) for an
-    opted-out subject exactly as it does for source=none. Named, because it
-    decides whether a writer waits, and an inline expression that knew about
-    the first and not the second is how the second got missed."""
-    return (key == "portrait_source" and int(value) == 0) or (key == "opted_out" and int(value) == 1)
 
 
 @app.post("/api/v1/pc/settings", tags=["Player Cards"])
@@ -24894,56 +24868,26 @@ async def pc_set_setting(
     value: int = Query(..., ge=0, le=1),
     db: AsyncSession = Depends(get_db),
 ):
-    """One Player Cards setting (opted_out | collection_public | announce),
-    HMAC over pcset:{steam}:{nonce}:{revision}:{key}:{value}, strict session.
+    """One Player Cards setting (collection_public | announce), HMAC over
+    pcset:{steam}:{nonce}:{revision}:{key}:{value}, strict session.
     Compare-and-set on pc_settings_revision: a stale revision is refused
-    (409 stale_revision with the current settings) and never applied."""
+    (409 stale_revision with the current settings) and never applied.
+    Neither setting touches the subject's picture, so no writer here takes
+    the identity lock or waits out a delivery lease (2026-09-13: the opt-out
+    and the picture choice are gone — a card leaves binders only through
+    the data deletion endpoint)."""
     if key not in _pc.SETTINGS_KEYS:
         raise HTTPException(status_code=422, detail="unknown setting")
     canon = _pc.canon_settings(steam_id, nonce, int(revision), key, int(value))
-    none_write = _pc_setting_revokes_picture(key, value)
-    if none_write:
-        # The None writer takes the identity lock EXCLUSIVE before the shared
-        # read half (r18 H2): lease acquisition takes the same lock, so no
-        # lease is granted between this re-read and this commit. Signature
-        # first, so an unsigned request never holds the lock.
-        if not _pc_hmac_ok(sig, canon):
-            raise HTTPException(status_code=403, detail="Invalid signature")
-        await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))"), {"sid": steam_id})
     player = await _pc_verified_actor(request, steam_id, sig, canon, db)
     pid = str(player.id)
-    old_units = (None, None)
-    if none_write:
-        # The Steam unit goes with the picture (v3 §6): its blob lock P is
-        # taken on the hash the row names BEFORE the row lock R, the row is
-        # re-read under R and compared, the clear itself rides the
-        # revision-bound UPDATE below, and the release comes after it — so a
-        # stale revision clears nothing and answers 409 exactly as before.
-        # The rig's stored picture is NOT touched: None hides it and the way
-        # back shows it again (v22 §3.1); the Steam unit is refetched instead.
-        old_units = await _pc_lock_portrait_blobs(db, pid)
     await db.execute(text("SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE"), {"pid": pid})
-    if none_write:
-        held = (await db.execute(text(
-            "SELECT pc_game_portrait_hash, pc_steam_portrait_hash FROM players WHERE id = CAST(:pid AS uuid)"),
-            {"pid": pid})).mappings().first()
-        if held is None or (held["pc_game_portrait_hash"], held["pc_steam_portrait_hash"]) != old_units:
-            await db.rollback()   # only reachable without the identity lock this writer holds
-            raise HTTPException(status_code=409, detail={"error": "subject_busy", "retry_after": 2})
-        # A live delivery lease means a bot send acquired under the previous
-        # picture may still be in flight: refuse with the wait (v22 §3.1).
-        wait = await _pc_lease_wait(db, pid)
-        if wait is not None:
-            await db.rollback()
-            raise HTTPException(status_code=409, detail={"error": "retry_after", "retry_after": wait})
     new_rev = (await db.execute(text(_PC_SETTINGS_SQL[key]),
                                 {"value": int(value), "pid": pid, "rev": int(revision)})).scalar_one_or_none()
     if new_rev is None:
         current = await _pc_settings_of(db, pid)
         await db.rollback()
         raise HTTPException(status_code=409, detail={"error": "stale_revision", **current})
-    if none_write and old_units[1]:
-        await _pc_release_portrait_blob(db, old_units[1])   # mark, never delete: the janitor takes it after the grace
     await db.commit()
     print(f"[PC-SETTINGS] player={steam_id} {key}={value} rev={new_rev}")
     return await _pc_settings_of(db, pid)
@@ -24983,10 +24927,8 @@ async def pc_me(
         SELECT 1 FROM pc_daily_claims WHERE player_id = CAST(:pid AS uuid) AND claimed_on = (now() AT TIME ZONE 'UTC')::date
     """), {"pid": pid})).first() is not None
     return {
-        "settings": {k: settings[k] for k in ("opted_out", "collection_public", "announce", "revision",
-                                              "portrait_source")},
+        "settings": {k: settings[k] for k in ("collection_public", "announce", "revision")},
         "shards": settings["shards"],
-        "portrait_source": settings["portrait_source"],
         "portrait_descriptor": settings["portrait_descriptor"],
         "portrait_hash": settings["portrait_hash"],
         "portrait_locked_until": settings["portrait_locked_until"],
@@ -25147,20 +25089,18 @@ _PC_EVENTS_SKIP_SQL = """
       FROM players pl, players su
      WHERE e.posted_at IS NULL AND pl.id = e.player_id AND su.id = e.subject_player_id
        AND NOT (pl.deleted_at IS NULL AND su.deleted_at IS NULL
-                AND pl.pc_announce AND su.pc_announce AND su.pc_opted_out_at IS NULL
+                AND pl.pc_announce AND su.pc_announce
                 AND (e.print_id IS NULL OR EXISTS (SELECT 1 FROM pc_prints pr WHERE pr.id = e.print_id AND pr.discarded_at IS NULL)))
 """
 
 _PC_EVENTS_PAGE = 20   # the first N unposted events of a page; every other unposted event of the same prints rides along (c6 F)
 # The subject's face is RESOLVED when what a render would draw now is what
-# it will keep drawing: a rig picture, a stored Steam picture, a subject who
-# chose None or opted out (the plate by choice), or Steam's own no-picture
-# answer (a reference stored with no hash and no failure — the plate by
-# fact). A never-attempted subject, an attempt in flight (the claim
+# it will keep drawing: a rig picture, a stored Steam picture, or Steam's own
+# no-picture answer (a reference stored with no hash and no failure — the
+# plate by fact). A never-attempted subject, an attempt in flight (the claim
 # withdraws the reference until a verdict stores one again, v4 §2) or a
 # failed attempt is NOT resolved: the plate would be a placeholder there.
 _PC_EVENTS_RESOLVED_SQL = """(su.pc_game_portrait_hash IS NOT NULL OR su.pc_steam_portrait_hash IS NOT NULL
-             OR COALESCE(su.pc_portrait_source, 'game') <> 'game' OR su.pc_opted_out_at IS NOT NULL
              OR (su.pc_steam_avatar_ref IS NOT NULL AND su.pc_steam_portrait_fail = 0))"""
 # A bounded hold (v3 §8): an unresolved subject's pull waits for the
 # resolution (priming at the open makes that seconds) or sixty seconds,
@@ -25195,7 +25135,7 @@ _PC_EVENTS_PENDING_SQL = """
        AND (e.id IN (SELECT id FROM page)
             OR (e.print_id IS NOT NULL AND e.print_id IN (SELECT print_id FROM page WHERE print_id IS NOT NULL)))
        AND pl.deleted_at IS NULL AND su.deleted_at IS NULL
-       AND pl.pc_announce AND su.pc_announce AND su.pc_opted_out_at IS NULL
+       AND pl.pc_announce AND su.pc_announce
        AND (pr.id IS NULL OR pr.discarded_at IS NULL)
      ORDER BY e.id
 """
@@ -25340,12 +25280,10 @@ async def internal_pc_card(
 ):
     """The bot's /card @user: the subject's card as the pool sees it now
     (latest snapshot: pool rank, band, rating, record, title) and how many
-    prints of them are in circulation. A subject who opted out or is not in
-    the pool answers 404 not_in_pool."""
+    prints of them are in circulation. A subject who is not in the pool
+    answers 404 not_in_pool."""
     _require_internal_key(x_internal_key)
     subject = await _pc_player_by_discord(db, discord_id)
-    if getattr(subject, "pc_opted_out_at", None) is not None:
-        raise HTTPException(status_code=404, detail={"error": "not_in_pool"})
     row = (await db.execute(text("""
         SELECT m.pool_rank, m.rarity, m.rating, m.peak_rating, m.board_rank, m.series_wins, m.series_losses,
                m.top_card, m.title, s.taken_at
@@ -25715,7 +25653,7 @@ _PC_FACE_EXPIRE_EVERY_S = 3600   # each box ages its own derived-face cache hour
 # Who the sweep may touch, for the players row aliased p. The claim and the
 # writer's revalidation read the SAME text, so eligibility has one meaning.
 _PC_STEAM_ELIGIBLE_SQL = """
-    p.deleted_at IS NULL AND p.pc_opted_out_at IS NULL AND p.pc_portrait_source = 'game'
+    p.deleted_at IS NULL
     AND (p.pc_game_portrait_locked_until IS NULL OR p.pc_game_portrait_locked_until < now())
     AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)
 """
@@ -26341,10 +26279,10 @@ async def _pc_lock_blob(db: AsyncSession, h: str) -> None:
                      {"cls": _pcp.PC_P_LOCK_CLASS, "h": h})
 
 
-async def _pc_clear_portrait_unit(db: AsyncSession, pid: str, lock_days, source):
+async def _pc_clear_portrait_unit(db: AsyncSession, pid: str, lock_days):
     """Under the caller's identity lock: clear BOTH portrait units (I → P →
-    R), lock further uploads for lock_days when given, force the source when
-    given, and release every previous blob no row references any more.
+    R), lock further uploads for lock_days when given, and release every
+    previous blob no row references any more.
     Returns (a previous hash if either unit held one, locked_until)."""
     old = await _pc_lock_portrait_blobs(db, pid)
     held = (await db.execute(text(
@@ -26384,9 +26322,6 @@ async def _pc_clear_portrait_unit(db: AsyncSession, pid: str, lock_days, source)
             sets.append("pc_steam_portrait_next_at = now()")
     # lock_days None is the deletion path: the schedule is left alone, because a
     # deleted row is outside the sweep's eligible predicate forever.
-    if source is not None:
-        sets.append("pc_portrait_source = CAST(:src AS text)")
-        params["src"] = source
     locked = (await db.execute(text(
         "UPDATE players SET " + ", ".join(sets) +
         " WHERE id = CAST(:pid AS uuid) RETURNING pc_game_portrait_locked_until"), params)).scalar_one_or_none()
@@ -26474,7 +26409,7 @@ async def pc_portrait_upload(
     # replaces and the one it writes, under the identity lock taken above.
     seen_old, _seen_steam = await _pc_lock_portrait_blobs(db, pid, portrait_hash)
     row = (await db.execute(text("""
-        SELECT p.pc_opted_out_at, p.pc_game_portrait_hash, p.pc_game_portrait_descriptor,
+        SELECT p.pc_game_portrait_hash, p.pc_game_portrait_descriptor,
                EXTRACT(EPOCH FROM (now() - p.pc_game_portrait_at)) AS since_last,
                EXTRACT(EPOCH FROM (p.pc_game_portrait_locked_until - now())) AS lock_left,
                p.pc_game_portrait_locked_until,
@@ -26486,7 +26421,7 @@ async def pc_portrait_upload(
     if row is not None and row["pc_game_portrait_hash"] != seen_old:
         await db.rollback()
         raise HTTPException(status_code=409, detail={"error": "subject_busy", "retry_after": 2})
-    if row is None or row["banned"] or row["pc_opted_out_at"] is not None:
+    if row is None or row["banned"]:
         await db.rollback()
         raise HTTPException(status_code=403, detail={"error": "portrait_refused"})
     if row["lock_left"] is not None and float(row["lock_left"]) > 0:
@@ -26580,7 +26515,7 @@ async def admin_pc_portrait_clear(payload: dict = Body(...), db: AsyncSession = 
     if wait is not None:
         await db.rollback()
         raise HTTPException(status_code=409, detail={"error": "retry_after", "retry_after": wait})
-    old, locked = await _pc_clear_portrait_unit(db, str(pid), lock_days=lock_days, source=None)
+    old, locked = await _pc_clear_portrait_unit(db, str(pid), lock_days=lock_days)
     await db.commit()
     print(f"[PC-PORTRAIT] admin clear target={steam_id} by={admin_id} lock_days={lock_days} had_blob={bool(old)}")
     return {"cleared": True, "had_portrait": bool(old), "locked_until": _pc_iso(locked)}
@@ -26769,7 +26704,7 @@ async def internal_pc_face_preview(
     sub = (await db.execute(text(
         "SELECT p.display_name, " + _PC_PORTRAIT_RESOLVE_COLS +
         " FROM players p WHERE p.id = CAST(:pid AS uuid)"), {"pid": player_ref})).mappings().first()
-    if sub is None or sub["subject_deleted"] or sub["subject_opted_out"] or sub["subject_banned"]:
+    if sub is None or sub["subject_deleted"] or sub["subject_banned"]:
         raise HTTPException(status_code=404, detail={"error": "not_in_pool"})
     member = (await db.execute(text("""
         SELECT m.pool_rank, m.rarity, m.rating, m.board_rank, m.series_wins, m.series_losses, m.top_card, m.title
@@ -32863,10 +32798,8 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     await db.execute(text("DELETE FROM player_region_pings WHERE player_id = :pid"), {"pid": pid})
     # Player Cards (migration 308): the player's OWN events (as puller or
     # subject), prints, daily claims, packs (open attempts cascade) and pool
-    # memberships; shards zeroed and the subject opted out. Prints of this
-    # player held by OTHERS stay — they are the holders' rows, and the face
-    # renders the anonymised name from here on (nothing on a print is
-    # personal data beyond the player id).
+    # memberships, shards zeroed — and then, under the snapshot lock, every
+    # print of the player's OWN CARD held by anyone, with the card rows.
     await db.execute(text("DELETE FROM pc_events WHERE player_id = :pid OR subject_player_id = :pid"), {"pid": pid})
     await db.execute(text("DELETE FROM pc_prints WHERE owner_player_id = :pid"), {"pid": pid})
     await db.execute(text("DELETE FROM pc_daily_claims WHERE player_id = :pid"), {"pid": pid})
@@ -32877,7 +32810,20 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # none of this player's survives it (c3 I). Order: identity -> pc_snapshot.
     await db.execute(text("SELECT pg_advisory_xact_lock(hashtext('pc_snapshot'))"))
     await db.execute(text("DELETE FROM pc_pool_members WHERE player_id = :pid"), {"pid": pid})
-    await db.execute(text("UPDATE players SET pc_shards = 0, pc_opted_out_at = COALESCE(pc_opted_out_at, NOW()) WHERE id = :pid"), {"pid": pid})
+    # Deleting all data is the one way a card leaves every binder
+    # (2026-09-13): the prints of this player's card, whoever holds them, and
+    # the card rows themselves. Safe against a pack open in flight: a roll
+    # takes the subject's identity lock SHARED and holds it to its commit
+    # (_PC_SUBJECT_HOLD_SQL) while this endpoint holds it EXCLUSIVE, so a
+    # mint either committed before this statement — its print is deleted
+    # here — or re-rolled the subject. The events of these prints went above
+    # (subject_player_id), their delivery leases go below (subject_id); a
+    # returning player gets a fresh card on their next pull (created lazily
+    # at mint).
+    await db.execute(text(
+        "DELETE FROM pc_prints WHERE card_id IN (SELECT id FROM pc_cards WHERE subject_player_id = :pid)"), {"pid": pid})
+    await db.execute(text("DELETE FROM pc_cards WHERE subject_player_id = :pid"), {"pid": pid})
+    await db.execute(text("UPDATE players SET pc_shards = 0 WHERE id = :pid"), {"pid": pid})
     # Portraits (migrations 310/311): every delivery lease of this subject
     # dies (a bot send in flight re-validates and drops the bytes), the
     # writer's nonces go, then BOTH portrait units are cleared under their
@@ -32886,7 +32832,7 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # deletes it after the grace — never here.
     await db.execute(text("DELETE FROM pc_delivery_leases WHERE subject_id = :pid"), {"pid": pid})
     await db.execute(text("DELETE FROM pc_portrait_nonces WHERE player_id = :pid"), {"pid": pid})
-    await _pc_clear_portrait_unit(db, str(pid), lock_days=None, source="none")
+    await _pc_clear_portrait_unit(db, str(pid), lock_days=None)
     # Music ratings (design-v4-report M15). EXPLICIT delete per the #437 audit
     # rule: this endpoint ANONYMIZES the players row rather than deleting it,
     # so music_ratings' ON DELETE CASCADE never fires — an ondelete clause is

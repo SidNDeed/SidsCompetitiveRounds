@@ -54,7 +54,7 @@ namespace CompetitiveRounds
 
         private class Tile
         {
-            public GameObject root, actions, btnView, btnDiscard, btnDupes;
+            public GameObject root, actions, btnDiscard, btnDupes;
             public GameObject face, textBlock;   // exactly one of the two is active
             public GameObject faceMarkGO;        // the DISCARDED stamp over a face that is still cached
             public int bindSeq;                  // v22 section 5.2: a face answer that misses this paints nothing
@@ -77,7 +77,14 @@ namespace CompetitiveRounds
         private static PackRow[] packRows;
         // binder
         private static object txtBinderHdr, txtBinderPage;
-        private static GameObject btnPrev, btnNext;
+        private static GameObject btnPrev, btnNext, btnSort;
+        private static object btnSortTxt;
+        /// <summary>Binder orders (2026-09-13): the header button cycles them.
+        /// Position is the leaderboard position printed on the card
+        /// (board_rank); a card of a player who was off the board that day
+        /// sorts last under it.</summary>
+        private enum Sort { Name, Rarity, Edition, Date, Position }
+        private static Sort binderSort = Sort.Name;
         private static Tile[] binderTiles;
         private static GameObject[] binderRows;
         private static int binderPage;
@@ -93,8 +100,8 @@ namespace CompetitiveRounds
         private static ApiClient.PcPackAnswer lastPack;
         private static string lastMsg; private static Color lastMsgColor; private static float lastMsgAt;
         // settings rows
-        private static GameObject btnBeCard, btnPublic, btnAnnounce, btnPicture, btnPreset, presetPreview;
-        private static object btnBeCardTxt, btnPublicTxt, btnAnnounceTxt, btnPictureTxt, btnPresetTxt;
+        private static GameObject btnPublic, btnAnnounce, btnPreset, presetPreview, presetPreviewRow;
+        private static object btnPublicTxt, btnAnnounceTxt, btnPresetTxt, txtPicNote;
         private static int previewShown = -1;   // PortraitRender.PreviewSerial the preview sprite was made from
         private static Sprite previewSprite;
         private static bool setInFlight; private static float setAt;
@@ -329,6 +336,7 @@ namespace CompetitiveRounds
 
         // ── NativeUI entry points ────────────────────────────────────────────
         private static bool pendingVisit;
+        private static bool settingsVisited;   // one picture check per Settings visit (2026-09-13)
 
         /// <summary>Every close path of the F5 page (#369). Two jobs:
         ///
@@ -341,7 +349,7 @@ namespace CompetitiveRounds
         internal static void OnOverlayClosed()
         {
             try { HideCardPopup(); } catch { }
-            pendingVisit = true;
+            pendingVisit = true; settingsVisited = false;
         }
 
         /// <summary>The card view is a full-screen uGUI surface: it owns input
@@ -387,6 +395,11 @@ namespace CompetitiveRounds
                 // without them; Settings has no fetch chain of its own.
                 if (ApiClient.CachedPcMe == null) ApiClient.FetchPcMe(id, false);
                 if (ApiClient.CachedPlayerStats == null) ApiClient.FetchPlayerStats(id);
+                // One picture check per Settings visit as well (2026-09-13): the
+                // preview only appeared after a preset change because nothing
+                // rendered while the stored picture was current. The check now
+                // draws the preview in that case (PortraitRender.Tick).
+                if (!settingsVisited) { settingsVisited = true; try { PortraitRender.OnTabVisit(); } catch { } }
                 return;
             }
             if (Time.unscaledTime >= meRefreshAt) { meRefreshAt = Time.unscaledTime + 30f; ApiClient.FetchPcMe(id, true); }
@@ -551,6 +564,9 @@ namespace CompetitiveRounds
             txtBinderPage = UIFactory.CreateText("PcBPage", hdr.transform, "", 13f, C_LABEL, UIFactory.AlignMidCenter, sizeDelta: new Vector2(160, 24));
             btnNext = UIFactory.CreateButton("PcBNext", hdr.transform, ">", 14f, C_WHITE, C_BTN, () => { binderPage++; NativeUI.MarkDirty(); }, sizeDelta: new Vector2(40, 24));
             var sp = new GameObject("PcBSp"); sp.transform.SetParent(hdr.transform, false); sp.AddComponent<RectTransform>(); UIFactory.AddLE(sp, flexW: 1);
+            btnSort = UIFactory.CreateButton("PcBSort", hdr.transform, "", 13f, C_WHITE, C_BTN, CycleSort, sizeDelta: new Vector2(220, 24));
+            btnSortTxt = UIFactory.GetButtonText(btnSort);
+            if (btnSortTxt != null) { UIFactory.SetOverflowMode(btnSortTxt, 2); UIFactory.SetWordWrap(btnSortTxt, false); }
 
             var sv = UIFactory.CreateScrollView("PcBSV", binderRoot.transform, spacing: 8);
             UIFactory.AddLE(sv.scrollGO, flexH: 1);
@@ -567,6 +583,9 @@ namespace CompetitiveRounds
                 for (int k = 0; k < TILES_PER_ROW; k++)
                     binderTiles[r * TILES_PER_ROW + k] = CreateTile(row.transform, $"PcB{r}_{k}", true);
             }
+            // Click-to-view (2026-09-13): the tiles have no View button; the
+            // picture and the text block open the card, and this line says so.
+            UIFactory.CreateText("PcBHint", binderRoot.transform, "Click a card to view it", 12f, C_DIM, UIFactory.AlignMidCenter, sizeDelta: new Vector2(600, 18));
         }
 
         private static void BuildInfoView(Transform parent)
@@ -619,6 +638,17 @@ namespace CompetitiveRounds
             t.textBlock.AddComponent<RectTransform>();
             UIFactory.AddVLG(t.textBlock, spacing: 1);
             UIFactory.AddLE(t.textBlock, flexH: 1);
+            // Click-to-view (2026-09-13): the picture and the text block open
+            // the card (exactly one of the two is active). The handlers sit on
+            // those two and not on the tile root, so the action row below
+            // keeps its own buttons; ClickHandler hit-tests its own rect and
+            // honours the scroll view's mask like every other handler.
+            var tile = t;
+            foreach (var go in new[] { t.face, t.textBlock })
+            {
+                var ch = go.AddComponent<ClickHandler>();
+                ch.onClick = () => OnTileClick(tile);
+            }
             var tb = t.textBlock.transform;
             float w = TILE_W - 18f;
             t.txtName = UIFactory.CreateText(name + "_n", tb, "", 15f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(w, 20));
@@ -646,15 +676,13 @@ namespace CompetitiveRounds
                 // minH as well as prefH: a row with no minimum is the first
                 // thing a layout over budget shrinks to nothing (#449's rule).
                 UIFactory.AddLE(t.actions, prefH: 22, minH: 22, flexH: 0);
-                var tile = t;
-                t.btnView = UIFactory.CreateButton(name + "_v", t.actions.transform, "View", 11f, C_WHITE, C_BTN, () => ShowCard(tile), sizeDelta: new Vector2(46, 20));
                 t.btnDiscard = UIFactory.CreateButton(name + "_d", t.actions.transform, "Discard", 11f, C_WHITE, C_DANGER, () => OnDiscardClick(tile, false), sizeDelta: new Vector2(76, 20));
                 t.btnDiscardTxt = UIFactory.GetButtonText(t.btnDiscard);
                 t.btnDupes = UIFactory.CreateButton(name + "_dd", t.actions.transform, "", 11f, C_WHITE, C_DANGER, () => OnDiscardClick(tile, true), sizeDelta: new Vector2(84, 20));
                 t.btnDupesTxt = UIFactory.GetButtonText(t.btnDupes);
-                // Masking, never Truncate, on the three labels: the tile's own
+                // Masking, never Truncate, on the two labels: the tile's own
                 // text lines opted out above and the buttons had not (c4/c5).
-                foreach (var o in new[] { UIFactory.GetButtonText(t.btnView), t.btnDiscardTxt, t.btnDupesTxt })
+                foreach (var o in new[] { t.btnDiscardTxt, t.btnDupesTxt })
                     if (o != null) { UIFactory.SetOverflowMode(o, 2); UIFactory.SetWordWrap(o, false); }
             }
             t.root.SetActive(false);
@@ -677,6 +705,7 @@ namespace CompetitiveRounds
         /// (#602); the labels are translated line by line.</summary>
         private static GameObject cardPopupGO, cardPopupImg;
         private static int cardPopupSeq;
+        private static int cardPopupFrame = -1;   // the frame the popup last opened or closed on (OnTileClick)
 
         /// <summary>The card view (v22 §5.6): the print's own 750x1050 face at fit
         /// height on the mod's overlay canvas, click anywhere to close. A print with
@@ -693,6 +722,7 @@ namespace CompetitiveRounds
                 var overlay = NativeUI.OverlayRoot;
                 if (overlay == null) { ShowCardText(p); return; }
                 cardPopupGO = new GameObject("CR_PcCard");
+                cardPopupFrame = Time.frameCount;
                 cardPopupGO.hideFlags = HideFlags.HideAndDontSave;
                 cardPopupGO.transform.SetParent(overlay, false);
                 var rt = cardPopupGO.AddComponent<RectTransform>();
@@ -704,7 +734,9 @@ namespace CompetitiveRounds
                 bdRT.offsetMin = Vector2.zero; bdRT.offsetMax = Vector2.zero;
                 var bdClick = bd.AddComponent<ClickHandler>();
                 bdClick.bypassModalBlock = true;
-                bdClick.onClick = () => { if (ClickGuard.Claim(bd)) HideCardPopup(); };
+                // Not on the frame that opened it: the tile's handler and this
+                // one both poll the same mouse-down (OnTileClick).
+                bdClick.onClick = () => { if (Time.frameCount != cardPopupFrame && ClickGuard.Claim(bd)) HideCardPopup(); };
                 var img = UIFactory.CreatePanel("Face", cardPopupGO.transform, C_CARD);
                 var irt = img.GetComponent<RectTransform>();
                 irt.anchorMin = new Vector2(0.5f, 0.5f); irt.anchorMax = new Vector2(0.5f, 0.5f);
@@ -738,11 +770,23 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>Click-to-view (2026-09-13). The frame check is the same-frame
+        /// guard: ClickHandler polls the mouse-down, so the backdrop a click
+        /// creates would see the same press in its own Update, and the press
+        /// that closes the popup reaches the tile beneath in the frame the
+        /// modal block lifts.</summary>
+        private static void OnTileClick(Tile t)
+        {
+            if (t == null || t.print == null || Time.frameCount == cardPopupFrame) return;
+            if (!ClickGuard.Claim(t.root)) return;
+            ShowCard(t);
+        }
+
         internal static void HideCardPopup()
         {
             cardPopupSeq++;
             cardPopupImg = null;
-            if (cardPopupGO != null) { try { UnityEngine.Object.Destroy(cardPopupGO); } catch { } cardPopupGO = null; }
+            if (cardPopupGO != null) { cardPopupFrame = Time.frameCount; try { UnityEngine.Object.Destroy(cardPopupGO); } catch { } cardPopupGO = null; }
         }
 
         /// <summary>The rarity strip a card shows wherever it is drawn: band,
@@ -1396,6 +1440,63 @@ namespace CompetitiveRounds
         private static readonly List<ApiClient.PcPrint> sorted = new List<ApiClient.PcPrint>();
         private static readonly Dictionary<string, int> faceCounts = new Dictionary<string, int>();
 
+        private static void CycleSort()
+        {
+            binderSort = (Sort)(((int)binderSort + 1) % 5);
+            binderPage = 0;
+            NativeUI.MarkDirty();
+        }
+
+        private static string SortLabel(Sort s)
+        {
+            switch (s)
+            {
+                case Sort.Rarity: return I18n.Tr("Rarity");
+                case Sort.Edition: return I18n.Tr("Edition");
+                case Sort.Date: return I18n.Tr("Date obtained");
+                case Sort.Position: return I18n.Tr("Position");
+                default: return I18n.Tr("Name");
+            }
+        }
+
+        private static int EditionNo(ApiClient.PcPrint p) { int e; return int.TryParse(p.edition_id ?? "", out e) ? e : int.MaxValue; }
+        private static int BoardKey(ApiClient.PcPrint p) { return p.board_rank > 0 ? p.board_rank : int.MaxValue; }
+
+        /// <summary>The binder order: the chosen key first, then the name order
+        /// as the tiebreaker under every mode (and the whole order under Name),
+        /// down to the print id so the order is total.</summary>
+        private static int CompareForBinder(ApiClient.PcPrint a, ApiClient.PcPrint b)
+        {
+            int c;
+            switch (binderSort)
+            {
+                case Sort.Rarity:
+                    c = RarityOrder(a.rarity).CompareTo(RarityOrder(b.rarity)); if (c != 0) return c;
+                    c = (b.foil ? 1 : 0).CompareTo(a.foil ? 1 : 0); if (c != 0) return c;
+                    c = (b.signed ? 1 : 0).CompareTo(a.signed ? 1 : 0); if (c != 0) return c;
+                    break;
+                case Sort.Edition:
+                    c = EditionNo(a).CompareTo(EditionNo(b)); if (c != 0) return c;
+                    c = string.CompareOrdinal(a.edition_id ?? "", b.edition_id ?? ""); if (c != 0) return c;
+                    c = RarityOrder(a.rarity).CompareTo(RarityOrder(b.rarity)); if (c != 0) return c;
+                    break;
+                case Sort.Date:
+                    c = string.CompareOrdinal(b.minted_at ?? "", a.minted_at ?? ""); if (c != 0) return c;   // newest first
+                    break;
+                case Sort.Position:
+                    c = BoardKey(a).CompareTo(BoardKey(b)); if (c != 0) return c;
+                    c = a.pool_rank.CompareTo(b.pool_rank); if (c != 0) return c;
+                    break;
+            }
+            c = string.Compare(SafeName(a), SafeName(b), StringComparison.OrdinalIgnoreCase); if (c != 0) return c;
+            c = string.CompareOrdinal(a.card_id ?? "", b.card_id ?? ""); if (c != 0) return c;
+            c = RarityOrder(a.rarity).CompareTo(RarityOrder(b.rarity)); if (c != 0) return c;
+            c = (b.foil ? 1 : 0).CompareTo(a.foil ? 1 : 0); if (c != 0) return c;
+            c = (b.signed ? 1 : 0).CompareTo(a.signed ? 1 : 0); if (c != 0) return c;
+            c = string.CompareOrdinal(a.minted_at ?? "", b.minted_at ?? "");
+            return c != 0 ? c : string.CompareOrdinal(a.print_id, b.print_id);
+        }
+
         private static void RefreshBinder(ApiClient.PcMe me)
         {
             var col = ApiClient.CachedPcCollection;
@@ -1403,21 +1504,7 @@ namespace CompetitiveRounds
             if (col != null)
             {
                 sorted.AddRange(col.prints);
-                sorted.Sort((a, b) =>
-                {
-                    int c = string.Compare(SafeName(a), SafeName(b), StringComparison.OrdinalIgnoreCase);
-                    if (c != 0) return c;
-                    c = string.CompareOrdinal(a.card_id ?? "", b.card_id ?? "");
-                    if (c != 0) return c;
-                    c = RarityOrder(a.rarity).CompareTo(RarityOrder(b.rarity));
-                    if (c != 0) return c;
-                    c = (b.foil ? 1 : 0).CompareTo(a.foil ? 1 : 0);
-                    if (c != 0) return c;
-                    c = (b.signed ? 1 : 0).CompareTo(a.signed ? 1 : 0);
-                    if (c != 0) return c;
-                    c = string.CompareOrdinal(a.minted_at ?? "", b.minted_at ?? "");
-                    return c != 0 ? c : string.CompareOrdinal(a.print_id, b.print_id);
-                });
+                sorted.Sort(CompareForBinder);
                 foreach (var p in sorted) { string k = FaceKey(p); int n; faceCounts.TryGetValue(k, out n); faceCounts[k] = n + 1; }
             }
             int total = sorted.Count;
@@ -1431,6 +1518,7 @@ namespace CompetitiveRounds
             if (discardInFlight) hdr += "  -  " + I18n.Tr("discarding...");
             UIFactory.SetTextRaw(txtBinderHdr, hdr);
             UIFactory.SetTextRaw(txtBinderPage, I18n.TrF("Page {0} of {1}", binderPage + 1, pages));
+            if (btnSortTxt != null) UIFactory.SetTextRaw(btnSortTxt, I18n.Tr("Sort:") + " " + SortLabel(binderSort));
             if (btnPrev != null) btnPrev.SetActive(pages > 1);
             if (btnNext != null) btnNext.SetActive(pages > 1);
             int start = binderPage * PAGE;
@@ -1905,32 +1993,45 @@ namespace CompetitiveRounds
         }
 
 
-        // ── Settings tab rows (design v4 §12 wording) ─────────────────────────
+        // ── Settings tab rows (design v4 §12 wording; no opt-out and no picture
+        // choice since 2026-09-13: every registered player is in the pool, the
+        // card shows the Steam profile picture until this PC has sent the
+        // in-game character, and only deleting all data removes the cards) ──
         internal static void BuildSettingsRows(Transform parent)
         {
             UIFactory.CreateText("SPcHdr", parent, "Player Cards", 15f, C_GOLD, UIFactory.AlignMidLeft, sizeDelta: new Vector2(700, 22));
-            btnBeCard = SettingsRow(parent, "SPcBe", () => ToggleSetting("opted_out"),
-                "Other players can pull, collect and trade a card of you showing your name, rank title, rating and ranked record - the same things the leaderboard shows. Turn this off and no new copies are printed; copies already pulled stay in their owners' collections.", 36f);
-            btnBeCardTxt = UIFactory.GetButtonText(btnBeCard);
+            var info = UIFactory.CreateText("SPcInfo", parent,
+                "Other players can pull, collect and trade a card of you showing your name, rank title, rating and ranked record - the same things the leaderboard shows. Its picture is your Steam profile picture until this PC has sent your in-game character - the same body, face, colour and effect you play with, drawn here and sent once. Deleting your data (below) removes every card of you from every binder.",
+                13f, C_DIM, sizeDelta: new Vector2(700, 36));
+            // wrap + auto height, the Info body's shape: CreateText defaults to a
+            // single Truncate line, and this caption is longer than the column
+            UIFactory.SetWordWrap(info, true); UIFactory.SetTextAutoHeight(info, 36f);
             btnPublic = SettingsRow(parent, "SPcPub", () => ToggleSetting("collection_public"),
                 "Lets others see which cards you hold, in the mod and in Discord.", 18f);
             btnPublicTxt = UIFactory.GetButtonText(btnPublic);
             btnAnnounce = SettingsRow(parent, "SPcAnn", () => ToggleSetting("announce"),
-                "Rare pulls may be posted to the Discord announcements channel with your name.", 18f);
+                "Rare pulls may be posted to the Discord gambler chat with your name.", 18f);
             btnAnnounceTxt = UIFactory.GetButtonText(btnAnnounce);
-            // The picture rows (design v22 §3.1, §3.4; Steam pictures v2 §12).
-            // Two states only: the in-game character (the Steam profile picture
-            // stands in until this PC has sent it) or None (the plain emblem);
-            // the preset decides WHICH character is drawn.
-            btnPicture = SettingsRow(parent, "SPcPic", TogglePortraitSource,
-                "Your card can show your in-game character - the same body, face, colour and effect you play with, drawn by this PC and sent once. Until this PC has sent it, your card shows your Steam profile picture. Set it to None and your card shows the plain card emblem instead.", 36f);
-            btnPictureTxt = UIFactory.GetButtonText(btnPicture);
             btnPreset = SettingsRow(parent, "SPcPre", CyclePreset,
-                "Which character your picture shows: Follow uses the one you have selected in the character menu, or pin a saved preset.", 18f);
+                "Which character your picture shows: Follow uses the one you have selected in the character menu, or pin a saved preset. The preview below is what your card will show.", 18f);
             btnPresetTxt = UIFactory.GetButtonText(btnPreset);
-            presetPreview = UIFactory.CreatePanel("SPcPrev", parent, C_CARD);
+            // The preview in its own left-aligned row: dropped straight into
+            // the settings column it was stretched to the column's width and
+            // its picture centred in that ("too far to the right", Sid,
+            // 2026-09-13). It shows as soon as a render exists, which the
+            // Settings tab now asks for itself (MaybeTick -> OnTabVisit).
+            presetPreviewRow = new GameObject("SPcPrevRow");
+            presetPreviewRow.transform.SetParent(parent, false);
+            presetPreviewRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(presetPreviewRow, spacing: 8, forceExpandW: false, forceExpandH: false);
+            UIFactory.AddLE(presetPreviewRow, prefH: 118, minH: 118, flexH: 0);
+            presetPreview = UIFactory.CreatePanel("SPcPrev", presetPreviewRow.transform, C_CARD);
             UIFactory.AddLE(presetPreview, prefW: 118, minW: 118, prefH: 118, minH: 118, flexW: 0, flexH: 0);
             PlayerCardFaces.SetFace(presetPreview, null);
+            presetPreviewRow.SetActive(false);
+            // The renderer's last word (rendered / uploading / picture current /
+            // why it refused), the diagnostic the picture row used to carry.
+            txtPicNote = UIFactory.CreateText("SPcPicN", parent, "", 12f, C_DIM, UIFactory.AlignMidLeft, sizeDelta: new Vector2(700, 16));
         }
 
         private static string PresetLabel()
@@ -1938,97 +2039,6 @@ namespace CompetitiveRounds
             int v = PortraitRender.CurrentPreset();
             // v is the slot INDEX; players count slots from one.
             return v < 0 ? I18n.Tr("Follow my character") : I18n.TrF("Preset {0}", v + 1);
-        }
-
-        /// <summary>The picture setting is a CAS write like every other one,
-        /// with the portrait_source key: 1 = the in-game character, 0 = none.
-        ///
-        /// A None write clears BOTH portrait units on the server -- the
-        /// in-game render (hash, descriptor, time) and the Steam picture
-        /// (hash, reference, failure run) -- exactly as an admin clear and an
-        /// account deletion do, and advances the Steam attempt id so a fetch
-        /// still in flight under the old attempt binds to nothing. Nothing is
-        /// deleted in the write: a blob no row names any more is marked
-        /// unreferenced and a janitor deletes it after a ten-minute grace.
-        /// Turning the picture back on renders and uploads afresh (the
-        /// RequestRefresh below); the cached faces are dropped either way.</summary>
-        private static void TogglePortraitSource() { TogglePortraitSource(false); }
-
-        /// <param name="fromRetry">this IS the one delayed re-send, so it does
-        /// not schedule another. One retry, not a loop that argues with the
-        /// server for as long as a delivery lease lives.</param>
-        private static void TogglePortraitSource(bool fromRetry)
-        {
-            var id = LocalId(); var me = ApiClient.CachedPcMe;
-            if (id == null) return;
-            if (me == null) { ApiClient.FetchPcMe(id, true); return; }
-            if (!SessionReady) { try { CompetitiveUI.ShowNotification(ReasonText("session_required"), C_WARN, 3f); } catch { } return; }
-            if (setInFlight && Now - setAt < 25f) return;
-            setInFlight = true; setAt = Now;
-            string before = me.portrait_source;
-            bool toGame = before != "game";
-            me.portrait_source = toGame ? "game" : "none";
-            NativeUI.MarkDirty();
-            int revision = me.revision, ep = uiEpoch;
-            Plugin.Log.LogInfo($"[PC] setting portrait_source -> {(toGame ? 1 : 0)} (rev {revision})");
-            ApiClient.PcSetSetting(id, NewNonce(), revision, "portrait_source", toGame ? 1 : 0, (ok, resp) =>
-            {
-                if (ep != uiEpoch) return;
-                setInFlight = false;
-                if (ok)
-                {
-                    // the picture the cards show changed: every cached face is stale
-                    try { PlayerCardFaces.Clear(); } catch { }
-                    ApiClient.FetchPcCollection(id, true);
-                    if (toGame) PortraitRender.RequestRefresh("setting");
-                }
-                else
-                {
-                    var cur = ApiClient.CachedPcMe;
-                    if (cur != null) cur.portrait_source = before;
-                    string code = ApiClient.PcErrorCode(resp);
-                    if (code == "stale_revision") ApiClient.FetchPcMe(id, true);
-                    // retry_after is not a refusal: a card of this player's is
-                    // mid-delivery under the picture being turned off, and the
-                    // server is naming the moment it will be free. The rollback
-                    // above is honest — the picture IS still on until the write
-                    // lands — and the same toggle is re-sent once when the wait
-                    // elapses. Without it the toggle silently does nothing and
-                    // the player is left to guess and click again.
-                    if (code == "retry_after" && !fromRetry && !toGame && Plugin.Instance != null)
-                    {
-                        int wait = 3;
-                        try
-                        {
-                            // the field is inside FastAPI's `detail` object, read
-                            // the way the portrait upload reads its own
-                            var m = System.Text.RegularExpressions.Regex.Match(resp ?? "", "\"retry_after\"\\s*:\\s*(\\d+)");
-                            if (m.Success) wait = Mathf.Clamp(int.Parse(m.Groups[1].Value), 1, 120);
-                        }
-                        catch { }
-                        Say(I18n.TrF("A card is being delivered - retrying in {0}s", wait));
-                        Plugin.Instance.StartCoroutine(SourceRetryCo(ep, wait));
-                        NativeUI.MarkDirty();
-                        return;
-                    }
-                    try { CompetitiveUI.ShowNotification(ReasonText(code), Color.yellow, 3f); } catch { }
-                }
-                NativeUI.MarkDirty();
-            });
-        }
-
-        /// <summary>The ONE delayed re-send of a None write the server asked
-        /// for. It re-reads the setting first: the rollback restored "game", so
-        /// "game" is the state this retry is still trying to leave. Anything
-        /// else means the player got there another way in the meantime, and
-        /// toggling from there would turn the picture back ON.</summary>
-        private static IEnumerator SourceRetryCo(int ep, int secs)
-        {
-            yield return new WaitForSecondsRealtime(secs);
-            if (ep != uiEpoch || setInFlight) yield break;
-            var cur = ApiClient.CachedPcMe;
-            if (cur == null || cur.portrait_source != "game") yield break;
-            TogglePortraitSource(true);
         }
 
         /// <summary>Follow → 1 → … → 10 → Follow. Local only (the picture itself is
@@ -2057,70 +2067,66 @@ namespace CompetitiveRounds
             UIFactory.AddVLG(group, spacing: 1);
             UIFactory.AddLE(group, flexH: 0);
             var btn = NativeUI.SettingsButton(group.transform, name, "", C_WHITE, C_BTN, new Vector2(340, 28), onClick);
-            UIFactory.CreateText(name + "_d", group.transform, desc, 13f, C_DIM, sizeDelta: new Vector2(700, descH));
+            var d = UIFactory.CreateText(name + "_d", group.transform, desc, 13f, C_DIM, sizeDelta: new Vector2(700, descH));
+            // wrap + auto height (2026-09-13): a caption longer than the column, or
+            // a translation of one, folds instead of running off the edge
+            UIFactory.SetWordWrap(d, true); UIFactory.SetTextAutoHeight(d, descH);
             return btn;
         }
 
         internal static void RefreshSettingsRows()
         {
-            if (btnBeCardTxt == null) return;
+            if (btnPublicTxt == null) return;
             var id = LocalId();
             var me = ApiClient.CachedPcMe;
             if (me == null && id != null) ApiClient.FetchPcMe(id);   // throttled inside (10 s)
             if (me == null)
             {
-                UIFactory.SetText(btnBeCardTxt, "I can be a Player Card: <color=#888>...</color>");
                 UIFactory.SetText(btnPublicTxt, "My collection is public: <color=#888>...</color>");
                 UIFactory.SetText(btnAnnounceTxt, "Announce my pulls: <color=#888>...</color>");
-                return;
             }
-            UIFactory.SetText(btnBeCardTxt, !me.opted_out
-                ? "I can be a Player Card: <color=#88FF88>ON</color>"
-                : "I can be a Player Card: <color=#FF9966>OFF</color>");
-            UIFactory.SetText(btnPublicTxt, me.collection_public
-                ? "My collection is public: <color=#88FF88>ON</color>"
-                : "My collection is public: <color=#FF9966>OFF</color>");
-            UIFactory.SetText(btnAnnounceTxt, me.announce
-                ? "Announce my pulls: <color=#88FF88>ON</color>"
-                : "Announce my pulls: <color=#FF9966>OFF</color>");
-            RefreshPictureRows(me);
+            else
+            {
+                UIFactory.SetText(btnPublicTxt, me.collection_public
+                    ? "My collection is public: <color=#88FF88>ON</color>"
+                    : "My collection is public: <color=#FF9966>OFF</color>");
+                UIFactory.SetText(btnAnnounceTxt, me.announce
+                    ? "Announce my pulls: <color=#88FF88>ON</color>"
+                    : "Announce my pulls: <color=#FF9966>OFF</color>");
+            }
+            RefreshPictureRows();
         }
 
-        private static void RefreshPictureRows(ApiClient.PcMe me)
+        /// <summary>The preset row and its preview are local (the preset is a
+        /// config value and the preview this PC's own render), so they refresh
+        /// whether or not /pc/me has answered.</summary>
+        private static void RefreshPictureRows()
         {
-            if (btnPictureTxt == null) return;
-            bool game = me == null || me.portrait_source == "game";
-            string state = game
-                ? "Card picture: <color=#88FF88>In-game character</color>"
-                : "Card picture: <color=#FF9966>None</color>";
-            string note = PortraitRender.LastResult;
-            if (game && !string.IsNullOrEmpty(note)) state += "  <color=#888>(" + note + ")</color>";
-            UIFactory.SetTextRaw(btnPictureTxt, state);
+            if (btnPresetTxt == null) return;
             UIFactory.SetTextRaw(btnPresetTxt, I18n.Tr("Character preset") + ": <color=#CCCCCC>" + PresetLabel() + "</color>");
-            if (btnPreset != null) btnPreset.SetActive(game);
-            if (presetPreview != null)
+            string note = PortraitRender.LastResult;
+            UIFactory.SetTextRaw(txtPicNote, string.IsNullOrEmpty(note) ? "" : "(" + note + ")");
+            if (presetPreviewRow == null || presetPreview == null) return;
+            bool show = PortraitRender.PreviewTex != null;
+            presetPreviewRow.SetActive(show);
+            if (show && previewShown != PortraitRender.PreviewSerial)
             {
-                bool show = game && PortraitRender.PreviewTex != null;
-                presetPreview.SetActive(show);
-                if (show && previewShown != PortraitRender.PreviewSerial)
-                {
-                    previewShown = PortraitRender.PreviewSerial;
-                    var old = previewSprite;
-                    previewSprite = PlayerCardFaces.SpriteOf(PortraitRender.PreviewTex);
-                    PlayerCardFaces.SetFace(presetPreview, previewSprite);
-                    if (old != null) { try { UnityEngine.Object.Destroy(old); } catch { } }
-                }
+                previewShown = PortraitRender.PreviewSerial;
+                var old = previewSprite;
+                previewSprite = PlayerCardFaces.SpriteOf(PortraitRender.PreviewTex);
+                PlayerCardFaces.SetFace(presetPreview, previewSprite);
+                if (old != null) { try { UnityEngine.Object.Destroy(old); } catch { } }
             }
         }
 
         private static bool SettingValue(ApiClient.PcMe me, string key)
         {
-            switch (key) { case "opted_out": return me.opted_out; case "collection_public": return me.collection_public; default: return me.announce; }
+            return key == "collection_public" ? me.collection_public : me.announce;
         }
         private static void ApplySetting(ApiClient.PcMe me, string key, bool v)
         {
             if (me == null) return;
-            switch (key) { case "opted_out": me.opted_out = v; break; case "collection_public": me.collection_public = v; break; default: me.announce = v; break; }
+            if (key == "collection_public") me.collection_public = v; else me.announce = v;
         }
 
         private static void ToggleSetting(string key)

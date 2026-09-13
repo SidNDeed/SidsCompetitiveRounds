@@ -142,14 +142,22 @@ def test_the_binder_tile_layout_repairs_are_pinned_one_by_one():
     """The three repairs behind the 2026-09-12 binder screenshot, each on its
     own so deleting any one of them fails here: the face slot asks for no
     preferred size (a 375x525 sprite used to claim 525 px and crush the
-    action row), the action row keeps a minimum height, and the three action
-    labels clip (TMP Masking) rather than blank under Truncate."""
+    action row), the action row keeps a minimum height, and the action
+    labels clip (TMP Masking) rather than blank under Truncate. Since
+    2026-09-13 there is no View button: the face and the text block open the
+    card on click (through the same-frame guard), and a hint line under the
+    grid says so."""
     src = CLIENT.read_text(encoding="utf-8")
     tile = _span(src, 't.face = UIFactory.CreatePanel(name + "_f"', "private static string RatingLine")
     assert "UIFactory.AddLE(t.face, prefW: 0, prefH: 0, flexH: 1, flexW: 1);" in tile
     assert "UIFactory.AddLE(t.actions, prefH: 22, minH: 22, flexH: 0);" in tile
-    assert "foreach (var o in new[] { UIFactory.GetButtonText(t.btnView), t.btnDiscardTxt, t.btnDupesTxt })" in tile
+    assert "foreach (var o in new[] { t.btnDiscardTxt, t.btnDupesTxt })" in tile
     assert "if (o != null) { UIFactory.SetOverflowMode(o, 2); UIFactory.SetWordWrap(o, false); }" in tile
+    assert "btnView" not in src
+    assert "foreach (var go in new[] { t.face, t.textBlock })" in tile
+    assert "ch.onClick = () => OnTileClick(tile);" in tile
+    assert "if (t == null || t.print == null || Time.frameCount == cardPopupFrame) return;" in src
+    assert 'UIFactory.CreateText("PcBHint", binderRoot.transform, "Click a card to view it"' in src
 
 
 def test_the_pack_history_keeps_the_servers_order_and_follows_its_signals():
@@ -290,12 +298,14 @@ def test_the_info_library_states_what_the_cards_settings_actually_do():
     assert "The name and the picture are live: a card of a renamed player shows the new name" in src
     assert "The player's current name - a rename follows onto every card of them" in src
     assert "and it never changes afterwards" not in src and "Everything on a card is frozen" not in src
-    # opt-out vs Public collection vs deletion
-    assert "<b>Opt out</b> stops new cards of you: none is minted from then on and pulls of you are no longer announced." in src
-    assert "show the plain card emblem in place of your picture. It does not hide your binder and it does not delete any card." in src
+    # no opt-out and no picture setting (2026-09-13) vs Public collection vs deletion
+    assert "There is no opt-out: every registered player who is not banned is in the pool, and cards of you stay in the binders that hold them." in src
+    assert "The picture is not a setting: every card of you shows your Steam picture until your PC has sent the character, then the character - including cards pulled before it was sent." in src
     assert "<b>Public collection</b> is the setting that shows or hides your binder from others" in src
-    assert "Deleting your account is what removes cards: it empties your binder." in src
-    assert "If the player opts out, cards of them stay in binders with their frozen stats and the emblem in place of the picture." in src
+    assert "Deleting your data is what removes cards: your binder is emptied, and every card of you is removed from every other player's binder." in src
+    assert "If the player deletes their data, every card of them is removed from every binder." in src
+    assert "Click a binder tile to see the card full size." in src
+    assert "Opt out</b>" not in src and "If the player opts out" not in src and "Deleting your account" not in src
     assert "and hides your binder" not in src
     # announcements: Epic-or-better, plus self / Foil / Signed at any rarity
     assert "and so is a pull of your own card, a Foil or a Signed print at any rarity" in src

@@ -3687,13 +3687,14 @@ namespace CompetitiveRounds
         public class PcUnopened { public string pack_id, source, mode, kind, reference_id, created_at; }
         public class PcMe
         {
-            public bool opted_out, collection_public, announce, daily_claimed;
+            public bool collection_public, announce, daily_claimed;
             public bool paid_cap_exempt;   // the server skips the daily paid-pack cap for this account (testing exemption)
             public int revision, shards, price_gold, price_shards, paid_packs_per_day, prints_per_pack, paid_today, prints, pool_member_count;
             public string daily_pack_id, next_reset_utc, pool_taken_at;
-            // v22 §3: the portrait unit — source "game" | "none", the stored
-            // hash + the descriptor of its inputs, and an admin lock's end.
-            public string portrait_source = "game", portrait_hash, portrait_descriptor, portrait_locked_until;
+            // v22 §3: the portrait unit — the stored hash + the descriptor of
+            // its inputs, and an admin lock's end. (No source since 2026-09-13:
+            // the picture is the character once sent, the Steam picture before.)
+            public string portrait_hash, portrait_descriptor, portrait_locked_until;
             public List<PcUnopened> unopened = new List<PcUnopened>();
         }
         public class PcPackAnswer
@@ -4291,12 +4292,10 @@ namespace CompetitiveRounds
         private static void PcApplySettings(PcMe me, string settingsObj)
         {
             if (me == null || string.IsNullOrEmpty(settingsObj)) return;
-            if (PcHas(settingsObj, "opted_out")) me.opted_out = PcBool(PcTopLevel(settingsObj, "opted_out"));
             if (PcHas(settingsObj, "collection_public")) me.collection_public = PcBool(PcTopLevel(settingsObj, "collection_public"));
             if (PcHas(settingsObj, "announce")) me.announce = PcBool(PcTopLevel(settingsObj, "announce"));
             if (PcHas(settingsObj, "revision")) me.revision = PcInt(PcTopLevel(settingsObj, "revision"));
             if (PcHas(settingsObj, "shards")) me.shards = PcInt(PcTopLevel(settingsObj, "shards"));
-            if (PcHas(settingsObj, "portrait_source")) me.portrait_source = PcStr(PcTopLevel(settingsObj, "portrait_source")) ?? "game";
         }
 
         internal static PcMe ParsePcMe(string json)
@@ -4315,7 +4314,6 @@ namespace CompetitiveRounds
             me.paid_today = PcInt(PcTopLevel(json, "paid_today"));
             me.paid_cap_exempt = PcBool(PcTopLevel(json, "paid_cap_exempt"));
             me.prints = PcInt(PcTopLevel(json, "prints"));
-            if (PcHas(json, "portrait_source")) me.portrait_source = PcStr(PcTopLevel(json, "portrait_source")) ?? "game";
             me.portrait_hash = PcHas(json, "portrait_hash") ? PcStr(PcTopLevel(json, "portrait_hash")) : null;
             me.portrait_descriptor = PcHas(json, "portrait_descriptor") ? PcStr(PcTopLevel(json, "portrait_descriptor")) : null;
             me.portrait_locked_until = PcHas(json, "portrait_locked_until") ? PcStr(PcTopLevel(json, "portrait_locked_until")) : null;

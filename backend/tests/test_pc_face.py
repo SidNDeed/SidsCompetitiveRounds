@@ -782,7 +782,10 @@ def test_catalogue_keys_equal_label_ids():
     # row -- so a catalogue identifier missing from PcLabels.cs is a label that
     # renders in English in every locale, quietly, with nothing to see in a log
     # (r19 H2: the consumer shipped and the producer did not).
-    repo = Path(pc_face.__file__).parents[2]
+    # resolve() first: whichever test module imported pc_face first decides
+    # whether __file__ carries a "tests/../api" segment, and parents[] of an
+    # unresolved path counts that ".." as a directory (collection-order flake)
+    repo = Path(pc_face.__file__).resolve().parents[2]
     labels_cs = (repo / "plugin" / "PcLabels.cs").read_text(encoding="utf-8")
     call = re.compile(r'case "([^"]+)":\s*return I18n\.TrC\("([^"]+)",\s*'
                       r'"((?:[^"\\]|\\.)*)"\);')
@@ -802,3 +805,31 @@ def test_catalogue_keys_equal_label_ids():
     harvested = set(source.get("contexts") or {})
     want = {v + "\x04" + k for k, v in catalogue.items()}
     assert want <= harvested, sorted(want - harvested)
+
+
+def test_the_name_budget_follows_the_chips_and_the_tile_shrinks_before_it_cuts():
+    """2026-09-13 (bug #361 feedback): the name is measured against the chips
+    actually drawn, not the layout rect, with a gap kept clear, and the tile
+    shrinks to its own floor before it ellipsises. A common chip is narrower
+    than a legendary one, so the same name gets more room beside it; a foil
+    chip on the same row can only narrow the budget."""
+    name = "Twenty Character Nam"
+    img = Image.new("RGBA", (750, 1050))
+    left_leg = pc_face._draw_chip(img, 696, 38, "LEGENDARY", "LEG", (1, 1, 1), (2, 2, 2), 1.0, False)
+    left_com = pc_face._draw_chip(img, 696, 38, "COMMON", "COM", (1, 1, 1), (2, 2, 2), 1.0, False)
+    assert 502 <= left_leg < left_com < 696          # the chip reports its left edge; the wider chip, the smaller x
+    gap = pc_face.NAME_CHIP_GAP
+    beside_leg = pc_face._name_fit(name, "card", left_leg - gap)
+    beside_com = pc_face._name_fit(name, "card", left_com - gap)
+    assert beside_leg[0] == beside_com[0] == name and beside_com[1] >= beside_leg[1]
+    # the fitted text never crosses the edge it was given
+    assert pc_face._measure_text(beside_leg[0], beside_leg[1], "black") <= left_leg - gap - pc_face.NAME_LEFT
+    # the tile: beside the RARE chip this name was cut to eleven characters at the old 28 px floor; whole now
+    tile = Image.new("RGBA", (375, 525))
+    left_rare = pc_face._draw_chip(tile, 348, 19, "RARE", "RARE", (1, 1, 1), (2, 2, 2), 0.5, True)
+    fitted, px = pc_face._name_fit(name, "tile", left_rare - gap * 0.5)
+    assert fitted == name and pc_face.NAME_SIZE_MIN_TILE // 2 <= px < 28
+    # the floors are what the comment says: the tile no longer stops two steps down
+    assert (pc_face.NAME_SIZE_MIN_CARD, pc_face.NAME_SIZE_MIN_TILE) == (34, 40)
+    # without a chip edge the layout rect still bounds the name (fit_name, the old entry point)
+    assert pc_face.fit_name("Ace", "card") == "Ace" and pc_face.fit_name("x" * 60, "card").endswith("...")

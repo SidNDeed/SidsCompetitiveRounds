@@ -509,8 +509,8 @@ def test_the_render_probe_composites_a_stored_steam_picture_or_says_why_not(monk
         return factory
     monkeypatch.setattr(database, "async_session", factory_for(None))
     assert _run(main._pc_steam_render_probe()) == "none"
-    sub = {"display_name": "Sid", "subject_deleted": False, "subject_banned": False, "subject_opted_out": False,
-           "portrait_source": "game", "portrait_hash": None, "steam_portrait_hash": "s" * 64}
+    sub = {"display_name": "Sid", "subject_deleted": False, "subject_banned": False,
+           "portrait_hash": None, "steam_portrait_hash": "s" * 64}
     calls = []
 
     async def pbytes(db, h):
@@ -535,14 +535,14 @@ def test_the_render_probe_composites_a_stored_steam_picture_or_says_why_not(monk
     assert args[0]["name"] == "Sid" and args[0]["subtitle"] is None and args[0]["band"] == "common"
     sql, params = dbs[-1].log[0]
     assert "WHERE p.pc_steam_portrait_hash IS NOT NULL AND p.pc_game_portrait_hash IS NULL" in sql
-    # the sweep's own eligibility text (v4 §3): an open ban, a lock, None or an opt-out never becomes the probe's pick
+    # the sweep's own eligibility text (v4 §3): an open ban or a lock never becomes the probe's pick
     assert " ".join(main._PC_STEAM_ELIGIBLE_SQL.split()) in sql and "player_bans" in sql
     assert "ORDER BY p.pc_steam_portrait_at DESC NULLS LAST LIMIT CAST(:n AS integer)" in sql
     assert params == {"n": main._PC_STEAM_PROBE_CANDIDATES} == {"n": 5}
     assert " ".join(main._pc_portrait_resolve_cols("p").split()) in sql   # the face route's own resolver columns
     assert dbs[-1].count("INSERT") == 0 and dbs[-1].count("UPDATE") == 0
     # the resolver must agree that the pick's face IS the Steam picture; with no candidate resolving, say so
-    monkeypatch.setattr(database, "async_session", factory_for({**sub, "portrait_source": "none"}))
+    monkeypatch.setattr(database, "async_session", factory_for({**sub, "subject_banned": True}))
     assert _run(main._pc_steam_render_probe()) == "failed:resolver"
     # the blob released between the two reads: the next candidate is tried, newest first
     released = {"s" * 64}
@@ -620,9 +620,10 @@ def test_the_blob_janitor_holds_one_lock_per_transaction():
 def test_the_hold_releases_on_resolution_never_on_an_attempt_and_names_face_ready():
     res = main._PC_EVENTS_RESOLVED_SQL
     for term in ("su.pc_game_portrait_hash IS NOT NULL", "su.pc_steam_portrait_hash IS NOT NULL",
-                 "COALESCE(su.pc_portrait_source, 'game') <> 'game'", "su.pc_opted_out_at IS NOT NULL",
                  "(su.pc_steam_avatar_ref IS NOT NULL AND su.pc_steam_portrait_fail = 0)"):
         assert term in res, term
+    for dead in ("pc_portrait_source", "pc_opted_out_at"):   # no plate by choice since 2026-09-13
+        assert dead not in res, dead
     assert "next_at" not in res and "portrait_at" not in res   # an attempt, a lease or a failure resolves nothing
     assert main._PC_EVENTS_HOLD_SQL == "(" + res + " OR e.created_at < now() - INTERVAL '60 seconds')"
     pending = main._PC_EVENTS_PENDING_SQL
@@ -637,77 +638,46 @@ def test_the_hold_releases_on_resolution_never_on_an_attempt_and_names_face_read
 
 # ── the settings routes ────────────────────────────────────────────────
 
-def test_none_and_opt_out_clear_the_steam_unit_inside_the_revision_bound_update(monkeypatch):
-    opt = " ".join(main._PC_SETTINGS_SQL["opted_out"].split())
-    src = " ".join(main._PC_SETTINGS_SQL["portrait_source"].split())
-    for sql in (opt, src):
-        assert "WHERE id = CAST(:pid AS uuid) AND pc_settings_revision = CAST(:rev AS integer) RETURNING pc_settings_revision" in sql
-        assert "pc_game_portrait" not in sql   # the rig's stored picture stays (v22 §3.1): None hides, the way back shows
-    assert "pc_steam_portrait_hash = CASE WHEN CAST(:value AS integer) = 1 THEN NULL ELSE pc_steam_portrait_hash END" in opt
-    assert "pc_steam_avatar_ref = CASE WHEN CAST(:value AS integer) = 1 THEN NULL ELSE pc_steam_avatar_ref END" in opt
-    assert "pc_steam_portrait_fail = CASE WHEN CAST(:value AS integer) = 1 THEN 0 ELSE pc_steam_portrait_fail END" in opt
-    assert "pc_steam_portrait_next_at = CASE WHEN CAST(:value AS integer) = 1 THEN pc_steam_portrait_next_at ELSE NULL END" in opt
-    # v4 §1: the attempt id advances with the clear, so a fetch in flight under the previous attempt binds to nothing
-    assert "pc_steam_attempt = CASE WHEN CAST(:value AS integer) = 1 THEN pc_steam_attempt + 1 ELSE pc_steam_attempt END" in opt
-    assert "pc_steam_attempt = CASE WHEN CAST(:value AS integer) = 1 THEN pc_steam_attempt ELSE pc_steam_attempt + 1 END" in src
-    assert "pc_steam_portrait_hash = CASE WHEN CAST(:value AS integer) = 1 THEN pc_steam_portrait_hash ELSE NULL END" in src
-    assert "pc_steam_avatar_ref = CASE WHEN CAST(:value AS integer) = 1 THEN pc_steam_avatar_ref ELSE NULL END" in src
-    assert "pc_steam_portrait_fail = CASE WHEN CAST(:value AS integer) = 1 THEN pc_steam_portrait_fail ELSE 0 END" in src
-    assert "pc_steam_portrait_next_at = CASE WHEN CAST(:value AS integer) = 1 THEN NULL ELSE pc_steam_portrait_next_at END" in src
-
-    monkeypatch.setattr(main, "_pc_hmac_ok", lambda sig, canon: True)
-
+def test_the_settings_writer_takes_no_blob_lock_and_releases_nothing(monkeypatch):
+    """2026-09-13: with no None write and no opt-out, every settings write is
+    the plain CAS — actor, row lock, the revision-bound UPDATE, commit — with
+    no identity lock, no P lock, no blob release and no lease wait. The two
+    keys that used to carry the picture choices are refused as unknown
+    before any read."""
     async def actor(request, steam_id, sig, canon, db):
         db.log.append(("ACTOR", {"steam_id": steam_id}))
         return SimpleNamespace(id=PID)
 
-    async def no_wait(db, pid):
-        return None
-
     async def settings_of(db, pid):
         return {"revision": 6}
     monkeypatch.setattr(main, "_pc_verified_actor", actor)
-    monkeypatch.setattr(main, "_pc_lease_wait", no_wait)
     monkeypatch.setattr(main, "_pc_settings_of", settings_of)
-
-    def settings_db(rev_rows):
-        return Scripted({"SELECT pc_game_portrait_hash, pc_steam_portrait_hash FROM players":
-                             [[{"pc_game_portrait_hash": None, "pc_steam_portrait_hash": H0}]],
-                         "RETURNING pc_settings_revision": [rev_rows]})
 
     def call(db, key, value, revision=5):
         return _run(main.pc_set_setting(request=_Req(), steam_id=STEAM, sig="s", nonce="n" * 8, revision=revision,
                                         key=key, value=value, db=db))
-    for key, value in (("portrait_source", 0), ("opted_out", 1)):
-        db = settings_db([{"pc_settings_revision": 6}])
-        assert call(db, key, value) == {"revision": 6} and db.committed == 1 and db.rolled_back == 0
-        order = [_idx(db, k) for k in ("pg_advisory_xact_lock(hashtext", "ACTOR", "CAST(:cls AS integer)",
-                                       "FOR NO KEY UPDATE", "RETURNING pc_settings_revision",
-                                       "UPDATE pc_portraits SET unreferenced_since")]
-        assert order == sorted(order), (key, order)   # I → actor → P → R → the CAS write → the release
-        assert [p["h"] for s, p in db.log if "CAST(:cls AS integer)" in s] == [H0]
-        assert db.log[_idx(db, "UPDATE pc_portraits SET unreferenced_since")][1] == {"h": H0}
-        assert db.log[_idx(db, "RETURNING pc_settings_revision")][1] == {"value": value, "pid": str(PID), "rev": 5}
-    # a stale revision clears nothing and releases nothing
-    db = settings_db([])
+    for key in main._pc.SETTINGS_KEYS:
+        for value in (0, 1):
+            db = Scripted({"RETURNING pc_settings_revision": [[{"pc_settings_revision": 6}]]})
+            assert call(db, key, value) == {"revision": 6} and db.committed == 1 and db.rolled_back == 0
+            order = [_idx(db, k) for k in ("ACTOR", "FOR NO KEY UPDATE", "RETURNING pc_settings_revision")]
+            assert order == sorted(order), (key, order)
+            assert db.log[_idx(db, "RETURNING pc_settings_revision")][1] == {"value": value, "pid": str(PID), "rev": 5}
+            for absent in ("pg_advisory_xact_lock(hashtext", "CAST(:cls AS integer)", "UPDATE pc_portraits",
+                           "SELECT pc_game_portrait_hash, pc_steam_portrait_hash", "pc_delivery_leases"):
+                assert db.count(absent) == 0, (key, absent)
+    # a stale revision writes nothing and rolls back
+    db = Scripted({"RETURNING pc_settings_revision": [[]]})
     with pytest.raises(HTTPException) as ei:
-        call(db, "portrait_source", 0, revision=4)
+        call(db, "announce", 0, revision=4)
     assert ei.value.status_code == 409 and ei.value.detail["error"] == "stale_revision"
-    assert db.rolled_back == 1 and db.committed == 0 and db.count("UPDATE pc_portraits SET unreferenced_since") == 0
-    # the row moved under the P read (only reachable without the identity lock): busy, nothing written
-    db = Scripted({"SELECT pc_game_portrait_hash, pc_steam_portrait_hash FROM players":
-                       [[{"pc_game_portrait_hash": None, "pc_steam_portrait_hash": H0}],
-                        [{"pc_game_portrait_hash": None, "pc_steam_portrait_hash": H1}]]})
-    with pytest.raises(HTTPException) as ei:
-        call(db, "portrait_source", 0)
-    assert ei.value.status_code == 409 and ei.value.detail["error"] == "subject_busy"
-    assert db.count("RETURNING pc_settings_revision") == 0 and db.rolled_back == 1
-    # the way back (and any other setting) takes no blob lock and releases nothing
-    for key, value in (("portrait_source", 1), ("opted_out", 0), ("announce", 1)):
-        db = settings_db([{"pc_settings_revision": 7}])
-        call(db, key, value)
-        assert db.count("CAST(:cls AS integer)") == 0 and db.count("UPDATE pc_portraits") == 0, key
-        assert db.count("SELECT pc_game_portrait_hash, pc_steam_portrait_hash") == 0
+    assert db.rolled_back == 1 and db.committed == 0
+    # the retired keys are unknown settings: refused before the actor is even verified
+    for key in ("opted_out", "portrait_source"):
+        db = Scripted({})
+        with pytest.raises(HTTPException) as ei:
+            call(db, key, 1)
+        assert ei.value.status_code == 422 and db.log == []
 
 
 def test_the_admin_clear_restarts_the_steam_unit_and_the_render_guard_refuses_the_plate():

@@ -6124,6 +6124,7 @@ namespace CompetitiveRounds
         }
 
         private static GameObject shopScrollGO;
+        private static GameObject settingsScrollGO;   // 2026-09-13: the lever scrolls Settings too ("5:<0..1>")
 
         // Deferred Info-article body scroll for the lever (see DevOpenTab).
         private static float pendingInfoScroll = -1f;
@@ -6191,9 +6192,11 @@ namespace CompetitiveRounds
                         if (bodyScroll >= 0f) { pendingInfoScroll = Mathf.Clamp01(bodyScroll); pendingInfoScrollFrame = Time.frameCount + 3; pendingInfoScrollKey = key; }
                     }
                 }
-                if (idx == 4 && shopScroll >= 0f && shopScrollGO != null && UIFactory.tScrollRect != null)
+                // the shop list, or (2026-09-13) the Settings column: the Player Cards rows live below its fold
+                var scrollGO = idx == 4 ? shopScrollGO : (idx == TAB_SETTINGS ? settingsScrollGO : null);
+                if (scrollGO != null && shopScroll >= 0f && UIFactory.tScrollRect != null)
                 {
-                    var sr = shopScrollGO.GetComponent(UIFactory.tScrollRect);
+                    var sr = scrollGO.GetComponent(UIFactory.tScrollRect);
                     var p = UIFactory.tScrollRect.GetProperty("verticalNormalizedPosition", BindingFlags.Public | BindingFlags.Instance);
                     if (sr != null && p != null) p.SetValue(sr, Mathf.Clamp01(1f - shopScroll));   // 0 = top of the list
                 }
@@ -8463,7 +8466,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 if (bdImg != null) UIFactory.tImage.GetProperty("raycastTarget", BindingFlags.Public | BindingFlags.Instance)?.SetValue(bdImg, true);
                 var bdClick = bd.AddComponent<ClickHandler>();
                 bdClick.bypassModalBlock = true;
-                bdClick.onClick = () => { if (ClickGuard.Claim(bd)) HideInfoPopup(); };
+                int opened = Time.frameCount;   // not on the frame that opened it: a popup a ClickHandler opens shares its mouse-down (PlayerCardsUI.OnTileClick)
+                bdClick.onClick = () => { if (Time.frameCount != opened && ClickGuard.Claim(bd)) HideInfoPopup(); };
 
                 var box = UIFactory.CreatePanel("Box", infoPopupGO.transform, new Color(0.10f, 0.12f, 0.16f, 0.97f));
                 var boxRT = box.GetComponent<RectTransform>();
@@ -13723,6 +13727,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             MakeSubTabAnchor(5, outer.transform, true);
             var scroll = UIFactory.CreateScrollView("SettingsScroll", outer.transform, spacing: 0);
             UIFactory.AddLE(scroll.scrollGO, flexH: 1);
+            settingsScrollGO = scroll.scrollGO;
 
             var panel = new GameObject("Settings");
             panel.transform.SetParent(scroll.content.transform, false);
@@ -14447,12 +14452,20 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             UIFactory.CreateText("SDL", delBox.transform,
                 "Delete My Data", 17f, new Color(1f, 0.6f, 0.6f),
                 sizeDelta: new Vector2(700, 24));
-            UIFactory.CreateText("SDD", delBox.transform,
+            var sdd = UIFactory.CreateText("SDD", delBox.transform,
                 "Anonymizes your Steam ID, display name, and Discord link. Matches stay so other players' " +
                 "Elo and histories aren't affected. You will no longer appear on leaderboards.\n" +
                 "<b><color=#FF8888>IRREVERSIBLE:</color></b> this Steam ID can never re-register. Future matches " +
                 "from this account will show as [Deleted User] and won't count toward stats.",
-                13f, C_DIM, sizeDelta: new Vector2(700, 68));
+                13f, C_DIM, sizeDelta: new Vector2(700, 34));
+            UIFactory.SetWordWrap(sdd, true); UIFactory.SetTextAutoHeight(sdd, 34f);   // 2026-09-13: its own height, no hole above SDD2
+            // 2026-09-13: deleting all data is the one thing that removes a
+            // player's cards from every binder; its own key so SDD's
+            // translations stay valid.
+            var sdd2 = UIFactory.CreateText("SDD2", delBox.transform,
+                "Also removes your Player Cards: your binder is emptied, and every card of you is removed from every other player's binder.",
+                13f, C_DIM, sizeDelta: new Vector2(700, 17));
+            UIFactory.SetWordWrap(sdd2, true); UIFactory.SetTextAutoHeight(sdd2, 17f);   // folds when translated
             var delRow = new GameObject("SDR");
             delRow.transform.SetParent(delBox.transform, false);
             delRow.AddComponent<RectTransform>();

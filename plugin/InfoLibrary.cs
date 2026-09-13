@@ -88,7 +88,7 @@ namespace CompetitiveRounds
         // ── Player Cards (Sept 12): the Shop > Collection tab, written for the
         // questions the first live pulls raised (what POOL and BOARD mean, why a
         // card says the rank it says, what discarding pays, when Discord posts).
-        private static string CardsIntro => I18n.Tr(@"Player Cards are collectible cards of the people who play here. Every registered player who has not opted out (and is not currently banned) has a card in the pool; you open packs, keep the cards you like, discard the rest for shards and chase the rare ones. Everything lives under <color=#7FD4FF>Shop > Collection</color>: <b>Open Packs</b>, <b>Binder</b> and <b>Get packs</b>.
+        private static string CardsIntro => I18n.Tr(@"Player Cards are collectible cards of the people who play here. Every registered player who is not currently banned has a card in the pool; you open packs, keep the cards you like, discard the rest for shards and chase the rare ones. Everything lives under <color=#7FD4FF>Shop > Collection</color>: <b>Open Packs</b>, <b>Binder</b> and <b>Get packs</b>.
 
 <color=#FFD94D><b>THE POOL, EDITIONS AND SNAPSHOTS</b></color>
 
@@ -118,7 +118,7 @@ namespace CompetitiveRounds
 <color=#FFD94D><b>DISCORD</b></color>
 
 - /daily claims the free pack, /collection shows a binder, /card shows one card - all with a linked Discord account.
-- A pull that is Epic or better is announced in the leaderboard channel, and so is a pull of your own card, a Foil or a Signed print at any rarity - but only when BOTH you and the player on the card have <b>Announce my pulls</b> on (see Card pictures & settings). A Rare or lower pull that is none of those is not announced.");
+- A pull that is Epic or better is announced in the Discord gambler chat, and so is a pull of your own card, a Foil or a Signed print at any rarity - but only when BOTH you and the player on the card have <b>Announce my pulls</b> on (see Card pictures & settings). A Rare or lower pull that is none of those is not announced.");
 
         private static string CardsFace => I18n.Tr(@"<color=#FFD94D><b>THE HEADER</b></color>
 
@@ -127,7 +127,7 @@ namespace CompetitiveRounds
 
 <color=#FFD94D><b>THE PICTURE</b></color>
 
-- The player's own in-game character - body, face, colour and effect - once their PC has sent it. Until then, their Steam profile picture. Players who set their picture to None show the plain card emblem instead. See <color=#7FD4FF>Card pictures & settings</color>.
+- The player's own in-game character - body, face, colour and effect - once their PC has sent it. Until then, their Steam profile picture. See <color=#7FD4FF>Card pictures & settings</color>.
 - A Top card badge in the lower-left corner means the snapshot found a card they pick more than any other; its name is on the text block when the picture is not shown.
 
 <color=#FFD94D><b>THE STATS</b></color>
@@ -141,27 +141,27 @@ namespace CompetitiveRounds
 <color=#FFD94D><b>THE MARKS</b></color>
 
 - A <b>Signed</b> card carries the player's autograph across the picture and a seal.
-- The bottom edge has the edition, the minted date, and your copy's print number. The View button on a binder tile shows the card full size.");
+- The bottom edge has the edition, the minted date, and your copy's print number. Click a binder tile to see the card full size.");
 
         private static string CardsPictures => I18n.Tr(@"<color=#FFD94D><b>YOUR PICTURE ON OTHER PEOPLE'S CARDS</b></color>
 
 - The card of you shows your <b>in-game character</b>: the body, face items, colour and effect you play with, drawn by your own PC the first time you visit the Collection tab after a change, and sent once. Nobody else's PC renders you.
 - Before your PC has sent it, your card shows your <b>Steam profile picture</b>, which the server takes from your public profile.
-- <b>Card picture</b> in Settings switches between your character and None. None hides both from the next render on; the character your PC sent stays stored until you send another.
+- The picture is not a setting: every card of you shows your Steam picture until your PC has sent the character, then the character - including cards pulled before it was sent. The character your PC sent stays stored until you send another.
 - <b>Character preset</b> picks which saved character your picture shows: Follow uses the one you have selected in the character menu, or pin a preset. The small preview under it is what will be sent.
 
 <color=#FFD94D><b>THE OTHER SETTINGS</b></color>
 
-- <b>Opt out</b> stops new cards of you: none is minted from then on and pulls of you are no longer announced. Cards of you that people already hold stay in their binders with their frozen stats and show the plain card emblem in place of your picture. It does not hide your binder and it does not delete any card.
-- <b>Public collection</b> is the setting that shows or hides your binder from others (/collection in Discord); opting out leaves it alone.
+- There is no opt-out: every registered player who is not banned is in the pool, and cards of you stay in the binders that hold them.
+- <b>Public collection</b> is the setting that shows or hides your binder from others (/collection in Discord).
 - <b>Announce my pulls</b> allows Discord posts about your Epic-or-better, Foil and Signed pulls, and about pulls of YOUR card - both sides must have it on for a post to happen.
-- Deleting your account is what removes cards: it empties your binder. Cards of you that others hold stay, with a neutral label in place of your name.
+- Deleting your data is what removes cards: your binder is emptied, and every card of you is removed from every other player's binder.
 
 <color=#FFD94D><b>WHY A CARD SHOWS WHAT IT SHOWS</b></color>
 
 - A card's rating, record, rank tier and shop title are frozen at the snapshot it was minted from. If you rank up tomorrow, cards of you minted today keep today's rank; the next snapshot's cards get the new one.
-- The name and the picture are live: a card of a renamed player shows the new name, and its picture follows what that player's PC last sent (or their Steam picture, or the emblem).
-- If the player opts out, cards of them stay in binders with their frozen stats and the emblem in place of the picture. If the player deletes their account, cards of them stay too, with a neutral label in place of the name and no picture.");
+- The name and the picture are live: a card of a renamed player shows the new name, and its picture follows what that player's PC last sent (or their Steam picture until then).
+- If the player deletes their data, every card of them is removed from every binder.");
 
         private static Category[] _cats;
         internal static Category[] Categories => _cats ?? (_cats = new[]

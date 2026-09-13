@@ -118,7 +118,7 @@ def _sig(secret, body, nonce, desc):
 
 
 def _row(**over):
-    row = {"pc_opted_out_at": None, "pc_game_portrait_hash": "cd" * 32, "pc_game_portrait_descriptor": DESC + "0",
+    row = {"pc_game_portrait_hash": "cd" * 32, "pc_game_portrait_descriptor": DESC + "0",
            "since_last": 100.0, "lock_left": None, "pc_game_portrait_locked_until": None, "banned": False,
            "active_player_color_id": None, "active_player_effect_id": None}
     row.update(over)
@@ -209,9 +209,10 @@ def test_upload_pacing_answers_409_with_the_remaining_seconds_and_consumes_no_no
     assert db.rolled_back == 1 and db.count("pc_portrait_nonces") == 0
 
 
-@pytest.mark.parametrize("over", [{"banned": True}, {"pc_opted_out_at": NOW}])
-def test_upload_refused_for_a_banned_or_opted_out_subject(monkeypatch, over):
-    face, db = _writer(monkeypatch, row=_row(**over))
+def test_upload_refused_for_a_banned_subject(monkeypatch):
+    # A ban is the one refusal left beside the admin lock: there has been no
+    # opt-out to refuse on since 2026-09-13.
+    face, db = _writer(monkeypatch, row=_row(banned=True))
     with pytest.raises(HTTPException) as ex:
         _upload(db, _png_body())
     assert ex.value.status_code == 403 and ex.value.detail == {"error": "portrait_refused"}
@@ -336,44 +337,33 @@ def test_upload_source_holds_the_exclusive_lock_before_the_actor_gate_and_the_si
 
 # ── the None write, the discard and the deletion sweep (static pins) ─────────
 
-def test_the_none_write_takes_the_exclusive_lock_and_waits_out_live_leases():
+def test_the_settings_writer_touches_no_picture_and_takes_no_identity_lock():
+    """Since 2026-09-13 neither setting can withdraw a picture, so the writer
+    has no exclusive-lock half and no lease wait: actor, row lock, the CAS
+    write, commit. A key that could move the resolution would need the old
+    None writer back (r18 H2), which is why the SQL is pinned to the two
+    announce columns and the surface to the two keys."""
     src = _src(main.pc_set_setting)
-    a = src.index("_pc_hmac_ok(sig, canon)")
-    b = src.index("pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))")
     c = src.index("_pc_verified_actor(request")
     d = src.index("FOR NO KEY UPDATE")
-    e = src.index("_pc_lease_wait(db, pid)")
     f = src.index("_PC_SETTINGS_SQL[key]")
-    assert a < b < c < d < e < f
-    assert "none_write = _pc_setting_revokes_picture(key, value)" in src
-    assert '"error": "retry_after"' in src
-    assert main._PC_SETTINGS_SQL["portrait_source"].count("'none'") == 1 and "'game'" in main._PC_SETTINGS_SQL["portrait_source"]
+    assert c < d < f
+    for absent in ("pg_advisory_xact_lock", "_pc_lease_wait", "_pc_lock_portrait_blobs",
+                   "_pc_release_portrait_blob", "none_write", "_pc_setting_revokes_picture"):
+        assert absent not in src, absent
+    assert tuple(main._PC_SETTINGS_SQL) == main._pc.SETTINGS_KEYS == ("collection_public", "announce")
+    for key, sql in main._PC_SETTINGS_SQL.items():
+        flat = " ".join(sql.split())
+        assert ("WHERE id = CAST(:pid AS uuid) AND pc_settings_revision = CAST(:rev AS integer) "
+                "RETURNING pc_settings_revision") in flat, key
+        for col in ("pc_steam", "pc_game_portrait", "pc_opted_out", "pc_portrait_source"):
+            assert col not in flat, (key, col)
 
 
-@pytest.mark.parametrize("key,value,revokes", [
-    ("portrait_source", 0, True),      # the picture becomes none
-    ("opted_out", 1, True),            # an opted-out subject resolves to none too
-    ("portrait_source", 1, False),     # turning it back ON adds a picture
-    ("opted_out", 0, False),
-    ("announce", 0, False),
-    ("announce", 1, False),
-    ("collection_public", 0, False),
-    ("collection_public", 1, False),
-])
-def test_only_the_writes_that_withdraw_the_picture_wait_for_a_live_lease(key, value, revokes):
-    """Which writes wait is the whole guarantee: a write that withdraws the
-    picture must not commit under a send already carrying it."""
-    assert main._pc_setting_revokes_picture(key, value) is revokes
-    assert key in main._pc.SETTINGS_KEYS
-
-
-def test_every_settings_key_is_answered_by_the_revocation_predicate():
-    # a key added to the settings surface without a decision here would
-    # silently default to "does not withdraw the picture"
-    for key in main._pc.SETTINGS_KEYS:
-        for value in (0, 1):
-            assert main._pc_setting_revokes_picture(key, value) in (True, False)
-    assert set(main._pc.SETTINGS_KEYS) == {"opted_out", "collection_public", "announce", "portrait_source"}
+def test_the_settings_surface_is_exactly_the_two_announce_keys():
+    # a key added here without a decision about the picture would silently
+    # ride the lock-free writer above
+    assert set(main._pc.SETTINGS_KEYS) == {"collection_public", "announce"}
 
 
 def test_a_ban_deletes_the_subjects_leases_under_the_identity_lock():
@@ -391,7 +381,10 @@ def test_account_deletion_sweeps_leases_nonces_and_the_portrait_unit():
     src = _src(main.delete_player_data)
     assert "DELETE FROM pc_delivery_leases WHERE subject_id" in src
     assert "DELETE FROM pc_portrait_nonces WHERE player_id" in src
-    assert '_pc_clear_portrait_unit(db, str(pid), lock_days=None, source="none")' in src
+    assert "_pc_clear_portrait_unit(db, str(pid), lock_days=None)" in src
+    # 2026-09-13: the deletion is the one way a card leaves every binder
+    assert "DELETE FROM pc_prints WHERE card_id IN (SELECT id FROM pc_cards WHERE subject_player_id = :pid)" in src
+    assert "DELETE FROM pc_cards WHERE subject_player_id = :pid" in src
 
 
 def test_the_ack_releases_leases_by_event_and_by_id():
@@ -414,7 +407,7 @@ def test_the_face_route_has_its_own_rate_bucket_and_health_reports_the_renderer(
 
 
 def test_the_print_face_select_carries_every_resolver_input():
-    for col in ("subject_opted_out", "portrait_source", "portrait_hash", "subject_banned", "subject_deleted"):
+    for col in ("portrait_hash", "steam_portrait_hash", "subject_banned", "subject_deleted"):
         assert f"AS {col}" in main._PC_PRINT_FACE_SELECT, col
 
 
@@ -700,7 +693,7 @@ def test_raqm_is_read_from_the_engine_actually_in_use(monkeypatch):
 def test_the_clear_unit_reads_lock_days_as_leave_alone_clear_or_set(days, expect):
     db = Scripted({"SELECT pc_game_portrait_hash, pc_steam_portrait_hash FROM players": [[{"pc_game_portrait_hash": None, "pc_steam_portrait_hash": None}]],
                    "RETURNING pc_game_portrait_locked_until": [[{"l": None}]]})
-    _run(main._pc_clear_portrait_unit(db, str(PID), lock_days=days, source=None))
+    _run(main._pc_clear_portrait_unit(db, str(PID), lock_days=days))
     upd = db.log[_idx(db, "UPDATE players SET")]
     sets = upd[0].split("RETURNING")[0]
     if expect == "untouched":
@@ -740,22 +733,22 @@ def test_the_acquire_and_the_revalidation_read_the_same_resolver_inputs():
     """`portrait_for` decides what a lease authorises. If the two statements
     that feed it selected different columns, one of them would resolve from a
     default and the two would disagree about the same subject."""
-    assert main._PC_PORTRAIT_RESOLVE_COLS.count(" AS ") == 6   # + steam_portrait_hash (Steam pictures v2 §1)
-    for col in ("subject_deleted", "subject_opted_out", "portrait_source", "portrait_hash", "subject_banned",
-                "steam_portrait_hash"):
+    # deleted, the rig hash, the Steam hash (Steam pictures v2 §1), banned — and
+    # nothing else: no opt-out and no source since 2026-09-13
+    assert main._PC_PORTRAIT_RESOLVE_COLS.count(" AS ") == 4
+    for col in ("subject_deleted", "portrait_hash", "steam_portrait_hash", "subject_banned"):
         assert f"AS {col}" in main._PC_PORTRAIT_RESOLVE_COLS, col
+    for dead in ("pc_opted_out_at", "pc_portrait_source"):
+        assert dead not in main._PC_PORTRAIT_RESOLVE_COLS, dead
     for fn in (main.internal_pc_lease, main.internal_pc_lease_check):
         src = _src(fn)
         assert "_PC_PORTRAIT_RESOLVE_COLS" in src and "_pcp.portrait_for(" in src, fn.__name__
-    # and nothing restates the rule in SQL beside it
-    assert "pc_opted_out_at IS NOT NULL" not in _src(main.internal_pc_lease_check)
 
 
 # ── the lease primitive ─────────────────────────────────────────────────────
 
 def _sub(**over):
-    row = {"subject_deleted": False, "subject_opted_out": False, "portrait_source": "game",
-           "portrait_hash": "ef" * 32, "subject_banned": False}
+    row = {"subject_deleted": False, "portrait_hash": "ef" * 32, "subject_banned": False}
     row.update(over)
     return row
 
@@ -814,9 +807,9 @@ def test_lease_acquire_answers_409_subject_busy_when_the_identity_is_held(monkey
     assert db.rolled_back == 1 and db.count("INSERT INTO pc_delivery_leases") == 0
 
 
-def test_lease_acquire_resolves_none_for_an_opted_out_subject_and_404s_a_deleted_one(monkeypatch):
+def test_lease_acquire_resolves_none_for_a_pictureless_subject_and_404s_a_deleted_one(monkeypatch):
     monkeypatch.setattr(main, "_require_internal_key", lambda k: None)
-    db, _ = _lease_db(sub=_sub(subject_opted_out=True))
+    db, _ = _lease_db(sub=_sub(portrait_hash=None))   # no rig, no Steam column: the plate
     ans = _run(main.internal_pc_lease({"subject_ref": str(PID)}, "k", db))
     assert ans["portrait_kind"] == "none" and ans["portrait_hash"] is None
     assert db.log[_idx(db, "INSERT INTO pc_delivery_leases")][1]["h"] is None
@@ -847,8 +840,7 @@ def _check_row(**over):
     """What the revalidation reads: the lease, and the subject's resolver
     inputs as they stand NOW."""
     row = {"until": NOW, "unexpired": True, "leased_hash": "ef" * 32, "print_deliverable": True,
-           "subject_deleted": False, "subject_opted_out": False, "portrait_source": "game",
-           "portrait_hash": "ef" * 32, "subject_banned": False}
+           "subject_deleted": False, "portrait_hash": "ef" * 32, "subject_banned": False}
     row.update(over)
     return row
 
@@ -859,11 +851,9 @@ def _check_row(**over):
     ({"subject_deleted": True}, False),
     ({"print_deliverable": False}, False),                           # discarded, gone, or not theirs
     ({"subject_banned": True}, False),                               # banned since the acquire
-    ({"subject_opted_out": True}, False),                            # opted out since the acquire
-    ({"portrait_source": "none"}, False),                            # switched off since the acquire
     ({"portrait_hash": "ab" * 32}, False),                           # replaced since the acquire
     ({"leased_hash": None, "portrait_hash": None}, True),            # no picture then, none now
-    ({"leased_hash": None, "portrait_source": "none"}, True),        # resolved none then and now
+    ({"leased_hash": None, "portrait_hash": None, "steam_portrait_hash": "ab" * 32}, False),   # none then, Steam now
     ({"leased_hash": None}, False),                                  # none then, a picture now
 ])
 def test_lease_check_answers_live_only_while_it_still_authorises_that_picture(monkeypatch, over, live):
@@ -943,7 +933,7 @@ def test_clear_unit_locks_hash_then_row_then_writes_then_deletes_the_orphan():
     until = NOW + timedelta(days=7)
     db = Scripted({"SELECT pc_game_portrait_hash, pc_steam_portrait_hash FROM players": [[{"pc_game_portrait_hash": "old" * 20, "pc_steam_portrait_hash": None}]],
                    "RETURNING pc_game_portrait_locked_until": [[{"l": until}]]})
-    assert _run(main._pc_clear_portrait_unit(db, str(PID), lock_days=7, source="none")) == ("old" * 20, until)
+    assert _run(main._pc_clear_portrait_unit(db, str(PID), lock_days=7)) == ("old" * 20, until)
     order = [_idx(db, k) for k in ("CAST(:cls AS integer)", "FOR NO KEY UPDATE", "UPDATE players SET", "UPDATE pc_portraits SET unreferenced_since")]
     assert order == sorted(order), db.log
     # the key read that P is taken on carries no row lock of its own
@@ -953,13 +943,13 @@ def test_clear_unit_locks_hash_then_row_then_writes_then_deletes_the_orphan():
     assert plock[1] == {"cls": P.PC_P_LOCK_CLASS, "h": "old" * 20}
     upd = db.log[_idx(db, "UPDATE players SET")]
     assert "make_interval(days => CAST(:days AS integer))" in upd[0] and upd[1]["days"] == 7
-    assert "pc_portrait_source = CAST(:src AS text)" in upd[0] and upd[1]["src"] == "none"
+    assert "pc_portrait_source" not in upd[0] and "src" not in upd[1]   # no source to force since 2026-09-13
     assert "pc_game_portrait_hash = NULL" in upd[0] and "pc_game_portrait_descriptor = NULL" in upd[0]
     assert "NOT EXISTS" in db.log[_idx(db, "UPDATE pc_portraits SET unreferenced_since")][0]
-    # no previous blob: no hash lock, no delete; no lock_days / source: neither clause
+    # no previous blob: no hash lock, no delete; no lock_days: no lock clause
     db = Scripted({"SELECT pc_game_portrait_hash, pc_steam_portrait_hash FROM players": [[{"pc_game_portrait_hash": None, "pc_steam_portrait_hash": None}]],
                    "RETURNING pc_game_portrait_locked_until": [[{"l": None}]]})
-    assert _run(main._pc_clear_portrait_unit(db, str(PID), lock_days=None, source=None)) == (None, None)
+    assert _run(main._pc_clear_portrait_unit(db, str(PID), lock_days=None)) == (None, None)
     assert db.count("CAST(:cls AS integer)") == 0 and db.count("UPDATE pc_portraits SET unreferenced_since") == 0
     upd = db.log[_idx(db, "UPDATE players SET")]
     assert "make_interval" not in upd[0] and "pc_portrait_source" not in upd[0]
@@ -1004,7 +994,7 @@ def test_admin_clear_verifies_then_locks_then_waits_out_leases(monkeypatch):
 # ── faces ───────────────────────────────────────────────────────────────────
 
 def _face_row(**over):
-    row = {"subject_deleted": False, "subject_banned": False, "subject_opted_out": False, "portrait_source": "game",
+    row = {"subject_deleted": False, "subject_banned": False,
            "portrait_hash": None, "subject_name": "Sid", "rating": None, "title": None, "rarity": "rare",
            "foil": False, "signed": False, "minted_at": NOW, "pool_rank": 12, "board_rank": None,
            "series_wins": 3, "series_losses": 1, "edition_id": 1, "print_id": PID, "top_card": False,
@@ -1109,7 +1099,7 @@ def test_internal_print_face_answers_the_current_revision_in_a_header(monkeypatc
 def test_preview_face_reapplies_the_card_gate_before_the_member_read(monkeypatch):
     monkeypatch.setattr(main, "_pcf", _Face())
     monkeypatch.setattr(main, "_require_internal_key", lambda k: None)
-    for sub in (_sub(subject_opted_out=True), _sub(subject_banned=True), _sub(subject_deleted=True)):
+    for sub in (_sub(subject_banned=True), _sub(subject_deleted=True)):
         db = Scripted({"AS subject_banned": [[{"display_name": "Sid", **sub}]]})
         with pytest.raises(HTTPException) as ex:
             _run(main.internal_pc_face_preview(str(PID), "en", "k", db))
