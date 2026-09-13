@@ -86,6 +86,38 @@ namespace CompetitiveRounds
         internal static string Key(string printId, string faceRev, string locale, string size)
             => printId + "/" + faceRev + "/" + (string.IsNullOrEmpty(locale) ? "en" : locale) + "/" + size;
 
+        /// <summary>Broadcast-seat lever only: put a synthetic face in the cache
+        /// under a print's key so a seat that cannot fetch faces (service
+        /// account) still binds tiles the way a real answer would — the sprite
+        /// sets the Image's preferred size exactly like a fetched one, which is
+        /// the pressure the binder's action row is verified under. Seeded
+        /// again, the entry it replaces is disposed of: the replacement goes
+        /// in first, a tile still showing the old sprite is moved onto it, and
+        /// only then are the old sprite and its texture destroyed -- each
+        /// seeding used to leave the previous ten pairs alive on the GPU until
+        /// teardown.</summary>
+        internal static void DevPut(string printId, string faceRev, string locale, string size, Sprite spr, long bytes)
+        {
+            if (spr == null || string.IsNullOrEmpty(printId) || string.IsNullOrEmpty(faceRev)) return;
+            string key = Key(printId, faceRev, locale, size);
+            Entry old;
+            cache.TryGetValue(key, out old);
+            cache[key] = new Entry { tex = spr.texture, spr = spr, bytes = bytes, lastUse = Time.realtimeSinceStartup };
+            cacheBytes += bytes;
+            if (old == null) return;
+            cacheBytes -= old.bytes;
+            if (old.spr == spr) return;   // the same sprite seeded twice: nothing to dispose of
+            // whatever still shows the old sprite is rebound to the new one before the old goes
+            SweepBindings();
+            var showing = new List<GameObject>();
+            for (int i = 0; i < bindings.Count; i++) if (bindings[i].spr == old.spr && bindings[i].go != null) showing.Add(bindings[i].go);
+            foreach (var go in showing) SetFace(go, spr);
+            for (int i = bindings.Count - 1; i >= 0; i--) if (bindings[i].spr == old.spr) bindings.RemoveAt(i);
+            // the sprite first, then its texture (Drop's order), never a texture the new sprite shares
+            try { if (old.spr != null) UnityEngine.Object.Destroy(old.spr); } catch { }
+            try { if (old.tex != null && old.tex != spr.texture) UnityEngine.Object.Destroy(old.tex); } catch { }
+        }
+
         /// <summary>The cached sprite or null; a hit touches the LRU clock.</summary>
         internal static Sprite Cached(string printId, string faceRev, string locale, string size)
         {

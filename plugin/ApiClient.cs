@@ -3676,6 +3676,7 @@ namespace CompetitiveRounds
             public string face_locale = "en";   // the locale the answer keyed face_rev under (set by the parsers)
             public bool subject_deleted, foil, signed, discarded;
             public int pool_rank, board_rank, series_wins, series_losses, slot;
+            public int discard_shards = -1;   // what the discard paid; -1 = not discarded, or an answer without the field
             // v22 7: copies of this exact card the opener held BEFORE this slot,
             // counted at mint. 0 is NEW and -1 is ABSENT -- an answer from an api
             // that predates the field, where the reveal strip states nothing
@@ -3687,6 +3688,7 @@ namespace CompetitiveRounds
         public class PcMe
         {
             public bool opted_out, collection_public, announce, daily_claimed;
+            public bool paid_cap_exempt;   // the server skips the daily paid-pack cap for this account (testing exemption)
             public int revision, shards, price_gold, price_shards, paid_packs_per_day, prints_per_pack, paid_today, prints, pool_member_count;
             public string daily_pack_id, next_reset_utc, pool_taken_at;
             // v22 §3: the portrait unit — source "game" | "none", the stored
@@ -3957,10 +3959,35 @@ namespace CompetitiveRounds
 
         /// <summary>GET a small PNG: an exact Content-Length, the byte cap and the
         /// PNG signature are all required, else (false, null).</summary>
+        /// <summary>A face request answered 404: the print id, face revision
+        /// and locale as the route carried them. The face cache retries a 404
+        /// on its own and then hands its caller a null with no status, so this
+        /// is where the pack history learns that a revision it holds is stale
+        /// (the name and the picture on a card are live) and asks its page
+        /// again. Raised for the face route only; any other 404 is nobody's.</summary>
+        internal static event Action<string, string, string> PcFaceNotFound;
+        private const string PC_FACE_ROUTE = "/api/v1/pc-face/";
+
+        private static void NotePcFaceNotFound(string url)
+        {
+            var h = PcFaceNotFound;
+            if (h == null || string.IsNullOrEmpty(url)) return;
+            int at = url.IndexOf(PC_FACE_ROUTE, StringComparison.Ordinal);
+            if (at < 0) return;
+            string[] seg = url.Substring(at + PC_FACE_ROUTE.Length).Split('/');
+            if (seg.Length != 4) return;   // print / revision / locale / size.png, as PcFaceUrl builds it
+            try { h(seg[0], seg[1], seg[2]); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[PC-FACE] not-found handler threw: {ex.Message}"); }
+        }
+
         public static void FetchBytes(string url, int cap, Action<bool, byte[], long> callback)
         {
             if (Plugin.Instance == null) { callback?.Invoke(false, null, 0); return; }
-            Plugin.Instance.StartCoroutine(GetBytes(url, cap, callback));
+            Plugin.Instance.StartCoroutine(GetBytes(url, cap, (ok, data, code) =>
+            {
+                if (!ok && code == 404) NotePcFaceNotFound(url);
+                callback?.Invoke(ok, data, code);
+            }));
         }
 
         /// <summary>(ok, bytes, HTTP status): 426 stands for the version gate,
@@ -4242,6 +4269,7 @@ namespace CompetitiveRounds
                 source = PcStr(PcTopLevel(obj, "source")),
                 slot = PcInt(PcTopLevel(obj, "slot")),
                 discarded = PcBool(PcTopLevel(obj, "discarded")),
+                discard_shards = PcIntOr(PcTopLevel(obj, "discard_shards"), -1),
                 face_rev = PcStr(PcTopLevel(obj, "face_rev")),
                 dup_at_pull = PcIntOr(PcTopLevel(obj, "dup_at_pull"), -1),
             };
@@ -4285,6 +4313,7 @@ namespace CompetitiveRounds
             me.paid_packs_per_day = PcInt(PcTopLevel(prices, "paid_packs_per_day"));
             me.prints_per_pack = PcInt(PcTopLevel(prices, "prints_per_pack"));
             me.paid_today = PcInt(PcTopLevel(json, "paid_today"));
+            me.paid_cap_exempt = PcBool(PcTopLevel(json, "paid_cap_exempt"));
             me.prints = PcInt(PcTopLevel(json, "prints"));
             if (PcHas(json, "portrait_source")) me.portrait_source = PcStr(PcTopLevel(json, "portrait_source")) ?? "game";
             me.portrait_hash = PcHas(json, "portrait_hash") ? PcStr(PcTopLevel(json, "portrait_hash")) : null;
@@ -4316,6 +4345,68 @@ namespace CompetitiveRounds
                     if (!string.IsNullOrEmpty(u.pack_id)) me.unopened.Add(u);
                 }
             return me;
+        }
+
+        /// <summary>One page of the caller's opened packs, newest first
+        /// (GET /pc/packs). `next_before` is the cursor for the older page,
+        /// null when this page ends the history.</summary>
+        public class PcPackHistory
+        {
+            public int total;
+            public string next_before, locale = "en";
+            public List<PcPackAnswer> packs = new List<PcPackAnswer>();
+        }
+
+        internal static PcPackHistory ParsePcPackHistory(string json)
+        {
+            if (string.IsNullOrEmpty(json)) return null;
+            string arr = PcTopLevel(json, "packs");
+            if (arr == null) return null;
+            var h = new PcPackHistory
+            {
+                total = PcInt(PcTopLevel(json, "total")),
+                next_before = PcStr(PcTopLevel(json, "next_before")),
+                locale = PcStr(PcTopLevel(json, "locale")) ?? "en",
+            };
+            if (arr != "null")
+                foreach (var o in SliceTopLevelObjects(arr))
+                {
+                    var a = ParsePcPackAnswer(o);
+                    if (a != null) h.packs.Add(a);
+                }
+            return h;
+        }
+
+        /// <summary>The caller's opened packs, one page per call: `before` is
+        /// the pack_id the previous page ended on (null = the newest page).
+        /// No cache and no throttle here — the pager owns both; an answer
+        /// from a previous identity or language is dropped like the
+        /// collection's.</summary>
+        public static void FetchPcPacks(string steamId, string before, Action<bool, string, PcPackHistory> callback)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") { callback?.Invoke(false, "no-id", null); return; }
+            string cursor = string.IsNullOrEmpty(before) ? "-" : before;
+            string url = PcUrl("packs", steamId, $"pcread:{steamId}:packs:{cursor}",
+                               (cursor == "-" ? "" : "before=" + cursor + "&") + "limit=10");
+            int epoch = _pcCacheEpoch;
+            string locale = I18n.Locale;
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
+            {
+                if (epoch != _pcCacheEpoch) { callback?.Invoke(false, "stale-identity", null); return; }
+                if (locale != I18n.Locale) { callback?.Invoke(false, "language-changed", null); return; }
+                PcPackHistory h = ok ? ParsePcPackHistory(resp) : null;
+                if (ok && h == null) Plugin.Log.LogWarning("[PC] pack history: malformed answer");
+                callback?.Invoke(ok && h != null, resp, h);
+            }));
+        }
+
+        /// <summary>Broadcast-seat lever only: a synthetic binder for a seat
+        /// whose account cannot read the collection (service account, 403).
+        /// Never called on a real answer path.</summary>
+        internal static void DevSetCollection(PcCollection col)
+        {
+            CachedPcCollection = col;
+            PcCollectionFetchedAt = Time.realtimeSinceStartup;
         }
 
         internal static PcPackAnswer ParsePcPackAnswer(string json)

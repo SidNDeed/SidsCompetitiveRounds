@@ -8744,7 +8744,11 @@ async def poll_pc_events():
                 first = by_id.get(ids[0], {})
                 p = first.get("print") or {}
                 face, lease, again = None, (None, None), False
-                if p.get("print_id") and first.get("subject_ref"):
+                # face_ready false: the subject's picture was still unresolved
+                # when the api's sixty-second hold ran out (Steam pictures v3
+                # §8). The line posts without a face rather than attach the
+                # plate for good — an attachment cannot be swapped later.
+                if p.get("print_id") and first.get("subject_ref") and first.get("face_ready", True):
                     lease = await _pc_lease(first["subject_ref"], print_id=p["print_id"], event_ids=ids)
                     again = bool(lease[2])
                     if lease[0]:

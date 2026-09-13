@@ -796,6 +796,14 @@ class HealthResponse(BaseModel):
     # under one face key. pc_raqm: complex-script shaping available.
     pc_renderer_fp: str | None = None
     pc_raqm: bool | None = None
+    # pc_steam_sweep: the Steam picture sweep's word — `standby` on the
+    # replica, else starting / running / paused:<reason>. Role-aware by
+    # design: the two boxes are SUPPOSED to disagree on it (Steam pictures
+    # v2 §9), which is why the release train asserts it per role.
+    pc_steam_sweep: str | None = None
+    # pc_steam_render: BOTH roles — `ok` once this box composited a stored
+    # Steam picture into a face through its own face path (v3 §9).
+    pc_steam_render: str | None = None
     # Which ROLE answered. Before this, /health was byte-identical on the
     # primary and on the read standby -- same status, same version, same
     # database -- so nothing on the network could tell a box that SKIPS writes

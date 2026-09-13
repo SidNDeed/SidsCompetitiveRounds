@@ -344,21 +344,26 @@ def test_name_fit_is_grapheme_safe_and_uses_ascii_dots():
     assert pc_face._measure_text(autograph, autograph_size, "script") <= 380
 
 
-def test_nameless_uses_label_but_initial_remains_question_mark(canonical_portraits):
+def test_nameless_uses_label_and_the_plate_ignores_the_name(canonical_portraits):
     specification = _spec(band="rare", name="", top_card=False)
     english = pc_face.render_face(specification, {}, None, "card")
     localized = pc_face.render_face(specification, {"pc.unnamed": "Без імені"}, None, "card")
     emoji = pc_face.render_face(_spec(band="rare", name="🔥🎯👾", top_card=False), {}, None, "card")
+    named = pc_face.render_face(_spec(band="rare", name="Ace", top_card=False), {}, None, "card")
     with (
         Image.open(io.BytesIO(english)) as first,
         Image.open(io.BytesIO(localized)) as second,
         Image.open(io.BytesIO(emoji)) as third,
+        Image.open(io.BytesIO(named)) as fourth,
     ):
         assert ImageChops.difference(first.crop((54, 38, 490, 132)),
                                      second.crop((54, 38, 490, 132))).convert("RGB").getbbox() is not None
-        assert ImageChops.difference(first.crop((120, 190, 630, 620)),
-                                     third.crop((120, 190, 630, 620))).convert("RGB").getbbox() is None
-    assert pc_face._initial("🏽") == "?"
+        # No picture = the emblem plate (2026-09-12): no initial, so the portrait
+        # area is byte-identical across a blank, an emoji and a plain name.
+        for other in (third, fourth):
+            assert ImageChops.difference(first.crop((120, 190, 630, 620)),
+                                         other.crop((120, 190, 630, 620))).convert("RGB").getbbox() is None
+    assert not hasattr(pc_face, "_initial")
 
 
 def test_portrait_reduction_is_direct_for_each_pass(canonical_portraits):

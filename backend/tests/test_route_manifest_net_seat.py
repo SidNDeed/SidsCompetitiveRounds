@@ -708,7 +708,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     )
 
     assert actual == expected
-    assert len(manifest) == 361   # portraits: +9 (the writer, the admin clear, the lease triple, four face routes; 352 before); Sept 10 Player Cards: +15 (pc/*, admin/pc/snapshot, internal/pc/*); room rules: +3 (334 before)
+    assert len(manifest) == 362   # Sept 12 pack history: +1 (361 before); portraits: +9 (the writer, the admin clear, the lease triple, four face routes; 352 before); Sept 10 Player Cards: +15 (pc/*, admin/pc/snapshot, internal/pc/*); room rules: +3 (334 before)
     assert len({json.dumps(item, sort_keys=True) for item in expected}) == len(expected)
     assert all(
         entry["classification"] in {"sentinel-exercised", "statically-nonconsumer"}
@@ -719,7 +719,7 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     exercised = [entry for entry in manifest if entry["classification"] == "sentinel-exercised"]
     static = [entry for entry in manifest if entry["classification"] == "statically-nonconsumer"]
     assert len(exercised) == 1
-    assert len(static) == 360   # portraits: +9 (351 before); Sept 10 Player Cards: +15; room rules: +3 (333 before)
+    assert len(static) == 361   # Sept 12 pack history: +1 (360 before); portraits: +9 (351 before); Sept 10 Player Cards: +15; room rules: +3 (333 before)
     assert _manifest_id(exercised[0]) == SENTINEL_ROUTE
 
     actual_by_identity = {
@@ -862,7 +862,13 @@ def test_the_helper_closure_stays_affordable():
     # here, so the bound is real and not merely raised to fit.
     assert all_median <= 90, f"median closure {all_median} of {total}"
     assert all_p90 <= 150, f"p90 closure {all_p90} of {total}"
-    assert all_worst <= 380, f"worst closure {all_worst} of {total}"
+    # Steam pictures (2026-09-12): a pack open now primes the subjects'
+    # Steam pictures, and that chain (claim, feed, download, the bound write
+    # and its blob locks) is ~20 real bindings on top of the face path the
+    # route already reached -- measured 383 on /api/v1/pc/packs/open. The
+    # bound moves to 400 for that reason and no other; p90 and the median
+    # stay where they were.
+    assert all_worst <= 400, f"worst closure {all_worst} of {total}"
 
 
 def _route_covering(module, name):

@@ -141,7 +141,7 @@ def _writer(monkeypatch, face=None, row=None, nonce_used=True, player=None, scri
     script = {
         # the unlocked read P is taken on, answered FROM THE SAME ROW so the
         # fixture cannot invent the mismatch the route refuses on
-        "SELECT pc_game_portrait_hash FROM players": [[{"h": row["pc_game_portrait_hash"]}]],
+        "SELECT pc_game_portrait_hash, pc_steam_portrait_hash FROM players": [[{"pc_game_portrait_hash": row["pc_game_portrait_hash"], "pc_steam_portrait_hash": None}]],
         "AS lock_left": [[row]],
         "INSERT INTO pc_portrait_nonces": [[{"nonce": "n"}] if nonce_used else []],
         "RETURNING pc_game_portrait_at": [[{"at": NOW}]],
@@ -176,7 +176,7 @@ def test_upload_happy_path_orders_lock_actor_reread_nonce_plocks_blob_row_delete
     assert db.log[0][0] == "SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))" and db.log[0][1] == {"sid": STEAM}
     order = [_idx(db, k) for k in ("pg_advisory_xact_lock(hashtext", "ACTOR", "CAST(:cls AS integer)", "AS lock_left",
                                    "INSERT INTO pc_portrait_nonces", "INSERT INTO pc_portraits",
-                                   "RETURNING pc_game_portrait_at", "DELETE FROM pc_portraits")]
+                                   "RETURNING pc_game_portrait_at", "UPDATE pc_portraits SET unreferenced_since")]
     assert order == sorted(order), order   # P BEFORE R — I → C → P → R
     # the re-read locks the row and excludes deleted accounts
     reread = db.log[_idx(db, "AS lock_left")]
@@ -185,10 +185,10 @@ def test_upload_happy_path_orders_lock_actor_reread_nonce_plocks_blob_row_delete
     plocks = [p for s, p in db.log if "CAST(:cls AS integer)" in s]
     assert [p["h"] for p in plocks] == sorted({"cd" * 32, "ab" * 32}) and {p["cls"] for p in plocks} == {P.PC_P_LOCK_CLASS}
     blob = db.log[_idx(db, "INSERT INTO pc_portraits")]
-    assert "ON CONFLICT (hash) DO NOTHING" in blob[0] and blob[1]["h"] == "ab" * 32 and blob[1]["b"] == b"canon"
+    assert "ON CONFLICT (hash) DO UPDATE SET unreferenced_since = NULL" in blob[0] and blob[1]["h"] == "ab" * 32 and blob[1]["b"] == b"canon"
     upd = db.log[_idx(db, "RETURNING pc_game_portrait_at")]
     assert upd[1] == {"h": "ab" * 32, "d": DESC, "pid": str(PID)} and "deleted_at IS NULL" in upd[0]
-    dele = db.log[_idx(db, "DELETE FROM pc_portraits")]
+    dele = db.log[_idx(db, "UPDATE pc_portraits SET unreferenced_since")]
     assert "NOT EXISTS" in dele[0] and dele[1] == {"h": "cd" * 32}
 
 
@@ -698,7 +698,7 @@ def test_raqm_is_read_from_the_engine_actually_in_use(monkeypatch):
     (7, "interval"),
 ])
 def test_the_clear_unit_reads_lock_days_as_leave_alone_clear_or_set(days, expect):
-    db = Scripted({"SELECT pc_game_portrait_hash FROM players": [[{"h": None}]],
+    db = Scripted({"SELECT pc_game_portrait_hash, pc_steam_portrait_hash FROM players": [[{"pc_game_portrait_hash": None, "pc_steam_portrait_hash": None}]],
                    "RETURNING pc_game_portrait_locked_until": [[{"l": None}]]})
     _run(main._pc_clear_portrait_unit(db, str(PID), lock_days=days, source=None))
     upd = db.log[_idx(db, "UPDATE players SET")]
@@ -725,18 +725,24 @@ def test_the_portrait_lock_class_is_the_only_two_argument_advisory_class():
     two_arg = re.findall(r"pg_advisory_xact_lock\(CAST\(:cls AS integer\), hashtext\(CAST\(:h AS text\)\)\)", MAIN_SRC)
     assert len(two_arg) >= 1
     assert MAIN_SRC.count('"cls": _pcp.PC_P_LOCK_CLASS') == len(two_arg)
-    # and P has exactly ONE taker, `_pc_lock_portrait_blobs`, which is what
-    # keeps "P before R" a property of the code rather than of each caller
-    body = _src(main._pc_lock_portrait_blobs)
+    # and P has exactly ONE statement, `_pc_lock_blob`, with two callers: the
+    # per-player set `_pc_lock_portrait_blobs` (which is what keeps "P before
+    # R" a property of the code rather than of each caller) and the blob
+    # janitor, which takes P before its guarded delete (Steam pictures v2 §6)
+    body = _src(main._pc_lock_blob)
     assert body.count("CAST(:cls AS integer)") == len(two_arg) == 1
+    assert _src(main._pc_lock_portrait_blobs).count("await _pc_lock_blob(") == 1
+    assert _src(main._pc_portrait_blob_janitor).count("await _pc_lock_blob(") == 1
+    assert MAIN_SRC.count("await _pc_lock_blob(") == 2
 
 
 def test_the_acquire_and_the_revalidation_read_the_same_resolver_inputs():
     """`portrait_for` decides what a lease authorises. If the two statements
     that feed it selected different columns, one of them would resolve from a
     default and the two would disagree about the same subject."""
-    assert main._PC_PORTRAIT_RESOLVE_COLS.count(" AS ") == 5
-    for col in ("subject_deleted", "subject_opted_out", "portrait_source", "portrait_hash", "subject_banned"):
+    assert main._PC_PORTRAIT_RESOLVE_COLS.count(" AS ") == 6   # + steam_portrait_hash (Steam pictures v2 §1)
+    for col in ("subject_deleted", "subject_opted_out", "portrait_source", "portrait_hash", "subject_banned",
+                "steam_portrait_hash"):
         assert f"AS {col}" in main._PC_PORTRAIT_RESOLVE_COLS, col
     for fn in (main.internal_pc_lease, main.internal_pc_lease_check):
         src = _src(fn)
@@ -935,26 +941,26 @@ def test_clear_unit_locks_hash_then_row_then_writes_then_deletes_the_orphan():
     bug, which is worse than no test (#441), so the order assertion is now the
     right way round and the unlocked key read is named explicitly."""
     until = NOW + timedelta(days=7)
-    db = Scripted({"SELECT pc_game_portrait_hash FROM players": [[{"h": "old" * 20}]],
+    db = Scripted({"SELECT pc_game_portrait_hash, pc_steam_portrait_hash FROM players": [[{"pc_game_portrait_hash": "old" * 20, "pc_steam_portrait_hash": None}]],
                    "RETURNING pc_game_portrait_locked_until": [[{"l": until}]]})
     assert _run(main._pc_clear_portrait_unit(db, str(PID), lock_days=7, source="none")) == ("old" * 20, until)
-    order = [_idx(db, k) for k in ("CAST(:cls AS integer)", "FOR NO KEY UPDATE", "UPDATE players SET", "DELETE FROM pc_portraits")]
+    order = [_idx(db, k) for k in ("CAST(:cls AS integer)", "FOR NO KEY UPDATE", "UPDATE players SET", "UPDATE pc_portraits SET unreferenced_since")]
     assert order == sorted(order), db.log
     # the key read that P is taken on carries no row lock of its own
     assert "FOR NO KEY UPDATE" not in db.log[0][0]
-    assert "SELECT pc_game_portrait_hash FROM players" in db.log[0][0]
+    assert "SELECT pc_game_portrait_hash, pc_steam_portrait_hash FROM players" in db.log[0][0]
     plock = db.log[_idx(db, "CAST(:cls AS integer)")]
     assert plock[1] == {"cls": P.PC_P_LOCK_CLASS, "h": "old" * 20}
     upd = db.log[_idx(db, "UPDATE players SET")]
     assert "make_interval(days => CAST(:days AS integer))" in upd[0] and upd[1]["days"] == 7
     assert "pc_portrait_source = CAST(:src AS text)" in upd[0] and upd[1]["src"] == "none"
     assert "pc_game_portrait_hash = NULL" in upd[0] and "pc_game_portrait_descriptor = NULL" in upd[0]
-    assert "NOT EXISTS" in db.log[_idx(db, "DELETE FROM pc_portraits")][0]
+    assert "NOT EXISTS" in db.log[_idx(db, "UPDATE pc_portraits SET unreferenced_since")][0]
     # no previous blob: no hash lock, no delete; no lock_days / source: neither clause
-    db = Scripted({"SELECT pc_game_portrait_hash FROM players": [[{"h": None}]],
+    db = Scripted({"SELECT pc_game_portrait_hash, pc_steam_portrait_hash FROM players": [[{"pc_game_portrait_hash": None, "pc_steam_portrait_hash": None}]],
                    "RETURNING pc_game_portrait_locked_until": [[{"l": None}]]})
     assert _run(main._pc_clear_portrait_unit(db, str(PID), lock_days=None, source=None)) == (None, None)
-    assert db.count("CAST(:cls AS integer)") == 0 and db.count("DELETE FROM pc_portraits") == 0
+    assert db.count("CAST(:cls AS integer)") == 0 and db.count("UPDATE pc_portraits SET unreferenced_since") == 0
     upd = db.log[_idx(db, "UPDATE players SET")]
     assert "make_interval" not in upd[0] and "pc_portrait_source" not in upd[0]
 
@@ -968,7 +974,7 @@ def test_admin_clear_verifies_then_locks_then_waits_out_leases(monkeypatch):
     monkeypatch.setattr(main, "_require_admin", admin)
     db = Scripted({"SELECT id FROM players WHERE steam_id": [[{"id": PID}]],
                    "FROM pc_delivery_leases": [[{"left": None}]],
-                   "SELECT pc_game_portrait_hash FROM players": [[{"h": "old" * 20}]],
+                   "SELECT pc_game_portrait_hash, pc_steam_portrait_hash FROM players": [[{"pc_game_portrait_hash": "old" * 20, "pc_steam_portrait_hash": None}]],
                    "RETURNING pc_game_portrait_locked_until": [[{"l": NOW}]]})
     ans = _run(main.admin_pc_portrait_clear({"admin_steam_id": "1", "steam_id": STEAM, "lock_days": 99999,
                                              "signature": "s"}, db))
@@ -988,7 +994,7 @@ def test_admin_clear_verifies_then_locks_then_waits_out_leases(monkeypatch):
     # lock_days 0 → no lock clause; a non-string signature is treated as absent
     db = Scripted({"SELECT id FROM players WHERE steam_id": [[{"id": PID}]],
                    "FROM pc_delivery_leases": [[{"left": None}]],
-                   "SELECT pc_game_portrait_hash FROM players": [[{"h": None}]],
+                   "SELECT pc_game_portrait_hash, pc_steam_portrait_hash FROM players": [[{"pc_game_portrait_hash": None, "pc_steam_portrait_hash": None}]],
                    "RETURNING pc_game_portrait_locked_until": [[{"l": None}]]})
     _run(main.admin_pc_portrait_clear({"admin_steam_id": "1", "steam_id": STEAM, "lock_days": -4, "signature": 5}, db))
     assert calls[-1] == ("1", "pc_portrait_clear", f"{STEAM}:0", "")

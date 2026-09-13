@@ -56,8 +56,9 @@ namespace CompetitiveRounds
         {
             public GameObject root, actions, btnView, btnDiscard, btnDupes;
             public GameObject face, textBlock;   // exactly one of the two is active
+            public GameObject faceMarkGO;        // the DISCARDED stamp over a face that is still cached
             public int bindSeq;                  // v22 section 5.2: a face answer that misses this paints nothing
-            public object txtName, txtTitle, txtL1, txtL2, txtL3, txtL4, txtMark, txtSign, btnDiscardTxt, btnDupesTxt;
+            public object txtName, txtTitle, txtL1, txtL2, txtL3, txtL4, txtMark, txtSign, btnDiscardTxt, btnDupesTxt, faceMark;
             public ApiClient.PcPrint print;   // the row's CURRENT binding — callbacks read this, never a captured print (#265)
             public int dupes;
         }
@@ -313,6 +314,7 @@ namespace CompetitiveRounds
             try { PlayerCardFaces.Clear(); } catch { }
             try { PortraitRender.OnIdentityChanged(); } catch { }
             lastPack = null; lastMsg = null;
+            HistoryReset();
             openInFlight = claimInFlight = recoverInFlight = discardInFlight = setInFlight = false;
             portraitWaitUntil = -1f; portraitWaitedAt = -100f; pendingVisit = false;
             // the previous account's character, as a Sprite over a texture
@@ -409,6 +411,7 @@ namespace CompetitiveRounds
 
         internal static void BuildInto(Transform parent)
         {
+            HookHistorySignals();
             view = View.Open; binderPage = 0; armedPrintId = null;
             tabRoot = new GameObject("PcRoot");
             tabRoot.transform.SetParent(parent, false);
@@ -509,7 +512,22 @@ namespace CompetitiveRounds
             var box4 = UIFactory.CreatePanel("PcLastBox", c, C_PANEL);
             UIFactory.AddVLG(box4, spacing: 6, padL: 12, padR: 12, padT: 8, padB: 8);
             UIFactory.AddLE(box4, flexH: 0);
-            txtLastHdr = UIFactory.CreateText("PcLastHdr", box4.transform, "Your last pack", 17f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(900, 24));
+            // The strip is a pager over the pack history (Sid, 2026-09-12): the
+            // header row carries the title, then older / position / newer.
+            var hdrRow = new GameObject("PcLastHdrRow");
+            hdrRow.transform.SetParent(box4.transform, false);
+            hdrRow.AddComponent<RectTransform>();
+            UIFactory.AddHLG(hdrRow, spacing: 8, forceExpandH: false);
+            UIFactory.AddLE(hdrRow, prefH: 26, minH: 26, flexH: 0);
+            txtLastHdr = UIFactory.CreateText("PcLastHdr", hdrRow.transform, "Your packs", 17f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(700, 24));
+            UIFactory.SetOverflowMode(txtLastHdr, 2); UIFactory.SetWordWrap(txtLastHdr, false);
+            var hdrGO = (txtLastHdr as Component)?.gameObject;
+            if (hdrGO != null) UIFactory.AddLE(hdrGO, flexW: 1);
+            btnHistOlder = UIFactory.CreateButton("PcHistOlder", hdrRow.transform, "< Older", 12f, C_WHITE, C_BTN, () => PageHistory(+1), sizeDelta: new Vector2(76, 22));
+            txtHistPos = UIFactory.CreateText("PcHistPos", hdrRow.transform, "", 13f, C_LABEL, UIFactory.AlignMidCenter, sizeDelta: new Vector2(120, 22));
+            btnHistNewer = UIFactory.CreateButton("PcHistNewer", hdrRow.transform, "Newer >", 12f, C_WHITE, C_BTN, () => PageHistory(-1), sizeDelta: new Vector2(76, 22));
+            foreach (var o in new[] { UIFactory.GetButtonText(btnHistOlder), UIFactory.GetButtonText(btnHistNewer), txtHistPos })
+                if (o != null) { UIFactory.SetOverflowMode(o, 2); UIFactory.SetWordWrap(o, false); }
             lastStrip = new GameObject("PcLastStrip");
             lastStrip.transform.SetParent(box4.transform, false);
             lastStrip.AddComponent<RectTransform>();
@@ -580,8 +598,21 @@ namespace CompetitiveRounds
             // The face slot: an Image the fetched sprite is set on, aspect-preserving
             // and click-through (the tile's own buttons keep every click).
             t.face = UIFactory.CreatePanel(name + "_f", inner.transform, C_CARD);
-            UIFactory.AddLE(t.face, flexH: 1, flexW: 1);
+            // Preferred size ZERO, explicitly: a UI Image reports its sprite's
+            // pixel size as its preferred size, so once a 375x525 face landed
+            // the slot asked the tile for 525 px, the layout went over budget,
+            // and the 22 px action row below it was crushed to a sliver whose
+            // labels then blanked under Truncate (Sid's binder screenshot,
+            // 2026-09-12). With 0 the slot is purely flexible and takes what
+            // is left after the row; preserveAspect letterboxes the picture.
+            UIFactory.AddLE(t.face, prefW: 0, prefH: 0, flexH: 1, flexW: 1);
             PlayerCardFaces.SetFace(t.face, null);
+            // The DISCARDED stamp: a centred label over the picture, shown only
+            // for a discarded print whose face is still in the cache.
+            t.faceMark = UIFactory.CreateText(name + "_fm", t.face.transform, "", 14f, C_WARN, UIFactory.AlignMidCenter, sizeDelta: new Vector2(TILE_W - 24, 40));
+            UIFactory.SetOverflowMode(t.faceMark, 2); UIFactory.SetWordWrap(t.faceMark, true);
+            t.faceMarkGO = (t.faceMark as Component)?.gameObject;
+            if (t.faceMarkGO != null) t.faceMarkGO.SetActive(false);
             t.face.SetActive(false);
             t.textBlock = new GameObject(name + "_tb");
             t.textBlock.transform.SetParent(inner.transform, false);
@@ -612,13 +643,19 @@ namespace CompetitiveRounds
                 t.actions.transform.SetParent(inner.transform, false);
                 t.actions.AddComponent<RectTransform>();
                 UIFactory.AddHLG(t.actions, spacing: 4, forceExpandH: true);
-                UIFactory.AddLE(t.actions, prefH: 22, flexH: 0);
+                // minH as well as prefH: a row with no minimum is the first
+                // thing a layout over budget shrinks to nothing (#449's rule).
+                UIFactory.AddLE(t.actions, prefH: 22, minH: 22, flexH: 0);
                 var tile = t;
                 t.btnView = UIFactory.CreateButton(name + "_v", t.actions.transform, "View", 11f, C_WHITE, C_BTN, () => ShowCard(tile), sizeDelta: new Vector2(46, 20));
                 t.btnDiscard = UIFactory.CreateButton(name + "_d", t.actions.transform, "Discard", 11f, C_WHITE, C_DANGER, () => OnDiscardClick(tile, false), sizeDelta: new Vector2(76, 20));
                 t.btnDiscardTxt = UIFactory.GetButtonText(t.btnDiscard);
                 t.btnDupes = UIFactory.CreateButton(name + "_dd", t.actions.transform, "", 11f, C_WHITE, C_DANGER, () => OnDiscardClick(tile, true), sizeDelta: new Vector2(84, 20));
                 t.btnDupesTxt = UIFactory.GetButtonText(t.btnDupes);
+                // Masking, never Truncate, on the three labels: the tile's own
+                // text lines opted out above and the buttons had not (c4/c5).
+                foreach (var o in new[] { UIFactory.GetButtonText(t.btnView), t.btnDiscardTxt, t.btnDupesTxt })
+                    if (o != null) { UIFactory.SetOverflowMode(o, 2); UIFactory.SetWordWrap(o, false); }
             }
             t.root.SetActive(false);
             return t;
@@ -718,6 +755,28 @@ namespace CompetitiveRounds
         /// (v22 7): 0 is NEW, n is DUPLICATE +n. The collection grid carries no
         /// such field and an answer from an api that predates it carries -1;
         /// both say nothing here rather than calling every card new.</summary>
+        /// <summary>The tier the card draws in its RANK slot, then the equipped
+        /// shop title when the player wears one (the server sends `title` only
+        /// for a real shop title; rank-title wearers get null). Each half is
+        /// translated on its own: the tier is a catalogue value, and the shop
+        /// title goes through the same runtime lookup the Shop list and the
+        /// profile card use for catalogue names (a catalogue miss reads as
+        /// the English the server sent).</summary>
+        private static string TitleLine(ApiClient.PcPrint p)
+        {
+            string tier = string.IsNullOrEmpty(p.rank_name) ? "" : I18n.Tr(p.rank_name);
+            string shop = string.IsNullOrEmpty(p.title) ? "" : I18n.Tr(p.title);
+            if (shop.Length == 0) return tier;
+            return tier.Length > 0 ? tier + "  ·  " + shop : shop;
+        }
+
+        private static string DiscardedLine(ApiClient.PcPrint p)
+        {
+            return p.discard_shards > 0
+                ? I18n.TrF("DISCARDED (+{0} shards)", p.discard_shards)
+                : I18n.TrC("pack open", "DISCARDED");
+        }
+
         private static string MarkLine(ApiClient.PcPrint p)
         {
             string mark = RarityLabel(p.rarity);
@@ -739,8 +798,8 @@ namespace CompetitiveRounds
             var lines = new List<string>();
             string mark = MarkLine(p);
             lines.Add(mark);
-            string title = !string.IsNullOrEmpty(p.title) ? p.title : (p.rank_name ?? "");
-            if (title.Length > 0) lines.Add(I18n.Tr(title));   // a catalogue value, never user text (c5)
+            string title = TitleLine(p);
+            if (title.Length > 0) lines.Add(title);
             lines.Add(RatingLine(p));
             lines.Add(RankLine(p));
             string tc = p.top_card ?? "";
@@ -764,8 +823,7 @@ namespace CompetitiveRounds
             BindFace(t, p);
             string name = SafeName(p);
             UIFactory.SetTextRaw(t.txtName, name);
-            string title = !string.IsNullOrEmpty(p.title) ? p.title : (p.rank_name ?? "");
-            UIFactory.SetTextRaw(t.txtTitle, title.Length > 0 ? I18n.Tr(title) : "");   // catalogue value (c5)
+            UIFactory.SetTextRaw(t.txtTitle, TitleLine(p));
             UIFactory.SetTextRaw(t.txtL1, RatingLine(p));
             UIFactory.SetTextRaw(t.txtL2, RankLine(p));
             string tc = p.top_card ?? "";
@@ -773,8 +831,15 @@ namespace CompetitiveRounds
             if (tc.Length > 18) tc = tc.Substring(0, 18);
             UIFactory.SetTextRaw(t.txtL3, tc.Length > 0 ? I18n.TrF("Top card: {0}", tc) : "");
             UIFactory.SetTextRaw(t.txtL4, I18n.TrF("Pool #{0} | Ed. {1} | {2}", p.pool_rank, p.edition_id ?? "", DateOnly(p.minted_at).Replace('-', '/')));
-            string mark = MarkLine(p);
+            // A discarded print stays where it was pulled, stamped (Sid,
+            // 2026-09-12): the mark line says so in the text block, the same
+            // words sit over the picture when the face is still cached, and the
+            // picture is dimmed so the stamp reads on any band colour.
+            string mark = p.discarded ? DiscardedLine(p) : MarkLine(p);
             UIFactory.SetTextRaw(t.txtMark, mark);
+            if (t.faceMark != null) UIFactory.SetTextRaw(t.faceMark, p.discarded ? "<b>" + DiscardedLine(p) + "</b>" : "");
+            if (t.faceMarkGO != null) t.faceMarkGO.SetActive(p.discarded);
+            UIFactory.SetImageColor(t.face, p.discarded ? new Color(0.42f, 0.42f, 0.48f, 1f) : Color.white);
             UIFactory.SetTextRaw(t.txtSign, p.signed ? "<i>~ " + name + " ~</i>" : "");
             if (t.actions != null)
             {
@@ -800,6 +865,11 @@ namespace CompetitiveRounds
             if (string.IsNullOrEmpty(p.face_rev)) { ShowTileText(t); return; }
             var hit = PlayerCardFaces.Cached(p.print_id, p.face_rev, p.face_locale, "tile");
             if (hit != null) { ShowTileFace(t, hit); return; }
+            // The face route answers 404 for a discarded print by design (its
+            // picture is not fetchable once the card is gone), and the strip
+            // used to ask three times and fall to text anyway. Cached = shown,
+            // stamped; not cached = the text block, stamped. Never a fetch.
+            if (p.discarded) { ShowTileText(t); return; }
             ShowTileText(t);
             int seq = t.bindSeq, ep = uiEpoch, gen = PlayerCardFaces.Generation;
             var tile = t; string pid = p.print_id;
@@ -862,6 +932,13 @@ namespace CompetitiveRounds
             UIFactory.SetTextRaw(txtStatus, status);
             UIFactory.SetColor(txtStatus, sc);
 
+            if (view == View.Open && me != null) EnsureHistory(id);
+            if (pendingHistoryIndex >= 0 && !historyInFlight)
+            {
+                // the page a click asked for has landed (or failed): land on it if it exists
+                if (pendingHistoryIndex < packHistory.Count) historyIndex = pendingHistoryIndex;
+                pendingHistoryIndex = -1;
+            }
             if (view == View.Open) RefreshOpen(me);
             else if (view == View.Binder) RefreshBinder(me);
             else RefreshInfo(me);
@@ -888,8 +965,10 @@ namespace CompetitiveRounds
             {
                 UIFactory.SetTextRaw(btnBuyGoldTxt, I18n.TrF("Open for {0} gold", me.price_gold));
                 UIFactory.SetTextRaw(btnBuyShardsTxt, I18n.TrF("Open for {0} shards", me.price_shards));
-                UIFactory.SetTextRaw(txtPaid, I18n.TrF("{0} of {1} paid packs today - {2} cards each", me.paid_today, me.paid_packs_per_day, me.prints_per_pack));
-                bool capped = me.paid_today >= me.paid_packs_per_day;
+                UIFactory.SetTextRaw(txtPaid, me.paid_cap_exempt
+                    ? I18n.TrF("{0} paid packs today - no daily limit on this account - {1} cards each", me.paid_today, me.prints_per_pack)
+                    : I18n.TrF("{0} of {1} paid packs today - {2} cards each", me.paid_today, me.paid_packs_per_day, me.prints_per_pack));
+                bool capped = !me.paid_cap_exempt && me.paid_today >= me.paid_packs_per_day;
                 UIFactory.SetImageColor(btnBuyGold, canAct && !capped ? C_BUY : C_BTN);
                 UIFactory.SetImageColor(btnBuyShards, canAct && !capped ? C_BUY : C_BTN);
                 UIFactory.SetTextRaw(txtPool, me.pool_member_count > 0
@@ -919,15 +998,350 @@ namespace CompetitiveRounds
                 }
             for (int i = n; i < MAX_PACK_ROWS; i++) { packRows[i].pack = null; packRows[i].root.SetActive(false); }
             if (packsBox != null) packsBox.SetActive(n > 0);
-            // reveal strip
-            bool hasLast = lastPack != null && lastPack.prints != null && lastPack.prints.Count > 0;
-            if (lastStrip != null) lastStrip.transform.parent.gameObject.SetActive(hasLast);
+            // reveal strip = the pack-history pager (index 0 is the newest)
+            if (historyIndex >= packHistory.Count) historyIndex = Math.Max(0, packHistory.Count - 1);
+            var shown = packHistory.Count > 0 ? packHistory[historyIndex] : null;
+            bool hasLast = shown != null && shown.prints != null && shown.prints.Count > 0;
+            if (lastStrip != null) lastStrip.transform.parent.gameObject.SetActive(hasLast || historyInFlight);
             if (hasLast)
             {
-                UIFactory.SetTextRaw(txtLastHdr, I18n.TrF("Your last pack ({0}) - {1}", PackSourceLabel(lastPack), DateOnly(lastPack.opened_at)));
+                int total = Math.Max(historyTotal, packHistory.Count);
+                int ordinal = total - historyIndex;   // packs count up from the oldest
+                UIFactory.SetTextRaw(txtLastHdr, historyIndex == 0
+                    ? I18n.TrF("Your last pack ({0}) - {1}", PackSourceLabel(shown), DateOnly(shown.opened_at))
+                    : I18n.TrF("Pack {0} of {1} ({2}) - {3}", ordinal, total, PackSourceLabel(shown), DateOnly(shown.opened_at)));
+                UIFactory.SetTextRaw(txtHistPos, I18n.TrF("{0} / {1}", ordinal, total));
+                bool olderExists = historyIndex + 1 < packHistory.Count || (!string.IsNullOrEmpty(historyNextBefore) && !historyExhausted);
+                UIFactory.SetImageColor(btnHistOlder, olderExists && !historyInFlight ? C_BTN : C_PANEL);
+                UIFactory.SetImageColor(btnHistNewer, historyIndex > 0 ? C_BTN : C_PANEL);
                 for (int i = 0; i < revealTiles.Length; i++)
-                    FillTile(revealTiles[i], i < lastPack.prints.Count ? lastPack.prints[i] : null, 0);
+                    FillTile(revealTiles[i], i < shown.prints.Count ? shown.prints[i] : null, 0);
             }
+            else if (historyInFlight)
+            {
+                UIFactory.SetTextRaw(txtLastHdr, I18n.Tr("Loading your packs..."));
+                UIFactory.SetTextRaw(txtHistPos, "");
+                for (int i = 0; i < revealTiles.Length; i++) FillTile(revealTiles[i], null, 0);
+            }
+        }
+
+        // ── pack history (the strip's pager) ──────────────────────────────
+        // Newest first; index 0 is what "Your last pack" always showed. A pack
+        // this client opens is inserted at once (it is the answer the open
+        // produced), where the server's order puts it -- the head, unless a
+        // newer pack from another device is already loaded; the server's
+        // pages fill in behind it, deduped by pack_id, one page per click past
+        // the loaded end. The list keeps the server's own order, (opened_at,
+        // id) DESC -- the keyset pair its cursor pages by -- on every
+        // insertion path, so a merged page lands where the server has it.
+        private static readonly List<ApiClient.PcPackAnswer> packHistory = new List<ApiClient.PcPackAnswer>();
+        private static string historyNextBefore;
+        private static bool historyLoaded, historyInFlight, historyExhausted;
+        private static int historyIndex, historyTotal;
+        // The chain's count is its FIRST page's total, kept for the chain's
+        // life: a later page's total can count a pack opened on another
+        // device since, which this anchored chain never reaches (its cursor
+        // pages backwards from the head it started at). That first page's
+        // head is the anchor a head insert is counted against: a pack this
+        // client opens after it is one more; a delayed open answer for a
+        // pack older than it was already in that total, loaded rows or not.
+        private static bool historyAnchored;
+        private static ApiClient.PcPackAnswer historyAnchor;
+        private static float historyFailedAt = -100f;
+        private static GameObject btnHistOlder, btnHistNewer;
+        private static object txtHistPos;
+        private static int pendingHistoryIndex = -1;
+        // Which server page each loaded pack came from: pack_id -> the cursor
+        // that page was asked with ("" for the newest page), so the page that
+        // holds a tile can be asked for again. A pack this client inserted at
+        // the head has no entry and counts as the newest page.
+        private static readonly Dictionary<string, string> historyPageOf = new Dictionary<string, string>(StringComparer.Ordinal);
+        // The cursors with a refetch on its way; the face keys
+        // (print|revision|locale) waiting on one, each with the cursor it
+        // waits on; and the keys that already spent their one refetch. A key
+        // is spent when its page comes back CARRYING the print -- never at
+        // the ask -- so a page that comes back without it (the print moved
+        // past the page's end) leaves the key free for the chain loaded again.
+        private static readonly HashSet<string> historyRefetching = new HashSet<string>(StringComparer.Ordinal);
+        private sealed class FaceRefetch { internal string key, printId, cursor; }
+        private static readonly List<FaceRefetch> faceRefetchPending = new List<FaceRefetch>();
+        private static readonly HashSet<string> faceRefetched = new HashSet<string>(StringComparer.Ordinal);
+        // Bumped by every reset (an identity edge, a language change): a page
+        // answer that left before the reset is dropped on landing instead of
+        // merging the old locale's face keys into the new list.
+        private static int historyGen;
+        private static bool historyHooked;
+
+        /// <summary>Once, from the first build: the two signals the loaded
+        /// history reacts to. The server keys a print's face revision under
+        /// the answer's locale, so a language change drops the loaded pages
+        /// and the next Open-tab paint loads them again in the new language;
+        /// a face answer of 404 for a print the history holds means that
+        /// revision moved on (the name and the picture on a card are live)
+        /// and its page is asked for again. Signals, not a timer: nothing
+        /// here polls.</summary>
+        private static void HookHistorySignals()
+        {
+            if (historyHooked) return;
+            historyHooked = true;
+            try { I18n.LocaleChanged += OnHistoryLocaleChanged; } catch (Exception ex) { Plugin.Log.LogWarning("[PC] locale hook failed: " + ex.Message); }
+            try { ApiClient.PcFaceNotFound += OnHistoryFaceNotFound; } catch (Exception ex) { Plugin.Log.LogWarning("[PC] face hook failed: " + ex.Message); }
+        }
+
+        private static void OnHistoryLocaleChanged()
+        {
+            HistoryReset();
+            try { NativeUI.MarkDirty(); } catch { }
+        }
+
+        private static string FaceRefetchKey(string printId, string faceRev, string locale)
+            => printId + "|" + faceRev + "|" + (string.IsNullOrEmpty(locale) ? "en" : locale);
+
+        /// <summary>A face request answered 404. When a loaded history page
+        /// holds that print under exactly that revision and locale, the page
+        /// is fetched again and the strip repaints from the fresh revisions.
+        /// The key spends its one refetch when that page comes back CARRYING
+        /// the print -- under a new revision, or still the old one, which is
+        /// a revision the face box does not serve yet and costs one page
+        /// fetch and not a loop. A page that comes back WITHOUT the print (a
+        /// pack opened on another device pushed it past the newest page's
+        /// end, where the anchored chain cannot follow) spends nothing: the
+        /// chain is dropped and the next paint loads it again from the head,
+        /// every page fresh, so the print is refreshed by whichever page
+        /// holds it. A key already waiting on a page is not asked twice; a
+        /// failed refetch is asked again no sooner than the pager's own 30 s.
+        /// A discarded print's face answers 404 by design and never gets
+        /// here; a history not loaded yet has its first load still ahead of
+        /// it.</summary>
+        private static void OnHistoryFaceNotFound(string printId, string faceRev, string locale)
+        {
+            if (string.IsNullOrEmpty(printId) || string.IsNullOrEmpty(faceRev) || !historyLoaded) return;
+            var id = LocalId();
+            if (id == null || !SessionReady) return;
+            string want = string.IsNullOrEmpty(locale) ? "en" : locale;
+            string cursor = null; bool held = false;
+            foreach (var a in packHistory)
+            {
+                if (a.prints == null) continue;
+                foreach (var p in a.prints)
+                {
+                    if (p.print_id != printId || p.face_rev != faceRev || p.discarded) continue;
+                    if ((string.IsNullOrEmpty(p.face_locale) ? "en" : p.face_locale) != want) continue;
+                    held = true;
+                    historyPageOf.TryGetValue(a.pack_id ?? "", out cursor);
+                    break;
+                }
+                if (held) break;
+            }
+            if (!held) return;
+            string key = FaceRefetchKey(printId, faceRev, locale);
+            if (faceRefetched.Contains(key) || FaceRefetchWaiting(key)) return;
+            if (Now - historyFailedAt < 30f) return;
+            faceRefetchPending.Add(new FaceRefetch { key = key, printId = printId, cursor = cursor ?? "" });
+            RefetchHistoryPage(id, cursor ?? "");
+        }
+
+        private static bool FaceRefetchWaiting(string key)
+        {
+            for (int i = 0; i < faceRefetchPending.Count; i++) if (faceRefetchPending[i].key == key) return true;
+            return false;
+        }
+
+        /// <summary>One more fetch of a page already loaded, merged in place;
+        /// the pager's cursor and end are left alone. A page already on its
+        /// way is not asked for twice -- its answer covers every key that
+        /// pointed at it.</summary>
+        private static void RefetchHistoryPage(string id, string cursor)
+        {
+            if (!historyRefetching.Add(cursor)) return;
+            int ep = uiEpoch, gen = historyGen;
+            ApiClient.FetchPcPacks(id, cursor.Length == 0 ? null : cursor, (ok, resp, h) =>
+            {
+                if (ep != uiEpoch || gen != historyGen) return;   // reset since: the sets went with it
+                historyRefetching.Remove(cursor);
+                if (!ok || h == null)
+                {
+                    Plugin.Log.LogWarning("[PC] pack history refetch failed: " + ApiClient.PcErrorCode(resp));
+                    historyFailedAt = Now;
+                    faceRefetchPending.RemoveAll(r => r.cursor == cursor);   // unspent: the next 404 asks again after the pager's 30 s
+                    return;
+                }
+                MergeHistoryPage(h, cursor);
+                SettleFaceRefetches(h, cursor);
+                NativeUI.MarkDirty();
+            });
+        }
+
+        /// <summary>A refetched page landed: every key that waited on it is
+        /// settled against the answer. The answer carries the print: the key
+        /// is spent (a new revision has a new key of its own; the old one
+        /// would only ask this same page again). It does not: the print
+        /// moved past this page's end, so the chain is dropped and loaded
+        /// again from the head -- the reset clears the key with the rest,
+        /// and the fresh page that holds the print brings its revision.</summary>
+        private static void SettleFaceRefetches(ApiClient.PcPackHistory h, string cursor)
+        {
+            bool moved = false;
+            for (int i = faceRefetchPending.Count - 1; i >= 0; i--)
+            {
+                var r = faceRefetchPending[i];
+                if (r.cursor != cursor) continue;
+                faceRefetchPending.RemoveAt(i);
+                if (AnswerHoldsPrint(h, r.printId)) faceRefetched.Add(r.key); else moved = true;
+            }
+            if (!moved) return;
+            Plugin.Log.LogInfo("[PC] pack history: a refetched page no longer holds its print; loading the history again from the head");
+            HistoryReset();
+        }
+
+        private static bool AnswerHoldsPrint(ApiClient.PcPackHistory h, string printId)
+        {
+            foreach (var a in h.packs)
+            {
+                if (a == null || a.prints == null) continue;
+                foreach (var p in a.prints) if (p.print_id == printId) return true;
+            }
+            return false;
+        }
+
+        /// <summary>The server's order: (opened_at, id) DESC, the pair its
+        /// keyset cursor pages by. Pack ids are canonical lowercase UUID text
+        /// and opened_at is the server's own ISO text, so an ordinal compare
+        /// on each agrees with the database. Never the timestamp alone: two
+        /// packs opened in the same instant would then trade places between
+        /// one page and the next.</summary>
+        private static int ServerOrder(ApiClient.PcPackAnswer x, ApiClient.PcPackAnswer y)
+        {
+            int c = string.CompareOrdinal(y.opened_at ?? "", x.opened_at ?? "");
+            return c != 0 ? c : string.CompareOrdinal(y.pack_id ?? "", x.pack_id ?? "");
+        }
+
+        /// <summary>A page answer into the list: a pack the list holds is
+        /// replaced by the fresh copy (new face revisions, the server's
+        /// discard marks), one it does not hold is added, and the list is put
+        /// back in the server's order. Every pack remembers the cursor of the
+        /// page that brought it. The first page anchors the chain: its total
+        /// is the chain's count and its head the anchor (see the fields); a
+        /// later page's total is not adopted.</summary>
+        private static void MergeHistoryPage(ApiClient.PcPackHistory h, string cursor)
+        {
+            foreach (var a in h.packs)
+            {
+                if (a == null || string.IsNullOrEmpty(a.pack_id)) continue;
+                int at = packHistory.FindIndex(x => x.pack_id == a.pack_id);
+                if (at >= 0) packHistory[at] = a; else packHistory.Add(a);
+                historyPageOf[a.pack_id] = cursor ?? "";
+            }
+            packHistory.Sort(ServerOrder);
+            if (!historyAnchored)
+            {
+                historyAnchored = true;
+                historyTotal = h.total;
+                historyAnchor = null;
+                foreach (var a in h.packs)
+                    if (a != null && !string.IsNullOrEmpty(a.pack_id) && (historyAnchor == null || ServerOrder(a, historyAnchor) < 0)) historyAnchor = a;
+            }
+            lastPack = packHistory.Count > 0 ? packHistory[0] : lastPack;
+        }
+
+        /// <summary>A pack this client opened, or a recovered open answer,
+        /// into the list where the server's order puts it -- a newer pack from
+        /// another device may already sit above it (a refetched newest page
+        /// brings one), and index 0 would then put the list out of the order
+        /// nothing else repairs. The strip lands on it. For the count: a pack
+        /// the list already held moves and the total stays; one it did not
+        /// hold is one more only when it is newer than the chain's anchor,
+        /// since a delayed answer for a pack older than the anchor was already
+        /// in the first page's total whether or not its row is loaded. Before
+        /// the chain is anchored nothing is counted here: the first page's
+        /// total is what counts.</summary>
+        private static void HistoryInsertHead(ApiClient.PcPackAnswer a)
+        {
+            if (a == null || string.IsNullOrEmpty(a.pack_id)) return;
+            bool absent = packHistory.RemoveAll(x => x.pack_id == a.pack_id) == 0;
+            int at = 0;
+            while (at < packHistory.Count && ServerOrder(packHistory[at], a) < 0) at++;
+            packHistory.Insert(at, a);
+            historyIndex = at;
+            if (absent && historyAnchored && (historyAnchor == null || ServerOrder(a, historyAnchor) < 0)) historyTotal++;
+        }
+
+        private static void HistoryReset()
+        {
+            historyGen++;
+            packHistory.Clear(); historyNextBefore = null;
+            historyPageOf.Clear(); historyRefetching.Clear(); faceRefetched.Clear(); faceRefetchPending.Clear();
+            historyLoaded = historyInFlight = historyExhausted = false;
+            historyAnchored = false; historyAnchor = null;
+            historyIndex = historyTotal = 0; historyFailedAt = -100f; pendingHistoryIndex = -1;
+        }
+
+        /// <summary>First page on the first Open-tab paint with a session; one
+        /// retry per 30 s after a failure, never a loop.</summary>
+        private static void EnsureHistory(string id)
+        {
+            if (historyLoaded || historyInFlight || id == null || !SessionReady) return;
+            if (Now - historyFailedAt < 30f) return;
+            LoadHistoryPage(id);
+        }
+
+        private static void LoadHistoryPage(string id)
+        {
+            if (historyInFlight) return;
+            string before = historyLoaded ? historyNextBefore : null;
+            if (historyLoaded && string.IsNullOrEmpty(before)) { historyExhausted = true; return; }
+            historyInFlight = true;
+            int ep = uiEpoch, gen = historyGen;
+            NativeUI.MarkDirty();
+            ApiClient.FetchPcPacks(id, before, (ok, resp, h) =>
+            {
+                if (ep != uiEpoch || gen != historyGen) return;   // reset since: its flags went with it
+                historyInFlight = false;
+                if (!ok || h == null)
+                {
+                    historyFailedAt = Now;
+                    Plugin.Log.LogWarning("[PC] pack history page failed: " + ApiClient.PcErrorCode(resp));
+                    NativeUI.MarkDirty();
+                    return;
+                }
+                MergeHistoryPage(h, before ?? "");
+                historyNextBefore = h.next_before;
+                historyExhausted = string.IsNullOrEmpty(h.next_before);
+                historyLoaded = true;
+                NativeUI.MarkDirty();
+            });
+        }
+
+        private static void PageHistory(int delta)
+        {
+            var id = LocalId();
+            int next = historyIndex + delta;
+            if (next < 0) return;
+            if (next >= packHistory.Count)
+            {
+                // past the loaded end: fetch the next page, then land on it
+                if (historyExhausted || historyInFlight || id == null) return;
+                int want = next;
+                LoadHistoryPage(id);
+                pendingHistoryIndex = want;
+                return;
+            }
+            historyIndex = next;
+            NativeUI.MarkDirty();
+        }
+
+        /// <summary>A print this client discarded, wherever the history holds
+        /// it: stamped in place, never removed (Sid, 2026-09-12).</summary>
+        private static void HistoryMarkDiscarded(string printId, int shards)
+        {
+            if (string.IsNullOrEmpty(printId)) return;
+            foreach (var a in packHistory)
+                if (a.prints != null)
+                    foreach (var p in a.prints)
+                        if (p.print_id == printId) { p.discarded = true; if (shards > 0) p.discard_shards = shards; }
+            if (lastPack != null && lastPack.prints != null)
+                foreach (var p in lastPack.prints)
+                    if (p.print_id == printId) { p.discarded = true; if (shards > 0) p.discard_shards = shards; }
         }
 
         private static bool HasUnopened(ApiClient.PcMe me, string packId)
@@ -1042,10 +1456,12 @@ namespace CompetitiveRounds
             string body = I18n.Tr("How to get packs") + "\n"
                 + I18n.Tr("- One free pack every day (resets at midnight UTC). Claim it on the Open Packs page or with /daily in Discord.") + "\n"
                 + I18n.Tr("- Ranked wins: every ranked 1v1 series you win rolls a 20% chance of a pack (a 2-0 sweep: 100%). 2v2, 1v2 and FFA wins roll 10% (a sweep: 50%). Earned packs wait here until you open them.") + "\n"
-                + I18n.TrF("- Buy one for {0} gold or {1} shards, up to {2} paid packs a day.", gold, shards, cap) + "\n\n"
+                + (me != null && me.paid_cap_exempt
+                    ? I18n.TrF("- Buy one for {0} gold or {1} shards. No daily limit on this account.", gold, shards)
+                    : I18n.TrF("- Buy one for {0} gold or {1} shards, up to {2} paid packs a day.", gold, shards, cap)) + "\n\n"
                 + I18n.TrF("Each pack holds {0} cards. A card's rarity is its player's rank in the card pool on the day of the pull: Legendary = #1, Epic #2-10, Rare #11-20, Uncommon #21-40, Common #41 and below. Odds per card: Common 60%, Uncommon 25%, Rare 11%, Epic 3.5%, Legendary 0.5%. Every card also rolls Foil (1 in 200) and Signed (1 in 2000) on its own.", per) + "\n\n"
                 + I18n.Tr("Discarding a card gives shards by its rarity: Common 5, Uncommon 15, Rare 40, Epic 150, Legendary 600. Shards buy packs. Discards are one card at a time; the Dupes button discards every other copy of that exact card.") + "\n\n"
-                + I18n.Tr("A card shows its player as the leaderboard did on the day it was pulled - name, title, rating, record and rank - and never changes afterwards (a renamed player shows their new name). Anyone with the mod can be pulled unless they turn it off in Settings; your own settings for being a card, a public binder and pull announcements live there too.");
+                + I18n.Tr("A card freezes its player's title, rating, record and rank as the leaderboard had them on the day it was pulled; the name and the picture stay live (a renamed player shows their new name). Anyone with the mod can be pulled unless they turn it off in Settings or are currently banned; your own settings for being a card, a public binder and pull announcements live there too.");
             UIFactory.SetTextRaw(txtInfo, body);
         }
 
@@ -1153,7 +1569,7 @@ namespace CompetitiveRounds
                 ApiClient.FetchPcMe(id, true);
                 return;
             }
-            if (me.paid_today >= me.paid_packs_per_day) { Say(ReasonText("daily_cap")); return; }
+            if (!me.paid_cap_exempt && me.paid_today >= me.paid_packs_per_day) { Say(ReasonText("daily_cap")); return; }
             int price = pay == "gold" ? me.price_gold : me.price_shards;
             string nonce = NewNonce();
             if (!WriteIntent("buy", nonce, pay, price))
@@ -1217,7 +1633,7 @@ namespace CompetitiveRounds
                 }
                 else if (a.status == "done")
                 {
-                    lastPack = a; ClearIntent();
+                    lastPack = a; HistoryInsertHead(a); ClearIntent();
                     Say(I18n.TrF("Pack opened - {0} new cards", a.prints.Count), C_OK);
                     try { CompetitiveUI.ShowNotification(I18n.TrF("Pack opened - {0} new cards", a.prints.Count), C_OK, 3f); } catch { }
                     if (view == View.Binder) view = View.Open;
@@ -1350,9 +1766,11 @@ namespace CompetitiveRounds
                 if (ok)
                 {
                     discardDone++;
-                    discardShards += ApiClient.PcInt(ApiClient.PcTopLevel(resp, "shards_gained"));
+                    int gained = ApiClient.PcInt(ApiClient.PcTopLevel(resp, "shards_gained"));
+                    discardShards += gained;
                     var col = ApiClient.CachedPcCollection;
                     if (col != null) col.prints.RemoveAll(x => x.print_id == pid);
+                    HistoryMarkDiscarded(pid, gained);
                     DiscardNext(id);
                 }
                 else FinishDiscard(id, ApiClient.PcErrorCode(resp));
@@ -1392,11 +1810,60 @@ namespace CompetitiveRounds
                     pool_rank = i == 0 ? 1 : i * 9, rating = 1850 - i * 120, peak_rating = 1900 - i * 100, board_rank = i == 0 ? 1 : i * 9,
                     series_wins = 60 - i * 8, series_losses = 12 + i * 3, top_card = "Bombs Away", title = i == 0 ? "Grandmaster" : "", rank_name = "Diamond", source = "bought", slot = i,
                     dup_at_pull = i == 0 ? 0 : (i == 3 ? 2 : -1),   // one NEW, one DUPLICATE +2, the rest silent
+                    discarded = i == 4, discard_shards = i == 4 ? 3 : -1,   // one DISCARDED stamp, for the screenshot
                 });
             lastPack = a;
+            HistoryInsertHead(a);
+            historyLoaded = true; historyExhausted = true;   // the pager shows this one; no server page behind it
             view = mode == "binder" ? View.Binder : (mode == "info" ? View.Info : View.Open);
-            Plugin.Log.LogInfo("[PC] synthetic tiles seeded (dev lever)");
+            if (mode == "binder" || mode == "binder-faces")
+            {
+                // A synthetic binder (this seat's account is a service account:
+                // 403 on the collection): ten prints, two of them copies of one
+                // card, so the Dupes button shows too. "binder-faces" also puts
+                // a synthetic 375x525 face in the cache for every print — the
+                // exact sprite size a fetched face has, so the action row is
+                // verified under the same layout pressure the live binder has.
+                var col = new ApiClient.PcCollection { owner_steam_id = "dev", owner_name = "Sid", is_public = true };
+                string[] rar2 = { "legendary", "epic", "rare", "uncommon", "common", "common", "rare", "uncommon", "common", "common" };
+                for (int i = 0; i < 10; i++)
+                {
+                    int subj = i == 9 ? 8 : i;   // the last two are the same card
+                    col.prints.Add(new ApiClient.PcPrint
+                    {
+                        print_id = "devb" + i, card_id = "cardb" + subj, subject_player_id = "pb" + subj, subject_name = i == 0 ? "Sid" : "Player " + subj,
+                        edition_id = "1", minted_at = "2026-09-12T00:00:00", rarity = rar2[i], foil = i == 2, signed = i == 0,
+                        pool_rank = i + 1, rating = 1900 - i * 40, peak_rating = 1950 - i * 40, board_rank = i < 5 ? i + 1 : 0,
+                        series_wins = 40 - i * 3, series_losses = 10 + i, top_card = "Bombs Away", title = i == 1 ? "Champion" : "", rank_name = "Advanced I",
+                        source = "bought", slot = i % 5, dup_at_pull = -1,
+                        face_rev = mode == "binder-faces" ? "dev" : null,
+                    });
+                }
+                if (mode == "binder-faces")
+                    for (int i = 0; i < col.prints.Count; i++)
+                        PlayerCardFaces.DevPut(col.prints[i].print_id, "dev", "en", "tile", DevSprite(FrameColor(col.prints[i].rarity, false)), 375L * 525L * 4L);
+                col.count = col.prints.Count;
+                ApiClient.DevSetCollection(col);
+                view = View.Binder;
+            }
+            Plugin.Log.LogInfo("[PC] synthetic tiles seeded (dev lever, mode=" + mode + ")");
             NativeUI.MarkDirty();
+        }
+
+        /// <summary>A 375x525 sprite for the dev lever: the band colour fading
+        /// to black, so a tile shows a picture-shaped picture.</summary>
+        private static Sprite DevSprite(Color c)
+        {
+            const int w = 375, h = 525;
+            var tex = new Texture2D(w, h, TextureFormat.RGBA32, false);
+            var px = new Color32[w * h];
+            for (int y = 0; y < h; y++)
+            {
+                var row = Color.Lerp(c, Color.black, 0.65f * (1f - y / (float)(h - 1)));
+                for (int x = 0; x < w; x++) px[y * w + x] = row;
+            }
+            tex.SetPixels32(px); tex.Apply(false, false);
+            return PlayerCardFaces.SpriteOf(tex);
         }
 
         /// <summary>Broadcast-seat lever `act:<what>` (identity-gated by the
@@ -1451,10 +1918,12 @@ namespace CompetitiveRounds
             btnAnnounce = SettingsRow(parent, "SPcAnn", () => ToggleSetting("announce"),
                 "Rare pulls may be posted to the Discord announcements channel with your name.", 18f);
             btnAnnounceTxt = UIFactory.GetButtonText(btnAnnounce);
-            // The picture rows (design v22 §3.1, §3.4). "None" keeps the card's
-            // initial disc; the preset decides WHICH character is drawn.
+            // The picture rows (design v22 §3.1, §3.4; Steam pictures v2 §12).
+            // Two states only: the in-game character (the Steam profile picture
+            // stands in until this PC has sent it) or None (the plain emblem);
+            // the preset decides WHICH character is drawn.
             btnPicture = SettingsRow(parent, "SPcPic", TogglePortraitSource,
-                "Your card can show your in-game character - the same body, face, colour and effect you play with, drawn by this PC and sent once. Set it to None and your card keeps a plain initial instead.", 36f);
+                "Your card can show your in-game character - the same body, face, colour and effect you play with, drawn by this PC and sent once. Until this PC has sent it, your card shows your Steam profile picture. Set it to None and your card shows the plain card emblem instead.", 36f);
             btnPictureTxt = UIFactory.GetButtonText(btnPicture);
             btnPreset = SettingsRow(parent, "SPcPre", CyclePreset,
                 "Which character your picture shows: Follow uses the one you have selected in the character menu, or pin a saved preset.", 18f);
@@ -1474,13 +1943,15 @@ namespace CompetitiveRounds
         /// <summary>The picture setting is a CAS write like every other one,
         /// with the portrait_source key: 1 = the in-game character, 0 = none.
         ///
-        /// A None write does NOT remove the stored picture. The server sets the
-        /// source column and nothing else — "the initial disc everywhere from
-        /// the next render on; nothing is removed" — so the hash and descriptor
-        /// it holds are still the ones this client uploaded. Clearing them
-        /// locally made None→game look like a client with no picture at all,
-        /// and it re-rendered and re-uploaded a portrait the server already
-        /// had, instead of simply showing it again.</summary>
+        /// A None write clears BOTH portrait units on the server -- the
+        /// in-game render (hash, descriptor, time) and the Steam picture
+        /// (hash, reference, failure run) -- exactly as an admin clear and an
+        /// account deletion do, and advances the Steam attempt id so a fetch
+        /// still in flight under the old attempt binds to nothing. Nothing is
+        /// deleted in the write: a blob no row names any more is marked
+        /// unreferenced and a janitor deletes it after a ten-minute grace.
+        /// Turning the picture back on renders and uploads afresh (the
+        /// RequestRefresh below); the cached faces are dropped either way.</summary>
         private static void TogglePortraitSource() { TogglePortraitSource(false); }
 
         /// <param name="fromRetry">this IS the one delayed re-send, so it does

@@ -107,7 +107,11 @@ def test_a_page_never_cuts_a_prints_group_in_two():
     src = _fn(BOT_SRC, "poll_pc_events")
     assert "page_size" not in src and "lines[:-2]" not in src
     sql = " ".join(MAIN_SRC[MAIN_SRC.index("_PC_EVENTS_PENDING_SQL = "):].split("\n\n\n")[0].split())
-    assert "WITH page AS ( SELECT e.id, e.print_id FROM pc_events e WHERE e.posted_at IS NULL ORDER BY e.id LIMIT 20 )" in sql
+    # the page CTE is where the face hold is decided (v3 §8 / v4): joined to the subject, once, so a group's
+    # events are all held or all handed out together
+    assert ("WITH page AS ( SELECT e.id, e.print_id FROM pc_events e JOIN players su ON su.id = e.subject_player_id "
+            'WHERE e.posted_at IS NULL AND """ + _PC_EVENTS_HOLD_SQL + """ ORDER BY e.id LIMIT 20 )') in sql
+    assert sql.count("_PC_EVENTS_HOLD_SQL") == 1   # never a second hold on the outer query
     assert ("WHERE e.posted_at IS NULL AND (e.id IN (SELECT id FROM page) OR (e.print_id IS NOT NULL "
             "AND e.print_id IN (SELECT print_id FROM page WHERE print_id IS NOT NULL)))") in sql
     assert '"page_size": _PC_EVENTS_PAGE' in MAIN_SRC and "_PC_EVENTS_PAGE = 20" in MAIN_SRC

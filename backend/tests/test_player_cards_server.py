@@ -273,7 +273,7 @@ def test_janitor_takes_the_first_snapshot_when_none_exists(monkeypatch):
     today = datetime(2026, 9, 11, 0, 5, tzinfo=timezone.utc)
     db, taken = _janitor(monkeypatch, _due_row(None, today - timedelta(hours=3), today))
     _run(main._pc_snapshot_janitor_step())
-    assert taken == ["first"] and db.committed == 2   # retention, then the snapshot
+    assert taken == ["first"] and db.committed == 3   # retention, the blob janitor, then the snapshot
     assert db.count("DELETE FROM pc_events WHERE created_at < NOW() - INTERVAL '7 days'") == 1
     # the due state is read before the lock and AGAIN under it (c3 F)
     order = [sql[:40] for sql, _ in db.log]
@@ -296,11 +296,11 @@ def test_janitor_takes_one_per_day_at_or_after_0005_utc(monkeypatch):
     # already done today: last snapshot after 00:05 today — retention still runs (c3 F)
     db, taken = _janitor(monkeypatch, _due_row(today + timedelta(seconds=30), today + timedelta(hours=5), today))
     _run(main._pc_snapshot_janitor_step())
-    assert taken == [] and db.count("DELETE FROM pc_events") == 1 and db.committed == 1
+    assert taken == [] and db.count("DELETE FROM pc_events") == 1 and db.committed == 2
     # lock held elsewhere: no snapshot (retention alone committed)
     db, taken = _janitor(monkeypatch, _due_row(yesterday, today + timedelta(minutes=1), today), lock=False)
     _run(main._pc_snapshot_janitor_step())
-    assert taken == [] and db.committed == 1
+    assert taken == [] and db.committed == 2
 
 
 def test_janitor_rereads_the_due_state_under_the_lock(monkeypatch):
@@ -321,7 +321,7 @@ def test_janitor_rereads_the_due_state_under_the_lock(monkeypatch):
 
     monkeypatch.setattr(main, "_pc_take_snapshot", _take)
     _run(main._pc_snapshot_janitor_step())
-    assert taken == [] and db.count("pg_try_advisory_xact_lock") == 1 and db.committed == 1
+    assert taken == [] and db.count("pg_try_advisory_xact_lock") == 1 and db.committed == 2
 
 
 # ── the wire shape ───────────────────────────────────────────────────────────
@@ -514,6 +514,7 @@ def test_route_inventory_of_phase_one():
     paths = {(r.path, tuple(sorted(r.methods))) for r in main.app.routes if getattr(r, "path", "").startswith("/api/v1/pc/")}
     assert paths == {
         ("/api/v1/pc/packs/open", ("POST",)), ("/api/v1/pc/packs/result", ("GET",)),
+        ("/api/v1/pc/packs", ("GET",)),   # the pack history pager (Sept 12)
         ("/api/v1/pc/daily", ("POST",)), ("/api/v1/pc/prints/discard", ("POST",)),
         ("/api/v1/pc/settings", ("POST",)), ("/api/v1/pc/me", ("GET",)),
         ("/api/v1/pc/collection", ("GET",)), ("/api/v1/pc/card", ("GET",)), ("/api/v1/pc/pool", ("GET",)),
@@ -652,4 +653,10 @@ def test_titles_and_rank_names_resolve_against_the_rounded_rating():
     assert main._pc_board_rating(1500.4) == 1500.0 and main._pc_board_rating(None) is None
     snap = inspect.getsource(main._pc_take_snapshot)
     assert "_pc_board_rating(rating)," in snap
-    assert _main_code().count("_rank_name_for(_pc_board_rating(rating))") == 2
+    # pinned per FUNCTION, never file-wide (#279): the tier helper, the bot's /card answer, and the preview
+    # drawing through the helper rather than its own expression
+    assert inspect.getsource(main._pc_rank_name).count("_rank_name_for(_pc_board_rating(rating))") == 1
+    assert inspect.getsource(main.internal_pc_card).count("_rank_name_for(_pc_board_rating(rating))") == 1
+    preview = inspect.getsource(main.internal_pc_face_preview)
+    assert "rank_name = _pc_rank_name(rating)" in preview and "_rank_name_for(" not in preview
+    assert 'subtitle = _pc_shop_title(member["title"], rank_name)' in preview and '"subtitle": subtitle' in preview

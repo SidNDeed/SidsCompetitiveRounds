@@ -1173,30 +1173,68 @@ def _effective_labels(labels: dict) -> dict[str, str]:
     return {identifier: str(supplied.get(identifier, english)) for identifier, english in ENGLISH.items()}
 
 
+STEAM_PICTURE_MIN_EDGE, STEAM_PICTURE_MAX_EDGE = 32, 1024
+
+
+def steam_picture_ihdr(ihdr: tuple[int, int, int, int, int]) -> bool:
+    """A stored Steam profile picture: square straight-alpha RGBA, 32–1024 px
+    (design v2 §2/§5). The rig's 1180 lies outside the range by construction."""
+    width, height, depth, colour_type, interlace = ihdr
+    return (width == height and STEAM_PICTURE_MIN_EDGE <= width <= STEAM_PICTURE_MAX_EDGE
+            and (depth, colour_type, interlace) == (8, 6, 0))
+
+
+def _portrait_bg() -> tuple[int, int, int, int]:
+    return tuple(int(LAYOUT["portrait_bg"][i:i + 2], 16) for i in (1, 3, 5)) + (255,)
+
+
 def _portrait_image(portrait_png: bytes, output_edge: int) -> Image.Image:
-    if png_ihdr(portrait_png) != _PORTRAIT_IHDR:
+    """The portrait square from a stored blob of either shape: the rig
+    (1180×1180, composited over portrait_bg and reduced) or a Steam profile
+    picture (square 32–1024, composited the same way and LANCZOS-resized to
+    the edge — no upscale filter beyond that; a 184 px picture at 590 is soft,
+    and that is what the account offers). Any other header is invalid."""
+    ihdr = png_ihdr(portrait_png)
+    rig = ihdr == _PORTRAIT_IHDR
+    if not rig and not steam_picture_ihdr(ihdr):
         raise ValueError("portrait_invalid")
     try:
         with Image.open(io.BytesIO(portrait_png)) as source:
             source.load()
-            if source.mode != "RGBA" or source.size != (PORTRAIT_SRC, PORTRAIT_SRC):
+            if source.mode != "RGBA" or source.size != (ihdr[0], ihdr[1]):
                 raise ValueError("portrait_invalid")
             foreground = Image.frombytes("RGBA", source.size, source.tobytes())
     except ValueError:
         raise
     except Exception as exc:
         raise ValueError("portrait_invalid") from exc
-    background = Image.new("RGBA", foreground.size, tuple(int(LAYOUT["portrait_bg"][i:i + 2], 16)
-                                                           for i in (1, 3, 5)) + (255,))
-    composed = Image.alpha_composite(background, foreground)
-    return composed.reduce(PORTRAIT_SRC // output_edge)
+    composed = Image.alpha_composite(Image.new("RGBA", foreground.size, _portrait_bg()), foreground)
+    if rig:
+        return composed.reduce(PORTRAIT_SRC // output_edge)
+    return composed.resize((output_edge, output_edge), Image.Resampling.LANCZOS)
 
 
-def _initial(name: str) -> str:
-    for cluster in graphemes(name):
-        if not _is_emoji_cluster(cluster) and cluster.strip():
-            return cluster.upper()
-    return "?"
+def _emblem_plate(colour: Sequence[int], edge: int) -> Image.Image:
+    """The no-picture portrait (design v2 §5): the band-tinted plate carrying
+    the card back's motif — no letter, no figure. It is what opt-out, None,
+    deletion, a ban and a picture that could not be fetched show, and it is
+    deliberately not a person. Drawn once at the card edge; the tile is its
+    exact reduction, so both sizes agree."""
+    base = _rgba(_mix(colour, LAYOUT["colours"]["card"], 0.78))
+    ink = _rgba(_mix(colour, LAYOUT["colours"]["card"], 0.55))
+    plate = Image.new("RGBA", (PORTRAIT_CARD, PORTRAIT_CARD), base)
+    for angle, dx in ((-18, -70), (18, 70), (0, 0)):
+        card = Image.new("RGBA", (170, 238), (0, 0, 0, 0))
+        mini = ImageDraw.Draw(card)
+        mini.rounded_rectangle((0, 0, 169, 237), radius=18, fill=ink)
+        mini.rounded_rectangle((19, 19, 150, 150), radius=12, fill=base)
+        mini.ellipse((56, 56, 113, 113), fill=ink)
+        mini.rounded_rectangle((19, 166, 150, 182), radius=5, fill=base)
+        mini.rounded_rectangle((19, 194, 100, 210), radius=5, fill=base)
+        rotated = card.rotate(angle, resample=Image.Resampling.BICUBIC, expand=True)
+        plate.alpha_composite(rotated, (PORTRAIT_CARD // 2 - rotated.width // 2 + dx,
+                                        PORTRAIT_CARD // 2 - rotated.height // 2 - (0 if angle else 14)))
+    return plate if edge == PORTRAIT_CARD else plate.reduce(PORTRAIT_CARD // edge)
 
 
 def _foil(body: Image.Image, size: str) -> Image.Image:
@@ -1383,20 +1421,9 @@ def render_face(spec: dict, labels: dict, portrait_png: bytes | None, size: str)
 
     portrait_rect = _scale_rect(LAYOUT["rects"]["portrait"], scale)
     portrait_edge = PORTRAIT_CARD if size == "card" else PORTRAIT_TILE
-    if portrait_png is not None:
-        portrait = _portrait_image(portrait_png, portrait_edge)
-    else:
-        portrait = Image.new("RGBA", (portrait_edge, portrait_edge),
-                             _rgba(_mix(colour, LAYOUT["colours"]["card"], 0.78)))
-        draw = ImageDraw.Draw(portrait)
-        inset = _scale_value(71, scale)
-        far = _scale_value(519, scale)
-        draw.ellipse((inset, inset, far, far),
-                     fill=_rgba(_mix(colour, LAYOUT["colours"]["card"], 0.55)))
-        initial = _initial(raw_name)
-        _draw_text(portrait, (portrait_edge / 2, _scale_value(300, scale)), initial,
-                   _scale_value(295, scale), _rgba(_mix(colour, (255, 255, 255), 0.55)),
-                   "mm", "black")
+    # No picture = the emblem plate, never a letter or a figure (2026-09-12).
+    portrait = (_portrait_image(portrait_png, portrait_edge) if portrait_png is not None
+                else _emblem_plate(colour, portrait_edge))
     portrait_mask = _rounded_mask(portrait_edge, portrait_edge, _scale_value(28, scale))
     body.paste(portrait, portrait_rect[:2], portrait_mask)
 
@@ -1422,9 +1449,18 @@ def render_face(spec: dict, labels: dict, portrait_png: bytes | None, size: str)
                    scale, size == "tile")
 
     fitted_name, name_size = _name_fit(display_name, size)
-    name_anchor = tuple(_scale_value(value, scale) for value in LAYOUT["anchors"]["name"])
+    subtitle = "" if spec.get("subtitle") is None else str(spec["subtitle"]).strip()
+    # A shop title the player wears sits under the name as a subtitle; the
+    # name moves up to make the room (the RANK slot below draws the tier and
+    # only the tier — 2026-09-12). No subtitle: the name keeps its anchor.
+    name_key = "name_subtitled" if subtitle else "name"
+    name_anchor = tuple(_scale_value(value, scale) for value in LAYOUT["anchors"][name_key])
     _draw_text(body, name_anchor, fitted_name, name_size, _rgba(LAYOUT["colours"]["white"]),
                "lm", "black")
+    if subtitle:
+        sub_anchor = tuple(_scale_value(value, scale) for value in LAYOUT["anchors"]["subtitle"])
+        _draw_fitted(body, sub_anchor, subtitle, _scale_value(436, scale), 22, 14, scale,
+                     _rgba(LAYOUT["colours"]["label"]), "lm", "bold")
 
     if size == "card":
         # The separator belongs BETWEEN two parts. The /card preview has no

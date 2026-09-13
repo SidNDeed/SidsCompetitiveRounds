@@ -3332,6 +3332,19 @@ async def lifespan(app: FastAPI):
             # Detached one-shot, deliberately NOT under _supervised (its while-True
             # would rerun a returning task forever) and not awaited on the boot path.
             tasks.append(asyncio.create_task(_run_janitor_query_selftest()))
+            # Steam pictures (design v2 §4): the sweep runs on the primary only
+            # (the standby's postgres is read-only) and only when the renderer
+            # stack imported; the health word says which of those it is.
+            if not IS_REPLICA and _pcs is not None:
+                tasks.append(asyncio.create_task(_pc_steam_sweep_loop()))
+        # The Steam-render probe (v3 §9) runs on BOTH roles: each box
+        # composites a stored Steam picture through its own face path and
+        # reports the word on /health; the standby serves faces too.
+        if _pcs is not None and _pcf is not None:
+            tasks.append(asyncio.create_task(_pc_steam_render_loop()))
+        # Every box that owns a derived-face cache ages it itself (v4 §4).
+        if _pc_face_cache is not None:
+            tasks.append(asyncio.create_task(_pc_face_cache_expire_loop()))
         # Read-only (SELECT COUNT per table, each begin_nested-wrapped), so it
         # runs on both roles.
         await _run_service_policy_audit(force=True)
@@ -5527,7 +5540,9 @@ async def health_check(db: AsyncSession = Depends(get_db)):
     try:
         await db.execute(text("SELECT 1"))
         return HealthResponse(status="ok", database="connected", replica=IS_REPLICA,
-                              pc_renderer_fp=_pc_renderer_fp(), pc_raqm=_pc_raqm())
+                              pc_renderer_fp=_pc_renderer_fp(), pc_raqm=_pc_raqm(),
+                              pc_steam_sweep=_pc_steam_sweep_word(),
+                              pc_steam_render=_pc_steam_render_word())
     except Exception:
         # Report the role even when the database is unreachable: "which box is
         # this" is exactly the question being asked when things are degraded.
@@ -23781,6 +23796,10 @@ async def get_inventory(steam_id: str, db: AsyncSession = Depends(get_db)):
 import player_cards as _pc
 import pc_portrait as _pcp
 try:
+    import pc_steam as _pcs   # imports pc_face (Pillow): absent → the Steam sweep never starts, everything else boots
+except Exception:
+    _pcs = None
+try:
     import pc_face as _pcf
 except Exception as _pcf_ex:  # Pillow / regex / fonts missing: face routes answer 503, everything else boots
     _pcf = None
@@ -23902,15 +23921,27 @@ _PC_PRINT_INSERT_SQL = """
     RETURNING id, minted_at
 """
 
+def _pc_portrait_resolve_cols(alias: str) -> str:
+    """The subject columns `pc_portrait.portrait_for` reads, for the players
+    row aliased `alias` — ONE definition for every reader (this face SELECT,
+    the lease acquire and its re-check, the /pc/card preview), so no reader can
+    resolve a subject from a default while another resolves it from the row
+    (#341). The Steam picture hash rides the same fragment (Steam pictures
+    design v2 §1): a reader that bypasses this is a failing test, not a NULL."""
+    return f"""
+               ({alias}.deleted_at IS NOT NULL) AS subject_deleted, ({alias}.pc_opted_out_at IS NOT NULL) AS subject_opted_out,
+               {alias}.pc_portrait_source AS portrait_source, {alias}.pc_game_portrait_hash AS portrait_hash,
+               {alias}.pc_steam_portrait_hash AS steam_portrait_hash,
+               EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = {alias}.steam_id AND b.unbanned_at IS NULL) AS subject_banned
+"""
+
+
 _PC_PRINT_FACE_SELECT = """
     SELECT pr.id AS print_id, pr.card_id, c.subject_player_id, c.edition_id, pr.owner_player_id,
            pr.minted_at, pr.snapshot_id, pr.rarity, pr.foil, pr.signed, pr.pool_rank, pr.rating,
            pr.peak_rating, pr.board_rank, pr.series_wins, pr.series_losses, pr.top_card, pr.title,
            pr.source, pr.pack_id, pr.slot, pr.discarded_at, pr.discard_shards,
-           s.display_name AS subject_name, (s.deleted_at IS NOT NULL) AS subject_deleted,
-           (s.pc_opted_out_at IS NOT NULL) AS subject_opted_out,
-           s.pc_portrait_source AS portrait_source, s.pc_game_portrait_hash AS portrait_hash,
-           EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = s.steam_id AND b.unbanned_at IS NULL) AS subject_banned
+           s.display_name AS subject_name, """ + _pc_portrait_resolve_cols("s") + """
       FROM pc_prints pr
       JOIN pc_cards c ON c.id = pr.card_id
       JOIN players s ON s.id = c.subject_player_id
@@ -24022,11 +24053,16 @@ def _pc_print_dict(row, ctx=None) -> dict:
         "series_wins": int(row["series_wins"] or 0),
         "series_losses": int(row["series_losses"] or 0),
         "top_card": row["top_card"],
-        "title": row["title"],
-        "rank_name": _rank_name_for(_pc_board_rating(rating)) if rating is not None else None,
+        # `title` is the equipped SHOP title only (None for rank-title wearers
+        # and for legacy rows that stored the rank text); `rank_name` is the
+        # computed tier, always — the client draws the tier where the card
+        # draws it and the shop title as the subtitle (2026-09-12).
+        "title": _pc_shop_title(row["title"], _pc_rank_name(rating)),
+        "rank_name": _pc_rank_name(rating),
         "source": row["source"],
         "slot": int(row["slot"]) if row["slot"] is not None else None,
         "discarded": row["discarded_at"] is not None,
+        "discard_shards": (int(row["discard_shards"]) if row.get("discard_shards") is not None else None),
     }
     if ctx is not None:
         d["face_rev"] = _pc_face_inputs(row, ctx)[3]
@@ -24102,6 +24138,11 @@ async def _pc_take_snapshot(db: AsyncSession, *, reason: str) -> dict:
                                         _pc_board_rating(rating),
                                         podium_pos=pmap.get(pid_s), podium_pos_2v2=pmap2.get(pid_s),
                                         podium_pos_ffa=pmapf.get(pid_s))
+        if r["title_sku"] == TITLE_RANK_SKU:
+            # The rank title's live text IS the tier the face computes from
+            # the frozen rating; storing it made the card say its rank twice
+            # once the RANK slot stopped drawing the shop title (2026-09-12).
+            title = None
         rank = int(r["pool_rank"])
         params.append({
             "sid": snap_id, "pid": pid_s, "rank": rank, "rarity": _pc.rarity_for_rank(rank),
@@ -24153,7 +24194,13 @@ async def _pc_snapshot_janitor_step() -> None:
         # older than a day can never be replayed (its session proof expired).
         await db.execute(text("DELETE FROM pc_delivery_leases WHERE until < NOW() - INTERVAL '1 hour'"))
         await db.execute(text("DELETE FROM pc_portrait_nonces WHERE used_at < NOW() - INTERVAL '1 day'"))
+        # Released portrait blobs (Steam pictures v2 §6): deleted only after
+        # ten unreferenced minutes, each under its P lock.
+        await _pc_portrait_blob_janitor(db)
         await db.commit()
+        # Derived faces age out in _pc_face_cache_expire_loop, on BOTH roles
+        # (v4 §4): this step runs on the primary alone, and the standby owns
+        # a cache of its own.
         if await _pc_snapshot_due(db) is None:
             return
         got = (await db.execute(text("SELECT pg_try_advisory_xact_lock(hashtext('pc_snapshot'))"))).scalar_one()
@@ -24279,11 +24326,13 @@ async def _pc_mint(db: AsyncSession, owner_pid, edition_id: int, snap_id: int, p
     return out
 
 
-async def _pc_pack_answer(db: AsyncSession, row, ctx=None) -> dict:
+async def _pc_pack_answer(db: AsyncSession, row, ctx=None, prerender: bool = True) -> dict:
     """The wire answer for a committed pack row (done / rejected / unopened).
     With a face context the prints carry `face_rev` and the five faces are
     pre-rendered best effort in that locale (v22 §2.2: an optimisation,
-    never a guarantee — the face route renders on demand)."""
+    never a guarantee — the face route renders on demand). The history page
+    passes prerender=False: ten packs of five would queue fifty renders for
+    tiles the player may never page to."""
     status = row["status"]
     base = {
         "pack_id": str(row["id"]), "status": status, "source": row["source"],
@@ -24295,7 +24344,7 @@ async def _pc_pack_answer(db: AsyncSession, row, ctx=None) -> dict:
         base["locale"] = ctx["locale"]   # the locale the prints' face_rev values are keyed under
     if status == "done":
         base["prints"] = await _pc_prints_of_pack(db, row["id"], ctx)
-        if ctx is not None:
+        if ctx is not None and prerender:
             _pc_schedule_prerender([p["print_id"] for p in base["prints"]], ctx["locale"])
     return base
 
@@ -24306,6 +24355,13 @@ def _pc_reject_http(reason: str, extra: dict | None = None):
     if extra:
         detail.update(extra)
     return HTTPException(status_code=code, detail=detail)
+
+
+# The daily paid-pack cap does not apply to these accounts: Sid's own, for
+# testing (2026-09-12) — by Steam ID and deliberately NOT "every admin", on
+# his word. The open route skips the cap for them and /pc/me says so, so the
+# client drops its own pre-flight refusal and shows no limit.
+PC_PACK_CAP_EXEMPT_STEAM_IDS = frozenset({"76561198040410653"})
 
 
 def _pc_prices() -> dict:
@@ -24401,6 +24457,8 @@ async def pc_open_pack(
             """), {"pack": pack_id, "pid": pid})).mappings().first()
             if row is None:
                 raise HTTPException(status_code=404, detail="Pack not found")
+            if row["status"] == "done":
+                await _pc_steam_prime(await _pc_pack_subjects(db, str(row["id"])))   # a replayed answer is primed like the first (v4 §5)
             answer = await _pc_pack_answer(db, row, await _pc_face_ctx(db, _pc_locale(request)))
             if row["status"] == "done":
                 return answer
@@ -24425,6 +24483,8 @@ async def pc_open_pack(
             """), {"pid": pid, "nonce": nonce})).mappings().first()
             if row is None:
                 raise HTTPException(status_code=409, detail={"error": "in_progress"})
+            if row["status"] == "done":
+                await _pc_steam_prime(await _pc_pack_subjects(db, str(row["id"])))   # a replayed answer is primed like the first (v4 §5)
             answer = await _pc_pack_answer(db, row, await _pc_face_ctx(db, _pc_locale(request)))
             if row["status"] == "done":
                 return answer
@@ -24475,7 +24535,7 @@ async def pc_open_pack(
         "SELECT id FROM pc_pool_snapshots ORDER BY id DESC LIMIT 1"))).scalar_one_or_none()
     if snap_id is None:
         await _reject("pool_empty")
-    if source == "bought":
+    if source == "bought" and steam_id not in PC_PACK_CAP_EXEMPT_STEAM_IDS:
         paid_today = (await db.execute(text("""
             SELECT COUNT(*) FROM pc_packs
              WHERE player_id = CAST(:pid AS uuid) AND source = 'bought' AND status = 'done'
@@ -24522,6 +24582,10 @@ async def pc_open_pack(
     print(f"[PC-OPEN] player={steam_id} pack={this_pack} source={source} pay={pay} price={price} "
           f"snapshot={snap_id} rarities={','.join(p['rarity'] for p in stored)}"
           f"{' foil' if any(p['foil'] for p in stored) else ''}{' signed' if any(p['signed'] for p in stored) else ''}")
+    # Steam pictures v2 §7: the subjects this pack minted for the first time
+    # get their picture fetched NOW (bounded), before the answer's face revs
+    # are computed — so the URLs the client sees already carry it.
+    await _pc_steam_prime(await _pc_pack_subjects(db, this_pack))
     row = (await db.execute(text("""
         SELECT id, status, source, mode, kind, pay, price, reject_reason, created_at, opened_at
           FROM pc_packs WHERE id = CAST(:pack AS uuid)
@@ -24562,6 +24626,8 @@ async def pc_pack_result(
         """), {"pid": str(player.id), "nonce": nonce})).mappings().first()
     if row is None:
         raise HTTPException(status_code=404, detail="Pack not found")
+    if row["status"] == "done":
+        await _pc_steam_prime(await _pc_pack_subjects(db, str(row["id"])))   # a no-op once attempted (v2 §7)
     answer = await _pc_pack_answer(db, row, await _pc_face_ctx(db, _pc_locale(request)))
     if row["status"] == "unopened":
         att = (await db.execute(text(
@@ -24570,6 +24636,57 @@ async def pc_pack_result(
         if att is not None:
             answer["last_attempt"] = {"reason": att["reject_reason"], "at": _pc_iso(att["attempted_at"])}
     return answer
+
+
+@app.get("/api/v1/pc/packs", tags=["Player Cards"])
+async def pc_packs_history(
+    request: Request,
+    steam_id: str = Query(...),
+    sig: str = Query(...),
+    before: str | None = Query(None, min_length=36, max_length=36),
+    limit: int = Query(10, ge=1, le=20),
+    db: AsyncSession = Depends(get_db),
+):
+    """The caller's opened packs, newest first, `limit` at a time (HMAC over
+    pcread:{steam}:packs:{before|-}, strict session). `before` is the pack_id
+    of the last pack of the previous page: a keyset cursor on (opened_at, id),
+    so a pack opened while the player pages never shifts what follows. Each
+    pack carries its prints as the open answer did — discarded ones included
+    and marked, they stay visible in the history (Sid, 2026-09-12). A cursor
+    naming a pack that is not the caller's answers an empty page, not 404."""
+    cursor = (before or "").strip()
+    player = await _pc_verified_actor(request, steam_id, sig, _pc.canon_read(steam_id, "packs", cursor or "-"), db)
+    pid = str(player.id)
+    if cursor:
+        try:
+            _ = uuid.UUID(cursor)
+        except Exception:
+            raise HTTPException(status_code=422, detail="bad cursor")
+    rows = (await db.execute(text("""
+        SELECT id, status, source, mode, kind, pay, price, reject_reason, created_at, opened_at,
+               (SELECT COUNT(*) FROM pc_packs t
+                 WHERE t.player_id = CAST(:pid AS uuid) AND t.status = 'done') AS total
+          FROM pc_packs
+         WHERE player_id = CAST(:pid AS uuid) AND status = 'done'
+           AND (CAST(:before AS uuid) IS NULL
+                OR (opened_at, id) < (SELECT c.opened_at, c.id FROM pc_packs c
+                                       WHERE c.id = CAST(:before AS uuid)
+                                         AND c.player_id = CAST(:pid AS uuid)))
+         ORDER BY opened_at DESC, id DESC
+         LIMIT CAST(:lim AS integer)
+    """), {"pid": pid, "before": cursor or None, "lim": int(limit) + 1})).mappings().all()
+    more = len(rows) > int(limit)
+    rows = rows[:int(limit)]
+    ctx = await _pc_face_ctx(db, _pc_locale(request))
+    packs = [await _pc_pack_answer(db, r, ctx, prerender=False) for r in rows]
+    # rows and total from ONE statement's snapshot (v4 §7), so a pack opened
+    # on another device between them cannot make the total count a head the
+    # page does not show; an empty page has no row to carry it.
+    total = rows[0]["total"] if rows else (await db.execute(text(
+        "SELECT COUNT(*) FROM pc_packs WHERE player_id = CAST(:pid AS uuid) AND status = 'done'"),
+        {"pid": pid})).scalar_one()
+    return {"packs": packs, "total": int(total or 0), "locale": ctx["locale"],
+            "next_before": (packs[-1]["pack_id"] if more and packs else None)}
 
 
 @app.post("/api/v1/pc/daily", tags=["Player Cards"])
@@ -24690,6 +24807,11 @@ async def pc_discard_print(
 _PC_SETTINGS_SQL = {
     "opted_out": """
         UPDATE players SET pc_opted_out_at = CASE WHEN CAST(:value AS integer) = 1 THEN COALESCE(pc_opted_out_at, now()) ELSE NULL END,
+                           pc_steam_portrait_hash = CASE WHEN CAST(:value AS integer) = 1 THEN NULL ELSE pc_steam_portrait_hash END,
+                           pc_steam_avatar_ref = CASE WHEN CAST(:value AS integer) = 1 THEN NULL ELSE pc_steam_avatar_ref END,
+                           pc_steam_portrait_fail = CASE WHEN CAST(:value AS integer) = 1 THEN 0 ELSE pc_steam_portrait_fail END,
+                           pc_steam_attempt = CASE WHEN CAST(:value AS integer) = 1 THEN pc_steam_attempt + 1 ELSE pc_steam_attempt END,
+                           pc_steam_portrait_next_at = CASE WHEN CAST(:value AS integer) = 1 THEN pc_steam_portrait_next_at ELSE NULL END,
                            pc_settings_revision = pc_settings_revision + 1
          WHERE id = CAST(:pid AS uuid) AND pc_settings_revision = CAST(:rev AS integer)
         RETURNING pc_settings_revision
@@ -24706,10 +24828,20 @@ _PC_SETTINGS_SQL = {
          WHERE id = CAST(:pid AS uuid) AND pc_settings_revision = CAST(:rev AS integer)
         RETURNING pc_settings_revision
     """,
-    # 1 = the in-game character (the default), 0 = None: the initial disc
-    # everywhere from the next render on; nothing is removed (v22 §3.1).
+    # 1 = the in-game character (the default; the Steam profile picture until
+    # this PC has sent it), 0 = None: the emblem plate everywhere from the next
+    # render on. The rig's picture is kept (v22 §3.1); the Steam unit is
+    # cleared, its blob released to the janitor and the attempt id advanced
+    # (v3 §6, v4 §1). The way BACK to the character clears the Steam schedule
+    # so the next sweep touch (or a pack open's priming) fetches again at once
+    # rather than at the old refresh date.
     "portrait_source": """
         UPDATE players SET pc_portrait_source = CASE WHEN CAST(:value AS integer) = 1 THEN 'game' ELSE 'none' END,
+                           pc_steam_portrait_hash = CASE WHEN CAST(:value AS integer) = 1 THEN pc_steam_portrait_hash ELSE NULL END,
+                           pc_steam_avatar_ref = CASE WHEN CAST(:value AS integer) = 1 THEN pc_steam_avatar_ref ELSE NULL END,
+                           pc_steam_portrait_fail = CASE WHEN CAST(:value AS integer) = 1 THEN pc_steam_portrait_fail ELSE 0 END,
+                           pc_steam_attempt = CASE WHEN CAST(:value AS integer) = 1 THEN pc_steam_attempt ELSE pc_steam_attempt + 1 END,
+                           pc_steam_portrait_next_at = CASE WHEN CAST(:value AS integer) = 1 THEN NULL ELSE pc_steam_portrait_next_at END,
                            pc_settings_revision = pc_settings_revision + 1
          WHERE id = CAST(:pid AS uuid) AND pc_settings_revision = CAST(:rev AS integer)
         RETURNING pc_settings_revision
@@ -24780,8 +24912,24 @@ async def pc_set_setting(
         await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))"), {"sid": steam_id})
     player = await _pc_verified_actor(request, steam_id, sig, canon, db)
     pid = str(player.id)
+    old_units = (None, None)
+    if none_write:
+        # The Steam unit goes with the picture (v3 §6): its blob lock P is
+        # taken on the hash the row names BEFORE the row lock R, the row is
+        # re-read under R and compared, the clear itself rides the
+        # revision-bound UPDATE below, and the release comes after it — so a
+        # stale revision clears nothing and answers 409 exactly as before.
+        # The rig's stored picture is NOT touched: None hides it and the way
+        # back shows it again (v22 §3.1); the Steam unit is refetched instead.
+        old_units = await _pc_lock_portrait_blobs(db, pid)
     await db.execute(text("SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE"), {"pid": pid})
     if none_write:
+        held = (await db.execute(text(
+            "SELECT pc_game_portrait_hash, pc_steam_portrait_hash FROM players WHERE id = CAST(:pid AS uuid)"),
+            {"pid": pid})).mappings().first()
+        if held is None or (held["pc_game_portrait_hash"], held["pc_steam_portrait_hash"]) != old_units:
+            await db.rollback()   # only reachable without the identity lock this writer holds
+            raise HTTPException(status_code=409, detail={"error": "subject_busy", "retry_after": 2})
         # A live delivery lease means a bot send acquired under the previous
         # picture may still be in flight: refuse with the wait (v22 §3.1).
         wait = await _pc_lease_wait(db, pid)
@@ -24794,6 +24942,8 @@ async def pc_set_setting(
         current = await _pc_settings_of(db, pid)
         await db.rollback()
         raise HTTPException(status_code=409, detail={"error": "stale_revision", **current})
+    if none_write and old_units[1]:
+        await _pc_release_portrait_blob(db, old_units[1])   # mark, never delete: the janitor takes it after the grace
     await db.commit()
     print(f"[PC-SETTINGS] player={steam_id} {key}={value} rev={new_rev}")
     return await _pc_settings_of(db, pid)
@@ -24842,6 +24992,7 @@ async def pc_me(
         "portrait_locked_until": settings["portrait_locked_until"],
         "prices": _pc_prices(),
         "paid_today": int(today["paid_today"] or 0),
+        "paid_cap_exempt": steam_id in PC_PACK_CAP_EXEMPT_STEAM_IDS,
         "prints": int(today["prints"] or 0),
         "daily": {"claimed": bool(daily_claimed),
                   "pack_id": str(today["daily_pack"]) if today["daily_pack"] else None,
@@ -25001,17 +25152,41 @@ _PC_EVENTS_SKIP_SQL = """
 """
 
 _PC_EVENTS_PAGE = 20   # the first N unposted events of a page; every other unposted event of the same prints rides along (c6 F)
+# The subject's face is RESOLVED when what a render would draw now is what
+# it will keep drawing: a rig picture, a stored Steam picture, a subject who
+# chose None or opted out (the plate by choice), or Steam's own no-picture
+# answer (a reference stored with no hash and no failure — the plate by
+# fact). A never-attempted subject, an attempt in flight (the claim
+# withdraws the reference until a verdict stores one again, v4 §2) or a
+# failed attempt is NOT resolved: the plate would be a placeholder there.
+_PC_EVENTS_RESOLVED_SQL = """(su.pc_game_portrait_hash IS NOT NULL OR su.pc_steam_portrait_hash IS NOT NULL
+             OR COALESCE(su.pc_portrait_source, 'game') <> 'game' OR su.pc_opted_out_at IS NOT NULL
+             OR (su.pc_steam_avatar_ref IS NOT NULL AND su.pc_steam_portrait_fail = 0))"""
+# A bounded hold (v3 §8): an unresolved subject's pull waits for the
+# resolution (priming at the open makes that seconds) or sixty seconds,
+# whichever first. Past the bound the event is handed out with face_ready
+# false and the bot posts the line WITHOUT a face — never the plate, which
+# an attachment would keep for good while the card gains its picture later.
+# The hold is decided once, in the page CTE. An event riding along with a
+# paged event of the same print shares that print's subject, so it is exactly
+# as resolved as the paged one; only the sixty-second clock could differ, and
+# a second hold on the outer query would then hand out half of a print's
+# group now and the rest later (c6 F: a page never cuts a group in two).
+_PC_EVENTS_HOLD_SQL = "(" + _PC_EVENTS_RESOLVED_SQL + " OR e.created_at < now() - INTERVAL '60 seconds')"
+
 _PC_EVENTS_PENDING_SQL = """
     WITH page AS (
         SELECT e.id, e.print_id FROM pc_events e
-         WHERE e.posted_at IS NULL
+          JOIN players su ON su.id = e.subject_player_id
+         WHERE e.posted_at IS NULL AND """ + _PC_EVENTS_HOLD_SQL + """
          ORDER BY e.id
          LIMIT 20
     )
     SELECT e.id, e.kind, e.created_at, e.print_id,
            pl.display_name AS puller_name, pl.id AS puller_ref,
            su.display_name AS subject_name, su.id AS subject_ref, e.dup_at_pull,
-           pr.rarity, pr.foil, pr.signed, pr.pool_rank, pr.rating, pr.title
+           pr.rarity, pr.foil, pr.signed, pr.pool_rank, pr.rating, pr.title,
+           """ + _PC_EVENTS_RESOLVED_SQL + """ AS face_ready
       FROM pc_events e
       JOIN players pl ON pl.id = e.player_id
       JOIN players su ON su.id = e.subject_player_id
@@ -25058,6 +25233,7 @@ async def internal_pc_events_pending(
         "subject_name": _pcp.public_render_name(r["subject_name"]) or _pc_neutral_name(),
         "subject_ref": str(r["subject_ref"]),
         "dup_at_pull": int(r["dup_at_pull"]) if r["dup_at_pull"] is not None else None,
+        "face_ready": bool(r["face_ready"]),
         "print": ({"print_id": str(r["print_id"]), "rarity": r["rarity"], "foil": bool(r["foil"]),
                    "signed": bool(r["signed"]), "pool_rank": int(r["pool_rank"]),
                    "rating": _pc_num(r["rating"]), "title": r["title"]} if r["rarity"] is not None else None),
@@ -25355,6 +25531,27 @@ def _pc_require_renderer():
         raise HTTPException(status_code=503, detail=reason)
 
 
+_PC_RANK_NAME_SET = frozenset(name for _threshold, name in RANK_TIERS) | {"Beginner"}
+
+
+def _pc_rank_name(rating) -> str | None:
+    """The computed tier for a print's frozen rating; None when the print
+    carries no rating at all (no Glicko row at snapshot time)."""
+    return _rank_name_for(_pc_board_rating(rating)) if rating is not None else None
+
+
+def _pc_shop_title(stored, rank_name) -> str | None:
+    """The equipped shop title frozen on the print, when it is a title and
+    not the rank. Rows minted before 2026-09-12 stored the rank-title's LIVE
+    text ("Intermediate I") for `title_rank` wearers, and the snapshot now
+    stores NULL for them — either way a stored value that names a tier is the
+    rank, not a subtitle, and a card never says its rank twice."""
+    value = (stored or "").strip()
+    if not value or value == rank_name or value in _PC_RANK_NAME_SET:
+        return None
+    return value
+
+
 def _pc_face_inputs(row, ctx):
     """(spec, portrait_kind, portrait_hash, face_rev) of one print row in the
     context's locale. The spec is exactly what pc_face.render_face draws; the
@@ -25364,8 +25561,13 @@ def _pc_face_inputs(row, ctx):
     name = _pcp.public_render_name(row["subject_name"])
     rating = _pc_num(row["rating"])
     board_rating = _pc_board_rating(rating) if rating is not None else None
-    rank_name = _rank_name_for(board_rating) if rating is not None else None
-    title = row["title"] or rank_name
+    # The RANK slot is the computed tier, always. It used to draw the equipped
+    # shop title first and the tier only as a fallback, so nine of the first
+    # thirty live cards read "Beta" — a retired title, not a rank (Sid,
+    # 2026-09-12). A shop title the player wears goes in the header subtitle.
+    rank_name = _pc_rank_name(rating)
+    title = rank_name   # None (an empty slot) for a print with no rating: RATING already says Unranked
+    subtitle = _pc_shop_title(row["title"], rank_name)
     title_hex = (ctx["colors"].get(rank_name) or _rank_fallback_color(rank_name)) if rank_name else None
     band = row["rarity"]
     foil, signed = bool(row["foil"]), bool(row["signed"])
@@ -25374,6 +25576,7 @@ def _pc_face_inputs(row, ctx):
     minted = row["minted_at"]
     spec = {
         "band": band, "name": name or "", "title": title, "title_rgb": _pc_hex_rgb(title_hex),
+        "subtitle": subtitle,
         "rating": int(board_rating) if board_rating is not None else None,
         "pool_rank": int(row["pool_rank"]),
         "board_rank": int(row["board_rank"]) if row["board_rank"] is not None else None,
@@ -25423,6 +25626,11 @@ async def _pc_render_face(db: AsyncSession, row, ctx: dict, size: str, want=None
         return rev, None
     key = _pcp.face_key(str(row["print_id"]), rev, ctx["locale"], size)
     pbytes = await _pc_portrait_bytes(db, phash)
+    if phash and pbytes is None:
+        # The row named a blob the bytes read did not find: released between
+        # the two reads. Refusing is the only answer that never caches the
+        # plate under a picture's immutable rev (Steam pictures v2 §5).
+        raise _PcPortraitMissing()
     data = await _pc_face_cache.get_or_render(
         key, _functools.partial(_pcf.render_face, spec, ctx["labels"], pbytes, size))
     return rev, data
@@ -25449,7 +25657,10 @@ async def _pc_prerender(print_ids, locale):
                 if row is None or row["discarded_at"] is not None:
                     continue
                 for size in _pcp.SIZES:
-                    await _pc_render_face(db, row, ctx, size)
+                    try:
+                        await _pc_render_face(db, row, ctx, size)
+                    except _PcPortraitMissing:
+                        break   # its blob moved under this print; the face route renders it on demand
     except Exception as ex:
         print(f"[PC-FACE] pre-render failed locale={locale}: {ex}")
 
@@ -25458,11 +25669,618 @@ async def _pc_prerender(print_ids, locale):
 # revalidation both select exactly this and both call that one function, so
 # "what this lease authorises" has a single definition (#341). `p` is the
 # players row in both statements.
-_PC_PORTRAIT_RESOLVE_COLS = """
-               (p.deleted_at IS NOT NULL) AS subject_deleted, (p.pc_opted_out_at IS NOT NULL) AS subject_opted_out,
-               p.pc_portrait_source AS portrait_source, p.pc_game_portrait_hash AS portrait_hash,
-               EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL) AS subject_banned
+_PC_PORTRAIT_RESOLVE_COLS = _pc_portrait_resolve_cols("p")
+
+
+# ── Player Cards: Steam profile pictures (design v2, 2026-09-13) ──────────
+# The default portrait for every player whose client has not sent the rig:
+# the sweep below fetches Steam profile pictures server-side (keyed player
+# summaries, the profile XML as the bounded fallback), stores them as
+# pc_portraits blobs under players.pc_steam_portrait_hash, and the resolver
+# draws the rig first, the Steam picture second, the emblem plate last. Every
+# mutation of either portrait unit follows one lock order: I (identity) → P
+# (every hash involved, sorted) → R (the row, re-read and revalidated).
+
+class _PcPortraitMissing(HTTPException):
+    """A resolved hash whose blob read found nothing: the blob was released
+    between this render's row read and its bytes read. Refuse (503, retry in
+    two seconds) rather than draw the plate under a picture's immutable rev
+    (v2 §5). The janitor's ten-minute grace makes this window a rare one."""
+
+    def __init__(self):
+        super().__init__(status_code=503, detail={"error": "portrait_pending", "retry_after": 2},
+                         headers={"Retry-After": "2"})
+
+
+_PC_STEAM_SWEEP_STATE = {"batches": 0, "clean_at": None, "error": None, "started_at": None}
+_PC_STEAM_RENDER_STATE = {"word": "starting"}
+_PC_STEAM_BOOT_DELAY_S = 15
+_PC_STEAM_IDLE_S = 20
+_PC_STEAM_STALE_S = 180          # nothing completed for this long → the health word is `stale` (v3 §9)
+_PC_STEAM_BATCH = 100
+_PC_STEAM_LEASE_MINUTES = 15     # a claim's lease: no second attempt on the row while this one is on the network (v3 §6)
+_PC_STEAM_PRIME_DEADLINE_S = 4.0
+_PC_STEAM_GRACE_MINUTES = 10
+_PC_STEAM_JANITOR_BATCH = 50
+_PC_STEAM_RENDER_IDLE_S = 600
+_PC_STEAM_RENDER_RETRY_S = 30
+_pc_steam_bucket = _pcs.TokenBucket() if _pcs is not None else None
+_pc_steam_breaker = _pcs.Breaker() if _pcs is not None else None
+_pc_steam_tasks: set = set()                        # priming attempts finishing past their deadline (v3 §7)
+_pc_steam_xml = {"forced": False, "refusals": 0}   # the keyed path refused twice → XML for this process
+_PC_STEAM_COMMITTED = frozenset({"applied", "plate", "touched", "backoff"})   # the verdicts a write commits (v4 §3)
+_PC_STEAM_PROBE_CANDIDATES = 5   # the render probe tries the newest few stored pictures, not one (v4 §3)
+_PC_FACE_EXPIRE_EVERY_S = 3600   # each box ages its own derived-face cache hourly (v4 §4)
+
+# Who the sweep may touch, for the players row aliased p. The claim and the
+# writer's revalidation read the SAME text, so eligibility has one meaning.
+_PC_STEAM_ELIGIBLE_SQL = """
+    p.deleted_at IS NULL AND p.pc_opted_out_at IS NULL AND p.pc_portrait_source = 'game'
+    AND (p.pc_game_portrait_locked_until IS NULL OR p.pc_game_portrait_locked_until < now())
+    AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)
 """
+
+
+def _pc_steam_paused_reason() -> str | None:
+    if _pcs is None:
+        return "paused:renderer"
+    if os.getenv("PC_STEAM_SWEEP", "").strip().lower() in ("off", "0", "false", "no"):
+        return "paused:env"
+    return _pc_steam_breaker.state()
+
+
+def _pc_steam_sweep_word() -> str:
+    """The health value: `standby` on the replica, else paused:<reason>,
+    starting, faulted:<Exception> (the last batch raised; cleared by the
+    next clean one), stale (nothing completed for _PC_STEAM_STALE_S — a
+    loop that is alive but never finishes) or running. `running` is earned
+    by completed work — an empty claim or a committed verdict — never by a
+    claim, a dropped verdict or a batch whose writes all failed (v4 §3). The
+    release train asserts it PER ROLE: the two boxes are supposed to disagree."""
+    if IS_REPLICA:
+        return "standby"
+    paused = _pc_steam_paused_reason()
+    if paused:
+        return paused
+    st = _PC_STEAM_SWEEP_STATE
+    if st["error"]:
+        return "faulted:" + str(st["error"])
+    # The age is measured from the last completed work, else from the loop's
+    # start after its boot delay: a loop that never completes anything ages
+    # into `stale` too, instead of reporting `starting` forever (v4.1 §2).
+    base = st["clean_at"] if st["clean_at"] is not None else st["started_at"]
+    if base is None:
+        return "starting"
+    if time.monotonic() - base > _PC_STEAM_STALE_S:
+        return "stale"
+    return "starting" if st["clean_at"] is None else "running"
+
+
+def _pc_steam_mark_clean() -> None:
+    st = _PC_STEAM_SWEEP_STATE
+    st["clean_at"] = time.monotonic()
+    st["error"] = None
+
+
+def _pc_steam_render_word() -> str:
+    """The second health value (v3 §9), on BOTH roles: `ok` once this box has
+    composited a stored Steam picture into a face through the face route's
+    own inputs and renderer; `none` while no subject resolves to one;
+    `failed:<word>` when that render broke. The sweep's storage count says
+    a picture was fetched; only this says a face is made of it here."""
+    if _pcs is None or _pcf is None:
+        return "paused:renderer"
+    return _PC_STEAM_RENDER_STATE["word"]
+
+
+async def _pc_release_portrait_blob(db: AsyncSession, h: str) -> None:
+    """Mark a blob unreferenced when no players row names it in EITHER
+    column; the janitor deletes it after the grace (v2 §6). Under the
+    caller's P lock on h. Idempotent."""
+    await db.execute(text("""
+        UPDATE pc_portraits SET unreferenced_since = now()
+         WHERE hash = CAST(:h AS text) AND unreferenced_since IS NULL
+           AND NOT EXISTS (SELECT 1 FROM players
+                            WHERE pc_game_portrait_hash = CAST(:h AS text)
+                               OR pc_steam_portrait_hash = CAST(:h AS text))
+    """), {"h": h})
+
+
+async def _pc_portrait_blob_janitor(db: AsyncSession) -> int:
+    """Delete blobs that have stayed unreferenced for the grace period, each
+    under its P lock after re-checking both columns AND the grace (a blob
+    re-used and released again since the candidate read is young again, v4
+    §3), ONE candidate per transaction (v3 §6): a transaction holding
+    several P locks in list order could sit inside a cycle with writers that
+    take theirs sorted. At most a batch per pass. Returns how many went."""
+    hashes = [str(r["hash"]) for r in (await db.execute(text("""
+        SELECT hash FROM pc_portraits
+         WHERE unreferenced_since < now() - make_interval(mins => CAST(:m AS integer))
+         ORDER BY unreferenced_since
+         LIMIT CAST(:n AS integer)
+    """), {"m": _PC_STEAM_GRACE_MINUTES, "n": _PC_STEAM_JANITOR_BATCH})).mappings().all()]
+    await db.commit()
+    deleted = 0
+    for h in hashes:
+        await _pc_lock_blob(db, h)
+        gone = (await db.execute(text("""
+            DELETE FROM pc_portraits
+             WHERE hash = CAST(:h AS text)
+               AND unreferenced_since < now() - make_interval(mins => CAST(:m AS integer))
+               AND NOT EXISTS (SELECT 1 FROM players
+                                WHERE pc_game_portrait_hash = CAST(:h AS text)
+                                   OR pc_steam_portrait_hash = CAST(:h AS text))
+            RETURNING hash
+        """), {"h": h, "m": _PC_STEAM_GRACE_MINUTES})).scalar_one_or_none()
+        await db.commit()   # the P lock goes with the transaction: one blob at a time
+        deleted += 1 if gone else 0
+    if deleted:
+        print(f"[PC-PORTRAIT] janitor deleted {deleted} released blob(s)")
+    return deleted
+
+
+async def _pc_steam_claim(db: AsyncSession, limit: int, ids=None, never_only: bool = False) -> list:
+    """Claim due players (or only these ids — the priming path) FOR NO KEY
+    UPDATE SKIP LOCKED and LEASE them (v4 §1): pc_steam_attempt advances —
+    the attempt id every write binds on, advanced as well by every clear,
+    None, opt-out and deletion, so a verdict computed under an older attempt
+    binds to nothing — next_at moves _PC_STEAM_LEASE_MINUTES out, so no
+    second attempt claims the row while this one is on the network (an
+    attempt that dies leaves a lease that simply expires, #276), and the
+    stored reference is WITHDRAWN: a reference is the last COMPLETED
+    attempt's feed answer, so a refresh in flight is unresolved for the
+    events hold (v4 §2). Order: never attempted first, the current pool
+    snapshot's members by pool rank, then everyone else. Returns rows of
+    id, steam_id, attempt, hash — the id the write binds on and the hash it
+    takes P on."""
+    where = _PC_STEAM_ELIGIBLE_SQL + " AND (p.pc_steam_portrait_next_at IS NULL"
+    where += ")" if never_only else " OR p.pc_steam_portrait_next_at <= now())"
+    params = {"lim": int(limit), "lease": int(_PC_STEAM_LEASE_MINUTES)}
+    if ids is not None:
+        where += " AND p.id = ANY(CAST(:ids AS uuid[]))"
+        params["ids"] = [str(i) for i in ids]
+    rows = (await db.execute(text(f"""
+        WITH due AS (
+            SELECT p.id FROM players p
+             WHERE {where}
+             ORDER BY p.pc_steam_portrait_next_at ASC NULLS FIRST,
+                      (SELECT m.pool_rank FROM pc_pool_members m
+                        WHERE m.player_id = p.id
+                          AND m.snapshot_id = (SELECT MAX(id) FROM pc_pool_snapshots)) ASC NULLS LAST,
+                      p.id
+             FOR NO KEY UPDATE OF p SKIP LOCKED
+             LIMIT CAST(:lim AS integer)
+        )
+        UPDATE players p SET pc_steam_attempt = p.pc_steam_attempt + 1,
+                             pc_steam_portrait_at = now(),
+                             pc_steam_portrait_next_at = now() + make_interval(mins => CAST(:lease AS integer)),
+                             pc_steam_avatar_ref = NULL
+          FROM due WHERE p.id = due.id
+        RETURNING p.id, p.steam_id, p.pc_steam_attempt AS attempt, p.pc_steam_portrait_hash AS hash
+    """), params)).mappings().all()
+    return [dict(r) for r in rows]
+
+
+async def _pc_pack_subjects(db: AsyncSession, pack_id: str) -> list:
+    rows = (await db.execute(text("""
+        SELECT DISTINCT c.subject_player_id AS subject FROM pc_prints pr
+          JOIN pc_cards c ON c.id = pr.card_id
+         WHERE pr.pack_id = CAST(:pack AS uuid)
+    """), {"pack": str(pack_id)})).mappings().all()
+    return [str(r["subject"]) for r in rows]
+
+
+async def _pc_steam_wait(priority: bool = False, deadline: float | None = None) -> bool:
+    """One token from the outbound bucket — every Steam request pays (v2 §4);
+    a priority take (priming) may overdraw and go now. With a deadline (the
+    player's, on time.monotonic) a wait that would end past it is not made:
+    False, and the caller counts the player unreached (v4.1 §3)."""
+    while True:
+        wait = _pc_steam_bucket.take(priority=priority)
+        if wait <= 0:
+            return True
+        if deadline is not None and time.monotonic() + wait > deadline:
+            return False
+        await asyncio.sleep(wait)
+
+
+async def _pc_steam_fetch_refs(steam_ids: list, priority: bool = False, deadlines: dict | None = None):
+    """{steam_id: reference | None} for the batch — the keyed summaries call
+    (100 ids each), else the profile XML per player. None = the batch itself
+    failed (the breaker recorded it; nothing is written). A player missing
+    from the answer was not reached (the XML loop stopped on a pause) and is
+    not written either. URLs are never logged: the keyed one carries the key.
+    `deadlines`, when given, receives each XML-path player's absolute
+    deadline: the profile request and the picture step share it (v4.1 §3)."""
+    key = os.getenv("STEAM_WEB_API_KEY", "")
+    out: dict = {}
+    if key and not _pc_steam_xml["forced"]:
+        for start in range(0, len(steam_ids), _pcs.SUMMARIES_PER_CALL):
+            chunk = steam_ids[start:start + _pcs.SUMMARIES_PER_CALL]
+            await _pc_steam_wait(priority)
+            if _pc_steam_breaker.paused():
+                break   # a pause began during the token wait: the rest of the batch is unreached (v4 §3)
+            try:
+                body = await asyncio.to_thread(_pcs.http_get, _pcs.summaries_url(key, chunk),
+                                               max_bytes=_pcs.MAX_META_BYTES)
+                out.update(_pcs.parse_summaries(body, chunk))
+                _pc_steam_breaker.record("api", True)
+            except _pcs.FetchError as ex:
+                _pc_steam_breaker.record("api", False, status=ex.status)
+                if ex.status in (401, 403):
+                    _pc_steam_xml["refusals"] += 1
+                    if _pc_steam_xml["refusals"] >= 2 and not _pc_steam_xml["forced"]:
+                        _pc_steam_xml["forced"] = True
+                        print("[PC-STEAM] keyed path refused twice; profile XML for the rest of this process")
+                print(f"[PC-STEAM] summaries failed kind={ex.kind} status={ex.status}")
+                return None
+            except _pcs.FeedError as ex:
+                _pc_steam_breaker.record("api", False)
+                print(f"[PC-STEAM] summaries unusable: {ex}")
+                return None
+        return out
+    for sid in steam_ids:
+        if _pc_steam_breaker.paused():
+            break
+        deadline = time.monotonic() + _pcs.PLAYER_DEADLINE   # this wait, the profile and the picture end here (v4.1 §3)
+        if deadlines is not None:
+            deadlines[sid] = deadline
+        if not await _pc_steam_wait(priority, deadline):
+            continue   # the token would arrive past the deadline: unreached, no request, no verdict
+        if _pc_steam_breaker.paused():
+            break   # re-checked after the wait: the rest of the batch is unreached (v4 §3)
+        try:
+            body = await asyncio.to_thread(_pcs.http_get, _pcs.profile_xml_url(sid), max_bytes=_pcs.MAX_META_BYTES,
+                                           deadline=deadline)
+            out[sid] = _pcs.parse_profile_xml(body)
+            _pc_steam_breaker.record("xml", True)
+        except _pcs.FetchError as ex:
+            _pc_steam_breaker.record("xml", False, status=ex.status)
+            print(f"[PC-STEAM] xml failed player={sid} kind={ex.kind} status={ex.status}")
+            out[sid] = None
+        except _pcs.FeedError as ex:
+            _pc_steam_breaker.record("xml", False)   # a body that is not a profile: the feed's failure, not an absence
+            print(f"[PC-STEAM] xml unusable player={sid}: {ex}")
+            out[sid] = None
+    return out
+
+
+async def _pc_steam_fetch_picture(ref: str, priority: bool = False, deadline: float | None = None):
+    """(attempted, canonical PNG or None) for one avatar reference. The URL
+    is built from the reference (v2 §3). The breaker is re-checked after the
+    token wait, right before the request (v4 §3): a pause that began during
+    the wait means no request and no verdict. The CDN earns a success only
+    for a body the canonicaliser accepts; a body it refuses is that player's
+    failure AND counts against the CDN, so junk behind HTTP 200 pauses the
+    sweep like any other run of failures. One absolute deadline — the XML
+    path's player deadline, else a fresh PLAYER_DEADLINE from here — bounds
+    the wait, the request and every body read (v4.1 §3)."""
+    if deadline is None:
+        deadline = time.monotonic() + _pcs.PLAYER_DEADLINE   # keyed path: the player's budget starts here
+    if not await _pc_steam_wait(priority, deadline):
+        return False, None   # the token would arrive past the player's deadline: unreached (v4.1 §3)
+    if _pc_steam_breaker.paused():
+        return False, None
+    try:
+        raw = await asyncio.to_thread(_pcs.http_get, _pcs.avatar_url(ref), max_bytes=_pcs.MAX_PICTURE_BYTES,
+                                      deadline=deadline)
+    except _pcs.FetchError as ex:
+        _pc_steam_breaker.record("cdn", False, status=ex.status)
+        print(f"[PC-STEAM] picture failed ref={ref[:12]} kind={ex.kind} status={ex.status}")
+        return True, None
+    try:
+        png = await asyncio.to_thread(_pcs.canonical_picture, raw)
+    except ValueError as ex:
+        _pc_steam_breaker.record("cdn", False)
+        print(f"[PC-STEAM] picture refused ref={ref[:12]} kind={ex}")
+        return True, None
+    _pc_steam_breaker.record("cdn", True)
+    return True, png
+
+
+async def _pc_steam_write(db: AsyncSession, claimed: dict, outcome: str, *, ref=None, png=None) -> str:
+    """One Steam-portrait mutation for one CLAIMED player inside ONE
+    transaction on db (v3 §6): I → P (both hashes the row holds plus the
+    new one, sorted) → R (the row FOR NO KEY UPDATE, re-read and revalidated
+    against the SAME eligibility text the claim used) → blob in → the row
+    write bound to the claim's attempt id → release of the hash this write
+    dropped.
+
+    The attempt id is pc_steam_attempt as the claim advanced it (v4 §1). A
+    later claim (the lease expired, or a clear reset the schedule) advances
+    it, and so does every clear, None, opt-out and deletion — whether or not
+    they change a value the row holds — so a verdict computed under an older
+    attempt binds to nothing and is dropped as `moved`: the newest attempt
+    owns the row, and no mutation is undone by a fetch that began before it.
+
+    outcome: `changed` (ref + png), `none` (Steam's own no-picture answer —
+    the reference is stored with no hash, the plate is the truth for a
+    week), `failed` (fail += 1, next_at backs off; the stored picture STAYS
+    — a transient failure never removes one — and the reference stays
+    withdrawn: a failed attempt resolves nothing, v4 §2). Returns the
+    disposition word for the batch log."""
+    pid, steam_id = str(claimed["id"]), str(claimed["steam_id"])
+    attempt, old_hash = int(claimed["attempt"]), claimed["hash"]
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))"), {"sid": steam_id})
+    new_hash = hashlib.sha256(png).hexdigest() if png is not None else None
+    old_game, old_steam = await _pc_lock_portrait_blobs(db, pid, new_hash)
+    row = (await db.execute(text(f"""
+        SELECT p.pc_game_portrait_hash AS game_hash, p.pc_steam_portrait_hash AS steam_hash,
+               p.pc_steam_avatar_ref AS ref, p.pc_steam_portrait_fail AS fail,
+               p.pc_steam_attempt AS attempt,
+               (p.deleted_at IS NOT NULL) AS deleted, ({_PC_STEAM_ELIGIBLE_SQL}) AS eligible
+          FROM players p WHERE p.id = CAST(:pid AS uuid) FOR NO KEY UPDATE OF p
+    """), {"pid": pid})).mappings().first()
+    if row is None or row["deleted"]:
+        return "gone"
+    if (row["game_hash"], row["steam_hash"]) != (old_game, old_steam):
+        await db.rollback()   # only reachable without I; the next loop claims again
+        return "moved"
+    if int(row["attempt"]) != attempt:
+        await db.rollback()   # a newer attempt, a clear, None, an opt-out or a deletion owns the row now: this verdict is stale
+        return "moved"
+    if not row["eligible"]:
+        return "ineligible"   # opted out, None, banned, locked or deleted since the claim: nothing written
+    bound = (" WHERE id = CAST(:pid AS uuid)"
+             " AND pc_steam_attempt = CAST(:attempt AS bigint)"
+             " RETURNING id")
+    base = {"pid": pid, "attempt": attempt}
+    if outcome == "failed":
+        fail = min(int(row["fail"] or 0) + 1, 30000)
+        wrote = (await db.execute(text("""
+            UPDATE players SET pc_steam_portrait_fail = CAST(:fail AS smallint),
+                               pc_steam_portrait_next_at = now() + make_interval(hours => CAST(:h AS integer))"""
+            + bound), {**base, "fail": fail, "h": _pcs.backoff_hours(fail)})).scalar_one_or_none()
+        return "backoff" if wrote is not None else "moved"
+    if outcome == "none":
+        wrote = (await db.execute(text("""
+            UPDATE players SET pc_steam_portrait_hash = NULL, pc_steam_avatar_ref = CAST(:ref AS text),
+                               pc_steam_portrait_fail = 0,
+                               pc_steam_portrait_next_at = now() + make_interval(days => CAST(:d AS integer))"""
+            + bound), {**base, "ref": ref, "d": _pcs.REFRESH_DAYS})).scalar_one_or_none()
+        if wrote is None:
+            return "moved"
+        if old_steam:
+            await _pc_release_portrait_blob(db, old_steam)
+        return "plate"
+    if new_hash == row["steam_hash"]:
+        wrote = (await db.execute(text("""
+            UPDATE players SET pc_steam_portrait_fail = 0, pc_steam_avatar_ref = CAST(:ref AS text),
+                               pc_steam_portrait_next_at = now() + make_interval(days => CAST(:d AS integer))"""
+            + bound), {**base, "ref": ref, "d": _pcs.REFRESH_DAYS})).scalar_one_or_none()
+        return "touched" if wrote is not None else "moved"
+    ihdr = _pcf.png_ihdr(png)
+    await db.execute(text("""
+        INSERT INTO pc_portraits (hash, bytes, content_type, width, height)
+        VALUES (CAST(:h AS text), CAST(:b AS bytea), 'image/png', CAST(:w AS integer), CAST(:hh AS integer))
+        ON CONFLICT (hash) DO UPDATE SET unreferenced_since = NULL
+    """), {"h": new_hash, "b": png, "w": int(ihdr[0]), "hh": int(ihdr[1])})
+    wrote = (await db.execute(text("""
+        UPDATE players SET pc_steam_portrait_hash = CAST(:h AS text), pc_steam_avatar_ref = CAST(:ref AS text),
+                           pc_steam_portrait_fail = 0,
+                           pc_steam_portrait_next_at = now() + make_interval(days => CAST(:d AS integer))"""
+        + bound), {**base, "h": new_hash, "ref": ref, "d": _pcs.REFRESH_DAYS})).scalar_one_or_none()
+    if wrote is None:
+        await db.rollback()
+        return "moved"
+    if old_steam and old_steam != new_hash:
+        await _pc_release_portrait_blob(db, old_steam)
+    return "applied"
+
+
+async def _pc_steam_process(claimed: list, priority: bool = False) -> dict:
+    """Network for a claimed batch (outside any transaction), then one short
+    write transaction per player; every committed write is a heartbeat for
+    the health word. A reference is ALWAYS downloaded (v3 §3): the same
+    bytes hash to the same blob, and a picture that changed behind an
+    unchanged reference is caught at the next refresh instead of never.
+    Returns the disposition counts."""
+    from database import async_session
+    counts: dict = {}
+    deadlines: dict = {}   # XML path: each player's absolute deadline, shared with the picture step (v4.1 §3)
+    refs = await _pc_steam_fetch_refs([str(r["steam_id"]) for r in claimed], priority, deadlines)
+    if refs is None:
+        counts["batch_failed"] = len(claimed)   # the leases expire; the rows are claimed again
+        return counts
+    for r in claimed:
+        sid = str(r["steam_id"])
+        if sid not in refs:
+            counts["unreached"] = counts.get("unreached", 0) + 1
+            continue
+        ref, png = refs[sid], None
+        if ref is None:
+            outcome = "failed"
+        elif _pcs.is_default_ref(ref):
+            outcome = "none"      # Steam's own no-picture answer: nothing to download, the plate is right
+        else:
+            if _pc_steam_breaker.paused():
+                counts["unreached"] = counts.get("unreached", 0) + 1
+                continue
+            attempted, png = await _pc_steam_fetch_picture(ref, priority, deadlines.get(sid))
+            if not attempted:
+                counts["unreached"] = counts.get("unreached", 0) + 1   # the breaker cut in after the token wait: no verdict
+                continue
+            outcome = "changed" if png is not None else "failed"
+        async with async_session() as db:
+            try:
+                word = await _pc_steam_write(db, r, outcome, ref=ref, png=png)
+                await db.commit()
+                if word in _PC_STEAM_COMMITTED:
+                    _pc_steam_mark_clean()   # a committed verdict is the heartbeat; a dropped one is not (v4 §3)
+            except Exception as ex:
+                await db.rollback()
+                word = "error"
+                counts["error_class"] = type(ex).__name__
+                print(f"[PC-STEAM] write failed player={sid}: {type(ex).__name__}: {ex}")
+        counts[word] = counts.get(word, 0) + 1
+    return counts
+
+
+async def _pc_steam_batch() -> int:
+    """One sweep iteration: claim (and lease) up to _PC_STEAM_BATCH due rows
+    and work them. `running` is earned by an EMPTY claim or by a batch that
+    committed a verdict — never by the claim itself, and never by a batch
+    whose work all failed (v4 §3)."""
+    from database import async_session
+    async with async_session() as db:
+        claimed = await _pc_steam_claim(db, _PC_STEAM_BATCH)
+        await db.commit()
+    if not claimed:
+        _pc_steam_mark_clean()
+        return 0
+    counts = await _pc_steam_process(claimed)
+    _PC_STEAM_SWEEP_STATE["batches"] += 1
+    if any(counts.get(w) for w in _PC_STEAM_COMMITTED):
+        _pc_steam_mark_clean()
+    elif counts.get("error"):
+        # every verdict of the batch failed to commit: faulted until a later
+        # batch commits one (v4 §3). A batch the feed refused or the breaker
+        # cut leaves the heartbeat alone and ages into `stale`.
+        _PC_STEAM_SWEEP_STATE["error"] = "write:" + str(counts.get("error_class") or "Exception")
+    print(f"[PC-STEAM] batch n={len(claimed)} {counts} bucket={_pc_steam_bucket.tokens:.1f}")
+    return len(claimed)
+
+
+async def _pc_steam_sweep_loop() -> None:
+    """The Steam picture sweep (v3 §4): primary only (lifespan starts it
+    there), single flight, one batch per iteration, paused by the env kill
+    switch or the breaker. Boot delay keeps a deploy's health window quiet.
+    A batch that raises leaves `faulted:<Exception>` on the health word
+    until a later batch completes."""
+    await asyncio.sleep(_PC_STEAM_BOOT_DELAY_S)
+    _PC_STEAM_SWEEP_STATE["started_at"] = time.monotonic()   # the never-clean baseline for `stale` (v4.1 §2)
+    while True:
+        try:
+            if _pc_steam_paused_reason():
+                await asyncio.sleep(_PC_STEAM_IDLE_S)
+                continue
+            n = await _pc_steam_batch()
+            await asyncio.sleep(_PC_STEAM_IDLE_S if n == 0 else 0.5)
+        except asyncio.CancelledError:
+            raise
+        except Exception as ex:
+            _PC_STEAM_SWEEP_STATE["error"] = type(ex).__name__
+            print(f"[PC-STEAM] sweep error: {type(ex).__name__}: {ex}")
+            await asyncio.sleep(_PC_STEAM_IDLE_S)
+
+
+def _pc_steam_task_done(task) -> None:
+    _pc_steam_tasks.discard(task)
+    if task.cancelled():
+        return
+    ex = task.exception()
+    if ex is not None:
+        print(f"[PC-STEAM] prime failed: {type(ex).__name__}: {ex}")
+
+
+async def _pc_steam_prime(subject_ids: list, deadline: float = _PC_STEAM_PRIME_DEADLINE_S) -> None:
+    """Priming at mint time (v3 §7): the never-attempted, eligible subjects
+    among these get their picture fetched NOW, and the caller waits up to
+    the deadline so the answer built next carries it. Past the deadline the
+    SAME attempt finishes in the background under the claim it already
+    holds — never a second claim of the row (the lease forbids one anyway),
+    so two verdicts never compete for it. A no-op once every subject has
+    been attempted, on the standby, and while the sweep is paused."""
+    if not subject_ids or IS_REPLICA or _pc_steam_paused_reason():
+        return
+    from database import async_session
+    try:
+        async with async_session() as db:
+            claimed = await _pc_steam_claim(db, len(subject_ids), ids=subject_ids, never_only=True)
+            await db.commit()
+    except Exception as ex:
+        print(f"[PC-STEAM] prime claim failed: {type(ex).__name__}: {ex}")
+        return
+    if not claimed:
+        return
+    task = asyncio.create_task(_pc_steam_process(claimed, priority=True))
+    _pc_steam_tasks.add(task)
+    task.add_done_callback(_pc_steam_task_done)
+    done, _pending = await asyncio.wait({task}, timeout=deadline)
+    if not done:
+        print(f"[PC-STEAM] prime deadline: {len(claimed)} finishing in the background")
+    elif not task.cancelled() and task.exception() is None:
+        print(f"[PC-STEAM] primed n={len(claimed)} {task.result()}")
+
+
+async def _pc_steam_render_probe() -> str:
+    """Composite ONE stored Steam picture into a card face through the face
+    route's own inputs (the resolver-column fragment, portrait_for, the
+    bytes read, render_face in the render pool) and say whether that worked
+    (v3 §9): `ok`, `none` (no eligible subject resolves to a Steam picture
+    on this box yet), or `failed:<word>`. Nothing is cached or published."""
+    from database import async_session
+    async with async_session() as db:
+        subs = (await db.execute(text(
+            "SELECT p.display_name, " + _PC_PORTRAIT_RESOLVE_COLS + f"""
+               FROM players p
+              WHERE p.pc_steam_portrait_hash IS NOT NULL AND p.pc_game_portrait_hash IS NULL
+                AND {_PC_STEAM_ELIGIBLE_SQL}
+              ORDER BY p.pc_steam_portrait_at DESC NULLS LAST
+              LIMIT CAST(:n AS integer)"""), {"n": _PC_STEAM_PROBE_CANDIDATES})).mappings().all()
+        if not subs:
+            return "none"
+        sub = pbytes = None
+        resolved = 0
+        for cand in subs:   # the sweep's own eligibility text, then the resolver's word, newest first (v4 §3)
+            kind, phash = _pcp.portrait_for(cand)
+            if kind != "steam" or not phash:
+                continue
+            resolved += 1
+            pbytes = await _pc_portrait_bytes(db, phash)
+            if pbytes is not None:
+                sub = cand
+                break
+        if sub is None:
+            return "failed:resolver" if not resolved else "none"   # nothing resolves / released between the reads
+        labels = (await _pc_face_ctx(db, "en"))["labels"]
+    spec = {"band": "common", "name": _pcp.public_render_name(sub["display_name"]) or "", "title": None,
+            "subtitle": None, "title_rgb": None, "rating": None, "pool_rank": 1, "board_rank": None,
+            "wins": 0, "losses": 0, "foil": False, "signed": False, "edition_label": "Probe",
+            "minted_on": "", "print_short": "", "top_card": False}
+    data = await _pcp.in_pool(_pcf.render_face, spec, labels, pbytes, "card")
+    if not data or bytes(data[:8]) != b"\x89PNG\r\n\x1a\n":
+        return "failed:bytes"
+    return "ok"
+
+
+async def _pc_steam_render_loop() -> None:
+    """Both roles: the probe every ten minutes once it says ok, every thirty
+    seconds until then, so a fresh deploy's health turns `ok` within a
+    minute of the first stored picture reaching this box."""
+    await asyncio.sleep(_PC_STEAM_BOOT_DELAY_S)
+    last = None
+    while True:
+        try:
+            word = await _pc_steam_render_probe()
+        except asyncio.CancelledError:
+            raise
+        except Exception as ex:
+            word = f"failed:{type(ex).__name__}"
+        _PC_STEAM_RENDER_STATE["word"] = word
+        if word != last:
+            print(f"[PC-STEAM] render probe: {word}")
+            last = word
+        await asyncio.sleep(_PC_STEAM_RENDER_IDLE_S if word == "ok" else _PC_STEAM_RENDER_RETRY_S)
+
+
+async def _pc_face_cache_expire_loop() -> None:
+    """Both roles (v4 §4): every box that owns a derived-face cache ages it
+    itself — a withdrawn picture must not outlive its blob in ANY box's
+    cache, and the DB janitor runs on the primary alone. Hourly: entries
+    untouched for a week go, and so do publish temporaries older than an
+    hour (an interrupted publish must not leave a face nothing tracks)."""
+    await asyncio.sleep(_PC_STEAM_BOOT_DELAY_S)
+    while True:
+        try:
+            n = await asyncio.to_thread(_pc_face_cache.expire)
+            if n:
+                print(f"[PC-FACE] cache expiry removed {n} file(s)")
+        except asyncio.CancelledError:
+            raise
+        except Exception as ex:
+            print(f"[PC-FACE] cache expiry error: {type(ex).__name__}: {ex}")
+        await asyncio.sleep(_PC_FACE_EXPIRE_EVERY_S)
 
 # A print is deliverable under a lease only while it exists, is not discarded,
 # and depicts the subject the lease names.
@@ -25488,7 +26306,8 @@ async def _pc_lease_wait(db: AsyncSession, pid: str):
 
 async def _pc_lock_portrait_blobs(db: AsyncSession, pid: str, *extra):
     """Take the portrait-blob locks P for this player, BEFORE the row lock R.
-    Returns the hash the row currently holds (None when it holds none).
+    Returns (game_hash, steam_hash) as the row currently holds them (None for
+    an empty slot); both units share the lock discipline (Steam pictures v2 §6).
 
     The order is V → I → C → P → R, and P's key is a value that lives IN the
     row — which is why the row was being read first, with FOR NO KEY UPDATE,
@@ -25503,30 +26322,49 @@ async def _pc_lock_portrait_blobs(db: AsyncSession, pid: str, *extra):
     the identity lock every caller of this already holds, no other writer for
     this player can move it, so the confirmation is a guard against a caller
     that forgot the identity lock rather than against a race."""
-    old = (await db.execute(text(
-        "SELECT pc_game_portrait_hash FROM players WHERE id = CAST(:pid AS uuid)"),
-        {"pid": pid})).scalar_one_or_none()
-    for h in sorted({x for x in (old,) + tuple(extra) if x}):
-        await db.execute(text("SELECT pg_advisory_xact_lock(CAST(:cls AS integer), hashtext(CAST(:h AS text)))"),
-                         {"cls": _pcp.PC_P_LOCK_CLASS, "h": h})
+    held = (await db.execute(text(
+        "SELECT pc_game_portrait_hash, pc_steam_portrait_hash FROM players WHERE id = CAST(:pid AS uuid)"),
+        {"pid": pid})).mappings().first()
+    old = ((held["pc_game_portrait_hash"], held["pc_steam_portrait_hash"]) if held is not None
+           else (None, None))
+    for h in sorted({x for x in old + tuple(extra) if x}):
+        await _pc_lock_blob(db, h)
     return old
 
 
+async def _pc_lock_blob(db: AsyncSession, h: str) -> None:
+    """The ONE statement that takes a portrait-blob lock P (class
+    PC_P_LOCK_CLASS, keyed by the hash). Two callers: `_pc_lock_portrait_blobs`
+    (a player's set, before R) and the blob janitor (before its guarded
+    delete). The test suite counts this text file-wide."""
+    await db.execute(text("SELECT pg_advisory_xact_lock(CAST(:cls AS integer), hashtext(CAST(:h AS text)))"),
+                     {"cls": _pcp.PC_P_LOCK_CLASS, "h": h})
+
+
 async def _pc_clear_portrait_unit(db: AsyncSession, pid: str, lock_days, source):
-    """Under the caller's identity lock: clear the game portrait unit (I → P →
+    """Under the caller's identity lock: clear BOTH portrait units (I → P →
     R), lock further uploads for lock_days when given, force the source when
-    given, and delete the previous blob when no row references it any more.
-    Returns (previous_hash, locked_until)."""
+    given, and release every previous blob no row references any more.
+    Returns (a previous hash if either unit held one, locked_until)."""
     old = await _pc_lock_portrait_blobs(db, pid)
     held = (await db.execute(text(
-        "SELECT pc_game_portrait_hash FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE"),
-        {"pid": pid})).scalar_one_or_none()
+        "SELECT pc_game_portrait_hash, pc_steam_portrait_hash FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE"),
+        {"pid": pid})).mappings().first()
+    held = ((held["pc_game_portrait_hash"], held["pc_steam_portrait_hash"]) if held is not None
+            else (None, None))
     if held != old:
         # Only reachable without the identity lock; refusing is the honest
         # answer, because P is now held on a hash this row no longer names.
         await db.rollback()
         raise HTTPException(status_code=409, detail={"error": "subject_busy", "retry_after": 2})
-    sets = ["pc_game_portrait_hash = NULL", "pc_game_portrait_descriptor = NULL", "pc_game_portrait_at = NULL"]
+    # Both units (Steam pictures v2 §6): the rig's three columns as before, and
+    # the Steam picture's hash, reference and failure run. The attempt id
+    # advances too (v4 §1): a fetch still in flight under the previous attempt
+    # binds to nothing, so a clear is never undone by a verdict computed
+    # before it — that is what makes an admin clear restartable.
+    sets = ["pc_game_portrait_hash = NULL", "pc_game_portrait_descriptor = NULL", "pc_game_portrait_at = NULL",
+            "pc_steam_portrait_hash = NULL", "pc_steam_avatar_ref = NULL", "pc_steam_portrait_fail = 0",
+            "pc_steam_attempt = pc_steam_attempt + 1"]
     params = {"pid": pid}
     # Three meanings, and 0 is not None: None leaves an existing lock alone
     # (the deletion path), 0 CLEARS it, N sets it. Folding 0 into None left an
@@ -25537,21 +26375,27 @@ async def _pc_clear_portrait_unit(db: AsyncSession, pid: str, lock_days, source)
     if lock_days is not None:
         if int(lock_days) > 0:
             sets.append("pc_game_portrait_locked_until = now() + make_interval(days => CAST(:days AS integer))")
+            # The sweep's next touch is the lock's end (v2 §2): suppression is
+            # the lock column, and the schedule merely agrees with it.
+            sets.append("pc_steam_portrait_next_at = now() + make_interval(days => CAST(:days AS integer))")
             params["days"] = int(lock_days)
         else:
             sets.append("pc_game_portrait_locked_until = NULL")
+            sets.append("pc_steam_portrait_next_at = now()")
+    # lock_days None is the deletion path: the schedule is left alone, because a
+    # deleted row is outside the sweep's eligible predicate forever.
     if source is not None:
         sets.append("pc_portrait_source = CAST(:src AS text)")
         params["src"] = source
     locked = (await db.execute(text(
         "UPDATE players SET " + ", ".join(sets) +
         " WHERE id = CAST(:pid AS uuid) RETURNING pc_game_portrait_locked_until"), params)).scalar_one_or_none()
-    if old:
-        await db.execute(text("""
-            DELETE FROM pc_portraits WHERE hash = CAST(:h AS text)
-               AND NOT EXISTS (SELECT 1 FROM players WHERE pc_game_portrait_hash = CAST(:h AS text))
-        """), {"h": old})
-    return old, locked
+    # Release, never delete: the janitor removes a blob ten minutes after its
+    # last reference went (v2 §6), so a render that read this row a moment
+    # ago still finds its bytes.
+    for h in {x for x in old if x}:
+        await _pc_release_portrait_blob(db, h)
+    return (old[0] or old[1]), locked
 
 
 @app.post("/api/v1/pc/portrait", tags=["Player Cards"])
@@ -25628,7 +26472,7 @@ async def pc_portrait_upload(
     pid = str(player.id)
     # P before R (the order is V → I → C → P → R): both the blob this upload
     # replaces and the one it writes, under the identity lock taken above.
-    seen_old = await _pc_lock_portrait_blobs(db, pid, portrait_hash)
+    seen_old, _seen_steam = await _pc_lock_portrait_blobs(db, pid, portrait_hash)
     row = (await db.execute(text("""
         SELECT p.pc_opted_out_at, p.pc_game_portrait_hash, p.pc_game_portrait_descriptor,
                EXTRACT(EPOCH FROM (now() - p.pc_game_portrait_at)) AS since_last,
@@ -25686,7 +26530,7 @@ async def pc_portrait_upload(
     await db.execute(text("""
         INSERT INTO pc_portraits (hash, bytes, content_type, width, height)
         VALUES (CAST(:h AS text), CAST(:b AS bytea), 'image/png', CAST(:w AS integer), CAST(:hh AS integer))
-        ON CONFLICT (hash) DO NOTHING
+        ON CONFLICT (hash) DO UPDATE SET unreferenced_since = NULL
     """), {"h": portrait_hash, "b": canonical, "w": int(info["width"]), "hh": int(info["height"])})
     at = (await db.execute(text("""
         UPDATE players SET pc_game_portrait_hash = CAST(:h AS text),
@@ -25699,10 +26543,7 @@ async def pc_portrait_upload(
         await db.rollback()
         raise HTTPException(status_code=403, detail={"error": "portrait_refused"})
     if old and old != portrait_hash:
-        await db.execute(text("""
-            DELETE FROM pc_portraits WHERE hash = CAST(:h AS text)
-               AND NOT EXISTS (SELECT 1 FROM players WHERE pc_game_portrait_hash = CAST(:h AS text))
-        """), {"h": old})
+        await _pc_release_portrait_blob(db, old)   # the janitor deletes it after the grace (v2 §6)
     await db.commit()
     print(f"[PC-PORTRAIT] player={steam_id} applied hash={portrait_hash[:12]} bytes={len(canonical)} "
           f"coverage={info['coverage']:.3f} replaced={bool(old and old != portrait_hash)}")
@@ -25713,8 +26554,10 @@ async def pc_portrait_upload(
 @app.post("/api/v1/admin/pc/portrait/clear", tags=["Admin"])
 async def admin_pc_portrait_clear(payload: dict = Body(...), db: AsyncSession = Depends(get_db)):
     """Admin-HMAC canonical admin:{admin}:pc_portrait_clear:{steam_id}:{lock_days}.
-    Clears the target's game portrait unit (I → P → R), deletes the blob when
-    unreferenced, locks uploads for lock_days (0 = no lock) and waits out live
+    Clears BOTH portrait units (game and Steam, I → P → R; the Steam attempt
+    id advances so a fetch in flight binds to nothing), marks every blob no
+    row references any more for the janitor (deleted after its grace, never
+    here), locks uploads for lock_days (0 = no lock) and waits out live
     delivery leases like the None write (409 retry_after)."""
     admin_id = str(payload.get("admin_steam_id", ""))[:20]
     steam_id = str(payload.get("steam_id", ""))[:20]
@@ -25922,13 +26765,10 @@ async def internal_pc_face_preview(
     if not _pcp.print_id_ok(player_ref):
         raise HTTPException(status_code=404, detail={"error": "not_in_pool"})
     loc = _pcp.effective_locale(locale, _pc_served_locales())
-    sub = (await db.execute(text("""
-        SELECT p.display_name, (p.deleted_at IS NOT NULL) AS subject_deleted,
-               (p.pc_opted_out_at IS NOT NULL) AS subject_opted_out,
-               p.pc_portrait_source AS portrait_source, p.pc_game_portrait_hash AS portrait_hash,
-               EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL) AS subject_banned
-          FROM players p WHERE p.id = CAST(:pid AS uuid)
-    """), {"pid": player_ref})).mappings().first()
+    await _pc_steam_prime([player_ref])   # v2 §7: the preview shows the picture, not the plate, on a first look
+    sub = (await db.execute(text(
+        "SELECT p.display_name, " + _PC_PORTRAIT_RESOLVE_COLS +
+        " FROM players p WHERE p.id = CAST(:pid AS uuid)"), {"pid": player_ref})).mappings().first()
     if sub is None or sub["subject_deleted"] or sub["subject_opted_out"] or sub["subject_banned"]:
         raise HTTPException(status_code=404, detail={"error": "not_in_pool"})
     member = (await db.execute(text("""
@@ -25944,11 +26784,15 @@ async def internal_pc_face_preview(
     name = _pcp.public_render_name(sub["display_name"])
     rating = _pc_num(member["rating"])
     board_rating = _pc_board_rating(rating) if rating is not None else None
-    rank_name = _rank_name_for(board_rating) if rating is not None else None
-    title = member["title"] or rank_name
+    # The same projection a minted face gets (v4 §6): the tier in the RANK
+    # slot, the equipped shop title as the subtitle.
+    rank_name = _pc_rank_name(rating)
+    title = rank_name
+    subtitle = _pc_shop_title(member["title"], rank_name)
     title_hex = (ctx["colors"].get(rank_name) or _rank_fallback_color(rank_name)) if rank_name else None
     spec = {
         "band": member["rarity"], "name": name or "", "title": title, "title_rgb": _pc_hex_rgb(title_hex),
+        "subtitle": subtitle,
         "rating": int(board_rating) if board_rating is not None else None,
         "pool_rank": int(member["pool_rank"]),
         "board_rank": int(member["board_rank"]) if member["board_rank"] is not None else None,
@@ -25961,6 +26805,8 @@ async def internal_pc_face_preview(
     bucket = int(time.time() // _pcp.PREVIEW_TTL_S)
     key = f"preview/{player_ref}/{rev}/{loc}/{bucket}.png"
     pbytes = await _pc_portrait_bytes(db, phash)
+    if phash and pbytes is None:
+        raise _PcPortraitMissing()   # released between the two reads: refuse, never cache the plate
     data = await _pc_face_cache.get_or_render(
         key, _functools.partial(_pcf.render_face, spec, labels, pbytes, "card"))
     return _pc_png_response(data, "private, max-age=60")
@@ -32032,10 +32878,12 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     await db.execute(text("SELECT pg_advisory_xact_lock(hashtext('pc_snapshot'))"))
     await db.execute(text("DELETE FROM pc_pool_members WHERE player_id = :pid"), {"pid": pid})
     await db.execute(text("UPDATE players SET pc_shards = 0, pc_opted_out_at = COALESCE(pc_opted_out_at, NOW()) WHERE id = :pid"), {"pid": pid})
-    # Portraits (migration 310): every delivery lease of this subject dies
-    # (a bot send in flight re-validates and drops the bytes), the writer's
-    # nonces go, then the game portrait unit is cleared under the per-hash P
-    # lock and the blob deleted when nothing else references it (I → P → R).
+    # Portraits (migrations 310/311): every delivery lease of this subject
+    # dies (a bot send in flight re-validates and drops the bytes), the
+    # writer's nonces go, then BOTH portrait units are cleared under their
+    # per-hash P locks (I → P → R), the Steam attempt id advances, and every
+    # blob nothing references any more is marked for the janitor, which
+    # deletes it after the grace — never here.
     await db.execute(text("DELETE FROM pc_delivery_leases WHERE subject_id = :pid"), {"pid": pid})
     await db.execute(text("DELETE FROM pc_portrait_nonces WHERE player_id = :pid"), {"pid": pid})
     await _pc_clear_portrait_unit(db, str(pid), lock_days=None, source="none")

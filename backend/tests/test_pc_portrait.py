@@ -315,6 +315,17 @@ def test_resolver_matrix():
     assert P.portrait_for({**row, "portrait_hash": None}) == ("none", None)
     assert P.portrait_for({**row, "portrait_hash": ""}) == ("none", None)
     assert P.portrait_for({**row, "portrait_source": None}) == ("game", "abc")  # absent column = default
+    # Steam pictures (design v2 §1): the rig wins, the Steam picture stands in
+    # for a missing rig, and every "none" state hides both
+    steam = {**row, "steam_portrait_hash": "s" * 64}
+    assert P.portrait_for(steam) == ("game", "abc")
+    assert P.portrait_for({**steam, "portrait_hash": None}) == ("steam", "s" * 64)
+    assert P.portrait_for({**steam, "portrait_hash": ""}) == ("steam", "s" * 64)
+    assert P.portrait_for({**steam, "portrait_hash": None, "steam_portrait_hash": ""}) == ("none", None)
+    assert P.portrait_for({**steam, "portrait_hash": None, "portrait_source": "none"}) == ("none", None)
+    for k in ("subject_deleted", "subject_banned", "subject_opted_out"):
+        assert P.portrait_for({**steam, "portrait_hash": None, k: True}) == ("none", None), k
+    assert P.portrait_for({**row, "portrait_hash": None}) == ("none", None), "an old SELECT has no fallback, not a crash"
 
 
 def test_face_key_shapes():
