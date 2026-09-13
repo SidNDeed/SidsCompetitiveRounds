@@ -400,6 +400,36 @@ def test_account_deletion_sweeps_leases_nonces_and_the_portrait_unit():
     assert "DELETE FROM pc_cards WHERE subject_player_id = :pid" in src
 
 
+class _GateDb(Scripted):
+    """The ban-rate gate reads with .scalar() and audits under a savepoint; the shared harness has
+    neither."""
+
+    async def execute(self, statement, params=None):
+        res = await super().execute(statement, params)
+        res.scalar = res.scalar_one_or_none
+        return res
+
+    def begin_nested(self):
+        return self
+
+
+def test_a_repeat_ban_is_answered_before_the_velocity_gate_refuses_it():
+    """r8 M2 (D4, 2026-09-13), executed: the retry of a ban whose caller timed out while the server
+    waited for a Discord line in flight finds the target already banned -- the gate returns without
+    counting or refusing (the core then runs the repeat cleanup and answers already_banned); a fifth
+    ban of a target NOT banned is still refused 429, audited, and flagged once."""
+    db = _GateDb({"FROM player_bans WHERE steam_id": [[("x",)]], "COUNT(*) FROM player_bans": [5]})
+    assert _run(main._ban_rate_gate_or_raise(db, "adm", "tgt")) is None
+    assert db.count("COUNT(*) FROM player_bans") == 0 and db.count("ban-rate:") == 0 and db.committed == 0
+    db = _GateDb({"FROM player_bans WHERE steam_id": [[]], "COUNT(*) FROM player_bans": [5],
+                  "COUNT(*) FROM admin_actions": [1]})
+    with pytest.raises(HTTPException) as ex:
+        _run(main._ban_rate_gate_or_raise(db, "adm", "tgt"))
+    assert ex.value.status_code == 429
+    assert db.count("ban-rate:") == 1 and db.count("INSERT INTO admin_actions") == 1 and db.committed == 1
+    assert db.count("INSERT INTO pending_channel_posts") == 1
+
+
 def test_the_ack_releases_leases_by_event_and_by_id():
     src = _src(main.internal_pc_events_ack)
     assert "event_ids && CAST(:ids AS bigint[])" in src and "leases" in src
@@ -774,20 +804,21 @@ def _sub(**over):
     return row
 
 
-def _lease_db(steam="765", got=True, sub=None, depicts=True, events=(3, 4), held=True):
+def _lease_db(steam="765", got=True, sub=None, depicts=True, events=(3, 4), held=True, pullers=("766",)):
     """`events`: the ids the named-events read answers with (each pulled by "766" from the subject
     "765"); `held`: the SHARED try-lock on the other party (r7 H2). The shared key is listed before
     the exclusive one: the scripted answer is the first key the statement contains."""
     lease_id = uuid4()
     return Scripted({
         "SELECT steam_id FROM players": [[{"steam_id": steam}] if steam else []],
-        "pg_try_advisory_xact_lock_shared": [[{"held": held}]],
+        "pg_try_advisory_xact_lock_shared": [[{"held": h}] for h in (held if isinstance(held, tuple) else (held,))],
         "pg_try_advisory_xact_lock": [[{"got": got}]],
         "AS subject_banned": [[sub if sub is not None else _sub()]],
         # the print named must depict the subject named
         "FROM pc_prints pr JOIN pc_cards c": [[{"one": 1}] if depicts else []],
         # every named event must resolve, and names its two parties (r7 H1/H2)
-        "SELECT e.id, pl.steam_id AS puller": [[{"id": i, "puller": "766", "subject": steam} for i in events]],
+        "SELECT e.id, pl.steam_id AS puller": [[{"id": i, "puller": pullers[k % len(pullers)], "subject": steam}
+                                                for k, i in enumerate(events)]],
         "INSERT INTO pc_delivery_leases": [[{"id": lease_id, "until": NOW + timedelta(seconds=60)}]],
     }), lease_id
 
@@ -849,6 +880,23 @@ def test_lease_acquire_refuses_a_named_event_that_is_gone_and_a_party_that_is_he
     db, _ = _lease_db()
     _run(main.internal_pc_lease({"subject_ref": str(PID)}, "k", db))
     assert db.count("SELECT e.id, pl.steam_id AS puller") == 0 and db.count("pg_try_advisory_xact_lock_shared") == 0
+
+
+def test_lease_acquire_try_locks_every_party_in_order_and_stops_at_the_first_one_held(monkeypatch):
+    """r8 (tests, 2026-09-13): two pullers of the named events -> two SHARED try-locks in canonical
+    order; the second one held by a writer is 409 after both were tried and the lease is never written;
+    both free, the lease is written after both."""
+    monkeypatch.setattr(main, "_require_internal_key", lambda k: None)
+    db, _ = _lease_db(pullers=("767", "766"), held=(True, False))
+    with pytest.raises(HTTPException) as ex:
+        _run(main.internal_pc_lease({"subject_ref": str(PID), "event_ids": [3, 4]}, "k", db))
+    assert ex.value.status_code == 409
+    assert [p["sid"] for q, p in db.log if "pg_try_advisory_xact_lock_shared" in q] == ["766", "767"]
+    assert db.count("INSERT INTO pc_delivery_leases") == 0
+    db, _ = _lease_db(pullers=("767", "766"), held=(True, True))
+    _run(main.internal_pc_lease({"subject_ref": str(PID), "event_ids": [3, 4]}, "k", db))
+    assert [p["sid"] for q, p in db.log if "pg_try_advisory_xact_lock_shared" in q] == ["766", "767"]
+    assert db.count("INSERT INTO pc_delivery_leases") == 1
 
 
 def test_lease_acquire_answers_409_subject_busy_when_the_identity_is_held(monkeypatch):

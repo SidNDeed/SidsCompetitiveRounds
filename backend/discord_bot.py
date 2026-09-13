@@ -2,6 +2,13 @@
 Competitive ROUNDS Discord Bot
 Environment: DISCORD_TOKEN, API_BASE_URL, LEADERBOARD_CHANNEL, SERIES_LOG_CHANNEL
 """
+# This process's generation, printed before anything else (the imports below
+# take seconds): the deploy train's witness binds the ready line to the process
+# that printed it -- a boot line after the last ready line in the log tail is a
+# newer process that has not reached ready (r8 M3). Its only job is to be probed.
+import uuid as _gen_uuid
+_BOT_GEN = _gen_uuid.uuid4().hex[:12]
+print("[BOT-BOOT] gen=" + _BOT_GEN, flush=True)
 import os, asyncio, aiohttp, discord, json, io, threading, re, time
 import random, ssl as ssl_mod
 import urllib.parse
@@ -420,7 +427,7 @@ async def on_ready():
     # The deploy train's witness (r6 M6): its only job is to be probed. The
     # stamp binds the line to THIS process (r7 M2): a retained log tail can
     # carry an earlier incarnation's line after a crash-restart.
-    print("[BOT-READY] " + str(bot.user) + " -- loops started at " + datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    print("[BOT-READY] " + str(bot.user) + " -- gen=" + _BOT_GEN + " -- loops started at " + datetime.now(timezone.utc).isoformat(timespec="seconds"))
 
 
 async def backfill_discord_usernames():
@@ -8671,13 +8678,18 @@ async def cmd_pc_card(ctx, member: discord.Member = None):
     # card as it was read.
     face, lease = None, (None, None)
     if body.get("player_ref"):
+        # The preview is drawn from the SAME snapshot the embed was read from
+        # (r7 L1): a daily rotation between the two reads cannot mix ranks. A
+        # body without a usable pin (an older api during a rolling deploy)
+        # posts nothing -- never one snapshot's text with another's face (r8
+        # L5); checked before the lease, so none is taken for nothing.
+        snap_id = body.get("snapshot_id")
+        if isinstance(snap_id, bool) or not isinstance(snap_id, int) or snap_id < 1:
+            await ctx.send("❌ That card isn't available right now — try again in a moment."); return
         lease = await _pc_lease(body["player_ref"])
         if not lease[0]:
             await ctx.send("❌ That card isn't available right now — try again in a moment."); return
-        # The preview is drawn from the SAME snapshot the embed was read from
-        # (r7 L1): a daily rotation between the two reads cannot mix ranks.
-        snap = {"snapshot_id": int(body["snapshot_id"])} if body.get("snapshot_id") is not None else None
-        st, face = await _pc_api_bytes(f"/internal/pc/face/preview/{body['player_ref']}/{_pc_locale_of(ctx)}", params=snap)
+        st, face = await _pc_api_bytes(f"/internal/pc/face/preview/{body['player_ref']}/{_pc_locale_of(ctx)}", params={"snapshot_id": snap_id})
         if st != 200:
             face = None
     if not await _pc_send_face(ctx.send, embed=embed, face=face, lease=lease, require_lease=bool(lease[0])):

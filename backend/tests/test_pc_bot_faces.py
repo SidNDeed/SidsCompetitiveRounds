@@ -244,7 +244,8 @@ def test_collection_and_card_lease_the_subject_and_release_on_the_text_only_path
     # /card has NO text-only path since r6 (H1/M2): no lease, no card -- a
     # refusal before the send, and the send itself requires the lease
     assert card.index("if not lease[0]:") < card.index("await _pc_send_face(ctx.send")
-    assert "require_lease=bool(lease[0])" in card and card.count("That card isn't available right now") == 2
+    # three refusals say the same thing: no usable snapshot pin (r8 L5), no lease, the send failed
+    assert "require_lease=bool(lease[0])" in card and card.count("That card isn't available right now") == 3
     assert "await _pc_lease_release(lease[0])" not in card
 
 
@@ -285,12 +286,12 @@ def test_the_locale_is_the_interaction_primary_subtag():
     assert 'split("-")[0].lower()' in src and 'return primary or "en"' in src
 
 
-def _card_ns(lease, preview_status=404):
-    calls = {"api": [], "bytes": [], "sent": [], "said": []}
+def _card_ns(lease, preview_status=404, body=None):
+    calls = {"api": [], "bytes": [], "sent": [], "said": [], "lease": []}
 
     async def _api(method, path, params=None, timeout=8.0, payload=None):
         calls["api"].append((method, path, params))
-        return 200, {"player_ref": "11111111-1111-4111-8111-111111111111", "subject_name": "Ace", "rarity": "rare",
+        return 200, body if body is not None else {"player_ref": "11111111-1111-4111-8111-111111111111", "subject_name": "Ace", "rarity": "rare",
                      "pool_rank": 3, "rating": 1500, "peak_rating": 1600, "board_rank": 7, "snapshot_id": 41,
                      "in_circulation": {"prints": 2, "holders": 2, "foil": 0, "signed": 0}}
 
@@ -299,6 +300,7 @@ def _card_ns(lease, preview_status=404):
         return preview_status, (b"png" if preview_status == 200 else None)
 
     async def _lease(ref, print_id=None, event_ids=None):
+        calls["lease"].append(ref)
         return lease
 
     async def _send(sender, content=None, embed=None, face=None, lease=(None, None), filename="card.png", require_lease=False):
@@ -347,3 +349,19 @@ def test_the_card_command_draws_its_preview_from_the_embeds_snapshot_and_posts_o
     assert calls["sent"] == [(True, b"png", "L2", True)]
     calls = _run_card(_card_ns(lease=(None, None, True)))
     assert calls["bytes"] == [] and calls["sent"] == [] and len(calls["said"]) == 1 and "isn't available" in calls["said"][0]
+
+
+def test_the_card_command_posts_nothing_without_a_usable_snapshot_pin():
+    """r8 L5 (2026-09-13), executed: a body without `snapshot_id` (an older api during a rolling deploy),
+    or with one that is not a positive integer, posts nothing and says so -- never one snapshot's text
+    with another's face -- and takes no lease for it; a pinned body posts as before."""
+    base = {"player_ref": "11111111-1111-4111-8111-111111111111", "subject_name": "Ace", "rarity": "rare",
+            "pool_rank": 3, "rating": 1500, "peak_rating": 1600, "board_rank": 7,
+            "in_circulation": {"prints": 2, "holders": 2, "foil": 0, "signed": 0}}
+    for pin in ({}, {"snapshot_id": None}, {"snapshot_id": "41"}, {"snapshot_id": 0}, {"snapshot_id": True}):
+        calls = _run_card(_card_ns(lease=("L1", time.monotonic() + 30, False), preview_status=200, body=dict(base, **pin)))
+        assert calls["lease"] == [] and calls["bytes"] == [] and calls["sent"] == [], pin
+        assert len(calls["said"]) == 1 and "isn't available" in calls["said"][0], pin
+    calls = _run_card(_card_ns(lease=("L1", time.monotonic() + 30, False), preview_status=200, body=dict(base, snapshot_id=41)))
+    assert calls["lease"] == ["11111111-1111-4111-8111-111111111111"] and calls["sent"] == [(True, b"png", "L1", True)]
+    assert calls["bytes"] == [("/internal/pc/face/preview/11111111-1111-4111-8111-111111111111/en", {"snapshot_id": 41})]

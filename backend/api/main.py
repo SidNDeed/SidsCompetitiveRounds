@@ -26301,6 +26301,17 @@ _PC_LEASE_NAMING_SQL = """
 """
 
 
+# How many writers may be WAITING in _pc_lease_drain at once, per api process
+# (one process: the Dockerfile runs a single worker). Each wait holds its pool
+# connection for up to LEASE_SECONDS + 5; the pool is 20 + 10 (database.py),
+# and the bot's lease release, the acks and every other request must always
+# find one (r8 M1): a fifth writer refuses and retries instead of holding a
+# fifth connection. Counted here, not in a Semaphore: the excess must refuse,
+# not queue -- a queued writer would hold its connection while it queued.
+_PC_DRAIN_SLOTS = 4
+_pc_drains_waiting = 0
+
+
 async def _pc_lease_drain(db: AsyncSession, pid: str) -> float:
     """Wait, under the player's identity lock, until no live delivery lease
     names them -- as its subject or as a party of an event it names -- and
@@ -26311,14 +26322,30 @@ async def _pc_lease_drain(db: AsyncSession, pid: str) -> float:
     (r7 H2). Held meanwhile: the identity lock, which refuses every new lease
     naming the player (the acquire try-locks each party). Bounded by the
     lease's own life: past `until` a lease authorises nothing, so the wait
-    ends there even for a lease the bot never released."""
+    ends there even for a lease the bot never released. At most
+    `_PC_DRAIN_SLOTS` writers wait at once: one that would wait beyond that
+    refuses with 503 `pc_wait_busy` (retry_after 5) BEFORE it sleeps -- its
+    transaction ends with the request, so it holds no connection meanwhile
+    and never commits unwaited (r8 M1); a writer that finds nothing live
+    takes no slot."""
+    global _pc_drains_waiting
     started = time.monotonic()
     limit = float(_pcp.LEASE_SECONDS) + 5.0
-    while True:
-        left = (await db.execute(text(_PC_LEASE_NAMING_SQL), {"pid": pid})).scalar_one_or_none()
-        if left is None or time.monotonic() - started > limit:
-            return time.monotonic() - started
-        await asyncio.sleep(min(0.25, max(0.05, float(left))))
+    admitted = False
+    try:
+        while True:
+            left = (await db.execute(text(_PC_LEASE_NAMING_SQL), {"pid": pid})).scalar_one_or_none()
+            if left is None or time.monotonic() - started > limit:
+                return time.monotonic() - started
+            if not admitted:
+                if _pc_drains_waiting >= _PC_DRAIN_SLOTS:
+                    raise HTTPException(status_code=503, detail={"error": "pc_wait_busy", "retry_after": 5})
+                _pc_drains_waiting += 1   # no await between the check and the count: one process, one loop
+                admitted = True
+            await asyncio.sleep(min(0.25, max(0.05, float(left))))
+    finally:
+        if admitted:
+            _pc_drains_waiting -= 1
 
 
 async def _pc_lock_portrait_blobs(db: AsyncSession, pid: str, *extra):
@@ -35325,6 +35352,15 @@ async def _ban_rate_gate_or_raise(db: AsyncSession, admin_steam_id: str, target_
     # two CONCURRENT bans both count 4 and both commit (6 in the window, no
     # 429). Serialize the whole gate+insert per admin with a transaction-scoped
     # advisory lock (#207's pattern: lock a VALUE that exists before any row).
+    # A repeat ban -- the retry of a ban whose caller timed out while the
+    # server waited for a Discord line in flight (D4), or any second ban of
+    # an active target -- is the no-op the core answers `already_banned`: it
+    # consumes no budget (the count is of player_bans rows) and is not
+    # refused either (r8 M2). Read here, behind every caller's identity lock
+    # on the target: the ban that landed is committed and visible, so the
+    # retry never counts as a fifth against the admin.
+    if await _is_banned(db, target_steam_id) is not None:
+        return
     await db.execute(text(
         "SELECT pg_advisory_xact_lock(hashtext('ban-rate:' || CAST(:adm AS VARCHAR)))"
     ), {"adm": admin_steam_id})

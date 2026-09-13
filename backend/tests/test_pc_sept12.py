@@ -419,6 +419,7 @@ def test_the_extracted_source_registry_matches_the_client_sources_byte_for_byte(
     import importlib.util
     import json
     import pathlib
+    import re
     root = pathlib.Path(__file__).resolve().parents[2]
     spec = importlib.util.spec_from_file_location("i18n_extract_under_test", str(root / "tools" / "i18n_extract.py"))
     ex = importlib.util.module_from_spec(spec)
@@ -429,7 +430,8 @@ def test_the_extracted_source_registry_matches_the_client_sources_byte_for_byte(
     assert fresh == on_disk
     keys = (root / "plugin" / "I18nSourceKeys.g.cs").read_text(encoding="utf-8")
     entries = sorted(found.keys())
-    assert keys.count('\n            "') == len(entries)
-    assert len(set(entries)) == len(entries)
+    listed = re.findall(r'\n            "((?:[^"\\]|\\.)*)",', keys)
+    assert len(listed) == len(entries)
+    assert len(set(listed)) == len(listed)   # the generated file lists each key once (r8: a dict's keys compared with themselves)
     for s in entries:   # every one (r7: sampling the ends let a middle substitution through)
         assert '"' + ex.cs_escape(s) + '",' in keys

@@ -1120,3 +1120,32 @@ def test_the_writers_wait_for_the_lines_in_flight_naming_the_player(monkeypatch)
     # bounded by the lease's life: a lease the bot never releases ends the wait by expiry
     src = inspect.getsource(main._pc_lease_drain)
     assert "limit = float(_pcp.LEASE_SECONDS) + 5.0" in src and "time.monotonic() - started > limit" in src
+
+
+def test_the_drain_admits_four_waits_and_refuses_the_fifth_before_it_holds_a_connection():
+    """r8 M1 (2026-09-13), executed on the real event loop: five writers find a live lease at once;
+    four wait (each holding its own connection for the lease's remaining life), the fifth is refused
+    503 pc_wait_busy at its first read, before any sleep -- the pool (20 + 10) keeps room for the bot's
+    release and every other request; a writer that finds nothing live takes no slot while the four
+    are full; every slot comes back when its wait ends, so a later writer is admitted."""
+    from fastapi import HTTPException
+
+    async def scenario():
+        sleepers = [Scripted({"MAX(l.until)": [0.06, None]}) for _ in range(4)]
+        idle = Scripted({"MAX(l.until)": [None]})
+        fifth = Scripted({"MAX(l.until)": [0.06, None]})
+        results = await asyncio.gather(*[main._pc_lease_drain(db, str(PID)) for db in sleepers],
+                                       main._pc_lease_drain(idle, str(PID)),
+                                       main._pc_lease_drain(fifth, str(PID)), return_exceptions=True)
+        after = await main._pc_lease_drain(Scripted({"MAX(l.until)": [0.06, None]}), str(PID))
+        return sleepers, idle, fifth, results, after
+
+    assert main._PC_DRAIN_SLOTS == 4 and main._pc_drains_waiting == 0
+    sleepers, idle, fifth, results, after = _run(scenario())
+    assert all(isinstance(r, float) for r in results[:5]), results
+    assert all(db.count("MAX(l.until)") == 2 for db in sleepers) and idle.count("MAX(l.until)") == 1
+    refused = results[5]
+    assert isinstance(refused, HTTPException) and refused.status_code == 503, refused
+    assert refused.detail == {"error": "pc_wait_busy", "retry_after": 5}
+    assert fifth.count("MAX(l.until)") == 1   # refused at its first read, before any sleep
+    assert isinstance(after, float) and main._pc_drains_waiting == 0

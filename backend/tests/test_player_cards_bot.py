@@ -111,10 +111,14 @@ def test_every_line_that_names_people_is_sent_under_a_live_lease():
     # tell this incarnation's line from one an earlier process left in the log tail (r7 M2), and the LAST
     # statement of on_ready: after every loop start and every task
     ready = _fn(BOT_SRC, "on_ready")
-    marker = 'print("[BOT-READY] " + str(bot.user) + " -- loops started at " + datetime.now(timezone.utc).isoformat(timespec="seconds"))'
+    marker = 'print("[BOT-READY] " + str(bot.user) + " -- gen=" + _BOT_GEN + " -- loops started at " + datetime.now(timezone.utc).isoformat(timespec="seconds"))'
     assert marker in ready
     assert ready.rstrip().splitlines()[-1].strip() == marker
     assert ready.rindex(".start()") < ready.index(marker) and ready.rindex("create_task(") < ready.index(marker)
+    # the process generation (r8 M3): drawn and printed before the imports, first thing the process does,
+    # and repeated on the ready line, so a boot line after the last ready line means a newer process
+    boot = 'print("[BOT-BOOT] gen=" + _BOT_GEN, flush=True)'
+    assert BOT_SRC.index("_BOT_GEN = _gen_uuid.uuid4().hex[:12]") < BOT_SRC.index(boot) < BOT_SRC.index("import os, asyncio, aiohttp, discord")
 
 
 def test_events_are_grouped_by_the_nested_print_id():
