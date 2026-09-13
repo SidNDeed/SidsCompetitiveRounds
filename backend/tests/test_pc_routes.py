@@ -1300,15 +1300,14 @@ def test_the_card_and_its_preview_read_one_snapshot():
 
 @pytest.mark.parametrize("gone, lookups, admin_w, target_w", [
     ("target", ["pid-1", None], "9", "deleted:abc"),   # the target's deletion committed first
-    ("admin", [None, "pid-9"], "deleted:abc", "1"),    # the admin's did
 ])
 def test_the_unban_persists_the_identities_the_lattice_re_read(monkeypatch, gone, lookups, admin_w, target_w):
     """r10 M1 (2026-09-13), executed: the identities the unban PERSISTS are the ones its locked re-read
     returned -- a participant whose deletion committed before the unban's lock is written as the
     tombstone, on the ban row's unbanned_by and on the audit row -- while the raw target id stays the
-    UPDATE's lookup key (the ban row was written with it) and the answer to the caller. Either
-    participant may be the deleted one (the lookups run in canonical order: the target "1", then the
-    admin "9")."""
+    UPDATE's lookup key (the ban row was written with it) and the answer to the caller. The target may be
+    the deleted one; a deleted ACTOR is refused instead (r11, the next test). The lookups run in canonical
+    order: the target "1", then the admin "9"."""
     async def _admin_ok(*a, **k):
         return None
     monkeypatch.setattr(main, "_require_admin", _admin_ok)
@@ -1328,3 +1327,81 @@ def test_the_unban_persists_the_identities_the_lattice_re_read(monkeypatch, gone
     assert src.index("_mail_identity_to_write(rows, req.target_steam_id)") < src.index("UPDATE player_bans")
     assert '{"admin": admin_w, "sid": req.target_steam_id}' in src
     assert "admin_steam_id=admin_w, action=\"unban\", target_steam_id=target_w" in src
+
+
+def test_the_unban_refuses_an_actor_whose_deletion_committed_first(monkeypatch):
+    """r11 M1/M4 (2026-09-13), executed: the unban's ACTOR must be live -- an admin whose own deletion
+    committed while the unban waited for its lock is re-read as the tombstone and refused 403
+    account_deleted before the UPDATE; nothing is written or committed. (A deleted account does not
+    act; on the ban the row's banned_by references the raw admin_users id.)"""
+    async def _admin_ok(*a, **k):
+        return None
+    monkeypatch.setattr(main, "_require_admin", _admin_ok)
+    db = _UnbanDb({"SELECT id FROM players WHERE steam_id": [None, "pid-9"],
+                   "SELECT id, steam_id, deleted_at FROM players WHERE id = :pid": [
+                       [{"id": "pid-9", "steam_id": "deleted:abc", "deleted_at": "2026-09-13"}]]})
+    with pytest.raises(HTTPException) as ex:
+        _run(main.admin_unban(main._AdminUnbanReq(admin_steam_id="9", target_steam_id="1", hmac_signature="x"), db=db))
+    assert (ex.value.status_code, ex.value.detail) == (403, "account_deleted")
+    assert db.count("UPDATE player_bans") == 0 and db.added == [] and db.committed == 0
+    assert db.count("FOR NO KEY UPDATE") == 1   # refused by the re-read, after the lock
+    src = inspect.getsource(main.admin_unban)
+    assert src.index("_mail_lock_identities(") < src.index("_mail_actor_live_or_raise(rows, req.admin_steam_id)") < src.index("UPDATE player_bans")
+    # the helper itself: a tombstone row refuses, a live row and no row pass
+    with pytest.raises(HTTPException):
+        main._mail_actor_live_or_raise({"9": {"id": "p", "steam_id": "deleted:x", "deleted_at": "2026-09-13"}}, "9")
+    assert main._mail_actor_live_or_raise({"9": {"id": "p", "steam_id": "9", "deleted_at": None}}, "9") is None
+    assert main._mail_actor_live_or_raise({}, "9") is None and main._mail_actor_live_or_raise({"9": None}, "9") is None
+
+
+def test_the_rate_refusal_audits_and_alerts_the_re_read_target_and_looks_up_the_raw_one():
+    """r11 M2 (2026-09-13), executed: the ban-velocity refusal looks the target's ban up, takes the rate
+    lock and counts by the RAW ids, but its audit row and its alert carry the identity the caller's
+    lattice re-read -- the tombstone when the target's deletion committed first; without `target_w`
+    the raw id is written, as before."""
+    db = _GateDb({"FROM player_bans WHERE steam_id": [[]], "COUNT(*) FROM player_bans": [5],
+                  "COUNT(*) FROM admin_actions": [1]})
+    with pytest.raises(HTTPException) as ex:
+        _run(main._ban_rate_gate_or_raise(db, "adm", "tgt", target_w="deleted:abc"))
+    assert ex.value.status_code == 429
+    assert [p["sid"] for sql, p in db.log if "FROM player_bans WHERE steam_id" in sql] == ["tgt"]
+    assert [p["adm"] for sql, p in db.log if "ban-rate:" in sql] == ["adm"]
+    audit = [p for sql, p in db.log if "INSERT INTO admin_actions" in sql]
+    assert len(audit) == 1 and (audit[0]["a"], audit[0]["t"]) == ("adm", "deleted:abc")
+    alert = [p for sql, p in db.log if "INSERT INTO pending_channel_posts" in sql]
+    assert len(alert) == 1 and "`deleted:abc`" in alert[0]["c"] and "`tgt`" not in alert[0]["c"]
+    db = _GateDb({"FROM player_bans WHERE steam_id": [[]], "COUNT(*) FROM player_bans": [5],
+                  "COUNT(*) FROM admin_actions": [1]})
+    with pytest.raises(HTTPException):
+        _run(main._ban_rate_gate_or_raise(db, "adm", "tgt"))
+    assert [p["t"] for sql, p in db.log if "INSERT INTO admin_actions" in sql] == ["tgt"]
+    src = inspect.getsource(main.admin_ban)
+    assert src.index("_mail_actor_live_or_raise(rows, req.admin_steam_id)") < src.index("_ban_rate_gate_or_raise(")
+    assert "target_w=target_w" in src
+
+
+def test_the_ack_executed_releases_by_event_and_by_id_then_marks_posted(monkeypatch):
+    """r11 (2026-09-13), executed on the scripted session: the ack deletes the leases naming any acked
+    event, then the leases it names by id, THEN marks the events posted, and commits once; ids alone,
+    leases alone and neither each do only their part; a non-canonical lease id is refused before any
+    statement."""
+    monkeypatch.setattr(main, "_require_internal_key", lambda key: None)
+    l1, l2 = str(uuid4()), str(uuid4())
+    db = Scripted({"DELETE FROM pc_delivery_leases WHERE event_ids && CAST(:ids AS bigint[])": [[("a",), ("b",)]],
+                   "DELETE FROM pc_delivery_leases WHERE id = ANY(CAST(:ids AS uuid[]))": [[("c",)]],
+                   "UPDATE pc_events SET posted_at = now()": [[(1,), (2,)]]})
+    res = _run(main.internal_pc_events_ack(ids="1,2", leases=l1 + "," + l2, x_internal_key="k", db=db))
+    assert res == {"acked": 2, "released": 3} and db.committed == 1
+    assert _idx(db, "event_ids && CAST(:ids AS bigint[])") < _idx(db, "id = ANY(CAST(:ids AS uuid[]))") < _idx(db, "UPDATE pc_events SET posted_at")
+    assert [p for sql, p in db.log if "id = ANY(CAST(:ids AS uuid[]))" in sql] == [{"ids": [l1, l2]}]
+    assert [p for sql, p in db.log if "event_ids &&" in sql] == [{"ids": [1, 2]}]
+    db = Scripted({"DELETE FROM pc_delivery_leases WHERE id = ANY(CAST(:ids AS uuid[]))": [[("c",)]]})
+    assert _run(main.internal_pc_events_ack(ids="", leases=l1, x_internal_key="k", db=db)) == {"acked": 0, "released": 1}
+    assert db.count("UPDATE pc_events") == 0 and db.count("event_ids &&") == 0 and db.committed == 1
+    db = Scripted({})
+    assert _run(main.internal_pc_events_ack(ids="", leases=None, x_internal_key="k", db=db)) == {"acked": 0, "released": 0}
+    assert db.committed == 0 and db.log == []
+    db = Scripted({})
+    with pytest.raises(HTTPException) as ex:
+        _run(main.internal_pc_events_ack(ids="1", leases="not-a-uuid", x_internal_key="k", db=db))
+    assert ex.value.status_code == 422 and db.log == []

@@ -35361,11 +35361,17 @@ async def admin_list_bans(
     ], "total": int(total), "limit": limit, "offset": offset}
 
 
-async def _ban_rate_gate_or_raise(db: AsyncSession, admin_steam_id: str, target_steam_id: str) -> None:
+async def _ban_rate_gate_or_raise(db: AsyncSession, admin_steam_id: str, target_steam_id: str, *,
+                                  target_w: str | None = None) -> None:
     """The ban-velocity gate, extracted verbatim from admin_ban (Sept 6 item
     b, B-2) so the moderation-case act path runs the SAME gate. On refusal it
     commits its own audit/alert rows and raises 429 — the caller's transaction
-    is over at that point, which is the behaviour the route always had."""
+    is over at that point, which is the behaviour the route always had.
+    `target_w` (review r11): the target identity the caller's lattice re-read
+    -- the tombstone when the target's deletion committed first -- written to
+    the refusal's audit row and alert; the RAW target id stays the key of the
+    ban lookup (the ban row was written with it). The admin is live (the
+    callers refuse a deleted actor), so its raw id is its written id."""
     # Aug 7 item 7: ban-velocity gate — 5+ COMMITTED bans by one admin inside
     # 5 minutes blocks further bans (429) and alerts #scr-admin. Counting
     # player_bans rows (not admin_actions) means already_banned no-ops never
@@ -35383,6 +35389,7 @@ async def _ban_rate_gate_or_raise(db: AsyncSession, admin_steam_id: str, target_
     # retry never counts as a fifth against the admin.
     if await _is_banned(db, target_steam_id) is not None:
         return
+    target_w = target_w or target_steam_id
     await db.execute(text(
         "SELECT pg_advisory_xact_lock(hashtext('ban-rate:' || CAST(:adm AS VARCHAR)))"
     ), {"adm": admin_steam_id})
@@ -35392,7 +35399,7 @@ async def _ban_rate_gate_or_raise(db: AsyncSession, admin_steam_id: str, target_
     ), {"adm": admin_steam_id})).scalar() or 0
     if int(recent_bans) >= 5:
         await _log_admin_action(db, admin_steam_id=admin_steam_id, action="ban_rate_blocked",
-                                target_steam_id=target_steam_id,
+                                target_steam_id=target_w,
                                 details={"recent_bans": int(recent_bans), "window": "5m"})
         # Alert once per burst: only on the FIRST blocked attempt (count==5
         # exactly would miss retries; instead check whether we already posted
@@ -35410,7 +35417,7 @@ async def _ban_rate_gate_or_raise(db: AsyncSession, admin_steam_id: str, target_
                     ), {"ch": "1495392567687250061",
                         "c": f"\N{WARNING SIGN} **Ban rate flag**: admin `{admin_steam_id}` "
                              f"hit {int(recent_bans)} bans in 5 minutes — further bans are "
-                             f"blocked until the window passes. Latest target: `{target_steam_id}`."})
+                             f"blocked until the window passes. Latest target: `{target_w}`."})
             except Exception as ex:
                 print(f"[ADMIN] ban-rate alert queue failed: {ex}")
         await db.commit()
@@ -35545,9 +35552,17 @@ async def admin_ban(req: _AdminBanReq, _slot=Depends(_pc_writer_slot), db: Async
     # admin wait on each other until PostgreSQL aborts one. Neither row has
     # to exist here: a ban may pre-date the account, and the admin's
     # authority is admin_users membership — the rows are locked when present.
-    await _mail_lock_identities(db, req.admin_steam_id, req.target_steam_id,
-                                optional=(req.admin_steam_id, req.target_steam_id))
-    await _ban_rate_gate_or_raise(db, req.admin_steam_id, req.target_steam_id)
+    rows = await _mail_lock_identities(db, req.admin_steam_id, req.target_steam_id,
+                                       optional=(req.admin_steam_id, req.target_steam_id))
+    # The actor must be live (review r11): the ban row's banned_by references
+    # the raw admin_users id, so the actor written is the raw id -- and only
+    # a live actor's re-read id IS its raw id. The target is looked up,
+    # rate-locked and banned by its RAW id (the ban row's key: a
+    # re-registration stays banned) and audited by the identity the re-read
+    # returned.
+    _mail_actor_live_or_raise(rows, req.admin_steam_id)
+    target_w = _mail_identity_to_write(rows, req.target_steam_id)
+    await _ban_rate_gate_or_raise(db, req.admin_steam_id, req.target_steam_id, target_w=target_w)
     result = await _apply_ban_core(db, admin_steam_id=req.admin_steam_id,
                                    target_steam_id=req.target_steam_id, reason=req.reason)
     await db.commit()
@@ -35609,9 +35624,11 @@ async def admin_unban(req: _AdminUnbanReq, _slot=Depends(_pc_writer_slot), db: A
     # lines in flight, so it must not hold a connection while it queues.
     rows = await _mail_lock_identities(db, req.admin_steam_id, req.target_steam_id,
                                        optional=(req.admin_steam_id, req.target_steam_id))
-    # The identities this transaction PERSISTS are the re-read ones -- the
-    # tombstone, if a deletion committed first (r10 M1); the raw target id is
+    # The actor must be live (review r11: a deleted account does not act); the
+    # identities this transaction PERSISTS are the re-read ones -- the target's
+    # tombstone, if its deletion committed first (r10 M1); the raw target id is
     # the lookup key only: the ban row was written with it.
+    _mail_actor_live_or_raise(rows, req.admin_steam_id)
     admin_w = _mail_identity_to_write(rows, req.admin_steam_id)
     target_w = _mail_identity_to_write(rows, req.target_steam_id)
     res = await db.execute(text(
@@ -53323,6 +53340,19 @@ def _mail_identity_to_write(rows: dict, steam_id: str) -> str:
     return str((row or {}).get("steam_id") or steam_id)
 
 
+def _mail_actor_live_or_raise(rows: dict, steam_id: str) -> None:
+    """The ACTOR of a privileged write must be live (review r11): an actor
+    whose own deletion committed while this transaction waited for its lock
+    was re-read as the tombstone -- `player_bans.banned_by_steam_id`
+    references the raw admin_users id, and a deleted account does not act.
+    Refused 403 account_deleted, as _mail_lock_identities refuses an actor
+    the deletion ledger already knows; an actor with no row at all (an admin
+    acting on admin_users membership) passes. Called before the first write."""
+    row = (rows or {}).get(str(steam_id))
+    if row is not None and row.get("deleted_at") is not None:
+        raise HTTPException(status_code=403, detail="account_deleted")
+
+
 async def _mail_lock_admin(db: AsyncSession, admin_steam_id: str, *others: str,
                            missing: dict | None = None, optional=(), handles: dict | None = None) -> dict:
     """The admin routes' entry into the lattice: lock the admin and every
@@ -54073,7 +54103,9 @@ async def _moderation_case_act(db: AsyncSession, *, case_id: str, actor_steam_id
     # actor's authority is the grant (_chat_moderator_scope), not a players
     # row: an admin acting through the HMAC route need not have one. A
     # subject deleted meanwhile refuses mute/ban (nothing to write) and lets
-    # dismiss close the case with the tombstone as its target.
+    # dismiss close the case with the tombstone as its target. An ACTOR deleted
+    # meanwhile is refused (review r11): a deleted account does not act, and
+    # the ban row's banned_by references the raw admin_users id.
     subject_pre = (await db.execute(text(
         "SELECT p.id AS subject_id, p.steam_id AS subject_sid"
         "  FROM moderation_cases c JOIN players p ON p.id = c.subject_player_id"
@@ -54086,6 +54118,7 @@ async def _moderation_case_act(db: AsyncSession, *, case_id: str, actor_steam_id
     rows = await _mail_lock_identities(
         db, actor_steam_id, subject_sid_pre, missing={subject_sid_pre: (400, "subject_deleted")},
         optional=optional, handles={subject_sid_pre: subject_pre["subject_id"]})
+    _mail_actor_live_or_raise(rows, actor_steam_id)
     actor_w = _mail_identity_to_write(rows, actor_steam_id)
     subject_w = _mail_identity_to_write(rows, subject_sid_pre)
     role, _langs = await _chat_moderator_scope(db, actor_steam_id)
@@ -54129,7 +54162,7 @@ async def _moderation_case_act(db: AsyncSession, *, case_id: str, actor_steam_id
                      "moderator_role": role, "via": via, "case_id": str(cid)})
         resolution, new_status = f"mute:{h}h", "resolved"
     elif action == "ban":
-        await _ban_rate_gate_or_raise(db, actor_steam_id, subject_sid)
+        await _ban_rate_gate_or_raise(db, actor_steam_id, subject_sid_pre, target_w=subject_sid)
         res = await _apply_ban_core(db, admin_steam_id=actor_w,
                                     target_steam_id=subject_sid, reason=reason_txt)
         resolution = "ban" if res.get("status") == "banned" else "ban:already_banned"

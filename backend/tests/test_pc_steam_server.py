@@ -1185,12 +1185,21 @@ def test_every_route_that_can_wait_for_the_lines_in_flight_declares_the_gate():
     gated["admin_unban"] = inspect.signature(main.admin_unban).parameters.get("_slot")   # the listed exception (r10 M3)
     for name, param in gated.items():
         assert param is not None and param.default.dependency is main._pc_writer_slot, name
-        names = list(inspect.signature(getattr(main, name)).parameters)
+        sig = inspect.signature(getattr(main, name))
+        names = list(sig.parameters)
         assert names.index("_slot") < names.index("db"), name   # the slot before the session (r10 M2)
-    # one gate per process because the api runs ONE uvicorn worker (docker-compose.yml)
+        assert sig.parameters["db"].default.dependency is main.get_db, name   # the session it outlives is the main pool's (r11)
+    # one gate per process because the api runs ONE uvicorn worker: passed EXPLICITLY on the compose
+    # command (it overrides the image's CMD), so WEB_CONCURRENCY -- uvicorn's default for the count when
+    # the flag is absent -- cannot raise it either (r11 L7)
     compose = (Path(__file__).resolve().parents[1] / "docker-compose.yml").read_text(encoding="utf-8")
     cmd = [l for l in compose.splitlines() if "uvicorn" in l and "main:app" in l]
-    assert len(cmd) == 1 and "--workers" not in cmd[0] and "gunicorn" not in compose
+    assert len(cmd) == 1 and '"--workers", "1"' in cmd[0] and "gunicorn" not in compose
+    dockerfile = (Path(__file__).resolve().parents[1] / "api" / "Dockerfile").read_text(encoding="utf-8")
+    assert '"--workers", "1"' in dockerfile
+    # ...and no environment entry in either file names the variable (the comments may)
+    assert not any("WEB_CONCURRENCY" in l and not l.lstrip().startswith("#")
+                   for l in (compose + "\n" + dockerfile).splitlines())
 
 
 def test_the_slot_outlives_the_session_on_the_real_dependency_stack():
@@ -1223,14 +1232,32 @@ def test_the_slot_outlives_the_session_on_the_real_dependency_stack():
         trace.append(("handler", main._pc_writer_gate()._value))
         raise HTTPException(status_code=409, detail="the handler ended by raising")
 
+    @app.get("/returns")
+    async def returns(_slot=Depends(main._pc_writer_slot), db=Depends(fake_db)):
+        trace.append(("handler", main._pc_writer_gate()._value))
+        return {"ok": True}
+
+    @app.get("/fails")
+    async def fails(_slot=Depends(main._pc_writer_slot), db=Depends(fake_db)):
+        trace.append(("handler", main._pc_writer_gate()._value))
+        raise RuntimeError("the handler failed")
+
     def settle():
         for _ in range(100):
             if any(k == "close" for k, _v in trace):
                 return
             time.sleep(0.02)
 
-    with TestClient(app) as client:
+    with TestClient(app, raise_server_exceptions=False) as client:
         assert client.get("/gated").status_code == 409
+        settle()
+        assert trace == [("open", 3), ("handler", 3), ("close", 3)], trace
+        trace.clear()
+        assert client.get("/returns").status_code == 200                    # a normal return (r11)
+        settle()
+        assert trace == [("open", 3), ("handler", 3), ("close", 3)], trace
+        trace.clear()
+        assert client.get("/fails").status_code == 500                      # an arbitrary handler exception (r11)
         settle()
         assert trace == [("open", 3), ("handler", 3), ("close", 3)], trace
         trace.clear()
@@ -1270,3 +1297,7 @@ def test_the_lease_release_and_the_ack_run_on_the_reserved_pool():
     src = inspect.getsource(database.get_release_db)
     assert "release_session()" in src and "await session.close()" in src
     assert "release_session = async_sessionmaker(release_engine" in inspect.getsource(database)
+    # the bot issues at most as many lease-ending requests as the pool holds (r11 L5): its gate is the pool's size
+    bot_src = (Path(__file__).resolve().parents[1] / "discord_bot.py").read_text(encoding="utf-8")
+    size = database.release_engine.pool.size() + database.release_engine.pool._max_overflow
+    assert "_PC_RELEASE_SLOTS = %d\n" % size in bot_src

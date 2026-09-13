@@ -415,6 +415,9 @@ def test_every_other_writer_of_the_bots_output_is_one_line_too():
     line = fmt.format(rec)
     assert "\n" not in line and "\r" not in line
     assert "Traceback" in line and "Ignoring exception in command card" in line and "[BOT-BOOT] gen=deadbeefcafe" in line
+    rec.stack_info = "Stack (most recent call last):\n  File x\n[BOT-READY] y -- gen=zz -- loops started at 2026-09-13T00:00:00+00:00"
+    line = fmt.format(rec)                                                    # stack_info is inside the flattened string too (r11)
+    assert "\n" not in line and "\r" not in line and "Stack (most recent call last)" in line
     # the excepthook, through the print flattener
     p = re.search(r"^def _one_line_print\(.*?\n(?=\n)", BOT_SRC, re.S | re.M)
     h = re.search(r"^def _one_line_excepthook\(.*?\n(?=\n)", BOT_SRC, re.S | re.M)
@@ -429,6 +432,19 @@ def test_every_other_writer_of_the_bots_output_is_one_line_too():
         ns2["_one_line_excepthook"](*sys.exc_info())
     assert len(out) == 1 and out[0][1] == {"file": sys.stderr, "flush": True}
     assert "\n" not in out[0][0][0] and "\r" not in out[0][0][0] and "Traceback" in out[0][0][0]
+    # a thread's unhandled exception (r11 L6): threading.excepthook delegates to the same hook
+    t = re.search(r"^def _one_line_thread_excepthook\(.*?\n(?=\n)", BOT_SRC, re.S | re.M)
+    assert t, "the thread hook"
+    exec(compile(t.group(0), "<discord_bot>", "exec"), ns2)
+    try:
+        raise RuntimeError(quoted)
+    except RuntimeError:
+        et, ev, tb = sys.exc_info()
+    ns2["_one_line_thread_excepthook"](SimpleNamespace(exc_type=et, exc_value=ev, exc_traceback=tb, thread=None))
+    assert len(out) == 2 and out[1][1] == {"file": sys.stderr, "flush": True}
+    assert "\n" not in out[1][0][0] and "\r" not in out[1][0][0] and "Traceback" in out[1][0][0]
+    assert BOT_SRC.count("_gen_threading.excepthook = _one_line_thread_excepthook") == 1
+    assert BOT_SRC.index("_gen_threading.excepthook = _one_line_thread_excepthook") < BOT_SRC.index("import os, asyncio, aiohttp, discord")
     # the wiring: the root logger's handler formatted by it, the hook and the warnings capture installed
     # before the imports, and one run site
     assert BOT_SRC.count("bot.run(") == 1
@@ -438,3 +454,33 @@ def test_every_other_writer_of_the_bots_output_is_one_line_too():
                  "_gen_logging.captureWarnings(True)"):
         assert BOT_SRC.count(stmt) == 1 and BOT_SRC.index(stmt) < imports, stmt
     assert "def format(self, record):" in m.group(0) and ".replace(\"\\r\", \" \").replace(\"\\n\", \" \")" in m.group(0)
+
+
+def test_the_bot_bounds_its_lease_ending_requests_to_the_apis_reserved_pool():
+    """r11 L5 (2026-09-13), executed: the lease release and the events ack run under ONE Semaphore of
+    five permits -- the size of the api's reserved pool (3 + 2, database.release_engine; pinned equal
+    in test_pc_steam_server) -- so a burst of releases waits in the bot for a DELETE to finish
+    (milliseconds), never in the api for a pool connection (30 s); the ack takes the same permit."""
+    assert re.search(r"^_PC_RELEASE_SLOTS = 5$", BOT_SRC, re.M) and "_pc_release_gate = asyncio.Semaphore(_PC_RELEASE_SLOTS)" in BOT_SRC
+    rel = _fn(BOT_SRC, "_pc_lease_release")
+    assert "async with _pc_release_gate:" in rel
+    ack_at = BOT_SRC.index('"/internal/pc/events/ack"')
+    assert "async with _pc_release_gate:" in BOT_SRC[ack_at - 120:ack_at]
+    assert BOT_SRC.count("async with _pc_release_gate:") == 2
+    running, peak = 0, 0
+
+    async def fake_api(method, path, params=None, timeout=8.0, payload=None):
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await asyncio.sleep(0.01)
+        running -= 1
+        return 200, {}
+    ns = {"asyncio": asyncio, "_pc_api": fake_api, "_pc_release_gate": asyncio.Semaphore(5)}
+    exec(compile(rel, "<discord_bot>", "exec"), ns)
+
+    async def burst():
+        await asyncio.gather(*[ns["_pc_lease_release"]("L%d" % i) for i in range(12)])
+        await ns["_pc_lease_release"](None)
+    asyncio.run(burst())
+    assert peak == 5

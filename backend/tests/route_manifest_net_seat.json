@@ -88,7 +88,7 @@
           ],
           "main",
           "admin_ban",
-          "33f0f0ba9b2270816a2693d7e1562cf98bf5dac3"
+          "c3c3f6972ddb81a0e869525350a7e4339a547256"
         ],
         [
           "/api/v1/admin/banned-users",
@@ -358,7 +358,7 @@
           ],
           "main",
           "admin_unban",
-          "63338a124bcd893bed55c7ee30bc3643d7a7a746"
+          "8a39d77caf2110409161f3bc30da12b777180e6c"
         ],
         [
           "/api/v1/bug-reports",
@@ -2846,7 +2846,7 @@
           ],
           "main",
           "admin_moderation_case_act",
-          "29fd3489b4698f6b4e1216273a584a8f6d37dccc"
+          "b14e1a8e7535b8440af82b7eb115ece86efda01f"
         ],
         [
           "/api/v1/admin/moderation-cases/{case_id}/notified",
@@ -2873,7 +2873,7 @@
           ],
           "main",
           "internal_moderation_case_act",
-          "83d575f10e813445a2bd46c5a7382f84f2736289"
+          "0ef3759681698bf64547c9ea3130c9a3d0687367"
         ],
         [
           "/api/v1/internal/moderation-cases/{case_id}/notified",

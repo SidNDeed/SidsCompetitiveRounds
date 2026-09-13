@@ -1538,6 +1538,10 @@ def _lattice_world(route):
         db.add_player(ADMIN_SID, discord_id="d-admin")
         db.admins.add(ADMIN_SID)
         actor, target = ADMIN_SID, A_SID
+    if route == "ban":
+        db.add_player(ADMIN_SID, discord_id="d-admin")
+        db.admins.add(ADMIN_SID)
+        actor, target = ADMIN_SID, A_SID
     db.statements.clear()
     db.locks.clear()
     db.commits = 0
@@ -1577,6 +1581,9 @@ def _lattice_coro(db, route, orig, case_id):
         return main.admin_moderation_case_act(case_id, main._AdminModCaseActReq(
             admin_steam_id=ADMIN_SID, hmac_signature=_sign(ADMIN_SID, "modcase_act", case_id),
             action="dismiss", reason="b"), db=db)
+    if route == "ban":
+        return main.admin_ban(main._AdminBanReq(admin_steam_id=ADMIN_SID, target_steam_id=A_SID, reason="x",
+                                                hmac_signature=_sign(ADMIN_SID, "ban", A_SID)), db=db)
     raise AssertionError(route)
 
 
@@ -1956,9 +1963,9 @@ def test_migration_300_matches_the_orm_and_the_readers():
 
 _LATTICE_TOMBSTONED = [  # route, whose row the racing deletion SCRUBS: the route completes and writes the tombstone it re-read
     ("grant", "actor"), ("revoke", "actor"), ("revoke", "target"),
-    ("act_mute", "actor"), ("act_dismiss", "actor"), ("act_dismiss", "target"),
-    ("act_dismiss_hmac", "actor"), ("act_dismiss_hmac", "target"),
-]
+    ("act_dismiss", "target"), ("act_dismiss_hmac", "target"),
+]   # a case act's or a ban's ACTOR scrubbed meanwhile is refused instead (review r11): the next test but one
+_LATTICE_ACTOR_REFUSED = ["act_mute", "act_dismiss", "act_dismiss_hmac", "ban"]
 
 
 @pytest.mark.parametrize("route,victim", _LATTICE_TOMBSTONED, ids=[f"{r}-{v}" for r, v in _LATTICE_TOMBSTONED])
@@ -2178,6 +2185,13 @@ def test_every_ban_path_takes_the_identity_locks_before_the_ban_rate_lock():
     assert "rows = await _mail_lock_identities(" in unban
     assert unban.index("_mail_identity_to_write(rows, req.admin_steam_id)") < unban.index("UPDATE player_bans")
     assert unban.index("_mail_identity_to_write(rows, req.target_steam_id)") < unban.index("UPDATE player_bans")
+    # ...and every ban-family actor must be live after the re-read, before the gate and the writes (r11 M1/M4);
+    # the rate refusal receives the re-read target for its audit and alert (r11 M2)
+    assert src.index("_mail_lock_identities(") < src.index("_mail_actor_live_or_raise(rows, req.admin_steam_id)") < src.index("_ban_rate_gate_or_raise(")
+    assert "target_w=target_w" in src
+    assert act.index("_mail_lock_identities(") < act.index("_mail_actor_live_or_raise(rows, actor_steam_id)") < act.index("_ban_rate_gate_or_raise(")
+    assert "_ban_rate_gate_or_raise(db, actor_steam_id, subject_sid_pre, target_w=subject_sid)" in act
+    assert unban.index("_mail_lock_identities(") < unban.index("_mail_actor_live_or_raise(rows, req.admin_steam_id)") < unban.index("UPDATE player_bans")
 
 
 def test_a_repeat_ban_at_the_velocity_threshold_is_answered_already_banned_by_the_route():
@@ -2288,3 +2302,51 @@ def test_client_selftest_count_and_fingerprint_structure():
     assert fp.count("FpField(sb, ") >= 8 and "'|'" not in fp and '"|"' not in fp
     caller = ui[ui.index("private static string Fingerprint(bool reply, string subj, string body)"):ui.index("internal static string FingerprintOf(")]
     assert "FingerprintOf(reply, cReplyToId, cReplyAll, to, cc, subj, body)" in caller
+
+
+@pytest.mark.parametrize("route", _LATTICE_ACTOR_REFUSED)
+def test_an_actor_whose_deletion_committed_under_the_lock_is_refused(route):
+    """review r11 (2026-09-13): the ACTOR of a case act or a ban is re-read under the lock like every
+    identity; when the actor's own deletion committed while the route waited (the hook fires as the
+    lock is granted), the route is refused 403 account_deleted before its first write -- the ban row's
+    banned_by references the raw admin_users id, and a deleted account does not act. r2's
+    tombstone-audit behaviour stays for the mail admin routes (grant, revoke) and for a deleted SUBJECT."""
+    db, orig, case_id, actor, target = _lattice_world(route)
+    tomb = {}
+
+    def scrub_under_lock(locked):
+        if locked == actor:
+            tomb["v"] = db.scrub(actor)
+    db.on_identity_lock = scrub_under_lock
+    with _admin_secret():
+        exc = _raises(_lattice_coro(db, route, orig, case_id))
+    assert (exc.status_code, exc.detail) == (403, "account_deleted") and "v" in tomb
+    assert db.commits == 0
+    reread_i = next(i for i, s in enumerate(db.statements) if "FROM players WHERE id = :pid FOR NO KEY UPDATE" in s)
+    assert not any(_is_write(s) for s in db.statements[reread_i:])
+    written = json.dumps([db.admin_actions, [c["resolved_by"] for c in db.cases.values()], sorted(db.bans)], default=str)
+    assert tomb["v"] not in written and target not in db.bans
+
+
+def test_a_rate_refusal_audits_the_target_the_lattice_re_read():
+    """review r11 M2 (2026-09-13), executed through the route on the fake: the target's deletion commits
+    while the ban waits for its lock; the velocity refusal looks the target up by the raw id and audits
+    and alerts the tombstone it re-read -- never the id the scrub removed."""
+    db, ids = _world()
+    db.add_player(ADMIN_SID, discord_id="d-admin")
+    db.admins.add(ADMIN_SID)
+    db.recent_bans_by_admin[ADMIN_SID] = 5
+    tomb = {}
+
+    def scrub_under_lock(locked):
+        if locked == A_SID:
+            tomb["v"] = db.scrub(A_SID)
+    db.on_identity_lock = scrub_under_lock
+    with _admin_secret():
+        exc = _raises(main.admin_ban(main._AdminBanReq(admin_steam_id=ADMIN_SID, target_steam_id=A_SID, reason="x",
+                                                       hmac_signature=_sign(ADMIN_SID, "ban", A_SID)), db=db))
+    assert exc.status_code == 429 and "v" in tomb
+    blocked = [a for a in db.admin_actions if a["action"] == "ban_rate_blocked"]
+    assert len(blocked) == 1 and (blocked[0]["admin"], blocked[0]["target"]) == (ADMIN_SID, tomb["v"])
+    assert len(db.outbox) == 1 and tomb["v"] in db.outbox[0][1] and A_SID not in db.outbox[0][1]
+    assert A_SID not in db.bans
