@@ -1120,6 +1120,22 @@ def test_the_writers_wait_for_the_lines_in_flight_naming_the_player(monkeypatch)
     # bounded by the lease's life: a lease the bot never releases ends the wait by expiry
     src = inspect.getsource(main._pc_lease_drain)
     assert "limit = float(_pcp.LEASE_SECONDS) + 5.0" in src and "time.monotonic() - started > limit" in src
+    # ...executed (r12): a lease that never leaves -- the naming read keeps answering 3 s -- ends the wait by the
+    # clock, LEASE_SECONDS + 5, on a clock that advances 30 s per reading of the lease table (the event loop
+    # reads the same clock, so the readings, not the calls, carry the time): three readings, two sleeps
+    clock = [0.0]
+    monkeypatch.setattr(main.time, "monotonic", lambda: clock[0])
+
+    class _Ticking(Scripted):
+        async def execute(self, statement, params=None):
+            clock[0] += 30.0
+            return await super().execute(statement, params)
+    slept.clear()
+    db3 = _Ticking({"MAX(l.until)": [3]})
+    limit = float(main._pcp.LEASE_SECONDS) + 5.0
+    reads = int(limit // 30.0) + 1                # the first reading past the limit ends the wait
+    waited = _run(main._pc_lease_drain(db3, str(PID)))
+    assert waited == 30.0 * reads > limit and db3.count("MAX(l.until)") == reads and slept == [0.25] * (reads - 1)
 
 
 def test_the_writers_gate_admits_four_at_once_and_a_fifth_waits_holding_nothing():
@@ -1242,6 +1258,29 @@ def test_the_slot_outlives_the_session_on_the_real_dependency_stack():
         trace.append(("handler", main._pc_writer_gate()._value))
         raise RuntimeError("the handler failed")
 
+    async def fake_release_db():
+        trace.append(("open", main._pc_release_gate()._value))
+        try:
+            yield "db"
+        finally:
+            trace.append(("close", main._pc_release_gate()._value))
+
+    @app.get("/release")
+    async def release(_slot=Depends(main._pc_release_slot), db=Depends(fake_release_db)):
+        trace.append(("handler", main._pc_release_gate()._value))
+        return {"released": 1}
+
+    @app.get("/release_reversed")
+    async def release_reversed(db=Depends(fake_release_db), _slot=Depends(main._pc_release_slot)):
+        trace.append(("handler", main._pc_release_gate()._value))
+        return {"released": 1}
+
+    @app.get("/release_slow")
+    async def release_slow(_slot=Depends(main._pc_release_slot), db=Depends(fake_release_db)):
+        await asyncio.sleep(0.25)
+        trace.append(("handler", main._pc_release_gate()._value))
+        return {"released": 1}
+
     def settle():
         for _ in range(100):
             if any(k == "close" for k, _v in trace):
@@ -1261,6 +1300,14 @@ def test_the_slot_outlives_the_session_on_the_real_dependency_stack():
         settle()
         assert trace == [("open", 3), ("handler", 3), ("close", 3)], trace
         trace.clear()
+        assert client.get("/release").status_code == 200                    # the reserved pool's slot (r12): 5 permits
+        settle()
+        assert trace == [("open", 4), ("handler", 4), ("close", 4)], trace
+        trace.clear()
+        assert client.get("/release_reversed").status_code == 200
+        settle()
+        assert trace == [("open", 5), ("handler", 4), ("close", 5)], trace   # the defect, on the reversed order
+        trace.clear()
         assert client.get("/reversed").status_code == 409
         settle()
         assert trace == [("open", 4), ("handler", 3), ("close", 4)], trace   # the defect, on the reversed order
@@ -1268,6 +1315,59 @@ def test_the_slot_outlives_the_session_on_the_real_dependency_stack():
         assert client.get("/gated").status_code == 409                       # every slot was returned
         settle()
         assert trace == [("open", 3), ("handler", 3), ("close", 3)], trace
+
+    # at the ASGI level (r12), on a fresh loop -- so a fresh gate of five permits: the app is called the way a
+    # server calls it, with a receive channel of this test's choosing
+    async def call(path, receive_msgs):
+        msgs = list(receive_msgs)
+        sent = []
+
+        async def receive():
+            return msgs.pop(0) if len(msgs) > 1 else msgs[0]
+
+        async def send(message):
+            sent.append(message)
+        scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "GET",
+                 "scheme": "http", "path": path, "raw_path": path.encode(), "query_string": b"", "root_path": "",
+                 "headers": [], "client": ("testclient", 50000), "server": ("testserver", 80)}
+        await app(scope, receive, send)
+        return next(m["status"] for m in sent if m["type"] == "http.response.start")
+
+    async def burst(n):
+        return await asyncio.gather(*[call("/release_slow", [{"type": "http.request", "body": b"", "more_body": False},
+                                                             {"type": "http.disconnect"}]) for _ in range(n)])
+    # seven at once against five permits: the sixth and the seventh open no session until a first one closed --
+    # they wait at the slot holding nothing, never at the pool
+    trace.clear()
+    assert asyncio.run(burst(7)) == [200] * 7
+    opens = [i for i, (k, _v) in enumerate(trace) if k == "open"]
+    closes = [i for i, (k, _v) in enumerate(trace) if k == "close"]
+    assert [trace[i][1] for i in opens[:5]] == [4, 3, 2, 1, 0] and len(opens) == len(closes) == 7, trace
+    assert opens[5] > closes[0] and opens[6] > closes[0], trace
+    # a client that disconnected before its handler ran: nothing stops the handler -- it runs to its end, the
+    # session closes, the slot is returned after it (a client timeout, a disconnect or a bot restart changes
+    # nothing on this side: the bound is held by the process that holds the connections)
+    trace.clear()
+    assert asyncio.run(call("/release_slow", [{"type": "http.disconnect"}])) == 200
+    assert trace == [("open", 4), ("handler", 4), ("close", 4)], trace
+    # a cancelled handler (a shutdown, D4's option d if it were ever taken): the same stack unwinds -- the session
+    # closes with the slot still held, the slot is released after it; nothing of the handler's ran
+    async def cancelled():
+        task = asyncio.create_task(call("/release_slow", [{"type": "http.disconnect"}]))
+        for _ in range(200):
+            if any(k == "open" for k, _v in trace):
+                break
+            await asyncio.sleep(0.005)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            return "cancelled"
+        return "finished"
+    trace.clear()
+    assert asyncio.run(cancelled()) == "cancelled"
+    assert trace == [("open", 4), ("close", 4)], trace
+    assert main._pc_release_gates == {} or all(g._value == main._PC_RELEASE_SLOTS for g in main._pc_release_gates.values())
 
 
 def test_the_lease_release_and_the_ack_run_on_the_reserved_pool():
@@ -1297,7 +1397,23 @@ def test_the_lease_release_and_the_ack_run_on_the_reserved_pool():
     src = inspect.getsource(database.get_release_db)
     assert "release_session()" in src and "await session.close()" in src
     assert "release_session = async_sessionmaker(release_engine" in inspect.getsource(database)
-    # the bot issues at most as many lease-ending requests as the pool holds (r11 L5): its gate is the pool's size
-    bot_src = (Path(__file__).resolve().parents[1] / "discord_bot.py").read_text(encoding="utf-8")
+    # the api admits exactly as many of these requests as the pool holds (r12): one slot per connection, the
+    # slot declared BEFORE the reserved session on both routes and on no other route; the bot has no gate of
+    # its own any more (r11's client-side gate returned its permit on a timeout while the handler ran on)
     size = database.release_engine.pool.size() + database.release_engine.pool._max_overflow
-    assert "_PC_RELEASE_SLOTS = %d\n" % size in bot_src
+    assert main._PC_RELEASE_SLOTS == size == database.RELEASE_POOL_SIZE + database.RELEASE_POOL_OVERFLOW == 5
+    admitted = {}
+    for route in main.app.routes:
+        fn = getattr(route, "endpoint", None)
+        if fn is None or getattr(fn, "__module__", None) != main.__name__:
+            continue
+        for p in inspect.signature(fn).parameters.values():
+            if getattr(p.default, "dependency", None) is main._pc_release_slot:
+                admitted[fn.__name__] = fn
+    assert set(admitted) == set(on_reserved), (sorted(admitted), sorted(on_reserved))
+    for name, fn in on_reserved.items():
+        names = list(inspect.signature(fn).parameters)
+        assert names.index("_slot") < names.index("db"), name
+    assert "async with _pc_release_gate():" in inspect.getsource(main._pc_release_slot)
+    bot_src = (Path(__file__).resolve().parents[1] / "discord_bot.py").read_text(encoding="utf-8")
+    assert "_pc_release_gate" not in bot_src and "_PC_RELEASE_SLOTS" not in bot_src

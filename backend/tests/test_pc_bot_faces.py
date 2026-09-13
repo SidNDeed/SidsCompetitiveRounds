@@ -454,33 +454,3 @@ def test_every_other_writer_of_the_bots_output_is_one_line_too():
                  "_gen_logging.captureWarnings(True)"):
         assert BOT_SRC.count(stmt) == 1 and BOT_SRC.index(stmt) < imports, stmt
     assert "def format(self, record):" in m.group(0) and ".replace(\"\\r\", \" \").replace(\"\\n\", \" \")" in m.group(0)
-
-
-def test_the_bot_bounds_its_lease_ending_requests_to_the_apis_reserved_pool():
-    """r11 L5 (2026-09-13), executed: the lease release and the events ack run under ONE Semaphore of
-    five permits -- the size of the api's reserved pool (3 + 2, database.release_engine; pinned equal
-    in test_pc_steam_server) -- so a burst of releases waits in the bot for a DELETE to finish
-    (milliseconds), never in the api for a pool connection (30 s); the ack takes the same permit."""
-    assert re.search(r"^_PC_RELEASE_SLOTS = 5$", BOT_SRC, re.M) and "_pc_release_gate = asyncio.Semaphore(_PC_RELEASE_SLOTS)" in BOT_SRC
-    rel = _fn(BOT_SRC, "_pc_lease_release")
-    assert "async with _pc_release_gate:" in rel
-    ack_at = BOT_SRC.index('"/internal/pc/events/ack"')
-    assert "async with _pc_release_gate:" in BOT_SRC[ack_at - 120:ack_at]
-    assert BOT_SRC.count("async with _pc_release_gate:") == 2
-    running, peak = 0, 0
-
-    async def fake_api(method, path, params=None, timeout=8.0, payload=None):
-        nonlocal running, peak
-        running += 1
-        peak = max(peak, running)
-        await asyncio.sleep(0.01)
-        running -= 1
-        return 200, {}
-    ns = {"asyncio": asyncio, "_pc_api": fake_api, "_pc_release_gate": asyncio.Semaphore(5)}
-    exec(compile(rel, "<discord_bot>", "exec"), ns)
-
-    async def burst():
-        await asyncio.gather(*[ns["_pc_lease_release"]("L%d" % i) for i in range(12)])
-        await ns["_pc_lease_release"](None)
-    asyncio.run(burst())
-    assert peak == 5

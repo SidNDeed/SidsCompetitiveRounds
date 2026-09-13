@@ -34,7 +34,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database import get_db, get_release_db
+from database import RELEASE_POOL_OVERFLOW, RELEASE_POOL_SIZE, get_db, get_release_db
 from flag_evidence import fetch_flag_context_rows, flag_payload
 from glicko2 import calculate_new_rating
 from models import AdminUser, AdminAction, Bet, BoosterGrant, BugReport, BugReportEvent, CardOffer, FlaggedMatch, GlickoRating, GoldTransaction, Match, MatchCard, Player, PlayerBan, PlayerItem, RankedSeries, RankRoleColor, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement, ShopItem, GlickoRating2v2, TeamQueue, TeamSeries, TeamMatch, TeamMatchCard, TeamMatchTelemetry, TournamentMatch
@@ -25209,15 +25209,51 @@ async def internal_pc_events_pending(
     } for r in rows], "page_size": _PC_EVENTS_PAGE}
 
 
+# The requests that END a writer's wait -- the delivery-lease release and the
+# events ack -- run on the RESERVED pool (database.release_engine, r10 M3)
+# and are admitted by a slot of exactly that pool's size (review r12): an
+# admitted request never waits for a connection, and a request beyond the
+# pool's size waits HERE holding nothing -- never at the pool's timeout --
+# whatever its client did meanwhile (a client timeout, a disconnect, a bot
+# restart: the handler runs on regardless, so the bound is held by the
+# process that holds the connections, not by the issuer). The writer's bound
+# stays the lease's own life (`_pc_lease_drain`); a release that lands
+# earlier ends the wait earlier.
+# Declared here, ahead of the ack route -- the first route that names it.
+_PC_RELEASE_SLOTS = RELEASE_POOL_SIZE + RELEASE_POOL_OVERFLOW
+_pc_release_gates = {}   # event loop -> its Semaphore
+
+
+def _pc_release_gate():
+    loop = asyncio.get_running_loop()
+    gate = _pc_release_gates.get(loop)
+    if gate is None:
+        for old in [l for l in _pc_release_gates if l.is_closed()]:
+            del _pc_release_gates[old]
+        gate = _pc_release_gates[loop] = asyncio.Semaphore(_PC_RELEASE_SLOTS)
+    return gate
+
+
+async def _pc_release_slot():
+    """FastAPI dependency: one of the reserved pool's admission slots for the
+    whole request; released when the request ends, however it ends. Declared
+    BEFORE the reserved session dependency, so the release follows the
+    session's close (review r12)."""
+    async with _pc_release_gate():
+        yield
+
+
 @app.post("/api/v1/internal/pc/events/ack", tags=["Internal"])
 async def internal_pc_events_ack(
     ids: str = Query(..., max_length=2000),
     leases: str | None = Query(None, max_length=4000),
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    _slot=Depends(_pc_release_slot),
     db: AsyncSession = Depends(get_release_db),
 ):
     """Mark posted: a comma-separated list of event ids the bot delivered --
-    on the RESERVED pool (r10 M3): an ack releases leases and so ends waits.
+    on the RESERVED pool (r10 M3), admitted by `_pc_release_slot` (r12): an
+    ack releases leases and so ends waits.
     The ack also releases the delivery leases it names (`leases`, comma-
     separated lease ids) and every lease naming one of the acked events."""
     _require_internal_key(x_internal_key)
@@ -26785,10 +26821,14 @@ async def internal_pc_lease_check(
 async def internal_pc_lease_release(
     lease_id: str,
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    _slot=Depends(_pc_release_slot),
     db: AsyncSession = Depends(get_release_db),
 ):
     # On the RESERVED pool (r10 M3): this delete is what ends a writer's wait
     # for the line in flight; it must never queue for a main-pool connection.
+    # Admitted by _pc_release_slot (r12): as many in flight as the pool holds,
+    # so it never queues for a reserved connection either -- a request beyond
+    # them waits at the slot holding nothing.
     _require_internal_key(x_internal_key)
     if not _pcp.print_id_ok(lease_id):
         return {"released": 0}

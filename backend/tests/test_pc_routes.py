@@ -1033,9 +1033,9 @@ def test_lease_check_and_release(monkeypatch):
         _run(main.internal_pc_lease_check("nope", "k", db))
     assert db.log == []
     db = Scripted({"DELETE FROM pc_delivery_leases WHERE id": [[{"id": lid}]]})
-    assert _run(main.internal_pc_lease_release(lid, "k", db)) == {"released": 1} and db.committed == 1
+    assert _run(main.internal_pc_lease_release(lid, "k", db=db)) == {"released": 1} and db.committed == 1
     db = Scripted({})
-    assert _run(main.internal_pc_lease_release("nope", "k", db)) == {"released": 0} and db.log == []
+    assert _run(main.internal_pc_lease_release("nope", "k", db=db)) == {"released": 0} and db.log == []
 
 
 def test_the_internal_key_gate_is_the_first_statement_of_every_internal_pc_route():
@@ -1366,6 +1366,7 @@ def test_the_rate_refusal_audits_and_alerts_the_re_read_target_and_looks_up_the_
     assert ex.value.status_code == 429
     assert [p["sid"] for sql, p in db.log if "FROM player_bans WHERE steam_id" in sql] == ["tgt"]
     assert [p["adm"] for sql, p in db.log if "ban-rate:" in sql] == ["adm"]
+    assert [p["adm"] for sql, p in db.log if "COUNT(*) FROM player_bans" in sql] == ["adm"]   # the count is the admin's too (r12)
     audit = [p for sql, p in db.log if "INSERT INTO admin_actions" in sql]
     assert len(audit) == 1 and (audit[0]["a"], audit[0]["t"]) == ("adm", "deleted:abc")
     alert = [p for sql, p in db.log if "INSERT INTO pending_channel_posts" in sql]
@@ -1395,6 +1396,16 @@ def test_the_ack_executed_releases_by_event_and_by_id_then_marks_posted(monkeypa
     assert _idx(db, "event_ids && CAST(:ids AS bigint[])") < _idx(db, "id = ANY(CAST(:ids AS uuid[]))") < _idx(db, "UPDATE pc_events SET posted_at")
     assert [p for sql, p in db.log if "id = ANY(CAST(:ids AS uuid[]))" in sql] == [{"ids": [l1, l2]}]
     assert [p for sql, p in db.log if "event_ids &&" in sql] == [{"ids": [1, 2]}]
+    assert all(sql.endswith("RETURNING id") for sql, _ in db.log if "DELETE FROM pc_delivery_leases" in sql)   # counted rows are returned rows (r12)
+    assert [sql for sql, _ in db.log if "UPDATE pc_events" in sql][0].endswith("RETURNING id")
+    # ids only (r12): the poll after a failed ack sends the ids with no lease list -- the event-overlap DELETE and
+    # the UPDATE run, the explicit-lease DELETE does not, one commit
+    db = Scripted({"DELETE FROM pc_delivery_leases WHERE event_ids && CAST(:ids AS bigint[])": [[("a",)]],
+                   "UPDATE pc_events SET posted_at = now()": [[(1,), (2,)]]})
+    assert _run(main.internal_pc_events_ack(ids="1,2", leases=None, x_internal_key="k", db=db)) == {"acked": 2, "released": 1}
+    assert db.count("id = ANY(CAST(:ids AS uuid[]))") == 0 and db.count("event_ids &&") == 1 and db.count("UPDATE pc_events") == 1
+    assert db.committed == 1 and _idx(db, "event_ids &&") < _idx(db, "UPDATE pc_events SET posted_at")
+    assert [p for sql, p in db.log if "event_ids &&" in sql or "UPDATE pc_events" in sql] == [{"ids": [1, 2]}, {"ids": [1, 2]}]
     db = Scripted({"DELETE FROM pc_delivery_leases WHERE id = ANY(CAST(:ids AS uuid[]))": [[("c",)]]})
     assert _run(main.internal_pc_events_ack(ids="", leases=l1, x_internal_key="k", db=db)) == {"acked": 0, "released": 1}
     assert db.count("UPDATE pc_events") == 0 and db.count("event_ids &&") == 0 and db.committed == 1
@@ -1405,3 +1416,21 @@ def test_the_ack_executed_releases_by_event_and_by_id_then_marks_posted(monkeypa
     with pytest.raises(HTTPException) as ex:
         _run(main.internal_pc_events_ack(ids="1", leases="not-a-uuid", x_internal_key="k", db=db))
     assert ex.value.status_code == 422 and db.log == []
+
+
+def test_the_rate_refusal_alerts_once_per_window_and_keys_its_lock_and_count_on_the_admin():
+    """r12 (2026-09-13), executed: the second refusal of one admin within the window -- another target --
+    is audited but not alerted again (the alert is once per burst, keyed on the admin's audit rows); the
+    rate lock and the count are keyed on the admin on both attempts."""
+    db = _GateDb({"FROM player_bans WHERE steam_id": [[]], "COUNT(*) FROM player_bans": [5],
+                  "COUNT(*) FROM admin_actions": [1, 2]})
+    for target in ("tgt", "tgt2"):
+        with pytest.raises(HTTPException) as ex:
+            _run(main._ban_rate_gate_or_raise(db, "adm", target))
+        assert ex.value.status_code == 429
+    assert db.count("INSERT INTO admin_actions") == 2 and db.count("INSERT INTO pending_channel_posts") == 1
+    assert [p["t"] for sql, p in db.log if "INSERT INTO admin_actions" in sql] == ["tgt", "tgt2"]
+    assert [p["adm"] for sql, p in db.log if "ban-rate:" in sql] == ["adm", "adm"]
+    assert [p["adm"] for sql, p in db.log if "COUNT(*) FROM player_bans" in sql] == ["adm", "adm"]
+    assert [p["adm"] for sql, p in db.log if "COUNT(*) FROM admin_actions" in sql] == ["adm", "adm"]
+    assert db.committed == 2

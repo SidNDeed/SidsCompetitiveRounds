@@ -8418,14 +8418,11 @@ def _pc_not_linked(ctx, target):
 # bytes: the text still goes out, the picture does not.
 _PC_FACE_MAX_BYTES = 4 * 1024 * 1024
 _PC_LEASE_RESERVE_S = 3.0
-# At most this many lease-ENDING requests in flight -- the release and the
-# ack: the api answers them from a reserved pool of the same size
-# (database.release_engine, 3 + 2), so a burst beyond it waits HERE for a
-# DELETE to finish (milliseconds), never in the api for a pool connection
-# (30 s) (review r11). This process is the only issuer: the bot is a
-# singleton.
-_PC_RELEASE_SLOTS = 5
-_pc_release_gate = asyncio.Semaphore(_PC_RELEASE_SLOTS)
+# The lease-ENDING requests (the release, the ack) are admitted by the api
+# itself (main._pc_release_slot, a slot per reserved-pool connection, review
+# r12): a client-side gate here (review r11) returned its permit on a timeout
+# while the api's handler ran on, so the bound was not where the connections
+# are. No gate here.
 _pc_back_bytes_cache = {"bytes": None, "at": 0.0}
 
 
@@ -8558,8 +8555,7 @@ async def _pc_lease_live(lease_id):
 
 async def _pc_lease_release(lease_id):
     if lease_id:
-        async with _pc_release_gate:
-            await _pc_api("DELETE", f"/internal/pc/lease/{lease_id}", timeout=4.0)
+        await _pc_api("DELETE", f"/internal/pc/lease/{lease_id}", timeout=4.0)
 
 
 async def _pc_send_face(sender, content=None, embed=None, face=None, lease=(None, None), filename="card.png",
@@ -8885,9 +8881,8 @@ async def poll_pc_events():
             break
     if not sent:
         return
-    async with _pc_release_gate:
-        st, _ = await _pc_api("POST", "/internal/pc/events/ack",
-                              params={"ids": ",".join(str(i) for i in sent), "leases": ",".join(leases)})
+    st, _ = await _pc_api("POST", "/internal/pc/events/ack",
+                          params={"ids": ",".join(str(i) for i in sent), "leases": ",".join(leases)})
     if st == 200:
         for i in sent:
             _pc_events_sent.pop(i, None)

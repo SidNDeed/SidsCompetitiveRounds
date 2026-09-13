@@ -2350,3 +2350,29 @@ def test_a_rate_refusal_audits_the_target_the_lattice_re_read():
     assert len(blocked) == 1 and (blocked[0]["admin"], blocked[0]["target"]) == (ADMIN_SID, tomb["v"])
     assert len(db.outbox) == 1 and tomb["v"] in db.outbox[0][1] and A_SID not in db.outbox[0][1]
     assert A_SID not in db.bans
+
+
+def test_a_case_ban_whose_subject_was_scrubbed_under_the_lock_is_refused_before_the_gate():
+    """r12 (2026-09-13), executed through the internal route on the fake: on the BAN action the subject is
+    not optional -- a subject whose deletion committed while the act waited for its lock is re-read as the
+    tombstone and refused 400 subject_deleted by the lattice, before the ban-rate lock, the ban and the case
+    write; so the identity the refusal path and the core receive on this action is always the raw, live one."""
+    db, ids = _world()
+    case_id = _open_case(db, ids)
+    db.add_player(ADMIN_SID, discord_id="d-admin")
+    db.admins.add(ADMIN_SID)
+    tomb = {}
+
+    def scrub_under_lock(locked):
+        if locked == A_SID:
+            tomb["v"] = db.scrub(A_SID)
+    db.on_identity_lock = scrub_under_lock
+    committed_before = db.commits                       # the seeding's own commits (the mail, the report)
+    with pytest.raises(HTTPException) as ex:
+        _act_internal(db, case_id, "d-admin", "ban")
+    assert (ex.value.status_code, ex.value.detail) == (400, "subject_deleted") and "v" in tomb
+    assert ("ban-rate", ADMIN_SID) not in db.locks and db.bans == {} and db.commits == committed_before
+    case = next(c for c in db.cases.values() if str(c["id"]) == str(case_id))
+    assert case["status"] == "open" and case["resolved_by"] is None
+    act = inspect.getsource(main._moderation_case_act)
+    assert 'optional = {actor_steam_id} | ({subject_sid_pre} if action == "dismiss" else set())' in act
