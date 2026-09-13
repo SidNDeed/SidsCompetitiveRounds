@@ -12,6 +12,7 @@ import functools
 import hashlib
 import json
 import os
+import time
 import re
 import threading
 
@@ -33,13 +34,14 @@ LEASE_RESERVE_SECONDS = 3                # the bot's deadline = until - reserve 
 COVERAGE_MIN, COVERAGE_MAX = 0.02, 0.60  # fraction of pixels with alpha > 0 (§1.7)
 DECODE_BUDGET_S = 2.0                    # decode + canonicalise budget in the pool (§3.2 step 1)
 FACE_CACHE_CAP_BYTES = 2 << 30           # disk LRU per box (§2.2)
+FACE_CACHE_MAX_AGE_S = 7 * 86400         # a face neither read nor written this long goes (Steam pictures v3 §6)
+FACE_CACHE_TMP_MAX_AGE_S = 3600          # a publish temporary older than this belongs to a publish that died (v4 §4)
 PREVIEW_TTL_S = 60                       # /card preview cache life (§2.2)
 # Two-argument advisory lock class for the per-hash P locks (§3.2 step 3):
 # disjoint from the one-argument identity keys by construction (a different
 # lock space) and from every other *_LOCK_CLASS in main.py (asserted by test).
 PC_P_LOCK_CLASS = 770902
 
-SOURCES = ("none", "game")
 SIZES = ("card", "tile")
 
 # ── the descriptor (§3.4, r18 H4) ─────────────────────────────────────────
@@ -366,13 +368,18 @@ def preview_rev(renderer_fp, cat_rev_, spec, portrait_kind, portrait_hash):
 # ── the resolver (§3.2, read-only, one function for every caller) ──────────
 def portrait_for(row):
     """(kind, hash_or_none) from a mapping with subject_deleted, subject_banned,
-    subject_opted_out, portrait_source and portrait_hash. Never reads more."""
-    if row.get("subject_deleted") or row.get("subject_banned") or row.get("subject_opted_out"):
-        return ("none", None)
-    if (row.get("portrait_source") or "game") != "game":
+    portrait_hash and steam_portrait_hash. Never reads more. The uploaded rig
+    wins, else the Steam profile picture, else no picture (Steam pictures
+    design v2 §1); there is no player-chosen source since 2026-09-13 — every
+    card carries whichever picture exists. A row without the steam column
+    (an old SELECT) simply has no fallback."""
+    if row.get("subject_deleted") or row.get("subject_banned"):
         return ("none", None)
     h = row.get("portrait_hash")
-    return ("game", str(h)) if h else ("none", None)
+    if h:
+        return ("game", str(h))
+    s = row.get("steam_portrait_hash")
+    return ("steam", str(s)) if s else ("none", None)
 
 
 # ── route-shape validation (§2.2: any other shape → 404, no render, no cache) ─
@@ -431,6 +438,7 @@ class FaceCache:
         self._sizes = {}          # key -> bytes
         self._clock = 0
         self._atime = {}          # key -> tick
+        self._seen = {}           # key -> wall clock of the last publish or read (expire)
         self._inflight = {}       # key -> asyncio.Future
         self._scanned = False
 
@@ -449,6 +457,7 @@ class FaceCache:
                 key = os.path.relpath(p, self.root).replace(os.sep, "/")
                 try:
                     self._sizes[key] = os.path.getsize(p)
+                    self._seen.setdefault(key, os.path.getmtime(p))   # a publish or read before the scan wins
                     self._clock += 1
                     self._atime[key] = self._clock
                 except OSError:
@@ -468,23 +477,32 @@ class FaceCache:
         except OSError:
             return None
         with self._lock:
-            self._clock += 1
-            self._atime[key] = self._clock
-            self._sizes[key] = len(data)
+            if key in self._sizes:   # not expired or evicted while the bytes were being read (v4 §4)
+                self._clock += 1
+                self._atime[key] = self._clock
+                self._seen[key] = time.time()
+                self._sizes[key] = len(data)
         return data
 
     def _publish(self, key, data):
         p = self.path(key)
         os.makedirs(os.path.dirname(p), exist_ok=True)
         tmp = p + ".tmp-%d" % threading.get_ident()
-        with open(tmp, "wb") as f:
-            f.write(data)
-        os.replace(tmp, p)
-        with self._lock:
-            self._clock += 1
-            self._atime[key] = self._clock
-            self._sizes[key] = len(data)
-            self._evict_locked()
+        try:
+            with open(tmp, "wb") as f:
+                f.write(data)
+            with self._lock:   # the swap-in and the index move together, under the lock expiry holds (v4 §4)
+                os.replace(tmp, p)
+                self._clock += 1
+                self._atime[key] = self._clock
+                self._seen[key] = time.time()
+                self._sizes[key] = len(data)
+                self._evict_locked()
+        finally:
+            try:
+                os.remove(tmp)   # still there only when the swap-in did not happen
+            except OSError:
+                pass
 
     def _evict_locked(self):
         total = sum(self._sizes.values())
@@ -493,22 +511,74 @@ class FaceCache:
         for key in sorted(self._atime, key=self._atime.get):
             if total <= self.cap:
                 break
-            size = self._sizes.pop(key, 0)
+            if not self._unlink_locked(key):
+                continue   # still on disk: it stays tracked and is retried later (v4.1 §5)
+            total -= self._sizes.pop(key, 0)
             self._atime.pop(key, None)
-            total -= size
-            try:
-                os.remove(self.path(key))
-            except OSError:
-                pass
+            self._seen.pop(key, None)
+
+    def _unlink_locked(self, key) -> bool:
+        """Remove the file for key under the lock. True when it is gone (removed
+        now or already missing); False when the remove failed, in which case
+        the caller keeps the entry tracked so a later pass retries instead of
+        leaving a readable file nothing tracks (v4.1 §5)."""
+        try:
+            os.remove(self.path(key))
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return False
+        return True
 
     def forget(self, key):
         with self._lock:
-            self._sizes.pop(key, None)
-            self._atime.pop(key, None)
-        try:
-            os.remove(self.path(key))
-        except OSError:
-            pass
+            if self._unlink_locked(key):
+                self._sizes.pop(key, None)
+                self._atime.pop(key, None)
+                self._seen.pop(key, None)
+
+    def _sweep_temporaries_locked(self, now, max_age_s=FACE_CACHE_TMP_MAX_AGE_S):
+        """Remove publish temporaries older than max_age_s: a publish that
+        died between the write and the swap-in left a complete face that no
+        index entry, eviction or expiry would ever reach (v4 §4)."""
+        gone = 0
+        for dirpath, _dirs, files in os.walk(self.root):
+            for f in files:
+                if ".tmp-" not in f:
+                    continue
+                p = os.path.join(dirpath, f)
+                try:
+                    if now - os.path.getmtime(p) > max_age_s:
+                        os.remove(p)
+                        gone += 1
+                except OSError:
+                    pass
+        return gone
+
+    def expire(self, max_age_s=FACE_CACHE_MAX_AGE_S, now=None):
+        """Remove every entry neither published nor read for max_age_s: the
+        bound on how long a released picture survives inside derived faces
+        (Steam pictures v3 §6), on every box that owns a cache (v4 §4). After
+        a restart the age is the file's publish age — a hot face is simply
+        rendered once more. Files go UNDER the lock, so a publish cannot slip
+        a fresh file under a key this pass is removing. Stale publish
+        temporaries go too. An entry whose file will not go (a reader holds
+        it open on Windows, a transient error) stays tracked for the next pass
+        (v4.1 §5). Returns how many files went."""
+        now = time.time() if now is None else now
+        with self._lock:
+            self._scan()
+            stale = [k for k, t in self._seen.items() if now - t > max_age_s]
+            gone = 0
+            for key in stale:
+                if not self._unlink_locked(key):
+                    continue   # still on disk: tracked until a later pass removes it (v4.1 §5)
+                self._sizes.pop(key, None)
+                self._atime.pop(key, None)
+                self._seen.pop(key, None)
+                gone += 1
+            stale_tmp = self._sweep_temporaries_locked(now)
+        return gone + stale_tmp
 
     async def get_or_render(self, key, render_sync):
         """Bytes for key: the cached file, else ONE render shared by every

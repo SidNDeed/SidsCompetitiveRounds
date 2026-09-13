@@ -118,7 +118,7 @@ def _sig(secret, body, nonce, desc):
 
 
 def _row(**over):
-    row = {"pc_opted_out_at": None, "pc_game_portrait_hash": "cd" * 32, "pc_game_portrait_descriptor": DESC + "0",
+    row = {"pc_game_portrait_hash": "cd" * 32, "pc_game_portrait_descriptor": DESC + "0",
            "since_last": 100.0, "lock_left": None, "pc_game_portrait_locked_until": None, "banned": False,
            "active_player_color_id": None, "active_player_effect_id": None}
     row.update(over)
@@ -141,7 +141,7 @@ def _writer(monkeypatch, face=None, row=None, nonce_used=True, player=None, scri
     script = {
         # the unlocked read P is taken on, answered FROM THE SAME ROW so the
         # fixture cannot invent the mismatch the route refuses on
-        "SELECT pc_game_portrait_hash FROM players": [[{"h": row["pc_game_portrait_hash"]}]],
+        "SELECT pc_game_portrait_hash, pc_steam_portrait_hash FROM players": [[{"pc_game_portrait_hash": row["pc_game_portrait_hash"], "pc_steam_portrait_hash": None}]],
         "AS lock_left": [[row]],
         "INSERT INTO pc_portrait_nonces": [[{"nonce": "n"}] if nonce_used else []],
         "RETURNING pc_game_portrait_at": [[{"at": NOW}]],
@@ -176,7 +176,7 @@ def test_upload_happy_path_orders_lock_actor_reread_nonce_plocks_blob_row_delete
     assert db.log[0][0] == "SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))" and db.log[0][1] == {"sid": STEAM}
     order = [_idx(db, k) for k in ("pg_advisory_xact_lock(hashtext", "ACTOR", "CAST(:cls AS integer)", "AS lock_left",
                                    "INSERT INTO pc_portrait_nonces", "INSERT INTO pc_portraits",
-                                   "RETURNING pc_game_portrait_at", "DELETE FROM pc_portraits")]
+                                   "RETURNING pc_game_portrait_at", "UPDATE pc_portraits SET unreferenced_since")]
     assert order == sorted(order), order   # P BEFORE R — I → C → P → R
     # the re-read locks the row and excludes deleted accounts
     reread = db.log[_idx(db, "AS lock_left")]
@@ -185,10 +185,10 @@ def test_upload_happy_path_orders_lock_actor_reread_nonce_plocks_blob_row_delete
     plocks = [p for s, p in db.log if "CAST(:cls AS integer)" in s]
     assert [p["h"] for p in plocks] == sorted({"cd" * 32, "ab" * 32}) and {p["cls"] for p in plocks} == {P.PC_P_LOCK_CLASS}
     blob = db.log[_idx(db, "INSERT INTO pc_portraits")]
-    assert "ON CONFLICT (hash) DO NOTHING" in blob[0] and blob[1]["h"] == "ab" * 32 and blob[1]["b"] == b"canon"
+    assert "ON CONFLICT (hash) DO UPDATE SET unreferenced_since = NULL" in blob[0] and blob[1]["h"] == "ab" * 32 and blob[1]["b"] == b"canon"
     upd = db.log[_idx(db, "RETURNING pc_game_portrait_at")]
     assert upd[1] == {"h": "ab" * 32, "d": DESC, "pid": str(PID)} and "deleted_at IS NULL" in upd[0]
-    dele = db.log[_idx(db, "DELETE FROM pc_portraits")]
+    dele = db.log[_idx(db, "UPDATE pc_portraits SET unreferenced_since")]
     assert "NOT EXISTS" in dele[0] and dele[1] == {"h": "cd" * 32}
 
 
@@ -209,9 +209,10 @@ def test_upload_pacing_answers_409_with_the_remaining_seconds_and_consumes_no_no
     assert db.rolled_back == 1 and db.count("pc_portrait_nonces") == 0
 
 
-@pytest.mark.parametrize("over", [{"banned": True}, {"pc_opted_out_at": NOW}])
-def test_upload_refused_for_a_banned_or_opted_out_subject(monkeypatch, over):
-    face, db = _writer(monkeypatch, row=_row(**over))
+def test_upload_refused_for_a_banned_subject(monkeypatch):
+    # A ban is the one refusal left beside the admin lock: there has been no
+    # opt-out to refuse on since 2026-09-13.
+    face, db = _writer(monkeypatch, row=_row(banned=True))
     with pytest.raises(HTTPException) as ex:
         _upload(db, _png_body())
     assert ex.value.status_code == 403 and ex.value.detail == {"error": "portrait_refused"}
@@ -336,50 +337,48 @@ def test_upload_source_holds_the_exclusive_lock_before_the_actor_gate_and_the_si
 
 # ── the None write, the discard and the deletion sweep (static pins) ─────────
 
-def test_the_none_write_takes_the_exclusive_lock_and_waits_out_live_leases():
+def test_the_settings_writer_touches_no_picture_and_takes_no_lock_of_its_own():
+    """Since 2026-09-13 neither setting can withdraw a picture, so the writer
+    has no exclusive-lock half and no lease wait: actor, row lock, the CAS
+    write, commit. A key that could move the resolution would need the old
+    None writer back (r18 H2), which is why the SQL is pinned to the two
+    announce columns and the surface to the two keys. The route BODY takes
+    no advisory lock; the SHARED identity hold every player route takes
+    inside `_pc_verified_actor` (c3) is kept on purpose, so a settings
+    write of a player mid-deletion waits for that deletion instead of
+    racing it -- pinned positively here so the claim can fail either way
+    (r5 L10)."""
     src = _src(main.pc_set_setting)
-    a = src.index("_pc_hmac_ok(sig, canon)")
-    b = src.index("pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))")
+    assert "pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))" in _src(main._pc_verified_actor)
     c = src.index("_pc_verified_actor(request")
     d = src.index("FOR NO KEY UPDATE")
-    e = src.index("_pc_lease_wait(db, pid)")
     f = src.index("_PC_SETTINGS_SQL[key]")
-    assert a < b < c < d < e < f
-    assert "none_write = _pc_setting_revokes_picture(key, value)" in src
-    assert '"error": "retry_after"' in src
-    assert main._PC_SETTINGS_SQL["portrait_source"].count("'none'") == 1 and "'game'" in main._PC_SETTINGS_SQL["portrait_source"]
+    assert c < d < f
+    for absent in ("pg_advisory_xact_lock", "_pc_lease_wait", "_pc_lock_portrait_blobs",
+                   "_pc_release_portrait_blob", "none_write", "_pc_setting_revokes_picture"):
+        assert absent not in src, absent
+    assert tuple(main._PC_SETTINGS_SQL) == main._pc.SETTINGS_KEYS == ("collection_public", "announce")
+    for key, sql in main._PC_SETTINGS_SQL.items():
+        flat = " ".join(sql.split())
+        assert ("WHERE id = CAST(:pid AS uuid) AND pc_settings_revision = CAST(:rev AS integer) "
+                "RETURNING pc_settings_revision") in flat, key
+        for col in ("pc_steam", "pc_game_portrait", "pc_opted_out", "pc_portrait_source"):
+            assert col not in flat, (key, col)
 
 
-@pytest.mark.parametrize("key,value,revokes", [
-    ("portrait_source", 0, True),      # the picture becomes none
-    ("opted_out", 1, True),            # an opted-out subject resolves to none too
-    ("portrait_source", 1, False),     # turning it back ON adds a picture
-    ("opted_out", 0, False),
-    ("announce", 0, False),
-    ("announce", 1, False),
-    ("collection_public", 0, False),
-    ("collection_public", 1, False),
-])
-def test_only_the_writes_that_withdraw_the_picture_wait_for_a_live_lease(key, value, revokes):
-    """Which writes wait is the whole guarantee: a write that withdraws the
-    picture must not commit under a send already carrying it."""
-    assert main._pc_setting_revokes_picture(key, value) is revokes
-    assert key in main._pc.SETTINGS_KEYS
-
-
-def test_every_settings_key_is_answered_by_the_revocation_predicate():
-    # a key added to the settings surface without a decision here would
-    # silently default to "does not withdraw the picture"
-    for key in main._pc.SETTINGS_KEYS:
-        for value in (0, 1):
-            assert main._pc_setting_revokes_picture(key, value) in (True, False)
-    assert set(main._pc.SETTINGS_KEYS) == {"opted_out", "collection_public", "announce", "portrait_source"}
+def test_the_settings_surface_is_exactly_the_two_announce_keys():
+    # a key added here without a decision about the picture would silently
+    # ride the lock-free writer above
+    assert set(main._pc.SETTINGS_KEYS) == {"collection_public", "announce"}
 
 
 def test_a_ban_deletes_the_subjects_leases_under_the_identity_lock():
     src = _src(main._apply_ban_core)
     assert "DELETE FROM pc_delivery_leases WHERE subject_id IN" in src
     assert src.index("DELETE FROM pc_delivery_leases") < src.index('"status": "already_banned"')
+    # and first it WAITS for the lines in flight naming the player (r7 H2), before the announce write
+    assert src.index("waited = await _pc_lease_drain(db, str(_bpid))") < src.index("pc_announce = false")
+    assert src.index("pg_advisory_xact_lock(hashtext(:sid))") < src.index("_pc_lease_drain(")   # under the identity lock
 
 
 def test_a_discard_deletes_the_prints_leases_after_the_discard_write():
@@ -390,8 +389,82 @@ def test_a_discard_deletes_the_prints_leases_after_the_discard_write():
 def test_account_deletion_sweeps_leases_nonces_and_the_portrait_unit():
     src = _src(main.delete_player_data)
     assert "DELETE FROM pc_delivery_leases WHERE subject_id" in src
+    # first it WAITS for the lines in flight naming the player (r7 H2): before the pc_events DELETE the
+    # naming query joins, under the identity lock
+    assert src.index("waited = await _pc_lease_drain(db, str(pid))") < src.index("DELETE FROM pc_events WHERE player_id = :pid")
+    assert src.index("pg_advisory_xact_lock(hashtext(:sid))") < src.index("_pc_lease_drain(")
     assert "DELETE FROM pc_portrait_nonces WHERE player_id" in src
-    assert '_pc_clear_portrait_unit(db, str(pid), lock_days=None, source="none")' in src
+    assert "_pc_clear_portrait_unit(db, str(pid), lock_days=None)" in src
+    # 2026-09-13: the deletion is the one way a card leaves every binder
+    assert "DELETE FROM pc_prints WHERE card_id IN (SELECT id FROM pc_cards WHERE subject_player_id = :pid)" in src
+    assert "DELETE FROM pc_cards WHERE subject_player_id = :pid" in src
+
+
+class _GateDb(Scripted):
+    """The ban-rate gate reads with .scalar() and audits under a savepoint; the shared harness has
+    neither."""
+
+    async def execute(self, statement, params=None):
+        res = await super().execute(statement, params)
+        res.scalar = res.scalar_one_or_none
+        return res
+
+    def begin_nested(self):
+        return self
+
+
+def test_a_repeat_ban_is_answered_before_the_velocity_gate_refuses_it():
+    """r8 M2 (D4, 2026-09-13), executed: the retry of a ban whose caller timed out while the server
+    waited for a Discord line in flight finds the target already banned -- the gate returns without
+    counting or refusing (the core then runs the repeat cleanup and answers already_banned); a fifth
+    ban of a target NOT banned is still refused 429, audited, and flagged once."""
+    db = _GateDb({"FROM player_bans WHERE steam_id": [[("x",)]], "COUNT(*) FROM player_bans": [5]})
+    assert _run(main._ban_rate_gate_or_raise(db, "adm", "tgt")) is None
+    assert db.count("COUNT(*) FROM player_bans") == 0 and db.count("ban-rate:") == 0 and db.committed == 0
+    db = _GateDb({"FROM player_bans WHERE steam_id": [[]], "COUNT(*) FROM player_bans": [5],
+                  "COUNT(*) FROM admin_actions": [1]})
+    with pytest.raises(HTTPException) as ex:
+        _run(main._ban_rate_gate_or_raise(db, "adm", "tgt"))
+    assert ex.value.status_code == 429
+    assert db.count("ban-rate:") == 1 and db.count("INSERT INTO admin_actions") == 1 and db.committed == 1
+    assert db.count("INSERT INTO pending_channel_posts") == 1
+
+
+class _UnbanDb(_GateDb):
+    """admin_unban reads the UPDATE's rowcount and adds an ORM audit row; the shared harness has
+    neither."""
+
+    def __init__(self, script):
+        super().__init__(script)
+        self.added = []
+
+    async def execute(self, statement, params=None):
+        res = await super().execute(statement, params)
+        res.rowcount = 1
+        return res
+
+    def add(self, obj):
+        self.added.append(obj)
+
+
+def test_the_unban_takes_the_identity_lattice_before_it_writes(monkeypatch):
+    """r9 M2 (2026-09-13), executed: the unban takes the identity locks of both parties in the
+    canonical order -- the ban's lattice, the ban's order -- BEFORE its UPDATE, so a ban's repeat
+    check and its insert (one serialised step under the target's identity) cannot be split by an
+    unban landing between them and turn the repeat into a fresh, ungated insert; the admin's own
+    identity is optional there, as on the ban."""
+    async def _admin_ok(*a, **k):
+        return None
+    monkeypatch.setattr(main, "_require_admin", _admin_ok)
+    db = _UnbanDb({})
+    res = _run(main.admin_unban(main._AdminUnbanReq(admin_steam_id="9", target_steam_id="1", hmac_signature="x"), db=db))
+    assert res == {"status": "unbanned", "steam_id": "1", "rows": 1}
+    assert [p["sid"] for sql, p in db.log if "pg_advisory_xact_lock(hashtext(:sid))" in sql] == ["1", "9"]
+    assert _idx(db, "pg_advisory_xact_lock(hashtext(:sid))") < _idx(db, "UPDATE player_bans SET unbanned_at")
+    assert db.committed == 1 and len(db.added) == 1 and db.added[0].action == "unban"
+    src = inspect.getsource(main.admin_unban)
+    assert src.index("_require_admin(") < src.index("_mail_lock_identities(") < src.index("UPDATE player_bans")
+    assert "optional=(req.admin_steam_id, req.target_steam_id)" in src
 
 
 def test_the_ack_releases_leases_by_event_and_by_id():
@@ -414,7 +487,7 @@ def test_the_face_route_has_its_own_rate_bucket_and_health_reports_the_renderer(
 
 
 def test_the_print_face_select_carries_every_resolver_input():
-    for col in ("subject_opted_out", "portrait_source", "portrait_hash", "subject_banned", "subject_deleted"):
+    for col in ("portrait_hash", "steam_portrait_hash", "subject_banned", "subject_deleted"):
         assert f"AS {col}" in main._PC_PRINT_FACE_SELECT, col
 
 
@@ -659,21 +732,29 @@ def test_the_mint_counts_the_copies_the_opener_already_held(monkeypatch):
 
 def test_the_public_pool_answers_no_identifier_and_projects_the_names():
     """/pc/pool takes no signature, no session and no key: it answers anyone."""
+    # ONE statement answers bands and top (r6 M3): the snapshot counted three,
+    # one is banned or deleted since, so the live word is two.
     db = Scripted({
-        "FROM pc_pool_snapshots ORDER BY id DESC": [[{"id": 4, "taken_at": NOW, "member_count": 2}]],
-        "GROUP BY rarity": [[{"rarity": "legendary", "n": 1}]],
-        "FROM pc_pool_members m JOIN players p": [[
-            {"pool_rank": 1, "rarity": "legendary", "board_rank": 3, "rating": 1800.0, "display_name": "Sid"},
-            {"pool_rank": 2, "rarity": "rare", "board_rank": 9, "rating": 1700.0, "display_name": STEAM},
+        "FROM pc_pool_snapshots ORDER BY id DESC": [[{"id": 4, "taken_at": NOW, "member_count": 3}]],
+        "WITH live AS": [[
+            {"kind": "band", "rarity": "legendary", "n": 1, "pool_rank": None, "board_rank": None, "rating": None, "display_name": None},
+            {"kind": "top", "rarity": "rare", "n": None, "pool_rank": 2, "board_rank": 9, "rating": 1700.0, "display_name": STEAM},
+            {"kind": "band", "rarity": "rare", "n": 1, "pool_rank": None, "board_rank": None, "rating": None, "display_name": None},
+            {"kind": "top", "rarity": "legendary", "n": None, "pool_rank": 1, "board_rank": 3, "rating": 1800.0, "display_name": "Sid"},
         ]],
     })
     ans = _run(main.pc_pool_summary(db=db))
-    assert [t["display_name"] for t in ans["top"]] == ["Sid", "Unnamed player"]
+    assert [t["display_name"] for t in ans["top"]] == ["Sid", "Unnamed player"]   # by pool rank, whatever order the union came in
+    assert ans["snapshot"]["member_count"] == 2 and ans["bands"]["legendary"] == 1 and ans["bands"]["rare"] == 1
     assert "steam_id" not in json.dumps(ans) and STEAM not in json.dumps(ans)
-    # the identifier is not in the SELECT either — an answer key can be dropped
-    # while the column keeps travelling into logs and tracebacks
+    # the identifier is not projected either — an answer key can be dropped
+    # while the column keeps travelling into logs and tracebacks; the ban
+    # predicate compares it (b.steam_id = p.steam_id) and that is its only use
     select = [s for s, _ in db.log if "FROM pc_pool_members m JOIN players p" in s][0]
-    assert "steam_id" not in select, select
+    assert len([s for s, _ in db.log if "pc_pool_members" in s]) == 1, "one read for bands and top"
+    assert "steam_id" not in select[:select.index(" FROM pc_pool_members")], select
+    assert select.count("steam_id") == 2 and "b.steam_id = p.steam_id" in select, select
+    assert "p.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM player_bans b" in select
 
 
 def test_raqm_is_read_from_the_engine_actually_in_use(monkeypatch):
@@ -698,9 +779,9 @@ def test_raqm_is_read_from_the_engine_actually_in_use(monkeypatch):
     (7, "interval"),
 ])
 def test_the_clear_unit_reads_lock_days_as_leave_alone_clear_or_set(days, expect):
-    db = Scripted({"SELECT pc_game_portrait_hash FROM players": [[{"h": None}]],
+    db = Scripted({"SELECT pc_game_portrait_hash, pc_steam_portrait_hash FROM players": [[{"pc_game_portrait_hash": None, "pc_steam_portrait_hash": None}]],
                    "RETURNING pc_game_portrait_locked_until": [[{"l": None}]]})
-    _run(main._pc_clear_portrait_unit(db, str(PID), lock_days=days, source=None))
+    _run(main._pc_clear_portrait_unit(db, str(PID), lock_days=days))
     upd = db.log[_idx(db, "UPDATE players SET")]
     sets = upd[0].split("RETURNING")[0]
     if expect == "untouched":
@@ -725,43 +806,56 @@ def test_the_portrait_lock_class_is_the_only_two_argument_advisory_class():
     two_arg = re.findall(r"pg_advisory_xact_lock\(CAST\(:cls AS integer\), hashtext\(CAST\(:h AS text\)\)\)", MAIN_SRC)
     assert len(two_arg) >= 1
     assert MAIN_SRC.count('"cls": _pcp.PC_P_LOCK_CLASS') == len(two_arg)
-    # and P has exactly ONE taker, `_pc_lock_portrait_blobs`, which is what
-    # keeps "P before R" a property of the code rather than of each caller
-    body = _src(main._pc_lock_portrait_blobs)
+    # and P has exactly ONE statement, `_pc_lock_blob`, with two callers: the
+    # per-player set `_pc_lock_portrait_blobs` (which is what keeps "P before
+    # R" a property of the code rather than of each caller) and the blob
+    # janitor, which takes P before its guarded delete (Steam pictures v2 §6)
+    body = _src(main._pc_lock_blob)
     assert body.count("CAST(:cls AS integer)") == len(two_arg) == 1
+    assert _src(main._pc_lock_portrait_blobs).count("await _pc_lock_blob(") == 1
+    assert _src(main._pc_portrait_blob_janitor).count("await _pc_lock_blob(") == 1
+    assert MAIN_SRC.count("await _pc_lock_blob(") == 2
 
 
 def test_the_acquire_and_the_revalidation_read_the_same_resolver_inputs():
     """`portrait_for` decides what a lease authorises. If the two statements
     that feed it selected different columns, one of them would resolve from a
     default and the two would disagree about the same subject."""
-    assert main._PC_PORTRAIT_RESOLVE_COLS.count(" AS ") == 5
-    for col in ("subject_deleted", "subject_opted_out", "portrait_source", "portrait_hash", "subject_banned"):
+    # deleted, the rig hash, the Steam hash (Steam pictures v2 §1), banned — and
+    # nothing else: no opt-out and no source since 2026-09-13
+    assert main._PC_PORTRAIT_RESOLVE_COLS.count(" AS ") == 4
+    for col in ("subject_deleted", "portrait_hash", "steam_portrait_hash", "subject_banned"):
         assert f"AS {col}" in main._PC_PORTRAIT_RESOLVE_COLS, col
+    for dead in ("pc_opted_out_at", "pc_portrait_source"):
+        assert dead not in main._PC_PORTRAIT_RESOLVE_COLS, dead
     for fn in (main.internal_pc_lease, main.internal_pc_lease_check):
         src = _src(fn)
         assert "_PC_PORTRAIT_RESOLVE_COLS" in src and "_pcp.portrait_for(" in src, fn.__name__
-    # and nothing restates the rule in SQL beside it
-    assert "pc_opted_out_at IS NOT NULL" not in _src(main.internal_pc_lease_check)
 
 
 # ── the lease primitive ─────────────────────────────────────────────────────
 
 def _sub(**over):
-    row = {"subject_deleted": False, "subject_opted_out": False, "portrait_source": "game",
-           "portrait_hash": "ef" * 32, "subject_banned": False}
+    row = {"subject_deleted": False, "portrait_hash": "ef" * 32, "subject_banned": False}
     row.update(over)
     return row
 
 
-def _lease_db(steam="765", got=True, sub=None, depicts=True):
+def _lease_db(steam="765", got=True, sub=None, depicts=True, events=(3, 4), held=True, pullers=("766",)):
+    """`events`: the ids the named-events read answers with (each pulled by "766" from the subject
+    "765"); `held`: the SHARED try-lock on the other party (r7 H2). The shared key is listed before
+    the exclusive one: the scripted answer is the first key the statement contains."""
     lease_id = uuid4()
     return Scripted({
         "SELECT steam_id FROM players": [[{"steam_id": steam}] if steam else []],
+        "pg_try_advisory_xact_lock_shared": [[{"held": h}] for h in (held if isinstance(held, tuple) else (held,))],
         "pg_try_advisory_xact_lock": [[{"got": got}]],
         "AS subject_banned": [[sub if sub is not None else _sub()]],
         # the print named must depict the subject named
         "FROM pc_prints pr JOIN pc_cards c": [[{"one": 1}] if depicts else []],
+        # every named event must resolve, and names its two parties (r7 H1/H2)
+        "SELECT e.id, pl.steam_id AS puller": [[{"id": i, "puller": pullers[k % len(pullers)], "subject": steam}
+                                                for k, i in enumerate(events)]],
         "INSERT INTO pc_delivery_leases": [[{"id": lease_id, "until": NOW + timedelta(seconds=60)}]],
     }), lease_id
 
@@ -791,12 +885,55 @@ def test_lease_acquire_try_locks_the_identity_then_resolves_under_it(monkeypatch
     assert ans == {"lease_id": str(lease_id), "until": (NOW + timedelta(seconds=60)).isoformat(),
                    "portrait_kind": "game", "portrait_hash": "ef" * 32}
     order = [_idx(db, k) for k in ("SELECT steam_id FROM players", "pg_try_advisory_xact_lock", "AS subject_banned",
-                                   "INSERT INTO pc_delivery_leases")]
+                                   "FROM pc_prints pr JOIN pc_cards c", "SELECT e.id, pl.steam_id AS puller",
+                                   "pg_try_advisory_xact_lock_shared", "INSERT INTO pc_delivery_leases")]
     assert order == sorted(order)
     ins = db.log[_idx(db, "INSERT INTO pc_delivery_leases")]
     assert ins[1] == {"sid": str(PID), "print": str(PID), "ids": [3, 4], "h": "ef" * 32, "secs": 60.0}
     assert "make_interval(secs =>" in ins[0] and db.committed == 1
     assert db.log[_idx(db, "pg_try_advisory_xact_lock")][1] == {"sid": "765"}
+    # the named events' OTHER party is try-locked SHARED, once; the subject (already held) is skipped (r7 H2)
+    shared = [(q, p) for q, p in db.log if "pg_try_advisory_xact_lock_shared" in q]
+    assert [p for _, p in shared] == [{"sid": "766"}]
+    assert db.log[_idx(db, "SELECT e.id, pl.steam_id AS puller")][1] == {"ids": [3, 4]}
+
+
+def test_lease_acquire_refuses_a_named_event_that_is_gone_and_a_party_that_is_held(monkeypatch):
+    """r7 H1/H2: a named id that does not resolve is 404 event_gone (not transient: the next handout
+    resolves it); a party whose identity a writer holds is 409 subject_busy (transient)."""
+    monkeypatch.setattr(main, "_require_internal_key", lambda k: None)
+    db, _ = _lease_db(events=(3,))
+    with pytest.raises(HTTPException) as ex:
+        _run(main.internal_pc_lease({"subject_ref": str(PID), "event_ids": [3, 4]}, "k", db))
+    assert ex.value.status_code == 404 and ex.value.detail == {"error": "event_gone"}
+    assert db.rolled_back == 1 and db.count("INSERT INTO pc_delivery_leases") == 0
+    assert db.count("pg_try_advisory_xact_lock_shared") == 0   # refused before any party lock
+    db, _ = _lease_db(held=False)
+    with pytest.raises(HTTPException) as ex:
+        _run(main.internal_pc_lease({"subject_ref": str(PID), "event_ids": [3, 4]}, "k", db))
+    assert ex.value.status_code == 409 and ex.value.detail == {"error": "subject_busy", "retry_after": 2}
+    assert db.rolled_back == 1 and db.count("INSERT INTO pc_delivery_leases") == 0
+    # a lease naming no events reads no events and locks no party
+    db, _ = _lease_db()
+    _run(main.internal_pc_lease({"subject_ref": str(PID)}, "k", db))
+    assert db.count("SELECT e.id, pl.steam_id AS puller") == 0 and db.count("pg_try_advisory_xact_lock_shared") == 0
+
+
+def test_lease_acquire_try_locks_every_party_in_order_and_stops_at_the_first_one_held(monkeypatch):
+    """r8 (tests, 2026-09-13): two pullers of the named events -> two SHARED try-locks in canonical
+    order; the second one held by a writer is 409 after both were tried and the lease is never written;
+    both free, the lease is written after both."""
+    monkeypatch.setattr(main, "_require_internal_key", lambda k: None)
+    db, _ = _lease_db(pullers=("767", "766"), held=(True, False))
+    with pytest.raises(HTTPException) as ex:
+        _run(main.internal_pc_lease({"subject_ref": str(PID), "event_ids": [3, 4]}, "k", db))
+    assert ex.value.status_code == 409
+    assert [p["sid"] for q, p in db.log if "pg_try_advisory_xact_lock_shared" in q] == ["766", "767"]
+    assert db.count("INSERT INTO pc_delivery_leases") == 0
+    db, _ = _lease_db(pullers=("767", "766"), held=(True, True))
+    _run(main.internal_pc_lease({"subject_ref": str(PID), "event_ids": [3, 4]}, "k", db))
+    assert [p["sid"] for q, p in db.log if "pg_try_advisory_xact_lock_shared" in q] == ["766", "767"]
+    assert db.count("INSERT INTO pc_delivery_leases") == 1
 
 
 def test_lease_acquire_answers_409_subject_busy_when_the_identity_is_held(monkeypatch):
@@ -808,9 +945,9 @@ def test_lease_acquire_answers_409_subject_busy_when_the_identity_is_held(monkey
     assert db.rolled_back == 1 and db.count("INSERT INTO pc_delivery_leases") == 0
 
 
-def test_lease_acquire_resolves_none_for_an_opted_out_subject_and_404s_a_deleted_one(monkeypatch):
+def test_lease_acquire_resolves_none_for_a_pictureless_subject_and_404s_a_deleted_one(monkeypatch):
     monkeypatch.setattr(main, "_require_internal_key", lambda k: None)
-    db, _ = _lease_db(sub=_sub(subject_opted_out=True))
+    db, _ = _lease_db(sub=_sub(portrait_hash=None))   # no rig, no Steam column: the plate
     ans = _run(main.internal_pc_lease({"subject_ref": str(PID)}, "k", db))
     assert ans["portrait_kind"] == "none" and ans["portrait_hash"] is None
     assert db.log[_idx(db, "INSERT INTO pc_delivery_leases")][1]["h"] is None
@@ -832,7 +969,7 @@ def test_lease_acquire_validates_its_payload_before_any_database_work(monkeypatc
         with pytest.raises(HTTPException) as ex:
             _run(main.internal_pc_lease(payload, "k", db))
         assert ex.value.status_code == 422 and db.log == [], payload
-    db, _ = _lease_db()
+    db, _ = _lease_db(events=range(200))
     _run(main.internal_pc_lease({"subject_ref": str(PID), "event_ids": list(range(500))}, "k", db))
     assert len(db.log[_idx(db, "INSERT INTO pc_delivery_leases")][1]["ids"]) == 200
 
@@ -841,8 +978,7 @@ def _check_row(**over):
     """What the revalidation reads: the lease, and the subject's resolver
     inputs as they stand NOW."""
     row = {"until": NOW, "unexpired": True, "leased_hash": "ef" * 32, "print_deliverable": True,
-           "subject_deleted": False, "subject_opted_out": False, "portrait_source": "game",
-           "portrait_hash": "ef" * 32, "subject_banned": False}
+           "subject_deleted": False, "portrait_hash": "ef" * 32, "subject_banned": False, "events_ok": True}
     row.update(over)
     return row
 
@@ -853,11 +989,11 @@ def _check_row(**over):
     ({"subject_deleted": True}, False),
     ({"print_deliverable": False}, False),                           # discarded, gone, or not theirs
     ({"subject_banned": True}, False),                               # banned since the acquire
-    ({"subject_opted_out": True}, False),                            # opted out since the acquire
-    ({"portrait_source": "none"}, False),                            # switched off since the acquire
+    ({"events_ok": False}, False),                                   # an event it names stopped being deliverable for either party (r6 H1)
+    ({"subject_banned": True, "leased_hash": None, "portrait_hash": None}, False),   # a ban is said outright, not through the hash (r6 M2)
     ({"portrait_hash": "ab" * 32}, False),                           # replaced since the acquire
     ({"leased_hash": None, "portrait_hash": None}, True),            # no picture then, none now
-    ({"leased_hash": None, "portrait_source": "none"}, True),        # resolved none then and now
+    ({"leased_hash": None, "portrait_hash": None, "steam_portrait_hash": "ab" * 32}, False),   # none then, Steam now
     ({"leased_hash": None}, False),                                  # none then, a picture now
 ])
 def test_lease_check_answers_live_only_while_it_still_authorises_that_picture(monkeypatch, over, live):
@@ -886,6 +1022,7 @@ def test_lease_check_and_release(monkeypatch):
     # be read from a snapshot the lease row was not read in
     sql = db.log[0][0]
     assert "print_deliverable" in sql and "pc_prints" in sql and "pc_cards" in sql
+    assert "events_ok" in sql and "FROM unnest(l.event_ids) AS named(id)" in sql and "subject_banned" in sql   # the events (per named id, r7 H1) and the ban, in the same statement (r6 H1/M2)
     for rows in ([_check_row(unexpired=False)], []):
         db = Scripted({"FROM pc_delivery_leases l JOIN players p": [rows]})
         with pytest.raises(HTTPException) as ex:
@@ -896,9 +1033,9 @@ def test_lease_check_and_release(monkeypatch):
         _run(main.internal_pc_lease_check("nope", "k", db))
     assert db.log == []
     db = Scripted({"DELETE FROM pc_delivery_leases WHERE id": [[{"id": lid}]]})
-    assert _run(main.internal_pc_lease_release(lid, "k", db)) == {"released": 1} and db.committed == 1
+    assert _run(main.internal_pc_lease_release(lid, "k", db=db)) == {"released": 1} and db.committed == 1
     db = Scripted({})
-    assert _run(main.internal_pc_lease_release("nope", "k", db)) == {"released": 0} and db.log == []
+    assert _run(main.internal_pc_lease_release("nope", "k", db=db)) == {"released": 0} and db.log == []
 
 
 def test_the_internal_key_gate_is_the_first_statement_of_every_internal_pc_route():
@@ -935,26 +1072,26 @@ def test_clear_unit_locks_hash_then_row_then_writes_then_deletes_the_orphan():
     bug, which is worse than no test (#441), so the order assertion is now the
     right way round and the unlocked key read is named explicitly."""
     until = NOW + timedelta(days=7)
-    db = Scripted({"SELECT pc_game_portrait_hash FROM players": [[{"h": "old" * 20}]],
+    db = Scripted({"SELECT pc_game_portrait_hash, pc_steam_portrait_hash FROM players": [[{"pc_game_portrait_hash": "old" * 20, "pc_steam_portrait_hash": None}]],
                    "RETURNING pc_game_portrait_locked_until": [[{"l": until}]]})
-    assert _run(main._pc_clear_portrait_unit(db, str(PID), lock_days=7, source="none")) == ("old" * 20, until)
-    order = [_idx(db, k) for k in ("CAST(:cls AS integer)", "FOR NO KEY UPDATE", "UPDATE players SET", "DELETE FROM pc_portraits")]
+    assert _run(main._pc_clear_portrait_unit(db, str(PID), lock_days=7)) == ("old" * 20, until)
+    order = [_idx(db, k) for k in ("CAST(:cls AS integer)", "FOR NO KEY UPDATE", "UPDATE players SET", "UPDATE pc_portraits SET unreferenced_since")]
     assert order == sorted(order), db.log
     # the key read that P is taken on carries no row lock of its own
     assert "FOR NO KEY UPDATE" not in db.log[0][0]
-    assert "SELECT pc_game_portrait_hash FROM players" in db.log[0][0]
+    assert "SELECT pc_game_portrait_hash, pc_steam_portrait_hash FROM players" in db.log[0][0]
     plock = db.log[_idx(db, "CAST(:cls AS integer)")]
     assert plock[1] == {"cls": P.PC_P_LOCK_CLASS, "h": "old" * 20}
     upd = db.log[_idx(db, "UPDATE players SET")]
     assert "make_interval(days => CAST(:days AS integer))" in upd[0] and upd[1]["days"] == 7
-    assert "pc_portrait_source = CAST(:src AS text)" in upd[0] and upd[1]["src"] == "none"
+    assert "pc_portrait_source" not in upd[0] and "src" not in upd[1]   # no source to force since 2026-09-13
     assert "pc_game_portrait_hash = NULL" in upd[0] and "pc_game_portrait_descriptor = NULL" in upd[0]
-    assert "NOT EXISTS" in db.log[_idx(db, "DELETE FROM pc_portraits")][0]
-    # no previous blob: no hash lock, no delete; no lock_days / source: neither clause
-    db = Scripted({"SELECT pc_game_portrait_hash FROM players": [[{"h": None}]],
+    assert "NOT EXISTS" in db.log[_idx(db, "UPDATE pc_portraits SET unreferenced_since")][0]
+    # no previous blob: no hash lock, no delete; no lock_days: no lock clause
+    db = Scripted({"SELECT pc_game_portrait_hash, pc_steam_portrait_hash FROM players": [[{"pc_game_portrait_hash": None, "pc_steam_portrait_hash": None}]],
                    "RETURNING pc_game_portrait_locked_until": [[{"l": None}]]})
-    assert _run(main._pc_clear_portrait_unit(db, str(PID), lock_days=None, source=None)) == (None, None)
-    assert db.count("CAST(:cls AS integer)") == 0 and db.count("DELETE FROM pc_portraits") == 0
+    assert _run(main._pc_clear_portrait_unit(db, str(PID), lock_days=None)) == (None, None)
+    assert db.count("CAST(:cls AS integer)") == 0 and db.count("UPDATE pc_portraits SET unreferenced_since") == 0
     upd = db.log[_idx(db, "UPDATE players SET")]
     assert "make_interval" not in upd[0] and "pc_portrait_source" not in upd[0]
 
@@ -968,7 +1105,7 @@ def test_admin_clear_verifies_then_locks_then_waits_out_leases(monkeypatch):
     monkeypatch.setattr(main, "_require_admin", admin)
     db = Scripted({"SELECT id FROM players WHERE steam_id": [[{"id": PID}]],
                    "FROM pc_delivery_leases": [[{"left": None}]],
-                   "SELECT pc_game_portrait_hash FROM players": [[{"h": "old" * 20}]],
+                   "SELECT pc_game_portrait_hash, pc_steam_portrait_hash FROM players": [[{"pc_game_portrait_hash": "old" * 20, "pc_steam_portrait_hash": None}]],
                    "RETURNING pc_game_portrait_locked_until": [[{"l": NOW}]]})
     ans = _run(main.admin_pc_portrait_clear({"admin_steam_id": "1", "steam_id": STEAM, "lock_days": 99999,
                                              "signature": "s"}, db))
@@ -988,7 +1125,7 @@ def test_admin_clear_verifies_then_locks_then_waits_out_leases(monkeypatch):
     # lock_days 0 → no lock clause; a non-string signature is treated as absent
     db = Scripted({"SELECT id FROM players WHERE steam_id": [[{"id": PID}]],
                    "FROM pc_delivery_leases": [[{"left": None}]],
-                   "SELECT pc_game_portrait_hash FROM players": [[{"h": None}]],
+                   "SELECT pc_game_portrait_hash, pc_steam_portrait_hash FROM players": [[{"pc_game_portrait_hash": None, "pc_steam_portrait_hash": None}]],
                    "RETURNING pc_game_portrait_locked_until": [[{"l": None}]]})
     _run(main.admin_pc_portrait_clear({"admin_steam_id": "1", "steam_id": STEAM, "lock_days": -4, "signature": 5}, db))
     assert calls[-1] == ("1", "pc_portrait_clear", f"{STEAM}:0", "")
@@ -998,7 +1135,7 @@ def test_admin_clear_verifies_then_locks_then_waits_out_leases(monkeypatch):
 # ── faces ───────────────────────────────────────────────────────────────────
 
 def _face_row(**over):
-    row = {"subject_deleted": False, "subject_banned": False, "subject_opted_out": False, "portrait_source": "game",
+    row = {"subject_deleted": False, "subject_banned": False,
            "portrait_hash": None, "subject_name": "Sid", "rating": None, "title": None, "rarity": "rare",
            "foil": False, "signed": False, "minted_at": NOW, "pool_rank": 12, "board_rank": None,
            "series_wins": 3, "series_losses": 1, "edition_id": 1, "print_id": PID, "top_card": False,
@@ -1103,7 +1240,7 @@ def test_internal_print_face_answers_the_current_revision_in_a_header(monkeypatc
 def test_preview_face_reapplies_the_card_gate_before_the_member_read(monkeypatch):
     monkeypatch.setattr(main, "_pcf", _Face())
     monkeypatch.setattr(main, "_require_internal_key", lambda k: None)
-    for sub in (_sub(subject_opted_out=True), _sub(subject_banned=True), _sub(subject_deleted=True)):
+    for sub in (_sub(subject_banned=True), _sub(subject_deleted=True)):
         db = Scripted({"AS subject_banned": [[{"display_name": "Sid", **sub}]]})
         with pytest.raises(HTTPException) as ex:
             _run(main.internal_pc_face_preview(str(PID), "en", "k", db))
@@ -1147,3 +1284,153 @@ def test_request_locale_is_the_effective_locale_of_the_informational_header(monk
     assert main._pc_locale(SimpleNamespace(headers={"X-Locale": "uk-UA"})) == "uk"
     assert main._pc_locale(SimpleNamespace(headers={"X-Locale": "fr"})) == "en"
     assert main._pc_locale(SimpleNamespace(headers={})) == "en"
+
+
+def test_the_card_and_its_preview_read_one_snapshot():
+    """r7 L1 (2026-09-13): /card returns the snapshot it read; the preview pins its member read to
+    that snapshot when told (COALESCE to the latest otherwise), so a daily rotation between the two
+    reads cannot pair an old-rank embed with a new-rank picture."""
+    card = _src(main.internal_pc_card)
+    assert "s.id AS snapshot_id" in card and '"snapshot_id": int(row["snapshot_id"])' in card
+    prev = _src(main.internal_pc_face_preview)
+    assert "snapshot_id: int | None = Query(None, ge=1)" in prev
+    assert "AND m.snapshot_id = COALESCE(CAST(:snap AS bigint), (SELECT MAX(id) FROM pc_pool_snapshots))" in prev
+    assert '{"pid": player_ref, "snap": snapshot_id}' in prev
+
+
+@pytest.mark.parametrize("gone, lookups, admin_w, target_w", [
+    ("target", ["pid-1", None], "9", "deleted:abc"),   # the target's deletion committed first
+])
+def test_the_unban_persists_the_identities_the_lattice_re_read(monkeypatch, gone, lookups, admin_w, target_w):
+    """r10 M1 (2026-09-13), executed: the identities the unban PERSISTS are the ones its locked re-read
+    returned -- a participant whose deletion committed before the unban's lock is written as the
+    tombstone, on the ban row's unbanned_by and on the audit row -- while the raw target id stays the
+    UPDATE's lookup key (the ban row was written with it) and the answer to the caller. The target may be
+    the deleted one; a deleted ACTOR is refused instead (r11, the next test). The lookups run in canonical
+    order: the target "1", then the admin "9"."""
+    async def _admin_ok(*a, **k):
+        return None
+    monkeypatch.setattr(main, "_require_admin", _admin_ok)
+    db = _UnbanDb({"SELECT id FROM players WHERE steam_id": list(lookups),
+                   "SELECT id, steam_id, deleted_at FROM players WHERE id = :pid": [
+                       [{"id": [p for p in lookups if p][0], "steam_id": "deleted:abc", "deleted_at": "2026-09-13"}]]})
+    res = _run(main.admin_unban(main._AdminUnbanReq(admin_steam_id="9", target_steam_id="1", hmac_signature="x"), db=db))
+    assert res == {"status": "unbanned", "steam_id": "1", "rows": 1}
+    update = [p for sql, p in db.log if "UPDATE player_bans SET unbanned_at" in sql]
+    assert update == [{"admin": admin_w, "sid": "1"}], update
+    assert len(db.added) == 1 and (db.added[0].admin_steam_id, db.added[0].target_steam_id) == (admin_w, target_w)
+    assert db.added[0].action == "unban" and db.committed == 1
+    assert _idx(db, "pg_advisory_xact_lock(hashtext(:sid))") < _idx(db, "FOR NO KEY UPDATE") < _idx(db, "UPDATE player_bans")
+    src = inspect.getsource(main.admin_unban)
+    assert "rows = await _mail_lock_identities(" in src
+    assert src.index("_mail_identity_to_write(rows, req.admin_steam_id)") < src.index("UPDATE player_bans")
+    assert src.index("_mail_identity_to_write(rows, req.target_steam_id)") < src.index("UPDATE player_bans")
+    assert '{"admin": admin_w, "sid": req.target_steam_id}' in src
+    assert "admin_steam_id=admin_w, action=\"unban\", target_steam_id=target_w" in src
+
+
+def test_the_unban_refuses_an_actor_whose_deletion_committed_first(monkeypatch):
+    """r11 M1/M4 (2026-09-13), executed: the unban's ACTOR must be live -- an admin whose own deletion
+    committed while the unban waited for its lock is re-read as the tombstone and refused 403
+    account_deleted before the UPDATE; nothing is written or committed. (A deleted account does not
+    act; on the ban the row's banned_by references the raw admin_users id.)"""
+    async def _admin_ok(*a, **k):
+        return None
+    monkeypatch.setattr(main, "_require_admin", _admin_ok)
+    db = _UnbanDb({"SELECT id FROM players WHERE steam_id": [None, "pid-9"],
+                   "SELECT id, steam_id, deleted_at FROM players WHERE id = :pid": [
+                       [{"id": "pid-9", "steam_id": "deleted:abc", "deleted_at": "2026-09-13"}]]})
+    with pytest.raises(HTTPException) as ex:
+        _run(main.admin_unban(main._AdminUnbanReq(admin_steam_id="9", target_steam_id="1", hmac_signature="x"), db=db))
+    assert (ex.value.status_code, ex.value.detail) == (403, "account_deleted")
+    assert db.count("UPDATE player_bans") == 0 and db.added == [] and db.committed == 0
+    assert db.count("FOR NO KEY UPDATE") == 1   # refused by the re-read, after the lock
+    src = inspect.getsource(main.admin_unban)
+    assert src.index("_mail_lock_identities(") < src.index("_mail_actor_live_or_raise(rows, req.admin_steam_id)") < src.index("UPDATE player_bans")
+    # the helper itself: a tombstone row refuses, a live row and no row pass
+    with pytest.raises(HTTPException):
+        main._mail_actor_live_or_raise({"9": {"id": "p", "steam_id": "deleted:x", "deleted_at": "2026-09-13"}}, "9")
+    assert main._mail_actor_live_or_raise({"9": {"id": "p", "steam_id": "9", "deleted_at": None}}, "9") is None
+    assert main._mail_actor_live_or_raise({}, "9") is None and main._mail_actor_live_or_raise({"9": None}, "9") is None
+
+
+def test_the_rate_refusal_audits_and_alerts_the_re_read_target_and_looks_up_the_raw_one():
+    """r11 M2 (2026-09-13), executed: the ban-velocity refusal looks the target's ban up, takes the rate
+    lock and counts by the RAW ids, but its audit row and its alert carry the identity the caller's
+    lattice re-read -- the tombstone when the target's deletion committed first; without `target_w`
+    the raw id is written, as before."""
+    db = _GateDb({"FROM player_bans WHERE steam_id": [[]], "COUNT(*) FROM player_bans": [5],
+                  "COUNT(*) FROM admin_actions": [1]})
+    with pytest.raises(HTTPException) as ex:
+        _run(main._ban_rate_gate_or_raise(db, "adm", "tgt", target_w="deleted:abc"))
+    assert ex.value.status_code == 429
+    assert [p["sid"] for sql, p in db.log if "FROM player_bans WHERE steam_id" in sql] == ["tgt"]
+    assert [p["adm"] for sql, p in db.log if "ban-rate:" in sql] == ["adm"]
+    assert [p["adm"] for sql, p in db.log if "COUNT(*) FROM player_bans" in sql] == ["adm"]   # the count is the admin's too (r12)
+    audit = [p for sql, p in db.log if "INSERT INTO admin_actions" in sql]
+    assert len(audit) == 1 and (audit[0]["a"], audit[0]["t"]) == ("adm", "deleted:abc")
+    alert = [p for sql, p in db.log if "INSERT INTO pending_channel_posts" in sql]
+    assert len(alert) == 1 and "`deleted:abc`" in alert[0]["c"] and "`tgt`" not in alert[0]["c"]
+    db = _GateDb({"FROM player_bans WHERE steam_id": [[]], "COUNT(*) FROM player_bans": [5],
+                  "COUNT(*) FROM admin_actions": [1]})
+    with pytest.raises(HTTPException):
+        _run(main._ban_rate_gate_or_raise(db, "adm", "tgt"))
+    assert [p["t"] for sql, p in db.log if "INSERT INTO admin_actions" in sql] == ["tgt"]
+    src = inspect.getsource(main.admin_ban)
+    assert src.index("_mail_actor_live_or_raise(rows, req.admin_steam_id)") < src.index("_ban_rate_gate_or_raise(")
+    assert "target_w=target_w" in src
+
+
+def test_the_ack_executed_releases_by_event_and_by_id_then_marks_posted(monkeypatch):
+    """r11 (2026-09-13), executed on the scripted session: the ack deletes the leases naming any acked
+    event, then the leases it names by id, THEN marks the events posted, and commits once; ids alone,
+    leases alone and neither each do only their part; a non-canonical lease id is refused before any
+    statement."""
+    monkeypatch.setattr(main, "_require_internal_key", lambda key: None)
+    l1, l2 = str(uuid4()), str(uuid4())
+    db = Scripted({"DELETE FROM pc_delivery_leases WHERE event_ids && CAST(:ids AS bigint[])": [[("a",), ("b",)]],
+                   "DELETE FROM pc_delivery_leases WHERE id = ANY(CAST(:ids AS uuid[]))": [[("c",)]],
+                   "UPDATE pc_events SET posted_at = now()": [[(1,), (2,)]]})
+    res = _run(main.internal_pc_events_ack(ids="1,2", leases=l1 + "," + l2, x_internal_key="k", db=db))
+    assert res == {"acked": 2, "released": 3} and db.committed == 1
+    assert _idx(db, "event_ids && CAST(:ids AS bigint[])") < _idx(db, "id = ANY(CAST(:ids AS uuid[]))") < _idx(db, "UPDATE pc_events SET posted_at")
+    assert [p for sql, p in db.log if "id = ANY(CAST(:ids AS uuid[]))" in sql] == [{"ids": [l1, l2]}]
+    assert [p for sql, p in db.log if "event_ids &&" in sql] == [{"ids": [1, 2]}]
+    assert all(sql.endswith("RETURNING id") for sql, _ in db.log if "DELETE FROM pc_delivery_leases" in sql)   # counted rows are returned rows (r12)
+    assert [sql for sql, _ in db.log if "UPDATE pc_events" in sql][0].endswith("RETURNING id")
+    # ids only (r12): the poll after a failed ack sends the ids with no lease list -- the event-overlap DELETE and
+    # the UPDATE run, the explicit-lease DELETE does not, one commit
+    db = Scripted({"DELETE FROM pc_delivery_leases WHERE event_ids && CAST(:ids AS bigint[])": [[("a",)]],
+                   "UPDATE pc_events SET posted_at = now()": [[(1,), (2,)]]})
+    assert _run(main.internal_pc_events_ack(ids="1,2", leases=None, x_internal_key="k", db=db)) == {"acked": 2, "released": 1}
+    assert db.count("id = ANY(CAST(:ids AS uuid[]))") == 0 and db.count("event_ids &&") == 1 and db.count("UPDATE pc_events") == 1
+    assert db.committed == 1 and _idx(db, "event_ids &&") < _idx(db, "UPDATE pc_events SET posted_at")
+    assert [p for sql, p in db.log if "event_ids &&" in sql or "UPDATE pc_events" in sql] == [{"ids": [1, 2]}, {"ids": [1, 2]}]
+    db = Scripted({"DELETE FROM pc_delivery_leases WHERE id = ANY(CAST(:ids AS uuid[]))": [[("c",)]]})
+    assert _run(main.internal_pc_events_ack(ids="", leases=l1, x_internal_key="k", db=db)) == {"acked": 0, "released": 1}
+    assert db.count("UPDATE pc_events") == 0 and db.count("event_ids &&") == 0 and db.committed == 1
+    db = Scripted({})
+    assert _run(main.internal_pc_events_ack(ids="", leases=None, x_internal_key="k", db=db)) == {"acked": 0, "released": 0}
+    assert db.committed == 0 and db.log == []
+    db = Scripted({})
+    with pytest.raises(HTTPException) as ex:
+        _run(main.internal_pc_events_ack(ids="1", leases="not-a-uuid", x_internal_key="k", db=db))
+    assert ex.value.status_code == 422 and db.log == []
+
+
+def test_the_rate_refusal_alerts_once_per_window_and_keys_its_lock_and_count_on_the_admin():
+    """r12 (2026-09-13), executed: the second refusal of one admin within the window -- another target --
+    is audited but not alerted again (the alert is once per burst, keyed on the admin's audit rows); the
+    rate lock and the count are keyed on the admin on both attempts."""
+    db = _GateDb({"FROM player_bans WHERE steam_id": [[]], "COUNT(*) FROM player_bans": [5],
+                  "COUNT(*) FROM admin_actions": [1, 2]})
+    for target in ("tgt", "tgt2"):
+        with pytest.raises(HTTPException) as ex:
+            _run(main._ban_rate_gate_or_raise(db, "adm", target))
+        assert ex.value.status_code == 429
+    assert db.count("INSERT INTO admin_actions") == 2 and db.count("INSERT INTO pending_channel_posts") == 1
+    assert [p["t"] for sql, p in db.log if "INSERT INTO admin_actions" in sql] == ["tgt", "tgt2"]
+    assert [p["adm"] for sql, p in db.log if "ban-rate:" in sql] == ["adm", "adm"]
+    assert [p["adm"] for sql, p in db.log if "COUNT(*) FROM player_bans" in sql] == ["adm", "adm"]
+    assert [p["adm"] for sql, p in db.log if "COUNT(*) FROM admin_actions" in sql] == ["adm", "adm"]
+    assert db.committed == 2

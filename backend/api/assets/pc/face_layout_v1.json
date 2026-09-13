@@ -41,6 +41,8 @@
   },
   "anchors": {
     "name": [54, 85],
+    "name_subtitled": [54, 71],
+    "subtitle": [54, 113],
     "badge_label": [118, 739],
     "autograph": [390, 689],
     "seal": [600, 690],

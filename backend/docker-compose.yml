@@ -38,14 +38,17 @@ services:
     # populate on other mod clients") and the online count splits per worker
     # (bug #51 — "says 1 online"). This command: overrides whatever CMD the
     # image's Dockerfile carries, so a stray --workers flag there can never
-    # resurface those bugs. If the API ever needs more throughput, scale
+    # resurface those bugs, and it passes --workers 1 EXPLICITLY so that the
+    # WEB_CONCURRENCY environment variable -- uvicorn's default for the count
+    # when the flag is absent -- cannot either (review r11). If the API ever
+    # needs more throughput, scale
     # verticals (asyncio handles this community's load easily) or move the
     # shared state to Redis FIRST.
     # --no-access-log: ~40 endpoints carry HMAC signatures as query params, so
     # uvicorn's access log recorded every sig verbatim, forever, in an
     # unrotated file (audit lower-pri item). App-level prints (the [TAG] lines)
     # are unaffected — they're where real diagnosis happens anyway.
-    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--no-access-log"]
     depends_on:
       db:
         condition: service_healthy
@@ -112,6 +115,10 @@ services:
       # actually gets (#438/#443: nothing reaches the process unless it is
       # named here).
       PC_FACE_CACHE_DIR: ${PC_FACE_CACHE_DIR:-/var/cache/pc-faces}
+      # PC_STEAM_SWEEP: "off" pauses the Steam profile-picture sweep (the
+      # health word reads paused:env); unset or anything else runs it. Named
+      # here so a value in .env reaches the process at all (#438/#443).
+      PC_STEAM_SWEEP: ${PC_STEAM_SWEEP:-}
     volumes:
       # Bind-mount bug-report logs to the host so they survive container
       # rebuilds. Without this, every `docker compose up -d --build api`
@@ -143,6 +150,9 @@ services:
       QUEUE_BEACON_CHANNEL: ${QUEUE_BEACON_CHANNEL}
       CHAT_CHANNEL: ${CHAT_CHANNEL:-1492022404829020230}
       RELEASES_CHANNEL: ${RELEASES_CHANNEL:-1498731888813277294}
+      # Player Cards notable pulls; empty = the bot's default (gambler chat,
+      # i.e. the live-bets channel). Passed through so .env can move it.
+      PC_EVENTS_CHANNEL: ${PC_EVENTS_CHANNEL:-}
       API_SECRET_KEY: ${API_SECRET_KEY}
       # FAQ auto-responder channel scoping (unset = global; see discord_bot.py)
       FAQ_CHANNEL_ALLOWLIST: ${FAQ_CHANNEL_ALLOWLIST:-}

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import inspect
 import json
 import random
 import re
@@ -336,29 +337,33 @@ def test_name_fit_is_grapheme_safe_and_uses_ascii_dots():
         assert fitted.endswith("...") and "…" not in fitted
         prefix = fitted[:-3]
         assert pc_face.graphemes(prefix) == pc_face.graphemes(original)[:len(pc_face.graphemes(prefix))]
-    assert len(pc_face.graphemes(pc_face.fit_name(original, "tile"))) < len(
-        pc_face.graphemes(pc_face.fit_name(original, "card"))
-    )
+    # parity (r5 L11): the tile keeps exactly the graphemes the card keeps
+    assert pc_face.fit_name(original, "tile") == pc_face.fit_name(original, "card")
     autograph, autograph_size = pc_face._autograph_fit("W" * 64, 1.0)
     assert autograph.endswith("...") and autograph_size == 40
     assert pc_face._measure_text(autograph, autograph_size, "script") <= 380
 
 
-def test_nameless_uses_label_but_initial_remains_question_mark(canonical_portraits):
+def test_nameless_uses_label_and_the_plate_ignores_the_name(canonical_portraits):
     specification = _spec(band="rare", name="", top_card=False)
     english = pc_face.render_face(specification, {}, None, "card")
     localized = pc_face.render_face(specification, {"pc.unnamed": "Без імені"}, None, "card")
     emoji = pc_face.render_face(_spec(band="rare", name="🔥🎯👾", top_card=False), {}, None, "card")
+    named = pc_face.render_face(_spec(band="rare", name="Ace", top_card=False), {}, None, "card")
     with (
         Image.open(io.BytesIO(english)) as first,
         Image.open(io.BytesIO(localized)) as second,
         Image.open(io.BytesIO(emoji)) as third,
+        Image.open(io.BytesIO(named)) as fourth,
     ):
         assert ImageChops.difference(first.crop((54, 38, 490, 132)),
                                      second.crop((54, 38, 490, 132))).convert("RGB").getbbox() is not None
-        assert ImageChops.difference(first.crop((120, 190, 630, 620)),
-                                     third.crop((120, 190, 630, 620))).convert("RGB").getbbox() is None
-    assert pc_face._initial("🏽") == "?"
+        # No picture = the emblem plate (2026-09-12): no initial, so the portrait
+        # area is byte-identical across a blank, an emoji and a plain name.
+        for other in (third, fourth):
+            assert ImageChops.difference(first.crop((120, 190, 630, 620)),
+                                         other.crop((120, 190, 630, 620))).convert("RGB").getbbox() is None
+    assert not hasattr(pc_face, "_initial")
 
 
 def test_portrait_reduction_is_direct_for_each_pass(canonical_portraits):
@@ -777,7 +782,10 @@ def test_catalogue_keys_equal_label_ids():
     # row -- so a catalogue identifier missing from PcLabels.cs is a label that
     # renders in English in every locale, quietly, with nothing to see in a log
     # (r19 H2: the consumer shipped and the producer did not).
-    repo = Path(pc_face.__file__).parents[2]
+    # resolve() first: whichever test module imported pc_face first decides
+    # whether __file__ carries a "tests/../api" segment, and parents[] of an
+    # unresolved path counts that ".." as a directory (collection-order flake)
+    repo = Path(pc_face.__file__).resolve().parents[2]
     labels_cs = (repo / "plugin" / "PcLabels.cs").read_text(encoding="utf-8")
     call = re.compile(r'case "([^"]+)":\s*return I18n\.TrC\("([^"]+)",\s*'
                       r'"((?:[^"\\]|\\.)*)"\);')
@@ -797,3 +805,86 @@ def test_catalogue_keys_equal_label_ids():
     harvested = set(source.get("contexts") or {})
     want = {v + "\x04" + k for k, v in catalogue.items()}
     assert want <= harvested, sorted(want - harvested)
+
+
+def test_the_name_budget_follows_the_chips_and_the_tile_shrinks_before_it_cuts():
+    """2026-09-13 (bug #361 feedback): the name is measured against the chips
+    actually drawn, not the layout rect, with a gap kept clear, and the tile
+    shrinks to its own floor before it ellipsises. A common chip is narrower
+    than a legendary one, so the same name gets more room beside it; a foil
+    chip on the same row can only narrow the budget."""
+    name = "Twenty Character Nam"
+    img = Image.new("RGBA", (750, 1050))
+    left_leg = pc_face._draw_chip(img, 696, 38, "LEGENDARY", "LEG", (1, 1, 1), (2, 2, 2), 1.0, False)
+    left_com = pc_face._draw_chip(img, 696, 38, "COMMON", "COM", (1, 1, 1), (2, 2, 2), 1.0, False)
+    assert 502 <= left_leg < left_com < 696          # the chip reports its left edge; the wider chip, the smaller x
+    gap = pc_face.NAME_CHIP_GAP
+    beside_leg = pc_face._name_fit(name, "card", left_leg - gap)
+    beside_com = pc_face._name_fit(name, "card", left_com - gap)
+    assert beside_leg[0] == beside_com[0] == name and beside_com[1] >= beside_leg[1]
+    # the fitted text never crosses the edge it was given
+    assert pc_face._measure_text(beside_leg[0], beside_leg[1], "black") <= left_leg - gap - pc_face.NAME_LEFT
+    # the tile: beside the RARE chip this name was cut to eleven characters at the old 28 px floor; whole now
+    tile = Image.new("RGBA", (375, 525))
+    left_rare = pc_face._draw_chip(tile, 348, 19, "RARE", "RARE", (1, 1, 1), (2, 2, 2), 0.5, True)
+    fitted, px = pc_face._name_fit(name, "tile", left_rare - gap * 0.5)
+    assert fitted == name and pc_face.NAME_SIZE_MIN_CARD // 2 <= px < 28
+    # one floor, the card's; the tile has none of its own (r5 L11)
+    assert pc_face.NAME_SIZE_MIN_CARD == 34 and not hasattr(pc_face, "NAME_SIZE_MIN_TILE")
+    # parity by construction: beside the widest chip, for every length, the tile keeps
+    # exactly the text the card keeps (whole or cut alike) at half the size, and that
+    # text stays inside the tile's own budget to within the font's rounding
+    left_leg_t = pc_face._draw_chip(tile, 348, 19, "LEGENDARY", "LEG", (1, 1, 1), (2, 2, 2), 0.5, True)
+    edge_t = left_leg_t - gap * 0.5
+    # the oracle is the CARD's chip as drawn above (LEGENDARY, full width), not the
+    # tile's short chip doubled (r6 L9): the renderer passes that edge to the tile fit
+    edge_c = left_leg - gap
+    assert pc_face._chip_width("LEGENDARY", "LEG", 1.0, False) == 696 - left_leg      # the width the renderer asks for
+    assert pc_face._chip_width("LEGENDARY", "LEG", 0.5, True) == 348 - left_leg_t
+    assert edge_t * 2.0 > edge_c   # the short chip leaves more room: the doubled tile edge was the wrong oracle
+    assert 'card_edge=(card_chip_left - NAME_CHIP_GAP) if size == "tile" else None' in inspect.getsource(pc_face.render_face)
+    assert pc_face._name_fit("Wm" * 20, "tile", edge_t) == pc_face._name_fit("Wm" * 20, "tile", edge_t, card_edge=edge_t * 2.0)   # the stand-in when no card edge is given
+    flips = 0
+    for n in range(1, 41):
+        nm = ("Wm" * 20)[:n]
+        card = pc_face._name_fit(nm, "card", edge_c)
+        tile_fit = pc_face._name_fit(nm, "tile", edge_t, card_edge=edge_c)
+        assert tile_fit[0] == card[0], (n, card, tile_fit)                 # the same text, whole or cut alike
+        half = max(1, round(card[1] * 0.5))
+        assert half - 3 <= tile_fit[1] <= half, (n, card, tile_fit)        # half the size, less the font's rounding
+        assert pc_face._measure_text(tile_fit[0], tile_fit[1], "black") <= edge_t - pc_face.NAME_LEFT * 0.5, n
+        flips += card[0] != nm
+    assert 0 < flips < 40   # the range crosses the whole/cut boundary, so the parity was exercised on both sides
+    # without a chip edge the layout rect still bounds the name (fit_name, the old entry point)
+    assert pc_face.fit_name("Ace", "card") == "Ace" and pc_face.fit_name("x" * 60, "card").endswith("...")
+
+
+def test_the_rendered_name_never_reaches_the_chips_on_either_size():
+    """r7 (2026-09-13): the geometry as DRAWN, not as the width helper reports it (which _draw_chip
+    shares): the name's ink -- the pixels that differ between a long name and a one-letter one --
+    ends a gap short of the leftmost chip-fill pixel, measured on the chip's middle row from its
+    right anchor; band chip and foil chip, card and tile, three long names incl. one at the floor."""
+    band_rgb = tuple(int(v) for v in pc_face.LAYOUT["colours"]["bands"]["legendary"])
+    for size, scale in (("card", 1.0), ("tile", 0.5)):
+        short_png = pc_face.render_face(_spec(name="W", foil=True, top_card=False), {}, None, size)
+        short_im = Image.open(io.BytesIO(short_png)).convert("RGBA")
+        for name in ("Wm" * 20, "MMMMMMMMMMMMMMMMMMMMWWWW", "iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii"):
+            long_im = Image.open(io.BytesIO(pc_face.render_face(_spec(name=name, foil=True, top_card=False), {}, None, size))).convert("RGBA")
+            diff = ImageChops.difference(long_im, short_im).convert("L").point(lambda v: 255 if v else 0)
+            ink = diff.getbbox()
+            assert ink is not None, (size, name)
+            name_right = ink[2]
+            right = pc_face._scale_value(696, scale)
+            gap = pc_face._scale_value(pc_face.NAME_CHIP_GAP, scale)
+            px = long_im.load()
+            for label, rgb, y0 in (("band", band_rgb, pc_face._scale_value(38, scale)), ("foil", (255, 255, 255), pc_face._scale_value(88, scale))):
+                y_mid = y0 + pc_face._scale_value(22, scale)   # the pill's widest row: its left end is reached here only
+                assert px[right, y_mid][:3] == rgb, (size, label, px[right, y_mid])   # the chip's right anchor, filled
+                # the first fill pixel to the RIGHT of the name's ink on that row is the pill's left end (the
+                # label's glyphs sit in the middle of the pill, so a run from the right anchor ends at them)
+                x = name_right
+                while x < right and px[x, y_mid][:3] != rgb:
+                    x += 1
+                chip_left = x
+                assert right - chip_left >= pc_face._scale_value(60, scale), (size, label, chip_left)   # a chip, not a stray pixel
+                assert name_right + gap <= chip_left, (size, name, label, name_right, chip_left)

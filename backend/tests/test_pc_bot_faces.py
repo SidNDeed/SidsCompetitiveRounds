@@ -2,8 +2,11 @@
 source like test_player_cards_bot: the bot builds itself at import time."""
 import asyncio
 import io
+import logging
 import re
+import sys
 import time
+import traceback
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -169,9 +172,13 @@ def test_the_bot_draws_no_avatar_and_no_thumbnail_anywhere_in_player_cards():
 def test_every_portrait_send_revalidates_its_lease_right_before_the_send_and_releases_it_after():
     src = _fn(BOT_SRC, "_pc_send_face")
     assert src.index("await _pc_lease_live(lease_id)") < src.index("await asyncio.wait_for(sender(**kwargs)")
-    assert "finally:" in src and src.index("finally:") < src.index("await _pc_lease_release(lease_id)")
-    # the bytes ride only under a lease: no lease, no attachment
-    assert "attach = face is not None and lease_id is not None" in src
+    # released after the send (the finally) -- and on the refusal path of a
+    # required lease, before the send that then does not happen (r6 H1/M2)
+    assert "finally:" in src and src.index("finally:") < src.rindex("await _pc_lease_release(lease_id)")
+    assert src.index("if require_lease and not live:") < src.index("await _pc_lease_release(lease_id)") < src.index("return False")
+    # the bytes ride only under a lease that is LIVE at the api right before the send
+    assert "live = await _pc_lease_live(lease_id) and _pc_lease_left(deadline) > 0" in src
+    assert "attach = face is not None and live" in src
 
 
 def test_the_lease_deadline_keeps_the_reserve_and_a_failed_acquire_means_no_picture():
@@ -236,8 +243,13 @@ def test_collection_and_card_lease_the_subject_and_release_on_the_text_only_path
     assert coll.index("_pc_api(\"GET\", \"/internal/pc/collection\"") < coll.index("_pc_best_face(body, locale)")
     assert coll.index("await _pc_lease_release(lease[0])") < coll.index("await _pc_send_face(ctx.send")
     card = _fn(BOT_SRC, "cmd_pc_card")
-    assert '_pc_lease(body["player_ref"])' in card and "_pc_locale_of(ctx)" in card
-    assert card.index("await _pc_lease_release(lease[0])") < card.index("await _pc_send_face(ctx.send")
+    assert "_pc_lease(ref)" in card and "_pc_locale_of(ctx)" in card
+    # /card has NO text-only path since r6 (H1/M2): no lease, no card -- a
+    # refusal before the send, and the send itself requires the lease
+    assert card.index("if not lease[0]:") < card.index("await _pc_send_face(ctx.send")
+    # three refusals say the same thing: no usable snapshot pin (r8 L5), no lease, the send failed
+    assert "require_lease=True" in card and card.count("That card isn't available right now") == 3
+    assert "await _pc_lease_release(lease[0])" not in card
 
 
 def test_the_drain_waits_a_bounded_number_of_ticks_for_a_transient_picture():
@@ -259,7 +271,7 @@ def test_the_drain_waits_a_bounded_number_of_ticks_for_a_transient_picture():
 
 def test_the_drain_leases_each_print_group_with_its_events_and_acks_with_the_leases():
     src = _fn(BOT_SRC, "poll_pc_events")
-    assert '_pc_lease(first["subject_ref"], print_id=p["print_id"], event_ids=ids)' in src
+    assert '_pc_lease(first["subject_ref"], print_id=p.get("print_id"), event_ids=ids)' in src   # every group, print or not (r6 H1)
     assert src.index("await _pc_send_face(ch.send") < src.index('"/internal/pc/events/ack"')
     assert '"leases": ",".join(leases)' in src
     assert "leases.append(lease[0])" in src
@@ -275,3 +287,170 @@ def test_the_daily_answer_carries_the_canonical_back_without_a_lease():
 def test_the_locale_is_the_interaction_primary_subtag():
     src = BOT_SRC[BOT_SRC.index("def _pc_locale_of(ctx):"):BOT_SRC.index("async def _pc_api_bytes")]
     assert 'split("-")[0].lower()' in src and 'return primary or "en"' in src
+
+
+def _card_ns(lease, preview_status=404, body=None):
+    calls = {"api": [], "bytes": [], "sent": [], "said": [], "lease": []}
+
+    async def _api(method, path, params=None, timeout=8.0, payload=None):
+        calls["api"].append((method, path, params))
+        return 200, body if body is not None else {"player_ref": "11111111-1111-4111-8111-111111111111", "subject_name": "Ace", "rarity": "rare",
+                     "pool_rank": 3, "rating": 1500, "peak_rating": 1600, "board_rank": 7, "snapshot_id": 41,
+                     "in_circulation": {"prints": 2, "holders": 2, "foil": 0, "signed": 0}}
+
+    async def _bytes(path, params=None, timeout=10.0):
+        calls["bytes"].append((path, params))
+        return preview_status, (b"png" if preview_status == 200 else None)
+
+    async def _lease(ref, print_id=None, event_ids=None):
+        calls["lease"].append(ref)
+        return lease
+
+    async def _send(sender, content=None, embed=None, face=None, lease=(None, None), filename="card.png", require_lease=False):
+        calls["sent"].append((embed is not None, face, lease[0], require_lease))
+        return True
+
+    async def _defer(ctx):
+        pass
+
+    class _Embed:
+        def __init__(self, **kw):
+            self.kw, self.fields = kw, []
+
+        def add_field(self, **kw):
+            self.fields.append(kw)
+
+        def set_footer(self, **kw):
+            pass
+
+    ns = _load(["cmd_pc_card"],
+               discord=SimpleNamespace(Member=object, Embed=_Embed, utils=SimpleNamespace(escape_markdown=lambda s: s)),
+               _pc_api=_api, _pc_api_bytes=_bytes, _pc_lease=_lease, _pc_send_face=_send, _maybe_defer=_defer,
+               _pc_detail=lambda body: body if isinstance(body, dict) else {}, _pc_not_linked=lambda ctx, t: "not linked",
+               _pc_name=lambda s: s, _PC_RARITY_EMOJI={}, _PC_RARITY_COLOR={}, get_rank_name=lambda r: "Gold",
+               rank_emoji=lambda n: "", _pc_locale_of=lambda ctx: "en")
+    ns["calls"] = calls
+    return ns
+
+
+def _run_card(ns):
+    async def _say(*a, **k):
+        ns["calls"]["said"].append(a[0] if a else k.get("content"))
+    ctx = SimpleNamespace(author=SimpleNamespace(id=1, display_name="Me"), send=_say)
+    asyncio.run(ns["cmd_pc_card"](ctx, None))
+    return ns["calls"]
+
+
+def test_the_card_command_draws_its_preview_from_the_embeds_snapshot_and_posts_only_under_a_lease():
+    """r7 L1 (2026-09-13), executed: the preview request carries the snapshot id the embed was read
+    from; a preview that 404s still posts the embed under the lease, without a picture; no lease
+    posts nothing and says so."""
+    calls = _run_card(_card_ns(lease=("L1", time.monotonic() + 30, False)))
+    assert calls["bytes"] == [("/internal/pc/face/preview/11111111-1111-4111-8111-111111111111/en", {"snapshot_id": 41})]
+    assert calls["sent"] == [(True, None, "L1", True)] and calls["said"] == []
+    calls = _run_card(_card_ns(lease=("L2", time.monotonic() + 30, False), preview_status=200))
+    assert calls["sent"] == [(True, b"png", "L2", True)]
+    calls = _run_card(_card_ns(lease=(None, None, True)))
+    assert calls["bytes"] == [] and calls["sent"] == [] and len(calls["said"]) == 1 and "isn't available" in calls["said"][0]
+
+
+def test_the_card_command_posts_nothing_without_a_usable_snapshot_pin_or_subject_reference():
+    """r8 L5 + r9 L5 (2026-09-13), executed: a body without `snapshot_id` (an older api during a rolling
+    deploy), or with one that is not a positive integer, posts nothing and says so -- never one
+    snapshot's text with another's face; a body without a usable `player_ref` (None, empty, not a
+    string, absent) posts nothing either: there is no text-only card; neither takes a lease for it;
+    a pinned body with its reference posts as before."""
+    base = {"player_ref": "11111111-1111-4111-8111-111111111111", "subject_name": "Ace", "rarity": "rare",
+            "pool_rank": 3, "rating": 1500, "peak_rating": 1600, "board_rank": 7,
+            "in_circulation": {"prints": 2, "holders": 2, "foil": 0, "signed": 0}}
+    refused = [{}, {"snapshot_id": None}, {"snapshot_id": "41"}, {"snapshot_id": 0}, {"snapshot_id": True},
+               {"snapshot_id": 41, "player_ref": None}, {"snapshot_id": 41, "player_ref": ""}, {"snapshot_id": 41, "player_ref": 7}]
+    no_ref = dict(base, snapshot_id=41)
+    del no_ref["player_ref"]
+    for body in [dict(base, **over) for over in refused] + [no_ref]:
+        calls = _run_card(_card_ns(lease=("L1", time.monotonic() + 30, False), preview_status=200, body=body))
+        assert calls["lease"] == [] and calls["bytes"] == [] and calls["sent"] == [], body
+        assert len(calls["said"]) == 1 and "isn't available" in calls["said"][0], body
+    calls = _run_card(_card_ns(lease=("L1", time.monotonic() + 30, False), preview_status=200, body=dict(base, snapshot_id=41)))
+    assert calls["lease"] == ["11111111-1111-4111-8111-111111111111"] and calls["sent"] == [(True, b"png", "L1", True)]
+    assert calls["bytes"] == [("/internal/pc/face/preview/11111111-1111-4111-8111-111111111111/en", {"snapshot_id": 41})]
+
+
+def test_every_line_the_bot_prints_is_one_line():
+    """r9 L8 (2026-09-13), executed: the bot's print flattens CR and LF out of every argument, so a
+    relayed message or a display name carrying line breaks prints as ONE log line -- no text a user
+    typed can occupy a line of its own and read as a lifecycle marker to the deploy train, whose
+    markers are whole lines; installed before the imports, ahead of every other print, and the only
+    marker prints are the fallback boot line and on_ready's."""
+    m = re.search(r"^def _one_line_print\(.*?\n(?=\n)", BOT_SRC, re.S | re.M)
+    assert m, "the flattener"
+    out = []
+    ns = {"_gen_builtins": SimpleNamespace(print=lambda *a, **k: out.append((a, k)))}
+    exec(compile(m.group(0), "<discord_bot>", "exec"), ns)
+    ns["_one_line_print"]("[CHAT] Discord msg from x: hi\n[BOT-BOOT] gen=deadbeefcafe\r\nmore", 7, flush=True)
+    assert out == [(("[CHAT] Discord msg from x: hi [BOT-BOOT] gen=deadbeefcafe  more", "7"), {"flush": True})]
+    assert BOT_SRC.index("print = _one_line_print") < BOT_SRC.index("import os, asyncio, aiohttp, discord")
+    assert BOT_SRC.count('print("[BOT-BOOT]') == 1 and BOT_SRC.count('print("[BOT-READY]') == 1
+
+
+def test_every_other_writer_of_the_bots_output_is_one_line_too():
+    """r10 M4 (2026-09-13), executed: `print` is not the only writer of the container's stdout/stderr --
+    discord.py LOGS a command's exception (whose text quotes the member's argument) and libraries, the
+    asyncio logger and warnings log through the root logger; the interpreter's excepthook writes stderr.
+    Each is flattened AFTER its traceback is rendered: the logging formatter installed on the ROOT
+    logger's handler by bot.run (root_logger=True), the excepthook, warnings captured into logging --
+    all before the imports, like the print flattener -- so no record can put a marker on a line of
+    its own."""
+    m = re.search(r"^class _OneLineFormatter\(.*?\n(?=\n\ndef _one_line_excepthook)", BOT_SRC, re.S | re.M)
+    assert m, "the formatter"
+    ns = {"_gen_logging": logging}
+    exec(compile(m.group(0), "<discord_bot>", "exec"), ns)
+    fmt = ns["_OneLineFormatter"]("[{asctime}] [{levelname:<8}] {name}: {message}", "%Y-%m-%d %H:%M:%S", style="{")
+    quoted = "bad argument:\n[BOT-BOOT] gen=deadbeefcafe\r\n[BOT-READY] x -- gen=deadbeefcafe -- loops started at 2026-09-13T00:00:00+00:00"
+    try:
+        raise ValueError(quoted)
+    except ValueError:
+        rec = logging.LogRecord("discord.ext.commands.bot", logging.ERROR, __file__, 1,
+                                "Ignoring exception in command %s", ("card",), sys.exc_info())
+    line = fmt.format(rec)
+    assert "\n" not in line and "\r" not in line
+    assert "Traceback" in line and "Ignoring exception in command card" in line and "[BOT-BOOT] gen=deadbeefcafe" in line
+    rec.stack_info = "Stack (most recent call last):\n  File x\n[BOT-READY] y -- gen=zz -- loops started at 2026-09-13T00:00:00+00:00"
+    line = fmt.format(rec)                                                    # stack_info is inside the flattened string too (r11)
+    assert "\n" not in line and "\r" not in line and "Stack (most recent call last)" in line
+    # the excepthook, through the print flattener
+    p = re.search(r"^def _one_line_print\(.*?\n(?=\n)", BOT_SRC, re.S | re.M)
+    h = re.search(r"^def _one_line_excepthook\(.*?\n(?=\n)", BOT_SRC, re.S | re.M)
+    assert p and h, "the flattener and the hook"
+    out = []
+    ns2 = {"_gen_builtins": SimpleNamespace(print=lambda *a, **k: out.append((a, k))),
+           "_gen_traceback": traceback, "_gen_sys": sys}
+    exec(compile(p.group(0) + "\n" + h.group(0), "<discord_bot>", "exec"), ns2)
+    try:
+        raise RuntimeError(quoted)
+    except RuntimeError:
+        ns2["_one_line_excepthook"](*sys.exc_info())
+    assert len(out) == 1 and out[0][1] == {"file": sys.stderr, "flush": True}
+    assert "\n" not in out[0][0][0] and "\r" not in out[0][0][0] and "Traceback" in out[0][0][0]
+    # a thread's unhandled exception (r11 L6): threading.excepthook delegates to the same hook
+    t = re.search(r"^def _one_line_thread_excepthook\(.*?\n(?=\n)", BOT_SRC, re.S | re.M)
+    assert t, "the thread hook"
+    exec(compile(t.group(0), "<discord_bot>", "exec"), ns2)
+    try:
+        raise RuntimeError(quoted)
+    except RuntimeError:
+        et, ev, tb = sys.exc_info()
+    ns2["_one_line_thread_excepthook"](SimpleNamespace(exc_type=et, exc_value=ev, exc_traceback=tb, thread=None))
+    assert len(out) == 2 and out[1][1] == {"file": sys.stderr, "flush": True}
+    assert "\n" not in out[1][0][0] and "\r" not in out[1][0][0] and "Traceback" in out[1][0][0]
+    assert BOT_SRC.count("_gen_threading.excepthook = _one_line_thread_excepthook") == 1
+    assert BOT_SRC.index("_gen_threading.excepthook = _one_line_thread_excepthook") < BOT_SRC.index("import os, asyncio, aiohttp, discord")
+    # the wiring: the root logger's handler formatted by it, the hook and the warnings capture installed
+    # before the imports, and one run site
+    assert BOT_SRC.count("bot.run(") == 1
+    assert "bot.run(DISCORD_TOKEN, log_formatter=_OneLineFormatter(" in BOT_SRC and "root_logger=True)" in BOT_SRC
+    imports = BOT_SRC.index("import os, asyncio, aiohttp, discord")
+    for stmt in ("class _OneLineFormatter(_gen_logging.Formatter):", "_gen_sys.excepthook = _one_line_excepthook",
+                 "_gen_logging.captureWarnings(True)"):
+        assert BOT_SRC.count(stmt) == 1 and BOT_SRC.index(stmt) < imports, stmt
+    assert "def format(self, record):" in m.group(0) and ".replace(\"\\r\", \" \").replace(\"\\n\", \" \")" in m.group(0)

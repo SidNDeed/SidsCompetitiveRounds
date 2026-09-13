@@ -738,6 +738,9 @@ class FakeDb:
         # send already acquired cannot post their picture after the ban
         if "DELETE FROM pc_delivery_leases WHERE subject_id IN" in sql:
             return _Res()
+        # ...and first WAITS for any Discord line in flight naming the player (r7 H2): none here
+        if "MAX(l.until) - clock_timestamp()" in sql:
+            return _Res()
         raise AssertionError(f"unexpected statement: {sql[:120]}")
 
 
@@ -1222,7 +1225,7 @@ def _act_internal(db, case_id, discord_id, action, hours=None):
     payload = {"actor_discord_id": discord_id, "actor_name": "Mod", "action": action, "reason": "button"}
     if hours:
         payload["hours"] = hours
-    return _run(main.internal_moderation_case_act(case_id, payload, "internal-key", db))
+    return _run(main.internal_moderation_case_act(case_id, payload, "internal-key", db=db))
 
 
 @pytest.fixture(autouse=True)
@@ -1236,20 +1239,20 @@ def test_act_with_a_stale_grant_is_403_and_writes_nothing():
     db.add_player(MOD_SID, discord_id="d-mod")                       # linked, but holds NO grant
     before = (len(db.admin_actions), len(db.mutes), dict(db.bans))
     exc = _raises(main.internal_moderation_case_act(case_id, {"actor_discord_id": "d-mod", "action": "mute", "hours": 24},
-                                                    "internal-key", db))
+                                                    "internal-key", db=db))
     assert exc.status_code == 403 and exc.detail == "not_authorised"
     assert (len(db.admin_actions), len(db.mutes), dict(db.bans)) == before
     assert db.cases[UUID(case_id)]["status"] == "open"
     assert _raises(main.internal_moderation_case_act(case_id, {"actor_discord_id": "nobody", "action": "dismiss"},
-                                                     "internal-key", db)).detail == "not_linked"
+                                                     "internal-key", db=db)).detail == "not_linked"
     assert _raises(main.internal_moderation_case_act(case_id, {"actor_discord_id": "d-mod", "action": "dismiss"},
-                                                     "wrong-key", db)).status_code == 403
+                                                     "wrong-key", db=db)).status_code == 403
     # a language moderator may dismiss but not mute or ban (a mail mute is global, admin-only)
     db.mod_grants[MOD_SID] = ["ru"]
     assert _raises(main.internal_moderation_case_act(case_id, {"actor_discord_id": "d-mod", "action": "mute", "hours": 24},
-                                                     "internal-key", db)).detail == "admin_required"
+                                                     "internal-key", db=db)).detail == "admin_required"
     assert _raises(main.internal_moderation_case_act(case_id, {"actor_discord_id": "d-mod", "action": "ban"},
-                                                     "internal-key", db)).detail == "admin_required"
+                                                     "internal-key", db=db)).detail == "admin_required"
     res = _act_internal(db, case_id, "d-mod", "dismiss")
     assert res["status"] == "ok" and db.cases[UUID(case_id)]["status"] == "dismissed"
     assert db.cases[UUID(case_id)]["resolved_by"] == MOD_SID
@@ -1276,9 +1279,9 @@ def test_act_mute_uses_the_chat_mute_core_globally():
     again = _act_internal(db, case_id, "d-admin", "ban")
     assert again["status"] == "already_resolved" and not db.added
     assert _raises(main.internal_moderation_case_act(str(uuid.uuid4()), {"actor_discord_id": "d-admin", "action": "dismiss"},
-                                                     "internal-key", db)).status_code == 404
+                                                     "internal-key", db=db)).status_code == 404
     assert _raises(main.internal_moderation_case_act(case_id, {"actor_discord_id": "d-admin", "action": "nuke"},
-                                                     "internal-key", db)).detail == "action_invalid"
+                                                     "internal-key", db=db)).detail == "action_invalid"
 
 
 def test_act_ban_uses_the_ban_core_and_admin_hmac_route_agrees():
@@ -1301,10 +1304,10 @@ def test_act_ban_uses_the_ban_core_and_admin_hmac_route_agrees():
     with _admin_secret():
         req = main._AdminModCaseActReq(admin_steam_id=ADMIN_SID, hmac_signature=_sign(ADMIN_SID, "modcase_act", cid2),
                                        actor_steam_id=B_SID, action="dismiss")
-        assert _raises(main.admin_moderation_case_act(cid2, req, db2)).detail == "actor_mismatch"
+        assert _raises(main.admin_moderation_case_act(cid2, req, db=db2)).detail == "actor_mismatch"
         req = main._AdminModCaseActReq(admin_steam_id=ADMIN_SID, hmac_signature=_sign(ADMIN_SID, "modcase_act", cid2),
                                        action="dismiss")
-        assert _run(main.admin_moderation_case_act(cid2, req, db2))["status"] == "ok"
+        assert _run(main.admin_moderation_case_act(cid2, req, db=db2))["status"] == "ok"
         listing = _run(main.admin_moderation_cases(ADMIN_SID, _sign(ADMIN_SID, "modcase_list", ""), "dismissed", 50, db2))
     assert [c["id"] for c in listing["cases"]] == [cid2] and listing["cases"][0]["reporter_steam_id"] == B_SID
 
@@ -1535,6 +1538,10 @@ def _lattice_world(route):
         db.add_player(ADMIN_SID, discord_id="d-admin")
         db.admins.add(ADMIN_SID)
         actor, target = ADMIN_SID, A_SID
+    if route == "ban":
+        db.add_player(ADMIN_SID, discord_id="d-admin")
+        db.admins.add(ADMIN_SID)
+        actor, target = ADMIN_SID, A_SID
     db.statements.clear()
     db.locks.clear()
     db.commits = 0
@@ -1566,14 +1573,17 @@ def _lattice_coro(db, route, orig, case_id):
         return main.admin_mail_bulk_grant_revoke(C_SID, ADMIN_SID, _sign(ADMIN_SID, "mail_bulk_grant_revoke", C_SID), db)
     if route == "act_mute":
         return main.internal_moderation_case_act(case_id, {"actor_discord_id": "d-admin", "actor_name": "Mod",
-                                                           "action": "mute", "hours": 24, "reason": "b"}, "internal-key", db)
+                                                           "action": "mute", "hours": 24, "reason": "b"}, "internal-key", db=db)
     if route == "act_dismiss":
         return main.internal_moderation_case_act(case_id, {"actor_discord_id": "d-admin", "actor_name": "Mod",
-                                                           "action": "dismiss", "reason": "b"}, "internal-key", db)
+                                                           "action": "dismiss", "reason": "b"}, "internal-key", db=db)
     if route == "act_dismiss_hmac":
         return main.admin_moderation_case_act(case_id, main._AdminModCaseActReq(
             admin_steam_id=ADMIN_SID, hmac_signature=_sign(ADMIN_SID, "modcase_act", case_id),
-            action="dismiss", reason="b"), db)
+            action="dismiss", reason="b"), db=db)
+    if route == "ban":
+        return main.admin_ban(main._AdminBanReq(admin_steam_id=ADMIN_SID, target_steam_id=A_SID, reason="x",
+                                                hmac_signature=_sign(ADMIN_SID, "ban", A_SID)), db=db)
     raise AssertionError(route)
 
 
@@ -1953,9 +1963,9 @@ def test_migration_300_matches_the_orm_and_the_readers():
 
 _LATTICE_TOMBSTONED = [  # route, whose row the racing deletion SCRUBS: the route completes and writes the tombstone it re-read
     ("grant", "actor"), ("revoke", "actor"), ("revoke", "target"),
-    ("act_mute", "actor"), ("act_dismiss", "actor"), ("act_dismiss", "target"),
-    ("act_dismiss_hmac", "actor"), ("act_dismiss_hmac", "target"),
-]
+    ("act_dismiss", "target"), ("act_dismiss_hmac", "target"),
+]   # a case act's or a ban's ACTOR scrubbed meanwhile is refused instead (review r11): the next test but one
+_LATTICE_ACTOR_REFUSED = ["act_mute", "act_dismiss", "act_dismiss_hmac", "ban"]
 
 
 @pytest.mark.parametrize("route,victim", _LATTICE_TOMBSTONED, ids=[f"{r}-{v}" for r, v in _LATTICE_TOMBSTONED])
@@ -2015,11 +2025,11 @@ def test_admin_without_a_players_row_acts_on_admin_users_authority():
         case_id = _open_case(db, ids)
         req = main._AdminModCaseActReq(admin_steam_id=ADMIN_SID, hmac_signature=_sign(ADMIN_SID, "modcase_act", case_id),
                                        action="dismiss")
-        assert _run(main.admin_moderation_case_act(case_id, req, db))["status"] == "ok"
+        assert _run(main.admin_moderation_case_act(case_id, req, db=db))["status"] == "ok"
         case2 = _open_case(db, ids)
         req = main._AdminModCaseActReq(admin_steam_id=ADMIN_SID, hmac_signature=_sign(ADMIN_SID, "modcase_act", case2),
                                        action="ban", reason="spam")
-        assert _run(main.admin_moderation_case_act(case2, req, db))["resolution"] == "ban"
+        assert _run(main.admin_moderation_case_act(case2, req, db=db))["resolution"] == "ban"
         exc = _raises(main.admin_mail_broadcast(_bcast_req(), db))
     assert (exc.status_code, exc.detail) == (404, "admin_player_unknown")
     assert db.cases[UUID(case_id)]["resolved_by"] == ADMIN_SID and db.cases[UUID(case2)]["resolved_by"] == ADMIN_SID
@@ -2075,7 +2085,7 @@ def test_a_deleted_admin_is_refused_while_a_never_created_one_acts():
                                        action="dismiss")
         for coro in (main.admin_mail_bulk_grant(grant, db),
                      main.admin_mail_bulk_grant_revoke(A_SID, ADMIN_SID, _sign(ADMIN_SID, "mail_bulk_grant_revoke", A_SID), db),
-                     main.admin_moderation_case_act(case_id, act, db),
+                     main.admin_moderation_case_act(case_id, act, db=db),
                      main.admin_mail_broadcast(_bcast_req(), db)):
             exc = _raises(coro)
             assert (exc.status_code, exc.detail) == (403, "account_deleted")
@@ -2147,7 +2157,7 @@ def test_every_ban_path_takes_the_identity_locks_before_the_ban_rate_lock():
     db.admins.add(ADMIN_SID)
     with _admin_secret():
         res = _run(main.admin_ban(main._AdminBanReq(admin_steam_id=ADMIN_SID, target_steam_id=A_SID, reason="x",
-                                                    hmac_signature=_sign(ADMIN_SID, "ban", A_SID)), db))
+                                                    hmac_signature=_sign(ADMIN_SID, "ban", A_SID)), db=db))
     assert res["status"] == "banned"
     plain = _first_acquisitions(db.locks)
     db2, ids2 = _world()
@@ -2167,6 +2177,38 @@ def test_every_ban_path_takes_the_identity_locks_before_the_ban_rate_lock():
     assert src.index("_mail_lock_identities(") < src.index("_ban_rate_gate_or_raise(") < src.index("_apply_ban_core(")
     act = inspect.getsource(main._moderation_case_act)
     assert act.index("_mail_lock_identities(") < act.index("_ban_rate_gate_or_raise(")
+    # the unban is on the same lattice, ahead of its write (r9 M2)
+    unban = inspect.getsource(main.admin_unban)
+    assert unban.index("_require_admin(") < unban.index("_mail_lock_identities(") < unban.index("UPDATE player_bans")
+    assert "optional=(req.admin_steam_id, req.target_steam_id)" in unban
+    # ...and writes the identities the lattice re-read, never its inputs (r10 M1)
+    assert "rows = await _mail_lock_identities(" in unban
+    assert unban.index("_mail_identity_to_write(rows, req.admin_steam_id)") < unban.index("UPDATE player_bans")
+    assert unban.index("_mail_identity_to_write(rows, req.target_steam_id)") < unban.index("UPDATE player_bans")
+    # ...and every ban-family actor must be live after the re-read, before the gate and the writes (r11 M1/M4);
+    # the rate refusal receives the re-read target for its audit and alert (r11 M2)
+    assert src.index("_mail_lock_identities(") < src.index("_mail_actor_live_or_raise(rows, req.admin_steam_id)") < src.index("_ban_rate_gate_or_raise(")
+    assert "target_w=target_w" in src
+    assert act.index("_mail_lock_identities(") < act.index("_mail_actor_live_or_raise(rows, actor_steam_id)") < act.index("_ban_rate_gate_or_raise(")
+    assert "_ban_rate_gate_or_raise(db, actor_steam_id, subject_sid_pre, target_w=subject_sid)" in act
+    assert unban.index("_mail_lock_identities(") < unban.index("_mail_actor_live_or_raise(rows, req.admin_steam_id)") < unban.index("UPDATE player_bans")
+
+
+def test_a_repeat_ban_at_the_velocity_threshold_is_answered_already_banned_by_the_route():
+    """r9 (D4, 2026-09-13), executed through the route on the fake: the retry of a ban whose caller
+    timed out finds its target banned -- the route answers already_banned, taking no ban-rate lock
+    and refusing nothing, however many bans the admin has in the window; the identity lattice is
+    still taken first."""
+    db, ids = _world()
+    db.add_player(ADMIN_SID, discord_id="d-admin")
+    db.admins.add(ADMIN_SID)
+    db.bans[A_SID] = "x"
+    db.recent_bans_by_admin[ADMIN_SID] = 5
+    with _admin_secret():
+        res = _run(main.admin_ban(main._AdminBanReq(admin_steam_id=ADMIN_SID, target_steam_id=A_SID, reason="x",
+                                                    hmac_signature=_sign(ADMIN_SID, "ban", A_SID)), db=db))
+    assert res["status"] == "already_banned"
+    assert ("ban-rate", ADMIN_SID) not in db.locks and ("identity", A_SID) in db.locks
 
 
 def test_broadcast_replay_precedes_the_mutable_sender_gates():
@@ -2260,3 +2302,77 @@ def test_client_selftest_count_and_fingerprint_structure():
     assert fp.count("FpField(sb, ") >= 8 and "'|'" not in fp and '"|"' not in fp
     caller = ui[ui.index("private static string Fingerprint(bool reply, string subj, string body)"):ui.index("internal static string FingerprintOf(")]
     assert "FingerprintOf(reply, cReplyToId, cReplyAll, to, cc, subj, body)" in caller
+
+
+@pytest.mark.parametrize("route", _LATTICE_ACTOR_REFUSED)
+def test_an_actor_whose_deletion_committed_under_the_lock_is_refused(route):
+    """review r11 (2026-09-13): the ACTOR of a case act or a ban is re-read under the lock like every
+    identity; when the actor's own deletion committed while the route waited (the hook fires as the
+    lock is granted), the route is refused 403 account_deleted before its first write -- the ban row's
+    banned_by references the raw admin_users id, and a deleted account does not act. r2's
+    tombstone-audit behaviour stays for the mail admin routes (grant, revoke) and for a deleted SUBJECT."""
+    db, orig, case_id, actor, target = _lattice_world(route)
+    tomb = {}
+
+    def scrub_under_lock(locked):
+        if locked == actor:
+            tomb["v"] = db.scrub(actor)
+    db.on_identity_lock = scrub_under_lock
+    with _admin_secret():
+        exc = _raises(_lattice_coro(db, route, orig, case_id))
+    assert (exc.status_code, exc.detail) == (403, "account_deleted") and "v" in tomb
+    assert db.commits == 0
+    reread_i = next(i for i, s in enumerate(db.statements) if "FROM players WHERE id = :pid FOR NO KEY UPDATE" in s)
+    assert not any(_is_write(s) for s in db.statements[reread_i:])
+    written = json.dumps([db.admin_actions, [c["resolved_by"] for c in db.cases.values()], sorted(db.bans)], default=str)
+    assert tomb["v"] not in written and target not in db.bans
+
+
+def test_a_rate_refusal_audits_the_target_the_lattice_re_read():
+    """review r11 M2 (2026-09-13), executed through the route on the fake: the target's deletion commits
+    while the ban waits for its lock; the velocity refusal looks the target up by the raw id and audits
+    and alerts the tombstone it re-read -- never the id the scrub removed."""
+    db, ids = _world()
+    db.add_player(ADMIN_SID, discord_id="d-admin")
+    db.admins.add(ADMIN_SID)
+    db.recent_bans_by_admin[ADMIN_SID] = 5
+    tomb = {}
+
+    def scrub_under_lock(locked):
+        if locked == A_SID:
+            tomb["v"] = db.scrub(A_SID)
+    db.on_identity_lock = scrub_under_lock
+    with _admin_secret():
+        exc = _raises(main.admin_ban(main._AdminBanReq(admin_steam_id=ADMIN_SID, target_steam_id=A_SID, reason="x",
+                                                       hmac_signature=_sign(ADMIN_SID, "ban", A_SID)), db=db))
+    assert exc.status_code == 429 and "v" in tomb
+    blocked = [a for a in db.admin_actions if a["action"] == "ban_rate_blocked"]
+    assert len(blocked) == 1 and (blocked[0]["admin"], blocked[0]["target"]) == (ADMIN_SID, tomb["v"])
+    assert len(db.outbox) == 1 and tomb["v"] in db.outbox[0][1] and A_SID not in db.outbox[0][1]
+    assert A_SID not in db.bans
+
+
+def test_a_case_ban_whose_subject_was_scrubbed_under_the_lock_is_refused_before_the_gate():
+    """r12 (2026-09-13), executed through the internal route on the fake: on the BAN action the subject is
+    not optional -- a subject whose deletion committed while the act waited for its lock is re-read as the
+    tombstone and refused 400 subject_deleted by the lattice, before the ban-rate lock, the ban and the case
+    write; so the identity the refusal path and the core receive on this action is always the raw, live one."""
+    db, ids = _world()
+    case_id = _open_case(db, ids)
+    db.add_player(ADMIN_SID, discord_id="d-admin")
+    db.admins.add(ADMIN_SID)
+    tomb = {}
+
+    def scrub_under_lock(locked):
+        if locked == A_SID:
+            tomb["v"] = db.scrub(A_SID)
+    db.on_identity_lock = scrub_under_lock
+    committed_before = db.commits                       # the seeding's own commits (the mail, the report)
+    with pytest.raises(HTTPException) as ex:
+        _act_internal(db, case_id, "d-admin", "ban")
+    assert (ex.value.status_code, ex.value.detail) == (400, "subject_deleted") and "v" in tomb
+    assert ("ban-rate", ADMIN_SID) not in db.locks and db.bans == {} and db.commits == committed_before
+    case = next(c for c in db.cases.values() if str(c["id"]) == str(case_id))
+    assert case["status"] == "open" and case["resolved_by"] is None
+    act = inspect.getsource(main._moderation_case_act)
+    assert 'optional = {actor_steam_id} | ({subject_sid_pre} if action == "dismiss" else set())' in act

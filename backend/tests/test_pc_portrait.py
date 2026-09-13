@@ -304,17 +304,28 @@ def test_cat_rev_and_face_rev_depend_on_every_input():
 
 
 def test_resolver_matrix():
-    row = {"subject_deleted": False, "subject_banned": False, "subject_opted_out": False,
-           "portrait_source": "game", "portrait_hash": "abc"}
+    row = {"subject_deleted": False, "subject_banned": False, "portrait_hash": "abc"}
     assert P.portrait_for(row) == ("game", "abc")
-    for k in ("subject_deleted", "subject_banned", "subject_opted_out"):
+    for k in ("subject_deleted", "subject_banned"):
         alt = dict(row)
         alt[k] = True
         assert P.portrait_for(alt) == ("none", None), k
-    assert P.portrait_for({**row, "portrait_source": "none"}) == ("none", None)
     assert P.portrait_for({**row, "portrait_hash": None}) == ("none", None)
     assert P.portrait_for({**row, "portrait_hash": ""}) == ("none", None)
-    assert P.portrait_for({**row, "portrait_source": None}) == ("game", "abc")  # absent column = default
+    # 2026-09-13: no player-chosen source and no opt-out. The columns that
+    # carried them are not read, so a row still carrying them changes nothing.
+    assert P.portrait_for({**row, "portrait_source": "none", "subject_opted_out": True}) == ("game", "abc")
+    # Steam pictures (design v2 §1): the rig wins, the Steam picture stands in
+    # for a missing rig, and a deletion or a ban hides both
+    steam = {**row, "steam_portrait_hash": "s" * 64}
+    assert P.portrait_for(steam) == ("game", "abc")
+    assert P.portrait_for({**steam, "portrait_hash": None}) == ("steam", "s" * 64)
+    assert P.portrait_for({**steam, "portrait_hash": ""}) == ("steam", "s" * 64)
+    assert P.portrait_for({**steam, "portrait_hash": None, "steam_portrait_hash": ""}) == ("none", None)
+    assert P.portrait_for({**steam, "portrait_hash": None, "portrait_source": "none"}) == ("steam", "s" * 64)
+    for k in ("subject_deleted", "subject_banned"):
+        assert P.portrait_for({**steam, "portrait_hash": None, k: True}) == ("none", None), k
+    assert P.portrait_for({**row, "portrait_hash": None}) == ("none", None), "an old SELECT has no fallback, not a crash"
 
 
 def test_face_key_shapes():

@@ -2,6 +2,64 @@
 Competitive ROUNDS Discord Bot
 Environment: DISCORD_TOKEN, API_BASE_URL, LEADERBOARD_CHANNEL, SERIES_LOG_CHANNEL
 """
+import builtins as _gen_builtins
+import os as _gen_os
+import uuid as _gen_uuid
+
+
+def _one_line_print(*args, **kwargs):
+    """Every log line is ONE line (r9 L8): a relayed message or a name that
+    carries CR/LF must not split into lines that could read as the lifecycle
+    markers the deploy train parses. Only the container's shell (the boot
+    line) and on_ready (the ready line) print markers."""
+    _gen_builtins.print(*(str(a).replace("\r", " ").replace("\n", " ") for a in args), **kwargs)
+
+
+print = _one_line_print
+import logging as _gen_logging
+import sys as _gen_sys
+import traceback as _gen_traceback
+
+
+class _OneLineFormatter(_gen_logging.Formatter):
+    """The logging half of the one-line rule (r10 M4): discord.py logs a
+    command's exception -- the exception text quotes the member's argument --
+    and the asyncio logger, warnings and any library log through the root
+    logger; every record is flattened AFTER its traceback is rendered."""
+
+    def format(self, record):
+        return _gen_logging.Formatter.format(self, record).replace("\r", " ").replace("\n", " ")
+
+
+def _one_line_excepthook(exc_type, exc, tb):
+    """The interpreter's last writer of stderr, flattened like the rest."""
+    _one_line_print("".join(_gen_traceback.format_exception(exc_type, exc, tb)),
+                    file=_gen_sys.stderr, flush=True)
+
+
+_gen_sys.excepthook = _one_line_excepthook
+import threading as _gen_threading
+
+
+def _one_line_thread_excepthook(args):
+    """A thread's unhandled exception (review r11) -- discord.py's gateway
+    keep-alive thread, any library thread -- rendered by the same one-line
+    hook instead of threading's default multi-line write to stderr."""
+    _one_line_excepthook(args.exc_type, args.exc_value, args.exc_traceback)
+
+
+_gen_threading.excepthook = _one_line_thread_excepthook
+_gen_logging.captureWarnings(True)
+# This process's generation: the deploy train's witness binds the ready line to
+# the process that printed it -- a boot line after the last ready line in the
+# log tail is a newer process that has not reached ready (r8 M3). In the
+# container the shell draws it and prints the boot line BEFORE python starts
+# (Dockerfile.bot), so a stall anywhere in this module still leaves a boot line
+# the train can see (r9 M4); outside the container this process draws and
+# prints its own. Its only job is to be probed.
+_BOT_GEN = _gen_os.environ.get("BOT_GEN") or _gen_uuid.uuid4().hex[:12]
+if not _gen_os.environ.get("BOT_GEN"):
+    print("[BOT-BOOT] gen=" + _BOT_GEN, flush=True)
 import os, asyncio, aiohttp, discord, json, io, threading, re, time
 import random, ssl as ssl_mod
 import urllib.parse
@@ -82,6 +140,11 @@ API_SECRET_KEY = os.getenv("API_SECRET_KEY", "")
 # bet buttons (100/500/2000g per player). Bets fire via /api/v1/discord-bets
 # which requires the user to have linked their Discord account in-game first.
 LIVE_BETS_CHANNEL_ID = int(os.getenv("LIVE_BETS_CHANNEL", "1456460424831701074"))
+# Player Cards notable pulls (Legendary, Epic, signed, foil, your own card)
+# post to gambler chat — the live-bets channel — rather than the leaderboard
+# (2026-09-13). Unset or empty = the live-bets channel; compose passes the
+# key through so .env can move it without a rebuild of this default.
+PC_EVENTS_CHANNEL_ID = int(os.getenv("PC_EVENTS_CHANNEL") or LIVE_BETS_CHANNEL_ID)
 # ── Gambler role: ping on every new open bet + self-serve opt-in/out ──────
 # Sid created a "Gambler" role in the guild. Members opt in to get pinged
 # whenever a new ranked match opens for betting. Opt-in/out is available BOTH
@@ -412,6 +475,10 @@ async def on_ready():
     # One-shot mirror of the last few #scr-releases posts (v1.33 Home tab).
     asyncio.create_task(backfill_release_posts())
     print(f"Bot ready: {bot.user} (guilds: {len(bot.guilds)}, chat={CHAT_CHANNEL_ID}, admin={ADMIN_CHANNEL_ID})")
+    # The deploy train's witness (r6 M6): its only job is to be probed. The
+    # stamp binds the line to THIS process (r7 M2): a retained log tail can
+    # carry an earlier incarnation's line after a crash-restart.
+    print("[BOT-READY] " + str(bot.user) + " -- gen=" + _BOT_GEN + " -- loops started at " + datetime.now(timezone.utc).isoformat(timespec="seconds"))
 
 
 async def backfill_discord_usernames():
@@ -8351,6 +8418,11 @@ def _pc_not_linked(ctx, target):
 # bytes: the text still goes out, the picture does not.
 _PC_FACE_MAX_BYTES = 4 * 1024 * 1024
 _PC_LEASE_RESERVE_S = 3.0
+# The lease-ENDING requests (the release, the ack) are admitted by the api
+# itself (main._pc_release_slot, a slot per reserved-pool connection, review
+# r12): a client-side gate here (review r11) returned its permit on a timeout
+# while the api's handler ran on, so the bound was not where the connections
+# are. No gate here.
 _pc_back_bytes_cache = {"bytes": None, "at": 0.0}
 
 
@@ -8486,11 +8558,17 @@ async def _pc_lease_release(lease_id):
         await _pc_api("DELETE", f"/internal/pc/lease/{lease_id}", timeout=4.0)
 
 
-async def _pc_send_face(sender, content=None, embed=None, face=None, lease=(None, None), filename="card.png"):
+async def _pc_send_face(sender, content=None, embed=None, face=None, lease=(None, None), filename="card.png",
+                        require_lease=False):
     """ONE send under the lease: the lease is re-validated immediately before
     the send and the bytes are dropped when it is gone; the send runs under
     the lease's deadline; the lease is released afterwards, sent or not.
-    Without a lease (or without bytes) the text goes out alone."""
+    Without a lease (or without bytes) the text goes out alone -- unless
+    `require_lease`: then the WHOLE send (text, embed, picture) goes out only
+    under a lease that is present, unexpired and still live at the api right
+    before the send, and returns False otherwise (r6 H1/M2: a line that names
+    people is authorised as a whole, both names re-read, or not posted).
+    Returns True when the send ran."""
     # `lease` is `_pc_lease`'s answer: (lease_id, deadline) and, since the
     # drain needed to know WHY a lease was refused, a third field this does
     # not use. Sliced rather than unpacked, so one caller's shape is not the
@@ -8501,25 +8579,27 @@ async def _pc_send_face(sender, content=None, embed=None, face=None, lease=(None
         kwargs["content"] = content
     if embed is not None:
         kwargs["embed"] = embed
-    attach = face is not None and lease_id is not None
-    # The picture may only go out INSIDE the lease. Checked before the
+    # The lease is asked about INSIDE its deadline: checked before the
     # revalidation and again after it, because the revalidation is itself a
-    # network call and can spend the rest of the budget.
-    if attach and _pc_lease_left(deadline) <= 0:
-        attach = False
-    if attach and not await _pc_lease_live(lease_id):
-        attach = False
-    if attach and _pc_lease_left(deadline) <= 0:
-        attach = False
+    # network call and can spend the rest of the budget. Asked only when the
+    # answer matters: a picture to attach, or a send that requires the lease.
+    live = False
+    if lease_id is not None and (require_lease or face is not None) and _pc_lease_left(deadline) > 0:
+        live = await _pc_lease_live(lease_id) and _pc_lease_left(deadline) > 0
+    if require_lease and not live:
+        await _pc_lease_release(lease_id)
+        return False
+    attach = face is not None and live
     if attach:
         if embed is not None:
             embed.set_image(url=f"attachment://{filename}")
         kwargs["file"] = discord.File(io.BytesIO(face), filename=filename)
     try:
-        budget = _pc_lease_left(deadline) if attach else 45.0
+        budget = _pc_lease_left(deadline) if (attach or require_lease) else 45.0   # a required lease bounds the whole send
         await asyncio.wait_for(sender(**kwargs), timeout=budget)
     finally:
         await _pc_lease_release(lease_id)
+    return True
 
 
 @bot.hybrid_command(name="daily", description="Claim today's free Player Cards pack (it opens in the mod)")
@@ -8609,7 +8689,8 @@ async def cmd_pc_collection(ctx, member: discord.Member = None):
 async def cmd_pc_card(ctx, member: discord.Member = None):
     """The subject's card from the latest pool snapshot (pool rank, band,
     rating, record, title) and how many prints of them are in circulation.
-    A player who opted out, or is not in the pool, has no card to show."""
+    A player who is not in the current pool snapshot, or is banned, has no
+    card to show."""
     target = member or ctx.author
     await _maybe_defer(ctx)
     status, body = await _pc_api("GET", "/internal/pc/card", params={"discord_id": str(target.id)})
@@ -8618,7 +8699,7 @@ async def cmd_pc_card(ctx, member: discord.Member = None):
         await ctx.send(_pc_not_linked(ctx, target)); return
     if status == 404:
         who = "You're" if target == ctx.author else f"{discord.utils.escape_markdown(target.display_name)} is"
-        await ctx.send(f"🎴 {who} not in the card pool right now (opted out, or no ranked games yet)."); return
+        await ctx.send(f"🎴 {who} not in the current card pool (the pool is re-taken daily; a banned player is out)."); return
     if status != 200 or not isinstance(body, dict):
         await ctx.send("❌ Couldn't fetch that card right now."); return
     rarity = str(body.get("rarity") or "common")
@@ -8646,20 +8727,28 @@ async def cmd_pc_card(ctx, member: discord.Member = None):
                            f" · ✨ {int(circ.get('foil') or 0)} foil · ✒️ {int(circ.get('signed') or 0)} signed"),
                     inline=False)
     embed.set_footer(text="Pool snapshot: taken daily at 00:05 UTC")
-    # The preview face (the subject as the pool sees them now) under a lease
-    # naming the subject; the route re-applies the /card gate itself.
-    face, lease = None, (None, None)
-    if body.get("player_ref"):
-        lease = await _pc_lease(body["player_ref"])
-        if lease[0]:
-            st, face = await _pc_api_bytes(f"/internal/pc/face/preview/{body['player_ref']}/{_pc_locale_of(ctx)}")
-            if st != 200:
-                face = None
-    if face is None:
-        await _pc_lease_release(lease[0])
-        await ctx.send(embed=embed)
-        return
-    await _pc_send_face(ctx.send, embed=embed, face=face, lease=lease)
+    # The card names its subject: it is posted only under a lease naming them
+    # that is still live right before the send (r6 H1/M2) -- the preview face
+    # rides under the same lease. No lease at all (a writer holds the subject:
+    # a deletion, an admin clear; or the api is away): say so, never post the
+    # card as it was read.
+    # There is no text-only card: a body without a usable subject reference
+    # posts nothing (r9 L5). The preview is drawn from the SAME snapshot the
+    # embed was read from (r7 L1): a body without a usable pin (an older api
+    # during a rolling deploy) posts nothing either -- never one snapshot's
+    # text with another's face (r8 L5). Both checked before the lease, so
+    # none is taken for nothing.
+    ref, snap_id = body.get("player_ref"), body.get("snapshot_id")
+    if not isinstance(ref, str) or not ref or isinstance(snap_id, bool) or not isinstance(snap_id, int) or snap_id < 1:
+        await ctx.send("❌ That card isn't available right now — try again in a moment."); return
+    lease = await _pc_lease(ref)
+    if not lease[0]:
+        await ctx.send("❌ That card isn't available right now — try again in a moment."); return
+    st, face = await _pc_api_bytes(f"/internal/pc/face/preview/{ref}/{_pc_locale_of(ctx)}", params={"snapshot_id": snap_id})
+    if st != 200:
+        face = None
+    if not await _pc_send_face(ctx.send, embed=embed, face=face, lease=lease, require_lease=True):
+        await ctx.send("❌ That card isn't available right now — try again in a moment.")
 
 
 _pc_events_sent = {}   # event id -> True once posted (a failed ack never re-posts; bounded below)
@@ -8712,25 +8801,31 @@ def _pc_event_lines(events):
 
 @tasks.loop(seconds=60)
 async def poll_pc_events():
-    """Notable pulls (Legendary, Epic, signed, foil, your own card) → the
-    leaderboard channel. Ack-after-send (#105): the api re-checks consent as
-    it hands events out, the bot posts, then acks what it posted; a bot
-    restart or a failed ack re-drives the rows, and the send memory keeps
-    the retry from posting twice. Order matters: a failed send stops the
-    batch, nothing behind it is acked."""
-    if http_session is None or not API_SECRET_KEY or not LEADERBOARD_CHANNEL_ID:
+    """Notable pulls (Legendary, Epic, signed, foil, your own card) → gambler
+    chat (PC_EVENTS_CHANNEL_ID, the live-bets channel by default). Ack-after-
+    send (#105): the api re-checks the announce settings as it hands events
+    out, the bot posts, then acks what it posted; a bot restart or a failed
+    ack re-drives the rows, and the send memory keeps the retry from posting
+    twice. Order matters: a failed send stops the batch, nothing behind it
+    is acked."""
+    if http_session is None or not API_SECRET_KEY or not PC_EVENTS_CHANNEL_ID:
         return
     status, body = await _pc_api("GET", "/internal/pc/events/pending")
     if status != 200 or not isinstance(body, dict) or not body.get("events"):
         return
-    ch = bot.get_channel(LEADERBOARD_CHANNEL_ID)
+    ch = bot.get_channel(PC_EVENTS_CHANNEL_ID)
+    why = "not found"
     if ch is None:
         try:
-            ch = await bot.fetch_channel(LEADERBOARD_CHANNEL_ID)
-        except Exception:
-            ch = None
+            ch = await bot.fetch_channel(PC_EVENTS_CHANNEL_ID)
+        except discord.NotFound:
+            why = "not found"
+        except discord.Forbidden:
+            why = "forbidden (the bot cannot see it)"
+        except Exception as ex:   # a transient HTTP or network failure: unavailable, not missing (r6 L11)
+            why = f"unavailable ({type(ex).__name__})"
     if ch is None:
-        print("[PC-EVENTS] leaderboard channel not found — leaving events queued")
+        print(f"[PC-EVENTS] Player Cards events channel {PC_EVENTS_CHANNEL_ID} (PC_EVENTS_CHANNEL, default: the live-bets channel) {why} — leaving events queued")
         return
     lines = _pc_event_lines(body["events"])   # whole print groups: the api's page never cuts one (c6 F)
     by_id = {int(e["id"]): e for e in body["events"]}
@@ -8738,21 +8833,29 @@ async def poll_pc_events():
     for text_line, ids in zip(lines[0::2], lines[1::2]):
         try:
             if any(i not in _pc_events_sent for i in ids):
-                # The print's face under ONE lease per print group, naming the
-                # subject, the print and the events (v22 §6). No lease or no
-                # bytes: the line still posts, without the picture.
+                # ONE lease per print group, naming the subject, the print (if
+                # any) and the events (v22 §6): it is the send's authorisation
+                # for the WHOLE line -- both names re-read by the api right
+                # before the send (r6 H1/M2) -- and the print's face rides
+                # under it when there is one. No lease: the line is not posted
+                # this tick (a deleted or banned party is resolved at the next
+                # handout; a busy subject is leased again).
                 first = by_id.get(ids[0], {})
                 p = first.get("print") or {}
                 face, lease, again = None, (None, None), False
-                if p.get("print_id") and first.get("subject_ref"):
-                    lease = await _pc_lease(first["subject_ref"], print_id=p["print_id"], event_ids=ids)
+                if first.get("subject_ref"):
+                    lease = await _pc_lease(first["subject_ref"], print_id=p.get("print_id"), event_ids=ids)
                     again = bool(lease[2])
-                    if lease[0]:
-                        st, face = await _pc_api_bytes(f"/internal/pc/face/print/{p['print_id']}/en",
-                                                       params={"size": "card"})
-                        if st != 200:
-                            face = None
-                            again = st == 0 or st == 409 or st >= 500
+                # face_ready false: the subject's picture was still unresolved
+                # when the api's sixty-second hold ran out (Steam pictures v3
+                # §8). The line posts without a face rather than attach the
+                # plate for good — an attachment cannot be swapped later.
+                if lease[0] and p.get("print_id") and first.get("face_ready", True):
+                    st, face = await _pc_api_bytes(f"/internal/pc/face/print/{p['print_id']}/en",
+                                                   params={"size": "card"})
+                    if st != 200:
+                        face = None
+                        again = st == 0 or st == 409 or st >= 500
                 # "Busy for two seconds" is not "has no picture". A transient
                 # refusal leaves the group QUEUED and unacked so the next tick
                 # can post it properly — but only so many times: an api that
@@ -8763,9 +8866,13 @@ async def poll_pc_events():
                     print(f"[PC-EVENTS] no picture for {ids[0]} yet (try {_pc_face_tries[ids[0]]}) — next tick")
                     break
                 _pc_face_tries.pop(ids[0], None)
-                if lease[0]:
-                    leases.append(lease[0])
-                await _pc_send_face(ch.send, content=text_line[:2000], face=face, lease=lease)
+                if not await _pc_send_face(ch.send, content=text_line[:2000], face=face, lease=lease, require_lease=True):
+                    # No live lease at the send: not posted, not acked, not
+                    # remembered as sent -- the api's next handout resolves a
+                    # deleted or banned party, a busy one is leased again.
+                    print(f"[PC-EVENTS] line for {ids} withdrawn before the send (no live lease) — left queued")
+                    continue
+                leases.append(lease[0])
                 for i in ids:
                     _pc_events_sent[i] = True
             sent.extend(ids)
@@ -13040,4 +13147,8 @@ async def cmd_gambler(ctx):
 
 if __name__ == "__main__":
     if not DISCORD_TOKEN: print("ERROR: Set DISCORD_TOKEN"); exit(1)
-    bot.run(DISCORD_TOKEN)
+    # The ROOT logger's handler (not only discord.py's own) with the one-line
+    # formatter, so nothing logged by any library reaches the container's
+    # stderr as more than one line (r10 M4).
+    bot.run(DISCORD_TOKEN, log_formatter=_OneLineFormatter(
+        "[{asctime}] [{levelname:<8}] {name}: {message}", "%Y-%m-%d %H:%M:%S", style="{"), root_logger=True)

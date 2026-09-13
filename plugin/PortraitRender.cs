@@ -150,6 +150,7 @@ namespace CompetitiveRounds
             if (Rendering) { Plugin.Log.LogInfo("[PORTRAIT] busy; ignoring '" + spec + "'"); return; }
             if (Plugin.Instance == null) { Plugin.Log.LogWarning("[PORTRAIT] no Plugin.Instance"); return; }
             if (spec.Equals("upload", StringComparison.OrdinalIgnoreCase)) { Start("lever", true); return; }   // the production path once (v22 §5.7)
+            if (spec.Equals("preview", StringComparison.OrdinalIgnoreCase)) { Start("lever-preview", false); return; }   // the same path without the upload: fills the Settings preview (2026-09-13)
             Plugin.Instance.StartCoroutine(Run(spec, _renderClaim.Take(Plugin.Instance, DEV_BUDGET)));
         }
 
@@ -233,8 +234,12 @@ namespace CompetitiveRounds
             Reclaim();
             if (_refreshAt >= 0f && Time.realtimeSinceStartup >= _refreshAt)
             {
+                // Consumed only by an ACCEPTED start (r5 M9, r6 M5): a request
+                // that matures while a render or an upload is busy, or that
+                // Start refuses (a match, no prefab or identity yet), stays
+                // armed and is tried again five seconds later.
+                if (Rendering || UploadInFlight || !Start(_refreshWhy ?? "preset", true)) { _refreshAt = Time.realtimeSinceStartup + 5f; return; }
                 _refreshAt = -1f;
-                if (!Rendering && !UploadInFlight) Start(_refreshWhy ?? "preset", true);
                 return;
             }
             if (!_pendingCheck || Rendering || UploadInFlight) return;
@@ -243,7 +248,6 @@ namespace CompetitiveRounds
             _pendingCheck = false;
             if (_checkedVisit == _visitId) return;
             _checkedVisit = _visitId;
-            if (me.portrait_source != "game") { LastResult = "no picture (setting)"; return; }
             if (!string.IsNullOrEmpty(me.portrait_locked_until)) { LastResult = "picture locked"; return; }
             string want = BuildDescriptor(CurrentPreset());
             // A refused capture leaves LastResult saying why and does NOT
@@ -251,44 +255,98 @@ namespace CompetitiveRounds
             // spin; the next visit (or a preset change) tries again, which is
             // what makes "art not loaded yet" self-correcting.
             if (want == null) return;
-            if (!string.IsNullOrEmpty(me.portrait_hash) && me.portrait_descriptor == want) { LastResult = "picture current"; return; }
-            Start("visit", true);
+            if (!string.IsNullOrEmpty(me.portrait_hash) && me.portrait_descriptor == want)
+            {
+                LastResult = "picture current";
+                // The Settings preview still wants a picture to show (2026-09-13):
+                // a render without an upload, once per visit like the check.
+                if (PreviewTex == null) Start("preview", false);
+                return;
+            }
+            if (!Start("visit", true)) { _refreshAt = Time.realtimeSinceStartup + 5f; _refreshWhy = "visit"; }   // refused: kept armed (r6 M5)
         }
 
-        private static void Start(string why, bool upload)
+        /// <summary>True when a run was started; false when it was refused
+        /// (busy, in a match, no prefab or identity yet) -- the caller keeps
+        /// its request armed in that case (r6 M5).</summary>
+        private static bool Start(string why, bool upload)
         {
             Reclaim();
-            if (Rendering || Plugin.Instance == null) return;
-            if (GameStateWatcher.IsInMatch) { LastResult = "skipped: in a match"; return; }
-            if (PlayerAssigner.instance == null || PlayerAssigner.instance.playerPrefab == null) { LastResult = "skipped: no player prefab yet"; return; }
-            if (string.IsNullOrEmpty(MatchTracker.LocalSteamId) || MatchTracker.LocalSteamId == "unknown") { LastResult = "skipped: no identity"; return; }
+            if (Rendering || Plugin.Instance == null) return false;
+            if (GameStateWatcher.IsInMatch) { LastResult = "skipped: in a match"; return false; }
+            if (PlayerAssigner.instance == null || PlayerAssigner.instance.playerPrefab == null) { LastResult = "skipped: no player prefab yet"; return false; }
+            if (string.IsNullOrEmpty(MatchTracker.LocalSteamId) || MatchTracker.LocalSteamId == "unknown") { LastResult = "skipped: no identity"; return false; }
             int gen = _renderClaim.Take(Plugin.Instance, RENDER_BUDGET);
             Plugin.Instance.StartCoroutine(ProductRun(why, upload, gen));
+            return true;
         }
 
         /// <summary>Every input whose change must abandon an in-flight render
         /// or an in-flight upload, as ONE value captured before the first yield
         /// and compared after each one.
         ///
-        /// It was identity + UI epoch + in-match, which is three of the seven:
-        /// switching the picture setting to None, changing the preset, or a new
-        /// tab visit all rode through a yield and uploaded the capture taken
-        /// under the old value. Pairs of ad-hoc checks are exactly how the
-        /// fourth one gets forgotten, so there is now one key and one
-        /// comparison.</summary>
+        /// It was identity + UI epoch + in-match, which is three of the six:
+        /// changing the preset or a new tab visit rode through a yield and
+        /// uploaded the capture taken under the old value. Pairs of ad-hoc
+        /// checks are exactly how the next one gets forgotten, so there is one
+        /// key and one comparison. (The picture setting was a term until
+        /// 2026-09-13; there is no such setting any more.)</summary>
         private static string StateKey()
         {
-            var me = ApiClient.CachedPcMe;
             return (MatchTracker.LocalSteamId ?? "")
                  + "|" + PlayerCardsUI.Epoch
                  + "|" + _visitId
-                 + "|" + (me != null ? (me.portrait_source ?? "?") : "?")
                  + "|" + CurrentPreset()
-                 + "|" + (AnimatedOn() ? 1 : 0)
-                 + "|" + (GameStateWatcher.IsInMatch ? 1 : 0);
+                 + "|" + (GameStateWatcher.IsInMatch ? 1 : 0)
+                 + "|" + LiveInputsKey();
         }
 
         private static bool Stale(string key) { return key != StateKey(); }
+
+        /// <summary>The pixel inputs as they are NOW -- the selected face's
+        /// ids and offsets, the animated-cosmetics setting, the equipped colour
+        /// and effect -- as the key's last segment (r6 M4; the setting joined
+        /// it in r7 M1: as a segment of its own it was seen by Stale but not by
+        /// Abandon, so a change of it aborted the render without asking for a
+        /// fresh one): a change of any of them across a yield abandons the
+        /// render or the upload taken under the old ones, and Abandon asks for
+        /// a fresh one. Reads what Capture reads, without its validation; no
+        /// '|' inside, so the segment can be cut off the key again.</summary>
+        private static string LiveInputsKey()
+        {
+            string face = "";
+            try
+            {
+                var cch = CharacterCreatorHandler.instance;
+                PlayerFace f = null;
+                int preset = CurrentPreset();
+                if (cch != null)
+                {
+                    if (preset >= 0 && cch.playerFaces != null && preset < cch.playerFaces.Length) f = cch.playerFaces[preset];
+                    else if (cch.selectedPlayerFaces != null && cch.selectedPlayerFaces.Length > 0) f = cch.selectedPlayerFaces[0];
+                }
+                if (f != null)
+                    face = f.eyeID + ":" + f.mouthID + ":" + f.detailID + ":" + f.detail2ID + ";"
+                         + Off(f.eyeOffset) + ";" + Off(f.mouthOffset) + ";" + Off(f.detailOffset) + ";" + Off(f.detail2Offset);
+            }
+            catch { face = "?"; }
+            var s = ApiClient.CachedPlayerStats;
+            string gear = (AnimatedOn() ? "1" : "0") + ":"
+                        + (s == null ? "" : (s.active_player_color_sku ?? "") + ":" + (s.active_player_color_hex ?? "") + ":" + (s.active_player_effect_sku ?? ""));
+            return (face + "~" + gear).Replace('|', '_');
+        }
+
+        /// <summary>A run abandoned because the key moved. When the move was in
+        /// the pixel inputs the picture on the server is now behind the
+        /// character, so a refresh is requested (debounced, retried while busy);
+        /// any other move -- identity, a new visit, a match -- has its own
+        /// follow-up already.</summary>
+        private static void Abandon(string key)
+        {
+            LastResult = "aborted";
+            int i = key.LastIndexOf('|');
+            if (i >= 0 && key.Substring(i + 1) != LiveInputsKey()) RequestRefresh("inputs changed");
+        }
 
         /// <summary>The animated-cosmetics setting. It changes the pixels a
         /// capture produces, so it belongs in both the fence and the
@@ -329,6 +387,7 @@ namespace CompetitiveRounds
             internal bool animated;
             internal string descriptor;
             internal string refusal;
+            internal PlayerFace face;   // the face the descriptor describes, a copy: the render equips THIS (r5 M7/M8)
         }
 
         /// <summary>#124: an id at or above the custom base resolves through
@@ -395,6 +454,12 @@ namespace CompetitiveRounds
                 }
                 inp.faceIds = f.eyeID + ":" + f.mouthID + ":" + f.detailID + ":" + f.detail2ID;
                 inp.faceOffs = Off(f.eyeOffset) + ";" + Off(f.mouthOffset) + ";" + Off(f.detailOffset) + ";" + Off(f.detail2Offset);
+                // A copy of the face the descriptor describes, equipped by the
+                // render after its end-of-frame yield: descriptor and pixels come
+                // from one snapshot however the character menu moves meanwhile,
+                // and slot n is slot n (the render used to look up n - 1).
+                try { inp.face = PlayerFace.CreateFace(f.eyeID, f.eyeOffset, f.mouthID, f.mouthOffset, f.detailID, f.detailOffset, f.detail2ID, f.detail2Offset); }
+                catch { inp.refusal = "the face could not be copied"; return inp; }   // never the live face (r6 L7)
             }
 
             var s = ApiClient.CachedPlayerStats;
@@ -467,7 +532,11 @@ namespace CompetitiveRounds
         }
 
         private static string Off(Vector2 v) => R(v.x) + "," + R(v.y);
-        private static string R(float x) => (float.IsNaN(x) || float.IsInfinity(x)) ? "0" : x.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+        // A non-finite offset is its own value in the key (r7 L2): written as "0"
+        // it was indistinguishable from a real zero, so a capture taken at zero
+        // rode through a yield across which the offset had become NaN -- which a
+        // fresh Capture refuses (Finite). Capture never writes these: it refuses first.
+        private static string R(float x) => float.IsNaN(x) ? "nan" : float.IsPositiveInfinity(x) ? "inf" : float.IsNegativeInfinity(x) ? "-inf" : x.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
         private static string Ident(string s)
         {
             if (string.IsNullOrEmpty(s)) return "";
@@ -523,7 +592,7 @@ namespace CompetitiveRounds
                 if (inp.refusal != null) { LastResult = "no picture: " + inp.refusal; yield break; }
                 yield return new WaitForEndOfFrame();
                 _renderClaim.Beat(gen, RENDER_BUDGET);
-                if (Stale(key)) { LastResult = "aborted"; yield break; }
+                if (Stale(key)) { Abandon(key); yield break; }
                 rootsBefore = SafeRoots();
                 GameObject clone; CharacterData data;
                 string err = BuildRig(rep, out clone, out data);
@@ -531,11 +600,11 @@ namespace CompetitiveRounds
                 clone.transform.SetParent(null, true);
                 _clone = clone;
                 UnityEngine.Object.Destroy(_root); _root = null;
-                AfterActivate(rep, clone, data, preset > 0 ? preset - 1 : -1, null);
+                if (!AfterActivate(rep, clone, data, inp.face, null)) { LastResult = "render failed: the captured face could not be equipped"; yield break; }   // the captured face, never a second lookup; no upload without it (r6 L8)
                 MakeGround(rep, clone);
                 yield return null;
                 _renderClaim.Beat(gen, RENDER_BUDGET);
-                if (Stale(key)) { LastResult = "aborted"; yield break; }
+                if (Stale(key)) { Abandon(key); yield break; }
                 ApplyColorExact(rep, clone, inp.colorSku, inp.colorHex);
                 ApplyEffectExact(rep, clone, inp.effectSku);
                 float ts = Time.realtimeSinceStartup; int frames = 0;
@@ -544,7 +613,7 @@ namespace CompetitiveRounds
                     frames++;
                     yield return null;
                     _renderClaim.Beat(gen, RENDER_BUDGET);
-                    if (Stale(key)) { LastResult = "aborted"; yield break; }
+                    if (Stale(key)) { Abandon(key); yield break; }
                 }
                 Stamp(clone); if (_holdable != null) Stamp(_holdable);
                 FreezeGun(rep);
@@ -576,7 +645,8 @@ namespace CompetitiveRounds
                 _renderClaim.Drop(gen);
                 try { NativeUI.MarkDirty(); } catch { }
             }
-            if (matte == null || descriptor == null || Stale(key)) yield break;
+            if (matte == null || descriptor == null) yield break;
+            if (Stale(key)) { Abandon(key); yield break; }
             _lastMatte = matte; _lastDescriptor = descriptor; _lastKey = key;
             if (upload) Upload(key, descriptor, matte, why);
             else LastResult = "rendered";
@@ -601,7 +671,7 @@ namespace CompetitiveRounds
             ApiClient.PcPortraitUpload(id, Guid.NewGuid().ToString("N"), descriptor, png, (ok, resp) =>
             {
                 _uploadClaim.Drop(ugen);
-                if (Stale(key)) return;
+                if (Stale(key)) { Abandon(key); return; }
                 if (ok)
                 {
                     var me = ApiClient.CachedPcMe;
@@ -640,7 +710,8 @@ namespace CompetitiveRounds
             // while this coroutine slept would otherwise be uploaded under the
             // earlier descriptor.
             if (_lastMatte == null || _lastDescriptor == null || _lastKey != key) yield break;
-            if (Rendering || UploadInFlight || Stale(key)) yield break;
+            if (Rendering || UploadInFlight) yield break;
+            if (Stale(key)) { Abandon(key); yield break; }   // the retry's pixels are behind the inputs: a fresh run instead (r6 M4)
             Upload(key, _lastDescriptor, _lastMatte, why + "-retry");
         }
 
@@ -757,7 +828,7 @@ namespace CompetitiveRounds
                 clone.transform.SetParent(null, true);
                 _clone = clone;
                 UnityEngine.Object.Destroy(_root); _root = null;
-                AfterActivate(rep, clone, data, preset, faceOverride);   // same frame: before any Start/Update
+                AfterActivate(rep, clone, data, PickFace(preset, rep), faceOverride);   // same frame: before any Start/Update
                 if (ground) MakeGround(rep, clone);
                 yield return null;                           // Starts ran (skin body, gun colours, masks)
 
@@ -1000,8 +1071,13 @@ namespace CompetitiveRounds
             catch (Exception ex) { return ex.ToString(); }
         }
 
-        private static void AfterActivate(StringBuilder rep, GameObject clone, CharacterData data, int preset, string faceOverride)
+        /// <summary>Returns false when a face was captured and could not be
+        /// equipped (no equipper, or the equip threw): the product run then
+        /// aborts before any upload, since the pixels would not be the
+        /// descriptor's (r6 L8). The dev path reads the report instead.</summary>
+        private static bool AfterActivate(StringBuilder rep, GameObject clone, CharacterData data, PlayerFace captured, string faceOverride)
         {
+            bool faceOk = true;
             try
             {
                 var hold = clone.GetComponentInChildren<Holding>(true);
@@ -1033,16 +1109,21 @@ namespace CompetitiveRounds
                 rep.Append("team colour applied=").Append(skin != null).Append('\n');
 
                 var eq = clone.GetComponentInChildren<CharacterCreatorItemEquipper>(true);
-                var face = faceOverride != null ? ParseFace(faceOverride, rep) : PickFace(preset, rep);
+                var face = faceOverride != null ? ParseFace(faceOverride, rep) : captured;
                 if (eq != null && face != null)
                 {
                     try { eq.SpawnPlayerFace(face); rep.Append("face equipped\n"); }
-                    catch (Exception ex) { rep.Append("face equip threw: ").Append(ex.Message).Append('\n'); }
+                    catch (Exception ex) { faceOk = false; rep.Append("face equip threw: ").Append(ex.Message).Append('\n'); }
                 }
-                else rep.Append("face: equipper=").Append(eq != null).Append(" face=").Append(face != null).Append('\n');
+                else
+                {
+                    if (face != null) faceOk = false;   // a face to show and nothing to equip it with
+                    rep.Append("face: equipper=").Append(eq != null).Append(" face=").Append(face != null).Append('\n');
+                }
                 Stamp(clone);
             }
-            catch (Exception ex) { rep.Append("AfterActivate threw: ").Append(ex).Append('\n'); }
+            catch (Exception ex) { faceOk = false; rep.Append("AfterActivate threw: ").Append(ex).Append('\n'); }
+            return faceOk;
         }
 
         /// <summary>Spike-only: "e:m:d:d2[:dx:dy]" item ids with one detail offset, so a

@@ -7688,6 +7688,9 @@ namespace CompetitiveRounds
             // catalogue key, appended after the body, so the body's existing
             // translations stay valid.
             body += "\n\n" + I18n.Tr("To pick the best server region for a match, the mod measures your ping to each Photon region and sends the result to the server, where it is kept for at most one hour.");
+            // 2026-09-13 (Player Cards): allowing covers the public Steam
+            // profile picture on a card of you; its own key, as above.
+            body += "\n" + I18n.Tr("Other players can collect a Player Card of you showing your name, rank, rating, ranked record and your public Steam profile picture (your in-game character replaces the picture once this PC has sent it). Deleting your data removes every card of you.");
 
             // The panel is sized to its text (translations run longer than the
             // English) so the body is never clipped against the buttons: the

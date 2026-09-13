@@ -147,12 +147,14 @@ SIZES = [{"rarity": "common", "n": 100}, {"rarity": "rare", "n": 10}, {"rarity":
 SIZES_KEY = "FROM pc_pool_members WHERE snapshot_id = CAST(:sid AS integer) GROUP BY rarity"
 MEMBER_KEY = "SELECT m.player_id, m.pool_rank"
 LIVE_KEY = "SELECT 1 FROM players p WHERE p.id = CAST(:pid AS uuid)"
+HOLD_KEY = "pg_try_advisory_xact_lock_shared(hashtext(p.steam_id))"   # the subject hold, before the live check
 
 
 # ── the roll ─────────────────────────────────────────────────────────────────
 
 def test_roll_deals_five_prints_from_the_snapshot_at_the_bands_rolled():
-    db = Scripted({SIZES_KEY: [SIZES], MEMBER_KEY: [[_member(S1, 15, "rare")]], LIVE_KEY: [[{"?column?": 1}]]})
+    db = Scripted({SIZES_KEY: [SIZES], MEMBER_KEY: [[_member(S1, 15, "rare")]], HOLD_KEY: [[{"held": True}]],
+                   LIVE_KEY: [[{"?column?": 1}]]})
     rng = _Rng([0.1, 0.9, 0.9] * 5, [4])      # per print: band roll in Rare, foil miss, signed miss
     prints, why = _run(main._pc_roll_prints(db, 7, OWNER, rng=rng))
     assert why is None and len(prints) == 5
@@ -160,8 +162,8 @@ def test_roll_deals_five_prints_from_the_snapshot_at_the_bands_rolled():
     assert all(p["rarity"] == "rare" and p["rolled"] == "rare" for p in prints)
     assert all(p["foil"] is False and p["signed"] is False for p in prints)
     assert all(p["player_id"] == str(S1) and p["pool_rank"] == 15 for p in prints)
-    # one member read and one live check per print, no writes
-    assert db.count(MEMBER_KEY) == 5 and db.count(LIVE_KEY) == 5
+    # one member read, one subject hold and one live check per print, no writes
+    assert db.count(MEMBER_KEY) == 5 and db.count(HOLD_KEY) == 5 and db.count(LIVE_KEY) == 5
     assert not any(sql.startswith(("INSERT", "UPDATE", "DELETE")) for sql, _ in db.log)
     member_params = [p for sql, p in db.log if MEMBER_KEY in sql]
     assert all(p == {"sid": 7, "rarity": "rare", "k": 4} for p in member_params)
@@ -170,7 +172,8 @@ def test_roll_deals_five_prints_from_the_snapshot_at_the_bands_rolled():
 def test_roll_falls_one_band_down_never_up():
     # Legendary band empty, Epic empty: a Legendary roll (0.0) is dealt from Rare.
     sizes = [{"rarity": "common", "n": 100}, {"rarity": "rare", "n": 10}]
-    db = Scripted({SIZES_KEY: [sizes], MEMBER_KEY: [[_member(S1, 12, "rare")]], LIVE_KEY: [[{"x": 1}]]})
+    db = Scripted({SIZES_KEY: [sizes], MEMBER_KEY: [[_member(S1, 12, "rare")]], HOLD_KEY: [[{"held": True}]],
+                   LIVE_KEY: [[{"x": 1}]]})
     prints, why = _run(main._pc_roll_prints(db, 7, OWNER, rng=_Rng([0.0, 0.9, 0.9] * 5, [0])))
     assert why is None and all(p["rolled"] == "legendary" and p["rarity"] == "rare" for p in prints)
     # Negative control: a Common roll with an empty Common band and members only above -> pool_empty.
@@ -187,19 +190,48 @@ def test_roll_is_pool_empty_when_the_snapshot_has_no_members():
 
 def test_a_subject_that_left_the_pool_is_rerolled_then_the_open_is_pool_changed():
     # The live check never passes: 1 + reroll_attempts tries, then pool_changed.
-    db = Scripted({SIZES_KEY: [SIZES], MEMBER_KEY: [[_member(S2, 1, "legendary")]], LIVE_KEY: [[]]})
+    db = Scripted({SIZES_KEY: [SIZES], MEMBER_KEY: [[_member(S2, 1, "legendary")]], HOLD_KEY: [[{"held": True}]],
+                   LIVE_KEY: [[]]})
     prints, why = _run(main._pc_roll_prints(db, 7, OWNER, rng=_Rng([0.001, 0.9, 0.9], [0])))
     assert (prints, why) == (None, "pool_changed")
     assert db.count(LIVE_KEY) == 1 + pc.PC_ECONOMY["reroll_attempts"]
     # Negative control: the vanished subject is never dealt when it passes on the retry.
     db2 = Scripted({SIZES_KEY: [SIZES], MEMBER_KEY: [[_member(S2, 1, "legendary")], [_member(S1, 15, "rare")]],
-                    LIVE_KEY: [[], [{"x": 1}]]})
+                    HOLD_KEY: [[{"held": True}]], LIVE_KEY: [[], [{"x": 1}]]})
     prints, why = _run(main._pc_roll_prints(db2, 7, OWNER, rng=_Rng([0.001, 0.9, 0.9], [0])))
     assert why is None and all(p["player_id"] == str(S1) for p in prints)
 
 
+def test_a_subject_held_by_a_deletion_is_rerolled_and_the_hold_precedes_the_live_check():
+    """The roll takes the subject's identity lock SHARED (try form) before the
+    live re-check and keeps it to the open's commit: a data deletion holds
+    it EXCLUSIVE while it removes every print of the subject's card, so the
+    try fails and the subject is re-rolled exactly like one that left the
+    pool (2026-09-13). The hold comes FIRST — a live check before the hold
+    would be the check-then-act window the hold exists to close."""
+    db = Scripted({SIZES_KEY: [SIZES], MEMBER_KEY: [[_member(S2, 1, "legendary")], [_member(S1, 15, "rare")]],
+                   HOLD_KEY: [[{"held": False}], [{"held": True}]], LIVE_KEY: [[{"x": 1}]]})
+    prints, why = _run(main._pc_roll_prints(db, 7, OWNER, rng=_Rng([0.001, 0.9, 0.9], [0])))
+    assert why is None and len(prints) == 5 and all(p["player_id"] == str(S1) for p in prints)
+    holds = [i for i, (sql, _) in enumerate(db.log) if HOLD_KEY in sql]
+    lives = [i for i, (sql, _) in enumerate(db.log) if LIVE_KEY in sql]
+    # the held-off subject was never live-checked; every dealt subject was held, then checked
+    assert len(holds) == len(lives) + 1 and all(h < l for h, l in zip(holds[1:], lives))
+    assert db.log[holds[0]][1] == {"pid": str(S2)} and db.log[holds[1]][1] == {"pid": str(S1)}
+    assert not any(sql.startswith(("INSERT", "UPDATE", "DELETE")) for sql, _ in db.log)
+    # a hold that never succeeds exhausts the attempts like a vanished subject: pool_changed, no live check at all
+    db2 = Scripted({SIZES_KEY: [SIZES], MEMBER_KEY: [[_member(S2, 1, "legendary")]], HOLD_KEY: [[{"held": False}]]})
+    assert _run(main._pc_roll_prints(db2, 7, OWNER, rng=_Rng([0.001, 0.9, 0.9], [0]))) == (None, "pool_changed")
+    assert db2.count(HOLD_KEY) == 1 + pc.PC_ECONOMY["reroll_attempts"] and db2.count(LIVE_KEY) == 0
+    # the try form on the subject's steam id — the key the deletion holds exclusive, blocking
+    hold = " ".join(main._PC_SUBJECT_HOLD_SQL.split())
+    assert hold.startswith("SELECT pg_try_advisory_xact_lock_shared(hashtext(p.steam_id)) AS held FROM players p")
+    assert "pg_advisory_xact_lock(hashtext(:sid))" in inspect.getsource(main.delete_player_data)
+
+
 def test_flags_are_rolled_per_print_after_the_subject():
-    db = Scripted({SIZES_KEY: [SIZES], MEMBER_KEY: [[_member(S1, 50, "common")]], LIVE_KEY: [[{"x": 1}]]})
+    db = Scripted({SIZES_KEY: [SIZES], MEMBER_KEY: [[_member(S1, 50, "common")]], HOLD_KEY: [[{"held": True}]],
+                   LIVE_KEY: [[{"x": 1}]]})
     # band, foil, signed per print: print 1 foil, print 2 signed, others plain
     randoms = [0.5, 0.001, 0.9,   0.5, 0.9, 0.0001,   0.5, 0.9, 0.9,   0.5, 0.9, 0.9,   0.5, 0.9, 0.9, 0.9]
     prints, why = _run(main._pc_roll_prints(db, 7, OWNER, rng=_Rng(randoms, [3])))
@@ -273,7 +305,7 @@ def test_janitor_takes_the_first_snapshot_when_none_exists(monkeypatch):
     today = datetime(2026, 9, 11, 0, 5, tzinfo=timezone.utc)
     db, taken = _janitor(monkeypatch, _due_row(None, today - timedelta(hours=3), today))
     _run(main._pc_snapshot_janitor_step())
-    assert taken == ["first"] and db.committed == 2   # retention, then the snapshot
+    assert taken == ["first"] and db.committed == 3   # retention, the blob janitor, then the snapshot
     assert db.count("DELETE FROM pc_events WHERE created_at < NOW() - INTERVAL '7 days'") == 1
     # the due state is read before the lock and AGAIN under it (c3 F)
     order = [sql[:40] for sql, _ in db.log]
@@ -296,11 +328,11 @@ def test_janitor_takes_one_per_day_at_or_after_0005_utc(monkeypatch):
     # already done today: last snapshot after 00:05 today — retention still runs (c3 F)
     db, taken = _janitor(monkeypatch, _due_row(today + timedelta(seconds=30), today + timedelta(hours=5), today))
     _run(main._pc_snapshot_janitor_step())
-    assert taken == [] and db.count("DELETE FROM pc_events") == 1 and db.committed == 1
+    assert taken == [] and db.count("DELETE FROM pc_events") == 1 and db.committed == 2
     # lock held elsewhere: no snapshot (retention alone committed)
     db, taken = _janitor(monkeypatch, _due_row(yesterday, today + timedelta(minutes=1), today), lock=False)
     _run(main._pc_snapshot_janitor_step())
-    assert taken == [] and db.committed == 1
+    assert taken == [] and db.committed == 2
 
 
 def test_janitor_rereads_the_due_state_under_the_lock(monkeypatch):
@@ -321,7 +353,7 @@ def test_janitor_rereads_the_due_state_under_the_lock(monkeypatch):
 
     monkeypatch.setattr(main, "_pc_take_snapshot", _take)
     _run(main._pc_snapshot_janitor_step())
-    assert taken == [] and db.count("pg_try_advisory_xact_lock") == 1 and db.committed == 1
+    assert taken == [] and db.count("pg_try_advisory_xact_lock") == 1 and db.committed == 2
 
 
 # ── the wire shape ───────────────────────────────────────────────────────────
@@ -439,14 +471,14 @@ def test_every_internal_route_checks_the_internal_key_first_and_the_drain_rechec
     assert pending.index("_PC_EVENTS_SKIP_SQL") < pending.index("_PC_EVENTS_PENDING_SQL")
     for sql in (main._PC_EVENTS_SKIP_SQL, main._PC_EVENTS_PENDING_SQL):
         flat = " ".join(sql.split())
-        for needle in ("pl.deleted_at IS NULL", "su.deleted_at IS NULL", "pl.pc_announce", "su.pc_announce",
-                       "su.pc_opted_out_at IS NULL"):
+        for needle in ("pl.deleted_at IS NULL", "su.deleted_at IS NULL", "pl.pc_announce", "su.pc_announce"):
             assert needle in flat, needle
+        assert "pc_opted_out_at" not in flat   # no opt-out since 2026-09-13: announce settings are the whole consent
     assert "posted_at IS NULL" in " ".join(main._PC_EVENTS_PENDING_SQL.split())
     ack = inspect.getsource(main.internal_pc_events_ack)
     assert "AND posted_at IS NULL" in ack and "CAST(:ids AS bigint[])" in ack
     card = inspect.getsource(main.internal_pc_card)
-    assert '"not_in_pool"' in card and "pc_opted_out_at" in card
+    assert '"not_in_pool"' in card and "pc_opted_out_at" not in card
     coll = inspect.getsource(main.internal_pc_collection)
     assert 'detail={"error": "private"}' in coll and "pc_collection_public" in coll
 
@@ -493,7 +525,9 @@ def test_delete_my_data_purges_every_player_cards_table_between_the_lock_and_the
         "DELETE FROM pc_daily_claims WHERE player_id = :pid",
         "DELETE FROM pc_packs WHERE player_id = :pid",
         "DELETE FROM pc_pool_members WHERE player_id = :pid",
-        "UPDATE players SET pc_shards = 0, pc_opted_out_at = COALESCE(pc_opted_out_at, NOW()) WHERE id = :pid",
+        "DELETE FROM pc_prints WHERE card_id IN (SELECT id FROM pc_cards WHERE subject_player_id = :pid)",
+        "DELETE FROM pc_cards WHERE subject_player_id = :pid",
+        "UPDATE players SET pc_shards = 0 WHERE id = :pid",
     ]
     positions = [src.index(s) for s in order]
     assert positions == sorted(positions)
@@ -503,10 +537,14 @@ def test_delete_my_data_purges_every_player_cards_table_between_the_lock_and_the
     assert lock < snap_lock < positions[4]
     # prints and claims (which reference packs) go before packs
     assert positions[1] < positions[3] and positions[2] < positions[3]
+    # 2026-09-13: every print of the player's card, whoever holds it, then the card rows (the FK
+    # points print -> card), both under the identity lock the roll's subject hold defers to
+    assert snap_lock < positions[5] < positions[6]
+    assert "pc_opted_out_at" not in src   # the deletion no longer marks an opt-out: deleted_at is the gate
 
 
 def test_the_orm_declares_the_player_columns():
-    for col in ("pc_opted_out_at", "pc_collection_public", "pc_announce", "pc_settings_revision", "pc_shards"):
+    for col in ("pc_collection_public", "pc_announce", "pc_settings_revision", "pc_shards"):
         assert col in models.Player.__table__.columns, col
 
 
@@ -514,6 +552,7 @@ def test_route_inventory_of_phase_one():
     paths = {(r.path, tuple(sorted(r.methods))) for r in main.app.routes if getattr(r, "path", "").startswith("/api/v1/pc/")}
     assert paths == {
         ("/api/v1/pc/packs/open", ("POST",)), ("/api/v1/pc/packs/result", ("GET",)),
+        ("/api/v1/pc/packs", ("GET",)),   # the pack history pager (Sept 12)
         ("/api/v1/pc/daily", ("POST",)), ("/api/v1/pc/prints/discard", ("POST",)),
         ("/api/v1/pc/settings", ("POST",)), ("/api/v1/pc/me", ("GET",)),
         ("/api/v1/pc/collection", ("GET",)), ("/api/v1/pc/card", ("GET",)), ("/api/v1/pc/pool", ("GET",)),
@@ -652,4 +691,10 @@ def test_titles_and_rank_names_resolve_against_the_rounded_rating():
     assert main._pc_board_rating(1500.4) == 1500.0 and main._pc_board_rating(None) is None
     snap = inspect.getsource(main._pc_take_snapshot)
     assert "_pc_board_rating(rating)," in snap
-    assert _main_code().count("_rank_name_for(_pc_board_rating(rating))") == 2
+    # pinned per FUNCTION, never file-wide (#279): the tier helper, the bot's /card answer, and the preview
+    # drawing through the helper rather than its own expression
+    assert inspect.getsource(main._pc_rank_name).count("_rank_name_for(_pc_board_rating(rating))") == 1
+    assert inspect.getsource(main.internal_pc_card).count("_rank_name_for(_pc_board_rating(rating))") == 1
+    preview = inspect.getsource(main.internal_pc_face_preview)
+    assert "rank_name = _pc_rank_name(rating)" in preview and "_rank_name_for(" not in preview
+    assert 'subtitle = _pc_shop_title(member["title"], rank_name)' in preview and '"subtitle": subtitle' in preview

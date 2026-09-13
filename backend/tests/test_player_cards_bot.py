@@ -52,7 +52,10 @@ def test_the_drain_posts_then_acks_and_stops_on_a_failed_send():
     # order, and so does a print group still waiting for its picture
     assert src.count("break") == 2 and "retrying next tick" in src
     assert "yet (try" in src
-    assert "LEADERBOARD_CHANNEL_ID" in src and "if not sent:\n        return" in src
+    # 2026-09-13: every Player Cards post goes to the gambler chat (the live-bets
+    # channel) unless PC_EVENTS_CHANNEL names another; never the leaderboard channel
+    assert "PC_EVENTS_CHANNEL_ID" in src and "LEADERBOARD_CHANNEL_ID" not in src and "if not sent:\n        return" in src
+    assert 'PC_EVENTS_CHANNEL_ID = int(os.getenv("PC_EVENTS_CHANNEL") or LIVE_BETS_CHANNEL_ID)' in BOT_SRC
     assert "_pc_events_sent.pop(i, None)" in src, "the send memory is released only by a successful ack"
 
 
@@ -78,7 +81,52 @@ def test_refusals_are_read_by_status_and_token():
     coll = _fn(BOT_SRC, "cmd_pc_collection")
     assert "status == 403" in coll and "private" in coll
     card = _fn(BOT_SRC, "cmd_pc_card")
-    assert "not in the card pool" in card
+    # the 404 copy whole (r6 L10): absence from the current snapshot, and the ban, are the two causes
+    assert 'not in the current card pool (the pool is re-taken daily; a banned player is out).' in card
+    assert "opted out" not in card and "new player" not in card
+
+
+def test_every_line_that_names_people_is_sent_under_a_live_lease():
+    """r6 H1/M2: the events handout leases every print group (subject, print if
+    any, the events) and sends the line only while the lease is live at the
+    api right before the send -- the api re-reads both parties -- and /card
+    does the same for its subject; a send without a live lease returns False
+    and the line stays queued, unacked, for the api's next handout."""
+    send = _fn(BOT_SRC, "_pc_send_face")
+    assert "require_lease=False" in send
+    assert "if require_lease and not live:" in send and "return False" in send and send.rstrip().endswith("return True")
+    assert "live = await _pc_lease_live(lease_id) and _pc_lease_left(deadline) > 0" in send
+    assert "attach = face is not None and live" in send
+    ev = _fn(BOT_SRC, "poll_pc_events")
+    assert 'if first.get("subject_ref"):' in ev
+    assert 'lease = await _pc_lease(first["subject_ref"], print_id=p.get("print_id"), event_ids=ids)' in ev
+    assert "if not await _pc_send_face(ch.send, content=text_line[:2000], face=face, lease=lease, require_lease=True):" in ev
+    assert "withdrawn before the send (no live lease)" in ev
+    assert ev.index("withdrawn before the send") < ev.index("leases.append(lease[0])") < ev.index("_pc_events_sent[i] = True")
+    card = _fn(BOT_SRC, "cmd_pc_card")
+    assert "require_lease=True" in card and "if not lease[0]:" in card
+    # the channel diagnostic tells the cases apart (r6 L11)
+    assert "except discord.NotFound:" in ev and "except discord.Forbidden:" in ev and 'f"unavailable ({type(ex).__name__})"' in ev
+    # the deploy train's witness (r6 M6): a line whose only job is to be probed -- stamped, so the train can
+    # tell this incarnation's line from one an earlier process left in the log tail (r7 M2), and the LAST
+    # statement of on_ready: after every loop start and every task
+    ready = _fn(BOT_SRC, "on_ready")
+    marker = 'print("[BOT-READY] " + str(bot.user) + " -- gen=" + _BOT_GEN + " -- loops started at " + datetime.now(timezone.utc).isoformat(timespec="seconds"))'
+    assert marker in ready
+    assert ready.rstrip().splitlines()[-1].strip() == marker
+    assert ready.rindex(".start()") < ready.index(marker) and ready.rindex("create_task(") < ready.index(marker)
+    # the process generation (r8 M3, r9 M4): the container's shell draws it and prints the boot line
+    # BEFORE python starts (Dockerfile.bot), handing it over as BOT_GEN -- a replacement stalled anywhere
+    # in this module has still left its boot line; the module takes it, drawing and printing its own
+    # only outside the container, before the imports; repeated on the ready line, so a boot line after
+    # the last ready line means a newer process
+    gen = '_BOT_GEN = _gen_os.environ.get("BOT_GEN") or _gen_uuid.uuid4().hex[:12]'
+    own = 'if not _gen_os.environ.get("BOT_GEN"):\n    print("[BOT-BOOT] gen=" + _BOT_GEN, flush=True)'
+    assert BOT_SRC.index(gen) < BOT_SRC.index(own) < BOT_SRC.index("import os, asyncio, aiohttp, discord")
+    docker = (Path(__file__).resolve().parents[1] / "Dockerfile.bot").read_text(encoding="utf-8")
+    cmd = [l for l in docker.splitlines() if l.startswith("CMD ")]
+    assert len(cmd) == 1 and "G=$(tr -d '-' < /proc/sys/kernel/random/uuid | cut -c1-12)" in cmd[0]
+    assert cmd[0].index('echo "[BOT-BOOT] gen=$G"') < cmd[0].index("BOT_GEN=$G exec python discord_bot.py")
 
 
 def test_events_are_grouped_by_the_nested_print_id():
@@ -107,7 +155,13 @@ def test_a_page_never_cuts_a_prints_group_in_two():
     src = _fn(BOT_SRC, "poll_pc_events")
     assert "page_size" not in src and "lines[:-2]" not in src
     sql = " ".join(MAIN_SRC[MAIN_SRC.index("_PC_EVENTS_PENDING_SQL = "):].split("\n\n\n")[0].split())
-    assert "WITH page AS ( SELECT e.id, e.print_id FROM pc_events e WHERE e.posted_at IS NULL ORDER BY e.id LIMIT 20 )" in sql
+    # the page CTE is where the face hold is decided (v3 §8 / v4): joined to the subject, once, so a group's
+    # events are all held or all handed out together
+    assert ("WITH page AS ( SELECT e.id, e.print_id FROM pc_events e JOIN players su ON su.id = e.subject_player_id "
+            'WHERE e.posted_at IS NULL AND """ + _PC_EVENTS_HOLD_SQL + """ '
+            'AND su.deleted_at IS NULL AND """ + _PC_NOT_BANNED_SQL.format(a="su") + """ '   # r5 M3: the pool's ban word, in the page too
+            'ORDER BY e.id LIMIT 20 )') in sql
+    assert sql.count("_PC_EVENTS_HOLD_SQL") == 1   # never a second hold on the outer query
     assert ("WHERE e.posted_at IS NULL AND (e.id IN (SELECT id FROM page) OR (e.print_id IS NOT NULL "
             "AND e.print_id IN (SELECT print_id FROM page WHERE print_id IS NOT NULL)))") in sql
     assert '"page_size": _PC_EVENTS_PAGE' in MAIN_SRC and "_PC_EVENTS_PAGE = 20" in MAIN_SRC
