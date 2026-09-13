@@ -658,21 +658,29 @@ def test_the_mint_counts_the_copies_the_opener_already_held(monkeypatch):
 
 def test_the_public_pool_answers_no_identifier_and_projects_the_names():
     """/pc/pool takes no signature, no session and no key: it answers anyone."""
+    # ONE statement answers bands and top (r6 M3): the snapshot counted three,
+    # one is banned or deleted since, so the live word is two.
     db = Scripted({
-        "FROM pc_pool_snapshots ORDER BY id DESC": [[{"id": 4, "taken_at": NOW, "member_count": 2}]],
-        "GROUP BY rarity": [[{"rarity": "legendary", "n": 1}]],
-        "FROM pc_pool_members m JOIN players p": [[
-            {"pool_rank": 1, "rarity": "legendary", "board_rank": 3, "rating": 1800.0, "display_name": "Sid"},
-            {"pool_rank": 2, "rarity": "rare", "board_rank": 9, "rating": 1700.0, "display_name": STEAM},
+        "FROM pc_pool_snapshots ORDER BY id DESC": [[{"id": 4, "taken_at": NOW, "member_count": 3}]],
+        "WITH live AS": [[
+            {"kind": "band", "rarity": "legendary", "n": 1, "pool_rank": None, "board_rank": None, "rating": None, "display_name": None},
+            {"kind": "top", "rarity": "rare", "n": None, "pool_rank": 2, "board_rank": 9, "rating": 1700.0, "display_name": STEAM},
+            {"kind": "band", "rarity": "rare", "n": 1, "pool_rank": None, "board_rank": None, "rating": None, "display_name": None},
+            {"kind": "top", "rarity": "legendary", "n": None, "pool_rank": 1, "board_rank": 3, "rating": 1800.0, "display_name": "Sid"},
         ]],
     })
     ans = _run(main.pc_pool_summary(db=db))
-    assert [t["display_name"] for t in ans["top"]] == ["Sid", "Unnamed player"]
+    assert [t["display_name"] for t in ans["top"]] == ["Sid", "Unnamed player"]   # by pool rank, whatever order the union came in
+    assert ans["snapshot"]["member_count"] == 2 and ans["bands"]["legendary"] == 1 and ans["bands"]["rare"] == 1
     assert "steam_id" not in json.dumps(ans) and STEAM not in json.dumps(ans)
-    # the identifier is not in the SELECT either — an answer key can be dropped
-    # while the column keeps travelling into logs and tracebacks
+    # the identifier is not projected either — an answer key can be dropped
+    # while the column keeps travelling into logs and tracebacks; the ban
+    # predicate compares it (b.steam_id = p.steam_id) and that is its only use
     select = [s for s, _ in db.log if "FROM pc_pool_members m JOIN players p" in s][0]
-    assert "steam_id" not in select, select
+    assert len([s for s, _ in db.log if "pc_pool_members" in s]) == 1, "one read for bands and top"
+    assert "steam_id" not in select[:select.index(" FROM pc_pool_members")], select
+    assert select.count("steam_id") == 2 and "b.steam_id = p.steam_id" in select, select
+    assert "p.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM player_bans b" in select
 
 
 def test_raqm_is_read_from_the_engine_actually_in_use(monkeypatch):
@@ -846,7 +854,7 @@ def _check_row(**over):
     """What the revalidation reads: the lease, and the subject's resolver
     inputs as they stand NOW."""
     row = {"until": NOW, "unexpired": True, "leased_hash": "ef" * 32, "print_deliverable": True,
-           "subject_deleted": False, "portrait_hash": "ef" * 32, "subject_banned": False}
+           "subject_deleted": False, "portrait_hash": "ef" * 32, "subject_banned": False, "events_ok": True}
     row.update(over)
     return row
 
@@ -857,6 +865,8 @@ def _check_row(**over):
     ({"subject_deleted": True}, False),
     ({"print_deliverable": False}, False),                           # discarded, gone, or not theirs
     ({"subject_banned": True}, False),                               # banned since the acquire
+    ({"events_ok": False}, False),                                   # an event it names stopped being deliverable for either party (r6 H1)
+    ({"subject_banned": True, "leased_hash": None, "portrait_hash": None}, False),   # a ban is said outright, not through the hash (r6 M2)
     ({"portrait_hash": "ab" * 32}, False),                           # replaced since the acquire
     ({"leased_hash": None, "portrait_hash": None}, True),            # no picture then, none now
     ({"leased_hash": None, "portrait_hash": None, "steam_portrait_hash": "ab" * 32}, False),   # none then, Steam now
@@ -888,6 +898,7 @@ def test_lease_check_and_release(monkeypatch):
     # be read from a snapshot the lease row was not read in
     sql = db.log[0][0]
     assert "print_deliverable" in sql and "pc_prints" in sql and "pc_cards" in sql
+    assert "events_ok" in sql and "e.id = ANY(l.event_ids)" in sql and "subject_banned" in sql   # the events and the ban, in the same statement (r6 H1/M2)
     for rows in ([_check_row(unexpired=False)], []):
         db = Scripted({"FROM pc_delivery_leases l JOIN players p": [rows]})
         with pytest.raises(HTTPException) as ex:

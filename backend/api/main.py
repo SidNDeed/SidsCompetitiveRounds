@@ -25033,23 +25033,37 @@ async def pc_card_face(
 async def pc_pool_summary(db: AsyncSession = Depends(get_db)):
     """Public pool summary from the snapshot in force: taken_at, member
     count, members per band, the collectible top 40 (rank, name, band, board
-    rank) and the prices — what the leaderboard already shows, no more."""
+    rank) and the prices — what the leaderboard already shows, no more.
+    Members deleted or banned since the snapshot are left out, as /card and
+    the pack open leave them out (r6 M3)."""
     snap = (await db.execute(text(
         "SELECT id, taken_at, member_count FROM pc_pool_snapshots ORDER BY id DESC LIMIT 1"))).mappings().first()
     if snap is None:
         return {"snapshot": None, "bands": {}, "top": [], "prices": _pc_prices()}
-    bands = {r["rarity"]: int(r["n"]) for r in (await db.execute(text("""
-        SELECT rarity, COUNT(*) AS n FROM pc_pool_members WHERE snapshot_id = CAST(:sid AS integer) GROUP BY rarity
-    """), {"sid": int(snap["id"])})).mappings().all()}
-    top = (await db.execute(text("""
-        SELECT m.pool_rank, m.rarity, m.board_rank, m.rating, p.display_name
-          FROM pc_pool_members m JOIN players p ON p.id = m.player_id
-         WHERE m.snapshot_id = CAST(:sid AS integer) AND m.pool_rank <= CAST(:top AS integer)
-         ORDER BY m.pool_rank
+    # The pool's live word (r6 M3): a member deleted or banned since the
+    # snapshot is out of /card and of every pack open, so the summary says the
+    # same -- names, bands and the count from ONE statement (one read, one
+    # answer; two statements could disagree about a ban between them).
+    rows = (await db.execute(text("""
+        WITH live AS (
+            SELECT m.pool_rank, m.rarity, m.board_rank, m.rating, p.display_name
+              FROM pc_pool_members m JOIN players p ON p.id = m.player_id
+             WHERE m.snapshot_id = CAST(:sid AS integer)
+               AND p.deleted_at IS NULL AND """ + _PC_NOT_BANNED_SQL.format(a="p") + """
+        )
+        SELECT 'band' AS kind, rarity, CAST(COUNT(*) AS integer) AS n,
+               CAST(NULL AS integer) AS pool_rank, CAST(NULL AS integer) AS board_rank,
+               CAST(NULL AS numeric) AS rating, CAST(NULL AS text) AS display_name
+          FROM live GROUP BY rarity
+        UNION ALL
+        SELECT 'top', rarity, CAST(NULL AS integer), pool_rank, board_rank, CAST(rating AS numeric), display_name
+          FROM live WHERE pool_rank <= CAST(:top AS integer)
     """), {"sid": int(snap["id"]), "top": int(_pc.PC_ECONOMY["band_max_rank"]["uncommon"])})).mappings().all()
+    bands = {r["rarity"]: int(r["n"]) for r in rows if r["kind"] == "band"}
+    top = sorted((r for r in rows if r["kind"] == "top"), key=lambda r: int(r["pool_rank"]))
     return {
         "snapshot": {"snapshot_id": int(snap["id"]), "taken_at": _pc_iso(snap["taken_at"]),
-                     "member_count": int(snap["member_count"])},
+                     "member_count": sum(bands.values())},
         "bands": {k: bands.get(k, 0) for k in _pc.RARITIES},
         "top": [{"pool_rank": int(t["pool_rank"]), "rarity": t["rarity"],
                  "display_name": _pcp.public_render_name(t["display_name"]) or _pc_neutral_name(),
@@ -25090,15 +25104,22 @@ async def admin_pc_snapshot(
 # (2026-09-13, r5 M3). One fragment, formatted with the row alias.
 _PC_NOT_BANNED_SQL = "NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = {a}.steam_id AND b.unbanned_at IS NULL)"
 
+# One word for "this pull may be announced", read at three moments (r6 H1/M2):
+# the handout's skip (negated: the event is resolved without a post), the
+# handout's own selection, and the lease re-check the bot makes right before
+# its send. Aliases: e the event, pl the puller, su the subject. Both parties
+# alive, both announcing, neither banned, the print (if any) not discarded.
+_PC_EVENT_DELIVERABLE_SQL = """(pl.deleted_at IS NULL AND su.deleted_at IS NULL
+                AND pl.pc_announce AND su.pc_announce
+                AND """ + _PC_NOT_BANNED_SQL.format(a="pl") + """
+                AND """ + _PC_NOT_BANNED_SQL.format(a="su") + """
+                AND (e.print_id IS NULL OR EXISTS (SELECT 1 FROM pc_prints pr WHERE pr.id = e.print_id AND pr.discarded_at IS NULL)))"""
+
 _PC_EVENTS_SKIP_SQL = """
     UPDATE pc_events e SET posted_at = now()
       FROM players pl, players su
      WHERE e.posted_at IS NULL AND pl.id = e.player_id AND su.id = e.subject_player_id
-       AND NOT (pl.deleted_at IS NULL AND su.deleted_at IS NULL
-                AND pl.pc_announce AND su.pc_announce
-                AND """ + _PC_NOT_BANNED_SQL.format(a="pl") + """
-                AND """ + _PC_NOT_BANNED_SQL.format(a="su") + """
-                AND (e.print_id IS NULL OR EXISTS (SELECT 1 FROM pc_prints pr WHERE pr.id = e.print_id AND pr.discarded_at IS NULL)))
+       AND NOT """ + _PC_EVENT_DELIVERABLE_SQL + """
 """
 
 _PC_EVENTS_PAGE = 20   # the first N unposted events of a page; every other unposted event of the same prints rides along (c6 F)
@@ -25143,11 +25164,7 @@ _PC_EVENTS_PENDING_SQL = """
      WHERE e.posted_at IS NULL
        AND (e.id IN (SELECT id FROM page)
             OR (e.print_id IS NOT NULL AND e.print_id IN (SELECT print_id FROM page WHERE print_id IS NOT NULL)))
-       AND pl.deleted_at IS NULL AND su.deleted_at IS NULL
-       AND """ + _PC_NOT_BANNED_SQL.format(a="pl") + """
-       AND """ + _PC_NOT_BANNED_SQL.format(a="su") + """
-       AND pl.pc_announce AND su.pc_announce
-       AND (pr.id IS NULL OR pr.discarded_at IS NULL)
+       AND """ + _PC_EVENT_DELIVERABLE_SQL + """
      ORDER BY e.id
 """
 
@@ -25164,10 +25181,11 @@ async def internal_pc_events_pending(
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Unposted notable pulls, re-checked NOW against both parties' consent
-    (pc_announce for puller and subject, the subject not opted out, neither
-    deleted, the print not discarded): events that fail the re-check are
-    marked posted without being handed out. The bot acks what it posted. A
+    """Unposted notable pulls, re-checked NOW for deliverability -- both
+    parties announcing, neither deleted nor banned, the print not discarded
+    (`_PC_EVENT_DELIVERABLE_SQL`, the same word the bot's lease re-check
+    reads right before its send, r6 H1/M2): events that fail the re-check
+    are marked posted without being handed out. The bot acks what it posted. A
     page is the first _PC_EVENTS_PAGE unposted events plus every other
     unposted event of the same prints, so one print's group is never cut in
     two by the page boundary (c6 F)."""
@@ -26241,6 +26259,16 @@ _PC_LEASE_PRINT_OK = """
                      WHERE pr.id = l.print_id AND pr.discarded_at IS NULL
                        AND c.subject_player_id = l.subject_id)) AS print_deliverable
 """
+# Every event the lease names is still deliverable for BOTH parties (the
+# puller too, whom the subject's row never covered): the handout's own word,
+# re-read right before the bot's send (r6 H1/M2). No events named: true.
+_PC_LEASE_EVENTS_OK = """
+               NOT EXISTS (
+                    SELECT 1 FROM pc_events e
+                      JOIN players pl ON pl.id = e.player_id
+                      JOIN players su ON su.id = e.subject_player_id
+                     WHERE e.id = ANY(l.event_ids) AND NOT """ + _PC_EVENT_DELIVERABLE_SQL + """) AS events_ok
+"""
 
 
 async def _pc_lease_wait(db: AsyncSession, pid: str):
@@ -26613,23 +26641,30 @@ async def internal_pc_lease_check(
 
     "Still authorises" is re-resolved, not assumed: the subject's row is read
     again through the same columns and the same `portrait_for` the acquire
-    used, and the answer must still be the picture the lease recorded. A ban,
-    a full opt-out, a deletion or a switch to `none` all move that resolution
-    and revoke the lease without having to find its row — which is what makes
-    this safe against the writer that cannot see it (a discard of a print of
-    ANOTHER subject commits under a different identity lock and never
-    conflicts with the acquisition). The DELETEs those writers do are a
-    cleanup, no longer the guarantee."""
+    used, and the answer must still be the picture the lease recorded; a
+    deletion and an active ban are refused outright, and a lease naming
+    events re-reads the deliverability of every one of them for BOTH parties
+    (r6 H1/M2). The revocation needs no writer to find the lease's row —
+    which is what makes this safe against the writer that cannot see it (a
+    discard of a print of ANOTHER subject commits under a different identity
+    lock and never conflicts with the acquisition). The DELETEs those writers
+    do are a cleanup, no longer the guarantee."""
     _require_internal_key(x_internal_key)
     if not _pcp.print_id_ok(lease_id):
         raise HTTPException(status_code=404, detail={"error": "lease_gone"})
     row = (await db.execute(text(
         "SELECT l.until, (l.until > now()) AS unexpired, l.portrait_hash AS leased_hash,"
-        + _PC_PORTRAIT_RESOLVE_COLS + "," + _PC_LEASE_PRINT_OK +
+        + _PC_PORTRAIT_RESOLVE_COLS + "," + _PC_LEASE_PRINT_OK + "," + _PC_LEASE_EVENTS_OK +
         """FROM pc_delivery_leases l JOIN players p ON p.id = l.subject_id
             WHERE l.id = CAST(:id AS uuid)"""),
         {"id": lease_id})).mappings().first()
-    if row is None or not row["unexpired"] or row["subject_deleted"] or not row["print_deliverable"]:
+    # Gone when: expired; the subject deleted or banned (said outright, not
+    # through the hash -- a subject with no picture leased NULL and a ban
+    # resolves to NULL as well, r6 M2); the print no longer the subject's; or
+    # any event the lease names no longer deliverable for EITHER party (the
+    # puller included, whom the lease's subject row never covered, r6 H1).
+    if (row is None or not row["unexpired"] or row["subject_deleted"] or row["subject_banned"]
+            or not row["print_deliverable"] or not row["events_ok"]):
         raise HTTPException(status_code=404, detail={"error": "lease_gone"})
     _, now_hash = _pcp.portrait_for(row)
     if now_hash != row["leased_hash"]:

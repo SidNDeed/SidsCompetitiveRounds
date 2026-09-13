@@ -409,3 +409,26 @@ def test_the_sept12_i18n_migrations_recompute_from_the_sync_tool_and_match_the_b
     assert len(plain) == 1 and len(ctxd) == 1
     for lang in ("es", "ru", "uk", "sv"):
         assert catalogue[lang]["DISCARDED"] == catalogue[lang]["DISCARDED\u0004pack open"]
+
+
+def test_the_extracted_source_registry_matches_the_client_sources_byte_for_byte():
+    """r6 tests (2026-09-13): the generated registry (tools/i18n_source.json)
+    and the compiled key list (plugin/I18nSourceKeys.g.cs) are what the
+    extractor produces from the plugin sources NOW -- a live C# sentence that
+    drifts from the seeds fails here, not in a player's language."""
+    import importlib.util
+    import json
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location("i18n_extract_under_test", str(root / "tools" / "i18n_extract.py"))
+    ex = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ex)
+    found, sites = ex.extract()
+    fresh = ex.build_registry(found, sites)
+    on_disk = json.loads((root / "tools" / "i18n_source.json").read_text(encoding="utf-8"))
+    assert fresh == on_disk
+    keys = (root / "plugin" / "I18nSourceKeys.g.cs").read_text(encoding="utf-8")
+    entries = sorted(found.keys())
+    assert keys.count('\n            "') == len(entries)
+    for s in entries[:50] + entries[-50:]:
+        assert '"' + ex.cs_escape(s) + '",' in keys

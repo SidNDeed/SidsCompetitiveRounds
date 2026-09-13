@@ -387,6 +387,7 @@ namespace CompetitiveRounds
             if (id == null) return;
             if (HasIntent()) MaybeRecover(false);
             if (onTab && pendingVisit) { pendingVisit = false; OnTabEntered(); }
+            if (!onSettings) settingsVisited = false;   // leaving Settings re-arms its one check for the next entry (r6 L12)
             if (!onTab && !onSettings) return;
             try { PlayerCardFaces.Tick(); } catch { }
             try { PortraitRender.Tick(); } catch (Exception ex) { Plugin.Log.LogWarning($"[PC] portrait tick threw: {ex.Message}"); }

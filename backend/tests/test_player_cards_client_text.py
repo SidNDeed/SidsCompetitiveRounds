@@ -12,6 +12,7 @@ CLIENT = ROOT / "plugin" / "PlayerCardsUI.cs"
 API = ROOT / "plugin" / "ApiClient.cs"
 INFO = ROOT / "plugin" / "InfoLibrary.cs"
 NATIVE = ROOT / "plugin" / "NativeUI.cs"
+PORTRAIT = ROOT / "plugin" / "PortraitRender.cs"
 FACES = ROOT / "plugin" / "PlayerCardFaces.cs"
 RULES = ROOT / "backend" / "api" / "player_cards.py"
 
@@ -325,3 +326,27 @@ def test_the_info_library_states_what_the_cards_settings_actually_do():
     assert "Rares and below are never announced." not in src
     # the cap
     assert "Up to 5 paid packs a day for most accounts" in src
+
+
+def test_the_renderer_fences_its_pixel_inputs_and_keeps_a_refused_request_armed():
+    """r6 M4/M5/L7/L8 + L12 (2026-09-13): the state key ends with the live
+    face/colour/effect inputs and an abandoned run asks for a refresh when
+    those moved; Start says whether it started and a refused request stays
+    armed (a five-second retry); a face copy that fails refuses the capture;
+    a face that cannot be equipped aborts the run before any upload; leaving
+    Settings re-arms its one check."""
+    pr = PORTRAIT.read_text(encoding="utf-8")
+    assert '+ "|" + LiveInputsKey();' in pr
+    assert "return (face + \"~\" + gear).Replace('|', '_');" in pr
+    assert 'if (i >= 0 && key.Substring(i + 1) != LiveInputsKey()) RequestRefresh("inputs changed");' in pr
+    assert pr.count("{ Abandon(key); yield break; }") == 5 and pr.count("{ Abandon(key); return; }") == 1   # 3 render yields, the matte gate, the upload retry; the upload's own
+    assert "if (Rendering || UploadInFlight || Stale(key)) yield break;" not in pr
+    assert 'LastResult = "aborted"; yield break;' not in pr
+    assert "private static bool Start(string why, bool upload)" in pr
+    assert 'if (Rendering || UploadInFlight || !Start(_refreshWhy ?? "preset", true)) { _refreshAt = Time.realtimeSinceStartup + 5f; return; }' in pr
+    assert 'if (!Start("visit", true)) { _refreshAt = Time.realtimeSinceStartup + 5f; _refreshWhy = "visit"; }' in pr
+    assert 'catch { inp.refusal = "the face could not be copied"; return inp; }' in pr and "inp.face = f;" not in pr
+    assert "private static bool AfterActivate(" in pr and "return faceOk;" in pr and "if (face != null) faceOk = false;" in pr
+    assert 'if (!AfterActivate(rep, clone, data, inp.face, null)) { LastResult = "render failed: the captured face could not be equipped"; yield break; }' in pr
+    ui = CLIENT.read_text(encoding="utf-8")
+    assert "if (!onSettings) settingsVisited = false;" in ui

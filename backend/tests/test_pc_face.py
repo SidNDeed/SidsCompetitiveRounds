@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import inspect
 import json
 import random
 import re
@@ -835,11 +836,19 @@ def test_the_name_budget_follows_the_chips_and_the_tile_shrinks_before_it_cuts()
     # text stays inside the tile's own budget to within the font's rounding
     left_leg_t = pc_face._draw_chip(tile, 348, 19, "LEGENDARY", "LEG", (1, 1, 1), (2, 2, 2), 0.5, True)
     edge_t = left_leg_t - gap * 0.5
+    # the oracle is the CARD's chip as drawn above (LEGENDARY, full width), not the
+    # tile's short chip doubled (r6 L9): the renderer passes that edge to the tile fit
+    edge_c = left_leg - gap
+    assert pc_face._chip_width("LEGENDARY", "LEG", 1.0, False) == 696 - left_leg      # the width the renderer asks for
+    assert pc_face._chip_width("LEGENDARY", "LEG", 0.5, True) == 348 - left_leg_t
+    assert edge_t * 2.0 > edge_c   # the short chip leaves more room: the doubled tile edge was the wrong oracle
+    assert 'card_edge=(card_chip_left - NAME_CHIP_GAP) if size == "tile" else None' in inspect.getsource(pc_face.render_face)
+    assert pc_face._name_fit("Wm" * 20, "tile", edge_t) == pc_face._name_fit("Wm" * 20, "tile", edge_t, card_edge=edge_t * 2.0)   # the stand-in when no card edge is given
     flips = 0
     for n in range(1, 41):
         nm = ("Wm" * 20)[:n]
-        card = pc_face._name_fit(nm, "card", edge_t * 2.0)
-        tile_fit = pc_face._name_fit(nm, "tile", edge_t)
+        card = pc_face._name_fit(nm, "card", edge_c)
+        tile_fit = pc_face._name_fit(nm, "tile", edge_t, card_edge=edge_c)
         assert tile_fit[0] == card[0], (n, card, tile_fit)                 # the same text, whole or cut alike
         half = max(1, round(card[1] * 0.5))
         assert half - 3 <= tile_fit[1] <= half, (n, card, tile_fit)        # half the size, less the font's rounding

@@ -636,6 +636,40 @@ def test_the_handout_and_card_apply_the_pools_ban_word_to_puller_and_subject():
     assert "JOIN players p ON p.id = m.player_id" in card
     assert "AND p.deleted_at IS NULL AND \"\"\" + _PC_NOT_BANNED_SQL.format(a=\"p\") + \"\"\"" in card
     assert card.index("JOIN players p ON p.id = m.player_id") < card.index('detail={"error": "not_in_pool"}')
+    # r6 H1/M2: ONE deliverability word for the skip, the handout and the send
+    frag = main._PC_EVENT_DELIVERABLE_SQL
+    assert frag.count(ban.format(a="pl")) == 1 and frag.count(ban.format(a="su")) == 1
+    assert frag.startswith("(pl.deleted_at IS NULL AND su.deleted_at IS NULL") and "pl.pc_announce AND su.pc_announce" in frag
+    assert "e.print_id IS NULL OR EXISTS (SELECT 1 FROM pc_prints pr WHERE pr.id = e.print_id AND pr.discarded_at IS NULL)" in frag
+    assert skip.count("AND NOT " + frag) == 1 and pend.count("AND " + frag) == 1
+    assert skip.count("pc_announce") == 2 and pend.count("pc_announce") == 2   # no second spelling beside the word
+
+
+def test_the_lease_recheck_authorises_the_whole_line_for_both_parties():
+    """r6 H1/M2 (2026-09-13): the bot's send is authorised by the lease's
+    re-check, so the re-check must say no when the subject is deleted OR
+    banned (outright: a no-picture subject leased NULL and a ban resolves to
+    NULL too), when the print stopped being the subject's, and when any event
+    the lease names is no longer deliverable for EITHER party -- the puller
+    included, whom the subject's row never covered."""
+    src = inspect.getsource(main.internal_pc_lease_check)
+    assert '_PC_PORTRAIT_RESOLVE_COLS + "," + _PC_LEASE_PRINT_OK + "," + _PC_LEASE_EVENTS_OK' in src
+    assert 'row["subject_deleted"] or row["subject_banned"]' in src
+    assert 'not row["print_deliverable"] or not row["events_ok"]' in src
+    ok = main._PC_LEASE_EVENTS_OK
+    assert "e.id = ANY(l.event_ids) AND NOT " + main._PC_EVENT_DELIVERABLE_SQL + ") AS events_ok" in ok
+    assert "JOIN players pl ON pl.id = e.player_id" in ok and "JOIN players su ON su.id = e.subject_player_id" in ok
+    assert "AS subject_banned" in main._PC_PORTRAIT_RESOLVE_COLS
+
+
+def test_the_public_pool_summary_speaks_the_pools_live_word():
+    """r6 M3: /pc/pool leaves out members deleted or banned since the snapshot
+    the way /card and the pack open do, in ONE statement (bands, count and
+    names from one read)."""
+    src = inspect.getsource(main.pc_pool_summary)
+    assert src.count('AND p.deleted_at IS NULL AND """ + _PC_NOT_BANNED_SQL.format(a="p") + """') == 1
+    assert "WITH live AS (" in src and "UNION ALL" in src and src.count("await db.execute") == 2   # the snapshot row, then the one read
+    assert '"member_count": sum(bands.values())' in src and 'int(snap["member_count"])' not in src
 
 
 def test_the_hold_releases_on_resolution_never_on_an_attempt_and_names_face_ready():
@@ -654,7 +688,7 @@ def test_the_hold_releases_on_resolution_never_on_an_attempt_and_names_face_read
     assert pending.count(res + " AS face_ready") == 1
     assert '"face_ready": bool(r["face_ready"])' in inspect.getsource(main.internal_pc_events_pending)
     bot = (REPO / "backend" / "discord_bot.py").read_text(encoding="utf-8")
-    assert 'if p.get("print_id") and first.get("subject_ref") and first.get("face_ready", True):' in bot
+    assert 'if lease[0] and p.get("print_id") and first.get("face_ready", True):' in bot   # the face rides under the line's lease (r6 H1)
 
 
 # ── the settings routes ────────────────────────────────────────────────

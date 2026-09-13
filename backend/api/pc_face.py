@@ -1089,18 +1089,22 @@ NAME_RIGHT_DEFAULT = 490     # the layout's name rect right edge: the budget whe
 NAME_CHIP_GAP = 24           # card px kept clear between the name and the nearest chip
 
 
-def _name_fit(name: str, size: str, right_edge: float | None = None) -> tuple[str, int]:
+def _name_fit(name: str, size: str, right_edge: float | None = None,
+              card_edge: float | None = None) -> tuple[str, int]:
     """(fitted text, font px) for the name at `size`. `right_edge`, when
     given, is the x the name may not cross (the nearest chip's left edge less
     the gap, in that size's pixels); without it the layout rect applies."""
     if size not in ("card", "tile"):
         raise ValueError("size")
     if size == "tile":
-        # Parity by construction: the fit is decided once, at card scale,
-        # against the tile's edge doubled, and the chosen size is halved.
-        # Halving keeps the text inside its budget to within the font's
-        # rounding, well inside the 12 px the gap leaves clear at the tile.
-        text, px = _name_fit(name, "card", None if right_edge is None else float(right_edge) * 2.0)
+        # Parity by construction (r5 L11, r6 L9): the text is decided ONCE,
+        # at card scale, against the CARD's own chip edge -- the renderer
+        # passes it, since the tile's short chip leaves more room than the
+        # card's full one; without it the tile's edge doubled stands in --
+        # and the chosen size is halved. Halving keeps the text inside the
+        # tile's budget to within the font's rounding.
+        at = card_edge if card_edge is not None else (None if right_edge is None else float(right_edge) * 2.0)
+        text, px = _name_fit(name, "card", at)
         budget = max(1.0, (NAME_RIGHT_DEFAULT * 0.5 if right_edge is None else float(right_edge)) - NAME_LEFT * 0.5)
         px = max(1, int(round(px * 0.5)))
         # hinting rounds advances up at small sizes: step down a pixel at a
@@ -1302,12 +1306,12 @@ def _draw_fitted(image: Image.Image, xy: tuple[int, int], text: str, box_width: 
     return fitted, font_size
 
 
-def _draw_chip(image: Image.Image, x_right: int, y: int, full: str, short: str,
-               colour: tuple[int, int, int], text_colour: tuple[int, int, int],
-               scale: float, tile: bool) -> int:
-    """Draw one right-anchored chip; returns its LEFT edge x, which is what
-    the name's budget is measured against."""
-    height = _scale_value(44, scale)
+def _chip_label(full: str, short: str, scale: float, tile: bool) -> tuple[str, int, int]:
+    """(label, font size, width) of the chip `_draw_chip` draws for these
+    texts at this scale: the tile shows the short form at one size, the card
+    the full form stepping down before it falls back to the short one. Kept
+    apart from the drawing so the TILE can ask what the CARD's chip is (r6
+    L9): a name is decided against the card's chip and shown on both."""
     padding = _scale_value(20, scale)
     max_width = _scale_value(194, scale)
     size_values = [_scale_value(26, scale)] if tile else [_scale_value(value, scale) for value in (26, 24, 22)]
@@ -1328,6 +1332,20 @@ def _draw_chip(image: Image.Image, x_right: int, y: int, full: str, short: str,
         chosen = candidate, font_size
     label, font_size = chosen
     width = min(max_width, int(math.ceil(_measure_text(label, font_size, "bold"))) + 2 * padding)
+    return label, font_size, width
+
+
+def _chip_width(full: str, short: str, scale: float, tile: bool) -> int:
+    return _chip_label(full, short, scale, tile)[2]
+
+
+def _draw_chip(image: Image.Image, x_right: int, y: int, full: str, short: str,
+               colour: tuple[int, int, int], text_colour: tuple[int, int, int],
+               scale: float, tile: bool) -> int:
+    """Draw one right-anchored chip; returns its LEFT edge x, which is what
+    the name's budget is measured against."""
+    height = _scale_value(44, scale)
+    label, font_size, width = _chip_label(full, short, scale, tile)
     draw = ImageDraw.Draw(image)
     draw.rounded_rectangle(
         (x_right - width, y, x_right, y + height),
@@ -1483,7 +1501,13 @@ def render_face(spec: dict, labels: dict, portrait_png: bytes | None, size: str)
                                               effective["pc.foil_short"], (255, 255, 255), (20, 20, 24),
                                               scale, size == "tile"))
 
-    fitted_name, name_size = _name_fit(display_name, size, chip_left - _scale_value(NAME_CHIP_GAP, scale))
+    # The tile decides its name against the CARD's chip (r6 L9): the same full
+    # chip at card scale, the foil chip narrowing it the same way.
+    card_chip_left = _scale_value(696, 1.0) - _chip_width(effective[f"pc.band.{band}"], effective[f"pc.band_short.{band}"], 1.0, False)
+    if bool(spec.get("foil")):
+        card_chip_left = min(card_chip_left, _scale_value(696, 1.0) - _chip_width(effective["pc.foil"], effective["pc.foil_short"], 1.0, False))
+    fitted_name, name_size = _name_fit(display_name, size, chip_left - _scale_value(NAME_CHIP_GAP, scale),
+                                       card_edge=(card_chip_left - NAME_CHIP_GAP) if size == "tile" else None)
     subtitle = "" if spec.get("subtitle") is None else str(spec["subtitle"]).strip()
     # A shop title the player wears sits under the name as a subtitle; the
     # name moves up to make the room (the RANK slot below draws the tier and

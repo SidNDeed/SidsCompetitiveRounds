@@ -81,7 +81,34 @@ def test_refusals_are_read_by_status_and_token():
     coll = _fn(BOT_SRC, "cmd_pc_collection")
     assert "status == 403" in coll and "private" in coll
     card = _fn(BOT_SRC, "cmd_pc_card")
-    assert "not in the card pool" in card
+    # the 404 copy whole (r6 L10): absence from the current snapshot, and the ban, are the two causes
+    assert 'not in the current card pool (the pool is re-taken daily; a banned player is out).' in card
+    assert "opted out" not in card and "new player" not in card
+
+
+def test_every_line_that_names_people_is_sent_under_a_live_lease():
+    """r6 H1/M2: the events handout leases every print group (subject, print if
+    any, the events) and sends the line only while the lease is live at the
+    api right before the send -- the api re-reads both parties -- and /card
+    does the same for its subject; a send without a live lease returns False
+    and the line stays queued, unacked, for the api's next handout."""
+    send = _fn(BOT_SRC, "_pc_send_face")
+    assert "require_lease=False" in send
+    assert "if require_lease and not live:" in send and "return False" in send and send.rstrip().endswith("return True")
+    assert "live = await _pc_lease_live(lease_id) and _pc_lease_left(deadline) > 0" in send
+    assert "attach = face is not None and live" in send
+    ev = _fn(BOT_SRC, "poll_pc_events")
+    assert 'if first.get("subject_ref"):' in ev
+    assert 'lease = await _pc_lease(first["subject_ref"], print_id=p.get("print_id"), event_ids=ids)' in ev
+    assert "if not await _pc_send_face(ch.send, content=text_line[:2000], face=face, lease=lease, require_lease=True):" in ev
+    assert "withdrawn before the send (no live lease)" in ev
+    assert ev.index("withdrawn before the send") < ev.index("leases.append(lease[0])") < ev.index("_pc_events_sent[i] = True")
+    card = _fn(BOT_SRC, "cmd_pc_card")
+    assert "require_lease=bool(lease[0])" in card and "if not lease[0]:" in card
+    # the channel diagnostic tells the cases apart (r6 L11)
+    assert "except discord.NotFound:" in ev and "except discord.Forbidden:" in ev and 'f"unavailable ({type(ex).__name__})"' in ev
+    # the deploy train's witness (r6 M6): a line whose only job is to be probed
+    assert 'print("[BOT-READY] " + str(bot.user)' in _fn(BOT_SRC, "on_ready")
 
 
 def test_events_are_grouped_by_the_nested_print_id():

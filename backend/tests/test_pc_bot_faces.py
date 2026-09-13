@@ -169,9 +169,13 @@ def test_the_bot_draws_no_avatar_and_no_thumbnail_anywhere_in_player_cards():
 def test_every_portrait_send_revalidates_its_lease_right_before_the_send_and_releases_it_after():
     src = _fn(BOT_SRC, "_pc_send_face")
     assert src.index("await _pc_lease_live(lease_id)") < src.index("await asyncio.wait_for(sender(**kwargs)")
-    assert "finally:" in src and src.index("finally:") < src.index("await _pc_lease_release(lease_id)")
-    # the bytes ride only under a lease: no lease, no attachment
-    assert "attach = face is not None and lease_id is not None" in src
+    # released after the send (the finally) -- and on the refusal path of a
+    # required lease, before the send that then does not happen (r6 H1/M2)
+    assert "finally:" in src and src.index("finally:") < src.rindex("await _pc_lease_release(lease_id)")
+    assert src.index("if require_lease and not live:") < src.index("await _pc_lease_release(lease_id)") < src.index("return False")
+    # the bytes ride only under a lease that is LIVE at the api right before the send
+    assert "live = await _pc_lease_live(lease_id) and _pc_lease_left(deadline) > 0" in src
+    assert "attach = face is not None and live" in src
 
 
 def test_the_lease_deadline_keeps_the_reserve_and_a_failed_acquire_means_no_picture():
@@ -237,7 +241,11 @@ def test_collection_and_card_lease_the_subject_and_release_on_the_text_only_path
     assert coll.index("await _pc_lease_release(lease[0])") < coll.index("await _pc_send_face(ctx.send")
     card = _fn(BOT_SRC, "cmd_pc_card")
     assert '_pc_lease(body["player_ref"])' in card and "_pc_locale_of(ctx)" in card
-    assert card.index("await _pc_lease_release(lease[0])") < card.index("await _pc_send_face(ctx.send")
+    # /card has NO text-only path since r6 (H1/M2): no lease, no card -- a
+    # refusal before the send, and the send itself requires the lease
+    assert card.index("if not lease[0]:") < card.index("await _pc_send_face(ctx.send")
+    assert "require_lease=bool(lease[0])" in card and card.count("That card isn't available right now") == 2
+    assert "await _pc_lease_release(lease[0])" not in card
 
 
 def test_the_drain_waits_a_bounded_number_of_ticks_for_a_transient_picture():
@@ -259,7 +267,7 @@ def test_the_drain_waits_a_bounded_number_of_ticks_for_a_transient_picture():
 
 def test_the_drain_leases_each_print_group_with_its_events_and_acks_with_the_leases():
     src = _fn(BOT_SRC, "poll_pc_events")
-    assert '_pc_lease(first["subject_ref"], print_id=p["print_id"], event_ids=ids)' in src
+    assert '_pc_lease(first["subject_ref"], print_id=p.get("print_id"), event_ids=ids)' in src   # every group, print or not (r6 H1)
     assert src.index("await _pc_send_face(ch.send") < src.index('"/internal/pc/events/ack"')
     assert '"leases": ",".join(leases)' in src
     assert "leases.append(lease[0])" in src
