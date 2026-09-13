@@ -26301,15 +26301,37 @@ _PC_LEASE_NAMING_SQL = """
 """
 
 
-# How many writers may be WAITING in _pc_lease_drain at once, per api process
-# (one process: the Dockerfile runs a single worker). Each wait holds its pool
-# connection for up to LEASE_SECONDS + 5; the pool is 20 + 10 (database.py),
-# and the bot's lease release, the acks and every other request must always
-# find one (r8 M1): a fifth writer refuses and retries instead of holding a
-# fifth connection. Counted here, not in a Semaphore: the excess must refuse,
-# not queue -- a queued writer would hold its connection while it queued.
-_PC_DRAIN_SLOTS = 4
-_pc_drains_waiting = 0
+# The admission gate of the writers that may wait for the Discord lines in
+# flight naming a player -- the deletion, the ban (direct and through a
+# moderation case): at most _PC_WRITER_SLOTS such requests hold a transaction
+# at once per api process (one uvicorn worker). Taken by the _pc_writer_slot
+# dependency BEFORE the handler runs its first statement, so a request beyond
+# the bound waits holding no pool connection and no lock -- neither in the
+# wait itself nor queued behind it on a shared identity (an admin's thirty
+# bans: r9 M1). The pool is 20 + 10 (database.py); four writers leave the
+# bot's lease release, the acks and every other request their connections.
+# A semaphore, not a refusal: the request is served in turn, its caller's
+# budget permitting (D4). One per event loop: an asyncio primitive binds to
+# the loop that first waits on it (the tests run one loop per test).
+_PC_WRITER_SLOTS = 4
+_pc_writer_gates = {}   # event loop -> its Semaphore
+
+
+def _pc_writer_gate():
+    loop = asyncio.get_running_loop()
+    gate = _pc_writer_gates.get(loop)
+    if gate is None:
+        for old in [l for l in _pc_writer_gates if l.is_closed()]:
+            del _pc_writer_gates[old]
+        gate = _pc_writer_gates[loop] = asyncio.Semaphore(_PC_WRITER_SLOTS)
+    return gate
+
+
+async def _pc_writer_slot():
+    """FastAPI dependency: one of the writers' admission slots for the whole
+    request; released when the request ends, however it ends."""
+    async with _pc_writer_gate():
+        yield
 
 
 async def _pc_lease_drain(db: AsyncSession, pid: str) -> float:
@@ -26323,29 +26345,17 @@ async def _pc_lease_drain(db: AsyncSession, pid: str) -> float:
     naming the player (the acquire try-locks each party). Bounded by the
     lease's own life: past `until` a lease authorises nothing, so the wait
     ends there even for a lease the bot never released. At most
-    `_PC_DRAIN_SLOTS` writers wait at once: one that would wait beyond that
-    refuses with 503 `pc_wait_busy` (retry_after 5) BEFORE it sleeps -- its
-    transaction ends with the request, so it holds no connection meanwhile
-    and never commits unwaited (r8 M1); a writer that finds nothing live
-    takes no slot."""
-    global _pc_drains_waiting
+    `_PC_WRITER_SLOTS` of the writers that can reach this wait hold a
+    transaction at once (`_pc_writer_slot`, taken before their first
+    statement), so the pool always keeps room for the bot's release, the
+    acks and every other request (r8 M1, r9 M1)."""
     started = time.monotonic()
     limit = float(_pcp.LEASE_SECONDS) + 5.0
-    admitted = False
-    try:
-        while True:
-            left = (await db.execute(text(_PC_LEASE_NAMING_SQL), {"pid": pid})).scalar_one_or_none()
-            if left is None or time.monotonic() - started > limit:
-                return time.monotonic() - started
-            if not admitted:
-                if _pc_drains_waiting >= _PC_DRAIN_SLOTS:
-                    raise HTTPException(status_code=503, detail={"error": "pc_wait_busy", "retry_after": 5})
-                _pc_drains_waiting += 1   # no await between the check and the count: one process, one loop
-                admitted = True
-            await asyncio.sleep(min(0.25, max(0.05, float(left))))
-    finally:
-        if admitted:
-            _pc_drains_waiting -= 1
+    while True:
+        left = (await db.execute(text(_PC_LEASE_NAMING_SQL), {"pid": pid})).scalar_one_or_none()
+        if left is None or time.monotonic() - started > limit:
+            return time.monotonic() - started
+        await asyncio.sleep(min(0.25, max(0.05, float(left))))
 
 
 async def _pc_lock_portrait_blobs(db: AsyncSession, pid: str, *extra):
@@ -32840,7 +32850,8 @@ async def ack_lfp_pings(
 # ── Routes: Privacy ──────────────────────────────────────────
 
 @app.delete("/api/v1/players/{steam_id}/data", tags=["Privacy"])
-async def delete_player_data(steam_id: str, request: Request, sig: str = Query(...), db: AsyncSession = Depends(get_db)):
+async def delete_player_data(steam_id: str, request: Request, sig: str = Query(...), db: AsyncSession = Depends(get_db),
+                             _slot=Depends(_pc_writer_slot)):
     """
     Anonymize a player's identity. Irreversible.
 
@@ -35513,7 +35524,7 @@ class _AdminBanReq(BaseModel):
 
 
 @app.post("/api/v1/admin/ban", tags=["Admin"])
-async def admin_ban(req: _AdminBanReq, db: AsyncSession = Depends(get_db)):
+async def admin_ban(req: _AdminBanReq, db: AsyncSession = Depends(get_db), _slot=Depends(_pc_writer_slot)):
     await _require_admin(db, req.admin_steam_id, "ban", req.target_steam_id, req.hmac_signature)
     # ONE lock order on every ban path (Sept 6 item b, review r2): the
     # identity lattice first — both identities this transaction writes, in
@@ -35579,6 +35590,12 @@ class _AdminUnbanReq(BaseModel):
 @app.post("/api/v1/admin/unban", tags=["Admin"])
 async def admin_unban(req: _AdminUnbanReq, db: AsyncSession = Depends(get_db)):
     await _require_admin(db, req.admin_steam_id, "unban", req.target_steam_id, req.hmac_signature)
+    # The same identity lattice as the ban, in the same canonical order (r9
+    # M2): a ban's repeat detection and its insert are one serialised step on
+    # the target's identity, so an unban cannot land between them and turn a
+    # repeat into a fresh, ungated insert.
+    await _mail_lock_identities(db, req.admin_steam_id, req.target_steam_id,
+                                optional=(req.admin_steam_id, req.target_steam_id))
     res = await db.execute(text(
         "UPDATE player_bans SET unbanned_at = NOW(), unbanned_by_steam_id = :admin "
         "WHERE steam_id = :sid AND unbanned_at IS NULL"
@@ -54175,7 +54192,7 @@ async def admin_moderation_cases(
 
 @app.post("/api/v1/admin/moderation-cases/{case_id}/act", tags=["Admin"])
 async def admin_moderation_case_act(case_id: str, req: _AdminModCaseActReq,
-                                    db: AsyncSession = Depends(get_db)):
+                                    db: AsyncSession = Depends(get_db), _slot=Depends(_pc_writer_slot)):
     """Admin-HMAC proof (admin tooling). The signer is the actor."""
     await _require_admin(db, req.admin_steam_id, "modcase_act", case_id, req.hmac_signature)
     if req.actor_steam_id and req.actor_steam_id != req.admin_steam_id:
@@ -54192,6 +54209,7 @@ async def internal_moderation_case_act(
     case_id: str, payload: dict,
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
     db: AsyncSession = Depends(get_db),
+    _slot=Depends(_pc_writer_slot),
 ):
     """The Discord buttons' proof (the bot cannot sign admin HMAC — it holds
     no ADMIN_HMAC_SECRET — so, like /internal/chat/discord-mute, it proves

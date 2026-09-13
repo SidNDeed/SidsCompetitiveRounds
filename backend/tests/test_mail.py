@@ -2170,6 +2170,27 @@ def test_every_ban_path_takes_the_identity_locks_before_the_ban_rate_lock():
     assert src.index("_mail_lock_identities(") < src.index("_ban_rate_gate_or_raise(") < src.index("_apply_ban_core(")
     act = inspect.getsource(main._moderation_case_act)
     assert act.index("_mail_lock_identities(") < act.index("_ban_rate_gate_or_raise(")
+    # the unban is on the same lattice, ahead of its write (r9 M2)
+    unban = inspect.getsource(main.admin_unban)
+    assert unban.index("_require_admin(") < unban.index("_mail_lock_identities(") < unban.index("UPDATE player_bans")
+    assert "optional=(req.admin_steam_id, req.target_steam_id)" in unban
+
+
+def test_a_repeat_ban_at_the_velocity_threshold_is_answered_already_banned_by_the_route():
+    """r9 (D4, 2026-09-13), executed through the route on the fake: the retry of a ban whose caller
+    timed out finds its target banned -- the route answers already_banned, taking no ban-rate lock
+    and refusing nothing, however many bans the admin has in the window; the identity lattice is
+    still taken first."""
+    db, ids = _world()
+    db.add_player(ADMIN_SID, discord_id="d-admin")
+    db.admins.add(ADMIN_SID)
+    db.bans[A_SID] = "x"
+    db.recent_bans_by_admin[ADMIN_SID] = 5
+    with _admin_secret():
+        res = _run(main.admin_ban(main._AdminBanReq(admin_steam_id=ADMIN_SID, target_steam_id=A_SID, reason="x",
+                                                    hmac_signature=_sign(ADMIN_SID, "ban", A_SID)), db))
+    assert res["status"] == "already_banned"
+    assert ("ban-rate", ADMIN_SID) not in db.locks and ("identity", A_SID) in db.locks
 
 
 def test_broadcast_replay_precedes_the_mutable_sender_gates():

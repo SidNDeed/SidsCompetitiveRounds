@@ -1122,30 +1122,64 @@ def test_the_writers_wait_for_the_lines_in_flight_naming_the_player(monkeypatch)
     assert "limit = float(_pcp.LEASE_SECONDS) + 5.0" in src and "time.monotonic() - started > limit" in src
 
 
-def test_the_drain_admits_four_waits_and_refuses_the_fifth_before_it_holds_a_connection():
-    """r8 M1 (2026-09-13), executed on the real event loop: five writers find a live lease at once;
-    four wait (each holding its own connection for the lease's remaining life), the fifth is refused
-    503 pc_wait_busy at its first read, before any sleep -- the pool (20 + 10) keeps room for the bot's
-    release and every other request; a writer that finds nothing live takes no slot while the four
-    are full; every slot comes back when its wait ends, so a later writer is admitted."""
-    from fastapi import HTTPException
-
+def test_the_writers_gate_admits_four_at_once_and_a_fifth_waits_holding_nothing():
+    """r9 M1 (2026-09-13), executed on the real event loop: the admission gate of the writers that
+    can wait for the Discord lines in flight -- one Semaphore of four slots per event loop, taken by
+    the `_pc_writer_slot` dependency -- lets four requests hold a transaction at once; a fifth waits
+    BEFORE its first statement (the dependency runs none: it holds no pool connection and no lock
+    while it waits) and is admitted when any of the four ends, however it ends -- a return or an
+    exception -- so no slot is ever lost."""
     async def scenario():
-        sleepers = [Scripted({"MAX(l.until)": [0.06, None]}) for _ in range(4)]
-        idle = Scripted({"MAX(l.until)": [None]})
-        fifth = Scripted({"MAX(l.until)": [0.06, None]})
-        results = await asyncio.gather(*[main._pc_lease_drain(db, str(PID)) for db in sleepers],
-                                       main._pc_lease_drain(idle, str(PID)),
-                                       main._pc_lease_drain(fifth, str(PID)), return_exceptions=True)
-        after = await main._pc_lease_drain(Scripted({"MAX(l.until)": [0.06, None]}), str(PID))
-        return sleepers, idle, fifth, results, after
+        gate = main._pc_writer_gate()
+        assert gate is main._pc_writer_gate() and gate._value == main._PC_WRITER_SLOTS   # one per loop, all free
+        running, peak, done = 0, 0, []
 
-    assert main._PC_DRAIN_SLOTS == 4 and main._pc_drains_waiting == 0
-    sleepers, idle, fifth, results, after = _run(scenario())
-    assert all(isinstance(r, float) for r in results[:5]), results
-    assert all(db.count("MAX(l.until)") == 2 for db in sleepers) and idle.count("MAX(l.until)") == 1
-    refused = results[5]
-    assert isinstance(refused, HTTPException) and refused.status_code == 503, refused
-    assert refused.detail == {"error": "pc_wait_busy", "retry_after": 5}
-    assert fifth.count("MAX(l.until)") == 1   # refused at its first read, before any sleep
-    assert isinstance(after, float) and main._pc_drains_waiting == 0
+        async def writer(i):
+            nonlocal running, peak
+            slot = main._pc_writer_slot()
+            await slot.__anext__()               # admitted: the request's first statement may run
+            running += 1
+            peak = max(peak, running)
+            await asyncio.sleep(0.02)
+            running -= 1
+            done.append(i)
+            await slot.aclose()                  # the request ended: its slot is free again
+        await asyncio.gather(*[writer(i) for i in range(6)])
+        assert peak == 4 and sorted(done) == list(range(6)) and gate._value == 4
+        held = [main._pc_writer_slot() for _ in range(4)]
+        for h in held:
+            await h.__anext__()
+        fifth = main._pc_writer_slot()
+        waiting = asyncio.ensure_future(fifth.__anext__())
+        await asyncio.sleep(0.05)
+        assert not waiting.done() and gate._value == 0    # the fifth waits...
+        with pytest.raises(RuntimeError):
+            await held[0].athrow(RuntimeError("the handler raised"))   # ...a request that ends by raising frees its slot...
+        await asyncio.wait_for(waiting, 0.5)                             # ...and the fifth is admitted
+        for h in (*held[1:], fifth):
+            await h.aclose()
+        assert gate._value == 4
+    _run(scenario())
+    assert main._PC_WRITER_SLOTS == 4
+    src = inspect.getsource(main._pc_lease_drain)
+    assert "_pc_drains_waiting" not in src and "pc_wait_busy" not in src   # the counted refusal is gone (r8 M1 -> r9 M1)
+
+
+def test_every_route_that_can_wait_for_the_lines_in_flight_declares_the_gate():
+    """r9 M1: the gated handlers are DERIVED from the app's routes -- every endpoint whose source
+    reaches the wait (`_pc_lease_drain` itself, or `_apply_ban_core` / `_moderation_case_act`,
+    which reach it) -- not listed: each declares `_slot=Depends(_pc_writer_slot)`, and they are
+    exactly the deletion, the ban and the two moderation acts; the unban, which never waits,
+    takes no slot."""
+    reach = ("_pc_lease_drain(", "_apply_ban_core(", "_moderation_case_act(")
+    gated = {}
+    for route in main.app.routes:
+        fn = getattr(route, "endpoint", None)
+        if fn is None or getattr(fn, "__module__", None) != main.__name__:
+            continue
+        if any(k in inspect.getsource(fn) for k in reach):
+            gated[fn.__name__] = inspect.signature(fn).parameters.get("_slot")
+    assert set(gated) == {"delete_player_data", "admin_ban", "admin_moderation_case_act", "internal_moderation_case_act"}, sorted(gated)
+    for name, param in gated.items():
+        assert param is not None and param.default.dependency is main._pc_writer_slot, name
+    assert "_slot" not in inspect.signature(main.admin_unban).parameters

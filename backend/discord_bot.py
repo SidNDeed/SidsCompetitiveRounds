@@ -2,13 +2,30 @@
 Competitive ROUNDS Discord Bot
 Environment: DISCORD_TOKEN, API_BASE_URL, LEADERBOARD_CHANNEL, SERIES_LOG_CHANNEL
 """
-# This process's generation, printed before anything else (the imports below
-# take seconds): the deploy train's witness binds the ready line to the process
-# that printed it -- a boot line after the last ready line in the log tail is a
-# newer process that has not reached ready (r8 M3). Its only job is to be probed.
+import builtins as _gen_builtins
+import os as _gen_os
 import uuid as _gen_uuid
-_BOT_GEN = _gen_uuid.uuid4().hex[:12]
-print("[BOT-BOOT] gen=" + _BOT_GEN, flush=True)
+
+
+def _one_line_print(*args, **kwargs):
+    """Every log line is ONE line (r9 L8): a relayed message or a name that
+    carries CR/LF must not split into lines that could read as the lifecycle
+    markers the deploy train parses. Only the container's shell (the boot
+    line) and on_ready (the ready line) print markers."""
+    _gen_builtins.print(*(str(a).replace("\r", " ").replace("\n", " ") for a in args), **kwargs)
+
+
+print = _one_line_print
+# This process's generation: the deploy train's witness binds the ready line to
+# the process that printed it -- a boot line after the last ready line in the
+# log tail is a newer process that has not reached ready (r8 M3). In the
+# container the shell draws it and prints the boot line BEFORE python starts
+# (Dockerfile.bot), so a stall anywhere in this module still leaves a boot line
+# the train can see (r9 M4); outside the container this process draws and
+# prints its own. Its only job is to be probed.
+_BOT_GEN = _gen_os.environ.get("BOT_GEN") or _gen_uuid.uuid4().hex[:12]
+if not _gen_os.environ.get("BOT_GEN"):
+    print("[BOT-BOOT] gen=" + _BOT_GEN, flush=True)
 import os, asyncio, aiohttp, discord, json, io, threading, re, time
 import random, ssl as ssl_mod
 import urllib.parse
@@ -8676,23 +8693,22 @@ async def cmd_pc_card(ctx, member: discord.Member = None):
     # rides under the same lease. No lease at all (a writer holds the subject:
     # a deletion, an admin clear; or the api is away): say so, never post the
     # card as it was read.
-    face, lease = None, (None, None)
-    if body.get("player_ref"):
-        # The preview is drawn from the SAME snapshot the embed was read from
-        # (r7 L1): a daily rotation between the two reads cannot mix ranks. A
-        # body without a usable pin (an older api during a rolling deploy)
-        # posts nothing -- never one snapshot's text with another's face (r8
-        # L5); checked before the lease, so none is taken for nothing.
-        snap_id = body.get("snapshot_id")
-        if isinstance(snap_id, bool) or not isinstance(snap_id, int) or snap_id < 1:
-            await ctx.send("❌ That card isn't available right now — try again in a moment."); return
-        lease = await _pc_lease(body["player_ref"])
-        if not lease[0]:
-            await ctx.send("❌ That card isn't available right now — try again in a moment."); return
-        st, face = await _pc_api_bytes(f"/internal/pc/face/preview/{body['player_ref']}/{_pc_locale_of(ctx)}", params={"snapshot_id": snap_id})
-        if st != 200:
-            face = None
-    if not await _pc_send_face(ctx.send, embed=embed, face=face, lease=lease, require_lease=bool(lease[0])):
+    # There is no text-only card: a body without a usable subject reference
+    # posts nothing (r9 L5). The preview is drawn from the SAME snapshot the
+    # embed was read from (r7 L1): a body without a usable pin (an older api
+    # during a rolling deploy) posts nothing either -- never one snapshot's
+    # text with another's face (r8 L5). Both checked before the lease, so
+    # none is taken for nothing.
+    ref, snap_id = body.get("player_ref"), body.get("snapshot_id")
+    if not isinstance(ref, str) or not ref or isinstance(snap_id, bool) or not isinstance(snap_id, int) or snap_id < 1:
+        await ctx.send("❌ That card isn't available right now — try again in a moment."); return
+    lease = await _pc_lease(ref)
+    if not lease[0]:
+        await ctx.send("❌ That card isn't available right now — try again in a moment."); return
+    st, face = await _pc_api_bytes(f"/internal/pc/face/preview/{ref}/{_pc_locale_of(ctx)}", params={"snapshot_id": snap_id})
+    if st != 200:
+        face = None
+    if not await _pc_send_face(ctx.send, embed=embed, face=face, lease=lease, require_lease=True):
         await ctx.send("❌ That card isn't available right now — try again in a moment.")
 
 

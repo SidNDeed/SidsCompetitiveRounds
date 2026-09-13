@@ -11,4 +11,8 @@ ENV MPLCONFIGDIR=/tmp
 # deleted, not bypassed (#310). Do not reintroduce it.
 RUN pip install --no-cache-dir discord.py aiohttp matplotlib
 COPY discord_bot.py .
-CMD ["python", "discord_bot.py"]
+# The boot line comes from this shell, before python starts (r9 M4): the deploy
+# train binds the bot's ready line to the generation the boot line names, and a
+# replacement that stalls anywhere in python still leaves its boot line in the
+# log. exec: python stays PID 1 (signals, one process).
+CMD G=$(tr -d '-' < /proc/sys/kernel/random/uuid | cut -c1-12); echo "[BOT-BOOT] gen=$G"; BOT_GEN=$G exec python discord_bot.py

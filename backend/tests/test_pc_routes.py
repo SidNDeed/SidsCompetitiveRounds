@@ -430,6 +430,43 @@ def test_a_repeat_ban_is_answered_before_the_velocity_gate_refuses_it():
     assert db.count("INSERT INTO pending_channel_posts") == 1
 
 
+class _UnbanDb(_GateDb):
+    """admin_unban reads the UPDATE's rowcount and adds an ORM audit row; the shared harness has
+    neither."""
+
+    def __init__(self, script):
+        super().__init__(script)
+        self.added = []
+
+    async def execute(self, statement, params=None):
+        res = await super().execute(statement, params)
+        res.rowcount = 1
+        return res
+
+    def add(self, obj):
+        self.added.append(obj)
+
+
+def test_the_unban_takes_the_identity_lattice_before_it_writes(monkeypatch):
+    """r9 M2 (2026-09-13), executed: the unban takes the identity locks of both parties in the
+    canonical order -- the ban's lattice, the ban's order -- BEFORE its UPDATE, so a ban's repeat
+    check and its insert (one serialised step under the target's identity) cannot be split by an
+    unban landing between them and turn the repeat into a fresh, ungated insert; the admin's own
+    identity is optional there, as on the ban."""
+    async def _admin_ok(*a, **k):
+        return None
+    monkeypatch.setattr(main, "_require_admin", _admin_ok)
+    db = _UnbanDb({})
+    res = _run(main.admin_unban(main._AdminUnbanReq(admin_steam_id="9", target_steam_id="1", hmac_signature="x"), db))
+    assert res == {"status": "unbanned", "steam_id": "1", "rows": 1}
+    assert [p["sid"] for sql, p in db.log if "pg_advisory_xact_lock(hashtext(:sid))" in sql] == ["1", "9"]
+    assert _idx(db, "pg_advisory_xact_lock(hashtext(:sid))") < _idx(db, "UPDATE player_bans SET unbanned_at")
+    assert db.committed == 1 and len(db.added) == 1 and db.added[0].action == "unban"
+    src = inspect.getsource(main.admin_unban)
+    assert src.index("_require_admin(") < src.index("_mail_lock_identities(") < src.index("UPDATE player_bans")
+    assert "optional=(req.admin_steam_id, req.target_steam_id)" in src
+
+
 def test_the_ack_releases_leases_by_event_and_by_id():
     src = _src(main.internal_pc_events_ack)
     assert "event_ids && CAST(:ids AS bigint[])" in src and "leases" in src

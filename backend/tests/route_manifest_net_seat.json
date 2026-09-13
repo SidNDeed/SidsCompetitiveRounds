@@ -88,7 +88,7 @@
           ],
           "main",
           "admin_ban",
-          "2c8c0844b3a01e55bca4621830ec3fbaf7959495"
+          "4aea20ecaa633f11d8000acf8b54597c6258d0b9"
         ],
         [
           "/api/v1/admin/banned-users",
@@ -358,7 +358,7 @@
           ],
           "main",
           "admin_unban",
-          "edd573a1884be4d482e79d13e78e185498d5cdb7"
+          "7e202ab3146a60366688cc196a6fe490a4fe3b33"
         ],
         [
           "/api/v1/bug-reports",
@@ -916,7 +916,7 @@
           ],
           "main",
           "delete_player_data",
-          "137548f5d613b09866e78da579e984a4a40661fa"
+          "567160315702b2bae6dfb20c6929dc8c212be14b"
         ],
         [
           "/api/v1/players/{steam_id}/ffa-history",
@@ -2846,7 +2846,7 @@
           ],
           "main",
           "admin_moderation_case_act",
-          "d5e45a8ce546e6bfef5135e4fc2d0d8ab15350ee"
+          "21e8f6340b712d88e86cd27d0a9f953ffda5e829"
         ],
         [
           "/api/v1/admin/moderation-cases/{case_id}/notified",
@@ -2873,7 +2873,7 @@
           ],
           "main",
           "internal_moderation_case_act",
-          "f8de16cc36c7b35eb198a06b267078c69c9e7a75"
+          "06eed5c215d5c41958b24350c9979f9ce7882f1b"
         ],
         [
           "/api/v1/internal/moderation-cases/{case_id}/notified",

@@ -240,12 +240,12 @@ def test_collection_and_card_lease_the_subject_and_release_on_the_text_only_path
     assert coll.index("_pc_api(\"GET\", \"/internal/pc/collection\"") < coll.index("_pc_best_face(body, locale)")
     assert coll.index("await _pc_lease_release(lease[0])") < coll.index("await _pc_send_face(ctx.send")
     card = _fn(BOT_SRC, "cmd_pc_card")
-    assert '_pc_lease(body["player_ref"])' in card and "_pc_locale_of(ctx)" in card
+    assert "_pc_lease(ref)" in card and "_pc_locale_of(ctx)" in card
     # /card has NO text-only path since r6 (H1/M2): no lease, no card -- a
     # refusal before the send, and the send itself requires the lease
     assert card.index("if not lease[0]:") < card.index("await _pc_send_face(ctx.send")
     # three refusals say the same thing: no usable snapshot pin (r8 L5), no lease, the send failed
-    assert "require_lease=bool(lease[0])" in card and card.count("That card isn't available right now") == 3
+    assert "require_lease=True" in card and card.count("That card isn't available right now") == 3
     assert "await _pc_lease_release(lease[0])" not in card
 
 
@@ -351,17 +351,40 @@ def test_the_card_command_draws_its_preview_from_the_embeds_snapshot_and_posts_o
     assert calls["bytes"] == [] and calls["sent"] == [] and len(calls["said"]) == 1 and "isn't available" in calls["said"][0]
 
 
-def test_the_card_command_posts_nothing_without_a_usable_snapshot_pin():
-    """r8 L5 (2026-09-13), executed: a body without `snapshot_id` (an older api during a rolling deploy),
-    or with one that is not a positive integer, posts nothing and says so -- never one snapshot's text
-    with another's face -- and takes no lease for it; a pinned body posts as before."""
+def test_the_card_command_posts_nothing_without_a_usable_snapshot_pin_or_subject_reference():
+    """r8 L5 + r9 L5 (2026-09-13), executed: a body without `snapshot_id` (an older api during a rolling
+    deploy), or with one that is not a positive integer, posts nothing and says so -- never one
+    snapshot's text with another's face; a body without a usable `player_ref` (None, empty, not a
+    string, absent) posts nothing either: there is no text-only card; neither takes a lease for it;
+    a pinned body with its reference posts as before."""
     base = {"player_ref": "11111111-1111-4111-8111-111111111111", "subject_name": "Ace", "rarity": "rare",
             "pool_rank": 3, "rating": 1500, "peak_rating": 1600, "board_rank": 7,
             "in_circulation": {"prints": 2, "holders": 2, "foil": 0, "signed": 0}}
-    for pin in ({}, {"snapshot_id": None}, {"snapshot_id": "41"}, {"snapshot_id": 0}, {"snapshot_id": True}):
-        calls = _run_card(_card_ns(lease=("L1", time.monotonic() + 30, False), preview_status=200, body=dict(base, **pin)))
-        assert calls["lease"] == [] and calls["bytes"] == [] and calls["sent"] == [], pin
-        assert len(calls["said"]) == 1 and "isn't available" in calls["said"][0], pin
+    refused = [{}, {"snapshot_id": None}, {"snapshot_id": "41"}, {"snapshot_id": 0}, {"snapshot_id": True},
+               {"snapshot_id": 41, "player_ref": None}, {"snapshot_id": 41, "player_ref": ""}, {"snapshot_id": 41, "player_ref": 7}]
+    no_ref = dict(base, snapshot_id=41)
+    del no_ref["player_ref"]
+    for body in [dict(base, **over) for over in refused] + [no_ref]:
+        calls = _run_card(_card_ns(lease=("L1", time.monotonic() + 30, False), preview_status=200, body=body))
+        assert calls["lease"] == [] and calls["bytes"] == [] and calls["sent"] == [], body
+        assert len(calls["said"]) == 1 and "isn't available" in calls["said"][0], body
     calls = _run_card(_card_ns(lease=("L1", time.monotonic() + 30, False), preview_status=200, body=dict(base, snapshot_id=41)))
     assert calls["lease"] == ["11111111-1111-4111-8111-111111111111"] and calls["sent"] == [(True, b"png", "L1", True)]
     assert calls["bytes"] == [("/internal/pc/face/preview/11111111-1111-4111-8111-111111111111/en", {"snapshot_id": 41})]
+
+
+def test_every_line_the_bot_prints_is_one_line():
+    """r9 L8 (2026-09-13), executed: the bot's print flattens CR and LF out of every argument, so a
+    relayed message or a display name carrying line breaks prints as ONE log line -- no text a user
+    typed can occupy a line of its own and read as a lifecycle marker to the deploy train, whose
+    markers are whole lines; installed before the imports, ahead of every other print, and the only
+    marker prints are the fallback boot line and on_ready's."""
+    m = re.search(r"^def _one_line_print\(.*?\n(?=\n)", BOT_SRC, re.S | re.M)
+    assert m, "the flattener"
+    out = []
+    ns = {"_gen_builtins": SimpleNamespace(print=lambda *a, **k: out.append((a, k)))}
+    exec(compile(m.group(0), "<discord_bot>", "exec"), ns)
+    ns["_one_line_print"]("[CHAT] Discord msg from x: hi\n[BOT-BOOT] gen=deadbeefcafe\r\nmore", 7, flush=True)
+    assert out == [(("[CHAT] Discord msg from x: hi [BOT-BOOT] gen=deadbeefcafe  more", "7"), {"flush": True})]
+    assert BOT_SRC.index("print = _one_line_print") < BOT_SRC.index("import os, asyncio, aiohttp, discord")
+    assert BOT_SRC.count('print("[BOT-BOOT]') == 1 and BOT_SRC.count('print("[BOT-READY]') == 1

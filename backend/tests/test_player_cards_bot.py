@@ -104,7 +104,7 @@ def test_every_line_that_names_people_is_sent_under_a_live_lease():
     assert "withdrawn before the send (no live lease)" in ev
     assert ev.index("withdrawn before the send") < ev.index("leases.append(lease[0])") < ev.index("_pc_events_sent[i] = True")
     card = _fn(BOT_SRC, "cmd_pc_card")
-    assert "require_lease=bool(lease[0])" in card and "if not lease[0]:" in card
+    assert "require_lease=True" in card and "if not lease[0]:" in card
     # the channel diagnostic tells the cases apart (r6 L11)
     assert "except discord.NotFound:" in ev and "except discord.Forbidden:" in ev and 'f"unavailable ({type(ex).__name__})"' in ev
     # the deploy train's witness (r6 M6): a line whose only job is to be probed -- stamped, so the train can
@@ -115,10 +115,18 @@ def test_every_line_that_names_people_is_sent_under_a_live_lease():
     assert marker in ready
     assert ready.rstrip().splitlines()[-1].strip() == marker
     assert ready.rindex(".start()") < ready.index(marker) and ready.rindex("create_task(") < ready.index(marker)
-    # the process generation (r8 M3): drawn and printed before the imports, first thing the process does,
-    # and repeated on the ready line, so a boot line after the last ready line means a newer process
-    boot = 'print("[BOT-BOOT] gen=" + _BOT_GEN, flush=True)'
-    assert BOT_SRC.index("_BOT_GEN = _gen_uuid.uuid4().hex[:12]") < BOT_SRC.index(boot) < BOT_SRC.index("import os, asyncio, aiohttp, discord")
+    # the process generation (r8 M3, r9 M4): the container's shell draws it and prints the boot line
+    # BEFORE python starts (Dockerfile.bot), handing it over as BOT_GEN -- a replacement stalled anywhere
+    # in this module has still left its boot line; the module takes it, drawing and printing its own
+    # only outside the container, before the imports; repeated on the ready line, so a boot line after
+    # the last ready line means a newer process
+    gen = '_BOT_GEN = _gen_os.environ.get("BOT_GEN") or _gen_uuid.uuid4().hex[:12]'
+    own = 'if not _gen_os.environ.get("BOT_GEN"):\n    print("[BOT-BOOT] gen=" + _BOT_GEN, flush=True)'
+    assert BOT_SRC.index(gen) < BOT_SRC.index(own) < BOT_SRC.index("import os, asyncio, aiohttp, discord")
+    docker = (Path(__file__).resolve().parents[1] / "Dockerfile.bot").read_text(encoding="utf-8")
+    cmd = [l for l in docker.splitlines() if l.startswith("CMD ")]
+    assert len(cmd) == 1 and "G=$(tr -d '-' < /proc/sys/kernel/random/uuid | cut -c1-12)" in cmd[0]
+    assert cmd[0].index('echo "[BOT-BOOT] gen=$G"') < cmd[0].index("BOT_GEN=$G exec python discord_bot.py")
 
 
 def test_events_are_grouped_by_the_nested_print_id():
