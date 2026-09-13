@@ -283,3 +283,67 @@ def test_the_daily_answer_carries_the_canonical_back_without_a_lease():
 def test_the_locale_is_the_interaction_primary_subtag():
     src = BOT_SRC[BOT_SRC.index("def _pc_locale_of(ctx):"):BOT_SRC.index("async def _pc_api_bytes")]
     assert 'split("-")[0].lower()' in src and 'return primary or "en"' in src
+
+
+def _card_ns(lease, preview_status=404):
+    calls = {"api": [], "bytes": [], "sent": [], "said": []}
+
+    async def _api(method, path, params=None, timeout=8.0, payload=None):
+        calls["api"].append((method, path, params))
+        return 200, {"player_ref": "11111111-1111-4111-8111-111111111111", "subject_name": "Ace", "rarity": "rare",
+                     "pool_rank": 3, "rating": 1500, "peak_rating": 1600, "board_rank": 7, "snapshot_id": 41,
+                     "in_circulation": {"prints": 2, "holders": 2, "foil": 0, "signed": 0}}
+
+    async def _bytes(path, params=None, timeout=10.0):
+        calls["bytes"].append((path, params))
+        return preview_status, (b"png" if preview_status == 200 else None)
+
+    async def _lease(ref, print_id=None, event_ids=None):
+        return lease
+
+    async def _send(sender, content=None, embed=None, face=None, lease=(None, None), filename="card.png", require_lease=False):
+        calls["sent"].append((embed is not None, face, lease[0], require_lease))
+        return True
+
+    async def _defer(ctx):
+        pass
+
+    class _Embed:
+        def __init__(self, **kw):
+            self.kw, self.fields = kw, []
+
+        def add_field(self, **kw):
+            self.fields.append(kw)
+
+        def set_footer(self, **kw):
+            pass
+
+    ns = _load(["cmd_pc_card"],
+               discord=SimpleNamespace(Member=object, Embed=_Embed, utils=SimpleNamespace(escape_markdown=lambda s: s)),
+               _pc_api=_api, _pc_api_bytes=_bytes, _pc_lease=_lease, _pc_send_face=_send, _maybe_defer=_defer,
+               _pc_detail=lambda body: body if isinstance(body, dict) else {}, _pc_not_linked=lambda ctx, t: "not linked",
+               _pc_name=lambda s: s, _PC_RARITY_EMOJI={}, _PC_RARITY_COLOR={}, get_rank_name=lambda r: "Gold",
+               rank_emoji=lambda n: "", _pc_locale_of=lambda ctx: "en")
+    ns["calls"] = calls
+    return ns
+
+
+def _run_card(ns):
+    async def _say(*a, **k):
+        ns["calls"]["said"].append(a[0] if a else k.get("content"))
+    ctx = SimpleNamespace(author=SimpleNamespace(id=1, display_name="Me"), send=_say)
+    asyncio.run(ns["cmd_pc_card"](ctx, None))
+    return ns["calls"]
+
+
+def test_the_card_command_draws_its_preview_from_the_embeds_snapshot_and_posts_only_under_a_lease():
+    """r7 L1 (2026-09-13), executed: the preview request carries the snapshot id the embed was read
+    from; a preview that 404s still posts the embed under the lease, without a picture; no lease
+    posts nothing and says so."""
+    calls = _run_card(_card_ns(lease=("L1", time.monotonic() + 30, False)))
+    assert calls["bytes"] == [("/internal/pc/face/preview/11111111-1111-4111-8111-111111111111/en", {"snapshot_id": 41})]
+    assert calls["sent"] == [(True, None, "L1", True)] and calls["said"] == []
+    calls = _run_card(_card_ns(lease=("L2", time.monotonic() + 30, False), preview_status=200))
+    assert calls["sent"] == [(True, b"png", "L2", True)]
+    calls = _run_card(_card_ns(lease=(None, None, True)))
+    assert calls["bytes"] == [] and calls["sent"] == [] and len(calls["said"]) == 1 and "isn't available" in calls["said"][0]

@@ -430,5 +430,6 @@ def test_the_extracted_source_registry_matches_the_client_sources_byte_for_byte(
     keys = (root / "plugin" / "I18nSourceKeys.g.cs").read_text(encoding="utf-8")
     entries = sorted(found.keys())
     assert keys.count('\n            "') == len(entries)
-    for s in entries[:50] + entries[-50:]:
+    assert len(set(entries)) == len(entries)
+    for s in entries:   # every one (r7: sampling the ends let a middle substitution through)
         assert '"' + ex.cs_escape(s) + '",' in keys

@@ -738,6 +738,9 @@ class FakeDb:
         # send already acquired cannot post their picture after the ban
         if "DELETE FROM pc_delivery_leases WHERE subject_id IN" in sql:
             return _Res()
+        # ...and first WAITS for any Discord line in flight naming the player (r7 H2): none here
+        if "MAX(l.until) - clock_timestamp()" in sql:
+            return _Res()
         raise AssertionError(f"unexpected statement: {sql[:120]}")
 
 

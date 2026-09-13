@@ -107,8 +107,14 @@ def test_every_line_that_names_people_is_sent_under_a_live_lease():
     assert "require_lease=bool(lease[0])" in card and "if not lease[0]:" in card
     # the channel diagnostic tells the cases apart (r6 L11)
     assert "except discord.NotFound:" in ev and "except discord.Forbidden:" in ev and 'f"unavailable ({type(ex).__name__})"' in ev
-    # the deploy train's witness (r6 M6): a line whose only job is to be probed
-    assert 'print("[BOT-READY] " + str(bot.user)' in _fn(BOT_SRC, "on_ready")
+    # the deploy train's witness (r6 M6): a line whose only job is to be probed -- stamped, so the train can
+    # tell this incarnation's line from one an earlier process left in the log tail (r7 M2), and the LAST
+    # statement of on_ready: after every loop start and every task
+    ready = _fn(BOT_SRC, "on_ready")
+    marker = 'print("[BOT-READY] " + str(bot.user) + " -- loops started at " + datetime.now(timezone.utc).isoformat(timespec="seconds"))'
+    assert marker in ready
+    assert ready.rstrip().splitlines()[-1].strip() == marker
+    assert ready.rindex(".start()") < ready.index(marker) and ready.rindex("create_task(") < ready.index(marker)
 
 
 def test_events_are_grouped_by_the_nested_print_id():

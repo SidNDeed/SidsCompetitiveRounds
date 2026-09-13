@@ -657,7 +657,12 @@ def test_the_lease_recheck_authorises_the_whole_line_for_both_parties():
     assert 'row["subject_deleted"] or row["subject_banned"]' in src
     assert 'not row["print_deliverable"] or not row["events_ok"]' in src
     ok = main._PC_LEASE_EVENTS_OK
-    assert "e.id = ANY(l.event_ids) AND NOT " + main._PC_EVENT_DELIVERABLE_SQL + ") AS events_ok" in ok
+    # per named id, fail-closed (r7 H1): a named event that no longer exists withdraws the lease;
+    # NULL or empty event lists (a /card lease) unnest to nothing and stay valid
+    assert "FROM unnest(l.event_ids) AS named(id)" in ok
+    assert (ok.index("NOT EXISTS (") < ok.index("FROM unnest(l.event_ids)") < ok.index("WHERE NOT EXISTS (")
+            < ok.index("WHERE e.id = named.id AND " + main._PC_EVENT_DELIVERABLE_SQL + ")) AS events_ok"))
+    assert "e.id = ANY(l.event_ids)" not in ok   # the vacuous anti-join is gone
     assert "JOIN players pl ON pl.id = e.player_id" in ok and "JOIN players su ON su.id = e.subject_player_id" in ok
     assert "AS subject_banned" in main._PC_PORTRAIT_RESOLVE_COLS
 
@@ -1070,3 +1075,48 @@ def test_the_train_code_state_tells_present_absent_and_unknown_apart():
         assert (ok, present, absent) == expect and codes == [new], new
     answers.update({"/control": "000", "/new": "200"})
     assert ns["code_state"]("h")[0] is False
+
+
+def test_the_acquire_holds_every_party_and_demands_every_named_event():
+    """r7 H1/H2 (2026-09-13): a lease naming events names their pullers and subjects too. Each of
+    them is try-locked SHARED for the acquisition (the exclusive holders -- a deletion, a ban, an
+    admin clear -- refuse it: 409, transient) and every named id must resolve now (404 event_gone,
+    not transient), as the re-check demands again at the send."""
+    src = inspect.getsource(main.internal_pc_lease)
+    assert 'raise HTTPException(status_code=404, detail={"error": "event_gone"})' in src
+    assert 'if {int(r["id"]) for r in named} != set(event_ids):' in src
+    assert 'SELECT pg_try_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))' in src
+    assert src.count('detail={"error": "subject_busy", "retry_after": 2}') == 2   # the subject's lock and a party's
+    assert "if party == steam:" in src   # the subject already holds its own, exclusive
+    assert (src.index('"print_not_of_subject"') < src.index("if event_ids:") < src.index('"event_gone"')
+            < src.index("pg_try_advisory_xact_lock_shared") < src.index("INSERT INTO pc_delivery_leases"))
+    assert "JOIN players pl ON pl.id = e.player_id" in src and "JOIN players su ON su.id = e.subject_player_id" in src
+
+
+def test_the_writers_wait_for_the_lines_in_flight_naming_the_player(monkeypatch):
+    """r7 H2 (2026-09-13): the deletion and the ban wait, under the identity lock, until no live
+    lease names the player -- as its subject or as a party of a named event -- before they commit;
+    the bot releases a lease right after Discord accepted the line, so the commit lands after the
+    line is on Discord. Executed: a lease with 3 s left, then none -> two reads, one short sleep."""
+    slept = []
+
+    async def _sleep(secs):
+        slept.append(secs)
+    monkeypatch.setattr(main.asyncio, "sleep", _sleep)
+    db = Scripted({"MAX(l.until)": [3, None]})
+    waited = _run(main._pc_lease_drain(db, str(PID)))
+    assert isinstance(waited, float) and waited >= 0.0
+    assert db.count("MAX(l.until)") == 2 and slept == [0.25]
+    sql = [q for q, _ in db.log if "MAX(l.until)" in q][0]
+    # the naming predicate: the subject, or either party of a named event; the clock that advances
+    assert "l.subject_id = CAST(:pid AS uuid)" in sql
+    assert "e.id = ANY(l.event_ids)" in sql and "e.player_id = CAST(:pid AS uuid) OR e.subject_player_id = CAST(:pid AS uuid)" in sql
+    assert sql.count("clock_timestamp()") == 2 and "now()" not in sql
+    # no lease at all: one read, no sleep
+    slept.clear()
+    db2 = Scripted({"MAX(l.until)": [None]})
+    _run(main._pc_lease_drain(db2, str(PID)))
+    assert db2.count("MAX(l.until)") == 1 and slept == []
+    # bounded by the lease's life: a lease the bot never releases ends the wait by expiry
+    src = inspect.getsource(main._pc_lease_drain)
+    assert "limit = float(_pcp.LEASE_SECONDS) + 5.0" in src and "time.monotonic() - started > limit" in src

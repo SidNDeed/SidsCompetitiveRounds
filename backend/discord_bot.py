@@ -417,7 +417,10 @@ async def on_ready():
     # One-shot mirror of the last few #scr-releases posts (v1.33 Home tab).
     asyncio.create_task(backfill_release_posts())
     print(f"Bot ready: {bot.user} (guilds: {len(bot.guilds)}, chat={CHAT_CHANNEL_ID}, admin={ADMIN_CHANNEL_ID})")
-    print("[BOT-READY] " + str(bot.user) + " -- loops started")   # the deploy train's witness (r6 M6): its only job is to be probed
+    # The deploy train's witness (r6 M6): its only job is to be probed. The
+    # stamp binds the line to THIS process (r7 M2): a retained log tail can
+    # carry an earlier incarnation's line after a crash-restart.
+    print("[BOT-READY] " + str(bot.user) + " -- loops started at " + datetime.now(timezone.utc).isoformat(timespec="seconds"))
 
 
 async def backfill_discord_usernames():
@@ -8671,7 +8674,10 @@ async def cmd_pc_card(ctx, member: discord.Member = None):
         lease = await _pc_lease(body["player_ref"])
         if not lease[0]:
             await ctx.send("❌ That card isn't available right now — try again in a moment."); return
-        st, face = await _pc_api_bytes(f"/internal/pc/face/preview/{body['player_ref']}/{_pc_locale_of(ctx)}")
+        # The preview is drawn from the SAME snapshot the embed was read from
+        # (r7 L1): a daily rotation between the two reads cannot mix ranks.
+        snap = {"snapshot_id": int(body["snapshot_id"])} if body.get("snapshot_id") is not None else None
+        st, face = await _pc_api_bytes(f"/internal/pc/face/preview/{body['player_ref']}/{_pc_locale_of(ctx)}", params=snap)
         if st != 200:
             face = None
     if not await _pc_send_face(ctx.send, embed=embed, face=face, lease=lease, require_lease=bool(lease[0])):

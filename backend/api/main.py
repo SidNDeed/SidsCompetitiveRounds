@@ -25315,7 +25315,7 @@ async def internal_pc_card(
     subject = await _pc_player_by_discord(db, discord_id)
     row = (await db.execute(text("""
         SELECT m.pool_rank, m.rarity, m.rating, m.peak_rating, m.board_rank, m.series_wins, m.series_losses,
-               m.top_card, m.title, s.taken_at
+               m.top_card, m.title, s.taken_at, s.id AS snapshot_id
           FROM pc_pool_members m JOIN pc_pool_snapshots s ON s.id = m.snapshot_id
           JOIN players p ON p.id = m.player_id
          WHERE m.player_id = CAST(:pid AS uuid) AND m.snapshot_id = (SELECT MAX(id) FROM pc_pool_snapshots)
@@ -25341,6 +25341,7 @@ async def internal_pc_card(
         "top_card": row["top_card"], "title": row["title"],
         "rank_name": _rank_name_for(_pc_board_rating(rating)) if rating is not None else None,
         "snapshot_at": _pc_iso(row["taken_at"]),
+        "snapshot_id": int(row["snapshot_id"]),   # the preview is drawn from this very snapshot (r7 L1)
         "in_circulation": {"prints": int(circ["prints"] or 0), "holders": int(circ["holders"] or 0),
                            "foil": int(circ["foil"] or 0), "signed": int(circ["signed"] or 0)},
     }
@@ -26259,15 +26260,20 @@ _PC_LEASE_PRINT_OK = """
                      WHERE pr.id = l.print_id AND pr.discarded_at IS NULL
                        AND c.subject_player_id = l.subject_id)) AS print_deliverable
 """
-# Every event the lease names is still deliverable for BOTH parties (the
-# puller too, whom the subject's row never covered): the handout's own word,
-# re-read right before the bot's send (r6 H1/M2). No events named: true.
+# Every event the lease names still RESOLVES to a row that is deliverable for
+# BOTH parties (the puller too, whom the subject's row never covered): the
+# handout's own word, re-read right before the bot's send (r6 H1/M2). Said
+# per named id, so a named event that is gone -- its puller's deletion
+# removed it -- withdraws the lease instead of leaving nothing to refuse
+# (r7 H1). No events named (NULL or empty: a /card lease): true.
 _PC_LEASE_EVENTS_OK = """
                NOT EXISTS (
-                    SELECT 1 FROM pc_events e
-                      JOIN players pl ON pl.id = e.player_id
-                      JOIN players su ON su.id = e.subject_player_id
-                     WHERE e.id = ANY(l.event_ids) AND NOT """ + _PC_EVENT_DELIVERABLE_SQL + """) AS events_ok
+                    SELECT 1 FROM unnest(l.event_ids) AS named(id)
+                     WHERE NOT EXISTS (
+                        SELECT 1 FROM pc_events e
+                          JOIN players pl ON pl.id = e.player_id
+                          JOIN players su ON su.id = e.subject_player_id
+                         WHERE e.id = named.id AND """ + _PC_EVENT_DELIVERABLE_SQL + """)) AS events_ok
 """
 
 
@@ -26281,6 +26287,38 @@ async def _pc_lease_wait(db: AsyncSession, pid: str):
     if left is None:
         return None
     return max(1, int(left))
+
+
+# The live leases naming a player: as their subject, or as a party (puller or
+# subject) of an event they name. clock_timestamp(), not now(): the writer
+# polls this inside ONE transaction, in which now() never advances.
+_PC_LEASE_NAMING_SQL = """
+        SELECT CEIL(EXTRACT(EPOCH FROM (MAX(l.until) - clock_timestamp()))) FROM pc_delivery_leases l
+         WHERE l.until > clock_timestamp()
+           AND (l.subject_id = CAST(:pid AS uuid) OR EXISTS (
+                SELECT 1 FROM pc_events e WHERE e.id = ANY(l.event_ids)
+                   AND (e.player_id = CAST(:pid AS uuid) OR e.subject_player_id = CAST(:pid AS uuid))))
+"""
+
+
+async def _pc_lease_drain(db: AsyncSession, pid: str) -> float:
+    """Wait, under the player's identity lock, until no live delivery lease
+    names them -- as its subject or as a party of an event it names -- and
+    return the seconds spent. The bot releases a lease right after Discord
+    has accepted (or refused) the line it authorised, so a writer that makes
+    the player undeliverable -- a deletion, a ban -- commits AFTER any line in
+    flight is on Discord, never between the bot's re-check and the acceptance
+    (r7 H2). Held meanwhile: the identity lock, which refuses every new lease
+    naming the player (the acquire try-locks each party). Bounded by the
+    lease's own life: past `until` a lease authorises nothing, so the wait
+    ends there even for a lease the bot never released."""
+    started = time.monotonic()
+    limit = float(_pcp.LEASE_SECONDS) + 5.0
+    while True:
+        left = (await db.execute(text(_PC_LEASE_NAMING_SQL), {"pid": pid})).scalar_one_or_none()
+        if left is None or time.monotonic() - started > limit:
+            return time.monotonic() - started
+        await asyncio.sleep(min(0.25, max(0.05, float(left))))
 
 
 async def _pc_lock_portrait_blobs(db: AsyncSession, pid: str, *extra):
@@ -26617,6 +26655,31 @@ async def internal_pc_lease(
         if depicts is None:
             await db.rollback()
             raise HTTPException(status_code=404, detail={"error": "print_not_of_subject"})
+    if event_ids:
+        # The lease names people beyond its subject: the puller and the
+        # subject of every event. Every named id must resolve now, as the
+        # re-check will demand again (r7 H1: 404, not transient -- the next
+        # handout no longer offers a resolved event), and each party is
+        # try-locked SHARED for this acquisition: the exclusive holders (a
+        # deletion, a ban, an admin clear) refuse it -- 409, transient -- so a
+        # writer that waits for the lines in flight sees no new one (r7 H2).
+        named = (await db.execute(text("""
+            SELECT e.id, pl.steam_id AS puller, su.steam_id AS subject
+              FROM pc_events e JOIN players pl ON pl.id = e.player_id
+              JOIN players su ON su.id = e.subject_player_id
+             WHERE e.id = ANY(CAST(:ids AS bigint[]))
+        """), {"ids": event_ids})).mappings().all()
+        if {int(r["id"]) for r in named} != set(event_ids):
+            await db.rollback()
+            raise HTTPException(status_code=404, detail={"error": "event_gone"})
+        for party in sorted({r["puller"] for r in named} | {r["subject"] for r in named}):
+            if party == steam:
+                continue
+            held = (await db.execute(text("SELECT pg_try_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))"),
+                                     {"sid": party})).scalar_one()
+            if not held:
+                await db.rollback()
+                raise HTTPException(status_code=409, detail={"error": "subject_busy", "retry_after": 2})
     kind, phash = _pcp.portrait_for(sub)
     lease = (await db.execute(text("""
         INSERT INTO pc_delivery_leases (subject_id, print_id, event_ids, portrait_hash, until)
@@ -26738,11 +26801,15 @@ async def internal_pc_face_preview(
     player_ref: str, locale: str,
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
     db: AsyncSession = Depends(get_db),
+    snapshot_id: int | None = Query(None, ge=1),
 ):
     """The /card preview: the subject as the pool sees them now, drawn as an
     unminted face. Re-applies the /card gate itself (opt-out, pool
     membership, live ban → 404); cached under a preview_rev over every drawn
-    field for at most 60 s; never immutable."""
+    field for at most 60 s; never immutable. `snapshot_id` pins the read to
+    the snapshot the caller's /card body came from (r7 L1): a daily rotation
+    between the two reads cannot pair an old-rank embed with a new-rank
+    picture (404 when that snapshot's row is gone)."""
     _require_internal_key(x_internal_key)
     _pc_require_renderer()
     if not _pcp.print_id_ok(player_ref):
@@ -26757,8 +26824,9 @@ async def internal_pc_face_preview(
     member = (await db.execute(text("""
         SELECT m.pool_rank, m.rarity, m.rating, m.board_rank, m.series_wins, m.series_losses, m.top_card, m.title
           FROM pc_pool_members m
-         WHERE m.player_id = CAST(:pid AS uuid) AND m.snapshot_id = (SELECT MAX(id) FROM pc_pool_snapshots)
-    """), {"pid": player_ref})).mappings().first()
+         WHERE m.player_id = CAST(:pid AS uuid)
+           AND m.snapshot_id = COALESCE(CAST(:snap AS bigint), (SELECT MAX(id) FROM pc_pool_snapshots))
+    """), {"pid": player_ref, "snap": snapshot_id})).mappings().first()
     if member is None:
         raise HTTPException(status_code=404, detail={"error": "not_in_pool"})
     ctx = await _pc_face_ctx(db, loc)
@@ -32844,10 +32912,17 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # deleted_at after it is granted, so no store in flight recreates the row
     # once this transaction commits.
     await db.execute(text("DELETE FROM player_region_pings WHERE player_id = :pid"), {"pid": pid})
-    # Player Cards (migration 308): the player's OWN events (as puller or
+    # Player Cards (migration 308): first, every Discord line in flight that
+    # names this player -- as a card's subject or as a party of a pull -- is
+    # on Discord before this transaction commits: the writer waits for the
+    # bot to release its leases (r7 H2), under the identity lock, which
+    # refuses new ones meanwhile. Then the player's OWN events (as puller or
     # subject), prints, daily claims, packs (open attempts cascade) and pool
     # memberships, shards zeroed — and then, under the snapshot lock, every
     # print of the player's OWN CARD held by anyone, with the card rows.
+    waited = await _pc_lease_drain(db, str(pid))
+    if waited >= 1.0:
+        print(f"[PC-LEASE] deletion waited {waited:.1f}s for the lines in flight naming the player")
     await db.execute(text("DELETE FROM pc_events WHERE player_id = :pid OR subject_player_id = :pid"), {"pid": pid})
     await db.execute(text("DELETE FROM pc_prints WHERE owner_player_id = :pid"), {"pid": pid})
     await db.execute(text("DELETE FROM pc_daily_claims WHERE player_id = :pid"), {"pid": pid})
@@ -32872,8 +32947,9 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
         "DELETE FROM pc_prints WHERE card_id IN (SELECT id FROM pc_cards WHERE subject_player_id = :pid)"), {"pid": pid})
     await db.execute(text("DELETE FROM pc_cards WHERE subject_player_id = :pid"), {"pid": pid})
     await db.execute(text("UPDATE players SET pc_shards = 0 WHERE id = :pid"), {"pid": pid})
-    # Portraits (migrations 310/311): every delivery lease of this subject
-    # dies (a bot send in flight re-validates and drops the bytes), the
+    # Portraits (migrations 310/311): the delivery leases of this subject go
+    # (a cleanup: the wait above saw every live one released or expired, and
+    # the identity lock refused new ones -- r7 H2), the
     # writer's nonces go, then BOTH portrait units are cleared under their
     # per-hash P locks (I → P → R), the Steam attempt id advances, and every
     # blob nothing references any more is marked for the janitor, which
@@ -35344,6 +35420,15 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
         # The candidate scans additionally exclude active bans (round-16) and
         # the issuance branches re-check all members (round-17) — those stay
         # as defense-in-depth around this serialization.
+    # Player Cards, first (r7 H2): a Discord line in flight naming this
+    # player -- as a card's subject or as a party of a pull -- is on Discord
+    # before the ban commits; the writer waits for the bot to release its
+    # leases, under the identity lock (new ones are refused meanwhile).
+    # Bounded by the lease's life (60 s); typically nothing is in flight.
+    if _bpid is not None:
+        waited = await _pc_lease_drain(db, str(_bpid))
+        if waited >= 1.0:
+            print(f"[PC-LEASE] ban waited {waited:.1f}s for the lines in flight naming the player")
     # Player Cards (design v4 §11 G5, c3 J, c5 F): the binder goes private
     # and the player's pulls stop being announced (the events drain re-checks
     # pc_announce); the pool excludes active bans by its own predicate. Runs
@@ -35355,11 +35440,11 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
         "UPDATE players SET pc_collection_public = false, pc_announce = false, "
         "pc_settings_revision = pc_settings_revision + 1 WHERE steam_id = :sid"),
         {"sid": target_steam_id})
-    # A ban must not wait on a Discord send, so it revokes instead: a lease of
-    # this subject is deleted here, and any the DELETE cannot see is revoked
-    # anyway because revalidation re-resolves the picture and a banned subject
-    # resolves to none. The residual is one revalidation-to-send gap, bounded
-    # by the bot's lease reserve.
+    # The subject's leases are deleted as a cleanup: the wait above saw every
+    # live one released (the line is on Discord) or expired (it authorises
+    # nothing past `until`), and the identity lock refused new ones (r7 H2).
+    # What remains is a send whose request was in flight when the bot's
+    # budget ran out at until - reserve and that Discord accepts after until.
     await db.execute(text(
         "DELETE FROM pc_delivery_leases WHERE subject_id IN "
         "(SELECT id FROM players WHERE steam_id = :sid)"), {"sid": target_steam_id})

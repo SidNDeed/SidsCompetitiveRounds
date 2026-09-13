@@ -857,3 +857,34 @@ def test_the_name_budget_follows_the_chips_and_the_tile_shrinks_before_it_cuts()
     assert 0 < flips < 40   # the range crosses the whole/cut boundary, so the parity was exercised on both sides
     # without a chip edge the layout rect still bounds the name (fit_name, the old entry point)
     assert pc_face.fit_name("Ace", "card") == "Ace" and pc_face.fit_name("x" * 60, "card").endswith("...")
+
+
+def test_the_rendered_name_never_reaches_the_chips_on_either_size():
+    """r7 (2026-09-13): the geometry as DRAWN, not as the width helper reports it (which _draw_chip
+    shares): the name's ink -- the pixels that differ between a long name and a one-letter one --
+    ends a gap short of the leftmost chip-fill pixel, measured on the chip's middle row from its
+    right anchor; band chip and foil chip, card and tile, three long names incl. one at the floor."""
+    band_rgb = tuple(int(v) for v in pc_face.LAYOUT["colours"]["bands"]["legendary"])
+    for size, scale in (("card", 1.0), ("tile", 0.5)):
+        short_png = pc_face.render_face(_spec(name="W", foil=True, top_card=False), {}, None, size)
+        short_im = Image.open(io.BytesIO(short_png)).convert("RGBA")
+        for name in ("Wm" * 20, "MMMMMMMMMMMMMMMMMMMMWWWW", "iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii"):
+            long_im = Image.open(io.BytesIO(pc_face.render_face(_spec(name=name, foil=True, top_card=False), {}, None, size))).convert("RGBA")
+            diff = ImageChops.difference(long_im, short_im).convert("L").point(lambda v: 255 if v else 0)
+            ink = diff.getbbox()
+            assert ink is not None, (size, name)
+            name_right = ink[2]
+            right = pc_face._scale_value(696, scale)
+            gap = pc_face._scale_value(pc_face.NAME_CHIP_GAP, scale)
+            px = long_im.load()
+            for label, rgb, y0 in (("band", band_rgb, pc_face._scale_value(38, scale)), ("foil", (255, 255, 255), pc_face._scale_value(88, scale))):
+                y_mid = y0 + pc_face._scale_value(22, scale)   # the pill's widest row: its left end is reached here only
+                assert px[right, y_mid][:3] == rgb, (size, label, px[right, y_mid])   # the chip's right anchor, filled
+                # the first fill pixel to the RIGHT of the name's ink on that row is the pill's left end (the
+                # label's glyphs sit in the middle of the pill, so a run from the right anchor ends at them)
+                x = name_right
+                while x < right and px[x, y_mid][:3] != rgb:
+                    x += 1
+                chip_left = x
+                assert right - chip_left >= pc_face._scale_value(60, scale), (size, label, chip_left)   # a chip, not a stray pixel
+                assert name_right + gap <= chip_left, (size, name, label, name_right, chip_left)

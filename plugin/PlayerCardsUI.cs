@@ -381,13 +381,17 @@ namespace CompetitiveRounds
         /// preview, no upload, and no error either.</param>
         internal static void MaybeTick(bool onTab, bool onSettings)
         {
+            // The Settings edge is tracked on EVERY call (NativeUI.Tick, each
+            // frame), ahead of the two-second throttle (r7 L3): a leave-and-
+            // return inside one throttle window never ran an off-Settings tick,
+            // so the visit check stayed disarmed for the second entry.
+            if (!onSettings) settingsVisited = false;   // leaving Settings re-arms its one check for the next entry (r6 L12)
             if (Time.unscaledTime < tickAt) return;
             tickAt = Time.unscaledTime + 2f;
             var id = LocalId();
             if (id == null) return;
             if (HasIntent()) MaybeRecover(false);
             if (onTab && pendingVisit) { pendingVisit = false; OnTabEntered(); }
-            if (!onSettings) settingsVisited = false;   // leaving Settings re-arms its one check for the next entry (r6 L12)
             if (!onTab && !onSettings) return;
             try { PlayerCardFaces.Tick(); } catch { }
             try { PortraitRender.Tick(); } catch (Exception ex) { Plugin.Log.LogWarning($"[PC] portrait tick threw: {ex.Message}"); }

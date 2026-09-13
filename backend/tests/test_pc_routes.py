@@ -376,6 +376,9 @@ def test_a_ban_deletes_the_subjects_leases_under_the_identity_lock():
     src = _src(main._apply_ban_core)
     assert "DELETE FROM pc_delivery_leases WHERE subject_id IN" in src
     assert src.index("DELETE FROM pc_delivery_leases") < src.index('"status": "already_banned"')
+    # and first it WAITS for the lines in flight naming the player (r7 H2), before the announce write
+    assert src.index("waited = await _pc_lease_drain(db, str(_bpid))") < src.index("pc_announce = false")
+    assert src.index("pg_advisory_xact_lock(hashtext(:sid))") < src.index("_pc_lease_drain(")   # under the identity lock
 
 
 def test_a_discard_deletes_the_prints_leases_after_the_discard_write():
@@ -386,6 +389,10 @@ def test_a_discard_deletes_the_prints_leases_after_the_discard_write():
 def test_account_deletion_sweeps_leases_nonces_and_the_portrait_unit():
     src = _src(main.delete_player_data)
     assert "DELETE FROM pc_delivery_leases WHERE subject_id" in src
+    # first it WAITS for the lines in flight naming the player (r7 H2): before the pc_events DELETE the
+    # naming query joins, under the identity lock
+    assert src.index("waited = await _pc_lease_drain(db, str(pid))") < src.index("DELETE FROM pc_events WHERE player_id = :pid")
+    assert src.index("pg_advisory_xact_lock(hashtext(:sid))") < src.index("_pc_lease_drain(")
     assert "DELETE FROM pc_portrait_nonces WHERE player_id" in src
     assert "_pc_clear_portrait_unit(db, str(pid), lock_days=None)" in src
     # 2026-09-13: the deletion is the one way a card leaves every binder
@@ -767,14 +774,20 @@ def _sub(**over):
     return row
 
 
-def _lease_db(steam="765", got=True, sub=None, depicts=True):
+def _lease_db(steam="765", got=True, sub=None, depicts=True, events=(3, 4), held=True):
+    """`events`: the ids the named-events read answers with (each pulled by "766" from the subject
+    "765"); `held`: the SHARED try-lock on the other party (r7 H2). The shared key is listed before
+    the exclusive one: the scripted answer is the first key the statement contains."""
     lease_id = uuid4()
     return Scripted({
         "SELECT steam_id FROM players": [[{"steam_id": steam}] if steam else []],
+        "pg_try_advisory_xact_lock_shared": [[{"held": held}]],
         "pg_try_advisory_xact_lock": [[{"got": got}]],
         "AS subject_banned": [[sub if sub is not None else _sub()]],
         # the print named must depict the subject named
         "FROM pc_prints pr JOIN pc_cards c": [[{"one": 1}] if depicts else []],
+        # every named event must resolve, and names its two parties (r7 H1/H2)
+        "SELECT e.id, pl.steam_id AS puller": [[{"id": i, "puller": "766", "subject": steam} for i in events]],
         "INSERT INTO pc_delivery_leases": [[{"id": lease_id, "until": NOW + timedelta(seconds=60)}]],
     }), lease_id
 
@@ -804,12 +817,38 @@ def test_lease_acquire_try_locks_the_identity_then_resolves_under_it(monkeypatch
     assert ans == {"lease_id": str(lease_id), "until": (NOW + timedelta(seconds=60)).isoformat(),
                    "portrait_kind": "game", "portrait_hash": "ef" * 32}
     order = [_idx(db, k) for k in ("SELECT steam_id FROM players", "pg_try_advisory_xact_lock", "AS subject_banned",
-                                   "INSERT INTO pc_delivery_leases")]
+                                   "FROM pc_prints pr JOIN pc_cards c", "SELECT e.id, pl.steam_id AS puller",
+                                   "pg_try_advisory_xact_lock_shared", "INSERT INTO pc_delivery_leases")]
     assert order == sorted(order)
     ins = db.log[_idx(db, "INSERT INTO pc_delivery_leases")]
     assert ins[1] == {"sid": str(PID), "print": str(PID), "ids": [3, 4], "h": "ef" * 32, "secs": 60.0}
     assert "make_interval(secs =>" in ins[0] and db.committed == 1
     assert db.log[_idx(db, "pg_try_advisory_xact_lock")][1] == {"sid": "765"}
+    # the named events' OTHER party is try-locked SHARED, once; the subject (already held) is skipped (r7 H2)
+    shared = [(q, p) for q, p in db.log if "pg_try_advisory_xact_lock_shared" in q]
+    assert [p for _, p in shared] == [{"sid": "766"}]
+    assert db.log[_idx(db, "SELECT e.id, pl.steam_id AS puller")][1] == {"ids": [3, 4]}
+
+
+def test_lease_acquire_refuses_a_named_event_that_is_gone_and_a_party_that_is_held(monkeypatch):
+    """r7 H1/H2: a named id that does not resolve is 404 event_gone (not transient: the next handout
+    resolves it); a party whose identity a writer holds is 409 subject_busy (transient)."""
+    monkeypatch.setattr(main, "_require_internal_key", lambda k: None)
+    db, _ = _lease_db(events=(3,))
+    with pytest.raises(HTTPException) as ex:
+        _run(main.internal_pc_lease({"subject_ref": str(PID), "event_ids": [3, 4]}, "k", db))
+    assert ex.value.status_code == 404 and ex.value.detail == {"error": "event_gone"}
+    assert db.rolled_back == 1 and db.count("INSERT INTO pc_delivery_leases") == 0
+    assert db.count("pg_try_advisory_xact_lock_shared") == 0   # refused before any party lock
+    db, _ = _lease_db(held=False)
+    with pytest.raises(HTTPException) as ex:
+        _run(main.internal_pc_lease({"subject_ref": str(PID), "event_ids": [3, 4]}, "k", db))
+    assert ex.value.status_code == 409 and ex.value.detail == {"error": "subject_busy", "retry_after": 2}
+    assert db.rolled_back == 1 and db.count("INSERT INTO pc_delivery_leases") == 0
+    # a lease naming no events reads no events and locks no party
+    db, _ = _lease_db()
+    _run(main.internal_pc_lease({"subject_ref": str(PID)}, "k", db))
+    assert db.count("SELECT e.id, pl.steam_id AS puller") == 0 and db.count("pg_try_advisory_xact_lock_shared") == 0
 
 
 def test_lease_acquire_answers_409_subject_busy_when_the_identity_is_held(monkeypatch):
@@ -845,7 +884,7 @@ def test_lease_acquire_validates_its_payload_before_any_database_work(monkeypatc
         with pytest.raises(HTTPException) as ex:
             _run(main.internal_pc_lease(payload, "k", db))
         assert ex.value.status_code == 422 and db.log == [], payload
-    db, _ = _lease_db()
+    db, _ = _lease_db(events=range(200))
     _run(main.internal_pc_lease({"subject_ref": str(PID), "event_ids": list(range(500))}, "k", db))
     assert len(db.log[_idx(db, "INSERT INTO pc_delivery_leases")][1]["ids"]) == 200
 
@@ -898,7 +937,7 @@ def test_lease_check_and_release(monkeypatch):
     # be read from a snapshot the lease row was not read in
     sql = db.log[0][0]
     assert "print_deliverable" in sql and "pc_prints" in sql and "pc_cards" in sql
-    assert "events_ok" in sql and "e.id = ANY(l.event_ids)" in sql and "subject_banned" in sql   # the events and the ban, in the same statement (r6 H1/M2)
+    assert "events_ok" in sql and "FROM unnest(l.event_ids) AS named(id)" in sql and "subject_banned" in sql   # the events (per named id, r7 H1) and the ban, in the same statement (r6 H1/M2)
     for rows in ([_check_row(unexpired=False)], []):
         db = Scripted({"FROM pc_delivery_leases l JOIN players p": [rows]})
         with pytest.raises(HTTPException) as ex:
@@ -1160,3 +1199,15 @@ def test_request_locale_is_the_effective_locale_of_the_informational_header(monk
     assert main._pc_locale(SimpleNamespace(headers={"X-Locale": "uk-UA"})) == "uk"
     assert main._pc_locale(SimpleNamespace(headers={"X-Locale": "fr"})) == "en"
     assert main._pc_locale(SimpleNamespace(headers={})) == "en"
+
+
+def test_the_card_and_its_preview_read_one_snapshot():
+    """r7 L1 (2026-09-13): /card returns the snapshot it read; the preview pins its member read to
+    that snapshot when told (COALESCE to the latest otherwise), so a daily rotation between the two
+    reads cannot pair an old-rank embed with a new-rank picture."""
+    card = _src(main.internal_pc_card)
+    assert "s.id AS snapshot_id" in card and '"snapshot_id": int(row["snapshot_id"])' in card
+    prev = _src(main.internal_pc_face_preview)
+    assert "snapshot_id: int | None = Query(None, ge=1)" in prev
+    assert "AND m.snapshot_id = COALESCE(CAST(:snap AS bigint), (SELECT MAX(id) FROM pc_pool_snapshots))" in prev
+    assert '{"pid": player_ref, "snap": snapshot_id}' in prev

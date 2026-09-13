@@ -297,7 +297,6 @@ namespace CompetitiveRounds
                  + "|" + PlayerCardsUI.Epoch
                  + "|" + _visitId
                  + "|" + CurrentPreset()
-                 + "|" + (AnimatedOn() ? 1 : 0)
                  + "|" + (GameStateWatcher.IsInMatch ? 1 : 0)
                  + "|" + LiveInputsKey();
         }
@@ -305,8 +304,11 @@ namespace CompetitiveRounds
         private static bool Stale(string key) { return key != StateKey(); }
 
         /// <summary>The pixel inputs as they are NOW -- the selected face's
-        /// ids and offsets, the equipped colour and effect -- as the key's last
-        /// segment (r6 M4): a change of any of them across a yield abandons the
+        /// ids and offsets, the animated-cosmetics setting, the equipped colour
+        /// and effect -- as the key's last segment (r6 M4; the setting joined
+        /// it in r7 M1: as a segment of its own it was seen by Stale but not by
+        /// Abandon, so a change of it aborted the render without asking for a
+        /// fresh one): a change of any of them across a yield abandons the
         /// render or the upload taken under the old ones, and Abandon asks for
         /// a fresh one. Reads what Capture reads, without its validation; no
         /// '|' inside, so the segment can be cut off the key again.</summary>
@@ -329,7 +331,8 @@ namespace CompetitiveRounds
             }
             catch { face = "?"; }
             var s = ApiClient.CachedPlayerStats;
-            string gear = s == null ? "" : (s.active_player_color_sku ?? "") + ":" + (s.active_player_color_hex ?? "") + ":" + (s.active_player_effect_sku ?? "");
+            string gear = (AnimatedOn() ? "1" : "0") + ":"
+                        + (s == null ? "" : (s.active_player_color_sku ?? "") + ":" + (s.active_player_color_hex ?? "") + ":" + (s.active_player_effect_sku ?? ""));
             return (face + "~" + gear).Replace('|', '_');
         }
 
@@ -529,7 +532,11 @@ namespace CompetitiveRounds
         }
 
         private static string Off(Vector2 v) => R(v.x) + "," + R(v.y);
-        private static string R(float x) => (float.IsNaN(x) || float.IsInfinity(x)) ? "0" : x.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
+        // A non-finite offset is its own value in the key (r7 L2): written as "0"
+        // it was indistinguishable from a real zero, so a capture taken at zero
+        // rode through a yield across which the offset had become NaN -- which a
+        // fresh Capture refuses (Finite). Capture never writes these: it refuses first.
+        private static string R(float x) => float.IsNaN(x) ? "nan" : float.IsPositiveInfinity(x) ? "inf" : float.IsNegativeInfinity(x) ? "-inf" : x.ToString("R", System.Globalization.CultureInfo.InvariantCulture);
         private static string Ident(string s)
         {
             if (string.IsNullOrEmpty(s)) return "";

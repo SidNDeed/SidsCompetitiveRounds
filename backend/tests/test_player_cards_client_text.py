@@ -348,5 +348,15 @@ def test_the_renderer_fences_its_pixel_inputs_and_keeps_a_refused_request_armed(
     assert 'catch { inp.refusal = "the face could not be copied"; return inp; }' in pr and "inp.face = f;" not in pr
     assert "private static bool AfterActivate(" in pr and "return faceOk;" in pr and "if (face != null) faceOk = false;" in pr
     assert 'if (!AfterActivate(rep, clone, data, inp.face, null)) { LastResult = "render failed: the captured face could not be equipped"; yield break; }' in pr
+    # the animated setting is a term of the live-input segment, not a segment of its own (r7 M1): Stale and
+    # Abandon see the same thing; non-finite offsets are their own values, never "0" (r7 L2)
+    assert '+ "|" + (AnimatedOn() ? 1 : 0)' not in pr
+    assert 'string gear = (AnimatedOn() ? "1" : "0") + ":"' in pr
+    assert 'float.IsNaN(x) ? "nan" : float.IsPositiveInfinity(x) ? "inf" : float.IsNegativeInfinity(x) ? "-inf" :' in pr
+    assert '? "0" :' not in pr
     ui = CLIENT.read_text(encoding="utf-8")
     assert "if (!onSettings) settingsVisited = false;" in ui
+    # the Settings edge is tracked AHEAD of the two-second throttle (r7 L3), inside MaybeTick
+    tick = ui[ui.index("internal static void MaybeTick("):]
+    tick = tick[:tick.index("\n        }\n")]
+    assert tick.index("if (!onSettings) settingsVisited = false;") < tick.index("if (Time.unscaledTime < tickAt) return;")
