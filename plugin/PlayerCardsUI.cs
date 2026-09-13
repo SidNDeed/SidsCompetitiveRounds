@@ -324,6 +324,7 @@ namespace CompetitiveRounds
             HistoryReset();
             openInFlight = claimInFlight = recoverInFlight = discardInFlight = setInFlight = false;
             portraitWaitUntil = -1f; portraitWaitedAt = -100f; pendingVisit = false;
+            settingsVisited = false;   // the next Settings look checks the picture again (r5 L12)
             // the previous account's character, as a Sprite over a texture
             // PortraitRender has just destroyed
             if (previewSprite != null) { try { UnityEngine.Object.Destroy(previewSprite); } catch { } previewSprite = null; }
@@ -1549,7 +1550,7 @@ namespace CompetitiveRounds
                     : I18n.TrF("- Buy one for {0} gold or {1} shards, up to {2} paid packs a day.", gold, shards, cap)) + "\n\n"
                 + I18n.TrF("Each pack holds {0} cards. A card's rarity is its player's rank in the card pool on the day of the pull: Legendary = #1, Epic #2-10, Rare #11-20, Uncommon #21-40, Common #41 and below. Odds per card: Common 60%, Uncommon 25%, Rare 11%, Epic 3.5%, Legendary 0.5%. Every card also rolls Foil (1 in 200) and Signed (1 in 2000) on its own.", per) + "\n\n"
                 + I18n.Tr("Discarding a card gives shards by its rarity: Common 5, Uncommon 15, Rare 40, Epic 150, Legendary 600. Shards buy packs. Discards are one card at a time; the Dupes button discards every other copy of that exact card.") + "\n\n"
-                + I18n.Tr("A card freezes its player's title, rating, record and rank as the leaderboard had them on the day it was pulled; the name and the picture stay live (a renamed player shows their new name). Anyone with the mod can be pulled unless they turn it off in Settings or are currently banned; your own settings for being a card, a public binder and pull announcements live there too.");
+                + I18n.Tr("A card freezes its player's title, rating, record and rank as the leaderboard had them on the day it was pulled; the name and the picture stay live (a renamed player shows their new name). Every registered player who is not banned can be pulled; a public binder and pull announcements are your Settings, and deleting your data removes every card of you from every binder.");
             UIFactory.SetTextRaw(txtInfo, body);
         }
 

@@ -25084,12 +25084,20 @@ async def admin_pc_snapshot(
 # internal key. Discord identity resolves through players.discord_id (the
 # /link flow); nothing here accepts a steam id from the bot's users.
 
+# An active ban keeps a player out of the pool (the eligibility fragment the
+# open's live check reads); the handout applies the same word to the puller and
+# the subject, so a pull of a player banned since the open is never posted
+# (2026-09-13, r5 M3). One fragment, formatted with the row alias.
+_PC_NOT_BANNED_SQL = "NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = {a}.steam_id AND b.unbanned_at IS NULL)"
+
 _PC_EVENTS_SKIP_SQL = """
     UPDATE pc_events e SET posted_at = now()
       FROM players pl, players su
      WHERE e.posted_at IS NULL AND pl.id = e.player_id AND su.id = e.subject_player_id
        AND NOT (pl.deleted_at IS NULL AND su.deleted_at IS NULL
                 AND pl.pc_announce AND su.pc_announce
+                AND """ + _PC_NOT_BANNED_SQL.format(a="pl") + """
+                AND """ + _PC_NOT_BANNED_SQL.format(a="su") + """
                 AND (e.print_id IS NULL OR EXISTS (SELECT 1 FROM pc_prints pr WHERE pr.id = e.print_id AND pr.discarded_at IS NULL)))
 """
 
@@ -25119,6 +25127,7 @@ _PC_EVENTS_PENDING_SQL = """
         SELECT e.id, e.print_id FROM pc_events e
           JOIN players su ON su.id = e.subject_player_id
          WHERE e.posted_at IS NULL AND """ + _PC_EVENTS_HOLD_SQL + """
+           AND su.deleted_at IS NULL AND """ + _PC_NOT_BANNED_SQL.format(a="su") + """
          ORDER BY e.id
          LIMIT 20
     )
@@ -25135,6 +25144,8 @@ _PC_EVENTS_PENDING_SQL = """
        AND (e.id IN (SELECT id FROM page)
             OR (e.print_id IS NOT NULL AND e.print_id IN (SELECT print_id FROM page WHERE print_id IS NOT NULL)))
        AND pl.deleted_at IS NULL AND su.deleted_at IS NULL
+       AND """ + _PC_NOT_BANNED_SQL.format(a="pl") + """
+       AND """ + _PC_NOT_BANNED_SQL.format(a="su") + """
        AND pl.pc_announce AND su.pc_announce
        AND (pr.id IS NULL OR pr.discarded_at IS NULL)
      ORDER BY e.id
@@ -25288,9 +25299,11 @@ async def internal_pc_card(
         SELECT m.pool_rank, m.rarity, m.rating, m.peak_rating, m.board_rank, m.series_wins, m.series_losses,
                m.top_card, m.title, s.taken_at
           FROM pc_pool_members m JOIN pc_pool_snapshots s ON s.id = m.snapshot_id
+          JOIN players p ON p.id = m.player_id
          WHERE m.player_id = CAST(:pid AS uuid) AND m.snapshot_id = (SELECT MAX(id) FROM pc_pool_snapshots)
+           AND p.deleted_at IS NULL AND """ + _PC_NOT_BANNED_SQL.format(a="p") + """
     """), {"pid": str(subject.id)})).mappings().first()
-    if row is None:
+    if row is None:   # not in the latest snapshot, or banned since it (2026-09-13, r5 M4): the pool's live word
         raise HTTPException(status_code=404, detail={"error": "not_in_pool"})
     circ = (await db.execute(text("""
         SELECT COUNT(*) AS prints, COUNT(DISTINCT pr.owner_player_id) AS holders,

@@ -15,9 +15,19 @@
 --
 -- Rows a choice had excluded re-enter the Steam sweep at once: their
 -- schedule is cleared (the claim orders NULLS FIRST), exactly as the old
--- "back to the character" write did. Deleted rows are left alone — their
--- deleted_at keeps them out of every predicate.
+-- "back to the character" write did. Deleted rows are left alone here —
+-- their deleted_at keeps them out of every predicate; the prints and cards
+-- of a subject deleted before this batch are removed by 315, which runs
+-- AFTER the api that deletes them itself is live (the deploy interval).
+--
+-- The index rebuild takes the table's lock queue for the duration of a
+-- CREATE INDEX on players (4,925 rows, 1.4 MB on 2026-09-13: milliseconds).
+-- What could hurt is WAITING for that lock behind a long transaction, with
+-- every later query queued behind this one: the timeout turns that into a
+-- clean failure, and the file is re-runnable as written (IF EXISTS, IF NOT
+-- EXISTS, idempotent UPDATEs).
 BEGIN;
+SET LOCAL lock_timeout = '5s';
 
 UPDATE players
    SET pc_steam_portrait_next_at = NULL

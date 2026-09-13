@@ -11,6 +11,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 CLIENT = ROOT / "plugin" / "PlayerCardsUI.cs"
 API = ROOT / "plugin" / "ApiClient.cs"
 INFO = ROOT / "plugin" / "InfoLibrary.cs"
+NATIVE = ROOT / "plugin" / "NativeUI.cs"
 FACES = ROOT / "plugin" / "PlayerCardFaces.cs"
 RULES = ROOT / "backend" / "api" / "player_cards.py"
 
@@ -158,6 +159,17 @@ def test_the_binder_tile_layout_repairs_are_pinned_one_by_one():
     assert "ch.onClick = () => OnTileClick(tile);" in tile
     assert "if (t == null || t.print == null || Time.frameCount == cardPopupFrame) return;" in src
     assert 'UIFactory.CreateText("PcBHint", binderRoot.transform, "Click a card to view it"' in src
+    # the guard's WRITE side (r5): the frame is stamped where the popup opens and where it
+    # closes, and the backdrop's own handler reads it; the info popup captures its frame too
+    show = _span(src, "private static void ShowCard(Tile t)", "private static void OnTileClick")
+    assert show.count("cardPopupFrame = Time.frameCount;") == 1
+    hide = _span(src, "internal static void HideCardPopup()", "private static")
+    assert hide.count("cardPopupFrame = Time.frameCount;") == 1
+    assert src.count("cardPopupFrame = Time.frameCount;") == 2
+    assert "bdClick.onClick = () => { if (Time.frameCount != cardPopupFrame && ClickGuard.Claim(bd)) HideCardPopup(); };" in show
+    nat = NATIVE.read_text(encoding="utf-8")
+    assert "int opened = Time.frameCount;" in nat
+    assert "bdClick.onClick = () => { if (Time.frameCount != opened && ClickGuard.Claim(bd)) HideInfoPopup(); };" in nat
 
 
 def test_the_pack_history_keeps_the_servers_order_and_follows_its_signals():

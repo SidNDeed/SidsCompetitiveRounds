@@ -234,8 +234,12 @@ namespace CompetitiveRounds
             Reclaim();
             if (_refreshAt >= 0f && Time.realtimeSinceStartup >= _refreshAt)
             {
+                // Consumed only by a start: a request that matures while a
+                // render or an upload is busy keeps waiting for the next idle
+                // tick instead of being dropped (r5 M9).
+                if (Rendering || UploadInFlight) return;
                 _refreshAt = -1f;
-                if (!Rendering && !UploadInFlight) Start(_refreshWhy ?? "preset", true);
+                Start(_refreshWhy ?? "preset", true);
                 return;
             }
             if (!_pendingCheck || Rendering || UploadInFlight) return;
@@ -334,6 +338,7 @@ namespace CompetitiveRounds
             internal bool animated;
             internal string descriptor;
             internal string refusal;
+            internal PlayerFace face;   // the face the descriptor describes, a copy: the render equips THIS (r5 M7/M8)
         }
 
         /// <summary>#124: an id at or above the custom base resolves through
@@ -400,6 +405,12 @@ namespace CompetitiveRounds
                 }
                 inp.faceIds = f.eyeID + ":" + f.mouthID + ":" + f.detailID + ":" + f.detail2ID;
                 inp.faceOffs = Off(f.eyeOffset) + ";" + Off(f.mouthOffset) + ";" + Off(f.detailOffset) + ";" + Off(f.detail2Offset);
+                // A copy of the face the descriptor describes, equipped by the
+                // render after its end-of-frame yield: descriptor and pixels come
+                // from one snapshot however the character menu moves meanwhile,
+                // and slot n is slot n (the render used to look up n - 1).
+                try { inp.face = PlayerFace.CreateFace(f.eyeID, f.eyeOffset, f.mouthID, f.mouthOffset, f.detailID, f.detailOffset, f.detail2ID, f.detail2Offset); }
+                catch { inp.face = f; }
             }
 
             var s = ApiClient.CachedPlayerStats;
@@ -536,7 +547,7 @@ namespace CompetitiveRounds
                 clone.transform.SetParent(null, true);
                 _clone = clone;
                 UnityEngine.Object.Destroy(_root); _root = null;
-                AfterActivate(rep, clone, data, preset > 0 ? preset - 1 : -1, null);
+                AfterActivate(rep, clone, data, inp.face, null);   // the captured face, never a second lookup
                 MakeGround(rep, clone);
                 yield return null;
                 _renderClaim.Beat(gen, RENDER_BUDGET);
@@ -762,7 +773,7 @@ namespace CompetitiveRounds
                 clone.transform.SetParent(null, true);
                 _clone = clone;
                 UnityEngine.Object.Destroy(_root); _root = null;
-                AfterActivate(rep, clone, data, preset, faceOverride);   // same frame: before any Start/Update
+                AfterActivate(rep, clone, data, PickFace(preset, rep), faceOverride);   // same frame: before any Start/Update
                 if (ground) MakeGround(rep, clone);
                 yield return null;                           // Starts ran (skin body, gun colours, masks)
 
@@ -1005,7 +1016,7 @@ namespace CompetitiveRounds
             catch (Exception ex) { return ex.ToString(); }
         }
 
-        private static void AfterActivate(StringBuilder rep, GameObject clone, CharacterData data, int preset, string faceOverride)
+        private static void AfterActivate(StringBuilder rep, GameObject clone, CharacterData data, PlayerFace captured, string faceOverride)
         {
             try
             {
@@ -1038,7 +1049,7 @@ namespace CompetitiveRounds
                 rep.Append("team colour applied=").Append(skin != null).Append('\n');
 
                 var eq = clone.GetComponentInChildren<CharacterCreatorItemEquipper>(true);
-                var face = faceOverride != null ? ParseFace(faceOverride, rep) : PickFace(preset, rep);
+                var face = faceOverride != null ? ParseFace(faceOverride, rep) : captured;
                 if (eq != null && face != null)
                 {
                     try { eq.SpawnPlayerFace(face); rep.Append("face equipped\n"); }

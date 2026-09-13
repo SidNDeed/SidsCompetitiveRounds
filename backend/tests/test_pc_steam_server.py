@@ -617,6 +617,27 @@ def test_the_blob_janitor_holds_one_lock_per_transaction():
 
 # ── the events hold-back ───────────────────────────────────────────────
 
+def test_the_handout_and_card_apply_the_pools_ban_word_to_puller_and_subject():
+    """r5 M3/M4 (2026-09-13): an active ban keeps a player out of the pool at
+    the open (_PC_STEAM_ELIGIBLE_SQL); the handout says the same of the puller
+    and the subject in its skip, its page and its final selection, and /card
+    says it of the subject live rather than trusting the latest snapshot. One
+    fragment, formatted with the row alias, so the word cannot drift."""
+    ban = main._PC_NOT_BANNED_SQL
+    assert ban == "NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = {a}.steam_id AND b.unbanned_at IS NULL)"
+    assert main._PC_STEAM_ELIGIBLE_SQL.count(ban.format(a="p")) == 1
+    skip, pend = main._PC_EVENTS_SKIP_SQL, main._PC_EVENTS_PENDING_SQL
+    for alias in ("pl", "su"):
+        assert skip.count(ban.format(a=alias)) == 1, alias
+    assert skip.index("AND NOT (pl.deleted_at IS NULL") < skip.index(ban.format(a="pl")) < skip.index("e.print_id IS NULL OR EXISTS")
+    assert pend.count(ban.format(a="su")) == 2 and pend.count(ban.format(a="pl")) == 1   # page CTE + final; final
+    assert pend.index(ban.format(a="su")) < pend.index("LIMIT 20")                       # the page never selects one
+    card = inspect.getsource(main.internal_pc_card)
+    assert "JOIN players p ON p.id = m.player_id" in card
+    assert "AND p.deleted_at IS NULL AND \"\"\" + _PC_NOT_BANNED_SQL.format(a=\"p\") + \"\"\"" in card
+    assert card.index("JOIN players p ON p.id = m.player_id") < card.index('detail={"error": "not_in_pool"}')
+
+
 def test_the_hold_releases_on_resolution_never_on_an_attempt_and_names_face_ready():
     res = main._PC_EVENTS_RESOLVED_SQL
     for term in ("su.pc_game_portrait_hash IS NOT NULL", "su.pc_steam_portrait_hash IS NOT NULL",
@@ -641,9 +662,10 @@ def test_the_hold_releases_on_resolution_never_on_an_attempt_and_names_face_read
 def test_the_settings_writer_takes_no_blob_lock_and_releases_nothing(monkeypatch):
     """2026-09-13: with no None write and no opt-out, every settings write is
     the plain CAS — actor, row lock, the revision-bound UPDATE, commit — with
-    no identity lock, no P lock, no blob release and no lease wait. The two
-    keys that used to carry the picture choices are refused as unknown
-    before any read."""
+    no lock of the route's own, no P lock, no blob release and no lease wait.
+    (The shared identity hold lives in the actor helper, which this test
+    replaces; test_pc_routes pins it there.) The two keys that used to carry
+    the picture choices are refused as unknown before any read."""
     async def actor(request, steam_id, sig, canon, db):
         db.log.append(("ACTOR", {"steam_id": steam_id}))
         return SimpleNamespace(id=PID)

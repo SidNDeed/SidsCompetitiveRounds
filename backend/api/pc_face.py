@@ -1076,13 +1076,14 @@ def _fit_text(text: str, box_width: float, sizes: Iterable[int], base_role: str,
 
 
 # The name shrinks before it is cut: from 58 px down to the floor in steps of
-# two, scaled at the tile. The tile used to stop at 56 (28 px drawn) and cut
-# nearly every real name to eleven characters ("Twenty Char..."); its floor is
-# now its own, lower one, and the budget is whatever the chips actually leave
-# free rather than the layout rect's constant (2026-09-13, bug #361 feedback).
+# two. The tile used to stop at 56 (28 px drawn) and cut nearly every real
+# name to eleven characters ("Twenty Char..."); the budget is now whatever
+# the chips actually leave free rather than the layout rect's constant
+# (2026-09-13, bug #361 feedback), and the tile has no floor of its own: its
+# fit is the card's fit at half size, so a name whole on the card is whole on
+# the tile by construction (r5 L11).
 NAME_SIZE_MAX = 58
 NAME_SIZE_MIN_CARD = 34
-NAME_SIZE_MIN_TILE = 40
 NAME_LEFT = 54               # anchors.name x in face_layout_v1
 NAME_RIGHT_DEFAULT = 490     # the layout's name rect right edge: the budget when no chip edge is known
 NAME_CHIP_GAP = 24           # card px kept clear between the name and the nearest chip
@@ -1094,11 +1095,23 @@ def _name_fit(name: str, size: str, right_edge: float | None = None) -> tuple[st
     the gap, in that size's pixels); without it the layout rect applies."""
     if size not in ("card", "tile"):
         raise ValueError("size")
-    scale = 1.0 if size == "card" else 0.5
-    minimum = NAME_SIZE_MIN_CARD if size == "card" else NAME_SIZE_MIN_TILE
-    sizes = [max(1, int(round(value * scale))) for value in range(NAME_SIZE_MAX, minimum - 1, -2)]
-    right = NAME_RIGHT_DEFAULT * scale if right_edge is None else float(right_edge)
-    return _fit_text(str(name), max(1.0, right - NAME_LEFT * scale), sizes, "black")
+    if size == "tile":
+        # Parity by construction: the fit is decided once, at card scale,
+        # against the tile's edge doubled, and the chosen size is halved.
+        # Halving keeps the text inside its budget to within the font's
+        # rounding, well inside the 12 px the gap leaves clear at the tile.
+        text, px = _name_fit(name, "card", None if right_edge is None else float(right_edge) * 2.0)
+        budget = max(1.0, (NAME_RIGHT_DEFAULT * 0.5 if right_edge is None else float(right_edge)) - NAME_LEFT * 0.5)
+        px = max(1, int(round(px * 0.5)))
+        # hinting rounds advances up at small sizes: step down a pixel at a
+        # time until the SAME text fits the tile's own budget (measured, not
+        # assumed; three steps at most in practice)
+        while px > 8 and _measure_text(text, px, "black") > budget:
+            px -= 1
+        return text, px
+    sizes = list(range(NAME_SIZE_MAX, NAME_SIZE_MIN_CARD - 1, -2))
+    right = NAME_RIGHT_DEFAULT if right_edge is None else float(right_edge)
+    return _fit_text(str(name), max(1.0, right - NAME_LEFT), sizes, "black")
 
 
 def fit_name(name: str, size: str) -> str:

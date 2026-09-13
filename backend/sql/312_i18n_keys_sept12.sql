@@ -16,6 +16,25 @@ BEGIN;
 INSERT INTO i18n_keys (key_id, namespace, msgctxt, source_hash, sensitive, max_px, context, updated_at)
 SELECT v.key_id, v.namespace, v.msgctxt, v.source_hash, v.sensitive, NULL, v.context, NOW()
   FROM (VALUES
+('15bea618a7cba803', 'client', $k312$<color=#FFD94D><b>YOUR PICTURE ON OTHER PEOPLE'S CARDS</b></color>
+
+- The card of you shows your <b>in-game character</b>: the body, face items, colour and effect you play with, drawn by your own PC when you visit the Collection or Settings tab after a change, and sent once. Nobody else's PC renders you.
+- Before your PC has sent it, your card shows your <b>Steam profile picture</b>, which the server takes from your public profile.
+- The picture is not a setting: every card of you shows your Steam picture until your PC has sent the character, then the character - including cards pulled before it was sent. The character your PC sent stays stored until you send another.
+- <b>Character preset</b> picks which saved character your picture shows: Follow uses the one you have selected in the character menu, or pin a preset. The small preview under it is what your card shows.
+
+<color=#FFD94D><b>THE OTHER SETTINGS</b></color>
+
+- There is no opt-out: every registered player who is not banned is in the pool, and cards of you stay in the binders that hold them.
+- <b>Public collection</b> is the setting that shows or hides your binder from others (/collection in Discord).
+- <b>Announce my pulls</b> allows Discord posts about your Epic-or-better, Foil and Signed pulls, and about pulls of YOUR card - both sides must have it on for a post to happen.
+- Deleting your data is what removes cards: your binder is emptied, and every card of you is removed from every other player's binder.
+
+<color=#FFD94D><b>WHY A CARD SHOWS WHAT IT SHOWS</b></color>
+
+- A card's rating, record, rank tier and shop title are frozen at the snapshot it was minted from. If you rank up tomorrow, cards of you minted today keep today's rank; the next snapshot's cards get the new one.
+- The name and the picture are live: a card of a renamed player shows the new name, and its picture follows what that player's PC last sent (or their Steam picture until then).
+- If the player deletes their data, every card of them is removed from every binder.$k312$, '4cfc0b7eca11ebe1bfc995a3c97e49d7bb479248', TRUE, E'InfoLibrary · (file scope)'),
 ('21805a6155a21285', 'client', $k312$Newer >$k312$, '03301bf980ea6a980fb2cc0bbd2bc77d811a526e', FALSE, E'PlayerCardsUI · BuildOpenView'),
 ('21b41babb49a1c4f', 'client', $k312$Card pictures & settings$k312$, '84148b567249dfa38d278200b986e32e0d5fd5e0', FALSE, E'InfoLibrary · (file scope)'),
 ('220199e67ed22fea', 'client', $k312$<color=#FFD94D><b>THE HEADER</b></color>
@@ -43,26 +62,6 @@ SELECT v.key_id, v.namespace, v.msgctxt, v.source_hash, v.sensitive, NULL, v.con
 ('26ff01ebab1e5fd2', 'client', $k312$Date obtained$k312$, 'aca780d4f575dff9323a27bb4fd0e72ccaa05ee2', FALSE, E'PlayerCardsUI · SortLabel'),
 ('2ed4fbc31d00c3dc', 'client', $k312$Reading a card$k312$, 'ea1e194a903d0c5f05c139f2012997ac724f3808', FALSE, E'InfoLibrary · (file scope)'),
 ('34174698bc381cf0', 'client', $k312$Rare pulls may be posted to the Discord gambler chat with your name.$k312$, '9af20b413c2ca79a11498cb299ee67afe394db74', FALSE, E'PlayerCardsUI · BuildSettingsRows'),
-('381a912e425e3489', 'client', $k312$<color=#FFD94D><b>YOUR PICTURE ON OTHER PEOPLE'S CARDS</b></color>
-
-- The card of you shows your <b>in-game character</b>: the body, face items, colour and effect you play with, drawn by your own PC the first time you visit the Collection tab after a change, and sent once. Nobody else's PC renders you.
-- Before your PC has sent it, your card shows your <b>Steam profile picture</b>, which the server takes from your public profile.
-- The picture is not a setting: every card of you shows your Steam picture until your PC has sent the character, then the character - including cards pulled before it was sent. The character your PC sent stays stored until you send another.
-- <b>Character preset</b> picks which saved character your picture shows: Follow uses the one you have selected in the character menu, or pin a preset. The small preview under it is what will be sent.
-
-<color=#FFD94D><b>THE OTHER SETTINGS</b></color>
-
-- There is no opt-out: every registered player who is not banned is in the pool, and cards of you stay in the binders that hold them.
-- <b>Public collection</b> is the setting that shows or hides your binder from others (/collection in Discord).
-- <b>Announce my pulls</b> allows Discord posts about your Epic-or-better, Foil and Signed pulls, and about pulls of YOUR card - both sides must have it on for a post to happen.
-- Deleting your data is what removes cards: your binder is emptied, and every card of you is removed from every other player's binder.
-
-<color=#FFD94D><b>WHY A CARD SHOWS WHAT IT SHOWS</b></color>
-
-- A card's rating, record, rank tier and shop title are frozen at the snapshot it was minted from. If you rank up tomorrow, cards of you minted today keep today's rank; the next snapshot's cards get the new one.
-- The name and the picture are live: a card of a renamed player shows the new name, and its picture follows what that player's PC last sent (or their Steam picture until then).
-- If the player deletes their data, every card of them is removed from every binder.$k312$, '0136fa48fd00decfb3ffb0e9dd8e6e4c198d2a71', TRUE, E'InfoLibrary · (file scope)'),
-('38b6cdfd96ae16c2', 'client', $k312$A card freezes its player's title, rating, record and rank as the leaderboard had them on the day it was pulled; the name and the picture stay live (a renamed player shows their new name). Anyone with the mod can be pulled unless they turn it off in Settings or are currently banned; your own settings for being a card, a public binder and pull announcements live there too.$k312$, 'b0ffe51bfe82553704cc014c3f95955797f4b040', TRUE, E'PlayerCardsUI · RefreshInfo'),
 ('399ed0d6343742dd', 'client', $k312${0} paid packs today - no daily limit on this account - {1} cards each$k312$, 'e46a6351a2a17383127d33142062257b0b527adb', FALSE, E'PlayerCardsUI · RefreshOpen'),
 ('3d3f357c73935320', 'client', $k312$Your packs$k312$, '8da4806ae9fda2e1398ea936d55ccfba37c2b98e', FALSE, E'PlayerCardsUI · BuildOpenView'),
 ('698f9dfdca5b1ca2', 'client', $k312$Player Cards are collectible cards of the people who play here. Every registered player who is not currently banned has a card in the pool; you open packs, keep the cards you like, discard the rest for shards and chase the rare ones. Everything lives under <color=#7FD4FF>Shop > Collection</color>: <b>Open Packs</b>, <b>Binder</b> and <b>Get packs</b>.
@@ -104,6 +103,7 @@ SELECT v.key_id, v.namespace, v.msgctxt, v.source_hash, v.sensitive, NULL, v.con
 - A pull that is Epic or better is announced in the Discord gambler chat, and so is a pull of your own card, a Foil or a Signed print at any rarity - but only when BOTH you and the player on the card have <b>Announce my pulls</b> on (see Card pictures & settings). A Rare or lower pull that is none of those is not announced.$k312$, '23fb496b3b1bbb259d8a9f5248d596533f7ac023', TRUE, E'InfoLibrary · (file scope)'),
 ('df18e7c25bc9a523', 'client', $k312$Pack {0} of {1} ({2}) - {3}$k312$, 'e8b2e6df79d2ab485ab205bfbfdac84b8212edb9', FALSE, E'PlayerCardsUI · RefreshOpen'),
 ('df73b3e97fba0f69', 'client', $k312$DISCARDED$k312$, '278d6c0448fc24279c6837735dda38cf6963e8c4', FALSE, E'PlayerCardsUI · DiscardedLine'),
+('e56a6d9c5bfe3b65', 'client', $k312$A card freezes its player's title, rating, record and rank as the leaderboard had them on the day it was pulled; the name and the picture stay live (a renamed player shows their new name). Every registered player who is not banned can be pulled; a public binder and pull announcements are your Settings, and deleting your data removes every card of you from every binder.$k312$, '946d290cf0d879594b08b7b948ff2e01e7f13813', TRUE, E'PlayerCardsUI · RefreshInfo'),
 ('e7d621f0d926348c', 'client', $k312$Other players can collect a Player Card of you showing your name, rank, rating, ranked record and your public Steam profile picture (your in-game character replaces the picture once this PC has sent it). Deleting your data removes every card of you.$k312$, 'd3212298f50d0af0f2055375a08d28d52ded91e5', TRUE, E'CompetitiveUI · DrawConsentModal'),
 ('f708e90d85c1e8d0', 'client', $k312$Position$k312$, 'cf1c85adba548e8d681255278976584a7e4a44de', FALSE, E'PlayerCardsUI · SortLabel'),
 ('fef31b7fdfed7ccc', 'client', $k312$- Buy one for {0} gold or {1} shards. No daily limit on this account.$k312$, '8d343394988fbe4e53cd65a191f5e808fbaa2b99', TRUE, E'PlayerCardsUI · RefreshInfo'),
@@ -124,14 +124,13 @@ BEGIN
     SELECT COUNT(*) INTO v_ok
       FROM i18n_keys k
       JOIN (VALUES
+        ('15bea618a7cba803', '4cfc0b7eca11ebe1bfc995a3c97e49d7bb479248', E'InfoLibrary · (file scope)'),
         ('21805a6155a21285', '03301bf980ea6a980fb2cc0bbd2bc77d811a526e', E'PlayerCardsUI · BuildOpenView'),
         ('21b41babb49a1c4f', '84148b567249dfa38d278200b986e32e0d5fd5e0', E'InfoLibrary · (file scope)'),
         ('220199e67ed22fea', '13291fec7b369881749d2cc00bc9093546edf1d1', E'InfoLibrary · (file scope)'),
         ('26ff01ebab1e5fd2', 'aca780d4f575dff9323a27bb4fd0e72ccaa05ee2', E'PlayerCardsUI · SortLabel'),
         ('2ed4fbc31d00c3dc', 'ea1e194a903d0c5f05c139f2012997ac724f3808', E'InfoLibrary · (file scope)'),
         ('34174698bc381cf0', '9af20b413c2ca79a11498cb299ee67afe394db74', E'PlayerCardsUI · BuildSettingsRows'),
-        ('381a912e425e3489', '0136fa48fd00decfb3ffb0e9dd8e6e4c198d2a71', E'InfoLibrary · (file scope)'),
-        ('38b6cdfd96ae16c2', 'b0ffe51bfe82553704cc014c3f95955797f4b040', E'PlayerCardsUI · RefreshInfo'),
         ('399ed0d6343742dd', 'e46a6351a2a17383127d33142062257b0b527adb', E'PlayerCardsUI · RefreshOpen'),
         ('3d3f357c73935320', '8da4806ae9fda2e1398ea936d55ccfba37c2b98e', E'PlayerCardsUI · BuildOpenView'),
         ('698f9dfdca5b1ca2', 'f66cedfaedf493138cb1bb8bbdc8257cbfe3d226', E'InfoLibrary · (file scope)'),
@@ -145,6 +144,7 @@ BEGIN
         ('c7d32e223ed2e3cd', '23fb496b3b1bbb259d8a9f5248d596533f7ac023', E'InfoLibrary · (file scope)'),
         ('df18e7c25bc9a523', 'e8b2e6df79d2ab485ab205bfbfdac84b8212edb9', E'PlayerCardsUI · RefreshOpen'),
         ('df73b3e97fba0f69', '278d6c0448fc24279c6837735dda38cf6963e8c4', E'PlayerCardsUI · DiscardedLine'),
+        ('e56a6d9c5bfe3b65', '946d290cf0d879594b08b7b948ff2e01e7f13813', E'PlayerCardsUI · RefreshInfo'),
         ('e7d621f0d926348c', 'd3212298f50d0af0f2055375a08d28d52ded91e5', E'CompetitiveUI · DrawConsentModal'),
         ('f708e90d85c1e8d0', 'cf1c85adba548e8d681255278976584a7e4a44de', E'PlayerCardsUI · SortLabel'),
         ('fef31b7fdfed7ccc', '8d343394988fbe4e53cd65a191f5e808fbaa2b99', E'PlayerCardsUI · RefreshInfo'),

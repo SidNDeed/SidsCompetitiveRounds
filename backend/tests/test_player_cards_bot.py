@@ -113,7 +113,9 @@ def test_a_page_never_cuts_a_prints_group_in_two():
     # the page CTE is where the face hold is decided (v3 §8 / v4): joined to the subject, once, so a group's
     # events are all held or all handed out together
     assert ("WITH page AS ( SELECT e.id, e.print_id FROM pc_events e JOIN players su ON su.id = e.subject_player_id "
-            'WHERE e.posted_at IS NULL AND """ + _PC_EVENTS_HOLD_SQL + """ ORDER BY e.id LIMIT 20 )') in sql
+            'WHERE e.posted_at IS NULL AND """ + _PC_EVENTS_HOLD_SQL + """ '
+            'AND su.deleted_at IS NULL AND """ + _PC_NOT_BANNED_SQL.format(a="su") + """ '   # r5 M3: the pool's ban word, in the page too
+            'ORDER BY e.id LIMIT 20 )') in sql
     assert sql.count("_PC_EVENTS_HOLD_SQL") == 1   # never a second hold on the outer query
     assert ("WHERE e.posted_at IS NULL AND (e.id IN (SELECT id FROM page) OR (e.print_id IS NOT NULL "
             "AND e.print_id IN (SELECT print_id FROM page WHERE print_id IS NOT NULL)))") in sql

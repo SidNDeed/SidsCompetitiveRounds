@@ -337,13 +337,19 @@ def test_upload_source_holds_the_exclusive_lock_before_the_actor_gate_and_the_si
 
 # ── the None write, the discard and the deletion sweep (static pins) ─────────
 
-def test_the_settings_writer_touches_no_picture_and_takes_no_identity_lock():
+def test_the_settings_writer_touches_no_picture_and_takes_no_lock_of_its_own():
     """Since 2026-09-13 neither setting can withdraw a picture, so the writer
     has no exclusive-lock half and no lease wait: actor, row lock, the CAS
     write, commit. A key that could move the resolution would need the old
     None writer back (r18 H2), which is why the SQL is pinned to the two
-    announce columns and the surface to the two keys."""
+    announce columns and the surface to the two keys. The route BODY takes
+    no advisory lock; the SHARED identity hold every player route takes
+    inside `_pc_verified_actor` (c3) is kept on purpose, so a settings
+    write of a player mid-deletion waits for that deletion instead of
+    racing it -- pinned positively here so the claim can fail either way
+    (r5 L10)."""
     src = _src(main.pc_set_setting)
+    assert "pg_advisory_xact_lock_shared(hashtext(CAST(:sid AS text)))" in _src(main._pc_verified_actor)
     c = src.index("_pc_verified_actor(request")
     d = src.index("FOR NO KEY UPDATE")
     f = src.index("_PC_SETTINGS_SQL[key]")

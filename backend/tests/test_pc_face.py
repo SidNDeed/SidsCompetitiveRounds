@@ -336,9 +336,8 @@ def test_name_fit_is_grapheme_safe_and_uses_ascii_dots():
         assert fitted.endswith("...") and "…" not in fitted
         prefix = fitted[:-3]
         assert pc_face.graphemes(prefix) == pc_face.graphemes(original)[:len(pc_face.graphemes(prefix))]
-    assert len(pc_face.graphemes(pc_face.fit_name(original, "tile"))) < len(
-        pc_face.graphemes(pc_face.fit_name(original, "card"))
-    )
+    # parity (r5 L11): the tile keeps exactly the graphemes the card keeps
+    assert pc_face.fit_name(original, "tile") == pc_face.fit_name(original, "card")
     autograph, autograph_size = pc_face._autograph_fit("W" * 64, 1.0)
     assert autograph.endswith("...") and autograph_size == 40
     assert pc_face._measure_text(autograph, autograph_size, "script") <= 380
@@ -828,8 +827,24 @@ def test_the_name_budget_follows_the_chips_and_the_tile_shrinks_before_it_cuts()
     tile = Image.new("RGBA", (375, 525))
     left_rare = pc_face._draw_chip(tile, 348, 19, "RARE", "RARE", (1, 1, 1), (2, 2, 2), 0.5, True)
     fitted, px = pc_face._name_fit(name, "tile", left_rare - gap * 0.5)
-    assert fitted == name and pc_face.NAME_SIZE_MIN_TILE // 2 <= px < 28
-    # the floors are what the comment says: the tile no longer stops two steps down
-    assert (pc_face.NAME_SIZE_MIN_CARD, pc_face.NAME_SIZE_MIN_TILE) == (34, 40)
+    assert fitted == name and pc_face.NAME_SIZE_MIN_CARD // 2 <= px < 28
+    # one floor, the card's; the tile has none of its own (r5 L11)
+    assert pc_face.NAME_SIZE_MIN_CARD == 34 and not hasattr(pc_face, "NAME_SIZE_MIN_TILE")
+    # parity by construction: beside the widest chip, for every length, the tile keeps
+    # exactly the text the card keeps (whole or cut alike) at half the size, and that
+    # text stays inside the tile's own budget to within the font's rounding
+    left_leg_t = pc_face._draw_chip(tile, 348, 19, "LEGENDARY", "LEG", (1, 1, 1), (2, 2, 2), 0.5, True)
+    edge_t = left_leg_t - gap * 0.5
+    flips = 0
+    for n in range(1, 41):
+        nm = ("Wm" * 20)[:n]
+        card = pc_face._name_fit(nm, "card", edge_t * 2.0)
+        tile_fit = pc_face._name_fit(nm, "tile", edge_t)
+        assert tile_fit[0] == card[0], (n, card, tile_fit)                 # the same text, whole or cut alike
+        half = max(1, round(card[1] * 0.5))
+        assert half - 3 <= tile_fit[1] <= half, (n, card, tile_fit)        # half the size, less the font's rounding
+        assert pc_face._measure_text(tile_fit[0], tile_fit[1], "black") <= edge_t - pc_face.NAME_LEFT * 0.5, n
+        flips += card[0] != nm
+    assert 0 < flips < 40   # the range crosses the whole/cut boundary, so the parity was exercised on both sides
     # without a chip edge the layout rect still bounds the name (fit_name, the old entry point)
     assert pc_face.fit_name("Ace", "card") == "Ace" and pc_face.fit_name("x" * 60, "card").endswith("...")

@@ -8623,7 +8623,7 @@ async def cmd_pc_card(ctx, member: discord.Member = None):
         await ctx.send(_pc_not_linked(ctx, target)); return
     if status == 404:
         who = "You're" if target == ctx.author else f"{discord.utils.escape_markdown(target.display_name)} is"
-        await ctx.send(f"🎴 {who} not in the card pool right now (opted out, or no ranked games yet)."); return
+        await ctx.send(f"🎴 {who} not in the card pool right now (a new player joins at the next pool snapshot; a banned player is out)."); return
     if status != 200 or not isinstance(body, dict):
         await ctx.send("❌ Couldn't fetch that card right now."); return
     rarity = str(body.get("rarity") or "common")
@@ -8736,7 +8736,7 @@ async def poll_pc_events():
         except Exception:
             ch = None
     if ch is None:
-        print("[PC-EVENTS] leaderboard channel not found — leaving events queued")
+        print(f"[PC-EVENTS] Player Cards events channel {PC_EVENTS_CHANNEL_ID} (PC_EVENTS_CHANNEL, default: the live-bets channel) not found — leaving events queued")
         return
     lines = _pc_event_lines(body["events"])   # whole print groups: the api's page never cuts one (c6 F)
     by_id = {int(e["id"]): e for e in body["events"]}

@@ -145,10 +145,10 @@ namespace CompetitiveRounds
 
         private static string CardsPictures => I18n.Tr(@"<color=#FFD94D><b>YOUR PICTURE ON OTHER PEOPLE'S CARDS</b></color>
 
-- The card of you shows your <b>in-game character</b>: the body, face items, colour and effect you play with, drawn by your own PC the first time you visit the Collection tab after a change, and sent once. Nobody else's PC renders you.
+- The card of you shows your <b>in-game character</b>: the body, face items, colour and effect you play with, drawn by your own PC when you visit the Collection or Settings tab after a change, and sent once. Nobody else's PC renders you.
 - Before your PC has sent it, your card shows your <b>Steam profile picture</b>, which the server takes from your public profile.
 - The picture is not a setting: every card of you shows your Steam picture until your PC has sent the character, then the character - including cards pulled before it was sent. The character your PC sent stays stored until you send another.
-- <b>Character preset</b> picks which saved character your picture shows: Follow uses the one you have selected in the character menu, or pin a preset. The small preview under it is what will be sent.
+- <b>Character preset</b> picks which saved character your picture shows: Follow uses the one you have selected in the character menu, or pin a preset. The small preview under it is what your card shows.
 
 <color=#FFD94D><b>THE OTHER SETTINGS</b></color>
 
