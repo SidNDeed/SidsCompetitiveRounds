@@ -1169,8 +1169,10 @@ def test_every_route_that_can_wait_for_the_lines_in_flight_declares_the_gate():
     """r9 M1: the gated handlers are DERIVED from the app's routes -- every endpoint whose source
     reaches the wait (`_pc_lease_drain` itself, or `_apply_ban_core` / `_moderation_case_act`,
     which reach it) -- not listed: each declares `_slot=Depends(_pc_writer_slot)`, and they are
-    exactly the deletion, the ban and the two moderation acts; the unban, which never waits,
-    takes no slot."""
+    exactly the deletion, the ban and the two moderation acts -- plus the unban, gated by name (r10
+    M3): it takes the admin's identity lock a waiting ban may hold, so it must not queue for that lock
+    holding a connection. On every gated route the slot is declared BEFORE the session (r10 M2): taken
+    first, released last."""
     reach = ("_pc_lease_drain(", "_apply_ban_core(", "_moderation_case_act(")
     gated = {}
     for route in main.app.routes:
@@ -1180,6 +1182,91 @@ def test_every_route_that_can_wait_for_the_lines_in_flight_declares_the_gate():
         if any(k in inspect.getsource(fn) for k in reach):
             gated[fn.__name__] = inspect.signature(fn).parameters.get("_slot")
     assert set(gated) == {"delete_player_data", "admin_ban", "admin_moderation_case_act", "internal_moderation_case_act"}, sorted(gated)
+    gated["admin_unban"] = inspect.signature(main.admin_unban).parameters.get("_slot")   # the listed exception (r10 M3)
     for name, param in gated.items():
         assert param is not None and param.default.dependency is main._pc_writer_slot, name
-    assert "_slot" not in inspect.signature(main.admin_unban).parameters
+        names = list(inspect.signature(getattr(main, name)).parameters)
+        assert names.index("_slot") < names.index("db"), name   # the slot before the session (r10 M2)
+    # one gate per process because the api runs ONE uvicorn worker (docker-compose.yml)
+    compose = (Path(__file__).resolve().parents[1] / "docker-compose.yml").read_text(encoding="utf-8")
+    cmd = [l for l in compose.splitlines() if "uvicorn" in l and "main:app" in l]
+    assert len(cmd) == 1 and "--workers" not in cmd[0] and "gunicorn" not in compose
+
+
+def test_the_slot_outlives_the_session_on_the_real_dependency_stack():
+    """r10 M2 (2026-09-13), executed through FastAPI's dependency stack (TestClient): on a route that
+    declares the slot BEFORE the session, the slot is held when the session opens, while the handler
+    runs and raises, and STILL when the session closes -- FastAPI unwinds yield-dependencies in reverse
+    declaration order, so the rollback, the locks and the connection are gone before a queued writer
+    is admitted; a route declaring them the other way round shows the defect this guards: the slot
+    is free again while its session is still open."""
+    from fastapi import Depends, FastAPI
+    from fastapi.testclient import TestClient
+    trace = []
+
+    async def fake_db():
+        trace.append(("open", main._pc_writer_gate()._value))
+        try:
+            yield "db"
+        finally:
+            trace.append(("close", main._pc_writer_gate()._value))
+
+    app = FastAPI()
+
+    @app.get("/gated")
+    async def gated(_slot=Depends(main._pc_writer_slot), db=Depends(fake_db)):
+        trace.append(("handler", main._pc_writer_gate()._value))
+        raise HTTPException(status_code=409, detail="the handler ended by raising")
+
+    @app.get("/reversed")
+    async def reversed_(db=Depends(fake_db), _slot=Depends(main._pc_writer_slot)):
+        trace.append(("handler", main._pc_writer_gate()._value))
+        raise HTTPException(status_code=409, detail="the handler ended by raising")
+
+    def settle():
+        for _ in range(100):
+            if any(k == "close" for k, _v in trace):
+                return
+            time.sleep(0.02)
+
+    with TestClient(app) as client:
+        assert client.get("/gated").status_code == 409
+        settle()
+        assert trace == [("open", 3), ("handler", 3), ("close", 3)], trace
+        trace.clear()
+        assert client.get("/reversed").status_code == 409
+        settle()
+        assert trace == [("open", 4), ("handler", 3), ("close", 4)], trace   # the defect, on the reversed order
+        trace.clear()
+        assert client.get("/gated").status_code == 409                       # every slot was returned
+        settle()
+        assert trace == [("open", 3), ("handler", 3), ("close", 3)], trace
+
+
+def test_the_lease_release_and_the_ack_run_on_the_reserved_pool():
+    """r10 M3 (2026-09-13), on the engines and derived from the app's routes: the two requests that END a
+    writer's wait -- the delivery-lease release and the events ack -- take their session from a RESERVED
+    pool (its own engine, 3 + 2) that no other request can occupy, so however many requests hold or queue
+    for the main pool's connections, the release always finds one; they are exactly the two routes on it,
+    and both delete leases."""
+    assert database.release_engine is not database.engine
+    assert database.release_engine.url == database.engine.url
+    assert database.release_engine.pool.size() == 3 and database.release_engine.pool._max_overflow == 2
+    assert database.engine.pool.size() == 20 and database.engine.pool._max_overflow == 10
+    assert main.get_release_db is database.get_release_db
+    assert database.release_session.kw["bind"] is database.release_engine
+    assert database.async_session.kw["bind"] is database.engine
+    on_reserved = {}
+    for route in main.app.routes:
+        fn = getattr(route, "endpoint", None)
+        if fn is None or getattr(fn, "__module__", None) != main.__name__:
+            continue
+        for p in inspect.signature(fn).parameters.values():
+            if getattr(p.default, "dependency", None) is database.get_release_db:
+                on_reserved[fn.__name__] = fn
+    assert set(on_reserved) == {"internal_pc_lease_release", "internal_pc_events_ack"}, sorted(on_reserved)
+    for fn in on_reserved.values():
+        assert "DELETE FROM pc_delivery_leases" in inspect.getsource(fn)
+    src = inspect.getsource(database.get_release_db)
+    assert "release_session()" in src and "await session.close()" in src
+    assert "release_session = async_sessionmaker(release_engine" in inspect.getsource(database)

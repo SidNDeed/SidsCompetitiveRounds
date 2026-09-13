@@ -16,6 +16,29 @@ def _one_line_print(*args, **kwargs):
 
 
 print = _one_line_print
+import logging as _gen_logging
+import sys as _gen_sys
+import traceback as _gen_traceback
+
+
+class _OneLineFormatter(_gen_logging.Formatter):
+    """The logging half of the one-line rule (r10 M4): discord.py logs a
+    command's exception -- the exception text quotes the member's argument --
+    and the asyncio logger, warnings and any library log through the root
+    logger; every record is flattened AFTER its traceback is rendered."""
+
+    def format(self, record):
+        return _gen_logging.Formatter.format(self, record).replace("\r", " ").replace("\n", " ")
+
+
+def _one_line_excepthook(exc_type, exc, tb):
+    """The interpreter's last writer of stderr, flattened like the rest."""
+    _one_line_print("".join(_gen_traceback.format_exception(exc_type, exc, tb)),
+                    file=_gen_sys.stderr, flush=True)
+
+
+_gen_sys.excepthook = _one_line_excepthook
+_gen_logging.captureWarnings(True)
 # This process's generation: the deploy train's witness binds the ready line to
 # the process that printed it -- a boot line after the last ready line in the
 # log tail is a newer process that has not reached ready (r8 M3). In the
@@ -13108,4 +13131,8 @@ async def cmd_gambler(ctx):
 
 if __name__ == "__main__":
     if not DISCORD_TOKEN: print("ERROR: Set DISCORD_TOKEN"); exit(1)
-    bot.run(DISCORD_TOKEN)
+    # The ROOT logger's handler (not only discord.py's own) with the one-line
+    # formatter, so nothing logged by any library reaches the container's
+    # stderr as more than one line (r10 M4).
+    bot.run(DISCORD_TOKEN, log_formatter=_OneLineFormatter(
+        "[{asctime}] [{levelname:<8}] {name}: {message}", "%Y-%m-%d %H:%M:%S", style="{"), root_logger=True)

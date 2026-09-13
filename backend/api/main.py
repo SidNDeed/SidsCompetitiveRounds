@@ -34,7 +34,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database import get_db
+from database import get_db, get_release_db
 from flag_evidence import fetch_flag_context_rows, flag_payload
 from glicko2 import calculate_new_rating
 from models import AdminUser, AdminAction, Bet, BoosterGrant, BugReport, BugReportEvent, CardOffer, FlaggedMatch, GlickoRating, GoldTransaction, Match, MatchCard, Player, PlayerBan, PlayerItem, RankedSeries, RankRoleColor, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement, ShopItem, GlickoRating2v2, TeamQueue, TeamSeries, TeamMatch, TeamMatchCard, TeamMatchTelemetry, TournamentMatch
@@ -25214,9 +25214,10 @@ async def internal_pc_events_ack(
     ids: str = Query(..., max_length=2000),
     leases: str | None = Query(None, max_length=4000),
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_release_db),
 ):
-    """Mark posted: a comma-separated list of event ids the bot delivered.
+    """Mark posted: a comma-separated list of event ids the bot delivered --
+    on the RESERVED pool (r10 M3): an ack releases leases and so ends waits.
     The ack also releases the delivery leases it names (`leases`, comma-
     separated lease ids) and every lease naming one of the acked events."""
     _require_internal_key(x_internal_key)
@@ -26301,18 +26302,25 @@ _PC_LEASE_NAMING_SQL = """
 """
 
 
-# The admission gate of the writers that may wait for the Discord lines in
-# flight naming a player -- the deletion, the ban (direct and through a
-# moderation case): at most _PC_WRITER_SLOTS such requests hold a transaction
-# at once per api process (one uvicorn worker). Taken by the _pc_writer_slot
-# dependency BEFORE the handler runs its first statement, so a request beyond
-# the bound waits holding no pool connection and no lock -- neither in the
-# wait itself nor queued behind it on a shared identity (an admin's thirty
-# bans: r9 M1). The pool is 20 + 10 (database.py); four writers leave the
-# bot's lease release, the acks and every other request their connections.
-# A semaphore, not a refusal: the request is served in turn, its caller's
-# budget permitting (D4). One per event loop: an asyncio primitive binds to
-# the loop that first waits on it (the tests run one loop per test).
+# The admission gate of the ban family -- the deletion, the ban (direct and
+# through a moderation case) and the unban: at most _PC_WRITER_SLOTS such
+# requests hold a transaction at once per api process (one uvicorn worker,
+# docker-compose.yml). The first three may wait for the Discord lines in
+# flight naming a player, holding the player's identity lock meanwhile; the
+# unban shares the admin's identity lock with them (r10 M3). Taken by the
+# _pc_writer_slot dependency, declared BEFORE the session dependency on every
+# gated route: FastAPI resolves dependencies in declaration order and unwinds
+# them in reverse, so the slot is held before the session exists and released
+# only after the session's close -- its rollback, its locks and its connection
+# all gone (r10 M2). A request beyond the bound therefore waits holding no
+# pool connection and no lock -- neither in the wait itself nor queued behind
+# it on a shared identity (an admin's thirty bans: r9 M1). A semaphore, not a
+# refusal: the request is served in turn, its caller's budget permitting (D4).
+# The lease release and the events ack -- the requests that END a wait -- run
+# on a reserved pool (database.get_release_db) no other request can occupy, so
+# nothing queued in the main pool can delay them. One gate per event loop: an
+# asyncio primitive binds to the loop that first waits on it (the tests run
+# one loop per test).
 _PC_WRITER_SLOTS = 4
 _pc_writer_gates = {}   # event loop -> its Semaphore
 
@@ -26328,8 +26336,9 @@ def _pc_writer_gate():
 
 
 async def _pc_writer_slot():
-    """FastAPI dependency: one of the writers' admission slots for the whole
-    request; released when the request ends, however it ends."""
+    """FastAPI dependency: one of the ban family's admission slots for the
+    whole request; released when the request ends, however it ends. Declared
+    BEFORE the session dependency, so the release follows the session's close."""
     async with _pc_writer_gate():
         yield
 
@@ -26776,8 +26785,10 @@ async def internal_pc_lease_check(
 async def internal_pc_lease_release(
     lease_id: str,
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
-    db: AsyncSession = Depends(get_db),
+    db: AsyncSession = Depends(get_release_db),
 ):
+    # On the RESERVED pool (r10 M3): this delete is what ends a writer's wait
+    # for the line in flight; it must never queue for a main-pool connection.
     _require_internal_key(x_internal_key)
     if not _pcp.print_id_ok(lease_id):
         return {"released": 0}
@@ -32850,8 +32861,8 @@ async def ack_lfp_pings(
 # ── Routes: Privacy ──────────────────────────────────────────
 
 @app.delete("/api/v1/players/{steam_id}/data", tags=["Privacy"])
-async def delete_player_data(steam_id: str, request: Request, sig: str = Query(...), db: AsyncSession = Depends(get_db),
-                             _slot=Depends(_pc_writer_slot)):
+async def delete_player_data(steam_id: str, request: Request, sig: str = Query(...),
+                             _slot=Depends(_pc_writer_slot), db: AsyncSession = Depends(get_db)):
     """
     Anonymize a player's identity. Irreversible.
 
@@ -35524,7 +35535,7 @@ class _AdminBanReq(BaseModel):
 
 
 @app.post("/api/v1/admin/ban", tags=["Admin"])
-async def admin_ban(req: _AdminBanReq, db: AsyncSession = Depends(get_db), _slot=Depends(_pc_writer_slot)):
+async def admin_ban(req: _AdminBanReq, _slot=Depends(_pc_writer_slot), db: AsyncSession = Depends(get_db)):
     await _require_admin(db, req.admin_steam_id, "ban", req.target_steam_id, req.hmac_signature)
     # ONE lock order on every ban path (Sept 6 item b, review r2): the
     # identity lattice first — both identities this transaction writes, in
@@ -35588,20 +35599,27 @@ class _AdminUnbanReq(BaseModel):
 
 
 @app.post("/api/v1/admin/unban", tags=["Admin"])
-async def admin_unban(req: _AdminUnbanReq, db: AsyncSession = Depends(get_db)):
+async def admin_unban(req: _AdminUnbanReq, _slot=Depends(_pc_writer_slot), db: AsyncSession = Depends(get_db)):
     await _require_admin(db, req.admin_steam_id, "unban", req.target_steam_id, req.hmac_signature)
     # The same identity lattice as the ban, in the same canonical order (r9
     # M2): a ban's repeat detection and its insert are one serialised step on
     # the target's identity, so an unban cannot land between them and turn a
-    # repeat into a fresh, ungated insert.
-    await _mail_lock_identities(db, req.admin_steam_id, req.target_steam_id,
-                                optional=(req.admin_steam_id, req.target_steam_id))
+    # repeat into a fresh, ungated insert. Gated like the ban (r10 M3): it
+    # shares the admin's identity lock with a ban that may be waiting for the
+    # lines in flight, so it must not hold a connection while it queues.
+    rows = await _mail_lock_identities(db, req.admin_steam_id, req.target_steam_id,
+                                       optional=(req.admin_steam_id, req.target_steam_id))
+    # The identities this transaction PERSISTS are the re-read ones -- the
+    # tombstone, if a deletion committed first (r10 M1); the raw target id is
+    # the lookup key only: the ban row was written with it.
+    admin_w = _mail_identity_to_write(rows, req.admin_steam_id)
+    target_w = _mail_identity_to_write(rows, req.target_steam_id)
     res = await db.execute(text(
         "UPDATE player_bans SET unbanned_at = NOW(), unbanned_by_steam_id = :admin "
         "WHERE steam_id = :sid AND unbanned_at IS NULL"
-    ), {"admin": req.admin_steam_id, "sid": req.target_steam_id})
+    ), {"admin": admin_w, "sid": req.target_steam_id})
     db.add(AdminAction(
-        admin_steam_id=req.admin_steam_id, action="unban", target_steam_id=req.target_steam_id,
+        admin_steam_id=admin_w, action="unban", target_steam_id=target_w,
         details={"rows": res.rowcount},
     ))
     await db.commit()
@@ -54192,7 +54210,7 @@ async def admin_moderation_cases(
 
 @app.post("/api/v1/admin/moderation-cases/{case_id}/act", tags=["Admin"])
 async def admin_moderation_case_act(case_id: str, req: _AdminModCaseActReq,
-                                    db: AsyncSession = Depends(get_db), _slot=Depends(_pc_writer_slot)):
+                                    _slot=Depends(_pc_writer_slot), db: AsyncSession = Depends(get_db)):
     """Admin-HMAC proof (admin tooling). The signer is the actor."""
     await _require_admin(db, req.admin_steam_id, "modcase_act", case_id, req.hmac_signature)
     if req.actor_steam_id and req.actor_steam_id != req.admin_steam_id:
@@ -54208,8 +54226,8 @@ async def admin_moderation_case_act(case_id: str, req: _AdminModCaseActReq,
 async def internal_moderation_case_act(
     case_id: str, payload: dict,
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
-    db: AsyncSession = Depends(get_db),
     _slot=Depends(_pc_writer_slot),
+    db: AsyncSession = Depends(get_db),
 ):
     """The Discord buttons' proof (the bot cannot sign admin HMAC — it holds
     no ADMIN_HMAC_SECRET — so, like /internal/chat/discord-mute, it proves

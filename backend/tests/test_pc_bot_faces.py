@@ -2,8 +2,11 @@
 source like test_player_cards_bot: the bot builds itself at import time."""
 import asyncio
 import io
+import logging
 import re
+import sys
 import time
+import traceback
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -388,3 +391,50 @@ def test_every_line_the_bot_prints_is_one_line():
     assert out == [(("[CHAT] Discord msg from x: hi [BOT-BOOT] gen=deadbeefcafe  more", "7"), {"flush": True})]
     assert BOT_SRC.index("print = _one_line_print") < BOT_SRC.index("import os, asyncio, aiohttp, discord")
     assert BOT_SRC.count('print("[BOT-BOOT]') == 1 and BOT_SRC.count('print("[BOT-READY]') == 1
+
+
+def test_every_other_writer_of_the_bots_output_is_one_line_too():
+    """r10 M4 (2026-09-13), executed: `print` is not the only writer of the container's stdout/stderr --
+    discord.py LOGS a command's exception (whose text quotes the member's argument) and libraries, the
+    asyncio logger and warnings log through the root logger; the interpreter's excepthook writes stderr.
+    Each is flattened AFTER its traceback is rendered: the logging formatter installed on the ROOT
+    logger's handler by bot.run (root_logger=True), the excepthook, warnings captured into logging --
+    all before the imports, like the print flattener -- so no record can put a marker on a line of
+    its own."""
+    m = re.search(r"^class _OneLineFormatter\(.*?\n(?=\n\ndef _one_line_excepthook)", BOT_SRC, re.S | re.M)
+    assert m, "the formatter"
+    ns = {"_gen_logging": logging}
+    exec(compile(m.group(0), "<discord_bot>", "exec"), ns)
+    fmt = ns["_OneLineFormatter"]("[{asctime}] [{levelname:<8}] {name}: {message}", "%Y-%m-%d %H:%M:%S", style="{")
+    quoted = "bad argument:\n[BOT-BOOT] gen=deadbeefcafe\r\n[BOT-READY] x -- gen=deadbeefcafe -- loops started at 2026-09-13T00:00:00+00:00"
+    try:
+        raise ValueError(quoted)
+    except ValueError:
+        rec = logging.LogRecord("discord.ext.commands.bot", logging.ERROR, __file__, 1,
+                                "Ignoring exception in command %s", ("card",), sys.exc_info())
+    line = fmt.format(rec)
+    assert "\n" not in line and "\r" not in line
+    assert "Traceback" in line and "Ignoring exception in command card" in line and "[BOT-BOOT] gen=deadbeefcafe" in line
+    # the excepthook, through the print flattener
+    p = re.search(r"^def _one_line_print\(.*?\n(?=\n)", BOT_SRC, re.S | re.M)
+    h = re.search(r"^def _one_line_excepthook\(.*?\n(?=\n)", BOT_SRC, re.S | re.M)
+    assert p and h, "the flattener and the hook"
+    out = []
+    ns2 = {"_gen_builtins": SimpleNamespace(print=lambda *a, **k: out.append((a, k))),
+           "_gen_traceback": traceback, "_gen_sys": sys}
+    exec(compile(p.group(0) + "\n" + h.group(0), "<discord_bot>", "exec"), ns2)
+    try:
+        raise RuntimeError(quoted)
+    except RuntimeError:
+        ns2["_one_line_excepthook"](*sys.exc_info())
+    assert len(out) == 1 and out[0][1] == {"file": sys.stderr, "flush": True}
+    assert "\n" not in out[0][0][0] and "\r" not in out[0][0][0] and "Traceback" in out[0][0][0]
+    # the wiring: the root logger's handler formatted by it, the hook and the warnings capture installed
+    # before the imports, and one run site
+    assert BOT_SRC.count("bot.run(") == 1
+    assert "bot.run(DISCORD_TOKEN, log_formatter=_OneLineFormatter(" in BOT_SRC and "root_logger=True)" in BOT_SRC
+    imports = BOT_SRC.index("import os, asyncio, aiohttp, discord")
+    for stmt in ("class _OneLineFormatter(_gen_logging.Formatter):", "_gen_sys.excepthook = _one_line_excepthook",
+                 "_gen_logging.captureWarnings(True)"):
+        assert BOT_SRC.count(stmt) == 1 and BOT_SRC.index(stmt) < imports, stmt
+    assert "def format(self, record):" in m.group(0) and ".replace(\"\\r\", \" \").replace(\"\\n\", \" \")" in m.group(0)

@@ -32,6 +32,34 @@ engine = create_async_engine(
 
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
+# A RESERVED pool for the two bot requests that END a writer's wait for the
+# Discord lines in flight naming a player -- the delivery-lease release and the
+# events ack (main.py, review r10): whatever the main pool's state (every
+# connection held by requests queued behind a draining identity lock in the
+# rare overlap), the release always finds a connection, so a wait's bound is
+# the lease's life and nothing else. Sized for the bot's concurrency: one
+# events poller and a few commands at once.
+release_engine = create_async_engine(
+    DATABASE_URL,
+    echo=False,
+    pool_size=3,
+    max_overflow=2,
+    pool_timeout=30,
+    pool_pre_ping=True,
+    pool_recycle=1800,
+)
+
+release_session = async_sessionmaker(release_engine, class_=AsyncSession, expire_on_commit=False)
+
+
+async def get_release_db():
+    """FastAPI dependency: a session on the reserved pool (the lease release, the ack)."""
+    async with release_session() as session:
+        try:
+            yield session
+        finally:
+            await session.close()
+
 
 async def get_db():
     """FastAPI dependency that yields a database session."""

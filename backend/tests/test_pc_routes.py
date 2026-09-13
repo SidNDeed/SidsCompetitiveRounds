@@ -457,7 +457,7 @@ def test_the_unban_takes_the_identity_lattice_before_it_writes(monkeypatch):
         return None
     monkeypatch.setattr(main, "_require_admin", _admin_ok)
     db = _UnbanDb({})
-    res = _run(main.admin_unban(main._AdminUnbanReq(admin_steam_id="9", target_steam_id="1", hmac_signature="x"), db))
+    res = _run(main.admin_unban(main._AdminUnbanReq(admin_steam_id="9", target_steam_id="1", hmac_signature="x"), db=db))
     assert res == {"status": "unbanned", "steam_id": "1", "rows": 1}
     assert [p["sid"] for sql, p in db.log if "pg_advisory_xact_lock(hashtext(:sid))" in sql] == ["1", "9"]
     assert _idx(db, "pg_advisory_xact_lock(hashtext(:sid))") < _idx(db, "UPDATE player_bans SET unbanned_at")
@@ -1296,3 +1296,35 @@ def test_the_card_and_its_preview_read_one_snapshot():
     assert "snapshot_id: int | None = Query(None, ge=1)" in prev
     assert "AND m.snapshot_id = COALESCE(CAST(:snap AS bigint), (SELECT MAX(id) FROM pc_pool_snapshots))" in prev
     assert '{"pid": player_ref, "snap": snapshot_id}' in prev
+
+
+@pytest.mark.parametrize("gone, lookups, admin_w, target_w", [
+    ("target", ["pid-1", None], "9", "deleted:abc"),   # the target's deletion committed first
+    ("admin", [None, "pid-9"], "deleted:abc", "1"),    # the admin's did
+])
+def test_the_unban_persists_the_identities_the_lattice_re_read(monkeypatch, gone, lookups, admin_w, target_w):
+    """r10 M1 (2026-09-13), executed: the identities the unban PERSISTS are the ones its locked re-read
+    returned -- a participant whose deletion committed before the unban's lock is written as the
+    tombstone, on the ban row's unbanned_by and on the audit row -- while the raw target id stays the
+    UPDATE's lookup key (the ban row was written with it) and the answer to the caller. Either
+    participant may be the deleted one (the lookups run in canonical order: the target "1", then the
+    admin "9")."""
+    async def _admin_ok(*a, **k):
+        return None
+    monkeypatch.setattr(main, "_require_admin", _admin_ok)
+    db = _UnbanDb({"SELECT id FROM players WHERE steam_id": list(lookups),
+                   "SELECT id, steam_id, deleted_at FROM players WHERE id = :pid": [
+                       [{"id": [p for p in lookups if p][0], "steam_id": "deleted:abc", "deleted_at": "2026-09-13"}]]})
+    res = _run(main.admin_unban(main._AdminUnbanReq(admin_steam_id="9", target_steam_id="1", hmac_signature="x"), db=db))
+    assert res == {"status": "unbanned", "steam_id": "1", "rows": 1}
+    update = [p for sql, p in db.log if "UPDATE player_bans SET unbanned_at" in sql]
+    assert update == [{"admin": admin_w, "sid": "1"}], update
+    assert len(db.added) == 1 and (db.added[0].admin_steam_id, db.added[0].target_steam_id) == (admin_w, target_w)
+    assert db.added[0].action == "unban" and db.committed == 1
+    assert _idx(db, "pg_advisory_xact_lock(hashtext(:sid))") < _idx(db, "FOR NO KEY UPDATE") < _idx(db, "UPDATE player_bans")
+    src = inspect.getsource(main.admin_unban)
+    assert "rows = await _mail_lock_identities(" in src
+    assert src.index("_mail_identity_to_write(rows, req.admin_steam_id)") < src.index("UPDATE player_bans")
+    assert src.index("_mail_identity_to_write(rows, req.target_steam_id)") < src.index("UPDATE player_bans")
+    assert '{"admin": admin_w, "sid": req.target_steam_id}' in src
+    assert "admin_steam_id=admin_w, action=\"unban\", target_steam_id=target_w" in src
