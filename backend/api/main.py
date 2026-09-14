@@ -25212,13 +25212,16 @@ async def internal_pc_events_pending(
 # The requests that END a writer's wait -- the delivery-lease release and the
 # events ack -- run on the RESERVED pool (database.release_engine, r10 M3)
 # and are admitted by a slot of exactly that pool's size (review r12): an
-# admitted request never waits for a connection, and a request beyond the
-# pool's size waits HERE holding nothing -- never at the pool's timeout --
-# whatever its client did meanwhile (a client timeout, a disconnect, a bot
-# restart: the handler runs on regardless, so the bound is held by the
-# process that holds the connections, not by the issuer). The writer's bound
-# stays the lease's own life (`_pc_lease_drain`); a release that lands
-# earlier ends the wait earlier.
+# admitted request never waits BEHIND ANOTHER CHECKOUT of the pool and never
+# reaches the pool's timeout -- a request beyond the pool's size waits HERE
+# holding nothing -- whatever its client did meanwhile (a client timeout, a
+# disconnect, a bot restart: the handler runs on regardless, so the bound is
+# held by the process that holds the connections, not by the issuer). What
+# admission does NOT remove (review r13): a connection's own validation --
+# the pre-ping, a recycle, a reconnection after an invalidation -- can still
+# delay an admitted request or fail it; that is the database's latency, not
+# a queue. The writer's bound stays the lease's own life (`_pc_lease_drain`);
+# a release that lands earlier ends the wait earlier.
 # Declared here, ahead of the ack route -- the first route that names it.
 _PC_RELEASE_SLOTS = RELEASE_POOL_SIZE + RELEASE_POOL_OVERFLOW
 _pc_release_gates = {}   # event loop -> its Semaphore
@@ -26827,8 +26830,10 @@ async def internal_pc_lease_release(
     # On the RESERVED pool (r10 M3): this delete is what ends a writer's wait
     # for the line in flight; it must never queue for a main-pool connection.
     # Admitted by _pc_release_slot (r12): as many in flight as the pool holds,
-    # so it never queues for a reserved connection either -- a request beyond
-    # them waits at the slot holding nothing.
+    # so it never queues behind another checkout of the reserved pool either
+    # and never reaches its timeout -- a request beyond them waits at the slot
+    # holding nothing. Its connection's own validation (pre-ping, recycle,
+    # reconnection) can still delay or fail it (r13).
     _require_internal_key(x_internal_key)
     if not _pcp.print_id_ok(lease_id):
         return {"released": 0}
@@ -35243,6 +35248,20 @@ async def _is_admin(db: AsyncSession, steam_id: str) -> bool:
     return r.scalar_one_or_none() is not None
 
 
+def _steam_id_or_422(value, field: str) -> str:
+    """A body-sourced steam id the ban family persists -- the ban row's key and
+    the audit row's target, both String(20): digits only, at most twenty
+    (review r13). Refused 422 BEFORE the signature check, any read, any lock
+    and the ban-rate gate: an identifier the audit row cannot hold would make
+    the best-effort audit insert fail silently, and the gate's once-per-window
+    alert reads that row back -- every refusal would alert again. Exact form,
+    no stripping: the signature covers the string as sent."""
+    # [0-9] not \d -- \d matches Unicode digits, which are not steam ids.
+    if not isinstance(value, str) or not _re.fullmatch(r"[0-9]{1,20}", value):
+        raise HTTPException(status_code=422, detail=f"{field} must be a numeric steam id")
+    return value
+
+
 async def _require_admin(db: AsyncSession, admin_steam_id: str, action: str, target: str, signature) -> None:
     if not await _is_admin(db, admin_steam_id):
         raise HTTPException(403, "Not an admin")
@@ -35583,6 +35602,7 @@ class _AdminBanReq(BaseModel):
 
 @app.post("/api/v1/admin/ban", tags=["Admin"])
 async def admin_ban(req: _AdminBanReq, _slot=Depends(_pc_writer_slot), db: AsyncSession = Depends(get_db)):
+    _steam_id_or_422(req.target_steam_id, "target_steam_id")   # before the signature, the reads, the locks and the gate (r13)
     await _require_admin(db, req.admin_steam_id, "ban", req.target_steam_id, req.hmac_signature)
     # ONE lock order on every ban path (Sept 6 item b, review r2): the
     # identity lattice first — both identities this transaction writes, in
@@ -35655,6 +35675,7 @@ class _AdminUnbanReq(BaseModel):
 
 @app.post("/api/v1/admin/unban", tags=["Admin"])
 async def admin_unban(req: _AdminUnbanReq, _slot=Depends(_pc_writer_slot), db: AsyncSession = Depends(get_db)):
+    _steam_id_or_422(req.target_steam_id, "target_steam_id")   # the same column, the same refusal (r13)
     await _require_admin(db, req.admin_steam_id, "unban", req.target_steam_id, req.hmac_signature)
     # The same identity lattice as the ban, in the same canonical order (r9
     # M2): a ban's repeat detection and its insert are one serialised step on

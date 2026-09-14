@@ -1281,6 +1281,16 @@ def test_the_slot_outlives_the_session_on_the_real_dependency_stack():
         trace.append(("handler", main._pc_release_gate()._value))
         return {"released": 1}
 
+    @app.get("/release_409")
+    async def release_409(_slot=Depends(main._pc_release_slot), db=Depends(fake_release_db)):
+        trace.append(("handler", main._pc_release_gate()._value))
+        raise HTTPException(status_code=409, detail="the handler ended by raising")
+
+    @app.get("/release_fails")
+    async def release_fails(_slot=Depends(main._pc_release_slot), db=Depends(fake_release_db)):
+        trace.append(("handler", main._pc_release_gate()._value))
+        raise RuntimeError("the handler failed")
+
     def settle():
         for _ in range(100):
             if any(k == "close" for k, _v in trace):
@@ -1307,6 +1317,18 @@ def test_the_slot_outlives_the_session_on_the_real_dependency_stack():
         assert client.get("/release_reversed").status_code == 200
         settle()
         assert trace == [("open", 5), ("handler", 4), ("close", 5)], trace   # the defect, on the reversed order
+        trace.clear()
+        assert client.get("/release_409").status_code == 409                # an HTTPException (r13)
+        settle()
+        assert trace == [("open", 4), ("handler", 4), ("close", 4)], trace
+        trace.clear()
+        assert client.get("/release_fails").status_code == 500              # an arbitrary handler exception (r13)
+        settle()
+        assert trace == [("open", 4), ("handler", 4), ("close", 4)], trace
+        trace.clear()
+        assert client.get("/release").status_code == 200                    # every reserved slot was returned
+        settle()
+        assert trace == [("open", 4), ("handler", 4), ("close", 4)], trace
         trace.clear()
         assert client.get("/reversed").status_code == 409
         settle()
@@ -1417,3 +1439,22 @@ def test_the_lease_release_and_the_ack_run_on_the_reserved_pool():
     assert "async with _pc_release_gate():" in inspect.getsource(main._pc_release_slot)
     bot_src = (Path(__file__).resolve().parents[1] / "discord_bot.py").read_text(encoding="utf-8")
     assert "_pc_release_gate" not in bot_src and "_PC_RELEASE_SLOTS" not in bot_src
+
+
+def test_the_gates_forget_a_closed_loop_when_the_next_loop_takes_its_own():
+    """r13 (2026-09-13), executed: a gate is bound to the loop that first waited on it (one entry per loop); a
+    closed loop's entry is pruned when a later loop takes its own gate -- the tests run one loop per test, and a
+    process that re-created its loop must not keep a dead gate. Both gates: the reserved pool's and the ban
+    family's."""
+    for gates, gate in ((main._pc_release_gates, main._pc_release_gate), (main._pc_writer_gates, main._pc_writer_gate)):
+        gates.clear()
+
+        async def touch():
+            loop = asyncio.get_running_loop()
+            assert gate() is gate() is gates[loop] and isinstance(gates[loop], asyncio.Semaphore)
+            return loop
+        first = asyncio.run(touch())
+        assert first.is_closed() and list(gates) == [first]            # closed, still listed until the next loop
+        second = asyncio.run(touch())
+        assert second is not first and list(gates) == [second], gates   # the closed loop's entry is gone
+        gates.clear()
