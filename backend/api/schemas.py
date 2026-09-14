@@ -801,6 +801,11 @@ class HealthResponse(BaseModel):
     # design: the two boxes are SUPPOSED to disagree on it (Steam pictures
     # v2 §9), which is why the release train asserts it per role.
     pc_steam_sweep: str | None = None
+    # pc_pool_rule: the card pool's membership rule this build carries
+    # (main._PC_POOL_RULE; 2 = players who have run the mod). A code
+    # constant, so the release train can tell the new build from the old one
+    # on a batch that adds no route, and equal on both boxes by construction.
+    pc_pool_rule: int | None = None
     # pc_steam_render: BOTH roles — `ok` once this box composited a stored
     # Steam picture into a face through its own face path (v3 §9).
     pc_steam_render: str | None = None

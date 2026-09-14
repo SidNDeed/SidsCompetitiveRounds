@@ -5542,11 +5542,14 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="ok", database="connected", replica=IS_REPLICA,
                               pc_renderer_fp=_pc_renderer_fp(), pc_raqm=_pc_raqm(),
                               pc_steam_sweep=_pc_steam_sweep_word(),
-                              pc_steam_render=_pc_steam_render_word())
+                              pc_steam_render=_pc_steam_render_word(),
+                              pc_pool_rule=int(_PC_POOL_RULE))
     except Exception:
         # Report the role even when the database is unreachable: "which box is
         # this" is exactly the question being asked when things are degraded.
-        return HealthResponse(status="degraded", database="disconnected", replica=IS_REPLICA)
+        # The pool rule is a code constant and answers the same question.
+        return HealthResponse(status="degraded", database="disconnected", replica=IS_REPLICA,
+                              pc_pool_rule=int(_PC_POOL_RULE))
 
 
 LATEST_MOD_VERSION = "1.40.3"
@@ -23795,6 +23798,7 @@ async def get_inventory(steam_id: str, db: AsyncSession = Depends(get_db)):
 # ═══════════════════════════════════════════════════════════════════════════
 import player_cards as _pc
 import pc_portrait as _pcp
+import pc_signature as _pcsig
 try:
     import pc_steam as _pcs   # imports pc_face (Pillow): absent → the Steam sweep never starts, everything else boots
 except Exception:
@@ -23806,6 +23810,27 @@ except Exception as _pcf_ex:  # Pillow / regex / fonts missing: face routes answ
     print(f"[PC-FACE] renderer unavailable: {_pcf_ex}")
 
 _PC_POOL_MIN_MATCHES = 5   # the leaderboard's own default: board_rank means "rank on the board as shown"
+
+# The pool rule, versioned (Sept 14 batch, S1). A snapshot records the rule it
+# was taken under (pc_pool_snapshots.rule, migration 316); the janitor takes
+# a fresh one as soon as the latest predates this constant, so a rule change
+# reaches the pool at the deploy and not at the next 00:05 UTC. Bump it with
+# every change to the membership text below.
+#   1  every registered, non-banned player (Sept 10-13)
+#   2  only players who have run the mod (mod_seen_at set) and are not banned
+_PC_POOL_RULE = 2
+
+# Pool membership, ONE text for the snapshot's pool CTE and the open's live
+# re-check (a subject the snapshot admitted and the live text refuses is
+# re-rolled): alias `p` is the players row. `mod_seen_at` is the set-once
+# "has ever run the mod" stamp (bug #78); the players table also holds every
+# opponent met in a lobby, and a card of someone who never ran the mod is a
+# card nobody asked to be on (product owner, 2026-09-13).
+_PC_POOL_MEMBER_SQL = """
+           p.deleted_at IS NULL
+           AND p.mod_seen_at IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)
+"""
 
 # board_rank (c3 F): eligibility is the LIVE leaderboard's own count — every
 # completed series, an invalidated one included, plus legacy matches — with
@@ -23819,8 +23844,7 @@ _PC_SNAPSHOT_SELECT_SQL = """
           FROM players p
           LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
           LEFT JOIN shop_items si ON si.id = p.active_title_id
-         WHERE p.deleted_at IS NULL
-           AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)
+         WHERE """ + _PC_POOL_MEMBER_SQL + """
     ),
     series AS (
         SELECT s.player_id, SUM(s.won) AS wins, SUM(s.lost) AS losses, COUNT(*) AS total
@@ -23896,8 +23920,7 @@ _PC_MEMBER_INSERT_SQL = """
 
 _PC_LIVE_POOL_CHECK_SQL = """
     SELECT 1 FROM players p
-     WHERE p.id = CAST(:pid AS uuid) AND p.deleted_at IS NULL
-       AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)
+     WHERE p.id = CAST(:pid AS uuid) AND """ + _PC_POOL_MEMBER_SQL + """
 """
 
 # The rolled subject's identity lock in its SHARED, non-blocking form (#612),
@@ -23955,7 +23978,9 @@ _PC_PRINT_FACE_SELECT = """
            pr.minted_at, pr.snapshot_id, pr.rarity, pr.foil, pr.signed, pr.pool_rank, pr.rating,
            pr.peak_rating, pr.board_rank, pr.series_wins, pr.series_losses, pr.top_card, pr.title,
            pr.source, pr.pack_id, pr.slot, pr.discarded_at, pr.discard_shards,
-           s.display_name AS subject_name, """ + _pc_portrait_resolve_cols("s") + """
+           s.display_name AS subject_name, """ + _pc_portrait_resolve_cols("s") + """,
+           (SELECT array_agg(si.sku ORDER BY si.sku) FROM shop_items si
+             WHERE si.kind = 'nametag' AND si.id = ANY(s.nametag_style_ids)) AS subject_nametag_skus
       FROM pc_prints pr
       JOIN pc_cards c ON c.id = pr.card_id
       JOIN players s ON s.id = c.subject_player_id
@@ -24142,8 +24167,9 @@ async def _pc_take_snapshot(db: AsyncSession, *, reason: str) -> dict:
     colors = await _rank_colors(db)
     pmap, pmap2, pmapf = await _podium_maps_for(db, (r["title_sku"] for r in rows))
     snap_id = (await db.execute(text(
-        "INSERT INTO pc_pool_snapshots (member_count) VALUES (CAST(:n AS integer)) RETURNING id"),
-        {"n": len(rows)})).scalar_one()
+        "INSERT INTO pc_pool_snapshots (member_count, rule) "
+        "VALUES (CAST(:n AS integer), CAST(:rule AS integer)) RETURNING id"),
+        {"n": len(rows), "rule": int(_PC_POOL_RULE)})).scalar_one()
     params = []
     for r in rows:
         rating = _pc_num(r["rating"])
@@ -24176,17 +24202,23 @@ async def _pc_take_snapshot(db: AsyncSession, *, reason: str) -> dict:
 
 
 async def _pc_snapshot_due(db: AsyncSession):
-    """'first' when no snapshot exists, 'daily' when the last one predates
-    today's 00:05 UTC and that time has passed, else None — from the DB
-    clock and the durable MAX(taken_at), so it is restart-safe."""
+    """'first' when no snapshot exists, 'rule' when the latest one was taken
+    under an older pool rule than _PC_POOL_RULE (the deploy that changed the
+    rule re-takes the pool at its first janitor pass), 'daily' when the last
+    one predates today's 00:05 UTC and that time has passed, else None — from
+    the DB clock and the durable MAX(taken_at) / latest rule, so it is
+    restart-safe."""
     due = (await db.execute(text("""
         SELECT (SELECT MAX(taken_at) FROM pc_pool_snapshots) AS last_at,
+               (SELECT rule FROM pc_pool_snapshots ORDER BY taken_at DESC, id DESC LIMIT 1) AS last_rule,
                now() AS db_now,
                (date_trunc('day', now() AT TIME ZONE 'UTC') + INTERVAL '5 minutes') AT TIME ZONE 'UTC' AS today_at
     """))).mappings().one()
     last_at, db_now, today_at = due["last_at"], due["db_now"], due["today_at"]
     if last_at is None:
         return "first"
+    if int(due["last_rule"] or 0) < int(_PC_POOL_RULE):
+        return "rule"
     if db_now < today_at or last_at >= today_at:
         return None
     return "daily"
@@ -25581,6 +25613,12 @@ def _pc_face_inputs(row, ctx):
     title_hex = (ctx["colors"].get(rank_name) or _rank_fallback_color(rank_name)) if rank_name else None
     band = row["rarity"]
     foil, signed = bool(row["foil"]), bool(row["signed"])
+    # The autograph on a signed print wears the subject's CURRENT shop name
+    # styling (Sept 14 batch, S5): resolved here from the face row's SKU
+    # list into one canonical dict, so it is in the spec — and so in the rev
+    # — for signed prints only; an unsigned print's key does not move when
+    # its subject restyles their name.
+    sign = _pcsig.signature_style(row.get("subject_nametag_skus")) if signed else None
     # (no `unranked` local: the spec's `rating` is None for exactly that case,
     # and the rev is now derived from the spec)
     minted = row["minted_at"]
@@ -25591,7 +25629,7 @@ def _pc_face_inputs(row, ctx):
         "pool_rank": int(row["pool_rank"]),
         "board_rank": int(row["board_rank"]) if row["board_rank"] is not None else None,
         "wins": int(row["series_wins"] or 0), "losses": int(row["series_losses"] or 0),
-        "foil": foil, "signed": signed,
+        "foil": foil, "signed": signed, "sign": sign,
         "edition_label": f"{labels.get('pc.edition', 'Edition')} {int(row['edition_id'])}",
         "minted_on": minted.strftime("%Y-%m-%d") if minted is not None else "",
         "print_short": "#" + str(row["print_id"]).replace("-", "")[:6],
@@ -26267,7 +26305,7 @@ async def _pc_steam_render_probe() -> str:
         labels = (await _pc_face_ctx(db, "en"))["labels"]
     spec = {"band": "common", "name": _pcp.public_render_name(sub["display_name"]) or "", "title": None,
             "subtitle": None, "title_rgb": None, "rating": None, "pool_rank": 1, "board_rank": None,
-            "wins": 0, "losses": 0, "foil": False, "signed": False, "edition_label": "Probe",
+            "wins": 0, "losses": 0, "foil": False, "signed": False, "sign": None, "edition_label": "Probe",
             "minted_on": "", "print_short": "", "top_card": False}
     data = await _pcp.in_pool(_pcf.render_face, spec, labels, pbytes, "card")
     if not data or bytes(data[:8]) != b"\x89PNG\r\n\x1a\n":
@@ -26868,15 +26906,24 @@ async def internal_pc_lease_release(
 async def pc_face_png(print_id: str, rev: str, locale: str, size: str, db: AsyncSession = Depends(get_db)):
     """The public face route (v22 §2.2): read-only and offline. Validation
     before anything else (any other shape → 404, no render, no cache entry);
-    one row read in one snapshot — discarded → 404, computed rev ≠ requested
+    one row read in one snapshot — no row → 404, computed rev ≠ requested
     → 404 (the client re-reads its collection); only then the disk cache,
-    else one shared render. Every 200 is immutable."""
+    else one shared render. Every 200 is immutable.
+
+    A DISCARDED print's face is served like a live one (Sept 14 batch, S3):
+    the print stays in its owner's pack history and binder, stamped, and the
+    picture used to vanish from it the moment the client's cache let go
+    (2026-09-13 feedback, item 4). What ends a face here is the row going —
+    the subject's data deletion removes every print of them — or its rev
+    moving (a ban plates the picture). The bot's internal route and the
+    /pc/card answer keep refusing a discarded print: nothing announces or
+    shows one that is not the owner's own history."""
     key = _pcp.face_key(print_id, rev, locale, size)
     if key is None or (locale != "en" and locale not in _pc_served_locales()):
         raise HTTPException(status_code=404, detail="Not found")
     _pc_require_renderer()
     row = await _pc_face_row(db, print_id)
-    if row is None or row["discarded_at"] is not None:
+    if row is None:
         raise HTTPException(status_code=404, detail="Not found")
     ctx = await _pc_face_ctx(db, locale)
     _rev, data = await _pc_render_face(db, row, ctx, size, want=rev)
@@ -26962,7 +27009,7 @@ async def internal_pc_face_preview(
         "pool_rank": int(member["pool_rank"]),
         "board_rank": int(member["board_rank"]) if member["board_rank"] is not None else None,
         "wins": int(member["series_wins"] or 0), "losses": int(member["series_losses"] or 0),
-        "foil": False, "signed": False,
+        "foil": False, "signed": False, "sign": None,
         "edition_label": labels.get("pc.preview_footer", "Preview"), "minted_on": "", "print_short": "",
         "top_card": bool(member["top_card"]),
     }

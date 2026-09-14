@@ -50,7 +50,7 @@ def _expected_fragments(eco):
         f"Epic {_pct(t['epic'])}, Legendary {_pct(t['legendary'])}.",
         f"Foil (1 in {round(100 / eco['foil_pct'])}) and Signed (1 in {round(100 / eco['signed_pct'])})",
         f"Common {s['common']}, Uncommon {s['uncommon']}, Rare {s['rare']}, Epic {s['epic']}, Legendary {s['legendary']}.",
-        f"Legendary = #{b['legendary']}, Epic #{b['legendary'] + 1}-{b['epic']}, Rare #{b['epic'] + 1}-{b['rare']}, "
+        f"Legendary = #1-{b['legendary']}, Epic #{b['legendary'] + 1}-{b['epic']}, Rare #{b['epic'] + 1}-{b['rare']}, "
         f"Uncommon #{b['rare'] + 1}-{b['uncommon']}, Common #{b['uncommon'] + 1} and below",
     ]
 

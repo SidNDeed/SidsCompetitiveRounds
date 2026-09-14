@@ -88,7 +88,7 @@ namespace CompetitiveRounds
         // ── Player Cards (Sept 12): the Shop > Collection tab, written for the
         // questions the first live pulls raised (what POOL and BOARD mean, why a
         // card says the rank it says, what discarding pays, when Discord posts).
-        private static string CardsIntro => I18n.Tr(@"Player Cards are collectible cards of the people who play here. Every registered player who is not currently banned has a card in the pool; you open packs, keep the cards you like, discard the rest for shards and chase the rare ones. Everything lives under <color=#7FD4FF>Shop > Collection</color>: <b>Open Packs</b>, <b>Binder</b> and <b>Get packs</b>.
+        private static string CardsIntro => I18n.Tr(@"Player Cards are collectible cards of the people who play here. Every player who has run the mod and is not currently banned has a card in the pool; you open packs, keep the cards you like, discard the rest for shards and chase the rare ones. Everything lives under <color=#7FD4FF>Shop > Collection</color>: <b>Open Packs</b>, <b>Binder</b> and <b>Get packs</b>.
 
 <color=#FFD94D><b>THE POOL, EDITIONS AND SNAPSHOTS</b></color>
 
@@ -105,7 +105,7 @@ namespace CompetitiveRounds
 <color=#FFD94D><b>WHAT IS IN A PACK</b></color>
 
 - Each card rolls its band on its own: <color=#8085A0>Common 60%</color>, <color=#4DB861>Uncommon 25%</color>, <color=#408CFA>Rare 11%</color>, <color=#9E52EB>Epic 3.5%</color>, <color=#FFB82E>Legendary 0.5%</color>.
-- The band decides WHO you get: the pool is ordered (players who have played a ranked series first, then by rating), and pool position #1 is the one Legendary card, #2-10 are Epic, #11-20 Rare, #21-40 Uncommon, and everyone past that is Common.
+- The band decides WHO you get: the pool is ordered (players who have played a ranked series first, then by rating), and pool positions #1-2 are the two Legendary cards, #3-10 are Epic, #11-20 Rare, #21-40 Uncommon, and everyone past that is Common.
 - Independently of the band, any card can come out <b>Foil</b> (1 in 200) or <b>Signed</b> (1 in 2,000) - a foil shimmers, a signed card carries the player's autograph.
 - The strip under the buttons shows your last pack, and the Older / Newer buttons page back through every pack you have opened. A card you discarded stays in its pack, stamped DISCARDED.
 
@@ -128,7 +128,7 @@ namespace CompetitiveRounds
 <color=#FFD94D><b>THE PICTURE</b></color>
 
 - The player's own in-game character - body, face, colour and effect - once their PC has sent it. Until then, their Steam profile picture. See <color=#7FD4FF>Card pictures & settings</color>.
-- A Top card badge in the lower-left corner means the snapshot found a card they pick more than any other; its name is on the text block when the picture is not shown.
+- The lower-left corner shows their Top card: the ROUNDS card the snapshot found they pick more than any other. It is drawn in-game from the card itself; cards shown outside the game (Discord) carry a plain badge there instead, and the name is on the text block when the picture is not shown.
 
 <color=#FFD94D><b>THE STATS</b></color>
 

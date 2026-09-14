@@ -39,7 +39,7 @@ class _Rng:
 # ── bands ──
 
 @pytest.mark.parametrize("rank,rarity", [
-    (1, "legendary"), (2, "epic"), (10, "epic"), (11, "rare"), (20, "rare"),
+    (1, "legendary"), (2, "legendary"), (3, "epic"), (10, "epic"), (11, "rare"), (20, "rare"),
     (21, "uncommon"), (40, "uncommon"), (41, "common"), (4818, "common"),
 ])
 def test_band_edges_are_the_fixed_ones(rank, rarity):

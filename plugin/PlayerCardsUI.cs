@@ -57,6 +57,8 @@ namespace CompetitiveRounds
             public GameObject root, actions, btnDiscard, btnDupes;
             public GameObject face, textBlock;   // exactly one of the two is active
             public GameObject faceMarkGO;        // the DISCARDED stamp over a face that is still cached
+            public GameObject topBack, topArt;   // the Top card overlay (Sept 14 batch, C3): the real card art over the badge
+            public Sprite topSprite;             // the art sprite currently set on topArt (a re-set only on change)
             public int bindSeq;                  // v22 section 5.2: a face answer that misses this paints nothing
             public object txtName, txtTitle, txtL1, txtL2, txtL3, txtL4, txtMark, txtSign, btnDiscardTxt, btnDupesTxt, faceMark;
             public ApiClient.PcPrint print;   // the row's CURRENT binding — callbacks read this, never a captured print (#265)
@@ -91,6 +93,7 @@ namespace CompetitiveRounds
         private static string armedPrintId; private static bool armedDupes; private static float armedAt;
         private static bool discardInFlight; private static readonly List<string> discardQueue = new List<string>();
         private static int discardDone, discardShards;
+        private static bool discardRetried;   // the one wait-and-retry a rate-limited copy gets (Sept 14 batch, C2)
         // info
         private static object txtInfo;
         // state
@@ -207,6 +210,7 @@ namespace CompetitiveRounds
                 case "no-consent": return I18n.Tr("Grant data consent first (Settings)");
                 case "outdated": return I18n.Tr("Update the mod first");
                 case "transport": return I18n.Tr("No answer from the server - try again in a moment");
+                case "rate_limited": return I18n.Tr("Too many requests at once - wait a few seconds and try again");
                 default: return I18n.Tr("The server refused that - try again in a moment");
             }
         }
@@ -386,6 +390,7 @@ namespace CompetitiveRounds
             // return inside one throttle window never ran an off-Settings tick,
             // so the visit check stayed disarmed for the second entry.
             if (!onSettings) settingsVisited = false;   // leaving Settings re-arms its one check for the next entry (r6 L12)
+            if (onTab || cardPopupTile != null) { try { PlaceTopCards(); } catch { } }   // every frame: the overlays follow the layout and the snapshots (C3)
             if (Time.unscaledTime < tickAt) return;
             tickAt = Time.unscaledTime + 2f;
             var id = LocalId();
@@ -632,8 +637,15 @@ namespace CompetitiveRounds
             // is left after the row; preserveAspect letterboxes the picture.
             UIFactory.AddLE(t.face, prefW: 0, prefH: 0, flexH: 1, flexW: 1);
             PlayerCardFaces.SetFace(t.face, null);
-            // The DISCARDED stamp: a centred label over the picture, shown only
-            // for a discarded print whose face is still in the cache.
+            // The Top card overlay (Sept 14 batch, C3): the face carries a
+            // generic badge; in game the actual ROUNDS card art is laid over
+            // its silhouette (a backing in the badge's own dark, the art above
+            // it), both created here and sized, shown or hidden by PlaceTopCard.
+            // Created BEFORE the stamp so the stamp stays on top.
+            t.topBack = CreatePanelCentred(name + "_tcb", t.face.transform, C_BADGE_DARK);
+            t.topArt = CreatePanelCentred(name + "_tca", t.face.transform, Color.white);
+            // The DISCARDED stamp: a centred label over the picture, shown for
+            // a discarded print whose face is showing.
             t.faceMark = UIFactory.CreateText(name + "_fm", t.face.transform, "", 14f, C_WARN, UIFactory.AlignMidCenter, sizeDelta: new Vector2(TILE_W - 24, 40));
             UIFactory.SetOverflowMode(t.faceMark, 2); UIFactory.SetWordWrap(t.faceMark, true);
             t.faceMarkGO = (t.faceMark as Component)?.gameObject;
@@ -710,6 +722,7 @@ namespace CompetitiveRounds
         /// info popup. Raw body — the subject's name never passes I18n.Tr
         /// (#602); the labels are translated line by line.</summary>
         private static GameObject cardPopupGO, cardPopupImg;
+        private static Tile cardPopupTile;   // the card view's print + its Top card overlay children (C3); face set when the picture lands
         private static int cardPopupSeq;
         private static int cardPopupFrame = -1;   // the frame the popup last opened or closed on (OnTileClick)
 
@@ -757,15 +770,30 @@ namespace CompetitiveRounds
                 irt.sizeDelta = new Vector2(h * PlayerCardFaces.CARD_W / PlayerCardFaces.CARD_H, h);
                 cardPopupImg = img;
                 PlayerCardFaces.SetFace(img, null);
+                // The card view carries the Top card overlay too (C3), and a
+                // discarded print's stamp over its dimmed face (C1): the
+                // owner's own history shows the card, marked, at every size.
+                // The pseudo-tile's face is set when the picture lands, so the
+                // overlay never sits over an empty popup.
+                var popupTile = new Tile { print = p };
+                popupTile.topBack = CreatePanelCentred("TcB", img.transform, C_BADGE_DARK);
+                popupTile.topArt = CreatePanelCentred("TcA", img.transform, Color.white);
+                if (p.discarded)
+                {
+                    var mk = UIFactory.CreateText("TcMark", img.transform, "<b>" + DiscardedLine(p) + "</b>", 30f, C_WARN, UIFactory.AlignMidCenter,
+                                                  sizeDelta: new Vector2(h * 0.6f, 80f));
+                    UIFactory.SetOverflowMode(mk, 2); UIFactory.SetWordWrap(mk, true);
+                }
+                cardPopupTile = popupTile;
                 int seq = ++cardPopupSeq, ep = uiEpoch, gen = PlayerCardFaces.Generation;
                 var hit = PlayerCardFaces.Cached(p.print_id, p.face_rev, p.face_locale, "card");
-                if (hit != null) { PlayerCardFaces.SetFace(img, hit); return; }
+                if (hit != null) { PopupFaceLanded(img, p, hit, popupTile); return; }
                 var print = p;
                 PlayerCardFaces.Get(p.print_id, p.face_rev, p.face_locale, "card", spr =>
                 {
                     if (seq != cardPopupSeq || ep != uiEpoch || gen != PlayerCardFaces.Generation) return;
                     if (spr == null) { HideCardPopup(); ShowCardText(print); return; }
-                    if (cardPopupImg != null) PlayerCardFaces.SetFace(cardPopupImg, spr);
+                    if (cardPopupImg != null) PopupFaceLanded(cardPopupImg, print, spr, popupTile);
                 });
             }
             catch (Exception ex)
@@ -788,10 +816,18 @@ namespace CompetitiveRounds
             ShowCard(t);
         }
 
+        private static void PopupFaceLanded(GameObject img, ApiClient.PcPrint p, Sprite spr, Tile popupTile)
+        {
+            PlayerCardFaces.SetFace(img, spr);
+            if (p.discarded) UIFactory.SetImageColor(img, C_FACE_DIM);
+            if (popupTile != null && cardPopupTile == popupTile) { popupTile.face = img; PlaceTopCard(popupTile); }
+        }
+
         internal static void HideCardPopup()
         {
             cardPopupSeq++;
             cardPopupImg = null;
+            cardPopupTile = null;
             if (cardPopupGO != null) { cardPopupFrame = Time.frameCount; try { UnityEngine.Object.Destroy(cardPopupGO); } catch { } cardPopupGO = null; }
         }
 
@@ -915,11 +951,11 @@ namespace CompetitiveRounds
             if (string.IsNullOrEmpty(p.face_rev)) { ShowTileText(t); return; }
             var hit = PlayerCardFaces.Cached(p.print_id, p.face_rev, p.face_locale, "tile");
             if (hit != null) { ShowTileFace(t, hit); return; }
-            // The face route answers 404 for a discarded print by design (its
-            // picture is not fetchable once the card is gone), and the strip
-            // used to ask three times and fall to text anyway. Cached = shown,
-            // stamped; not cached = the text block, stamped. Never a fetch.
-            if (p.discarded) { ShowTileText(t); return; }
+            // A discarded print's face is fetched like a live one: the face
+            // route serves it since the Sept 14 batch (S3), so the owner's
+            // pack history keeps the picture under the DISCARDED stamp instead
+            // of falling to the text block once the cache let go (Sid,
+            // 2026-09-13, item 4).
             ShowTileText(t);
             int seq = t.bindSeq, ep = uiEpoch, gen = PlayerCardFaces.Generation;
             var tile = t; string pid = p.print_id;
@@ -937,12 +973,106 @@ namespace CompetitiveRounds
             PlayerCardFaces.SetFace(t.face, spr);
             t.face.SetActive(true);
             if (t.textBlock != null) t.textBlock.SetActive(false);
+            PlaceTopCard(t);
         }
 
         private static void ShowTileText(Tile t)
         {
             if (t.face != null) { PlayerCardFaces.SetFace(t.face, null); t.face.SetActive(false); }
             if (t.textBlock != null) t.textBlock.SetActive(true);
+            PlaceTopCard(t);
+        }
+
+        // ── the Top card overlay (Sept 14 batch, C3) ─────────────────────────
+        // The face draws its Top card badge at [58,642,178,754] of 750x1050
+        // (backend face_layout_v1.json): a silhouette above the TOP CARD label.
+        // In game the silhouette is covered by the actual card art from
+        // CardSnapshot; outside the game (Discord) the badge stands as drawn.
+        // Fractions of the face, top-left origin; the art box keeps the
+        // snapshot's own aspect inside it (preserveAspect).
+        private const float TC_BACK_X = 88f / 750f, TC_BACK_Y = 650f / 1050f, TC_BACK_W = 60f / 750f, TC_BACK_H = 77f / 1050f;
+        private const float TC_ART_X = 93f / 750f, TC_ART_Y = 652f / 1050f, TC_ART_W = 50f / 750f, TC_ART_H = 73f / 1050f;
+        private static readonly Color C_BADGE_DARK = new Color(0.08f, 0.08f, 0.10f, 1f);
+        private static readonly Color C_FACE_DIM = new Color(0.42f, 0.42f, 0.48f, 1f);
+
+        /// <summary>An Image child anchored at its parent's centre, click-through,
+        /// aspect-preserving, inactive until placed.</summary>
+        private static GameObject CreatePanelCentred(string name, Transform parent, Color c)
+        {
+            var go = UIFactory.CreatePanel(name, parent, c);
+            var rt = go.GetComponent<RectTransform>();
+            rt.anchorMin = new Vector2(0.5f, 0.5f); rt.anchorMax = new Vector2(0.5f, 0.5f); rt.pivot = new Vector2(0.5f, 0.5f);
+            rt.anchoredPosition = Vector2.zero; rt.sizeDelta = Vector2.zero;
+            try
+            {
+                var img = UIFactory.tImage != null ? go.GetComponent(UIFactory.tImage) : null;
+                var bf = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance;
+                if (img != null)
+                {
+                    UIFactory.tImage.GetProperty("raycastTarget", bf)?.SetValue(img, false);
+                    UIFactory.tImage.GetProperty("preserveAspect", bf)?.SetValue(img, true);
+                }
+            }
+            catch { }
+            go.SetActive(false);
+            return go;
+        }
+
+        /// <summary>Lay one overlay child over a fraction box of the face. The
+        /// face Image preserves the 5:7 aspect inside its own rect, so the drawn
+        /// picture is the largest 5:7 box centred in it; the child's anchors are
+        /// the rect's centre, so this holds for any pivot and any slot shape.</summary>
+        private static void PlaceOverFace(GameObject face, GameObject child, float fx, float fy, float fw, float fh)
+        {
+            if (face == null || child == null) return;
+            var frt = face.GetComponent<RectTransform>(); var crt = child.GetComponent<RectTransform>();
+            if (frt == null || crt == null) return;
+            Rect r = frt.rect;
+            float s = Mathf.Min(r.width / PlayerCardFaces.CARD_W, r.height / PlayerCardFaces.CARD_H);
+            if (s <= 0f) { crt.sizeDelta = Vector2.zero; return; }
+            float pw = PlayerCardFaces.CARD_W * s, ph = PlayerCardFaces.CARD_H * s;
+            crt.anchoredPosition = new Vector2((fx + fw / 2f - 0.5f) * pw, (0.5f - fy - fh / 2f) * ph);
+            crt.sizeDelta = new Vector2(fw * pw, fh * ph);
+        }
+
+        /// <summary>Show the tile's Top card art when its face is showing, the
+        /// print names a top card and CardSnapshot has the sprite (asked for
+        /// when it has not); otherwise the face's own badge stands. Called when
+        /// a face is shown or hidden and every frame while the tab is up: the
+        /// snapshot lands later, the layout settles later, and a snapshot
+        /// generation change can void a sprite under the overlay.</summary>
+        private static void PlaceTopCard(Tile t)
+        {
+            if (t == null || t.face == null || t.topArt == null || t.topBack == null) return;
+            var p = t.print;
+            string card = (p != null && t.face.activeSelf) ? p.top_card : null;
+            Sprite spr = null;
+            bool show = !string.IsNullOrEmpty(card) && CardSnapshot.TryGetSprite(card, out spr) && spr != null;
+            if (!show)
+            {
+                if (!string.IsNullOrEmpty(card) && !CardSnapshot.IsFailed(card)) CardSnapshot.RequestSnapshot(card, false);
+                if (t.topArt.activeSelf) t.topArt.SetActive(false);
+                if (t.topBack.activeSelf) t.topBack.SetActive(false);
+                t.topSprite = null;
+                return;
+            }
+            if (t.topSprite != spr)
+            {
+                UIFactory.SetImageSprite(t.topArt, spr);
+                t.topSprite = spr;
+                UIFactory.SetImageColor(t.topArt, p.discarded ? C_FACE_DIM : Color.white);
+            }
+            PlaceOverFace(t.face, t.topBack, TC_BACK_X, TC_BACK_Y, TC_BACK_W, TC_BACK_H);
+            PlaceOverFace(t.face, t.topArt, TC_ART_X, TC_ART_Y, TC_ART_W, TC_ART_H);
+            if (!t.topBack.activeSelf) t.topBack.SetActive(true);
+            if (!t.topArt.activeSelf) t.topArt.SetActive(true);
+        }
+
+        private static void PlaceTopCards()
+        {
+            if (revealTiles != null) foreach (var t in revealTiles) PlaceTopCard(t);
+            if (binderTiles != null) foreach (var t in binderTiles) PlaceTopCard(t);
+            PlaceTopCard(cardPopupTile);
         }
 
         // ── repaint ──────────────────────────────────────────────────────────
@@ -1160,9 +1290,9 @@ namespace CompetitiveRounds
         /// every page fresh, so the print is refreshed by whichever page
         /// holds it. A key already waiting on a page is not asked twice; a
         /// failed refetch is asked again no sooner than the pager's own 30 s.
-        /// A discarded print's face answers 404 by design and never gets
-        /// here; a history not loaded yet has its first load still ahead of
-        /// it.</summary>
+        /// A discarded print's face is served like a live one (Sept 14
+        /// batch, S3), so its 404 means the same moved revision; a history
+        /// not loaded yet has its first load still ahead of it.</summary>
         private static void OnHistoryFaceNotFound(string printId, string faceRev, string locale)
         {
             if (string.IsNullOrEmpty(printId) || string.IsNullOrEmpty(faceRev) || !historyLoaded) return;
@@ -1175,7 +1305,7 @@ namespace CompetitiveRounds
                 if (a.prints == null) continue;
                 foreach (var p in a.prints)
                 {
-                    if (p.print_id != printId || p.face_rev != faceRev || p.discarded) continue;
+                    if (p.print_id != printId || p.face_rev != faceRev) continue;
                     if ((string.IsNullOrEmpty(p.face_locale) ? "en" : p.face_locale) != want) continue;
                     held = true;
                     historyPageOf.TryGetValue(a.pack_id ?? "", out cursor);
@@ -1553,9 +1683,9 @@ namespace CompetitiveRounds
                 + (me != null && me.paid_cap_exempt
                     ? I18n.TrF("- Buy one for {0} gold or {1} shards. No daily limit on this account.", gold, shards)
                     : I18n.TrF("- Buy one for {0} gold or {1} shards, up to {2} paid packs a day.", gold, shards, cap)) + "\n\n"
-                + I18n.TrF("Each pack holds {0} cards. A card's rarity is its player's rank in the card pool on the day of the pull: Legendary = #1, Epic #2-10, Rare #11-20, Uncommon #21-40, Common #41 and below. Odds per card: Common 60%, Uncommon 25%, Rare 11%, Epic 3.5%, Legendary 0.5%. Every card also rolls Foil (1 in 200) and Signed (1 in 2000) on its own.", per) + "\n\n"
+                + I18n.TrF("Each pack holds {0} cards. A card's rarity is its player's rank in the card pool on the day of the pull: Legendary = #1-2, Epic #3-10, Rare #11-20, Uncommon #21-40, Common #41 and below. Odds per card: Common 60%, Uncommon 25%, Rare 11%, Epic 3.5%, Legendary 0.5%. Every card also rolls Foil (1 in 200) and Signed (1 in 2000) on its own.", per) + "\n\n"
                 + I18n.Tr("Discarding a card gives shards by its rarity: Common 5, Uncommon 15, Rare 40, Epic 150, Legendary 600. Shards buy packs. Discards are one card at a time; the Dupes button discards every other copy of that exact card.") + "\n\n"
-                + I18n.Tr("A card freezes its player's title, rating, record and rank as the leaderboard had them on the day it was pulled; the name and the picture stay live (a renamed player shows their new name). Every registered player who is not banned can be pulled; a public binder and pull announcements are your Settings, and deleting your data removes every card of you from every binder.");
+                + I18n.Tr("A card freezes its player's title, rating, record and rank as the leaderboard had them on the day it was pulled; the name and the picture stay live (a renamed player shows their new name). Every player who has run the mod and is not banned can be pulled; a public binder and pull announcements are your Settings, and deleting your data removes every card of you from every binder.");
             UIFactory.SetTextRaw(txtInfo, body);
         }
 
@@ -1866,14 +1996,38 @@ namespace CompetitiveRounds
                     if (col != null) col.prints.RemoveAll(x => x.print_id == pid);
                     HistoryMarkDiscarded(pid, gained);
                     DiscardNext(id);
+                    return;
                 }
-                else FinishDiscard(id, ApiClient.PcErrorCode(resp));
+                string code = ApiClient.PcErrorCode(resp);
+                // A dupes discard is one request per copy, and the api's
+                // sensitive-path limit is 20 in 10 s (Sept 14 batch, C2): a
+                // rate-limited answer is waited out and the same copy asked
+                // again, once per copy; not a refusal, and not a chain of
+                // refetches on top of the limit.
+                if (code == "rate_limited" && !discardRetried)
+                {
+                    discardRetried = true;
+                    discardQueue.Insert(0, pid);
+                    float wait = ApiClient.PcRetryAfter(resp, 3);
+                    Say(I18n.TrF("Slowing down - the server asked for a {0} s pause", (int)wait), C_WARN);
+                    Plugin.Instance.StartCoroutine(DiscardAfter(id, wait, ep));
+                    return;
+                }
+                FinishDiscard(id, code);
             });
+        }
+
+        private static IEnumerator DiscardAfter(string id, float seconds, int ep)
+        {
+            yield return new WaitForSecondsRealtime(seconds);
+            if (ep != uiEpoch || !discardInFlight) yield break;
+            discardRetried = false;
+            DiscardNext(id);
         }
 
         private static void FinishDiscard(string id, string errorCode)
         {
-            discardInFlight = false; discardQueue.Clear();
+            discardInFlight = false; discardQueue.Clear(); discardRetried = false;
             // One line for both halves: what was discarded stays reported when
             // the next discard fails (c4).
             if (discardDone > 0 && errorCode != null)
@@ -1881,7 +2035,15 @@ namespace CompetitiveRounds
             else if (discardDone > 0)
                 Say(I18n.TrF("Discarded {0} card(s) for {1} shards", discardDone, discardShards), C_OK);
             else if (errorCode != null) Say(ReasonText(errorCode), C_WARN);
-            if (id != null) { ApiClient.FetchPcCollection(id, true); ApiClient.FetchPcMe(id, true); }
+            // The collection and the balance were updated from each discard's
+            // own answer, so a clean run needs no refetch (Sept 14 batch, C2:
+            // the two refetches after every discard were what the rate limit
+            // saw first). A refusal other than the limit itself re-reads both,
+            // since the local copy may be what was wrong (not_owned).
+            if (id != null && errorCode != null && errorCode != "rate_limited" && errorCode != "transport")
+            {
+                ApiClient.FetchPcCollection(id, true); ApiClient.FetchPcMe(id, true);
+            }
             NativeUI.MarkDirty();
         }
 

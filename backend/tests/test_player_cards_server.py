@@ -34,8 +34,10 @@ import database
 import main
 import models
 import player_cards as pc
+import schemas
 
 MAIN_PY = Path(__file__).resolve().parents[1] / "api" / "main.py"
+ROOT = MAIN_PY.parents[2]
 
 S1 = UUID("11111111-1111-1111-1111-111111111111")
 S2 = UUID("22222222-2222-2222-2222-222222222222")
@@ -272,7 +274,8 @@ def test_snapshot_freezes_band_from_rank_and_the_resolved_title(monkeypatch):
     insert = [p for sql, p in db.log if "INSERT INTO pc_pool_members" in sql]
     assert len(insert) == 1 and isinstance(insert[0], list) and len(insert[0]) == 3
     by_rank = {p["rank"]: p for p in insert[0]}
-    assert by_rank[1]["rarity"] == "legendary" and by_rank[2]["rarity"] == "epic" and by_rank[41]["rarity"] == "common"
+    # the top TWO are Legendary since the Sept 14 batch (S2)
+    assert by_rank[1]["rarity"] == "legendary" and by_rank[2]["rarity"] == "legendary" and by_rank[41]["rarity"] == "common"
     assert by_rank[1]["title"] == "resolved:title_x" and by_rank[41]["title"] is None
     assert by_rank[41]["rating"] is None and by_rank[41]["board"] is None and by_rank[1]["board"] == 1
     assert all(p["sid"] == 42 for p in insert[0])
@@ -282,10 +285,67 @@ def test_snapshot_freezes_band_from_rank_and_the_resolved_title(monkeypatch):
     assert keep == [{"keep": pc.PC_ECONOMY["snapshot_keep"]}]
     select_params = [p for sql, p in db.log if "WITH pool AS" in sql][0]
     assert select_params["min_matches"] == 5 and select_params["active_days"] == main.LEADERBOARD_ACTIVE_DAYS
+    # the snapshot records the pool rule it was taken under (Sept 14 batch, S1)
+    snapshot_params = [p for sql, p in db.log if "INSERT INTO pc_pool_snapshots" in sql]
+    assert snapshot_params == [{"n": 3, "rule": main._PC_POOL_RULE}] and main._PC_POOL_RULE == 2
 
 
-def _due_row(last_at, db_now, today_at):
-    return [{"last_at": last_at, "db_now": db_now, "today_at": today_at}]
+def test_the_pool_admits_players_who_have_run_the_mod_through_one_fragment():
+    """Sept 14 batch, S1: the pool is the registered, non-banned, non-deleted
+    players who have RUN the mod; the snapshot's pool CTE and the open-time
+    live check share the one membership fragment, so they cannot drift."""
+    fragment = main._PC_POOL_MEMBER_SQL
+    assert "p.mod_seen_at IS NOT NULL" in fragment and "p.deleted_at IS NULL" in fragment
+    assert "NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)" in fragment
+    assert fragment in main._PC_SNAPSHOT_SELECT_SQL and fragment in main._PC_LIVE_POOL_CHECK_SQL
+    src = _main_code()
+    assert src.count("_PC_POOL_MEMBER_SQL") == 3   # its definition and exactly the two readers
+    # the snapshot's WHERE is the fragment alone: no second membership predicate beside it
+    pool = main._PC_SNAPSHOT_SELECT_SQL[:main._PC_SNAPSHOT_SELECT_SQL.index(fragment)]
+    assert pool.rstrip().endswith("WHERE")
+    # the health answer names the rule on both branches, so a deploy that
+    # changes it is visible on a batch with no new route
+    health = inspect.getsource(main.health_check)
+    assert health.count("pc_pool_rule=int(_PC_POOL_RULE)") == 2
+    assert "pc_pool_rule: int | None = None" in inspect.getsource(schemas.HealthResponse)
+
+
+def test_migration_316_adds_the_rule_column_the_janitor_reads():
+    sql = (ROOT / "backend" / "sql" / "316_pc_pool_snapshot_rule.sql").read_text(encoding="utf-8")
+    assert sql.count("BEGIN;") == 1 and sql.count("COMMIT;") == 1
+    assert "ALTER TABLE pc_pool_snapshots ADD COLUMN IF NOT EXISTS rule INTEGER NOT NULL DEFAULT 1;" in sql
+    assert "RAISE EXCEPTION 'migration 316" in sql
+    # the api's own reads of the column: the due check and the insert
+    assert "(SELECT rule FROM pc_pool_snapshots ORDER BY taken_at DESC, id DESC LIMIT 1) AS last_rule" in inspect.getsource(main._pc_snapshot_due)
+    assert "INSERT INTO pc_pool_snapshots (member_count, rule)" in inspect.getsource(main._pc_take_snapshot)
+
+
+def test_janitor_retakes_the_pool_once_when_the_rule_changed(monkeypatch):
+    today = datetime(2026, 9, 11, 0, 5, tzinfo=timezone.utc)
+    hour_ago = today - timedelta(hours=1)
+    # the latest snapshot predates the rule change: due now, as 'rule', even before 00:05
+    db, taken = _janitor(monkeypatch, _due_row(hour_ago, today - timedelta(minutes=2), today, last_rule=main._PC_POOL_RULE - 1))
+    _run(main._pc_snapshot_janitor_step())
+    assert taken == ["rule"]
+    # taken under the current rule: the daily clock alone decides
+    db, taken = _janitor(monkeypatch, _due_row(hour_ago, today - timedelta(minutes=2), today, last_rule=main._PC_POOL_RULE))
+    _run(main._pc_snapshot_janitor_step())
+    assert taken == []
+    # under a NEWER rule (a rolled-back api): no re-take, no thrash
+    db, taken = _janitor(monkeypatch, _due_row(hour_ago, today - timedelta(minutes=2), today, last_rule=main._PC_POOL_RULE + 1))
+    _run(main._pc_snapshot_janitor_step())
+    assert taken == []
+    # no snapshot at all: 'first' wins over 'rule'
+    db, taken = _janitor(monkeypatch, _due_row(None, today, today, last_rule=0))
+    _run(main._pc_snapshot_janitor_step())
+    assert taken == ["first"]
+
+
+def _due_row(last_at, db_now, today_at, last_rule=None):
+    # The latest snapshot's rule defaults to the CURRENT one, so every test
+    # written before the rule column asks about the daily rule alone.
+    rule = main._PC_POOL_RULE if last_rule is None else last_rule
+    return [{"last_at": last_at, "last_rule": rule, "db_now": db_now, "today_at": today_at}]
 
 
 def _janitor(monkeypatch, due, lock=True):

@@ -349,7 +349,7 @@
           ],
           "main",
           "admin_resolve_team_series",
-          "c2749dcc5722efdfee59f9e240b667ca2e733a8d"
+          "7b66c8f9765a759cf88853581dce1941ec35e6d9"
         ],
         [
           "/api/v1/admin/unban",
@@ -493,7 +493,7 @@
           ],
           "main",
           "submit_ffa_match",
-          "f33c224ddb65728dfdeb6a841b3c3fd4c11d103c"
+          "592c8a5f43a7858a37f7313816221f44f04a3ef7"
         ],
         [
           "/api/v1/h2h/{steam_id}/{opponent_steam_id}",
@@ -583,7 +583,7 @@
           ],
           "main",
           "submit_match",
-          "ca92bf3ca0e11b35220f1ed714892dd250d840b9"
+          "c94eb32413156b0736f25b45a85d6a5f0962a3c9"
         ],
         [
           "/api/v1/matches/casual-dc",
@@ -619,7 +619,7 @@
           ],
           "main",
           "submit_ovt_match",
-          "7e0d9c22d521215dda2ed33aae5a7a061395f6d4"
+          "bd5234eb4c875eb67cedf4a946f4c4c164d8ef73"
         ],
         [
           "/api/v1/ovt/series/active",
@@ -646,7 +646,7 @@
           ],
           "main",
           "pc_card_face",
-          "5e238c53433284e5ded8ad11c507cd279ff4dde8"
+          "578b7e012af31f0970a5ac6fb63959c6eff6f22e"
         ],
         [
           "/api/v1/pc/collection",
@@ -655,7 +655,7 @@
           ],
           "main",
           "pc_collection",
-          "0cbaeeb5320d5827c8d96c40ac6d9469d2f23855"
+          "008428d36527173a08290c67da6bdf6e1c536f9d"
         ],
         [
           "/api/v1/pc/daily",
@@ -673,7 +673,7 @@
           ],
           "main",
           "pc_me",
-          "34e25420473c9bfacd07becc10aa41e22b1b20b3"
+          "b5fc5baee9fbc13f4225ea30de577039d3a52eee"
         ],
         [
           "/api/v1/pc/packs/open",
@@ -682,7 +682,7 @@
           ],
           "main",
           "pc_open_pack",
-          "c27208f4fcd2a8d3d46164a4a339fdbecbf9d519"
+          "8b764d45e08770e4c136b0136f099ad8038c6fd5"
         ],
         [
           "/api/v1/pc/packs/result",
@@ -691,7 +691,7 @@
           ],
           "main",
           "pc_pack_result",
-          "f77b10881ba44e7de7f4ea56114c8f638035bdf2"
+          "93d29ff08ee44de26eebadbd91e2b7fbbc034796"
         ],
         [
           "/api/v1/pc/packs",
@@ -700,7 +700,7 @@
           ],
           "main",
           "pc_packs_history",
-          "1e1b20ecc2e437636177d2f2a74fdbb31d8af85a"
+          "7d36b819cd5280b2b14cd8eb4de70df3a69e178f"
         ],
         [
           "/api/v1/pc/pool",
@@ -709,7 +709,7 @@
           ],
           "main",
           "pc_pool_summary",
-          "814cc9a5d7a2d4ccd178ebb6287546b80379e6f3"
+          "058a8fa748e79513232ca2cf59128978310a6c6c"
         ],
         [
           "/api/v1/pc/prints/discard",
@@ -718,7 +718,7 @@
           ],
           "main",
           "pc_discard_print",
-          "def4376e86baee50dbd5d2d1afc328613fff2b4e"
+          "cb454183d691ea20390b54ac8d2582ec3fbfd791"
         ],
         [
           "/api/v1/pc/settings",
@@ -1150,7 +1150,7 @@
           ],
           "main",
           "submit_team_match",
-          "f7e7af5df3fcc21c2335b9724e45323c7f015d2e"
+          "f24f5af16601a4adcab00657ffa050b52e1faf89"
         ],
         [
           "/api/v1/team/players/{steam_id}/team-matches",
@@ -1213,7 +1213,7 @@
           ],
           "main",
           "team_series_report_dc",
-          "eccb4894b0c0b9ad37efbb595aae8d055604588c"
+          "cc8573704bfe6604f6015bd66aca16dd256c1e42"
         ],
         [
           "/api/v1/team/series/{series_id}/spawn-confirm",
@@ -1777,7 +1777,7 @@
           ],
           "main",
           "health_check",
-          "363d6a7655400d2b20b4b7a0c0fc7453236f440e"
+          "787a50f6a710fb9544804684fd2cd3198c786a3f"
         ],
         [
           "/api/v1/i18n/approved",
@@ -2864,7 +2864,7 @@
           ],
           "main",
           "admin_pc_snapshot",
-          "3a2f171f6774168da028432af10df3ed9cd366fc"
+          "1e570e12b11b257821dd3d025331bd1f913dcdee"
         ],
         [
           "/api/v1/internal/moderation-cases/{case_id}/act",
@@ -2900,7 +2900,7 @@
           ],
           "main",
           "internal_pc_collection",
-          "160eb116abe2014277525f774ca481855da5de69"
+          "b3b502a86238e27b6f3b2bf29256378ea0fe4e56"
         ],
         [
           "/api/v1/internal/pc/daily",
@@ -3080,7 +3080,7 @@
           ],
           "main",
           "internal_pc_face_back",
-          "e27bc883120b2091fabd89d36138fa311cb3ed6d"
+          "f19302527c5bbfae357dda85bef2048eca30b911"
         ],
         [
           "/api/v1/internal/pc/face/preview/{player_ref}/{locale}",
@@ -3089,7 +3089,7 @@
           ],
           "main",
           "internal_pc_face_preview",
-          "e2da559555fde1d3a9fd315fca26c4ef33e622ee"
+          "054a673c4fa87fedd3e2a40d77885faf4f692bdb"
         ],
         [
           "/api/v1/internal/pc/face/print/{print_id}/{locale}",
@@ -3098,7 +3098,7 @@
           ],
           "main",
           "internal_pc_face_print",
-          "f60d2faab92adb54d580df6649dd1d90f7e461e9"
+          "7f14b0c314f0c8fcd0d10afaf01a76af21890d04"
         ],
         [
           "/api/v1/internal/pc/lease",
@@ -3134,7 +3134,7 @@
           ],
           "main",
           "pc_face_png",
-          "9a0a4938a35e40ea4e06590b346d918c7ac18fb2"
+          "008dbcb8ef32c6beec4dd7db9a162ea2129fb740"
         ],
         [
           "/api/v1/pc/portrait",
@@ -3143,7 +3143,7 @@
           ],
           "main",
           "pc_portrait_upload",
-          "54d05fc1ee30d9de95e6920c4f17c35125db7df4"
+          "49ec717c288664b7d525eacbee7196bb39a64519"
         ]
       ]
     },
@@ -3317,7 +3317,7 @@
       [
         "main",
         "lifespan",
-        "8d3938972648ab9573cc20401e67ae0ef9c799ed"
+        "71c73059c172ae8fa0c4ead8974e21057b976949"
       ]
     ]
   },

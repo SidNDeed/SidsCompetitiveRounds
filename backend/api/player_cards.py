@@ -40,7 +40,10 @@ PC_ECONOMY = {
     # Shards a discarded print is worth — by the PRINT's rarity, nothing else.
     "shards": {"common": 5, "uncommon": 15, "rare": 40, "epic": 150, "legendary": 600},
     # Highest pool rank of each band; Common is everything past Uncommon.
-    "band_max_rank": {"legendary": 1, "epic": 10, "rare": 20, "uncommon": 40},
+    # Legendary is the top TWO since the Sept 14 batch (one before): the pool
+    # is now the players who have run the mod, and its second place is a
+    # Legendary card too (product owner, 2026-09-13).
+    "band_max_rank": {"legendary": 2, "epic": 10, "rare": 20, "uncommon": 40},
     # Earned packs: (win %, sweep %) per ranked mode. The sweep roll replaces
     # the win roll on a 2-0 (FFA: every round won, nobody else any).
     "earned_pct": {"1v1": (20.0, 100.0), "team": (10.0, 50.0), "ovt": (10.0, 50.0), "ffa": (10.0, 50.0)},
