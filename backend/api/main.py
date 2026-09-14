@@ -25724,8 +25724,15 @@ _PC_FACE_EXPIRE_EVERY_S = 3600   # each box ages its own derived-face cache hour
 
 # Who the sweep may touch, for the players row aliased p. The claim and the
 # writer's revalidation read the SAME text, so eligibility has one meaning.
+# A subject the sweep can ask Steam about is one whose id IS a Steam id. The
+# players table also holds opponents met in crossplay lobbies -- sixteen- to
+# twenty-digit ids from other platforms, 844 rows on 2026-09-13 -- and both
+# URL builders refuse such an id outright, the keyed one for its WHOLE chunk
+# (see the guard in the batch's URL step). The pattern is pc_steam's own
+# STEAM_ID_RE, mirrored as a Postgres regex; a test pins the two together.
 _PC_STEAM_ELIGIBLE_SQL = """
     p.deleted_at IS NULL
+    AND p.steam_id ~ '^7656119[0-9]{10}$'
     AND (p.pc_game_portrait_locked_until IS NULL OR p.pc_game_portrait_locked_until < now())
     AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)
 """
@@ -25904,6 +25911,20 @@ async def _pc_steam_fetch_refs(steam_ids: list, priority: bool = False, deadline
     deadline: the profile request and the picture step share it (v4.1 §3)."""
     key = os.getenv("STEAM_WEB_API_KEY", "")
     out: dict = {}
+    # A subject whose id is not a Steam id has no Steam picture to fetch. Both
+    # URL builders refuse such an id with a ValueError -- the keyed one for the
+    # WHOLE hundred-id chunk -- and a ValueError is not a feed failure, so it
+    # escaped this function and the batch: every claim holding one non-Steam
+    # id produced no verdict for its other ninety-nine rows, and with 844 such
+    # rows spread through the table no batch after the first two was clean
+    # (the sweep faulted from 21:21 UTC on 2026-09-13). The eligibility text
+    # keeps them out of every claim; the answer for one that arrives anyway is
+    # its own absence, no request, and the batch goes on.
+    steam_ids = [str(s) for s in steam_ids]
+    for sid in steam_ids:
+        if not _pcs.STEAM_ID_RE.match(sid):
+            out[sid] = None
+    steam_ids = [s for s in steam_ids if s not in out]
     if key and not _pc_steam_xml["forced"]:
         for start in range(0, len(steam_ids), _pcs.SUMMARIES_PER_CALL):
             chunk = steam_ids[start:start + _pcs.SUMMARIES_PER_CALL]

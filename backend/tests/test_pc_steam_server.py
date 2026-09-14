@@ -338,6 +338,60 @@ def test_the_xml_path_counts_an_unusable_body_as_the_feeds_failure_and_rechecks_
     assert _run(main._pc_steam_fetch_refs([STEAM])) == {} and bodies == [b"<profile/>"]
 
 
+def test_the_sweep_never_claims_a_non_steam_id():
+    """The eligibility text (the claim, the writer's revalidation, the render probe) admits only a Steam id:
+    crossplay opponents carry sixteen- to twenty-digit ids from other platforms, and both URL builders refuse
+    those. The pattern is pc_steam's own, mirrored as a Postgres regex."""
+    assert pc_steam.STEAM_ID_RE.pattern == "^7656119[0-9]{10}$"
+    assert f"AND p.steam_id ~ '{pc_steam.STEAM_ID_RE.pattern}'" in main._PC_STEAM_ELIGIBLE_SQL
+    for sid in ("2535425419861127", "14732509580164257529", "7536364063920709669", "765611980404106530", "abcd", ""):
+        assert not pc_steam.STEAM_ID_RE.match(sid)
+    assert pc_steam.STEAM_ID_RE.match(STEAM) and pc_steam.STEAM_ID_RE.match(S2)
+
+
+def test_a_non_steam_id_costs_only_its_own_row_on_both_paths(monkeypatch):
+    """One non-Steam id in a chunk used to make the keyed URL builder refuse the WHOLE chunk (a ValueError, not a
+    feed error) and the batch die with no verdict for its other rows; the XML path's builder refuses per id the
+    same way (2026-09-13). Now such an id is its own absence, no request is made for it, and the rest of the
+    batch is fetched."""
+    xbox, other = "2535425419861127", "14732509580164257529"
+    monkeypatch.setattr(main._pc_steam_breaker, "paused", lambda now=None: False)
+    monkeypatch.setattr(main._pc_steam_breaker, "record", lambda *a, **k: None)
+
+    async def wait(priority=False, deadline=None):
+        return True
+    monkeypatch.setattr(main, "_pc_steam_wait", wait)
+    # the keyed path: ONE call carrying the Steam ids only; the non-Steam ids absent without a request
+    monkeypatch.setitem(main._pc_steam_xml, "forced", False)
+    monkeypatch.setitem(main._pc_steam_xml, "refusals", 0)
+    monkeypatch.setenv("STEAM_WEB_API_KEY", "k")
+    urls = []
+    body = ('{"response":{"players":['
+            f'{{"steamid":"{STEAM}","avatarfull":"https://avatars.steamstatic.com/{"e" * 40}_full.jpg"}},'
+            f'{{"steamid":"{S2}","avatarfull":"https://avatars.steamstatic.com/{"f" * 40}_full.jpg"}}]}}}}').encode()
+
+    def get(url, **kw):
+        urls.append(url)
+        return body
+    monkeypatch.setattr(pc_steam, "http_get", get)
+    out = _run(main._pc_steam_fetch_refs([STEAM, xbox, S2, other]))
+    assert out == {STEAM: "e" * 40, S2: "f" * 40, xbox: None, other: None}
+    assert len(urls) == 1 and STEAM in urls[0] and S2 in urls[0] and xbox not in urls[0] and other not in urls[0]
+    # every id non-Steam: no request at all, every row its own absence
+    urls.clear()
+    assert _run(main._pc_steam_fetch_refs([xbox, other])) == {xbox: None, other: None} and urls == []
+    # the XML path: the Steam id is fetched, the non-Steam id is not
+    monkeypatch.setitem(main._pc_steam_xml, "forced", True)
+    bodies = [f"<profile><avatarFull>https://avatars.steamstatic.com/{'e' * 40}_full.jpg</avatarFull></profile>".encode()]
+    monkeypatch.setattr(pc_steam, "http_get", lambda url, **kw: bodies.pop(0))
+    assert _run(main._pc_steam_fetch_refs([xbox, STEAM])) == {xbox: None, STEAM: "e" * 40} and bodies == []
+    # the URL builders still refuse a non-Steam id on their own: the guard above is what keeps them unreached
+    with pytest.raises(ValueError):
+        pc_steam.summaries_url("k", [STEAM, xbox])
+    with pytest.raises(ValueError):
+        pc_steam.profile_xml_url(xbox)
+
+
 # ── priming ────────────────────────────────────────────────────────────
 
 def test_priming_waits_for_its_deadline_and_the_attempt_finishes_behind_it(monkeypatch):
