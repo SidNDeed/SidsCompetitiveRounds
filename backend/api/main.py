@@ -25212,13 +25212,16 @@ async def internal_pc_events_pending(
 # The requests that END a writer's wait -- the delivery-lease release and the
 # events ack -- run on the RESERVED pool (database.release_engine, r10 M3)
 # and are admitted by a slot of exactly that pool's size (review r12): an
-# admitted request never waits for a connection, and a request beyond the
-# pool's size waits HERE holding nothing -- never at the pool's timeout --
-# whatever its client did meanwhile (a client timeout, a disconnect, a bot
-# restart: the handler runs on regardless, so the bound is held by the
-# process that holds the connections, not by the issuer). The writer's bound
-# stays the lease's own life (`_pc_lease_drain`); a release that lands
-# earlier ends the wait earlier.
+# admitted request never waits BEHIND ANOTHER CHECKOUT of the pool and never
+# reaches the pool's timeout -- a request beyond the pool's size waits HERE
+# holding nothing -- whatever its client did meanwhile (a client timeout, a
+# disconnect, a bot restart: the handler runs on regardless, so the bound is
+# held by the process that holds the connections, not by the issuer). What
+# admission does NOT remove (review r13): a connection's own validation --
+# the pre-ping, a recycle, a reconnection after an invalidation -- can still
+# delay an admitted request or fail it; that is the database's latency, not
+# a queue. The writer's bound stays the lease's own life (`_pc_lease_drain`);
+# a release that lands earlier ends the wait earlier.
 # Declared here, ahead of the ack route -- the first route that names it.
 _PC_RELEASE_SLOTS = RELEASE_POOL_SIZE + RELEASE_POOL_OVERFLOW
 _pc_release_gates = {}   # event loop -> its Semaphore
@@ -25721,8 +25724,15 @@ _PC_FACE_EXPIRE_EVERY_S = 3600   # each box ages its own derived-face cache hour
 
 # Who the sweep may touch, for the players row aliased p. The claim and the
 # writer's revalidation read the SAME text, so eligibility has one meaning.
+# A subject the sweep can ask Steam about is one whose id IS a Steam id. The
+# players table also holds opponents met in crossplay lobbies -- sixteen- to
+# twenty-digit ids from other platforms, 844 rows on 2026-09-13 -- and both
+# URL builders refuse such an id outright, the keyed one for its WHOLE chunk
+# (see the guard in the batch's URL step). The pattern is pc_steam's own
+# STEAM_ID_RE, mirrored as a Postgres regex; a test pins the two together.
 _PC_STEAM_ELIGIBLE_SQL = """
     p.deleted_at IS NULL
+    AND p.steam_id ~ '^7656119[0-9]{10}$'
     AND (p.pc_game_portrait_locked_until IS NULL OR p.pc_game_portrait_locked_until < now())
     AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)
 """
@@ -25901,6 +25911,20 @@ async def _pc_steam_fetch_refs(steam_ids: list, priority: bool = False, deadline
     deadline: the profile request and the picture step share it (v4.1 §3)."""
     key = os.getenv("STEAM_WEB_API_KEY", "")
     out: dict = {}
+    # A subject whose id is not a Steam id has no Steam picture to fetch. Both
+    # URL builders refuse such an id with a ValueError -- the keyed one for the
+    # WHOLE hundred-id chunk -- and a ValueError is not a feed failure, so it
+    # escaped this function and the batch: every claim holding one non-Steam
+    # id produced no verdict for its other ninety-nine rows, and with 844 such
+    # rows spread through the table no batch after the first two was clean
+    # (the sweep faulted from 21:21 UTC on 2026-09-13). The eligibility text
+    # keeps them out of every claim; the answer for one that arrives anyway is
+    # its own absence, no request, and the batch goes on.
+    steam_ids = [str(s) for s in steam_ids]
+    for sid in steam_ids:
+        if not _pcs.STEAM_ID_RE.match(sid):
+            out[sid] = None
+    steam_ids = [s for s in steam_ids if s not in out]
     if key and not _pc_steam_xml["forced"]:
         for start in range(0, len(steam_ids), _pcs.SUMMARIES_PER_CALL):
             chunk = steam_ids[start:start + _pcs.SUMMARIES_PER_CALL]
@@ -26827,8 +26851,10 @@ async def internal_pc_lease_release(
     # On the RESERVED pool (r10 M3): this delete is what ends a writer's wait
     # for the line in flight; it must never queue for a main-pool connection.
     # Admitted by _pc_release_slot (r12): as many in flight as the pool holds,
-    # so it never queues for a reserved connection either -- a request beyond
-    # them waits at the slot holding nothing.
+    # so it never queues behind another checkout of the reserved pool either
+    # and never reaches its timeout -- a request beyond them waits at the slot
+    # holding nothing. Its connection's own validation (pre-ping, recycle,
+    # reconnection) can still delay or fail it (r13).
     _require_internal_key(x_internal_key)
     if not _pcp.print_id_ok(lease_id):
         return {"released": 0}
@@ -35243,6 +35269,20 @@ async def _is_admin(db: AsyncSession, steam_id: str) -> bool:
     return r.scalar_one_or_none() is not None
 
 
+def _steam_id_or_422(value, field: str) -> str:
+    """A body-sourced steam id the ban family persists -- the ban row's key and
+    the audit row's target, both String(20): digits only, at most twenty
+    (review r13). Refused 422 BEFORE the signature check, any read, any lock
+    and the ban-rate gate: an identifier the audit row cannot hold would make
+    the best-effort audit insert fail silently, and the gate's once-per-window
+    alert reads that row back -- every refusal would alert again. Exact form,
+    no stripping: the signature covers the string as sent."""
+    # [0-9] not \d -- \d matches Unicode digits, which are not steam ids.
+    if not isinstance(value, str) or not _re.fullmatch(r"[0-9]{1,20}", value):
+        raise HTTPException(status_code=422, detail=f"{field} must be a numeric steam id")
+    return value
+
+
 async def _require_admin(db: AsyncSession, admin_steam_id: str, action: str, target: str, signature) -> None:
     if not await _is_admin(db, admin_steam_id):
         raise HTTPException(403, "Not an admin")
@@ -35583,6 +35623,7 @@ class _AdminBanReq(BaseModel):
 
 @app.post("/api/v1/admin/ban", tags=["Admin"])
 async def admin_ban(req: _AdminBanReq, _slot=Depends(_pc_writer_slot), db: AsyncSession = Depends(get_db)):
+    _steam_id_or_422(req.target_steam_id, "target_steam_id")   # before the signature, the reads, the locks and the gate (r13)
     await _require_admin(db, req.admin_steam_id, "ban", req.target_steam_id, req.hmac_signature)
     # ONE lock order on every ban path (Sept 6 item b, review r2): the
     # identity lattice first — both identities this transaction writes, in
@@ -35655,6 +35696,7 @@ class _AdminUnbanReq(BaseModel):
 
 @app.post("/api/v1/admin/unban", tags=["Admin"])
 async def admin_unban(req: _AdminUnbanReq, _slot=Depends(_pc_writer_slot), db: AsyncSession = Depends(get_db)):
+    _steam_id_or_422(req.target_steam_id, "target_steam_id")   # the same column, the same refusal (r13)
     await _require_admin(db, req.admin_steam_id, "unban", req.target_steam_id, req.hmac_signature)
     # The same identity lattice as the ban, in the same canonical order (r9
     # M2): a ban's repeat detection and its insert are one serialised step on

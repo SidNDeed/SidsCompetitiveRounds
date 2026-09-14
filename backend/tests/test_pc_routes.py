@@ -1434,3 +1434,41 @@ def test_the_rate_refusal_alerts_once_per_window_and_keys_its_lock_and_count_on_
     assert [p["adm"] for sql, p in db.log if "COUNT(*) FROM player_bans" in sql] == ["adm", "adm"]
     assert [p["adm"] for sql, p in db.log if "COUNT(*) FROM admin_actions" in sql] == ["adm", "adm"]
     assert db.committed == 2
+    # r13: the dedup's predicate and its place -- the scripted counts [1, 2] alone would pass a count keyed on
+    # the target or a count taken before the audit row was written; the predicate is pinned normalised and the
+    # order on BOTH attempts: audit, count, audit, count
+    assert [sql for sql, _ in db.log if "COUNT(*) FROM admin_actions" in sql] == [
+        "SELECT COUNT(*) FROM admin_actions WHERE admin_steam_id = :adm AND action = 'ban_rate_blocked' "
+        "AND created_at > NOW() - INTERVAL '5 minutes'"] * 2
+    audits = [i for i, (sql, _) in enumerate(db.log) if "INSERT INTO admin_actions" in sql]
+    counts = [i for i, (sql, _) in enumerate(db.log) if "COUNT(*) FROM admin_actions" in sql]
+    assert len(audits) == len(counts) == 2 and audits[0] < counts[0] < audits[1] < counts[1], (audits, counts)
+
+
+def test_a_ban_target_the_audit_row_cannot_hold_is_refused_before_the_signature_and_the_gate(monkeypatch):
+    """r13 (2026-09-13), executed: a body-sourced target that is not a numeric steam id of at most twenty
+    digits -- the ban row's key and the audit row's target are String(20) -- is refused 422 before the signature
+    check, any read, any lock and the ban-rate gate, on the ban and on the unban alike. The gate's once-per-window
+    alert reads the refusal's audit row back, so a target that row cannot hold must never reach the gate. Digits
+    are [0-9]: Unicode digits are refused too."""
+    import inspect
+    reached = []
+
+    async def admin(db, adm, action, target, sig):
+        reached.append((action, target))
+    monkeypatch.setattr(main, "_require_admin", admin)
+    calls = (lambda t, db: main.admin_ban(main._AdminBanReq(admin_steam_id="9", target_steam_id=t), db=db),
+             lambda t, db: main.admin_unban(main._AdminUnbanReq(admin_steam_id="9", target_steam_id=t), db=db))
+    for bad in ("7656119800000000x", "760000000000000000000", "", " 76561198000000008", "76561198000000008 ",
+                "\u0667\u0666\u0665\u0666\u0661\u0661\u0669\u0668\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0668"):
+        for call in calls:
+            db = Scripted({})
+            with pytest.raises(HTTPException) as ex:
+                _run(call(bad, db))
+            assert ex.value.status_code == 422 and db.log == [] and db.committed == 0 and reached == [], bad
+    assert main._steam_id_or_422("76561198000000008", "target_steam_id") == "76561198000000008"
+    assert main._steam_id_or_422("1", "target_steam_id") == "1"
+    for fn in (main.admin_ban, main.admin_unban):
+        src = inspect.getsource(fn)
+        assert src.count('_steam_id_or_422(req.target_steam_id, "target_steam_id")') == 1, fn.__name__
+        assert src.index("_steam_id_or_422(") < src.index("_require_admin(") < src.index("_mail_lock_identities("), fn.__name__

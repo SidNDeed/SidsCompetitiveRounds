@@ -36,12 +36,15 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 # Discord lines in flight naming a player -- the delivery-lease release and the
 # events ack (main.py, review r10): whatever the main pool's state (every
 # connection held by requests queued behind a draining identity lock in the
-# rare overlap), an ADMITTED release finds a connection: main.py's
-# _pc_release_slot admits exactly RELEASE_POOL_SIZE + RELEASE_POOL_OVERFLOW of
-# these requests at once (review r12), the rest wait at the slot holding
-# nothing -- never at this pool's timeout. The writer's bound stays the
-# lease's own life; a release that lands earlier ends the wait earlier. Sized
-# for the bot's concurrency: one events poller and a few commands at once.
+# rare overlap), an ADMITTED release never waits behind another checkout of
+# this pool and never reaches its timeout: main.py's _pc_release_slot admits
+# exactly RELEASE_POOL_SIZE + RELEASE_POOL_OVERFLOW of these requests at once
+# (review r12), the rest wait at the slot holding nothing. What admission
+# does not remove (review r13): a connection's own validation -- pool_pre_ping,
+# a pool_recycle, a reconnection after an invalidation -- can still delay an
+# admitted request or fail it. The writer's bound stays the lease's own
+# life; a release that lands earlier ends the wait earlier. Sized for the
+# bot's concurrency: one events poller and a few commands at once.
 RELEASE_POOL_SIZE = 3
 RELEASE_POOL_OVERFLOW = 2
 release_engine = create_async_engine(

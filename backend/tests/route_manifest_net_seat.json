@@ -88,7 +88,7 @@
           ],
           "main",
           "admin_ban",
-          "5b9fbd45169f1d1b1f2f399921bdf5dea4923019"
+          "ce9fd2bb366725e5d26bba486eeabd3d7d2708fe"
         ],
         [
           "/api/v1/admin/banned-users",
@@ -358,7 +358,7 @@
           ],
           "main",
           "admin_unban",
-          "b0d2ca06dd681833adc0b789f8175d0f089ce4a3"
+          "dc9ac19bfa312c5e1ce1cf56ed62fc9034da8497"
         ],
         [
           "/api/v1/bug-reports",
@@ -682,7 +682,7 @@
           ],
           "main",
           "pc_open_pack",
-          "28956ec0eaf68ee5afc8407ba43df89d0b5d984b"
+          "c27208f4fcd2a8d3d46164a4a339fdbecbf9d519"
         ],
         [
           "/api/v1/pc/packs/result",
@@ -691,7 +691,7 @@
           ],
           "main",
           "pc_pack_result",
-          "f6958a4545ea159b89f7cdae4ecb3c5acf8a70b6"
+          "f77b10881ba44e7de7f4ea56114c8f638035bdf2"
         ],
         [
           "/api/v1/pc/packs",
@@ -3089,7 +3089,7 @@
           ],
           "main",
           "internal_pc_face_preview",
-          "652d9e8d0088fba5cabfe6346fdd5148b506ec68"
+          "e2da559555fde1d3a9fd315fca26c4ef33e622ee"
         ],
         [
           "/api/v1/internal/pc/face/print/{print_id}/{locale}",
@@ -3116,7 +3116,7 @@
           ],
           "main",
           "internal_pc_lease_release",
-          "de14f053e3ba41be3f0276faabb5b5f63662ddce"
+          "cac3f965a09bddc46df2d1c393115c404e811dc2"
         ],
         [
           "/api/v1/internal/pc/lease/{lease_id}",
@@ -3317,7 +3317,7 @@
       [
         "main",
         "lifespan",
-        "9c6a4de33aa35818971499b3193116fab3c3a557"
+        "8d3938972648ab9573cc20401e67ae0ef9c799ed"
       ]
     ]
   },
