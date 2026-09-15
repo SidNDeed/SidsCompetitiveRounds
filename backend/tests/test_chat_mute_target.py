@@ -8,12 +8,21 @@ the ban family uses (integrator decision D-f) -- and one unsliced string through
   * the unmute route, as the unban does, calls _mod_release_or_422 after its UPDATE: a target outside the domain is
     refused when the UPDATE revoked no row and admitted when it revoked one, so a row stored under such a key stays
     revocable;
-  * every chat_mutes key is bound unsliced.
-The routes are driven through FastAPI's request stack (the body model, the Query bound on the admin-actions filter,
-the dependency override), with the database scripted and the identity proof stubbed."""
+  * a target no text bind can carry (a NUL character, a lone surrogate) is refused before any statement on the
+    unmute and on the admin-actions filter by _mod_bindable_or_422, their first statement (review r15), and on
+    the mute by the domain; an admin-actions action filter no text bind can carry is refused before any statement
+    too, by _pg_text_ok (review r15 sweep);
+  * every chat_mutes key is bound unsliced;
+  * the internal moderation routes check a string naming their target or its message before the statements that
+    bind it (review r15 and its sweep): the bridge moderation route and the Discord mute refuse one no text bind
+    can carry (422), and the Discord delete event drops such an id and reads the rest.
+The public routes are driven through FastAPI's request stack (the body model, the Query bound on the admin-actions
+filter, the dependency override) wherever a value can travel in a request, with the database scripted and the
+identity proof stubbed; the internal routes are called directly, with the internal key stubbed."""
 import ast
 import asyncio
 import inspect
+import json
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -251,6 +260,165 @@ def test_the_unmute_revokes_a_key_outside_the_domain_only_when_a_row_carries_it(
             assert db.committed == 1 and f"[CHAT-MOD] {role} {actor} unmuted {good} in [{label}] (0 row(s))" in out
 
 
+# strings no text bind can carry: a NUL character (PostgreSQL text holds none) and lone surrogates (no UTF-8 encoding)
+UNBINDABLE = ("\x00", "7656119800000000\x00", "photon_\x00", "\ud800", "76561198000000008\udfff")
+
+
+def _post_escaped(client, path, body):
+    """The body as ASCII JSON: a lone surrogate travels as its \\u escape, which the route's JSON parse restores
+    (httpx's json= encodes the body as UTF-8, which a lone surrogate does not have)."""
+    return client.post(path, content=json.dumps(body).encode("ascii"), headers={"content-type": "application/json"})
+
+
+def test_a_target_no_text_bind_can_carry_is_refused_before_any_statement(monkeypatch, capsys):
+    """v4.13 (review r15 LOW): a statement that binds a string no text bind can carry fails (500), and the unmute
+    binds its target in every UPDATE arm before its domain check (_mod_release_or_422). _mod_bindable_or_422 is the
+    unmute's first statement: on each of its three arms, and whether or not a row would be revoked, such a target
+    answers 422 with the domain's detail and nothing else happens -- no statement, no commit, no identity proof, no
+    scope read, no log line. The mute refuses the same strings with the same answer (its domain is ASCII digits).
+    The admin-actions filter refuses them before the admin check: a query string carries a NUL (%00) but not a
+    lone surrogate (the query is decoded as UTF-8 with replacement), so the surrogates are handed to the route
+    function directly."""
+    client, seen, holder = _client(monkeypatch)
+    for bad in UNBINDABLE:
+        assert main._pg_text_ok(bad) is False, repr(bad)
+        for actor, chan, _arm, _label in ARMS:
+            for path in ("/mute", "/unmute"):
+                holder["db"] = db = _Db(1)
+                _clear(seen)
+                r = _post_escaped(client, path, _body(actor, bad, chan))
+                assert r.status_code == 422 and r.json() == {"detail": DETAIL}, (path, actor, chan, repr(bad), r.text)
+                assert db.log == [] and db.committed == 0, (path, actor, chan, repr(bad), db.log)
+                assert seen == {"scope": [], "hmac": [], "session": []}, (path, actor, chan, repr(bad), seen)
+        db = _Db()
+        _clear(seen)
+        with pytest.raises(HTTPException) as ex:
+            asyncio.run(main.admin_list_actions(admin_steam_id=ADMIN, hmac_signature="sig", limit=50, offset=0,
+                                                action="", target_steam_id=bad, db=db))
+        assert (ex.value.status_code, ex.value.detail) == (422, DETAIL) and db.log == [] and seen["hmac"] == [], repr(bad)
+    holder["db"] = db = _Db()
+    _clear(seen)
+    r = client.get("/actions", params={"admin_steam_id": ADMIN, "target_steam_id": "7656\x00"})
+    assert r.status_code == 422 and r.json() == {"detail": DETAIL} and db.log == [] and seen["hmac"] == [], r.text
+    assert "[CHAT-MOD]" not in capsys.readouterr().out
+    # a filter a text bind carries, outside the domain included, reaches the admin check and both statements (the
+    # query refuses one longer than its 20-character limit before either)
+    for key in ("photon_1", "￾", ""):
+        holder["db"] = db = _Db()
+        _clear(seen)
+        r = client.get("/actions", params={"admin_steam_id": ADMIN, "target_steam_id": key})
+        assert r.status_code == 200 and seen["hmac"] == [("admin_actions_list", "")], (repr(key), r.text)
+        assert db.binds("aa.target_steam_id = :target", "target") == ([key, key] if key else []), db.log
+
+
+def test_the_internal_moderation_routes_refuse_an_id_no_text_bind_can_carry_before_any_statement(monkeypatch):
+    """v4.13 (review r15 LOW, the sweep): the bridge moderation route and the Discord mute bind caller-sent strings
+    that name their target or its message, each as the route's existing slice of it. The first 128 characters of the
+    bridge event's native message id and of the Discord message id are bound by the route's read, its first
+    statement. The first 64 of the purged platform identity's id are bound by the purge's first statement, and the
+    first 64 of its lower-cased login and of its display name by the later mute upsert when the event carries a ban
+    (the login by the audit row too). Each such slice is refused 422 before any of those statements when no text
+    bind can carry it, with nothing purged, muted, broadcast or committed (the reader treats a 4xx as a verdict and
+    does not retry it); every other slice reaches its statements as it is (an empty message or platform id is
+    refused as missing, an empty login or display name is bound as NULL), and the new check alters nothing. The
+    Discord delete event drops such an id instead (the next test)."""
+    monkeypatch.setattr(main, "_require_internal_key", lambda key: None)
+    calls = []
+
+    async def purge(_db, *, kind, value, actor, **_kw):
+        calls.append(("purge", kind, value))
+        return [], False
+
+    async def upsert(_db, **kw):
+        calls.append(("upsert", kw["user_id"], kw["login"], kw["display_name"]))
+
+    async def broadcast(*_a, **_kw):
+        calls.append(("broadcast",))
+
+    monkeypatch.setattr(main, "_purge_identity_rows", purge)
+    monkeypatch.setattr(main, "_bridge_mute_upsert", upsert)
+    monkeypatch.setattr(main, "_broadcast_deletes", broadcast)
+    bridge, discord = main.internal_chat_bridge_moderation, main.internal_chat_discord_mute
+
+    def purge_body(**fields):
+        return {"source": "twitch", "kind": "purge_user", "platform_user_id": "41", "login": "a",
+                "display_name": "A", "permanent": True, **fields}
+
+    for bad in UNBINDABLE:
+        cases = [(bridge, {"source": "youtube", "kind": "delete_message", "native_id": bad}, "native_id"),
+                 (discord, {"message_id": bad, "actor_discord_id": "7"}, "message_id")]
+        cases += [(bridge, purge_body(**{field: bad}), field) for field in ("platform_user_id", "login", "display_name")]
+        for route, body, field in cases:
+            db = _Db()
+            calls.clear()
+            with pytest.raises(HTTPException) as ex:
+                asyncio.run(route(body, x_internal_key="k", db=db))
+            assert (ex.value.status_code, ex.value.detail) == (422, f"{field} is not storable text"), (field, repr(bad))
+            assert db.log == [] and db.committed == 0 and calls == [], (field, repr(bad), db.log, calls)
+    for key in ("1234567890", "photon_1", "￾", "\U0010ffff"):
+        for route, body in ((bridge, {"source": "youtube", "kind": "delete_message", "native_id": key}),
+                            (discord, {"message_id": key, "actor_discord_id": "7"})):
+            db = _Db()
+            res = asyncio.run(route(body, x_internal_key="k", db=db))
+            assert res == {"status": "unknown_message"} and db.binds("mr.mirror_id = :m", "m") == [key], (repr(key), db.log)
+        db = _Db()
+        calls.clear()
+        res = asyncio.run(bridge(purge_body(platform_user_id=key, login=key, display_name=key), x_internal_key="k", db=db))
+        assert res["status"] == "ok" and db.committed == 1, (repr(key), res)
+        assert calls == [("purge", "twitch_user", key), ("upsert", key, key, key), ("broadcast",)], (repr(key), calls)
+
+
+def test_the_discord_delete_event_drops_an_id_no_text_bind_can_carry_and_reads_the_rest(monkeypatch):
+    """v4.13 (review r15 sweep): the Discord delete event binds its message ids, as one array, in its read, where one
+    id no text bind can carry fails the read for the whole event (500). The ids are the route's existing slice of
+    the list: the entries among its first 100 that are neither empty nor whitespace (a falsy entry counts as
+    empty), each cut to its first 128 characters. Such an id is dropped before the read, which binds the other ids
+    of that slice in order, and the new check alters nothing else: no chat_mirrors row can hold a dropped id, and
+    the read passes over an id no row holds. An event whose every id is dropped answers as one that names no
+    message, with no statement and no commit."""
+    monkeypatch.setattr(main, "_require_internal_key", lambda key: None)
+    route = main.internal_chat_discord_deleted
+    carried = ("1234567890", "photon_1", "\ufffe", "\U0010ffff")
+    for bad in UNBINDABLE:
+        assert main._pg_text_ok(bad) is False, repr(bad)
+        for ids in ([bad], [bad, bad]):
+            db = _Db()
+            res = asyncio.run(route({"message_ids": ids}, x_internal_key="k", db=db))
+            assert res == {"status": "ok", "deleted": 0} and db.log == [] and db.committed == 0, (repr(bad), db.log)
+        db = _Db()
+        res = asyncio.run(route({"message_ids": [carried[0], bad, *carried[1:], bad]}, x_internal_key="k", db=db))
+        assert res == {"status": "ok", "deleted": 0} and db.committed == 1, (repr(bad), res)
+        assert db.binds("mr.mirror_id = ANY(:mids)", "mids") == [list(carried)], (repr(bad), db.log)
+
+
+def test_the_admin_actions_list_refuses_an_action_filter_no_text_bind_can_carry_before_any_statement(monkeypatch):
+    """v4.13 (review r15 sweep): the admin-actions list binds its action filter in both of its reads. An action
+    filter no text bind can carry is refused 422 before the admin check and any statement. A query string carries a
+    NUL (%00) but not a lone surrogate (the query is decoded as UTF-8 with replacement), so the surrogates are handed
+    to the route function directly. Every action filter a text bind carries reaches the admin check and both reads
+    unchanged (an empty one, neither read's filter), except through the query, which refuses one longer than its
+    32-character limit before either."""
+    detail = "action is not storable text"
+    client, seen, holder = _client(monkeypatch)
+    for bad in UNBINDABLE:
+        db = _Db()
+        _clear(seen)
+        with pytest.raises(HTTPException) as ex:
+            asyncio.run(main.admin_list_actions(admin_steam_id=ADMIN, hmac_signature="sig", limit=50, offset=0,
+                                                action=bad, target_steam_id="", db=db))
+        assert (ex.value.status_code, ex.value.detail) == (422, detail) and db.log == [] and seen["hmac"] == [], repr(bad)
+    holder["db"] = db = _Db()
+    _clear(seen)
+    r = client.get("/actions", params={"admin_steam_id": ADMIN, "action": "chat_mute\x00"})
+    assert r.status_code == 422 and r.json() == {"detail": detail} and db.log == [] and seen["hmac"] == [], r.text
+    for key in ("chat_mute", "\ufffe", ""):
+        holder["db"] = db = _Db()
+        _clear(seen)
+        r = client.get("/actions", params={"admin_steam_id": ADMIN, "action": key})
+        assert r.status_code == 200 and seen["hmac"] == [("admin_actions_list", "")], (repr(key), r.text)
+        assert db.binds("aa.action = :action", "action") == ([key, key] if key else []), db.log
+
+
 def _functions(tree):
     return {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
 
@@ -290,7 +458,9 @@ def test_the_mute_checks_first_the_unmute_after_its_update_and_no_chat_mutes_sta
     - The mute route's first statement (after its docstring) checks the request's target, which it reads nowhere
       else; the write core's first statement checks its key parameter, which it reads nowhere else.
     - The unmute route calls no restriction check. Its one _mod_release_or_422 call is the statement right after its
-      UPDATE arms and right before its audit block, and passes the number of rows the arm revoked.
+      UPDATE arms and right before its audit block, and passes the number of rows the arm revoked. Its first
+      statement is _mod_bindable_or_422 on the request's target (review r15), as the admin-actions list's is on
+      its filter.
     - The r14 class is a chat_mutes key bound as a slice of its input: over main.py's syntax tree, every db.execute
       whose SQL names chat_mutes and whose binds carry "sid" is found (the writer functions among them must include
       the five known ones), and none binds "sid" to an expression containing a slice, or to a local the same
@@ -312,6 +482,9 @@ def test_the_mute_checks_first_the_unmute_after_its_update_and_no_chat_mutes_sta
     heads = [ast.unparse(s).split("\n")[0] for s in _body_after_docstring(unmute)]
     at = heads.index("_mod_release_or_422(req.target_steam_id, len(cleared))")
     assert heads[at - 1] == "if chan is not None:" and heads[at + 1] == "if cleared:", heads
+    assert heads[0] == "_mod_bindable_or_422(req.target_steam_id)" and called.count("_mod_bindable_or_422") == 1, heads
+    listing = funcs["admin_list_actions"]
+    assert ast.unparse(_body_after_docstring(listing)[0]) == "_mod_bindable_or_422(target_steam_id)"
     binds, writers = [], set()
     for fn in ast.walk(tree):
         if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):

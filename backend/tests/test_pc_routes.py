@@ -843,9 +843,13 @@ def _sub(**over):
     return row
 
 
-def _lease_db(steam="765", got=True, sub=None, depicts=True, events=(3, 4), held=True, pullers=("766",)):
+# the lease subject's id: a SteamID64, which the acquisition requires (v4.13, review r15)
+LEASE_STEAM = "76561198000000765"
+
+
+def _lease_db(steam=LEASE_STEAM, got=True, sub=None, depicts=True, events=(3, 4), held=True, pullers=("766",)):
     """`events`: the ids the named-events read answers with (each pulled by "766" from the subject
-    "765"); `held`: the SHARED try-lock on the other party (r7 H2). The shared key is listed before
+    `steam`); `held`: the SHARED try-lock on the other party (r7 H2). The shared key is listed before
     the exclusive one: the scripted answer is the first key the statement contains."""
     lease_id = uuid4()
     return Scripted({
@@ -893,7 +897,7 @@ def test_lease_acquire_try_locks_the_identity_then_resolves_under_it(monkeypatch
     ins = db.log[_idx(db, "INSERT INTO pc_delivery_leases")]
     assert ins[1] == {"sid": str(PID), "print": str(PID), "ids": [3, 4], "h": "ef" * 32, "secs": 60.0}
     assert "make_interval(secs =>" in ins[0] and db.committed == 1
-    assert db.log[_idx(db, "pg_try_advisory_xact_lock")][1] == {"sid": "765"}
+    assert db.log[_idx(db, "pg_try_advisory_xact_lock")][1] == {"sid": LEASE_STEAM}
     # the named events' OTHER party is try-locked SHARED, once; the subject (already held) is skipped (r7 H2)
     shared = [(q, p) for q, p in db.log if "pg_try_advisory_xact_lock_shared" in q]
     assert [p for _, p in shared] == [{"sid": "766"}]
@@ -980,7 +984,8 @@ def _check_row(**over):
     """What the revalidation reads: the lease, and the subject's resolver
     inputs as they stand NOW."""
     row = {"until": NOW, "unexpired": True, "leased_hash": "ef" * 32, "print_deliverable": True,
-           "subject_deleted": False, "portrait_hash": "ef" * 32, "subject_banned": False, "events_ok": True}
+           "subject_deleted": False, "portrait_hash": "ef" * 32, "subject_banned": False, "events_ok": True,
+           "subject_id_ok": True}
     row.update(over)
     return row
 
@@ -991,7 +996,8 @@ def _check_row(**over):
     ({"subject_deleted": True}, False),
     ({"print_deliverable": False}, False),                           # discarded, gone, or not theirs
     ({"subject_banned": True}, False),                               # banned since the acquire
-    ({"events_ok": False}, False),                                   # an event it names stopped being deliverable for either party (r6 H1)
+    ({"subject_id_ok": False}, False),                               # the subject's id is not a SteamID64 (v4.13, review r15)
+    ({"events_ok": False}, False),                                 # an event it names stopped being deliverable for either party (r6 H1)
     ({"subject_banned": True, "leased_hash": None, "portrait_hash": None}, False),   # a ban is said outright, not through the hash (r6 M2)
     ({"portrait_hash": "ab" * 32}, False),                           # replaced since the acquire
     ({"leased_hash": None, "portrait_hash": None}, True),            # no picture then, none now
@@ -1229,7 +1235,7 @@ def test_internal_print_face_answers_the_current_revision_in_a_header(monkeypatc
 
     async def ctx(db, locale):
         return _ctx(locale=locale)
-    monkeypatch.setattr(main, "_pc_face_row", face_row)
+    monkeypatch.setattr(main, "_pc_bot_face_row", face_row)   # the public read with the subject's id rule (v4.13, review r15)
     monkeypatch.setattr(main, "_pc_face_ctx", ctx)
     resp = _run(main.internal_pc_face_print(str(PID), "fr", "card", "k", Scripted({})))
     assert resp.headers["x-face-rev"] == main._pc_face_inputs(row, _ctx(locale="en"))[3]
@@ -1454,7 +1460,8 @@ def test_a_restriction_target_outside_the_domain_is_refused_before_the_signature
     read, any lock and the ban-rate gate. Both ends of the length are pinned (one and twenty digits pass, none and
     twenty-one are refused), digits are [0-9] (Arabic-Indic and fullwidth digits refused), the match is the whole
     string (a trailing newline refused), and a NUL character -- PostgreSQL text cannot hold one, so the gate's
-    best-effort refusal audit would fail on it silently (#656) -- is refused. A target that passes reaches the
+    best-effort refusal audit would fail on it silently (#656) -- is refused, as is every value no text bind can
+    carry (UNBINDABLE below, a lone surrogate among them; review r15). A target that passes reaches the
     signature check unchanged. The unban makes no domain check before its UPDATE (the next test)."""
     reached = []
 
@@ -1470,7 +1477,7 @@ def test_a_restriction_target_outside_the_domain_is_refused_before_the_signature
     for bad in ("7656119800000000x", "9" * 21, "", " 76561198000000008", "76561198000000008 ", "76561198000000008\n",
                 "7656119800000000\x00",
                 "\u0667\u0666\u0665\u0666\u0661\u0661\u0669\u0668\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0668",
-                "\uff11", "photon_1"):
+                "\uff11", "photon_1", *UNBINDABLE):
         db = Scripted({})
         with pytest.raises(HTTPException) as ex:
             _run(ban(bad, db))
@@ -1544,6 +1551,90 @@ def test_the_unban_releases_a_key_outside_the_domain_only_when_a_row_carries_it(
     assert "_mod_target_or_422(" not in src
     assert (src.index("UPDATE player_bans") < src.index("_mod_release_or_422(req.target_steam_id, res.rowcount)")
             < src.index("db.add(AdminAction("))
+
+
+# strings no text bind can carry: a NUL character (PostgreSQL text holds none) and lone surrogates (no UTF-8 encoding)
+UNBINDABLE = ("\x00", "7656119800000000\x00", "photon_\x00", "\ud800", "76561198000000008\udfff")
+
+
+def test_the_unban_refuses_a_key_no_text_bind_can_carry_before_any_statement(monkeypatch):
+    """v4.13 (review r15 LOW): the unban makes no domain check before its UPDATE (the test above): a NUL key with a
+    valid signature failed the identity lattice's first statement that binds it, its pre-read (500; the lattice
+    pre-reads the admin's and the target's ids in sorted order), and a lone surrogate failed (500) in the admin
+    check's canonical encode -- reached only once the admin id passes _is_admin and a signature is sent: the check
+    refuses a non-admin 403 at _is_admin first, and _verify_admin_hmac returns False (403) before the encode when
+    the secret is unset or no signature is sent. _mod_bindable_or_422 is the route's first statement: such a key
+    is refused 422 with the
+    domain's detail before the admin check, any statement, any audit row and any commit. No row can be keyed by such
+    a string, so no release is refused that could have happened. Every key a text bind carries -- in the domain,
+    outside it, empty, or a noncharacter -- reaches the admin check unchanged."""
+    reached = []
+
+    async def admin(db, adm, action, target, sig):
+        reached.append((action, target))
+        raise HTTPException(status_code=403, detail="Bad admin signature")   # the probe stops at the admin check
+
+    monkeypatch.setattr(main, "_require_admin", admin)
+
+    def unban(target, db):
+        return main.admin_unban(main._AdminUnbanReq(admin_steam_id="9", target_steam_id=target, hmac_signature="x"),
+                                db=db)
+
+    for bad in UNBINDABLE:
+        db = _ReleaseDb({}, 1)
+        with pytest.raises(HTTPException) as ex:
+            _run(unban(bad, db))
+        assert (ex.value.status_code, ex.value.detail) == (422, "target_steam_id must be a numeric steam id"), repr(bad)
+        assert db.log == [] and db.added == [] and db.committed == 0 and reached == [], repr(bad)
+        assert main._pg_text_ok(bad) is False, repr(bad)
+    carried = ("76561198000000008", "9" * 21, "photon_1", "", "￾", "\U0010ffff", "٧" * 17)
+    for key in carried:
+        db = _ReleaseDb({}, 1)
+        with pytest.raises(HTTPException) as ex:
+            _run(unban(key, db))
+        assert (ex.value.status_code, reached[-1]) == (403, ("unban", key)), repr(key)
+        assert db.log == [] and main._pg_text_ok(key) is True, repr(key)
+    assert len(reached) == len(carried)
+    fn = ast.parse(inspect.getsource(main.admin_unban)).body[0]
+    assert ast.unparse(fn.body[0]) == "_mod_bindable_or_422(req.target_steam_id)"
+
+
+def test_the_admin_portrait_clear_refuses_a_target_no_text_bind_can_carry_before_any_statement(monkeypatch):
+    """v4.13 (review r15 sweep): the admin portrait clear signs its target and binds it in the identity lock and the
+    players read, as the route's existing slice of it, its first 20 characters. A lone surrogate there failed in the
+    admin check's canonical encode (500) -- reached only once the admin id passes _is_admin and a signature is
+    sent: the check refuses a non-admin 403 at _is_admin first, and _verify_admin_hmac returns False (403) before
+    the encode when the secret is unset or no signature is sent -- and a NUL character there with a valid
+    signature failed the identity
+    lock's bind (500). Such a target is refused 422 before the admin check, any statement and any commit. Every
+    target whose slice a text bind carries -- a Steam id, outside the domain, empty, a noncharacter -- reaches the
+    admin check as that slice; the new check alters nothing."""
+    reached = []
+
+    async def admin(db, adm, action, target, sig):
+        reached.append((action, target))
+        raise HTTPException(status_code=403, detail="Bad admin signature")   # the probe stops at the admin check
+
+    monkeypatch.setattr(main, "_require_admin", admin)
+
+    def clear(target, db):
+        return main.admin_pc_portrait_clear({"admin_steam_id": "1", "steam_id": target, "lock_days": 0,
+                                             "signature": "s"}, db)
+
+    for bad in UNBINDABLE:
+        db = Scripted({})
+        with pytest.raises(HTTPException) as ex:
+            _run(clear(bad, db))
+        assert (ex.value.status_code, ex.value.detail) == (422, "steam_id is not storable text"), repr(bad)
+        assert db.log == [] and db.committed == 0 and reached == [], repr(bad)
+    carried = (STEAM, "9" * 20, "photon_1", "", "\ufffe", "\U0010ffff", "\u0667" * 17)
+    for key in carried:
+        db = Scripted({})
+        with pytest.raises(HTTPException) as ex:
+            _run(clear(key, db))
+        assert (ex.value.status_code, reached[-1]) == (403, ("pc_portrait_clear", f"{key}:0")), repr(key)
+        assert db.log == [] and main._pg_text_ok(key) is True, repr(key)
+    assert len(reached) == len(carried)
 
 
 def test_migration_319_puts_the_target_domain_on_active_bans_in_the_helpers_spelling():

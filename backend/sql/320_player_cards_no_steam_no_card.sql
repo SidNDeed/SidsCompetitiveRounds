@@ -28,14 +28,26 @@
 --            pins both copies of it), as a delta on players.pc_shards (#326).
 --   'none'   (variant B): the print is retired and nothing is paid
 --            (discard_shards 0).
--- Any other value raises before anything is retired; the switch is a
--- constant, so only an edit to this file can make that check raise. This
--- file holds 'shards', Sid's decision of 2026-09-15.
+-- This file holds 'shards', Sid's decision of 2026-09-15.
 --
--- ORDER: apply AFTER the v4.13 api code phase, on the primary, as 315 was: an
--- older api still deals these subjects, and a print it mints after this file
--- has run stays held. The retirement's last check raises while a live print
--- of such a subject is visible after the retirement.
+-- ORDER, a prerequisite: apply only once the v4.13 api code is live on the
+-- primary, as 315 was. The requirement is #236's: what this file retires, and
+-- pays for, is decided by the rule the v4.13 code carries, so that code has
+-- to be live first. This file is therefore NOT one of the release train's
+-- schema migrations: the train runs its schema phase BEFORE the code phase
+-- (release_train.py PHASES), and on an executing run, one carrying `--go`,
+-- phase_code raises until schema_done (#477); `plan` forces `--go` off, and
+-- such a dry run raises nothing. So anything listed in schema_sql lands too
+-- early. 315 reached the box the other way, on the batch's post_code_sql
+-- list, which the train applies after the code phase; this file and 319 are
+-- applied BY HAND after `--only code`, per the deploy plan. v4.13 code never
+-- mints a print of such a subject: the open deals a member only when the live
+-- pool check, which carries steamid64's rule, answers for it under the
+-- subject's hold. An older api still deals these subjects, and a print it
+-- mints after this file has run stays held. The retirement's last check
+-- raises on a live print of such a subject that is visible to that check's
+-- statement. A print whose transaction has not committed when that statement
+-- begins is not visible to it, so the check does not stand in for the order.
 --
 -- READ HALF: the SELECT below writes nothing and runs as it is through the
 -- read-only wrapper (joined onto one line). Its answer changes until the
@@ -63,9 +75,11 @@
 --      at a time in sorted steam_id order (COLLATE "C", byte order), the
 --      canonical order of #197 that _mail_lock_identities and the api's
 --      other loops over several identity locks use, and all of them before
---      the first players row. A print committed after the first read under
---      an owner outside that set is not retired, and the last check raises
---      on it. Nothing ahead of those locks writes a row or changes a table.
+--      the first players row. Of the prints committed after the first read,
+--      the retirement retires only those whose owner is in that set and that
+--      committed before its statement began; the last check raises on any
+--      left live that committed before that check's statement began (see
+--      ORDER). Nothing ahead of those locks writes a row or changes a table.
 --
 -- MONEY: the retirement reads the locked owners' pc_shards total before its
 -- write and again after it, and raises unless the total moved by exactly the
@@ -136,11 +150,6 @@ DECLARE
     v_ids       uuid[];
     v_sid       text;
 BEGIN
-    -- A check on this file's own text (THE SWITCH above).
-    IF v_compensation NOT IN ('shards', 'none') THEN
-        RAISE EXCEPTION '320: the compensation switch holds %, not shards or none; the retirement is not applied', v_compensation;
-    END IF;
-
     -- The owners of the prints to retire, read once. The locks, both balance
     -- readings and the retirement below are restricted to this set; only the
     -- last check reads beyond it, to find a print left outside the set.
@@ -223,15 +232,22 @@ BEGIN
         RAISE EXCEPTION '320: the owners'' shards moved by % but % shard(s) are recorded for the prints retired here; the retirement is not applied', v_after - v_before, v_recorded;
     END IF;
 
-    -- No live print of such a subject may remain: one an older api dealt, or
-    -- one committed after the first read under an owner outside that set.
+    -- The last check, over the rows visible to this statement: none of them
+    -- may be a live print of such a subject. One would be a print this run
+    -- did not retire, left by a writer other than v4.13 code after the first
+    -- read: a print committed since, or a subject's id changed since (v4.13
+    -- changes an id only where it deletes that subject's prints, in the same
+    -- transaction). A print whose transaction has not committed when this
+    -- statement begins is not visible to it; the ORDER prerequisite (v4.13
+    -- code live on the primary first, and it never mints such a print) is
+    -- what excludes one.
     IF EXISTS (SELECT 1
                  FROM pc_prints pr
                  JOIN pc_cards c ON c.id = pr.card_id
                  JOIN players s ON s.id = c.subject_player_id
                 WHERE pr.discarded_at IS NULL
                   AND NOT (CASE WHEN s.steam_id ~ '^[0-9]{17}$' THEN CAST(s.steam_id AS bigint) BETWEEN 76561197960265728 AND 76561202255233023 ELSE false END)) THEN
-        RAISE EXCEPTION '320: a live print of a subject whose id is not a SteamID64 is visible after the retirement (an api older than v4.13 may still be dealing them, or one was committed under an owner this run did not read); the retirement is not applied';
+        RAISE EXCEPTION '320: a live print of a subject whose id is not a SteamID64 is visible after the retirement (left after this run''s first read by a writer other than v4.13 code, such as an older api); the retirement is not applied';
     END IF;
     RAISE NOTICE '320: compensation %: % print(s) retired from % owner(s), % shard(s) paid, % lease(s) released',
         v_compensation, v_retired, v_owners, v_after - v_before, v_leases;

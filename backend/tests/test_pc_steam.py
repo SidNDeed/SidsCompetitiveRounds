@@ -13,10 +13,12 @@ import pytest
 from PIL import Image, ImageChops, PngImagePlugin
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.normpath(os.path.join(HERE, "..", "api")))
 
 import pc_face  # noqa: E402
 import pc_steam  # noqa: E402
+from steamid64_pg_parity import VECTORS  # noqa: E402
 
 REF = "0123456789abcdef0123456789abcdef01234567"
 SID, SID2 = "76561198040410653", "76561198720512419"
@@ -60,6 +62,21 @@ def test_the_picture_url_is_built_from_the_reference_and_nothing_else():
     assert pc_steam.profile_xml_url(SID) == f"https://steamcommunity.com/profiles/{SID}?xml=1"
     with pytest.raises(ValueError):
         pc_steam.profile_xml_url("1; DROP")
+    # Both id-reading builders over every spelling steamid64_pg_parity holds the validator and PostgreSQL to,
+    # rather than two strings nobody would ever send: 22 the rule refuses, 5 it admits. "not-an-id" and
+    # "1; DROP" leave a builder free to read the form, a prefix, or the interval through str.isdigit() and
+    # int(); the sweep carries the near-misses of each -- the interval's two neighbours, the leading zero, the
+    # terminal newline, the Arabic-Indic seventeen int() reads as SID itself.
+    assert (len(VECTORS), sum(1 for _, ok in VECTORS if ok)) == (27, 5)
+    for text, ok in VECTORS:
+        if ok:
+            assert pc_steam.profile_xml_url(text) == f"https://steamcommunity.com/profiles/{text}?xml=1"
+            assert pc_steam.summaries_url("K", [SID, text]).endswith(f"steamids={SID}%2C{text}")
+        else:
+            with pytest.raises(ValueError):
+                pc_steam.profile_xml_url(text)
+            with pytest.raises(ValueError):
+                pc_steam.summaries_url("K", [SID, text])
 
 
 # ── feed parsing ───────────────────────────────────────────────────────

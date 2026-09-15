@@ -34,7 +34,7 @@
           ],
           "main",
           "admin_list_actions",
-          "daf009b6300d0b6b025c80dd9dd89004864119e0"
+          "de05a6ae54dfa7217724be4a8f18024caa100331"
         ],
         [
           "/api/v1/admin/admins",
@@ -241,7 +241,7 @@
           ],
           "main",
           "admin_accept_quarantine",
-          "f50f560fbc627eeb5342e0a029f097f43b8ec7be"
+          "a1693016ea033d71db6ccf6e2f6168a7291c3a48"
         ],
         [
           "/api/v1/admin/quarantine/{qid}/discard",
@@ -250,7 +250,7 @@
           ],
           "main",
           "admin_discard_quarantine",
-          "017de2cbf04f8f1281bb8b8201beeb64d994d87a"
+          "84f8351b162932923b4024a97799da98f51e6df4"
         ],
         [
           "/api/v1/admin/recent-series",
@@ -268,7 +268,7 @@
           ],
           "main",
           "admin_record_exclude",
-          "b5025a769d766e41bf28b761cd8b9f724ba037bb"
+          "1fb34dcb98ca77efdb3073f113af61b444bff560"
         ],
         [
           "/api/v1/admin/release-notes",
@@ -286,7 +286,7 @@
           ],
           "main",
           "admin_resolve_flag_restoration",
-          "0c4f1b3165e322f19e86bb68675bd0db70b4bdd2"
+          "28cdeffd459bdf2cbebc34529c0628f3bb69d0ed"
         ],
         [
           "/api/v1/admin/reverse-series",
@@ -304,7 +304,7 @@
           ],
           "main",
           "admin_review_flag",
-          "bd4c5c1018a455853e74fcd55b0aae9d639a2ddc"
+          "65bf0f82f68599d6d7e9b39680a3a14052f8ff9a"
         ],
         [
           "/api/v1/admin/set-discord-username",
@@ -358,7 +358,7 @@
           ],
           "main",
           "admin_unban",
-          "d9c918dcebe567e2de6125df4e6ccba7cc95ff4e"
+          "9ea6f16c53357afa011d5543694dc3a1bfce875f"
         ],
         [
           "/api/v1/bug-reports",
@@ -1570,7 +1570,7 @@
           ],
           "main",
           "chat_moderate_unmute",
-          "51525b6bc7ef60a28e2ff6ab363dbe5935ba97e0"
+          "755c8416aecd35280c56e1adaa459bd9eb60cb64"
         ],
         [
           "/api/v1/chat/post",
@@ -1939,7 +1939,7 @@
           ],
           "main",
           "internal_chat_bridge_moderation",
-          "7ba935ad2985ebf2c74222651f7c1c606068481b"
+          "1995bf7adc5e86f6fe4edad3323820efca8c0722"
         ],
         [
           "/api/v1/internal/chat/discord-deleted",
@@ -1948,7 +1948,7 @@
           ],
           "main",
           "internal_chat_discord_deleted",
-          "2ea5653710c05aca66890ef8c488cbc9018dc4b2"
+          "dd0b900f8f6c8c89313141ecb791610112f21e5f"
         ],
         [
           "/api/v1/internal/chat/discord-mute",
@@ -1957,7 +1957,7 @@
           ],
           "main",
           "internal_chat_discord_mute",
-          "43f8fbb713bbb089ea1479b95099ff4139a60cb0"
+          "8e3ad2199379b5fe9fc2560fffde40e043ba5f94"
         ],
         [
           "/api/v1/internal/chat/lockdown",
@@ -3071,7 +3071,7 @@
           ],
           "main",
           "admin_pc_portrait_clear",
-          "dbe45ed76ee9c2f2a0aa2563374920e3dbbf280f"
+          "38f8c233813ff5f18de1c4c4508dce5882ab81fd"
         ],
         [
           "/api/v1/internal/pc/face/back",
@@ -3098,7 +3098,7 @@
           ],
           "main",
           "internal_pc_face_print",
-          "8a6f2abb8f354dba189b62d6d3a87cc98d33c15c"
+          "8e510d35db7690f773cff37da1e3e2934ccfee03"
         ],
         [
           "/api/v1/internal/pc/lease",
@@ -3107,7 +3107,7 @@
           ],
           "main",
           "internal_pc_lease",
-          "ceb93c5d8c03a97bb7f726fe1b4999c939ae1021"
+          "62da92ae4dd122461310bc30fd4f39cee0b687a3"
         ],
         [
           "/api/v1/internal/pc/lease/{lease_id}",
@@ -3125,7 +3125,7 @@
           ],
           "main",
           "internal_pc_lease_check",
-          "f9ac77bbd6491f7909f3b3be3b096e04db79d725"
+          "b20e624b24d9ca080215dae44d2fbecc419ac8ff"
         ],
         [
           "/api/v1/pc-face/{print_id}/{rev}/{locale}/{size}.png",

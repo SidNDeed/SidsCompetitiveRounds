@@ -119,12 +119,48 @@ def test_shard_values_are_by_rarity_only():
 
 # ── earned packs: deterministic, one flat roll ──
 
-def test_earned_roll_is_deterministic_and_keyed_by_mode_and_reference():
-    a = pc.earned_roll(b"k", "1v1", "s1")
-    assert a == pc.earned_roll(b"k", "1v1", "s1")
-    assert 0 <= a < 10000
-    assert pc.earned_roll(b"k", "team", "s1") != a or pc.earned_roll(b"k", "1v1", "s2") != a
-    assert pc.earned_roll(b"other", "1v1", "s1") != a or pc.earned_roll(b"other", "1v1", "s3") != a
+EARNED_SECRETS = (b"scr-earned-vectors-1", b"scr-earned-vectors-2")
+EARNED_MODES = ("1v1", "team", "ovt", "ffa")
+EARNED_REFS = ("series-0019", "series-0002")
+# earned_roll's output for every (secret, mode, reference) above, computed from its definition (the first four
+# bytes of HMAC-SHA256(secret, "{mode}:{reference}"), big-endian, mod 10000): sixteen distinct rolls, four under
+# the 20% cut (2000)
+EARNED_VECTORS = {
+    (b"scr-earned-vectors-1", "1v1", "series-0019"): 776, (b"scr-earned-vectors-1", "1v1", "series-0002"): 5395,
+    (b"scr-earned-vectors-1", "team", "series-0019"): 5926, (b"scr-earned-vectors-1", "team", "series-0002"): 5533,
+    (b"scr-earned-vectors-1", "ovt", "series-0019"): 2347, (b"scr-earned-vectors-1", "ovt", "series-0002"): 3787,
+    (b"scr-earned-vectors-1", "ffa", "series-0019"): 6745, (b"scr-earned-vectors-1", "ffa", "series-0002"): 9921,
+    (b"scr-earned-vectors-2", "1v1", "series-0019"): 5604, (b"scr-earned-vectors-2", "1v1", "series-0002"): 883,
+    (b"scr-earned-vectors-2", "team", "series-0019"): 1288, (b"scr-earned-vectors-2", "team", "series-0002"): 3860,
+    (b"scr-earned-vectors-2", "ovt", "series-0019"): 8863, (b"scr-earned-vectors-2", "ovt", "series-0002"): 423,
+    (b"scr-earned-vectors-2", "ffa", "series-0019"): 3981, (b"scr-earned-vectors-2", "ffa", "series-0002"): 5079,
+}
+
+
+def test_earned_roll_is_pinned_and_each_of_secret_mode_and_reference_changes_it_on_its_own():
+    """Review r15 (LOW): fixed output vectors for a fixed secret pin the roll and the pack it grants, and changing
+    any one of the three inputs -- the secret, the mode, the reference -- with the other two held changes the roll,
+    for every vector: a roll that ignores any one of them cannot match the table."""
+    assert len(EARNED_VECTORS) == len(EARNED_SECRETS) * len(EARNED_MODES) * len(EARNED_REFS)
+    assert len(set(EARNED_VECTORS.values())) == len(EARNED_VECTORS)
+    for (secret, mode, ref), roll in EARNED_VECTORS.items():
+        assert pc.earned_roll(secret, mode, ref) == roll, (secret, mode, ref)
+        assert pc.earned_roll(secret, mode, ref) == roll   # deterministic: the same inputs, the same roll
+        assert pc.earned_pack_kind(secret, mode, ref) == ("win" if roll < 2000 else None), (secret, mode, ref)
+    wins = sorted(k for k in EARNED_VECTORS if pc.earned_pack_kind(*k) == "win")
+    assert wins == sorted([(b"scr-earned-vectors-1", "1v1", "series-0019"), (b"scr-earned-vectors-2", "1v1", "series-0002"),
+                           (b"scr-earned-vectors-2", "team", "series-0019"), (b"scr-earned-vectors-2", "ovt", "series-0002")])
+    for secret, mode, ref in EARNED_VECTORS:
+        roll = pc.earned_roll(secret, mode, ref)
+        for other in EARNED_SECRETS:
+            if other != secret:
+                assert pc.earned_roll(other, mode, ref) != roll, ("secret", secret, mode, ref)
+        for other in EARNED_MODES:
+            if other != mode:
+                assert pc.earned_roll(secret, other, ref) != roll, ("mode", secret, mode, ref)
+        for other in EARNED_REFS:
+            if other != ref:
+                assert pc.earned_roll(secret, mode, other) != roll, ("reference", secret, mode, ref)
 
 
 def test_every_ranked_mode_rolls_the_same_flat_odds_and_there_is_no_sweep_roll():

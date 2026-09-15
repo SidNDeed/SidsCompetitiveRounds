@@ -29,9 +29,23 @@
 -- widening -- the cut was the api's own slice.
 --
 -- Additive: no api code needs it, so it rides the code SHA and is applied
--- after the code phase (learning #477's single-SHA case). Re-running is a
--- no-op: the constraint is added only when absent. Explicit transaction:
--- psql autocommits statement by statement otherwise (#340).
+-- after the code phase (learning #477's single-SHA case).
+--
+-- WHO applies it: a person, not the train. release_train.py carries neither
+-- this file nor 320 in any of its SQL lists (schema_sql, post_code_sql,
+-- i18n_sql, backfill_sql; a mention in a comment is not a list entry), so a
+-- run of `--only code` followed by `--only verify` lands nothing of this file,
+-- and nothing in the verify phase probes for this constraint (it checks
+-- routes, tables, columns and indexes), so its absence is not caught there
+-- either. The operator applies it BY HAND after the code phase and before
+-- 320, with the migrate: verb on the PRIMARY, naming this file. It needs
+-- no copy step: the file reaches the box with the clone update the deploy
+-- playbook performs. The standby receives the constraint by streaming
+-- replication -- do not apply it there. Acceptance stays the pg_constraint
+-- probe on BOTH boxes (above), not the verb's output.
+--
+-- Re-running is a no-op: the constraint is added only when absent. Explicit
+-- transaction: psql autocommits statement by statement otherwise (#340).
 BEGIN;
 SET LOCAL lock_timeout = '5s';
 

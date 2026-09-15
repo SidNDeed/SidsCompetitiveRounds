@@ -30,6 +30,7 @@ import pc_steam  # noqa: E402
 import schemas  # noqa: E402
 import steamid64  # noqa: E402
 import steamid64_pg_parity  # noqa: E402
+from steamid64_pg_parity import VECTORS  # noqa: E402
 
 MAIN_SRC = inspect.getsource(main)
 REPO = Path(main.__file__).resolve().parents[2]
@@ -358,6 +359,19 @@ def test_the_sweep_never_claims_a_non_steam_id():
             pc_steam.profile_xml_url(bad)
         with pytest.raises(ValueError):
             pc_steam.summaries_url("k", [STEAM, bad])
+    # ...and both builders over every spelling steamid64_pg_parity holds the validator and PostgreSQL to, not a
+    # hand-picked few: 22 the rule refuses, 5 it admits. A builder drifting to the form, a prefix, or the
+    # interval read through str.isdigit() and int(), sends a request for one of those 22 or refuses one of the 5.
+    assert (len(VECTORS), sum(1 for _, ok in VECTORS if ok)) == (27, 5)
+    for text, ok in VECTORS:
+        if ok:
+            assert pc_steam.profile_xml_url(text) == f"https://steamcommunity.com/profiles/{text}?xml=1"
+            assert pc_steam.summaries_url("k", [STEAM, text]).endswith(f"steamids={STEAM}%2C{text}")
+        else:
+            with pytest.raises(ValueError):
+                pc_steam.profile_xml_url(text)
+            with pytest.raises(ValueError):
+                pc_steam.summaries_url("k", [STEAM, text])
 
 
 def test_a_non_steam_id_costs_only_its_own_row_on_both_paths(monkeypatch):
@@ -430,6 +444,18 @@ def test_the_batch_fetches_the_whole_interval_and_refuses_its_neighbours(monkeyp
     out = _run(main._pc_steam_fetch_refs([below, lo, high, hi, above]))
     assert out == {lo: "e" * 40, high: "e" * 40, hi: "e" * 40, below: None, above: None}
     assert len(urls) == 1 and urls[0].endswith(f"steamids={lo}%2C{high}%2C{hi}")
+    # ...and the same partition over every spelling steamid64_pg_parity holds the validator and PostgreSQL to,
+    # not a hand-picked few: ONE chunk carrying the 5 the rule admits, in claim order, while the 22 it refuses
+    # are each their own absence with no request made for any of them. A partition drifting to the form, a
+    # prefix, or the interval read through str.isdigit() and int() puts one of those 22 into the chunk.
+    urls.clear()
+    admitted = [text for text, ok in VECTORS if ok]
+    body = ('{"response":{"players":['
+            + ",".join(f'{{"steamid":"{s}","avatarhash":"{"e" * 40}"}}' for s in admitted)
+            + ']}}').encode()
+    out = _run(main._pc_steam_fetch_refs([text for text, _ in VECTORS]))
+    assert out == {text: ("e" * 40 if ok else None) for text, ok in VECTORS}
+    assert len(urls) == 1 and urls[0].endswith("steamids=" + "%2C".join(admitted))
 
 
 def test_a_refused_id_ends_ineligible_with_nothing_written_on_both_paths(monkeypatch):

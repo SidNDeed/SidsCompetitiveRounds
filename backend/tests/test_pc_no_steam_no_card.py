@@ -17,6 +17,10 @@ match report named. From v4.13:
   * the events deliverable word carries the rule on the subject: the
     handout's skip marks a pending pull of such a subject posted, and it is
     never handed out;
+  * the delivery lease refuses such a subject when it is taken, whatever the
+    lease names (a print, events, both or neither), and its re-check before
+    a send withdraws a lease on one; the bot's picture source for a print
+    answers 404 for a print of one (review r15);
   * migration 320 creates its record table in a transaction of its own, then
     reads once the owners of such subjects' live prints, locks them, and
     retires only the prints they hold, through the two discard columns,
@@ -48,6 +52,7 @@ import database  # noqa: E402
 import main  # noqa: E402
 import player_cards as pc  # noqa: E402
 import steamid64  # noqa: E402
+from steamid64_pg_parity import VECTORS  # noqa: E402
 from test_player_cards_server import Scripted, _Res, _Rng, _due_row, _member, _run  # noqa: E402
 
 SQL320 = Path(HERE).parent / "sql" / "320_player_cards_no_steam_no_card.sql"
@@ -55,11 +60,31 @@ SQL320 = Path(HERE).parent / "sql" / "320_player_cards_no_steam_no_card.sql"
 STEAM_SUBJECT = UUID("11111111-1111-1111-1111-111111111111")
 OTHER_SUBJECT = UUID("22222222-2222-2222-2222-222222222222")
 OWNER = UUID("99999999-9999-9999-9999-999999999999")
+# a subject whose id is 7656119 followed by ten Arabic-Indic digits (test_steamid64_consumers.py's ARABIC_TAIL):
+# seventeen characters that str.isdigit() accepts and int() reads as the SteamID64 subject's own id, and that the
+# rule refuses, since its digits are [0-9] only. It is the one swept id the parity vectors do not carry -- theirs
+# is Arabic-Indic throughout, so a rule reading the 7656119 prefix refuses that one and admits this one.
+ARABIC_TAIL_SUBJECT = UUID("88888888-8888-8888-8888-888888888888")
 PLAYERS = {
     str(STEAM_SUBJECT): {"steam_id": "76561198040410653", "deleted": False, "banned": False, "announce": True},
     str(OTHER_SUBJECT): {"steam_id": "2535425419861127", "deleted": False, "banned": False, "announce": True},   # another platform's id
     str(OWNER): {"steam_id": "76561197960265729", "deleted": False, "banned": False, "announce": True},
+    str(ARABIC_TAIL_SUBJECT): {"steam_id": "7656119" + "\u0668\u0660\u0664\u0660\u0664\u0661\u0660\u0666\u0665\u0663",
+                               "deleted": False, "banned": False, "announce": True},
 }
+# The acquisition is swept over the ids the validator and PostgreSQL are themselves held to: every spelling in
+# steamid64_pg_parity's VECTORS gets a subject of its own, in VECTORS' order -- 22 the rule refuses, 5 it admits.
+# A hand-picked few separate the shared rule only from the near-misses someone thought of; these carry the leading
+# zero, the terminal newline and the Arabic-Indic seventeen as well, which is what closes the class. Separately
+# from those three, five of the refused spellings are seventeen ASCII digits (two behind the 7656119 prefix)
+# that fail the rule on its interval alone. So a form-only check admits all five and an interval-only check
+# admits each of the three, and the sweep carries both kinds -- where a hand-picked list carries whichever
+# near-misses its author thought of.
+_VECTOR_SUBJECTS = tuple(UUID("aaaaaaaa-0000-0000-0000-%012d" % i) for i in range(len(VECTORS)))
+PLAYERS.update({str(s): {"steam_id": spelling, "deleted": False, "banned": False, "announce": True}
+                for s, (spelling, _) in zip(_VECTOR_SUBJECTS, VECTORS)})
+REFUSED_SUBJECTS = tuple(s for s, (_, admitted) in zip(_VECTOR_SUBJECTS, VECTORS) if not admitted)
+ADMITTED_SUBJECTS = tuple(s for s, (_, admitted) in zip(_VECTOR_SUBJECTS, VECTORS) if admitted)
 NOW = datetime(2026, 9, 15, 2, 0, tzinfo=timezone.utc)
 
 # ── the clauses a statement carries, evaluated from its text ─────────────────
@@ -377,6 +402,171 @@ def test_a_pending_pull_of_a_non_steam_subject_is_marked_posted_and_never_handed
         assert sql.count(main._PC_EVENT_DELIVERABLE_SQL) == 1 and sql.count(term) == 1
 
 
+# ── the delivery lease and the bot's picture source (review r15) ────────────
+
+PRINT = UUID("33333333-3333-3333-3333-333333333333")
+LEASE = UUID("44444444-4444-4444-4444-444444444444")
+# the lease shapes the bot takes: a print alone, none (the /card lease), events alone, a print and events
+LEASE_SHAPES = ({"print_id": str(PRINT)}, {}, {"event_ids": [7]}, {"print_id": str(PRINT), "event_ids": [7]})
+
+
+def _lease_session(subject):
+    """The acquisition's statements for `subject`: the subject's live steam_id first; after it, what an
+    acquisition that goes through reads -- the identity try-lock taken, the subject live with a picture, the
+    print depicting the subject, event 7 resolving with OWNER as its puller and `subject` as its subject, OWNER's
+    shared try-lock taken, the lease row written."""
+    return Scripted({
+        "SELECT steam_id FROM players": [[{"steam_id": PLAYERS[str(subject)]["steam_id"]}]],
+        "pg_try_advisory_xact_lock_shared": [[{"held": True}]],
+        "pg_try_advisory_xact_lock": [[{"got": True}]],
+        "AS subject_banned": [[{"subject_deleted": False, "portrait_hash": "ef" * 32, "subject_banned": False}]],
+        "FROM pc_prints pr JOIN pc_cards c": [[{"one": 1}]],
+        "SELECT e.id, pl.steam_id AS puller": [[{"id": 7, "puller": PLAYERS[str(OWNER)]["steam_id"],
+                                                 "subject": PLAYERS[str(subject)]["steam_id"]}]],
+        "INSERT INTO pc_delivery_leases": [[{"id": LEASE, "until": NOW + timedelta(seconds=60)}]],
+    })
+
+
+def test_a_lease_on_a_non_steam_subject_is_refused_before_the_identity_lock_whatever_it_names(monkeypatch):
+    """The acquisition refuses a subject whose id is not a SteamID64 with the answer it gives a missing subject
+    (404 not_found), for every lease shape, after its one read of the subject's id: no identity lock, no other
+    statement, no commit. The subjects refused are not a hand-picked few: they are every one of the parity
+    vectors' 22 refused spellings, plus the mixed Arabic-Indic tail those vectors do not carry -- other platforms'
+    ids, five that fail the rule only on its interval (two behind the 7656119 prefix), and the three that separate
+    the rule from a near-miss of itself: the Arabic-Indic seventeen (str.isdigit() and int() read it as this very
+    SteamID64), the leading zero (eighteen ASCII digits int() reads as one), and the terminal newline (re's "$"
+    matches before it). So a rule that reads the form or a prefix alone, the interval through str.isdigit() and
+    int(), or one that drops the length or anchors with "$", admits one of these. The same leases on each admitted
+    spelling are written, the first lock on the subject's id."""
+    monkeypatch.setattr(main, "_require_internal_key", lambda k: None)
+    assert (len(REFUSED_SUBJECTS), len(ADMITTED_SUBJECTS)) == (22, 5)
+    swept = REFUSED_SUBJECTS + (ARABIC_TAIL_SUBJECT,)
+    refused = [PLAYERS[str(s)]["steam_id"] for s in swept]
+    for sid in refused:
+        assert steamid64.is_individual_id(sid) is False, ascii(sid)
+    for subject in ADMITTED_SUBJECTS:
+        assert steamid64.is_individual_id(PLAYERS[str(subject)]["steam_id"]) is True, subject
+    steam = PLAYERS[str(STEAM_SUBJECT)]["steam_id"]
+    assert PLAYERS[str(OTHER_SUBJECT)]["steam_id"] in refused
+    # the three spellings that separate the shared rule from a near-miss of it, each swept exactly once
+    vtail = "\u0667\u0666\u0665\u0666\u0661\u0661\u0669\u0668\u0660\u0664\u0660\u0664\u0661\u0660\u0666\u0665\u0663"
+    assert len(vtail) == 17 and vtail.isdigit() and not vtail.isascii() and int(vtail) == int(steam), ascii(vtail)
+    assert ("0" + steam).isascii() and ("0" + steam).isdigit() and int("0" + steam) == int(steam)
+    assert re.match(r"[0-9]{17}$", steam + "\n") is not None
+    assert [refused.count(s) for s in (vtail, "0" + steam, steam + "\n")] == [1, 1, 1]
+    tail = PLAYERS[str(ARABIC_TAIL_SUBJECT)]["steam_id"]
+    assert len(tail) == 17 and tail.isdigit() and not tail.isascii() and int(tail) == int(steam), ascii(tail)
+    # the ids that fail the rule only on its interval, the prefix no defence
+    interval = [s for s in refused if len(s) == 17 and s.isascii() and s.isdigit()]
+    assert len(interval) == 5 and sum(s.startswith("7656119") for s in interval) == 2
+    for sid in interval:
+        assert not steamid64.INDIVIDUAL_MIN <= int(sid) <= steamid64.INDIVIDUAL_MAX, sid
+    for shape in LEASE_SHAPES:
+        for subject in swept:
+            db = _lease_session(subject)
+            with pytest.raises(HTTPException) as ex:
+                _run(main.internal_pc_lease({"subject_ref": str(subject), **shape}, "k", db))
+            assert (ex.value.status_code, ex.value.detail) == (404, {"error": "not_found"}), (shape, subject)
+            assert len(db.log) == 1 and db.log[0][0].startswith("SELECT steam_id FROM players WHERE id ="), (
+                shape, subject, db.log)
+            assert db.committed == 0, (shape, subject)
+        for subject in ADMITTED_SUBJECTS:
+            sid = PLAYERS[str(subject)]["steam_id"]
+            db = _lease_session(subject)
+            ans = _run(main.internal_pc_lease({"subject_ref": str(subject), **shape}, "k", db))
+            assert ans["lease_id"] == str(LEASE) and db.count("INSERT INTO pc_delivery_leases") == 1, (shape, sid)
+            assert db.log[1] == ("SELECT pg_try_advisory_xact_lock(hashtext(CAST(:sid AS text)))", {"sid": sid})
+            assert db.committed == 1, (shape, sid)
+
+
+_SUBJECT_ID_OK = re.compile(r"\(CASE WHEN p\.steam_id ~ '([^']*)' THEN CAST\(p\.steam_id AS bigint\) "
+                            r"BETWEEN (\d+) AND (\d+) ELSE false END\) AS subject_id_ok")
+
+
+class _LeaseCheckSession:
+    """The re-check's one statement for a lease on `subject`: every column answers as for a lease that still
+    authorises its picture (the print and events words true, as for a bare lease), except subject_id_ok, which is
+    evaluated from the id clause the statement's text carries under that name (no such clause: no such column)."""
+
+    def __init__(self, subject):
+        self.subject = subject
+        self.log = []
+
+    async def execute(self, statement, params=None):
+        sql = " ".join(str(statement).split())
+        self.log.append(sql)
+        assert "FROM pc_delivery_leases l JOIN players p ON p.id = l.subject_id" in sql, sql[:120]
+        row = {"until": NOW, "unexpired": True, "leased_hash": "ef" * 32, "print_deliverable": True,
+               "subject_deleted": False, "portrait_hash": "ef" * 32, "subject_banned": False, "events_ok": True}
+        for pattern, lo, hi in _SUBJECT_ID_OK.findall(sql):
+            sid = PLAYERS[str(self.subject)]["steam_id"]
+            row["subject_id_ok"] = re.search(pattern, sid) is not None and int(lo) <= int(sid) <= int(hi)
+        return _Res([row])
+
+
+def test_the_lease_re_check_withdraws_a_lease_on_a_subject_whose_id_is_not_a_steam_id(monkeypatch):
+    """The re-check right before the bot's send reads the subject's id rule again, in its one statement, for every
+    lease, and answers 404 lease_gone for a subject whose id is not a SteamID64 -- whatever the lease names, since
+    its print and events words answer true here. The same lease on a SteamID64 subject is live."""
+    monkeypatch.setattr(main, "_require_internal_key", lambda k: None)
+    db = _LeaseCheckSession(OTHER_SUBJECT)
+    with pytest.raises(HTTPException) as ex:
+        _run(main.internal_pc_lease_check(str(LEASE), "k", db))
+    assert (ex.value.status_code, ex.value.detail) == (404, {"error": "lease_gone"}) and len(db.log) == 1
+    db = _LeaseCheckSession(STEAM_SUBJECT)
+    assert _run(main.internal_pc_lease_check(str(LEASE), "k", db)) == {
+        "lease_id": str(LEASE), "until": NOW.isoformat(), "live": True}
+    # the column is steamid64's text on the lease's subject row, once in the statement
+    assert len(_SUBJECT_ID_OK.findall(db.log[0])) == 1
+    assert main._PC_LEASE_SUBJECT_ID_OK.count(steamid64.individual_id_sql("p.steam_id")) == 1
+
+
+class _FaceSession:
+    """The face row read for PRINT, a live print of `subject`: the row, unless the statement's text carries an id
+    clause on the subject row `s` that the subject's id fails."""
+
+    def __init__(self, subject):
+        self.subject = subject
+        self.log = []
+
+    async def execute(self, statement, params=None):
+        sql = " ".join(str(statement).split())
+        self.log.append(sql)
+        assert "FROM pc_prints pr JOIN pc_cards c ON c.id = pr.card_id JOIN players s ON s.id = c.subject_player_id" in sql
+        if not _admits(sql, PLAYERS[str(self.subject)], "s"):
+            return _Res([])
+        return _Res([{"print_id": str(PRINT), "subject_player_id": str(self.subject), "discarded_at": None}])
+
+
+def test_the_bots_picture_source_answers_404_for_a_print_of_a_non_steam_subject(monkeypatch):
+    """/internal/pc/face/print reads the print's face row with the subject's id rule added, so a live print of a
+    subject whose id is not a SteamID64 answers 404 before any render, and a SteamID64 subject's print renders.
+    The public face route keeps its read without the rule (_pc_face_row): the same row still answers there."""
+    monkeypatch.setattr(main, "_require_internal_key", lambda k: None)
+    monkeypatch.setattr(main, "_pc_require_renderer", lambda: None)
+    monkeypatch.setattr(main, "_pc_served_locales", lambda: set())
+    rendered = []
+
+    async def ctx(_db, locale):
+        return {"locale": locale}
+
+    async def render(_db, row, _ctx, size, want=None):
+        rendered.append(row["subject_player_id"])
+        return "f" * 16, b"\x89PNG"
+
+    monkeypatch.setattr(main, "_pc_face_ctx", ctx)
+    monkeypatch.setattr(main, "_pc_render_face", render)
+    db = _FaceSession(OTHER_SUBJECT)
+    with pytest.raises(HTTPException) as ex:
+        _run(main.internal_pc_face_print(str(PRINT), "en", "card", "k", db))
+    assert ex.value.status_code == 404 and rendered == [] and len(db.log) == 1
+    resp = _run(main.internal_pc_face_print(str(PRINT), "en", "card", "k", _FaceSession(STEAM_SUBJECT)))
+    assert resp.headers["x-face-rev"] == "f" * 16 and rendered == [str(STEAM_SUBJECT)]
+    assert _run(main._pc_face_row(_FaceSession(OTHER_SUBJECT), str(PRINT))) is not None
+    assert "row = await _pc_face_row(db, print_id)" in inspect.getsource(main.pc_face_png)
+    assert main._PC_FACE_SUBJECT_ID_SQL == steamid64.individual_id_sql("s.steam_id")
+
+
 # ── migration 320 ────────────────────────────────────────────────────────────
 
 RULE_S = "NOT " + steamid64.individual_id_sql("s.steam_id")
@@ -436,9 +626,11 @@ def test_migration_320_pays_what_a_discard_pays_by_a_delta_under_one_switch():
     flat = _flat320()
     body = _body320(flat)
     assert flat.count(SHARDS_CASE) == 2    # the dry run and the retirement, both from PC_ECONOMY (#229)
-    # the switch is checked before the first statement that reads a table
-    assert body.index("IF v_compensation NOT IN ('shards', 'none') THEN RAISE EXCEPTION") < body.index("SELECT ")
     assert ("discard_shards = CASE WHEN v_compensation = 'shards' THEN " + SHARDS_CASE + " ELSE 0 END") in body
+    # the switch is read where it is declared, by the payout, by the record and by the closing notice, and the block
+    # raises in two places only (the shards check and the last check): no check on the switch's own value (r15 LOW 7)
+    assert body.count("v_compensation") == 4 and body.count("RAISE EXCEPTION") == 2, (
+        body.count("v_compensation"), body.count("RAISE EXCEPTION"))
     # the owner's balance moves by a delta (#326), and only by what the retirement returned
     assert body.count("pc_shards =") == 1
     assert ("UPDATE players o SET pc_shards = o.pc_shards + d.shards FROM (SELECT r.owner_player_id, "
@@ -487,8 +679,10 @@ def test_migration_320_retires_live_prints_of_non_steam_subjects_through_the_dis
             "'no_steam_id', v_compensation, r.discard_shards FROM retired r ), paid AS (") in retire
     assert "DELETE FROM pc_delivery_leases l USING retired r WHERE l.print_id = r.id RETURNING l.id" in retire
     assert retire.endswith("(SELECT array_agg(r.id) FROM retired r) INTO v_retired, v_owners, v_leases, v_ids;")
-    # after it, a live print of such a subject still visible raises: one an older api dealt, or one committed
-    # after the owners' read under an owner outside that set
+    # after it, a live print of such a subject visible to that statement raises: one this run did not retire, left
+    # after the owners' read by a writer other than v4.13 code (a print committed since, or a subject's id changed
+    # since); the file's ORDER prerequisite excludes one, and a print not yet committed when that statement begins
+    # is not visible to it
     last = _span(body, "IF EXISTS (SELECT 1 FROM pc_prints pr", "END IF;")
     assert last.startswith("IF EXISTS (SELECT 1 FROM pc_prints pr JOIN pc_cards c ON c.id = pr.card_id JOIN players s "
                            "ON s.id = c.subject_player_id WHERE pr.discarded_at IS NULL AND " + RULE_S +

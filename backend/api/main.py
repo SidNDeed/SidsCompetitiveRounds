@@ -11757,6 +11757,15 @@ async def admin_record_exclude(payload: dict, db: AsyncSession = Depends(get_db)
     if steam_id == "-":
         steam_id = ""
     reason = str(payload.get("reason", ""))[:400]
+    # Each string this route binds or signs, other than the admin's own id, is
+    # checked before the admin check and every statement (review r15 sweep):
+    # the steam id is bound by the players read, the reason by the exclusion's
+    # insert and the audit row, and the board, the match id and the steam id
+    # reach the signature check's canonical, whose encode fails on a lone
+    # surrogate. A string no text bind can carry is refused 422 here.
+    for field, value in (("board", board), ("match_id", match_id), ("steam_id", steam_id), ("reason", reason)):
+        if not _pg_text_ok(value):   # record exclusion: the row's key and its reason, before the admin check (r15 sweep)
+            raise HTTPException(422, f"{field} is not storable text")
     # r4 f1: hmac.compare_digest raises TypeError on non-string / non-ASCII
     # input — fail closed as a 403, never a 500.
     _sig = payload.get("signature")
@@ -19369,7 +19378,10 @@ async def chat_moderate_unmute(req: _ChatModMuteReq, request: Request,
     sent. _mod_release_or_422 then refuses a target outside the domain when
     the arm revoked no row -- before the commit and the log line -- and
     admits every other target. The audit row, the log line and the response
-    name the target exactly as the UPDATE used it."""
+    name the target exactly as the UPDATE used it. Only a string no row can
+    carry is refused before all of that, by _mod_bindable_or_422 (review
+    r15)."""
+    _mod_bindable_or_422(req.target_steam_id)   # chat unmute: before the channel check, the identity proof and every UPDATE arm (r15)
     chan = (req.channel or "").lower().strip() or None
     if chan is not None and chan not in CHAT_CHANNELS_ALLOWED:
         raise HTTPException(400, f"Unknown channel '{chan}'")
@@ -20010,6 +20022,8 @@ async def internal_chat_bridge_moderation(
         native_id = str(payload.get("native_id", "") or "")[:128]
         if not native_id:
             raise HTTPException(422, "native_id required")
+        if not _pg_text_ok(native_id):   # bridge moderation: the message's id, before its read (r15)
+            raise HTTPException(422, "native_id is not storable text")
         row = (await db.execute(text(
             "SELECT cm.id, cm.channel, cm.deleted_at"
             "  FROM chat_mirrors mr JOIN chat_messages cm ON cm.id = mr.chat_id"
@@ -20040,6 +20054,9 @@ async def internal_chat_bridge_moderation(
             raise HTTPException(422, "platform_user_id required")
         login = str(payload.get("login", "") or "").lower()[:64] or None
         display = str(payload.get("display_name", "") or "")[:64] or None
+        for field, value in (("platform_user_id", user_id), ("login", login), ("display_name", display)):
+            if value is not None and not _pg_text_ok(value):   # bridge moderation: the purge's target, before the purge and the mute (r15)
+                raise HTTPException(422, f"{field} is not storable text")
         ban_duration_s = payload.get("ban_duration_s")
         permanent = bool(payload.get("permanent"))
         purged, truncated = await _purge_identity_rows(
@@ -20102,6 +20119,11 @@ async def internal_chat_discord_deleted(
     if not isinstance(raw_ids, list) or not raw_ids:
         raise HTTPException(422, "message_ids required")
     mids = [str(m)[:128] for m in raw_ids[:100] if str(m or "").strip()]
+    # An id no text bind can carry (a NUL character, a lone surrogate) is
+    # dropped before the read (review r15 sweep), as the read passes over an
+    # id no row holds: no chat_mirrors row can hold such an id, and binding one
+    # failed the read for the whole event (500).
+    mids = [m for m in mids if _pg_text_ok(m)]   # discord delete event: drop an id no text bind can carry, before the read (r15 sweep)
     if not mids:
         return {"status": "ok", "deleted": 0}
     rows = (await db.execute(text(
@@ -20153,6 +20175,8 @@ async def internal_chat_discord_mute(
     message_id = str(payload.get("message_id", "") or "")[:128]
     if not message_id:
         raise HTTPException(422, "message_id required")
+    if not _pg_text_ok(message_id):   # discord mute: the id of the message whose row names the target, before its read (r15)
+        raise HTTPException(422, "message_id is not storable text")
     actor_id = str(payload.get("actor_discord_id", "") or "")[:32]
     actor = f"discord:{actor_id or 'unknown'}"
     actor_lang = str(payload.get("actor_channel_lang", "") or "").lower()[:16]
@@ -20343,7 +20367,13 @@ async def admin_list_actions(
     auditable through the same panel as bans.
 
     `action` and `target_steam_id` are BOUND PARAMETERS, never interpolated
-    (#188 — the ORDER BY there is a fixed literal for the same reason)."""
+    (#188 — the ORDER BY there is a fixed literal for the same reason). A
+    filter no text bind can carry is refused 422 before any statement: the
+    target filter by _mod_bindable_or_422 (review r15), the action filter by
+    _pg_text_ok (review r15 sweep)."""
+    _mod_bindable_or_422(target_steam_id)   # audit list: the target filter, before the admin check and the reads (r15)
+    if not _pg_text_ok(action):   # audit list: the action filter, before the admin check and the reads (r15 sweep)
+        raise HTTPException(422, "action is not storable text")
     await _require_admin(db, admin_steam_id, "admin_actions_list", "", hmac_signature)
     where = ["TRUE"]
     params: dict = {"limit": limit, "offset": offset}
@@ -25753,6 +25783,20 @@ async def _pc_face_row(db: AsyncSession, print_id: str):
                              {"id": print_id})).mappings().first()
 
 
+# The bot's picture source reads a print's face row only for a subject whose id
+# is a SteamID64 (v4.13, review r15; Sid, 2026-09-15: no Steam ID, no card):
+# steamid64's rule on the subject row `s` of _PC_PRINT_FACE_SELECT.
+_PC_FACE_SUBJECT_ID_SQL = _sid64.individual_id_sql("s.steam_id")
+
+
+async def _pc_bot_face_row(db: AsyncSession, print_id: str):
+    """_pc_face_row's statement with the subject's id rule added: no row for a
+    print of a subject whose id is not a SteamID64."""
+    return (await db.execute(text(_PC_PRINT_FACE_SELECT + " WHERE pr.id = CAST(:id AS uuid) AND "
+                                  + _PC_FACE_SUBJECT_ID_SQL),
+                             {"id": print_id})).mappings().first()
+
+
 async def _pc_portrait_bytes(db: AsyncSession, phash):
     if not phash:
         return None
@@ -26501,6 +26545,13 @@ _PC_LEASE_EVENTS_OK = """
                           JOIN players su ON su.id = e.subject_player_id
                          WHERE e.id = named.id AND """ + _PC_EVENT_DELIVERABLE_SQL + """)) AS events_ok
 """
+# The lease's subject still has a SteamID64 (v4.13, review r15; Sid, 2026-09-15:
+# no Steam ID, no card): steamid64's rule on the subject's row, for every lease,
+# whatever else it names. The events word above holds the same rule for the
+# subject of each event a lease names.
+_PC_LEASE_SUBJECT_ID_OK = """
+               """ + _sid64.individual_id_sql("p.steam_id") + """ AS subject_id_ok
+"""
 
 
 async def _pc_lease_wait(db: AsyncSession, pid: str):
@@ -26868,6 +26919,13 @@ async def admin_pc_portrait_clear(payload: dict = Body(...), db: AsyncSession = 
     _sig = payload.get("signature")
     if not isinstance(_sig, str) or not _sig.isascii():
         _sig = ""
+    # The target is signed and bound below (review r15 sweep). The signature
+    # check encodes it, which fails for a lone surrogate, and once the
+    # signature verifies, the identity lock binds it, which fails for a NUL
+    # character; either failure answered 500. A target no text bind can carry
+    # is refused 422 here, before the admin check and every statement.
+    if not _pg_text_ok(steam_id):   # portrait clear: the target, before the admin check, the lock and the read (r15 sweep)
+        raise HTTPException(status_code=422, detail="steam_id is not storable text")
     await _require_admin(db, admin_id, "pc_portrait_clear", f"{steam_id}:{lock_days}", _sig)
     await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))"), {"sid": steam_id})
     pid = (await db.execute(text(
@@ -26914,7 +26972,11 @@ async def internal_pc_lease(
     steam = (await db.execute(text(
         "SELECT steam_id FROM players WHERE id = CAST(:pid AS uuid) AND deleted_at IS NULL"),
         {"pid": subject_ref})).scalar_one_or_none()
-    if steam is None:
+    # No Steam ID, no card (v4.13, review r15): a subject whose id is not a
+    # SteamID64 is refused as a missing one is, whatever else the lease names
+    # (a print, events, or neither: the /card lease), before the identity
+    # lock. The re-check reads the rule again from the subject's row.
+    if steam is None or not _sid64.is_individual_id(steam):
         raise HTTPException(status_code=404, detail={"error": "not_found"})
     got = (await db.execute(text("SELECT pg_try_advisory_xact_lock(hashtext(CAST(:sid AS text)))"),
                             {"sid": steam})).scalar_one()
@@ -26990,7 +27052,8 @@ async def internal_pc_lease_check(
     "Still authorises" is re-resolved, not assumed: the subject's row is read
     again through the same columns and the same `portrait_for` the acquire
     used, and the answer must still be the picture the lease recorded; a
-    deletion and an active ban are refused outright, and a lease naming
+    deletion, an active ban and a subject whose id is not a SteamID64 (v4.13,
+    review r15) are refused outright, and a lease naming
     events re-reads the deliverability of every one of them for BOTH parties
     (r6 H1/M2). The revocation needs no writer to find the lease's row —
     which is what makes this safe against the writer that cannot see it (a
@@ -27002,17 +27065,18 @@ async def internal_pc_lease_check(
         raise HTTPException(status_code=404, detail={"error": "lease_gone"})
     row = (await db.execute(text(
         "SELECT l.until, (l.until > now()) AS unexpired, l.portrait_hash AS leased_hash,"
-        + _PC_PORTRAIT_RESOLVE_COLS + "," + _PC_LEASE_PRINT_OK + "," + _PC_LEASE_EVENTS_OK +
+        + _PC_PORTRAIT_RESOLVE_COLS + "," + _PC_LEASE_PRINT_OK + "," + _PC_LEASE_EVENTS_OK + "," + _PC_LEASE_SUBJECT_ID_OK +
         """FROM pc_delivery_leases l JOIN players p ON p.id = l.subject_id
             WHERE l.id = CAST(:id AS uuid)"""),
         {"id": lease_id})).mappings().first()
     # Gone when: expired; the subject deleted or banned (said outright, not
     # through the hash -- a subject with no picture leased NULL and a ban
-    # resolves to NULL as well, r6 M2); the print no longer the subject's; or
-    # any event the lease names no longer deliverable for EITHER party (the
-    # puller included, whom the lease's subject row never covered, r6 H1).
+    # resolves to NULL as well, r6 M2); the subject's id not a SteamID64
+    # (v4.13, review r15); the print no longer the subject's; or any event the
+    # lease names no longer deliverable for EITHER party (the puller included,
+    # whom the lease's subject row never covered, r6 H1).
     if (row is None or not row["unexpired"] or row["subject_deleted"] or row["subject_banned"]
-            or not row["print_deliverable"] or not row["events_ok"]):
+            or not row["subject_id_ok"] or not row["print_deliverable"] or not row["events_ok"]):
         raise HTTPException(status_code=404, detail={"error": "lease_gone"})
     _, now_hash = _pcp.portrait_for(row)
     if now_hash != row["leased_hash"]:
@@ -27072,14 +27136,16 @@ async def internal_pc_face_print(
     db: AsyncSession = Depends(get_db),
 ):
     """The bot's picture source for a live print: its CURRENT revision,
-    resolved by the same read as the public route (discarded → 404); the
-    locale falls back to en here (no public cache key is involved)."""
+    resolved by the public route's read (discarded → 404) with the subject's
+    id rule added (v4.13, review r15): a print of a subject whose id is not a
+    SteamID64 → 404, as the delivery lease refuses that subject. The locale
+    falls back to en here (no public cache key is involved)."""
     _require_internal_key(x_internal_key)
     _pc_require_renderer()
     if not _pcp.print_id_ok(print_id) or size not in _pcp.SIZES:
         raise HTTPException(status_code=404, detail="Not found")
     loc = _pcp.effective_locale(locale, _pc_served_locales())
-    row = await _pc_face_row(db, print_id)
+    row = await _pc_bot_face_row(db, print_id)
     if row is None or row["discarded_at"] is not None:
         raise HTTPException(status_code=404, detail="Not found")
     ctx = await _pc_face_ctx(db, loc)
@@ -35493,6 +35559,37 @@ def _mod_release_or_422(value, released: int, field: str = "target_steam_id") ->
     return value
 
 
+def _pg_text_ok(value) -> bool:
+    """True when a text bind can carry value to PostgreSQL: a str with no NUL
+    character (PostgreSQL text cannot hold one) that has a UTF-8 encoding
+    (asyncpg sends a str bind as UTF-8, and a lone surrogate has none). The
+    database is UTF8, which holds every other str."""
+    if not isinstance(value, str) or "\x00" in value:
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _mod_bindable_or_422(value, field: str = "target_steam_id") -> str:
+    """A moderation route's caller-sent target, before the route's first
+    statement (review r15): refused 422 unless _pg_text_ok. A statement that
+    binds a string no text bind can carry fails (the driver cannot encode a
+    lone surrogate; the server refuses a NUL character), and the route
+    answered 500; no row can be keyed by such a string, so no statement keyed
+    on it could find one. admin_unban and chat_moderate_unmute call it first:
+    their domain check follows their UPDATE (_mod_release_or_422), after
+    statements that bind the target. admin_list_actions calls it on its
+    target filter. admin_ban and chat_moderate_mute call _mod_target_or_422
+    first instead, whose domain holds ASCII digits only. Every other string
+    goes on as sent."""
+    if not _pg_text_ok(value):
+        raise HTTPException(status_code=422, detail=f"{field} must be a numeric steam id")
+    return value
+
+
 async def _require_admin(db: AsyncSession, admin_steam_id: str, action: str, target: str, signature) -> None:
     if not await _is_admin(db, admin_steam_id):
         raise HTTPException(403, "Not an admin")
@@ -35908,12 +36005,14 @@ class _AdminUnbanReq(BaseModel):
 
 @app.post("/api/v1/admin/unban", tags=["Admin"])
 async def admin_unban(req: _AdminUnbanReq, _slot=Depends(_pc_writer_slot), db: AsyncSession = Depends(get_db)):
-    # No target check before the UPDATE (v4.13, review r14): a ban stored
+    # No domain check before the UPDATE (v4.13, review r14): a ban stored
     # under a key outside the domain (admin_ban took any string before v4.11)
     # must stay releasable, and only the UPDATE can tell whether a row carries
-    # the key. The signature check and the UPDATE take the target as sent;
-    # _mod_release_or_422 below refuses it when it is outside the domain and
-    # the UPDATE released nothing.
+    # the key. Only a string no row can carry is refused first, by
+    # _mod_bindable_or_422 (review r15). The signature check and the UPDATE
+    # take the target as sent; _mod_release_or_422 below refuses it when it is
+    # outside the domain and the UPDATE released nothing.
+    _mod_bindable_or_422(req.target_steam_id)   # unban: before the signature, the locks and the UPDATE (r15)
     await _require_admin(db, req.admin_steam_id, "unban", req.target_steam_id, req.hmac_signature)
     # The same identity lattice as the ban, in the same canonical order (r9
     # M2): a ban's repeat detection and its insert are one serialised step on
@@ -36160,12 +36259,17 @@ async def admin_review_flag(req: _AdminReviewFlagReq, db: AsyncSession = Depends
             status_code=426,
             detail="Flag review requires the updated admin client",
         )
+    # The flag's id is parsed before the admin check and the read (review r15
+    # sweep): the read binds the parsed UUID, as a string that is not a UUID
+    # fails the read's uuid bind (500). The signature, the audit row and the
+    # answer keep the id as sent.
+    flag_uuid = _mail_parse_uuid(req.flag_id, "flag_id")   # flag review: the flag's id, before the admin check and its read (r15 sweep)
     await _require_admin(
         db, req.admin_steam_id, "review_flag",
         f"{req.flag_id}:{req.review_action}:{req.evidence_revision}",
         req.hmac_signature)
     fm = (await db.execute(
-        select(FlaggedMatch).where(FlaggedMatch.id == req.flag_id).with_for_update()
+        select(FlaggedMatch).where(FlaggedMatch.id == flag_uuid).with_for_update()
     )).scalar_one_or_none()
     if fm is None:
         raise HTTPException(404, "Flag not found")
@@ -36230,13 +36334,16 @@ async def admin_resolve_flag_restoration(
     """Close the durable repair reminder after an admin has restored the
     invalidated match's rewards/series state through the controlled repair
     workflow. This endpoint records the attestation; it does not alter economy
-    or rating rows itself."""
+    or rating rows itself. The flag's id is parsed before the admin check and
+    the read, which binds the parsed UUID; the signature, the audit row and the
+    answer keep the id as sent (review r15 sweep, as the review route does)."""
+    flag_uuid = _mail_parse_uuid(req.flag_id, "flag_id")   # flag restoration: the flag's id, before the admin check and its read (r15 sweep)
     await _require_admin(
         db, req.admin_steam_id, "resolve_flag_restoration",
         req.flag_id, req.hmac_signature)
     fm = (await db.execute(
         select(FlaggedMatch)
-        .where(FlaggedMatch.id == req.flag_id)
+        .where(FlaggedMatch.id == flag_uuid)
         .with_for_update()
     )).scalar_one_or_none()
     if fm is None:
@@ -49905,13 +50012,22 @@ async def admin_list_quarantine(
 @app.post("/api/v1/admin/quarantine/{qid}/discard", tags=["Admin"])
 async def admin_discard_quarantine(qid: str, req: _AdminQuarantineReq,
                                    db: AsyncSession = Depends(get_db)):
+    # The report's id and the note are checked before the admin check and the
+    # UPDATE (review r15 sweep): the UPDATE binds the id as a uuid, which fails
+    # for a string that is not one, and binds the note, which fails for a
+    # string no text bind can carry (500). It binds the parsed id's canonical
+    # text; the signature keeps the id as sent.
+    qid_uuid = _mail_parse_uuid(qid, "qid")   # quarantine discard: the report's id, before the admin check and the UPDATE (r15 sweep)
+    note = (req.note or "")[:500]
+    if not _pg_text_ok(note):   # quarantine discard: the note, before the admin check and the UPDATE (r15 sweep)
+        raise HTTPException(422, "note is not storable text")
     await _require_admin(db, req.admin_steam_id, "quarantine_action", qid, req.hmac_signature)
     res = await db.execute(text("""
         UPDATE match_report_quarantine
            SET status='discarded', reviewed_at=NOW(), review_note=:note,
                reviewed_by=(SELECT id FROM players WHERE steam_id=:sid)
          WHERE id=CAST(:qid AS UUID) AND status='pending'
-    """), {"qid": qid, "sid": req.admin_steam_id, "note": (req.note or "")[:500]})
+    """), {"qid": str(qid_uuid), "sid": req.admin_steam_id, "note": note})
     await db.commit()
     if not res.rowcount:
         raise HTTPException(409, "Already reviewed")
@@ -49928,11 +50044,16 @@ async def admin_accept_quarantine(qid: str, req: _AdminQuarantineReq,
     history, which is precisely the corruption the July 30 recovery had to undo
     with a chronological replay. This route records the admin's decision and
     locks the row; the actual application is an ordered replay, run deliberately.
+
+    The report's id is parsed before the admin check, and both statements bind
+    the parsed id's canonical text; the signature keeps the id as sent (review
+    r15 sweep: a string that is not a UUID failed the uuid bind, 500).
     """
+    qid_uuid = _mail_parse_uuid(qid, "qid")   # quarantine accept: the report's id, before the admin check and its reads (r15 sweep)
     await _require_admin(db, req.admin_steam_id, "quarantine_action", qid, req.hmac_signature)
     row = (await db.execute(text(
         "SELECT player_ids, created_at, status, mode FROM match_report_quarantine"
-        " WHERE id = CAST(:qid AS UUID) FOR UPDATE"), {"qid": qid})).mappings().first()
+        " WHERE id = CAST(:qid AS UUID) FOR UPDATE"), {"qid": str(qid_uuid)})).mappings().first()
     if row is None:
         raise HTTPException(404, "Not found")
     if row["status"] != "pending":
@@ -49952,7 +50073,7 @@ async def admin_accept_quarantine(qid: str, req: _AdminQuarantineReq,
            SET status='accepted', reviewed_at=NOW(),
                reviewed_by=(SELECT id FROM players WHERE steam_id=:sid)
          WHERE id=CAST(:qid AS UUID) AND status='pending'
-    """), {"qid": qid, "sid": req.admin_steam_id})
+    """), {"qid": str(qid_uuid), "sid": req.admin_steam_id})
     await db.commit()
     print(f"[QUARANTINE] {qid} accepted by {req.admin_steam_id}")
     return {"status": "accepted"}

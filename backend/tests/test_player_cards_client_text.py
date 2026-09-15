@@ -4,17 +4,16 @@ the client cannot fetch them today, so this test pins the client text to the
 server constants — a retune of either side without the other fails here, for
 every fragment _expected_fragments quotes verbatim.
 The earned-pack odds are held differently while the client half of v4.13 is
-unmerged: the Get-packs line and the Info article's earned-packs bullet are
-judged on the rates they state and on naming no sweep, under a strict xfail.
-Until that marker is removed, a server retune that leaves the old client text
-in place still reports XFAIL and the suite passes; removing it restores the
-guarantee for both texts.
+unmerged (review r15; Sid, 2026-09-14: the server's flat odds ride the backend
+deploy, the client text ships on the Sept 14 branch): one test pins that
+transitional state exactly -- the server's flat 20% rule AND the two stale
+client texts, verbatim -- so a change to either side fails. The Sept 14 client
+text merge replaces that pin with the parity assert, which judges both texts on
+the rates they state and on naming no sweep.
 Prices are NOT pinned: the client renders them from /pc/me."""
 import importlib.util
 import pathlib
 import re
-
-import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 CLIENT = ROOT / "plugin" / "PlayerCardsUI.cs"
@@ -124,14 +123,36 @@ def _earned_odds_problems(text, eco):
     return problems
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="the client half of v4.13's flat earned odds is not merged yet; the change that "
-                          "rewords both earned-pack texts removes this marker")
-def test_client_earned_pack_texts_state_the_flat_earned_odds():
+# The client texts as b4831ad left them, before the flat earned odds (review r15).
+STALE_RANKED_WINS_LINE = (
+    "- Ranked wins: every ranked 1v1 series you win rolls a 20% chance of a pack (a 2-0 sweep: 100%). "
+    "2v2, 1v2 and FFA wins roll 10% (a sweep: 50%). Earned packs wait here until you open them.")
+STALE_EARNED_BULLET = (
+    "- <b>Earned packs</b>: winning a ranked 1v1 series grants a pack one time in five, and a 2-0 sweep always "
+    "does. 2v2, 1v2 and FFA wins grant one time in ten, a sweep one time in two (an FFA sweep is every round won "
+    "and nobody else scoring). Earned and claimed packs wait under <b>Packs waiting</b> until you open them, as "
+    "long as you like.")
+
+
+def test_the_earned_odds_hold_the_transitional_state_until_the_client_text_merges():
+    """The transitional state, pinned exactly (review r15; Sid, 2026-09-14): the server rolls the flat 20% rule in
+    every ranked mode, and both client texts still carry their stale wording, which the judge refuses. A server
+    retune, a mode added or removed, and any edit to either client text all fail here.
+
+    THE SEPT 14 CLIENT TEXT MERGE MUST REPLACE THIS TEST with the parity assert:
+        eco = _economy()
+        problems = (_earned_odds_problems(_ranked_wins_line(CLIENT.read_text(encoding="utf-8")), eco)
+                    + _earned_odds_problems(_earned_bullet(INFO.read_text(encoding="utf-8")), eco))
+        assert problems == []
+    """
     eco = _economy()
-    problems = (_earned_odds_problems(_ranked_wins_line(CLIENT.read_text(encoding="utf-8")), eco)
-                + _earned_odds_problems(_earned_bullet(INFO.read_text(encoding="utf-8")), eco))
-    assert problems == []
+    assert eco["earned_pct"] == {"1v1": 20.0, "team": 20.0, "ovt": 20.0, "ffa": 20.0}, eco["earned_pct"]
+    line = _ranked_wins_line(CLIENT.read_text(encoding="utf-8"))
+    bullet = _earned_bullet(INFO.read_text(encoding="utf-8"))
+    assert line == STALE_RANKED_WINS_LINE, line
+    assert bullet == STALE_EARNED_BULLET, bullet
+    # a pin of the known mismatch, not of parity: the judge refuses both texts against the server's odds
+    assert _earned_odds_problems(line, eco) and _earned_odds_problems(bullet, eco)
 
 
 def test_the_earned_odds_judge_refuses_the_old_texts_and_a_split_rate():
