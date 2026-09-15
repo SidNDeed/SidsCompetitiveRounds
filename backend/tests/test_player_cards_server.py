@@ -284,8 +284,8 @@ def test_snapshot_freezes_band_from_rank_and_the_resolved_title(monkeypatch):
     assert select_params["min_matches"] == 5 and select_params["active_days"] == main.LEADERBOARD_ACTIVE_DAYS
 
 
-def _due_row(last_at, db_now, today_at):
-    return [{"last_at": last_at, "db_now": db_now, "today_at": today_at}]
+def _due_row(last_at, db_now, today_at, stale_rule=False):
+    return [{"last_at": last_at, "stale_rule": stale_rule, "db_now": db_now, "today_at": today_at}]
 
 
 def _janitor(monkeypatch, due, lock=True):
@@ -512,7 +512,10 @@ def test_janitor_runs_the_snapshot_step_and_the_prefix_is_rate_limited():
     assert step.index("DELETE FROM pc_events") < step.index("_pc_snapshot_due(db)")   # retention first, always
     due = inspect.getsource(main._pc_snapshot_due)
     assert "INTERVAL '5 minutes'" in due and "MAX(taken_at)" in due
-    assert "/api/v1/pc/" in main._RL_SENSITIVE_PREFIXES
+    # v4.13 §9: the family has buckets of its own (test_pc_rate_bucket.py); a
+    # second listing in the sensitive tuple would be dead configuration.
+    assert main._RL_PC_PREFIX == "/api/v1/pc/" and main._RL_PC_UPLOAD_PATH == "/api/v1/pc/portrait"
+    assert not any(p.startswith("/api/v1/pc") for p in main._RL_SENSITIVE_PREFIXES)
 
 
 def test_delete_my_data_purges_every_player_cards_table_between_the_lock_and_the_anonymisation():

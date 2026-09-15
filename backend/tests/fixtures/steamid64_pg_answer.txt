@@ -1,0 +1,29 @@
+query-sha256: c530be9f26d635697ed2e68fc1b900570e79f804dd8bd785faee37ecf899b0a6
+# PostgreSQL's answer to steamid64_pg_parity.py --query: PostgreSQL 16.15 (Alpine), the primary through the read-only SQL verb, 2026-09-15 00:31 UTC
+0|17|t
+1|17|t
+2|17|f
+3|17|f
+4|17|t
+5|17|t
+6|17|t
+7|17|f
+8|18|f
+9|19|f
+10|18|f
+11|18|f
+12|18|f
+13|18|f
+14|18|f
+15|16|f
+16|18|f
+17|18|f
+18|18|f
+19|17|f
+20|17|f
+21|17|f
+22|17|f
+23|16|f
+24|20|f
+25|4|f
+26|0|f

@@ -749,12 +749,14 @@ def test_the_public_pool_answers_no_identifier_and_projects_the_names():
     assert "steam_id" not in json.dumps(ans) and STEAM not in json.dumps(ans)
     # the identifier is not projected either — an answer key can be dropped
     # while the column keeps travelling into logs and tracebacks; the ban
-    # predicate compares it (b.steam_id = p.steam_id) and that is its only use
+    # predicate compares it (b.steam_id = p.steam_id) and the pool's id rule
+    # tests it (v4.13), and those are its only uses
     select = [s for s, _ in db.log if "FROM pc_pool_members m JOIN players p" in s][0]
     assert len([s for s, _ in db.log if "pc_pool_members" in s]) == 1, "one read for bands and top"
     assert "steam_id" not in select[:select.index(" FROM pc_pool_members")], select
-    assert select.count("steam_id") == 2 and "b.steam_id = p.steam_id" in select, select
-    assert "p.deleted_at IS NULL AND NOT EXISTS (SELECT 1 FROM player_bans b" in select
+    rule = " ".join(main._PC_POOL_STEAM_ID_SQL.split())
+    assert select.count("steam_id") == 2 + rule.count("steam_id") and "b.steam_id = p.steam_id" in select, select
+    assert select.count(rule) == 1 and " ".join(main._PC_POOL_MEMBER_SQL.split()) in select, select
 
 
 def test_raqm_is_read_from_the_engine_actually_in_use(monkeypatch):
@@ -1445,30 +1447,171 @@ def test_the_rate_refusal_alerts_once_per_window_and_keys_its_lock_and_count_on_
     assert len(audits) == len(counts) == 2 and audits[0] < counts[0] < audits[1] < counts[1], (audits, counts)
 
 
-def test_a_ban_target_the_audit_row_cannot_hold_is_refused_before_the_signature_and_the_gate(monkeypatch):
-    """r13 (2026-09-13), executed: a body-sourced target that is not a numeric steam id of at most twenty
-    digits -- the ban row's key and the audit row's target are String(20) -- is refused 422 before the signature
-    check, any read, any lock and the ban-rate gate, on the ban and on the unban alike. The gate's once-per-window
-    alert reads the refusal's audit row back, so a target that row cannot hold must never reach the gate. Digits
-    are [0-9]: Unicode digits are refused too."""
-    import inspect
+def test_a_restriction_target_outside_the_domain_is_refused_before_the_signature_and_the_gate(monkeypatch):
+    """r13 (2026-09-13), rationale corrected by v4.13 (r14): admin_ban's target is the key the ban row is written
+    with, and a target outside the moderation target's domain -- one to twenty ASCII digits, the whole string, the
+    pattern migration 319 puts on every ACTIVE player_bans row -- is refused 422 before the signature check, any
+    read, any lock and the ban-rate gate. Both ends of the length are pinned (one and twenty digits pass, none and
+    twenty-one are refused), digits are [0-9] (Arabic-Indic and fullwidth digits refused), the match is the whole
+    string (a trailing newline refused), and a NUL character -- PostgreSQL text cannot hold one, so the gate's
+    best-effort refusal audit would fail on it silently (#656) -- is refused. A target that passes reaches the
+    signature check unchanged. The unban makes no domain check before its UPDATE (the next test)."""
     reached = []
 
     async def admin(db, adm, action, target, sig):
         reached.append((action, target))
+        raise HTTPException(status_code=403, detail="Bad admin signature")   # the probe stops at the signature check
+
     monkeypatch.setattr(main, "_require_admin", admin)
-    calls = (lambda t, db: main.admin_ban(main._AdminBanReq(admin_steam_id="9", target_steam_id=t), db=db),
-             lambda t, db: main.admin_unban(main._AdminUnbanReq(admin_steam_id="9", target_steam_id=t), db=db))
-    for bad in ("7656119800000000x", "760000000000000000000", "", " 76561198000000008", "76561198000000008 ",
-                "\u0667\u0666\u0665\u0666\u0661\u0661\u0669\u0668\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0668"):
-        for call in calls:
-            db = Scripted({})
-            with pytest.raises(HTTPException) as ex:
-                _run(call(bad, db))
-            assert ex.value.status_code == 422 and db.log == [] and db.committed == 0 and reached == [], bad
-    assert main._steam_id_or_422("76561198000000008", "target_steam_id") == "76561198000000008"
-    assert main._steam_id_or_422("1", "target_steam_id") == "1"
-    for fn in (main.admin_ban, main.admin_unban):
-        src = inspect.getsource(fn)
-        assert src.count('_steam_id_or_422(req.target_steam_id, "target_steam_id")') == 1, fn.__name__
-        assert src.index("_steam_id_or_422(") < src.index("_require_admin(") < src.index("_mail_lock_identities("), fn.__name__
+
+    def ban(target, db):
+        return main.admin_ban(main._AdminBanReq(admin_steam_id="9", target_steam_id=target), db=db)
+
+    for bad in ("7656119800000000x", "9" * 21, "", " 76561198000000008", "76561198000000008 ", "76561198000000008\n",
+                "7656119800000000\x00",
+                "\u0667\u0666\u0665\u0666\u0661\u0661\u0669\u0668\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0660\u0668",
+                "\uff11", "photon_1"):
+        db = Scripted({})
+        with pytest.raises(HTTPException) as ex:
+            _run(ban(bad, db))
+        assert ex.value.status_code == 422 and db.log == [] and db.committed == 0 and reached == [], repr(bad)
+        assert main._mod_target_ok(bad) is False, repr(bad)
+    for good in ("1", "76561198000000008", "9" * 20):
+        db = Scripted({})
+        with pytest.raises(HTTPException) as ex:
+            _run(ban(good, db))
+        assert (ex.value.status_code, reached[-1] if reached else None) == (403, ("ban", good)), repr(good)
+        assert db.log == [] and db.committed == 0
+        assert main._mod_target_or_422(good) == good and main._mod_target_ok(good) is True
+    assert len(reached) == 3
+    src = inspect.getsource(main.admin_ban)
+    assert src.count('_mod_target_or_422(req.target_steam_id, "target_steam_id")') == 1
+    assert src.index("_mod_target_or_422(") < src.index("_require_admin(") < src.index("_mail_lock_identities(")
+    assert "_mod_target_or_422(" not in inspect.getsource(main.admin_unban)
+
+
+class _ReleaseDb(_UnbanDb):
+    """The unban's UPDATE releases `released` rows (the shared _UnbanDb always answers one)."""
+
+    def __init__(self, script, released):
+        super().__init__(script)
+        self.released = released
+
+    async def execute(self, statement, params=None):
+        res = await super().execute(statement, params)
+        res.rowcount = self.released
+        return res
+
+
+@pytest.mark.parametrize("key", ["9" * 21, "photon_1", "7656119800000000x", " 76561198000000008", ""])
+def test_the_unban_releases_a_key_outside_the_domain_only_when_a_row_carries_it(monkeypatch, key):
+    """v4.13 (r14 LOW, NO-GO 2): a ban stored under a key outside the domain (admin_ban took any string before
+    v4.11) must stay releasable, so the unban makes no domain check before its UPDATE. When that UPDATE releases a
+    row, the key -- whatever it is -- is the signature's, the UPDATE's, the audit row's and the answer's, verbatim,
+    and the release commits. When it releases none, a key outside the domain is refused 422 by _mod_release_or_422
+    after the UPDATE and before the audit row: no audit, no commit (once migration 319 is applied no ACTIVE row
+    outside the domain exists, so from then on such a key never releases a row). An in-domain key that releases
+    nothing still answers rows 0 with its audit row. The identity lattice locks the non-empty ids in canonical
+    order; an empty key takes no identity lock (the lattice skips it)."""
+    seen = []
+
+    async def admin(db, adm, action, target, sig):
+        seen.append((adm, action, target, sig))
+
+    monkeypatch.setattr(main, "_require_admin", admin)
+
+    def unban(target, db):
+        req = main._AdminUnbanReq(admin_steam_id="9", target_steam_id=target, hmac_signature="x")
+        return main.admin_unban(req, db=db)
+
+    db = _ReleaseDb({}, 1)
+    assert _run(unban(key, db)) == {"status": "unbanned", "steam_id": key, "rows": 1}
+    assert seen == [("9", "unban", key, "x")]
+    assert [p["sid"] for sql, p in db.log if "pg_advisory_xact_lock(hashtext(:sid))" in sql] == sorted({"9", key} - {""})
+    assert [p for sql, p in db.log if "UPDATE player_bans SET unbanned_at" in sql] == [{"admin": "9", "sid": key}]
+    assert len(db.added) == 1
+    assert (db.added[0].action, db.added[0].target_steam_id, db.added[0].details) == ("unban", key, {"rows": 1})
+    assert db.committed == 1
+    db = _ReleaseDb({}, 0)
+    with pytest.raises(HTTPException) as ex:
+        _run(unban(key, db))
+    assert (ex.value.status_code, ex.value.detail) == (422, "target_steam_id must be a numeric steam id")
+    assert db.count("UPDATE player_bans SET unbanned_at") == 1 and db.added == [] and db.committed == 0
+    db = _ReleaseDb({}, 0)
+    assert _run(unban("76561198000000008", db)) == {"status": "unbanned", "steam_id": "76561198000000008", "rows": 0}
+    assert len(db.added) == 1 and db.added[0].details == {"rows": 0} and db.committed == 1
+    src = inspect.getsource(main.admin_unban)
+    assert "_mod_target_or_422(" not in src
+    assert (src.index("UPDATE player_bans") < src.index("_mod_release_or_422(req.target_steam_id, res.rowcount)")
+            < src.index("db.add(AdminAction("))
+
+
+def test_migration_319_puts_the_target_domain_on_active_bans_in_the_helpers_spelling():
+    """v4.13 (r14 LOW): player_bans.steam_id is TEXT in the applied schema (028), so the api's check was the only
+    boundary and nothing tied it to the table. Migration 319 adds the helper's pattern, anchored at both ends, as a
+    CHECK on ACTIVE rows -- an unbanned row keeps whatever key it was written with, and an unban (which sets
+    unbanned_at) always leaves a row the CHECK admits. (PostgreSQL's `$` is the end of the string, the boundary
+    fullmatch has: measured on the primary 2026-09-14 for twenty and twenty-one digits, a trailing newline,
+    Arabic-Indic and fullwidth digits.) The file counts the active rows outside the pattern and raises a named
+    error with that count (ADD CONSTRAINT's own validation would fail on them too, without the count), adds the
+    constraint only when it is absent, validates it (no NOT VALID) and is one explicit transaction. The domain is
+    spelled once: no moderation route or core calls fullmatch itself."""
+    with open(os.path.join(HERE, "..", "sql", "319_player_bans_active_key_numeric.sql"), encoding="utf-8") as fh:
+        body = "\n".join(line for line in fh.read().splitlines() if not line.lstrip().startswith("--"))
+    assert main._MOD_TARGET_PATTERN == "[0-9]{1,20}"
+    anchored = "^" + main._MOD_TARGET_PATTERN + "$"
+    assert re.findall(r"CHECK \((.*?)\);", body, re.S) == [f"unbanned_at IS NOT NULL OR steam_id ~ '{anchored}'"]
+    assert body.count(f"WHERE unbanned_at IS NULL AND steam_id !~ '{anchored}'") == 1
+    assert body.count("RAISE EXCEPTION") == 1
+    assert (body.index("WHERE unbanned_at IS NULL AND steam_id !~") < body.index("RAISE EXCEPTION")
+            < body.index("IF NOT EXISTS (SELECT 1 FROM pg_constraint")
+            < body.index("ADD CONSTRAINT player_bans_active_key_numeric"))
+    assert "conname = 'player_bans_active_key_numeric'" in body and "NOT VALID" not in body
+    lines = [line.strip() for line in body.splitlines() if line.strip()]
+    assert lines[0] == "BEGIN;" and lines[-1] == "COMMIT;"
+    for value, ok in (("1", True), ("9" * 20, True), ("9" * 21, False), ("", False), ("12\n", False),
+                      ("\u0661\u0662", False), ("\uff11", False), ("photon_1", False)):
+        assert main._mod_target_ok(value) is ok, repr(value)
+    for fn in (main.admin_ban, main.admin_unban, main._moderation_case_act, main.chat_moderate_mute,
+               main.chat_moderate_unmute, main._chat_mute_apply):
+        assert "fullmatch(" not in inspect.getsource(fn), fn.__name__
+
+
+def test_the_audit_rows_carry_the_whole_actor(monkeypatch):
+    """v4.13 (D-g): admin_actions.admin_steam_id is TEXT in the applied schema (028) -- the String(20) in models.py
+    is a declaration -- and a Discord moderator is recorded as `discord:<id>`, so the `[:20]` both audit writers
+    applied kept only twelve digits of the id. Both writers, and the two Discord call sites (the lockdown and the
+    context-menu mute), bind the whole actor; no call site in main.py slices an admin_steam_id it passes."""
+    discord_id = "1234567890" * 2
+    actor = "discord:" + discord_id   # 28 characters
+
+    def audited(db):
+        return [p["a"] for sql, p in db.log if "INSERT INTO admin_actions" in sql]
+
+    for writer in (main._log_admin_action, main._log_admin_action_strict):
+        db = _GateDb({})
+        _run(writer(db, admin_steam_id=actor, action="x", target_steam_id=None, details={}))
+        assert audited(db) == [actor], writer.__name__
+    db = _GateDb({})
+    _run(main._set_chat_lockdown(db, True, actor))
+    assert audited(db) == [actor]
+
+    async def apply(db, row, **kw):
+        return {"status": "ok", "muted": row["steam_id"], "purged": 0, "purged_rows": []}
+
+    async def broadcast(rows):
+        return None
+
+    monkeypatch.setattr(main, "_apply_mute_for_row", apply)
+    monkeypatch.setattr(main, "_broadcast_deletes", broadcast)
+    monkeypatch.setattr(main, "_require_internal_key", lambda key: None)
+    row = {"id": 7, "source": "game", "channel": "global", "steam_id": "76561198000000008", "discord_id": None,
+           "display_name": "x", "origin_user_id": None, "origin_login": None, "author_verified": True,
+           "deleted_at": None}
+    db = _GateDb({"FROM chat_mirrors mr JOIN chat_messages cm": [[row]]})
+    res = _run(main.internal_chat_discord_mute({"message_id": "m-1", "actor_discord_id": discord_id},
+                                               x_internal_key="k", db=db))
+    assert res["muted"] == "76561198000000008" and audited(db) == [actor] and db.committed == 1
+    src = inspect.getsource(main)
+    assert re.search(r'"a": admin_steam_id\[:', src) is None
+    assert re.search(r"admin_steam_id=\w+\[:\d*\]", src) is None

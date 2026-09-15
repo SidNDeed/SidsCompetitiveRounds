@@ -1,11 +1,20 @@
 """The Collection tab's "Get packs" text quotes the economy (odds, bands,
 shard values). Those numbers live in backend/api/player_cards.py's PC_ECONOMY;
 the client cannot fetch them today, so this test pins the client text to the
-server constants — a retune of either side without the other fails here.
+server constants — a retune of either side without the other fails here, for
+every fragment _expected_fragments quotes verbatim.
+The earned-pack odds are held differently while the client half of v4.13 is
+unmerged: the Get-packs line and the Info article's earned-packs bullet are
+judged on the rates they state and on naming no sweep, under a strict xfail.
+Until that marker is removed, a server retune that leaves the old client text
+in place still reports XFAIL and the suite passes; removing it restores the
+guarantee for both texts.
 Prices are NOT pinned: the client renders them from /pc/me."""
 import importlib.util
 import pathlib
 import re
+
+import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 CLIENT = ROOT / "plugin" / "PlayerCardsUI.cs"
@@ -36,16 +45,12 @@ def _span(src, start, end):
 
 
 def _expected_fragments(eco):
-    win1, sweep1 = eco["earned_pct"]["1v1"]
-    others = {eco["earned_pct"][m] for m in ("team", "ovt", "ffa")}
-    assert len(others) == 1, "the client text states one odds pair for 2v2 / 1v2 / FFA"
-    win2, sweep2 = next(iter(others))
+    """The economy fragments quoted verbatim. The earned-pack texts are judged
+    on their rates only (_earned_odds_problems): their sentences are the client's."""
     t = eco["tier_pct"]
     s = eco["shards"]
     b = eco["band_max_rank"]
     return [
-        f"rolls a {_pct(win1)} chance of a pack (a 2-0 sweep: {_pct(sweep1)})",
-        f"2v2, 1v2 and FFA wins roll {_pct(win2)} (a sweep: {_pct(sweep2)})",
         f"Odds per card: Common {_pct(t['common'])}, Uncommon {_pct(t['uncommon'])}, Rare {_pct(t['rare'])}, "
         f"Epic {_pct(t['epic'])}, Legendary {_pct(t['legendary'])}.",
         f"Foil (1 in {round(100 / eco['foil_pct'])}) and Signed (1 in {round(100 / eco['signed_pct'])})",
@@ -67,6 +72,90 @@ def test_client_text_pin_can_fail():
     mutated = {**eco, "tier_pct": {**eco["tier_pct"], "common": eco["tier_pct"]["common"] + 1}}
     src = CLIENT.read_text(encoding="utf-8")
     assert any(frag not in src for frag in _expected_fragments(mutated))
+
+
+# The earned-pack odds as the client states them. The server's rule (v4.13,
+# 2026-09-14): every won ranked series, in every mode, and every won ranked FFA
+# match rolls one flat percentage; there is no sweep roll. Two client sites
+# state it: the Get-packs line and the Info article's earned-packs bullet. Only
+# the rates they state, and that they name no sweep, are judged; the sentences
+# are the client's to word.
+RANKED_WINS_PREFIX = 'I18n.Tr("- Ranked wins:'
+EARNED_BULLET = "- <b>Earned packs</b>"
+_NUMBER_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                 "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+
+
+def _ranked_wins_line(src):
+    """The English literal RefreshInfo passes for the earned-pack line."""
+    body = _span(src, "private static void RefreshInfo", "// ── actions")
+    at = body.index(RANKED_WINS_PREFIX) + len('I18n.Tr("')
+    return body[at:body.index('")', at)]
+
+
+def _earned_bullet(src):
+    """The earned-packs bullet of the Info article's GETTING PACKS literal."""
+    body = _span(src, 'private static string CardsPacks => I18n.Tr(@"', '");')
+    at = body.index(EARNED_BULLET)
+    return body[at:body.index("\n", at)]
+
+
+def _stated_rates(text):
+    """Every rate a sentence states, as _pct renders it: "20%", "one time in
+    five" and "1 in 5" alike. A "one in <word>" it cannot read is kept as
+    written, so it never equals a rate."""
+    rates = {_pct(float(p)) for p in re.findall(r"(\d+(?:\.\d+)?)%", text)}
+    for n in re.findall(r"\b(?:one time|one|1) in (\w+)", text, flags=re.I):
+        k = _NUMBER_WORDS.get(n.lower()) or (int(n) if n.isdigit() else 0)
+        rates.add(_pct(100 / k) if k else f"one in {n}")
+    return rates
+
+
+def _earned_odds_problems(text, eco):
+    """Why a client sentence fails to state the server's earned-pack odds; [] when it does."""
+    rates = set(eco["earned_pct"].values())
+    if len(rates) != 1:
+        return [f"the server's earned odds are not one flat rate: {eco['earned_pct']}"]
+    want = _pct(next(iter(rates)))
+    stated = sorted(_stated_rates(text))
+    problems = [] if stated == [want] else [f"the text states {stated}, the server rolls {want}"]
+    if "sweep" in text.lower():
+        problems.append("the text still names a sweep")
+    return problems
+
+
+@pytest.mark.xfail(strict=True, raises=AssertionError,
+                   reason="the client half of v4.13's flat earned odds is not merged yet; the change that "
+                          "rewords both earned-pack texts removes this marker")
+def test_client_earned_pack_texts_state_the_flat_earned_odds():
+    eco = _economy()
+    problems = (_earned_odds_problems(_ranked_wins_line(CLIENT.read_text(encoding="utf-8")), eco)
+                + _earned_odds_problems(_earned_bullet(INFO.read_text(encoding="utf-8")), eco))
+    assert problems == []
+
+
+def test_the_earned_odds_judge_refuses_the_old_texts_and_a_split_rate():
+    """Negative controls (#391) for the judge both earned-pack texts are held to."""
+    assert _stated_rates("rolls a 20% chance (a sweep: 100%)") == {"20%", "100%"}
+    assert _stated_rates("one time in five, One time in ten, 1 in 2, one in many") == {"20%", "10%", "50%", "one in many"}
+    eco = _economy()
+    rate = _pct(eco["earned_pct"]["1v1"])
+    old_line = ("- Ranked wins: every ranked 1v1 series you win rolls a 20% chance of a pack (a 2-0 sweep: 100%). "
+                "2v2, 1v2 and FFA wins roll 10% (a sweep: 50%). Earned packs wait here until you open them.")
+    old_bullet = ("- <b>Earned packs</b>: winning a ranked 1v1 series grants a pack one time in five, and a 2-0 "
+                  "sweep always does. 2v2, 1v2 and FFA wins grant one time in ten, a sweep one time in two (an FFA "
+                  "sweep is every round won and nobody else scoring).")
+    assert _earned_odds_problems(old_line, eco) and _earned_odds_problems(old_bullet, eco)
+    # each half of the judge on its own: stale rates with no sweep named, a sweep named with no rate
+    assert _earned_odds_problems("- <b>Earned packs</b>: a ranked 1v1 win grants a pack one time in five; "
+                                 "2v2, 1v2 and FFA wins one time in ten.", eco)
+    assert _earned_odds_problems(f"- Ranked wins: any ranked win rolls a {rate} chance of a pack, "
+                                 "and a 2-0 sweep always does.", eco)
+    flat_line = f"- Ranked wins: any ranked series you win rolls a {rate} chance of a pack."
+    flat_bullet = f"- <b>Earned packs</b>: each ranked series or ranked FFA match you win grants a pack {rate} of the time."
+    assert _earned_odds_problems(flat_line, eco) == [] and _earned_odds_problems(flat_bullet, eco) == []
+    split = {**eco, "earned_pct": {**eco["earned_pct"], "team": eco["earned_pct"]["1v1"] / 2}}
+    assert _earned_odds_problems(flat_line, split) and _earned_odds_problems(flat_bullet, split)
 
 
 def test_client_prints_per_pack_and_prices_come_from_the_server():

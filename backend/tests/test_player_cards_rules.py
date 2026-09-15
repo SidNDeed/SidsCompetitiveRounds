@@ -2,10 +2,12 @@
 
 Every property Nic was firm on has a test AND a negative control: the band
 edges, the never-up fallback, the independence of the three per-print rolls,
-the exclusive sweep, and the determinism of the earned roll. The migration
+and the determinism of the earned roll. So do the flat earned odds and their
+exact cut, which replaced the exclusive sweep in v4.13. The migration
 that carries the immutability trigger is pinned by text.
 """
 
+import inspect
 import os
 import random
 import sys
@@ -115,7 +117,7 @@ def test_shard_values_are_by_rarity_only():
     assert [pc.shards_for(r) for r in pc.RARITIES] == [5, 15, 40, 150, 600]
 
 
-# ── earned packs: deterministic, exclusive sweep ──
+# ── earned packs: deterministic, one flat roll ──
 
 def test_earned_roll_is_deterministic_and_keyed_by_mode_and_reference():
     a = pc.earned_roll(b"k", "1v1", "s1")
@@ -125,19 +127,27 @@ def test_earned_roll_is_deterministic_and_keyed_by_mode_and_reference():
     assert pc.earned_roll(b"other", "1v1", "s1") != a or pc.earned_roll(b"other", "1v1", "s3") != a
 
 
-def test_sweep_is_exclusive_and_the_1v1_sweep_is_certain():
-    # 1v1 sweep = 100 %: every reference grants the sweep pack.
-    for i in range(50):
-        assert pc.earned_pack_kind(b"k", "1v1", f"s{i}", sweep=True) == "sweep"
-    # The win roll at 20 % / the half-odds modes: the empirical rate matches.
+def test_every_ranked_mode_rolls_the_same_flat_odds_and_there_is_no_sweep_roll():
+    # Product rule (2026-09-14): every won ranked series, in every mode, rolls
+    # 20 % for a pack, whatever the score line.
+    assert pc.PC_ECONOMY["earned_pct"] == {"1v1": 20.0, "team": 20.0, "ovt": 20.0, "ffa": 20.0}
+    assert list(inspect.signature(pc.earned_pack_kind).parameters) == ["secret", "mode", "reference_id"]
     n = 4000
-    wins = sum(1 for i in range(n) if pc.earned_pack_kind(b"k", "1v1", f"w{i}", sweep=False) == "win")
-    assert 0.16 * n < wins < 0.24 * n, wins
-    sweeps = sum(1 for i in range(n) if pc.earned_pack_kind(b"k", "team", f"t{i}", sweep=True) == "sweep")
-    assert 0.45 * n < sweeps < 0.55 * n, sweeps
-    # Negative controls: a sweep never yields 'win'; an unknown mode yields nothing.
-    assert all(pc.earned_pack_kind(b"k", "team", f"t{i}", sweep=True) != "win" for i in range(200))
-    assert pc.earned_pack_kind(b"k", "duel", "x", sweep=True) is None
+    for mode in ("1v1", "team", "ovt", "ffa"):
+        kinds = [pc.earned_pack_kind(b"k", mode, f"{mode}-{i}") for i in range(n)]
+        assert set(kinds) <= {"win", None}, mode
+        assert 0.16 * n < kinds.count("win") < 0.24 * n, (mode, kinds.count("win"))
+    # an unknown mode earns nothing
+    assert pc.earned_pack_kind(b"k", "duel", "x") is None
+
+
+def test_the_earned_cut_is_exact(monkeypatch):
+    # 20 % of 0..9999 in every mode: a roll of 1999 hits, 2000 misses
+    for mode in pc.PC_ECONOMY["earned_pct"]:
+        monkeypatch.setattr(pc, "earned_roll", lambda secret, m, ref: 1999)
+        assert pc.earned_pack_kind(b"k", mode, "r") == "win", mode
+        monkeypatch.setattr(pc, "earned_roll", lambda secret, m, ref: 2000)
+        assert pc.earned_pack_kind(b"k", mode, "r") is None, mode
 
 
 # ── canonical strings ──

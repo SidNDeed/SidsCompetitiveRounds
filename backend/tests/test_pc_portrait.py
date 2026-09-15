@@ -172,6 +172,17 @@ def test_public_name_answers_none_for_everything_unreadable():
     assert P.public_name("★") == "★"
 
 
+def test_a_stored_name_is_unnamed_exactly_when_it_is_a_steam_id():
+    """The constructor's fallback stores the Steam id as the name, and both the public name (P) and the coverage
+    projection (C) answer None for it. v4.13 (r14): the rule is steamid64's interval, not the 7656119 prefix, so
+    an account numbered 2,039,734,272 or higher is unnamed too, and a seventeen-digit name outside the interval
+    is a name like any other."""
+    for sid in ("76561197960265728", "76561202255233023", "76561200000000000", "76561198040410653"):
+        assert P.public_name(sid) is None and P.coverage_project(sid) is None, sid
+    for name in ("76561197960265727", "76561202255233024", "76561190000000001"):
+        assert P.public_name(name) == name and P.coverage_project(name) == name, name
+
+
 def test_the_coverage_projection_removes_what_no_font_can_draw():
     """A code point with no glyph in any renderer font is drawn as tofu, and
     the face's revision key would promise those boxes are the right picture."""

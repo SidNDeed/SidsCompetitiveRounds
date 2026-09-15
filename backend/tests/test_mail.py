@@ -1474,6 +1474,49 @@ def test_moderation_cores_are_shared_not_copied():
     assert gate.count("await db.commit()") == 1 and "status_code=429" in gate
 
 
+def test_a_case_mute_or_ban_whose_subject_id_is_outside_the_domain_is_refused_before_any_write():
+    """v4.13 (r14 LOW, the class swept by the operation; D-f): a mute and a ban are keyed by the subject's id, and
+    that key must be in the moderation target's domain -- the one admin_ban's body is held to. players.steam_id is
+    a varchar(20), not a digit string (phantom `photon_*` rows), so a case mute or case ban on such a subject is a
+    400 subject_id_not_numeric after the act's reads and locks and before its first write: no ban-rate lock, no
+    mute or ban row, no audit row, no commit, the case still open. A dismiss writes no such key and closes such a
+    case; the same ban on a numeric subject bans. _apply_ban_core keeps exactly two callers, each checking its key
+    before the gate."""
+    db, ids = _world()
+    case_id = _open_case(db, ids)
+    db.add_player(ADMIN_SID, discord_id="d-admin")
+    db.admins.add(ADMIN_SID)
+    db.players[ids[A_SID]]["steam_id"] = "photon_1"
+    db.locks.clear()
+    before = (len(db.admin_actions), dict(db.bans), list(db.mutes), len(db.added), db.commits)
+    for action, extra in (("ban", {}), ("mute", {"hours": 24})):
+        exc = _raises(main.internal_moderation_case_act(
+            case_id, {"actor_discord_id": "d-admin", "action": action, "reason": "button", **extra},
+            "internal-key", db=db))
+        assert (exc.status_code, exc.detail) == (400, "subject_id_not_numeric"), action
+        assert (len(db.admin_actions), dict(db.bans), list(db.mutes), len(db.added), db.commits) == before, action
+        assert db.cases[UUID(case_id)]["status"] == "open", action
+    assert ("identity", "photon_1") in db.locks and ("ban-rate", ADMIN_SID) not in db.locks
+    db.players[ids[A_SID]]["steam_id"] = A_SID
+    assert _act_internal(db, case_id, "d-admin", "ban")["resolution"] == "ban"
+    assert [type(o).__name__ for o in db.added[before[3]:]] == ["PlayerBan", "AdminAction"]
+    assert db.added[before[3]].steam_id == A_SID
+    other, other_ids = _world()
+    other_case = _open_case(other, other_ids)
+    other.add_player(ADMIN_SID, discord_id="d-admin")
+    other.admins.add(ADMIN_SID)
+    other.players[other_ids[A_SID]]["steam_id"] = "photon_1"
+    assert _act_internal(other, other_case, "d-admin", "dismiss")["resolution"] == "dismissed"
+    assert inspect.getsource(main).count("await _apply_ban_core(") == 2
+    ban = inspect.getsource(main.admin_ban)
+    act = inspect.getsource(main._moderation_case_act)
+    assert ban.index("_mod_target_or_422(req.target_steam_id") < ban.index("_ban_rate_gate_or_raise(") < ban.index("_apply_ban_core(")
+    check = 'if action in ("mute", "ban") and not _mod_target_ok(subject_sid):'
+    assert act.count(check) == 1
+    assert act.index("_mail_lock_identities(") < act.index(check) < act.index("_chat_mute_apply(")
+    assert act.index(check) < act.index("_ban_rate_gate_or_raise(") < act.index("_apply_ban_core(")
+
+
 def test_fanout_and_marker_contracts_pinned():
     for needle in FANOUT_PREDICATES:
         assert needle in main._MAIL_FANOUT_SQL

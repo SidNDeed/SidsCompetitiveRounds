@@ -766,7 +766,13 @@ class AdminUser(Base):
 
 
 class PlayerBan(Base):
-    """Append-only ban log; player is currently banned if latest row has unbanned_at IS NULL."""
+    """Append-only ban log; player is currently banned if latest row has unbanned_at IS NULL.
+
+    The applied steam_id column is TEXT (028); String(20) here is a declaration
+    SQLAlchemy does not enforce on insert. Once migration 319 is applied the
+    table enforces its CHECK: an ACTIVE row's steam_id is one to twenty ASCII
+    digits (main._MOD_TARGET_PATTERN); an unbanned row keeps the key it was
+    written with."""
     __tablename__ = "player_bans"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -787,7 +793,13 @@ class AdminAction(Base):
     (language_grants scope='chat_moderate') are not admins yet must be
     auditable here, and an audit log must not be constrained by the CURRENT
     roster — otherwise removing a retired admin is blocked by their own
-    history. Do not re-add it."""
+    history. Do not re-add it.
+
+    The applied admin_steam_id and target_steam_id columns are TEXT (028): the
+    String lengths below are declarations SQLAlchemy does not enforce. The
+    raw-SQL audit writers in main.py (_log_admin_action and its strict twin)
+    bind the actor whole since v4.13 -- a Discord moderator is recorded as
+    "discord:<id>", longer than twenty characters."""
     __tablename__ = "admin_actions"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
