@@ -14,8 +14,9 @@ only move rows and money and the tests exercise the rule itself:
   * ``roll_flags`` — foil and signed are two further independent rolls per
     print (nothing about the band changes their odds).
   * ``earned_pack_kind`` — the deterministic earned-pack roll from an HMAC of
-    ``{mode}:{reference_id}``: a 2-0 series rolls the SWEEP odds instead of
-    the win odds (exclusive), so one series grants at most one pack.
+    ``{mode}:{reference_id}``: 'win' or None at that mode's odds, with
+    nothing about the score line as an input (the 2-0 sweep roll was removed
+    in v4.13).
   * the canonical strings every signed request carries.
 
 No pity, no floors, no streaks; prints are generated at the pull and never
@@ -41,9 +42,12 @@ PC_ECONOMY = {
     "shards": {"common": 5, "uncommon": 15, "rare": 40, "epic": 150, "legendary": 600},
     # Highest pool rank of each band; Common is everything past Uncommon.
     "band_max_rank": {"legendary": 1, "epic": 10, "rare": 20, "uncommon": 40},
-    # Earned packs: (win %, sweep %) per ranked mode. The sweep roll replaces
-    # the win roll on a 2-0 (FFA: every round won, nobody else any).
-    "earned_pct": {"1v1": (20.0, 100.0), "team": (10.0, 50.0), "ovt": (10.0, 50.0), "ffa": (10.0, 50.0)},
+    # Earned packs: per ranked mode, the percent chance that the earned-pack
+    # roll of a won ranked series (a won ranked FFA match) hits; a mode not
+    # listed earns none. One roll whatever the score line: there is no 2-0
+    # sweep roll (removed in v4.13, 2026-09-14). Pack rows the sweep roll wrote
+    # before then keep kind 'sweep'.
+    "earned_pct": {"1v1": 20.0, "team": 20.0, "ovt": 20.0, "ffa": 20.0},
     # A rolled subject that left the pool since the snapshot is re-rolled this
     # many times before the open is rejected as pool_changed (before any debit).
     "reroll_attempts": 3,
@@ -51,8 +55,10 @@ PC_ECONOMY = {
 }
 
 PACK_PAY = ("gold", "shards")
-# No opt-out and no picture choice (2026-09-13): every registered player is
-# a card and every card carries a picture; deleting all data is the one exit.
+# No opt-out and no picture choice (2026-09-13): no player leaves the pool by
+# choice. Every registered, unbanned player whose id is a SteamID64 is a card
+# subject (v4.13), every card carries a picture, and deleting all data is the
+# one way such a player's card leaves the binders.
 SETTINGS_KEYS = ("collection_public", "announce")
 
 
@@ -121,16 +127,14 @@ def earned_roll(secret: bytes, mode: str, reference_id: str) -> int:
     return int.from_bytes(digest[:4], "big") % 10000
 
 
-def earned_pack_kind(secret: bytes, mode: str, reference_id: str, sweep: bool) -> str | None:
-    """'sweep' | 'win' | None. A sweep rolls ONLY the sweep odds (exclusive:
-    the win roll is not made), so a series grants at most one pack."""
-    if mode not in PC_ECONOMY["earned_pct"]:
+def earned_pack_kind(secret: bytes, mode: str, reference_id: str) -> str | None:
+    """'win' | None: one roll at the mode's odds; None for a mode that earns
+    nothing. The word is what an earned pack row's ``kind`` stores. Nothing
+    about the series' score line is an input."""
+    pct = PC_ECONOMY["earned_pct"].get(mode)
+    if pct is None:
         return None
-    win_pct, sweep_pct = PC_ECONOMY["earned_pct"][mode]
-    r = earned_roll(secret, mode, reference_id)
-    if sweep:
-        return "sweep" if r < sweep_pct * 100 else None
-    return "win" if r < win_pct * 100 else None
+    return "win" if earned_roll(secret, mode, reference_id) < pct * 100 else None
 
 
 # ── canonical strings (every term of an operation is inside the signed string) ──

@@ -294,10 +294,12 @@ def test_the_pack_answer_only_prerenders_when_asked(monkeypatch):
     monkeypatch.setattr(main, "_pc_prints_of_pack", prints)
     row = _pack_row(0)
     _run(main._pc_pack_answer(None, row, _ctx()))
-    assert scheduled == [["p1"]], "the open answer still pre-renders by default"
+    assert scheduled == [], "only the minting request asks for a pre-render (v4.13 §9)"
+    _run(main._pc_pack_answer(None, row, _ctx(), prerender=True))
+    assert scheduled == [["p1"]]
     _run(main._pc_pack_answer(None, row, _ctx(), prerender=False))
     assert scheduled == [["p1"]]
-    assert "prints" not in _run(main._pc_pack_answer(None, dict(row, status="unopened"), _ctx()))
+    assert "prints" not in _run(main._pc_pack_answer(None, dict(row, status="unopened"), _ctx(), prerender=True))
 
 
 # ── v4.1 (r4): the i18n migrations recompute from the sync tool and match the bundled catalogues ──

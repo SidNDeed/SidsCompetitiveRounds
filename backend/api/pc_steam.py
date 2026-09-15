@@ -23,6 +23,7 @@ from typing import Iterable
 from PIL import Image
 
 import pc_face
+import steamid64
 
 AVATAR_REF_RE = re.compile(r"^[0-9a-f]{40}$")
 # Steam's own "no picture" answers: the all-zero reference some summaries
@@ -31,7 +32,6 @@ AVATAR_REF_RE = re.compile(r"^[0-9a-f]{40}$")
 # downloaded: the card's answer for them is the emblem plate (v3 §3).
 DEFAULT_AVATAR_REFS = frozenset({"0" * 40, "fef49e7fa7e1997310d705b2a6158ff8dc1cdfeb"})
 _AVATAR_URL_RE = re.compile(r"^https://avatars\.(?:akamai\.)?steamstatic\.com/([0-9a-f]{40})_full\.jpg$")
-STEAM_ID_RE = re.compile(r"^7656119[0-9]{10}$")
 CDN_HOST = "avatars.steamstatic.com"
 HOSTS = frozenset({"api.steampowered.com", "steamcommunity.com", CDN_HOST,
                    "avatars.akamai.steamstatic.com"})
@@ -89,13 +89,13 @@ def summaries_url(key: str, steam_ids: Iterable[str]) -> str:
     ids = list(steam_ids)
     if not key:
         raise ValueError("key")
-    if not ids or len(ids) > SUMMARIES_PER_CALL or not all(STEAM_ID_RE.match(s or "") for s in ids):
+    if not ids or len(ids) > SUMMARIES_PER_CALL or not all(steamid64.is_individual_id(s) for s in ids):
         raise ValueError("steam_ids")
     return SUMMARIES_URL + "?" + urllib.parse.urlencode({"key": key, "steamids": ",".join(ids)})
 
 
 def profile_xml_url(steam_id: str) -> str:
-    if not STEAM_ID_RE.match(steam_id or ""):
+    if not steamid64.is_individual_id(steam_id):
         raise ValueError("steam_id")
     return f"https://steamcommunity.com/profiles/{steam_id}?xml=1"
 

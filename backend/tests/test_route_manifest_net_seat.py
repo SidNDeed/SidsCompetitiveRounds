@@ -820,11 +820,14 @@ def test_the_helper_closure_stays_affordable():
     """A fingerprint that pulls half the app in drifts on every commit, and a
     gate that always fires is a gate nobody reads.
 
-    MEASURED on this tree at the shipped two-tier rule: median 15, p90 49,
-    worst 190 (/api/v1/matches) of 1282 indexed bindings, with the walk itself
-    taking 0.1 s once the index is built (~5.3 s, once per process). The bounds
-    below sit above those with room, so this fails on a walk that has gone
-    wrong rather than on ordinary growth.
+    MEASURED when these bounds were set (Sept 4 batch, r14 M7) at the shipped
+    two-tier rule: median 15, p90 49, worst 190 (/api/v1/matches) of 1282
+    indexed bindings, with the walk itself taking 0.1 s once the index is built
+    (~5.3 s, once per process). The bounds below sat above those with room, so
+    this fails on a walk that has gone wrong rather than on ordinary growth;
+    the worst-route bounds have since moved for measured growth in bindings
+    a route really runs, each move recorded with its measurement at its
+    assertion.
 
     The second tier is exactly what these numbers pay for. Expanding data
     bindings as well as def/class ones makes `app = FastAPI(...)` a hub that
@@ -852,7 +855,14 @@ def test_the_helper_closure_stays_affordable():
     # 16 / 48 / 191 before it.
     assert code_median <= 24, f"median code closure {code_median} of {total}"
     assert code_p90 <= 75, f"p90 code closure {code_p90} of {total}"
-    assert code_worst <= 280, f"worst code closure {code_worst} of {total}"
+    # Player Cards v4.13 (2026-09-15): measured 20 / 64 / 278 on e894c45 and
+    # 20 / 64 / 282 on the v4.13 fold, the worst both times POST
+    # /api/v1/pc/packs/open. What it gained are bindings that route runs: the
+    # shared SteamID64 check (is_individual_id and its three constants, +4, in
+    # place of the two id regexes, -2) and the pool membership word with its
+    # Steam id clause (+2). The worst bound moves to 300 for that reason and
+    # no other; the median and p90 bounds stay.
+    assert code_worst <= 300, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
     # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is
@@ -868,7 +878,12 @@ def test_the_helper_closure_stays_affordable():
     # route already reached -- measured 383 on /api/v1/pc/packs/open. The
     # bound moves to 400 for that reason and no other; p90 and the median
     # stay where they were.
-    assert all_worst <= 400, f"worst closure {all_worst} of {total}"
+    # Player Cards v4.13 (2026-09-15): the same route measured 394 on e894c45
+    # and 401 on the v4.13 fold -- the code bindings above plus the three
+    # import lines they are reached through (steamid64 in main, pc_steam and
+    # pc_portrait); p90 126 -> 129, median 64. The bound moves to 420 for that
+    # reason and no other.
+    assert all_worst <= 420, f"worst closure {all_worst} of {total}"
 
 
 def _route_covering(module, name):

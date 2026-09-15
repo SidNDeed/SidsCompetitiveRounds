@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database import RELEASE_POOL_OVERFLOW, RELEASE_POOL_SIZE, get_db, get_release_db
 from flag_evidence import fetch_flag_context_rows, flag_payload
 from glicko2 import calculate_new_rating
+import steamid64 as _sid64   # the SteamID64 rule, standard library only: the name cleanup, the bug-log scrubber and the Steam sweep read it
 from models import AdminUser, AdminAction, Bet, BoosterGrant, BugReport, BugReportEvent, CardOffer, FlaggedMatch, GlickoRating, GoldTransaction, Match, MatchCard, Player, PlayerBan, PlayerItem, RankedSeries, RankRoleColor, RatingHistory, RankedQueue, QueueBlock, PlayerBlock, LinkCode, PlayerAchievement, ShopItem, GlickoRating2v2, TeamQueue, TeamSeries, TeamMatch, TeamMatchCard, TeamMatchTelemetry, TournamentMatch
 from schemas import (
     AchievementUnlockRequest,
@@ -3653,9 +3654,9 @@ async def queue_cleanup_loop():
             await _pc_snapshot_janitor_step()
         except Exception as e:
             print(f"[QUEUE-CLEANUP] player cards snapshot error: {e}")
-        # Player Cards (WP-D): re-derive any earned-pack grant a failed
-        # savepoint lost, and void the unopened packs of invalidated series
-        # (its own session, every PC_RECONCILE_EVERY_S).
+        # Player Cards (WP-D): re-derive, at the earned-pack odds in force,
+        # the grants a failed savepoint lost, and void the unopened packs of
+        # invalidated series (its own session, every PC_RECONCILE_EVERY_S).
         try:
             await _pc_reconcile_earned_packs()
         except Exception as e:
@@ -4854,9 +4855,14 @@ async def _alerts_load(db) -> list:
 # ── Rate limiting + body-size cap (F7/F9 hardening) ─────────────────────────
 # In-process per-IP sliding-window limiter. This is a BACKSTOP against abuse
 # loops (gold-farm, DC-spam, F5 button hammering) — the real DDoS shield is the
-# TLS reverse proxy in the infra runbook. Limits are generous so normal play +
-# F5 polling never trips them; the bot is exempt via X-Internal-Key. Source IPs
-# are real per-client because the port-forward DNATs without source rewrite.
+# TLS reverse proxy in the infra runbook. Each bucket's comment below says what
+# its limit is sized for. A refused request is not counted, and the window
+# slides: a slot frees once the request that took it is more than `window`
+# seconds old. A request carrying the right X-Internal-Key (the bot) and every
+# /api/v1/internal/ route never reach a bucket. Buckets key on the client
+# address uvicorn reports, so that address must be the player's own. Behind a
+# proxy it is only when uvicorn runs with --forwarded-allow-ips naming that
+# proxy; otherwise everyone behind the proxy shares one bucket (#189).
 import time as _rl_time
 from collections import deque as _rl_deque, defaultdict as _rl_defaultdict
 _RL_BUCKETS = _rl_defaultdict(_rl_deque)
@@ -4864,10 +4870,34 @@ _RL_GLOBAL = (150, 10.0)     # 150 req / 10s per IP (a fast browser is ~10)
 _RL_SENSITIVE = (20, 10.0)   # 20 req / 10s for mutating / abuse-prone paths
 _RL_FACE = (120, 10.0)       # the public Player Cards face route: its own bucket (v22 §2.2)
 _RL_FACE_PREFIX = "/api/v1/pc-face/"
+# Player Cards (v4.13 §9): every /api/v1/pc/ route has buckets of its own, off
+# the sensitive bucket, so card activity never spends the budget a queue join,
+# a match report, a bet or a sign-in needs from the same address.
+#
+# The family bucket is sized from the drop client (4db577d) and production.
+# That client sends up to three requests per discard (the discard, then a
+# collection and a profile refetch when its answer lands). The closest two
+# discards production had recorded by 2026-09-15 were 0.419 s apart. 90 lets
+# 29 discards into any 10 s, one every 0.345 s, at three requests each, plus
+# one of each of the tab's polls (profile every 30 s, pack recovery every
+# 15 s). What it holds: more than 90 requests in 10 s from one address to the
+# family routes other than the upload are refused on the excess. Buckets add
+# up per address, so this is up to 90 requests per 10 s on top of the general
+# 150, not inside it. A loop slower than that is not refused here; what such
+# a loop can obtain is set by each route's own rules (a print is discarded
+# once, paid packs are held to the balance and, where it applies, the day
+# cap, the daily claim to once a day), not by this bucket.
+_RL_PC = (90, 10.0)
+_RL_PC_PREFIX = "/api/v1/pc/"
+# The picture upload keeps its v22 §1.7 bound in a bucket of its own, matched
+# on its exact path. Its body (up to 1 MiB) is decoded in the two-thread pool
+# that also renders the card faces, before the session proof and the 30 s
+# pacing, so this bucket is the limit on how many decodes one address can
+# queue there. 20 is the sensitive limit it had; the drop client sends one
+# upload per render and at most one paced retry per visit.
+_RL_PC_UPLOAD = (20, 10.0)
+_RL_PC_UPLOAD_PATH = "/api/v1/pc/portrait"
 _RL_SENSITIVE_PREFIXES = (
-    # Player Cards (Sept 10 batch): every open / claim / discard / settings
-    # write and every private read. One literal prefix for the whole family.
-    "/api/v1/pc/",
     "/api/v1/achievements/unlock", "/api/v1/matches", "/api/v1/team/matches",
     "/api/v1/report-disconnect", "/api/v1/bets", "/api/v1/team-bets",
     "/api/v1/shop/purchase", "/api/v1/queue/join", "/api/v1/team/queue/join",
@@ -4982,6 +5012,14 @@ async def rate_limit_gate(request: Request, call_next):
         sensitive = False
         limit, window = _RL_FACE
         key = f"{ip}|f"
+    elif path == _RL_PC_UPLOAD_PATH:
+        # Exactly the upload, ahead of the family prefix that also matches it;
+        # a path that only starts with the upload's is family traffic.
+        limit, window = _RL_PC_UPLOAD
+        key = f"{ip}|pcu"
+    elif path.startswith(_RL_PC_PREFIX):
+        limit, window = _RL_PC
+        key = f"{ip}|pc"
     else:
         sensitive = any(path.startswith(p) for p in _RL_SENSITIVE_PREFIXES)
         limit, window = _RL_SENSITIVE if sensitive else _RL_GLOBAL
@@ -5198,8 +5236,9 @@ def _clean_display_name(display_name: str | None, steam_id: str) -> str | None:
     i.e. people who launched once, were registered before their Steam persona
     name was available, and never came back to heal it.
 
-    Treated as "no name": empty/whitespace, the steam_id itself, and any bare
-    17-digit run (a SteamID64 under a different formatting). Returning None lets
+    Treated as "no name": empty/whitespace, the steam_id itself, and any name
+    that is itself a public individual SteamID64 (steamid64.is_individual_id:
+    an account id sent where the name belongs). Returning None lets
     callers distinguish "call me this" from "I don't know yet", which is what
     stops a nameless call from clobbering a good stored name.
     """
@@ -5208,10 +5247,13 @@ def _clean_display_name(display_name: str | None, steam_id: str) -> str | None:
         return None
     if nm == (steam_id or "").strip():
         return None
-    # Every SteamID64 starts with the 7656119 prefix, so requiring it lets a
-    # player legitimately called "12345678901234567" keep their name while
-    # still catching an id that arrived under different formatting.
-    if len(nm) == 17 and nm.isdigit() and nm.startswith("7656119"):
+    # The public individual SteamID64 interval (steamid64.py), not a digit
+    # count, so a player legitimately called "12345678901234567" keeps the
+    # name while an account id in the name's place is still caught. Until
+    # v4.13 this was a 7656119 prefix, which also caught seventeen-digit names
+    # below the interval and missed every account numbered 2,039,734,272 or
+    # higher.
+    if _sid64.is_individual_id(nm):
         return None
     return nm
 
@@ -5534,6 +5576,18 @@ async def calculate_match_xp(
 
 # ── Routes: Health ─────────────────────────────────────────────
 
+# The Player Cards fold this build carries (v4.13 §8), reported on /health as
+# `pc_fold`. A marker whose only purpose is to be probed (#306): nothing reads
+# it and no behaviour depends on it. The release train requires it on BOTH api
+# boxes, because on the standby two of the train's discriminators read the same
+# on the build before v4.13 -- the route it treats as new already exists there,
+# and the standby's sweep word is `standby` on every build -- and a write probe
+# cannot fail there: the replica write gate answers 503 to every write before
+# any handler runs. Change it together with the train's entry, for a fold whose
+# deployment must be proven.
+PC_FOLD = "v4.13"
+
+
 @app.get("/api/v1/health", response_model=HealthResponse, tags=["System"])
 async def health_check(db: AsyncSession = Depends(get_db)):
     """Check if the API and database are operational."""
@@ -5542,11 +5596,14 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="ok", database="connected", replica=IS_REPLICA,
                               pc_renderer_fp=_pc_renderer_fp(), pc_raqm=_pc_raqm(),
                               pc_steam_sweep=_pc_steam_sweep_word(),
-                              pc_steam_render=_pc_steam_render_word())
+                              pc_steam_render=_pc_steam_render_word(),
+                              pc_fold=PC_FOLD)
     except Exception:
         # Report the role even when the database is unreachable: "which box is
-        # this" is exactly the question being asked when things are degraded.
-        return HealthResponse(status="degraded", database="disconnected", replica=IS_REPLICA)
+        # this" is exactly the question being asked when things are degraded --
+        # and which build it runs is the same question.
+        return HealthResponse(status="degraded", database="disconnected", replica=IS_REPLICA,
+                              pc_fold=PC_FOLD)
 
 
 LATEST_MOD_VERSION = "1.40.3"
@@ -7437,7 +7494,7 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
                 async with db.begin_nested():
                     await _pc_grant_earned_packs(
                         db, mode="1v1", series_id=series.id, winner_ids=[series.winner_id],
-                        sweep=_pc_sweep(series.p1_series_wins, series.p2_series_wins), label="1v1-complete")
+                        label="1v1-complete")
             except Exception as pcex:
                 print(f"[PC-EARNED] 1v1 grant failed for series {series.id}: {pcex}")
         else:
@@ -11700,6 +11757,15 @@ async def admin_record_exclude(payload: dict, db: AsyncSession = Depends(get_db)
     if steam_id == "-":
         steam_id = ""
     reason = str(payload.get("reason", ""))[:400]
+    # Each string this route binds or signs, other than the admin's own id, is
+    # checked before the admin check and every statement (review r15 sweep):
+    # the steam id is bound by the players read, the reason by the exclusion's
+    # insert and the audit row, and the board, the match id and the steam id
+    # reach the signature check's canonical, whose encode fails on a lone
+    # surrogate. A string no text bind can carry is refused 422 here.
+    for field, value in (("board", board), ("match_id", match_id), ("steam_id", steam_id), ("reason", reason)):
+        if not _pg_text_ok(value):   # record exclusion: the row's key and its reason, before the admin check (r15 sweep)
+            raise HTTPException(422, f"{field} is not storable text")
     # r4 f1: hmac.compare_digest raises TypeError on non-string / non-ASCII
     # input — fail closed as a 403, never a 500.
     _sig = payload.get("signature")
@@ -19064,7 +19130,7 @@ async def _log_admin_action(db: AsyncSession, *, admin_steam_id: str, action: st
             await db.execute(text(
                 "INSERT INTO admin_actions (admin_steam_id, action, target_steam_id, details)"
                 " VALUES (:a, :act, :t, CAST(:d AS jsonb))"
-            ), {"a": admin_steam_id[:20], "act": action[:32],
+            ), {"a": admin_steam_id, "act": action[:32],   # the actor whole (v4.13): TEXT since 028, and a Discord actor is "discord:<id>"
                 "t": (target_steam_id or None), "d": _json.dumps(details or {})})
     except Exception as ex:
         print(f"[CHAT-MOD] audit row failed for {action}: {ex}")
@@ -19199,18 +19265,24 @@ async def _chat_mute_apply(db, *, target_steam_id: str, channel: str | None,
     `:mins || ' minutes'` — the concat form types the param as TEXT while
     `:mins > 0` needs an INT, an asyncpg #275-class hazard this statement
     carried untested (chat_mutes had zero rows when checked 2026-08-29, so
-    the timed arm had never once executed)."""
+    the timed arm had never once executed).
+
+    The key is checked by _mod_target_or_422 -- the moderation target's
+    domain (v4.13, review r14) -- before either statement, and both
+    statements bind it unsliced: a key outside the domain raises 422 here,
+    before this function executes anything, whichever caller reached it."""
+    sid = _mod_target_or_422(target_steam_id)   # chat mute core: before either statement (v4.13 G4)
     mins = int(minutes or 0)
     await db.execute(text(
         "UPDATE chat_mutes SET revoked_at = NOW()"
         " WHERE steam_id = :sid AND revoked_at IS NULL"
         "   AND channel IS NOT DISTINCT FROM :chan"
-    ), {"sid": target_steam_id[:32], "chan": channel})
+    ), {"sid": sid, "chan": channel})
     await db.execute(text(
         "INSERT INTO chat_mutes (steam_id, channel, muted_by_steam_id, reason, expires_at)"
         " VALUES (:sid, :chan, :by, :why,"
         "         CASE WHEN :mins > 0 THEN NOW() + make_interval(mins => :mins) ELSE NULL END)"
-    ), {"sid": target_steam_id[:32], "chan": channel, "by": by_steam_id[:32],
+    ), {"sid": sid, "chan": channel, "by": by_steam_id[:32],
         "why": (reason or "")[:256] or None, "mins": mins})
 
 
@@ -19244,42 +19316,47 @@ async def chat_moderate_mute(req: _ChatModMuteReq, request: Request,
 
     channel=None means EVERY channel and is admin-only (it silences 'global',
     which no language grant covers). duration_minutes omitted or <= 0 means
-    permanent."""
+    permanent.
+
+    The target is checked first -- before the channel check, the identity
+    proof and any read or write -- by _mod_target_or_422, the moderation
+    target's domain (v4.13, review r14), and from then on the one string is
+    used as sent: the signature, the moderator-target check, the key handed
+    to the write core, the audit row, the log line and the response."""
+    target = _mod_target_or_422(req.target_steam_id)   # chat mute: first statement (v4.13 G4)
     chan = (req.channel or "").lower().strip() or None
     if chan is not None and chan not in CHAT_CHANNELS_ALLOWED:
         raise HTTPException(400, f"Unknown channel '{chan}'")
     role, langs = await _chat_mod_authn(
-        db, request, req, "chat_mute", f"{req.target_steam_id}:{chan or 'all'}")
+        db, request, req, "chat_mute", f"{target}:{chan or 'all'}")
     if not _chat_scope_allows(role, langs, chan):
         raise HTTPException(
             403,
             "Your moderation grant does not cover "
             + ("all channels — name a channel you moderate" if chan is None
                else f"the '{chan}' channel"))
-    if not req.target_steam_id:
-        raise HTTPException(400, "target_steam_id required")
     # A moderator must not be able to silence an admin or another moderator.
     # Admins may mute anyone (including each other — that is a people problem,
     # not a code one, and the audit log records it).
     if role == "moderator":
-        t_role, _ = await _chat_moderator_scope(db, req.target_steam_id)
+        t_role, _ = await _chat_moderator_scope(db, target)
         if t_role is not None:
             raise HTTPException(403, "You cannot mute another moderator or an admin")
     mins = int(req.duration_minutes) if req.duration_minutes else 0
     if mins > 0 and mins > 60 * 24 * 365:
         raise HTTPException(400, "duration_minutes too large")
-    await _chat_mute_apply(db, target_steam_id=req.target_steam_id, channel=chan,
+    await _chat_mute_apply(db, target_steam_id=target, channel=chan,
                            by_steam_id=req.steam_id, reason=req.reason, minutes=mins)
     await _log_admin_action(
         db, admin_steam_id=req.steam_id, action="chat_mute",
-        target_steam_id=req.target_steam_id,
+        target_steam_id=target,
         details={"channel": chan or "ALL", "duration_minutes": mins or None,
                  "permanent": mins <= 0, "reason": (req.reason or "")[:256],
                  "moderator_steam_id": req.steam_id, "moderator_role": role})
     await db.commit()
-    print(f"[CHAT-MOD] {role} {req.steam_id} muted {req.target_steam_id} "
+    print(f"[CHAT-MOD] {role} {req.steam_id} muted {target} "
           f"in [{chan or 'ALL'}] for {mins or 'ever'} min")
-    return {"status": "ok", "target_steam_id": req.target_steam_id,
+    return {"status": "ok", "target_steam_id": target,
             "channel": chan, "duration_minutes": mins or None,
             "permanent": mins <= 0}
 
@@ -19290,14 +19367,26 @@ async def chat_moderate_unmute(req: _ChatModMuteReq, request: Request,
     """Revoke live mutes for a steam_id. With `channel` set, revokes only that
     channel's mute; without it, revokes every mute the CALLER is entitled to
     revoke (an admin clears all; a moderator clears only their languages —
-    never the all-channels row, which is admin-issued)."""
+    never the all-channels row, which is admin-issued).
+
+    No target check before the UPDATE (v4.13, review r14), as on the unban:
+    a mute stored under a key outside the moderation target's domain must
+    stay revocable -- before v4.13 the mute route stored the first
+    thirty-two characters of any non-empty target, and chat_mutes holds no
+    such boundary -- and only the UPDATE can tell whether an unrevoked row
+    carries the key. The signature and every UPDATE arm take the target as
+    sent. _mod_release_or_422 then refuses a target outside the domain when
+    the arm revoked no row -- before the commit and the log line -- and
+    admits every other target. The audit row, the log line and the response
+    name the target exactly as the UPDATE used it. Only a string no row can
+    carry is refused before all of that, by _mod_bindable_or_422 (review
+    r15)."""
+    _mod_bindable_or_422(req.target_steam_id)   # chat unmute: before the channel check, the identity proof and every UPDATE arm (r15)
     chan = (req.channel or "").lower().strip() or None
     if chan is not None and chan not in CHAT_CHANNELS_ALLOWED:
         raise HTTPException(400, f"Unknown channel '{chan}'")
     role, langs = await _chat_mod_authn(
         db, request, req, "chat_unmute", f"{req.target_steam_id}:{chan or 'all'}")
-    if not req.target_steam_id:
-        raise HTTPException(400, "target_steam_id required")
     if chan is not None:
         if not _chat_scope_allows(role, langs, chan):
             raise HTTPException(403, f"Your moderation grant does not cover the '{chan}' channel")
@@ -19305,12 +19394,12 @@ async def chat_moderate_unmute(req: _ChatModMuteReq, request: Request,
             "UPDATE chat_mutes SET revoked_at = NOW()"
             " WHERE steam_id = :sid AND revoked_at IS NULL AND channel = :chan"
             " RETURNING id"
-        ), {"sid": req.target_steam_id[:32], "chan": chan})).scalars().all()
+        ), {"sid": req.target_steam_id, "chan": chan})).scalars().all()
     elif role == "admin":
         cleared = (await db.execute(text(
             "UPDATE chat_mutes SET revoked_at = NOW()"
             " WHERE steam_id = :sid AND revoked_at IS NULL RETURNING id"
-        ), {"sid": req.target_steam_id[:32]})).scalars().all()
+        ), {"sid": req.target_steam_id})).scalars().all()
     else:
         # Scoped moderator with no channel named: clear exactly the channels
         # they moderate. The all-channels (NULL) row is deliberately excluded
@@ -19320,7 +19409,8 @@ async def chat_moderate_unmute(req: _ChatModMuteReq, request: Request,
             "UPDATE chat_mutes SET revoked_at = NOW()"
             " WHERE steam_id = :sid AND revoked_at IS NULL AND channel = ANY(:chans)"
             " RETURNING id"
-        ), {"sid": req.target_steam_id[:32], "chans": sorted(langs)})).scalars().all()
+        ), {"sid": req.target_steam_id, "chans": sorted(langs)})).scalars().all()
+    _mod_release_or_422(req.target_steam_id, len(cleared))   # chat unmute: outside the domain and nothing revoked: 422, no commit (v4.13 G4)
     if cleared:
         await _log_admin_action(
             db, admin_steam_id=req.steam_id, action="chat_unmute",
@@ -19567,7 +19657,7 @@ async def _set_chat_lockdown(db, locked: bool, actor: str) -> None:
         "INSERT INTO runtime_settings (key, value) VALUES ('chat_lockdown', :v)"
         " ON CONFLICT (key) DO UPDATE SET value = :v, updated_at = NOW()"
     ), {"v": "1" if locked else "0"})
-    await _log_admin_action(db, admin_steam_id=actor[:20], action="chat_lockdown",
+    await _log_admin_action(db, admin_steam_id=actor, action="chat_lockdown",
                             details={"locked": bool(locked), "actor": actor})
     # Announcements: Discord (durable channel-post outbox), Twitch chat line
     # (at-most-once, D1 F13) and best-effort emote-only (D1 F11 — native
@@ -19615,12 +19705,12 @@ async def _apply_mute_for_row(db, row, *, actor: str, role: str,
             "UPDATE chat_mutes SET revoked_at = NOW()"
             " WHERE steam_id = :sid AND revoked_at IS NULL"
             "   AND channel IS NOT DISTINCT FROM :chan"
-        ), {"sid": target[:32], "chan": scope_channel})
+        ), {"sid": target, "chan": scope_channel})
         await db.execute(text(
             "INSERT INTO chat_mutes (steam_id, channel, muted_by_steam_id, reason, expires_at)"
             " VALUES (:sid, :chan, :by, :why,"
             "         CASE WHEN :mins > 0 THEN NOW() + make_interval(mins => :mins) ELSE NULL END)"
-        ), {"sid": target[:32], "chan": scope_channel, "by": actor[:32],
+        ), {"sid": target, "chan": scope_channel, "by": actor[:32],
             "why": (reason or "")[:256] or None, "mins": mins})
         if purge:
             purged, truncated = await _purge_identity_rows(
@@ -19647,12 +19737,12 @@ async def _apply_mute_for_row(db, row, *, actor: str, role: str,
                 "UPDATE chat_mutes SET revoked_at = NOW()"
                 " WHERE steam_id = :sid AND revoked_at IS NULL"
                 "   AND channel IS NOT DISTINCT FROM :chan"
-            ), {"sid": linked[:32], "chan": scope_channel})
+            ), {"sid": linked, "chan": scope_channel})
             await db.execute(text(
                 "INSERT INTO chat_mutes (steam_id, channel, muted_by_steam_id, reason, expires_at)"
                 " VALUES (:sid, :chan, :by, :why,"
                 "         CASE WHEN :mins > 0 THEN NOW() + make_interval(mins => :mins) ELSE NULL END)"
-            ), {"sid": linked[:32], "chan": scope_channel, "by": actor[:32],
+            ), {"sid": linked, "chan": scope_channel, "by": actor[:32],
                 "why": (reason or "")[:256] or None, "mins": mins})
         if purge:
             purged, truncated = await _purge_identity_rows(
@@ -19932,6 +20022,8 @@ async def internal_chat_bridge_moderation(
         native_id = str(payload.get("native_id", "") or "")[:128]
         if not native_id:
             raise HTTPException(422, "native_id required")
+        if not _pg_text_ok(native_id):   # bridge moderation: the message's id, before its read (r15)
+            raise HTTPException(422, "native_id is not storable text")
         row = (await db.execute(text(
             "SELECT cm.id, cm.channel, cm.deleted_at"
             "  FROM chat_mirrors mr JOIN chat_messages cm ON cm.id = mr.chat_id"
@@ -19962,6 +20054,9 @@ async def internal_chat_bridge_moderation(
             raise HTTPException(422, "platform_user_id required")
         login = str(payload.get("login", "") or "").lower()[:64] or None
         display = str(payload.get("display_name", "") or "")[:64] or None
+        for field, value in (("platform_user_id", user_id), ("login", login), ("display_name", display)):
+            if value is not None and not _pg_text_ok(value):   # bridge moderation: the purge's target, before the purge and the mute (r15)
+                raise HTTPException(422, f"{field} is not storable text")
         ban_duration_s = payload.get("ban_duration_s")
         permanent = bool(payload.get("permanent"))
         purged, truncated = await _purge_identity_rows(
@@ -20024,6 +20119,11 @@ async def internal_chat_discord_deleted(
     if not isinstance(raw_ids, list) or not raw_ids:
         raise HTTPException(422, "message_ids required")
     mids = [str(m)[:128] for m in raw_ids[:100] if str(m or "").strip()]
+    # An id no text bind can carry (a NUL character, a lone surrogate) is
+    # dropped before the read (review r15 sweep), as the read passes over an
+    # id no row holds: no chat_mirrors row can hold such an id, and binding one
+    # failed the read for the whole event (500).
+    mids = [m for m in mids if _pg_text_ok(m)]   # discord delete event: drop an id no text bind can carry, before the read (r15 sweep)
     if not mids:
         return {"status": "ok", "deleted": 0}
     rows = (await db.execute(text(
@@ -20075,6 +20175,8 @@ async def internal_chat_discord_mute(
     message_id = str(payload.get("message_id", "") or "")[:128]
     if not message_id:
         raise HTTPException(422, "message_id required")
+    if not _pg_text_ok(message_id):   # discord mute: the id of the message whose row names the target, before its read (r15)
+        raise HTTPException(422, "message_id is not storable text")
     actor_id = str(payload.get("actor_discord_id", "") or "")[:32]
     actor = f"discord:{actor_id or 'unknown'}"
     actor_lang = str(payload.get("actor_channel_lang", "") or "").lower()[:16]
@@ -20106,7 +20208,7 @@ async def internal_chat_discord_mute(
                                        scope_channel=scope_channel, minutes=mins,
                                        reason=f"via Discord by {payload.get('actor_name', '')}"[:200],
                                        purge=True)
-    await _log_admin_action(db, admin_steam_id=actor[:20], action="chat_mute_msg",
+    await _log_admin_action(db, admin_steam_id=actor, action="chat_mute_msg",
                             target_steam_id=row["steam_id"],
                             details={"message_id": int(row["id"]), "actor": actor,
                                      "actor_name": str(payload.get("actor_name", ""))[:64],
@@ -20265,7 +20367,13 @@ async def admin_list_actions(
     auditable through the same panel as bans.
 
     `action` and `target_steam_id` are BOUND PARAMETERS, never interpolated
-    (#188 — the ORDER BY there is a fixed literal for the same reason)."""
+    (#188 — the ORDER BY there is a fixed literal for the same reason). A
+    filter no text bind can carry is refused 422 before any statement: the
+    target filter by _mod_bindable_or_422 (review r15), the action filter by
+    _pg_text_ok (review r15 sweep)."""
+    _mod_bindable_or_422(target_steam_id)   # audit list: the target filter, before the admin check and the reads (r15)
+    if not _pg_text_ok(action):   # audit list: the action filter, before the admin check and the reads (r15 sweep)
+        raise HTTPException(422, "action is not storable text")
     await _require_admin(db, admin_steam_id, "admin_actions_list", "", hmac_signature)
     where = ["TRUE"]
     params: dict = {"limit": limit, "offset": offset}
@@ -23789,9 +23897,12 @@ async def get_inventory(steam_id: str, db: AsyncSession = Depends(get_db)):
 #     through a new intent) so a player can never be wedged;
 #   * prints are immutable after insert — the pc_prints_immutable trigger
 #     raises on any UPDATE that touches a frozen column.
-# The pool snapshot (daily 00:05 UTC, first one within a minute of boot) is
-# what rolls read; a rolled subject is re-checked against the LIVE pool inside
-# the transaction and re-rolled when it left (opt-out, ban, deletion).
+# The pool snapshot is what rolls read: one per UTC day at 00:05, and one at
+# the janitor's next pass when none exists or the latest holds a member whose
+# id is not a SteamID64 (v4.13). A rolled subject is re-checked against the
+# pool word (_PC_POOL_MEMBER_SQL) inside the transaction and re-rolled when
+# the word refuses it now: banned or deleted since the snapshot, or an id that
+# is not a SteamID64 in a snapshot an older api took.
 # ═══════════════════════════════════════════════════════════════════════════
 import player_cards as _pc
 import pc_portrait as _pcp
@@ -23807,6 +23918,29 @@ except Exception as _pcf_ex:  # Pillow / regex / fonts missing: face routes answ
 
 _PC_POOL_MIN_MATCHES = 5   # the leaderboard's own default: board_rank means "rank on the board as shown"
 
+# The pool's Steam id rule (v4.13; Sid, 2026-09-15: no Steam ID, no card).
+# The players table also holds every opponent a match report named
+# (get_or_create_player), ids from other platforms included; a row whose id
+# is not a public individual SteamID64 is not a card subject. The clause is
+# steamid64.individual_id_sql("p.steam_id") -- the rule the Steam sweep's
+# eligibility text reads -- written out rather than called, because two
+# janitor reads carry it (the snapshot's select and its due read) and the
+# janitor's boot self-test resolves SQL statically, refusing a call.
+# test_pc_no_steam_no_card.py pins this text to steamid64's, character for
+# character.
+_PC_POOL_STEAM_ID_SQL = "(CASE WHEN p.steam_id ~ '^[0-9]{17}$' THEN CAST(p.steam_id AS bigint) BETWEEN 76561197960265728 AND 76561202255233023 ELSE false END)"
+
+# Pool membership: ONE word for every reader that decides who is in the pool
+# now -- the snapshot's pool CTE, the open's live re-check, the public pool
+# summary and the bot's /card (alias `p`, the players row). A member an older
+# snapshot holds and this word refuses is re-rolled at the open and left out
+# of the summary and of /card. The ban clause is _PC_NOT_BANNED_SQL's text,
+# written out because that fragment is defined further down, with the
+# handout; a test pins the two spellings together.
+_PC_POOL_MEMBER_SQL = """(p.deleted_at IS NULL
+           AND """ + _PC_POOL_STEAM_ID_SQL + """
+           AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL))"""
+
 # board_rank (c3 F): eligibility is the LIVE leaderboard's own count — every
 # completed series, an invalidated one included, plus legacy matches — with
 # its tie-breaker (rating, then player id); the card's W/L (`series`) is the
@@ -23819,8 +23953,7 @@ _PC_SNAPSHOT_SELECT_SQL = """
           FROM players p
           LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
           LEFT JOIN shop_items si ON si.id = p.active_title_id
-         WHERE p.deleted_at IS NULL
-           AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)
+         WHERE """ + _PC_POOL_MEMBER_SQL + """
     ),
     series AS (
         SELECT s.player_id, SUM(s.won) AS wins, SUM(s.lost) AS losses, COUNT(*) AS total
@@ -23896,8 +24029,7 @@ _PC_MEMBER_INSERT_SQL = """
 
 _PC_LIVE_POOL_CHECK_SQL = """
     SELECT 1 FROM players p
-     WHERE p.id = CAST(:pid AS uuid) AND p.deleted_at IS NULL
-       AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)
+     WHERE p.id = CAST(:pid AS uuid) AND """ + _PC_POOL_MEMBER_SQL + """
 """
 
 # The rolled subject's identity lock in its SHARED, non-blocking form (#612),
@@ -24129,9 +24261,10 @@ def _pc_pack_dup_at_pull(stored: dict, print_id: str):
 
 
 async def _pc_take_snapshot(db: AsyncSession, *, reason: str) -> dict:
-    """One new pool snapshot from the live tables (the caller commits).
-    pool_rank = leaderboard order among players with a completed, non-
-    invalidated ranked series, then everyone else by rating / peak / id;
+    """One new pool snapshot from the live tables (the caller commits): the
+    players _PC_POOL_MEMBER_SQL admits. pool_rank = leaderboard order among
+    those with a completed, non-invalidated ranked series, then the rest by
+    rating / peak / id;
     the band is fixed from the rank; board_rank is the leaderboard's own
     rank under its default eligibility (5 matches, active window) or NULL;
     the title is resolved exactly as the leaderboard resolves it (dynamic
@@ -24176,17 +24309,34 @@ async def _pc_take_snapshot(db: AsyncSession, *, reason: str) -> dict:
 
 
 async def _pc_snapshot_due(db: AsyncSession):
-    """'first' when no snapshot exists, 'daily' when the last one predates
-    today's 00:05 UTC and that time has passed, else None — from the DB
-    clock and the durable MAX(taken_at), so it is restart-safe."""
+    """'first' when no snapshot exists; 'rule' when the latest snapshot holds
+    a member whose id _PC_POOL_STEAM_ID_SQL refuses; 'daily' when the last one
+    predates today's 00:05 UTC and that time has passed; else None -- from the
+    DB clock and the durable rows, so it is restart-safe.
+
+    'rule' fires at the first pass after the v4.13 deploy, and after any
+    snapshot an older api takes: the pool loses its non-SteamID64 members then,
+    not at the next 00:05 UTC. Until that pass the open's live re-check
+    re-rolls such a member, which keeps it from being dealt but does not keep
+    an open from being refused: a pack whose re-rolls all land on such members
+    is rejected pool_changed. A snapshot this code takes holds no such member
+    (its pool CTE reads the same clause), and the one writer of a live
+    players.steam_id, the data deletion, removes that player's memberships in
+    the same transaction under the snapshot lock, so 'rule' does not fire
+    again on this code's own snapshot."""
     due = (await db.execute(text("""
         SELECT (SELECT MAX(taken_at) FROM pc_pool_snapshots) AS last_at,
+               EXISTS (SELECT 1 FROM pc_pool_members m JOIN players p ON p.id = m.player_id
+                        WHERE m.snapshot_id = (SELECT MAX(id) FROM pc_pool_snapshots)
+                          AND NOT """ + _PC_POOL_STEAM_ID_SQL + """) AS stale_rule,
                now() AS db_now,
                (date_trunc('day', now() AT TIME ZONE 'UTC') + INTERVAL '5 minutes') AT TIME ZONE 'UTC' AS today_at
     """))).mappings().one()
     last_at, db_now, today_at = due["last_at"], due["db_now"], due["today_at"]
     if last_at is None:
         return "first"
+    if due["stale_rule"]:
+        return "rule"
     if db_now < today_at or last_at >= today_at:
         return None
     return "daily"
@@ -24194,8 +24344,9 @@ async def _pc_snapshot_due(db: AsyncSession):
 
 async def _pc_snapshot_janitor_step() -> None:
     """Janitor: event retention on every step, then a pool snapshot when
-    none exists (first boot after the migration) or one per UTC day at or
-    after 00:05 UTC. An advisory try-lock keeps two api processes from
+    none exists (first boot after the migration), when the latest one holds a
+    member whose id is not a SteamID64 (v4.13, `_pc_snapshot_due`'s 'rule'),
+    or once per UTC day at or after 00:05 UTC. An advisory try-lock keeps two api processes from
     taking the same day's snapshot twice, and the due state is re-read under
     it (c3 F): a snapshot committed by another taker between the two reads
     is not doubled."""
@@ -24230,8 +24381,10 @@ async def _pc_snapshot_janitor_step() -> None:
 async def _pc_roll_prints(db: AsyncSession, snap_id: int, owner_pid, rng=None):
     """Roll one pack's prints from snapshot ``snap_id``: per print an
     independent band roll (fallback one band down, never up), a uniform
-    member of the band, then the live-pool re-check — a subject that left the
-    pool since the snapshot is re-rolled up to reroll_attempts times. Returns
+    member of the band, then the subject hold and the live-pool re-check — a
+    subject a deletion holds, or one the pool word refuses now (banned or
+    deleted since the snapshot, or an id that is not a SteamID64 in a snapshot
+    an older api took), is re-rolled up to reroll_attempts times. Returns
     (prints, None) or (None, reason) with reason pool_empty | pool_changed.
     Nothing here writes; the caller debits and mints only on success."""
     rng = rng or secrets.SystemRandom()
@@ -24343,13 +24496,17 @@ async def _pc_mint(db: AsyncSession, owner_pid, edition_id: int, snap_id: int, p
     return out
 
 
-async def _pc_pack_answer(db: AsyncSession, row, ctx=None, prerender: bool = True) -> dict:
+async def _pc_pack_answer(db: AsyncSession, row, ctx=None, prerender: bool = False) -> dict:
     """The wire answer for a committed pack row (done / rejected / unopened).
-    With a face context the prints carry `face_rev` and the five faces are
-    pre-rendered best effort in that locale (v22 §2.2: an optimisation,
-    never a guarantee — the face route renders on demand). The history page
-    passes prerender=False: ten packs of five would queue fifty renders for
-    tiles the player may never page to."""
+    With a face context the prints carry `face_rev`. Only the request that
+    minted the pack asks for a pre-render, and its five faces are then
+    pre-rendered best effort in that request's locale (v22 §2.2: an
+    optimisation, never a guarantee — the face route renders on demand).
+    Every other answer of a committed pack (an open's replay, /packs/result,
+    the history page) schedules nothing, so reading a pack again starts no
+    render work (v4.13 §9); a face the minting request did not warm
+    (another locale, a mint whose answer was never built) renders when it is
+    first asked for."""
     status = row["status"]
     base = {
         "pack_id": str(row["id"]), "status": status, "source": row["source"],
@@ -24607,7 +24764,9 @@ async def pc_open_pack(
         SELECT id, status, source, mode, kind, pay, price, reject_reason, created_at, opened_at
           FROM pc_packs WHERE id = CAST(:pack AS uuid)
     """), {"pack": this_pack})).mappings().one()
-    return await _pc_pack_answer(db, row, await _pc_face_ctx(db, _pc_locale(request)))
+    # The one caller that asks for a pre-render: these prints were minted by
+    # this request, so no one has asked for their faces yet (v4.13 §9).
+    return await _pc_pack_answer(db, row, await _pc_face_ctx(db, _pc_locale(request)), prerender=True)
 
 
 @app.get("/api/v1/pc/packs/result", tags=["Player Cards"])
@@ -24874,8 +25033,8 @@ async def pc_set_setting(
     (409 stale_revision with the current settings) and never applied.
     Neither setting touches the subject's picture, so no writer here takes
     the identity lock or waits out a delivery lease (2026-09-13: the opt-out
-    and the picture choice are gone — a card leaves binders only through
-    the data deletion endpoint)."""
+    and the picture choice are gone, and no setting takes a card out of the
+    binders that hold it)."""
     if key not in _pc.SETTINGS_KEYS:
         raise HTTPException(status_code=422, detail="unknown setting")
     canon = _pc.canon_settings(steam_id, nonce, int(revision), key, int(value))
@@ -25034,14 +25193,15 @@ async def pc_pool_summary(db: AsyncSession = Depends(get_db)):
     """Public pool summary from the snapshot in force: taken_at, member
     count, members per band, the collectible top 40 (rank, name, band, board
     rank) and the prices — what the leaderboard already shows, no more.
-    Members deleted or banned since the snapshot are left out, as /card and
-    the pack open leave them out (r6 M3)."""
+    Members the pool word refuses now (deleted or banned since the snapshot,
+    or an id that is not a SteamID64 in a snapshot an older api took) are left
+    out, as /card and the pack open leave them out (r6 M3)."""
     snap = (await db.execute(text(
         "SELECT id, taken_at, member_count FROM pc_pool_snapshots ORDER BY id DESC LIMIT 1"))).mappings().first()
     if snap is None:
         return {"snapshot": None, "bands": {}, "top": [], "prices": _pc_prices()}
-    # The pool's live word (r6 M3): a member deleted or banned since the
-    # snapshot is out of /card and of every pack open, so the summary says the
+    # The pool's live word (r6 M3, _PC_POOL_MEMBER_SQL): a member it refuses
+    # now is out of /card and of every pack open, so the summary says the
     # same -- names, bands and the count from ONE statement (one read, one
     # answer; two statements could disagree about a ban between them).
     rows = (await db.execute(text("""
@@ -25049,7 +25209,7 @@ async def pc_pool_summary(db: AsyncSession = Depends(get_db)):
             SELECT m.pool_rank, m.rarity, m.board_rank, m.rating, p.display_name
               FROM pc_pool_members m JOIN players p ON p.id = m.player_id
              WHERE m.snapshot_id = CAST(:sid AS integer)
-               AND p.deleted_at IS NULL AND """ + _PC_NOT_BANNED_SQL.format(a="p") + """
+               AND """ + _PC_POOL_MEMBER_SQL + """
         )
         SELECT 'band' AS kind, rarity, CAST(COUNT(*) AS integer) AS n,
                CAST(NULL AS integer) AS pool_rank, CAST(NULL AS integer) AS board_rank,
@@ -25108,9 +25268,16 @@ _PC_NOT_BANNED_SQL = "NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id =
 # the handout's skip (negated: the event is resolved without a post), the
 # handout's own selection, and the lease re-check the bot makes right before
 # its send. Aliases: e the event, pl the puller, su the subject. Both parties
-# alive, both announcing, neither banned, the print (if any) not discarded.
+# alive, both announcing, neither banned, the subject's id a SteamID64, the
+# print (if any) not discarded. The id term is steamid64's rule on the subject
+# (v4.13; Sid, 2026-09-15: no Steam ID, no card). No v4.13 pack deals a subject
+# the rule refuses, so the term decides pulls an older api dealt: the skip
+# marks such a pull posted, the handout never selects it, and a lease naming
+# it is withdrawn at the re-check. It sits here and not in the hold's
+# RESOLVED word, because resolving such a pull would hand it out.
 _PC_EVENT_DELIVERABLE_SQL = """(pl.deleted_at IS NULL AND su.deleted_at IS NULL
                 AND pl.pc_announce AND su.pc_announce
+                AND """ + _sid64.individual_id_sql("su.steam_id") + """
                 AND """ + _PC_NOT_BANNED_SQL.format(a="pl") + """
                 AND """ + _PC_NOT_BANNED_SQL.format(a="su") + """
                 AND (e.print_id IS NULL OR EXISTS (SELECT 1 FROM pc_prints pr WHERE pr.id = e.print_id AND pr.discarded_at IS NULL)))"""
@@ -25182,7 +25349,8 @@ async def internal_pc_events_pending(
     db: AsyncSession = Depends(get_db),
 ):
     """Unposted notable pulls, re-checked NOW for deliverability -- both
-    parties announcing, neither deleted nor banned, the print not discarded
+    parties announcing, neither deleted nor banned, the subject's id a
+    SteamID64 (v4.13), the print not discarded
     (`_PC_EVENT_DELIVERABLE_SQL`, the same word the bot's lease re-check
     reads right before its send, r6 H1/M2): events that fail the re-check
     are marked posted without being handed out. The bot acks what it posted. A
@@ -25220,8 +25388,10 @@ async def internal_pc_events_pending(
 # admission does NOT remove (review r13): a connection's own validation --
 # the pre-ping, a recycle, a reconnection after an invalidation -- can still
 # delay an admitted request or fail it; that is the database's latency, not
-# a queue. The writer's bound stays the lease's own life (`_pc_lease_drain`);
-# a release that lands earlier ends the wait earlier.
+# a queue. The writer's wait ends within the lease's own life plus 5 s (65 s
+# from its start), plus the one reading or sleep in flight then and the
+# event loop's scheduling delay (`_pc_lease_drain`, r14); a release that
+# lands earlier ends the wait earlier.
 # Declared here, ahead of the ack route -- the first route that names it.
 _PC_RELEASE_SLOTS = RELEASE_POOL_SIZE + RELEASE_POOL_OVERFLOW
 _pc_release_gates = {}   # event loop -> its Semaphore
@@ -25359,9 +25529,9 @@ async def internal_pc_card(
           FROM pc_pool_members m JOIN pc_pool_snapshots s ON s.id = m.snapshot_id
           JOIN players p ON p.id = m.player_id
          WHERE m.player_id = CAST(:pid AS uuid) AND m.snapshot_id = (SELECT MAX(id) FROM pc_pool_snapshots)
-           AND p.deleted_at IS NULL AND """ + _PC_NOT_BANNED_SQL.format(a="p") + """
+           AND """ + _PC_POOL_MEMBER_SQL + """
     """), {"pid": str(subject.id)})).mappings().first()
-    if row is None:   # not in the latest snapshot, or banned since it (2026-09-13, r5 M4): the pool's live word
+    if row is None:   # not in the latest snapshot, or refused by the pool's live word since (r5 M4; v4.13)
         raise HTTPException(status_code=404, detail={"error": "not_in_pool"})
     circ = (await db.execute(text("""
         SELECT COUNT(*) AS prints, COUNT(DISTINCT pr.owner_player_id) AS holders,
@@ -25613,6 +25783,20 @@ async def _pc_face_row(db: AsyncSession, print_id: str):
                              {"id": print_id})).mappings().first()
 
 
+# The bot's picture source reads a print's face row only for a subject whose id
+# is a SteamID64 (v4.13, review r15; Sid, 2026-09-15: no Steam ID, no card):
+# steamid64's rule on the subject row `s` of _PC_PRINT_FACE_SELECT.
+_PC_FACE_SUBJECT_ID_SQL = _sid64.individual_id_sql("s.steam_id")
+
+
+async def _pc_bot_face_row(db: AsyncSession, print_id: str):
+    """_pc_face_row's statement with the subject's id rule added: no row for a
+    print of a subject whose id is not a SteamID64."""
+    return (await db.execute(text(_PC_PRINT_FACE_SELECT + " WHERE pr.id = CAST(:id AS uuid) AND "
+                                  + _PC_FACE_SUBJECT_ID_SQL),
+                             {"id": print_id})).mappings().first()
+
+
 async def _pc_portrait_bytes(db: AsyncSession, phash):
     if not phash:
         return None
@@ -25635,6 +25819,12 @@ async def _pc_render_face(db: AsyncSession, row, ctx: dict, size: str, want=None
     if want is not None and want != rev:
         return rev, None
     key = _pcp.face_key(str(row["print_id"]), rev, ctx["locale"], size)
+    # The cached file first (v4.13 §9): a face already rendered under this
+    # key is answered without reading its picture. The rev in the key covers
+    # the portrait's kind and hash, so that file is this picture's render.
+    data = _pc_face_cache.read(key)
+    if data is not None:
+        return rev, data
     pbytes = await _pc_portrait_bytes(db, phash)
     if phash and pbytes is None:
         # The row named a blob the bytes read did not find: released between
@@ -25728,11 +25918,18 @@ _PC_FACE_EXPIRE_EVERY_S = 3600   # each box ages its own derived-face cache hour
 # players table also holds opponents met in crossplay lobbies -- sixteen- to
 # twenty-digit ids from other platforms, 844 rows on 2026-09-13 -- and both
 # URL builders refuse such an id outright, the keyed one for its WHOLE chunk
-# (see the guard in the batch's URL step). The pattern is pc_steam's own
-# STEAM_ID_RE, mirrored as a Postgres regex; a test pins the two together.
-_PC_STEAM_ELIGIBLE_SQL = """
+# (see the guard in the batch's URL step). The id clause is steamid64's
+# individual_id_sql, written from the two constants is_individual_id reads
+# -- the validator both URL builders and that guard call -- so the SQL and
+# the Python state one rule: seventeen ASCII digits inside the public
+# individual SteamID64 interval. backend/tests/fixtures holds PostgreSQL's
+# answer for that SQL over the shared vectors, and test_steamid64.py fails
+# when the SQL no longer matches the query that answer was recorded for.
+# (Until v4.13 the clause was a 7656119 prefix, which admitted ids below the
+# interval and refused every account numbered 2,039,734,272 or higher.)
+_PC_STEAM_ELIGIBLE_SQL = f"""
     p.deleted_at IS NULL
-    AND p.steam_id ~ '^7656119[0-9]{10}$'
+    AND {_sid64.individual_id_sql("p.steam_id")}
     AND (p.pc_game_portrait_locked_until IS NULL OR p.pc_game_portrait_locked_until < now())
     AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)
 """
@@ -25919,10 +26116,17 @@ async def _pc_steam_fetch_refs(steam_ids: list, priority: bool = False, deadline
     # rows spread through the table no batch after the first two was clean
     # (the sweep faulted from 21:21 UTC on 2026-09-13). The eligibility text
     # keeps them out of every claim; the answer for one that arrives anyway is
-    # its own absence, no request, and the batch goes on.
+    # its own absence, no request, and the batch goes on. When the batch
+    # returns, the processor passes that absence on as `failed` and the writer
+    # revalidates against the eligibility text, which is written from the same
+    # rule and refuses the id: `ineligible`, or `gone`/`moved` when the row was
+    # deleted, cleared or claimed again since. When the batch itself fails,
+    # every row of it is `batch_failed` and none reaches the writer; a write
+    # that raises is `error`. In every case nothing is written for that id: no
+    # fail count, no backoff.
     steam_ids = [str(s) for s in steam_ids]
     for sid in steam_ids:
-        if not _pcs.STEAM_ID_RE.match(sid):
+        if not _sid64.is_individual_id(sid):
             out[sid] = None
     steam_ids = [s for s in steam_ids if s not in out]
     if key and not _pc_steam_xml["forced"]:
@@ -26050,8 +26254,13 @@ async def _pc_steam_write(db: AsyncSession, claimed: dict, outcome: str, *, ref=
     if int(row["attempt"]) != attempt:
         await db.rollback()   # a newer attempt, a clear, None, an opt-out or a deletion owns the row now: this verdict is stale
         return "moved"
+    # Past the checks above the row still belongs to this claim, so the text
+    # refuses it only for a ban placed since the claim or an id outside the
+    # Steam-id rule (claimed under a text that admitted it). A deletion ended
+    # above as `gone`; the clear -- the only code that sets the upload lock --
+    # advances the attempt and ended above as `moved`.
     if not row["eligible"]:
-        return "ineligible"   # opted out, None, banned, locked or deleted since the claim: nothing written
+        return "ineligible"   # nothing written: no fail count, no backoff
     bound = (" WHERE id = CAST(:pid AS uuid)"
              " AND pc_steam_attempt = CAST(:attempt AS bigint)"
              " RETURNING id")
@@ -26336,6 +26545,13 @@ _PC_LEASE_EVENTS_OK = """
                           JOIN players su ON su.id = e.subject_player_id
                          WHERE e.id = named.id AND """ + _PC_EVENT_DELIVERABLE_SQL + """)) AS events_ok
 """
+# The lease's subject still has a SteamID64 (v4.13, review r15; Sid, 2026-09-15:
+# no Steam ID, no card): steamid64's rule on the subject's row, for every lease,
+# whatever else it names. The events word above holds the same rule for the
+# subject of each event a lease names.
+_PC_LEASE_SUBJECT_ID_OK = """
+               """ + _sid64.individual_id_sql("p.steam_id") + """ AS subject_id_ok
+"""
 
 
 async def _pc_lease_wait(db: AsyncSession, pid: str):
@@ -26411,13 +26627,25 @@ async def _pc_lease_drain(db: AsyncSession, pid: str) -> float:
     the player undeliverable -- a deletion, a ban -- commits AFTER any line in
     flight is on Discord, never between the bot's re-check and the acceptance
     (r7 H2). Held meanwhile: the identity lock, which refuses every new lease
-    naming the player (the acquire try-locks each party). Bounded by the
-    lease's own life: past `until` a lease authorises nothing, so the wait
-    ends there even for a lease the bot never released. At most
-    `_PC_WRITER_SLOTS` of the writers that can reach this wait hold a
-    transaction at once (`_pc_writer_slot`, taken before their first
-    statement), so the pool always keeps room for the bot's release, the
-    acks and every other request (r8 M1, r9 M1)."""
+    naming the player (the acquire try-locks each party). Without a release
+    the wait still ends: past `until` a lease authorises nothing and the
+    reading no longer counts it, and `limit` -- LEASE_SECONDS + 5 s after
+    the wait began -- ends the wait by the clock, with no further reading,
+    even for a lease the bot never released. The limit is checked after
+    every await the wait makes -- each reading and each sleep -- so a
+    reading starts only after a check found the limit not yet passed; the
+    one reading or sleep in flight when it passes runs to its end. A
+    reading is never cancelled to meet the limit: SQLAlchemy invalidates a
+    connection whose statement is cancelled, and the writer's transaction
+    -- its identity lock and every statement before the wait -- would be
+    lost, so the deletion or the ban could not commit. The wait therefore
+    ends within `limit` plus the longer of one sleep (0.25 s) and one
+    reading, plus the event loop's scheduling delay; a reading lasts as
+    long as the database takes to answer it, which nothing here bounds
+    (r14). At most `_PC_WRITER_SLOTS` of the writers that can reach this
+    wait hold a transaction at once (`_pc_writer_slot`, taken before their
+    first statement), so the pool always keeps room for the bot's release,
+    the acks and every other request (r8 M1, r9 M1)."""
     started = time.monotonic()
     limit = float(_pcp.LEASE_SECONDS) + 5.0
     while True:
@@ -26425,6 +26653,8 @@ async def _pc_lease_drain(db: AsyncSession, pid: str) -> float:
         if left is None or time.monotonic() - started > limit:
             return time.monotonic() - started
         await asyncio.sleep(min(0.25, max(0.05, float(left))))
+        if time.monotonic() - started > limit:   # the limit passed during the sleep: no further reading
+            return time.monotonic() - started
 
 
 async def _pc_lock_portrait_blobs(db: AsyncSession, pid: str, *extra):
@@ -26689,6 +26919,13 @@ async def admin_pc_portrait_clear(payload: dict = Body(...), db: AsyncSession = 
     _sig = payload.get("signature")
     if not isinstance(_sig, str) or not _sig.isascii():
         _sig = ""
+    # The target is signed and bound below (review r15 sweep). The signature
+    # check encodes it, which fails for a lone surrogate, and once the
+    # signature verifies, the identity lock binds it, which fails for a NUL
+    # character; either failure answered 500. A target no text bind can carry
+    # is refused 422 here, before the admin check and every statement.
+    if not _pg_text_ok(steam_id):   # portrait clear: the target, before the admin check, the lock and the read (r15 sweep)
+        raise HTTPException(status_code=422, detail="steam_id is not storable text")
     await _require_admin(db, admin_id, "pc_portrait_clear", f"{steam_id}:{lock_days}", _sig)
     await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))"), {"sid": steam_id})
     pid = (await db.execute(text(
@@ -26735,7 +26972,11 @@ async def internal_pc_lease(
     steam = (await db.execute(text(
         "SELECT steam_id FROM players WHERE id = CAST(:pid AS uuid) AND deleted_at IS NULL"),
         {"pid": subject_ref})).scalar_one_or_none()
-    if steam is None:
+    # No Steam ID, no card (v4.13, review r15): a subject whose id is not a
+    # SteamID64 is refused as a missing one is, whatever else the lease names
+    # (a print, events, or neither: the /card lease), before the identity
+    # lock. The re-check reads the rule again from the subject's row.
+    if steam is None or not _sid64.is_individual_id(steam):
         raise HTTPException(status_code=404, detail={"error": "not_found"})
     got = (await db.execute(text("SELECT pg_try_advisory_xact_lock(hashtext(CAST(:sid AS text)))"),
                             {"sid": steam})).scalar_one()
@@ -26811,7 +27052,8 @@ async def internal_pc_lease_check(
     "Still authorises" is re-resolved, not assumed: the subject's row is read
     again through the same columns and the same `portrait_for` the acquire
     used, and the answer must still be the picture the lease recorded; a
-    deletion and an active ban are refused outright, and a lease naming
+    deletion, an active ban and a subject whose id is not a SteamID64 (v4.13,
+    review r15) are refused outright, and a lease naming
     events re-reads the deliverability of every one of them for BOTH parties
     (r6 H1/M2). The revocation needs no writer to find the lease's row —
     which is what makes this safe against the writer that cannot see it (a
@@ -26823,17 +27065,18 @@ async def internal_pc_lease_check(
         raise HTTPException(status_code=404, detail={"error": "lease_gone"})
     row = (await db.execute(text(
         "SELECT l.until, (l.until > now()) AS unexpired, l.portrait_hash AS leased_hash,"
-        + _PC_PORTRAIT_RESOLVE_COLS + "," + _PC_LEASE_PRINT_OK + "," + _PC_LEASE_EVENTS_OK +
+        + _PC_PORTRAIT_RESOLVE_COLS + "," + _PC_LEASE_PRINT_OK + "," + _PC_LEASE_EVENTS_OK + "," + _PC_LEASE_SUBJECT_ID_OK +
         """FROM pc_delivery_leases l JOIN players p ON p.id = l.subject_id
             WHERE l.id = CAST(:id AS uuid)"""),
         {"id": lease_id})).mappings().first()
     # Gone when: expired; the subject deleted or banned (said outright, not
     # through the hash -- a subject with no picture leased NULL and a ban
-    # resolves to NULL as well, r6 M2); the print no longer the subject's; or
-    # any event the lease names no longer deliverable for EITHER party (the
-    # puller included, whom the lease's subject row never covered, r6 H1).
+    # resolves to NULL as well, r6 M2); the subject's id not a SteamID64
+    # (v4.13, review r15); the print no longer the subject's; or any event the
+    # lease names no longer deliverable for EITHER party (the puller included,
+    # whom the lease's subject row never covered, r6 H1).
     if (row is None or not row["unexpired"] or row["subject_deleted"] or row["subject_banned"]
-            or not row["print_deliverable"] or not row["events_ok"]):
+            or not row["subject_id_ok"] or not row["print_deliverable"] or not row["events_ok"]):
         raise HTTPException(status_code=404, detail={"error": "lease_gone"})
     _, now_hash = _pcp.portrait_for(row)
     if now_hash != row["leased_hash"]:
@@ -26893,14 +27136,16 @@ async def internal_pc_face_print(
     db: AsyncSession = Depends(get_db),
 ):
     """The bot's picture source for a live print: its CURRENT revision,
-    resolved by the same read as the public route (discarded → 404); the
-    locale falls back to en here (no public cache key is involved)."""
+    resolved by the public route's read (discarded → 404) with the subject's
+    id rule added (v4.13, review r15): a print of a subject whose id is not a
+    SteamID64 → 404, as the delivery lease refuses that subject. The locale
+    falls back to en here (no public cache key is involved)."""
     _require_internal_key(x_internal_key)
     _pc_require_renderer()
     if not _pcp.print_id_ok(print_id) or size not in _pcp.SIZES:
         raise HTTPException(status_code=404, detail="Not found")
     loc = _pcp.effective_locale(locale, _pc_served_locales())
-    row = await _pc_face_row(db, print_id)
+    row = await _pc_bot_face_row(db, print_id)
     if row is None or row["discarded_at"] is not None:
         raise HTTPException(status_code=404, detail="Not found")
     ctx = await _pc_face_ctx(db, loc)
@@ -26930,9 +27175,11 @@ async def internal_pc_face_preview(
         raise HTTPException(status_code=404, detail={"error": "not_in_pool"})
     loc = _pcp.effective_locale(locale, _pc_served_locales())
     await _pc_steam_prime([player_ref])   # v2 §7: the preview shows the picture, not the plate, on a first look
+    # /card's gate includes the pool's id rule (v4.13): no row comes back for
+    # a subject whose id is not a SteamID64, whichever snapshot is pinned
     sub = (await db.execute(text(
         "SELECT p.display_name, " + _PC_PORTRAIT_RESOLVE_COLS +
-        " FROM players p WHERE p.id = CAST(:pid AS uuid)"), {"pid": player_ref})).mappings().first()
+        " FROM players p WHERE p.id = CAST(:pid AS uuid) AND " + _PC_POOL_STEAM_ID_SQL), {"pid": player_ref})).mappings().first()
     if sub is None or sub["subject_deleted"] or sub["subject_banned"]:
         raise HTTPException(status_code=404, detail={"error": "not_in_pool"})
     member = (await db.execute(text("""
@@ -26995,16 +27242,20 @@ async def internal_pc_face_back(x_internal_key: str | None = Header(None, alias=
 
 # ── Player Cards: earned packs (WP-D) ────────────────────────────────────────
 # One deterministic roll per (mode, series) — player_cards.earned_pack_kind,
-# HMAC(secret, "mode:series") — the sweep odds INSTEAD of the win odds on a
-# 2-0 (FFA: every round to the winner, nobody else any). The completion hooks
+# HMAC(secret, "mode:series") — at the mode's odds, whatever the score line
+# (there is no sweep roll since v4.13, 2026-09-14). The completion hooks
 # call _pc_grant_earned_packs inside their own savepoint and insert one
-# unopened pack per winner, idempotent on (player_id, 'earned', reference).
+# unopened pack per live winner whose identity lock they get (a busy one is
+# left to the reconciler), idempotent on (player_id, 'earned', reference).
 # Reversal / invalidation voids the unopened packs of that series (opened
-# outcomes stay, by policy). A cursor-based reconciler re-derives any grant a
-# failed savepoint lost from the durable completion rows — same roll, same
-# insert — re-scanning 24 h behind its high-water mark and never before the
-# instant the feature started, and voids the unopened packs of every series
-# invalidated by any path (the class guarantee behind the inline voids).
+# outcomes stay, by policy). A cursor-based reconciler re-derives the grants a
+# failed savepoint or a busy identity left out, from the durable completion
+# rows — the same roll and the same insert, at the odds in force when it runs,
+# so after a change of odds a completion still inside its window is decided
+# again at the new odds (see _pc_reconcile_one) — re-scanning 24 h behind its
+# high-water mark and never before the instant the feature started, and voids
+# the unopened packs of every series invalidated by any path (the class
+# guarantee behind the inline voids).
 
 _PC_EARNED_INSERT_SQL = """
     INSERT INTO pc_packs (player_id, source, mode, kind, reference_id, status)
@@ -27013,15 +27264,13 @@ _PC_EARNED_INSERT_SQL = """
     RETURNING id
 """
 
-# The reconciler's scans: every completion newer than :since, its winners and
-# whether it was a sweep, from the rows the result itself is kept in. No LIMIT
+# The reconciler's scans: every completion newer than :since and its winners,
+# from the rows the result itself is kept in. No LIMIT
 # on purpose — a capped page anchored 24 h behind a cursor that only advances
 # to the page's newest row can stall on a busy day; the window is the bound.
 _PC_RECONCILE_SQL = {
     "1v1": """
-        SELECT rs.id AS ref, rs.completed_at, rs.winner_id AS w1, NULL::uuid AS w2,
-               (LEAST(rs.p1_series_wins, rs.p2_series_wins) = 0
-                AND GREATEST(rs.p1_series_wins, rs.p2_series_wins) >= 2) AS sweep
+        SELECT rs.id AS ref, rs.completed_at, rs.winner_id AS w1, NULL::uuid AS w2
           FROM ranked_series rs
          WHERE rs.status = 'completed' AND rs.invalidated_at IS NULL AND rs.winner_id IS NOT NULL
            AND rs.completed_at > CAST(:since AS timestamptz)
@@ -27030,9 +27279,7 @@ _PC_RECONCILE_SQL = {
     "team": """
         SELECT ts.id AS ref, ts.completed_at,
                CASE WHEN ts.winner_team = 1 THEN ts.t1a_id ELSE ts.t2a_id END AS w1,
-               CASE WHEN ts.winner_team = 1 THEN ts.t1b_id ELSE ts.t2b_id END AS w2,
-               (LEAST(ts.t1_series_wins, ts.t2_series_wins) = 0
-                AND GREATEST(ts.t1_series_wins, ts.t2_series_wins) >= 2) AS sweep
+               CASE WHEN ts.winner_team = 1 THEN ts.t1b_id ELSE ts.t2b_id END AS w2
           FROM team_series ts
          WHERE ts.status = 'completed' AND ts.invalidated_at IS NULL AND ts.winner_team IN (1, 2)
            AND ts.completed_at > CAST(:since AS timestamptz)
@@ -27041,20 +27288,14 @@ _PC_RECONCILE_SQL = {
     "ovt": """
         SELECT os.id AS ref, os.completed_at,
                CASE WHEN os.winner_side = 1 THEN os.solo_id ELSE os.duo_a_id END AS w1,
-               CASE WHEN os.winner_side = 1 THEN NULL::uuid ELSE os.duo_b_id END AS w2,
-               (LEAST(os.solo_series_wins, os.duo_series_wins) = 0
-                AND GREATEST(os.solo_series_wins, os.duo_series_wins) >= 2) AS sweep
+               CASE WHEN os.winner_side = 1 THEN NULL::uuid ELSE os.duo_b_id END AS w2
           FROM ovt_series os
          WHERE os.status = 'completed' AND os.invalidated_at IS NULL AND os.winner_side IN (1, 2)
            AND os.completed_at > CAST(:since AS timestamptz)
          ORDER BY os.completed_at
     """,
     "ffa": """
-        SELECT fm.id AS ref, fm.ended_at AS completed_at, fm.winner_id AS w1, NULL::uuid AS w2,
-               (NOT EXISTS (SELECT 1 FROM ffa_match_players fp
-                             WHERE fp.match_id = fm.id AND fp.player_id <> fm.winner_id AND fp.rounds_won > 0)
-                AND EXISTS (SELECT 1 FROM ffa_match_players fw
-                             WHERE fw.match_id = fm.id AND fw.player_id = fm.winner_id AND fw.rounds_won > 0)) AS sweep
+        SELECT fm.id AS ref, fm.ended_at AS completed_at, fm.winner_id AS w1, NULL::uuid AS w2
           FROM ffa_matches fm
          WHERE fm.is_ranked AND fm.invalidated_at IS NULL AND fm.winner_id IS NOT NULL
            AND fm.ended_at > CAST(:since AS timestamptz)
@@ -27132,27 +27373,7 @@ def _pc_earned_ref(mode: str, series_id) -> str:
     return f"{mode}:{series_id}"
 
 
-def _pc_sweep(a, b) -> bool:
-    """A 2-0: the loser took no game and the winner took the series."""
-    try:
-        a, b = int(a or 0), int(b or 0)
-    except (TypeError, ValueError):
-        return False
-    return min(a, b) == 0 and max(a, b) >= 2
-
-
-def _pc_ffa_sweep(report) -> bool:
-    """FFA: every round to the winner and none to anybody else — the same
-    definition the reconciler's scan applies to ffa_match_players."""
-    try:
-        mine = [int(p.rounds_won or 0) for p in report.players if p.steam_id == report.winner_steam_id]
-        others = [int(p.rounds_won or 0) for p in report.players if p.steam_id != report.winner_steam_id]
-    except (TypeError, ValueError, AttributeError):
-        return False
-    return bool(mine) and mine[0] > 0 and bool(others) and all(n == 0 for n in others)
-
-
-async def _pc_grant_earned_packs(db: AsyncSession, *, mode: str, series_id, winner_ids, sweep: bool,
+async def _pc_grant_earned_packs(db: AsyncSession, *, mode: str, series_id, winner_ids,
                                  label: str, kind: str | None = None, busy: list | None = None) -> list:
     """Inside the caller's savepoint (or the reconciler's transaction). One
     roll for the series (the reconciler passes the roll it already made); an
@@ -27162,7 +27383,7 @@ async def _pc_grant_earned_packs(db: AsyncSession, *, mode: str, series_id, winn
         return []
     ref = _pc_earned_ref(mode, series_id)
     if kind is None:
-        kind = _pc.earned_pack_kind(MATCH_HMAC_SECRET.encode(), mode, str(series_id), sweep=bool(sweep))
+        kind = _pc.earned_pack_kind(MATCH_HMAC_SECRET.encode(), mode, str(series_id))
     if kind is None:
         return []
     out = []
@@ -27214,16 +27435,20 @@ async def _pc_void_earned_packs(db: AsyncSession, *, mode: str, series_id, label
 
 
 async def _pc_reconcile_one(db: AsyncSession, source: str, r) -> tuple:
-    """One scanned completion (c3 B): the same deterministic roll first — a
-    miss costs nothing further; on a hit, every STORED winner without a pack
-    row for this reference is granted, and only after the series row is
-    share-locked and re-read as still valid. A winner the inline hook
-    already answered (unopened, voided, opening, done) is never revisited,
-    so inline and reconcile can never name two recipient sets. Returns
-    (packs inserted, whether a recipient was skipped as identity-busy) —
-    the caller holds its cursor at a skipped completion (c5 B)."""
+    """One scanned completion (c3 B): the deterministic roll first, at the
+    odds in force when this pass runs — a miss costs nothing further; on a
+    hit, every STORED winner without a pack row for this reference is handed
+    to the grant (which skips a deleted or identity-busy one), and only after
+    the series row is share-locked and re-read as still valid. A winner the
+    inline hook already answered (a pack row in any status) is never
+    revisited, so inline and reconcile can never name two recipient sets.
+    After a change of odds (v4.13) a completion still inside the window is
+    decided again for its winners without a pack row: each is granted only
+    if the roll hits at the new odds. Returns (packs inserted, whether a
+    recipient was skipped as identity-busy) — the caller holds its cursor at
+    a skipped completion (c5 B)."""
     ref = _pc_earned_ref(source, r["ref"])
-    kind = _pc.earned_pack_kind(MATCH_HMAC_SECRET.encode(), source, str(r["ref"]), sweep=bool(r["sweep"]))
+    kind = _pc.earned_pack_kind(MATCH_HMAC_SECRET.encode(), source, str(r["ref"]))
     if kind is None:
         return 0, False
     missing = []
@@ -27246,7 +27471,7 @@ async def _pc_reconcile_one(db: AsyncSession, source: str, r) -> tuple:
             return 0, False
     busy: list = []
     got = await _pc_grant_earned_packs(db, mode=source, series_id=r["ref"], winner_ids=missing,
-                                       sweep=bool(r["sweep"]), label="reconcile", kind=kind, busy=busy)
+                                       label="reconcile", kind=kind, busy=busy)
     return len(got), bool(busy)
 
 
@@ -27263,9 +27488,12 @@ async def _pc_reconcile_earned_packs(force: bool = False) -> None:
     the cursors are still planted (a later process with the secret then
     scans from THIS one's start, not its own) and the void sweeps still run
     (they need no secret); only the scan and the grants wait (c5 B).
-    Idempotent: the same deterministic roll, the same ON CONFLICT insert; a
-    voided pack keeps its reference row, so it is never re-granted; a series
-    the inline hook already answered is never revisited (_pc_reconcile_one)."""
+    Idempotent at unchanged odds: the same deterministic roll, the same ON
+    CONFLICT insert; a voided pack keeps its reference row, so it is never
+    re-granted; a winner who already holds a pack row for the reference is
+    never revisited (_pc_reconcile_one). A completion whose roll missed is
+    rolled again by every pass that still has it in the window, so after a
+    change of odds (v4.13) that pass decides it at the new odds."""
     global _pc_reconcile_last_monotonic
     now_mono = time.monotonic()
     if not force and now_mono - _pc_reconcile_last_monotonic < PC_RECONCILE_EVERY_S:
@@ -33048,8 +33276,9 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # none of this player's survives it (c3 I). Order: identity -> pc_snapshot.
     await db.execute(text("SELECT pg_advisory_xact_lock(hashtext('pc_snapshot'))"))
     await db.execute(text("DELETE FROM pc_pool_members WHERE player_id = :pid"), {"pid": pid})
-    # Deleting all data is the one way a card leaves every binder
-    # (2026-09-13): the prints of this player's card, whoever holds them, and
+    # Deleting all data is the one way a player's card leaves every binder
+    # (2026-09-13), beside migration 320 for subjects whose id is not a
+    # SteamID64 (v4.13): the prints of this player's card, whoever holds them, and
     # the card rows themselves. Safe against a pack open in flight: a roll
     # takes the subject's identity lock SHARED and holds it to its commit
     # (_PC_SUBJECT_HOLD_SQL) while this endpoint holds it EXCLUSIVE, so a
@@ -34389,8 +34618,13 @@ _SCRUB_NIXUSER_RE = _re.compile(r"(/(?:home|Users)/)([^/\r\n]+)", _re.IGNORECASE
 _SCRUB_DISCORD_KV_RE = _re.compile(r'("discord[ _]?id"\s*:\s*)("?\d{15,20}"?)', _re.IGNORECASE)
 _SCRUB_DISCORD_TXT_RE = _re.compile(
     r'((?:discord|Discord)[ _-]?(?:id|ID)?\s*[:=]\s*)(\d{15,20})')
-# Every SteamID64 begins 7656119 and is 17 digits.
-_SCRUB_STEAMID_RE = _re.compile(r"\b7656119\d{10}\b")
+# A candidate account id: seventeen ASCII digits bounded by non-word
+# characters or the text's ends. steamid64.is_individual_id decides which
+# candidates are public individual SteamID64s, the only ids stage one sends
+# to the deletion probe; stage two can only redact what the probe returned.
+# (Until v4.13 this was a 7656119 prefix, which also matched values below
+# the interval and missed every account numbered 2,039,734,272 or higher.)
+_SCRUB_STEAMID_RE = _re.compile(r"\b[0-9]{17}\b")
 
 
 def _read_bug_log_sync(path_str: str) -> str:
@@ -34464,9 +34698,13 @@ def _scrub_pass_one(body: str) -> tuple:
     # holding the GIL for ~500 ms in a single block. Walking matches instead
     # restores the switch points, and stopping at the cap avoids scanning the
     # tail of a huge bundle for ids that would be dropped anyway. The resulting
-    # id list is identical to the old expression's: first-seen order, capped.
+    # id list has the old expression's shape: first-seen order, capped. A
+    # candidate the SteamID64 rule refuses is skipped before it can use up
+    # the cap.
     seen_ids = {}
     for m in _SCRUB_STEAMID_RE.finditer(body):
+        if not _sid64.is_individual_id(m.group(0)):
+            continue
         seen_ids.setdefault(m.group(0), None)
         if len(seen_ids) >= _BUG_LOG_STEAMID_PROBE_MAX:
             break
@@ -35269,16 +35507,85 @@ async def _is_admin(db: AsyncSession, steam_id: str) -> bool:
     return r.scalar_one_or_none() is not None
 
 
-def _steam_id_or_422(value, field: str) -> str:
-    """A body-sourced steam id the ban family persists -- the ban row's key and
-    the audit row's target, both String(20): digits only, at most twenty
-    (review r13). Refused 422 BEFORE the signature check, any read, any lock
-    and the ban-rate gate: an identifier the audit row cannot hold would make
-    the best-effort audit insert fail silently, and the gate's once-per-window
-    alert reads that row back -- every refusal would alert again. Exact form,
-    no stripping: the signature covers the string as sent."""
+# The moderation target (v4.13, review r14): the ONE domain for the player a
+# moderation action names -- the ban and the unban, the chat mute and the chat
+# unmute, and the moderation-case act's subject. One to twenty ASCII digits,
+# the whole string. A restriction (a ban, a mute) refuses a target outside it
+# with _mod_target_or_422; a release (an unban, an unmute) refuses one with
+# _mod_release_or_422 only when the release found no row stored under that
+# exact key. Migration 319 puts the same pattern, anchored at both ends, on
+# player_bans as a CHECK on ACTIVE rows; a test pins the two spellings.
+_MOD_TARGET_PATTERN = "[0-9]{1,20}"
+
+
+def _mod_target_ok(value) -> bool:
     # [0-9] not \d -- \d matches Unicode digits, which are not steam ids.
-    if not isinstance(value, str) or not _re.fullmatch(r"[0-9]{1,20}", value):
+    # fullmatch, not a `$` anchor: Python's `$` also matches before a final
+    # newline; PostgreSQL's does not, and fullmatch is its boundary.
+    return isinstance(value, str) and _re.fullmatch(_MOD_TARGET_PATTERN, value) is not None
+
+
+def _mod_target_or_422(value, field: str = "target_steam_id") -> str:
+    """A restriction's target (review r13; the rationale corrected by v4.13):
+    refused 422 unless _mod_target_ok. Exact form, no stripping: the
+    signature covers the string as sent.
+
+    admin_ban calls it as its first statement, before the signature check,
+    any read, the identity locks and the ban-rate gate, for two reasons. The
+    target is the key the ban row is written with, and no ban may carry a key
+    outside the domain (once migration 319 is applied the table refuses one
+    on an active row). And the gate's refusal writes a best-effort audit row
+    naming this target, then counts those rows to alert once per window
+    (#656): the audit column is TEXT (028), so no LENGTH fails that insert,
+    but a string PostgreSQL text cannot hold (a NUL character, for one) would
+    fail it silently and every refusal would alert again -- the domain keeps
+    every such string away from the gate."""
+    if not _mod_target_ok(value):
+        raise HTTPException(status_code=422, detail=f"{field} must be a numeric steam id")
+    return value
+
+
+def _mod_release_or_422(value, released: int, field: str = "target_steam_id") -> str:
+    """A release's target (v4.13, review r14). The caller calls it after its
+    releasing UPDATE, with the number of rows that UPDATE released, and before
+    it writes anything else. A target outside the domain is refused 422 when
+    the UPDATE released no row, and admitted when it released one: a row is
+    keyed by the exact string it was stored with, and a row stored without
+    this domain's check (admin_ban took any string before v4.11) must stay
+    releasable. A target inside the domain is never refused here -- releasing
+    nothing is an answer."""
+    if released < 1 and not _mod_target_ok(value):
+        raise HTTPException(status_code=422, detail=f"{field} must be a numeric steam id")
+    return value
+
+
+def _pg_text_ok(value) -> bool:
+    """True when a text bind can carry value to PostgreSQL: a str with no NUL
+    character (PostgreSQL text cannot hold one) that has a UTF-8 encoding
+    (asyncpg sends a str bind as UTF-8, and a lone surrogate has none). The
+    database is UTF8, which holds every other str."""
+    if not isinstance(value, str) or "\x00" in value:
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _mod_bindable_or_422(value, field: str = "target_steam_id") -> str:
+    """A moderation route's caller-sent target, before the route's first
+    statement (review r15): refused 422 unless _pg_text_ok. A statement that
+    binds a string no text bind can carry fails (the driver cannot encode a
+    lone surrogate; the server refuses a NUL character), and the route
+    answered 500; no row can be keyed by such a string, so no statement keyed
+    on it could find one. admin_unban and chat_moderate_unmute call it first:
+    their domain check follows their UPDATE (_mod_release_or_422), after
+    statements that bind the target. admin_list_actions calls it on its
+    target filter. admin_ban and chat_moderate_mute call _mod_target_or_422
+    first instead, whose domain holds ASCII digits only. Every other string
+    goes on as sent."""
+    if not _pg_text_ok(value):
         raise HTTPException(status_code=422, detail=f"{field} must be a numeric steam id")
     return value
 
@@ -35569,7 +35876,9 @@ async def _apply_ban_core(db: AsyncSession, *, admin_steam_id: str, target_steam
     # player -- as a card's subject or as a party of a pull -- is on Discord
     # before the ban commits; the writer waits for the bot to release its
     # leases, under the identity lock (new ones are refused meanwhile).
-    # Bounded by the lease's life (60 s); typically nothing is in flight.
+    # Bounded by the lease's life (60 s) plus 5 s, plus the one reading or
+    # sleep in flight then and the event loop's scheduling delay
+    # (_pc_lease_drain, r14); typically no line is in flight.
     if _bpid is not None:
         waited = await _pc_lease_drain(db, str(_bpid))
         if waited >= 1.0:
@@ -35623,7 +35932,7 @@ class _AdminBanReq(BaseModel):
 
 @app.post("/api/v1/admin/ban", tags=["Admin"])
 async def admin_ban(req: _AdminBanReq, _slot=Depends(_pc_writer_slot), db: AsyncSession = Depends(get_db)):
-    _steam_id_or_422(req.target_steam_id, "target_steam_id")   # before the signature, the reads, the locks and the gate (r13)
+    _mod_target_or_422(req.target_steam_id, "target_steam_id")   # before the signature, the reads, the locks and the gate (r13)
     await _require_admin(db, req.admin_steam_id, "ban", req.target_steam_id, req.hmac_signature)
     # ONE lock order on every ban path (Sept 6 item b, review r2): the
     # identity lattice first — both identities this transaction writes, in
@@ -35696,7 +36005,14 @@ class _AdminUnbanReq(BaseModel):
 
 @app.post("/api/v1/admin/unban", tags=["Admin"])
 async def admin_unban(req: _AdminUnbanReq, _slot=Depends(_pc_writer_slot), db: AsyncSession = Depends(get_db)):
-    _steam_id_or_422(req.target_steam_id, "target_steam_id")   # the same column, the same refusal (r13)
+    # No domain check before the UPDATE (v4.13, review r14): a ban stored
+    # under a key outside the domain (admin_ban took any string before v4.11)
+    # must stay releasable, and only the UPDATE can tell whether a row carries
+    # the key. Only a string no row can carry is refused first, by
+    # _mod_bindable_or_422 (review r15). The signature check and the UPDATE
+    # take the target as sent; _mod_release_or_422 below refuses it when it is
+    # outside the domain and the UPDATE released nothing.
+    _mod_bindable_or_422(req.target_steam_id)   # unban: before the signature, the locks and the UPDATE (r15)
     await _require_admin(db, req.admin_steam_id, "unban", req.target_steam_id, req.hmac_signature)
     # The same identity lattice as the ban, in the same canonical order (r9
     # M2): a ban's repeat detection and its insert are one serialised step on
@@ -35717,6 +36033,7 @@ async def admin_unban(req: _AdminUnbanReq, _slot=Depends(_pc_writer_slot), db: A
         "UPDATE player_bans SET unbanned_at = NOW(), unbanned_by_steam_id = :admin "
         "WHERE steam_id = :sid AND unbanned_at IS NULL"
     ), {"admin": admin_w, "sid": req.target_steam_id})
+    _mod_release_or_422(req.target_steam_id, res.rowcount)   # outside the domain and nothing released: 422, nothing written
     db.add(AdminAction(
         admin_steam_id=admin_w, action="unban", target_steam_id=target_w,
         details={"rows": res.rowcount},
@@ -35942,12 +36259,17 @@ async def admin_review_flag(req: _AdminReviewFlagReq, db: AsyncSession = Depends
             status_code=426,
             detail="Flag review requires the updated admin client",
         )
+    # The flag's id is parsed before the admin check and the read (review r15
+    # sweep): the read binds the parsed UUID, as a string that is not a UUID
+    # fails the read's uuid bind (500). The signature, the audit row and the
+    # answer keep the id as sent.
+    flag_uuid = _mail_parse_uuid(req.flag_id, "flag_id")   # flag review: the flag's id, before the admin check and its read (r15 sweep)
     await _require_admin(
         db, req.admin_steam_id, "review_flag",
         f"{req.flag_id}:{req.review_action}:{req.evidence_revision}",
         req.hmac_signature)
     fm = (await db.execute(
-        select(FlaggedMatch).where(FlaggedMatch.id == req.flag_id).with_for_update()
+        select(FlaggedMatch).where(FlaggedMatch.id == flag_uuid).with_for_update()
     )).scalar_one_or_none()
     if fm is None:
         raise HTTPException(404, "Flag not found")
@@ -36012,13 +36334,16 @@ async def admin_resolve_flag_restoration(
     """Close the durable repair reminder after an admin has restored the
     invalidated match's rewards/series state through the controlled repair
     workflow. This endpoint records the attestation; it does not alter economy
-    or rating rows itself."""
+    or rating rows itself. The flag's id is parsed before the admin check and
+    the read, which binds the parsed UUID; the signature, the audit row and the
+    answer keep the id as sent (review r15 sweep, as the review route does)."""
+    flag_uuid = _mail_parse_uuid(req.flag_id, "flag_id")   # flag restoration: the flag's id, before the admin check and its read (r15 sweep)
     await _require_admin(
         db, req.admin_steam_id, "resolve_flag_restoration",
         req.flag_id, req.hmac_signature)
     fm = (await db.execute(
         select(FlaggedMatch)
-        .where(FlaggedMatch.id == req.flag_id)
+        .where(FlaggedMatch.id == flag_uuid)
         .with_for_update()
     )).scalar_one_or_none()
     if fm is None:
@@ -37988,14 +38313,14 @@ async def _complete_team_series_with_ratings(
             await db.flush()
     except Exception as bex:
         print(f"[TEAM-DC-COMPLETE] bet settle error for {series_uuid}: {bex}")
-    # Player Cards (WP-D): a forfeit / admin completion grants the WIN roll
-    # and never a sweep — the same line the series gold draws.
+    # Player Cards (WP-D): a forfeit / admin completion rolls the same
+    # earned-pack odds as a played one — one roll, no score line.
     try:
         async with db.begin_nested():
             await _pc_grant_earned_packs(
                 db, mode="team", series_id=series_uuid,
                 winner_ids=([t1a_id, t1b_id] if winner_team == 1 else [t2a_id, t2b_id]),
-                sweep=False, label=f"team-{reason}")
+                label=f"team-{reason}")
     except Exception as pcex:
         print(f"[PC-EARNED] team grant failed for {series_uuid} ({reason}): {pcex}")
 
@@ -40624,7 +40949,7 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
                 await _pc_grant_earned_packs(
                     db, mode="ovt", series_id=series_uuid,
                     winner_ids=([slot_solo] if winner_side == 1 else [slot_da, slot_db]),   # STORED slots (c3 B)
-                    sweep=_pc_sweep(solo_wins, duo_wins), label="ovt-complete")
+                    label="ovt-complete")
         except Exception as pcex:
             print(f"[PC-EARNED] ovt grant failed for {series_uuid}: {pcex}")
         await _lock_queue_rows_ordered(
@@ -46116,15 +46441,14 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                                 db, _ach_pid, "ffa_half_point_heartbreak")
     except Exception as _ach_ex:
         print(f"[FFA-ACH] achievement evaluation failed (report unaffected): {_ach_ex}")
-    # Player Cards (WP-D): the earned-pack roll for a RANKED FFA match — a
-    # sweep is every round to the winner and none to anybody else (own
+    # Player Cards (WP-D): the earned-pack roll for a RANKED FFA match (own
     # savepoint; reconciled from the match row if it is lost).
     if rated:
         try:
             async with db.begin_nested():
                 await _pc_grant_earned_packs(
                     db, mode="ffa", series_id=match_id, winner_ids=[id_by_steam[report.winner_steam_id]],
-                    sweep=_pc_ffa_sweep(report), label="ffa-complete")
+                    label="ffa-complete")
         except Exception as pcex:
             print(f"[PC-EARNED] ffa grant failed for {match_id}: {pcex}")
 
@@ -48749,7 +49073,7 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
                     db, mode="team", series_id=series_uuid,
                     winner_ids=([series["t1a_id"], series["t1b_id"]] if winner_team == 1
                                 else [series["t2a_id"], series["t2b_id"]]),
-                    sweep=_pc_sweep(new_t1w, new_t2w), label="team-complete")
+                    label="team-complete")
         except Exception as pcex:
             print(f"[PC-EARNED] team grant failed for {series_uuid}: {pcex}")
 
@@ -49688,13 +50012,22 @@ async def admin_list_quarantine(
 @app.post("/api/v1/admin/quarantine/{qid}/discard", tags=["Admin"])
 async def admin_discard_quarantine(qid: str, req: _AdminQuarantineReq,
                                    db: AsyncSession = Depends(get_db)):
+    # The report's id and the note are checked before the admin check and the
+    # UPDATE (review r15 sweep): the UPDATE binds the id as a uuid, which fails
+    # for a string that is not one, and binds the note, which fails for a
+    # string no text bind can carry (500). It binds the parsed id's canonical
+    # text; the signature keeps the id as sent.
+    qid_uuid = _mail_parse_uuid(qid, "qid")   # quarantine discard: the report's id, before the admin check and the UPDATE (r15 sweep)
+    note = (req.note or "")[:500]
+    if not _pg_text_ok(note):   # quarantine discard: the note, before the admin check and the UPDATE (r15 sweep)
+        raise HTTPException(422, "note is not storable text")
     await _require_admin(db, req.admin_steam_id, "quarantine_action", qid, req.hmac_signature)
     res = await db.execute(text("""
         UPDATE match_report_quarantine
            SET status='discarded', reviewed_at=NOW(), review_note=:note,
                reviewed_by=(SELECT id FROM players WHERE steam_id=:sid)
          WHERE id=CAST(:qid AS UUID) AND status='pending'
-    """), {"qid": qid, "sid": req.admin_steam_id, "note": (req.note or "")[:500]})
+    """), {"qid": str(qid_uuid), "sid": req.admin_steam_id, "note": note})
     await db.commit()
     if not res.rowcount:
         raise HTTPException(409, "Already reviewed")
@@ -49711,11 +50044,16 @@ async def admin_accept_quarantine(qid: str, req: _AdminQuarantineReq,
     history, which is precisely the corruption the July 30 recovery had to undo
     with a chronological replay. This route records the admin's decision and
     locks the row; the actual application is an ordered replay, run deliberately.
+
+    The report's id is parsed before the admin check, and both statements bind
+    the parsed id's canonical text; the signature keeps the id as sent (review
+    r15 sweep: a string that is not a UUID failed the uuid bind, 500).
     """
+    qid_uuid = _mail_parse_uuid(qid, "qid")   # quarantine accept: the report's id, before the admin check and its reads (r15 sweep)
     await _require_admin(db, req.admin_steam_id, "quarantine_action", qid, req.hmac_signature)
     row = (await db.execute(text(
         "SELECT player_ids, created_at, status, mode FROM match_report_quarantine"
-        " WHERE id = CAST(:qid AS UUID) FOR UPDATE"), {"qid": qid})).mappings().first()
+        " WHERE id = CAST(:qid AS UUID) FOR UPDATE"), {"qid": str(qid_uuid)})).mappings().first()
     if row is None:
         raise HTTPException(404, "Not found")
     if row["status"] != "pending":
@@ -49735,7 +50073,7 @@ async def admin_accept_quarantine(qid: str, req: _AdminQuarantineReq,
            SET status='accepted', reviewed_at=NOW(),
                reviewed_by=(SELECT id FROM players WHERE steam_id=:sid)
          WHERE id=CAST(:qid AS UUID) AND status='pending'
-    """), {"qid": qid, "sid": req.admin_steam_id})
+    """), {"qid": str(qid_uuid), "sid": req.admin_steam_id})
     await db.commit()
     print(f"[QUARANTINE] {qid} accepted by {req.admin_steam_id}")
     return {"status": "accepted"}
@@ -53462,7 +53800,7 @@ async def _log_admin_action_strict(db: AsyncSession, *, admin_steam_id: str, act
     await db.execute(text(
         "INSERT INTO admin_actions (admin_steam_id, action, target_steam_id, details)"
         " VALUES (:a, :act, :t, CAST(:d AS jsonb))"
-    ), {"a": admin_steam_id[:20], "act": action[:32],
+    ), {"a": admin_steam_id, "act": action[:32],   # the actor whole, as in _log_admin_action (v4.13)
         "t": (target_steam_id or None), "d": _json.dumps(details or {})})
 
 
@@ -54227,6 +54565,16 @@ async def _moderation_case_act(db: AsyncSession, *, case_id: str, actor_steam_id
     # the actor's raw id: it is velocity accounting per admin, not a row
     # carrying the actor's identity.
     subject_sid = subject_w
+    # A mute or a ban is keyed by the subject's re-read id, which must be in
+    # the moderation target's domain (v4.13, review r14; _mod_target_ok, the
+    # domain _mod_target_or_422 holds a restriction route's body to):
+    # players.steam_id is a varchar(20), not a digit string, such as the
+    # phantom `photon_*` rows. Refused here, after this path's reads and locks
+    # and before its first write: no ban-rate lock, no mute or ban row, no
+    # case change and no audit row, and the route commits nothing. A dismiss
+    # writes no such key and goes on.
+    if action in ("mute", "ban") and not _mod_target_ok(subject_sid):
+        raise HTTPException(status_code=400, detail="subject_id_not_numeric")
     reason_txt = (reason or "").strip()[:256] or f"mail moderation case ({case['kind']})"
     if action == "mute":
         try:

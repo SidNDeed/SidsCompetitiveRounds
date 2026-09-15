@@ -804,6 +804,10 @@ class HealthResponse(BaseModel):
     # pc_steam_render: BOTH roles — `ok` once this box composited a stored
     # Steam picture into a face through its own face path (v3 §9).
     pc_steam_render: str | None = None
+    # pc_fold: the Player Cards fold this build carries (main.py's marker, v4.13
+    # §8) -- probed by the release train on both roles and read by nothing
+    # else. Absent on a build older than v4.13.
+    pc_fold: str | None = None
     # Which ROLE answered. Before this, /health was byte-identical on the
     # primary and on the read standby -- same status, same version, same
     # database -- so nothing on the network could tell a box that SKIPS writes

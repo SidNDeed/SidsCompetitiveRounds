@@ -28,6 +28,9 @@ import main  # noqa: E402
 import pc_portrait  # noqa: E402
 import pc_steam  # noqa: E402
 import schemas  # noqa: E402
+import steamid64  # noqa: E402
+import steamid64_pg_parity  # noqa: E402
+from steamid64_pg_parity import VECTORS  # noqa: E402
 
 MAIN_SRC = inspect.getsource(main)
 REPO = Path(main.__file__).resolve().parents[2]
@@ -339,14 +342,36 @@ def test_the_xml_path_counts_an_unusable_body_as_the_feeds_failure_and_rechecks_
 
 
 def test_the_sweep_never_claims_a_non_steam_id():
-    """The eligibility text (the claim, the writer's revalidation, the render probe) admits only a Steam id:
-    crossplay opponents carry sixteen- to twenty-digit ids from other platforms, and both URL builders refuse
-    those. The pattern is pc_steam's own, mirrored as a Postgres regex."""
-    assert pc_steam.STEAM_ID_RE.pattern == "^7656119[0-9]{10}$"
-    assert f"AND p.steam_id ~ '{pc_steam.STEAM_ID_RE.pattern}'" in main._PC_STEAM_ELIGIBLE_SQL
-    for sid in ("2535425419861127", "14732509580164257529", "7536364063920709669", "765611980404106530", "abcd", ""):
-        assert not pc_steam.STEAM_ID_RE.match(sid)
-    assert pc_steam.STEAM_ID_RE.match(STEAM) and pc_steam.STEAM_ID_RE.match(S2)
+    """The eligibility text (the claim, the writer's revalidation, the render probe) admits exactly a public
+    individual SteamID64: crossplay opponents carry sixteen- to twenty-digit ids from other platforms, and both URL
+    builders refuse those. v4.13 (r14): the id clause is steamid64's SQL, written from the constants its Python
+    validator reads, and the URL builders call that validator; test_steamid64.py holds the rule itself. The old
+    7656119 prefix admitted ids below the interval and refused every account from 76561200000000000 up."""
+    clause = steamid64.individual_id_sql("p.steam_id")
+    assert main._PC_STEAM_ELIGIBLE_SQL.count(clause) == 1 and "~ '^7656119" not in main._PC_STEAM_ELIGIBLE_SQL
+    assert not hasattr(pc_steam, "STEAM_ID_RE") and "STEAM_ID_RE" not in MAIN_SRC
+    for sid in ("76561197960265728", "76561202255233023", "76561200000000000", STEAM, S2):
+        assert pc_steam.profile_xml_url(sid) == f"https://steamcommunity.com/profiles/{sid}?xml=1"
+        assert pc_steam.summaries_url("k", [STEAM, sid]).endswith(f"steamids={STEAM}%2C{sid}")
+    for bad in ("76561197960265727", "76561202255233024", "76561190000000001", STEAM + "\n", "2535425419861127",
+                "14732509580164257529", "765611980404106530", "abcd", "", None):
+        with pytest.raises(ValueError):
+            pc_steam.profile_xml_url(bad)
+        with pytest.raises(ValueError):
+            pc_steam.summaries_url("k", [STEAM, bad])
+    # ...and both builders over every spelling steamid64_pg_parity holds the validator and PostgreSQL to, not a
+    # hand-picked few: 22 the rule refuses, 5 it admits. A builder drifting to the form, a prefix, or the
+    # interval read through str.isdigit() and int(), sends a request for one of those 22 or refuses one of the 5.
+    assert (len(VECTORS), sum(1 for _, ok in VECTORS if ok)) == (27, 5)
+    for text, ok in VECTORS:
+        if ok:
+            assert pc_steam.profile_xml_url(text) == f"https://steamcommunity.com/profiles/{text}?xml=1"
+            assert pc_steam.summaries_url("k", [STEAM, text]).endswith(f"steamids={STEAM}%2C{text}")
+        else:
+            with pytest.raises(ValueError):
+                pc_steam.profile_xml_url(text)
+            with pytest.raises(ValueError):
+                pc_steam.summaries_url("k", [STEAM, text])
 
 
 def test_a_non_steam_id_costs_only_its_own_row_on_both_paths(monkeypatch):
@@ -390,6 +415,108 @@ def test_a_non_steam_id_costs_only_its_own_row_on_both_paths(monkeypatch):
         pc_steam.summaries_url("k", [STEAM, xbox])
     with pytest.raises(ValueError):
         pc_steam.profile_xml_url(xbox)
+
+
+def test_the_batch_fetches_the_whole_interval_and_refuses_its_neighbours(monkeypatch):
+    """v4.13 (r14): the batch's partition reads the shared validator, so both boundaries and an id past the old
+    7656119 prefix go out in the keyed chunk, in claim order, and both neighbours are their own absence with no
+    request made for them."""
+    lo, hi, high = "76561197960265728", "76561202255233023", "76561200000000000"
+    below, above = "76561197960265727", "76561202255233024"
+    monkeypatch.setattr(main._pc_steam_breaker, "paused", lambda now=None: False)
+    monkeypatch.setattr(main._pc_steam_breaker, "record", lambda *a, **k: None)
+
+    async def wait(priority=False, deadline=None):
+        return True
+    monkeypatch.setattr(main, "_pc_steam_wait", wait)
+    monkeypatch.setitem(main._pc_steam_xml, "forced", False)
+    monkeypatch.setitem(main._pc_steam_xml, "refusals", 0)
+    monkeypatch.setenv("STEAM_WEB_API_KEY", "k")
+    urls = []
+    body = ('{"response":{"players":['
+            + ",".join(f'{{"steamid":"{s}","avatarhash":"{"e" * 40}"}}' for s in (lo, hi, high))
+            + ']}}').encode()
+
+    def get(url, **kw):
+        urls.append(url)
+        return body
+    monkeypatch.setattr(pc_steam, "http_get", get)
+    out = _run(main._pc_steam_fetch_refs([below, lo, high, hi, above]))
+    assert out == {lo: "e" * 40, high: "e" * 40, hi: "e" * 40, below: None, above: None}
+    assert len(urls) == 1 and urls[0].endswith(f"steamids={lo}%2C{high}%2C{hi}")
+    # ...and the same partition over every spelling steamid64_pg_parity holds the validator and PostgreSQL to,
+    # not a hand-picked few: ONE chunk carrying the 5 the rule admits, in claim order, while the 22 it refuses
+    # are each their own absence with no request made for any of them. A partition drifting to the form, a
+    # prefix, or the interval read through str.isdigit() and int() puts one of those 22 into the chunk.
+    urls.clear()
+    admitted = [text for text, ok in VECTORS if ok]
+    body = ('{"response":{"players":['
+            + ",".join(f'{{"steamid":"{s}","avatarhash":"{"e" * 40}"}}' for s in admitted)
+            + ']}}').encode()
+    out = _run(main._pc_steam_fetch_refs([text for text, _ in VECTORS]))
+    assert out == {text: ("e" * 40 if ok else None) for text, ok in VECTORS}
+    assert len(urls) == 1 and urls[0].endswith("steamids=" + "%2C".join(admitted))
+
+
+def test_a_refused_id_ends_ineligible_with_nothing_written_on_both_paths(monkeypatch):
+    """v4.13 (r14): an id the Steam-id rule refuses -- the interval's lower neighbour, which the old prefix
+    admitted -- followed from the batch's URL step through the processor to the writer, in one batch with the
+    interval's lower boundary. On the keyed path and on the profile XML path the URL step makes no request for
+    the refused id and answers it with its own absence, while the boundary is fetched; the processor passes the
+    absence on as `failed`. The writer's revalidation row carries, as `eligible`, PostgreSQL's recorded verdict
+    for that id under the id clause of the eligibility text (steamid64_pg_parity's committed answer, which
+    test_steamid64 ties to the SQL the text is built from), and it refuses the id: the disposition is
+    `ineligible` -- no UPDATE, no blob, no rollback, no heartbeat -- and the boundary's plate is written. Under
+    a text that admitted the id the same absence is the `failed` backoff, which the last half shows: widening
+    the rule in Python or in SQL turns this test red."""
+    lo, below = "76561197960265728", "76561197960265727"
+    monkeypatch.setattr(main._pc_steam_breaker, "paused", lambda now=None: False)
+    monkeypatch.setattr(main._pc_steam_breaker, "record", lambda *a, **k: None)
+
+    async def wait(priority=False, deadline=None):
+        return True
+    monkeypatch.setattr(main, "_pc_steam_wait", wait)
+    monkeypatch.setitem(main._pc_steam_xml, "refusals", 0)
+    monkeypatch.setenv("STEAM_WEB_API_KEY", "k")
+    marks = []
+    monkeypatch.setattr(main, "_pc_steam_mark_clean", lambda: marks.append(1))
+    urls = []
+    dbs = []
+
+    def session():
+        # claim order: the refused id's write transaction first, then the boundary's
+        sid = (below, lo)[len(dbs) % 2]
+        dbs.append(_wdb(row=_wrow(eligible=steamid64_pg_parity.pg_verdict(sid))))
+        return dbs[-1]
+    monkeypatch.setattr(database, "async_session", session)
+    keyed = ('{"response":{"players":[' f'{{"steamid":"{lo}","avatarhash":"{DEFAULT}"}}' ']}}').encode()
+    xml = f"<profile><avatarFull>https://avatars.steamstatic.com/{DEFAULT}_full.jpg</avatarFull></profile>".encode()
+    for forced, body, url in ((False, keyed, f"{pc_steam.SUMMARIES_URL}?key=k&steamids={lo}"),
+                              (True, xml, f"https://steamcommunity.com/profiles/{lo}?xml=1")):
+        monkeypatch.setitem(main._pc_steam_xml, "forced", forced)
+        monkeypatch.setattr(pc_steam, "http_get", lambda u, **kw: urls.append(u) or body)
+        urls.clear()
+        dbs.clear()
+        marks.clear()
+        claimed = [_claimed(steam_id=below), _claimed(steam_id=lo)]
+        assert _run(main._pc_steam_process(claimed)) == {"ineligible": 1, "plate": 1}, forced
+        assert urls == [url], (forced, urls)
+        refused, boundary = dbs
+        assert refused.count("AS eligible") == 1 and refused.count("UPDATE players") == 0, forced
+        assert refused.count("INSERT INTO pc_portraits") == 0 and refused.rolled_back == 0, forced
+        assert boundary.count("UPDATE players SET pc_steam_portrait_hash = NULL") == 1, forced
+        assert marks == [1], forced   # the boundary's committed plate; `ineligible` earns no heartbeat
+    # the contrast: the same absence on a row the text admits is the `failed` backoff the processor asked for
+    monkeypatch.setitem(main._pc_steam_xml, "forced", False)
+    urls.clear()
+    dbs.clear()
+
+    def admitted():
+        dbs.append(_wdb())
+        return dbs[-1]
+    monkeypatch.setattr(database, "async_session", admitted)
+    assert _run(main._pc_steam_process([_claimed(steam_id=below)])) == {"backoff": 1}
+    assert dbs[0].count("pc_steam_portrait_fail = CAST(:fail AS smallint)") == 1 and urls == []
 
 
 # ── priming ────────────────────────────────────────────────────────────
@@ -624,6 +751,38 @@ def test_the_render_probe_composites_a_stored_steam_picture_or_says_why_not(monk
     assert _run(main._pc_steam_render_probe()) == "failed:bytes"
 
 
+def test_health_carries_the_fold_marker_the_release_train_asserts_on_both_roles():
+    """v4.13 §8: `pc_fold` exists only to be probed (#306). The release train requires it on BOTH api boxes: on
+    the standby its new-route check and the sweep word read the same on the build before this fold, and the replica
+    write gate answers 503 to every write before any handler, so a write probe cannot fail there. The marker is on
+    the connected and on the degraded answer, declared on the response model (an undeclared keyword never reaches
+    the response), read by nothing else, and the value the train expects for each role; the train's picture signal
+    requires more than the 183 pictures stored before this fold (R19), so that signal can fail."""
+    fold = main.PC_FOLD
+    assert isinstance(fold, str) and fold.startswith("v") and fold == fold.strip()
+
+    class _Up:
+        async def execute(self, *a, **k):
+            return None
+
+    class _Down:
+        async def execute(self, *a, **k):
+            raise OSError("database unreachable")
+    up, down = _run(main.health_check(db=_Up())), _run(main.health_check(db=_Down()))
+    assert (up.status, down.status) == ("ok", "degraded")
+    assert up.model_dump()["pc_fold"] == fold                  # the connected answer, through the model
+    assert down.model_dump()["pc_fold"] == fold                # the degraded answer too: which build is this box
+    assert MAIN_SRC.count("PC_FOLD") == 3                      # defined once, reported twice, read by nothing else
+    train = REPO / "scripts" / "deploy" / "release_train.py"
+    if not train.exists():
+        pytest.skip("the release train is local to the operating seat")
+    src = train.read_text(encoding="utf-8")
+    batch = src[src.index('"sept12-gacha": {'):src.index('"sept10-batch": {')]
+    assert batch.count('"pc_fold"') == 1
+    assert '{"key": "pc_fold", "primary": "%s", "standby": "%s"},' % (fold, fold) in batch
+    assert '"SELECT count(*) FROM players WHERE pc_steam_portrait_hash IS NOT NULL;", 184),' in batch
+
+
 def test_health_reports_both_steam_words_and_the_render_loop_runs_on_both_roles():
     src = inspect.getsource(main.health_check)
     assert "pc_steam_sweep=_pc_steam_sweep_word()" in src and "pc_steam_render=_pc_steam_render_word()" in src
@@ -688,7 +847,8 @@ def test_the_handout_and_card_apply_the_pools_ban_word_to_puller_and_subject():
     assert pend.index(ban.format(a="su")) < pend.index("LIMIT 20")                       # the page never selects one
     card = inspect.getsource(main.internal_pc_card)
     assert "JOIN players p ON p.id = m.player_id" in card
-    assert "AND p.deleted_at IS NULL AND \"\"\" + _PC_NOT_BANNED_SQL.format(a=\"p\") + \"\"\"" in card
+    assert 'AND """ + _PC_POOL_MEMBER_SQL + """' in card and "_PC_NOT_BANNED_SQL" not in card   # v4.13: the pool word
+    assert main._PC_POOL_MEMBER_SQL.count(ban.format(a="p")) == 1   # ... whose ban clause is this word's text
     assert card.index("JOIN players p ON p.id = m.player_id") < card.index('detail={"error": "not_in_pool"}')
     # r6 H1/M2: ONE deliverability word for the skip, the handout and the send
     frag = main._PC_EVENT_DELIVERABLE_SQL
@@ -726,7 +886,7 @@ def test_the_public_pool_summary_speaks_the_pools_live_word():
     the way /card and the pack open do, in ONE statement (bands, count and
     names from one read)."""
     src = inspect.getsource(main.pc_pool_summary)
-    assert src.count('AND p.deleted_at IS NULL AND """ + _PC_NOT_BANNED_SQL.format(a="p") + """') == 1
+    assert src.count('AND """ + _PC_POOL_MEMBER_SQL + """') == 1   # v4.13: the pool word (deleted, banned, not a SteamID64)
     assert "WITH live AS (" in src and "UNION ALL" in src and src.count("await db.execute") == 2   # the snapshot row, then the one read
     assert '"member_count": sum(bands.values())' in src and 'int(snap["member_count"])' not in src
 
@@ -1174,22 +1334,134 @@ def test_the_writers_wait_for_the_lines_in_flight_naming_the_player(monkeypatch)
     # bounded by the lease's life: a lease the bot never releases ends the wait by expiry
     src = inspect.getsource(main._pc_lease_drain)
     assert "limit = float(_pcp.LEASE_SECONDS) + 5.0" in src and "time.monotonic() - started > limit" in src
-    # ...executed (r12): a lease that never leaves -- the naming read keeps answering 3 s -- ends the wait by the
-    # clock, LEASE_SECONDS + 5, on a clock that advances 30 s per reading of the lease table (the event loop
-    # reads the same clock, so the readings, not the calls, carry the time): three readings, two sleeps
+    # ...executed (r12; oracle corrected r14): a lease that never leaves -- the naming read keeps answering 3 s. The
+    # limit is checked after every await (a reading, a sleep), never inside one, so a reading starts only after a
+    # check found the limit not yet passed, and the wait ends within the limit plus the longer of the one sleep
+    # (0.25 s) and the one reading in flight when it passes -- not a hard 65 s. The clock is the event loop's own
+    # (time.monotonic): a scripted reading or sleep carries the time, not the calls.
     clock = [0.0]
     monkeypatch.setattr(main.time, "monotonic", lambda: clock[0])
+    limit = float(main._pcp.LEASE_SECONDS) + 5.0
 
     class _Ticking(Scripted):
+        def __init__(self, script, reading):
+            super().__init__(script)
+            self.reading, self.starts = reading, []
+
         async def execute(self, statement, params=None):
-            clock[0] += 30.0
+            self.starts.append(clock[0])
+            clock[0] += self.reading
             return await super().execute(statement, params)
+
+    # (a) the limit passes DURING a reading: 30 s readings, sleeps that take no time -> the readings start at 0, 30
+    # and 60 (none past the limit); the one in flight when the limit passes runs to 90 and ends the wait
     slept.clear()
-    db3 = _Ticking({"MAX(l.until)": [3]})
-    limit = float(main._pcp.LEASE_SECONDS) + 5.0
-    reads = int(limit // 30.0) + 1                # the first reading past the limit ends the wait
+    db3 = _Ticking({"MAX(l.until)": [3]}, 30.0)
+    reads = int(limit // 30.0) + 1
     waited = _run(main._pc_lease_drain(db3, str(PID)))
-    assert waited == 30.0 * reads > limit and db3.count("MAX(l.until)") == reads and slept == [0.25] * (reads - 1)
+    assert db3.starts == [30.0 * i for i in range(reads)] and max(db3.starts) <= limit
+    assert limit < waited == 30.0 * reads <= limit + 30.0
+    assert db3.count("MAX(l.until)") == reads and slept == [0.25] * (reads - 1)
+
+    # (b) the limit passes DURING a sleep: readings of (limit - 0.875) / 4 s and sleeps that take their 0.25 s end
+    # the fourth reading 0.125 s before the limit and its sleep 0.125 s past it -> the check after the sleep ends
+    # the wait, and no fifth reading starts
+    async def _ticking_sleep(secs):
+        slept.append(secs)
+        clock[0] += secs
+    monkeypatch.setattr(main.asyncio, "sleep", _ticking_sleep)
+    clock[0] = 0.0
+    slept.clear()
+    reading = (limit - 0.875) / 4.0
+    db4 = _Ticking({"MAX(l.until)": [3]}, reading)
+    waited = _run(main._pc_lease_drain(db4, str(PID)))
+    assert len(db4.starts) == db4.count("MAX(l.until)") == 4 and max(db4.starts) <= limit
+    assert slept == [0.25] * 4 and waited == limit + 0.125 <= limit + max(0.25, reading)
+
+
+def test_the_drain_never_cancels_a_reading_because_a_cancelled_statement_loses_the_writers_transaction(monkeypatch):
+    """r14 (2026-09-14): the wait's limit is enforced between awaits, never by cancelling the reading in flight.
+    Executed on the drain first: a reading the database answers only after the limit has long passed, on the clock
+    the event loop itself reads -- so a timeout, a deadline or a scheduled cancel armed on that clock falls due
+    while the reading waits for its answer -- runs to its end, ends the wait, and receives no cancellation. Then
+    the same as a rule on the drain's own body, its docstring aside. Then the reason, executed on the SQLAlchemy
+    the requirements pin: a statement interrupted by a cancellation or a timeout invalidates its connection, and
+    the transaction refuses its next statement -- the deletion or the ban that was waiting could never commit. An
+    ordinary exception leaves the connection valid (the negative case)."""
+    import ast
+    import textwrap
+
+    import sqlalchemy as sa
+    clock = [0.0]
+    monkeypatch.setattr(main.time, "monotonic", lambda: clock[0])
+    limit = float(main._pcp.LEASE_SECONDS) + 5.0
+
+    class _Late(Scripted):
+        def __init__(self, script):
+            super().__init__(script)
+            self.started = self.answered = self.cancelled = 0
+
+        async def execute(self, statement, params=None):
+            self.started += 1
+            clock[0] += 2.0 * limit      # every deadline armed on the loop's clock since the wait began is now due
+            loop = asyncio.get_running_loop()
+            answer = loop.create_future()
+
+            def hop(n):                  # the database answers eight turns of the event loop later
+                if answer.done():
+                    return
+                if n:
+                    loop.call_soon(hop, n - 1)
+                else:
+                    answer.set_result(None)
+            loop.call_soon(hop, 8)
+            try:
+                await answer
+            except asyncio.CancelledError:
+                self.cancelled += 1
+                raise
+            self.answered += 1
+            return await super().execute(statement, params)
+
+    async def drive(db):
+        try:
+            waited = await main._pc_lease_drain(db, str(PID))
+        except (asyncio.CancelledError, TimeoutError) as exc:   # a cancellation reached the reading and escaped
+            waited = type(exc).__name__
+        return waited, db.started, db.answered, db.cancelled     # counted when the wait ENDS, not at the loop's close
+    late = _Late({"MAX(l.until)": [3]})
+    assert _run(drive(late)) == (2.0 * limit, 1, 1, 0)
+    # the same, as a rule on the drain's own body (its docstring aside): no timeout, deadline, shield or cancel
+    fn = ast.parse(textwrap.dedent(inspect.getsource(main._pc_lease_drain))).body[0]
+    body = fn.body[1:] if isinstance(fn.body[0], ast.Expr) and isinstance(fn.body[0].value, ast.Constant) else fn.body
+    names = {n.id for s in body for n in ast.walk(s) if isinstance(n, ast.Name)}
+    names |= {n.attr for s in body for n in ast.walk(s) if isinstance(n, ast.Attribute)}
+    assert {"execute", "sleep", "monotonic"} <= names, names   # the body read is the drain's own
+    assert not names & {"wait_for", "wait", "timeout", "timeout_at", "shield", "cancel", "call_later", "call_at"}, names
+    req = (REPO / "backend" / "api" / "requirements.txt").read_text(encoding="utf-8").splitlines()
+    assert "sqlalchemy[asyncio]==" + sa.__version__ in req, (
+        "the local SQLAlchemy %s differs from the requirements pin: re-run this witness on the pinned version "
+        "(a seat mismatch, not a drain regression)" % sa.__version__)
+    for exc_type, lost in ((asyncio.CancelledError, True), (asyncio.TimeoutError, True), (RuntimeError, False)):
+        eng = sa.create_engine("sqlite://")
+        armed = [True]
+
+        @sa.event.listens_for(eng, "do_execute")
+        def _interrupt(cursor, statement, parameters, context):
+            if armed[0] and "7" in statement:
+                armed[0] = False
+                raise exc_type()
+        with eng.connect() as conn:
+            assert conn.execute(sa.text("SELECT 1")).scalar() == 1   # the writer's transaction is open
+            with pytest.raises(exc_type):
+                conn.execute(sa.text("SELECT 7"))                  # the reading, interrupted inside the DBAPI call
+            assert conn.invalidated is lost, exc_type
+            if lost:
+                with pytest.raises(sa.exc.PendingRollbackError):
+                    conn.execute(sa.text("SELECT 1"))              # the writer's next statement: refused
+            else:
+                assert conn.execute(sa.text("SELECT 1")).scalar() == 1
+        eng.dispose()
 
 
 def test_the_writers_gate_admits_four_at_once_and_a_fifth_waits_holding_nothing():
@@ -1506,9 +1778,12 @@ def test_the_gates_forget_a_closed_loop_when_the_next_loop_takes_its_own():
         async def touch():
             loop = asyncio.get_running_loop()
             assert gate() is gate() is gates[loop] and isinstance(gates[loop], asyncio.Semaphore)
-            return loop
-        first = asyncio.run(touch())
+            return loop, gates[loop]
+        first, first_gate = asyncio.run(touch())
         assert first.is_closed() and list(gates) == [first]            # closed, still listed until the next loop
-        second = asyncio.run(touch())
+        second, second_gate = asyncio.run(touch())
         assert second is not first and list(gates) == [second], gates   # the closed loop's entry is gone
+        # r14: each loop gets its OWN semaphore -- one object shared by every loop and merely re-keyed passes the two
+        # lines above, and binds to the first loop that waits on it
+        assert second_gate is not first_gate and gates[second] is second_gate
         gates.clear()

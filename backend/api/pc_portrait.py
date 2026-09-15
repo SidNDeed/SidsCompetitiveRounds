@@ -22,6 +22,8 @@ import threading
 # says they agree — so the import failing is the right failure.
 import regex as _regex
 
+import steamid64
+
 # ── constants ──────────────────────────────────────────────────────────────
 PORTRAIT_SIZE = 1180                     # the upload's edge (§1.7)
 PC_PORTRAIT_MAX_BYTES = 1 << 20          # 1 MiB upload cap; re-applied to the canonical bytes (r18 M6)
@@ -116,7 +118,6 @@ _TAG_RE = re.compile(
 # also feeds the global display name and must not blank a legal name.
 _CTRL_RE = re.compile(r"[\x00-\x1f\x7f\x80-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
 _WS_RE = re.compile(r"\s+")
-_STEAM_ID_RE = re.compile(r"^7656119[0-9]{10}$")
 
 
 def single_line(s):
@@ -149,7 +150,7 @@ def public_name(stored):
             break
         prev = s
         s = single_line(_TAG_RE.sub("", s))
-    if not s or _STEAM_ID_RE.match(s):
+    if not s or steamid64.is_individual_id(s):
         return None
     return s
 
@@ -291,7 +292,7 @@ def coverage_project(name):
             break
         prev = s
         s = single_line(_TAG_RE.sub("", coverage_strip(s)))
-    if not s or _STEAM_ID_RE.match(s) or not _INK_RE.search(s):
+    if not s or steamid64.is_individual_id(s) or not _INK_RE.search(s):
         return None
     return s
 

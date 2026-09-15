@@ -2,10 +2,12 @@
 
 Every property Nic was firm on has a test AND a negative control: the band
 edges, the never-up fallback, the independence of the three per-print rolls,
-the exclusive sweep, and the determinism of the earned roll. The migration
+and the determinism of the earned roll. So do the flat earned odds and their
+exact cut, which replaced the exclusive sweep in v4.13. The migration
 that carries the immutability trigger is pinned by text.
 """
 
+import inspect
 import os
 import random
 import sys
@@ -115,29 +117,73 @@ def test_shard_values_are_by_rarity_only():
     assert [pc.shards_for(r) for r in pc.RARITIES] == [5, 15, 40, 150, 600]
 
 
-# ── earned packs: deterministic, exclusive sweep ──
+# ── earned packs: deterministic, one flat roll ──
 
-def test_earned_roll_is_deterministic_and_keyed_by_mode_and_reference():
-    a = pc.earned_roll(b"k", "1v1", "s1")
-    assert a == pc.earned_roll(b"k", "1v1", "s1")
-    assert 0 <= a < 10000
-    assert pc.earned_roll(b"k", "team", "s1") != a or pc.earned_roll(b"k", "1v1", "s2") != a
-    assert pc.earned_roll(b"other", "1v1", "s1") != a or pc.earned_roll(b"other", "1v1", "s3") != a
+EARNED_SECRETS = (b"scr-earned-vectors-1", b"scr-earned-vectors-2")
+EARNED_MODES = ("1v1", "team", "ovt", "ffa")
+EARNED_REFS = ("series-0019", "series-0002")
+# earned_roll's output for every (secret, mode, reference) above, computed from its definition (the first four
+# bytes of HMAC-SHA256(secret, "{mode}:{reference}"), big-endian, mod 10000): sixteen distinct rolls, four under
+# the 20% cut (2000)
+EARNED_VECTORS = {
+    (b"scr-earned-vectors-1", "1v1", "series-0019"): 776, (b"scr-earned-vectors-1", "1v1", "series-0002"): 5395,
+    (b"scr-earned-vectors-1", "team", "series-0019"): 5926, (b"scr-earned-vectors-1", "team", "series-0002"): 5533,
+    (b"scr-earned-vectors-1", "ovt", "series-0019"): 2347, (b"scr-earned-vectors-1", "ovt", "series-0002"): 3787,
+    (b"scr-earned-vectors-1", "ffa", "series-0019"): 6745, (b"scr-earned-vectors-1", "ffa", "series-0002"): 9921,
+    (b"scr-earned-vectors-2", "1v1", "series-0019"): 5604, (b"scr-earned-vectors-2", "1v1", "series-0002"): 883,
+    (b"scr-earned-vectors-2", "team", "series-0019"): 1288, (b"scr-earned-vectors-2", "team", "series-0002"): 3860,
+    (b"scr-earned-vectors-2", "ovt", "series-0019"): 8863, (b"scr-earned-vectors-2", "ovt", "series-0002"): 423,
+    (b"scr-earned-vectors-2", "ffa", "series-0019"): 3981, (b"scr-earned-vectors-2", "ffa", "series-0002"): 5079,
+}
 
 
-def test_sweep_is_exclusive_and_the_1v1_sweep_is_certain():
-    # 1v1 sweep = 100 %: every reference grants the sweep pack.
-    for i in range(50):
-        assert pc.earned_pack_kind(b"k", "1v1", f"s{i}", sweep=True) == "sweep"
-    # The win roll at 20 % / the half-odds modes: the empirical rate matches.
+def test_earned_roll_is_pinned_and_each_of_secret_mode_and_reference_changes_it_on_its_own():
+    """Review r15 (LOW): fixed output vectors for a fixed secret pin the roll and the pack it grants, and changing
+    any one of the three inputs -- the secret, the mode, the reference -- with the other two held changes the roll,
+    for every vector: a roll that ignores any one of them cannot match the table."""
+    assert len(EARNED_VECTORS) == len(EARNED_SECRETS) * len(EARNED_MODES) * len(EARNED_REFS)
+    assert len(set(EARNED_VECTORS.values())) == len(EARNED_VECTORS)
+    for (secret, mode, ref), roll in EARNED_VECTORS.items():
+        assert pc.earned_roll(secret, mode, ref) == roll, (secret, mode, ref)
+        assert pc.earned_roll(secret, mode, ref) == roll   # deterministic: the same inputs, the same roll
+        assert pc.earned_pack_kind(secret, mode, ref) == ("win" if roll < 2000 else None), (secret, mode, ref)
+    wins = sorted(k for k in EARNED_VECTORS if pc.earned_pack_kind(*k) == "win")
+    assert wins == sorted([(b"scr-earned-vectors-1", "1v1", "series-0019"), (b"scr-earned-vectors-2", "1v1", "series-0002"),
+                           (b"scr-earned-vectors-2", "team", "series-0019"), (b"scr-earned-vectors-2", "ovt", "series-0002")])
+    for secret, mode, ref in EARNED_VECTORS:
+        roll = pc.earned_roll(secret, mode, ref)
+        for other in EARNED_SECRETS:
+            if other != secret:
+                assert pc.earned_roll(other, mode, ref) != roll, ("secret", secret, mode, ref)
+        for other in EARNED_MODES:
+            if other != mode:
+                assert pc.earned_roll(secret, other, ref) != roll, ("mode", secret, mode, ref)
+        for other in EARNED_REFS:
+            if other != ref:
+                assert pc.earned_roll(secret, mode, other) != roll, ("reference", secret, mode, ref)
+
+
+def test_every_ranked_mode_rolls_the_same_flat_odds_and_there_is_no_sweep_roll():
+    # Product rule (2026-09-14): every won ranked series, in every mode, rolls
+    # 20 % for a pack, whatever the score line.
+    assert pc.PC_ECONOMY["earned_pct"] == {"1v1": 20.0, "team": 20.0, "ovt": 20.0, "ffa": 20.0}
+    assert list(inspect.signature(pc.earned_pack_kind).parameters) == ["secret", "mode", "reference_id"]
     n = 4000
-    wins = sum(1 for i in range(n) if pc.earned_pack_kind(b"k", "1v1", f"w{i}", sweep=False) == "win")
-    assert 0.16 * n < wins < 0.24 * n, wins
-    sweeps = sum(1 for i in range(n) if pc.earned_pack_kind(b"k", "team", f"t{i}", sweep=True) == "sweep")
-    assert 0.45 * n < sweeps < 0.55 * n, sweeps
-    # Negative controls: a sweep never yields 'win'; an unknown mode yields nothing.
-    assert all(pc.earned_pack_kind(b"k", "team", f"t{i}", sweep=True) != "win" for i in range(200))
-    assert pc.earned_pack_kind(b"k", "duel", "x", sweep=True) is None
+    for mode in ("1v1", "team", "ovt", "ffa"):
+        kinds = [pc.earned_pack_kind(b"k", mode, f"{mode}-{i}") for i in range(n)]
+        assert set(kinds) <= {"win", None}, mode
+        assert 0.16 * n < kinds.count("win") < 0.24 * n, (mode, kinds.count("win"))
+    # an unknown mode earns nothing
+    assert pc.earned_pack_kind(b"k", "duel", "x") is None
+
+
+def test_the_earned_cut_is_exact(monkeypatch):
+    # 20 % of 0..9999 in every mode: a roll of 1999 hits, 2000 misses
+    for mode in pc.PC_ECONOMY["earned_pct"]:
+        monkeypatch.setattr(pc, "earned_roll", lambda secret, m, ref: 1999)
+        assert pc.earned_pack_kind(b"k", mode, "r") == "win", mode
+        monkeypatch.setattr(pc, "earned_roll", lambda secret, m, ref: 2000)
+        assert pc.earned_pack_kind(b"k", mode, "r") is None, mode
 
 
 # ── canonical strings ──

@@ -42,9 +42,12 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 # (review r12), the rest wait at the slot holding nothing. What admission
 # does not remove (review r13): a connection's own validation -- pool_pre_ping,
 # a pool_recycle, a reconnection after an invalidation -- can still delay an
-# admitted request or fail it. The writer's bound stays the lease's own
-# life; a release that lands earlier ends the wait earlier. Sized for the
-# bot's concurrency: one events poller and a few commands at once.
+# admitted request or fail it. The writer's wait ends within the lease's
+# own life plus 5 s (65 s from its start), plus the one reading or sleep in
+# flight then and the event loop's scheduling delay (main.py's
+# _pc_lease_drain, r14); a release that lands earlier ends the wait
+# earlier. Sized for the bot's concurrency: one events poller and a few
+# commands at once.
 RELEASE_POOL_SIZE = 3
 RELEASE_POOL_OVERFLOW = 2
 release_engine = create_async_engine(

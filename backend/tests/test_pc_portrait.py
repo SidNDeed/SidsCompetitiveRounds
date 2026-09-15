@@ -8,9 +8,11 @@ import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, "..", "api"))
 
 import pc_portrait as P  # noqa: E402
+from steamid64_pg_parity import VECTORS  # noqa: E402
 
 
 GOOD = ("v1|face=1000:1002:1004:1005|off=0.1234567,-0.25;0,0;1E-05,-1.5E-05;12.5,0"
@@ -170,6 +172,29 @@ def test_public_name_answers_none_for_everything_unreadable():
     assert P.public_name("Sid") == "Sid"
     assert P.public_name("محمد") == "محمد"          # a legal name is never blanked here
     assert P.public_name("★") == "★"
+
+
+def test_a_stored_name_is_unnamed_exactly_when_it_is_a_steam_id():
+    """The constructor's fallback stores the Steam id as the name, and both the public name (P) and the coverage
+    projection (C) answer None for it. v4.13 (r14): the rule is steamid64's interval, not the 7656119 prefix, so
+    an account numbered 2,039,734,272 or higher is unnamed too, and a seventeen-digit name outside the interval
+    is a name like any other."""
+    for sid in ("76561197960265728", "76561202255233023", "76561200000000000", "76561198040410653"):
+        assert P.public_name(sid) is None and P.coverage_project(sid) is None, sid
+    for name in ("76561197960265727", "76561202255233024", "76561190000000001"):
+        assert P.public_name(name) == name and P.coverage_project(name) == name, name
+    # ...and over every spelling steamid64_pg_parity holds the validator and PostgreSQL to, not a hand-picked
+    # few: 22 the rule refuses, 5 it admits. Both P and C normalise the stored name before the rule reads it, so
+    # a spelling differing from a public individual SteamID64 only in surrounding whitespace IS that id and is
+    # unnamed. A rule drifting to the form, a prefix, or the interval read through str.isdigit() and int() draws
+    # one of the 27 wrong: a real name replaced by the neutral label, or an account id drawn on the card.
+    admitted = {text for text, ok in VECTORS if ok}
+    assert (len(VECTORS), len(admitted)) == (27, 5)
+    for text, _ in VECTORS:
+        stripped = text.strip()
+        want = None if (not stripped or stripped in admitted) else stripped
+        assert P.public_name(text) == want, ascii(text)
+        assert P.coverage_project(text) == want, ascii(text)
 
 
 def test_the_coverage_projection_removes_what_no_font_can_draw():
