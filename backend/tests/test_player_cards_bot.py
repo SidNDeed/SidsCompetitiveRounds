@@ -81,8 +81,11 @@ def test_refusals_are_read_by_status_and_token():
     coll = _fn(BOT_SRC, "cmd_pc_collection")
     assert "status == 403" in coll and "private" in coll
     card = _fn(BOT_SRC, "cmd_pc_card")
-    # the 404 copy whole (r6 L10): absence from the current snapshot, and the ban, are the two causes
-    assert 'not in the current card pool (the pool is re-taken daily; a banned player is out).' in card
+    # the 404 copy whole (r6 L10): absence from the current snapshot and the ban are the two causes, and
+    # since the 2026-09-15 merge (_PC_POOL_RULE = 3) the FIRST of them is mostly "has never run the mod",
+    # which is the one cause the copy used to leave the reader to guess
+    assert ('not in the current card pool (the pool is the players who have run the mod, '
+            're-taken daily; a banned player is out).') in card
     assert "opted out" not in card and "new player" not in card
 
 

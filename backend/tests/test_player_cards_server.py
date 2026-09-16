@@ -23,6 +23,7 @@ import asyncio
 import inspect
 import io
 import re
+import time
 import tokenize
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -34,8 +35,10 @@ import database
 import main
 import models
 import player_cards as pc
+import schemas
 
 MAIN_PY = Path(__file__).resolve().parents[1] / "api" / "main.py"
+ROOT = MAIN_PY.parents[2]
 
 S1 = UUID("11111111-1111-1111-1111-111111111111")
 S2 = UUID("22222222-2222-2222-2222-222222222222")
@@ -272,7 +275,8 @@ def test_snapshot_freezes_band_from_rank_and_the_resolved_title(monkeypatch):
     insert = [p for sql, p in db.log if "INSERT INTO pc_pool_members" in sql]
     assert len(insert) == 1 and isinstance(insert[0], list) and len(insert[0]) == 3
     by_rank = {p["rank"]: p for p in insert[0]}
-    assert by_rank[1]["rarity"] == "legendary" and by_rank[2]["rarity"] == "epic" and by_rank[41]["rarity"] == "common"
+    # the top TWO are Legendary since the Sept 14 batch (S2)
+    assert by_rank[1]["rarity"] == "legendary" and by_rank[2]["rarity"] == "legendary" and by_rank[41]["rarity"] == "common"
     assert by_rank[1]["title"] == "resolved:title_x" and by_rank[41]["title"] is None
     assert by_rank[41]["rating"] is None and by_rank[41]["board"] is None and by_rank[1]["board"] == 1
     assert all(p["sid"] == 42 for p in insert[0])
@@ -282,10 +286,250 @@ def test_snapshot_freezes_band_from_rank_and_the_resolved_title(monkeypatch):
     assert keep == [{"keep": pc.PC_ECONOMY["snapshot_keep"]}]
     select_params = [p for sql, p in db.log if "WITH pool AS" in sql][0]
     assert select_params["min_matches"] == 5 and select_params["active_days"] == main.LEADERBOARD_ACTIVE_DAYS
+    # the snapshot records the pool rule it was taken under (Sept 14 batch, S1)
+    snapshot_params = [p for sql, p in db.log if "INSERT INTO pc_pool_snapshots" in sql]
+    assert snapshot_params == [{"n": 3, "rule": main._PC_POOL_RULE}] and main._PC_POOL_RULE == 3
 
 
-def _due_row(last_at, db_now, today_at, stale_rule=False):
-    return [{"last_at": last_at, "stale_rule": stale_rule, "db_now": db_now, "today_at": today_at}]
+def test_the_pool_admits_players_who_have_run_the_mod_through_one_fragment():
+    """Sept 14 batch S1, as the 2026-09-15 merge left it: the pool is the
+    registered, non-banned, non-deleted players who have RUN the mod AND whose
+    id is a public individual SteamID64 -- the INTERSECTION of two decisions
+    taken a day apart, both of them restrictions on who may be a subject. Every
+    reader that decides membership reads the one fragment, so they cannot
+    drift."""
+    fragment = main._PC_POOL_MEMBER_SQL
+    assert "p.mod_seen_at IS NOT NULL" in fragment and "p.deleted_at IS NULL" in fragment
+    assert "NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)" in fragment
+    # the Steam id clause is the other half of the intersection (v4.13), and the
+    # word carries it once -- a union of the two decisions would admit a
+    # mod-runner with no SteamID64 and break the later one
+    assert fragment.count(main._PC_POOL_STEAM_ID_SQL) == 1
+    assert fragment in main._PC_SNAPSHOT_SELECT_SQL and fragment in main._PC_LIVE_POOL_CHECK_SQL
+    src = _main_code()
+    # FIVE readers decide membership since the merge, and each interpolates the
+    # one word: the snapshot's pool CTE, the open's live re-check, the public
+    # pool summary, the bot's /card and that card's face preview. Counted on the
+    # interpolation spelling -- under either quoting, since the preview builds
+    # its statement from single-quoted pieces -- so the number IS the reader
+    # count and does not move with prose. The preview joined this count on
+    # 2026-09-15: it interpolated _PC_POOL_STEAM_ID_SQL, which is one half of
+    # the merged word, while answering not_in_pool.
+    assert len(re.findall(r'(?:WHERE|AND) (?:"""|") \+ _PC_POOL_MEMBER_SQL', src)) == 5
+    for fn in (main.pc_pool_summary, main.internal_pc_card, main.internal_pc_face_preview):
+        assert len(re.findall(r'AND (?:"""|") \+ _PC_POOL_MEMBER_SQL', inspect.getsource(fn))) == 1, fn.__name__
+    # ...and the identifier appears nowhere else but its definition and the one
+    # docstring that names it, so a sixth reader cannot reach the word by any
+    # other spelling without failing here (comments are stripped by _main_code).
+    assert src.count("_PC_POOL_MEMBER_SQL") == 7
+    assert src.count("_PC_POOL_MEMBER_SQL = ") == 1
+    assert "_PC_POOL_MEMBER_SQL admits" in inspect.getdoc(main._pc_take_snapshot)
+    # the snapshot's WHERE is the fragment alone: no second membership predicate beside it
+    pool = main._PC_SNAPSHOT_SELECT_SQL[:main._PC_SNAPSHOT_SELECT_SQL.index(fragment)]
+    assert pool.rstrip().endswith("WHERE")
+    # the health answer names the rule on both branches, so a deploy that
+    # changes it is visible on a batch with no new route
+    health = inspect.getsource(main.health_check)
+    assert health.count("pc_pool_rule=int(_PC_POOL_RULE)") == 2
+    schema_src = inspect.getsource(schemas.HealthResponse)
+    assert "pc_pool_rule: int | None = None" in schema_src
+    # ...and the field's own note says which rule THIS build carries. It said
+    # "2 = players who have run the mod" after the merge had made it 3 (found
+    # 2026-09-15): the number is now recomputed from the constant, so the note
+    # cannot describe a rule the build does not carry.
+    assert f"main._PC_POOL_RULE; {main._PC_POOL_RULE} = " in schema_src
+    # ...and the pure-rules module says who a subject is by pointing AT the one
+    # word and at the rule number this build carries, recomputed from the
+    # constant the same way. It stated main's half of the merge as the whole
+    # rule until 2026-09-15 -- "every registered, unbanned player whose id is a
+    # SteamID64", a pool of 4165 described where the code admits 473 -- which is
+    # the third copy of one defect the same repair had already fixed twice.
+    pc_src = inspect.getsource(pc)
+    assert "main._PC_POOL_MEMBER_SQL" in pc_src and f"_PC_POOL_RULE = {main._PC_POOL_RULE}" in pc_src
+    assert "Every registered, unbanned player" not in pc_src
+
+
+def test_migration_316_adds_the_rule_column_the_janitor_reads():
+    sql = (ROOT / "backend" / "sql" / "316_pc_pool_snapshot_rule.sql").read_text(encoding="utf-8")
+    assert sql.count("BEGIN;") == 1 and sql.count("COMMIT;") == 1
+    assert "ALTER TABLE pc_pool_snapshots ADD COLUMN IF NOT EXISTS rule INTEGER NOT NULL DEFAULT 1;" in sql
+    assert "RAISE EXCEPTION 'migration 316" in sql
+    # the api's own reads of the column: the due check and the insert
+    assert "(SELECT rule FROM pc_pool_snapshots ORDER BY taken_at DESC, id DESC LIMIT 1) AS last_rule" in inspect.getsource(main._pc_snapshot_due)
+    assert "INSERT INTO pc_pool_snapshots (member_count, rule)" in inspect.getsource(main._pc_take_snapshot)
+
+
+def test_janitor_retakes_the_pool_once_when_the_rule_changed(monkeypatch):
+    today = datetime(2026, 9, 11, 0, 5, tzinfo=timezone.utc)
+    hour_ago = today - timedelta(hours=1)
+    # the latest snapshot predates the rule change: due now, as 'rule', even before 00:05
+    db, taken = _janitor(monkeypatch, _due_row(hour_ago, today - timedelta(minutes=2), today, last_rule=main._PC_POOL_RULE - 1))
+    _run(main._pc_snapshot_janitor_step())
+    assert taken == ["rule"]
+    # taken under the current rule: the daily clock alone decides
+    db, taken = _janitor(monkeypatch, _due_row(hour_ago, today - timedelta(minutes=2), today, last_rule=main._PC_POOL_RULE))
+    _run(main._pc_snapshot_janitor_step())
+    assert taken == []
+    # under a NEWER rule (a rolled-back api): no re-take, no thrash
+    db, taken = _janitor(monkeypatch, _due_row(hour_ago, today - timedelta(minutes=2), today, last_rule=main._PC_POOL_RULE + 1))
+    _run(main._pc_snapshot_janitor_step())
+    assert taken == []
+    # no snapshot at all: 'first' wins over 'rule'
+    db, taken = _janitor(monkeypatch, _due_row(None, today, today, last_rule=0))
+    _run(main._pc_snapshot_janitor_step())
+    assert taken == ["first"]
+
+
+def test_the_boot_path_retakes_the_snapshot_instead_of_waiting_for_the_first_janitor_pass(monkeypatch):
+    """queue_cleanup_loop sleeps 60 s at the TOP of its body, so its first pass
+    is a minute after boot. In that minute `_pc_roll_prints` draws its band
+    SIZES from the snapshot the previous rule took while the per-member live
+    re-check applies the new word -- at the 2026-09-15 merge's rule, 4116 of the
+    4165 members are in the Common band and ~473 of the pool survive, so a
+    Common slot is refused most of the time it is rolled, a slot exhausts its
+    re-rolls often, and a pack fails if ANY of its five slots exhausts. Nothing
+    is debited (the roll is step 4, the debit step 5, and a rejected open puts
+    the held pack back to 'unopened'), but the opens fail and get reported. The
+    boot path takes the snapshot rather than scheduling the deploy around it."""
+    today = datetime(2026, 9, 15, 0, 5, tzinfo=timezone.utc)
+    hour_ago = today - timedelta(hours=1)
+    db, taken = _janitor(monkeypatch, _due_row(hour_ago, today - timedelta(minutes=2), today,
+                                               last_rule=main._PC_POOL_RULE - 1))
+    _run(main._pc_snapshot_boot_retake())
+    # the janitor's OWN step, so the boot retake and the pass cannot drift apart,
+    # and the step's advisory try-lock is what makes two booting api processes safe
+    assert taken == ["rule"] and db.count("pg_try_advisory_xact_lock") == 1
+    # nothing due: the boot path takes nothing, exactly as the pass would not
+    db, taken = _janitor(monkeypatch, _due_row(hour_ago, today - timedelta(minutes=2), today))
+    _run(main._pc_snapshot_boot_retake())
+    assert taken == []
+
+
+def test_the_boot_retake_cannot_stop_the_api_from_booting(monkeypatch):
+    """Which direction the unhandled case fails (#276): this call is an
+    availability improvement, so a failure has to land on the OLD timing -- the
+    janitor retakes at its first pass -- and never on an api that will not
+    start. Both shapes are covered: a raise, and a step that never returns."""
+    async def _boom():
+        raise RuntimeError("database is not accepting connections")
+
+    monkeypatch.setattr(main, "_pc_snapshot_janitor_step", _boom)
+    assert _run(main._pc_snapshot_boot_retake()) is None       # swallowed; boot continues
+
+    started = []
+
+    async def _hang():
+        started.append(True)
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(main, "_pc_snapshot_janitor_step", _hang)
+    monkeypatch.setattr(main, "PC_BOOT_SNAPSHOT_TIMEOUT_S", 0.05)
+    began = time.monotonic()
+    assert _run(main._pc_snapshot_boot_retake()) is None       # bounded; boot continues
+    assert started and time.monotonic() - began < 30           # the bound, not the 3600 s sleep
+
+
+def test_the_lifespan_takes_the_boot_retake_on_the_primary_before_it_serves():
+    life = inspect.getsource(main.lifespan)
+    call = "await _pc_snapshot_boot_retake()"
+    assert life.count(call) == 1
+    # PRIMARY only -- it WRITES, and the standby's postgres is in recovery. It sits
+    # after the banner that says which role booted and before the yield, so the
+    # first request cannot arrive ahead of the snapshot it reads.
+    assert life.index('print("[REPLICA] booting as PRIMARY') < life.index(call) < life.index("yield")
+    # awaited, not a detached task: a task scheduled behind the server's first
+    # requests does not give the first open the new snapshot, which is the point
+    assert "create_task(_pc_snapshot_boot_retake" not in life
+
+
+def test_migration_321_converts_the_prints_minted_while_legendary_was_rank_1():
+    """Legendary became ranks 1-2 in the Sept 14 batch and the code mints from
+    the snapshot, so only the prints minted BEFORE that deploy carry the old
+    band. 321 converts those rows once, and it is the one documented writer of
+    a pc_prints column the immutability trigger freezes."""
+    sql = (ROOT / "backend" / "sql" / "321_pc_rank2_legendary.sql").read_text(encoding="utf-8")
+    assert sql.count("BEGIN;") == 1 and sql.count("COMMIT;") == 1   # psql -f wraps nothing (#340)
+    body = sql[sql.index("BEGIN;"):]
+    # The gap between the work list and the rewrite is closed by an EXPLICIT lock,
+    # taken before the trigger is touched (#557). Until 2026-09-16 both this file
+    # and its test said the ALTER's own lock was ACCESS EXCLUSIVE; on PostgreSQL
+    # 16.15 `ALTER TABLE ... ENABLE/DISABLE TRIGGER` takes SHARE ROW EXCLUSIVE, so
+    # the guarantee is "no writer can touch pc_prints" and NOT "readers are fenced
+    # too", which the old wording implied.
+    assert "LOCK TABLE pc_prints IN SHARE ROW EXCLUSIVE MODE;" in body
+    assert "ACCESS EXCLUSIVE" not in sql
+    assert body.index("SET LOCAL lock_timeout") < body.index("LOCK TABLE pc_prints")
+    assert body.index("LOCK TABLE pc_prints") < body.index("ALTER TABLE pc_prints DISABLE TRIGGER pc_prints_immutable;")
+    assert body.index("ALTER TABLE pc_prints DISABLE TRIGGER pc_prints_immutable;") < body.index("UPDATE pc_prints")
+    assert body.index("UPDATE pc_prints") < body.index("ALTER TABLE pc_prints ENABLE TRIGGER pc_prints_immutable;")
+    # ...and the re-arming is PROVEN before the commit rather than assumed (#438)
+    assert body.index("ENABLE TRIGGER") < body.index("FROM pg_trigger") < body.index("COMMIT;")
+    assert "IF st IS DISTINCT FROM 'O' THEN" in sql and "refusing to commit" in sql
+    # the work list: live rank-2 prints of the old band. A discarded one froze what
+    # its discard PAID at the epic rate, so promoting it would contradict its own
+    # payment record -- it is excluded on purpose.
+    assert "SET rarity = 'legendary'" in sql
+    assert "WHERE pool_rank = 2" in sql and "AND rarity = 'epic'" in sql and "AND discarded_at IS NULL" in sql
+    # A work list that GREW is refused; one that SHRANK is applied and reported.
+    # `IF n NOT IN (0, 3)` stood here until 2026-09-16 and aborted the whole
+    # conversion when a player discarded one of the three between the deploy and
+    # the migration: the UPDATE matched 2, the guard fired, and nothing converted --
+    # leaving two prints epic while every newly minted rank-2 print was legendary.
+    assert "IF n > pinned THEN" in sql and "the set GREW since this file was authored; refusing" in sql
+    assert "IF n NOT IN" not in sql
+    assert "pinned CONSTANT integer := 3;" in sql            # the count read from the primary, named once
+    assert "ELSIF n < pinned THEN" in sql and "A discard explains the shortfall" in sql
+    # ORDER, ENFORCED (Sid ratified 2026-09-15: after the pool is RETAKEN, not
+    # merely after the code deploy). It was a comment until 2026-09-16, and a
+    # comment cannot refuse -- the boot retake is awaited under a 30 s timeout and
+    # swallowed on failure, so "the deploy finished" is not evidence the pool moved.
+    # the STATEMENTS of the precondition, with the file's own prose dropped: what
+    # the guard names is a property of the SQL, not of the paragraph explaining it
+    pre = "\n".join(ln for ln in body[:body.index("LOCK TABLE pc_prints")].splitlines()
+                    if not ln.lstrip().startswith("--"))
+    assert pre.count("DO $$") == 1, "the precondition runs before anything touches pc_prints"
+    assert "FROM pc_pool_snapshots ORDER BY taken_at DESC, id DESC LIMIT 1" in pre
+    assert 'int(due["last_rule"] or 0) < int(_PC_POOL_RULE)' in inspect.getsource(main._pc_snapshot_due)
+    # a POSITIVE signal the new band table emitted (#438), not a version number:
+    # the newest snapshot must ITSELF call rank 2 what this build's band table calls
+    # it. The live database is the negative control -- snapshot 6 recorded rank 2 as
+    # 'epic' on 2026-09-16, so the guard refuses today and can only pass after a real
+    # retake.
+    assert pc.rarity_for_rank(2) == "legendary" and pc.rarity_for_rank(3) == "epic"
+    assert "IF v_band <> 'legendary' THEN" in pre
+    assert "AND m.pool_rank = 2" in pre
+    # ...and the recorded rule, because "the pool was retaken" IS "a snapshot was
+    # taken under the deployed pool word"; the band table and the pool rule are two
+    # independent constants that merely ship together.
+    assert "IF v_rule < %d THEN" % main._PC_POOL_RULE in pre
+    # it names no player: a subject id would rot the moment the pool reorders
+    for rots in ("steam_id", "player_id", "subject", "display_name"):
+        assert rots not in pre, rots
+    # what it disables is the trigger 308 installs, and rarity is one of the columns that trigger freezes
+    trig = (ROOT / "backend" / "sql" / "308_player_cards.sql").read_text(encoding="utf-8")
+    assert "CREATE TRIGGER pc_prints_immutable BEFORE UPDATE ON pc_prints" in trig
+    assert "OR NEW.rarity IS DISTINCT FROM OLD.rarity" in trig
+    # ORDER: it converts what the OLD code minted, so it runs AFTER the deploy that
+    # carries the new band edge and the new pool rule (#236) -- and both are here
+    assert "run AFTER the api deploy" in sql and "_PC_POOL_RULE = 3" in sql
+    assert pc.PC_ECONOMY["band_max_rank"]["legendary"] == 2 and main._PC_POOL_RULE == 3
+    # its claims about 316 are 316's own text and the code's own term
+    sql316 = (ROOT / "backend" / "sql" / "316_pc_pool_snapshot_rule.sql").read_text(encoding="utf-8")
+    assert "NOT NULL DEFAULT 1" in sql and "ADD COLUMN IF NOT EXISTS rule INTEGER NOT NULL DEFAULT 1" in sql316
+    assert 'int(due["last_rule"] or 0) < int(_PC_POOL_RULE)' in inspect.getsource(main._pc_snapshot_due)
+    # the api side states the rule 321 makes true instead of the flat guarantee it
+    # contradicts, and points AT the file rather than at a bare number (#302/#351)
+    doc = pc.__doc__
+    assert "never change afterwards" not in doc
+    assert "pc_prints_immutable" in doc and "backend/sql/321_pc_rank2_legendary.sql" in doc
+    assert inspect.getsource(pc).count("backend/sql/321_pc_rank2_legendary.sql") == 2
+
+
+def _due_row(last_at, db_now, today_at, last_rule=None):
+    # The latest snapshot's rule defaults to the CURRENT one, so every test
+    # written before the rule column asks about the daily rule alone.
+    rule = main._PC_POOL_RULE if last_rule is None else last_rule
+    return [{"last_at": last_at, "last_rule": rule, "db_now": db_now, "today_at": today_at}]
 
 
 def _janitor(monkeypatch, due, lock=True):

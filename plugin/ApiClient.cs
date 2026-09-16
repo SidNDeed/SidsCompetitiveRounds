@@ -4464,13 +4464,40 @@ namespace CompetitiveRounds
             if (b < 0) return "http";
             string body = resp.Substring(b);
             string detail = PcTopLevel(body, "detail");
-            if (detail == null) return "http";
+            if (detail == null)
+            {
+                // The rate limiter answers 429 with a top-level {"error":
+                // "rate_limited", "retry_after": n} and no detail object
+                // (Sept 14 batch, C2): name it, so the discard chain can
+                // wait it out instead of reporting a refusal.
+                string top = PcTopLevel(body, "error");
+                return top != null ? (PcStr(top) ?? "http") : "http";
+            }
             if (detail.StartsWith("{", StringComparison.Ordinal))
             {
                 string e = PcTopLevel(detail, "error");
                 return e != null ? (PcStr(e) ?? "http") : "http";
             }
             return "http";   // a plain-string detail (FastAPI's default) is not a named code (c4)
+        }
+
+        /// <summary>The seconds a rate-limited answer asks the caller to wait
+        /// (`retry_after`, top-level or inside the detail object); the fallback
+        /// when the answer carries none.</summary>
+        public static int PcRetryAfter(string resp, int fallback)
+        {
+            if (string.IsNullOrEmpty(resp)) return fallback;
+            int b = resp.IndexOf('{');
+            if (b < 0) return fallback;
+            string body = resp.Substring(b);
+            string raw = PcTopLevel(body, "retry_after");
+            if (raw == null)
+            {
+                string detail = PcTopLevel(body, "detail");
+                if (detail != null && detail.StartsWith("{", StringComparison.Ordinal)) raw = PcTopLevel(detail, "retry_after");
+            }
+            int v = raw != null ? PcIntOr(raw, fallback) : fallback;
+            return v > 0 ? Math.Min(v, 60) : fallback;
         }
 
         /// <summary>HTTP status of a failed call's "HTTP <code>: ..." line, 0 when none.</summary>

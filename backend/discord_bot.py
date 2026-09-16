@@ -8689,8 +8689,9 @@ async def cmd_pc_collection(ctx, member: discord.Member = None):
 async def cmd_pc_card(ctx, member: discord.Member = None):
     """The subject's card from the latest pool snapshot (pool rank, band,
     rating, record, title) and how many prints of them are in circulation.
-    A player who is not in the current pool snapshot, or is banned, has no
-    card to show."""
+    A player who is not in the current pool snapshot has no card to show —
+    since the 2026-09-15 merge the pool is the players who have RUN the mod
+    (and are not banned), so the copy names that cause and not only the ban."""
     target = member or ctx.author
     await _maybe_defer(ctx)
     status, body = await _pc_api("GET", "/internal/pc/card", params={"discord_id": str(target.id)})
@@ -8699,7 +8700,7 @@ async def cmd_pc_card(ctx, member: discord.Member = None):
         await ctx.send(_pc_not_linked(ctx, target)); return
     if status == 404:
         who = "You're" if target == ctx.author else f"{discord.utils.escape_markdown(target.display_name)} is"
-        await ctx.send(f"🎴 {who} not in the current card pool (the pool is re-taken daily; a banned player is out)."); return
+        await ctx.send(f"🎴 {who} not in the current card pool (the pool is the players who have run the mod, re-taken daily; a banned player is out)."); return
     if status != 200 or not isinstance(body, dict):
         await ctx.send("❌ Couldn't fetch that card right now."); return
     rarity = str(body.get("rarity") or "common")

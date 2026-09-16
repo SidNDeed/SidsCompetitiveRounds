@@ -3333,6 +3333,11 @@ async def lifespan(app: FastAPI):
             # Detached one-shot, deliberately NOT under _supervised (its while-True
             # would rerun a returning task forever) and not awaited on the boot path.
             tasks.append(asyncio.create_task(_run_janitor_query_selftest()))
+            # Player Cards: the pool snapshot is retaken HERE when one is due --
+            # a rule change carried by this very deploy, above all -- instead of
+            # at queue_cleanup_loop's first pass, which is 60 s of sleep away.
+            # Awaited, bounded and swallowed; see _pc_snapshot_boot_retake.
+            await _pc_snapshot_boot_retake()
             # Steam pictures (design v2 §4): the sweep runs on the primary only
             # (the standby's postgres is read-only) and only when the renderer
             # stack imported; the health word says which of those it is.
@@ -5585,7 +5590,14 @@ async def calculate_match_xp(
 # cannot fail there: the replica write gate answers 503 to every write before
 # any handler runs. Change it together with the train's entry, for a fold whose
 # deployment must be proven.
-PC_FOLD = "v4.13"
+#
+# v4.14 = the Sept 14 Player Cards feature merge: the pool word becomes the
+# INTERSECTION of the mod-runner and SteamID64 decisions (_PC_POOL_RULE = 3),
+# rank 2 joins the Legendary band, and the client text states the odds the
+# server actually rolls. It carries NO new route, so without this bump a stale
+# standby would answer identically to a fresh one -- the bug #266 shape, which
+# is the case this marker exists for. Both boxes answered v4.13 before it.
+PC_FOLD = "v4.14"
 
 
 @app.get("/api/v1/health", response_model=HealthResponse, tags=["System"])
@@ -5597,13 +5609,14 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               pc_renderer_fp=_pc_renderer_fp(), pc_raqm=_pc_raqm(),
                               pc_steam_sweep=_pc_steam_sweep_word(),
                               pc_steam_render=_pc_steam_render_word(),
-                              pc_fold=PC_FOLD)
+                              pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE))
     except Exception:
         # Report the role even when the database is unreachable: "which box is
         # this" is exactly the question being asked when things are degraded --
-        # and which build it runs is the same question.
+        # and which build it runs, and which pool rule, are the same question.
+        # Both are code constants, so they answer with no database.
         return HealthResponse(status="degraded", database="disconnected", replica=IS_REPLICA,
-                              pc_fold=PC_FOLD)
+                              pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE))
 
 
 LATEST_MOD_VERSION = "1.40.3"
@@ -23897,15 +23910,18 @@ async def get_inventory(steam_id: str, db: AsyncSession = Depends(get_db)):
 #     through a new intent) so a player can never be wedged;
 #   * prints are immutable after insert — the pc_prints_immutable trigger
 #     raises on any UPDATE that touches a frozen column.
-# The pool snapshot is what rolls read: one per UTC day at 00:05, and one at
-# the janitor's next pass when none exists or the latest holds a member whose
-# id is not a SteamID64 (v4.13). A rolled subject is re-checked against the
-# pool word (_PC_POOL_MEMBER_SQL) inside the transaction and re-rolled when
-# the word refuses it now: banned or deleted since the snapshot, or an id that
-# is not a SteamID64 in a snapshot an older api took.
+# The pool snapshot is what rolls read: one per UTC day at 00:05, one on the
+# primary's boot path, and one at the janitor's next pass when none exists or
+# when the latest was taken under an older pool rule than _PC_POOL_RULE
+# (pc_pool_snapshots.rule, migration 316). A rolled subject is re-checked
+# against the pool word (_PC_POOL_MEMBER_SQL) inside the transaction and
+# re-rolled when the word refuses it now: banned or deleted since the
+# snapshot, or -- in a snapshot an older api took -- an id that is not a
+# SteamID64, or a player who has never run the mod.
 # ═══════════════════════════════════════════════════════════════════════════
 import player_cards as _pc
 import pc_portrait as _pcp
+import pc_signature as _pcsig
 try:
     import pc_steam as _pcs   # imports pc_face (Pillow): absent → the Steam sweep never starts, everything else boots
 except Exception:
@@ -23930,15 +23946,33 @@ _PC_POOL_MIN_MATCHES = 5   # the leaderboard's own default: board_rank means "ra
 # character.
 _PC_POOL_STEAM_ID_SQL = "(CASE WHEN p.steam_id ~ '^[0-9]{17}$' THEN CAST(p.steam_id AS bigint) BETWEEN 76561197960265728 AND 76561202255233023 ELSE false END)"
 
+# The pool rule, versioned (Sept 14 batch, S1). A snapshot records the rule it
+# was taken under (pc_pool_snapshots.rule, migration 316); the janitor takes
+# a fresh one as soon as the latest predates this constant, so a rule change
+# reaches the pool at the deploy and not at the next 00:05 UTC. Bump it with
+# every change to the membership text below.
+#   1  every registered, non-banned player (Sept 10-13)
+#   2  only players who have run the mod (mod_seen_at set) and are not banned
+#   3  rule 2 AND the id is a public individual SteamID64 (the Sept 15 merge)
+#
+# Rule 3 is the INTERSECTION of two decisions taken a day apart, not a choice
+# between them: "only players who have run the mod" (product owner,
+# 2026-09-13) and "no Steam ID, no card" (Sid, 2026-09-15). Both restrict who
+# may be a subject, so admitting a member either one refuses would break the
+# later decision; a union was considered and is wrong for that reason.
+_PC_POOL_RULE = 3
+
 # Pool membership: ONE word for every reader that decides who is in the pool
 # now -- the snapshot's pool CTE, the open's live re-check, the public pool
 # summary and the bot's /card (alias `p`, the players row). A member an older
 # snapshot holds and this word refuses is re-rolled at the open and left out
-# of the summary and of /card. The ban clause is _PC_NOT_BANNED_SQL's text,
-# written out because that fragment is defined further down, with the
-# handout; a test pins the two spellings together.
+# of the summary and of /card. `mod_seen_at` is the set-once "has ever run the
+# mod" stamp (bug #78). The ban clause is _PC_NOT_BANNED_SQL's text, written
+# out because that fragment is defined further down, with the handout; a test
+# pins the two spellings together.
 _PC_POOL_MEMBER_SQL = """(p.deleted_at IS NULL
            AND """ + _PC_POOL_STEAM_ID_SQL + """
+           AND p.mod_seen_at IS NOT NULL
            AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL))"""
 
 # board_rank (c3 F): eligibility is the LIVE leaderboard's own count — every
@@ -24087,7 +24121,9 @@ _PC_PRINT_FACE_SELECT = """
            pr.minted_at, pr.snapshot_id, pr.rarity, pr.foil, pr.signed, pr.pool_rank, pr.rating,
            pr.peak_rating, pr.board_rank, pr.series_wins, pr.series_losses, pr.top_card, pr.title,
            pr.source, pr.pack_id, pr.slot, pr.discarded_at, pr.discard_shards,
-           s.display_name AS subject_name, """ + _pc_portrait_resolve_cols("s") + """
+           s.display_name AS subject_name, """ + _pc_portrait_resolve_cols("s") + """,
+           (SELECT array_agg(si.sku ORDER BY si.sku) FROM shop_items si
+             WHERE si.kind = 'nametag' AND si.id = ANY(s.nametag_style_ids)) AS subject_nametag_skus
       FROM pc_prints pr
       JOIN pc_cards c ON c.id = pr.card_id
       JOIN players s ON s.id = c.subject_player_id
@@ -24275,8 +24311,9 @@ async def _pc_take_snapshot(db: AsyncSession, *, reason: str) -> dict:
     colors = await _rank_colors(db)
     pmap, pmap2, pmapf = await _podium_maps_for(db, (r["title_sku"] for r in rows))
     snap_id = (await db.execute(text(
-        "INSERT INTO pc_pool_snapshots (member_count) VALUES (CAST(:n AS integer)) RETURNING id"),
-        {"n": len(rows)})).scalar_one()
+        "INSERT INTO pc_pool_snapshots (member_count, rule) "
+        "VALUES (CAST(:n AS integer), CAST(:rule AS integer)) RETURNING id"),
+        {"n": len(rows), "rule": int(_PC_POOL_RULE)})).scalar_one()
     params = []
     for r in rows:
         rating = _pc_num(r["rating"])
@@ -24309,33 +24346,28 @@ async def _pc_take_snapshot(db: AsyncSession, *, reason: str) -> dict:
 
 
 async def _pc_snapshot_due(db: AsyncSession):
-    """'first' when no snapshot exists; 'rule' when the latest snapshot holds
-    a member whose id _PC_POOL_STEAM_ID_SQL refuses; 'daily' when the last one
-    predates today's 00:05 UTC and that time has passed; else None -- from the
-    DB clock and the durable rows, so it is restart-safe.
+    """'first' when no snapshot exists, 'rule' when the latest one was taken
+    under an older pool rule than _PC_POOL_RULE, 'daily' when the last one
+    predates today's 00:05 UTC and that time has passed, else None -- from the
+    DB clock and the durable MAX(taken_at) / latest rule, so it is restart-safe.
 
-    'rule' fires at the first pass after the v4.13 deploy, and after any
-    snapshot an older api takes: the pool loses its non-SteamID64 members then,
-    not at the next 00:05 UTC. Until that pass the open's live re-check
-    re-rolls such a member, which keeps it from being dealt but does not keep
-    an open from being refused: a pack whose re-rolls all land on such members
-    is rejected pool_changed. A snapshot this code takes holds no such member
-    (its pool CTE reads the same clause), and the one writer of a live
-    players.steam_id, the data deletion, removes that player's memberships in
-    the same transaction under the snapshot lock, so 'rule' does not fire
-    again on this code's own snapshot."""
+    'rule' is what carries a membership change into the pool at the DEPLOY
+    rather than at the next 00:05 UTC: it fires at the first janitor pass after
+    this constant moves, and after any snapshot an older api takes. Until that
+    pass the open's live re-check re-rolls a member the current text refuses,
+    which keeps such a member from being dealt but does not keep an open from
+    being refused -- a pack whose re-rolls all land on refused members is
+    rejected pool_changed before any debit."""
     due = (await db.execute(text("""
         SELECT (SELECT MAX(taken_at) FROM pc_pool_snapshots) AS last_at,
-               EXISTS (SELECT 1 FROM pc_pool_members m JOIN players p ON p.id = m.player_id
-                        WHERE m.snapshot_id = (SELECT MAX(id) FROM pc_pool_snapshots)
-                          AND NOT """ + _PC_POOL_STEAM_ID_SQL + """) AS stale_rule,
+               (SELECT rule FROM pc_pool_snapshots ORDER BY taken_at DESC, id DESC LIMIT 1) AS last_rule,
                now() AS db_now,
                (date_trunc('day', now() AT TIME ZONE 'UTC') + INTERVAL '5 minutes') AT TIME ZONE 'UTC' AS today_at
     """))).mappings().one()
     last_at, db_now, today_at = due["last_at"], due["db_now"], due["today_at"]
     if last_at is None:
         return "first"
-    if due["stale_rule"]:
+    if int(due["last_rule"] or 0) < int(_PC_POOL_RULE):
         return "rule"
     if db_now < today_at or last_at >= today_at:
         return None
@@ -24344,9 +24376,12 @@ async def _pc_snapshot_due(db: AsyncSession):
 
 async def _pc_snapshot_janitor_step() -> None:
     """Janitor: event retention on every step, then a pool snapshot when
-    none exists (first boot after the migration), when the latest one holds a
-    member whose id is not a SteamID64 (v4.13, `_pc_snapshot_due`'s 'rule'),
-    or once per UTC day at or after 00:05 UTC. An advisory try-lock keeps two api processes from
+    none exists (first boot after the migration), when the latest one was
+    taken under an older pool rule than this build carries (`_pc_snapshot_due`'s
+    'rule' -- the members scan that term used to be is gone since the
+    2026-09-15 merge), or once per UTC day at or after 00:05 UTC. Also run once
+    on the primary's boot path (`_pc_snapshot_boot_retake`), which is why it
+    carries no caller state. An advisory try-lock keeps two api processes from
     taking the same day's snapshot twice, and the due state is re-read under
     it (c3 F): a snapshot committed by another taker between the two reads
     is not doubled."""
@@ -24378,13 +24413,53 @@ async def _pc_snapshot_janitor_step() -> None:
         await db.commit()
 
 
+# How long the boot retake below may hold the boot path. Bounded on purpose:
+# the api must come up whether or not this finishes.
+PC_BOOT_SNAPSHOT_TIMEOUT_S = 30.0
+
+
+async def _pc_snapshot_boot_retake() -> None:
+    """The janitor's snapshot step, run ONCE on the primary's boot path.
+
+    Without it the retake waits for queue_cleanup_loop's first pass, and that
+    loop sleeps 60 s at the TOP of its body -- so a deploy that moves
+    _PC_POOL_RULE leaves a window in which `_pc_roll_prints` draws its band
+    SIZES from the previous rule's snapshot while the per-member live re-check
+    applies the new word. Every slot that lands on a member the new word
+    refuses is re-rolled, and a pack whose re-rolls all exhaust is refused
+    `pool_changed`. No value is lost -- the roll is step 4, before the debit,
+    and a rejected open returns the held pack to 'unopened' -- but at a rule
+    that removes most of a band the great majority of opens in that window
+    fail, and players report that as a bug. Taking the snapshot here closes the
+    window instead of scheduling around it.
+
+    It is the janitor's OWN step, not a second taker, so the two cannot drift,
+    and the step's advisory try-lock is what makes it safe with several api
+    processes: the lock is taken inside the transaction that writes the
+    snapshot, the due state is re-read under it, and a process that finds the
+    lock held returns without taking one. A process that arrives after the
+    holder committed gets the lock and re-reads 'due' as None.
+
+    Awaited rather than detached, so the FIRST open already reads the new
+    snapshot -- but bounded and swallowed: a failure or a timeout here prints
+    and boots anyway, and the janitor then retakes at its first pass, which is
+    exactly the behaviour this call improves on. The unhandled case fails
+    toward the old timing, never toward an api that will not start (#276)."""
+    try:
+        await asyncio.wait_for(_pc_snapshot_janitor_step(), timeout=PC_BOOT_SNAPSHOT_TIMEOUT_S)
+    except Exception as e:
+        print(f"[PC-SNAPSHOT] boot retake skipped ({type(e).__name__}: {e}) -- "
+              "the janitor retakes at its first pass")
+
+
 async def _pc_roll_prints(db: AsyncSession, snap_id: int, owner_pid, rng=None):
     """Roll one pack's prints from snapshot ``snap_id``: per print an
     independent band roll (fallback one band down, never up), a uniform
     member of the band, then the subject hold and the live-pool re-check — a
     subject a deletion holds, or one the pool word refuses now (banned or
-    deleted since the snapshot, or an id that is not a SteamID64 in a snapshot
-    an older api took), is re-rolled up to reroll_attempts times. Returns
+    deleted since the snapshot, or -- in a snapshot an older api took -- an id
+    that is not a SteamID64 or a player who has never run the mod), is
+    re-rolled up to reroll_attempts times. Returns
     (prints, None) or (None, reason) with reason pool_empty | pool_changed.
     Nothing here writes; the caller debits and mints only on success."""
     rng = rng or secrets.SystemRandom()
@@ -25194,8 +25269,9 @@ async def pc_pool_summary(db: AsyncSession = Depends(get_db)):
     count, members per band, the collectible top 40 (rank, name, band, board
     rank) and the prices — what the leaderboard already shows, no more.
     Members the pool word refuses now (deleted or banned since the snapshot,
-    or an id that is not a SteamID64 in a snapshot an older api took) are left
-    out, as /card and the pack open leave them out (r6 M3)."""
+    or -- in a snapshot an older api took -- an id that is not a SteamID64 or
+    a player who has never run the mod) are left out, as /card and the pack
+    open leave them out (r6 M3)."""
     snap = (await db.execute(text(
         "SELECT id, taken_at, member_count FROM pc_pool_snapshots ORDER BY id DESC LIMIT 1"))).mappings().first()
     if snap is None:
@@ -25751,6 +25827,12 @@ def _pc_face_inputs(row, ctx):
     title_hex = (ctx["colors"].get(rank_name) or _rank_fallback_color(rank_name)) if rank_name else None
     band = row["rarity"]
     foil, signed = bool(row["foil"]), bool(row["signed"])
+    # The autograph on a signed print wears the subject's CURRENT shop name
+    # styling (Sept 14 batch, S5): resolved here from the face row's SKU
+    # list into one canonical dict, so it is in the spec — and so in the rev
+    # — for signed prints only; an unsigned print's key does not move when
+    # its subject restyles their name.
+    sign = _pcsig.signature_style(row.get("subject_nametag_skus")) if signed else None
     # (no `unranked` local: the spec's `rating` is None for exactly that case,
     # and the rev is now derived from the spec)
     minted = row["minted_at"]
@@ -25761,7 +25843,7 @@ def _pc_face_inputs(row, ctx):
         "pool_rank": int(row["pool_rank"]),
         "board_rank": int(row["board_rank"]) if row["board_rank"] is not None else None,
         "wins": int(row["series_wins"] or 0), "losses": int(row["series_losses"] or 0),
-        "foil": foil, "signed": signed,
+        "foil": foil, "signed": signed, "sign": sign,
         "edition_label": f"{labels.get('pc.edition', 'Edition')} {int(row['edition_id'])}",
         "minted_on": minted.strftime("%Y-%m-%d") if minted is not None else "",
         "print_short": "#" + str(row["print_id"]).replace("-", "")[:6],
@@ -25912,8 +25994,41 @@ _PC_STEAM_COMMITTED = frozenset({"applied", "plate", "touched", "backoff"})   # 
 _PC_STEAM_PROBE_CANDIDATES = 5   # the render probe tries the newest few stored pictures, not one (v4 §3)
 _PC_FACE_EXPIRE_EVERY_S = 3600   # each box ages its own derived-face cache hourly (v4 §4)
 
-# Who the sweep may touch, for the players row aliased p. The claim and the
-# writer's revalidation read the SAME text, so eligibility has one meaning.
+# Who the sweep may touch, for the players row aliased p. The claim, the
+# writer's revalidation and the render probe read the SAME text, so eligibility
+# has one meaning.
+#
+# It carries the pool's mod-runner clause as well as the id clause (2026-09-15
+# coherence r3). The sweep exists to give a CARD SUBJECT a picture, and since
+# the merge the pool admits only players who have run the mod, so an eligibility
+# text carrying the id half alone worked through a population the pool no longer
+# has: measured on the primary 2026-09-16, 3471 stored pictures against 473
+# players the merged word admits -- roughly 89% of a rate-limited Steam budget,
+# and of the writes it makes, spent on players who cannot appear on a card. The
+# claim's ordering only partly self-corrects that (it puts the current
+# snapshot's members ahead of everyone else, but never-attempted rows sort ahead
+# of both), so the word is carried here rather than left to the ordering.
+# What the narrowing takes away is non-members and nothing else: every clause
+# the POOL word carries is a clause of this text, so no player the pool admits
+# loses a picture TO the narrowing; a first-time mod-runner has no
+# pc_steam_portrait_next_at and is therefore claimed on the very next batch;
+# and pictures already stored for players the pool no longer admits are kept --
+# they simply stop being refreshed.
+#
+# The containment does NOT hold the other way, and that is deliberate: this
+# text carries a FIFTH clause the pool word does not, the admin picture lock.
+# A clear with lock_days > 0 NULLs both portrait hashes and pushes the lock out
+# (with pc_steam_portrait_next_at agreeing, v2 §2 -- the lock column is the
+# suppression, the schedule merely follows it), so for that window the subject
+# is a pool member with no picture that the sweep will not refill. That is what
+# the clear was asked for. The next batch after the lock lapses claims the row.
+# The render probe narrows with it, by construction: 422 of the 473 have a
+# stored Steam picture and no game portrait, so its `ok` verdict keeps its
+# candidates.
+# The clause is spelled out rather than reached through _PC_POOL_MEMBER_SQL --
+# that word would bring a second ban clause and would make this a POOL
+# membership reader, which it is not: it decides whom to ask Steam about.
+#
 # A subject the sweep can ask Steam about is one whose id IS a Steam id. The
 # players table also holds opponents met in crossplay lobbies -- sixteen- to
 # twenty-digit ids from other platforms, 844 rows on 2026-09-13 -- and both
@@ -25930,6 +26045,7 @@ _PC_FACE_EXPIRE_EVERY_S = 3600   # each box ages its own derived-face cache hour
 _PC_STEAM_ELIGIBLE_SQL = f"""
     p.deleted_at IS NULL
     AND {_sid64.individual_id_sql("p.steam_id")}
+    AND p.mod_seen_at IS NOT NULL
     AND (p.pc_game_portrait_locked_until IS NULL OR p.pc_game_portrait_locked_until < now())
     AND NOT EXISTS (SELECT 1 FROM player_bans b WHERE b.steam_id = p.steam_id AND b.unbanned_at IS NULL)
 """
@@ -26476,7 +26592,7 @@ async def _pc_steam_render_probe() -> str:
         labels = (await _pc_face_ctx(db, "en"))["labels"]
     spec = {"band": "common", "name": _pcp.public_render_name(sub["display_name"]) or "", "title": None,
             "subtitle": None, "title_rgb": None, "rating": None, "pool_rank": 1, "board_rank": None,
-            "wins": 0, "losses": 0, "foil": False, "signed": False, "edition_label": "Probe",
+            "wins": 0, "losses": 0, "foil": False, "signed": False, "sign": None, "edition_label": "Probe",
             "minted_on": "", "print_short": "", "top_card": False}
     data = await _pcp.in_pool(_pcf.render_face, spec, labels, pbytes, "card")
     if not data or bytes(data[:8]) != b"\x89PNG\r\n\x1a\n":
@@ -27111,15 +27227,24 @@ async def internal_pc_lease_release(
 async def pc_face_png(print_id: str, rev: str, locale: str, size: str, db: AsyncSession = Depends(get_db)):
     """The public face route (v22 §2.2): read-only and offline. Validation
     before anything else (any other shape → 404, no render, no cache entry);
-    one row read in one snapshot — discarded → 404, computed rev ≠ requested
+    one row read in one snapshot — no row → 404, computed rev ≠ requested
     → 404 (the client re-reads its collection); only then the disk cache,
-    else one shared render. Every 200 is immutable."""
+    else one shared render. Every 200 is immutable.
+
+    A DISCARDED print's face is served like a live one (Sept 14 batch, S3):
+    the print stays in its owner's pack history and binder, stamped, and the
+    picture used to vanish from it the moment the client's cache let go
+    (2026-09-13 feedback, item 4). What ends a face here is the row going —
+    the subject's data deletion removes every print of them — or its rev
+    moving (a ban plates the picture). The bot's internal route and the
+    /pc/card answer keep refusing a discarded print: nothing announces or
+    shows one that is not the owner's own history."""
     key = _pcp.face_key(print_id, rev, locale, size)
     if key is None or (locale != "en" and locale not in _pc_served_locales()):
         raise HTTPException(status_code=404, detail="Not found")
     _pc_require_renderer()
     row = await _pc_face_row(db, print_id)
-    if row is None or row["discarded_at"] is not None:
+    if row is None:
         raise HTTPException(status_code=404, detail="Not found")
     ctx = await _pc_face_ctx(db, locale)
     _rev, data = await _pc_render_face(db, row, ctx, size, want=rev)
@@ -27175,11 +27300,16 @@ async def internal_pc_face_preview(
         raise HTTPException(status_code=404, detail={"error": "not_in_pool"})
     loc = _pcp.effective_locale(locale, _pc_served_locales())
     await _pc_steam_prime([player_ref])   # v2 §7: the preview shows the picture, not the plate, on a first look
-    # /card's gate includes the pool's id rule (v4.13): no row comes back for
-    # a subject whose id is not a SteamID64, whichever snapshot is pinned
+    # This decides pool membership -- it answers not_in_pool -- so it carries
+    # the pool's WHOLE word and not one half of it: no row comes back for a
+    # subject the word refuses (deleted, banned, id not a SteamID64, or never
+    # ran the mod), whichever snapshot is pinned. It read _PC_POOL_STEAM_ID_SQL
+    # alone until 2026-09-15, which is the Steam half of the merged rule and
+    # not the rule. The deleted/banned re-check below is that gate said again
+    # over the row `portrait_for` resolves the picture from.
     sub = (await db.execute(text(
         "SELECT p.display_name, " + _PC_PORTRAIT_RESOLVE_COLS +
-        " FROM players p WHERE p.id = CAST(:pid AS uuid) AND " + _PC_POOL_STEAM_ID_SQL), {"pid": player_ref})).mappings().first()
+        " FROM players p WHERE p.id = CAST(:pid AS uuid) AND " + _PC_POOL_MEMBER_SQL), {"pid": player_ref})).mappings().first()
     if sub is None or sub["subject_deleted"] or sub["subject_banned"]:
         raise HTTPException(status_code=404, detail={"error": "not_in_pool"})
     member = (await db.execute(text("""
@@ -27209,7 +27339,7 @@ async def internal_pc_face_preview(
         "pool_rank": int(member["pool_rank"]),
         "board_rank": int(member["board_rank"]) if member["board_rank"] is not None else None,
         "wins": int(member["series_wins"] or 0), "losses": int(member["series_losses"] or 0),
-        "foil": False, "signed": False,
+        "foil": False, "signed": False, "sign": None,
         "edition_label": labels.get("pc.preview_footer", "Preview"), "minted_on": "", "print_short": "",
         "top_card": bool(member["top_card"]),
     }

@@ -6,6 +6,15 @@
 -- card leaves every binder (the api's deletion endpoint now removes the
 -- prints of the deleted player's card from every holder).
 --
+-- SUPERSEDED IN PART (2026-09-15, added here rather than rewritten above --
+-- this file already ran): "every registered player" was the pool as of THIS
+-- migration. Two later decisions narrowed who may be a subject, and the pool
+-- is now their intersection: only players who have run the mod (2026-09-13)
+-- and only ids that are public individual SteamID64s (v4.13, 2026-09-15).
+-- The rule a snapshot was taken under is recorded from 316 on; main.py's
+-- _PC_POOL_MEMBER_SQL is the word itself. What this file DID -- clearing the
+-- two choice columns -- is unchanged by that.
+--
 -- The two columns that carried the choices — pc_opted_out_at (308) and
 -- pc_portrait_source (310) — are no longer read or written by the api.
 -- They are RETAINED, not dropped: the previous api selects them, so a

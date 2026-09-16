@@ -22,8 +22,10 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 import PIL
-from PIL import Image, ImageChops, ImageDraw, ImageFont, features
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, features
 import regex
+
+from pc_signature import RAINBOW as _SIGN_RAINBOW
 
 
 CARD_W, CARD_H = 750, 1050
@@ -1382,21 +1384,273 @@ def _draw_badge(image: Image.Image, band_colour: tuple[int, int, int], labels: d
                  11, 8, scale, _rgba(band_colour), "mm", "bold")
 
 
-def _autograph_fit(name: str, scale: float) -> tuple[str, int]:
-    max_width = _scale_value(380, scale)
-    sizes = _fit_range(96, 40, scale, 4)
-    return _fit_text(name, max_width, sizes, "script")
+# ── the autograph of a signed print, in the subject's shop name styling ──────
+# The style is the spec's `sign` (pc_signature.signature_style: fill solid /
+# gradient / rainbow with its hex codes, a neon glow, the case, the size band
+# and the four flags); None is the plain autograph, drawn exactly as before
+# the Sept 14 batch. The line is built as an alpha MASK (white ink, the bold
+# stroke, underline and strike drawn in) and the colour is laid through it,
+# which is what lets one shaped line carry a gradient or rainbow bands.
+_SIGN_SMALLCAP_RATIO = 0.78     # lower-case letters as capitals at this share of the size
+_SIGN_SPACING_EM = 0.16         # the "spaced" font: the extra advance after each grapheme, in em
+_SIGN_ITALIC_SHEAR = 0.20       # x shift per px of height above the baseline
+_SIGN_GLOW_ALPHA = 150          # the neon halo's peak alpha under the letters
+_SIGN_SIZE_MAX = 96             # the plain fit's start; a size band scales it (pc_signature.SIZES)
+_SIGN_SIZE_MIN = 40
+_SIGN_MARGIN = 10               # card px kept between the line and the autograph rect's left edge
+_SIGN_SEAL_GAP = 12             # card px kept between the line's end and the SIGNED seal
 
 
-def _draw_autograph(image: Image.Image, name: str, scale: float) -> None:
+def _sign_style(style) -> dict | None:
+    return style if isinstance(style, dict) else None
+
+
+def _hex_rgb(code: str) -> tuple[int, int, int]:
+    value = str(code).lstrip("#")
+    return int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
+
+
+def _sign_case(name: str, style) -> str:
+    style = _sign_style(style)
+    if style and style.get("case") == "caps":
+        return name.upper()
+    return name
+
+
+def _sign_pieces(text: str, size: int, style) -> tuple[list[tuple[str, int]], float]:
+    """The line as (text, font px) pieces on one baseline, and the gap laid
+    after each piece but the last: one piece for a plain line; for small
+    caps, stretches of lower-case letters upper-cased at the small size; for
+    the spaced font, one piece per grapheme with the spacing between."""
+    style = _sign_style(style)
+    case = style.get("case") if style else None
+    if case == "smallcaps":
+        small = max(1, int(round(size * _SIGN_SMALLCAP_RATIO)))
+        pieces: list[tuple[str, int]] = []
+        for cluster in graphemes(text):
+            lower = cluster.islower()
+            piece = (cluster.upper() if lower else cluster, small if lower else size)
+            if pieces and pieces[-1][1] == piece[1]:
+                pieces[-1] = (pieces[-1][0] + piece[0], piece[1])
+            else:
+                pieces.append(piece)
+        return pieces, 0.0
+    if case == "spaced":
+        return [(cluster, size) for cluster in graphemes(text)], size * _SIGN_SPACING_EM
+    return [(text, size)], 0.0
+
+
+def _sign_layout(text: str, size: int, style):
+    """Every visual run of the line as (x, role, value, px, advance, ascent,
+    descent, emoji image), with the line's ink width, ascent and descent.
+    A plain style lays out exactly what _render_text_line draws."""
+    pieces, gap = _sign_pieces(text, size, style)
+    runs = []
+    x = 0.0
+    ascent = descent = 0
+    for index, (piece, px) in enumerate(pieces):
+        for role, value, _level in _visual(_runs(piece, "script")):
+            advance, run_ascent, run_descent, image = _run_metrics(role, value, px)
+            runs.append((x, role, value, px, advance, run_ascent, run_descent, image))
+            x += advance
+            ascent = max(ascent, run_ascent)
+            descent = max(descent, run_descent)
+        if index + 1 < len(pieces):
+            x += gap
+    return runs, x, max(1, ascent), descent
+
+
+def _sign_width(text: str, size: int, style) -> float:
+    return _sign_layout(text, size, style)[1]
+
+
+def _sign_ink_height(text: str, size: int, style) -> int:
+    """The line's ink height: the glyphs' own boxes, not the font's nominal
+    ascent and descent (Kalam sets those far outside its letters), plus an
+    underline's depth."""
+    runs = _sign_layout(text, size, style)[0]
+    top = bottom = None
+    for _x, role, value, px, _advance, _asc, _desc, image in runs:
+        if image is not None:
+            run_top, run_bottom = -image.height, 0
+        else:
+            bbox = _font(role, px).getbbox(value, anchor="ls")
+            run_top, run_bottom = bbox[1], bbox[3]
+        top = run_top if top is None else min(top, run_top)
+        bottom = run_bottom if bottom is None else max(bottom, run_bottom)
+    if top is None:
+        return 0
+    style = _sign_style(style)
+    if style and style.get("underline"):
+        bottom = max(bottom, int(round(size * 0.12)) + max(2, int(round(size * 0.055))))
+    return bottom - top
+
+
+def _autograph_box(scale: float) -> tuple[int, int]:
+    """(max width, max height) of the autograph line at this scale. The line
+    is centred on its anchor and has to end before the SIGNED seal, whose
+    rect overlaps the autograph rect's right end (a name that filled the
+    old 380 px measure ran under the seal), and its ink has to fit the
+    rect's height; the 6-degree tilt's corners are the clip's business."""
+    rect, seal = LAYOUT["rects"]["autograph"], LAYOUT["rects"]["seal"]
+    anchor_x = LAYOUT["anchors"]["autograph"][0]
+    half = min(anchor_x - rect[0] - _SIGN_MARGIN, seal[0] - _SIGN_SEAL_GAP - anchor_x)
+    return _scale_value(2 * half, scale), _scale_value(rect[3] - rect[1], scale)
+
+
+def _autograph_fit(name: str, scale: float, style=None) -> tuple[str, int]:
+    """(fitted text, font px): the largest size, from the top of the style's
+    band down, at which the styled line fits the autograph's width and the
+    rect's height; else the floor with the name cut and an ellipsis — the
+    shrink-then-cut rule of _fit_text, on the styled measure. A band above
+    1 only raises where the fit STARTS, so a long or tall name is bounded by
+    the card exactly as a plain one is (product owner: never too big); the
+    band below 1 shrinks the fitted size itself, so it always shows, and
+    never under the floor (never too small)."""
+    style = _sign_style(style)
+    mult = float(style.get("size") or 1.0) if style else 1.0
+    max_width, max_height = _autograph_box(scale)
+    text = _sign_case(name, style)
+    top = max(1, _scale_value(int(round(_SIGN_SIZE_MAX * max(1.0, mult))), scale))
+    floor = max(1, _scale_value(_SIGN_SIZE_MIN, scale))
+
+    def fits(size: int) -> bool:
+        return (_sign_width(text, size, style) <= max_width
+                and _sign_ink_height(text, size, style) <= max_height)
+
+    # The largest size in [floor, top] that fits, by bisection: both measures
+    # grow with the size, and every size is a candidate (a coarser ladder
+    # from a band's own top landed a long name BELOW its plain size).
+    if fits(top):
+        size = top
+    elif fits(floor):
+        low, high = floor, top
+        while high - low > 1:
+            middle = (low + high) // 2
+            if fits(middle):
+                low = middle
+            else:
+                high = middle
+        size = low
+    else:
+        size = None
+    if size is None:
+        clusters = graphemes(text)
+        while clusters and _sign_width("".join(clusters) + "...", floor, style) > max_width:
+            clusters.pop()
+        fitted = ("".join(clusters) + "...", floor)
+    else:
+        fitted = (text, size)
+    if mult < 1.0:
+        fitted = (fitted[0], max(floor, int(round(fitted[1] * mult))))
+    return fitted
+
+
+def _sign_mask(fitted: str, size: int, style, stroke: int):
+    """The line as an RGBA mask (white ink; the stroke, underline and strike
+    drawn in), the emoji runs to lay over it in colour, the ink width and the
+    baseline's y inside the mask."""
+    runs, width, ascent, descent = _sign_layout(fitted, size, style)
+    pad = stroke + 2
+    mask = Image.new("RGBA", (int(math.ceil(width)) + 2 * pad + 2, ascent + descent + 2 * pad), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(mask)
+    baseline = pad + ascent
+    white = (255, 255, 255, 255)
+    emoji = []
+    for x, role, value, px, _advance, _asc, _desc, image in runs:
+        if image is not None:
+            emoji.append((int(round(pad + x)), max(0, baseline - image.height), image))
+            continue
+        draw.text((pad + x, baseline), value, font=_font(role, px), fill=white, anchor="ls",
+                  stroke_width=stroke, stroke_fill=white)
+    style = _sign_style(style)
+    if style and width > 0:
+        thickness = max(2, int(round(size * 0.055)))
+        left, right = pad, pad + int(math.ceil(width))
+        if style.get("underline"):
+            top = baseline + int(round(size * 0.12))
+            draw.rectangle((left, top, right, top + thickness), fill=white)
+        if style.get("strike"):
+            top = baseline - int(round(size * 0.30))
+            draw.rectangle((left, top, right, top + thickness), fill=white)
+    return mask, emoji, width, baseline
+
+
+def _sign_fill(style, size_wh: tuple[int, int], alpha: Image.Image, characters: int,
+               default_rgb: tuple[int, int, int]) -> Image.Image:
+    """The colour under the mask: solid, a left-to-right gradient across the
+    ink, or rainbow bands, one per non-space character of the line."""
+    style = _sign_style(style)
+    width, height = size_wh
+    fill = style.get("fill") if style else "solid"
+    bbox = alpha.getbbox()
+    if fill == "gradient" and bbox and style.get("rgb") and style.get("rgb2"):
+        start, end = _hex_rgb(style["rgb"]), _hex_rgb(style["rgb2"])
+        left, right = bbox[0], max(bbox[0] + 1, bbox[2])
+        ramp = Image.new("L", (width, height), 0)
+        ramp.paste(255, (right, 0, width, height))
+        ramp.paste(Image.linear_gradient("L").rotate(90, expand=True).resize((right - left, height)), (left, 0))
+        return Image.composite(Image.new("RGBA", (width, height), end + (255,)),
+                               Image.new("RGBA", (width, height), start + (255,)), ramp)
+    if fill == "rainbow" and bbox:
+        bands = Image.new("RGBA", (width, height), _SIGN_RAINBOW[0] + (255,))
+        draw = ImageDraw.Draw(bands)
+        count = max(1, characters)
+        left, right = bbox[0], max(bbox[0] + 1, bbox[2])
+        band = (right - left) / count
+        for index in range(count):
+            x0 = left + int(round(index * band))
+            x1 = right if index + 1 == count else left + int(round((index + 1) * band))
+            draw.rectangle((x0, 0, max(x0, x1 - 1), height), fill=_SIGN_RAINBOW[index % len(_SIGN_RAINBOW)] + (255,))
+        draw.rectangle((right, 0, width, height), fill=_SIGN_RAINBOW[(count - 1) % len(_SIGN_RAINBOW)] + (255,))
+        return bands
+    rgb = _hex_rgb(style["rgb"]) if style and style.get("rgb") else tuple(int(v) for v in default_rgb)
+    return Image.new("RGBA", (width, height), rgb + (255,))
+
+
+def _draw_autograph(image: Image.Image, name: str, scale: float, style=None) -> None:
+    style = _sign_style(style)
     box = _scale_rect(LAYOUT["rects"]["autograph"], scale)
     center = tuple(_scale_value(value, scale) for value in LAYOUT["anchors"]["autograph"])
-    fitted, font_size = _autograph_fit(name, scale)
+    fitted, font_size = _autograph_fit(name, scale, style)
+    stroke = max(1, int(round(font_size * 0.03))) if style and style.get("bold") else 0
+    mask, emoji, _width, baseline = _sign_mask(fitted, font_size, style, stroke)
+    alpha = mask.getchannel("A")
+    characters = sum(1 for cluster in graphemes(fitted) if not cluster.isspace())
+    ink = _sign_fill(style, mask.size, alpha, characters, LAYOUT["colours"]["sign"])
+    ink.putalpha(alpha)
+    for x, y, run_image in emoji:
+        ink.alpha_composite(run_image, (x, y))
+    extra = 0
+    if style and style.get("italic"):
+        # Lean right: widen, then map every row's x back by its height above
+        # the baseline (x_src = x_dst + shear * (y - baseline)).
+        extra = int(math.ceil(_SIGN_ITALIC_SHEAR * ink.height))
+        wide = Image.new("RGBA", (ink.width + extra, ink.height), (0, 0, 0, 0))
+        wide.alpha_composite(ink, (0, 0))
+        ink = wide.transform(wide.size, Image.Transform.AFFINE,
+                             (1, _SIGN_ITALIC_SHEAR, -_SIGN_ITALIC_SHEAR * baseline, 0, 1, 0),
+                             resample=Image.Resampling.BICUBIC)
+    alpha = ink.getchannel("A")
+    # The line's box centred on the anchor, as the plain "mm" draw centred it.
+    left = int(round(center[0] - (ink.width - extra) / 2))
+    top = int(round(center[1] - ink.height / 2))
     layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
     shadow = _scale_value(4, scale)
-    _draw_text(layer, (center[0] + shadow, center[1] + shadow), fitted, font_size,
-               (0, 0, 0, 200), "mm", "script")
-    _draw_text(layer, center, fitted, font_size, _rgba(LAYOUT["colours"]["sign"]), "mm", "script")
+    shade = Image.new("RGBA", ink.size, (0, 0, 0, 255))
+    shade.putalpha(ImageChops.multiply(alpha, Image.new("L", ink.size, 200)))
+    layer.alpha_composite(shade, (left + shadow, top + shadow))
+    if style and style.get("glow"):
+        # The halo in the glow's own colour (a neon's, or a plain glow's),
+        # under the shadow-free ink: blurred alpha, capped, then coloured.
+        halo = Image.new("L", image.size, 0)
+        halo.paste(alpha, (left, top))
+        halo = halo.filter(ImageFilter.GaussianBlur(max(2.0, font_size * 0.10)))
+        halo = halo.point(lambda value: value * _SIGN_GLOW_ALPHA // 255)
+        glow = Image.new("RGBA", image.size, _hex_rgb(style["glow"]) + (255,))
+        glow.putalpha(halo)
+        layer.alpha_composite(glow)
+    layer.alpha_composite(ink, (left, top))
     layer = layer.rotate(6, resample=Image.Resampling.BICUBIC, center=center)
     clipped = Image.new("RGBA", image.size, (0, 0, 0, 0))
     clipped.alpha_composite(layer)
@@ -1487,7 +1741,7 @@ def render_face(spec: dict, labels: dict, portrait_png: bytes | None, size: str)
     if bool(spec.get("top_card")):
         _draw_badge(body, colour, effective, scale, size)
     if bool(spec.get("signed")):
-        _draw_autograph(body, display_name, scale)
+        _draw_autograph(body, display_name, scale, spec.get("sign"))
         _draw_seal(body, effective, scale, size)
 
     chip_text = (0, 0, 0) if _luminance(colour) > 150 else (255, 255, 255)

@@ -6,8 +6,10 @@ only move rows and money and the tests exercise the rule itself:
 
   * ``PC_ECONOMY`` — every tunable in one place (prices, cap, odds, shard
     values, band edges, earned-pack odds).
-  * ``rarity_for_rank`` — the fixed bands: Legendary = pool rank 1, Epic 2-10,
-    Rare 11-20, Uncommon 21-40, Common 41+.
+  * ``rarity_for_rank`` — the fixed bands: Legendary = pool ranks 1-2, Epic
+    3-10, Rare 11-20, Uncommon 21-40, Common 41+. (Legendary was rank 1 alone
+    until the Sept 14 batch; this line is recomputed from ``band_max_rank`` by
+    test_player_cards_rules.py, so it cannot go stale again.)
   * ``roll_slot`` — one print: an independent band roll, then the band
     actually used (the rolled band, else ONE band down, then further down —
     never up; None when the pool is empty), then a uniform index inside it.
@@ -19,8 +21,12 @@ only move rows and money and the tests exercise the rule itself:
     in v4.13).
   * the canonical strings every signed request carries.
 
-No pity, no floors, no streaks; prints are generated at the pull and never
-change afterwards (the ``pc_prints_immutable`` trigger enforces the rows).
+No pity, no floors, no streaks. A print's rolled fields are fixed at the pull
+and no api path writes them again: the ``pc_prints_immutable`` trigger refuses
+any UPDATE that touches one. The single documented exception is a migration
+that disables that trigger for its own transaction and proves it re-armed
+before committing -- ``backend/sql/321_pc_rank2_legendary.sql``, the one-time
+band conversion of the rank-2 prints minted while Legendary was rank 1 alone.
 """
 
 import hashlib
@@ -41,12 +47,19 @@ PC_ECONOMY = {
     # Shards a discarded print is worth — by the PRINT's rarity, nothing else.
     "shards": {"common": 5, "uncommon": 15, "rare": 40, "epic": 150, "legendary": 600},
     # Highest pool rank of each band; Common is everything past Uncommon.
-    "band_max_rank": {"legendary": 1, "epic": 10, "rare": 20, "uncommon": 40},
+    # Legendary is the top TWO since the Sept 14 batch (one before): the pool
+    # is now the players who have run the mod, and its second place is a
+    # Legendary card too (product owner, 2026-09-13). The rank-2 prints minted
+    # before this line are converted by backend/sql/321_pc_rank2_legendary.sql,
+    # which must run AFTER the deploy that carries it (#236).
+    "band_max_rank": {"legendary": 2, "epic": 10, "rare": 20, "uncommon": 40},
     # Earned packs: per ranked mode, the percent chance that the earned-pack
     # roll of a won ranked series (a won ranked FFA match) hits; a mode not
     # listed earns none. One roll whatever the score line: there is no 2-0
-    # sweep roll (removed in v4.13, 2026-09-14). Pack rows the sweep roll wrote
-    # before then keep kind 'sweep'.
+    # sweep roll (removed in v4.13, 2026-09-14, review round 14 -- the Sept 14
+    # branch still carried the (win, sweep) tuple form and the flat odds are
+    # the later decision). Pack rows the sweep roll wrote before then keep
+    # kind 'sweep'.
     "earned_pct": {"1v1": 20.0, "team": 20.0, "ovt": 20.0, "ffa": 20.0},
     # A rolled subject that left the pool since the snapshot is re-rolled this
     # many times before the open is rejected as pool_changed (before any debit).
@@ -56,9 +69,12 @@ PC_ECONOMY = {
 
 PACK_PAY = ("gold", "shards")
 # No opt-out and no picture choice (2026-09-13): no player leaves the pool by
-# choice. Every registered, unbanned player whose id is a SteamID64 is a card
-# subject (v4.13), every card carries a picture, and deleting all data is the
-# one way such a player's card leaves the binders.
+# choice. Who IS a subject is main._PC_POOL_MEMBER_SQL's word, and since the
+# 2026-09-15 merge (_PC_POOL_RULE = 3) that word is the INTERSECTION of two
+# decisions: an unbanned, undeleted player who has run the mod (mod_seen_at
+# set, 2026-09-13) AND whose id is a public individual SteamID64 (v4.13).
+# Every card carries a picture, and deleting all data is the one way such a
+# player's card leaves the binders.
 SETTINGS_KEYS = ("collection_public", "announce")
 
 

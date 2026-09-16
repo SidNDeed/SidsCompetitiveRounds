@@ -1169,6 +1169,29 @@ def test_face_inputs_draw_the_public_name_and_key_every_input():
     assert main._pc_face_inputs(_face_row(), _ctx(cat_rev="1" * 16))[3] != rev
 
 
+def test_face_inputs_carry_the_signature_style_for_signed_prints_only():
+    """Sept 14 batch, S5: the subject's nametag SKUs become the spec's `sign`
+    on a signed print (so the rev moves with a restyle), and nothing on an
+    unsigned one (so its immutable URL never moves for a restyle)."""
+    skus = ["nametag_bold", "nametag_neon_cyan"]
+    plain = main._pc_face_inputs(_face_row(signed=True), _ctx())
+    styled = main._pc_face_inputs(_face_row(signed=True, subject_nametag_skus=skus), _ctx())
+    assert plain[0]["sign"] is None and styled[0]["sign"] == main._pcsig.signature_style(skus)
+    assert styled[0]["sign"]["rgb"] == "#1FF0FF" and styled[0]["sign"]["bold"] is True
+    assert styled[3] != plain[3]
+    unsigned = main._pc_face_inputs(_face_row(), _ctx())
+    assert main._pc_face_inputs(_face_row(subject_nametag_skus=skus), _ctx()) == unsigned
+    assert unsigned[0]["sign"] is None
+    # the floating name has no still form: the same style, the same rev
+    assert main._pc_face_inputs(_face_row(signed=True, subject_nametag_skus=skus + ["nametag_float"]), _ctx())[3] == styled[3]
+    # the SKU list rides the face row's own select: one read, no second query
+    select = main._PC_PRINT_FACE_SELECT
+    assert "AS subject_nametag_skus" in select and "si.kind = 'nametag'" in select and "ANY(s.nametag_style_ids)" in select
+    assert "array_agg(si.sku ORDER BY si.sku)" in select
+    # the probe and the preview draw unsigned faces: no style, the same key set as a print's spec
+    assert set(styled[0]) == set(main._pc_face_inputs(_face_row(), _ctx())[0])
+
+
 def test_render_face_answers_none_on_a_revision_mismatch_before_any_render(monkeypatch, tmp_path):
     face = _Face()
     monkeypatch.setattr(main, "_pcf", face)
@@ -1217,9 +1240,16 @@ def test_public_face_route_validates_shape_and_locale_before_the_row_read(monkey
     resp = _run(main.pc_face_png(str(PID), rev, "uk", "card", db=db))
     assert resp.media_type == "image/png" and resp.headers["cache-control"] == "public, max-age=31536000, immutable"
     assert resp.body == b"\x89PNGcard" and resp.headers["content-length"] == str(len(resp.body))
+    # A discarded print's face is served like a live one (Sept 14 batch, S3):
+    # the owner's pack history and binder keep the picture under the stamp...
     row["discarded_at"] = NOW
+    resp = _run(main.pc_face_png(str(PID), rev, "uk", "card", db=db))
+    assert resp.media_type == "image/png" and resp.body == b"\x89PNGcard"
+    # ...and the bot's internal route still refuses it: nothing announces or
+    # shows a discarded print outside its owner's own history.
+    monkeypatch.setattr(main, "_require_internal_key", lambda k: None)
     with pytest.raises(HTTPException) as ex:
-        _run(main.pc_face_png(str(PID), rev, "uk", "card", db=db))
+        _run(main.internal_pc_face_print(str(PID), "uk", "card", "k", Scripted({})))
     assert ex.value.status_code == 404
 
 

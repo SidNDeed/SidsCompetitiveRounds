@@ -860,9 +860,33 @@ def test_the_helper_closure_stays_affordable():
     # /api/v1/pc/packs/open. What it gained are bindings that route runs: the
     # shared SteamID64 check (is_individual_id and its three constants, +4, in
     # place of the two id regexes, -2) and the pool membership word with its
-    # Steam id clause (+2). The worst bound moves to 300 for that reason and
-    # no other; the median and p90 bounds stay.
-    assert code_worst <= 300, f"worst code closure {code_worst} of {total}"
+    # Steam id clause (+2). That moved the worst bound to 300.
+    #
+    # Sept 14 batch merge (2026-09-15): measured 21 / 64 / 315 of 2319 indexed
+    # bindings, the worst still POST /api/v1/pc/packs/open. The same walk with
+    # the same route seeds over MAIN's backend/api gives 21 / 64 / 282, so the
+    # merge's own delta is +33 on the worst route and 0 on the median and p90.
+    #
+    # All 33 are bindings that DID NOT EXIST on main, and nothing main reached
+    # stopped being reached: 18 in pc_face (the autograph layout -- _autograph_box,
+    # _hex_rgb, _sign_case/_fill/_ink_height/_layout/_mask/_pieces/_style/_width
+    # and the eight _SIGN_* constants) and 15 in the new pc_signature module
+    # (signature_style, _hex and the style tables it decides from). That is the
+    # signed-print face work, which this route runs when an opened pack mints a
+    # signed print.
+    #
+    # It is NOT the pool predicate, and the pool predicate cannot move this
+    # number: the clause the merge added to _PC_POOL_MEMBER_SQL
+    # (`p.mod_seen_at IS NOT NULL`) is literal SQL inside a data binding and
+    # names nothing the walk can follow. The +2 the v4.13 note above counts is
+    # the two data bindings themselves, and there are still exactly two.
+    #
+    # The bound moves to 335 -- the same ~6% headroom over the measurement that
+    # 300 gave over 282 -- so it goes on failing a walk that has gone wrong (the
+    # data-into-data hub case measured worst 279 at MEDIAN 179, i.e. a runaway
+    # shows up in the median long before it shows up here) rather than on a
+    # feature module a route genuinely runs. The median and p90 bounds stay.
+    assert code_worst <= 335, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
     # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is
@@ -881,9 +905,19 @@ def test_the_helper_closure_stays_affordable():
     # Player Cards v4.13 (2026-09-15): the same route measured 394 on e894c45
     # and 401 on the v4.13 fold -- the code bindings above plus the three
     # import lines they are reached through (steamid64 in main, pc_steam and
-    # pc_portrait); p90 126 -> 129, median 64. The bound moves to 420 for that
-    # reason and no other.
-    assert all_worst <= 420, f"worst closure {all_worst} of {total}"
+    # pc_portrait); p90 126 -> 129, median 64. That moved the bound to 420.
+    # Sept 14 batch merge (2026-09-15): the same route measured 439, against 401
+    # for the same walk over MAIN's backend/api -- +38, and median 65 / p90 129
+    # both unmoved. Of the 38, 33 are the signed-print face code bindings
+    # accounted for at the code bound above; 4 are the import lines they arrive
+    # through (main._pcsig, pc_face.ImageFilter, pc_face._SIGN_RAINBOW,
+    # pc_signature.Iterable); and 1 is main.case -- sqlalchemy's `case`, already
+    # imported, newly reached because the new signature code writes the bare
+    # name `case` and the walk folds in EVERY module that binds a shared name.
+    # That last one widens the reviewed surface rather than narrowing it, which
+    # is the only direction this gate may be wrong in. The bound moves to 460,
+    # the same ~5% headroom 420 gave over 401 and 400 gave over 383.
+    assert all_worst <= 460, f"worst closure {all_worst} of {total}"
 
 
 def _route_covering(module, name):

@@ -41,11 +41,30 @@ class _Rng:
 # ── bands ──
 
 @pytest.mark.parametrize("rank,rarity", [
-    (1, "legendary"), (2, "epic"), (10, "epic"), (11, "rare"), (20, "rare"),
+    (1, "legendary"), (2, "legendary"), (3, "epic"), (10, "epic"), (11, "rare"), (20, "rare"),
     (21, "uncommon"), (40, "uncommon"), (41, "common"), (4818, "common"),
 ])
 def test_band_edges_are_the_fixed_ones(rank, rarity):
     assert pc.rarity_for_rank(rank) == rarity
+
+
+def test_the_modules_own_band_sentence_is_recomputed_from_the_edges():
+    """The module docstring states the bands in words, and it said "Legendary =
+    pool rank 1" for a day after the Sept 14 batch made the top TWO Legendary --
+    a comment asserting a mechanism the code below had stopped implementing
+    (found 2026-09-15). The sentence is now built from band_max_rank, so the
+    prose cannot outlive the edges it describes."""
+    edges = pc.PC_ECONOMY["band_max_rank"]
+    sentence = (f"the fixed bands: Legendary = pool ranks 1-{edges['legendary']}, "
+                f"Epic {edges['legendary'] + 1}-{edges['epic']}, "
+                f"Rare {edges['epic'] + 1}-{edges['rare']}, "
+                f"Uncommon {edges['rare'] + 1}-{edges['uncommon']}, "
+                f"Common {edges['uncommon'] + 1}+.")
+    assert sentence in " ".join(pc.__doc__.split()), sentence
+    # ...and the words match what the function actually returns at each edge
+    for name in ("legendary", "epic", "rare", "uncommon"):
+        assert pc.rarity_for_rank(edges[name]) == name, name
+    assert pc.rarity_for_rank(edges["uncommon"] + 1) == "common"
 
 
 def test_tier_odds_sum_to_one_hundred():

@@ -21,7 +21,7 @@ from PIL import Image
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.normpath(os.path.join(HERE, "..", "api")))
 
-from test_player_cards_server import Scripted, _run  # noqa: E402
+from test_player_cards_server import Scripted, _main_code, _run  # noqa: E402
 from test_pc_routes import PID, STEAM, NOW, _Req, _idx  # noqa: E402
 import database  # noqa: E402
 import main  # noqa: E402
@@ -372,6 +372,55 @@ def test_the_sweep_never_claims_a_non_steam_id():
                 pc_steam.profile_xml_url(text)
             with pytest.raises(ValueError):
                 pc_steam.summaries_url("k", [STEAM, text])
+
+
+def test_the_sweep_only_asks_steam_about_players_the_pool_can_put_on_a_card():
+    """2026-09-15 coherence r3: the sweep exists to give a CARD SUBJECT a picture, so its eligibility text
+    carries the pool's mod-runner clause and not the id clause alone. Measured on the primary 2026-09-16,
+    while the text still carried the id half by itself: 3471 stored pictures against the 473 players the
+    merged word admits -- roughly 89% of a rate-limited Steam budget, and of the writes it makes, spent on
+    rows that cannot appear on a card. The claim's ordering only partly self-corrects that: it puts the
+    current snapshot's members ahead of everyone else, but never-attempted rows sort ahead of BOTH.
+
+    The containment runs ONE way: every clause the POOL word carries is a clause of the sweep's text, in the
+    pool word's own spelling, so the narrowing drops non-members and nothing else and the two texts cannot
+    drift into meaning different things. The reverse is FALSE and deliberate -- the sweep carries a FIFTH
+    clause the pool word does not, the admin picture lock -- so "every pool member is eligible", which this
+    docstring claimed until 2026-09-16, is not true of a subject inside a clear's lock window: that subject is
+    a pool member with both portrait hashes NULLed and no refill coming, which is exactly what the clear was
+    asked for. Checked below as containment in one direction PLUS an exact account of the extra clause, so
+    neither text can gain a clause nobody named here."""
+    import re
+    eli = main._PC_STEAM_ELIGIBLE_SQL
+    word = main._PC_POOL_MEMBER_SQL
+    assert eli.count("p.mod_seen_at IS NOT NULL") == 1
+    shared = ("p.deleted_at IS NULL", "p.mod_seen_at IS NOT NULL",
+              steamid64.individual_id_sql("p.steam_id"),
+              main._PC_NOT_BANNED_SQL.format(a="p"))
+    for clause in shared:
+        assert word.count(clause) == 1 and eli.count(clause) == 1, clause
+    # the fifth clause, named: in the sweep, absent from the pool word
+    lock = "(p.pc_game_portrait_locked_until IS NULL OR p.pc_game_portrait_locked_until < now())"
+    assert eli.count(lock) == 1 and lock not in word
+    # ...and there is no SIXTH in either text. Strike out every clause named
+    # above and only the conjunction scaffolding may remain, so a clause added
+    # to either text -- which is how a pool member could start being skipped
+    # without anyone saying so -- leaves a residue here.
+    def residue(sql_text, clauses):
+        for c in clauses:
+            sql_text = sql_text.replace(c, "", 1)
+        return re.sub(r"[\s()]|AND", "", sql_text)
+    assert residue(eli, shared + (lock,)) == "", residue(eli, shared + (lock,))
+    assert residue(word, shared) == "", residue(word, shared)
+    # the sweep is NOT a pool membership reader: it decides whom to ask Steam about, and
+    # interpolating the whole word would bring a second ban clause with it
+    assert "_PC_POOL_MEMBER_SQL" not in inspect.getsource(main._pc_steam_claim)
+    # ...and eligibility keeps ONE meaning: the definition plus its three readers, no fourth text
+    code = _main_code()
+    assert code.count("_PC_STEAM_ELIGIBLE_SQL") == 4
+    assert code.count("_PC_STEAM_ELIGIBLE_SQL = ") == 1
+    for fn in (main._pc_steam_claim, main._pc_steam_write, main._pc_steam_render_probe):
+        assert inspect.getsource(fn).count("_PC_STEAM_ELIGIBLE_SQL") == 1, fn.__name__
 
 
 def test_a_non_steam_id_costs_only_its_own_row_on_both_paths(monkeypatch):
@@ -751,13 +800,44 @@ def test_the_render_probe_composites_a_stored_steam_picture_or_says_why_not(monk
     assert _run(main._pc_steam_render_probe()) == "failed:bytes"
 
 
+TRAIN_BATCH = "sept14-gacha"   # the release-train entry THIS batch ships under
+
+
+def _release_train():
+    """The release train module itself, imported rather than string-sliced.
+
+    It is local to the operating seat, so a machine without it skips. Reading
+    the real BATCHES dict is what lets this test say WHICH entry an expectation
+    sits in: a slice between two other batch names cannot, and one round put
+    this batch's expectations inside the entry of a batch that had already
+    shipped, where the text still satisfied the slice."""
+    import importlib.util
+    train = REPO / "scripts" / "deploy" / "release_train.py"
+    if not train.exists():
+        pytest.skip("the release train is local to the operating seat")
+    spec = importlib.util.spec_from_file_location("release_train_under_test", train)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod, train.read_text(encoding="utf-8")
+
+
+def _role_expect(entry, key):
+    """Every health_expect entry for `key` that states a value per role."""
+    return [e for e in entry["health_expect"] if isinstance(e, dict) and e.get("key") == key]
+
+
 def test_health_carries_the_fold_marker_the_release_train_asserts_on_both_roles():
     """v4.13 §8: `pc_fold` exists only to be probed (#306). The release train requires it on BOTH api boxes: on
-    the standby its new-route check and the sweep word read the same on the build before this fold, and the replica
-    write gate answers 503 to every write before any handler, so a write probe cannot fail there. The marker is on
-    the connected and on the degraded answer, declared on the response model (an undeclared keyword never reaches
-    the response), read by nothing else, and the value the train expects for each role; the train's picture signal
-    requires more than the 183 pictures stored before this fold (R19), so that signal can fail."""
+    the standby the sweep word reads the same on the build before this fold, and the replica write gate answers
+    503 to every write before any handler, so a write probe cannot fail there. The marker is on the connected and
+    on the degraded answer, declared on the response model (an undeclared keyword never reaches the response),
+    read by nothing else, and the value the train expects for each role.
+
+    The Sept 14 batch adds NO new route, so the fold marker and the pool rule are together the train's only
+    build discriminator, and both are asserted here to sit in THIS batch's own entry -- exactly once each, on
+    both roles. The already-shipped Sept 12 entry is asserted to carry neither: an expectation parked in a
+    finished batch's entry makes that batch's re-verification fail against live boxes and attributes the failure
+    to the wrong release."""
     fold = main.PC_FOLD
     assert isinstance(fold, str) and fold.startswith("v") and fold == fold.strip()
 
@@ -772,15 +852,110 @@ def test_health_carries_the_fold_marker_the_release_train_asserts_on_both_roles(
     assert (up.status, down.status) == ("ok", "degraded")
     assert up.model_dump()["pc_fold"] == fold                  # the connected answer, through the model
     assert down.model_dump()["pc_fold"] == fold                # the degraded answer too: which build is this box
+    assert up.model_dump()["pc_pool_rule"] == main._PC_POOL_RULE
+    assert down.model_dump()["pc_pool_rule"] == main._PC_POOL_RULE
     assert MAIN_SRC.count("PC_FOLD") == 3                      # defined once, reported twice, read by nothing else
-    train = REPO / "scripts" / "deploy" / "release_train.py"
-    if not train.exists():
-        pytest.skip("the release train is local to the operating seat")
-    src = train.read_text(encoding="utf-8")
-    batch = src[src.index('"sept12-gacha": {'):src.index('"sept10-batch": {')]
-    assert batch.count('"pc_fold"') == 1
-    assert '{"key": "pc_fold", "primary": "%s", "standby": "%s"},' % (fold, fold) in batch
-    assert '"SELECT count(*) FROM players WHERE pc_steam_portrait_hash IS NOT NULL;", 184),' in batch
+
+    rt, src = _release_train()
+    # A duplicate key in the dict literal would be silently shadowed by the
+    # later one, and the structural reads below would never see the first.
+    assert src.count('"%s": {' % TRAIN_BATCH) == 1
+    assert TRAIN_BATCH in rt.BATCHES
+    entry = rt.BATCHES[TRAIN_BATCH]
+
+    # ...and the entry BINDS: an unreachable entry would satisfy every read above
+    rt.select_batch(TRAIN_BATCH)
+    assert rt.BRANCH == "claude/sept14-gacha-features"
+    assert rt.NEW_ROUTES == []          # no new route: the markers are the whole discriminator
+    assert rt.CODE_MARKERS == ["pc_fold", "pc_pool_rule"]
+    assert rt.SMOKE_ROUTE and rt.SMOKE_ROUTE not in rt.NEW_ROUTES
+    assert dict(rt.edge_markers()) == {"pc_fold": fold, "pc_pool_rule": main._PC_POOL_RULE}
+
+    # the fold marker, exactly once, on both roles, in THIS batch's entry
+    assert _role_expect(entry, "pc_fold") == [{"key": "pc_fold", "primary": fold, "standby": fold}]
+    # the merged pool rule is the second, independent signal for the same
+    # question (#438): with no new route a stale standby would otherwise answer
+    # exactly like a fresh one (the bug #266 shape)
+    assert _role_expect(entry, "pc_pool_rule") == [
+        {"key": "pc_pool_rule", "primary": main._PC_POOL_RULE, "standby": main._PC_POOL_RULE}]
+
+    # 321's own work, read back as a positive signal the feature EMITS (#438):
+    # not "3 prints" but "every live rank-2 print", so a half-applied run reads 0
+    # and a print discarded before the run (which 321 accepts, and which keeps
+    # its epic payout) does not redden a correct deploy.
+    rank2 = [q for _label, q, _min in entry["positive_sql"] if "pc_prints" in q]
+    assert len(rank2) == 1 and "NOT EXISTS" in rank2[0] and "discarded_at IS NULL" in rank2[0]
+
+    # the SHIPPED batch keeps its own expectations and gains none of ours
+    shipped = rt.BATCHES["sept12-gacha"]
+    assert _role_expect(shipped, "pc_fold") == [{"key": "pc_fold", "primary": "v4.13", "standby": "v4.13"}]
+    assert _role_expect(shipped, "pc_pool_rule") == []
+    assert [q for _l, q, _m in shipped["positive_sql"]] == [
+        "SELECT count(*) FROM players WHERE pc_steam_portrait_hash IS NOT NULL;"]
+
+
+def test_the_release_train_runs_a_batch_that_adds_no_route(monkeypatch):
+    """A batch that adds no route is a first-class case, not a crash.
+
+    `new_routes` was indexed unguarded (`NEW_ROUTES[0]` for the smoke route and for both edge probes) and mapped
+    over in code_state, where `all([])` is True -- so an empty list raised IndexError before the train started,
+    and where it did not, it made a box read as the new build and the old build at the same time. This drives the
+    whole surface with no network: every batch binds, the verdicts come out of the health markers instead, and a
+    no-route batch that names no marker is REFUSED rather than run with gates that cannot fail."""
+    rt, _src = _release_train()
+
+    # every batch in the table binds -- the new one and the three that shipped
+    for name in sorted(rt.BATCHES):
+        rt.select_batch(name)
+        assert rt.SMOKE_ROUTE, name
+        assert rt.NEW_ROUTES or rt.CODE_MARKERS, name   # one discriminator or the other, never neither
+
+    rt.select_batch(TRAIN_BATCH)
+    fold, rule = main.PC_FOLD, main._PC_POOL_RULE
+    new_build = {"pc_fold": fold, "pc_pool_rule": rule}
+    old_build = {"pc_fold": "v4.13"}
+    monkeypatch.setattr(rt, "http_code", lambda host, path, **kw: "200")
+
+    for body, want in ((new_build, (True, False)),      # both markers matched: the new build
+                       (old_build, (False, True)),      # neither matched: the old build
+                       ({"pc_fold": fold}, (False, False)),   # one of each: UNKNOWN, never a build
+                       ({}, (False, False))):           # health unreadable: UNKNOWN, not "old"
+        monkeypatch.setattr(rt, "health_json", lambda host, _b=body: _b)
+        for host in (rt.PRIMARY, rt.STANDBY):
+            ok, present, absent, readings = rt.code_state(host)
+            assert (present, absent) == want, (host, body)
+            # the probe still REPORTS on both boxes, and names what it read:
+            # one line per marker, or the reason there were no marker lines
+            assert ok, host
+            assert readings == (["pc_fold=%r (want %r)" % (body["pc_fold"], fold)]
+                                + ["pc_pool_rule=%s (want %r)"
+                                   % (repr(body["pc_pool_rule"]) if "pc_pool_rule" in body
+                                      else "(absent)", rule)]
+                                if body else ["/api/v1/health did not answer JSON"]), readings
+    # a reading that names neither build is not a pass: nothing here is ever both
+    assert not any(p and a for p, a, _r in
+                   [rt.marker_state(h) for h in (rt.PRIMARY, rt.STANDBY)])
+
+    # the routed path is probed too, from the markers the two roles agree on
+    monkeypatch.setattr(rt, "health_json", lambda host, _b=new_build: _b)
+    rt.assert_edge_runs_new_code()
+    monkeypatch.setattr(rt, "health_json", lambda host, _b=old_build: _b)
+    with pytest.raises(rt.Fail):
+        rt.assert_edge_runs_new_code()
+    monkeypatch.setattr(rt, "health_json", lambda host: {})
+    with pytest.raises(rt.Fail):
+        rt.assert_edge_runs_new_code()
+
+    # ...and a no-route batch with no marker is refused before any phase runs
+    for broken in ({"code_markers": []},                       # nothing to discriminate on
+                   {"code_markers": ["pc_renderer_fp"]},       # present on the old build, no per-role value
+                   {"smoke_route": None}):                     # no liveness probe left to borrow
+        entry = dict(rt.BATCHES[TRAIN_BATCH])
+        entry.update(broken)
+        rt.BATCHES["_broken"] = entry
+        with pytest.raises(rt.Fail):
+            rt.select_batch("_broken")
+        del rt.BATCHES["_broken"]
 
 
 def test_health_reports_both_steam_words_and_the_render_loop_runs_on_both_roles():
@@ -886,7 +1061,17 @@ def test_the_public_pool_summary_speaks_the_pools_live_word():
     the way /card and the pack open do, in ONE statement (bands, count and
     names from one read)."""
     src = inspect.getsource(main.pc_pool_summary)
-    assert src.count('AND """ + _PC_POOL_MEMBER_SQL + """') == 1   # v4.13: the pool word (deleted, banned, not a SteamID64)
+    # the pool word, WHOLE -- and the enumeration is an assertion rather than a
+    # comment, because the comment that stood here listed three of its four
+    # clauses (found 2026-09-15) and a prose list cannot go red when the word
+    # gains or loses one
+    assert src.count('AND """ + _PC_POOL_MEMBER_SQL + """') == 1
+    word = main._PC_POOL_MEMBER_SQL
+    for clause in ("p.deleted_at IS NULL",                       # deleted
+                   main._PC_NOT_BANNED_SQL.format(a="p"),        # banned
+                   main._PC_POOL_STEAM_ID_SQL,                   # id not a SteamID64 (v4.13)
+                   "p.mod_seen_at IS NOT NULL"):                 # never ran the mod (the merge's rule 3)
+        assert word.count(clause) == 1, clause
     assert "WITH live AS (" in src and "UNION ALL" in src and src.count("await db.execute") == 2   # the snapshot row, then the one read
     assert '"member_count": sum(bands.values())' in src and 'int(snap["member_count"])' not in src
 
@@ -1099,32 +1284,55 @@ def test_migration_311_carries_every_column_and_index_the_code_plans_on():
 
 
 def test_the_release_train_asserts_the_indexes_and_the_render_word_on_both_roles():
-    train = REPO / "scripts" / "deploy" / "release_train.py"
-    if not train.exists():
-        pytest.skip("the release train is local to the operating seat")
-    src = train.read_text(encoding="utf-8")
-    batch = src[src.index('"sept12-gacha": {'):src.index('"sept10-batch": {')]
-    for idx in INDEXES:
-        assert '"%s",' % idx in batch, idx
-    assert '{"key": "pc_steam_sweep", "primary": "running", "standby": "standby"},' in batch
-    assert '{"key": "pc_steam_render", "primary": "ok", "standby": "ok"},' in batch
-    assert "SELECT count(*) FROM players WHERE pc_steam_portrait_hash IS NOT NULL;" in batch
+    """The SHIPPED Sept 12 entry, read out of BATCHES rather than sliced between two other batch names.
+
+    The slice this used to take ran from `"sept12-gacha": {` to `"sept10-batch": {`, so a batch added between
+    them landed inside it and every assertion here still passed over the wrong entry's text -- which is how
+    this batch's expectations came to sit in a finished batch's entry in the first place."""
+    rt, src = _release_train()
+    batch = rt.BATCHES["sept12-gacha"]
+    assert list(batch["expect_indexes"]) == list(INDEXES)
+    assert _role_expect(batch, "pc_steam_sweep") == [
+        {"key": "pc_steam_sweep", "primary": "running", "standby": "standby"}]
+    assert _role_expect(batch, "pc_steam_render") == [
+        {"key": "pc_steam_render", "primary": "ok", "standby": "ok"}]
+    assert [q for _l, q, _m in batch["positive_sql"]] == [
+        "SELECT count(*) FROM players WHERE pc_steam_portrait_hash IS NOT NULL;"]
+    cols = [tuple(c) for c in batch["expect_columns"]]
     for col in ("pc_steam_avatar_ref", "pc_steam_portrait_at", "pc_steam_portrait_fail", "pc_steam_portrait_hash",
                 "pc_steam_portrait_next_at"):
-        assert '("players", "%s"),' % col in batch, col
-    assert '("pc_portraits", "unreferenced_since"),' in batch and '("players", "pc_steam_attempt"),' in batch
+        assert ("players", col) in cols, col
+    assert ("pc_portraits", "unreferenced_since") in cols and ("players", "pc_steam_attempt") in cols
     # pc/pool answers 200 on BOTH builds, so it is the smoke route and never the presence discriminator (r3)
-    assert '"new_routes": ["/api/v1/pc/packs"],' in batch and '"smoke_route": "/api/v1/pc/pool",' in batch
-    assert '"rollback_sql": "rollback_311_player_cards_steam_portraits.sql",' in batch
-    assert '"i18n_sql": ["312_i18n_keys_sept12.sql", "313_seed_machine_translations_sept12.sql"],' in batch
+    assert batch["new_routes"] == ["/api/v1/pc/packs"] and batch["smoke_route"] == "/api/v1/pc/pool"
+    assert batch["rollback_sql"] == "rollback_311_player_cards_steam_portraits.sql"
+    assert batch["i18n_sql"] == ["312_i18n_keys_sept12.sql", "313_seed_machine_translations_sept12.sql"]
+    # the rollback prose is this batch's, and lives in this batch's entry: it used to be hardcoded in
+    # phase_check, where any other batch that set `rollback_sql` would have had it printed over its own
+    note = batch["rollback_note"]
+    assert "resume_311_player_cards_steam_portraits.sql" in note and "parks every player" in note
+    assert "{rollback_sql}" in note and note.count("{rollback_sql}") == 1
+    # The region that matters is phase_check itself, where the prose USED to be hardcoded.
+    # Slicing to the first BATCHES entry covered only the module preamble, so this could
+    # never fail for the defect it names (#441/#342) -- proven by putting the hardcoded
+    # print back and watching it stay green.
+    _check_fn = src[src.index("def phase_check("):src.index("def phase_snapshot(")]
+    assert "resume_311_player_cards_steam_portraits.sql" not in _check_fn
+    assert "ROLLBACK_NOTE" in _check_fn   # it prints the SELECTED batch's note instead
+
     assert 'present = all(c not in ("404", "000", "") for c in codes)' in src
-    assert 'SMOKE_ROUTE = batch.get("smoke_route", NEW_ROUTES[0])' in src and "rollback rule" in src
+    # the smoke route is never borrowed from an empty route list (that raised IndexError)
+    assert 'SMOKE_ROUTE = batch.get("smoke_route") or (NEW_ROUTES[0] if NEW_ROUTES else None)' in src
+    assert "rollback rule" in src
     # the code phase is saved only on POSITIVE presence on both boxes and a routed answer from the edge (r4)
     phase = src[src.index("def phase_code("):src.index("def phase_i18n(")]
-    assert "if not present:" in phase and 'if edge in ("000", ""):' in phase and 'if edge == "404":' in phase
-    assert phase.index("if not present:") < phase.index('st["code_deployed"] = True')
+    assert "if not present:" in phase and "assert_edge_runs_new_code()" in phase
+    assert phase.index("if not present:") < phase.index("assert_edge_runs_new_code()") \
+        < phase.index('st["code_deployed"] = True')
+    edge = src[src.index("def assert_edge_runs_new_code("):src.index("# ---", src.index("def assert_edge_runs_new_code("))]
+    assert 'if edge in ("000", ""):' in edge and 'if edge == "404":' in edge   # the route batch's half
+    assert "for key, want in edge_markers():" in edge                          # the no-route batch's half
     assert "294 must run" not in src   # the i18n gate names the selected batch's files, not a stale migration
-    assert "resume_311_player_cards_steam_portraits.sql" in src and "parks every player" in src
     assert "def index_state(host):" in src and "FROM pg_indexes WHERE schemaname = 'public'" in src
     assert src.count("index_state(host)") == 4   # its definition, the check, the schema postcondition, the verify
     assert 'EXPECT_INDEXES = list(batch.get("expect_indexes", []))' in src
@@ -1273,22 +1481,24 @@ def test_the_api_key_never_reaches_a_log_line_or_an_error(monkeypatch, capsys):
     assert key not in str(pc_steam.FetchError("http", 403)) and key not in str(pc_steam.FeedError("shape"))
 
 
-def test_the_train_code_state_tells_present_absent_and_unknown_apart():
-    train = REPO / "scripts" / "deploy" / "release_train.py"
-    if not train.exists():
-        pytest.skip("the release train is local to the operating seat")
-    src = train.read_text(encoding="utf-8")
-    fn = src[src.index("def code_state(host):"):src.index("def health_json(host):")]
+def test_the_train_code_state_tells_present_absent_and_unknown_apart(monkeypatch):
+    """A ROUTE batch's discriminator, driven through the real module: 404 is the old code, any other real
+    status is the new one, and curl's 000 / empty is NEITHER -- an unknown state must never be recorded as a
+    build. (The no-route batch's half of the same contract is the marker test above.)"""
+    rt, _src = _release_train()
+    rt.select_batch("sept12-gacha")
+    assert rt.NEW_ROUTES == ["/api/v1/pc/packs"]
+    route = rt.NEW_ROUTES[0]
     answers = {}
-    ns = {"CONTROL_ROUTE": "/control", "NEW_ROUTES": ["/new"], "http_code": lambda host, route: answers[route]}
-    exec(fn, ns)
+    monkeypatch.setattr(rt, "http_code", lambda host, path, **kw: answers[path])
     for new, expect in (("200", (True, True, False)), ("422", (True, True, False)), ("405", (True, True, False)),
                         ("404", (True, False, True)), ("000", (True, False, False)), ("", (True, False, False))):
-        answers.update({"/control": "200", "/new": new})
-        ok, present, absent, codes = ns["code_state"]("h")
-        assert (ok, present, absent) == expect and codes == [new], new
-    answers.update({"/control": "000", "/new": "200"})
-    assert ns["code_state"]("h")[0] is False
+        answers.update({rt.CONTROL_ROUTE: "200", route: new})
+        ok, present, absent, readings = rt.code_state("h")
+        assert (ok, present, absent) == expect, new
+        assert readings == ["%s %s" % (new, route)], new   # the probe names the route it read
+    answers.update({rt.CONTROL_ROUTE: "000", route: "200"})
+    assert rt.code_state("h")[0] is False
 
 
 def test_the_acquire_holds_every_party_and_demands_every_named_event():

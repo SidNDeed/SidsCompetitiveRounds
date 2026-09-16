@@ -359,34 +359,71 @@ def _cs(lit):
     return "".join(out)
 
 
-def test_the_sept12_i18n_migrations_recompute_from_the_sync_tool_and_match_the_bundled_catalogues():
-    import json
-    import re
-    repo = os.path.abspath(os.path.join(os.path.dirname(main.__file__), "..", ".."))
-    sys.path.insert(0, os.path.join(repo, "tools"))
+def _repo():
+    return os.path.abspath(os.path.join(os.path.dirname(main.__file__), "..", ".."))
+
+
+def _sync_tool():
+    sys.path.insert(0, os.path.join(_repo(), "tools"))
     import i18n_sync_keys as sk
-    with io.open(os.path.join(repo, "tools", "i18n_source.json"), encoding="utf-8") as fh:
+    return sk
+
+
+def _live_client_keys():
+    """{key_id: record} for every client string the extractor knows TODAY."""
+    import json
+    with io.open(os.path.join(_repo(), "tools", "i18n_source.json"), encoding="utf-8") as fh:
         data = json.load(fh)
-    recs = {r["key_id"]: r for r in sk.build_client_keys(data)}
-    with io.open(os.path.join(repo, "backend", "sql", "312_i18n_keys_sept12.sql"), encoding="utf-8") as fh:
+    return {r["key_id"]: r for r in _sync_tool().build_client_keys(data)}
+
+
+def _keys_migration(filename, tag, count):
+    """The rows of an i18n KEYS migration, each recomputed from the sync tool
+    over its OWN frozen text.
+
+    A keys migration is applied and immutable, so what its rows are checked
+    against is what the tool makes of the string the row carries -- never
+    whichever strings the client happens to emit today. Returns
+    {key_id: (msgctxt, source_hash, context)}."""
+    import re
+    with io.open(os.path.join(_repo(), "backend", "sql", filename), encoding="utf-8") as fh:
         keys_sql = fh.read()
     values = keys_sql[keys_sql.index("FROM (VALUES"):keys_sql.index(") AS v(key_id")]
-    row_re = re.compile(r"\('(?P<id>[0-9a-f]{16})', 'client', (?P<msg>\$k312\$.*?\$k312\$|E'(?:[^'\\]|\\.|'')*'), "
+    row_re = re.compile(r"\('(?P<id>[0-9a-f]{16})', 'client', (?P<msg>\$" + tag + r"\$.*?\$" + tag + r"\$|E'(?:[^'\\]|\\.|'')*'), "
                         r"'(?P<hash>[0-9a-f]{40})', (?P<sens>TRUE|FALSE), (?P<ctx>E'(?:[^'\\]|\\.|'')*'|NULL)\)", re.S)
     rows = list(row_re.finditer(values))
     expected = int(re.search(r"v_expected INT := (\d+);", keys_sql).group(1))
-    assert len(rows) == expected == 25 and len({m.group("id") for m in rows}) == 25
-    english = {}
+    assert len(rows) == expected == count and len({m.group("id") for m in rows}) == count
+    sk = _sync_tool()
+    frozen = {}
     for m in rows:
-        rec = recs[m.group("id")]   # every key is a live client string the extractor knows
         msg = m.group("msg")
-        msg = msg[6:-6] if msg.startswith("$k312$") else _pg_e(msg)
-        assert msg == rec["msgctxt"], m.group("id")
-        assert m.group("hash") == rec["source_hash"] and (m.group("sens") == "TRUE") == rec["sensitive"], m.group("id")
-        ctx = None if m.group("ctx") == "NULL" else _pg_e(m.group("ctx"))
-        assert ctx == rec.get("context"), m.group("id")
-        english[m.group("id")] = msg
-    with io.open(os.path.join(repo, "plugin", "I18nCatalogues.cs"), encoding="utf-8") as fh:
+        mark = "$" + tag + "$"
+        msg = msg[len(mark):-len(mark)] if msg.startswith(mark) else _pg_e(msg)
+        made = sk.build_client_keys({"format": 1, "strings": [msg]})[0]
+        assert m.group("id") == made["key_id"], m.group("id")
+        assert m.group("hash") == made["source_hash"], m.group("id")
+        assert (m.group("sens") == "TRUE") == made["sensitive"], m.group("id")
+        frozen[m.group("id")] = (msg, m.group("hash"),
+                                 None if m.group("ctx") == "NULL" else _pg_e(m.group("ctx")))
+    return frozen, keys_sql
+
+
+def _seed_migration(filename, table, count):
+    """The (key_id, lang, source_hash, target) rows of an i18n SEEDS migration."""
+    import re
+    with io.open(os.path.join(_repo(), "backend", "sql", filename), encoding="utf-8") as fh:
+        seeds_sql = fh.read()
+    seed_re = re.compile(r"\('([0-9a-f]{16})', '(es|ru|uk|sv)', '([0-9a-f]{40})', (E'(?:[^'\\]|\\.|'')*')\)")
+    seeds = seed_re.findall(seeds_sql[seeds_sql.index("INSERT INTO " + table):seeds_sql.index("INSERT INTO i18n_proposals")])
+    assert len(seeds) == count and len({(k, lang) for k, lang, _h, _t in seeds}) == count
+    return seeds, seeds_sql
+
+
+def _bundled_catalogues():
+    """{lang: {english: translation}} as the mod compiles them in."""
+    import re
+    with io.open(os.path.join(_repo(), "plugin", "I18nCatalogues.cs"), encoding="utf-8") as fh:
         cs = fh.read()
     catalogue = {}
     entry_re = re.compile(r'^\s+\["((?:[^"\\]|\\.)*)"\] = "((?:[^"\\]|\\.)*)",$', re.M)
@@ -396,14 +433,84 @@ def test_the_sept12_i18n_migrations_recompute_from_the_sync_tool_and_match_the_b
         entries = entry_re.findall(body)
         assert len(entries) == len({k for k, _ in entries}), lang   # a duplicate key throws at the mod's static init
         catalogue[lang] = {_cs(k): _cs(v) for k, v in entries}
-    with io.open(os.path.join(repo, "backend", "sql", "313_seed_machine_translations_sept12.sql"), encoding="utf-8") as fh:
-        seeds_sql = fh.read()
-    seed_re = re.compile(r"\('([0-9a-f]{16})', '(es|ru|uk|sv)', '([0-9a-f]{40})', (E'(?:[^'\\]|\\.|'')*')\)")
-    seeds = seed_re.findall(seeds_sql[seeds_sql.index("INSERT INTO _seed313"):seeds_sql.index("INSERT INTO i18n_proposals")])
-    assert len(seeds) == 100 and len({(k, lang) for k, lang, _h, _t in seeds}) == 100
+    return catalogue
+
+
+# The Sept-12 keys that a LATER batch edited out of the client, each named with
+# the key that replaced it and the migration that pinned the replacement. A key
+# lands here only WITH its successor: that is what keeps "the string is gone
+# from the client" from being a way to make this test pass.
+SUPERSEDED_SEPT12 = {
+    # All five were edited by the Sept 14 batch, and each edit is one of that
+    # batch's product decisions reaching the text that states it. 317/318 are
+    # unapplied on production, so the 2026-09-15 coherence round CORRECTED those
+    # rows in place rather than adding a later file -- which moved four of the
+    # five successor ids, since key_id is sha1("client\0" + English)[:16].
+    #
+    # InfoLibrary "Reading a card": the Top card paragraph, rewritten for C3 --
+    # the real ROUNDS card art is drawn in game, a plain badge outside it.
+    "220199e67ed22fea": ("6262aad1393e919b", "317_i18n_keys_sept14.sql"),
+    # InfoLibrary "Player Cards": S1, "every registered player" -> "every player
+    # who has run the mod from a Steam account" (both halves of _PC_POOL_RULE 3).
+    "698f9dfdca5b1ca2": ("98a3af3eca38f474", "317_i18n_keys_sept14.sql"),
+    # InfoLibrary "Getting packs": S2, "#1 is the one Legendary card" -> "#1-2
+    # are the two Legendary cards", plus the earned-pack odds the server
+    # actually rolls (one flat 20% in every mode, no sweep roll).
+    "c7d32e223ed2e3cd": ("cf026731cc105418", "317_i18n_keys_sept14.sql"),
+    # InfoLibrary "Card pictures & settings": the same membership word as the
+    # intro. It said "every registered player" until 2026-09-15, two paragraphs
+    # below the intro sentence that no longer did.
+    "15bea618a7cba803": ("d09d8f0a4703b058", "317_i18n_keys_sept14.sql"),
+    # PlayerCardsUI RefreshInfo: S1 again, in the in-game info panel.
+    "e56a6d9c5bfe3b65": ("fd240ccd9449ca74", "317_i18n_keys_sept14.sql"),
+}
+
+
+def test_the_sept12_i18n_migrations_recompute_from_the_sync_tool_and_match_the_bundled_catalogues():
+    import difflib
+    recs = _live_client_keys()
+    frozen, _keys_sql = _keys_migration("312_i18n_keys_sept12.sql", "k312", 25)
+    english = {k: v[0] for k, v in frozen.items()}
+    catalogue = _bundled_catalogues()
+    sept14, _s14 = _keys_migration("317_i18n_keys_sept14.sql", "k317", 9)
+
+    # Every Sept-12 key is either STILL a live client string, or superseded by a
+    # later batch that edited it -- and a superseded one is named above with the
+    # key that replaced it, so a client string cannot be edited away without
+    # this test being made to account for where it went.
+    assert set(frozen) - set(recs) == set(SUPERSEDED_SEPT12), sorted(set(frozen) - set(recs))
+    for key_id, (successor, migration) in SUPERSEDED_SEPT12.items():
+        assert key_id in frozen, key_id
+        assert migration == "317_i18n_keys_sept14.sql" and successor in sept14, key_id
+        assert successor in recs, successor          # the replacement IS live today
+        # the string moved; its SITE did not -- same context on both rows
+        assert sept14[successor][2] == frozen[key_id][2], key_id
+        assert sept14[successor][0] != frozen[key_id][0], key_id
+        # ...and a supersession is an EDIT of that string, not some other
+        # string, which the shared context cannot show on its own: four of
+        # these five carry "InfoLibrary · (file scope)", so each of those four
+        # would pair with any of the other three's successors and pass on
+        # context alone. Re-measured 2026-09-16 over the five entries, with this
+        # module's own _keys_migration and the same SequenceMatcher call: the
+        # real pairs score 0.661 / 0.906 / 0.934 / 0.968 / 0.982, and the best
+        # of the 12 wrong same-context pairings reaches 0.116. The floor sits at
+        # 0.5, inside that gap and far from both ends.
+        ratio = difflib.SequenceMatcher(None, frozen[key_id][0], sept14[successor][0]).ratio()
+        assert ratio >= 0.5, (key_id, successor, round(ratio, 3))
+    for key_id, (msg, source_hash, ctx) in frozen.items():
+        if key_id in SUPERSEDED_SEPT12:
+            continue
+        rec = recs[key_id]   # a key no successor accounts for is a live client string
+        assert msg == rec["msgctxt"] and source_hash == rec["source_hash"], key_id
+        assert ctx == rec.get("context"), key_id
+
+    seeds, seeds_sql = _seed_migration("313_seed_machine_translations_sept12.sql", "_seed313", 100)
     assert "of 100 seed pairs" in seeds_sql and "(25 keys x es/ru/uk/sv)" in seeds_sql
     for key_id, lang, source_hash, target in seeds:
-        assert key_id in english and source_hash == recs[key_id]["source_hash"], key_id
+        # the seed's hash is the hash the KEYS migration froze for that row: the
+        # two migrations are one artifact, and neither is re-derived from
+        # today's client
+        assert key_id in frozen and source_hash == frozen[key_id][1], key_id
         assert catalogue[lang][english[key_id]] == _pg_e(target), (key_id, lang)   # the seed IS the bundled text
     # the plain and the contextual DISCARDED keys carry the same translation in every language
     plain = [k for k, e in english.items() if e == "DISCARDED"]
@@ -411,6 +518,36 @@ def test_the_sept12_i18n_migrations_recompute_from_the_sync_tool_and_match_the_b
     assert len(plain) == 1 and len(ctxd) == 1
     for lang in ("es", "ru", "uk", "sv"):
         assert catalogue[lang]["DISCARDED"] == catalogue[lang]["DISCARDED\u0004pack open"]
+
+
+def test_the_sept14_i18n_migrations_recompute_from_the_sync_tool_and_match_the_bundled_catalogues():
+    """The sibling the Sept 14 batch never got (added 2026-09-15): 312/313 had
+    this check and 317/318 shipped with none. That is why the batch editing five
+    Sept-12 strings first showed up as a KeyError inside the SEPT-12 test rather
+    than as a statement about the Sept-14 batch.
+
+    Same three artifacts, same rule: every key recomputes from the sync tool
+    over its own frozen text, every key is a live client string the extractor
+    knows, and every seed IS the text the mod bundles."""
+    recs = _live_client_keys()
+    frozen, _keys_sql = _keys_migration("317_i18n_keys_sept14.sql", "k317", 9)
+    catalogue = _bundled_catalogues()
+    english = {k: v[0] for k, v in frozen.items()}
+    for key_id, (msg, source_hash, ctx) in frozen.items():
+        rec = recs[key_id]   # a Sept-14 key is a live client string: nothing has superseded one yet
+        assert msg == rec["msgctxt"] and source_hash == rec["source_hash"], key_id
+        assert ctx == rec.get("context"), key_id
+    # the five that REPLACED a Sept-12 string are in this migration, and each
+    # replacement is a different string from the one it replaced
+    sept12, _s12 = _keys_migration("312_i18n_keys_sept12.sql", "k312", 25)
+    for old, (new, _mig) in SUPERSEDED_SEPT12.items():
+        assert new in frozen and frozen[new][0] != sept12[old][0], old
+    seeds, seeds_sql = _seed_migration("318_seed_machine_translations_sept14.sql", "_seed318", 36)
+    assert "of 36 seed pairs" in seeds_sql
+    assert {lang for _k, lang, _h, _t in seeds} == {"es", "ru", "uk", "sv"}
+    for key_id, lang, source_hash, target in seeds:
+        assert key_id in frozen and source_hash == frozen[key_id][1], key_id
+        assert catalogue[lang][english[key_id]] == _pg_e(target), (key_id, lang)
 
 
 def test_the_extracted_source_registry_matches_the_client_sources_byte_for_byte():

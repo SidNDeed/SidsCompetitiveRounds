@@ -4,16 +4,19 @@ A players row whose id is not a public individual SteamID64 is an opponent a
 match report named. From v4.13:
   * one pool word, _PC_POOL_MEMBER_SQL, carries steamid64's rule, and every
     reader that decides who is in the pool reads it: the snapshot's pool CTE,
-    the open's live re-check, the public pool summary, the bot's /card (its
-    id clause is steamid64's text, written out so the janitor's boot
-    self-test can resolve the two janitor reads that carry it);
+    the open's live re-check, the public pool summary, the bot's /card and
+    that card's face preview (its id clause is steamid64's text, written out
+    so the janitor's boot self-test can resolve the two janitor reads that
+    carry it). Since the 2026-09-15 merge the word is an INTERSECTION -- the
+    id rule AND "has run the mod" (_PC_POOL_RULE = 3) -- so a reader that
+    carries one half of it is a reader that admits members the pool does not;
   * the open re-rolls such a member an older snapshot still holds, and the
     janitor re-takes a snapshot that holds one ('rule'): re-rolls keep such a
     member from being dealt, but they do not keep an open from being refused;
   * the public pool summary neither counts nor names such a member, and the
     bot's /card answers not_in_pool for one;
-  * the bot's /card face preview re-applies the id rule with the rest of
-    /card's gate, whichever snapshot the caller pins;
+  * the bot's /card face preview re-applies the whole pool word with the rest
+    of /card's gate, whichever snapshot the caller pins;
   * the events deliverable word carries the rule on the subject: the
     handout's skip marks a pending pull of such a subject posted, and it is
     never handed out;
@@ -31,6 +34,7 @@ There is no database here. The readers run against sessions that evaluate the
 clauses a statement carries from the text it receives; migration 320 is
 pinned as text and has not run on PostgreSQL in these tests.
 """
+import hashlib
 import os
 import re
 import sys
@@ -53,7 +57,7 @@ import main  # noqa: E402
 import player_cards as pc  # noqa: E402
 import steamid64  # noqa: E402
 from steamid64_pg_parity import VECTORS  # noqa: E402
-from test_player_cards_server import Scripted, _Res, _Rng, _due_row, _member, _run  # noqa: E402
+from test_player_cards_server import MAIN_PY, Scripted, _Res, _Rng, _due_row, _main_code, _member, _run  # noqa: E402
 
 SQL320 = Path(HERE).parent / "sql" / "320_player_cards_no_steam_no_card.sql"
 
@@ -65,12 +69,17 @@ OWNER = UUID("99999999-9999-9999-9999-999999999999")
 # rule refuses, since its digits are [0-9] only. It is the one swept id the parity vectors do not carry -- theirs
 # is Arabic-Indic throughout, so a rule reading the 7656119 prefix refuses that one and admits this one.
 ARABIC_TAIL_SUBJECT = UUID("88888888-8888-8888-8888-888888888888")
+# A perfectly good SteamID64 belonging to a registered player who has never run the mod: the OTHER half
+# of the merged pool word (_PC_POOL_RULE = 3). It is what separates "carries the Steam id rule" from
+# "carries the pool word" -- 3692 of the 4165 members the id rule alone admits are exactly this player.
+MOD_UNSEEN_SUBJECT = UUID("77777777-7777-7777-7777-777777777777")
 PLAYERS = {
-    str(STEAM_SUBJECT): {"steam_id": "76561198040410653", "deleted": False, "banned": False, "announce": True},
-    str(OTHER_SUBJECT): {"steam_id": "2535425419861127", "deleted": False, "banned": False, "announce": True},   # another platform's id
-    str(OWNER): {"steam_id": "76561197960265729", "deleted": False, "banned": False, "announce": True},
+    str(STEAM_SUBJECT): {"steam_id": "76561198040410653", "deleted": False, "banned": False, "announce": True, "mod_seen": True},
+    str(OTHER_SUBJECT): {"steam_id": "2535425419861127", "deleted": False, "banned": False, "announce": True, "mod_seen": True},   # another platform's id
+    str(MOD_UNSEEN_SUBJECT): {"steam_id": "76561198000000042", "deleted": False, "banned": False, "announce": True, "mod_seen": False},
+    str(OWNER): {"steam_id": "76561197960265729", "deleted": False, "banned": False, "announce": True, "mod_seen": True},
     str(ARABIC_TAIL_SUBJECT): {"steam_id": "7656119" + "\u0668\u0660\u0664\u0660\u0664\u0661\u0660\u0666\u0665\u0663",
-                               "deleted": False, "banned": False, "announce": True},
+                               "deleted": False, "banned": False, "announce": True, "mod_seen": True},
 }
 # The acquisition is swept over the ids the validator and PostgreSQL are themselves held to: every spelling in
 # steamid64_pg_parity's VECTORS gets a subject of its own, in VECTORS' order -- 22 the rule refuses, 5 it admits.
@@ -81,7 +90,7 @@ PLAYERS = {
 # admits each of the three, and the sweep carries both kinds -- where a hand-picked list carries whichever
 # near-misses its author thought of.
 _VECTOR_SUBJECTS = tuple(UUID("aaaaaaaa-0000-0000-0000-%012d" % i) for i in range(len(VECTORS)))
-PLAYERS.update({str(s): {"steam_id": spelling, "deleted": False, "banned": False, "announce": True}
+PLAYERS.update({str(s): {"steam_id": spelling, "deleted": False, "banned": False, "announce": True, "mod_seen": True}
                 for s, (spelling, _) in zip(_VECTOR_SUBJECTS, VECTORS)})
 REFUSED_SUBJECTS = tuple(s for s, (_, admitted) in zip(_VECTOR_SUBJECTS, VECTORS) if not admitted)
 ADMITTED_SUBJECTS = tuple(s for s, (_, admitted) in zip(_VECTOR_SUBJECTS, VECTORS) if admitted)
@@ -95,11 +104,20 @@ _LIVE_PREFIX = "SELECT 1 FROM players p WHERE p.id = CAST(:pid AS uuid)"
 
 def _admits(sql, row, alias="p"):
     """What a statement's WHERE says of one players row under `alias`, from the
-    clauses its text carries for that alias: deleted_at IS NULL, pc_announce,
-    the ban NOT EXISTS, and each Steam id clause (its pattern searched as
-    PostgreSQL's ~ does, then its bounds)."""
+    clauses its text carries for that alias: deleted_at IS NULL, mod_seen_at IS
+    NOT NULL, pc_announce, the ban NOT EXISTS, and each Steam id clause (its
+    pattern searched as PostgreSQL's ~ does, then its bounds).
+
+    mod_seen_at is here because the 2026-09-15 merge put it in the pool word:
+    an evaluator one clause short reads the whole word and silently ignores the
+    half of it that removes seven eighths of the pool, so every reader would
+    have looked correct while carrying only the other half (which is the defect
+    the face preview actually had). Every row must therefore carry `mod_seen` --
+    a KeyError here is the fixture's bug, not a reason for a default."""
     a = re.escape(alias)
     if re.search(r"(?<![\w.])" + a + r"\.deleted_at IS NULL", sql) and row["deleted"]:
+        return False
+    if re.search(r"(?<![\w.])" + a + r"\.mod_seen_at IS NOT NULL", sql) and not row["mod_seen"]:
         return False
     if re.search(r"(?<![\w.])" + a + r"\.pc_announce\b", sql) and not row["announce"]:
         return False
@@ -155,6 +173,24 @@ def test_a_non_steam_member_of_an_older_snapshot_is_rerolled_and_never_dealt():
     only = _PoolSession({"common": [_member(OTHER_SUBJECT, 41, "common")]})
     assert _run(main._pc_roll_prints(only, 7, OWNER, rng=_Rng([0.5], [0]))) == (None, "pool_changed")
     assert len(only.checked) == 1 + pc.PC_ECONOMY["reroll_attempts"]
+
+
+def test_a_member_who_never_ran_the_mod_is_rerolled_like_one_the_id_rule_refuses():
+    """The merged word is an INTERSECTION, so the open's live re-check refuses a
+    member on either half of it. A snapshot an older api took can hold a
+    registered player who never ran the mod -- 3692 of the 4165 members the id
+    rule alone admits are exactly that -- and the roll treats them as it treats
+    a non-SteamID64 member: re-rolled, never dealt."""
+    db = _PoolSession({"common": [_member(MOD_UNSEEN_SUBJECT, 41, "common"), _member(STEAM_SUBJECT, 42, "common")]})
+    prints, why = _run(main._pc_roll_prints(db, 7, OWNER, rng=_Rng([0.5, 0.5, 0.9, 0.9] * 5, [0, 1] * 5)))
+    assert why is None and len(prints) == 5
+    assert {p["player_id"] for p in prints} == {str(STEAM_SUBJECT)}
+    assert db.checked == [(str(MOD_UNSEEN_SUBJECT), False), (str(STEAM_SUBJECT), True)] * 5
+    # the evaluator is not what refuses (#391): the PRE-MERGE text of the same check --
+    # the id rule without the mod-runner clause -- admits that member
+    pre_merge = (_LIVE_PREFIX + " AND p.deleted_at IS NULL AND " + main._PC_POOL_STEAM_ID_SQL
+                 + " AND " + _BAN_CLAUSE)
+    assert _admits(pre_merge, PLAYERS[str(MOD_UNSEEN_SUBJECT)]) is True
 
 
 class _SummarySession:
@@ -233,8 +269,8 @@ def test_card_answers_not_in_pool_for_a_non_steam_subject(monkeypatch):
 
 
 class _PreviewSession:
-    """Answers the face preview's subject read from the Steam id clauses its
-    text carries (a row, or none), and counts the member reads after it."""
+    """Answers the face preview's subject read from the pool clauses its text
+    carries (a row, or none), and counts the member reads after it."""
 
     def __init__(self, row):
         self.row = row
@@ -252,7 +288,15 @@ class _PreviewSession:
         raise AssertionError("unexpected statement: " + sql[:120])
 
 
-def test_the_face_preview_refuses_a_non_steam_subject_before_the_member_read(monkeypatch):
+def test_the_face_preview_refuses_a_subject_the_pool_word_refuses_before_the_member_read(monkeypatch):
+    """The preview answers not_in_pool, so it decides membership, so it carries
+    the WHOLE pool word -- not the Steam half of it.
+
+    It carried `_PC_POOL_STEAM_ID_SQL` alone until 2026-09-15 (found in the
+    coherence review of the merge): the id rule admits 4165 players where the
+    merged word admits 473, so a subject who has never run the mod reached the
+    member read and was answered as a pool member for as long as an older
+    snapshot still held their row."""
     monkeypatch.setattr(main, "_require_internal_key", lambda k: None)
     monkeypatch.setattr(main, "_pc_require_renderer", lambda: None)
 
@@ -260,13 +304,13 @@ def test_the_face_preview_refuses_a_non_steam_subject_before_the_member_read(mon
         return None
 
     monkeypatch.setattr(main, "_pc_steam_prime", _prime)
-    for pid, reads in ((OTHER_SUBJECT, 0), (STEAM_SUBJECT, 1)):
+    for pid, reads in ((OTHER_SUBJECT, 0), (MOD_UNSEEN_SUBJECT, 0), (STEAM_SUBJECT, 1)):
         db = _PreviewSession(PLAYERS[str(pid)])
         with pytest.raises(HTTPException) as ex:
             _run(main.internal_pc_face_preview(player_ref=str(pid), locale="en", x_internal_key="k", db=db))
         assert ex.value.status_code == 404 and ex.value.detail == {"error": "not_in_pool"}
-        # the non-SteamID64 subject stops at the gate, pinned snapshot or not; a SteamID64 one reaches
-        # the member read (answered empty here, hence its 404)
+        # a subject the word refuses -- no SteamID64, or never ran the mod -- stops at the gate,
+        # pinned snapshot or not; a member reaches the member read (answered empty here, hence its 404)
         assert db.member_reads == reads, pid
 
 
@@ -285,28 +329,145 @@ def test_one_pool_word_carries_the_steam_id_rule_for_every_membership_reader():
     assert rule not in board
     live = " ".join(main._PC_LIVE_POOL_CHECK_SQL.split())
     assert live == " ".join((_LIVE_PREFIX + " AND " + word).split())
-    for fn in (main.pc_pool_summary, main.internal_pc_card):
+    # Every reader that DECIDES membership -- answers not_in_pool, or leaves a
+    # member out -- carries the one word, in whatever quoting its own statement is
+    # built from. The face preview is in this tuple because it is the reader that
+    # drifted: it carried the id clause alone until 2026-09-15.
+    for fn in (main.pc_pool_summary, main.internal_pc_card, main.internal_pc_face_preview):
         src = inspect.getsource(fn)
-        assert src.count('AND """ + _PC_POOL_MEMBER_SQL + """') == 1, fn.__name__
+        assert len(re.findall(r'AND (?:"""|") \+ _PC_POOL_MEMBER_SQL', src)) == 1, fn.__name__
         assert "_PC_NOT_BANNED_SQL" not in src and "p.deleted_at IS NULL" not in src, fn.__name__
+    # ...and no reader anywhere tests the id clause on its own, which is a property
+    # of the MODULE rather than of a tuple someone remembered to extend. The id
+    # clause exists to be part of the word, so the counts below enumerate the
+    # spellings a site can reach it by: the constant, the qualified call, and the
+    # bare call under any import form.
+    #
+    # Only the constant's count was pinned until 2026-09-15 (coherence r3), and
+    # that is not the class the comment claimed. main.py reaches the same rule
+    # four more times through _sid64.individual_id_sql(...), so a seventh
+    # membership reader written as
+    #     "... WHERE p.id = CAST(:pid AS uuid) AND " + _sid64.individual_id_sql("p.steam_id")
+    # decides membership on the id half alone and adds NOTHING to the constant's
+    # count, so the guard that stood here could not see it; the same reader
+    # spelled with the constant went red at once.
+    #
+    # A THIRD spelling was demonstrated on 2026-09-16 and evaded both of those:
+    # `from steamid64 import individual_id_sql` followed by a BARE
+    # `individual_id_sql("p.steam_id")` leaves the constant at 2, the qualified
+    # call at 4 and the hand-copied CASE at 1, all unmoved. The bare count is
+    # what closes it, and it is measurable rather than asserted: main.py reaches
+    # the rule only through `_sid64.`, so in comment-stripped source the bare
+    # count equals the qualified one -- 4 as measured here on 2026-09-16, a
+    # number re-derived rather than carried over from a brief. Any new site
+    # moves it, under any import form and any alias.
+    code = _main_code()
+    assert code.count("_PC_POOL_STEAM_ID_SQL") == 2, "the pool's id clause decides membership somewhere on its own"
+    # The four calls, by the alias each reads -- the events word's subject (su),
+    # the bot's face row (s), the Steam sweep's eligibility and the delivery
+    # lease's subject (p). None of them decides POOL membership: they gate a
+    # Discord handout, a picture read, whom the sweep may ask Steam about, and
+    # whether a lease's subject still has an id. A fifth call moves the total
+    # even under an alias nobody listed here.
+    assert code.count('_sid64.individual_id_sql("p.steam_id")') == 2
+    assert code.count('_sid64.individual_id_sql("s.steam_id")') == 1
+    assert code.count('_sid64.individual_id_sql("su.steam_id")') == 1
+    assert code.count("_sid64.individual_id_sql(") == 4, "a new site spells the id rule under some other alias"
+    # the bare call, which the two counts above cannot see: equal to the
+    # qualified count exactly while every reach goes through `_sid64.`
+    assert code.count("individual_id_sql(") == 4, \
+        "a site reaches the id rule through a bare individual_id_sql(...) -- a `from steamid64 import` form"
+    # ...and nothing hand-copies the rule PAST both names: its text exists once,
+    # in the constant above, and so do the interval's two edges.
+    assert code.count("CASE WHEN p.steam_id") == 1
+    for edge in ("76561197960265728", "76561202255233023"):
+        assert code.count(edge) == 1, edge
+
+
+# The pool word this build carries, and the rule number that stands for it.
+# pc_pool_snapshots.rule records which WORD a snapshot was taken under, so the two
+# are one fact kept in two places; the test below holds them together.
+_POOL_WORD_RULE = 3
+_POOL_WORD_SHA = "8c4a06b4101e8c2bc89f76dfaa5d90cfa28c2132e5cbf66bb01ccdc86b8f73fd"
+
+
+def test_the_rule_number_and_the_membership_word_cannot_move_without_each_other():
+    """The versioned retake rests on one sentence -- "bump _PC_POOL_RULE with
+    every change to the membership text" -- and until now nothing enforced it.
+    Main's old mechanism scanned the latest snapshot's MEMBERS, so it needed no
+    bump: it read the data. The replacement is more general and strictly less
+    automatic. Demonstrated on a private mirror, 2026-09-15: one more clause in
+    _PC_POOL_MEMBER_SQL with the constant left at 3, and 214 Player Cards tests
+    passed green while the pool would have kept serving yesterday's members.
+
+    So the pair is pinned, and either half moving alone fails here. The rule
+    number is also a STAMP -- the column holds the number and nothing else --
+    so its two decoders, main.py's enumeration and migration 316's header, are
+    required to list the rule this build writes."""
+    word = " ".join(main._PC_POOL_MEMBER_SQL.split())
+    sha = hashlib.sha256(word.encode("utf-8")).hexdigest()
+    assert (main._PC_POOL_RULE, sha) == (_POOL_WORD_RULE, _POOL_WORD_SHA), (
+        "The pool's membership word and its rule number are ONE fact and one of them moved alone.\n"
+        "  word now:      " + word + "\n"
+        "  sha256 now:    " + sha + "   (pinned " + _POOL_WORD_SHA + ")\n"
+        "  _PC_POOL_RULE: " + str(main._PC_POOL_RULE) + "   (pinned " + str(_POOL_WORD_RULE) + ")\n"
+        "If you changed the word: BUMP main._PC_POOL_RULE, add the new rule to its enumeration in\n"
+        "main.py and to backend/sql/316_pc_pool_snapshot_rule.sql's header, then update both\n"
+        "constants above. Without the bump nothing is retaken -- _pc_snapshot_due compares the\n"
+        "latest snapshot's recorded rule against this constant -- so the pool keeps serving the\n"
+        "members the new word refuses until 00:05 UTC, and every open that rolls one of them is\n"
+        "re-rolled or refused pool_changed.")
+    # Both decoders must define EVERY rule up to the one this build stamps -- the
+    # column holds old numbers too, and a list with a gap decodes none of them.
+    # Pinned on the enumeration's own line shape, not on the number appearing
+    # somewhere in the prose: 316's header names rule 3 in a sentence as well,
+    # so a looser check passed the mutation that removed the entry (2026-09-15).
+    enumeration = MAIN_PY.read_text(encoding="utf-8")
+    sql316 = (Path(HERE).parent / "sql" / "316_pc_pool_snapshot_rule.sql").read_text(encoding="utf-8")
+    for r in range(1, main._PC_POOL_RULE + 1):
+        assert ("#   %d  " % r) in enumeration, "main.py's enumeration does not define rule %d" % r
+        assert ("-- Rule %d (" % r) in sql316, "migration 316's header does not define rule %d" % r
 
 
 def test_a_snapshot_holding_a_non_steam_member_is_retaken_at_the_next_pass(monkeypatch):
+    """The SAME property as before the 2026-09-15 merge, through the mechanism
+    the merge kept: the pool rule is VERSIONED (pc_pool_snapshots.rule,
+    migration 316) instead of the latest snapshot being scanned for a member
+    the Steam id rule refuses.
+
+    A snapshot can hold a non-SteamID64 member only if an api took it under a
+    pool word without the Steam id clause -- the select this api runs cannot
+    admit one -- and every such api recorded a LOWER rule than this one, since
+    the rule is bumped with every change to the membership text. So 'a snapshot
+    holding a non-Steam member is retaken' is exactly 'a snapshot taken under
+    an older rule is retaken', and the versioned form also catches rule changes
+    the members scan never could."""
     today = datetime(2026, 9, 15, 0, 5, tzinfo=timezone.utc)
+    # rule 3 IS the one that added the Steam id clause (the merge), so a
+    # snapshot recorded at rule 2 is one an api without that clause took.
+    assert main._PC_POOL_RULE == 3 and main._PC_POOL_STEAM_ID_SQL in main._PC_POOL_MEMBER_SQL
+    pre_steam = main._PC_POOL_RULE - 1
+    # read before the monkeypatch below replaces the taker: the retake CLEARS
+    # the condition rather than firing every pass, because the taker writes
+    # this build's rule onto the snapshot it just took
+    taker = " ".join(inspect.getsource(main._pc_take_snapshot).split())
+    assert ('"INSERT INTO pc_pool_snapshots (member_count, rule) " '
+            '"VALUES (CAST(:n AS integer), CAST(:rule AS integer)) RETURNING id"') in taker
+    assert '{"n": len(rows), "rule": int(_PC_POOL_RULE)}' in taker
 
     def due(row):
         return _run(main._pc_snapshot_due(Scripted({"SELECT (SELECT MAX(taken_at)": [row]})))
 
     # the rule outranks the daily clock both ways: after today's snapshot, and before 00:05
-    assert due(_due_row(today + timedelta(seconds=30), today + timedelta(hours=5), today, stale_rule=True)) == "rule"
-    assert due(_due_row(today - timedelta(days=1), today - timedelta(minutes=2), today, stale_rule=True)) == "rule"
+    assert due(_due_row(today + timedelta(seconds=30), today + timedelta(hours=5), today, last_rule=pre_steam)) == "rule"
+    assert due(_due_row(today - timedelta(days=1), today - timedelta(minutes=2), today, last_rule=pre_steam)) == "rule"
     # a snapshot the rule admits keeps the daily cadence, and no snapshot at all is still 'first'
     assert due(_due_row(today + timedelta(seconds=30), today + timedelta(hours=5), today)) is None
     assert due(_due_row(today - timedelta(days=1), today + timedelta(minutes=1), today)) == "daily"
-    assert due(_due_row(None, today, today, stale_rule=True)) == "first"
+    assert due(_due_row(None, today, today, last_rule=pre_steam)) == "first"
     # the janitor takes it, under its try-lock, with the due state re-read there (c3 F)
     db = Scripted({"SELECT (SELECT MAX(taken_at)": [
-        _due_row(today + timedelta(seconds=30), today + timedelta(hours=5), today, stale_rule=True)],
+        _due_row(today + timedelta(seconds=30), today + timedelta(hours=5), today, last_rule=pre_steam)],
         "pg_try_advisory_xact_lock": [True]})
     monkeypatch.setattr(database, "async_session", lambda: db)
     taken = []
@@ -318,20 +479,28 @@ def test_a_snapshot_holding_a_non_steam_member_is_retaken_at_the_next_pass(monke
     monkeypatch.setattr(main, "_pc_take_snapshot", _take)
     _run(main._pc_snapshot_janitor_step())
     assert taken == ["rule"] and db.count("SELECT (SELECT MAX(taken_at)") == 2
-    # the term reads the LATEST snapshot's members and keeps only those the rule refuses
+    # the term reads the LATEST snapshot's own recorded rule and compares it to
+    # this build's constant -- and the members scan it replaced is GONE, so the
+    # retake cannot come back to depending on one rule change in particular
     read = " ".join(inspect.getsource(main._pc_snapshot_due).split())
-    assert ('EXISTS (SELECT 1 FROM pc_pool_members m JOIN players p ON p.id = m.player_id '
-            'WHERE m.snapshot_id = (SELECT MAX(id) FROM pc_pool_snapshots) '
-            'AND NOT """ + _PC_POOL_STEAM_ID_SQL + """) AS stale_rule,') in read
+    assert ('(SELECT rule FROM pc_pool_snapshots ORDER BY taken_at DESC, id DESC LIMIT 1) AS last_rule,') in read
+    assert 'if int(due["last_rule"] or 0) < int(_PC_POOL_RULE): return "rule"' in read
+    assert "pc_pool_members" not in read and "stale_rule" not in read
     assert read.index('return "first"') < read.index('return "rule"') < read.index('return "daily"')
 
 
-def test_the_boot_self_test_explains_the_pool_word_in_both_janitor_reads():
+def test_the_boot_self_test_explains_both_of_the_janitors_pool_reads():
     """The janitor's boot self-test (_janitor_sql_from_sources) resolves SQL
     statically and fails on a site it cannot resolve, so the pool's id clause
-    is written out in main.py (pinned to steamid64's text above), and both
-    janitor reads that carry it -- the due read and the snapshot's select --
-    are in the inventory the self-test EXPLAINs at boot."""
+    is written out in main.py (pinned to steamid64's text above) rather than
+    called, and both janitor reads of the pool are in the inventory the
+    self-test EXPLAINs at boot.
+
+    Since the 2026-09-15 merge the two reads carry different things: the
+    snapshot's select carries the whole membership word, id clause and all,
+    and the due read carries no membership text at all -- it asks the latest
+    snapshot which RULE it was taken under (migration 316). Both still have to
+    resolve statically, which is the property this test exists for."""
     inv = main._janitor_sql_inventory()
     assert inv["dynamic"] == [], inv["dynamic"]
     by_func = {}
@@ -339,8 +508,18 @@ def test_the_boot_self_test_explains_the_pool_word_in_both_janitor_reads():
         by_func.setdefault(s["func"], []).append(" ".join(s["sql"].split()))
     rule = " ".join(steamid64.individual_id_sql("p.steam_id").split())
     word = " ".join(main._PC_POOL_MEMBER_SQL.split())
-    assert sum(("AND NOT " + rule + ") AS stale_rule,") in q for q in by_func["_pc_snapshot_due"]) == 1
+    assert rule in word
+    # the snapshot's select: the word resolved down to the id clause's own text
     assert sum(("WHERE " + word + " ), series AS (") in q for q in by_func["_pc_take_snapshot"]) == 1
+    # the writer half of the versioned rule is a janitor statement too
+    assert sum("INSERT INTO pc_pool_snapshots (member_count, rule)" in q
+               for q in by_func["_pc_take_snapshot"]) == 1
+    # the due read: the rule column, and no membership predicate of its own --
+    # a second copy of the word here is exactly the drift the one word prevents
+    due = by_func["_pc_snapshot_due"]
+    assert sum("(SELECT rule FROM pc_pool_snapshots ORDER BY taken_at DESC, id DESC LIMIT 1) AS last_rule" in q
+               for q in due) == 1
+    assert not any(rule in q or "pc_pool_members" in q for q in due)
 
 
 def _deliverable(sql, event):

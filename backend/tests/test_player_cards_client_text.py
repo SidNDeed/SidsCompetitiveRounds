@@ -3,13 +3,13 @@ shard values). Those numbers live in backend/api/player_cards.py's PC_ECONOMY;
 the client cannot fetch them today, so this test pins the client text to the
 server constants — a retune of either side without the other fails here, for
 every fragment _expected_fragments quotes verbatim.
-The earned-pack odds are held differently while the client half of v4.13 is
-unmerged (review r15; Sid, 2026-09-14: the server's flat odds ride the backend
-deploy, the client text ships on the Sept 14 branch): one test pins that
-transitional state exactly -- the server's flat 20% rule AND the two stale
-client texts, verbatim -- so a change to either side fails. The Sept 14 client
-text merge replaces that pin with the parity assert, which judges both texts on
-the rates they state and on naming no sweep.
+The earned-pack odds are held by a judge rather than by a verbatim pin: both
+client sites are read for the rates they STATE and for naming no sweep, so the
+sentences stay the client's to word while the numbers stay the server's. The
+transitional pin that stood while the client half of v4.13 was unmerged (review
+r15; Sid, 2026-09-14: the server's flat odds rode the backend deploy, the client
+text shipped on the Sept 14 branch) was replaced by that parity assert when this
+merge landed the corrected text, exactly as its docstring required.
 Prices are NOT pinned: the client renders them from /pc/me."""
 import importlib.util
 import pathlib
@@ -54,7 +54,7 @@ def _expected_fragments(eco):
         f"Epic {_pct(t['epic'])}, Legendary {_pct(t['legendary'])}.",
         f"Foil (1 in {round(100 / eco['foil_pct'])}) and Signed (1 in {round(100 / eco['signed_pct'])})",
         f"Common {s['common']}, Uncommon {s['uncommon']}, Rare {s['rare']}, Epic {s['epic']}, Legendary {s['legendary']}.",
-        f"Legendary = #{b['legendary']}, Epic #{b['legendary'] + 1}-{b['epic']}, Rare #{b['epic'] + 1}-{b['rare']}, "
+        f"Legendary = #1-{b['legendary']}, Epic #{b['legendary'] + 1}-{b['epic']}, Rare #{b['epic'] + 1}-{b['rare']}, "
         f"Uncommon #{b['rare'] + 1}-{b['uncommon']}, Common #{b['uncommon'] + 1} and below",
     ]
 
@@ -123,36 +123,26 @@ def _earned_odds_problems(text, eco):
     return problems
 
 
-# The client texts as b4831ad left them, before the flat earned odds (review r15).
-STALE_RANKED_WINS_LINE = (
-    "- Ranked wins: every ranked 1v1 series you win rolls a 20% chance of a pack (a 2-0 sweep: 100%). "
-    "2v2, 1v2 and FFA wins roll 10% (a sweep: 50%). Earned packs wait here until you open them.")
-STALE_EARNED_BULLET = (
-    "- <b>Earned packs</b>: winning a ranked 1v1 series grants a pack one time in five, and a 2-0 sweep always "
-    "does. 2v2, 1v2 and FFA wins grant one time in ten, a sweep one time in two (an FFA sweep is every round won "
-    "and nobody else scoring). Earned and claimed packs wait under <b>Packs waiting</b> until you open them, as "
-    "long as you like.")
+def test_the_client_texts_state_the_servers_earned_pack_odds():
+    """The parity assert the transitional pin's docstring specified, put in its place by the Sept 14 client
+    text merge (2026-09-15): both client sites are judged on the rates they state and on naming no sweep.
+    Until this merge they said 20% / 100% for 1v1 and 10% / 50% for 2v2, 1v2 and FFA, while the server had
+    rolled one flat 20% in every mode with no sweep roll since v4.13 -- a false statement about reward rates
+    that the transitional test deliberately held, and that would have shipped as seeded server data in five
+    languages.
 
-
-def test_the_earned_odds_hold_the_transitional_state_until_the_client_text_merges():
-    """The transitional state, pinned exactly (review r15; Sid, 2026-09-14): the server rolls the flat 20% rule in
-    every ranked mode, and both client texts still carry their stale wording, which the judge refuses. A server
-    retune, a mode added or removed, and any edit to either client text all fail here.
-
-    THE SEPT 14 CLIENT TEXT MERGE MUST REPLACE THIS TEST with the parity assert:
-        eco = _economy()
-        problems = (_earned_odds_problems(_ranked_wins_line(CLIENT.read_text(encoding="utf-8")), eco)
-                    + _earned_odds_problems(_earned_bullet(INFO.read_text(encoding="utf-8")), eco))
-        assert problems == []
-    """
+    Both texts also say the chance is the SAME in every ranked mode and name the four, so the mode set is
+    part of what they claim: a mode added or dropped server-side makes them wrong even if the surviving
+    rates stay flat, and fails here."""
     eco = _economy()
-    assert eco["earned_pct"] == {"1v1": 20.0, "team": 20.0, "ovt": 20.0, "ffa": 20.0}, eco["earned_pct"]
+    assert set(eco["earned_pct"]) == {"1v1", "team", "ovt", "ffa"}, eco["earned_pct"]
     line = _ranked_wins_line(CLIENT.read_text(encoding="utf-8"))
     bullet = _earned_bullet(INFO.read_text(encoding="utf-8"))
-    assert line == STALE_RANKED_WINS_LINE, line
-    assert bullet == STALE_EARNED_BULLET, bullet
-    # a pin of the known mismatch, not of parity: the judge refuses both texts against the server's odds
-    assert _earned_odds_problems(line, eco) and _earned_odds_problems(bullet, eco)
+    assert _earned_odds_problems(line, eco) == [], line
+    assert _earned_odds_problems(bullet, eco) == [], bullet
+    # the four modes the server rolls for, named in the text that claims they are alike
+    for label in ("1v1", "2v2", "1v2", "FFA"):
+        assert label in bullet, label
 
 
 def test_the_earned_odds_judge_refuses_the_old_texts_and_a_split_rate():
@@ -342,7 +332,16 @@ def test_the_pack_history_keeps_the_servers_order_and_follows_its_signals():
     assert "if (!historyRefetching.Add(cursor)) return;" in refetch
     assert 'historyPageOf[a.pack_id] = cursor ?? "";' in merge
     assert 'historyPageOf.TryGetValue(a.pack_id ?? "", out cursor);' in notfound
-    assert "if (p.print_id != printId || p.face_rev != faceRev || p.discarded) continue;" in notfound
+    # Sept 14 batch C1/S3: a discarded print KEEPS its face for its owner --
+    # the tile and the card view draw it stamped, and the public face route
+    # (/api/v1/pc-face/, the only route this signal fires on) serves it like a
+    # live one. So a 404 for a discarded print's face asks its page again like
+    # any other. The `|| p.discarded` skip that stood here was the earlier rule,
+    # where such a face was only ever shown out of the client's own cache;
+    # leaving it in would have made exactly those prints the ones that never
+    # recover a face. The second line pins the decision, not just the spelling.
+    assert "if (p.print_id != printId || p.face_rev != faceRev) continue;" in notfound
+    assert "p.discarded" not in notfound
     assert "if (at >= 0) packHistory[at] = a; else packHistory.Add(a);" in merge
     # ...and the key is spent by the ANSWER, never at the ask: the ask records
     # the wait (a key already waiting is not asked twice); the answer spends
@@ -402,11 +401,15 @@ def test_the_paid_cap_copy_is_not_universal():
 
 def test_the_info_library_states_what_the_cards_settings_actually_do():
     """The Player Cards category registers its three articles, and their text
-    states the server's behaviour: opting out stops new cards and announcements
-    and plates existing cards (it hides no binder and deletes nothing); Public
-    collection is what hides a binder; deletion is what removes cards; a card's
-    stats, tier and title are frozen while its name and picture stay live;
-    self, Foil and Signed pulls are announced at any rarity."""
+    states the server's behaviour: there is no opt-out and the pool is the
+    players the merged pool word admits (run the mod, from a Steam account,
+    unbanned); Public collection is what hides a binder; deletion is what
+    removes cards; a card's stats, tier and title are frozen while its name and
+    picture stay live; self, Foil and Signed pulls are announced at any rarity.
+
+    (The opt-out this docstring described -- it stopped new cards and plated
+    existing ones -- was removed on 2026-09-13; the asserts below have refused
+    its wording since, and this sentence had not caught up.)"""
     src = INFO.read_text(encoding="utf-8")
     start = src.index("Color = CAT_CARDS, Articles")
     nxt = src.find("new Category {", start + 1)
@@ -422,7 +425,11 @@ def test_the_info_library_states_what_the_cards_settings_actually_do():
     assert "The player's current name - a rename follows onto every card of them" in src
     assert "and it never changes afterwards" not in src and "Everything on a card is frozen" not in src
     # no opt-out and no picture setting (2026-09-13) vs Public collection vs deletion
-    assert "There is no opt-out: every registered player who is not banned is in the pool, and cards of you stay in the binders that hold them." in src
+    # ...and it states the pool word this build carries (_PC_POOL_RULE = 3), not the one before it:
+    # the article said "every registered player" two paragraphs below the intro's own corrected
+    # sentence, so the tab header's member count and the article disagreed by an order of magnitude
+    assert "There is no opt-out: every player who has run the mod from a Steam account and is not banned is in the pool, and cards of you stay in the binders that hold them." in src
+    assert "every registered player" not in src
     assert "The picture is not a setting: every card of you shows your Steam picture until your PC has sent the character, then the character - including cards pulled before it was sent." in src
     assert "<b>Public collection</b> is the setting that shows or hides your binder from others" in src
     assert "Deleting your data is what removes cards: your binder is emptied, and every card of you is removed from every other player's binder." in src
