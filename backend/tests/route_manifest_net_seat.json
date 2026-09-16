@@ -1579,7 +1579,7 @@
           ],
           "main",
           "post_chat_from_discord",
-          "c1f5ae38bcce261c4241fe701b8d2ff3d83f2ef9"
+          "bb48782dc72f37232919d97e65ff86c367448b92"
         ],
         [
           "/api/v1/chat/recent",
@@ -1930,7 +1930,7 @@
           ],
           "main",
           "bridge_stream_chat",
-          "68503e2969670272ddbc9f3248f6d9ab51cffd85"
+          "011e1f90e4b469da0a7ccbec3f4e267c3f4fb909"
         ],
         [
           "/api/v1/internal/chat/bridge-moderation",
@@ -2783,7 +2783,7 @@
           [],
           "main",
           "ws_chat",
-          "e15c7efa81691e537315a0878049f1e9b6c81513"
+          "f7b3575ae51de2d2135f3fa4a23fe6049248ce2f"
         ],
         [
           "/api/v1/rating-preview/2v2",
@@ -2810,7 +2810,7 @@
           ],
           "main",
           "admin_mail_broadcast",
-          "68f5fbae273280adfd6e0d73a6b43c21e1c6f91a"
+          "43d19950f3d1079c02ea7ab82e0efaf8e0dbb4e7"
         ],
         [
           "/api/v1/admin/mail/bulk-grants",
@@ -2936,7 +2936,7 @@
           ],
           "main",
           "mail_send",
-          "fe342b823511da2eb867f7dd0dff25b1c082d61f"
+          "786322a2075a096dc6f9a4c889ca7db6f4b0f0f3"
         ],
         [
           "/api/v1/mail/blocks",
@@ -3044,7 +3044,7 @@
           ],
           "main",
           "mail_reply",
-          "5963c1297b4a3d5b5f21589507db48995f0b9c87"
+          "ade853363772137d7d2eac34f4093a120f443ac4"
         ],
         [
           "/api/v1/mail/{message_id}/report",

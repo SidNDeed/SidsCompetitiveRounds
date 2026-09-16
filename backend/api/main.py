@@ -17825,7 +17825,16 @@ _CHAT_MODERATE_LANGS = tuple(c for c in CHAT_CHANNELS_ALLOWED if c != "global")
 # conspicuous/spice, "chink" in chink-in-the-armor). A constant, not a table:
 # matches the SHOP_OWNER_STEAM_IDS precedent (#71) and the list should change
 # rarely — extending it is a one-line deploy.
-_CHAT_CENSOR_TERMS = ("nigger", "nigga", "faggot", "kike", "wetback")
+# NAME COLLISION, removed 2026-09-16: one term formerly on this list is
+# spelled exactly like the common Spanish short form of a given name, with
+# nothing -- no accent, no spelling difference -- to separate the two. A hit
+# here is an escalating ALL-CHANNEL mute, so a Spanish-speaking player typing
+# a friend's name was silenced everywhere and had their next mute doubled.
+# Dropped on Sid's rule that a real name which merely resembles a slur is
+# fine. This list is the ONLY live term list and all six call sites share it
+# (in-game chat, the Discord relay, and mail), so the removal is uniform.
+# Do not re-add it; the names filter, when it is built, must exclude it too.
+_CHAT_CENSOR_TERMS = ("nigger", "nigga", "faggot", "wetback")
 # 0→o 1→i 3→e 4→a 5→s 7→t @→a $→s !→i
 _CHAT_CENSOR_LEET = str.maketrans("013457@$!", "oieastasi")
 _CHAT_MUTE_BASE_MINUTES = 15          # Sid asked 10-20; doubles per repeat offense
