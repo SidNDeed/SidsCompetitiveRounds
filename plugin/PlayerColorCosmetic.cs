@@ -62,9 +62,85 @@ namespace CompetitiveRounds
             // Static-cosmetics mode applies one representative frame, then leaves
             // the renderers alone until animation resumes.
             public bool staticFrameApplied;
+            // A portrait rig: the animation clock is held at 0 whatever the
+            // animated-cosmetics setting says, so a capture never depends on
+            // when it was taken.
+            public bool clockPinned;
+            // The ApplyForPortrait call that created this state (0 for a live
+            // player's): a capture checks it is reading its own application.
+            public int portraitToken;
+            // Tint passes of ApplyToPlayer that threw part-way (their targets
+            // are then a partial list).
+            public int passFailures;
+            // Targets the last static (clock 0) frame wrote; -1 before one ran.
+            public int frameWrites = -1;
         }
         private static readonly Dictionary<int, AnimState> animByActor = new Dictionary<int, AnimState>();
+        // AnimTickLoop's handle and the behaviour it runs on. Unity stops a
+        // coroutine when its behaviour is destroyed, without running the rest of
+        // the loop, so the handle alone stays set after its loop is gone:
+        // OnHostDestroyed clears it for the destroyed behaviour, and a loop is
+        // only taken as running while its behaviour is not destroyed. Each start
+        // has its own generation, so a loop that ends clears the handle only
+        // while no later loop has been started.
         private static Coroutine animLoop;
+        private static MonoBehaviour animLoopHost;
+        private static int animLoopGen;
+
+        /// <summary>Starts AnimTickLoop on Plugin.Instance when an animated
+        /// state exists and no loop runs on a behaviour that is not destroyed.</summary>
+        private static void EnsureAnimLoop(string why)
+        {
+            if (animLoop != null && animLoopHost != null) return;
+            if (Plugin.Instance == null) return;
+            bool need = false;
+            foreach (var st in animByActor.Values)
+                if (st != null && IsAnimatedSku(st.sku)) { need = true; break; }
+            if (!need) return;
+            int gen = ++animLoopGen;
+            animLoopHost = Plugin.Instance;
+            animLoop = Plugin.Instance.StartCoroutine(AnimTickLoop(gen));
+            Plugin.Log.LogInfo($"[PCOLOR] Started anim tick loop ({why})");
+        }
+
+        /// <summary>Stops AnimTickLoop, on the behaviour that runs it, and
+        /// forgets its handle.</summary>
+        private static void StopAnimLoop()
+        {
+            if (animLoop != null && animLoopHost != null)
+            {
+                try { animLoopHost.StopCoroutine(animLoop); } catch { }
+            }
+            animLoop = null;
+            animLoopHost = null;
+        }
+
+        /// <summary>The plugin's coroutine host is being destroyed (Plugin.cs
+        /// OnDestroy): the coroutines it runs stop with it, so the deferred
+        /// applies recorded on it are forgotten (they no longer hold back a
+        /// later request for those actors) and a loop it runs has its handle
+        /// cleared. Compared by reference, so it answers from inside the host's
+        /// own OnDestroy.</summary>
+        internal static void OnHostDestroyed(MonoBehaviour host)
+        {
+            if (ReferenceEquals(host, null)) return;
+            var stopped = new List<int>();
+            foreach (var kv in _pendingInactiveApplies)
+                if (ReferenceEquals(kv.Value.host, host)) stopped.Add(kv.Key);
+            foreach (var actor in stopped) _pendingInactiveApplies.Remove(actor);
+            if (!ReferenceEquals(animLoopHost, host)) return;
+            animLoop = null;
+            animLoopHost = null;
+        }
+
+        /// <summary>The plugin's coroutine host was respawned (Plugin.cs
+        /// OnDestroy, after Plugin.Instance names the new host): the animated
+        /// states are animated again from it.</summary>
+        internal static void OnHostRespawned()
+        {
+            try { EnsureAnimLoop("host respawned"); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[PCOLOR] anim loop restart failed: {ex.Message}"); }
+        }
 
         /// <summary>Publish our own player-color selection so other mod clients can render it.</summary>
         public static void PublishLocalProps()
@@ -113,11 +189,7 @@ namespace CompetitiveRounds
             foreach (var kv in animByActor)
                 try { RevertOnState(kv.Value); } catch { }
             animByActor.Clear();
-            if (animLoop != null && Plugin.Instance != null)
-            {
-                try { Plugin.Instance.StopCoroutine(animLoop); } catch { }
-                animLoop = null;
-            }
+            StopAnimLoop();
         }
 
         /// <summary>Restore one player to their pre-tint colors. Called when re-equipping
@@ -126,11 +198,50 @@ namespace CompetitiveRounds
         /// <summary>Portrait spike / renderer entry: tint an offscreen rig exactly like a
         /// live body (same sniff + apply path). Pair with RevertPlayer(actor) at teardown.</summary>
         private static bool _portraitApply;   // v22 section 3.4: a portrait shows the EQUIPPED cosmetics whatever the local visibility toggle says
-        internal static void ApplyForPortrait(Transform rigRoot, int actor, string sku, string colorHex)
+        private static int _portraitToken;    // the token of the ApplyForPortrait call in progress; 0 outside one
+        private static int _portraitSerial;
+
+        /// <summary>Returns this application's token: never 0 when the call
+        /// created the actor's state, 0 when it did not (ApplyToPlayer returned
+        /// before creating one). A throw from ApplyToPlayer propagates, and the
+        /// caller then has no token.</summary>
+        internal static int ApplyForPortrait(Transform rigRoot, int actor, string sku, string colorHex)
         {
+            int token = ++_portraitSerial;
+            if (token <= 0) { _portraitSerial = 1; token = 1; }
             _portraitApply = true;
+            _portraitToken = token;
             try { ApplyToPlayer(rigRoot, actor, sku, colorHex); }
-            finally { _portraitApply = false; }
+            finally { _portraitApply = false; _portraitToken = 0; }
+            // The pinned (time 0) frame is written here, synchronously, instead of
+            // waiting for AnimTickLoop: that loop is a coroutine on the plugin's
+            // host, which can be destroyed and respawned while a render runs, and
+            // a capture must not depend on when, or whether, that loop next runs.
+            AnimState st;
+            if (!animByActor.TryGetValue(actor, out st) || st == null || st.portraitToken != token) return 0;
+            st.clockPinned = true;
+            if (!IsAnimatedSku(st.sku)) return token;
+            st.staticFrameApplied = false;
+            try { st.frameWrites = WriteFrame(st, 0f); st.staticFrameApplied = true; }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[PCOLOR] portrait frame write failed: {ex.Message}"); }
+            return token;
+        }
+
+        /// <summary>True only when the portrait actor's colour is the one a
+        /// capture may take: the actor's state is the one the ApplyForPortrait
+        /// call that returned `token` created, its clock is pinned, no tint pass
+        /// threw, it tinted at least one target, and -- for an animated sku --
+        /// its pinned (time 0) frame completed and wrote at least one target
+        /// (written by ApplyForPortrait itself, or by AnimTickLoop, which skips a
+        /// pinned state once it holds that frame). False for anything else,
+        /// a missing state included.</summary>
+        internal static bool PortraitFrameReady(int actor, int token)
+        {
+            AnimState st;
+            if (token == 0 || !animByActor.TryGetValue(actor, out st) || st == null) return false;
+            if (st.portraitToken != token || !st.clockPinned || st.passFailures != 0) return false;
+            if (st.tintedSkins.Count + st.tintedParticles.Count + st.tintedSprites.Count == 0) return false;
+            return !IsAnimatedSku(st.sku) || (st.staticFrameApplied && st.frameWrites > 0);
         }
 
         public static void RevertPlayer(int actor)
@@ -153,11 +264,7 @@ namespace CompetitiveRounds
                 foreach (var kv in animByActor)
                     try { RevertOnState(kv.Value); } catch { }
                 animByActor.Clear();
-                if (animLoop != null && Plugin.Instance != null)
-                {
-                    try { Plugin.Instance.StopCoroutine(animLoop); } catch { }
-                    animLoop = null;
-                }
+                StopAnimLoop();
                 // Also force a re-bake of every player's PlayerSkin via vanilla
                 // so any tints we applied that didn't get caught by RevertOnState
                 // (e.g., live SpriteRenderer.color we don't have an originals
@@ -261,7 +368,31 @@ namespace CompetitiveRounds
         // never host coroutines on scene/player objects) until the body is
         // active again, with a bail so a player who never revives doesn't
         // leak a spinning coroutine. Returns true when applied immediately.
-        private static readonly HashSet<int> _pendingInactiveApplies = new HashSet<int>();
+        //
+        // One deferred apply per actor is recorded, with the behaviour its
+        // coroutine runs on, the request generation it applies and the time
+        // after which it no longer holds back a new defer. Unity stops a
+        // coroutine without running the rest of its body when its behaviour is
+        // destroyed (learning #508), and that is not the only way a coroutine
+        // stops without reaching its end, so the coroutine's own removal is not
+        // the only way a record ends: OnHostDestroyed removes the records of
+        // the behaviour being destroyed, and a record whose behaviour is
+        // destroyed, or whose time has passed, is replaced by the next defer
+        // for its actor.
+        private struct PendingApply
+        {
+            internal MonoBehaviour host;
+            internal int gen;
+            internal float until;
+        }
+        private static readonly Dictionary<int, PendingApply> _pendingInactiveApplies = new Dictionary<int, PendingApply>();
+        // How long a deferred apply waits for the body to be active, and how much
+        // longer its record holds back a new defer: a frame that stalls past the
+        // deadline ends the wait late. A defer started while an older one still
+        // runs is safe: the request that started it bumped the generation, so the
+        // older one finds itself superseded and applies nothing.
+        private const float DEFER_WAIT_SECS = 10f;
+        private const float DEFER_SLACK_SECS = 2f;
 
         // Per-actor generation: every request supersedes an in-flight defer so
         // a stale deferred apply can't overwrite a newer color/unequip on
@@ -280,26 +411,39 @@ namespace CompetitiveRounds
                 ApplyToPlayer(playerRoot, actor, sku, colorHex);
                 return true;
             }
-            if (_pendingInactiveApplies.Add(actor))  // one defer in flight per actor
+            PendingApply pending;
+            if (_pendingInactiveApplies.TryGetValue(actor, out pending) && pending.host != null
+                && Time.realtimeSinceStartup <= pending.until)
+                return false;   // the actor's record still holds back a new defer
+            var host = Plugin.Instance;
+            _pendingInactiveApplies[actor] = new PendingApply { host = host, gen = g, until = Time.realtimeSinceStartup + DEFER_WAIT_SECS + DEFER_SLACK_SECS };
+            Plugin.Log.LogInfo($"[PCOLOR] deferred (player inactive) actor={actor}");
+            try { host.StartCoroutine(ApplyWhenActive(playerRoot, actor, sku, colorHex, g)); }
+            catch (Exception ex)
             {
-                Plugin.Log.LogInfo($"[PCOLOR] deferred (player inactive) actor={actor}");
-                try { Plugin.Instance.StartCoroutine(ApplyWhenActive(playerRoot, actor, sku, colorHex, g)); }
-                catch (Exception ex)
-                {
-                    _pendingInactiveApplies.Remove(actor);
-                    Plugin.Log.LogWarning($"[PCOLOR] defer failed: {ex.Message}");
-                }
+                DropPending(actor, g);
+                Plugin.Log.LogWarning($"[PCOLOR] defer failed: {ex.Message}");
             }
             return false;
         }
 
+        /// <summary>Removes the actor's defer record when it is the one for
+        /// `gen`: a defer that ends after a later one replaced its record leaves
+        /// that record alone.</summary>
+        private static void DropPending(int actor, int gen)
+        {
+            PendingApply pending;
+            if (_pendingInactiveApplies.TryGetValue(actor, out pending) && pending.gen == gen)
+                _pendingInactiveApplies.Remove(actor);
+        }
+
         private static IEnumerator ApplyWhenActive(Transform playerRoot, int actor, string sku, string colorHex, int gen)
         {
-            float deadline = Time.realtimeSinceStartup + 10f;
+            float deadline = Time.realtimeSinceStartup + DEFER_WAIT_SECS;
             while (playerRoot != null && !playerRoot.gameObject.activeInHierarchy
                    && Time.realtimeSinceStartup < deadline)
                 yield return null;
-            _pendingInactiveApplies.Remove(actor);
+            DropPending(actor, gen);
             int cur;
             if (_applyGen.TryGetValue(actor, out cur) && cur != gen)
             {
@@ -353,11 +497,7 @@ namespace CompetitiveRounds
             }
 
             // Spin up the animation tick if any equipped sku is animated.
-            bool needTick = false;
-            foreach (var st in animByActor.Values)
-                if (IsAnimatedSku(st.sku)) { needTick = true; break; }
-            if (needTick && animLoop == null)
-                animLoop = Plugin.Instance.StartCoroutine(AnimTickLoop());
+            EnsureAnimLoop("apply all");
         }
 
         private static bool IsAnimatedSku(string sku) =>
@@ -401,7 +541,10 @@ namespace CompetitiveRounds
                 hadBaseline = existing.baselineCaptured;
                 RevertOnState(existing);
             }
-            var st = new AnimState { sku = sku, baseColor = tint };
+            // A portrait state is pinned from creation: StartCoroutine below runs the
+            // loop's first tick synchronously, and that tick must not write a
+            // live-time hue onto the rig.
+            var st = new AnimState { sku = sku, baseColor = tint, clockPinned = _portraitApply, portraitToken = _portraitApply ? _portraitToken : 0 };
 
             // First pass: identify the player's BASELINE team color. On a re-equip
             // we use the cached value from the previous apply (now back to vanilla
@@ -435,7 +578,7 @@ namespace CompetitiveRounds
                         if (bestSat > 0.2f) { teamBaseline = best; break; }
                     }
                 }
-                catch { }
+                catch { st.passFailures++; }
             }
             st.teamBaseline = teamBaseline;
             st.baselineCaptured = true;
@@ -470,7 +613,7 @@ namespace CompetitiveRounds
                     }
                 }
             }
-            catch (Exception ex) { Plugin.Log.LogWarning($"[PCOLOR] PlayerSkin tint failed: {ex.Message}"); }
+            catch (Exception ex) { st.passFailures++; Plugin.Log.LogWarning($"[PCOLOR] PlayerSkin tint failed: {ex.Message}"); }
 
             // 2) Particle systems = the body blob. Only tint particles whose START color
             //    is already close to the team baseline (skips block-orb cyan, hit-spark
@@ -500,7 +643,7 @@ namespace CompetitiveRounds
                     st.originalParticleColors.Add(startC);
                 }
             }
-            catch (Exception ex) { Plugin.Log.LogWarning($"[PCOLOR] ParticleSystem tint failed: {ex.Message}"); }
+            catch (Exception ex) { st.passFailures++; Plugin.Log.LogWarning($"[PCOLOR] ParticleSystem tint failed: {ex.Message}"); }
 
             // 3) SpriteRenderer pass — only tint sprites whose existing color is close
             //    to the team baseline. Face (cream/white), gun (grey/black), block orb
@@ -520,7 +663,7 @@ namespace CompetitiveRounds
                     st.originalSpriteColors.Add(c0);
                 }
             }
-            catch { }
+            catch { st.passFailures++; }
 
             animByActor[actor] = st;
             Plugin.Log.LogInfo($"[PCOLOR] Applied actor={actor} sku={sku} hex={colorHex}  baseline=({teamBaseline.r:F2},{teamBaseline.g:F2},{teamBaseline.b:F2})  skins={st.tintedSkins.Count} particles={st.tintedParticles.Count} sprites={st.tintedSprites.Count}");
@@ -533,11 +676,7 @@ namespace CompetitiveRounds
             // was the empty-string fallback) and chrome stayed at one shade.
             try
             {
-                if (IsAnimatedSku(sku) && animLoop == null && Plugin.Instance != null)
-                {
-                    animLoop = Plugin.Instance.StartCoroutine(AnimTickLoop());
-                    Plugin.Log.LogInfo($"[PCOLOR] Started anim tick loop (triggered by actor={actor} sku={sku})");
-                }
+                if (IsAnimatedSku(sku)) EnsureAnimLoop($"triggered by actor={actor} sku={sku}");
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[PCOLOR] anim loop start failed: {ex.Message}"); }
         }
@@ -580,7 +719,7 @@ namespace CompetitiveRounds
         /// <summary>Drives the animated specials (prismatic = HSV cycle, chrome = subtle
         /// shifting tint). Runs once for the whole match while at least one animated sku
         /// is equipped. ~30Hz update — cheap enough that we can avoid per-frame.</summary>
-        private static IEnumerator AnimTickLoop()
+        private static IEnumerator AnimTickLoop(int gen)
         {
             var wait = new WaitForSeconds(1f / 30f);
             while (animByActor.Count > 0)
@@ -589,41 +728,59 @@ namespace CompetitiveRounds
                 // prismatic/chrome render a stable representative hue instantly (and
                 // resume from live time the moment the setting flips back on).
                 bool animationsEnabled = Plugin.AnimatedCosmetics == null || Plugin.AnimatedCosmetics.Value;
-                float now = animationsEnabled ? Time.time : 0f;
+                float live = Time.time;
                 foreach (var kv in animByActor)
                 {
                     var st = kv.Value;
                     if (!IsAnimatedSku(st.sku)) continue;
-                    if (!animationsEnabled && st.staticFrameApplied) continue;
-                    Color c = st.baseColor;
-                    if (st.sku == "pcolor_prismatic")
-                    {
-                        // Full hue cycle in 4 seconds.
-                        float h = (now * 0.25f) % 1f;
-                        c = Color.HSVToRGB(h, 0.85f, 1f);
-                    }
-                    else if (st.sku == "pcolor_chrome")
-                    {
-                        // Soft shift between two cool greys + faint blue tint.
-                        float t = (Mathf.Sin(now * 0.7f) + 1f) * 0.5f;
-                        c = Color.Lerp(new Color(0.78f, 0.78f, 0.86f), new Color(0.92f, 0.92f, 0.96f), t);
-                    }
-                    // Apply to all 3 visual layers.
-                    for (int i = 0; i < st.tintedSkins.Count; i++)
-                        st.skinColorFields[i].SetValue(st.tintedSkins[i], c);
-                    foreach (var sr in st.tintedSprites)
-                        if (sr != null) sr.color = c;
-                    foreach (var ps in st.tintedParticles)
-                    {
-                        if (ps == null) continue;
-                        var main = ps.main;
-                        main.startColor = new ParticleSystem.MinMaxGradient(c);
-                    }
-                    st.staticFrameApplied = !animationsEnabled;
+                    // A portrait rig's clock is pinned: it takes the static frame
+                    // once, exactly like static-cosmetics mode.
+                    bool animThis = animationsEnabled && !st.clockPinned;
+                    if (!animThis && st.staticFrameApplied) continue;
+                    int writes = WriteFrame(st, animThis ? live : 0f);
+                    if (!animThis) st.frameWrites = writes;
+                    st.staticFrameApplied = !animThis;
                 }
                 yield return wait;
             }
-            animLoop = null;
+            if (gen == animLoopGen) { animLoop = null; animLoopHost = null; }
+        }
+
+        /// <summary>One frame of an animated sku, at animation clock `now`,
+        /// onto all three visual layers of its state. Returns the targets
+        /// written (a destroyed sprite or particle system is skipped).</summary>
+        private static int WriteFrame(AnimState st, float now)
+        {
+            int writes = 0;
+            Color c = st.baseColor;
+            if (st.sku == "pcolor_prismatic")
+            {
+                // Full hue cycle in 4 seconds.
+                float h = (now * 0.25f) % 1f;
+                c = Color.HSVToRGB(h, 0.85f, 1f);
+            }
+            else if (st.sku == "pcolor_chrome")
+            {
+                // Soft shift between two cool greys + faint blue tint.
+                float t = (Mathf.Sin(now * 0.7f) + 1f) * 0.5f;
+                c = Color.Lerp(new Color(0.78f, 0.78f, 0.86f), new Color(0.92f, 0.92f, 0.96f), t);
+            }
+            // Apply to all 3 visual layers.
+            for (int i = 0; i < st.tintedSkins.Count; i++)
+            {
+                st.skinColorFields[i].SetValue(st.tintedSkins[i], c);
+                writes++;
+            }
+            foreach (var sr in st.tintedSprites)
+                if (sr != null) { sr.color = c; writes++; }
+            foreach (var ps in st.tintedParticles)
+            {
+                if (ps == null) continue;
+                var main = ps.main;
+                main.startColor = new ParticleSystem.MinMaxGradient(c);
+                writes++;
+            }
+            return writes;
         }
 
         private static Color ParseHex(string hex, Color fallback)

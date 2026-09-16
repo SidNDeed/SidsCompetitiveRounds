@@ -3146,6 +3146,11 @@ namespace CompetitiveRounds
 
         private void OnDestroy()
         {
+            // First, and on its own: the portrait renderer releases a run this
+            // host drove (its coroutines stop here without their finally).
+            try { PortraitRender.OnHostDestroyed(this); } catch { }
+            // The animated player-colour loop, when this host runs it, stops here too.
+            try { PlayerColorCosmetic.OnHostDestroyed(this); } catch { }
             Plugin.Log.LogWarning("[PERSIST] Destroyed! Attempting respawn...");
             MainMenuInjector.Reset();
 
@@ -3159,6 +3164,8 @@ namespace CompetitiveRounds
                 // Round-4 finding 3: the respawn must carry the SAME companion
                 // set as the initial spawn, through the one shared helper.
                 Plugin.AttachPersistentCompanions(go);
+                // Animated player colours, if any, resume from the new host.
+                try { PlayerColorCosmetic.OnHostRespawned(); } catch { }
                 Plugin.Log.LogInfo("[PERSIST] Respawned with DontDestroyOnLoad!");
             }
             catch (Exception ex)
