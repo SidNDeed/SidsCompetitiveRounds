@@ -21,12 +21,22 @@ ARABIC_TAIL = "7656119" + "\u0668\u0660\u0664\u0660\u0664\u0661\u0660\u0666\u066
 
 def test_a_display_name_that_is_a_steam_id_is_no_name():
     """_clean_display_name answers None for a name that is itself a public individual SteamID64, whoever's it
-    is, after the strip; every seventeen-digit name outside the interval is a name like any other."""
+    is, after the strip; a seventeen-digit name outside the interval is a name like any other UNLESS it is the
+    caller's own id, which the earlier `nm == steam_id` branch answers None for whatever its form (residual R2:
+    the claim used to be stated without that exception, and was false for e.g. the pair
+    ("12345678901234567", "12345678901234567")). Both halves are asserted below, so the exception is tested
+    rather than merely written down."""
     for sid in (LO, HI, HIGH, "76561198720512419", " " + HIGH + "\n"):
         assert main._clean_display_name(sid, OWN) is None, ascii(sid)
     for name in (BELOW, ABOVE, PREFIX_BELOW, ARABIC_TAIL, "12345678901234567", "7656119804041065"):
         assert main._clean_display_name(name, OWN) == name, ascii(name)
     assert main._clean_display_name(OWN, OWN) is None and main._clean_display_name("  ", OWN) is None
+    # R2: the exception the docstring now states. These ids are OUTSIDE the public individual interval, so the
+    # interval rule alone would call them names; the `nm == steam_id` branch answers None first. Without that
+    # branch the first two would come back unchanged, which is what makes these lines able to fail.
+    for own in ("12345678901234567", PREFIX_BELOW, BELOW, ABOVE):
+        assert main._clean_display_name(own, own) is None, ascii(own)
+        assert main._clean_display_name(own, OWN) == own, ascii(own)
     # ...and over every spelling steamid64_pg_parity holds the validator and PostgreSQL to, not a hand-picked
     # few. The name is stripped before the rule reads it, so a spelling that differs from a public individual
     # SteamID64 only in surrounding whitespace IS that id and is no name. A rule drifting to the form, a prefix

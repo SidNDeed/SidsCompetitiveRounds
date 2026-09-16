@@ -1516,7 +1516,7 @@
           ],
           "main",
           "chat_moderate_mute",
-          "8ce08ef033d60356a52dbd58d8282acfa3a62a5e"
+          "c1650e09b1c58355591abc809d4d6165394b55ee"
         ],
         [
           "/api/v1/chat/moderate/mute-by-message",
@@ -1525,7 +1525,7 @@
           ],
           "main",
           "chat_moderate_mute_by_message",
-          "3e658c4f2a5ba9b76b9259fd449f2421de24428b"
+          "755e4e43d14baabbafb5ce59a4e8ce3ea6d0fe90"
         ],
         [
           "/api/v1/chat/moderate/mutes",
@@ -1957,7 +1957,7 @@
           ],
           "main",
           "internal_chat_discord_mute",
-          "8e3ad2199379b5fe9fc2560fffde40e043ba5f94"
+          "db2f3bfc0ad622526b69a0a1c419d6cfe58b22f7"
         ],
         [
           "/api/v1/internal/chat/lockdown",
@@ -2846,7 +2846,7 @@
           ],
           "main",
           "admin_moderation_case_act",
-          "53996d6e1aa056f74ba59272645204b913e62037"
+          "41415a5ba7252dcc689001bf959d07b6ed07b3b2"
         ],
         [
           "/api/v1/admin/moderation-cases/{case_id}/notified",
@@ -2873,7 +2873,7 @@
           ],
           "main",
           "internal_moderation_case_act",
-          "021fe57b69d8a6a787e4a3cb27548a3525f4ac86"
+          "c6b4521b45bed487c07978a6fe5e85a7fb38b746"
         ],
         [
           "/api/v1/internal/moderation-cases/{case_id}/notified",

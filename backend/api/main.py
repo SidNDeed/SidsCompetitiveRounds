@@ -19434,6 +19434,7 @@ async def _chat_mute_apply(db, *, target_steam_id: str, channel: str | None,
     statements bind it unsliced: a key outside the domain raises 422 here,
     before this function executes anything, whichever caller reached it."""
     sid = _mod_target_or_422(target_steam_id)   # chat mute core: before either statement (v4.13 G4)
+    _mod_reason_or_422(reason)                  # R8: the reason is bound by the INSERT below; a NUL 500'd it
     mins = int(minutes or 0)
     await db.execute(text(
         "UPDATE chat_mutes SET revoked_at = NOW()"
@@ -19848,6 +19849,7 @@ async def _apply_mute_for_row(db, row, *, actor: str, role: str,
     the row's source; refuses targets the caller may not silence. Runs in the
     caller's transaction; returns the result dict with `purged_rows` for the
     caller to broadcast after commit."""
+    _mod_reason_or_422(reason)   # R8: bound by this function's own mute INSERT; refuse before any statement
     mins = max(0, int(minutes or 0))
     source = row["source"]
     purged: list[tuple[int, str]] = []
@@ -35866,6 +35868,37 @@ def _mod_bindable_or_422(value, field: str = "target_steam_id") -> str:
     goes on as sent."""
     if not _pg_text_ok(value):
         raise HTTPException(status_code=422, detail=f"{field} must be a numeric steam id")
+    return value
+
+
+def _mod_reason_or_422(value, field: str = "reason"):
+    """A moderation route's caller-sent FREE TEXT, before anything binds it.
+
+    The sibling of _mod_bindable_or_422, one field over (residual R8). A reason
+    is not a key, so no statement is keyed on it and no row could be found by
+    it -- but the mute INSERT still binds it as text, and PostgreSQL text
+    cannot hold a NUL character. Before this guard that INSERT failed, the
+    route answered 500 and the mute rolled back, so a moderator's action was
+    lost to a character they cannot type. The audit row is not what failed:
+    it runs under a SAVEPOINT and only logs (#235/#187), which is exactly why
+    the 500 came from the mute and not from the log.
+
+    REFUSED, not stripped. Storing something other than what was sent would
+    leave the stored reason and the audit row describing different text, and a
+    422 naming the field is a correction the caller can act on; a silent strip
+    is not. The cost of this refusal is one retyped reason, against today's
+    cost of a lost mute (#430).
+
+    Placed in the two WRITE cores rather than at each route, so every caller
+    inherits it -- the in-game mute, the mute-by-message flow, the Discord
+    context menu and the mail moderation act path -- and a future caller
+    cannot forget it. None and "" are accepted: the column is nullable and
+    both mean "no reason given"."""
+    if value is None:
+        return value
+    if not _pg_text_ok(value):
+        raise HTTPException(status_code=422,
+                            detail=f"{field} must be text PostgreSQL can store (no NUL character)")
     return value
 
 

@@ -509,3 +509,53 @@ def test_the_mute_checks_first_the_unmute_after_its_update_and_no_chat_mutes_sta
     assert {k: per_function.get(k) for k in ("_chat_mute_apply", "chat_moderate_unmute", "_apply_mute_for_row")} \
         == {"_chat_mute_apply": 2, "chat_moderate_unmute": 3, "_apply_mute_for_row": 4}, per_function
     assert [(fn.name, ast.unparse(v)) for fn, v in binds if _sliced(v, fn)] == []
+
+
+def test_a_mute_reason_that_no_text_bind_can_carry_is_refused_before_any_statement():
+    """Residual R8, the sibling of the target item one field over.
+
+    `reason` is not a key, so nothing is keyed on it -- but both mute write cores BIND it as text, and
+    PostgreSQL text cannot hold a NUL. Before the guard the INSERT failed, the route answered 500 and the
+    mute rolled back, so a moderator's action was lost to a character they cannot type. The audit row was
+    never the failure: it runs under a SAVEPOINT and only logs.
+
+    Two halves, both able to fail:
+    - BEHAVIOUR: the guard refuses exactly what _pg_text_ok refuses, and passes None and "" (the column is
+      nullable, and both mean "no reason given").
+    - PLACEMENT: in each write core the guard call is a top-level statement that comes BEFORE the first
+      top-level statement containing a db.execute, and appears exactly once. Deleting either call, or moving
+      it below the first execute, fails this.
+    """
+    NUL = chr(0)
+    LONE_SURROGATE = chr(0xD800)
+
+    # Behaviour. Anything _pg_text_ok refuses, the guard refuses -- as 422, not 500.
+    for bad in (NUL, "why" + NUL, NUL + "why", "why" + LONE_SURROGATE, LONE_SURROGATE, 17, b"why"):
+        assert main._pg_text_ok(bad) is False, repr(bad)
+        with pytest.raises(HTTPException) as ei:
+            main._mod_reason_or_422(bad)
+        assert ei.value.status_code == 422, (repr(bad), ei.value.status_code)
+    # ...and everything it admits goes on as sent, None included.
+    for ok in (None, "", "spamming", "  ", "razon: insultos", "ругается"):
+        assert main._mod_reason_or_422(ok) == ok, repr(ok)
+
+    # Placement, read from main.py's own syntax tree.
+    with open(inspect.getsourcefile(main), encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    funcs = _functions(tree)
+    for name in ("_chat_mute_apply", "_apply_mute_for_row"):
+        fn = funcs[name]
+        body = _body_after_docstring(fn)
+        guard_at = [i for i, s in enumerate(body)
+                    if any(isinstance(c, ast.Call) and ast.unparse(c.func) == "_mod_reason_or_422"
+                           for c in ast.walk(s))]
+        assert len(guard_at) == 1, (name, guard_at)
+        exec_at = [i for i, s in enumerate(body)
+                   if any(isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+                          and c.func.attr == "execute" for c in ast.walk(s))]
+        assert exec_at, name + ": no db.execute found, this pin would be vacuous"
+        assert guard_at[0] < exec_at[0], (name, guard_at[0], exec_at[0])
+        # it must guard the parameter the writer actually binds, not some other local
+        call = next(c for c in ast.walk(body[guard_at[0]])
+                    if isinstance(c, ast.Call) and ast.unparse(c.func) == "_mod_reason_or_422")
+        assert [ast.unparse(a) for a in call.args] == ["reason"], (name, ast.unparse(call))
