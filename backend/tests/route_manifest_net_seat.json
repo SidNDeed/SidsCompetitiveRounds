@@ -916,7 +916,7 @@
           ],
           "main",
           "delete_player_data",
-          "0717609ea3c1ae9113c58878234fa715e738d42c"
+          "909a50f728d76f62bf3fb7fcdbf6ec6c1fb46fe7"
         ],
         [
           "/api/v1/players/{steam_id}/ffa-history",
@@ -1678,7 +1678,7 @@
           ],
           "main",
           "ffa_lobby_create",
-          "c32801d55deed7c2eeac38492ea5867b54b6872a"
+          "458c99bcdbbfca828b0a6b160445979850d72f6d"
         ],
         [
           "/api/v1/ffa/lobby/join",
@@ -1687,7 +1687,7 @@
           ],
           "main",
           "ffa_lobby_join",
-          "d864a72d1a14044abe1cc79d8183818b5ef12056"
+          "77b1b8140178d8aac1d40e13d6e917521ff74bf6"
         ],
         [
           "/api/v1/ffa/lobby/kick",
@@ -1714,7 +1714,7 @@
           ],
           "main",
           "ffa_lobby_start",
-          "efd0f87393d2fe2a99256c4d0930c65e6b0f4315"
+          "ee5b13ed735afc4f17c6f3908327f5bb343b51a1"
         ],
         [
           "/api/v1/ffa/queue/join",
@@ -1723,7 +1723,7 @@
           ],
           "main",
           "ffa_queue_join",
-          "ffe1c51fd1c07057379e287dbb5fcab71e4da83d"
+          "47681accd6cb96b2874438b522eca82b6f7d902e"
         ],
         [
           "/api/v1/ffa/queue/leave",
@@ -1732,7 +1732,7 @@
           ],
           "main",
           "ffa_queue_leave",
-          "a4f44039722a3ff013f3777820e1672f07515302"
+          "ef21debce550491cf9023182ce6b28821a220b0b"
         ],
         [
           "/api/v1/ffa/queue/list",
@@ -1750,7 +1750,7 @@
           ],
           "main",
           "ffa_queue_poll",
-          "24a2bca1a1c8c84963d7f4945388dfe7d336dac3"
+          "29cdd5e3f218ccf9e10d539634f1a8cde772d07f"
         ],
         [
           "/api/v1/ffa/queue/recent-joins",
@@ -1777,7 +1777,7 @@
           ],
           "main",
           "health_check",
-          "c39504cb8b530b5cab104248dccc14a96135f847"
+          "2843c1a7b863a32f26e5b2e1e9dd4232f93026bb"
         ],
         [
           "/api/v1/i18n/approved",
@@ -3317,7 +3317,7 @@
       [
         "main",
         "lifespan",
-        "b360a87177c2a44f289c8663c07d53483c859261"
+        "f037943aaece916ad3585ccd36a2520ee787339a"
       ]
     ]
   },

@@ -4079,6 +4079,30 @@ async def queue_cleanup_loop():
                         RETURNING steam_id, status"""))
                 for r in ffa_husks.fetchall():
                     print(f"[FFA-CLEANUP] Husk row swept: {r[0]} status={r[1]}")
+                # ── Lapsed readmission holds (migration 325) ──────────────
+                # A held seat is deliberately invisible to every sweep above:
+                # the husk sweep exempts ready_join under an active lobby at
+                # ANY poll age, which is exactly the state a hold occupies.
+                # That exemption is what makes this sweep mandatory rather
+                # than tidy -- it is the only thing that ends a hold nobody
+                # claims, and it is why the hold can be described as
+                # expiring-by-default (learnings #276, #430). Fenced on the
+                # granting lobby as well as the clock: a row whose bind moved
+                # on already had its hold cleared by the writers, so a
+                # held_lobby that no longer matches series_id is a torn state
+                # worth collecting on sight rather than trusting.
+                lapsed = await db.execute(text("""
+                    DELETE FROM ffa_queue
+                     WHERE player_id IN (
+                        SELECT player_id FROM ffa_queue
+                         WHERE held_until IS NOT NULL
+                           AND (held_until < NOW()
+                                OR held_lobby IS DISTINCT FROM series_id)
+                         FOR UPDATE SKIP LOCKED
+                     )
+                    RETURNING steam_id"""))
+                for r in lapsed.fetchall():
+                    print(f"[FFA-CLEANUP] Readmission hold lapsed, seat released: {r[0]}")
                 # NOTE (Codex round-3 find 2): the 30-min searching cap for
                 # FFA lives ONLY in ffa_queue_poll ('expired') — a janitor
                 # DELETE would race the poll into the client's auto-rejoin
@@ -5598,6 +5622,13 @@ async def calculate_match_xp(
 # standby would answer identically to a fresh one -- the bug #266 shape, which
 # is the case this marker exists for. Both boxes answered v4.13 before it.
 PC_FOLD = "v4.14"
+# FFA readmission-hold fences (rejoin Phase A, migration 325). 1 = this build
+# honours held_until / held_lobby in the janitor lapse sweep, the poll's 3-hour
+# husk sweep and the poll's lease-expired arm. Phase A writes no hold -- the
+# claim path lands in a later phase -- so the fences have no runtime signal of
+# their own and this constant is what says WHICH BUILD a box runs. Raise it
+# when the fences change shape, never when a caller is added.
+_FFA_HOLD_FENCES = 1
 
 
 @app.get("/api/v1/health", response_model=HealthResponse, tags=["System"])
@@ -5609,14 +5640,16 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               pc_renderer_fp=_pc_renderer_fp(), pc_raqm=_pc_raqm(),
                               pc_steam_sweep=_pc_steam_sweep_word(),
                               pc_steam_render=_pc_steam_render_word(),
-                              pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE))
+                              pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE),
+                              ffa_hold_fences=_FFA_HOLD_FENCES)
     except Exception:
         # Report the role even when the database is unreachable: "which box is
         # this" is exactly the question being asked when things are degraded --
         # and which build it runs, and which pool rule, are the same question.
         # Both are code constants, so they answer with no database.
         return HealthResponse(status="degraded", database="disconnected", replica=IS_REPLICA,
-                              pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE))
+                              pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE),
+                              ffa_hold_fences=_FFA_HOLD_FENCES)
 
 
 LATEST_MOD_VERSION = "1.40.3"
@@ -33839,7 +33872,8 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
         await _reconcile_ffa_lobby_bets(db, _lid, "member deleted")
         await db.execute(text(
             """UPDATE ffa_queue SET status='searching', series_id=NULL, slot=NULL,
-                      room_name=NULL, room_region=NULL, matched_at=NULL, joined_at=NOW()
+                      room_name=NULL, room_region=NULL, matched_at=NULL, joined_at=NOW(),
+                      held_until=NULL, held_lobby=NULL
                 WHERE series_id=:lid
                   AND EXISTS (SELECT 1 FROM ffa_lobbies l WHERE l.id=:lid
                               AND l.status NOT IN ('active', 'open'))"""),
@@ -42385,7 +42419,8 @@ async def ffa_queue_join(req: _FfaQueueJoinReq, request: Request, db: AsyncSessi
     if await _lease_live_mode(db, player.id) is None:
         _cleared = (await db.execute(text(
             "UPDATE ffa_queue SET status='searching', series_id=NULL, slot=NULL,"
-            "       room_name=NULL, room_region=NULL, matched_at=NULL"
+            "       room_name=NULL, room_region=NULL, matched_at=NULL,"
+            "       held_until=NULL, held_lobby=NULL"
             " WHERE player_id = :pid AND status <> 'searching'"
             " RETURNING status"), {"pid": player.id})).scalar()
         if _cleared:
@@ -44313,7 +44348,8 @@ async def _ffa_lobby_enroll_caller(db: AsyncSession, player, req, lobby_id) -> N
             await db.execute(text(
                 "UPDATE ffa_queue SET status='searching', series_id=NULL, slot=NULL,"
                 "       room_name=NULL, room_region=NULL, matched_at=NULL,"
-                "       joined_at=NOW(), last_polled=NOW()"
+                "       joined_at=NOW(), last_polled=NOW(),"
+                "       held_until=NULL, held_lobby=NULL"
                 " WHERE player_id = :pid"), {"pid": player.id})
             print(f"[LEASE] FFA enroll cleared an unleased {mine['status']} husk "
                   f"for {req.steam_id} (lobby {mine['series_id']})")
@@ -44359,6 +44395,7 @@ async def _ffa_lobby_enroll_caller(db: AsyncSession, player, req, lobby_id) -> N
         flipped = (await db.execute(text("""
             UPDATE ffa_queue SET status='lobby', series_id=:lid, slot=NULL,
                    room_name=NULL, room_region=NULL, matched_at=NULL,
+                   held_until=NULL, held_lobby=NULL,
                    display_name=:dn, region=:reg, rating=:r, rating_deviation=:rd,
                    games_played=:gp, fallback_rating=:fr,
                    joined_at=NOW(), last_polled=NOW(), mod_version=:mv
@@ -44878,7 +44915,8 @@ async def ffa_lobby_start(req: _FfaLobbyStartReq, request: Request, db: AsyncSes
     for slot, r in enumerate(ordered):
         await db.execute(text("""
             UPDATE ffa_queue SET status='ready_join', series_id=:lid, slot=:slot,
-                   room_name=:room, room_region=:reg, matched_at=NOW()
+                   room_name=:room, room_region=:reg, matched_at=NOW(),
+                   held_until=NULL, held_lobby=NULL
              WHERE player_id=:pid
         """), {"lid": lobby_id, "slot": slot, "room": room, "reg": (region or "us")[:8],
                "pid": r["player_id"]})
@@ -45202,7 +45240,8 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
             ), {"lid": lobby_id})
             await db.execute(text("""
                 UPDATE ffa_queue SET status='searching', series_id=NULL, slot=NULL,
-                       room_name=NULL, room_region=NULL, matched_at=NULL, joined_at=NOW()
+                       room_name=NULL, room_region=NULL, matched_at=NULL, joined_at=NOW(),
+                       held_until=NULL, held_lobby=NULL
                  WHERE series_id = :lid AND player_id != :pid
             """), {"lid": lobby_id, "pid": me["player_id"]})
             await _reconcile_ffa_lobby_bets(db, lobby_id, "lobby dissolved")
@@ -45444,12 +45483,28 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
     # poll would delete its grouped rows here and the sitting-over self-heal
     # below would see zero members and never close the lobby. The caller's
     # group is the self-heal's to dissolve; this sweep owns everyone else's.
+    #
+    # LIVE-HOLD EXEMPTION (migration 325). This age is the LOBBY's, not the
+    # hold's: matched_at is stamped when the seat was bound, so a long sitting
+    # -- a score_target=10 game inside its scaled ceiling -- carries rows older
+    # than three hours while running perfectly. A 130 s hold granted in such a
+    # lobby is therefore ALREADY past this predicate the moment it is written,
+    # and any unrelated searching player's poll would delete it: the returner
+    # then gets not_in_queue with no trace. The first draft of 325 reasoned
+    # that "a 130 s hold is two orders of magnitude inside three hours" and
+    # left this sweep alone -- wrong, because it compared the hold's age to a
+    # threshold measured against the LOBBY's. clock_timestamp(), not NOW():
+    # NOW() is frozen at transaction start, which would widen the window by
+    # however long this poll has been running.
     await db.execute(text("""
         DELETE FROM ffa_queue WHERE player_id IN (
             SELECT player_id FROM ffa_queue
              WHERE status != 'searching' AND matched_at IS NOT NULL
                AND matched_at < NOW() - INTERVAL '3 hours'
                AND series_id IS DISTINCT FROM :my_series
+               AND NOT (held_until IS NOT NULL
+                        AND held_lobby IS NOT DISTINCT FROM series_id
+                        AND held_until > clock_timestamp())
              FOR UPDATE SKIP LOCKED)
     """), {"my_series": me["series_id"]})
 
@@ -45653,7 +45708,24 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
         # report still validates against the lobby's frozen roster, so being
         # freed early can never cost a recorded game — which is what makes the
         # expire-by-default direction safe (migration 174).
-        if not dead and await _lease_live_mode(db, me["player_id"]) is None:
+        #
+        # A LIVE READMISSION HOLD is the one state where "no lease" does not
+        # mean "no longer committed" (migration 325). The claim path deletes
+        # the lease AS it writes the hold -- that deletion is deliberate, and
+        # it is what leaves a held player free to join any other queue during
+        # the window, since _locked_in_other_queue consults leases and never
+        # this table. So this arm sees precisely the state a hold creates.
+        # Without the conjunct below it fires on the RETURNER'S OWN first poll
+        # and deletes the row the hold exists to keep: the feature would ship
+        # fully inert while printing a success line ("[LEASE] freed ...") on
+        # its way out -- #438's shape, a feature that is 100% dead with clean
+        # logs. The exemption cannot become an unbounded strand: held_until is
+        # a wall-clock bound written once and never renewed, and the janitor
+        # collects the row the moment it passes.
+        _held = (me["held_until"] is not None
+                 and me["held_lobby"] == me["series_id"]
+                 and me["held_until"] > datetime.now(timezone.utc))
+        if not dead and not _held and await _lease_live_mode(db, me["player_id"]) is None:
             await db.execute(text("DELETE FROM ffa_queue WHERE player_id = :pid"),
                              {"pid": me["player_id"]})
             await db.commit()
@@ -45748,7 +45820,8 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
                 await _reconcile_ffa_lobby_bets(db, me["series_id"], "dead lock reset")
             await db.execute(text("""
                 UPDATE ffa_queue SET status='searching', series_id=NULL, slot=NULL,
-                       room_name=NULL, room_region=NULL, matched_at=NULL, joined_at=NOW()
+                       room_name=NULL, room_region=NULL, matched_at=NULL, joined_at=NOW(),
+                       held_until=NULL, held_lobby=NULL
                  WHERE series_id = :lid
             """), {"lid": me["series_id"]})
             await db.commit()
@@ -45875,7 +45948,8 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
     for slot, r in enumerate(ordered):
         await db.execute(text("""
             UPDATE ffa_queue SET status='ready_join', series_id=:lid, slot=:slot,
-                   room_name=:room, room_region=:reg, matched_at=NOW()
+                   room_name=:room, room_region=:reg, matched_at=NOW(),
+                   held_until=NULL, held_lobby=NULL
              WHERE player_id=:pid
         """), {"lid": lobby_id, "slot": slot, "room": room, "reg": (region or "us")[:8],
                "pid": r["player_id"]})
