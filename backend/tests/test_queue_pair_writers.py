@@ -359,17 +359,24 @@ def test_room_issuing_branches_stamp_only_through_the_reciprocal_helper():
 
 def test_ready_dissolutions_reset_the_own_row_and_answer_dissolved():
     """A dissolution (non-reciprocal pair, failed reciprocal stamp, replay room
-    mismatch) resets the caller's OWN row and answers 200 'dissolved' — the
-    1.40.1 client returns to Searching on it. The pair is read under the locks
-    BEFORE the caller's ready write. The only 503 left is the pre-existing
-    re-pair race (a 5xx is what the generic retry loop is built for); the ban
-    dissolution keeps its 409."""
+    mismatch, lapsed lease) resets the caller's OWN row and answers 200
+    'dissolved' — the 1.40.1 client returns to Searching on it. The pair is
+    read under the locks BEFORE the caller's ready write. The only 503 left is
+    the pre-existing re-pair race (a 5xx is what the generic retry loop is
+    built for); the ban dissolution keeps its 409.
+
+    A1 (2026-09-17) added the FOURTH: the strict lease gate at fresh room
+    issuance. queue_ready requires the pair's exact live ("ranked", None)
+    predecessor, so a lapsed commitment dissolves instead of resurrecting a
+    pair that is already gone. Counted here rather than loosened to >= 3,
+    because the point of this assertion is that a NEW dissolution path has to
+    be a deliberate edit to this line."""
     src = inspect.getsource(main.queue_ready)
     assert '"status": "not_matched", "message": "Match dissolved' not in src
     assert "pair_changed" not in src and "dissolved_at_ready" not in src
     adjacent = re.findall(r"await _queue_reset_to_searching\(db, player\.id\)\s+await db\.commit\(\)\s+"
                           r"return \{\"status\": \"dissolved\"", src)
-    assert len(adjacent) == 3
+    assert len(adjacent) == 4
     assert src.count('raise HTTPException(status_code=503, detail="queue_contended")') == 1
     assert 'raise HTTPException(409, "match dissolved (participant banned)")' in src
     opp_read = src.index("FROM ranked_queue WHERE player_id = :oid")

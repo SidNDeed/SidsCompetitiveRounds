@@ -551,6 +551,14 @@ class FakeIssuanceSession:
         self.statements = []
         self.heartbeats = []
         self.commits = 0
+        # A1: the pair's queue_leases state. A normally-matched pair holds its
+        # exact ("ranked", None) predecessor -- queue_poll's matched branch
+        # acquires it in the same transaction as the status write -- and
+        # queue_ready now REQUIRES it before issuing a room. Modelled here so
+        # these region tests exercise the issuance they are about; the gate's
+        # own refusal path is tested in test_a1_identity_formation.py.
+        self.lease_mode = "ranked"
+        self.leases_written = []
 
     async def execute(self, statement, params=None):
         params = dict(params or {})
@@ -583,6 +591,15 @@ class FakeIssuanceSession:
                 row = self.rows[params["pid"]]
                 row["region_pings"] = params["region_pings"]
                 row["region_pings_at"] = stamp
+            return _Result([])
+        if "FROM queue_leases" in sql:
+            # lease_mode None models a lapsed commitment, which A1 dissolves
+            # rather than resurrecting.
+            if self.lease_mode is None or params.get("pid") not in self.rows:
+                return _Result([])
+            return _Result([{"mode": self.lease_mode, "group_id": None}])
+        if sql.startswith("INSERT INTO queue_leases"):
+            self.leases_written.append(params.get("pid"))
             return _Result([])
         if sql.startswith("SELECT") and "FROM players" in sql:
             pid = self.by_steam[self.me_steam]
@@ -692,6 +709,32 @@ def test_queue_ready_issues_the_room_from_the_projected_maps(issuance):
     assert resp["status"] == "both_ready"
     assert resp["photon_region"] == "eu"
     assert issuance == [(ME, PARTNER, resp["room_name"], "eu")]
+
+
+def test_queue_ready_refuses_to_issue_a_room_on_a_lapsed_lease(issuance):
+    """A1: queue_ready REQUIRES the pair's exact live ("ranked", None)
+    predecessor. An absent lease does not mean "both seats are free" -- it
+    means the commitment lapsed and this pair is already gone, so issuing a
+    room would resurrect it and make it cross-mode eligible again. The caller
+    is returned to searching instead, and NO room is issued."""
+    at = _now() - timedelta(seconds=20)
+    session = FakeIssuanceSession(_pair(FRESH_MAP, FRESH_MAP_PARTNER, at, at), ME_STEAM)
+    session.lease_mode = None
+    resp = _ready(session)
+    assert resp["status"] == "dissolved", resp
+    assert issuance == [], "a room was issued on a lapsed commitment"
+    assert session.leases_written == [], "a lapsed pair was re-leased"
+
+
+def test_queue_ready_reacquires_the_lease_on_the_room_it_issues(issuance):
+    """The renew half of the same requirement: the committed room carries a
+    lease measured from ISSUANCE, not whatever remained of the poll's five
+    minutes."""
+    at = _now() - timedelta(seconds=20)
+    session = FakeIssuanceSession(_pair(FRESH_MAP, FRESH_MAP_PARTNER, at, at), ME_STEAM)
+    assert _ready(session)["status"] == "both_ready"
+    assert sorted(str(p) for p in session.leases_written) == sorted(
+        [str(ME), str(PARTNER)]), session.leases_written
 
 
 def test_queue_ready_control_without_maps_or_with_stale_maps_takes_the_ladder(issuance):

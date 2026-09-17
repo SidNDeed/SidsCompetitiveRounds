@@ -13150,6 +13150,19 @@ _QUEUE_GROUP_STATUSES = {
 }
 
 
+# Every table _lock_snapshot_rows will accept as a formation PARENT. DERIVED
+# from the two maps above rather than written out again, so a new mode added
+# there cannot silently fail the allowlist here. ranked_series is added by
+# hand: 1v1 has no grouped queue shape (ranked_queue carries no series_id, so
+# it appears in neither map) but the matched branch and queue_ready both lock a
+# ranked series row as the formation's parent.
+_QUEUE_PARENT_LOCK_TABLES = frozenset(
+    set(_QUEUE_GROUP_SERIES_TABLES.values())
+    | set(_QUEUE_GROUP_LOBBY_TABLES.values())
+    | {"ranked_series"}
+)
+
+
 async def _lock_queue_rows_ordered(db: AsyncSession, table: str, player_ids) -> None:
     """Take FOR UPDATE locks on the given queue rows in a deterministic GLOBAL
     order (ascending player_id), one statement per row.
@@ -13751,6 +13764,192 @@ async def _locked_in_other_queue(db: AsyncSession, player_id, joining_table: str
     if table is None or table == joining_table:
         return None
     return table
+
+
+# --- A1: identity-first two-phase formation (rejoin batch, 2026-09-17) ------
+#
+# The SCOPE NOTE above records the double-lock race this block exists to close:
+# a player may legitimately search several modes at once, every lock path's
+# pre-check is an UNLOCKED read, so two matchmakers can both pass it and both
+# lock the same player. Refusing the second claim at lease time does not cure
+# it -- by then the losing FORMATION has already committed its series and its
+# other members' rows, which is strictly worse. The cure is to make two
+# overlapping formations mutually exclusive BEFORE either writes anything, by
+# serializing them on the identities they share.
+#
+# Shape, from the Codex ultra design round of 2026-09-17. Three other options
+# were examined and all fail -- (a) hoisting the identity phase above the
+# UNCHANGED group helper, whose internal commits release the very locks we just
+# took; (b) mutating that helper's contract globally, which reaches many
+# leave/poll/lobby routes and still misses ranked; (c) having it acquire
+# identities itself, when it only ever knows the caller's own group and never
+# the counterparties chosen later. The why is written up in
+# ai-collab/rejoin/A1-BRIEF.md. What survives is a caller-owned loop:
+#
+#   1. finish and COMMIT any independent preflight maintenance
+#   2. UNLOCKED discovery of the exact roster and the full lock footprint
+#   3. _identity_lock_many(every sid)          <- the phase barrier
+#   4. reread mappings / bans / tombstones / admission state under the locks
+#   5. _lock_snapshot_rows(...)                <- named parents then named queue
+#                                                 rows; no commit, no retry, no
+#                                                 open-ended candidate scan
+#   6. revalidate; on drift rollback() and restart from (2), bounded
+#   7. strict lease gate, write, commit
+#
+# TWO LOCK CLASSES are in play: identity (hashtext of the steam_id) and queue
+# row (UUID order). They are safe as separate classes ONLY under a strict phase
+# barrier -- every identity taken before any row. If SID(A) < SID(B) but
+# UUID(A) > UUID(B), both contenders still request identity A then B, so the
+# loser blocks in the IDENTITY phase holding no row at all and the winner is
+# free to take queue B then A with no cycle. players.steam_id is unique, so
+# disjoint identities cannot denote the same row. The moment a path locks a row
+# and THEN asks for an identity -- or adds a newly discovered sid without
+# rolling back first, or reuses one of the open-ended SKIP LOCKED candidate
+# scans after the barrier -- that argument collapses and the ABBA returns.
+
+FORMATION_MAX_ATTEMPTS = 3
+
+
+async def _identity_lock_many(db: AsyncSession, steam_ids) -> list:
+    """Take the per-identity advisory lock for EVERY sid, in ONE canonical order.
+
+    LOCK-ONLY, on purpose. _enrollment_identity_gate performs the same
+    acquisition and then reads ban + deletion-tombstone state and RAISES, which
+    is right for a single enrolling caller and wrong for a roster: it would
+    interleave a policy read between acquisitions, and FFA's hosted Start
+    deliberately PRUNES banned seats rather than refusing, so a raise inside
+    the loop would convert that pruning into a whole-Start refusal. Callers run
+    their own rereads after this returns, against the roster they now hold.
+
+    The key derivation is the lattice's, not a private one:
+    hashtext(steam_id), the same expression _enrollment_identity_gate and the
+    deletion path use, so this interlocks with them instead of forming a
+    parallel class that serializes against nothing. Global lock order is
+    unchanged: identity -> lobby/series -> queue -> lease.
+
+    Ordering is the whole point, not tidiness. Two formations overlapping on A
+    and B that acquire in opposite orders deadlock on the advisory locks
+    themselves, which no row ordering can repair (#197/#202/#282). The key is
+    _ffa_sort_key -- the repo's existing canonical (length, ordinal) order for
+    steam ids. Any total order would serialize correctly PROVIDED it is the
+    only one in the class, which is why every site routes through this function
+    rather than sorting for itself; _ffa_sort_key is chosen over bare sorted()
+    because the two agree on canonical 17-digit ids and diverge on anything
+    shorter, and this is not the place to assume the domain is clean.
+
+    Returns the ordered list actually locked, so a test can assert the real
+    bind sequence instead of trusting the loop (a check that reads the source
+    cannot fail -- #441).
+    """
+    ordered = sorted({s for s in steam_ids if s}, key=_ffa_sort_key)
+    for sid in ordered:
+        await db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))"),
+            {"sid": sid},
+        )
+    return ordered
+
+
+async def _lock_snapshot_rows(db: AsyncSession, table: str, *,
+                              parents=None, player_ids=None) -> None:
+    """Lock an already-DISCOVERED snapshot: named parents, then named queue rows.
+
+    The counterpart to _lock_queue_group_for_player for callers that have
+    already crossed the identity barrier. It differs in the three ways that
+    matter, and each difference is load-bearing:
+
+      * NO COMMIT. The group helper commits when the row is missing and when
+        its membership re-check fails. Committing here would release every
+        transaction-scoped advisory lock the caller took in phase 3 and hand
+        the formation straight back to the race it just closed.
+      * NO RETRY. Drift is the CALLER's to handle, because only the caller can
+        roll back and rediscover -- and rediscovery may turn up an identity we
+        do not yet hold, which must never be acquired while rows are held.
+      * NO DISCOVERY. Parents and rows are passed in. An open-ended scan after
+        the barrier can select a player outside the gated set, which is exactly
+        the hole the barrier exists to close.
+
+    Parent rows come first (series/lobby before queue), matching match
+    completion, which already locks the series before touching its queue rows.
+    Both passes are deterministically ordered so two callers holding different
+    identity subsets still agree on row order.
+    """
+    if table not in _QUEUE_LOCK_TABLES:
+        raise ValueError(f"refusing to lock unknown table {table!r}")
+    for ptable, pid in sorted(
+        {(t, p) for (t, p) in (parents or ()) if t and p is not None},
+        key=lambda tp: (tp[0], str(tp[1])),
+    ):
+        if ptable not in _QUEUE_PARENT_LOCK_TABLES:
+            raise ValueError(f"refusing to lock unknown parent table {ptable!r}")
+        await db.execute(
+            text(f"SELECT 1 FROM {ptable} WHERE id = :pid FOR UPDATE"),
+            {"pid": pid},
+        )
+    await _lock_queue_rows_ordered(db, table, list(player_ids or ()))
+
+
+async def _lease_live_claim_strict(db: AsyncSession, player_id):
+    """(mode, group_id) of this player's LIVE lease, or None. Errors PROPAGATE.
+
+    A sibling of _lease_live_mode, NOT a strictening of it. That helper turns a
+    read failure into "free", and its callers -- ranked/team/OVT/FFA join, team
+    and OVT and FFA lobby create and join, same-mode husk reclamation, FFA
+    poll's own expired-lease self-release -- are all built on that polarity;
+    making it strict globally would newly abort every one of them on a lease
+    read fault. A fail-soft helper becomes a bug the moment a caller with the
+    opposite polarity reuses it (#412), so formation gets its own reader.
+
+    Here the polarity is inverted deliberately: a formation that cannot READ
+    the leases must not conclude the players are free. Failing to form is an
+    availability cost; forming twice is the defect this change exists to
+    remove.
+
+    Note the consequence for deploy order -- this has no savepoint and no
+    catch, so queue_leases must EXIST before this code is live. Surviving that
+    window is precisely what _lease_live_mode's savepoint was written for.
+    """
+    return (await db.execute(text(
+        "SELECT mode, group_id FROM queue_leases"
+        " WHERE player_id = :pid AND expires_at > clock_timestamp()"
+    ), {"pid": player_id})).mappings().first()
+
+
+async def _formation_lease_conflict(db: AsyncSession, members, *,
+                                    allow=None, require: bool = False):
+    """First member whose live lease forbids this formation, else None.
+
+    members   iterable of (steam_id, player_id) for the WHOLE roster -- every
+              identity this transaction will write, not merely the fresh ones.
+    allow     (mode, group_id) this formation is entitled to supersede, i.e.
+              its OWN exact predecessor. Hosted Start's seats already hold a
+              same-mode lobby lease BY DESIGN, so a blanket "reject any live
+              lease" would refuse every healthy Start -- fail-closed in the
+              most operationally severe way available, and a guard is judged by
+              what its refusal costs (#430).
+    require   every member must hold exactly `allow`; absent is NOT admissible.
+              This is queue_ready and delayed activation, which refresh a
+              possibly stale pair: an expired lease there means the pair is
+              already gone, and proceeding would resurrect it and make it
+              cross-mode eligible again.
+
+    Returns (steam_id, reason) for the first offender, or None when the whole
+    roster is admissible. Reasons are stable strings so a test can tell the
+    three policies apart rather than merely observing that something refused.
+    """
+    for sid, pid in members:
+        if pid is None:
+            continue
+        claim = await _lease_live_claim_strict(db, pid)
+        if claim is None:
+            if require:
+                return (sid, "lease_expired")
+            continue
+        held = (claim["mode"], claim["group_id"])
+        if allow is not None and held == allow:
+            continue
+        return (sid, "lease_held_elsewhere")
+    return None
 
 
 async def _lock_queue_group_for_player(
@@ -16192,9 +16391,30 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
         {"pid": player.id},
     )).mappings().first()
 
-    await _lock_queue_rows_ordered(
+    # A1 phase 3 — the identity barrier, BEFORE any row lock. This endpoint
+    # refreshes a possibly stale pair and can issue a room and create a
+    # RankedSeries, so it FORMS just as much as the poll does and has to be
+    # serialized against every other formation touching either seat.
+    #
+    # The opponent's canonical sid is fetched by its own read rather than
+    # joined into the discovery statement above. A discovery yielding
+    # player_ids alone cannot gate the pair — which is exactly why this site
+    # was missed in the first draft of the brief — but the statement above is
+    # pinned by several existing fakes, and widening it into a self-join
+    # changes its shape for no gain. Both reads are unlocked, which is what
+    # this phase is for.
+    _opp_sid = None
+    if disc is not None and disc["matched_with"] is not None:
+        _opp = (await db.execute(
+            text("SELECT steam_id FROM ranked_queue WHERE player_id = :oid"),
+            {"oid": disc["matched_with"]},
+        )).mappings().first()
+        _opp_sid = _opp["steam_id"] if _opp else None
+    await _identity_lock_many(db, [steam_id, _opp_sid])
+
+    await _lock_snapshot_rows(
         db, "ranked_queue",
-        [player.id, disc["matched_with"] if disc else None])
+        player_ids=[player.id, disc["matched_with"] if disc else None])
 
     entry_result = await db.execute(
         text("""
@@ -16308,6 +16528,24 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
                     await _queue_reset_partner_if_reciprocal(db, player.id, opp["player_id"])
                 await db.commit()
                 raise HTTPException(409, "match dissolved (participant banned)")
+            # A1 phase 7 — the strict lease gate. This site's policy is
+            # REQUIRE, not "no live lease": the pair already holds
+            # ("ranked", None) from the poll that matched them, so an ABSENT
+            # lease here does not mean "both seats are free", it means the
+            # five-minute commitment lapsed and this pair is already gone.
+            # Issuing a room anyway RESURRECTS it, and a resurrected pair is
+            # cross-mode eligible again — the exact double-lock this batch
+            # exists to remove. Dissolving is both the truthful answer and the
+            # conservative one: the caller returns to searching.
+            _lease_bad = await _formation_lease_conflict(
+                db, [(steam_id, player.id), (opp["steam_id"], opp["player_id"])],
+                allow=("ranked", None), require=True)
+            if _lease_bad is not None:
+                print(f"[QUEUE-READY] {steam_id} lease gate refused "
+                      f"({_lease_bad[0]}: {_lease_bad[1]}) — dissolving own row")
+                await _queue_reset_to_searching(db, player.id)
+                await db.commit()
+                return {"status": "dissolved", "message": "Match dissolved - searching again"}
             room_name = f"ranked_{uuid_mod.uuid4().hex[:12]}"
             # Aug 15 item 5: agreeing home regions beat the readier's live
             # snapshot (see _pick_room_region). opp is non-None in this
@@ -16338,6 +16576,15 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
                 await db.commit()
                 return {"status": "dissolved", "message": "Match dissolved - searching again"}
             room_generated = True
+            # A1: re-acquire on the freshly issued room, in the SAME
+            # transaction as the stamp (migration 174's rule) and in sorted
+            # order. The gate above proved the poll's commitment is still
+            # live; this replaces whatever was left of it so the lease
+            # measures from room issuance rather than from pairing. TTL is
+            # unchanged (LEASE_TTL_POLLING, renewed by the 3s ranked poll),
+            # so nothing about 1v1 lease lifetime moves — only its origin.
+            await _lease_acquire_many(db, [player.id, opp["player_id"]],
+                                      "ranked", None, LEASE_TTL_POLLING)
         elif opp["room_name"] != room_name:
             print(f"[QUEUE-READY] {steam_id} replay room mismatch (ours={room_name} theirs={opp['room_name']}) — dissolving own row")
             await _queue_reset_to_searching(db, player.id)
