@@ -14056,6 +14056,145 @@ _RANKED_CANDIDATE_SQL = """
 """
 
 
+# The 1v2 gather predicate, lifted to module level for the same reason as the
+# 1v1 one (#330): discovery and revalidation have to be the SAME test, not two
+# copies free to drift. `:only` NULL discovers; a uuid[] re-aims the whole
+# predicate at exactly the rows already chosen.
+#
+# A1 dropped the `FOR UPDATE SKIP LOCKED` this scan used to carry. That form
+# discovered and LOCKED in one statement, so it took rows belonging to
+# identities the transaction does not hold -- the one move the phase barrier
+# forbids -- and it made the decider election depend on who else happened to be
+# mid-poll rather than on the queue.
+_OVT_CANDIDATE_SQL = """
+    SELECT player_id, steam_id, display_name, preferred_side, solo_extra_pick,
+           region, rating, rating_deviation, completed_series
+      FROM ovt_queue
+     WHERE status = 'searching'
+       AND last_polled > NOW() - INTERVAL '10 seconds'
+       AND NOT EXISTS (SELECT 1 FROM player_bans pb
+                        WHERE pb.steam_id = ovt_queue.steam_id
+                          AND pb.unbanned_at IS NULL)
+       AND NOT (steam_id = ANY(CAST(:service_ids AS text[])))
+       -- A1: a seat already committed elsewhere is not a candidate. Excluding
+       -- it HERE, and not only refusing it at the gate below, is what keeps one
+       -- leased row at the head of the queue from blocking the whole pool --
+       -- the gate then only has to catch a claim made after discovery.
+       AND NOT EXISTS (SELECT 1 FROM queue_leases ql
+                        WHERE ql.player_id = ovt_queue.player_id
+                          AND ql.expires_at > clock_timestamp())
+       -- revalidation aims the whole predicate at the discovered rows
+       AND (CAST(:only AS uuid[]) IS NULL OR player_id = ANY(CAST(:only AS uuid[])))
+     ORDER BY joined_at
+     LIMIT 3
+"""
+
+# The FFA gather predicate. Same rule, same reasons; LIMIT is the mode's own
+# ceiling rather than a fixed 3.
+_FFA_CANDIDATE_SQL = """
+    SELECT player_id, steam_id, display_name, region, joined_at
+      FROM ffa_queue
+     WHERE status = 'searching'
+       AND last_polled > NOW() - INTERVAL '10 seconds'
+       AND NOT EXISTS (SELECT 1 FROM player_bans pb
+                        WHERE pb.steam_id = ffa_queue.steam_id
+                          AND pb.unbanned_at IS NULL)
+       AND NOT (steam_id = ANY(CAST(:service_ids AS text[])))
+       -- see _OVT_CANDIDATE_SQL: excluded at discovery so one committed seat
+       -- cannot wedge the gather, re-checked at the gate for the window
+       -- between discovery and the barrier.
+       AND NOT EXISTS (SELECT 1 FROM queue_leases ql
+                        WHERE ql.player_id = ffa_queue.player_id
+                          AND ql.expires_at > clock_timestamp())
+       -- revalidation aims the whole predicate at the discovered rows
+       AND (CAST(:only AS uuid[]) IS NULL OR player_id = ANY(CAST(:only AS uuid[])))
+     ORDER BY joined_at
+     LIMIT :maxp
+"""
+
+
+# The 2v2 candidate predicate. It has two shapes -- the bilateral rating band
+# is dropped for manual queues, where joining the lobby IS the consent (#127)
+# -- so it is a template, built ONCE per poll and then used for both discovery
+# and revalidation. Same rule as the 1v1 and 1v2 predicates (#330): the test
+# that revalidates has to be the test that chose, not a second copy of it.
+_TEAM_BILATERAL_SQL = """
+              AND :my_r BETWEEN
+                  tq.rating - (CASE
+                      WHEN EXTRACT(EPOCH FROM (now() - tq.joined_at)) >= 120 THEN 800
+                      WHEN EXTRACT(EPOCH FROM (now() - tq.joined_at)) >= 60 THEN 400
+                      WHEN EXTRACT(EPOCH FROM (now() - tq.joined_at)) >= 30 THEN 200
+                      ELSE 100
+                  END)
+                  AND
+                  tq.rating + (CASE
+                      WHEN EXTRACT(EPOCH FROM (now() - tq.joined_at)) >= 120 THEN 800
+                      WHEN EXTRACT(EPOCH FROM (now() - tq.joined_at)) >= 60 THEN 400
+                      WHEN EXTRACT(EPOCH FROM (now() - tq.joined_at)) >= 30 THEN 200
+                      ELSE 100
+                  END)"""
+
+_TEAM_CANDIDATE_SQL_TMPL = """
+            SELECT tq.player_id, tq.steam_id, tq.display_name, tq.rating, tq.rating_deviation,
+                   tq.completed_series, tq.fallback_rating, tq.region, tq.joined_at,
+                   tq.manual_pick_enabled, tq.preferred_team, tq.queue_type
+            FROM team_queue tq
+            WHERE tq.status = 'searching'
+              AND tq.player_id != :pid
+              AND tq.queue_type = :qt
+              -- Freshness (review find): a crashed client's row must never lock
+              -- into a series (its player would never spawn-confirm). Mirrors
+              -- the 1v2 matcher's 10s rule; matters more now that the janitor
+              -- sweep runs at 90s instead of 30s.
+              AND tq.last_polled > NOW() - INTERVAL '10 seconds'
+              AND ABS(tq.rating - :my_r) <= :range{bilateral}
+              AND tq.player_id NOT IN (
+                  SELECT blocked_id FROM player_blocks WHERE blocker_id = :pid
+                  UNION SELECT blocker_id FROM player_blocks WHERE blocked_id = :pid
+                  UNION SELECT blocked_id FROM queue_blocks WHERE blocker_id = :pid AND expires_at > now()
+                  UNION SELECT blocker_id FROM queue_blocks WHERE blocked_id = :pid AND expires_at > now()
+              )
+              AND NOT EXISTS (SELECT 1 FROM player_bans pb
+                               WHERE pb.steam_id = tq.steam_id
+                                 AND pb.unbanned_at IS NULL)
+              AND NOT (tq.steam_id = ANY(CAST(:service_ids AS text[])))
+              -- A1: a seat already committed elsewhere is not a candidate for a
+              -- FRESH series. Excluding it here, not only refusing it at the
+              -- gate, is what stops one committed row from wedging the pool.
+              AND NOT EXISTS (SELECT 1 FROM queue_leases ql
+                               WHERE ql.player_id = tq.player_id
+                                 AND ql.expires_at > clock_timestamp())
+              -- revalidation aims the whole predicate at the discovered rows
+              AND (CAST(:only AS uuid[]) IS NULL OR tq.player_id = ANY(CAST(:only AS uuid[])))
+            ORDER BY ABS(tq.rating - :my_r), tq.joined_at
+            LIMIT 3
+"""
+
+# Sticky-resume consent. Deliberately NOT lease-filtered, unlike the fresh
+# predicate above: the four are resuming the series they already hold a
+# ("team", <that series>) lease for, and excluding leased rows here would
+# refuse every healthy resume. The gate handles it instead, by allowing that
+# one exact predecessor and nothing else.
+_TEAM_RESUME_CONSENT_SQL = """
+                SELECT player_id, steam_id, display_name, rating, region,
+                       preferred_team
+                  FROM team_queue
+                 WHERE player_id = ANY(:pids)
+                   AND ((status = 'searching' AND series_id IS NULL)
+                        OR series_id = :sid)
+                   AND player_id != :me
+                   -- Freshness (review find): don't resume a series onto a
+                   -- crashed teammate's ghost row.
+                   AND last_polled > NOW() - INTERVAL '10 seconds'
+                   AND NOT EXISTS (SELECT 1 FROM player_bans pb
+                                    WHERE pb.steam_id = team_queue.steam_id
+                                      AND pb.unbanned_at IS NULL)
+                   -- revalidation aims the predicate at the discovered rows
+                   AND (CAST(:only AS uuid[]) IS NULL
+                        OR player_id = ANY(CAST(:only AS uuid[])))
+"""
+
+
 async def _lock_queue_group_for_player(
     db: AsyncSession, table: str, steam_id: str, max_attempts: int = 3
 ):
@@ -14153,6 +14292,115 @@ async def _lock_queue_group_for_player(
         print(f"[QUEUE-LOCK] {table} membership changed while locking "
               f"{steam_id}; retry {attempt}/{max_attempts}")
 
+    raise HTTPException(status_code=503, detail="queue_contended")
+
+
+async def _lock_group_snapshot(db: AsyncSession, table: str, steam_id: str,
+                               max_attempts: int = FORMATION_MAX_ATTEMPTS):
+    """A1's replacement for _lock_queue_group_for_player on FORMATION paths.
+
+    Same job and same return value — the caller's authoritative row under the
+    group's locks, or None when they have no row — with three differences, each
+    of which is the reason this exists rather than a flag on the original:
+
+      * the IDENTITY BARRIER is taken first, over every member of the
+        discovered group, so the formation is serialized against any other
+        formation touching one of those seats;
+      * it NEVER COMMITS. The original commits on a missing row and on a failed
+        membership re-check; here a commit would release the advisory locks
+        just taken and hand the formation back to the race it closed. Drift
+        rolls back and rediscovers instead;
+      * discovery reads the FULL physical group — every row pointing at the
+        parent — rather than a status/freshness-filtered view, because the row
+        lock and the callers' prunes touch all of them.
+
+    _lock_queue_group_for_player keeps its contract and its many non-formation
+    consumers (leave, poll-state, lobby-state); this is not a migration of that
+    helper, it is a sibling for the eight sites that form.
+    """
+    series_table = _QUEUE_GROUP_SERIES_TABLES.get(table)
+    grouped_statuses = _QUEUE_GROUP_STATUSES.get(table)
+    if series_table is None or grouped_statuses is None:
+        raise ValueError(f"refusing grouped lock for unknown table {table!r}")
+
+    def _parent_table(status: str) -> str:
+        """Which table this row's series_id points at (Aug 6 item 9).
+        Closed set on both sides — never derived from a request."""
+        if status == "lobby":
+            return _QUEUE_GROUP_LOBBY_TABLES.get(table) or series_table
+        return series_table
+
+    for attempt in range(1, max_attempts + 1):
+        # 2. UNLOCKED discovery of the caller and, when grouped, the whole
+        # physical group plus the parent row it hangs from.
+        disc = (await db.execute(
+            text(f"SELECT player_id, steam_id, status, series_id FROM {table}"
+                 f" WHERE steam_id = :sid"),
+            {"sid": steam_id},
+        )).mappings().first()
+        if disc is None:
+            await db.rollback()
+            return None
+
+        grouped = (disc["status"] in grouped_statuses
+                   and disc["series_id"] is not None)
+        disc_series_id = disc["series_id"] if grouped else None
+        disc_parent = _parent_table(disc["status"]) if grouped else None
+
+        members = [(disc["player_id"], disc["steam_id"])]
+        if disc_series_id is not None:
+            members = [(r["player_id"], r["steam_id"]) for r in (await db.execute(
+                text(f"SELECT player_id, steam_id FROM {table}"
+                     f" WHERE series_id = :sid"),
+                {"sid": disc_series_id},
+            )).mappings().all()]
+            if disc["player_id"] not in {p for p, _ in members}:
+                members.append((disc["player_id"], disc["steam_id"]))
+
+        # 3. the barrier, over every identity in the discovered group.
+        await _identity_lock_many(db, [s for _p, s in members] + [steam_id])
+
+        # 5. the discovered snapshot: parent row first, then the queue rows.
+        await _lock_snapshot_rows(
+            db, table,
+            parents=[(disc_parent, disc_series_id)] if disc_series_id else None,
+            player_ids=[p for p, _s in members],
+        )
+
+        # 6. revalidate. The parent TABLE must match too: a row that moved
+        # between 'lobby' and a series status points at a different table, so
+        # the lock taken is not the lock the caller needs (Aug 6 item 9).
+        current = (await db.execute(
+            text(f"SELECT player_id, steam_id, status, series_id FROM {table}"
+                 f" WHERE steam_id = :sid"),
+            {"sid": steam_id},
+        )).mappings().first()
+        if current is None:
+            await db.rollback()
+            return None
+
+        current_grouped = (current["status"] in grouped_statuses
+                           and current["series_id"] is not None)
+        stable = not current_grouped
+        if (current_grouped and current["series_id"] == disc_series_id
+                and _parent_table(current["status"]) == disc_parent):
+            current_ids = set((await db.execute(
+                text(f"SELECT player_id FROM {table} WHERE series_id = :sid"),
+                {"sid": current["series_id"]},
+            )).scalars().all())
+            stable = current_ids.issubset({p for p, _s in members})
+
+        if stable:
+            return current
+
+        # Drift: ROLL BACK, never commit. A member who joined while we were
+        # acquiring is an identity we do not hold, and one may only be taken
+        # while holding nothing.
+        await db.rollback()
+        print(f"[QUEUE-LOCK] {table} membership changed while locking "
+              f"{steam_id}; retry {attempt}/{max_attempts}")
+
+    await db.rollback()
     raise HTTPException(status_code=503, detail="queue_contended")
 
 
@@ -16430,6 +16678,14 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
                   f"{_form_attempt}/{FORMATION_MAX_ATTEMPTS}")
             await db.rollback()
             opp = None
+            if _bad[0] == steam_id:
+                # OUR OWN seat is the committed one. Rediscovery cannot change
+                # that: it is not contention, it is a stable fact that holds
+                # until the other commitment lapses, so three attempts and a
+                # 503 every three seconds would wedge this client for no
+                # reason. Answer an honest "no match yet" instead -- the seat
+                # becomes matchable again the moment its other lease expires.
+                break
             continue
 
         # Match found — set both to matched, NO room yet (wait for both to ready up)
@@ -37717,7 +37973,7 @@ async def team_queue_poll(steam_id: str, request: Request,
     # series group. The old self-FOR-UPDATE followed by bulk four-row writes was
     # the same ABBA shape as 1v1; SKIP LOCKED candidate selection below was safe,
     # but the matched/ready branch was not.
-    locked = await _lock_queue_group_for_player(db, "team_queue", steam_id)
+    locked = await _lock_group_snapshot(db, "team_queue", steam_id)
     if locked is None:
         return TeamQueuePollResponse(status="not_in_queue")
 
@@ -38062,73 +38318,45 @@ async def team_queue_poll(steam_id: str, request: Request,
     # only the OTHER three — a banned caller (row reset to searching, client
     # still polling) must not form a series either. Delete + not_in_queue;
     # the enrollment gate refuses a rejoin. Covers the dc-resume path below
-    # too, since both live behind this point.
+    # too, since both live behind this point. Still inside the preflight
+    # transaction, so the delete lands with the heartbeat taken above it.
     if (await _is_banned(db, steam_id)) is not None:
         await db.execute(text("DELETE FROM team_queue WHERE player_id = :pid"),
                          {"pid": my_pid})
         await db.commit()
         return TeamQueuePollResponse(status="not_in_queue")
+
+    # A1 phase 1 -- COMMIT the independent preflight before forming. The
+    # presence touch, the last_polled/mod_version heartbeat and the ping-map
+    # refresh are maintenance this poll owes whether or not it locks a series.
+    # Committing also releases the caller's own row lock, which the barrier
+    # below requires: every roster this poll can form contains identities we
+    # do not hold yet.
+    await db.commit()
+
+    my_qtype = (me.get("queue_type") or "auto").lower()
     # Find 3 other compatible players. Bilateral Elo overlap, no mutual blocks.
-    # BILATERAL for real since Aug 23 (Codex wiki-batch finding): this comment
+    # BILATERAL for real since Aug 23 (Codex wiki-batch finding): the comment
     # claimed bilateral for months while the SQL applied only the CALLER's
     # band — a 120s waiter (band 800) could lock a fresh joiner whose own
     # ±100 window excluded them, a pairing the 1v1 matcher refuses. The
-    # candidate-side band below mirrors the 1v1 matcher's inline CASE
+    # candidate-side band mirrors the 1v1 matcher's inline CASE
     # (compute_elo_range's schedule) off each candidate's OWN joined_at.
     # Manual queues skip both directions — joining the lobby is consent
     # (#127), and the caller side is already inert via the 1M range.
-    my_qtype = (me.get("queue_type") or "auto").lower()
-    bilateral_sql = ""
-    if my_qtype != "manual":
-        bilateral_sql = """
-              AND :my_r BETWEEN
-                  tq.rating - (CASE
-                      WHEN EXTRACT(EPOCH FROM (now() - tq.joined_at)) >= 120 THEN 800
-                      WHEN EXTRACT(EPOCH FROM (now() - tq.joined_at)) >= 60 THEN 400
-                      WHEN EXTRACT(EPOCH FROM (now() - tq.joined_at)) >= 30 THEN 200
-                      ELSE 100
-                  END)
-                  AND
-                  tq.rating + (CASE
-                      WHEN EXTRACT(EPOCH FROM (now() - tq.joined_at)) >= 120 THEN 800
-                      WHEN EXTRACT(EPOCH FROM (now() - tq.joined_at)) >= 60 THEN 400
-                      WHEN EXTRACT(EPOCH FROM (now() - tq.joined_at)) >= 30 THEN 200
-                      ELSE 100
-                  END)"""
-    cands = await db.execute(
-        text(f"""
-            SELECT tq.player_id, tq.steam_id, tq.display_name, tq.rating, tq.rating_deviation,
-                   tq.completed_series, tq.fallback_rating, tq.region, tq.joined_at,
-                   tq.manual_pick_enabled, tq.preferred_team, tq.queue_type
-            FROM team_queue tq
-            WHERE tq.status = 'searching'
-              AND tq.player_id != :pid
-              AND tq.queue_type = :qt
-              -- Freshness (review find): a crashed client's row must never lock
-              -- into a series (its player would never spawn-confirm). Mirrors
-              -- the 1v2 matcher's 10s rule; matters more now that the janitor
-              -- sweep runs at 90s instead of 30s.
-              AND tq.last_polled > NOW() - INTERVAL '10 seconds'
-              AND ABS(tq.rating - :my_r) <= :range{bilateral_sql}
-              AND tq.player_id NOT IN (
-                  SELECT blocked_id FROM player_blocks WHERE blocker_id = :pid
-                  UNION SELECT blocker_id FROM player_blocks WHERE blocked_id = :pid
-                  UNION SELECT blocked_id FROM queue_blocks WHERE blocker_id = :pid AND expires_at > now()
-                  UNION SELECT blocker_id FROM queue_blocks WHERE blocked_id = :pid AND expires_at > now()
-              )
-              AND NOT EXISTS (SELECT 1 FROM player_bans pb
-                               WHERE pb.steam_id = tq.steam_id
-                                 AND pb.unbanned_at IS NULL)
-              AND NOT (tq.steam_id = ANY(CAST(:service_ids AS text[])))
-            ORDER BY ABS(tq.rating - :my_r), tq.joined_at
-            LIMIT 3
-            FOR UPDATE SKIP LOCKED
-        """),
-        {"pid": my_pid, "my_r": me["rating"], "range": elo_range,
-         "qt": my_qtype, "service_ids": sorted(SPECTATE_BROADCAST_STEAM_IDS)},
-    )
-    others = list(cands.mappings().all())
+    _cand_sql = _TEAM_CANDIDATE_SQL_TMPL.format(
+        bilateral="" if my_qtype == "manual" else _TEAM_BILATERAL_SQL)
+    _cand_binds = {"pid": my_pid, "my_r": me["rating"], "range": elo_range,
+                   "qt": my_qtype,
+                   "service_ids": sorted(SPECTATE_BROADCAST_STEAM_IDS)}
 
+    # ── Branch choice, made during UNLOCKED discovery (A1) ───────────────
+    # Sticky resume and fresh formation lock DIFFERENT footprints, and the old
+    # order ran the fresh candidate scan FIRST: a resume therefore held three
+    # strangers' rows while it decided it did not want them, and it held them
+    # without ever acquiring the identities behind them. The branch is now
+    # chosen from reads that lock nothing, and only the chosen branch locks.
+    #
     # ── Sticky-team requeue resume ──────────────────────────────────
     # If this caller belongs to a live-but-interrupted series (legacy
     # `dc_paused` inside its grace window, or a recent `dc_incomplete` —
@@ -38169,53 +38397,62 @@ async def team_queue_poll(steam_id: str, request: Request,
     )).mappings().first()
     if dc_row is not None:
         original_pids = [dc_row["t1a_id"], dc_row["t1b_id"], dc_row["t2a_id"], dc_row["t2b_id"]]
-        # Are the OTHER 3 originals here? Requeue CONSENT (r1 finding 2) is
-        # a fresh 'searching' row with no series binding, or a row already
-        # bound to THIS series (idempotent re-poll) — a matched/ready member
-        # of a DIFFERENT live series must never be stolen out of it.
-        rs = await db.execute(
-            text("""
-                SELECT player_id, steam_id, display_name, rating, region,
-                       preferred_team
-                  FROM team_queue
-                 WHERE player_id = ANY(:pids)
-                   AND ((status = 'searching' AND series_id IS NULL)
-                        OR series_id = :sid)
-                   AND player_id != :me
-                   -- Freshness (review find): don't resume a series onto a
-                   -- crashed teammate's ghost row.
-                   AND last_polled > NOW() - INTERVAL '10 seconds'
-                   AND NOT EXISTS (SELECT 1 FROM player_bans pb
-                                    WHERE pb.steam_id = team_queue.steam_id
-                                      AND pb.unbanned_at IS NULL)
-                FOR UPDATE SKIP LOCKED
-            """),
-            {"pids": original_pids, "me": my_pid, "sid": dc_row["id"]},
-        )
-        present = list(rs.mappings().all())
-        if len(present) < 3:
-            # r1 finding 7: distinguish ABSENT from CONTENDED. If an
-            # unlocked read finds all 3 consenting originals, one of their
-            # rows is merely locked by a concurrent poll — defer instead of
-            # falling through and locking the four into a series with a
-            # stranger while every original is actually present.
-            free_cnt = (await db.execute(text("""
-                SELECT COUNT(*) FROM team_queue
-                 WHERE player_id = ANY(:pids)
-                   AND ((status = 'searching' AND series_id IS NULL)
-                        OR series_id = :sid)
-                   AND player_id != :me
-                   AND last_polled > NOW() - INTERVAL '10 seconds'
-                   AND NOT EXISTS (SELECT 1 FROM player_bans pb
-                                    WHERE pb.steam_id = team_queue.steam_id
-                                      AND pb.unbanned_at IS NULL)
-            """), {"pids": original_pids, "me": my_pid,
-                   "sid": dc_row["id"]})).scalar() or 0
-            if free_cnt >= 3:
-                await db.commit()
-                return TeamQueuePollResponse(status="searching", queue_count=4,
-                                             elo_range=elo_range)
-        else:
+        _resume_binds = {"pids": original_pids, "me": my_pid, "sid": dc_row["id"]}
+        for _form_attempt in range(1, FORMATION_MAX_ATTEMPTS + 1):
+            # 2. UNLOCKED consent discovery over the KNOWN four. Requeue
+            # CONSENT (r1 finding 2) is a fresh 'searching' row with no series
+            # binding, or a row already bound to THIS series (idempotent
+            # re-poll) — a matched/ready member of a DIFFERENT live series must
+            # never be stolen out of it.
+            #
+            # r1 finding 7 distinguished ABSENT from CONTENDED with a second,
+            # unlocked COUNT, because the locked scan's SKIP LOCKED hid rows a
+            # concurrent poll happened to hold. This read locks nothing, so the
+            # two answers are now the same answer and the second read is gone:
+            # fewer than three consenting originals means genuinely absent.
+            present = list((await db.execute(
+                text(_TEAM_RESUME_CONSENT_SQL),
+                dict(_resume_binds, only=None))).mappings().all())
+            if len(present) < 3:
+                break                      # nothing resumable — fall through
+
+            # 3. the identity barrier over all four, then 5. the snapshot: the
+            # series row this resume targets, then the four queue rows. The
+            # footprint is KNOWN — it is the original quartet — so there is no
+            # open-ended scan to take a row we have not gated.
+            await _identity_lock_many(
+                db, [p["steam_id"] for p in present] + [steam_id])
+            await _lock_snapshot_rows(
+                db, "team_queue", parents=[("team_series", dc_row["id"])],
+                player_ids=original_pids)
+
+            # 6. revalidate the SAME consent predicate under the locks.
+            still = list((await db.execute(
+                text(_TEAM_RESUME_CONSENT_SQL),
+                dict(_resume_binds,
+                     only=[p["player_id"] for p in present]))).mappings().all())
+            if len(still) != len(present):
+                await db.rollback()
+                continue
+            present = still
+
+            # 7. the lease gate, STICKY policy. These four may legitimately
+            # still hold this very series' lease — that is what makes this a
+            # resume rather than a formation — but any OTHER live claim means
+            # the seat is committed elsewhere and must not be pulled back.
+            _lease_bad = await _formation_lease_conflict(
+                db, [(p["steam_id"], p["player_id"]) for p in present]
+                    + [(steam_id, my_pid)],
+                allow=("team", dc_row["id"]))
+            if _lease_bad is not None:
+                print(f"[TEAM-QUEUE-LOCK] resume refused: {_lease_bad[0]} is "
+                      f"already committed ({_lease_bad[1]}); rediscovering "
+                      f"{_form_attempt}/{FORMATION_MAX_ATTEMPTS}")
+                await db.rollback()
+                if _lease_bad[0] == steam_id:
+                    break          # fall through; the fresh gate refuses too
+                continue
+
             # Manual-queue partition intent (r1 finding 11): resume gates on
             # the REQUESTED split only when all four expressed a preference
             # (a fully-determined request). Partial preferences leave the
@@ -38230,6 +38467,13 @@ async def team_queue_poll(steam_id: str, request: Request,
                     req2 = [pid for pid, v in prefs.items() if v == 2]
                     if len(req1) != 2 or len(req2) != 2:
                         req1 = req2 = None
+            # The quartet advisory lock inside the resolver is a THIRD lock
+            # class, and it is taken here with the four identities already
+            # held. The signed continuation funnel takes the same per-steam
+            # identities before it, so both funnels order identities first and
+            # neither can hold what the other needs. The series rows the
+            # resolver touches are taken SKIP LOCKED, so they defer rather
+            # than wait.
             outcome, resp = await _team_resolve_live_family(
                 db, original_pids, my_pid, steam_id, my_qtype, req1, req2)
             if outcome == "relocked":
@@ -38238,7 +38482,80 @@ async def team_queue_poll(steam_id: str, request: Request,
                 await db.commit()
                 return TeamQueuePollResponse(status="searching", queue_count=4,
                                              elo_range=elo_range)
-            # 'fresh': nothing resumable — fall through to normal matching.
+            break                          # 'fresh' — fall through
+        else:
+            await db.rollback()
+            print(f"[TEAM-QUEUE-LOCK] {steam_id} resume contended out after "
+                  f"{FORMATION_MAX_ATTEMPTS} attempts")
+            raise HTTPException(status_code=503, detail="queue_contended")
+        # Falling through to fresh formation COMMITS rather than rolls back:
+        # the resolver may have superseded zero-game husks on its way to
+        # 'fresh', and that bookkeeping is real work. The commit is also what
+        # the fresh branch needs — it must start holding nothing, because it
+        # is about to discover identities this transaction never gated.
+        await db.commit()
+
+    # ── Fresh formation ─────────────────────────────────────────────────
+    others = None
+    for _form_attempt in range(1, FORMATION_MAX_ATTEMPTS + 1):
+        # 2. UNLOCKED discovery. The old scan carried FOR UPDATE SKIP LOCKED,
+        # so it locked three rows whose identities this transaction does not
+        # hold — the one move the phase barrier forbids.
+        cands = list((await db.execute(
+            text(_cand_sql), dict(_cand_binds, only=None))).mappings().all())
+        if len(cands) < 3:
+            others = cands
+            break
+
+        # 3. the identity barrier over the caller and the three, then 5. the
+        # snapshot lock over exactly those four rows.
+        await _identity_lock_many(
+            db, [c["steam_id"] for c in cands] + [steam_id])
+        _ids = [c["player_id"] for c in cands]
+        await _lock_snapshot_rows(db, "team_queue",
+                                  player_ids=_ids + [my_pid])
+
+        # 6. revalidate under the locks: our own row is still searching in the
+        # same queue type, and those three still satisfy the SAME predicate
+        # that chose them. Drift rolls back and rediscovers, never commits.
+        _mine = (await db.execute(text(
+            "SELECT status, queue_type FROM team_queue WHERE player_id = :pid"),
+            {"pid": my_pid})).mappings().first()
+        still = list((await db.execute(
+            text(_cand_sql), dict(_cand_binds, only=_ids))).mappings().all())
+        if (_mine is None or _mine["status"] != "searching"
+                or (_mine["queue_type"] or "auto").lower() != my_qtype
+                or len(still) != 3):
+            await db.rollback()
+            continue
+
+        # 7. the strict lease gate. A fresh automatic roster, so no seat may
+        # hold ANY live commitment, in this mode or another. Discovery already
+        # excluded leased rows, so the gate only catches a claim made between
+        # discovery and the barrier.
+        _lease_bad = await _formation_lease_conflict(
+            db, [(c["steam_id"], c["player_id"]) for c in still]
+                + [(steam_id, my_pid)])
+        if _lease_bad is not None:
+            print(f"[TEAM-QUEUE-LOCK] seat {_lease_bad[0]} is already "
+                  f"committed ({_lease_bad[1]}); rediscovering "
+                  f"{_form_attempt}/{FORMATION_MAX_ATTEMPTS}")
+            await db.rollback()
+            if _lease_bad[0] == steam_id:
+                # see queue_poll: our own commitment is not contention. An
+                # empty roster falls through to the honest searching payload.
+                others = []
+                break
+            continue
+        others = still
+        break
+    else:
+        # Bounded for the same reason as the other formation loops: identity
+        # locks stabilise only the identities already discovered.
+        await db.rollback()
+        print(f"[TEAM-QUEUE-LOCK] {steam_id} formation contended out after "
+              f"{FORMATION_MAX_ATTEMPTS} attempts")
+        raise HTTPException(status_code=503, detail="queue_contended")
 
     if len(others) < 3:
         # Not enough — count searching, return. Freshness-filtered so the
@@ -38248,14 +38565,14 @@ async def team_queue_poll(steam_id: str, request: Request,
             "SELECT COUNT(*) FROM team_queue WHERE status='searching'"
             " AND last_polled > NOW() - INTERVAL '90 seconds'"))
         cnt = cnt_q.scalar() or 0
-        # Diagnostic: when the searching queue has >= 4 players but our lock
+        # Diagnostic: when the searching queue has >= 4 players but our scan
         # only finds < 3 candidates from THIS poller's perspective, something
-        # filter-side is rejecting them (Elo band too tight, mutual block, or
-        # SKIP LOCKED on a concurrent poll). This log is the primary signal
-        # for "queue is full but match isn't locking".
+        # filter-side is rejecting them (Elo band too tight, a mutual block,
+        # or a seat already committed elsewhere). This log is the primary
+        # signal for "queue is full but match isn't locking".
         if cnt >= 4:
             print(f"[TEAM-QUEUE-LOCK] caller={steam_id} q_size={cnt} found_others={len(others)} elo_range={elo_range} my_rating={me['rating']:.0f}")
-        await db.commit()
+        await db.rollback()
         return TeamQueuePollResponse(status="searching", queue_count=cnt, elo_range=elo_range)
 
     # 4 candidates total (caller + others). Run balancer (or honor manual picks).
@@ -39710,10 +40027,13 @@ async def _team_quartet_lock(db: AsyncSession, pids) -> None:
     4): the queue matcher and the signed continuation endpoint could both
     read "no live same-four series" and insert disjoint rows. Both funnels
     take this xact-scoped advisory lock BEFORE their live recheck.
-    Ordering note: the queue poll holds team_queue tuples when it takes
-    this; the continuation holds per-steam advisory locks. Neither ever
-    acquires the other's first resource, and two polls over one quartet
-    cannot both hold the same queue rows, so no cycle exists."""
+    Ordering note (A1, 2026-09-17): BOTH funnels now take the four per-steam
+    identity locks FIRST -- the continuation always did, and the queue poll
+    acquires them at its phase barrier before it touches a queue row. So two
+    callers over one quartet contend on identities, and the one that loses is
+    holding nothing at all. The poll additionally holds its four team_queue
+    tuples when it takes this lock, which cannot close a cycle: reaching those
+    tuples requires the same four identities the other caller would need."""
     await db.execute(text(
         "SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"
     ), {"k": _team_quartet_key(pids)})
@@ -40871,7 +41191,7 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
     # Region map store (migration 307) — before any queue-row lock, see
     # _region_pings_store; the result rides into this poll's own issuance.
     _cur_pings = await _region_pings_store(request, steam_id, "ovt")
-    locked = await _lock_queue_group_for_player(db, "ovt_queue", steam_id)
+    locked = await _lock_group_snapshot(db, "ovt_queue", steam_id)
     if locked is None:
         return {"status": "not_in_queue", "queue_count": 0}
     me = (await db.execute(text(
@@ -41086,51 +41406,90 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
         await db.commit()
         return await _ovt_poll_locked_payload(db, me["series_id"], steam_id, request=request)
 
-    # Try to lock. Only the lowest current Steam ID attempts, so the three
-    # clients don't race to create three series. Fresh-poll filter: a row
-    # whose client stopped polling must never lock into a series (its player
-    # would never join the room) — live clients poll every ~2s, so 10s of
-    # silence disqualifies without waiting for the 75s prune.
-    # LIMIT 3: lock exactly one lobby's worth of rows, not the whole searching
-    # pool. The old no-LIMIT form locked every fresh searching row (only
-    # rows[:3] were used), so a second independent trio could never assemble
-    # concurrently — its poller found everything locked and bounced. With
-    # LIMIT 3 + SKIP LOCKED, concurrent pollers carve the pool into disjoint
-    # 3-row lobbies. queue_count is reported from a separate plain COUNT —
-    # len(rows) is capped by the LIMIT and misses rows other pollers hold.
-    rows = (await db.execute(text("""
-        SELECT player_id, steam_id, display_name, preferred_side, solo_extra_pick,
-               region, rating, rating_deviation, completed_series
-          FROM ovt_queue
-         WHERE status = 'searching'
-           AND last_polled > NOW() - INTERVAL '10 seconds'
-           AND NOT EXISTS (SELECT 1 FROM player_bans pb
-                            WHERE pb.steam_id = ovt_queue.steam_id
-                              AND pb.unbanned_at IS NULL)
-           AND NOT (steam_id = ANY(CAST(:service_ids AS text[])))
-         ORDER BY joined_at
-         LIMIT 3
-         FOR UPDATE SKIP LOCKED
-    """), {"service_ids": sorted(SPECTATE_BROADCAST_STEAM_IDS)})).mappings().all()
-    if len(rows) < 3:
-        await db.commit()
-        n = (await db.execute(text(
-            "SELECT COUNT(*) FROM ovt_queue WHERE status = 'searching'"
-            "   AND last_polled > NOW() - INTERVAL '75 seconds'"
-        ))).scalar() or 0
-        return {"status": "searching", "queue_count": int(n)}
+    # A1 phase 1 -- COMMIT the independent preflight before forming. Everything
+    # above is maintenance this poll owes whether or not it locks a trio: the
+    # presence touch, the last_polled/mod_version heartbeat, the ghost prunes.
+    # Committing also releases the caller's own row lock, and that is the
+    # point -- the trio below contains two identities we do not hold yet, and
+    # an identity must never be acquired while rows are held.
+    await db.commit()
 
-    # Review HIGH: the decider MUST be a member of the lobby it locks. Pick the
-    # lobby (3 earliest joiners) FIRST, then elect the decider from exactly those
-    # three. The old code chose the decider as min Steam ID over ALL searching
-    # rows while locking rows[:3] — when a 4th player with the lowest Steam ID
-    # was waiting, they'd elect themselves, lock a room for the OTHER three, and
-    # strand themselves in a 3-player room as a 4th client (permanent stall).
-    lobby = rows[:3]  # exactly three lock together (earliest by joined_at)
-    lobby_numeric = [r["steam_id"] for r in lobby if r["steam_id"].isdigit()]
-    lowest = min(lobby_numeric, key=int) if lobby_numeric else lobby[0]["steam_id"]
-    if steam_id != lowest:
-        await db.commit()
+    # Formation. Only the lowest Steam ID of the discovered trio attempts, so
+    # the three clients don't race to create three series. The lobby (the three
+    # earliest joiners) is picked FIRST and the decider elected from exactly
+    # those three -- a review HIGH from the original design: electing over ALL
+    # searching rows let a 4th, lower-ID player lock a room for the other three
+    # and strand itself in it as a spare client.
+    _cand_binds = {"service_ids": sorted(SPECTATE_BROADCAST_STEAM_IDS)}
+    lobby = None
+    _formed = False
+    for _form_attempt in range(1, FORMATION_MAX_ATTEMPTS + 1):
+        # 2. UNLOCKED discovery -- see _OVT_CANDIDATE_SQL for why the old
+        # SKIP LOCKED form had to go.
+        rows = (await db.execute(
+            text(_OVT_CANDIDATE_SQL),
+            dict(_cand_binds, only=None))).mappings().all()
+        if len(rows) < 3:
+            lobby = None
+            break
+        lobby = list(rows[:3])
+        lobby_numeric = [r["steam_id"] for r in lobby if r["steam_id"].isdigit()]
+        lowest = min(lobby_numeric, key=int) if lobby_numeric else lobby[0]["steam_id"]
+        if steam_id != lowest:
+            lobby = None
+            break
+
+        # 3. the identity barrier over the whole trio -- the caller is in it by
+        # construction, having just been elected out of it -- then 5. the
+        # snapshot lock over exactly the rows discovery named.
+        await _identity_lock_many(db, [r["steam_id"] for r in lobby])
+        _ids = [r["player_id"] for r in lobby]
+        await _lock_snapshot_rows(db, "ovt_queue", player_ids=_ids)
+
+        # 6. revalidate under the locks, with the SAME predicate aimed at the
+        # three rows we chose. A missing row means the trio moved while we were
+        # acquiring: roll back and rediscover, never commit, because a
+        # rediscovery can turn up an identity we do not hold.
+        still = (await db.execute(
+            text(_OVT_CANDIDATE_SQL),
+            dict(_cand_binds, only=_ids))).mappings().all()
+        if len(still) != 3:
+            await db.rollback()
+            lobby = None
+            continue
+        lobby = list(still)
+
+        # 7. the strict lease gate. A fresh automatic roster, so no member may
+        # hold ANY live commitment -- this mode or another. Discovery already
+        # excluded leased rows, so reaching this means a seat was claimed in
+        # the window between discovery and the barrier.
+        _lease_bad = await _formation_lease_conflict(
+            db, [(r["steam_id"], r["player_id"]) for r in lobby])
+        if _lease_bad is not None:
+            print(f"[OVT-LOCK] seat {_lease_bad[0]} is already committed "
+                  f"({_lease_bad[1]}); rediscovering "
+                  f"{_form_attempt}/{FORMATION_MAX_ATTEMPTS}")
+            await db.rollback()
+            lobby = None
+            if _lease_bad[0] == steam_id:
+                # see queue_poll: our own commitment is not contention, and
+                # retrying it would only wedge this client.
+                break
+            continue
+        _formed = True
+        break
+    else:
+        # Bounded for the same reason as the 1v1 loop: identity locks stabilise
+        # only the identities already discovered, so a rediscovery can always
+        # turn up a new contender. The client's next poll is a fresh attempt.
+        await db.rollback()
+        print(f"[OVT-LOCK] {steam_id} formation contended out after "
+              f"{FORMATION_MAX_ATTEMPTS} attempts")
+        raise HTTPException(status_code=503, detail="queue_contended")
+
+    if not _formed:
+        # Fewer than three fresh rows, or we are not this trio's decider.
+        await db.rollback()
         n = (await db.execute(text(
             "SELECT COUNT(*) FROM ovt_queue WHERE status = 'searching'"
             "   AND last_polled > NOW() - INTERVAL '75 seconds'"
@@ -41141,7 +41500,7 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
     solo = next((r for r in lobby if r["preferred_side"] == 1), None) or lobby[0]
     duo = [r for r in lobby if r["player_id"] != solo["player_id"]]
     if len(duo) != 2:
-        await db.commit()
+        await db.rollback()   # nothing written -- this only releases the locks
         return {"status": "searching", "queue_count": len(rows)}
     extra_pick = any(bool(r["solo_extra_pick"]) for r in lobby)
     room = f"ovt_{uuid.uuid4().hex[:12]}"
@@ -44115,10 +44474,66 @@ async def _lobby_start_common(db: AsyncSession, mode: str, steam_id: str, reques
         f"UPDATE {cfg['queue']} SET last_polled = NOW()"
         f" WHERE steam_id = :sid AND status = 'lobby'"), {"sid": steam_id})
     await db.commit()
-    me = await _lock_queue_group_for_player(db, cfg["queue"], steam_id)
-    if me is None or me["status"] != "lobby" or me["series_id"] is None:
-        raise HTTPException(409, "You're not in an open lobby")
-    lobby_id = me["series_id"]
+    # A1 — hosted Start forms behind the identity barrier. _lock_queue_group_for_player
+    # cannot be used here: it COMMITS when the row is missing and when its own
+    # membership re-check fails, and a commit releases the transaction-scoped
+    # advisory locks we are about to take. It also discovers only the caller's
+    # group, while the footprint this function LOCKS and DELETES is every
+    # physical row pointing at the lobby.
+    #
+    # The liveness touch above is the committed preflight; from here nothing
+    # commits until the caller's Start succeeds.
+    me = None
+    lobby_id = None
+    for _start_attempt in range(1, FORMATION_MAX_ATTEMPTS + 1):
+        # 2. UNLOCKED discovery of the FULL lock footprint. Deliberately NOT
+        # _lobby_live_members: that filters by status and freshness, while the
+        # prune below deletes stale rows and the row lock covers all of them.
+        # Gating only the fresh members would leave rows this transaction
+        # writes outside the barrier.
+        disc = (await db.execute(text(
+            f"SELECT player_id, status, series_id FROM {cfg['queue']}"
+            f" WHERE steam_id = :sid"), {"sid": steam_id})).mappings().first()
+        if disc is None or disc["status"] != "lobby" or disc["series_id"] is None:
+            await db.commit()
+            raise HTTPException(409, "You're not in an open lobby")
+        _lid = disc["series_id"]
+        roster = (await db.execute(text(
+            f"SELECT player_id, steam_id FROM {cfg['queue']} WHERE series_id = :lid"),
+            {"lid": _lid})).mappings().all()
+        _seen = {r["player_id"] for r in roster} | {disc["player_id"]}
+
+        # 3. the identity barrier over the whole footprint, caller included.
+        await _identity_lock_many(
+            db, [r["steam_id"] for r in roster] + [steam_id])
+
+        # 5. the discovered snapshot: the lobby row first, then its queue rows.
+        await _lock_snapshot_rows(
+            db, cfg["queue"],
+            parents=[(cfg["lobbies"], _lid)],
+            player_ids=list(_seen))
+
+        # 6. revalidate under the locks. A seat that joined while we were
+        # acquiring is an identity we do not hold, so the only safe move is to
+        # roll back and rediscover — never to lock it from here.
+        me = (await db.execute(text(
+            f"SELECT player_id, status, series_id FROM {cfg['queue']}"
+            f" WHERE steam_id = :sid"), {"sid": steam_id})).mappings().first()
+        now_ids = set((await db.execute(text(
+            f"SELECT player_id FROM {cfg['queue']} WHERE series_id = :lid"),
+            {"lid": _lid})).scalars().all())
+        if (me is None or me["status"] != "lobby" or me["series_id"] != _lid
+                or not now_ids.issubset(_seen)):
+            await db.rollback()
+            me = None
+            continue
+        lobby_id = _lid
+        break
+    else:
+        await db.rollback()
+        print(f"[{cfg['label']}-LOBBY] start contended out for {steam_id} after "
+              f"{FORMATION_MAX_ATTEMPTS} attempts")
+        raise HTTPException(status_code=503, detail="queue_contended")
     lrow = (await db.execute(text(
         f"SELECT id, status, host_player_id, friendly_fire, same_cards, settings_version"
         f"  FROM {cfg['lobbies']} WHERE id = :lid"
@@ -44192,6 +44607,28 @@ async def _lobby_start_common(db: AsyncSession, mode: str, steam_id: str, reques
             await _fail(HTTPException(409, "rules_need_update"))
         if _new_enough and int(_m["seen_settings_version"] or 0) < _cur_ver:
             await _fail(HTTPException(409, "settings_unseen"))
+    # A1 phase 7 — the strict lease gate, run on the FINAL roster: after the
+    # stale prune, the banned-seat prune, the host check and the count, so it
+    # judges the set that is actually about to be frozen into a series.
+    #
+    # The policy is `allow`, NOT "no live lease". These seats already hold a
+    # same-mode lobby lease BY DESIGN — every member acquires
+    # ("<mode>", lobby_id) when it joins and renews it on every lobby poll — so
+    # rejecting any live lease here would refuse every healthy Start in the
+    # game. What must be refused is a seat committed somewhere ELSE: a
+    # different lobby, or a different mode. A guard is judged by what its
+    # refusal costs (#430), and this is the one place in A1 where getting the
+    # polarity wrong is an outage rather than a race.
+    #
+    # Through _fail, so a refusal still commits the banned-seat eviction on the
+    # way out rather than handing those seats back to the lobby.
+    _lease_bad = await _formation_lease_conflict(
+        db, [(_m["steam_id"], _m["player_id"]) for _m in live],
+        allow=(cfg["lease"], lobby_id))
+    if _lease_bad is not None:
+        print(f"[{cfg['label']}-LOBBY] start refused: {_lease_bad[0]} is "
+              f"committed elsewhere ({_lease_bad[1]})")
+        await _fail(HTTPException(409, "A player is already in another game"))
     return me, lrow, live
 
 
@@ -45098,11 +45535,60 @@ async def ffa_lobby_start(req: _FfaLobbyStartReq, request: Request, db: AsyncSes
         "UPDATE ffa_queue SET last_polled = NOW() WHERE steam_id = :sid AND status = 'lobby'"
     ), {"sid": req.steam_id})
     await db.commit()
-    me = await _lock_queue_group_for_player(db, "ffa_queue", req.steam_id)
-    if me is None or me["status"] != "lobby" or me["series_id"] is None:
-        raise HTTPException(409, "You're not in an open lobby")
-    lobby_id = me["series_id"]
-    # The group helper already holds the lobby row FOR UPDATE + member rows.
+    # A1 — hosted Start forms behind the identity barrier, same shape as the
+    # shared 2v2/1v2 Start. _lock_queue_group_for_player cannot be used: it
+    # COMMITS on a missing row and on a failed membership re-check, and a
+    # commit releases the transaction-scoped advisory locks. The liveness touch
+    # above is the committed preflight; nothing commits from here until Start
+    # succeeds.
+    me = None
+    lobby_id = None
+    for _start_attempt in range(1, FORMATION_MAX_ATTEMPTS + 1):
+        # 2. UNLOCKED discovery of the FULL footprint — every physical row
+        # pointing at the lobby, not the filtered live members, because the
+        # prune below DELETES stale rows and the lock covers all of them.
+        disc = (await db.execute(text(
+            "SELECT player_id, status, series_id FROM ffa_queue WHERE steam_id = :sid"
+        ), {"sid": req.steam_id})).mappings().first()
+        if disc is None or disc["status"] != "lobby" or disc["series_id"] is None:
+            await db.commit()
+            raise HTTPException(409, "You're not in an open lobby")
+        _lid = disc["series_id"]
+        roster = (await db.execute(text(
+            "SELECT player_id, steam_id FROM ffa_queue WHERE series_id = :lid"
+        ), {"lid": _lid})).mappings().all()
+        _seen = {r["player_id"] for r in roster} | {disc["player_id"]}
+
+        # 3. the barrier, then 5. the discovered snapshot: lobby row, then rows.
+        await _identity_lock_many(
+            db, [r["steam_id"] for r in roster] + [req.steam_id])
+        await _lock_snapshot_rows(
+            db, "ffa_queue",
+            parents=[("ffa_lobbies", _lid)],
+            player_ids=list(_seen))
+
+        # 6. revalidate. A seat that joined while we were acquiring is an
+        # identity we do not hold, so roll back and rediscover rather than
+        # locking it from here.
+        me = (await db.execute(text(
+            "SELECT player_id, status, series_id FROM ffa_queue WHERE steam_id = :sid"
+        ), {"sid": req.steam_id})).mappings().first()
+        now_ids = set((await db.execute(text(
+            "SELECT player_id FROM ffa_queue WHERE series_id = :lid"
+        ), {"lid": _lid})).scalars().all())
+        if (me is None or me["status"] != "lobby" or me["series_id"] != _lid
+                or not now_ids.issubset(_seen)):
+            await db.rollback()
+            me = None
+            continue
+        lobby_id = _lid
+        break
+    else:
+        await db.rollback()
+        print(f"[FFA-LOBBY] start contended out for {req.steam_id} after "
+              f"{FORMATION_MAX_ATTEMPTS} attempts")
+        raise HTTPException(status_code=503, detail="queue_contended")
+    # The snapshot lock holds the lobby row FOR UPDATE + every member row.
     lrow = (await db.execute(text(
         "SELECT * FROM ffa_lobbies WHERE id = :lid"
     ), {"lid": lobby_id})).mappings().first()
@@ -45162,6 +45648,25 @@ async def ffa_lobby_start(req: _FfaLobbyStartReq, request: Request, db: AsyncSes
                 f"Settings changed recently - wait {int(float(_gate)) + 1}s so everyone can read them")
     if len(live) < FFA_MIN_PLAYERS:
         raise HTTPException(409, f"Need at least {FFA_MIN_PLAYERS} players to start")
+    # Member sids for the gate below, read from the rows this transaction
+    # holds rather than carried down from discovery — the prune deleted rows
+    # since then, and the gate must judge the roster that is about to start.
+    _sid_by_pid = dict((await db.execute(text(
+        "SELECT player_id, steam_id FROM ffa_queue WHERE player_id = ANY(:ids)"
+    ), {"ids": [_m["player_id"] for _m in live]})).all())
+    # A1 phase 7 — the strict lease gate on the FINAL roster, after the stale
+    # prune, the banned prune, the host check, the settings lock and the count.
+    # Policy is `allow`, not "no live lease": every FFA lobby member acquires
+    # ("ffa", lobby_id) on join and renews it on each ~2 s lobby poll, so a
+    # blanket refusal here would refuse every healthy FFA Start. What is
+    # refused is a seat committed to a DIFFERENT lobby or a different mode.
+    _lease_bad = await _formation_lease_conflict(
+        db, [(_sid_by_pid.get(_m["player_id"]), _m["player_id"]) for _m in live],
+        allow=("ffa", lobby_id))
+    if _lease_bad is not None:
+        print(f"[FFA-LOBBY] start refused: {_lease_bad[0]} is committed "
+              f"elsewhere ({_lease_bad[1]})")
+        raise HTTPException(409, "A player is already in another game")
     # §7d re-validation at Start: the floor depends on BOTH card_cap and
     # score_target, so a later change to either can invalidate an earlier
     # initial_picks (#208's re-read rule applied to config). Clamp up
@@ -45836,7 +46341,7 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
     # Region map store (migration 307) — before any queue-row lock, see
     # _region_pings_store; the result rides into this poll's own issuance.
     _cur_pings = await _region_pings_store(request, steam_id, "ffa")
-    locked = await _lock_queue_group_for_player(db, "ffa_queue", steam_id)
+    locked = await _lock_group_snapshot(db, "ffa_queue", steam_id)
     if locked is None:
         return {"status": "not_in_queue", "queue_count": 0}
     me = (await db.execute(text(
@@ -46216,30 +46721,33 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
         await db.commit()
         return await _ffa_poll_locked_payload(db, me["series_id"], steam_id)
 
-    # Candidate scan: earliest fresh searching rows, one lobby's worth. LIMIT
-    # bounds the lock set so concurrent pollers carve disjoint lobbies.
-    rows = (await db.execute(text("""
-        SELECT player_id, steam_id, display_name, region, joined_at
-          FROM ffa_queue
-         WHERE status = 'searching'
-           AND last_polled > NOW() - INTERVAL '10 seconds'
-           AND NOT EXISTS (SELECT 1 FROM player_bans pb
-                            WHERE pb.steam_id = ffa_queue.steam_id
-                              AND pb.unbanned_at IS NULL)
-           AND NOT (steam_id = ANY(CAST(:service_ids AS text[])))
-         ORDER BY joined_at
-         LIMIT :maxp
-         FOR UPDATE SKIP LOCKED
-    """), {"maxp": FFA_MAX_PLAYERS,
-             "service_ids": sorted(SPECTATE_BROADCAST_STEAM_IDS)})).mappings().all()
+    # A1 phase 1 -- COMMIT the independent preflight before forming. The
+    # presence touch, the last_polled heartbeat, the ghost/husk prunes and the
+    # ping-map refresh are maintenance this poll owes whether or not it locks a
+    # lobby. Committing also releases the caller's own row lock, which the
+    # barrier below requires: the roster contains identities we do not hold.
+    await db.commit()
+
+    # Candidate scan: earliest fresh searching rows, one lobby's worth.
+    # UNLOCKED (A1) -- see _FFA_CANDIDATE_SQL. The old form carried
+    # FOR UPDATE SKIP LOCKED, which locked rows whose identities this
+    # transaction does not hold and made the decider election depend on which
+    # other seats happened to be mid-poll rather than on the queue itself.
+    _cand_binds = {"maxp": FFA_MAX_PLAYERS,
+                   "service_ids": sorted(SPECTATE_BROADCAST_STEAM_IDS)}
+    rows = (await db.execute(
+        text(_FFA_CANDIDATE_SQL),
+        dict(_cand_binds, only=None))).mappings().all()
     fresh_count = (await db.execute(text(
         "SELECT COUNT(*) FROM ffa_queue WHERE status = 'searching'"
         "   AND last_polled > NOW() - INTERVAL '75 seconds'"
         "   AND NOT (steam_id = ANY(CAST(:service_ids AS text[])))"
     ), {"service_ids": sorted(SPECTATE_BROADCAST_STEAM_IDS)})).scalar() or 0
 
-    # Authoritative pool size: PLAIN count (sees rows the SKIP LOCKED slice
-    # hides while their own poll briefly holds them — re-review find 4).
+    # Authoritative pool size: PLAIN count. It deliberately disagrees with
+    # len(rows), which is capped by the mode's LIMIT and excludes banned,
+    # service and already-committed seats -- the pool is what the player is
+    # waiting in, not what this poll is allowed to lock (re-review find 4).
     pool10 = (await db.execute(text(
         "SELECT COUNT(*) FROM ffa_queue WHERE status = 'searching'"
         "   AND last_polled > NOW() - INTERVAL '10 seconds'"
@@ -46289,7 +46797,8 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
                 "players_needed": FFA_MIN_PLAYERS,
                 "gather_seconds_left": max(0, int(left))}
 
-    # Decider election: lowest steam id WITHIN the locked set (must be a member).
+    # Decider election: lowest steam id WITHIN the discovered set (the ovt
+    # lesson -- the decider must be a member of the lobby it locks).
     lobby_rows = list(rows)
     lowest = min((r["steam_id"] for r in lobby_rows), key=_ffa_sort_key)
     if steam_id != lowest:
@@ -46297,8 +46806,73 @@ async def ffa_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
         return {"status": "searching", "queue_count": int(fresh_count),
                 "players_needed": FFA_MIN_PLAYERS, "gather_seconds_left": 0}
 
-    # Lock: slots by the deterministic steam ordering (client mirrors it).
-    ordered = sorted(lobby_rows, key=lambda r: _ffa_sort_key(r["steam_id"]))
+    # A1 -- the bounded formation attempt. The gather window decided above is
+    # NOT re-evaluated per attempt: it is module-monotonic bookkeeping, and
+    # re-running it here would let a contended lock reopen a window this poll
+    # has already closed.
+    ordered = None
+    for _form_attempt in range(1, FORMATION_MAX_ATTEMPTS + 1):
+        # 3. the identity barrier over the whole roster -- the caller is in it
+        # by construction, having just been elected out of it -- then 5. the
+        # snapshot lock over exactly the rows discovery named.
+        await _identity_lock_many(db, [r["steam_id"] for r in lobby_rows])
+        _ids = [r["player_id"] for r in lobby_rows]
+        await _lock_snapshot_rows(db, "ffa_queue", player_ids=_ids)
+
+        # 6. revalidate with the SAME predicate, re-aimed at those rows, then
+        # 7. the strict lease gate: a fresh automatic roster, so no member may
+        # hold ANY live commitment, in this mode or another. Discovery already
+        # excluded leased rows, so the gate only has to catch a claim made
+        # between discovery and the barrier.
+        still = (await db.execute(
+            text(_FFA_CANDIDATE_SQL),
+            dict(_cand_binds, only=_ids))).mappings().all()
+        _lease_bad = None
+        if len(still) == len(lobby_rows):
+            _lease_bad = await _formation_lease_conflict(
+                db, [(r["steam_id"], r["player_id"]) for r in still])
+        if len(still) != len(lobby_rows) or _lease_bad is not None:
+            await db.rollback()
+            if _lease_bad is not None:
+                print(f"[FFA-LOCK] seat {_lease_bad[0]} is already committed "
+                      f"({_lease_bad[1]}); rediscovering "
+                      f"{_form_attempt}/{FORMATION_MAX_ATTEMPTS}")
+                if _lease_bad[0] == steam_id:
+                    # see queue_poll: our own commitment is not contention,
+                    # and no rediscovery can clear it.
+                    break
+            # The roster moved, and the decider is a property of the ROSTER --
+            # so rediscover and re-elect rather than locking a set this seat no
+            # longer leads. The rollback above is what makes the rediscovery
+            # legal: a newly discovered identity must never be acquired while
+            # rows are held.
+            lobby_rows = list((await db.execute(
+                text(_FFA_CANDIDATE_SQL),
+                dict(_cand_binds, only=None))).mappings().all())
+            if (len(lobby_rows) < FFA_MIN_PLAYERS
+                    or steam_id != min((r["steam_id"] for r in lobby_rows),
+                                       key=_ffa_sort_key)):
+                lobby_rows = None
+                break
+            continue
+        # Lock: slots by the deterministic steam ordering (client mirrors it).
+        ordered = sorted(still, key=lambda r: _ffa_sort_key(r["steam_id"]))
+        break
+    else:
+        # Bounded for the same reason as the 1v1 and 1v2 loops: identity locks
+        # stabilise only the identities already discovered.
+        await db.rollback()
+        print(f"[FFA-LOCK] {steam_id} formation contended out after "
+              f"{FORMATION_MAX_ATTEMPTS} attempts")
+        raise HTTPException(status_code=503, detail="queue_contended")
+
+    if ordered is None:
+        # The roster fell below the minimum, or this seat no longer leads it.
+        # The gather window is left as it stands: the next poll re-reads it and
+        # whoever leads the new roster locks.
+        await db.rollback()
+        return {"status": "searching", "queue_count": int(fresh_count),
+                "players_needed": FFA_MIN_PLAYERS, "gather_seconds_left": 0}
     # Kills tie-break capability, frozen at lock (migration 187) — same rule
     # and same provenance constraint as the host-lobby Start site: only each
     # member's own session-authenticated queue-row version counts. Legacy

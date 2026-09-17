@@ -408,6 +408,7 @@ def test_members_with_no_player_id_are_skipped_not_refused():
 
 # --- item 1: the phase order, per wired site ------------------------------
 
+import ast as _ast
 import inspect as _inspect
 import re as _re
 
@@ -415,9 +416,26 @@ _IDENTITY = _re.compile(r"_identity_lock_many\(|_ranked_identity_phase\(")
 _ROWLOCK = _re.compile(r"_lock_snapshot_rows\(|_lock_queue_rows_ordered\(")
 _ENDTXN = _re.compile(r"await db\.(commit|rollback)\(\)")
 
-# Sites wired so far. The remaining six from A1-BRIEF.md are added here as
+# Sites wired so far. The remaining ones from A1-BRIEF.md are added here as
 # they land, and this list is the record of which are done.
-WIRED_SITES = ["queue_poll", "queue_ready"]
+# _lobby_start_common is listed rather than team_lobby_start/ovt_lobby_start:
+# the two routes share it, and it is where the locking actually happens, so
+# checking the routes would pass trivially and prove nothing.
+WIRED_SITES = ["queue_poll", "queue_ready", "_lobby_start_common",
+               "ffa_lobby_start", "team_queue_poll", "ovt_queue_poll",
+               "ffa_queue_poll"]
+
+# The gather paths. A FRESH automatic roster, so the gate must be called with
+# no `allow` at all -- the exact mirror of HOSTED_STARTS, and the same one-word
+# edit in the other direction: an `allow` here would admit precisely the
+# double booking A1 exists to refuse.
+FRESH_ROSTER_SITES = ["queue_poll", "ovt_queue_poll", "ffa_queue_poll"]
+
+# The two hosted-Start paths and the `allow` expression each must pass.
+HOSTED_STARTS = {
+    "_lobby_start_common": 'allow=(cfg["lease"], lobby_id)',
+    "ffa_lobby_start": 'allow=("ffa", lobby_id)',
+}
 
 
 def phase_order_violations(src):
@@ -489,6 +507,63 @@ def test_the_formation_loop_is_bounded_and_rolls_back_rather_than_commits():
     )
 
 
+@pytest.mark.parametrize("site,allow_expr", sorted(HOSTED_STARTS.items()))
+def test_hosted_start_passes_allow_and_never_a_bare_gate(site, allow_expr):
+    """The single highest-consequence parameter in A1. Hosted seats hold a
+    same-mode lobby lease by design, so a gate called WITHOUT `allow` — or with
+    allow=None — refuses every healthy 2v2, 1v2 and FFA Start in the game.
+    That is an outage, not a race, and it is a one-word edit away at all
+    times."""
+    src = _inspect.getsource(getattr(main, site))
+    assert "_formation_lease_conflict(" in src, (
+        f"{site} lost its lease gate entirely"
+    )
+    assert allow_expr in src, (
+        f"{site} must allow its OWN (mode, lobby) predecessor; a bare gate "
+        f"here refuses every healthy Start"
+    )
+    assert "require=True" not in src, (
+        f"{site} must still admit a seat with no lease -- requiring one would "
+        f"refuse a lobby whose members' leases lapsed while it filled"
+    )
+    # and it runs on the pruned roster, after the count decides
+    gate = src.index("_formation_lease_conflict(")
+    assert src.index("banned") < gate, f"{site}: gate must follow the banned prune"
+
+
+@pytest.mark.parametrize("site,live_reader", [
+    ("_lobby_start_common", "_lobby_live_members("),
+    ("ffa_lobby_start", "_ffa_live_lobby_members("),
+])
+def test_lobby_start_gates_the_full_footprint_not_just_live_members(site, live_reader):
+    """Codex HIGH: the row lock and the prune touch EVERY physical row
+    pointing at the lobby, while the live-member readers filter by status and
+    freshness. Gating only the live members leaves rows this transaction
+    writes outside the barrier."""
+    src = _inspect.getsource(getattr(main, site))
+    disc = src.index("_identity_lock_many(")
+    live = src.index(live_reader)
+    assert disc < live, (
+        f"{site}: the barrier must be taken from the raw roster discovery, "
+        f"BEFORE the filtered live-member read"
+    )
+    assert "WHERE series_id = :lid" in src[:disc], (
+        f"{site}: the identity phase must be fed by an unfiltered roster read"
+    )
+
+
+@pytest.mark.parametrize("site", sorted(HOSTED_STARTS))
+def test_hosted_start_no_longer_uses_the_committing_group_helper(site):
+    """Option (a)'s exact failure: that helper commits on a missing row and on
+    a failed membership re-check, and a commit releases every advisory lock the
+    barrier just took."""
+    src = _inspect.getsource(getattr(main, site))
+    assert "_lock_queue_group_for_player(" not in src, (
+        f"{site} is back on the committing group helper; the barrier it takes "
+        f"would be released inside that call"
+    )
+
+
 def test_phase_order_oracle_rejects_a_planted_violation():
     """Negative control for the oracle itself."""
     planted = (
@@ -520,3 +595,233 @@ def test_phase_order_oracle_notices_a_commit_between_identity_and_rows():
         "    await _lock_snapshot_rows(db, 't', player_ids=[1])\n"
     )
     assert phase_order_violations(leaky) != []
+
+
+def _gate_calls(src):
+    """Every _formation_lease_conflict(...) call in `src`, returned whole.
+
+    Paren-matched rather than regex'd: team_queue_poll has TWO gates with
+    different policies, and a substring test over the whole handler would let
+    the sticky branch's `allow` vouch for the fresh branch (#432 -- a flag
+    names a line, the defect is a class).
+    """
+    out = []
+    marker = "_formation_lease_conflict("
+    i = src.find(marker)
+    while i != -1:
+        j = i + len(marker)
+        depth = 1
+        while depth:
+            if src[j] == "(":
+                depth += 1
+            elif src[j] == ")":
+                depth -= 1
+            j += 1
+        out.append(src[i:j])
+        i = src.find(marker, j)
+    return out
+
+
+def test_gate_call_splitter_separates_two_calls():
+    """Negative control for the splitter: a handler carrying one gate WITH
+    allow and one without must not read as either."""
+    NL = chr(10)
+    planted = NL.join([
+        "await _formation_lease_conflict(db, a, allow=(1, 2))",
+        "await _formation_lease_conflict(db, b)",
+    ])
+    calls = _gate_calls(planted)
+    assert len(calls) == 2
+    assert "allow=" in calls[0] and "allow=" not in calls[1]
+
+
+@pytest.mark.parametrize("site", FRESH_ROSTER_SITES)
+def test_fresh_roster_gate_carries_no_allow(site):
+    calls = _gate_calls(_inspect.getsource(getattr(main, site)))
+    assert len(calls) == 1, (site, len(calls))
+    assert "allow=" not in calls[0], (
+        f"{site} forms a fresh roster -- any live lease on any seat is the "
+        f"double lock, so there is no predecessor to allow")
+    assert "require=" not in calls[0], (
+        f"{site} must not REQUIRE a lease either: a fresh roster has none")
+
+
+def test_team_poll_gates_its_two_branches_differently():
+    """Codex HIGH: team must choose sticky-resume vs fresh formation during
+    unlocked discovery, and the two branches cannot share one lease policy.
+    The resuming four legitimately still hold THAT series' lease -- it is what
+    makes the path a resume; a fresh four must hold nothing at all."""
+    calls = _gate_calls(_inspect.getsource(main.team_queue_poll))
+    assert len(calls) == 2, len(calls)
+    sticky, fresh = calls
+    assert 'allow=("team", dc_row["id"])' in sticky, sticky
+    assert "allow=" not in fresh, fresh
+    assert "require=True" not in sticky, (
+        "a resume must still admit a seat whose lease lapsed during the DC")
+
+
+# How many times each handler EXECUTES its predicate. Two is discovery plus
+# revalidation; the FFA gather runs a third, its post-drift rediscovery, which
+# re-elects the decider because the decider is a property of the roster.
+@pytest.mark.parametrize("site,const,runs", [
+    ("queue_poll", "_RANKED_CANDIDATE_SQL", 2),
+    ("ovt_queue_poll", "_OVT_CANDIDATE_SQL", 2),
+    ("ffa_queue_poll", "_FFA_CANDIDATE_SQL", 3),
+])
+def test_gather_predicates_are_one_statement_run_more_than_once(site, const, runs):
+    src = _inspect.getsource(getattr(main, site))
+    # count EXECUTIONS, not mentions -- the comments name the constant too
+    assert src.count("text(" + const + ")") == runs, (
+        f"{site} must run {const} exactly {runs} times; a revalidation that is "
+        f"not the same test the discovery made proves nothing (#330)")
+    sql = getattr(main, const)
+    assert "FOR UPDATE" not in sql and "SKIP LOCKED" not in sql, (
+        f"{const} still locks while it discovers -- that takes rows whose "
+        f"identities the caller does not hold")
+    assert ":only" in sql
+
+
+def test_team_predicate_is_one_template_built_once():
+    src = _inspect.getsource(main.team_queue_poll)
+    assert src.count("_TEAM_CANDIDATE_SQL_TMPL.format(") == 1
+    # built once, then used for discovery and for revalidation
+    assert src.count("_cand_sql") == 3, src.count("_cand_sql")
+    assert src.count("_TEAM_RESUME_CONSENT_SQL") == 2
+    for name in ("_TEAM_CANDIDATE_SQL_TMPL", "_TEAM_RESUME_CONSENT_SQL"):
+        sql = getattr(main, name)
+        assert "FOR UPDATE" not in sql and "SKIP LOCKED" not in sql, name
+        assert ":only" in sql, name
+
+
+@pytest.mark.parametrize("const", ["_OVT_CANDIDATE_SQL", "_FFA_CANDIDATE_SQL",
+                                   "_TEAM_CANDIDATE_SQL_TMPL"])
+def test_fresh_predicates_exclude_an_already_committed_seat(const):
+    """The gate alone would head-of-line block: one leased row at the front of
+    the queue would fail every formation attempt until its lease lapsed, and
+    the whole pool behind it would sit there. Excluding it at DISCOVERY keeps
+    the pool moving and leaves the gate to catch only a claim made after."""
+    sql = getattr(main, const)
+    assert "FROM queue_leases ql" in sql, const
+    assert "ql.expires_at > clock_timestamp()" in sql, const
+
+
+def test_the_resume_predicate_is_deliberately_not_lease_filtered():
+    """The four resuming a DC'd series still hold that series' lease -- that is
+    what makes it a resume. Filtering them out at discovery would refuse every
+    healthy resume; the sticky `allow` is what handles them instead."""
+    assert "queue_leases" not in main._TEAM_RESUME_CONSENT_SQL
+
+
+def test_ffa_rediscovery_re_elects_the_decider():
+    """The decider is a property of the ROSTER (the ovt review HIGH: a lower-ID
+    4th player who elects itself over a lobby it is not in locks a room for
+    the other three and strands itself in it). The post-drift rediscovery
+    therefore has to re-run the election, not reuse the old winner.
+
+    Counted rather than grepped for presence: three uses is the election, the
+    re-election and the slot ordering, so dropping any one of them fails here
+    instead of passing on the other two (#432)."""
+    src = _inspect.getsource(main.ffa_queue_poll)
+    assert src.count("_ffa_sort_key") == 3, src.count("_ffa_sort_key")
+
+
+@pytest.mark.parametrize("site,loop_var", [
+    ("ovt_queue_poll", "_form_attempt"),
+    ("ffa_queue_poll", "_form_attempt"),
+    ("team_queue_poll", "_form_attempt"),
+])
+def test_gather_loops_are_bounded_and_end_in_a_refusal(site, loop_var):
+    """Bounded on purpose: identity locks stabilise only the identities
+    already discovered, so a rediscovery can always turn up a new contender
+    and an unbounded loop is a real possibility, not a theoretical one."""
+    src = _inspect.getsource(getattr(main, site))
+    assert f"for {loop_var} in range(1, FORMATION_MAX_ATTEMPTS + 1):" in src, site
+    assert 'raise HTTPException(status_code=503, detail="queue_contended")' in src, site
+
+
+@pytest.mark.parametrize("site", ["ovt_queue_poll", "ffa_queue_poll"])
+def test_gather_drift_rolls_back_and_never_commits(site):
+    """A commit inside the formation loop would publish a half-formation AND
+    release the barrier -- option (a)'s failure, reached from inside the retry
+    instead of from a helper."""
+    src = _inspect.getsource(getattr(main, site))
+    loop = src[src.index("for _form_attempt"):]
+    loop = loop[:loop.index("await _lease_acquire_many(")]
+    assert "await db.commit()" not in loop, (
+        f"{site}: the formation loop commits somewhere between the barrier and "
+        f"the lease acquisition")
+    assert loop.count("await db.rollback()") >= 3, (
+        f"{site}: the drift exit, the lease-conflict exit and the exhausted "
+        f"-attempts exit must all roll back")
+
+
+def _gate_calls_inside_a_swallowing_scope(src):
+    """Handler-relative lines where a _formation_lease_conflict call sits
+    inside a `try:` or an `async with db.begin_nested():`.
+
+    An AST walk rather than a text search, because the thing being looked for
+    is CONTAINMENT, and indentation-by-substring gets that wrong on exactly the
+    nested cases that matter.
+    """
+    tree = _ast.parse(src)
+    bad = []
+
+    class V(_ast.NodeVisitor):
+        def __init__(self):
+            self.depth = 0
+
+        def _guarded(self, node):
+            self.depth += 1
+            self.generic_visit(node)
+            self.depth -= 1
+
+        def visit_Try(self, node):
+            self._guarded(node)
+
+        def visit_AsyncWith(self, node):
+            if "begin_nested" in _ast.dump(node):
+                self._guarded(node)
+            else:
+                self.generic_visit(node)
+
+        def visit_Call(self, node):
+            name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+            if name == "_formation_lease_conflict" and self.depth:
+                bad.append(node.lineno)
+            self.generic_visit(node)
+
+    V().visit(tree)
+    return bad
+
+
+def test_the_swallowing_scope_detector_can_fail():
+    """Negative control for the detector, both directions."""
+    NL = chr(10)
+    planted = NL.join([
+        "async def f(db):",
+        "    try:",
+        "        await _formation_lease_conflict(db, [])",
+        "    except Exception:",
+        "        pass",
+    ])
+    assert _gate_calls_inside_a_swallowing_scope(planted) != []
+    ok = NL.join([
+        "async def f(db):",
+        "    await _formation_lease_conflict(db, [])",
+    ])
+    assert _gate_calls_inside_a_swallowing_scope(ok) == []
+
+
+@pytest.mark.parametrize("site", WIRED_SITES)
+def test_the_lease_gate_is_never_wrapped_in_a_swallowing_scope(site):
+    """Acceptance item 3, the source half. A strict reader is only strict if
+    nothing catches it: _lease_live_claim_strict has no savepoint and no catch
+    ON PURPOSE, and wrapping the gate at the CALL site puts the #412 polarity
+    error straight back. It is also precisely the edit someone reaches for to
+    'fix' a 500 coming out of a lease read."""
+    bad = _gate_calls_inside_a_swallowing_scope(
+        _inspect.getsource(getattr(main, site)))
+    assert bad == [], (
+        f"{site}: the lease gate at handler-relative line(s) {bad} is inside a "
+        f"try/except or a savepoint, so a lease-read fault would be swallowed "
+        f"and the formation would commit anyway")
