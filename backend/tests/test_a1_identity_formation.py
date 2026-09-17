@@ -404,3 +404,119 @@ def test_members_with_no_player_id_are_skipped_not_refused():
     assert run(main._formation_lease_conflict(
         db, [("76561198040410653", None)])) is None
     assert not any("queue_leases" in s for s in db.statements)
+
+
+# --- item 1: the phase order, per wired site ------------------------------
+
+import inspect as _inspect
+import re as _re
+
+_IDENTITY = _re.compile(r"_identity_lock_many\(|_ranked_identity_phase\(")
+_ROWLOCK = _re.compile(r"_lock_snapshot_rows\(|_lock_queue_rows_ordered\(")
+_ENDTXN = _re.compile(r"await db\.(commit|rollback)\(\)")
+
+# Sites wired so far. The remaining six from A1-BRIEF.md are added here as
+# they land, and this list is the record of which are done.
+WIRED_SITES = ["queue_poll", "queue_ready"]
+
+
+def phase_order_violations(src):
+    """Walk a handler's source in order and return every row lock that is not
+    covered by an identity acquisition taken since the last commit/rollback.
+
+    This is a SOURCE-order walk, not an execution trace, and that limit is
+    worth stating: it is meaningful for these handlers because each is a
+    linear sequence of guarded blocks, and the one construct that revisits a
+    lock -- the poll's pair-inversion loop -- commits before re-locking, so the
+    walk sees the same clear/re-acquire the runtime does. What it CAN catch is
+    the mistake that matters: a row lock reachable with no identity acquired
+    since the transaction last ended.
+    """
+    events = []
+    for m in _IDENTITY.finditer(src):
+        events.append((m.start(), "identity"))
+    for m in _ROWLOCK.finditer(src):
+        events.append((m.start(), "rowlock"))
+    for m in _ENDTXN.finditer(src):
+        events.append((m.start(), "endtxn"))
+    events.sort()
+
+    held = False
+    bad = []
+    for pos, kind in events:
+        if kind == "identity":
+            held = True
+        elif kind == "endtxn":
+            held = False
+        elif kind == "rowlock" and not held:
+            bad.append(src[:pos].count("\n") + 1)
+    return bad
+
+
+@pytest.mark.parametrize("site", WIRED_SITES)
+def test_every_row_lock_is_behind_an_identity_acquisition(site):
+    src = _inspect.getsource(getattr(main, site))
+    bad = phase_order_violations(src)
+    assert bad == [], (
+        f"{site}: row lock(s) at handler-relative line(s) {bad} are reachable "
+        f"with no identity held since the last commit/rollback. A row taken "
+        f"before its identity is the ABBA this change removes."
+    )
+
+
+def test_the_poll_reacquires_after_the_inversion_loop_commit():
+    """The specific trap: the pair-inversion loop commits deliberately to
+    release a mis-ordered row set, which also releases the advisory locks.
+    Re-locking there without re-taking identities would leave the barrier
+    behind."""
+    src = _inspect.getsource(main.queue_poll)
+    assert src.count("_ranked_identity_phase(") == 2, (
+        "expected exactly two identity acquisitions in the poll: one before "
+        "the first row lock, one after the inversion loop's commit"
+    )
+
+
+def test_the_formation_loop_is_bounded_and_rolls_back_rather_than_commits():
+    src = _inspect.getsource(main.queue_poll)
+    assert "for _form_attempt in range(1, FORMATION_MAX_ATTEMPTS + 1):" in src
+    assert 'raise HTTPException(status_code=503, detail="queue_contended")' in src
+    # every drift/conflict exit inside the loop rolls back; a commit there
+    # would publish a half-formation and release the barrier
+    loop = src[src.index("for _form_attempt"):src.index("    # No match yet")]
+    assert loop.count("await db.rollback()") == 3, (
+        "the two in-loop drift/conflict exits and the exhausted-attempts exit "
+        "must all roll back"
+    )
+
+
+def test_phase_order_oracle_rejects_a_planted_violation():
+    """Negative control for the oracle itself."""
+    planted = (
+        "async def f(db):\n"
+        "    await db.commit()\n"
+        "    await _lock_snapshot_rows(db, 't', player_ids=[1])\n"
+        "    await _identity_lock_many(db, ['x'])\n"
+    )
+    assert phase_order_violations(planted) != []
+
+
+def test_phase_order_oracle_accepts_the_correct_shape():
+    ok = (
+        "async def f(db):\n"
+        "    await db.commit()\n"
+        "    await _identity_lock_many(db, ['x'])\n"
+        "    await _lock_snapshot_rows(db, 't', player_ids=[1])\n"
+    )
+    assert phase_order_violations(ok) == []
+
+
+def test_phase_order_oracle_notices_a_commit_between_identity_and_rows():
+    """The exact failure mode of option (a): a helper that commits between the
+    barrier and the row locks releases the barrier."""
+    leaky = (
+        "async def f(db):\n"
+        "    await _identity_lock_many(db, ['x'])\n"
+        "    await db.commit()\n"
+        "    await _lock_snapshot_rows(db, 't', player_ids=[1])\n"
+    )
+    assert phase_order_violations(leaky) != []

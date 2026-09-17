@@ -13952,6 +13952,110 @@ async def _formation_lease_conflict(db: AsyncSession, members, *,
     return None
 
 
+async def _ranked_identity_phase(db: AsyncSession, steam_id: str, matched_with):
+    """The identity barrier for a 1v1 pair: the caller, plus its current
+    partner when it has one.
+
+    One implementation for all three 1v1 entry points (the poll's first
+    acquisition, the poll's re-acquisition after a pair inversion, and
+    queue_ready), because the guarantee is that every formation touching a seat
+    agrees on the order — and three hand-rolled copies are three chances to
+    disagree.
+
+    The partner's canonical sid is read separately rather than joined into the
+    callers' discovery statements: those statements are pinned by several
+    existing fakes, and widening them into a self-join changes their shape for
+    no gain. This read is unlocked, which is what the discovery phase is for.
+
+    MUST be re-called after any commit or rollback that restarts discovery.
+    Advisory locks are transaction-scoped, so a commit releases them; the
+    poll's inversion loop commits deliberately to release a mis-ordered row set
+    and re-discovers, and re-locking rows there without re-taking identities
+    would leave the barrier behind. Re-acquiring is safe precisely BECAUSE the
+    commit already dropped every row: a newly discovered identity may only be
+    taken while holding nothing.
+    """
+    partner_sid = None
+    if matched_with is not None:
+        row = (await db.execute(
+            text("SELECT steam_id FROM ranked_queue WHERE player_id = :oid"),
+            {"oid": matched_with},
+        )).mappings().first()
+        partner_sid = row["steam_id"] if row else None
+    return await _identity_lock_many(db, [steam_id, partner_sid])
+
+
+# The 1v1 candidate predicate. ONE statement, used TWICE per formation: once
+# for unlocked discovery (:only NULL), and once after the identity barrier and
+# the row locks to revalidate that THIS EXACT candidate still satisfies it
+# (:only = their player_id). Two copies of a predicate this size are two
+# chances for one of them to drift (#330), and a revalidation that is not the
+# same test the discovery made proves nothing at all.
+#
+# FOR UPDATE SKIP LOCKED is deliberately ABSENT. It used to close this scan,
+# which made the scan itself the thing that locked the opponent -- an
+# open-ended lock over a row whose identity had not been gated, and precisely
+# why the searching branch could not simply be moved behind the barrier. Rows
+# are now taken by _lock_snapshot_rows against the discovered snapshot, so the
+# set that gets locked is the set that was gated.
+#
+# :only is CAST (#275): a bare parameter compared against a uuid column gives
+# asyncpg's prepare no type context, and the NULL test needs one too.
+_RANKED_CANDIDATE_SQL = """
+    SELECT player_id, steam_id, display_name, rating
+    FROM ranked_queue
+    WHERE status = 'searching'
+      AND player_id != :pid
+      -- a seat that stopped polling is not a partner (Sept 12). The
+      -- janitor sweeps it at 30 s and a live client polls every 3 s.
+      AND last_polled > NOW() - INTERVAL '15 seconds'
+      -- MY window (Sept 12) -- the stepped ladder until the uncap
+      -- second, then ANY rating; the my_uncapped switch decides.
+      AND (CAST(:my_uncapped AS boolean) OR rating BETWEEN :rmin AND :rmax)
+      -- THEIR window off THEIR wait clock (bilateral; wait_since when
+      -- a rejoin kept it) -- the same ladder, and no bound once they
+      -- have waited 120 s themselves.
+      AND (EXTRACT(EPOCH FROM (now() - COALESCE(wait_since, joined_at))) >= 120
+           OR :my_rating BETWEEN
+              rating - (CASE
+                  WHEN EXTRACT(EPOCH FROM (now() - COALESCE(wait_since, joined_at))) >= 60 THEN 400
+                  WHEN EXTRACT(EPOCH FROM (now() - COALESCE(wait_since, joined_at))) >= 30 THEN 200
+                  ELSE 100
+              END)
+              AND
+              rating + (CASE
+                  WHEN EXTRACT(EPOCH FROM (now() - COALESCE(wait_since, joined_at))) >= 60 THEN 400
+                  WHEN EXTRACT(EPOCH FROM (now() - COALESCE(wait_since, joined_at))) >= 30 THEN 200
+                  ELSE 100
+              END))
+      AND player_id NOT IN (
+          SELECT blocked_id FROM queue_blocks
+          WHERE blocker_id = :pid AND expires_at > now()
+      )
+      AND player_id NOT IN (
+          SELECT blocker_id FROM queue_blocks
+          WHERE blocked_id = :pid AND expires_at > now()
+      )
+      AND player_id NOT IN (
+          SELECT blocked_id FROM player_blocks WHERE blocker_id = :pid
+      )
+      AND player_id NOT IN (
+          SELECT blocker_id FROM player_blocks WHERE blocked_id = :pid
+      )
+      -- Round-16 finds 1-3: matchability is DECIDED here, so the
+      -- ban exclusion lives here — no purge/reset race can make a
+      -- banned row matchable when the scan itself refuses it.
+      AND NOT EXISTS (SELECT 1 FROM player_bans pb
+                       WHERE pb.steam_id = ranked_queue.steam_id
+                         AND pb.unbanned_at IS NULL)
+      AND NOT (steam_id = ANY(CAST(:service_ids AS text[])))
+      -- revalidation aims the whole predicate at one discovered row
+      AND (CAST(:only AS uuid) IS NULL OR player_id = CAST(:only AS uuid))
+    ORDER BY ABS(rating - :my_rating)
+    LIMIT 1
+"""
+
+
 async def _lock_queue_group_for_player(
     db: AsyncSession, table: str, steam_id: str, max_attempts: int = 3
 ):
@@ -15826,6 +15930,14 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
         await db.commit()
         return QueuePollResponse(status="not_in_queue")
 
+    # A1 phase 3 — the identity barrier, before the first row lock. This covers
+    # the MATCHED-state handling below: ready-up, room issuance and the ready
+    # timeout all write a pair. The SEARCHING branch does not run under these
+    # locks; it commits this transaction and forms inside its own bounded loop,
+    # because the opponent it will pair with is not known yet and an identity
+    # must never be acquired while rows are held.
+    await _ranked_identity_phase(db, steam_id, disc["matched_with"])
+
     await _lock_queue_rows_ordered(
         db, "ranked_queue", [disc["player_id"], disc["matched_with"]])
     _lock_attempts = 1
@@ -15877,6 +15989,11 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
         if not disc:
             await db.commit()
             return QueuePollResponse(status="not_in_queue")
+        # Re-take the barrier: the commit above released it along with the
+        # mis-ordered rows, and this iteration may have discovered a DIFFERENT
+        # partner. Safe here precisely because that commit dropped every row —
+        # a newly discovered identity may only be taken while holding nothing.
+        await _ranked_identity_phase(db, steam_id, disc["matched_with"])
         await _lock_queue_rows_ordered(
             db, "ranked_queue", [disc["player_id"], disc["matched_with"]])
         entry = (await db.execute(
@@ -16229,73 +16346,92 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
                          {"pid": my_pid})
         await db.commit()
         return QueuePollResponse(status="not_in_queue", wait_time=0)
-    elo_range = compute_ranked_window(wait_seconds)
-    my_rating = entry["rating"]
-    # None = uncapped (>= RANKED_WINDOW_UNCAPPED_SECONDS): the bounds are still
-    # bound (typed floats) but the my_uncapped switch short-circuits them in SQL.
-    my_uncapped, min_rating, max_rating = _ranked_window_binds(my_rating, elo_range)
+    # A1 phase 1 — COMMIT the independent preflight before forming. Everything
+    # above is maintenance this poll owes whether or not it matches: the
+    # presence touch, the last_polled/mod_version heartbeat, the ping-map
+    # refresh. Committing also RELEASES the row locks taken for the
+    # matched-state handling, and that is the point — the loop below discovers
+    # a counterparty we do not hold yet, and an identity may never be acquired
+    # while rows are held.
+    await db.commit()
 
-    # Find best candidate (SKIP LOCKED prevents race conditions)
-    # Bilateral range check: OUR range must include them AND THEIR range must include us
-    candidate = await db.execute(
-        text("""
-            SELECT player_id, steam_id, display_name, rating
-            FROM ranked_queue
-            WHERE status = 'searching'
-              AND player_id != :pid
-              -- a seat that stopped polling is not a partner (Sept 12). The
-              -- janitor sweeps it at 30 s and a live client polls every 3 s.
-              AND last_polled > NOW() - INTERVAL '15 seconds'
-              -- MY window (Sept 12) -- the stepped ladder until the uncap
-              -- second, then ANY rating; the my_uncapped switch decides.
-              AND (CAST(:my_uncapped AS boolean) OR rating BETWEEN :rmin AND :rmax)
-              -- THEIR window off THEIR wait clock (bilateral; wait_since when
-              -- a rejoin kept it) -- the same ladder, and no bound once they
-              -- have waited 120 s themselves.
-              AND (EXTRACT(EPOCH FROM (now() - COALESCE(wait_since, joined_at))) >= 120
-                   OR :my_rating BETWEEN
-                      rating - (CASE
-                          WHEN EXTRACT(EPOCH FROM (now() - COALESCE(wait_since, joined_at))) >= 60 THEN 400
-                          WHEN EXTRACT(EPOCH FROM (now() - COALESCE(wait_since, joined_at))) >= 30 THEN 200
-                          ELSE 100
-                      END)
-                      AND
-                      rating + (CASE
-                          WHEN EXTRACT(EPOCH FROM (now() - COALESCE(wait_since, joined_at))) >= 60 THEN 400
-                          WHEN EXTRACT(EPOCH FROM (now() - COALESCE(wait_since, joined_at))) >= 30 THEN 200
-                          ELSE 100
-                      END))
-              AND player_id NOT IN (
-                  SELECT blocked_id FROM queue_blocks
-                  WHERE blocker_id = :pid AND expires_at > now()
-              )
-              AND player_id NOT IN (
-                  SELECT blocker_id FROM queue_blocks
-                  WHERE blocked_id = :pid AND expires_at > now()
-              )
-              AND player_id NOT IN (
-                  SELECT blocked_id FROM player_blocks WHERE blocker_id = :pid
-              )
-              AND player_id NOT IN (
-                  SELECT blocker_id FROM player_blocks WHERE blocked_id = :pid
-              )
-              -- Round-16 finds 1-3: matchability is DECIDED here, so the
-              -- ban exclusion lives here — no purge/reset race can make a
-              -- banned row matchable when the scan itself refuses it.
-              AND NOT EXISTS (SELECT 1 FROM player_bans pb
-                               WHERE pb.steam_id = ranked_queue.steam_id
-                                 AND pb.unbanned_at IS NULL)
-              AND NOT (steam_id = ANY(CAST(:service_ids AS text[])))
-            ORDER BY ABS(rating - :my_rating)
-            LIMIT 1
-            FOR UPDATE SKIP LOCKED
-        """),
-        {"pid": my_pid, "rmin": min_rating, "rmax": max_rating, "my_uncapped": my_uncapped,
-         "my_rating": my_rating, "service_ids": sorted(SPECTATE_BROADCAST_STEAM_IDS)},
-    )
-    opp = candidate.mappings().first()
+    opp = None
+    for _form_attempt in range(1, FORMATION_MAX_ATTEMPTS + 1):
+        # 2. UNLOCKED discovery. Our own row is re-read too: the commit above
+        # ended the transaction the earlier snapshot came from, so the window
+        # is recomputed from what is true NOW rather than from `entry`.
+        me = (await db.execute(text(
+            "SELECT player_id, rating, status, joined_at, wait_since"
+            " FROM ranked_queue WHERE player_id = :pid"),
+            {"pid": my_pid})).mappings().first()
+        if me is None:
+            await db.commit()
+            return QueuePollResponse(status="not_in_queue")
+        if me["status"] != "searching":
+            # Matched by somebody else between the preflight commit and here.
+            # The matched-state branch is at the TOP of this handler, so the
+            # honest answer is a retry: the client's next 3 s poll enters it
+            # cleanly. Same precedent, and same status, as the pair-inversion
+            # give-up above; any 200 body would be acted on instead.
+            await db.commit()
+            raise HTTPException(status_code=503, detail="queue_contended")
 
-    if opp:
+        wait_seconds = int((datetime.now(timezone.utc)
+                            - (me["wait_since"] or me["joined_at"])).total_seconds())
+        elo_range = compute_ranked_window(wait_seconds)
+        my_rating = me["rating"]
+        # None = uncapped (>= RANKED_WINDOW_UNCAPPED_SECONDS): the bounds are
+        # still bound (typed floats) but my_uncapped short-circuits them in SQL.
+        my_uncapped, min_rating, max_rating = _ranked_window_binds(my_rating, elo_range)
+        _cand_binds = {
+            "pid": my_pid, "rmin": min_rating, "rmax": max_rating,
+            "my_uncapped": my_uncapped, "my_rating": my_rating,
+            "service_ids": sorted(SPECTATE_BROADCAST_STEAM_IDS),
+        }
+
+        # Bilateral range check: OUR range must include them AND theirs us.
+        cand = (await db.execute(
+            text(_RANKED_CANDIDATE_SQL),
+            dict(_cand_binds, only=None))).mappings().first()
+        if cand is None:
+            break
+
+        # 3. the identity barrier, then 5. the discovered snapshot, in that
+        # order and with nothing held before it.
+        await _identity_lock_many(db, [steam_id, cand["steam_id"]])
+        await _lock_snapshot_rows(
+            db, "ranked_queue", player_ids=[my_pid, cand["player_id"]])
+
+        # 6. revalidate under the locks: our own row is still searching, and
+        # this exact candidate still satisfies the SAME predicate that chose
+        # them. Drift rolls back — never commits — and rediscovers, because a
+        # rediscovery may turn up an identity we do not hold.
+        still_me = (await db.execute(text(
+            "SELECT status FROM ranked_queue WHERE player_id = :pid"),
+            {"pid": my_pid})).mappings().first()
+        opp = (await db.execute(
+            text(_RANKED_CANDIDATE_SQL),
+            dict(_cand_binds, only=cand["player_id"]))).mappings().first()
+        if still_me is None or still_me["status"] != "searching" or opp is None:
+            await db.rollback()
+            opp = None
+            continue
+
+        # 7. the strict lease gate. A fresh automatic roster, so neither seat
+        # may hold ANY live commitment — in this mode or another. This is the
+        # double-lock itself: without it both formations commit, and the later
+        # lease upsert supersedes the winner while both sets of roster writes
+        # survive.
+        _bad = await _formation_lease_conflict(
+            db, [(steam_id, my_pid), (cand["steam_id"], cand["player_id"])])
+        if _bad is not None:
+            print(f"[QUEUE-POLL] {steam_id} seat {_bad[0]} is already committed "
+                  f"({_bad[1]}); rediscovering "
+                  f"{_form_attempt}/{FORMATION_MAX_ATTEMPTS}")
+            await db.rollback()
+            opp = None
+            continue
+
         # Match found — set both to matched, NO room yet (wait for both to ready up)
         matched_at = datetime.now(timezone.utc)
         for pid, opp_id in [(my_pid, opp["player_id"]), (opp["player_id"], my_pid)]:
@@ -16327,6 +16463,16 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
             opponent_rating=opp["rating"],
             opponent_ready=False,
         )
+    else:
+        # Three complete discovery attempts, each one beaten. Bounded on
+        # purpose: identity locks stabilise only the identities already
+        # discovered, so a rediscovery can always turn up a new contender and
+        # an unbounded loop is a real possibility, not a theoretical one. The
+        # client's next poll is a fresh attempt.
+        await db.rollback()
+        print(f"[QUEUE-POLL] {steam_id} formation contended out after "
+              f"{FORMATION_MAX_ATTEMPTS} attempts")
+        raise HTTPException(status_code=503, detail="queue_contended")
 
     # No match yet
     count_result = await db.execute(
@@ -16396,21 +16542,10 @@ async def queue_ready(request: Request, steam_id: str = Query(...), db: AsyncSes
     # RankedSeries, so it FORMS just as much as the poll does and has to be
     # serialized against every other formation touching either seat.
     #
-    # The opponent's canonical sid is fetched by its own read rather than
-    # joined into the discovery statement above. A discovery yielding
-    # player_ids alone cannot gate the pair — which is exactly why this site
-    # was missed in the first draft of the brief — but the statement above is
-    # pinned by several existing fakes, and widening it into a self-join
-    # changes its shape for no gain. Both reads are unlocked, which is what
-    # this phase is for.
-    _opp_sid = None
-    if disc is not None and disc["matched_with"] is not None:
-        _opp = (await db.execute(
-            text("SELECT steam_id FROM ranked_queue WHERE player_id = :oid"),
-            {"oid": disc["matched_with"]},
-        )).mappings().first()
-        _opp_sid = _opp["steam_id"] if _opp else None
-    await _identity_lock_many(db, [steam_id, _opp_sid])
+    # A discovery yielding player_ids alone cannot gate the pair — which is
+    # exactly why this site was missed in the first draft of the brief.
+    await _ranked_identity_phase(
+        db, steam_id, disc["matched_with"] if disc else None)
 
     await _lock_snapshot_rows(
         db, "ranked_queue",
