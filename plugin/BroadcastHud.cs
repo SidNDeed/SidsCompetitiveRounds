@@ -239,10 +239,27 @@ namespace CompetitiveRounds
                 // canonical card names.
                 if (ffa)
                 {
+                    // The HP cell widens when the player raises health precision
+                    // (TabStatsOverlay.HealthPrecisionSetting) and this line sits
+                    // in a 17px rect, which is bug 239's exact setup: a line that
+                    // no longer fits gets wrapped and clipped top and bottom.
+                    // Measured against the REAL cell geometry, at snapshot
+                    // cadence like everything else here (r1 F8) — the triple
+                    // space collapses to one before anything overflows, and
+                    // stStat clips horizontally past that.
+                    float ffaAvail = FfaCellWidth(n) - 16f;   // cell - 4 gutter - 12 padding
                     _sb.Length = 0;
                     _sb.Append("HP ").Append(TabStatsOverlay.BroadcastStatValue(i, 0))
                        .Append("   Dmg ").Append(TabStatsOverlay.BroadcastStatValue(i, 1));
-                    _ffaLine1Cache[i] = _sb.ToString();
+                    string ffaLine1 = _sb.ToString();
+                    if (MeasureWidth(stStat, ffaLine1) > ffaAvail)
+                    {
+                        _sb.Length = 0;
+                        _sb.Append("HP ").Append(TabStatsOverlay.BroadcastStatValue(i, 0))
+                           .Append(" Dmg ").Append(TabStatsOverlay.BroadcastStatValue(i, 1));
+                        ffaLine1 = _sb.ToString();
+                    }
+                    _ffaLine1Cache[i] = ffaLine1;
                     var abbrevs = _ffaCardAbbrevCache[i];
                     for (int c = 0; c < FFA_CARD_SLOTS; c++)
                         abbrevs[c] = CardAbbrev(TabStatsOverlay.BroadcastFighterCardName(i, c));
@@ -365,6 +382,24 @@ namespace CompetitiveRounds
 
         private const float PANEL_W = 232f;
         private const float PANEL_MARGIN_X = 10f;
+
+        /// <summary>The FFA strip's per-fighter cell width. ONE definition,
+        /// because RefreshCaches now measures a composed line against it and
+        /// DrawFfaStrip lays out with it — two copies of this expression would
+        /// agree only by coincidence.</summary>
+        private static float FfaCellWidth(int n)
+            => Mathf.Min(180f, (Screen.width - 40f) / Mathf.Max(1, n));
+
+        /// <summary>Rendered width of <paramref name="s"/> in
+        /// <paramref name="st"/>, reusing FitNameLine's scratch GUIContent (:77)
+        /// so this snapshot-cadence caller allocates nothing; both uses are
+        /// synchronous and never interleave. 0 on any failure, i.e. "it fits" —
+        /// the fallback is the layout that shipped before the measurement.</summary>
+        private static float MeasureWidth(GUIStyle st, string s)
+        {
+            try { _measure.text = s; return st.CalcSize(_measure).x; }
+            catch { return 0f; }
+        }
 
         private static float PanelHeight(bool withActions)
         {
@@ -519,7 +554,7 @@ namespace CompetitiveRounds
         /// virtually always, and what people actually want is WHICH cards).</summary>
         private static void DrawFfaStrip(int n)
         {
-            float cellW = Mathf.Min(180f, (Screen.width - 40f) / Mathf.Max(1, n));
+            float cellW = FfaCellWidth(n);
             float x = (Screen.width - cellW * n) / 2f;
             float y = 58f;   // below the spectator bar + tournament tag
             for (int i = 0; i < n; i++)
@@ -723,7 +758,13 @@ namespace CompetitiveRounds
             // metrics from shaving letter tops (#143); horizontal overflow
             // cannot happen because FitNameLine measures with this style.
             stName = new GUIStyle(GUI.skin.label) { fontSize = 14, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleLeft, wordWrap = false, clipping = TextClipping.Overflow };
-            stStat = new GUIStyle(GUI.skin.label) { fontSize = 12, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleLeft };
+            // wordWrap/clipping explicit for the reason bug 239 made them
+            // explicit on stName: GUI.skin.label wraps by default and these
+            // values render in 17px rects, so a cell that outgrows its rect (a
+            // 2-decimal "87.50/100.00" in a crowded FFA strip) would wrap and
+            // be clipped top AND bottom instead of simply ending. Clip, not
+            // Overflow — in the strip, Overflow bleeds into the next fighter.
+            stStat = new GUIStyle(GUI.skin.label) { fontSize = 12, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleLeft, wordWrap = false, clipping = TextClipping.Clip };
             stStatLabel = new GUIStyle(GUI.skin.label) { fontSize = 12, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleLeft };
             stStatLabel.normal.textColor = new Color(0.72f, 0.76f, 0.84f);
             stKey = new GUIStyle(GUI.skin.label) { fontSize = 11, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };

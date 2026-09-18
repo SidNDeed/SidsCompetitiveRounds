@@ -13115,6 +13115,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // v1.32 items 7+8 toggle rows.
         private static GameObject screenShakeToggleBtn, mapLightingToggleBtn, mapShadowsToggleBtn, animCosToggleBtn, bloomToggleBtn;
         private static object screenShakeToggleTxt, mapLightingToggleTxt, mapShadowsToggleTxt, animCosToggleTxt, bloomToggleTxt;
+        private static GameObject healthPrecToggleBtn;
+        private static object healthPrecToggleTxt;
         // July 20 item 8: chromatic aberration toggle row.
         private static GameObject chromAbToggleBtn;
         private static object chromAbToggleTxt;
@@ -14273,6 +14275,26 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 "Camera screen shake on shots/hits/deaths. Full = vanilla. Reduced = softer, keeps the hit feedback. "
                 + "Off = a perfectly steady camera. Local only.");
             screenShakeToggleTxt = UIFactory.GetButtonText(screenShakeToggleBtn);
+            // v1.41.0 item 10: the HP-readout precision lever. The setting
+            // itself (TabStatsOverlay.HealthPrecisionSetting) was complete
+            // before this row existed -- it bound, normalised, cycled and
+            // formatted -- and had no caller anywhere, so no stock player
+            // could reach it. A finished feature with no entry point is
+            // indistinguishable in the logs from one that works (#438/#443).
+            // It lives in the Display box because it changes how a number is
+            // drawn and nothing else: the wire format is produced by WireNum,
+            // which ignores StatRow.fmt entirely (#47).
+            healthPrecToggleBtn = SettingsToggle(dispBox.transform, "SHpPrec", new Vector2(260, 28),
+                () =>
+                {
+                    TabStatsOverlay.HealthPrecisionSetting.Cycle();
+                    Plugin.Log.LogInfo($"[SETTINGS] HP decimals -> {TabStatsOverlay.HealthPrecisionSetting.Level}");
+                    dirty = true;
+                },
+                "Decimals on the HP readout in the hold-Tab board, the spectator seat and the broadcaster HUD. "
+                + "Both halves of \"current/max\" follow it, so a card that leaves max health on a fraction stops "
+                + "reading as a whole number too. Local display only - nothing stored or sent changes.", 46f);
+            healthPrecToggleTxt = UIFactory.GetButtonText(healthPrecToggleBtn);
             langToggleBtn = SettingsToggle(langBox.transform, "SLang", new Vector2(260, 28),
                 () =>
                 {
@@ -14888,6 +14910,24 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 // Item 9 (F-class): Tr the hole value too, or English leaks
                 // through the translated template.
                 UIFactory.SetTextRaw(bloomToggleTxt, I18n.TrF("Glow (bloom): <color={0}>{1}</color>", _bc, I18n.Tr(_bl.ToUpperInvariant())));
+            }
+            if (healthPrecToggleTxt != null)
+            {
+                // Each level is its OWN literal inside I18n.Tr, rather than
+                // Tr(level.ToUpperInvariant()) the way the bloom row above
+                // does it. A Tr whose argument is computed is invisible to
+                // tools/i18n_extract.py, so the string never enters
+                // i18n_source.json or I18nSourceKeys.g.cs and ships English in
+                // every locale unless someone remembers to hand-register it
+                // (#295a). Three literals cost three lines and cannot be
+                // forgotten.
+                string _hp = TabStatsOverlay.HealthPrecisionSetting.Level;
+                UIFactory.SetTextRaw(healthPrecToggleTxt,
+                    _hp == TabStatsOverlay.HealthPrecisionSetting.TWO_DP
+                        ? I18n.Tr("HP decimals: <color=#88FF88>2 DECIMALS</color>")
+                        : _hp == TabStatsOverlay.HealthPrecisionSetting.ONE_DP
+                            ? I18n.Tr("HP decimals: <color=#DDDD66>1 DECIMAL</color>")
+                            : I18n.Tr("HP decimals: <color=#FF9966>ROUNDED</color>"));
             }
             if (chromAbToggleTxt != null && Plugin.ChromaticAberrationEnabled != null)
                 UIFactory.SetText(chromAbToggleTxt,

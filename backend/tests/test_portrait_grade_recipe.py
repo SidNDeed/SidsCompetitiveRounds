@@ -112,9 +112,10 @@ MARK_BAKED = "SCR_GRADE_TABLE=BAKED"
 # what may change. 3: the particle pin reaches sub-emitters and steps in fixed
 # increments with prewarm off and path-only seeds; the table and the length are
 # RECIPE 2's. The length was picked in game under RECIPE 2's simulation, so it
-# is re-checked in game with `sweep` before a RECIPE 3 build that uploads is
-# published; once RECIPE 3 pictures are stored, a different length is RECIPE 4.
-LEDGER = {2: (0xfad306d7, 5.5), 3: (0xfad306d7, 5.5)}
+# is re-checked in game with `sweep` before a build that uploads is published.
+# 4: the frame is centred on the rig transform rather than on the solid union
+# (ComputeBounds); the table and the length are still RECIPE 2's.
+LEDGER = {2: (0xfad306d7, 5.5), 3: (0xfad306d7, 5.5), 4: (0xfad306d7, 5.5)}
 
 
 # ── the digest, as PortraitGrade.GradeDigest computes it ────────────────────

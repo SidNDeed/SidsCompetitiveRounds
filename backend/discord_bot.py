@@ -91,6 +91,11 @@ LEADERBOARD_CHANNEL_ID = int(os.getenv("LEADERBOARD_CHANNEL", "0"))
 # mirror of that server setting for footer/label text -- the filtering itself
 # is server-side, so a mismatch here can only mislabel, never mis-filter.
 LB_ACTIVE_DAYS = int(os.getenv("LEADERBOARD_ACTIVE_DAYS", "90"))
+# v1.41.0 item 1: which boards #scr-leaderboard carries, in channel order
+# (the last one sits at the bottom). Keys are BOARDS entries; an unknown key
+# is logged by _enabled_boards rather than dropped. Default excludes 1v2 and
+# the Records mini-boards (Sid, 2026-09-18).
+LEADERBOARD_BOARDS_RAW = os.getenv("LEADERBOARD_BOARDS", "1v1,2v2,ffa")
 SERIES_LOG_CHANNEL_ID = int(os.getenv("SERIES_LOG_CHANNEL", "0"))
 QUEUE_BEACON_CHANNEL_ID = int(os.getenv("QUEUE_BEACON_CHANNEL", "0"))
 CHAT_CHANNEL_ID = int(os.getenv("CHAT_CHANNEL", "1492022404829020230"))
@@ -7789,10 +7794,13 @@ async def setup_rank_roles(ctx):
 async def publish_lb_loop():
     """Dedicated leaderboard-channel refresh (item 8). Was piggybacked on the
     end of the 30-min role sync — any role-sync failure or slowness starved
-    it. Fully guarded so one bad tick can never stop the loop."""
+    it. Fully guarded so one bad tick can never stop the loop. Publishes the
+    whole BOARDS set now, not just the 1v1 board (v1.41.0 item 1); a single
+    board's failure is contained inside publish_boards, and this guard stays
+    as the backstop for everything above it (channel resolution, the rescan)."""
     for guild in bot.guilds:
         try:
-            await publish_lb(guild)
+            await publish_boards(guild)
         except Exception as e:
             print(f"Leaderboard publish error: {e}")
 
@@ -7914,19 +7922,21 @@ LB_PAGE_SIZE = 50
 LB_TOTAL_FETCH = 500
 
 
-def _build_lb_embeds(entries: list, total_players: int, page: int, total_pages: int,
-                     hidden_inactive: int = 0) -> list:
-    """Render one page of the auto-posted leaderboard as a LIST of embeds
-    (a worst-case 50-row page can exceed a single embed's 4096-char
-    description; up to 3 embeds travel in one message). Pure function so the
-    paginator view + initial post share the rendering."""
+def _build_board_embeds(board: dict, entries: list, total_players: int, page: int,
+                        total_pages: int, hidden_inactive: int = 0) -> list:
+    """Render one page of an auto-posted board as a LIST of embeds (a
+    worst-case 50-row page can exceed a single embed's 4096-char description;
+    up to 3 embeds travel in one message). Pure function so the paginator view
+    + initial post share the rendering. `board` is one BOARDS entry: the row
+    renderer, the title, the colour and the population noun come from it and
+    nothing else here is 1v1-specific."""
     start = page * LB_PAGE_SIZE
     end = min(start + LB_PAGE_SIZE, len(entries))
     # Rank from list position (entries are one offset-0 fetch, so position
     # IS the rank) — entry["rank"] is double-offset on offset pages server-side
     # (see _lb_line docstring); deriving locally keeps this correct even if
     # the fetch ever grows an offset.
-    lines = [_lb_line(e, rank=start + i + 1) for i, e in enumerate(entries[start:end])]
+    lines = [board["line"](e, start + i + 1) for i, e in enumerate(entries[start:end])]
     # Live relative timestamp INSIDE the embed body ("Updated 3 minutes ago",
     # ticking client-side). The embed's footer timestamp was the only recency
     # signal before, and a silently-edited days-old message reads as a dead
@@ -7938,17 +7948,17 @@ def _build_lb_embeds(entries: list, total_players: int, page: int, total_pages: 
     embeds = []
     for ci, desc in enumerate(descs):
         em = discord.Embed(
-            # Title on the FIRST embed only — publish_lb's duplicate rescan
-            # identifies the board by this title on embeds[0].
-            title="🏆 Ranked Leaderboard" if ci == 0 else None,
+            # Title on the FIRST embed only — the restart rescan identifies
+            # WHICH board a message is by this exact string on embeds[0].
+            title=board["title"] if ci == 0 else None,
             description=desc,
-            color=discord.Color.gold(),
+            color=board["color"](),
             timestamp=datetime.utcnow() if ci == len(descs) - 1 else None,
         )
         if ci == len(descs) - 1:
             # Item d: the board hides players not seen for LB_ACTIVE_DAYS days;
-            # publish_lb passes how many, and 0 (or a failed count) shows nothing.
-            em.set_footer(text=f"Page {page+1}/{total_pages} • {total_players} ranked players"
+            # _render_board passes how many, and 0 (or a skipped probe) shows nothing.
+            em.set_footer(text=f"Page {page+1}/{total_pages} • {total_players} {board['noun']}"
                           + (f" • {hidden_inactive} inactive hidden ({LB_ACTIVE_DAYS} days)"
                              if hidden_inactive > 0 else "")
                           + " • Auto-updated")
@@ -7957,17 +7967,29 @@ def _build_lb_embeds(entries: list, total_players: int, page: int, total_pages: 
 
 
 class LeaderboardPaginator(discord.ui.View):
-    """Prev/Next buttons for the auto-posted leaderboard. Caches the entries list
-    so page flips don't re-hit the API. Long timeout (24h) — refreshed on every
-    publish_lb tick (sync_roles_periodic loop, every 30 min) so users always have
-    a working set of buttons within an hour of clicking."""
-    def __init__(self, entries: list, total_players: int, hidden_inactive: int = 0):
+    """Prev/Next buttons for ONE board. Caches that board's entries list so
+    page flips don't re-hit the API. Long timeout (24h) — refreshed on every
+    publish_boards tick (every 10 min) so users always have a working set of
+    buttons within an hour of clicking."""
+    def __init__(self, board: dict, entries: list, total_players: int, hidden_inactive: int = 0):
         super().__init__(timeout=86400)
+        self.board = board
         self.entries = entries
         self.total_players = total_players
         self.hidden_inactive = hidden_inactive   # item d footer suffix, kept across page flips
         self.total_pages = max(1, (len(entries) + LB_PAGE_SIZE - 1) // LB_PAGE_SIZE)
         self.page = 0
+        # Board-scoped custom_ids. discord.py keys its view store by
+        # (message_id, custom_id) and every board is its own message, so this
+        # is not what keeps one board's buttons off another's message; it is
+        # what makes a stray component interaction attributable to a board in
+        # the logs, and what keeps the ids distinct if these views are ever
+        # made persistent (a persistent view is stored under message_id None).
+        token = os.urandom(4).hex()
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                slot = "prev" if (child.label or "").startswith("◀") else "next"
+                child.custom_id = f"scrlb:{board['key']}:{slot}:{token}"
 
     def _update_buttons(self):
         # Disable Prev on first page, Next on last page. Children list order = button order.
@@ -7983,8 +8005,8 @@ class LeaderboardPaginator(discord.ui.View):
         self.page = max(0, self.page - 1)
         self._update_buttons()
         await interaction.response.edit_message(
-            embeds=_build_lb_embeds(self.entries, self.total_players, self.page, self.total_pages,
-                                    self.hidden_inactive),
+            embeds=_build_board_embeds(self.board, self.entries, self.total_players, self.page,
+                                       self.total_pages, self.hidden_inactive),
             view=self,
         )
 
@@ -7993,19 +8015,315 @@ class LeaderboardPaginator(discord.ui.View):
         self.page = min(self.total_pages - 1, self.page + 1)
         self._update_buttons()
         await interaction.response.edit_message(
-            embeds=_build_lb_embeds(self.entries, self.total_players, self.page, self.total_pages,
-                                    self.hidden_inactive),
+            embeds=_build_board_embeds(self.board, self.entries, self.total_players, self.page,
+                                       self.total_pages, self.hidden_inactive),
             view=self,
         )
 
 
-# Remembered per-channel leaderboard message id — direct edits instead of a
-# history scan. If the message got deleted we fall back to a (wider) scan and
-# finally post a fresh one. The old 5-message scan silently posted duplicates
-# (or found nothing to edit) once a few chat messages buried the board (item 8).
+# ── Board catalogue (v1.41.0 item 1) ──────────────────────────────
+# #scr-leaderboard carried the 1v1 board only; every other board the API
+# already serves was invisible there. One entry here is one message in the
+# channel, published in this order — the LAST entry sits at the channel
+# bottom. Each board keeps its own message id, its own paginator and its own
+# row renderer, because the 2v2/FFA/1v2 rows are not 1v1 rows: the fields each
+# renderer reads were taken from that endpoint's response model in schemas.py,
+# not from the 1v1 shape.
+#
+# #153 is why every `path` below carries an explicit min_matches / min_series /
+# min_games instead of letting the endpoint apply its own default: "matches the
+# visible leaderboard" means matching what CALLERS PASS, not the signature's
+# defaults. The F5 client and the old bot board both pass 1, so a board built on
+# the default would disagree with what players already see. (An earlier version
+# of this comment cited #153 for "render what the endpoint returns", which is a
+# different rule and not one #153 states.)
+#
+#   key    — LEADERBOARD_BOARDS token, log prefix, paginator custom_id scope
+#   title  — embed title, and the string the restart rescan adopts a message
+#            by (EXACT match: renaming a title orphans the message already in
+#            the channel — nothing will adopt it and nothing deletes it)
+#   path   — the GET this board renders
+#   probe  — 1-row fetch whose total_players gives the population INCLUDING
+#            inactives, for the "N inactive hidden" footer. None where the
+#            endpoint's total_players is the PAGE size rather than the
+#            population — main.py says exactly that of /ovt/leaderboard in its
+#            own KNOWN NIT comment, so the difference would measure nothing.
+#   line   — row renderer (entry, rank) -> str
+#   noun   — what total_players counts, for the footer
+#   color  — embed colour, called per embed (discord.Color factories)
+#
+# /api/v1/records is deliberately NOT a board here: it answers parallel arrays
+# for ONE named stat board at a time (RecordsBoardResponse in schemas.py), not
+# entries/total_players, and which of its stats this channel should carry has
+# not been decided. `LEADERBOARD_BOARDS=records` therefore logs an unknown-key
+# line rather than looking like a setting that works.
+
+
+def _board_medal(rank: int) -> str:
+    """Podium glyph for the mode boards. The 1v1 tier emoji (_lb_line) is
+    deliberately not reused: the tiers and the Discord rank roles are both
+    derived from the 1v1 rating (update_member_role), so a tier glyph beside a
+    2v2 or FFA rating would name a tier nothing grants. Mode podiums do exist
+    server-side (bootstrap_mode_podium_titles in main.py), so top-3 is the one
+    distinction these rows can honestly draw."""
+    return {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, "▫️")
+
+
+def _lb_line_2v2(e, rank=None):
+    """One 2v2 row: rating + completed-series W/L. Fields per
+    Team2v2LeaderboardEntry — series_wins/series_losses, NOT the 1v1
+    wins/losses keys. Indexed, not .get(): a changed row shape must fail this
+    board's render (contained per board in publish_boards) rather than publish
+    a column of zeros."""
+    if rank is None:
+        rank = e["rank"]
+    name = str(e["display_name"])[:24]
+    return (f"`#{rank:>3}` {_board_medal(rank)} **{name}** — {e['rating']} "
+            f"({e['series_wins']}W/{e['series_losses']}L)")
+
+
+def _lb_line_ffa(e, rank=None):
+    """One FFA row. Fields per FfaLeaderboardEntry, where `wins` is 1st places
+    (not series wins) and avg_placement is averaged over recorded games — the
+    two numbers an FFA player is read on besides the rating."""
+    if rank is None:
+        rank = e["rank"]
+    name = str(e["display_name"])[:24]
+    return (f"`#{rank:>3}` {_board_medal(rank)} **{name}** — {e['rating']} "
+            f"({e['games_played']}g, {e['wins']}× 1st, avg {float(e['avg_placement']):.1f})")
+
+
+def _lb_line_ovt(e, rank=None):
+    """One 1v2 row. Ovt1v2LeaderboardEntry carries no rating — the endpoint
+    answers is_ranked=false — so the row is W/L over games played.
+
+    win_rate here is ALREADY A PERCENT, not a 0-1 fraction, and 1v2 is the
+    only board where that is true. The producer is
+    `round(100.0 * wins / games, 1)` in the /ovt/leaderboard handler; the
+    other three all divide without scaling (1v1 and 2v2 as
+    `ROUND(wins::numeric / total, 4)` in SQL, FFA as `round(wins / games, 3)`).
+    So this renderer must NOT multiply by 100.
+
+    It is also the only row renderer in this file that shows a win rate at
+    all: the 1v1 row shows `rating (WW/LL)`, 2v2 shows `rating (series
+    W/L)`, FFA shows `rating (games, firsts, avg placement)`. So there is
+    no sibling here to copy the unit from, which is how the stray 100* got
+    written in the first place — it was generalised from the client, where
+    all four boards DO render a win rate and three of them scale.
+
+    Do not "fix" the divergence in main.py. The shipped client already
+    matches it — NativeUI.cs renders the 1v1 and 2v2 boards as
+    `{e.win_rate*100f:F0}%` and the 1v2 board as `{e.win_rate:F0}%` — so
+    normalising the server would turn a live player's 58.8%% into "1%%"
+    in-game. test_win_rate_unit_is_per_endpoint pins both halves."""
+    if rank is None:
+        rank = e["rank"]
+    name = str(e["display_name"])[:24]
+    return (f"`#{rank:>3}` {_board_medal(rank)} **{name}** — "
+            f"{e['wins']}W/{e['losses']}L "
+            f"({e['games_played']} games, {round(float(e['win_rate']))}%)")
+
+
+BOARDS = [
+    {"key": "1v1", "title": "🏆 Ranked Leaderboard",
+     "path": f"/leaderboard?limit={LB_TOTAL_FETCH}&min_matches=1",
+     "probe": "/leaderboard?limit=1&min_matches=1&include_inactive=true",
+     "line": _lb_line, "noun": "ranked players", "color": lambda: discord.Color.gold()},
+    {"key": "2v2", "title": "👥 2v2 Ranked Leaderboard",
+     "path": f"/team/leaderboard?limit={LB_TOTAL_FETCH}&min_series=1",
+     "probe": "/team/leaderboard?limit=1&min_series=1&include_inactive=true",
+     "line": _lb_line_2v2, "noun": "rated 2v2 players", "color": lambda: discord.Color.blurple()},
+    {"key": "ffa", "title": "🎯 FFA Ranked Leaderboard",
+     "path": f"/ffa/leaderboard?limit={LB_TOTAL_FETCH}&min_games=1",
+     "probe": "/ffa/leaderboard?limit=1&min_games=1&include_inactive=true",
+     "line": _lb_line_ffa, "noun": "rated FFA players", "color": lambda: discord.Color.orange()},
+    # Off by default (Sid, 2026-09-18): 1v2 is unranked, and its total_players
+    # is the page size, so its footer says "listed" and carries no inactive
+    # suffix — see `probe` above.
+    {"key": "1v2", "title": "⚔️ 1v2 Leaderboard",
+     "path": f"/ovt/leaderboard?limit={LB_TOTAL_FETCH}&role=combined",
+     "probe": None,
+     "line": _lb_line_ovt, "noun": "1v2 players listed", "color": lambda: discord.Color.teal()},
+]
+
+_lb_unknown_board_keys: set = set()
+
+
+def _enabled_boards() -> list:
+    """The boards this deployment publishes, in LEADERBOARD_BOARDS order
+    (default 1v1,2v2,ffa — 1v2 and the Records mini-boards stay off, Sid
+    2026-09-18). An unknown token is logged once rather than dropped in
+    silence: a key that publishes nothing would otherwise look like a setting
+    that works."""
+    by_key = {b["key"]: b for b in BOARDS}
+    out, unknown = [], []
+    for tok in (LEADERBOARD_BOARDS_RAW or "").split(","):
+        tok = tok.strip().lower()
+        if not tok:
+            continue
+        if tok in by_key:
+            if by_key[tok] not in out:
+                out.append(by_key[tok])
+        elif tok not in _lb_unknown_board_keys:
+            _lb_unknown_board_keys.add(tok)
+            unknown.append(tok)
+    if unknown:
+        print(f"[LB] LEADERBOARD_BOARDS names no such board: {', '.join(unknown)} "
+              f"(known: {', '.join(by_key)})")
+    return out
+
+
+# Remembered board message ids per channel: {channel id: {board key: message id}}.
+# Direct edits instead of a history scan. A restart empties this and the rescan
+# below re-adopts by embed title; a message that has gone falls back to a fresh
+# post. The old 5-message scan silently posted duplicates once a few chat
+# messages buried the board (item 8).
 _lb_message_ids: dict = {}
 
-async def publish_lb(guild):
+
+async def _render_board(board: dict):
+    """Fetch one board and render it. Returns (embeds, view), or None when the
+    endpoint answered nothing this tick. Raises on a row shape it cannot
+    render — publish_boards contains that per board, so one board's bad tick
+    can neither skip the others nor kill the loop (#129)."""
+    data = await api_get(board["path"])
+    if not data or not data.get("entries"):
+        # api_get already logged the status on non-200; this covers empty payloads.
+        return None
+    entries = data["entries"]
+    total_players = data.get("total_players", 0)
+    # Item d: the fetch above is the DEFAULT board, so inactive players are
+    # already hidden. One extra 1-row fetch with everyone included yields the
+    # population; the footer says how many are hidden. A failed fetch or a
+    # non-positive difference just omits the suffix — never blocks the post.
+    hidden_inactive = 0
+    if board["probe"]:
+        try:
+            _all = await api_get(board["probe"])
+            if _all:
+                hidden_inactive = int(_all.get("total_players", 0) or 0) - int(total_players or 0)
+        except Exception as e:
+            print(f"[LB] {board['key']}: inactive count fetch failed ({e}) — footer suffix skipped")
+    total_pages = max(1, (len(entries) + LB_PAGE_SIZE - 1) // LB_PAGE_SIZE)
+    embeds = _build_board_embeds(board, entries, total_players, 0, total_pages, hidden_inactive)
+    view = LeaderboardPaginator(board, entries, total_players, hidden_inactive)
+    view._update_buttons()
+    return embeds, view
+
+
+async def _adopt_board_messages(ch, boards: list, ids: dict):
+    """Re-attach to boards already in the channel (this map is process memory,
+    so a restart starts empty) and delete older duplicates of the same board.
+    Newest wins: history is newest-first, so the first message carrying a
+    board's title is the keeper and any later one is a leftover from an
+    earlier re-anchor — whichever of those a viewer or a pin is looking at may
+    not be the one we edit, which is what made a board look permanently stale
+    before. Only this bot's own messages are ever touched."""
+    by_title = {b["title"]: b["key"] for b in boards}
+    keepers, dupes = {}, 0
+    try:
+        async for msg in ch.history(limit=50):
+            if msg.author != bot.user or not msg.embeds:
+                continue
+            key = by_title.get(msg.embeds[0].title or "")
+            if key is None:
+                continue
+            if key not in keepers:
+                keepers[key] = msg.id
+                continue
+            try:
+                await msg.delete()
+                dupes += 1
+            except Exception as e:
+                print(f"[LB] couldn't delete duplicate {key} board mid={msg.id}: {e}")
+    except Exception as e:
+        print(f"[LB] rescan failed ({e}) — boards not found here are posted fresh")
+    ids.update(keepers)
+    if dupes:
+        print(f"[LB] deleted {dupes} duplicate stale board message(s)")
+
+
+async def _boards_are_anchored(ch, boards: list, ids: dict) -> bool:
+    """True when the channel's last len(boards) messages are exactly our board
+    messages, in BOARDS order, oldest to newest. An EDIT never moves a Discord
+    message and never changes its posted date, so a board edited every 10
+    minutes but buried under chat still reads as dead ("posts aren't
+    updating") — sitting at the bottom is part of publishing it, not polish.
+
+    A history read that fails answers True: the direction we want to fail in
+    is editing in place, never deleting a set whose position we could not
+    confirm."""
+    want = [ids.get(b["key"]) for b in boards]
+    if any(mid is None for mid in want):
+        return False
+    try:
+        tail = [m.id async for m in ch.history(limit=len(want))]
+    except Exception as e:
+        print(f"[LB] channel tail read failed ({e}) — editing in place this tick")
+        return True
+    tail.reverse()   # history is newest-first; channel order is oldest-first
+    return tail == want
+
+
+async def _repost_board_set(ch, boards: list, rendered: dict, ids: dict):
+    """Move the whole board set to the channel bottom in BOARDS order, one
+    board at a time, POSTING EACH REPLACEMENT BEFORE DELETING THE MESSAGE IT
+    REPLACES. Sends append at the bottom in order while the deletes remove
+    from above, so the channel ends in the same state a delete-all-then-repost
+    reaches -- but no board is ever absent, not even briefly.
+
+    The delete-first shape this replaces was sound only for as long as every
+    send that followed it succeeded. The caller renders the whole set up front
+    and still refuses to repost unless EVERY board rendered, so the
+    replacement CONTENT was always in hand; what no amount of pre-rendering
+    can hold is a SUCCESSFUL SEND. A 5xx, a timeout, a lost Manage-Messages,
+    or the task being cancelled between the two loops left the channel holding
+    part of the set or none of it until a later tick -- ten minutes of empty
+    leaderboard channel, which is precisely the appearance of deadness that
+    bottom-anchoring exists to prevent (#140).
+
+    Both failure directions are now non-destructive. A failed send leaves the
+    old message in place: stale and out of order, but present, and the next
+    tick re-anchors. A failed delete leaves a duplicate above the new set for
+    the next tick's re-adopt sweep to resolve. Neither can empty the channel.
+    Deletes still only ever touch ids this process posted or adopted, and the
+    whole path still runs at most once per tick.
+    """
+    print(f"[LB] board set is not at the channel bottom -- reposting {len(boards)} boards in order")
+    for b in boards:
+        r = rendered.get(b["key"])
+        if r is None:
+            # The caller gates on every board having rendered, so this is
+            # unreachable today. It is here because the alternative to
+            # skipping one board is a KeyError that costs the whole guild's
+            # tick -- the caller catches it, so the loop survives (#129), but
+            # every board after this one in BOARDS order would be skipped too.
+            print(f"[LB] {b['key']}: no render in hand -- left as it is, not reposted")
+            continue
+        embeds, view = r
+        old = ids.get(b["key"])
+        try:
+            sent = await ch.send(embeds=embeds, view=view)
+        except Exception as e:
+            print(f"[LB] {b['key']}: repost failed ({e}) -- old message kept, re-anchoring next tick")
+            continue
+        ids[b["key"]] = sent.id
+        print(f"[LB] {b['key']}: reposted at bottom as mid={sent.id}")
+        if old is None:
+            continue
+        try:
+            msg = await ch.fetch_message(old)
+            await msg.delete()
+        except Exception as e:
+            print(f"[LB] {b['key']}: old message mid={old} not deleted ({e}) -- next tick's re-adopt sweeps it")
+
+
+async def publish_boards(guild):
+    """Publish every enabled board into the leaderboard channel, one message
+    each, in BOARDS order. One outcome line per board per tick — a silently
+    successful loop is indistinguishable from a dead one in the logs (learning
+    #83), and "is the board actually being updated?" is the question this
+    channel keeps raising."""
     if LEADERBOARD_CHANNEL_ID <= 0: return
     ch = guild.get_channel(LEADERBOARD_CHANNEL_ID)
     if not ch:
@@ -8014,100 +8332,65 @@ async def publish_lb(guild):
             print(f"[LB] channel {LEADERBOARD_CHANNEL_ID} unreachable: {e}")
             return
     if not ch: return
-    data = await api_get(f"/leaderboard?limit={LB_TOTAL_FETCH}&min_matches=1")
-    if not data or not data.get("entries"):
-        # api_get already logged the status on non-200; this covers empty payloads.
-        print("[LB] no leaderboard data this tick — skipping")
+    boards = _enabled_boards()
+    if not boards:
+        print("[LB] LEADERBOARD_BOARDS is empty — nothing to publish")
         return
-    entries = data["entries"]
-    total_players = data.get("total_players", 0)
-    # Item d: the fetch above is the DEFAULT board, so inactive players are
-    # already hidden. One extra 1-row fetch with everyone included yields the
-    # population; the footer says how many are hidden. A failed fetch or a
-    # non-positive difference just omits the suffix -- never blocks the post.
-    hidden_inactive = 0
-    try:
-        _all = await api_get("/leaderboard?limit=1&min_matches=1&include_inactive=true")
-        if _all:
-            hidden_inactive = int(_all.get("total_players", 0) or 0) - int(total_players or 0)
-    except Exception as e:
-        print(f"[LB] inactive count fetch failed ({e}) — footer suffix skipped")
-    total_pages = max(1, (len(entries) + LB_PAGE_SIZE - 1) // LB_PAGE_SIZE)
-    embeds = _build_lb_embeds(entries, total_players, 0, total_pages, hidden_inactive)
-    view = LeaderboardPaginator(entries, total_players, hidden_inactive)
-    view._update_buttons()
-    # Fast path: edit the message we already know about. Logged on success too —
-    # a silently-successful loop is indistinguishable from a dead one in the logs
-    # (learning #83), and "is the board actually being edited?" is exactly the
-    # question this bug keeps asking. 6 lines/hour.
-    #
-    # Bottom-anchor: an EDIT never moves a Discord message and never changes its
-    # "posted" date, so a days-old board being edited every 10 minutes still
-    # reads as dead ("posts aren't posting/updating") to anyone scrolled to the
-    # channel bottom. If anything was posted after our board, delete it and
-    # repost at the bottom — in a dedicated board channel this triggers rarely
-    # (restarts, someone chatting), at most once per tick, and pings no one.
-    mid = _lb_message_ids.get(ch.id)
-    if mid:
+    # Render everything BEFORE touching the channel: the repost path deletes
+    # messages, and it may only do that while holding a replacement for each.
+    rendered = {}
+    for b in boards:
         try:
-            msg = await ch.fetch_message(mid)
-            if getattr(ch, "last_message_id", None) not in (None, mid):
-                try:
-                    await msg.delete()
-                except Exception:
-                    pass
-                sent = await ch.send(embeds=embeds, view=view)
-                _lb_message_ids[ch.id] = sent.id
-                print(f"[LB] board was buried (last_message_id={ch.last_message_id}) — reposted at bottom as mid={sent.id}")
-                return
-            await msg.edit(embeds=embeds, view=view)
-            print(f"[LB] edited board mid={mid}")
-            return
-        except Exception as e:
-            print(f"[LB] fast-path edit of mid={mid} failed ({e}) — rescanning")
-            _lb_message_ids.pop(ch.id, None)  # deleted/unreachable — rediscover
-    # Rescan: adopt the NEWEST board message and DELETE any older duplicates.
-    # Restart-era re-anchors and the pre-v1.30 5-message scan left duplicate
-    # boards behind in some channels; whichever one a viewer (or a pin) is
-    # looking at may not be the one we edit — a permanently "stale" board that
-    # no log line ever explained. Sweeping duplicates makes the visible board
-    # unambiguous, and every outcome now logs.
-    keeper = None
-    dupes = 0
-    async for msg in ch.history(limit=50):
-        if msg.author == bot.user and msg.embeds and "Ranked Leaderboard" in (msg.embeds[0].title or ""):
-            if keeper is None:
-                keeper = msg
+            r = await _render_board(b)
+            if r is None:
+                print(f"[LB] {b['key']}: no data this tick — board left as it is")
             else:
-                try:
-                    await msg.delete()
-                    dupes += 1
-                except Exception as e:
-                    print(f"[LB] couldn't delete duplicate board mid={msg.id}: {e}")
-    if dupes:
-        print(f"[LB] deleted {dupes} duplicate stale board message(s)")
-    if keeper is not None:
-        if getattr(ch, "last_message_id", None) not in (None, keeper.id):
-            # Same bottom-anchor rule as the fast path.
-            try:
-                await keeper.delete()
-            except Exception:
-                pass
-            sent = await ch.send(embeds=embeds, view=view)
-            _lb_message_ids[ch.id] = sent.id
-            print(f"[LB] re-anchored board was buried — reposted at bottom as mid={sent.id}")
-            return
-        _lb_message_ids[ch.id] = keeper.id
-        try:
-            await keeper.edit(embeds=embeds, view=view)
-            print(f"[LB] re-anchored to board mid={keeper.id} and edited")
+                rendered[b["key"]] = r
         except Exception as e:
-            # Leave the id cached; the next tick retries via the fast path.
-            print(f"[LB] re-anchor edit of mid={keeper.id} failed: {e}")
+            print(f"[LB] {b['key']}: render failed ({e}) — board left as it is")
+    if not rendered:
+        print("[LB] no board rendered this tick — nothing published")
         return
-    sent = await ch.send(embeds=embeds, view=view)
-    _lb_message_ids[ch.id] = sent.id
-    print(f"[LB] posted fresh leaderboard message in {ch.id}")
+    ids = _lb_message_ids.setdefault(ch.id, {})
+    adopted = False
+    if any(b["key"] not in ids for b in boards):
+        await _adopt_board_messages(ch, boards, ids)
+        adopted = True
+    if not await _boards_are_anchored(ch, boards, ids):
+        if len(rendered) == len(boards):
+            # Rescan before reposting as well: an id we hold may no longer be
+            # the newest message for its board (another process, a failed edit
+            # that posted a fresh one), and reposting without re-adopting would
+            # leave that older board message in the channel above the new set —
+            # the stale-duplicate case the sweep exists for.
+            if not adopted:
+                await _adopt_board_messages(ch, boards, ids)
+            await _repost_board_set(ch, boards, rendered, ids)
+            return
+        print("[LB] set is buried but a board did not render — editing in place, "
+              "re-anchoring on a tick where every board renders")
+    for b in boards:
+        r = rendered.get(b["key"])
+        if r is None:
+            continue                      # its outcome line was printed above
+        embeds, view = r
+        mid = ids.get(b["key"])
+        if mid is not None:
+            try:
+                msg = await ch.fetch_message(mid)
+                await msg.edit(embeds=embeds, view=view)
+                print(f"[LB] {b['key']}: edited board mid={mid}")
+                continue
+            except Exception as e:
+                print(f"[LB] {b['key']}: edit of mid={mid} failed ({e}) — posting a fresh message")
+                ids.pop(b["key"], None)   # deleted/unreachable — rediscover
+        try:
+            sent = await ch.send(embeds=embeds, view=view)
+            ids[b["key"]] = sent.id
+            print(f"[LB] {b['key']}: posted fresh board message mid={sent.id}")
+        except Exception as e:
+            print(f"[LB] {b['key']}: post failed ({e})")
+
 
 # ── Anti-cheat flag relay ────────────────────────────────────────
 # IDs whose Discord send succeeded but durable API acknowledgement failed.
@@ -11627,7 +11910,11 @@ async def _publish_tournament_board():
         _build_tournament_board_embed(pick("sync"), "sync"),
         _build_tournament_board_embed(pick("async"), "async"),
     ]
-    # Living-message management — same shape as publish_lb.
+    # Living-message management — the single-message shape the leaderboard
+    # channel used before v1.41.0 item 1: remembered id, edit in place, delete
+    # and repost when something was posted after it. publish_boards now runs a
+    # SET of messages instead (last_message_id can't order a set), so this is
+    # its own copy, not a caller of it.
     mid = _tournament_board_ids.get(ch.id)
     if mid:
         try:

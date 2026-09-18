@@ -76,6 +76,97 @@ namespace CompetitiveRounds
             }
         }
 
+        // ── health precision (v1.41.0, item 10) ─────────────────────────────
+        //
+        // Display-only, and one site covers all three seats: the hold-Tab
+        // board, the spectator seat and the broadcaster HUD all render the
+        // SAME cached cell string (BroadcastStatValue hands out cachedValues,
+        // it does not re-format). Nothing reads a formatted cell
+        // back — the match-history wire is produced by WireNum, which ignores
+        // StatRow.fmt entirely and writes "0.###" invariant (#47).
+        internal static class HealthPrecisionSetting
+        {
+            internal const string ROUNDED = "Rounded";
+            internal const string ONE_DP = "1 decimal";
+            internal const string TWO_DP = "2 decimals";
+
+            private static BepInEx.Configuration.ConfigEntry<string> _entry;
+
+            /// <summary>Bound here rather than in Plugin.cs because this file
+            /// owns the format site — the same local-bind pattern LagNotices
+            /// .cs:571 uses for its own lever. Lazy, and a null ConfigFile
+            /// (very early in startup) is retried on the next read instead of
+            /// being latched as "no setting".</summary>
+            private static BepInEx.Configuration.ConfigEntry<string> Entry()
+            {
+                if (_entry != null) return _entry;
+                try
+                {
+                    var cf = Plugin.ConfigFileForLevers;
+                    if (cf == null) return null;
+                    _entry = cf.Bind(
+                        "UI", "HealthPrecision", ROUNDED,
+                        "Decimals on the HP readout (hold-Tab board, spectator seat, broadcaster HUD): "
+                        + "Rounded, 1 decimal or 2 decimals. BOTH halves of \"current/max\" follow it, so a "
+                        + "card that leaves max health on a fraction stops reading as a whole number too. "
+                        + "Local display only - nothing stored or sent changes.");
+                }
+                catch { _entry = null; }
+                return _entry;
+            }
+
+            /// <summary>Current pick, normalised. Anything else in the cfg — a
+            /// hand-edit, a value written by a later build — reads as Rounded,
+            /// i.e. today's board, rather than an unrenderable format.</summary>
+            internal static string Level
+            {
+                get
+                {
+                    string v = "";
+                    try { var e = Entry(); v = e != null ? (e.Value ?? "") : ""; } catch { }
+                    v = v.Trim();
+                    if (string.Equals(v, ONE_DP, StringComparison.OrdinalIgnoreCase)) return ONE_DP;
+                    if (string.Equals(v, TWO_DP, StringComparison.OrdinalIgnoreCase)) return TWO_DP;
+                    return ROUNDED;
+                }
+            }
+
+            /// <summary>Rounded -> 1 decimal -> 2 decimals -> Rounded. No
+            /// invalidation call: the board re-renders every cell at its next
+            /// 8 Hz snapshot (RefreshSnapshot), and the broadcaster's derived
+            /// strings rebuild on that same generation bump.</summary>
+            internal static void Cycle()
+            {
+                string next = Level == ROUNDED ? ONE_DP : Level == ONE_DP ? TWO_DP : ROUNDED;
+                try { var e = Entry(); if (e != null) e.Value = next; } catch { }
+            }
+
+            /// <summary>The .NET numeric format the HP row renders with.</summary>
+            internal static string Fmt
+            {
+                get
+                {
+                    string lvl = Level;
+                    return lvl == TWO_DP ? "F2" : lvl == ONE_DP ? "F1" : "F0";
+                }
+            }
+        }
+
+        /// <summary>The HP row's format is a delegate, not a string, so it is
+        /// re-resolved at render time and cycling the precision setting takes
+        /// effect immediately instead of being frozen at static-init.
+        ///
+        /// This is NOT an allocation optimisation and must not be described as
+        /// one. ROWS is a static initialiser that runs once, so a method group
+        /// and a lambda both allocate exactly one delegate for the process.
+        /// Nor is this a per-frame path: the board renders from a throttled
+        /// snapshot (`Time.unscaledTime >= nextSnapshotAt` before
+        /// RefreshSnapshot, ~8 Hz), which is itself what #162 asked for in this
+        /// file. An earlier version of this comment cited #162 for the opposite
+        /// - a per-call saving on a hot path - and #162's own fix is the reason
+        /// that hot path no longer exists.</summary>
+        private static string HealthFmt() => HealthPrecisionSetting.Fmt;
+
         // Stat row description: label + the raw numeric read(s) + how the
         // overlay cell renders them.
         //
@@ -101,9 +192,15 @@ namespace CompetitiveRounds
             public string suffix;                  // display-only unit — never on the wire
             public Func<Player, float> number;     // primary numeric read
             public Func<Player, float> number2;    // secondary read (HP row only), else null
+            // Non-null = the player picks this row's precision at runtime and
+            // `fmt` is only the fallback. Display-only by construction: the
+            // wire side never reads fmt (WireNum), so no setting here can move
+            // a stored build.
+            public Func<string> fmtOf;
             public StatRow(string l, string f, string sfx,
-                           Func<Player, float> n, Func<Player, float> n2 = null)
-            { label = l; fmt = f; suffix = sfx; number = n; number2 = n2; }
+                           Func<Player, float> n, Func<Player, float> n2 = null,
+                           Func<string> fd = null)
+            { label = l; fmt = f; suffix = sfx; number = n; number2 = n2; fmtOf = fd; }
         }
 
         // ── WIRE FORMAT LOCK ────────────────────────────────────────────────
@@ -113,11 +210,22 @@ namespace CompetitiveRounds
         // edit MUST bump BUILD_STATS_WIRE_VERSION and add a new WIRE_Vn table in
         // the same change — never mutate WIRE_V1, stored rows still decode from
         // it. WireTableValid() fails closed if the two stop lining up.
+        //
+        // APPENDING a row past the last index WIRE_V1 references is the single
+        // exception and needs no version bump: WIRE_V1 addresses rows BY INDEX,
+        // so an appended row leaves wireFirstAt[r] at -1 and DecodeBuildStats
+        // skips any row with no field — every stored v1 string still decodes to
+        // exactly the 21 fields it was written with. The appended row is
+        // board-only until some WIRE_V2 carries it ("Scale", added for v1.41.0,
+        // is board-only for that reason).
         private static readonly StatRow[] ROWS = new[]
         {
             // Clamp at 0 — a dead player's health goes negative internally
             // and "-39/100" on the board reads as a bug (July 28 screenshot).
-            new StatRow("HP",          "F0", "",   p => Mathf.Max(0f, p.data.health), p => p.data.MaxHealth),
+            // "F0" is the fallback only — HealthFmt resolves the player's
+            // health-precision pick per render, and DisplayCell applies it to
+            // BOTH halves, so a fractional max health stops reading whole too.
+            new StatRow("HP",          "F0", "",   p => Mathf.Max(0f, p.data.health), p => p.data.MaxHealth, HealthFmt),
             new StatRow("Lives",       "F0", "",   p => p.data.stats.remainingRespawns + 1),
             // Infoholic's damage formula: gun.damage x bulletDamageMultiplier x 55
             // (55 = vanilla base bullet damage).
@@ -140,6 +248,17 @@ namespace CompetitiveRounds
             new StatRow("Jump",        "F2", "",   p => p.data.stats.jump),
             new StatRow("Jumps",       "F0", "",   p => p.data.stats.numberOfJumps),
             new StatRow("Size",        "F2", "",   p => p.data.stats.sizeMultiplier),
+            // The APPLIED body scale, not the multiplier above it. ROUNDS
+            // derives it from max health AND sizeMultiplier —
+            //   transform.localScale = Vector3.one * 1.2f
+            //       * Mathf.Pow(data.MaxHealth / 100f * 1.2f, 0.2f) * sizeMultiplier
+            // (decompile CharacterStatModifiers.ConfigureMassAndSize:262) —
+            // which is why a max-health card moves this row while Size does
+            // not, and why an untouched player reads ~1.24 rather than 1.00.
+            // Read off stats.transform because that is the transform that line
+            // writes, and CharacterData.stats is a GetComponent on the same
+            // object (decompile CharacterData.cs:147).
+            new StatRow("Scale",       "F2", "",   p => p.data.stats.transform.localScale.x),
         };
 
         /// <summary>Renders one board cell from the row's numeric reader(s).
@@ -148,9 +267,22 @@ namespace CompetitiveRounds
         /// "-" for that cell alone.</summary>
         private static string DisplayCell(StatRow row, Player p)
         {
+            string fmt = FmtOf(row);
             float a = row.number(p);
-            if (row.number2 == null) return a.ToString(row.fmt) + row.suffix;
-            return a.ToString(row.fmt) + "/" + row.number2(p).ToString(row.fmt) + row.suffix;
+            if (row.number2 == null) return a.ToString(fmt) + row.suffix;
+            return a.ToString(fmt) + "/" + row.number2(p).ToString(fmt) + row.suffix;
+        }
+
+        /// <summary>The format this row renders with right now: the player's
+        /// health-precision pick for the HP row, the row's own static fmt
+        /// everywhere else. Falls back to that static fmt rather than throwing
+        /// — a settings read must not cost the board a cell.</summary>
+        private static string FmtOf(StatRow row)
+        {
+            var f = row.fmtOf;
+            if (f == null) return row.fmt;
+            try { string s = f(); return string.IsNullOrEmpty(s) ? row.fmt : s; }
+            catch { return row.fmt; }
         }
 
         private static Gun Gun(Player p) => p.data.weaponHandler.gun;
@@ -200,7 +332,7 @@ namespace CompetitiveRounds
                 I18n.Tr("Bullet slow"), I18n.Tr("Knockback"), I18n.Tr("Spread"),
                 I18n.Tr("Life steal"), I18n.Tr("Block CD"), I18n.Tr("Blocks"),
                 I18n.Tr("Regen"), I18n.Tr("Move spd"), I18n.Tr("Jump"),
-                I18n.Tr("Jumps"), I18n.Tr("Size"),
+                I18n.Tr("Jumps"), I18n.Tr("Size"), I18n.Tr("Scale"),
             };
             if (labels.Length != ROWS.Length)
             {
@@ -552,15 +684,19 @@ namespace CompetitiveRounds
             // Parsed invariantly (that is how it was written), re-rendered
             // through the row's own fmt/suffix so a history cell reads like the
             // board cell. NOT a bit-exact round trip and does not claim to be:
-            // the wire keeps 3 decimals, the board renders 2, so a value that
-            // sits exactly on the 3rd-decimal rounding boundary can land one
-            // step off the digit the board showed. Harmless for a build
-            // read-out, and storing the full float would spend wire width on
-            // digits no surface renders.
+            // the wire keeps 3 decimals, the board renders at most 2, so a
+            // value that sits exactly on the 3rd-decimal rounding boundary can
+            // land one step off the digit the board showed. Harmless for a
+            // build read-out, and storing the full float would spend wire width
+            // on digits no surface renders.
+            // FmtOf, not row.fmt: a stored HP re-renders at the VIEWER's current
+            // health precision, which is what makes a history cell keep reading
+            // like the board cell after that setting moves.
+            string fmt = FmtOf(row);
             if (!TryParseWire(a, out float fa)) return WIRE_MISSING;
-            if (b == null) return fa.ToString(row.fmt) + row.suffix;
+            if (b == null) return fa.ToString(fmt) + row.suffix;
             if (!TryParseWire(b, out float fb)) return WIRE_MISSING;
-            return fa.ToString(row.fmt) + "/" + fb.ToString(row.fmt) + row.suffix;
+            return fa.ToString(fmt) + "/" + fb.ToString(fmt) + row.suffix;
         }
 
         private static bool TryParseWire(string s, out float v)
@@ -829,9 +965,18 @@ namespace CompetitiveRounds
             stH2H = new GUIStyle(GUI.skin.label) { fontSize = 12, fontStyle = FontStyle.Bold, richText = false };
             stH2H.normal.textColor = new Color(0.82f, 0.82f, 0.82f);
             stName = new GUIStyle(GUI.skin.label) { fontSize = 14, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
-            stLabel = new GUIStyle(GUI.skin.label) { fontSize = 13, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleLeft };
+            // wordWrap/clipping explicit, for the same reason bug 239 made them
+            // explicit on BroadcastHud's stName/stStat (:760, :767): GUI.skin.label
+            // defaults wordWrap ON, and both of this batch's changes make these
+            // strings longer - the HP row can now render "87.50/100.00" instead of
+            // "88/100", and the label column gained the "Scale" row whose localised
+            // forms are longer than the English one in every bundled locale. The
+            // cells draw into a FIXED-height Rect (see the GUI.Label below), so a
+            // wrapped second line is not shown smaller - it is clipped away.
+            // stCards below is deliberately the opposite: card lists are MEANT to wrap.
+            stLabel = new GUIStyle(GUI.skin.label) { fontSize = 13, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleLeft, wordWrap = false, clipping = TextClipping.Clip };
             stLabel.normal.textColor = new Color(0.75f, 0.78f, 0.85f);
-            stCell = new GUIStyle(GUI.skin.label) { fontSize = 13, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
+            stCell = new GUIStyle(GUI.skin.label) { fontSize = 13, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter, wordWrap = false, clipping = TextClipping.Clip };
             stCards = new GUIStyle(GUI.skin.label)
             { fontSize = 11, fontStyle = FontStyle.Bold, alignment = TextAnchor.UpperCenter, wordWrap = true, richText = true };
             // Bug #114 item 5: ROUNDS' IMGUI skin has taller glyph metrics

@@ -928,6 +928,7 @@
   "Deal damage",
   "Deaths",
   "Decent",
+  "Decimals on the HP readout in the hold-Tab board, the spectator seat and the broadcaster HUD. Both halves of \"current/max\" follow it, so a card that leaves max health on a fraction stops reading as a whole number too. Local display only - nothing stored or sent changes.",
   "Decline",
   "Decline (offline mode)",
   "Deep blood-red body color.",
@@ -1230,6 +1231,9 @@
   "HOST",
   "HOW A COSMETIC REACHES YOUR BODY",
   "HOW SURE THE SYSTEM IS",
+  "HP decimals: <color=#88FF88>2 DECIMALS</color>",
+  "HP decimals: <color=#DDDD66>1 DECIMAL</color>",
+  "HP decimals: <color=#FF9966>ROUNDED</color>",
   "HUMAN REVIEW",
   "Halo",
   "Harassment",
@@ -2008,6 +2012,7 @@
   "Sapphire",
   "Sapphire Gradient",
   "Save Votes",
+  "Scale",
   "Scarlet",
   "Score",
   "Score progression",
@@ -7530,6 +7535,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Decimals on the HP readout in the hold-Tab board, the spectator seat and the broadcaster HUD. Both halves of \"current/max\" follow it, so a card that leaves max health on a fraction stops reading as a whole number too. Local display only - nothing stored or sent changes.": {
+   "surface": "NativeUI",
+   "location": "BuildSettingsTab",
+   "kind": "SettingsToggle"
+  },
   "Decline": {
    "surface": "NativeUI",
    "location": "BuildRankedRow",
@@ -9038,6 +9048,21 @@
   "HOW SURE THE SYSTEM IS": {
    "surface": "InfoViz",
    "location": "BuildGlickoRd",
+   "kind": "Tr"
+  },
+  "HP decimals: <color=#88FF88>2 DECIMALS</color>": {
+   "surface": "NativeUI",
+   "location": "RefreshSettings",
+   "kind": "Tr"
+  },
+  "HP decimals: <color=#DDDD66>1 DECIMAL</color>": {
+   "surface": "NativeUI",
+   "location": "RefreshSettings",
+   "kind": "Tr"
+  },
+  "HP decimals: <color=#FF9966>ROUNDED</color>": {
+   "surface": "NativeUI",
+   "location": "RefreshSettings",
    "kind": "Tr"
   },
   "HUMAN REVIEW": {
@@ -12929,6 +12954,11 @@
    "surface": "NativeUI",
    "location": "BuildTournamentsTab",
    "kind": "CreateButton"
+  },
+  "Scale": {
+   "surface": "TabStatsOverlay",
+   "location": "EnsureLocaleStrings",
+   "kind": "Tr"
   },
   "Scarlet": {
    "surface": "shop catalog",

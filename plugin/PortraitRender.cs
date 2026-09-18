@@ -284,10 +284,18 @@ namespace CompetitiveRounds
         // Unity's fixed-timestep option off and prewarm off, and seeds each from
         // its own path with no collision bump. The table and the length are
         // RECIPE 2's.
+        // 4: the frame is centred horizontally on the rig transform instead of on
+        // the solid union, and its half-extent reaches the union's far side from
+        // there (ComputeBounds), so a gun or a one-sided cosmetic widens the frame
+        // instead of sliding the body off centre. Every other input -- rig, matte,
+        // pins, table, length -- is RECIPE 3's. Bumped although no r=3 picture is
+        // known to be stored: 3 is already written down as a byte contract here and
+        // in backend/tests/test_portrait_grade_recipe.py's ledger, and the cost of
+        // being wrong about some dev upload is a portrait that never re-renders.
         // A change to any of these once ANY picture is stored under this RECIPE
         // (a dev build's upload included) needs a bump: check the stored
         // descriptors before folding one under the same number.
-        internal const int RECIPE = 3;
+        internal const int RECIPE = 4;
         // The particle snapshot length: the live particle systems on the rig and
         // every sub-emitter they reach are re-simulated from a restart for this
         // long, in PARTICLE_STEP_MS increments, with prewarm off (PinParticles).
@@ -3099,9 +3107,37 @@ namespace CompetitiveRounds
                 // emitter-sized bounds (±6 units here) that would shrink the character to a
                 // third of the frame. The aura may bleed past the edge; the body may not.
                 var use = anyA ? a : b;
-                float side = Mathf.Max(use.size.x, use.size.y, 0.5f) * pad;
-                fit = new Bounds(new Vector3(use.center.x, use.center.y, PARK.z), new Vector3(side, side, 1f));
-                rep.Append("fit centre=").Append(V(fit.center - PARK)).Append(" side=").Append(side.ToString("F2")).Append('\n');
+                // Horizontally the frame is centred on the BODY, not on that union. The union
+                // carries the gun (reserved to about +1.9 above, hand at +1.2), the free arm and
+                // any one-sided cosmetic, so centring on it put the body left of centre in every
+                // run recorded at r=2 (BepInEx/pc_portrait_report_*.txt: fit centre x +0.25 and
+                // +0.37 on sides of 4.28 and 4.59, the rig 6.0% and 8.2% of the width left of it).
+                // The body is built AT the rig transform -- PlayerSkinHandler.Init instantiates the
+                // skin at base.transform.position under base.transform (decompile:
+                // logs-snapshot/decompiled/full/PlayerSkinHandler.cs) -- and eroding the r2 matte
+                // until the thin arm/gun link breaks leaves a body core centred on rig x -0.006
+                // (bbox mid -0.004), the same at every erosion depth from 20 to 56 px.
+                // So rigPos.x is a measured body centre here, not a stand-in for one.
+                float bodyCx = rigPos.x;
+                if (bodyCx < use.min.x || bodyCx > use.max.x)
+                {
+                    // Nothing being framed straddles the rig transform, so it is not the body's
+                    // centre on this rig (re-rooted, or a clone whose skin never spawned). Frame on
+                    // the union instead; this must not cost a render.
+                    rep.Append("body centre: rig x=").Append((bodyCx - PARK.x).ToString("F2"))
+                       .Append(" is outside the framed span, using the union centre\n");
+                    bodyCx = use.center.x;
+                }
+                // Square, and symmetric about the body centre: the half-extent has to reach the
+                // union's FAR side, so an off-centre gun or cosmetic costs scale and never a crop.
+                // With bodyCx == use.center.x this is the previous side exactly (the 0.25f floor is
+                // the old 0.5f one, halved), so the change is only ever the off-centre case.
+                float half = Mathf.Max(use.max.x - bodyCx, bodyCx - use.min.x);
+                float side = Mathf.Max(half, use.size.y * 0.5f, 0.25f) * 2f * pad;
+                fit = new Bounds(new Vector3(bodyCx, use.center.y, PARK.z), new Vector3(side, side, 1f));
+                rep.Append("fit centre=").Append(V(fit.center - PARK)).Append(" side=").Append(side.ToString("F2"))
+                   .Append(" bodyCx=").Append((bodyCx - PARK.x).ToString("F2"))
+                   .Append(" unionCx=").Append((use.center.x - PARK.x).ToString("F2")).Append('\n');
                 return true;
             }
             catch (Exception ex) { rep.Append("bounds threw: ").Append(ex.Message).Append('\n'); return false; }
