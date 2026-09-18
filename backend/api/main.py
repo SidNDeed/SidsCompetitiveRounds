@@ -14582,7 +14582,18 @@ _RANKED_CANDIDATE_SQL = """
       AND NOT EXISTS (SELECT 1 FROM player_bans pb
                        WHERE pb.steam_id = ranked_queue.steam_id
                          AND pb.unbanned_at IS NULL)
-      -- A1 r2 (review MEDIUM :16675). Discovery must not SELECT a seat the
+      -- A1 r2 (review MEDIUM 16675 - the colon before that number is
+      -- omitted on purpose; see the warning below). Discovery must not
+      -- SELECT a seat the
+      -- WARNING, and it is the reason this comment reads oddly. Do not put a
+      -- colon-prefixed token in a comment inside a SQL literal that goes
+      -- through text(). SQLAlchemy scans the ENTIRE string for bind names and
+      -- does not skip a double-dash comment, so a review citation written with
+      -- a leading colon becomes a required bind that no caller supplies, and
+      -- every execute raises InvalidRequestError. That is exactly what happened
+      -- here - ranked 1v1 discovery could not run at all. Proven with
+      -- construct_params against a comment-stripped negative control, and
+      -- pinned by backend/tests/test_sql_literals_have_no_phantom_binds.py.
       -- gate under the locks is going to refuse. The gate stays the
       -- authority -- this read is unlocked by design -- but a filter that
       -- disagrees with its gate is how a select-then-refuse loop gets built:
