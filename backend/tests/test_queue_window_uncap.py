@@ -86,8 +86,15 @@ def test_poll_uses_the_uncapped_window_sql():
     assert sql.count(f"WHEN EXTRACT(EPOCH FROM (now() - {CLOCK})) >= 60 THEN 400") == 2
     assert sql.count(f"WHEN EXTRACT(EPOCH FROM (now() - {CLOCK})) >= 30 THEN 200") == 2
     assert "now() - joined_at" not in sql               # no bare insert-time clock left
-    # a seat that stopped polling (the janitor sweeps it at 30 s) is not a partner
-    assert sql.count("AND last_polled > NOW() - INTERVAL '15 seconds'") == 1
+    # a seat that stopped polling (the janitor sweeps it at 30 s) is not a partner,
+    # measured on the WALL clock. This statement runs twice in one transaction
+    # -- discovery, then revalidation after the identity barrier -- and NOW() is
+    # transaction-stable, so under NOW() the second run re-asks the question at
+    # the first run's instant and can never see a seat that went stale during
+    # the wait (review r1). Asserting the absence too: tracking the new literal
+    # without refusing the old one would just repaint the pin.
+    assert sql.count("AND last_polled > clock_timestamp() - INTERVAL '15 seconds'") == 1
+    assert "last_polled > NOW()" not in sql
     # the scan no longer locks: rows are taken against the discovered snapshot
     # AFTER the identity barrier, so an open-ended scan cannot select a player
     # outside the gated set.

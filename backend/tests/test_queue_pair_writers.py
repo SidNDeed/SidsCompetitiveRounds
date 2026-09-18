@@ -185,6 +185,19 @@ class FakeQueueSession:
                 r.update(status="searching", matched_with=None, room_name=None, room_region=None,
                          ready=False, matched_at=None)
             return _Result([])
+        if "DELETE FROM queue_leases" in sql:
+            # A1 r2: the three ranked dissolution writers release the pre-room
+            # lease they fenced. The DELETE must stay FENCED -- without
+            # mode='ranked' it would destroy a seat's 2v2/1v2/FFA commitment,
+            # and without group_id IS NULL it would destroy the in-game
+            # (ranked, series.id) fence of a series that is still being played.
+            # Asserted rather than tolerated: a writer that loses a predicate is
+            # exactly what this fake exists to catch.
+            assert "mode = 'ranked'" in sql, (
+                f"lease release is not fenced to the ranked mode: {sql}")
+            assert "group_id IS NULL" in sql, (
+                f"lease release is not fenced to the pre-room lease: {sql}")
+            return _Result([])
         if "DELETE FROM issued_room_regions" in sql:
             # Migration 292 promised rows are deleted past 30 days and nothing
             # deleted them. The issuance path is where it happens: there is no
@@ -370,13 +383,22 @@ def test_ready_dissolutions_reset_the_own_row_and_answer_dissolved():
     predecessor, so a lapsed commitment dissolves instead of resurrecting a
     pair that is already gone. Counted here rather than loosened to >= 3,
     because the point of this assertion is that a NEW dissolution path has to
-    be a deliberate edit to this line."""
+    be a deliberate edit to this line.
+
+    A1 round 2 adds the FIFTH, and this is that deliberate edit. Room issuance
+    is now gated TWICE in this handler, for two different reasons: the fourth
+    refuses a pair whose polling lease has lapsed (require), the fifth refuses
+    a pair one of whose seats has since been committed somewhere else
+    (allow_any), and past it the new series is fenced with (ranked,
+    series.id). Before r2 a live 1v1 held no in-game lease at all -- the pair's
+    only cover was a 5-minute polling lease that lapsed minutes into the
+    match."""
     src = inspect.getsource(main.queue_ready)
     assert '"status": "not_matched", "message": "Match dissolved' not in src
     assert "pair_changed" not in src and "dissolved_at_ready" not in src
     adjacent = re.findall(r"await _queue_reset_to_searching\(db, player\.id\)\s+await db\.commit\(\)\s+"
                           r"return \{\"status\": \"dissolved\"", src)
-    assert len(adjacent) == 4
+    assert len(adjacent) == 5
     assert src.count('raise HTTPException(status_code=503, detail="queue_contended")') == 1
     assert 'raise HTTPException(409, "match dissolved (participant banned)")' in src
     opp_read = src.index("FROM ranked_queue WHERE player_id = :oid")

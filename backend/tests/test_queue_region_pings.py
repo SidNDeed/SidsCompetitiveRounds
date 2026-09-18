@@ -599,7 +599,14 @@ class FakeIssuanceSession:
                 return _Result([])
             return _Result([{"mode": self.lease_mode, "group_id": None}])
         if sql.startswith("INSERT INTO queue_leases"):
-            self.leases_written.append(params.get("pid"))
+            # A1 r2: mode/group/ttl are recorded too. queue_ready now writes
+            # TWICE -- the pre-issuance reacquire of the group-less polling
+            # lease, then the in-game fence on the series it just created --
+            # and a record of player ids alone cannot tell those apart, which
+            # is exactly the distinction the fix turns on.
+            self.leases_written.append((
+                params.get("pid"), params.get("mode"),
+                params.get("gid"), params.get("ttl")))
             return _Result([])
         if sql.startswith("SELECT") and "FROM players" in sql:
             pid = self.by_steam[self.me_steam]
@@ -729,12 +736,32 @@ def test_queue_ready_refuses_to_issue_a_room_on_a_lapsed_lease(issuance):
 def test_queue_ready_reacquires_the_lease_on_the_room_it_issues(issuance):
     """The renew half of the same requirement: the committed room carries a
     lease measured from ISSUANCE, not whatever remained of the poll's five
-    minutes."""
+    minutes.
+
+    A1 r2 makes that TWO writes, and the pair is the point:
+      * the pre-issuance reacquire of the group-less polling lease -- the
+        commitment to "matched in ranked", which has no id until a room
+        exists;
+      * the fence on the live game, scoped to the series and carrying
+        LEASE_TTL_INGAME. Before r2 a 1v1 in progress held NO in-game lease at
+        all: every ranked lease in the file was group-less and five minutes
+        long, so the pair's cover lapsed minutes INTO the match and both seats
+        looked free to every other mode's formation."""
     at = _now() - timedelta(seconds=20)
     session = FakeIssuanceSession(_pair(FRESH_MAP, FRESH_MAP_PARTNER, at, at), ME_STEAM)
     assert _ready(session)["status"] == "both_ready"
-    assert sorted(str(p) for p in session.leases_written) == sorted(
-        [str(ME), str(PARTNER)]), session.leases_written
+
+    polling = [w for w in session.leases_written if w[2] is None]
+    ingame = [w for w in session.leases_written if w[2] is not None]
+    assert sorted(str(w[0]) for w in polling) == sorted(
+        [str(ME), str(PARTNER)]), polling
+    assert sorted(str(w[0]) for w in ingame) == sorted(
+        [str(ME), str(PARTNER)]), ingame
+    assert {w[1] for w in session.leases_written} == {"ranked"}, session.leases_written
+    assert {w[3] for w in polling} == {main.LEASE_TTL_POLLING}, polling
+    assert {w[3] for w in ingame} == {main.LEASE_TTL_INGAME}, ingame
+    assert len({w[2] for w in ingame}) == 1, (
+        "both seats must be fenced onto the SAME series")
 
 
 def test_queue_ready_control_without_maps_or_with_stale_maps_takes_the_ladder(issuance):
