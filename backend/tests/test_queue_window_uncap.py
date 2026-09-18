@@ -58,27 +58,61 @@ def test_team_queue_ladder_unchanged():
 
 
 def test_poll_uses_the_uncapped_window_sql():
+    """A1 (2026-09-17) moved the candidate predicate OUT of queue_poll into the
+    module-level _RANKED_CANDIDATE_SQL, because the formation now runs it
+    twice: once for unlocked discovery and once, after the identity barrier,
+    to revalidate the one candidate it chose. Two copies of a predicate this
+    size are two chances for one to drift (#330).
+
+    So the window assertions are split by where the thing they pin now lives.
+    They are NOT relaxed: the SQL half is still counted exactly, against the
+    constant, and the ladder counts stay at 2 because each rung still appears
+    once on the lower bound and once on the upper."""
     src = inspect.getsource(main.queue_poll)
+    sql = main._RANKED_CANDIDATE_SQL
+
+    # --- the decision, still in the handler ---
     assert src.count("compute_ranked_window(wait_seconds)") == 1
     assert src.count("my_uncapped, min_rating, max_rating = _ranked_window_binds(my_rating, elo_range)") == 1
     assert "compute_elo_range(" not in src
+    assert '"my_uncapped": my_uncapped' in src
+
+    # --- the predicate, now in the shared constant ---
     # my side: the typed boolean short-circuits the bounds
-    assert src.count("AND (CAST(:my_uncapped AS boolean) OR rating BETWEEN :rmin AND :rmax)") == 1
+    assert sql.count("AND (CAST(:my_uncapped AS boolean) OR rating BETWEEN :rmin AND :rmax)") == 1
     # their side: no bound from 120 s off THEIR wait clock, the ladder below it
-    assert src.count(f"AND (EXTRACT(EPOCH FROM (now() - {CLOCK})) >= 120") == 1
-    assert "THEN 800" not in src
-    assert src.count(f"WHEN EXTRACT(EPOCH FROM (now() - {CLOCK})) >= 60 THEN 400") == 2
-    assert src.count(f"WHEN EXTRACT(EPOCH FROM (now() - {CLOCK})) >= 30 THEN 200") == 2
-    assert "now() - joined_at" not in src               # no bare insert-time clock left
-    # my own row carries the kept clock (both row SELECTs) and the wait uses it
+    assert sql.count(f"AND (EXTRACT(EPOCH FROM (now() - {CLOCK})) >= 120") == 1
+    assert "THEN 800" not in sql
+    assert sql.count(f"WHEN EXTRACT(EPOCH FROM (now() - {CLOCK})) >= 60 THEN 400") == 2
+    assert sql.count(f"WHEN EXTRACT(EPOCH FROM (now() - {CLOCK})) >= 30 THEN 200") == 2
+    assert "now() - joined_at" not in sql               # no bare insert-time clock left
+    # a seat that stopped polling (the janitor sweeps it at 30 s) is not a partner,
+    # measured on the WALL clock. This statement runs twice in one transaction
+    # -- discovery, then revalidation after the identity barrier -- and NOW() is
+    # transaction-stable, so under NOW() the second run re-asks the question at
+    # the first run's instant and can never see a seat that went stale during
+    # the wait (review r1). Asserting the absence too: tracking the new literal
+    # without refusing the old one would just repaint the pin.
+    assert sql.count("AND last_polled > clock_timestamp() - INTERVAL '15 seconds'") == 1
+    assert "last_polled > NOW()" not in sql
+    # the scan no longer locks: rows are taken against the discovered snapshot
+    # AFTER the identity barrier, so an open-ended scan cannot select a player
+    # outside the gated set.
+    assert "FOR UPDATE" not in sql and "SKIP LOCKED" not in sql
+    # and the handler runs that one statement for both discovery and revalidation
+    assert src.count("text(_RANKED_CANDIDATE_SQL)") == 2
+    assert src.count("only=None") == 1
+    assert src.count('only=cand["player_id"]') == 1
+
+    # --- my own row carries the kept clock, and the wait uses it ---
     assert src.count("rq.ready, rq.joined_at, rq.wait_since, rq.matched_at,") == 2
     assert "rq.ready, rq.joined_at, rq.matched_at" not in src
     assert src.count('wait_seconds = int((now - (entry["wait_since"] or entry["joined_at"])).total_seconds())') == 1
     assert 'now - entry["joined_at"]' not in src
-    # a seat that stopped polling (the janitor sweeps it at 30 s) is not a partner
-    assert src.count("AND last_polled > NOW() - INTERVAL '15 seconds'") == 1
-    assert '"my_uncapped": my_uncapped' in src
-    # the wire: the legacy cap for old clients + the real flag
+    # the formation loop re-derives the same clock from its own unlocked re-read
+    assert src.count('(me["wait_since"] or me["joined_at"])') == 1
+
+    # --- the wire: the legacy cap for old clients + the real flag ---
     assert "elo_range=elo_range if elo_range is not None else RANKED_WINDOW_LEGACY_CAP" in src
     assert "elo_unbounded=(elo_range is None)" in src
     assert main.RANKED_WINDOW_LEGACY_CAP == 800

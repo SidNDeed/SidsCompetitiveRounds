@@ -308,7 +308,17 @@ class FakeDb:
         if "pg_advisory_xact_lock(hashtext('ban-rate:'" in sql:
             self.locks.append(("ban-rate", params["adm"]))
             return _Res([(1,)])
-        if "pg_advisory_xact_lock(hashtext(:sid))" in sql:
+        # The identity lock in EITHER spelling. This used to pin the exact
+        # literal `hashtext(:sid)`, so when _mail_lock_identities moved onto
+        # the shared _identity_lock_many -- which spells its bind
+        # `CAST(:sid AS text)` (#275) -- the fake silently stopped
+        # recognising it, on_identity_lock stopped firing, and 84 tests
+        # failed for that one reason. Match the SHAPE (an advisory lock on
+        # a :sid bind), not one rendering of it. The two literal-keyed
+        # classes above have already returned, and the quoted-key guard
+        # keeps a future one from being miscounted as an identity.
+        if ("pg_advisory_xact_lock(hashtext(" in sql
+                and chr(39) not in sql and "sid" in params):
             self.locks.append(("identity", params["sid"]))
             if self.on_identity_lock is not None:
                 self.on_identity_lock(params["sid"])        # "a deletion committed while we waited for this lock"
@@ -741,6 +751,24 @@ class FakeDb:
         # ...and first WAITS for any Discord line in flight naming the player (r7 H2): none here
         if "MAX(l.until) - clock_timestamp()" in sql:
             return _Res()
+        # A1 r2: the identity barrier bounds its lock WAIT (self-review
+        # finding 2). Recognised rather than merely tolerated: SET LOCAL
+        # governs only the statements that FOLLOW it, so a timeout issued
+        # after the first identity lock is decoration — and the mail
+        # lattice's tests are exactly the ones that assert lock order.
+        if sql.startswith("SET LOCAL lock_timeout"):
+            # The POSITION claim (the SET precedes the locks it governs)
+            # is asserted where it is true and checkable: inside
+            # _identity_lock_many's own statement sequence, in
+            # test_a1_identity_formation.py. It cannot be asserted here,
+            # because this fake is one object across many simulated
+            # requests while SET LOCAL is per TRANSACTION -- an identity
+            # lock from an earlier send is not "already taken" for this one.
+            # Two forms reach here: the arming, which must carry the
+            # constant, and the disarming that follows the barrier.
+            assert (sql.rstrip().endswith("DEFAULT")
+                    or str(main.FORMATION_LOCK_TIMEOUT_MS) in sql), sql
+            return _Res([])
         raise AssertionError(f"unexpected statement: {sql[:120]}")
 
 
@@ -921,7 +949,7 @@ def test_advisory_lock_is_taken_first_and_pinned_in_the_send_span():
     lock_i = next(i for i, s in enumerate(db.statements) if "hashtext('mail:'" in s)
     idem_i = next(i for i, s in enumerate(db.statements) if "idempotency_key = :key" in s)
     ins_i = next(i for i, s in enumerate(db.statements) if "INSERT INTO mail_messages" in s)
-    ident_i = next(i for i, s in enumerate(db.statements) if "pg_advisory_xact_lock(hashtext(:sid))" in s)
+    ident_i = next(i for i, s in enumerate(db.statements) if "pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))" in s)
     assert ident_i < lock_i < idem_i < ins_i                          # identity lattice -> sender lock -> replay -> write
     assert db.locks == [("identity", A_SID), ("mail", ids[A_SID])]
     for fn in (main.mail_send, main.mail_reply):
@@ -1645,7 +1673,7 @@ def test_every_mutation_joins_the_identity_lattice(route, victim, refusal):
     with _admin_secret():
         _run(_lattice_coro(db, route, orig, case_id))
     sid = actor if victim == "actor" else target
-    lock_i = next(i for i, s in enumerate(db.statements) if "pg_advisory_xact_lock(hashtext(:sid))" in s)
+    lock_i = next(i for i, s in enumerate(db.statements) if "pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))" in s)
     reread_i = next(i for i, s in enumerate(db.statements) if "FROM players WHERE id = :pid FOR NO KEY UPDATE" in s)
     write_i = next(i for i, s in enumerate(db.statements) if _is_write(s))
     assert lock_i < reread_i < write_i and ("identity", sid) in db.locks and db.commits >= 1
@@ -2033,7 +2061,7 @@ def test_a_scrub_under_the_lock_is_written_as_the_tombstone(route, victim):
     with _admin_secret():
         res = _run(_lattice_coro(db, route, orig, case_id))
     assert res["status"] == "ok" and "v" in tomb and db.commits == 1
-    lock_i = next(i for i, s in enumerate(db.statements) if "pg_advisory_xact_lock(hashtext(:sid))" in s)
+    lock_i = next(i for i, s in enumerate(db.statements) if "pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))" in s)
     reread_i = next(i for i, s in enumerate(db.statements) if "FROM players WHERE id = :pid FOR NO KEY UPDATE" in s)
     write_i = next(i for i, s in enumerate(db.statements) if _is_write(s))
     assert any("players" in s for s in db.statements[:lock_i])       # the route's first read of the identity precedes the lock ...
@@ -2132,7 +2160,7 @@ def test_a_deleted_admin_is_refused_while_a_never_created_one_acts():
                      main.admin_mail_broadcast(_bcast_req(), db)):
             exc = _raises(coro)
             assert (exc.status_code, exc.detail) == (403, "account_deleted")
-        lock_i = next(i for i, s in enumerate(db.statements) if "pg_advisory_xact_lock(hashtext(:sid))" in s)
+        lock_i = next(i for i, s in enumerate(db.statements) if "pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))" in s)
         ledger_i = next(i for i, s in enumerate(db.statements) if "FROM deleted_steam_ids" in s)
         assert lock_i < ledger_i                                          # read under the lock, after it
         assert not db.admin_actions and A_SID not in db.bulk_grants

@@ -481,12 +481,23 @@ ISSUERS = ("team_queue_poll", "ovt_queue_poll", "ovt_lobby_start", "ffa_lobby_st
 
 
 def test_every_writer_stores_after_auth_and_before_any_queue_row_lock():
+    # A1 (2026-09-17) swapped the three formation polls onto
+    # _lock_group_snapshot and gave them _lock_snapshot_rows as well, so
+    # pinning one helper NAME would have quietly stopped measuring anything
+    # (#342 -- a check that cannot fail is worse than no check; this one threw
+    # ValueError instead, which is how it was caught). It now measures the
+    # FIRST row lock of ANY kind, and refuses to pass a handler where it can
+    # find no row lock at all.
+    LOCKS = ("await _lock_queue_group_for_player(", "await _lock_group_snapshot(",
+             "await _lock_snapshot_rows(", "await _lock_queue_rows_ordered(")
     for name in WRITERS:
         src = inspect.getsource(getattr(main, name))
         assert src.count("await _region_pings_store(request, steam_id, ") == 1, name
         store = src.index("await _region_pings_store(")
         assert src.index("await _check_steam_session(request, steam_id, db)") < store, name
-        assert store < src.index("await _lock_queue_group_for_player("), (
+        found = [src.index(m) for m in LOCKS if m in src]
+        assert found, (name, "no queue row lock here -- the check would be vacuous")
+        assert store < min(found), (
             name, "the store must not hold queue rows while it waits on the identity lock")
     code = _main_code()
     assert code.count("await _region_pings_store(") == len(WRITERS), (

@@ -815,6 +815,15 @@ class HealthResponse(BaseModel):
     # §8) -- probed by the release train on both roles and read by nothing
     # else. Absent on a build older than v4.13.
     pc_fold: str | None = None
+    # ffa_hold_fences: which generation of the FFA readmission-hold fences this
+    # build carries (main._FFA_HOLD_FENCES; 1 = migration 325's held_until /
+    # held_lobby honoured by the janitor lapse sweep, the poll's 3-hour sweep
+    # and the poll's lease-expired arm). A code constant, equal on both boxes
+    # by construction, and the ONLY thing that distinguishes the new build from
+    # the old one on a batch that adds no route -- Phase A is enabling work, so
+    # it has no runtime signal of its own to read (#441: a postcondition that
+    # cannot fail is worse than none). Absent on any build before Phase A.
+    ffa_hold_fences: int | None = None
     # Which ROLE answered. Before this, /health was byte-identical on the
     # primary and on the read standby -- same status, same version, same
     # database -- so nothing on the network could tell a box that SKIPS writes

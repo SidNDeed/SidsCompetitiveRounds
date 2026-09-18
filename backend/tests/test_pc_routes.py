@@ -459,8 +459,8 @@ def test_the_unban_takes_the_identity_lattice_before_it_writes(monkeypatch):
     db = _UnbanDb({})
     res = _run(main.admin_unban(main._AdminUnbanReq(admin_steam_id="9", target_steam_id="1", hmac_signature="x"), db=db))
     assert res == {"status": "unbanned", "steam_id": "1", "rows": 1}
-    assert [p["sid"] for sql, p in db.log if "pg_advisory_xact_lock(hashtext(:sid))" in sql] == ["1", "9"]
-    assert _idx(db, "pg_advisory_xact_lock(hashtext(:sid))") < _idx(db, "UPDATE player_bans SET unbanned_at")
+    assert [p["sid"] for sql, p in db.log if "pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))" in sql] == ["1", "9"]
+    assert _idx(db, "pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))") < _idx(db, "UPDATE player_bans SET unbanned_at")
     assert db.committed == 1 and len(db.added) == 1 and db.added[0].action == "unban"
     src = inspect.getsource(main.admin_unban)
     assert src.index("_require_admin(") < src.index("_mail_lock_identities(") < src.index("UPDATE player_bans")
@@ -1358,7 +1358,7 @@ def test_the_unban_persists_the_identities_the_lattice_re_read(monkeypatch, gone
     assert update == [{"admin": admin_w, "sid": "1"}], update
     assert len(db.added) == 1 and (db.added[0].admin_steam_id, db.added[0].target_steam_id) == (admin_w, target_w)
     assert db.added[0].action == "unban" and db.committed == 1
-    assert _idx(db, "pg_advisory_xact_lock(hashtext(:sid))") < _idx(db, "FOR NO KEY UPDATE") < _idx(db, "UPDATE player_bans")
+    assert _idx(db, "pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))") < _idx(db, "FOR NO KEY UPDATE") < _idx(db, "UPDATE player_bans")
     src = inspect.getsource(main.admin_unban)
     assert "rows = await _mail_lock_identities(" in src
     assert src.index("_mail_identity_to_write(rows, req.admin_steam_id)") < src.index("UPDATE player_bans")
@@ -1564,7 +1564,17 @@ def test_the_unban_releases_a_key_outside_the_domain_only_when_a_row_carries_it(
     db = _ReleaseDb({}, 1)
     assert _run(unban(key, db)) == {"status": "unbanned", "steam_id": key, "rows": 1}
     assert seen == [("9", "unban", key, "x")]
-    assert [p["sid"] for sql, p in db.log if "pg_advisory_xact_lock(hashtext(:sid))" in sql] == sorted({"9", key} - {""})
+    # CANONICAL order is (length, ordinal), not bare lexical. The two agree on
+    # 17-digit ids and diverge on everything else, which this parametrisation is
+    # full of: "7656119800000000x" and " 76561198000000008" both sort BEFORE "9"
+    # lexically and AFTER it canonically. Before A1 round 2 the lattice sorted
+    # for itself with bare sorted() while the formation paths used (length,
+    # ordinal) -- two total orders in one advisory-lock class, which is a
+    # deadlock between any two transactions sharing a mixed-length pair. The
+    # rule is written out here rather than imported from main so this test
+    # still fails if the production key changes underneath it.
+    assert [p["sid"] for sql, p in db.log
+            if "pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))" in sql] == sorted({"9", key} - {""}, key=lambda s: (len(s), s))
     assert [p for sql, p in db.log if "UPDATE player_bans SET unbanned_at" in sql] == [{"admin": "9", "sid": key}]
     assert len(db.added) == 1
     assert (db.added[0].action, db.added[0].target_steam_id, db.added[0].details) == ("unban", key, {"rows": 1})
