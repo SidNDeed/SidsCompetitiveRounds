@@ -42840,8 +42840,19 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
 
     # ── Difficulty inputs (bug #129) ──────────────────────────────────────
     # Opponents' 1v1 Glicko drives the tier multiplier; guarded exactly like
-    # 2v2's fetch so a ratings hiccup degrades to x1.0-at-1500 instead of
-    # failing the report.
+    # 2v2's fetch so a ratings hiccup degrades to the 1500 DEFAULT RATING
+    # instead of failing the report.
+    #
+    # That default is Intermediate **x1.5**, NOT x1.0: the multiplier table's
+    # 1500 row is `>=` and the substituted value is exactly 1500 (see
+    # `_tier_mult_for`). A hiccup here is therefore NOT economically neutral —
+    # it pays the Intermediate multiplier on XP and gold.
+    #
+    # This line used to read "x1.0-at-1500", which is the exact sentence
+    # `_tier_mult_for`'s own docstring records as having hidden the
+    # 1v2-vs-2v2 economy gap for a release (bug #129) — written again, in the
+    # feature that bug was about. Do not restate the multiplier here; name the
+    # RATING and let the one table own the mapping.
     # begin_nested, not a bare try/except (#235, and review-confirmed): under
     # asyncpg a caught statement error still leaves the TRANSACTION aborted, so
     # the "degrade to 1500" promise below would be a lie — the very next
