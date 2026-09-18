@@ -370,7 +370,12 @@ async def _rank_colors(db: AsyncSession) -> dict:
     now = time.monotonic()
     if now - _rank_colors_cache["at"] > 300:
         try:
-            rows = (await db.execute(select(RankRoleColor))).scalars().all()
+            # Savepoint (#235): this swallows its own error and serves the
+            # stale map, but 21 call sites carry on issuing SQL on the same
+            # session — unguarded, the refresh's failure aborted the
+            # TRANSACTION and they died instead, logged as a colour refresh.
+            async with db.begin_nested():
+                rows = (await db.execute(select(RankRoleColor))).scalars().all()
             _rank_colors_cache["map"] = {r.name: r.color_hex for r in rows}
         except Exception as ex:
             print(f"[RANK] color cache refresh failed: {ex}")
@@ -599,8 +604,14 @@ async def _podium_player_ids(db: AsyncSession) -> list:
     now = time.monotonic()
     if now - _podium_cache["at"] > 60:
         try:
-            rows = (await db.execute(text(_PODIUM_QUERY),
-                                     {"active_days": LEADERBOARD_ACTIVE_DAYS})).scalars().all()
+            # Savepoint (#235): "failures serve the stale copy and never raise"
+            # is only true if the failure stays local. This swallows its own
+            # exception, so callers (submit_match's series-gold bonus among
+            # them) never see it — unguarded, they just died on their next
+            # statement with the transaction already aborted.
+            async with db.begin_nested():
+                rows = (await db.execute(text(_PODIUM_QUERY),
+                                         {"active_days": LEADERBOARD_ACTIVE_DAYS})).scalars().all()
             ids = [str(r) for r in rows]
             _podium_cache["ids"] = ids
             _podium_cache["map"] = {pid: i + 1 for i, pid in enumerate(ids)}
@@ -4685,9 +4696,14 @@ async def _live_points_capable(db: AsyncSession, player_ids) -> bool:
     if not ids:
         return False
     try:
-        rows = (await db.execute(text(
-            "SELECT mod_version FROM players WHERE id = ANY(:pids)"
-        ), {"pids": ids})).scalars().all()
+        # Savepoint (#235): "fail closed" has to mean fail closed and nothing
+        # else. Unguarded, the False this returns rode on an aborted
+        # TRANSACTION, so place_bet and its siblings 500'd on their next
+        # statement instead of declining the wager.
+        async with db.begin_nested():
+            rows = (await db.execute(text(
+                "SELECT mod_version FROM players WHERE id = ANY(:pids)"
+            ), {"pids": ids})).scalars().all()
     except Exception:
         return False
     if len(rows) < len(set(ids)):
@@ -5353,30 +5369,50 @@ async def _mark_mod_seen(db: AsyncSession, player: Player, *,
         return
     try:
         first_touch = player.mod_seen_at is None
-        if first_touch:
-            player.mod_seen_at = datetime.now(timezone.utc)
+        # Version stamping stays here: it is observational, idempotent, and
+        # re-derived from the header on the very next request, so losing one is
+        # harmless.
         observed_version = _player_mod_version_stamp_value(
             _current_mod_version.get()) if stamp_version else None
         if observed_version is not None and player.mod_version != observed_version:
             player.mod_version = observed_version
-        rank_id = (await db.execute(
-            text("SELECT id FROM shop_items WHERE sku = :sku LIMIT 1"),
-            {"sku": TITLE_RANK_SKU},
-        )).scalar()
+        # Savepoint (#235): this runs near the TOP of nine endpoints, so almost
+        # the whole request follows it. Unguarded, a failure here left the
+        # TRANSACTION aborted and the endpoint 500'd far below, logged as a
+        # title stamp.
+        async with db.begin_nested():
+            rank_id = (await db.execute(
+                text("SELECT id FROM shop_items WHERE sku = :sku LIMIT 1"),
+                {"sku": TITLE_RANK_SKU},
+            )).scalar()
         if rank_id is None:
-            return
+            return   # no rank-title item to grant: leave the one-shot UNSET and retry next request
         # P2: resolved-house provenance (see the podium-grant sibling).
-        await db.execute(
-            text("INSERT INTO player_items (player_id, item_id, purchase_price, "
-                 "        royalty_paid, royalty_rate_pct, royalty_resolved) "
-                 "VALUES (:pid, :iid, 0, 0, 0, TRUE) "
-                 "ON CONFLICT (player_id, item_id) DO NOTHING"),
-            {"pid": player.id, "iid": rank_id},
-        )
-        # Default-equip ONLY on first touch: an existing player who
-        # deliberately cleared their active title must stay title-less.
-        if first_touch and player.active_title_id is None:
-            player.active_title_id = rank_id
+        async with db.begin_nested():   # savepoint (#235), as above
+            await db.execute(
+                text("INSERT INTO player_items (player_id, item_id, purchase_price, "
+                     "        royalty_paid, royalty_rate_pct, royalty_resolved) "
+                     "VALUES (:pid, :iid, 0, 0, 0, TRUE) "
+                     "ON CONFLICT (player_id, item_id) DO NOTHING"),
+                {"pid": player.id, "iid": rank_id},
+            )
+        # ── The one-shot is claimed LAST, and only here ───────────────────
+        # `mod_seen_at` gates the default-title equip forever after, so it must
+        # not be set until the grant behind it has actually happened. It used to
+        # be assigned at the top and un-set by the handler on failure, which
+        # could not work: entering begin_nested FLUSHES before it emits the
+        # SAVEPOINT, so that players UPDATE was already in the OUTER transaction
+        # — and if the failure was the entry flush ITSELF, the session is
+        # rollback-only and the compensating write can never reach disk either
+        # (r1 finding). Ordering the claim after the work removes the window
+        # instead of trying to compensate for it: nothing above this line has
+        # claimed anything, so nothing needs undoing.
+        if first_touch:
+            player.mod_seen_at = datetime.now(timezone.utc)
+            # Default-equip ONLY on first touch: an existing player who
+            # deliberately cleared their active title must stay title-less.
+            if player.active_title_id is None:
+                player.active_title_id = rank_id
     except Exception as ex:
         print(f"[TITLE] mark_mod_seen failed for {player.steam_id}: {ex}")
 
@@ -5995,6 +6031,57 @@ async def _check_anti_cheat(
     return {"flags": flags, "invalidate": invalidate}
 
 
+async def _add_advisory_flag(db: AsyncSession, flag) -> bool:
+    """Record an ADVISORY flag row NOW, inside its own SAVEPOINT.
+
+    An advisory flag must never be able to take down the real work it observes,
+    and every one of these sites has an `except` that says so. `db.add()` alone
+    does not deliver it: add() only QUEUES the INSERT, which is then emitted by
+    whatever flushes next — the entry flush of somebody else's `begin_nested`,
+    or the final commit — i.e. outside every savepoint this code controls, and
+    well past the handler that was meant to swallow it. The failure then lands
+    on the match submit instead, which is the one thing the contract promised it
+    could not touch (r1 findings, `fps_dip_pattern` and `suspected_speedhack`).
+
+    Adding AND flushing inside a savepoint puts the failure back where the
+    contract says it belongs: the nested rollback expunges the row and hands the
+    caller a usable transaction. Returns whether the row was recorded, so a
+    caller that wants to log the miss can.
+
+    THE ONE THING IT CANNOT DO is repair a transaction that was already broken
+    when it was called. `SessionTransaction._take_snapshot` flushes the session
+    CLEAN before the SAVEPOINT is emitted, so `begin_nested()` first drains
+    whatever else is pending into the OUTER transaction; a failure in that drain
+    happens before any savepoint exists, and no nested rollback can undo it.
+    That drain is done explicitly below so the savepoint's own guarantee is true
+    — there is nothing left pending when it is entered — and so the log says
+    whose failure it was. An earlier version left it implicit and reported a
+    foreign pending write dying as "advisory flag not recorded", sending the
+    next reader to this function instead of to the code that queued the write
+    (r3 finding).
+    """
+    try:
+        # Not ours. Drained here only so it cannot happen at the savepoint's
+        # threshold, where it would be indistinguishable from our own INSERT
+        # failing. Still swallowed: this helper's contract with all six call
+        # sites is that it never raises.
+        await db.flush()
+    except Exception as ex:
+        print(f"[ANTICHEAT] transaction was already unusable before the "
+              f"{getattr(flag, 'flag_reason', '?')} advisory flag; the failure "
+              f"below belongs to an earlier pending write, not to this flag: {ex}")
+        return False
+    try:
+        async with db.begin_nested():
+            db.add(flag)
+            await db.flush()
+        return True
+    except Exception as ex:
+        print(f"[ANTICHEAT] advisory flag "
+              f"{getattr(flag, 'flag_reason', '?')} not recorded: {ex}")
+        return False
+
+
 def _median(vals) -> float:
     """Median of a numeric list; 0.0 for an empty list."""
     s = sorted(vals)
@@ -6040,7 +6127,7 @@ async def _check_fps_lag_flags(
                         dip_floor = max(30.0, 0.35 * med)
                         dips = [b for b in buckets if b < dip_floor]
                         if len(dips) >= 2:
-                            db.add(FlaggedMatch(
+                            await _add_advisory_flag(db, FlaggedMatch(
                                 match_id=match.id, series_id=None,
                                 player_steam_ids=[p1.steam_id, p2.steam_id],
                                 flag_reason="fps_dip_pattern",
@@ -6059,21 +6146,27 @@ async def _check_fps_lag_flags(
             # required). Consistently-low players never flag — their median
             # is low too.
             if fps_avg is not None and fps_avg < 60:
-                base_rows = (await db.execute(text("""
-                    SELECT CASE WHEN m.player1_id = :pid THEN m.p1_fps_avg
-                                ELSE m.p2_fps_avg END AS f
-                      FROM matches m
-                     WHERE (m.player1_id = :pid OR m.player2_id = :pid)
-                       AND m.reported_by = :pid AND m.id != :mid
-                       AND CASE WHEN m.player1_id = :pid THEN m.p1_fps_avg
-                                ELSE m.p2_fps_avg END > 0
-                     ORDER BY m.ended_at DESC LIMIT 20
-                """), {"pid": player_obj.id, "mid": match.id})).scalars().all()
+                # Savepoint (#235): the per-side except below swallows and the
+                # caller swallows again, so an unguarded failure here left the
+                # TRANSACTION aborted and killed the match submit it promises
+                # never to break — the savepoint has to be INSIDE this try,
+                # where the exception actually unwinds it.
+                async with db.begin_nested():
+                    base_rows = (await db.execute(text("""
+                        SELECT CASE WHEN m.player1_id = :pid THEN m.p1_fps_avg
+                                    ELSE m.p2_fps_avg END AS f
+                          FROM matches m
+                         WHERE (m.player1_id = :pid OR m.player2_id = :pid)
+                           AND m.reported_by = :pid AND m.id != :mid
+                           AND CASE WHEN m.player1_id = :pid THEN m.p1_fps_avg
+                                    ELSE m.p2_fps_avg END > 0
+                         ORDER BY m.ended_at DESC LIMIT 20
+                    """), {"pid": player_obj.id, "mid": match.id})).scalars().all()
                 base_vals = [int(v) for v in base_rows]
                 if len(base_vals) >= 5:
                     base_med = _median(base_vals)
                     if base_med > 0 and fps_avg < 0.5 * base_med:
-                        db.add(FlaggedMatch(
+                        await _add_advisory_flag(db, FlaggedMatch(
                             match_id=match.id, series_id=None,
                             player_steam_ids=[p1.steam_id, p2.steam_id],
                             flag_reason="low_fps_outlier",
@@ -6090,7 +6183,7 @@ async def _check_fps_lag_flags(
             # stall resumes focused; alt-tab stalls resume unfocused and only
             # count in the unfocused-inclusive total).
             if (fz_focused or 0) >= 3 or ((fz_total or 0) >= 5 and (fz_focused or 0) >= 1):
-                db.add(FlaggedMatch(
+                await _add_advisory_flag(db, FlaggedMatch(
                     match_id=match.id, series_id=None,
                     player_steam_ids=[p1.steam_id, p2.steam_id],
                     flag_reason="freeze_events",
@@ -6119,33 +6212,35 @@ async def _check_fps_lag_flags(
                 gap_med = None
                 hb_med = None
                 if (recv_gaps or 0) >= 3:
-                    gap_rows = (await db.execute(text("""
-                        SELECT CASE WHEN m.player1_id = :pid THEN m.p1_recv_gap_count
-                                    ELSE m.p2_recv_gap_count END AS g
-                          FROM matches m
-                         WHERE (m.player1_id = :pid OR m.player2_id = :pid)
-                           AND m.id != :mid
-                           AND CASE WHEN m.player1_id = :pid THEN m.p1_recv_gap_count
-                                    ELSE m.p2_recv_gap_count END IS NOT NULL
-                         ORDER BY m.ended_at DESC LIMIT 20
-                    """), {"pid": player_obj.id, "mid": match.id})).scalars().all()
+                    async with db.begin_nested():   # savepoint (#235), as above
+                        gap_rows = (await db.execute(text("""
+                            SELECT CASE WHEN m.player1_id = :pid THEN m.p1_recv_gap_count
+                                        ELSE m.p2_recv_gap_count END AS g
+                              FROM matches m
+                             WHERE (m.player1_id = :pid OR m.player2_id = :pid)
+                               AND m.id != :mid
+                               AND CASE WHEN m.player1_id = :pid THEN m.p1_recv_gap_count
+                                        ELSE m.p2_recv_gap_count END IS NOT NULL
+                             ORDER BY m.ended_at DESC LIMIT 20
+                        """), {"pid": player_obj.id, "mid": match.id})).scalars().all()
                     gap_med = _median([int(v) for v in gap_rows])
                     recv_flag = (recv_gaps or 0) >= 2 + 2 * gap_med
                 if (hb_gaps or 0) >= 2:
-                    hb_rows = (await db.execute(text("""
-                        SELECT CASE WHEN m.player1_id = :pid THEN m.p1_hb_gap_count
-                                    ELSE m.p2_hb_gap_count END AS g
-                          FROM matches m
-                         WHERE (m.player1_id = :pid OR m.player2_id = :pid)
-                           AND m.id != :mid
-                           AND CASE WHEN m.player1_id = :pid THEN m.p1_hb_gap_count
-                                    ELSE m.p2_hb_gap_count END IS NOT NULL
-                         ORDER BY m.ended_at DESC LIMIT 20
-                    """), {"pid": player_obj.id, "mid": match.id})).scalars().all()
+                    async with db.begin_nested():   # savepoint (#235), as above
+                        hb_rows = (await db.execute(text("""
+                            SELECT CASE WHEN m.player1_id = :pid THEN m.p1_hb_gap_count
+                                        ELSE m.p2_hb_gap_count END AS g
+                              FROM matches m
+                             WHERE (m.player1_id = :pid OR m.player2_id = :pid)
+                               AND m.id != :mid
+                               AND CASE WHEN m.player1_id = :pid THEN m.p1_hb_gap_count
+                                        ELSE m.p2_hb_gap_count END IS NOT NULL
+                             ORDER BY m.ended_at DESC LIMIT 20
+                        """), {"pid": player_obj.id, "mid": match.id})).scalars().all()
                     hb_med = _median([int(v) for v in hb_rows])
                     hb_flag = (hb_gaps or 0) >= 2 + 2 * hb_med
                 if recv_flag or hb_flag:
-                    db.add(FlaggedMatch(
+                    await _add_advisory_flag(db, FlaggedMatch(
                         match_id=match.id, series_id=None,
                         player_steam_ids=[p1.steam_id, p2.steam_id],
                         flag_reason="ping_gap_cluster",
@@ -6963,14 +7058,29 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
         match.invalidated_at = datetime.now(timezone.utc)
         match.invalidation_reason = ",".join(r for r, _, ai in ac["flags"] if ai)
     for reason, details, auto_inv in ac["flags"]:
-        db.add(FlaggedMatch(
+        _row = FlaggedMatch(
             match_id=match.id,
             series_id=None,                      # set on retro-flags, not on the live one (no series yet)
             player_steam_ids=[p1.steam_id, p2.steam_id],
             flag_reason=reason,
             flag_details=details,
             auto_invalidated=auto_inv,
-        ))
+        )
+        if auto_inv:
+            # LOAD-BEARING. This row is the record of WHY `match.invalidated_at`
+            # was just set, so it has to live or die with that invalidation:
+            # plain add, same transaction, no savepoint to let it fail on its
+            # own.
+            db.add(_row)
+        else:
+            # ADVISORY (too_many_cards, inactive_player, suspected_macro): it
+            # observes the match and must not be able to take it down. A bare
+            # add does not achieve that — the INSERT is emitted by whatever
+            # flushes next, outside any savepoint, and an accepted match then
+            # rolls back because a note about it would not insert (r2 finding).
+            # This loop mixes both kinds, which is exactly why treating it as
+            # uniformly load-bearing was wrong.
+            await _add_advisory_flag(db, _row)
     # FPS/lag telemetry heuristics (July 21) — advisory only, never blocks or
     # invalidates. Guarded so telemetry can NEVER break a match submit
     # (learning #46's cost — a broken advisory path 500'd /matches for 26 min).
@@ -7143,12 +7253,22 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     _pair_ratings: dict = {}
     if report.is_ranked:
         try:
-            _rrows = (await db.execute(text(
-                "SELECT player_id, rating FROM glicko_ratings WHERE player_id IN (:pa, :pb)"
-            ), {"pa": str(p1.id), "pb": str(p2.id)})).all()
+            # begin_nested, not a bare try/except (#235) — exactly as the 1v2
+            # twin further down: a caught statement error still leaves the
+            # TRANSACTION aborted, so a fallback that only LOOKED real would be a
+            # lie and the next statement in this report would 500 instead.
+            # The fallback is 1500, which _tier_mult_for maps to Intermediate
+            # x1.5 — NOT x1.0. Saying x1.0 here is the exact sentence that
+            # hid the 1v2-vs-2v2 economy gap for a release (bug #129), which
+            # is why that function's docstring calls it out by name.
+            async with db.begin_nested():
+                _rrows = (await db.execute(text(
+                    "SELECT player_id, rating FROM glicko_ratings WHERE player_id IN (:pa, :pb)"
+                ), {"pa": str(p1.id), "pb": str(p2.id)})).all()
             _pair_ratings = {str(r[0]): float(r[1]) for r in _rrows}
         except Exception as ex:
-            print(f"[MATCH] tier-mult rating fetch failed (defaulting x1.0): {ex}")
+            print(f"[MATCH] tier-mult rating fetch failed "
+                  f"(defaulting to rating 1500 = Intermediate x1.5): {ex}")
     p1_xp, p1_bonuses = await calculate_match_xp(
         won=p1_won, is_ranked=report.is_ranked,
         winner_rounds=winner_rounds, loser_rounds=loser_rounds,
@@ -7366,11 +7486,15 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
         # full interval is observed after it count toward the threshold.
         if not series_was_new:
             try:
-                prior_matches = (await db.execute(
-                    select(Match.id, Match.ended_at)
-                    .where(Match.series_id == series.id, Match.id != match.id)
-                    .order_by(Match.ended_at.asc(), Match.id.asc())
-                )).all()
+                # Savepoint (#235): an advisory check must never take the report
+                # with it — unguarded, a failure here left the TRANSACTION
+                # aborted and the series-completion writes below died instead.
+                async with db.begin_nested():
+                    prior_matches = (await db.execute(
+                        select(Match.id, Match.ended_at)
+                        .where(Match.series_id == series.id, Match.id != match.id)
+                        .order_by(Match.ended_at.asc(), Match.id.asc())
+                    )).all()
                 if prior_matches:
                     baseline_at = prior_matches[0].ended_at
                     elapsed = (
@@ -7382,7 +7506,7 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
                         observed_ids = [
                             str(r.id) for r in prior_matches[1:]
                         ] + [str(match.id)]
-                        db.add(FlaggedMatch(
+                        await _add_advisory_flag(db, FlaggedMatch(
                             match_id=match.id,
                             series_id=series.id,
                             player_steam_ids=[p1.steam_id, p2.steam_id],
@@ -7549,129 +7673,149 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     # (for non-ranked matches, Glicko is not affected)
     if series_completed:
         # Set before the try so the post-rating blocks below can never NameError
-        # on it if the rating pass throws before the authoritative re-read.
-        _series_still_valid = True
+        # on it if the rating pass throws before the authoritative re-read — and
+        # set FALSE, because the only honest answer before that re-read is "we
+        # have not checked". It defaulted True, which was safe only while the
+        # whole pass either completed or 500'd. Now that the pass is savepointed
+        # and its handler swallows, an exception BEFORE the re-read (the lock
+        # waits below are the realistic one: an admin reversal holding the
+        # players rows) rolled the SAVEPOINT back and left this Python flag
+        # still True — and the slayer grant, the title and 1000 gold then went
+        # out for a series that had just been reversed. A SAVEPOINT rolls back
+        # DATABASE state; it cannot roll back a local. Failing closed here costs
+        # at most a skipped grant that the next report re-derives.
+        _series_still_valid = False
         # Inline recalculation for the two series players
         try:
-            # This is a NEW transaction (the match write committed above), so
-            # it holds no locks. Its old shape — glicko reads, ORM updates,
-            # then players achievement-gold UPDATEs — acquired glicko-then-
-            # players in report order, invertible against admin_reverse_series
-            # (players-then-glicko, sorted). Same canonical pass first; it
-            # also serializes two completions sharing a player, whose
-            # unlocked glicko read-modify-writes could otherwise clobber
-            # each other's rating update.
-            for _pid in sorted([p1.id, p2.id], key=str):
-                await db.execute(
-                    text("SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"),
-                    {"pid": _pid},
+            # SAVEPOINT (#235): the rating pass is the whole point of this
+            # block, but its handler below swallows and the request carries
+            # on into the slayer grant and the tournament advance. Under
+            # asyncpg a caught statement error still leaves the TRANSACTION
+            # aborted, so those continuations died instead, logged as a
+            # Glicko error. begin_nested makes the pass atomic: it is either
+            # applied and committed below, or rolled back to the savepoint
+            # with the transaction still usable. The commit itself stays
+            # OUTSIDE the savepoint.
+            async with db.begin_nested():
+                # This is a NEW transaction (the match write committed above), so
+                # it holds no locks. Its old shape — glicko reads, ORM updates,
+                # then players achievement-gold UPDATEs — acquired glicko-then-
+                # players in report order, invertible against admin_reverse_series
+                # (players-then-glicko, sorted). Same canonical pass first; it
+                # also serializes two completions sharing a player, whose
+                # unlocked glicko read-modify-writes could otherwise clobber
+                # each other's rating update.
+                for _pid in sorted([p1.id, p2.id], key=str):
+                    await db.execute(
+                        text("SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"),
+                        {"pid": _pid},
+                    )
+                # AUTHORITATIVE RE-READ under the locks (learning #197's own rule,
+                # which the first version of this block invoked and then skipped —
+                # Codex cold review). `series` is a pre-commit ORM object and
+                # expire_on_commit=False, so its attributes are a snapshot from
+                # BEFORE the commit above. An admin_reverse_series that wins these
+                # locks in the gap between the two transactions invalidates the
+                # series and claws its gold/XP back — and this block would then
+                # happily apply a FORWARD Glicko period, rating achievements,
+                # slayer/streak titles and a tournament advance to a series that
+                # no longer exists. Re-read the row and bail if it is gone,
+                # invalidated, or no longer completed.
+                _live = (await db.execute(
+                    text("SELECT status, invalidated_at, winner_id FROM ranked_series WHERE id = :sid"),
+                    {"sid": series.id},
+                )).mappings().first()
+                _series_still_valid = (
+                    _live is not None
+                    and _live["invalidated_at"] is None
+                    and _live["status"] == "completed"
                 )
-            # AUTHORITATIVE RE-READ under the locks (learning #197's own rule,
-            # which the first version of this block invoked and then skipped —
-            # Codex cold review). `series` is a pre-commit ORM object and
-            # expire_on_commit=False, so its attributes are a snapshot from
-            # BEFORE the commit above. An admin_reverse_series that wins these
-            # locks in the gap between the two transactions invalidates the
-            # series and claws its gold/XP back — and this block would then
-            # happily apply a FORWARD Glicko period, rating achievements,
-            # slayer/streak titles and a tournament advance to a series that
-            # no longer exists. Re-read the row and bail if it is gone,
-            # invalidated, or no longer completed.
-            _live = (await db.execute(
-                text("SELECT status, invalidated_at, winner_id FROM ranked_series WHERE id = :sid"),
-                {"sid": series.id},
-            )).mappings().first()
-            _series_still_valid = (
-                _live is not None
-                and _live["invalidated_at"] is None
-                and _live["status"] == "completed"
-            )
-            if not _series_still_valid:
-                print(f"[MATCH] series {series.id} was invalidated/changed between the match "
-                      f"commit and the rating pass — skipping Glicko, achievements and "
-                      f"tournament advance for it")
-            # Read both ratings BEFORE any updates (avoids ordering bug)
-            g1_r = await db.execute(select(GlickoRating).where(GlickoRating.player_id == p1.id))
-            g1 = g1_r.scalar_one_or_none()
-            g2_r = await db.execute(select(GlickoRating).where(GlickoRating.player_id == p2.id))
-            g2 = g2_r.scalar_one_or_none()
+                if not _series_still_valid:
+                    print(f"[MATCH] series {series.id} was invalidated/changed between the match "
+                          f"commit and the rating pass — skipping Glicko, achievements and "
+                          f"tournament advance for it")
+                # Read both ratings BEFORE any updates (avoids ordering bug)
+                g1_r = await db.execute(select(GlickoRating).where(GlickoRating.player_id == p1.id))
+                g1 = g1_r.scalar_one_or_none()
+                g2_r = await db.execute(select(GlickoRating).where(GlickoRating.player_id == p2.id))
+                g2 = g2_r.scalar_one_or_none()
 
-            if g1 and g2 and _series_still_valid:
-                p1_won_series = (series.winner_id == p1.id)
+                if g1 and g2 and _series_still_valid:
+                    p1_won_series = (series.winner_id == p1.id)
 
-                # Calculate both new ratings using pre-update opponent values
-                new_r1, new_rd1, new_vol1 = calculate_new_rating(
-                    g1.rating, g1.rating_deviation, g1.volatility,
-                    [(g2.rating, g2.rating_deviation, 1.0 if p1_won_series else 0.0)],
-                    GLICKO2_TAU,
-                )
-                new_r2, new_rd2, new_vol2 = calculate_new_rating(
-                    g2.rating, g2.rating_deviation, g2.volatility,
-                    [(g1.rating, g1.rating_deviation, 0.0 if p1_won_series else 1.0)],
-                    GLICKO2_TAU,
-                )
+                    # Calculate both new ratings using pre-update opponent values
+                    new_r1, new_rd1, new_vol1 = calculate_new_rating(
+                        g1.rating, g1.rating_deviation, g1.volatility,
+                        [(g2.rating, g2.rating_deviation, 1.0 if p1_won_series else 0.0)],
+                        GLICKO2_TAU,
+                    )
+                    new_r2, new_rd2, new_vol2 = calculate_new_rating(
+                        g2.rating, g2.rating_deviation, g2.volatility,
+                        [(g1.rating, g1.rating_deviation, 0.0 if p1_won_series else 1.0)],
+                        GLICKO2_TAU,
+                    )
 
-                # Store rating changes on the series for UI display
-                # Must map match-report p1/p2 to the series' player1/player2
-                # (match report order can differ from series order)
-                rc_match_p1 = round(new_r1 - g1.rating, 1)
-                rc_match_p2 = round(new_r2 - g2.rating, 1)
-                if p1.id == series.player1_id:
-                    series.p1_rating_change = rc_match_p1
-                    series.p2_rating_change = rc_match_p2
-                else:
-                    series.p1_rating_change = rc_match_p2
-                    series.p2_rating_change = rc_match_p1
+                    # Store rating changes on the series for UI display
+                    # Must map match-report p1/p2 to the series' player1/player2
+                    # (match report order can differ from series order)
+                    rc_match_p1 = round(new_r1 - g1.rating, 1)
+                    rc_match_p2 = round(new_r2 - g2.rating, 1)
+                    if p1.id == series.player1_id:
+                        series.p1_rating_change = rc_match_p1
+                        series.p2_rating_change = rc_match_p2
+                    else:
+                        series.p1_rating_change = rc_match_p2
+                        series.p2_rating_change = rc_match_p1
 
-                # Apply updates
-                now = datetime.now(timezone.utc)
-                g1.rating = new_r1
-                g1.rating_deviation = new_rd1
-                g1.volatility = new_vol1
-                g1.peak_rating = max(g1.peak_rating or new_r1, new_r1)
-                g1.updated_at = now
-                g2.rating = new_r2
-                g2.rating_deviation = new_rd2
-                g2.volatility = new_vol2
-                g2.peak_rating = max(g2.peak_rating or new_r2, new_r2)
-                g2.updated_at = now
+                    # Apply updates
+                    now = datetime.now(timezone.utc)
+                    g1.rating = new_r1
+                    g1.rating_deviation = new_rd1
+                    g1.volatility = new_vol1
+                    g1.peak_rating = max(g1.peak_rating or new_r1, new_r1)
+                    g1.updated_at = now
+                    g2.rating = new_r2
+                    g2.rating_deviation = new_rd2
+                    g2.volatility = new_vol2
+                    g2.peak_rating = max(g2.peak_rating or new_r2, new_r2)
+                    g2.updated_at = now
 
-                # Save rating history snapshots (powers the Elo-over-time graph)
-                snapshot_ids = []
-                for pid, r, rd, vol in [
-                    (p1.id, new_r1, new_rd1, new_vol1),
-                    (p2.id, new_r2, new_rd2, new_vol2),
-                ]:
-                    snapshot_id = uuid.uuid4()
-                    snapshot_ids.append(str(snapshot_id))
-                    db.add(RatingHistory(
-                        id=snapshot_id,
-                        player_id=pid,
-                        rating=r,
-                        rating_deviation=rd,
-                        volatility=vol,
-                        period_end=now,
-                    ))
-                # Sept 6 batch (Group 4 item c, migration 299): link the two
-                # snapshots to THIS series by identity, so the session report
-                # joins rating_history.series_id instead of guessing from a
-                # time window. Raw SQL under a SAVEPOINT on purpose: the column
-                # is deliberately NOT declared on the model (see RatingHistory),
-                # so a box whose schema predates 299 skips the link here and
-                # keeps the rating update — an ORM column would have failed the
-                # whole Glicko commit in the deploy window (#477/#235).
-                await db.flush()
-                try:
-                    async with db.begin_nested():
-                        await db.execute(text(_RATING_HISTORY_LINK_SQL),
-                                         {"sid": str(series.id), "ids": snapshot_ids})
-                except Exception as _lx:
-                    print(f"[REPORT] rating_history series link skipped: {_lx}")
+                    # Save rating history snapshots (powers the Elo-over-time graph)
+                    snapshot_ids = []
+                    for pid, r, rd, vol in [
+                        (p1.id, new_r1, new_rd1, new_vol1),
+                        (p2.id, new_r2, new_rd2, new_vol2),
+                    ]:
+                        snapshot_id = uuid.uuid4()
+                        snapshot_ids.append(str(snapshot_id))
+                        db.add(RatingHistory(
+                            id=snapshot_id,
+                            player_id=pid,
+                            rating=r,
+                            rating_deviation=rd,
+                            volatility=vol,
+                            period_end=now,
+                        ))
+                    # Sept 6 batch (Group 4 item c, migration 299): link the two
+                    # snapshots to THIS series by identity, so the session report
+                    # joins rating_history.series_id instead of guessing from a
+                    # time window. Raw SQL under a SAVEPOINT on purpose: the column
+                    # is deliberately NOT declared on the model (see RatingHistory),
+                    # so a box whose schema predates 299 skips the link here and
+                    # keeps the rating update — an ORM column would have failed the
+                    # whole Glicko commit in the deploy window (#477/#235).
+                    await db.flush()
+                    try:
+                        async with db.begin_nested():
+                            await db.execute(text(_RATING_HISTORY_LINK_SQL),
+                                             {"sid": str(series.id), "ids": snapshot_ids})
+                    except Exception as _lx:
+                        print(f"[REPORT] rating_history series link skipped: {_lx}")
 
-                # Auto-grant rating achievements (Master / Grand Master) when
-                # either player crosses a threshold on this Glicko update.
-                await _grant_rating_achievements(db, p1.id, new_r1)
-                await _grant_rating_achievements(db, p2.id, new_r2)
+                    # Auto-grant rating achievements (Master / Grand Master) when
+                    # either player crosses a threshold on this Glicko update.
+                    await _grant_rating_achievements(db, p1.id, new_r1)
+                    await _grant_rating_achievements(db, p2.id, new_r2)
 
             await db.commit()
         except Exception as ex:
@@ -7686,33 +7830,101 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
         # win that no longer stands (Codex cold review).
         try:
             if _series_still_valid:
-                winner_steam = (await db.execute(
-                    select(Player.steam_id).where(Player.id == series.winner_id)
-                )).scalar_one_or_none()
-                loser_id = series.player2_id if series.winner_id == series.player1_id else series.player1_id
-                loser_steam = (await db.execute(
-                    select(Player.steam_id).where(Player.id == loser_id)
-                )).scalar_one_or_none()
-                slayer_key = SLAYER_TARGETS.get(loser_steam or "")
-                if slayer_key and winner_steam and winner_steam != loser_steam:
-                    if await _grant_achievement_inline(db, series.winner_id, slayer_key):
-                        await db.commit()
-                        print(f"[ACH] {slayer_key} auto-granted to {winner_steam} for beating {loser_steam} in a ranked series")
-                # v1.30 streak achievements (thresholds per Sid July 12: 25/50/100).
-                if winner_steam:
-                    streak = await get_ranked_streak(db, winner_steam)
-                    granted_streak = False
-                    if streak >= 25:
-                        granted_streak |= await _grant_achievement_inline(db, series.winner_id, "on_fire")
-                    if streak >= 50:
-                        granted_streak |= await _grant_achievement_inline(db, series.winner_id, "unstoppable")
-                    if streak >= 100:
-                        granted_streak |= await _grant_achievement_inline(db, series.winner_id, "immortal")
-                    if granted_streak:
-                        await db.commit()
-                        print(f"[ACH] streak achievement(s) granted to {winner_steam} (streak={streak})")
+                # RE-VERIFY, UNDER THE LOCKS, IN THIS TRANSACTION.
+                # `_series_still_valid` was decided in the rating pass above —
+                # which then COMMITTED, and a commit releases every lock it
+                # held. The flag is therefore a statement about a moment that
+                # has passed, and an admin reversal landing in the gap left it
+                # saying True while the series it describes no longer stands:
+                # a permanent Slayer title and 1000 gold for a reversed winner
+                # (r2 HIGH). Re-taking the players locks in the same canonical
+                # order admin_reverse_series uses (sorted, players first) makes
+                # the reversal either finish before this read — so the re-read
+                # sees it — or wait behind this transaction's commit. The
+                # winner is then taken from the ROW rather than from the stale
+                # ORM object, so a reversal that rewrote it cannot be granted
+                # against either.
+                #
+                # Savepoint (#235) around the reads: the handler below swallows
+                # and the request continues into the tournament advance, so an
+                # unguarded failure here aborted the TRANSACTION and took that
+                # with it. The grants below commit, and a commit never goes in
+                # a savepoint.
+                winner_steam = loser_steam = None
+                live_winner_id = None
+                async with db.begin_nested():
+                    for _pid in sorted([p1.id, p2.id], key=str):
+                        await db.execute(
+                            text("SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"),
+                            {"pid": _pid},
+                        )
+                    _live2 = (await db.execute(
+                        text("SELECT status, invalidated_at, winner_id "
+                             "  FROM ranked_series WHERE id = :sid"),
+                        {"sid": series.id},
+                    )).mappings().first()
+                    if (_live2 is not None
+                            and _live2["invalidated_at"] is None
+                            and _live2["status"] == "completed"
+                            and _live2["winner_id"] is not None):
+                        live_winner_id = _live2["winner_id"]
+                        winner_steam = (await db.execute(
+                            select(Player.steam_id).where(Player.id == live_winner_id)
+                        )).scalar_one_or_none()
+                        loser_id = (series.player2_id if live_winner_id == series.player1_id
+                                    else series.player1_id)
+                        loser_steam = (await db.execute(
+                            select(Player.steam_id).where(Player.id == loser_id)
+                        )).scalar_one_or_none()
+                if live_winner_id is None:
+                    print(f"[ACH] series {series.id} no longer stands at the slayer grant — "
+                          f"skipping achievements and titles for it")
+                    # Commit anyway: the re-verification above took FOR NO KEY
+                    # UPDATE on both players, and those locks must not be
+                    # carried into the tournament advance below — that saga is
+                    # deliberately lock-free precisely because early player
+                    # locks ABBA'd against it (see its SCOPE NOTE), and holding
+                    # them across it would hand it the shape four review rounds
+                    # removed.
+                    await db.commit()
+                else:
+                    slayer_key = SLAYER_TARGETS.get(loser_steam or "")
+                    if slayer_key and winner_steam and winner_steam != loser_steam:
+                        if await _grant_achievement_inline(db, live_winner_id, slayer_key):
+                            print(f"[ACH] {slayer_key} auto-granted to {winner_steam} for beating {loser_steam} in a ranked series")
+                    # v1.30 streak achievements (thresholds per Sid July 12: 25/50/100).
+                    if winner_steam:
+                        streak = await get_ranked_streak(db, winner_steam)
+                        granted_streak = False
+                        if streak >= 25:
+                            granted_streak |= await _grant_achievement_inline(db, live_winner_id, "on_fire")
+                        if streak >= 50:
+                            granted_streak |= await _grant_achievement_inline(db, live_winner_id, "unstoppable")
+                        if streak >= 100:
+                            granted_streak |= await _grant_achievement_inline(db, live_winner_id, "immortal")
+                        if granted_streak:
+                            print(f"[ACH] streak achievement(s) granted to {winner_steam} (streak={streak})")
+                    # ONE commit, unconditional, covering everything the block
+                    # may have written. The old shape committed only when a
+                    # grant returned True — and `_grant_achievement_inline`
+                    # returns False for an ALREADY-UNLOCKED achievement even
+                    # when it repaired that achievement's missing title on the
+                    # way through, so a winner who earned no new tier dropped
+                    # out of here with the repair still uncommitted and lost it
+                    # on the next rollback (r2 MEDIUM). Committing an empty
+                    # session is free; guessing whether it is empty is not.
+                    await db.commit()
         except Exception as ex:
             print(f"Slayer auto-grant error: {ex}")
+            # Same reason as the skip path: an exception after the
+            # re-verification leaves this transaction holding FOR NO KEY UPDATE
+            # on both players, and the lock-free tournament advance below must
+            # not inherit them. Nothing here is worth keeping after a failure,
+            # so let the transaction go.
+            try:
+                await db.rollback()
+            except Exception as _rbx:
+                print(f"[ACH] rollback after slayer-grant failure also failed: {_rbx}")
 
         # Tournament bracket advancement. Noop for non-tournament series.
         # Also gated: advancing a bracket off a reversed series would promote
@@ -8851,13 +9063,21 @@ async def get_player_stats(
     #          they were the reporter, fps > 0).
     avg_fps = 0
     try:
-        fps_row = (await db.execute(text("""
-            SELECT AVG(NULLIF(f, 0))::float AS avg_fps FROM (
-                SELECT CASE WHEN m.player1_id = :pid THEN m.p1_fps_avg ELSE m.p2_fps_avg END AS f
-                  FROM matches m
-                 WHERE (m.player1_id = :pid OR m.player2_id = :pid)
-            ) s WHERE f IS NOT NULL AND f > 0
-        """), {"pid": player.id})).mappings().first()
+        # begin_nested on EVERY block in this chain, not only the last one
+        # (#235): the rule this endpoint states further down — guarded, and
+        # LAST before the return so a failed query can't poison the
+        # transaction for the queries above — only holds mid-chain if each
+        # block rolls back to its OWN savepoint. Under asyncpg a bare
+        # try/except leaves the TRANSACTION aborted, so "default to safe
+        # zeros" was really a 500 raised by the next query down.
+        async with db.begin_nested():
+            fps_row = (await db.execute(text("""
+                SELECT AVG(NULLIF(f, 0))::float AS avg_fps FROM (
+                    SELECT CASE WHEN m.player1_id = :pid THEN m.p1_fps_avg ELSE m.p2_fps_avg END AS f
+                      FROM matches m
+                     WHERE (m.player1_id = :pid OR m.player2_id = :pid)
+                ) s WHERE f IS NOT NULL AND f > 0
+            """), {"pid": player.id})).mappings().first()
         if fps_row and fps_row["avg_fps"]:
             avg_fps = int(round(fps_row["avg_fps"]))
     except Exception:
@@ -8867,14 +9087,15 @@ async def get_player_stats(
     # fast picks fewer cards → closer to 1. Computed as total card picks / matches.
     avg_cards_per_game = 0.0
     try:
-        cpg_row = (await db.execute(text("""
-            SELECT
-              (SELECT COUNT(*) FROM match_cards mc
-                 JOIN matches m2 ON m2.id = mc.match_id
-                WHERE mc.player_id = :pid)::float AS total_picks,
-              (SELECT COUNT(*) FROM matches m
-                WHERE (m.player1_id = :pid OR m.player2_id = :pid))::float AS total_matches
-        """), {"pid": player.id})).mappings().first()
+        async with db.begin_nested():   # savepoint (#235), as above
+            cpg_row = (await db.execute(text("""
+                SELECT
+                  (SELECT COUNT(*) FROM match_cards mc
+                     JOIN matches m2 ON m2.id = mc.match_id
+                    WHERE mc.player_id = :pid)::float AS total_picks,
+                  (SELECT COUNT(*) FROM matches m
+                    WHERE (m.player1_id = :pid OR m.player2_id = :pid))::float AS total_matches
+            """), {"pid": player.id})).mappings().first()
         if cpg_row and (cpg_row["total_matches"] or 0) > 0:
             avg_cards_per_game = round((cpg_row["total_picks"] or 0) / cpg_row["total_matches"], 2)
     except Exception:
@@ -8884,20 +9105,21 @@ async def get_player_stats(
     # (min sample so a 1-pick fluke doesn't dominate). Mirror of top_cards shape.
     worst_cards: list[dict] = []
     try:
-        wc_rows = (await db.execute(text("""
-            SELECT mc.card_name,
-                   COUNT(*) AS times_picked,
-                   SUM(CASE WHEN m.winner_id = :pid THEN 1 ELSE 0 END) AS wins_with,
-                   ROUND(SUM(CASE WHEN m.winner_id = :pid THEN 1 ELSE 0 END)::numeric
-                         / NULLIF(COUNT(*), 0), 4) AS win_rate
-              FROM match_cards mc
-              JOIN matches m ON m.id = mc.match_id
-             WHERE mc.player_id = :pid
-             GROUP BY mc.card_name
-            HAVING COUNT(*) >= 4
-             ORDER BY win_rate ASC, times_picked DESC
-             LIMIT 10
-        """), {"pid": player.id})).mappings().all()
+        async with db.begin_nested():   # savepoint (#235), as above
+            wc_rows = (await db.execute(text("""
+                SELECT mc.card_name,
+                       COUNT(*) AS times_picked,
+                       SUM(CASE WHEN m.winner_id = :pid THEN 1 ELSE 0 END) AS wins_with,
+                       ROUND(SUM(CASE WHEN m.winner_id = :pid THEN 1 ELSE 0 END)::numeric
+                             / NULLIF(COUNT(*), 0), 4) AS win_rate
+                  FROM match_cards mc
+                  JOIN matches m ON m.id = mc.match_id
+                 WHERE mc.player_id = :pid
+                 GROUP BY mc.card_name
+                HAVING COUNT(*) >= 4
+                 ORDER BY win_rate ASC, times_picked DESC
+                 LIMIT 10
+            """), {"pid": player.id})).mappings().all()
         worst_cards = [
             {"card_name": c["card_name"], "times_picked": c["times_picked"],
              "wins_with": c["wins_with"], "win_rate": float(c["win_rate"] or 0)}
@@ -8909,9 +9131,10 @@ async def get_player_stats(
     # achievements_unlocked: count of this player's unlocked achievements.
     achievements_unlocked = 0
     try:
-        ach_row = (await db.execute(text(
-            "SELECT COUNT(*) FROM player_achievements WHERE player_id = :pid"
-        ), {"pid": player.id})).scalar()
+        async with db.begin_nested():   # savepoint (#235), as above
+            ach_row = (await db.execute(text(
+                "SELECT COUNT(*) FROM player_achievements WHERE player_id = :pid"
+            ), {"pid": player.id})).scalar()
         achievements_unlocked = int(ach_row or 0)
     except Exception:
         achievements_unlocked = 0
@@ -8920,13 +9143,14 @@ async def get_player_stats(
     # (proxy for "time spent" per region). Returned as a list of {region, matches}.
     region_breakdown: list[dict] = []
     try:
-        rb_rows = (await db.execute(text("""
-            SELECT COALESCE(NULLIF(m.region, ''), 'unknown') AS region, COUNT(*) AS matches
-              FROM matches m
-             WHERE (m.player1_id = :pid OR m.player2_id = :pid)
-             GROUP BY COALESCE(NULLIF(m.region, ''), 'unknown')
-             ORDER BY matches DESC
-        """), {"pid": player.id})).mappings().all()
+        async with db.begin_nested():   # savepoint (#235), as above
+            rb_rows = (await db.execute(text("""
+                SELECT COALESCE(NULLIF(m.region, ''), 'unknown') AS region, COUNT(*) AS matches
+                  FROM matches m
+                 WHERE (m.player1_id = :pid OR m.player2_id = :pid)
+                 GROUP BY COALESCE(NULLIF(m.region, ''), 'unknown')
+                 ORDER BY matches DESC
+            """), {"pid": player.id})).mappings().all()
         region_breakdown = [{"region": r["region"], "matches": r["matches"]} for r in rb_rows]
     except Exception:
         region_breakdown = []
@@ -8956,21 +9180,23 @@ async def get_player_stats(
     # only (same one-sided basis as the other input metrics).
     avg_keys_per_game = 0
     try:
-        avg_keys_per_game = int((await db.execute(text(
-            "SELECT COALESCE(AVG(m.local_keys_pressed), 0) FROM matches m "
-            " WHERE m.reported_by = :pid AND m.local_keys_pressed > 0 "
-            "   AND m.invalidated_at IS NULL"
-        ), {"pid": player.id})).scalar() or 0)
+        async with db.begin_nested():   # savepoint (#235), as above
+            avg_keys_per_game = int((await db.execute(text(
+                "SELECT COALESCE(AVG(m.local_keys_pressed), 0) FROM matches m "
+                " WHERE m.reported_by = :pid AND m.local_keys_pressed > 0 "
+                "   AND m.invalidated_at IS NULL"
+            ), {"pid": player.id})).scalar() or 0)
     except Exception:
         pass
     try:
-        avg_game_seconds = int((await db.execute(text(
-            "SELECT COALESCE(AVG(COALESCE(m.duration_seconds, m.match_duration)), 0) "
-            "  FROM matches m "
-            " WHERE (m.player1_id = :pid OR m.player2_id = :pid) "
-            "   AND COALESCE(m.duration_seconds, m.match_duration) BETWEEN 30 AND 7200 "
-            "   AND m.invalidated_at IS NULL"
-        ), {"pid": player.id})).scalar() or 0)
+        async with db.begin_nested():   # savepoint (#235), as above
+            avg_game_seconds = int((await db.execute(text(
+                "SELECT COALESCE(AVG(COALESCE(m.duration_seconds, m.match_duration)), 0) "
+                "  FROM matches m "
+                " WHERE (m.player1_id = :pid OR m.player2_id = :pid) "
+                "   AND COALESCE(m.duration_seconds, m.match_duration) BETWEEN 30 AND 7200 "
+                "   AND m.invalidated_at IS NULL"
+            ), {"pid": player.id})).scalar() or 0)
     except Exception:
         avg_game_seconds = 0
     bets_won = bets_lost = bet_gold_net = 0
@@ -8978,23 +9204,24 @@ async def get_player_stats(
         # settlement_kind is AUTHORITATIVE when stamped (round-10 find 5): a
         # 1g win whose payout rounds to the stake was counted neither won nor
         # lost by the arithmetic. NULL (pre-180) rows keep the legacy math.
-        bet_row = (await db.execute(text(
-            "SELECT COUNT(*) FILTER (WHERE COALESCE(b.settlement_kind,"
-            "               CASE WHEN b.payout > b.amount THEN 'won'"
-            "                    WHEN COALESCE(b.payout, -1) = 0 THEN 'lost' END) = 'won') AS won, "
-            "       COUNT(*) FILTER (WHERE COALESCE(b.settlement_kind,"
-            "               CASE WHEN b.payout > b.amount THEN 'won'"
-            "                    WHEN COALESCE(b.payout, -1) = 0 THEN 'lost' END) = 'lost') AS lost, "
-            "       COALESCE(SUM(CASE WHEN COALESCE(b.settlement_kind,"
-            "                               CASE WHEN b.payout > b.amount THEN 'won'"
-            "                                    WHEN b.payout = 0 THEN 'lost' END) = 'won'"
-            "                         THEN b.payout - b.amount "
-            "                         WHEN COALESCE(b.settlement_kind,"
-            "                               CASE WHEN b.payout > b.amount THEN 'won'"
-            "                                    WHEN b.payout = 0 THEN 'lost' END) = 'lost'"
-            "                         THEN -b.amount ELSE 0 END), 0) AS net "
-            "  FROM bets b WHERE b.player_id = :pid AND b.settled_at IS NOT NULL"
-        ), {"pid": player.id})).mappings().first()
+        async with db.begin_nested():   # savepoint (#235), as above
+            bet_row = (await db.execute(text(
+                "SELECT COUNT(*) FILTER (WHERE COALESCE(b.settlement_kind,"
+                "               CASE WHEN b.payout > b.amount THEN 'won'"
+                "                    WHEN COALESCE(b.payout, -1) = 0 THEN 'lost' END) = 'won') AS won, "
+                "       COUNT(*) FILTER (WHERE COALESCE(b.settlement_kind,"
+                "               CASE WHEN b.payout > b.amount THEN 'won'"
+                "                    WHEN COALESCE(b.payout, -1) = 0 THEN 'lost' END) = 'lost') AS lost, "
+                "       COALESCE(SUM(CASE WHEN COALESCE(b.settlement_kind,"
+                "                               CASE WHEN b.payout > b.amount THEN 'won'"
+                "                                    WHEN b.payout = 0 THEN 'lost' END) = 'won'"
+                "                         THEN b.payout - b.amount "
+                "                         WHEN COALESCE(b.settlement_kind,"
+                "                               CASE WHEN b.payout > b.amount THEN 'won'"
+                "                                    WHEN b.payout = 0 THEN 'lost' END) = 'lost'"
+                "                         THEN -b.amount ELSE 0 END), 0) AS net "
+                "  FROM bets b WHERE b.player_id = :pid AND b.settled_at IS NOT NULL"
+            ), {"pid": player.id})).mappings().first()
         if bet_row:
             bets_won = int(bet_row["won"] or 0)
             bets_lost = int(bet_row["lost"] or 0)
@@ -12966,10 +13193,11 @@ async def _check_steam_session(request, steam_id: str, db: AsyncSession) -> None
         reason = "no_token"
     else:
         try:
-            row = (await db.execute(text(
-                "SELECT steam_id, verified, expires_at FROM steam_sessions "
-                "WHERE token_hash = :th"
-            ), {"th": hashlib.sha256(token.encode()).hexdigest()})).mappings().first()
+            async with db.begin_nested():  # savepoint: never poison the caller's tx
+                row = (await db.execute(text(
+                    "SELECT steam_id, verified, expires_at FROM steam_sessions "
+                    "WHERE token_hash = :th"
+                ), {"th": hashlib.sha256(token.encode()).hexdigest()})).mappings().first()
             if row is None:
                 reason = "unknown_token"
             elif row["expires_at"] is not None and row["expires_at"] < datetime.now(timezone.utc):
@@ -13015,15 +13243,17 @@ async def _check_steam_session(request, steam_id: str, db: AsyncSession) -> None
         # identity there is established by Discord linkage, not a client
         # token, and an external attacker always arrives WITH a Request.
         try:
-            armed = (await db.execute(text(
-                "SELECT 1 FROM players WHERE steam_id = :sid "
-                "AND steam_auth_seen_at IS NOT NULL LIMIT 1"
-            ), {"sid": steam_id})).scalar() is not None
-            if not armed:
+            async with db.begin_nested():  # savepoint: never poison the caller's tx
                 armed = (await db.execute(text(
-                    "SELECT 1 FROM steam_sessions WHERE steam_id = :sid "
-                    "AND verified AND issued_at > NOW() - INTERVAL '7 days' LIMIT 1"
+                    "SELECT 1 FROM players WHERE steam_id = :sid "
+                    "AND steam_auth_seen_at IS NOT NULL LIMIT 1"
                 ), {"sid": steam_id})).scalar() is not None
+            if not armed:
+                async with db.begin_nested():  # savepoint: never poison the caller's tx
+                    armed = (await db.execute(text(
+                        "SELECT 1 FROM steam_sessions WHERE steam_id = :sid "
+                        "AND verified AND issued_at > NOW() - INTERVAL '7 days' LIMIT 1"
+                    ), {"sid": steam_id})).scalar() is not None
                 if armed and IS_REPLICA:
                     _replica_skip("steam_auth_arming_backfill")
                 if armed and not IS_REPLICA:
@@ -34345,6 +34575,16 @@ async def _grant_translator_achievements(db: AsyncSession, steam_id: str) -> Non
         "SELECT achievement_key FROM player_achievements WHERE player_id = :p"
         "   AND achievement_key = ANY(:keys)"
     ), {"p": pid, "keys": [k for _, k in TRANSLATOR_TIERS]})).scalars().all())
+    # Titles ride these achievements but are granted OUTSIDE the achievement's
+    # savepoint, so a title can have failed while its achievement committed.
+    # Both shortcuts below — the all-tiers early return and `key not in have` —
+    # then skip the only code that would ever grant it again, leaving an earned,
+    # non-purchasable title unobtainable short of an admin re-grant (r2
+    # finding). Re-assert the held tiers' titles first: idempotent upserts, at
+    # most three, on a moderation action that is already doing DB work.
+    for _, key in TRANSLATOR_TIERS:
+        if key in have:
+            await _ensure_achievement_title(db, pid, key)
     if len(have) == len(TRANSLATOR_TIERS):
         return
     credit = await _translator_credit(db, steam_id)
@@ -34477,23 +34717,30 @@ async def _check_twins_achievement(db: AsyncSession, report, p1_id, p2_id) -> No
 
 async def _grant_title_item(db: AsyncSession, player_id, sku: str) -> None:
     """Idempotently grant a shop title item (used for achievement titles)."""
-    item_id = (await db.execute(
-        select(ShopItem.id).where(ShopItem.sku == sku))).scalar_one_or_none()
+    # Savepoint (#235): _grant_achievement_inline calls this inside a try that
+    # prints "title grant failed" and carries on. Unguarded, a failure here left
+    # the TRANSACTION aborted, so the caller's own writes — and the whole
+    # request behind them — failed on a cosmetic title.
+    async with db.begin_nested():
+        item_id = (await db.execute(
+            select(ShopItem.id).where(ShopItem.sku == sku))).scalar_one_or_none()
     if item_id is None:
         print(f"[ACHIEVEMENT] title sku {sku} missing from shop_items — run the titles migration")
         return
-    owned = (await db.execute(
-        select(PlayerItem).where(PlayerItem.player_id == player_id,
-                                 PlayerItem.item_id == item_id))).scalar_one_or_none()
+    async with db.begin_nested():
+        owned = (await db.execute(
+            select(PlayerItem).where(PlayerItem.player_id == player_id,
+                                     PlayerItem.item_id == item_id))).scalar_one_or_none()
     if owned is None:
         # P2: resolved-house provenance; raw INSERT because the PlayerItem
         # model deliberately omits the royalty columns (#346).
-        await db.execute(text(
-            "INSERT INTO player_items (player_id, item_id, purchase_price, "
-            "        royalty_paid, royalty_rate_pct, royalty_resolved) "
-            "VALUES (:pid, :iid, 0, 0, 0, TRUE) "
-            "ON CONFLICT (player_id, item_id) DO NOTHING"
-        ), {"pid": player_id, "iid": item_id})
+        async with db.begin_nested():
+            await db.execute(text(
+                "INSERT INTO player_items (player_id, item_id, purchase_price, "
+                "        royalty_paid, royalty_rate_pct, royalty_resolved) "
+                "VALUES (:pid, :iid, 0, 0, 0, TRUE) "
+                "ON CONFLICT (player_id, item_id) DO NOTHING"
+            ), {"pid": player_id, "iid": item_id})
         print(f"[ACHIEVEMENT] granted title item {sku} to {player_id}")
 
 
@@ -34533,13 +34780,16 @@ async def _achievement_payment_eligible(db: AsyncSession, player_id, achievement
     for the presence of a clawback would wrongly re-open payment on a later
     keep-the-gold revocation. Owed only when every payment so far has been
     clawed back."""
-    row = await db.execute(text(
-        "SELECT"
-        " COUNT(*) FILTER (WHERE reason IN ('achievement','achievement_prepaid')) AS paid,"
-        " COUNT(*) FILTER (WHERE reason = 'achievement_revoked') AS clawed"
-        " FROM gold_transactions"
-        " WHERE player_id = :pid AND reference_id = :k"
-    ), {"pid": player_id, "k": achievement_key})
+    # Savepoint (#235): this read sits on every paying grant path, including
+    # _grant_achievement_inline's, whose callers swallow and continue.
+    async with db.begin_nested():
+        row = await db.execute(text(
+            "SELECT"
+            " COUNT(*) FILTER (WHERE reason IN ('achievement','achievement_prepaid')) AS paid,"
+            " COUNT(*) FILTER (WHERE reason = 'achievement_revoked') AS clawed"
+            " FROM gold_transactions"
+            " WHERE player_id = :pid AND reference_id = :k"
+        ), {"pid": player_id, "k": achievement_key})
     paid, clawed = row.one()
     return paid == 0 or clawed >= paid
 
@@ -34551,49 +34801,89 @@ async def _grant_achievement_inline(db: AsyncSession, player_id, achievement_key
     Returns True if newly granted, False if already unlocked or unknown key."""
     if achievement_key not in ACHIEVEMENT_DEFS:
         return False
-    existing = await db.execute(
-        select(PlayerAchievement).where(
-            PlayerAchievement.player_id == player_id,
-            PlayerAchievement.achievement_key == achievement_key,
+    # Savepoint (#235): ~20 call sites reach this helper from inside a
+    # try/except that reports "achievement check failed" and continues. Without
+    # the savepoint a failure here left the TRANSACTION aborted, so the report
+    # the caller went on to write died instead — logged as the achievement.
+    async with db.begin_nested():
+        existing = await db.execute(
+            select(PlayerAchievement).where(
+                PlayerAchievement.player_id == player_id,
+                PlayerAchievement.achievement_key == achievement_key,
+            )
         )
-    )
     if existing.scalar_one_or_none():
+        # Already unlocked — but the title that RIDES this achievement is
+        # granted outside the achievement's savepoint, so it can have failed on
+        # the original grant while the achievement itself committed. This early
+        # return is what used to make that permanent: every later trigger found
+        # the achievement present and returned here without ever retrying the
+        # title, leaving a non-purchasable earned title unobtainable short of an
+        # admin re-grant (r1 finding). Re-assert it instead. The grant is an
+        # idempotent upsert, so the repair costs one cheap statement on a path
+        # that has just done a SELECT anyway.
+        await _ensure_achievement_title(db, player_id, achievement_key)
         return False
     await _assert_no_service_subject(db, affected_player_ids=[player_id])
-    db.add(PlayerAchievement(player_id=player_id, achievement_key=achievement_key))
-    gold_amt = _achievement_gold(achievement_key)
-    # A 0g achievement writes NEITHER a no-op balance update NOR a 0-amount
-    # ledger row. The ledger is read as "what did this player actually earn" —
-    # the gold-sources breakdown filters to amount > 0 — so a zero row is pure
-    # noise in the audit trail for something that moved no money.
-    #
-    # No key prices at 0 today: the six FFA keys were the only ones and were
-    # priced 2026-08-07, so this branch is currently unreachable. It stays
-    # because re-introducing a 0g key is a one-line ACHIEVEMENT_GOLD_OVERRIDES
-    # edit.
-    if gold_amt and not await _achievement_payment_eligible(db, player_id, achievement_key):
-        print(f"[ACHIEVEMENT] {achievement_key} re-earned by {player_id} —"
-              f" gold already booked, not paying again")
-        gold_amt = 0
-    if gold_amt:
-        await db.execute(
-            text("UPDATE players SET gold_earned = COALESCE(gold_earned, 0) + :g WHERE id = :pid"),
-            {"g": gold_amt, "pid": player_id},
-        )
-        db.add(GoldTransaction(
-            player_id=player_id, amount=gold_amt,
-            reason="achievement", reference_id=achievement_key,
-        ))
+    # ONE savepoint over the grant, the payment and the ledger row, because they
+    # are one unit of work. Splitting them is worse than not guarding at all:
+    # entering begin_nested FLUSHES the session before it emits SAVEPOINT, so an
+    # achievement row added out here would already be in the OUTER transaction
+    # when a payment savepoint opened — a failing gold UPDATE would then roll
+    # back only the money and leave the achievement granted, unpaid, with no
+    # ledger row, and un-regrantable for ever after (the `existing` check above
+    # refuses the retry). An object added INSIDE the block is expunged by the
+    # nested rollback, so this boundary is what makes the degrade coherent.
+    async with db.begin_nested():
+        db.add(PlayerAchievement(player_id=player_id, achievement_key=achievement_key))
+        gold_amt = _achievement_gold(achievement_key)
+        # A 0g achievement writes NEITHER a no-op balance update NOR a 0-amount
+        # ledger row. The ledger is read as "what did this player actually earn" —
+        # the gold-sources breakdown filters to amount > 0 — so a zero row is pure
+        # noise in the audit trail for something that moved no money.
+        #
+        # No key prices at 0 today: the six FFA keys were the only ones and were
+        # priced 2026-08-07, so this branch is currently unreachable. It stays
+        # because re-introducing a 0g key is a one-line ACHIEVEMENT_GOLD_OVERRIDES
+        # edit.
+        if gold_amt and not await _achievement_payment_eligible(db, player_id, achievement_key):
+            print(f"[ACHIEVEMENT] {achievement_key} re-earned by {player_id} —"
+                  f" gold already booked, not paying again")
+            gold_amt = 0
+        if gold_amt:
+            await db.execute(
+                text("UPDATE players SET gold_earned = COALESCE(gold_earned, 0) + :g WHERE id = :pid"),
+                {"g": gold_amt, "pid": player_id},
+            )
+            db.add(GoldTransaction(
+                player_id=player_id, amount=gold_amt,
+                reason="achievement", reference_id=achievement_key,
+            ))
     # Achievement-gated titles (Sid Slayer / Stan Slayer) become equippable
     # the moment the achievement lands, whatever the grant path.
-    title_sku = ACHIEVEMENT_TITLE_SKUS.get(achievement_key)
-    if title_sku:
-        try:
-            await _grant_title_item(db, player_id, title_sku)
-        except Exception as tex:
-            print(f"[ACHIEVEMENT] title grant failed for {achievement_key}: {tex}")
+    await _ensure_achievement_title(db, player_id, achievement_key)
     print(f"[ACHIEVEMENT] auto-granted {achievement_key} to {player_id}")
     return True
+
+
+async def _ensure_achievement_title(db: AsyncSession, player_id, achievement_key: str) -> None:
+    """Grant the title that rides an achievement, if it has one. Idempotent.
+
+    Called from BOTH the fresh-grant path and the already-unlocked early return,
+    which is the whole point: the title is deliberately granted OUTSIDE the
+    achievement's savepoint — an achievement and its gold that landed must not
+    be rolled back because a cosmetic grant failed — and the price of that
+    choice is that a title failure has to be repairable on a later visit rather
+    than compensated on the spot. `_grant_title_item` carries its own savepoint,
+    so swallowing here leaves the caller's transaction usable.
+    """
+    title_sku = ACHIEVEMENT_TITLE_SKUS.get(achievement_key)
+    if not title_sku:
+        return
+    try:
+        await _grant_title_item(db, player_id, title_sku)
+    except Exception as tex:
+        print(f"[ACHIEVEMENT] title grant failed for {achievement_key}: {tex}")
 
 
 @app.get("/api/v1/achievements/definitions", tags=["Achievements"])
@@ -34715,20 +35005,24 @@ async def _achievement_global_pcts(db: AsyncSession) -> dict[str, float]:
     if now - _ach_pct_cache["at"] < 300 and _ach_pct_cache["pcts"]:
         return _ach_pct_cache["pcts"]
     try:
-        total = (await db.execute(text(
-            "SELECT COUNT(*) FROM players WHERE deleted_at IS NULL AND mod_seen_at IS NOT NULL"
-        ))).scalar() or 0
-        pcts: dict[str, float] = {}
-        if total > 0:
-            rows = (await db.execute(text(
-                "SELECT pa.achievement_key, COUNT(DISTINCT pa.player_id) AS n "
-                "FROM player_achievements pa "
-                "JOIN players p ON p.id = pa.player_id AND p.deleted_at IS NULL "
-                "AND p.mod_seen_at IS NOT NULL "
-                "GROUP BY pa.achievement_key"
-            ))).mappings().all()
-            for r in rows:
-                pcts[r["achievement_key"]] = round(100.0 * int(r["n"]) / total, 1)
+        # Savepoint (#235): "fall back to the cached pcts" is only true if the
+        # failure stays local — get_player_achievements issues 2 more statements
+        # after this call.
+        async with db.begin_nested():
+            total = (await db.execute(text(
+                "SELECT COUNT(*) FROM players WHERE deleted_at IS NULL AND mod_seen_at IS NOT NULL"
+            ))).scalar() or 0
+            pcts: dict[str, float] = {}
+            if total > 0:
+                rows = (await db.execute(text(
+                    "SELECT pa.achievement_key, COUNT(DISTINCT pa.player_id) AS n "
+                    "FROM player_achievements pa "
+                    "JOIN players p ON p.id = pa.player_id AND p.deleted_at IS NULL "
+                    "AND p.mod_seen_at IS NOT NULL "
+                    "GROUP BY pa.achievement_key"
+                ))).mappings().all()
+                for r in rows:
+                    pcts[r["achievement_key"]] = round(100.0 * int(r["n"]) / total, 1)
         _ach_pct_cache["at"] = now
         _ach_pct_cache["pcts"] = pcts
         return pcts
@@ -34775,7 +35069,11 @@ async def unlock_achievement(req: AchievementUnlockRequest, request: Request, db
         try:
             from uuid import UUID as _UUID
             mid = _UUID(req.match_id)
-            match_row = await db.execute(select(Match.id).where(Match.id == mid))
+            # Savepoint (#235): the `except: pass` below only makes the match_id
+            # OPTIONAL if the lookup's failure stays local — the unlock insert,
+            # _achievement_payment_eligible and the gold payout all follow.
+            async with db.begin_nested():
+                match_row = await db.execute(select(Match.id).where(Match.id == mid))
             m = match_row.scalar_one_or_none()
             if m:
                 match_id_val = m
@@ -39674,23 +39972,48 @@ async def team_series_report_dc(
     if rep_team is None or rep_team == dc_team:
         raise HTTPException(400, "reporter must be a member of the non-DC team")
 
-    # F6 FOLLOW-UP (tracked in docs/SECURITY_ACTION_ITEMS.md): t1/t2_points_total
-    # are still client-supplied + outside the DC HMAC, so a member could misreport
-    # the abandoned game's score to flip the >=2-points game-award branch. Lower
-    # impact (one 2v2 game; the lead-forfeit rule below ignores points entirely)
-    # and needs a coordinated client-canonical change — folding points into the
-    # DC signature is the next pass.
+    # THE POINT TOTAL IS NOT YET A FACT THIS ENDPOINT OWNS. t1/t2_points_total
+    # arrive on the query string, outside the DC signature, as ONE seat's snapshot
+    # of a game that never produced a team_matches row. Two HONEST survivors can
+    # therefore submit different totals for the same abandoned game, and when the
+    # two straddle the threshold below, the outcome is settled by whichever request
+    # takes the series lock first: a completed series with ratings and gold in one
+    # order, dc_incomplete in the other. No dishonest client is required for that.
+    #
+    # What this comment used to say, and why it mattered: it called the exposure
+    # "lower impact (one 2v2 game; the lead-forfeit rule below ignores points
+    # entirely)". The rule four lines down does NOT ignore points — `total_points
+    # >= 2` is half of its condition. A false statement about the code directly
+    # beneath it is the stated reason this was left for a later pass. It also
+    # claimed to be "tracked in docs/SECURITY_ACTION_ITEMS.md", a file that has
+    # never existed in this repository's history, so it was tracked nowhere.
+    #
+    # Signing these values does not fix it: signing two differing honest snapshots
+    # authenticates the disagreement without resolving it. What the endpoint needs
+    # is a fact it records for the CURRENT game — "did this game cross two points",
+    # keyed by (series_id, game_ordinal) and written during play — because only an
+    # independent current-game fact separates a stale low from an incorrect high.
+    # The series-wide live-points columns cannot stand in: they are stored with
+    # GREATEST across the series, so in game 2 or 3 they still carry game 1's
+    # crossing. Designed and specified in ai-collab/sept16-bugs/LOG.md.
     total_points = (t1_points_total or 0) + (t2_points_total or 0)
 
     # ── Anti-abuse lead-forfeit (v1.28) ───────────────────────────────────
     # If the NON-DC (remaining) team has ALREADY won at least one game of this
-    # series, a DC by the other team forfeits the WHOLE series to them
-    # immediately — regardless of the abandoned game's point total. This is the
-    # rule Sid asked for: you can't leave a 2v2 to dodge a loss once the other
-    # team is up a game. Applies full Glicko/gold/xp via the shared helper so
-    # the forfeit win actually moves the board (the old dc_decided/dc_forfeit
-    # paths completed the series with NO ratings — leaving was strictly safer
-    # than losing).
+    # series, AND real play happened in the abandoned game (>=2 points between
+    # them), the WHOLE series completes to them. This is the rule Sid asked for:
+    # you can't leave a 2v2 to dodge a loss once the other team is up a game,
+    # while a break or restart with little play in it is never auto-decided.
+    # The point total is half the condition — this comment used to say the rule
+    # applied "regardless of the abandoned game's point total", which described
+    # the code as it has never been, and see the note above for what that cost.
+    #
+    # Applies Glicko and gold through the shared helper so the forfeit win
+    # actually moves the board (the old dc_decided/dc_forfeit paths completed the
+    # series with NO ratings — leaving was strictly safer than losing). It does
+    # NOT pay XP: there is no played game to pay for, as that helper's own
+    # docstring records. "Full Glicko/gold/xp" here named a write this path has
+    # never made, which is the same correction that docstring already carries.
     other_team_existing_wins = (s["t1_series_wins"] or 0) if other_team == 1 else (s["t2_series_wins"] or 0)
     # "Clear case" (Sid's rule): auto-forfeit ONLY when the non-DC team was already
     # up a game AND real play happened in the abandoned game (>=2 points). A break/
@@ -39699,13 +40022,26 @@ async def team_series_report_dc(
     # that breaks and needs a restart never auto-penalizes anyone.
     if (other_team_existing_wins or 0) >= 1 and total_points >= 2:
         # Record a synthetic forfeit game for history parity.
+        #
+        # The synthetic room id is PER SERIES, never the bare literal it used to
+        # be. team_matches carries UNIQUE (photon_room_id, t1a_id, t1b_id, t2a_id,
+        # t2b_id) — models.py uq_team_match — so a constant here allows exactly ONE
+        # lead-forfeit per ordered quartet for all time. The second one that the
+        # same four players produce in the same slot order would violate that
+        # constraint, abort this transaction, and return 500 with the series left
+        # unsettled — and a regular duo meeting the same opponents is precisely how
+        # a small community plays. The branch has never auto-fired in production
+        # (zero rows carry the old literal; the two series recorded with reason
+        # 'dc_leadforfeit' were repaired by hand in migrations 099/108), so this is
+        # a latent defect being closed, not an active one. Fits String(64): the
+        # prefix plus a UUID is 51 characters.
         await db.execute(
             text("""INSERT INTO team_matches
                        (series_id, t1a_id, t1b_id, t2a_id, t2b_id,
                         t1_rounds_won, t2_rounds_won, t1_points_total, t2_points_total,
                         winner_team, dc_player_id, dc_at, ended_at, photon_room_id)
                    VALUES (:sid, :t1a, :t1b, :t2a, :t2b, 0, 0, :t1p, :t2p,
-                           :wt, :dpid, NOW(), NOW(), 'dc_leadforfeit')"""),
+                           :wt, :dpid, NOW(), NOW(), 'dc_leadforfeit:' || CAST(:sid AS text))"""),
             {"sid": sid_uuid, "t1a": s["t1a_id"], "t1b": s["t1b_id"],
              "t2a": s["t2a_id"], "t2b": s["t2b_id"], "t1p": t1_points_total or 0,
              "t2p": t2_points_total or 0, "wt": other_team, "dpid": dc_pid},
@@ -42518,13 +42854,18 @@ def _lobby_cfg(mode: str) -> dict:
 async def _player_body_color(db: AsyncSession, player_id):
     """(name, hex) of the player's equipped body colour, or (None, None).
     kind='player_color' — NOT kind='color', which is the map-colour system."""
-    row = (await db.execute(text("""
-        SELECT si.name, si.preview_color
-          FROM players p
-          JOIN shop_items si ON si.id = p.active_player_color_id
-                            AND si.kind = 'player_color'
-         WHERE p.id = :pid
-    """), {"pid": player_id})).first()
+    # #235: savepoint around the lookup itself. _stamp_team_series_colors wraps
+    # its own UPDATE but reaches this helper through _team_color_holders BEFORE
+    # that savepoint opens, so a failure here aborted the whole lock/Start
+    # transaction while the stamp's handler reported a cosmetic miss.
+    async with db.begin_nested():
+        row = (await db.execute(text("""
+            SELECT si.name, si.preview_color
+              FROM players p
+              JOIN shop_items si ON si.id = p.active_player_color_id
+                                AND si.kind = 'player_color'
+             WHERE p.id = :pid
+        """), {"pid": player_id})).first()
     if row is None or not row[1]:
         return None, None
     return (row[0] or "")[:40] or None, (row[1] or "")[:9] or None
@@ -42555,6 +42896,7 @@ async def _stamp_team_series_colors(db: AsyncSession, series_id,
     """Compute + persist both teams' colour identity on a just-created
     team_series row. Best-effort: a cosmetic lookup failure must never take
     a lock/Start/continuation down with it."""
+    t1n = t1h = t2n = t2h = None
     try:
         t1_holders = await _team_color_holders(db, team1_ids)
         t2_holders = await _team_color_holders(db, team2_ids)
@@ -42568,14 +42910,27 @@ async def _stamp_team_series_colors(db: AsyncSession, series_id,
             _alt = [(n, h) for (n, h) in t2_holders
                     if (h or "").lower() != t1h.lower()]
             t2n, t2h = random.choice(_alt) if _alt else (None, None)
-        # Codex r2 f9: ALWAYS stamp, using '' for a vanilla side. NULL means
-        # "never decided" (pre-feature rows); '' means "decided vanilla —
-        # FROZEN". Without the marker, an all-vanilla decision was
-        # indistinguishable from no decision, so a mid-series colour equip
-        # re-opened the identity through the client's live local fallback.
-        # #235: savepoint, not bare try — under asyncpg a failed UPDATE
-        # (migration 206 not applied yet) would otherwise abort the whole
-        # lock/Start transaction, not just this stamp.
+    except Exception as _tce:
+        # A lookup failure decides NOTHING — so fall through and stamp the
+        # frozen-vanilla marker rather than returning. Skipping the stamp left
+        # the row NULL, and NULL is not "no colours": it is "never decided",
+        # which re-opens team identity to the client's live local fallback and
+        # lets it vary by client or by what someone equips later (r1 finding).
+        # A decided-vanilla series is the conservative outcome; an undecided one
+        # is not.
+        print(f"[TEAMCOLOR] holder lookup failed for series {series_id}, "
+              f"stamping vanilla: {_tce}")
+        t1n = t1h = t2n = t2h = None
+
+    # Codex r2 f9: ALWAYS stamp, using '' for a vanilla side. NULL means
+    # "never decided" (pre-feature rows); '' means "decided vanilla —
+    # FROZEN". Without the marker, an all-vanilla decision was
+    # indistinguishable from no decision, so a mid-series colour equip
+    # re-opened the identity through the client's live local fallback.
+    # #235: savepoint, not bare try — under asyncpg a failed UPDATE
+    # (migration 206 not applied yet) would otherwise abort the whole
+    # lock/Start transaction, not just this stamp.
+    try:
         async with db.begin_nested():
             await db.execute(text("""
                 UPDATE team_series
@@ -42584,8 +42939,8 @@ async def _stamp_team_series_colors(db: AsyncSession, series_id,
                  WHERE id = :sid
             """), {"sid": series_id, "t1n": t1n or "", "t1h": t1h or "",
                    "t2n": t2n or "", "t2h": t2h or ""})
-    except Exception as _tce:
-        print(f"[TEAMCOLOR] stamp failed for series {series_id}: {_tce}")
+    except Exception as _uex:
+        print(f"[TEAMCOLOR] stamp failed for series {series_id}: {_uex}")
 
 
 async def _dissolve_group_rows(db: AsyncSession, mode: str, series_id,
@@ -44489,10 +44844,13 @@ async def _ffa_lobby_config_echo(db: AsyncSession, lobby_id) -> dict:
     """The config fields the client mirrors, straight off the row.
     Best-effort: an error returns {} (client falls back to defaults + poll)."""
     try:
-        row = (await db.execute(text(
-            "SELECT score_target, card_candidates, initial_picks, card_cap,"
-            "       same_card_rule, sudden_death, is_ranked FROM ffa_lobbies WHERE id = :lid"
-        ), {"lid": lobby_id})).mappings().first()
+        # Savepoint (#235): "an error returns {}" only holds if the failure stays
+        # local — ffa_lobby_join continues with SQL after this echo.
+        async with db.begin_nested():
+            row = (await db.execute(text(
+                "SELECT score_target, card_candidates, initial_picks, card_cap,"
+                "       same_card_rule, sudden_death, is_ranked FROM ffa_lobbies WHERE id = :lid"
+            ), {"lid": lobby_id})).mappings().first()
         cfg = _ffa_lobby_config(row)
         return {
             "score_target": cfg["score_target"],
@@ -45908,9 +46266,13 @@ async def _ffa_game_in_progress_tristate(db: AsyncSession, lobby_id, lobby) -> b
         # Startup window. A ZERO-GAME lobby locked AFTER this process booted
         # cannot carry a live game this process never heard about.
         if int((lobby["games_played"] if lobby is not None else 0) or 0) == 0:
-            locked_at = (await db.execute(text(
-                "SELECT MAX(matched_at) FROM ffa_queue WHERE series_id = :lid"
-            ), {"lid": lobby_id})).scalar()
+            # Savepoint (#235): "unknown, the client waits" is only true if the
+            # caller's transaction survives — the poll payload this feeds issues
+            # more statements after us.
+            async with db.begin_nested():
+                locked_at = (await db.execute(text(
+                    "SELECT MAX(matched_at) FROM ffa_queue WHERE series_id = :lid"
+                ), {"lid": lobby_id})).scalar()
             if locked_at is not None and locked_at > _PROCESS_STARTED_WALL:
                 return False
         return None
@@ -46671,8 +47033,16 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # stops being true.)
     try:
         if rated:
-            await db.flush()
             async with db.begin_nested():
+                # No explicit flush here, and deliberately so: entering
+                # begin_nested ALREADY flushes the session before it emits the
+                # SAVEPOINT (SQLAlchemy SessionTransaction._take_snapshot), so a
+                # flush written inside the block is dead code — the pending set
+                # has gone out to the database one statement earlier, in the
+                # OUTER transaction, where this savepoint cannot roll it back.
+                # An earlier revision of this block moved a flush() in here and
+                # claimed the move protected it; it does not, and that claim is
+                # exactly the kind a later reader would build on.
                 # Players who ACTUALLY PLAYED this game. `unrated` is the
                 # refutation-filtered absent set plus the early-leave graces (a
                 # signed non-zero tally has already refuted a false `absent` or
@@ -49024,98 +49394,146 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
     # completion, later than this block). Missing rating rows default 1500.
     _t2v2_ratings: dict = {}
     try:
-        _t2v2_rows = (await db.execute(text(
-            "SELECT player_id, rating FROM glicko_ratings_2v2 WHERE player_id IN (:a, :b, :c, :d)"
-        ), {"a": str(p_t1a.id), "b": str(p_t1b.id), "c": str(p_t2a.id), "d": str(p_t2b.id)})).all()
+        # begin_nested, not a bare try/except (#235): a caught statement error
+        # still leaves the TRANSACTION aborted — the XP/gold writes below would
+        # raise InFailedSQLTransaction and 500 the report. The SAVEPOINT is what
+        # makes the fallback real. The fallback itself is 1500, which
+        # _tier_mult_for maps to Intermediate x1.5 and NOT x1.0; that wrong
+        # sentence is what hid the 1v2-vs-2v2 economy gap for a release (#129).
+        async with db.begin_nested():
+            _t2v2_rows = (await db.execute(text(
+                "SELECT player_id, rating FROM glicko_ratings_2v2 WHERE player_id IN (:a, :b, :c, :d)"
+            ), {"a": str(p_t1a.id), "b": str(p_t1b.id), "c": str(p_t2a.id), "d": str(p_t2b.id)})).all()
         _t2v2_ratings = {str(r[0]): float(r[1]) for r in _t2v2_rows}
     except Exception as _rex:
-        print(f"[TEAM-ECON] 2v2 tier-mult rating fetch failed (defaulting x1.0): {_rex}")
+        print(f"[TEAM-ECON] 2v2 tier-mult rating fetch failed "
+              f"(defaulting to rating 1500 = Intermediate x1.5): {_rex}")
     _t1_avg_rating = (_t2v2_ratings.get(str(p_t1a.id), 1500.0) + _t2v2_ratings.get(str(p_t1b.id), 1500.0)) / 2.0
     _t2_avg_rating = (_t2v2_ratings.get(str(p_t2a.id), 1500.0) + _t2v2_ratings.get(str(p_t2b.id), 1500.0)) / 2.0
     try:
-        team_match_winner = report.winner_team
-        for p in (p_t1a, p_t1b, p_t2a, p_t2b):
-            p_team = 1 if p.id in (p_t1a.id, p_t1b.id) else 2
-            won_match = (p_team == team_match_winner)
-            _opp_mult, _ = _tier_mult_for(_t2_avg_rating if p_team == 1 else _t1_avg_rating)
-            xp = int(TEAM_MATCH_XP_BASE * _opp_mult)
-            if won_match:
-                xp = int(xp * TEAM_MATCH_WIN_MULT)
-            # Atomic delta + RETURNING pre/post (#148/#326 — the old
-            # SELECT-then-absolute-write silently erased any concurrent
-            # credit to the same player, e.g. an achievement grant or an FFA
-            # game landing in the gap, while that credit's ledger row stayed).
-            xp_row = (await db.execute(
-                text("UPDATE players SET total_xp = COALESCE(total_xp,0) + :delta, "
-                     "team_xp_earned = COALESCE(team_xp_earned,0) + :delta "
-                     "WHERE id = :pid "
-                     "RETURNING total_xp AS new_xp, total_xp - :delta AS old_xp"),
-                {"delta": xp, "pid": p.id},
-            )).mappings().first()
-            new_xp = int(xp_row["new_xp"] or 0)
-            old_xp = int(xp_row["old_xp"] or 0)
-            series_xp_by_pid[p.id] = series_xp_by_pid.get(p.id, 0) + xp
-            # Level rewards (v1.26.8): granted when crossing 5x level
-            # boundaries. 100g per band through 50, 500g per band 55-100.
-            old_lvl, _, _ = level_from_xp(old_xp)
-            new_lvl, _, _ = level_from_xp(new_xp)
-            if new_lvl > old_lvl:
-                lvl_reward = sum(level_reward_for(lv) for lv in range(old_lvl + 1, new_lvl + 1))
-                if lvl_reward > 0:
+        # SAVEPOINT (#235): a bare try/except does NOT make this block optional
+        # — under asyncpg a failed statement here leaves the TRANSACTION
+        # aborted, so the match write and everything after it dies too.
+        # begin_nested makes the block atomic: it degrades as a whole instead
+        # of poisoning the request (same discipline as the bet settlement
+        # below).
+        async with db.begin_nested():
+            team_match_winner = report.winner_team
+            for p in (p_t1a, p_t1b, p_t2a, p_t2b):
+                p_team = 1 if p.id in (p_t1a.id, p_t1b.id) else 2
+                won_match = (p_team == team_match_winner)
+                _opp_mult, _ = _tier_mult_for(_t2_avg_rating if p_team == 1 else _t1_avg_rating)
+                xp = int(TEAM_MATCH_XP_BASE * _opp_mult)
+                if won_match:
+                    xp = int(xp * TEAM_MATCH_WIN_MULT)
+                # Atomic delta + RETURNING pre/post (#148/#326 — the old
+                # SELECT-then-absolute-write silently erased any concurrent
+                # credit to the same player, e.g. an achievement grant or an FFA
+                # game landing in the gap, while that credit's ledger row stayed).
+                xp_row = (await db.execute(
+                    text("UPDATE players SET total_xp = COALESCE(total_xp,0) + :delta, "
+                         "team_xp_earned = COALESCE(team_xp_earned,0) + :delta "
+                         "WHERE id = :pid "
+                         "RETURNING total_xp AS new_xp, total_xp - :delta AS old_xp"),
+                    {"delta": xp, "pid": p.id},
+                )).mappings().first()
+                new_xp = int(xp_row["new_xp"] or 0)
+                old_xp = int(xp_row["old_xp"] or 0)
+                series_xp_by_pid[p.id] = series_xp_by_pid.get(p.id, 0) + xp
+                # Level rewards (v1.26.8): granted when crossing 5x level
+                # boundaries. 100g per band through 50, 500g per band 55-100.
+                old_lvl, _, _ = level_from_xp(old_xp)
+                new_lvl, _, _ = level_from_xp(new_xp)
+                if new_lvl > old_lvl:
+                    lvl_reward = sum(level_reward_for(lv) for lv in range(old_lvl + 1, new_lvl + 1))
+                    if lvl_reward > 0:
+                        await db.execute(
+                            text("UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g WHERE id = :pid"),
+                            {"g": lvl_reward, "pid": p.id},
+                        )
+                        db.add(GoldTransaction(
+                            player_id=p.id, amount=lvl_reward,
+                            reason="level_reward", reference_id=str(new_match.id),
+                        ))
+                # 100 XP = 1 gold conversion (mirrors submit_match logic).
+                gold_delta = (new_xp // 100) - (old_xp // 100)
+                if gold_delta > 0:
                     await db.execute(
-                        text("UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g WHERE id = :pid"),
-                        {"g": lvl_reward, "pid": p.id},
+                        text("UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g, "
+                             "team_gold_earned = COALESCE(team_gold_earned,0) + :g WHERE id = :pid"),
+                        {"g": gold_delta, "pid": p.id},
                     )
                     db.add(GoldTransaction(
-                        player_id=p.id, amount=lvl_reward,
-                        reason="level_reward", reference_id=str(new_match.id),
+                        player_id=p.id, amount=gold_delta,
+                        reason="team_xp", reference_id=str(new_match.id),
                     ))
-            # 100 XP = 1 gold conversion (mirrors submit_match logic).
-            gold_delta = (new_xp // 100) - (old_xp // 100)
-            if gold_delta > 0:
-                await db.execute(
-                    text("UPDATE players SET gold_earned = COALESCE(gold_earned,0) + :g, "
-                         "team_gold_earned = COALESCE(team_gold_earned,0) + :g WHERE id = :pid"),
-                    {"g": gold_delta, "pid": p.id},
-                )
-                db.add(GoldTransaction(
-                    player_id=p.id, amount=gold_delta,
-                    reason="team_xp", reference_id=str(new_match.id),
-                ))
-                series_gold_by_pid[p.id] = series_gold_by_pid.get(p.id, 0) + gold_delta
+                    series_gold_by_pid[p.id] = series_gold_by_pid.get(p.id, 0) + gold_delta
+
+            # The per-slot accumulators go in HERE, inside the same savepoint as
+            # the payments they describe, because they are the same unit of
+            # work. They used to be a second savepoint further down, and the two
+            # could then disagree in the direction the dict-clearing repair does
+            # not cover: the player UPDATEs commit, the accumulator UPDATE
+            # fails, its handler swallows — and `team_series.*_xp_earned`
+            # understates that game's XP and gold for ever, with the money
+            # already paid and nothing to reconcile it against (r1 finding).
+            # One boundary means the match's economy either happened and is
+            # recorded, or neither.
+            #
+            # LOCK ORDER is unchanged by the move, and the order is
+            # team_series THEN players: this request already took
+            # `SELECT * FROM team_series ... FOR UPDATE` near the top of the
+            # handler, well before the per-player `FOR NO KEY UPDATE` in the
+            # loop above. Both the old separate block and this one therefore
+            # write team_series while that same lock is already held — no new
+            # lock is acquired here at all. (Stated explicitly because the
+            # first version of this note had the order backwards, and a
+            # reversed lock-order comment is how sibling code learns to ABBA.)
+            _slot_pid = {
+                "t1a": series["t1a_id"], "t1b": series["t1b_id"],
+                "t2a": series["t2a_id"], "t2b": series["t2b_id"],
+            }
+            await db.execute(text(
+                "UPDATE team_series SET "
+                "t1a_xp_earned = COALESCE(t1a_xp_earned,0) + :t1a_xp, "
+                "t1b_xp_earned = COALESCE(t1b_xp_earned,0) + :t1b_xp, "
+                "t2a_xp_earned = COALESCE(t2a_xp_earned,0) + :t2a_xp, "
+                "t2b_xp_earned = COALESCE(t2b_xp_earned,0) + :t2b_xp, "
+                "t1a_gold_earned = COALESCE(t1a_gold_earned,0) + :t1a_g, "
+                "t1b_gold_earned = COALESCE(t1b_gold_earned,0) + :t1b_g, "
+                "t2a_gold_earned = COALESCE(t2a_gold_earned,0) + :t2a_g, "
+                "t2b_gold_earned = COALESCE(t2b_gold_earned,0) + :t2b_g "
+                "WHERE id = :sid"
+            ), {
+                "sid": series_uuid,
+                "t1a_xp": series_xp_by_pid.get(_slot_pid["t1a"], 0),
+                "t1b_xp": series_xp_by_pid.get(_slot_pid["t1b"], 0),
+                "t2a_xp": series_xp_by_pid.get(_slot_pid["t2a"], 0),
+                "t2b_xp": series_xp_by_pid.get(_slot_pid["t2b"], 0),
+                "t1a_g":  series_gold_by_pid.get(_slot_pid["t1a"], 0),
+                "t1b_g":  series_gold_by_pid.get(_slot_pid["t1b"], 0),
+                "t2a_g":  series_gold_by_pid.get(_slot_pid["t2a"], 0),
+                "t2b_g":  series_gold_by_pid.get(_slot_pid["t2b"], 0),
+            })
     except Exception as xpex:
+        # The savepoint above is all-or-nothing: on failure NO player's `players`
+        # UPDATE, no GoldTransaction row and no accumulator delta survived.
+        # These two dicts are plain Python and a SAVEPOINT cannot roll them
+        # back, so a partial loop leaves them claiming awards nobody received.
+        # Nothing downstream reads them now that the accumulator write lives
+        # inside the same savepoint, but they are cleared anyway: they are the
+        # in-memory record of "what this match paid", and leaving them stating
+        # payments that were rolled back is the same false claim one refactor
+        # away from being consumed again. (Before the savepoint the whole
+        # request 500'd here, which is why this state was previously
+        # unreachable.)
+        series_xp_by_pid.clear()
+        series_gold_by_pid.clear()
         print(f"[TEAM-ECON] per-match XP failed for match {new_match.id}: {xpex}")
 
-    # Roll the per-match awards into the team_series row's per-slot accumulators.
-    try:
-        slot_pid = {
-            "t1a": series["t1a_id"], "t1b": series["t1b_id"],
-            "t2a": series["t2a_id"], "t2b": series["t2b_id"],
-        }
-        await db.execute(text(
-            "UPDATE team_series SET "
-            "t1a_xp_earned = COALESCE(t1a_xp_earned,0) + :t1a_xp, "
-            "t1b_xp_earned = COALESCE(t1b_xp_earned,0) + :t1b_xp, "
-            "t2a_xp_earned = COALESCE(t2a_xp_earned,0) + :t2a_xp, "
-            "t2b_xp_earned = COALESCE(t2b_xp_earned,0) + :t2b_xp, "
-            "t1a_gold_earned = COALESCE(t1a_gold_earned,0) + :t1a_g, "
-            "t1b_gold_earned = COALESCE(t1b_gold_earned,0) + :t1b_g, "
-            "t2a_gold_earned = COALESCE(t2a_gold_earned,0) + :t2a_g, "
-            "t2b_gold_earned = COALESCE(t2b_gold_earned,0) + :t2b_g "
-            "WHERE id = :sid"
-        ), {
-            "sid": series_uuid,
-            "t1a_xp": series_xp_by_pid.get(slot_pid["t1a"], 0),
-            "t1b_xp": series_xp_by_pid.get(slot_pid["t1b"], 0),
-            "t2a_xp": series_xp_by_pid.get(slot_pid["t2a"], 0),
-            "t2b_xp": series_xp_by_pid.get(slot_pid["t2b"], 0),
-            "t1a_g":  series_gold_by_pid.get(slot_pid["t1a"], 0),
-            "t1b_g":  series_gold_by_pid.get(slot_pid["t1b"], 0),
-            "t2a_g":  series_gold_by_pid.get(slot_pid["t2a"], 0),
-            "t2b_g":  series_gold_by_pid.get(slot_pid["t2b"], 0),
-        })
-    except Exception as agex:
-        print(f"[TEAM-ECON] per-series accumulator update failed: {agex}")
+    # (The per-slot accumulators are rolled in above, inside the same savepoint
+    # as the payments they describe — see the note there for why they cannot be
+    # a separate block.)
 
     # Tag Team Sweep: 5-0 (round shutout) win in this individual 2v2 game.
     # Fires per-match — matches the canonical "sweep = 5-0 game" definition
@@ -50559,12 +50977,51 @@ async def _service_player_uuids(db: AsyncSession) -> "set[str]":
     now_mono = time.monotonic()
     if (_service_player_uuid_cache is None
             or now_mono - _service_uuid_cache_monotonic > 3600.0):
-        rows = (await db.execute(text("""
-            SELECT id::text FROM players
-             WHERE steam_id = ANY(CAST(:sids AS text[]))
-        """), {"sids": sorted(SPECTATE_BROADCAST_STEAM_IDS)})).scalars().all()
-        _service_player_uuid_cache = {str(r) for r in rows}
-        _service_uuid_cache_monotonic = now_mono
+        # SAVEPOINT the refresh. This is the one hour-marked moment when a
+        # ~90-call-site policy guard executes SQL, and several of those callers
+        # sit inside handlers that swallow — so an unguarded failure here left
+        # the TRANSACTION aborted and surfaced as an unrelated statement dying
+        # a long way downstream (r1 finding). Contained, the caller keeps a
+        # usable transaction whichever way THIS QUERY goes — but not if the
+        # transaction was already broken when we were called: `begin_nested()`
+        # flushes the session clean before emitting the SAVEPOINT, and a failure
+        # in that drain precedes the savepoint it would have to be rolled back
+        # by. The refusal below is not a repair for that case, only an honest
+        # answer to it (r3 finding).
+        try:
+            async with db.begin_nested():
+                rows = (await db.execute(text("""
+                    SELECT id::text FROM players
+                     WHERE steam_id = ANY(CAST(:sids AS text[]))
+                """), {"sids": sorted(SPECTATE_BROADCAST_STEAM_IDS)})).scalars().all()
+            _service_player_uuid_cache = {str(r) for r in rows}
+            # An EMPTY result is not a normal steady state — these accounts are
+            # a hand-edited constant whose players rows predate the policy — so
+            # it is cached only briefly. A UUID-only guard running before the
+            # service row exists would otherwise pin "there are none" for a
+            # full hour, and every UUID-only economy guard in that window would
+            # pass an account this check exists to refuse (r2 finding). Short
+            # TTL rather than no caching: it still collapses the poll-rate
+            # traffic this cache was added for.
+            _service_uuid_cache_monotonic = (
+                now_mono if _service_player_uuid_cache
+                else now_mono - 3540.0   # empty: re-ask in ~60s, not in an hour
+            )
+        except Exception as ex:
+            # FAILURE DIRECTION (#276). An empty set here does not mean "no
+            # service accounts" — it means "we could not look". Answering with
+            # one would silently switch a refusal guard off, so it is never the
+            # fallback. A previous fill is reused instead: staleness up to an
+            # hour is already this cache's accepted contract, and a refresh
+            # failure is not a reason to widen what gets allowed.
+            if _service_player_uuid_cache is None:
+                print(f"[SERVICE-POLICY] uuid cache could not be filled: {ex}")
+                raise HTTPException(
+                    status_code=503,
+                    detail="service_policy_unavailable",
+                )
+            print(f"[SERVICE-POLICY] uuid cache refresh failed, keeping the "
+                  f"previous set: {ex}")
     return _service_player_uuid_cache
 
 
@@ -51669,34 +52126,39 @@ async def _stream_series_score(db: AsyncSession, candidate: dict | None) -> str 
                 # "no tally" — falling through to the pair lookup rendered a
                 # DIFFERENT active series' score under the watched match's
                 # names. Only an UNRESOLVED reference may use the fallback.
-                row = (await db.execute(text("""
-                    SELECT rs.p1_series_wins AS w1, rs.p2_series_wins AS w2,
-                           p1.steam_id AS s1, rs.invalidated_at AS inv
-                      FROM ranked_series rs
-                      JOIN players p1 ON p1.id = rs.player1_id
-                      JOIN players p2 ON p2.id = rs.player2_id
-                     WHERE rs.id = :sid
-                        OR rs.id = (SELECT tm.series_id
-                                      FROM tournament_matches tm
-                                     WHERE tm.id = :sid)
-                     LIMIT 1
-                """), {"sid": src_uuid})).mappings().first()
+                # Savepoint (#235): a failed lookup must degrade to "no tally"
+                # here, not leave the transaction aborted — _stream_post_upkeep
+                # issues 7 more statements after this call.
+                async with db.begin_nested():
+                    row = (await db.execute(text("""
+                        SELECT rs.p1_series_wins AS w1, rs.p2_series_wins AS w2,
+                               p1.steam_id AS s1, rs.invalidated_at AS inv
+                          FROM ranked_series rs
+                          JOIN players p1 ON p1.id = rs.player1_id
+                          JOIN players p2 ON p2.id = rs.player2_id
+                         WHERE rs.id = :sid
+                            OR rs.id = (SELECT tm.series_id
+                                          FROM tournament_matches tm
+                                         WHERE tm.id = :sid)
+                         LIMIT 1
+                    """), {"sid": src_uuid})).mappings().first()
                 if row is not None and row["inv"] is not None:
                     return None
         if row is None:
-            row = (await db.execute(text("""
-                SELECT rs.p1_series_wins AS w1, rs.p2_series_wins AS w2,
-                       p1.steam_id AS s1
-                  FROM ranked_series rs
-                  JOIN players p1 ON p1.id = rs.player1_id
-                  JOIN players p2 ON p2.id = rs.player2_id
-                 WHERE rs.status = 'active' AND rs.invalidated_at IS NULL
-                   AND ((p1.steam_id = :a AND p2.steam_id = :b)
-                        OR (p1.steam_id = :b AND p2.steam_id = :a))
-                 ORDER BY GREATEST(rs.created_at,
-                                   COALESCE(rs.last_activity_at, rs.created_at)) DESC
-                 LIMIT 1
-            """), {"a": sids[0], "b": sids[1]})).mappings().first()
+            async with db.begin_nested():   # savepoint (#235), as above
+                row = (await db.execute(text("""
+                    SELECT rs.p1_series_wins AS w1, rs.p2_series_wins AS w2,
+                           p1.steam_id AS s1
+                      FROM ranked_series rs
+                      JOIN players p1 ON p1.id = rs.player1_id
+                      JOIN players p2 ON p2.id = rs.player2_id
+                     WHERE rs.status = 'active' AND rs.invalidated_at IS NULL
+                       AND ((p1.steam_id = :a AND p2.steam_id = :b)
+                            OR (p1.steam_id = :b AND p2.steam_id = :a))
+                     ORDER BY GREATEST(rs.created_at,
+                                       COALESCE(rs.last_activity_at, rs.created_at)) DESC
+                     LIMIT 1
+                """), {"a": sids[0], "b": sids[1]})).mappings().first()
         if row is None:
             return None
         w1, w2 = int(row["w1"] or 0), int(row["w2"] or 0)
