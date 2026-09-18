@@ -6421,12 +6421,43 @@ namespace CompetitiveRounds
         // text unconditionally — so opening the "Change view" / "Typing
         // channel" pickers, which register as ArtistPromptOpen modals and trip
         // the modal guard below, silently ate whatever the player had typed.
-        // The distinction is INTENT, not call site: Esc and a successful send
-        // end the message, so they discard; a close FORCED on us (a modal
-        // taking the keyboard, vanilla's Enter box, the liveness watchdog)
-        // stashes it and the next open resumes.
+        // The distinction is INTENT, not call site: a successful send ends the
+        // message, so it discards; a close FORCED on us (a modal taking the
+        // keyboard, vanilla's Enter box, the liveness watchdog) stashes it and
+        // the next open resumes. #382 moved ESCAPE from the first group to the
+        // second: a player pressing Esc to look something up had not finished
+        // their message either, and it is the consent-revoked path — not Esc —
+        // that still has to hard-discard.
         private static string chatDraftStash;
         private static float chatDraftStashAt = -999f;
+        /// <summary>Which typing channel the stashed draft was written for.
+        /// A draft belongs to an audience, so the resume is keyed on this and
+        /// not just on the TTL. Null means "stashed before a channel was
+        /// resolvable", which only matches another null.</summary>
+        private static string chatDraftStashChannel;
+        // NO IDENTITY FENCE LIVES HERE ANY MORE (r5 method change). Two generation
+        // counters used to guard this — one stamped on the stash, one on the open
+        // editor — each compared against ApiClient.IdentityEpoch at the moment the
+        // text was about to be used. Three findings landed inside that scheme in a
+        // single round: the close path stamped the NEW epoch onto A's text; the
+        // `/report` and `/mute` commands dispatch BEFORE the submit comparison, so
+        // a line composed as A filed a report under B; and an ordinary FIRST
+        // resolution of the local id (unknown -> A, nobody's account changed)
+        // advanced the epoch and discarded a legitimate draft.
+        //
+        // A comparison made where the text is USED has to be repeated at every such
+        // place and is only ever as good as the worst one — and one of them was
+        // three statements too late. The guarantee is now enforced where the text
+        // STOPS BELONGING TO ITS AUTHOR: an account change destroys the stash and
+        // the live box together (DropChatOnAccountChange below), so no later reader
+        // has to ask, and no future caller can forget to. A first resolution is not
+        // an account change and deliberately does not fire it —
+        // GameStateWatcher.NoteIdentityTransition already separates the two
+        // structurally, which is what makes this both cheaper and correct where the
+        // counter was not.
+        /// <summary>Window during which the box says a draft came back (#382).</summary>
+        private static float chatResumeNoticeUntil = -999f;
+        private static GUIStyle chatResumeStyle;
         // Ceiling on a resumed draft. The stash only ever bridges an
         // involuntary interruption — a picker round-trip, a yield to vanilla
         // chat — which is a seconds-scale detour, so 3 minutes is generous for
@@ -6437,14 +6468,72 @@ namespace CompetitiveRounds
         // that makes Time.time crawl (#221).
         private const float CHAT_DRAFT_STASH_TTL = 180f;
 
-        /// <summary>Returns a stashed draft to resume (one-shot — the stash is
-        /// consumed either way), or "" when there is none or it has expired.</summary>
+        /// <summary>Destroy any held chat draft. Called from the consent-revoke
+        /// path itself so the hard-discard does not depend on the chat loop
+        /// running a frame later — a revoke arriving while the draw path is
+        /// throwing would otherwise never reach the guard that drops it.</summary>
+        internal static void DropChatDraftOnRevoke() { DropStash(); }
+
+        /// <summary>The resolved account CHANGED — not merely resolved for the
+        /// first time. Everything the previous account composed is destroyed
+        /// outright: the stash AND whatever is sitting in the open box. That is
+        /// what makes "a line written as A can never leave as B" true without a
+        /// single reader checking for it.
+        ///
+        /// <para>Called from GameStateWatcher.NoteIdentityTransition's
+        /// account-change branch, which is the only place that can tell a switch
+        /// apart from a first resolution. Fencing this on the identity epoch
+        /// instead could not: the same counter advances for both.</para></summary>
+        internal static void DropChatOnAccountChange()
+        {
+            bool hadText = !string.IsNullOrEmpty(chatDraftStash)
+                        || !string.IsNullOrEmpty(chatInputText);
+            DropStash();
+            chatInputText = "";
+            chatResumeNoticeUntil = -999f;
+            if (hadText)
+            {
+                Plugin.Log.LogInfo("[CHAT] account changed — the held draft and the open line were discarded");
+                try { ShowNotification(I18n.Tr("Account changed — message not sent."),
+                                       Color.yellow, 4f); } catch { }
+            }
+        }
+
+        /// <summary>Forget the stash and everything that described it, in one place
+        /// so a future field cannot be added and then left behind by one of the
+        /// several paths that drop it. The TIMESTAMP is part of "everything that
+        /// described it" — leaving it set meant a dropped stash still carried the
+        /// age of the text that no longer existed (r5 finding).</summary>
+        private static void DropStash()
+        {
+            chatDraftStash = null;
+            chatDraftStashChannel = null;
+            chatDraftStashAt = -999f;
+        }
+
+        /// <summary>Returns a stashed draft to resume, or "" when there is none, it
+        /// has expired, or it belongs to a different channel.
+        ///
+        /// <para>Consumed on resume and on expiry — but NOT when the typing channel
+        /// has moved since it was stashed. A draft is written for an audience, and
+        /// resuming it into whatever channel happens to be selected now puts the
+        /// player one Enter away from sending it to the wrong room (r2 finding).
+        /// Holding it instead means switching back inside the TTL still gets it
+        /// back, and switching away simply lets it age out.</para></summary>
         private static string TakeStashedDraft()
         {
             string d = chatDraftStash;
-            chatDraftStash = null;
-            if (string.IsNullOrEmpty(d)) return "";
-            if (Time.unscaledTime - chatDraftStashAt > CHAT_DRAFT_STASH_TTL) return "";
+            if (string.IsNullOrEmpty(d)) { DropStash(); return ""; }
+            if (Time.unscaledTime - chatDraftStashAt > CHAT_DRAFT_STASH_TTL) { DropStash(); return ""; }
+            // DIFFERENT ACCOUNT -> destroy it. Unlike the channel case below this
+            // is never "hold it, they might come back": the identity edge means the
+            // person who wrote the line is gone, and handing their text to whoever
+            // signed in next is the one outcome this whole mechanism must not have.
+            string now = null;
+            try { now = ChatClient.SendChannel; } catch { }
+            if (!string.Equals(chatDraftStashChannel ?? "", now ?? "", StringComparison.Ordinal))
+                return "";                      // different audience: keep it, do not resume it here
+            DropStash();
             return d;
         }
 
@@ -6456,16 +6545,40 @@ namespace CompetitiveRounds
         /// it is.</summary>
         private static void CloseChatInput(bool discardDraft)
         {
-            if (discardDraft) chatDraftStash = null;
+            if (discardDraft)
+            {
+                // Discard the draft for THIS channel — not a stash being held back
+                // because the typing channel moved. That one is a different message
+                // for a different room; the player abandoning an empty box here has
+                // not abandoned it, and deleting it was undoing the hold-back the
+                // line above exists for (r3 finding). Only a POSITIVELY different
+                // channel earns the reprieve: if the current channel cannot be read
+                // we cannot tell them apart, and losing a draft beats resuming one
+                // into a room it was not written for.
+                string now = null;
+                try { now = ChatClient.SendChannel; } catch { }
+                bool belongsElsewhere = chatDraftStashChannel != null && now != null
+                    && !string.Equals(chatDraftStashChannel, now, StringComparison.Ordinal);
+                if (!belongsElsewhere) DropStash();
+            }
             // Only overwrite the stash when there is something to stash. The
             // modal and consent guards call this EVERY frame the modal is up,
             // and by the second call chatInputText is already "" — an
             // unconditional write there would erase the draft one frame after
             // saving it, which is the original bug with extra steps.
+            // Never stash without consent. The revoke path drops the stash, but it
+            // is not the only order events can arrive in: the epoch bump and the
+            // DataConsentGranted flip are separated by a dozen statements, and a
+            // watchdog close landing in that window wrote a NEW stash carrying the
+            // post-revoke epoch — one the fence would then happily accept (r4
+            // finding). A close during a revoke keeps nothing.
+            else if (!Plugin.DataConsentGranted) DropStash();
             else if (!string.IsNullOrEmpty(chatInputText) && chatInputText.Trim().Length > 0)
             {
                 chatDraftStash = chatInputText;
                 chatDraftStashAt = Time.unscaledTime;
+                chatDraftStashChannel = null;
+                try { chatDraftStashChannel = ChatClient.SendChannel; } catch { }
             }
             chatInputOpen = false;
             chatJustOpened = false;
@@ -6476,15 +6589,22 @@ namespace CompetitiveRounds
             chatAltHeld = false;
             chatAltTapClean = false;
             // Disarm the resume-caret window with the box — it is re-armed by
-            // the next open that actually resumes something.
+            // the next open that actually resumes something. Same for the
+            // "draft restored" notice: its deadline outlives the box by up to
+            // four seconds, so a submit-then-reopen inside that window would
+            // otherwise announce a restore over an empty field (r2 finding).
             chatCaretToEndUntil = -999f;
+            chatResumeNoticeUntil = -999f;
             SetGameplayInputLock(false);
         }
 
         // ── Chat input (IMGUI overlay) ───────────────────────────
         // Lives over the native F5 menu so we don't need TMP_InputField reflection
         // just for a one-line send box. Press T with the menu open to focus; Enter
-        // sends, Escape cancels.
+        // sends. Escape CLOSES WITHOUT SENDING AND KEEPS THE DRAFT (bug #382) --
+        // it used to discard, and this line went on saying "cancels" after the
+        // behaviour changed, one screen above the comment that calls that wording
+        // false (r4 finding).
         private static bool chatInputOpen = false;
         /// <summary>True while the in-game chat IMGUI text field has focus. Used to
         /// suppress raw-key input tracking (Immovable Object achievement) so typing
@@ -6538,6 +6658,23 @@ namespace CompetitiveRounds
             // idx == -1 (a stale/unknown value) lands on "global".
             ChatClient.SendChannel = ChatSendCycle[(idx + 1) % ChatSendCycle.Length];
             chatHeaderCache = null;
+            // The stash is resumed on OPEN, and the channel it is waiting for can
+            // be selected without ever closing the box — so a draft held back for
+            // "es" was unreachable by the only action that would recover it, and
+            // the next Enter then deleted it as this channel's own abandoned
+            // draft (r4 finding). Retry here, and only into an EMPTY field: the
+            // player cycling channels mid-message is composing, and their text is
+            // not something to overwrite.
+            if (chatInputOpen && chatInputText.Length == 0)
+            {
+                string resumed = TakeStashedDraft();
+                if (resumed.Length > 0)
+                {
+                    chatInputText = resumed;
+                    chatCaretToEndUntil = Time.unscaledTime + 1f;
+                    chatResumeNoticeUntil = Time.unscaledTime + 4f;
+                }
+            }
         }
 
         // Shift-tap state for the channel cycle (see the KeyUp handler in
@@ -6585,7 +6722,13 @@ namespace CompetitiveRounds
             // Discard: consent has been revoked, so chat is gone entirely —
             // there is no "next open" to resume into, and holding the player's
             // typed text after they opted out is the wrong default (F4).
-            if (!Plugin.DataConsentGranted) { CloseChatInput(discardDraft: true); return; }
+            // DropStash FIRST and unconditionally: consent revocation is the one
+            // discard that must not be negotiable. CloseChatInput's discard now
+            // spares a stash belonging to another typing channel (r3), and that
+            // reprieve has no business surviving an opt-out — the epoch fence in
+            // TakeStashedDraft would also catch it, but a rule this categorical
+            // should not rest on a second mechanism being correct.
+            if (!Plugin.DataConsentGranted) { DropStash(); CloseChatInput(discardDraft: true); return; }
             // Don't hijack T or M while a modal owns the screen. Two distinct
             // reasons, one guard: a modal with a text field needs 't'/'m' as
             // typed characters (lopi: typing "t" in Compare search opened chat),
@@ -6674,11 +6817,18 @@ namespace CompetitiveRounds
                     chatInputOpen = true;
                     chatJustOpened = true;
                     // F4: resume a draft an incidental close stashed (one-shot,
-                    // TTL-bounded). "" when there is nothing to resume, which
-                    // is the old behaviour.
+                    // TTL-bounded, and only into the channel it was written
+                    // for). "" when there is nothing to resume, which is the
+                    // old behaviour.
                     chatInputText = TakeStashedDraft();
                     if (chatInputText.Length > 0)
+                    {
                         chatCaretToEndUntil = Time.unscaledTime + 1f;
+                        // Longer than the caret window on purpose: that one is
+                        // disarmed the moment the editor is found, and this one
+                        // has to stay up long enough to be read (bug #382).
+                        chatResumeNoticeUntil = Time.unscaledTime + 4f;
+                    }
                     chatAltHeld = false;
                     chatAltTapClean = false;
                     // Belt-and-suspenders re-derive. Since F10 the memo's key
@@ -6871,8 +7021,11 @@ namespace CompetitiveRounds
                 || hdrLoc != chatHeaderLocale || hdrGen != chatHeaderGen)
             {
                 chatHeaderChan = hdrChan; chatHeaderLocale = hdrLoc; chatHeaderGen = hdrGen;
+                // "Esc to cancel" became a false statement when Esc started
+                // keeping the draft (bug #382) — the line has to say what the
+                // key now does, so this key changes with the behaviour.
                 chatHeaderCache = I18n.TrF(
-                    "Chat [{0}]  —  Enter to send, Esc to cancel, Alt switches channel",
+                    "Chat [{0}]  —  Enter to send, Esc keeps your draft, Alt switches channel",
                     ChannelDisplayLabel(hdrChan));
             }
             // Overflow clipping + no wrap on the header: it is a TRANSLATED
@@ -6886,6 +7039,31 @@ namespace CompetitiveRounds
                 chatHeaderStyle = new GUIStyle(GUI.skin.label)
                 { wordWrap = false, clipping = TextClipping.Overflow };
             GUI.Label(new Rect(x, headerY, w, ChatInHeaderH), chatHeaderCache, chatHeaderStyle);
+
+            // Bug #382, second half: a resumed draft used to come back in
+            // SILENCE. Entering a game already stashed correctly, but the box
+            // vanished and the text only reappeared if the player happened to
+            // press T again inside the TTL — which from their seat is
+            // indistinguishable from having been deleted. Say it out loud.
+            // Drawn separately rather than folded into chatHeaderCache on
+            // purpose: it is transient, and the header memo's key is supposed
+            // to cover everything that can change that line.
+            // Time AND a field that still holds the restored text. The deadline alone
+            // described a moment, not a state: select-all-delete inside the window
+            // left "draft restored" sitting over an empty box, saying the opposite of
+            // what the player had just done (r3 finding).
+            if (Time.unscaledTime < chatResumeNoticeUntil && chatInputText.Length > 0)
+            {
+                if (chatResumeStyle == null)
+                    chatResumeStyle = new GUIStyle(GUI.skin.label)
+                    {
+                        wordWrap = false,
+                        clipping = TextClipping.Overflow,
+                        alignment = TextAnchor.MiddleRight,
+                    };
+                GUI.Label(new Rect(x, headerY, w, ChatInHeaderH),
+                          I18n.Tr("draft restored"), chatResumeStyle);
+            }
 
             GUI.SetNextControlName("CRChat");
             chatInputText = GUI.TextField(new Rect(x, y, w, h), chatInputText ?? "", 480, chatStyle);
@@ -6948,6 +7126,11 @@ namespace CompetitiveRounds
                         // discarded with the close below, same as a normal send.
                         NativeUI.NotifyChatLockedAttempt();
                     }
+                    // No identity comparison here, deliberately. An account change
+                    // has already destroyed this text before it could reach any of
+                    // these branches — see DropChatOnAccountChange. A check placed
+                    // at this point sat BELOW the /mute and /report dispatches
+                    // above it and never covered them (r5 finding).
                     else
                     {
                         ChatClient.Send(GameStateWatcher.LocalSteamId,
@@ -6961,9 +7144,24 @@ namespace CompetitiveRounds
             }
             else if (cancel)
             {
-                // Esc IS the discard gesture — it must also drop any older
-                // stash, or a resumed-then-cancelled draft would come back.
-                CloseChatInput(discardDraft: true);
+                // Bug #382 — Esc KEEPS the draft. It used to be treated as the
+                // discard gesture, on the reasoning that Esc ends the message.
+                // The field refuted the premise: in ROUNDS Esc is the MENU
+                // gesture, so a player leaving a match presses it while the box
+                // is open and our overlay swallows it — and this was the one
+                // close path that destroyed the draft AND the stash, i.e. the
+                // exact path "leaving a game deletes what you were typing"
+                // travels. It is no different in kind from the modal and
+                // watchdog closes that already stash; the only thing that ever
+                // made it different was that assumption about intent (#351 —
+                // the guarantee a comment asserts is written from the one state
+                // its author had in mind).
+                //
+                // A deliberate discard is still one keystroke away: Esc, then
+                // do not press T again — the stash ages out on its own TTL and
+                // nothing was sent. What is no longer possible is losing a long
+                // message to a keypress aimed at the game menu.
+                CloseChatInput(discardDraft: false);
             }
         }
 

@@ -236,6 +236,14 @@ namespace CompetitiveRounds
         private static int localFreezeCount = 0;
         private static int localFreezeFocusedCount = 0;   // resumed WITH focus = window-drag signature
         private static float localFreezeTotalSec = 0f;
+        // Counters trip at 0.5s so the server-side local_freeze_* series stays
+        // comparable across builds; the LOG trips at 0.2s so the shorter hitch class
+        // players describe as "stuttery" is present in a bundle at all (#359). The
+        // log is capped — that report was already 27% diagnostic noise by line count.
+        private const float FREEZE_COUNT_SEC = 0.5f;
+        private const float FREEZE_LOG_SEC = 0.2f;
+        private const int FREEZE_LOG_CAP = 60;
+        private static int _freezeLogged = 0;
         private static readonly List<int> pingSamples = new List<int>();        // 3s cadence, aggregates reported
         private static int localRecvGapCount = 0;
         private static int localRecvGapMaxMs = 0;
@@ -1879,22 +1887,44 @@ namespace CompetitiveRounds
             if (!isTracking) { _lastTickStopwatchMs = -1; return; }
             float dt = Time.unscaledDeltaTime;
             // July 21 item 2 — freeze detection BEFORE the dt>1 skip (that skip
-            // used to discard exactly the evidence). unscaledDeltaTime carries
-            // the gap on the resume frame; the independent Stopwatch cross-checks
-            // any engine smoothing. Focused resume = window-drag signature.
+            // used to discard exactly the evidence). Focused resume = window-drag
+            // signature.
+            //
+            // THE MONOTONIC STOPWATCH IS THE SOLE TRIP SOURCE (report #359). The old
+            // condition was `gap = Math.Max(dt, wallGap)` with BOTH sources sampled
+            // every tick — and Math.Max is an OR, not the "cross-check" the previous
+            // wording here claimed. One stall therefore tripped TWICE: on the resume
+            // tick the Stopwatch carries the gap while unscaledDeltaTime has not caught
+            // up, then on the NEXT tick unscaledDeltaTime carries it while the wall is
+            // already normal. #359's bundle holds the twin verbatim —
+            //   gap=1.40 dt=0.01 wall=1.40 n=1
+            //   gap=1.40 dt=1.40 wall=0.01 n=2
+            // These counters ship to the server as local_freeze_count /
+            // local_freeze_focused_count / local_freeze_total_sec, so EVERY freeze
+            // figure this seat has ever reported was inflated about 2x, and anything
+            // concluded from that series needs re-checking before it is trusted.
+            // dt remains in the log line as an observation; it trips nothing.
             long nowMs = _tickStopwatch.ElapsedMilliseconds;
             if (_lastTickStopwatchMs >= 0)
             {
                 float wallGap = (nowMs - _lastTickStopwatchMs) / 1000f;
-                float gap = Math.Max(dt, wallGap);
-                if (gap > 0.5f && !inPickPhase)
+                if (wallGap > FREEZE_LOG_SEC && !inPickPhase)
                 {
-                    localFreezeCount++;
-                    localFreezeTotalSec += gap;
                     bool focused = false;
                     try { focused = Application.isFocused; } catch { }
-                    if (focused) localFreezeFocusedCount++;
-                    Plugin.Log.LogInfo($"[FREEZE-DIAG] gap={gap:F2}s dt={dt:F2} wall={wallGap:F2} focused={focused} n={localFreezeCount}");
+                    bool counted = wallGap > FREEZE_COUNT_SEC;
+                    if (counted)
+                    {
+                        localFreezeCount++;
+                        localFreezeTotalSec += wallGap;
+                        if (focused) localFreezeFocusedCount++;
+                    }
+                    if (_freezeLogged < FREEZE_LOG_CAP)
+                    {
+                        _freezeLogged++;
+                        Plugin.Log.LogInfo($"[FREEZE-DIAG] gap={wallGap:F2}s dt={dt:F2} focused={focused} counted={counted} n={localFreezeCount}"
+                            + (_freezeLogged == FREEZE_LOG_CAP ? " (log cap reached — counting continues)" : ""));
+                    }
                 }
             }
             _lastTickStopwatchMs = nowMs;
@@ -4344,6 +4374,14 @@ namespace CompetitiveRounds
                 try { PlayerCardsUI.OnIdentityChanged(); } catch { }
                 try { MusicEntitlements.OnIdentityChanged(); } catch { }
                 try { MusicRatings.OnIdentityChanged(); } catch { }
+                // Text the PREVIOUS account composed — the held draft and whatever
+                // is still in the open box — is destroyed here, at the transition,
+                // rather than being compared against a generation counter wherever
+                // it later gets used (r5). This branch is the only place in the
+                // client that can tell an account SWITCH from a first resolution,
+                // and the first-resolution branch below deliberately does not do
+                // this: resolving unknown -> A changes nobody's authorship.
+                try { CompetitiveUI.DropChatOnAccountChange(); } catch { }
                 _identityRefetchPending = true;
             }
             else if (!prevResolved && newResolved)
@@ -5849,7 +5887,12 @@ namespace CompetitiveRounds
                 try
                 {
                     string rn = PhotonNetwork.CurrentRoom?.Name ?? "(no room)";
-                    bool isTour = rn.StartsWith("sct-");
+                    // `sct-` is the SYNC tournament prefix only. ASYNC tournaments run
+                    // in player-hosted code rooms and never carry it, so this field read
+                    // False straight through a real Grand Final (report #358) — the one
+                    // mis-route the block comment above names as the reason this line
+                    // exists. Read the resolved context that routing itself uses.
+                    bool isTour = GameStateWatcher.IsTournamentMatch;
                     bool isRk = rn.StartsWith("ranked_");
                     Plugin.Log.LogInfo($"[REPORT-ROUTE] 1v1 path: room={rn} isRanked={matchIsRanked} tournament={isTour} ranked_queue={isRk} reporter={localSteamId} opponent={opponentSteamId}");
                 }

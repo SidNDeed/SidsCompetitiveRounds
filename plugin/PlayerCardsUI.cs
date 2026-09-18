@@ -2213,16 +2213,22 @@ namespace CompetitiveRounds
             return v < 0 ? I18n.Tr("Follow my character") : I18n.TrF("Preset {0}", v + 1);
         }
 
-        /// <summary>Follow → 1 → … → 10 → Follow. Local only (the picture itself is
-        /// what reaches the server), debounced by the renderer.</summary>
+        /// <summary>Follow → 1 → … → the last AUTHORABLE slot → Follow. Local only (the
+        /// picture itself is what reaches the server), debounced by the renderer.
+        ///
+        /// <para>The upper bound is <see cref="PortraitRender.PresetSlotCount"/>, not
+        /// <c>playerFaces.Length</c> (bug #370): the array holds ten entries but the
+        /// character creator only lets you fill the first eight, and the two that cannot
+        /// be filled used to be offered here and rendered an empty face.</para></summary>
         private static void CyclePreset()
         {
             try
             {
                 var cfg = Plugin.PortraitPreset;
                 if (cfg == null) return;
-                // -1 → 0 → … → 9 → -1
-                cfg.Value = ((Mathf.Clamp(cfg.Value, -1, 9) + 2) % 11) - 1;
+                // -1 → 0 → … → slots-1 → -1, over slots+1 states.
+                int slots = PortraitRender.PresetSlotCount();
+                cfg.Value = ((Mathf.Clamp(cfg.Value, -1, slots - 1) + 2) % (slots + 1)) - 1;
                 PortraitRender.RequestRefresh("preset");
                 NativeUI.MarkDirty();
             }

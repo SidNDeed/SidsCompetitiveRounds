@@ -4773,11 +4773,19 @@ namespace CompetitiveRounds
                 string note=lobby.is_member
                     ?"  "+I18n.Tr("<color=#777>(your lobby)</color>")
                     :lobby.already_bet?"  "+I18n.Tr("<color=#777>(bet placed)</color>"):"";
-                UIFactory.SetTextRaw(ui.txtHeader,I18n.TrF("Game {0} - {1} players",lobby.game_number,count)+note);
                 // Aug 7 item 13: WATCH — /ffa/bettable's lobby_id IS the
                 // spectate feed's ffa source_ref (both are ffa_lobbies.id).
-                var specG=FindSpectateGame("ffa",lobby.lobby_id);
-                bool canWatch=specG!=null&&!lobby.is_member&&!LocalInSpectateRoster(specG);
+                // includeUnavailable (bug #375, extended here by r3): a refused game
+                // used to come back null and take the WATCH away silently. Asking for
+                // it either way lets the header carry the reason instead; the added
+                // `specG.spectatable` is the condition the finder was applying for us,
+                // so canWatch is unchanged.
+                var specG=FindSpectateGame("ffa",lobby.lobby_id,includeUnavailable:true);
+                bool eligibleSeat=specG!=null&&!lobby.is_member&&!LocalInSpectateRoster(specG);
+                bool canWatch=eligibleSeat&&specG.spectatable;
+                if(eligibleSeat&&!specG.spectatable)
+                    note+="  <color=#777>"+FfaSafeRich(ApiClient.SpectateReasonShort(specG.disabled_reason))+"</color>";
+                UIFactory.SetTextRaw(ui.txtHeader,I18n.TrF("Game {0} - {1} players",lobby.game_number,count)+note);
                 ui.watchGameId=canWatch?specG.game_id:null;
                 if(ui.watchBtn!=null)ui.watchBtn.SetActive(canWatch);
                 while(ui.players.Count<playerRows)
@@ -5739,8 +5747,15 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Aug 7 item 13: fill the 1v2 live-games panel from
-        /// CachedSpectateGames (mode=="1v2"). Panel hides when nothing is
-        /// live-and-watchable; fighters never see their own game's button.</summary>
+        /// CachedSpectateGames (mode=="1v2"). Fighters never see their own game's
+        /// button.
+        ///
+        /// <para>The panel hides when nothing is LIVE — not when nothing is watchable.
+        /// Bug #375 made a refused game stay listed and carry its reason instead of
+        /// vanishing, so "live-and-watchable" stopped being this panel's condition;
+        /// the summary still said it was (r3 finding). Watchable rows are emitted
+        /// before refused ones so the shared row budget can never be spent on rows
+        /// that cannot be clicked.</para></summary>
         private static void RenderOvtLiveGames()
         {
             if (ovtLivePanel == null || ovtLiveRowsHost == null) return;
@@ -5748,22 +5763,40 @@ namespace CompetitiveRounds
             int shown = 0;
             if (games != null)
             {
-                foreach (var g in games)
+                // WATCHABLE FIRST, refused rows only with the space left over. Keeping a
+                // refused game listed (bug #375) must not cost the player the one game
+                // they can actually watch: in list order, ten newer unavailable games
+                // filled the cap and hid the single WATCH row behind them (r1 finding).
+                // Two passes over the same list, one shared cap.
+                for (int pass = 0; pass < 2 && shown < 10; pass++)
                 {
-                    if (g == null || g.mode != "1v2" || !g.spectatable) continue;
-                    if (shown >= 10) break;
-                    if (ovtLiveRows.Count <= shown) ovtLiveRows.Add(CreateTeamLiveRow(ovtLiveRowsHost.transform));
-                    var row = ovtLiveRows[shown];
-                    row.root.SetActive(true);
-                    // names is the server-composed display string; user-authored,
-                    // so sanitize before it reaches TMP rich text.
-                    UIFactory.SetTextRaw(row.txt,
-                        $"<color=#DDD>{FfaSafeRich(Trunc(g.names, 60))}</color>  "
-                        + $"<color=#888>({g.spectator_count}/{g.spectator_cap} {I18n.Tr("watching")})</color>");
-                    bool canWatch = !LocalInSpectateRoster(g);
-                    row.gameId = canWatch ? g.game_id : null;
-                    if (row.watchBtn != null) row.watchBtn.SetActive(canWatch);
-                    shown++;
+                    foreach (var g in games)
+                    {
+                        // Bug #375: a game the server currently refuses stays listed and
+                        // carries its reason, instead of vanishing with nothing said. This
+                        // row is pre-built, so the reason folds into its text line and the
+                        // WATCH button is simply not offered.
+                        if (g == null || g.mode != "1v2") continue;
+                        bool canWatch = g.spectatable && !LocalInSpectateRoster(g);
+                        if (canWatch != (pass == 0)) continue;
+                        if (shown >= 10) break;
+                        if (ovtLiveRows.Count <= shown) ovtLiveRows.Add(CreateTeamLiveRow(ovtLiveRowsHost.transform));
+                        var row = ovtLiveRows[shown];
+                        row.root.SetActive(true);
+                        // names is the server-composed display string; user-authored,
+                        // so sanitize before it reaches TMP rich text.
+                        string tail = g.spectatable
+                            ? $"<color=#888>({g.spectator_count}/{g.spectator_cap} {I18n.Tr("watching")})</color>"
+                            // Short form: this tail shares one truncated line with a
+                            // 60-char name, and its counterpart above is four words —
+                            // a sentence here is clipped before it says anything.
+                            : $"<color=#888>{FfaSafeRich(ApiClient.SpectateReasonShort(g.disabled_reason))}</color>";
+                        UIFactory.SetTextRaw(row.txt,
+                            $"<color=#DDD>{FfaSafeRich(Trunc(g.names, 60))}</color>  " + tail);
+                        row.gameId = canWatch ? g.game_id : null;
+                        if (row.watchBtn != null) row.watchBtn.SetActive(canWatch);
+                        shown++;
+                    }
                 }
             }
             for (int i = shown; i < ovtLiveRows.Count; i++)
@@ -9925,7 +9958,17 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // shapes between refreshes (#63 prefH rules).
             UIFactory.SetPrefH(row, 26f);
             for (int i = row.transform.childCount - 1; i >= 0; i--)
-                UnityEngine.Object.Destroy(row.transform.GetChild(i).gameObject);
+            {
+                // Destroy() is DEFERRED to the end of the frame; the SetActive(true)
+                // below is immediate. Between the two, last refresh's children are
+                // still alive under a live row — so a WATCH button for a game that has
+                // just stopped being watchable could still take a raw-polled click and
+                // send a grant for it (r1 finding). Deactivating first makes the row
+                // stale-click-proof now instead of whenever Unity collects it.
+                var child = row.transform.GetChild(i).gameObject;
+                child.SetActive(false);
+                UnityEngine.Object.Destroy(child);
+            }
             row.SetActive(true);
             return row;
         }
@@ -9940,11 +9983,23 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             var outList = new List<ApiClient.SpectateGameInfo>();
             var games = ApiClient.CachedSpectateGames;
             if (games == null) return outList;
-            foreach (var g in games)
+            // WATCHABLE FIRST. The caller trims this list from the TAIL to fit the
+            // shared 16-row budget, so list order decides what survives — and keeping
+            // refused games listed (bug #375) meant a run of unavailable ones could
+            // push every watchable game off the end (r1 finding). Two passes, so a row
+            // that can be clicked is never dropped in favour of one that cannot.
+            for (int pass = 0; pass < 2; pass++)
             {
-                if (g == null || !g.spectatable) continue;
-                if (g.mode != "ffa" && g.mode != "1v2") continue;
-                outList.Add(g);
+                foreach (var g in games)
+                {
+                    // Keep games the server currently refuses (bug #375) — the row renders
+                    // with its reason instead of a WATCH button rather than disappearing.
+                    if (g == null) continue;
+                    if (g.mode != "ffa" && g.mode != "1v2") continue;
+                    bool canWatch = g.spectatable && !LocalInSpectateRoster(g);
+                    if (canWatch != (pass == 0)) continue;
+                    outList.Add(g);
+                }
             }
             return outList;
         }
@@ -9965,11 +10020,29 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // would 409 on the commitment check anyway).
             if (!LocalInSpectateRoster(g))
             {
-                string gameId = g.game_id;   // #265: bind the ENTITY at fill time
-                UIFactory.CreateButton("watch", row.transform, I18n.Tr("WATCH"), 12f, Color.white,
-                    new Color(0.16f, 0.32f, 0.45f),
-                    () => ApiClient.RequestSpectateGrant(gameId),
-                    sizeDelta: new Vector2(64, 22));
+                if (!g.spectatable)
+                {
+                    // Bug #375: say why instead of hiding the game. SHORT form —
+                    // the cell is 190px and one line, which the sentence form does
+                    // not survive. No ellipsis: TMP appends U+2026 itself, so the
+                    // glyph never passes through UnicodeFallback and Gravity does
+                    // not carry it — the marker would render as a missing-glyph
+                    // box, which reads as corruption rather than as a clip. The
+                    // project default (Truncate) is the honest bound, and these
+                    // labels fit it with about twice the width to spare.
+                    var off = UIFactory.CreateText("sgoff", row.transform,
+                        ApiClient.SpectateReasonShort(g.disabled_reason), 11f, C_DIM,
+                        UIFactory.AlignMidLeft, sizeDelta: new Vector2(190, 22));
+                    UIFactory.SetWordWrap(off, false);
+                }
+                else
+                {
+                    string gameId = g.game_id;   // #265: bind the ENTITY at fill time
+                    UIFactory.CreateButton("watch", row.transform, I18n.Tr("WATCH"), 12f, Color.white,
+                        new Color(0.16f, 0.32f, 0.45f),
+                        () => ApiClient.RequestSpectateGrant(gameId),
+                        sizeDelta: new Vector2(64, 22));
+                }
             }
         }
 
@@ -10006,13 +10079,6 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             AddSpectateButton(row.transform, s.series_id, s.p1_steam_id, s.p2_steam_id);
         }
 
-        /// <summary>Append a WATCH button when the spectate registry lists a
-        /// spectatable game for this series. Matching is by server-derived
-        /// source_ref when present (2v2/1v2/ffa), else by roster containment
-        /// (1v1 rooms have no server-side series mapping — Codex r1 find 4
-        /// moved source_ref server-side). The game_id is captured at
-        /// row-build time (#265: bind to the entity the row RENDERS, never
-        /// re-index a mutable cache in the click handler).</summary>
         /// <summary>Aug 7 item 13: the eligibility matcher, extracted from
         /// AddSpectateButton so every mode tab can share it. Matches by
         /// source_ref first (2v2=team_series.id, 1v2=ovt_series.id,
@@ -10020,14 +10086,35 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         /// containment (1v1 code-rooms have empty source_ref). The optional
         /// mode filter keeps a 1v2 row from matching a 2v2 game that happens
         /// to share players.</summary>
+        /// <param name="includeUnavailable">When true, a matching game the server has
+        /// marked NOT spectatable is returned rather than skipped, so the caller can
+        /// show the row with its <c>disabled_reason</c> instead of deleting it (bug
+        /// #375). A WATCHABLE match still wins: the cache can hold two fresh rows for
+        /// one <c>source_ref</c>, and returning the first — refused — one where the
+        /// default would have walked past it to the watchable one silently took a
+        /// WATCH button away from a game that could be watched, which is the opposite
+        /// of what this flag is for (r4 finding). So the flag only ever ADDS an
+        /// answer where there was none; it never changes an existing one. Defaults to
+        /// false; no caller relies on that default any more — all three pass it
+        /// explicitly — but it stays the default so a new caller has to decide.</param>
         internal static ApiClient.SpectateGameInfo FindSpectateGame(string mode, string sourceRef,
-                                                                    string steamA = null, string steamB = null)
+                                                                    string steamA = null, string steamB = null,
+                                                                    bool includeUnavailable = false)
         {
+            // Two passes when unavailable games are in scope, so "watchable wins" is a
+            // property of the SEARCH and not of cache ordering. One pass when they are
+            // not, which is byte-for-byte the old walk.
+            if (includeUnavailable)
+            {
+                var watchable = FindSpectateGame(mode, sourceRef, steamA, steamB, false);
+                if (watchable != null) return watchable;
+            }
             var games = ApiClient.CachedSpectateGames;
             if (games == null) return null;
             foreach (var g in games)
             {
-                if (g == null || !g.spectatable) continue;
+                if (g == null) continue;
+                if (!g.spectatable && !includeUnavailable) continue;
                 if (!string.IsNullOrEmpty(mode) && g.mode != mode) continue;
                 if (!string.IsNullOrEmpty(sourceRef) && g.source_ref == sourceRef) return g;
                 if (!string.IsNullOrEmpty(steamA) && !string.IsNullOrEmpty(steamB)
@@ -10058,13 +10145,34 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             return false;
         }
 
+        /// <summary>Give this row its spectate affordance: a WATCH button when the
+        /// registry lists a watchable game for this series, and since bug #375 a short
+        /// REFUSAL LABEL when it lists one the server currently refuses --
+        /// the row is never simply dropped. Matching is by server-derived
+        /// source_ref when present (2v2/1v2/ffa), else by roster containment
+        /// (1v1 rooms have no server-side series mapping — Codex r1 find 4
+        /// moved source_ref server-side). The game_id is captured at
+        /// row-build time (#265: bind to the entity the row RENDERS, never
+        /// re-index a mutable cache in the click handler).</summary>
         private static void AddSpectateButton(Transform rowParent, string seriesId,
                                               string steamA = null, string steamB = null)
         {
             try
             {
-                var match = FindSpectateGame(null, seriesId, steamA, steamB);
+                // includeUnavailable (bug #375): a live series whose game the server
+                // currently refuses used to produce no button, no label and no log line —
+                // the player was told nothing at all and concluded the mod was broken.
+                // Show the row either way; only the affordance differs.
+                var match = FindSpectateGame(null, seriesId, steamA, steamB, includeUnavailable: true);
                 if (match == null) return;
+                if (!match.spectatable)
+                {
+                    var lbl = UIFactory.CreateText("watchoff", rowParent,
+                        ApiClient.SpectateReasonShort(match.disabled_reason), 11f, C_DIM,
+                        UIFactory.AlignMidLeft, sizeDelta: new Vector2(190, 22));
+                    UIFactory.SetWordWrap(lbl, false);
+                    return;
+                }
                 string gameId = match.game_id;   // capture the ENTITY, not the cache index
                 var btn = UIFactory.CreateButton("watch", rowParent,
                     I18n.Tr("WATCH"), 12f, Color.white, new Color(0.16f, 0.32f, 0.45f),
@@ -26938,12 +27046,23 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                     // fallback (mirrors ApplyTeamHeaderRow).
                     string lh1 = SafeStampTextHex(ts.t1_color_hex) ?? "#AAF";
                     string lh2 = SafeStampTextHex(ts.t2_color_hex) ?? "#FAA";
+                    // Bug #375 reaches this strip too (r3 finding): asking for
+                    // watchable-only games meant a REFUSED one came back null and lost
+                    // its WATCH with nothing in its place, which is the same silence the
+                    // #375 work removed from the other lists. Ask for it either way and
+                    // let the row say why. `g.spectatable` in canWatch preserves the old
+                    // condition exactly — the finder used to apply it on our behalf.
+                    var g = FindSpectateGame("2v2", ts.series_id, includeUnavailable: true);
+                    bool onRoster = g != null && LocalInSpectateRoster(g);
+                    bool canWatch = g != null && g.spectatable && !onRoster;
+                    string whyOff = (g != null && !g.spectatable && !onRoster)
+                        ? $"  <color=#888>{FfaSafeRich(ApiClient.SpectateReasonShort(g.disabled_reason))}</color>"
+                        : "";
                     UIFactory.SetTextRaw(row.txt,
                         $"<color={lh1}>{FfaSafeRich(Trunc(ts.t1a_name, 7))}({ts.t1a_rating})+{FfaSafeRich(Trunc(ts.t1b_name, 7))}({ts.t1b_rating})</color>"
                         + $"  <b>{ts.t1_wins}-{ts.t2_wins}</b>  "
-                        + $"<color={lh2}>{FfaSafeRich(Trunc(ts.t2a_name, 7))}({ts.t2a_rating})+{FfaSafeRich(Trunc(ts.t2b_name, 7))}({ts.t2b_rating})</color>");
-                    var g = FindSpectateGame("2v2", ts.series_id);
-                    bool canWatch = g != null && !LocalInSpectateRoster(g);
+                        + $"<color={lh2}>{FfaSafeRich(Trunc(ts.t2a_name, 7))}({ts.t2a_rating})+{FfaSafeRich(Trunc(ts.t2b_name, 7))}({ts.t2b_rating})</color>"
+                        + whyOff);
                     row.gameId = canWatch ? g.game_id : null;
                     if (row.watchBtn != null) row.watchBtn.SetActive(canWatch);
                 }

@@ -486,6 +486,7 @@
   "About this library",
   "Abyss",
   "Accept",
+  "Account changed — message not sent.",
   "Achievement Grid",
   "Achievement Unlocked: {0}!",
   "Achievement comparison",
@@ -749,7 +750,7 @@
   "Chat  <color=#888>(press T to chat)</color>",
   "Chat Lockdown...",
   "Chat Mutes...",
-  "Chat [{0}]  —  Enter to send, Esc to cancel, Alt switches channel",
+  "Chat [{0}]  —  Enter to send, Esc keeps your draft, Alt switches channel",
   "Chat fade after: <color=#88CCFF>{0}</color>",
   "Chat fade after: <color=#FF9966>Off (chat hidden in game)</color>",
   "Chat has been locked by moderators - messages are paused.",
@@ -1159,6 +1160,7 @@
   "Game",
   "Game ?",
   "Game Mechanics",
+  "Game ended",
   "Game over - {0} wins",
   "Game records (all players) - hover a row for the cards",
   "Game {0}",
@@ -1482,6 +1484,7 @@
   "Mint",
   "Mirrored chrome with a soft shifting tint.",
   "Mod display language. Machine-translated drafts until community moderators review them — card text in matches follows ROUNDS' own language setting.",
+  "Mode closed",
   "Mode: <color=#88CCFF>vanilla music</color>",
   "Mode: <color=#88FF88>custom music</color>",
   "Mode: <color=#DDDD66>loading custom music - vanilla plays meanwhile</color>",
@@ -1604,6 +1607,7 @@
   "Not found - it may have been deleted.",
   "Not great. Not terrible.",
   "Not in queue.",
+  "Not ready yet",
   "Nothing playing",
   "Nothing sent yet.",
   "Now Playing: {0} - {1}",
@@ -1747,6 +1751,7 @@
   "Player Cards are not open yet - no edition is running",
   "Player Cards need your Steam sign-in - try again in a moment",
   "Player Nemesis",
+  "Player opted out",
   "Player removed from the lobby.",
   "Player {0}",
   "Players",
@@ -2019,6 +2024,7 @@
   "Searing electric-green body color.",
   "Searing-lime neon name with a soft glow halo. Visible to everyone; modded players also see the glow.",
   "Seasonal Spring",
+  "Seats full",
   "Secure connection unavailable - signed-in features are disabled this session.",
   "Select 2-12 players (left) to see who beats each of them most.",
   "Select 2-12 players to find their common nemesis.",
@@ -2054,6 +2060,7 @@
   "Session",
   "Session Info",
   "Session Series: {0}",
+  "Session expired",
   "Session games",
   "Session games ({0})",
   "Session report",
@@ -2180,6 +2187,7 @@
   "Steam ID not ready yet — try again in a few seconds",
   "Steam identity is not available yet",
   "Steam identity not ready yet",
+  "Steam session expired — try again in a moment.",
   "Steam session not accepted — queue polling stopped; the server will clear your seat shortly. Try again in a moment.",
   "Steam sign-in is required to view session reports",
   "Steam sign-in still pending - try again in a moment.",
@@ -2270,6 +2278,8 @@
   "That amounts to all my current understanding of Conditional damage. My model of what is going on behind the scenes is entirely a construction (I have not seen the source code), but it correctly predicts all currently tested behaviour, and I have been thorough. Still, there are limits: I do not know whether the RefreshValid bool is held by the attacker or the target - that is, whether every player has a cap on the Refreshes they can trigger for themselves, or every target has a cap on the Refreshes they can trigger for others. In a 1v1 this makes no difference, but in an FFA it would. If only there was a free-to-play type gamemode I could use to test this feature out!\n\n<color=#FFD94D><b>CONCLUSION</b></color>\n\nNow, as beautifully complex as this system is, I do have to ask how on earth the developers thought it would be a good idea. What is it supposed to be balancing? Why does the amount of damage dictate Refreshes? How was anyone supposed to know any of this? Questions only the warped mind who dreamt up this system can answer.\n\nI do appreciate the subtleties of the system, but from a gameplay perspective it is abominable. No real human is going to accurately calculate their RefreshValid state in the middle of a fight - that is, if you ever actually get a build where this information matters. The chances that my findings here will affect your next 30 matches range from low to non-existent. At the end of the day, the player experience this system produces is one of confusion, frustration, and randomness. Yet, all of that said, I would not want it changed. Why? Because if it was, the last week of my life would have been wasted.\n\nThank you for reading my ramblings. I hope you will at least find the table useful.\n\n<color=#8A8A93>Related reading: <color=#7FD4FF>Blocking</color> covers what a block actually does and which cards ride it; <color=#7FD4FF>Poison & damage over time</color> covers how tick damage lands and syncs.</color>",
   "That card is no longer in your collection",
   "That game is no longer live.",
+  "That game is not ready to watch yet.",
+  "That mode is not accepting spectators right now.",
   "That pack is not available any more",
   "That pack is still opening - hold on",
   "That pack purchase never went through - nothing was charged",
@@ -2416,6 +2426,7 @@
   "UNCOMMON",
   "UNCOMMON\u0004pc.band.uncommon",
   "Umber",
+  "Unavailable",
   "Unavailable until the game restarts",
   "Unban",
   "Unblock",
@@ -2452,8 +2463,10 @@
   "Update failed — couldn't start the updater. Update manually from GitHub.",
   "Update failed — that release has no download attached. Update manually from GitHub.",
   "Update failed — the download didn't finish. Try again.",
+  "Update required",
   "Update the mod first",
   "Update the mod to use mail.",
+  "Update the mod to watch this game.",
   "Updates",
   "Upload a Cosmetic...",
   "Usage: /report [name] [reason]",
@@ -2587,6 +2600,7 @@
   "You don't own any dances yet - check the Shop's DANCES section!",
   "You should join Competitive Rounds, it's a discord community",
   "You show up.",
+  "You're in a game",
   "You're in a live {0} game — finish or leave it first.",
   "YouTube",
   "Your 2v2 lobby is starting — Ready Up in the 2v2 tab (F5)!",
@@ -2663,6 +2677,7 @@
   "dmg",
   "dmg/s",
   "does not trigger",
+  "draft restored",
   "duo",
   "duo: the whole right half",
   "earn gold by playing",
@@ -5112,7 +5127,7 @@
   },
   "A player in this game has spectating disabled.": {
    "surface": "ApiClient",
-   "location": "RequestSpectateGrantCore",
+   "location": "SpectateReason",
    "kind": "Tr"
   },
   "A player's mod is too old for these settings - they need to update, or turn the setting off.": {
@@ -5305,6 +5320,11 @@
    "location": "BuildAdminQuarantineRow",
    "kind": "CreateButton"
   },
+  "Account changed — message not sent.": {
+   "surface": "CompetitiveUI",
+   "location": "DropChatOnAccountChange",
+   "kind": "Tr"
+  },
   "Achievement Grid": {
    "surface": "NativeUI",
    "location": "TrMetric",
@@ -5487,7 +5507,7 @@
   },
   "All spectator seats are taken.": {
    "surface": "ApiClient",
-   "location": "RequestSpectateGrantCore",
+   "location": "SpectateReason",
    "kind": "Tr"
   },
   "All-time: {0} games ({1}W-{2}L), series {3}-{4}": {
@@ -6620,7 +6640,7 @@
    "location": "BuildAdminTab",
    "kind": "CreateButton"
   },
-  "Chat [{0}]  —  Enter to send, Esc to cancel, Alt switches channel": {
+  "Chat [{0}]  —  Enter to send, Esc keeps your draft, Alt switches channel": {
    "surface": "CompetitiveUI",
    "location": "DrawChatInput",
    "kind": "TrF"
@@ -7107,7 +7127,7 @@
   },
   "Could not spectate this game.": {
    "surface": "ApiClient",
-   "location": "RequestSpectateGrantCore",
+   "location": "SpectateReason",
    "kind": "Tr"
   },
   "Couldn't change Appear offline - try again": {
@@ -8670,6 +8690,11 @@
    "location": "(file scope)",
    "kind": "Tr"
   },
+  "Game ended": {
+   "surface": "ApiClient",
+   "location": "SpectateReason",
+   "kind": "Tr"
+  },
   "Game over - {0} wins": {
    "surface": "SpectatorSync",
    "location": "PlayPointSequence",
@@ -9742,7 +9767,7 @@
   },
   "Leave your current game first.": {
    "surface": "ApiClient",
-   "location": "RequestSpectateGrantCore",
+   "location": "SpectateReason",
    "kind": "Tr"
   },
   "Leave your custom 1v2 lobby first.": {
@@ -10284,6 +10309,11 @@
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
    "kind": "SettingsToggle"
+  },
+  "Mode closed": {
+   "surface": "ApiClient",
+   "location": "SpectateReason",
+   "kind": "Tr"
   },
   "Mode: <color=#88CCFF>vanilla music</color>": {
    "surface": "NativeUI",
@@ -10894,6 +10924,11 @@
    "surface": "NativeUI",
    "location": "BuildOneVTwoTab, RefreshOneVTwoTab",
    "kind": "CreateText, Tr"
+  },
+  "Not ready yet": {
+   "surface": "ApiClient",
+   "location": "SpectateReason",
+   "kind": "Tr"
   },
   "Nothing playing": {
    "surface": "NativeUI",
@@ -11608,6 +11643,11 @@
   "Player Nemesis": {
    "surface": "NativeUI",
    "location": "TrMetric",
+   "kind": "Tr"
+  },
+  "Player opted out": {
+   "surface": "ApiClient",
+   "location": "SpectateReason",
    "kind": "Tr"
   },
   "Player removed from the lobby.": {
@@ -12970,6 +13010,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Seats full": {
+   "surface": "ApiClient",
+   "location": "SpectateReason",
+   "kind": "Tr"
+  },
   "Secure connection unavailable - signed-in features are disabled this session.": {
    "surface": "ApiClient",
    "location": "PostSteamAuth",
@@ -13144,6 +13189,11 @@
    "surface": "SpectatorHud",
    "location": "ComposeBarLine",
    "kind": "TrF"
+  },
+  "Session expired": {
+   "surface": "ApiClient",
+   "location": "SpectateReason",
+   "kind": "Tr"
   },
   "Session games": {
    "surface": "PostSessionReport",
@@ -13775,6 +13825,11 @@
    "location": "Refresh",
    "kind": "Tr"
   },
+  "Steam session expired — try again in a moment.": {
+   "surface": "ApiClient",
+   "location": "SpectateReason",
+   "kind": "Tr"
+  },
   "Steam session not accepted — queue polling stopped; the server will clear your seat shortly. Try again in a moment.": {
    "surface": "ApiClient",
    "location": "UpdateQueuePoll",
@@ -14222,7 +14277,17 @@
   },
   "That game is no longer live.": {
    "surface": "ApiClient",
-   "location": "RequestSpectateGrantCore",
+   "location": "SpectateReason",
+   "kind": "Tr"
+  },
+  "That game is not ready to watch yet.": {
+   "surface": "ApiClient",
+   "location": "SpectateReason",
+   "kind": "Tr"
+  },
+  "That mode is not accepting spectators right now.": {
+   "surface": "ApiClient",
+   "location": "SpectateReason",
    "kind": "Tr"
   },
   "That pack is not available any more": {
@@ -14955,6 +15020,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Unavailable": {
+   "surface": "ApiClient",
+   "location": "SpectateReason",
+   "kind": "Tr"
+  },
   "Unavailable until the game restarts": {
    "surface": "MusicEngine",
    "location": "MusicStatusLine",
@@ -15135,6 +15205,11 @@
    "location": "DoAutoUpdate",
    "kind": "ShowNotification"
   },
+  "Update required": {
+   "surface": "ApiClient",
+   "location": "SpectateReason",
+   "kind": "Tr"
+  },
   "Update the mod first": {
    "surface": "PlayerCardsUI",
    "location": "ReasonText",
@@ -15143,6 +15218,11 @@
   "Update the mod to use mail.": {
    "surface": "MailClient",
    "location": "ErrorDetail",
+   "kind": "Tr"
+  },
+  "Update the mod to watch this game.": {
+   "surface": "ApiClient",
+   "location": "SpectateReason",
    "kind": "Tr"
   },
   "Updates": {
@@ -15810,6 +15890,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "You're in a game": {
+   "surface": "ApiClient",
+   "location": "SpectateReason",
+   "kind": "Tr"
+  },
   "You're in a live {0} game — finish or leave it first.": {
    "surface": "ApiClient",
    "location": "ActionPreflight",
@@ -16188,6 +16273,11 @@
   "does not trigger": {
    "surface": "InfoViz",
    "location": "BuildDamageMatrix",
+   "kind": "Tr"
+  },
+  "draft restored": {
+   "surface": "CompetitiveUI",
+   "location": "DrawChatInput",
    "kind": "Tr"
   },
   "duo": {

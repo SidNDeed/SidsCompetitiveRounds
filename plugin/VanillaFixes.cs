@@ -211,6 +211,295 @@ namespace CompetitiveRounds
         }
     }
 
+    /// <summary>Bug #380 — "killing with saw leaves particles behind. Corpses activate
+    /// it in FFA. Same with abyssal saw."
+    ///
+    /// <para>Both halves are one vanilla defect, in <c>Saw.Update</c>'s target loop
+    /// (decompile <c>Saw.cs:29-36</c>): it walks <c>PlayerManager.instance.players</c>,
+    /// accepts any entry that is not the owner and is in range, and assigns without a
+    /// break — so the LAST in-list match wins — and it never checks <c>data.dead</c>.
+    /// A corpse is still in the list, still has a transform, and is still in range, so
+    /// it takes the target slot. <c>HealthHandler.TakeDamage</c> has its own
+    /// <c>!data.dead</c> guard, so the corpse takes nothing; but the saw has already
+    /// committed to it, which means (a) the particle systems are re-<c>Play()</c>ed
+    /// every frame and the <c>Stop()</c> branch at <c>Saw.cs:75-81</c> is unreachable —
+    /// the "particles left behind" — and (b) a LIVE enemy in the same radius is
+    /// skipped whenever the corpse sorts later, which is the saw appearing to be
+    /// "activated by corpses" while doing nothing.</para>
+    ///
+    /// <para>Shape: a POSTFIX that never cancels. Vanilla's <c>Update</c> runs to
+    /// completion exactly as stock on every frame; afterwards, if the target it chose was
+    /// a corpse, the particle systems are stopped. Nothing else is touched.</para>
+    ///
+    /// <para>It began as a cancelling prefix, and the reason it is not one any more is
+    /// worth keeping: vanilla's target branch ends in
+    /// <c>GameFeel((normalized + Random.onUnitSphere)...)</c> (decompile
+    /// <c>Saw.cs:72</c>), and it reaches that line for a CORPSE too —
+    /// <c>TakeDamage</c>'s own <c>!data.dead</c> guard discards the damage, but the
+    /// method runs on. <c>Random.onUnitSphere</c> draws from the shared
+    /// <c>UnityEngine.Random</c> stream, so a seat that skipped the branch skipped a
+    /// draw, and from that frame on its stream is one step out of phase with every
+    /// unpatched seat's — which later surfaces as different gun spread, i.e. a genuinely
+    /// different projectile that every seat can see (r2 HIGH). Suppressing a branch is
+    /// never free when the branch touches global RNG. Letting vanilla run and correcting
+    /// only the PRESENTATION afterwards is the version with nothing left to diverge:
+    /// damage, force, screen shake, spark and the RNG stream are all stock, and particle
+    /// playback is local.</para>
+    ///
+    /// <para>DELIBERATE DEVIATION, and it is half of the defect above. Correcting (b) —
+    /// letting the saw fall through to a LIVE enemy the corpse was masking — was
+    /// implemented, reviewed and then withdrawn: it makes a patched seat deal damage
+    /// that an unpatched peer in the same room never deals, so the two seats' health
+    /// totals diverge permanently and can hand them different round winners. Saws are
+    /// spawned per seat by a plain local <c>Instantiate</c> (<c>Block.Spawn</c>), so
+    /// there is no owner to arbitrate. Making it safe needs a whole-room capability
+    /// quorum on a replicated prop, the <c>GrowNormalize</c> pattern below, which is a
+    /// mechanics change rather than a defect fix — Sid's call, not this patch's. Until
+    /// then a live enemy sharing a radius with a corpse is skipped exactly as vanilla
+    /// skips it. The reported symptoms (particles left behind, a saw "activated" by a
+    /// corpse) are entirely (a), and (a) is fixed here.</para>
+    ///
+    /// <para>Among LIVE candidates the vanilla "last in list wins" order is likewise
+    /// preserved rather than switched to nearest-first — also mechanics, also Sid's.</para></summary>
+    [HarmonyPatch(typeof(Saw), "Update")]
+    internal static class SawDeadTargetPatch
+    {
+        /// <summary>A target this patch is willing to act on: present, with data, and
+        /// dead. Anything else — including a destroyed entry or a null <c>data</c> —
+        /// answers false, which sends the frame to stock vanilla.</summary>
+        private static bool IsCorpse(Player p) => p != null && p.data != null && p.data.dead;
+
+        /// <summary>Vanilla's own loop, with NO added guards. <paramref name="faithful"/>
+        /// comes back false the moment the list holds an entry vanilla would dereference
+        /// and this replica would have to invent behaviour for — a destroyed player.
+        /// Deferring there is the point: stock vanilla throwing is stock vanilla's
+        /// business, and a replica that quietly skips what the original trips over is
+        /// not a replica (r1 finding — the two selectors disagreed on exactly this).</summary>
+        private static Player Select(Saw saw, out bool faithful)
+        {
+            faithful = true;
+            Player chosen = null;
+            var players = PlayerManager.instance.players;
+            for (int i = 0; i < players.Count; i++)
+            {
+                Player p = players[i];
+                if (p == null) { faithful = false; return null; }
+                if (p == saw.owner) continue;
+                if (Vector3.Distance(p.transform.position, saw.transform.transform.position) < saw.range * saw.transform.localScale.x)
+                {
+                    chosen = p;
+                }
+            }
+            return chosen;
+        }
+
+        [HarmonyPostfix]
+        private static void AfterUpdate(Saw __instance)
+        {
+            try
+            {
+                if (__instance == null || PlayerManager.instance == null
+                    || PlayerManager.instance.players == null || __instance.parts == null) return;
+
+                bool faithful;
+                Player vanillaTarget = Select(__instance, out faithful);
+                if (!faithful) return;                     // vanilla's own edge case, vanilla's to handle
+                if (!IsCorpse(vanillaTarget)) return;      // no corpse holding the slot — nothing to correct
+
+                VanillaFixSupport.DiagLimited(
+                    "SawDeadTarget",
+                    "Saw held a dead target (" +
+                    vanillaTarget.PlayerID.ToString(CultureInfo.InvariantCulture) +
+                    ") — stopping the particles vanilla re-Play()s at it every frame " +
+                    "(bug 380)",
+                    20);
+
+                // Vanilla's OWN idle branch (decompile Saw.cs:75-81), applied after the
+                // fact to the one case that could never reach it. Particle playback is
+                // local presentation: no damage, no force, no RNG, nothing another seat
+                // can observe. Re-running Select here is a pure read of positions that
+                // Update did not move, so it picks what vanilla just picked.
+                for (int k = 0; k < __instance.parts.Length; k++)
+                {
+                    if (__instance.parts[k] != null && __instance.parts[k].isPlaying)
+                    {
+                        __instance.parts[k].Stop();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // Nothing to fail open TO: vanilla has already run in full.
+                VanillaFixSupport.LogError("SawDeadTarget", ex);
+            }
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("SawDeadTarget", exception);
+        }
+    }
+
+    /// <summary>Bug #369 — Lifestealer's drawn ring is wider than the radius that
+    /// actually steals health, so the card reads as "the effect radius is decently
+    /// smaller" than the indicator promises.
+    ///
+    /// <para>A_Lifestealer carries two independently-authored numbers. The EFFECT is
+    /// <c>PlayerInRangeTrigger</c>, which fires at
+    /// <c>Distance &lt; range * transform.root.localScale.x</c> with a shipped
+    /// <c>range</c> of 4.0. The INDICATOR is a child <c>LineEffect</c> ring drawn at
+    /// <c>radius * transform.root.localScale.x * radiusOverTime.Evaluate(counter)</c>
+    /// with a shipped <c>radius</c> of 5.0 and a flat curve. Both scale by the same
+    /// player-root factor, so the ring is 25% wide at every player size — a fixed
+    /// ratio, which is why it reads as a scaling fault rather than a constant offset.</para>
+    ///
+    /// <para>Mirror the trigger's range into the ring rather than writing 4f: a
+    /// hardcoded constant is a check that cannot fail (#342/#431) and rots the next
+    /// time the card is retuned. Derived this way the patch is a no-op on
+    /// A_ChillingPresence, whose two numbers already agree (4.5 == 4.5) — the built-in
+    /// regression control.</para>
+    ///
+    /// <para>Postfix on <c>Start</c>, not <c>Awake</c>: vanilla's own <c>Start</c>
+    /// applies <c>range *= transform.localScale.x</c> when <c>scaleWithRange</c> is
+    /// set, so this is the first point at which <c>range</c> is final. Only permanent
+    /// looping indicator rings with a flat radius curve are touched — an animated ring
+    /// is an effect, not a range promise, and overwriting its radius would rescale the
+    /// animation — and only when the trigger is the ring's nearest such ancestor AND
+    /// is the only candidate under it, so a nested trigger's ring and an ambiguous pair
+    /// both keep their authored radius. Ungated (#151) and local-only: a LineRenderer is drawn per seat and
+    /// nothing here is networked, so an unpatched peer simply keeps the wide ring.</para></summary>
+    [HarmonyPatch(typeof(PlayerInRangeTrigger), "Start")]
+    internal static class InRangeIndicatorRadiusPatch
+    {
+        /// <summary>True when the curve is constant 1 EVERYWHERE, decided from the
+        /// keyframes rather than from samples. Sampling at 0/0.5/1 proved nothing: a
+        /// curve that is 1 at exactly those three points and pulses at 0.25/0.75 passed
+        /// and had its authored animation overwritten (r1 finding). Every key sitting at
+        /// value 1 with both tangents flat is constant between every adjacent pair, so
+        /// this cannot be fooled by a bulge between samples.</summary>
+        private static bool FlatCurve(AnimationCurve c)
+        {
+            // NO keys is not "constant 1" — Unity evaluates a keyless curve as ZERO,
+            // and a null one cannot be evaluated at all. Both used to answer true and
+            // so admitted the ring to the rewrite (r3 finding). Neither says the ring
+            // draws a constant multiple of its radius, and a curve that is keyless
+            // right now may be filled in later by whatever builds it, so the honest
+            // answer is "cannot prove flat" — which leaves the authored radius alone.
+            // That is the direction every other refusal in this patch takes, and it
+            // does not cost the fix this patch exists for: A_Lifestealer ships a
+            // real keyed curve.
+            if (c == null) return false;
+            var keys = c.keys;
+            if (keys == null || keys.Length == 0) return false;
+            for (int i = 0; i < keys.Length; i++)
+            {
+                if (!Mathf.Approximately(keys[i].value, 1f)) return false;
+                if (!Mathf.Approximately(keys[i].inTangent, 0f)) return false;
+                if (!Mathf.Approximately(keys[i].outTangent, 0f)) return false;
+            }
+            return true;
+        }
+
+        /// <summary>True when <paramref name="ring"/>'s NEAREST PlayerInRangeTrigger
+        /// ancestor — searching the ring's own object first, then upward — is
+        /// <paramref name="trigger"/> and nothing else.
+        ///
+        /// <para>GetComponentsInChildren walks the whole subtree, so ownership of the
+        /// trigger says nothing about ownership of a ring several levels down: a
+        /// second PlayerInRangeTrigger nested underneath draws ITS range, and this
+        /// postfix would have rewritten that ring with the OUTER range (r2 finding).
+        /// Nearest-ancestor is the same association vanilla itself uses to decide
+        /// which trigger a subtree belongs to. Two triggers on one object is
+        /// unanswerable rather than ours, so it reads as not-ours.</para></summary>
+        private static bool OwnsRing(PlayerInRangeTrigger trigger, Transform ring)
+        {
+            Transform stop = trigger.transform;
+            Transform t = ring;
+            for (int guard = 0; t != null && guard < 64; guard++)
+            {
+                var owners = t.GetComponents<PlayerInRangeTrigger>();
+                if (owners != null && owners.Length > 0)
+                    return owners.Length == 1 && ReferenceEquals(owners[0], trigger);
+                if (ReferenceEquals(t, stop)) return false;
+                t = t.parent;
+            }
+            return false;
+        }
+
+        [HarmonyPostfix]
+        private static void AfterStart(PlayerInRangeTrigger __instance)
+        {
+            try
+            {
+                if (__instance == null || __instance.range <= 0f) return;
+
+                // SEMANTIC ASSOCIATION, taken from vanilla rather than invented (r1
+                // finding: this postfix would retune ANY permanent flat ring under ANY
+                // PlayerInRangeTrigger, including a decorative one belonging to some
+                // other mod). PlayerInRangeTrigger.Start resolves what the trigger
+                // belongs to — the root's Player, else the root's SpawnedAttack.spawner
+                // — and NREs when it is neither. This postfix runs after Start, so a
+                // resolved owner is vanilla's own statement that this really is a
+                // player's range indicator and its ring really is drawing that range.
+                if (__instance.ownPlayer == null) return;
+
+                var rings = __instance.GetComponentsInChildren<LineEffect>(true);
+                if (rings == null) return;
+
+                // Collect first, decide after. "Every qualifying ring is this
+                // trigger's range promise" is an assumption, not a reading: a card
+                // free to carry two permanent flat rings gives no way to say which
+                // one depicts the range, and retuning both would be inventing the
+                // answer. One candidate is a statement; more than one is a question,
+                // and a question is left alone (r2 finding).
+                LineEffect candidate = null;
+                int candidates = 0;
+                for (int i = 0; i < rings.Length; i++)
+                {
+                    var ring = rings[i];
+                    if (ring == null) continue;
+                    if (ring.lineType != LineEffect.LineType.Ring) continue;
+                    if (!ring.playOnAwake || !ring.loop) continue;      // a transient burst is not a range promise
+                    if (!FlatCurve(ring.radiusOverTime)) continue;      // an animated ring owns its own radius
+                    if (!OwnsRing(__instance, ring.transform)) continue; // a nested trigger's ring draws ITS range
+                    candidates++;
+                    if (candidate == null) candidate = ring;
+                }
+
+                if (candidates == 0) return;
+                if (candidates > 1)
+                {
+                    VanillaFixSupport.DiagLimited(
+                        "InRangeIndicatorRadius",
+                        __instance.transform.root.name + " carries " + candidates +
+                        " permanent flat rings under one range trigger — none of them is uniquely " +
+                        "the range indicator, so all were left as authored (bug 369)",
+                        5);
+                    return;
+                }
+                if (Mathf.Approximately(candidate.radius, __instance.range)) return;
+
+                VanillaFixSupport.DiagLimited(
+                    "InRangeIndicatorRadius",
+                    "Indicator ring on " + __instance.transform.root.name + "/" + candidate.name +
+                    " drew " + candidate.radius.ToString("0.##") + " for a trigger range of " +
+                    __instance.range.ToString("0.##") + " — matched to the range (bug 369)",
+                    20);
+                candidate.radius = __instance.range;
+            }
+            catch (Exception ex) { VanillaFixSupport.LogError("InRangeIndicatorRadius", ex); }
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("InRangeIndicatorRadius", exception);
+        }
+    }
+
     [HarmonyPatch(typeof(Gun), "ResetStats")]
     internal static class DemonicPactSprayPatch
     {
@@ -1272,11 +1561,28 @@ namespace CompetitiveRounds
     /// rescue deliveries — the faults are SYMPTOMS of dead/diverged
     /// projectile replicas (#366's causal model), which is where the real
     /// fixes live. 23 faults in the bug-217 session, 87 in bug-214's
-    /// (v1.38.4), so the class long predates the Radiance change. RPCA_DoHit
-    /// is the only RPC observed faulting: its body dereferences
-    /// GetPhotonView(viewID) results, the map collider array and component
-    /// lookups with no null checks, so a hit replicated after this client
-    /// already retired the target NREs (decompile ProjectileHit.cs:199+).
+    /// (v1.38.4), so the class long predates the Radiance change.
+    ///
+    /// THE GUARD COVERS A FAMILY, NOT ONE CALL (reports #356/#357/#358). This
+    /// note used to read "RPCA_DoHit is the only RPC observed faulting", and
+    /// TargetMethods bound that single name to match. Sweeping every captured
+    /// bundle for faulting RPC bodies refutes it — a flag names a LINE, the
+    /// defect is a CLASS (#432):
+    ///   ApplyCardStats.RPCA_Pick    176 faults / 10 sessions  (was unguarded)
+    ///   ProjectileHit.RPCA_DoHit    149 faults /  5 sessions  (guarded)
+    ///   CardChoice.RPCA_DoEndPick    52 faults / 32 sessions  (was unguarded)
+    ///   ProjectileInit.RPCA_Init      1 fault                 (was unguarded)
+    ///   Block.RPCA_DoBlock            1 fault                 (was unguarded)
+    /// The most FREQUENT member was never guarded and emitted no counter, so it
+    /// was invisible to every [NET] figure we hold. What unites them is not the
+    /// sender but arrival ORDER: each body dereferences GetPhotonView(viewID)
+    /// results, collider arrays, effect lists or component lookups with no null
+    /// check, so an action replicated after this seat already retired the object
+    /// NREs (decompile ProjectileHit.cs:199+ for the original member).
+    /// ProjectileInit's two sibling fire variants are included although neither
+    /// has appeared in a bundle yet, because Gun.FireBurst sends all three on
+    /// the same path (DanceEmotes.cs:939) — sweep siblings rather than waiting
+    /// for each to be reported (#330).
     /// SCOPE note (#366): RpcTarget.All executes locally SYNCHRONOUSLY, so
     /// this finalizer also lets the SHOOTER's caller (e.g. RayCastTrail.
     /// Update) continue past a failed local hit where 1.38.5 unwound one
@@ -1303,30 +1609,56 @@ namespace CompetitiveRounds
     /// semantics, and gating would exclude the room-code games where most
     /// rated play happens.</summary>
     [HarmonyPatch]
-    internal static class RpcDoHitDispatchGuardPatch
+    internal static class RpcDispatchGuardPatch
     {
         static IEnumerable<MethodBase> TargetMethods()
         {
-            // By name, all overloads (#324c); a signature drift in a game
-            // patch must break loudly at attach, never silently no-op (#83).
+            // By name, all overloads (#324c). DRIFT POLICY, deliberately changed
+            // when this became a family: a missing member is named in an error at
+            // attach and the REST still attach, instead of one renamed method
+            // throwing the whole guard away. Total drift — nothing resolved at all
+            // — still breaks loudly, so the patch can never silently no-op (#83).
             var list = new List<MethodBase>();
-            foreach (var m in typeof(ProjectileHit).GetMethods(AccessTools.all))
-                if (m.Name == "RPCA_DoHit") list.Add(m);
+            var missing = new List<string>();
+            AddByName(list, missing, typeof(ProjectileHit),  "RPCA_DoHit");
+            AddByName(list, missing, typeof(ApplyCardStats), "RPCA_Pick");
+            AddByName(list, missing, typeof(CardChoice),     "RPCA_DoEndPick");
+            AddByName(list, missing, typeof(ProjectileInit), "RPCA_Init");
+            AddByName(list, missing, typeof(ProjectileInit), "RPCA_Init_noAmmoUse");
+            AddByName(list, missing, typeof(ProjectileInit), "RPCA_Init_SeparateGun");
+            AddByName(list, missing, typeof(Block),          "RPCA_DoBlock");
+            if (missing.Count > 0)
+                Plugin.Log.LogError("[NET] dispatch guard has no target for "
+                    + string.Join(", ", missing.ToArray())
+                    + " — a ROUNDS update renamed or removed them and those bodies are now UNGUARDED");
             if (list.Count == 0)
-                throw new Exception("ProjectileHit.RPCA_DoHit not found — dispatch guard has no target");
+                throw new Exception("dispatch guard resolved no targets at all — every guarded RPC name has drifted");
             return list;
         }
 
+        private static void AddByName(List<MethodBase> list, List<string> missing, Type type, string name)
+        {
+            int before = list.Count;
+            foreach (var m in type.GetMethods(AccessTools.all))
+                if (m.Name == name) list.Add(m);
+            if (list.Count == before) missing.Add(type.Name + "." + name);
+        }
+
         [HarmonyFinalizer]
-        private static Exception Finalizer(Exception __exception)
+        private static Exception Finalizer(Exception __exception, MethodBase __originalMethod)
         {
             if (__exception != null)
             {
                 NetDiag.CountRpcSwallow();
+                string who = __originalMethod != null ? __originalMethod.Name : "unknown RPC";
+                // PER-MEMBER budget. A single shared key would let the noisiest
+                // body spend the whole allowance and leave the rarer members
+                // invisible — which is how the unguarded majority stayed unseen
+                // in the first place.
                 VanillaFixSupport.DiagLimited(
-                    "RpcDoHitDispatchGuard-swallowed",
-                    "RPCA_DoHit threw " + __exception.GetType().Name +
-                    " — swallowed so Photon's incoming dispatch batch survives (" +
+                    "RpcDispatchGuard-" + who,
+                    who + " threw " + __exception.GetType().Name +
+                    " — swallowed so it does not escape Photon's dispatch into FixedUpdate (" +
                     __exception.Message + ")",
                     20);
             }
@@ -1337,7 +1669,7 @@ namespace CompetitiveRounds
         private static Exception Cleanup(MethodBase original, Exception exception)
         {
             if (original != null) return exception;
-            return VanillaFixSupport.Cleanup("RpcDoHitDispatchGuard", exception);
+            return VanillaFixSupport.Cleanup("RpcDispatchGuard", exception);
         }
     }
 

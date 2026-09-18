@@ -165,7 +165,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<string> BroadcastTestQuit;           // broadcast seat only — any new non-empty value quits the game (Sept 6)
         internal static ConfigEntry<string> BroadcastTestGstatsSentinel; // broadcast seat only — any new value runs the cr_gstats W1-sentinel self-test once
         internal static ConfigEntry<string> BroadcastTestPlayerCards;   // broadcast seat only — any new value seeds synthetic Player Card tiles (Sept 10)
-        internal static ConfigEntry<int> PortraitPreset;                 // Player Cards (v22 section 6): -1 = follow the selected character, 0-9 = playerFaces[n]
+        internal static ConfigEntry<int> PortraitPreset;                 // Player Cards (v22 section 6): -1 = follow the selected character, 0..PortraitRender.PresetSlotCount()-1 = the saved face slot (#370 — NOT 0-9; playerFaces has ten entries but only eight are authorable). Anything outside that range resolves to -1, and is rewritten to -1 once the real slot count has been discovered — it is NOT clamped to the top slot (that silently re-rendered someone else's face onto the card).
         internal static ConfigEntry<bool> BroadcastTestSilence;          // broadcast seat only, offline/sandbox — apply 3s of silence to a bot for indicator verification
         internal static ConfigEntry<string> BroadcastTestQuickChatWheel; // broadcast seat only — pin the quick-chat wheel open for layout screenshots
         internal static ConfigEntry<string> BroadcastTestDance;         // broadcast seat only — "wheel" | "preview:<sku>" | "play:<idx>" dance verification
@@ -1075,7 +1075,7 @@ namespace CompetitiveRounds
             );
             PortraitPreset = Config.Bind(
                 "Player Cards", "PortraitPreset", -1,
-                "Which character your card picture shows: -1 follows the character you have selected, 0-9 pins that saved preset slot (the button counts them from 1). Changing it re-renders the picture next time the Collection tab or Settings is open."
+                "Which character your card picture shows: -1 follows the character you have selected, or pin one of your saved character slots by its index counting from 0 (the button counts them from 1). Only slots the character creator lets you fill can be pinned; any other value falls back to following your selected character, and is reset to -1 once the game has told us how many slots there really are. Changing it re-renders the picture next time the Collection tab or Settings is open."
             );
             BroadcastTestGstatsSentinel = Config.Bind(
                 "Broadcast", "TestGstatsSentinel", "",
@@ -3944,6 +3944,34 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogWarning($"[2v2-DIAG] PlayerEntered log error: {ex.Message}"); }
         }
 
+        /// <summary>The 2v2 team a seat advertises (`t_id`), or -1 when it does not say
+        /// anything a 2v2 team can be. Same prop the leaver banner and DetermineLocalTeam
+        /// read, so every seat in the room answers this identically. -1 means UNKNOWN,
+        /// never "team 0".
+        ///
+        /// <para>A 2v2 `t_id` is 0 or 1 and nothing else. The prop is not 2v2's alone —
+        /// FFA writes the player's own SLOT into it ("every player own team"), so a seat
+        /// carrying a stale value from a previous FFA room can advertise 2, 3, 4. Taking
+        /// any non-negative integer at face value turned each of those into its own
+        /// one-member team, and a one-member team is always its own lowest id: every such
+        /// seat elected itself and the reporter count could reach every survivor in the
+        /// room instead of the two the election is designed to allow (r3 finding).
+        /// Anything outside {0,1} is UNKNOWN, which is the value the election already
+        /// handles by falling back to the room-wide rule.</para></summary>
+        private static int TeamIdOf(Photon.Realtime.Player pl)
+        {
+            try
+            {
+                if (pl == null || pl.CustomProperties == null) return -1;
+                object v;
+                if (!pl.CustomProperties.TryGetValue("t_id", out v) || v == null) return -1;
+                int t;
+                if (!int.TryParse(v.ToString(), out t)) return -1;
+                return (t == 0 || t == 1) ? t : -1;
+            }
+            catch { return -1; }
+        }
+
         public void OnPlayerLeftRoom(Photon.Realtime.Player p)
         {
             // Roster changed: same-frame reads must not see the cached view
@@ -4055,11 +4083,61 @@ namespace CompetitiveRounds
                 if (string.IsNullOrEmpty(dcSteamId) && !string.IsNullOrEmpty(p.UserId)) dcSteamId = p.UserId;
                 if (string.IsNullOrEmpty(dcSteamId) || dcSteamId.StartsWith("photon_")) return;
 
-                // Reporter election: lowest steam_id of those still in the room.
+                // Reporter election: lowest steam_id among the survivors ON THE TEAM
+                // THAT DID NOT LOSE A PLAYER.
+                //
+                // Bugs #384/#385. The server accepts a DC report only from a member of
+                // the non-DC team (team/series/{id}/report-dc: "reporter must be a
+                // member of the non-DC team"). This election used to pick the lowest id
+                // in the ROOM — a different rule, and the two only agreed by luck. When
+                // the lowest id belonged to the DC'd player's own teammate the server
+                // refused with a 400, and because exactly ONE client is elected, nobody
+                // else tried: the series was never closed, every survivor kept a live
+                // 2v2 hold, and all further 2v2 joins were refused until the lease TTL
+                // ran out ~15 minutes later. The information needed to avoid it was
+                // already here — the leaver banner one block above prints "your
+                // teammate" off the same t_id prop.
                 string myId = MatchTracker.LocalSteamId;
                 if (string.IsNullOrEmpty(myId)) return;
                 long myVal; if (!long.TryParse(myId, out myVal)) return;
-                bool iAmLowest = true;
+
+                int dcTeam = TeamIdOf(p);
+                int myTeam = TeamIdOf(PhotonNetwork.LocalPlayer);
+                bool teamsKnown = dcTeam >= 0 && myTeam >= 0;
+
+                // TWO independent reasons to report, OR'd. This shape is chosen so the
+                // election can never do WORSE than the room-wide one it replaces.
+                //
+                //   lowestOverall  — the old rule, unchanged. True on AT LEAST one
+                //                    surviving seat whatever anyone advertises, which
+                //                    is the property that matters; see the bound below
+                //                    for when it is true on more than one.
+                //   lowestOnMyTeam — the new rule: I look like a member of the team
+                //                    that did not lose a player, and I am the lowest
+                //                    id among the seats that also look that way.
+                //
+                // An earlier version STOOD DOWN when it looked like the DC'd player's
+                // teammate. That could reach zero reporters, which is the one outcome
+                // worse than the bug being fixed: `t_id` is advertised per seat, and a
+                // leaver whose advertised team does not match its real one flips the
+                // real non-DC survivors into standing down while the one seat still
+                // willing to report is the one the server refuses (r2 HIGH). Keeping
+                // the old elector as a floor means the server always receives at least
+                // one report, and the team rule can only ADD a report from a seat it
+                // will accept. Duplicates are cheap — the series is closed by whichever
+                // lands first and the rest no-op.
+                //
+                // THE BOUND, stated honestly. At least one reporter, always: that is
+                // the property worth having and it holds unconditionally. At most two
+                // only while every survivor advertises a parseable `u_id` — a seat
+                // that does not is invisible to the census, so its peers cannot defer
+                // to it, and with two such seats every survivor can believe it is the
+                // lowest and all of them report. That is the direction this election
+                // deliberately errs in, and the duplicate reports no-op; it is stated
+                // here because the previous wording claimed "exactly one" as if it
+                // were unconditional (r4 finding).
+                bool lowestOverall = true;
+                bool lowestOnMyTeam = teamsKnown && myTeam != dcTeam;
                 foreach (var pp in RoomActors.ActiveFighters())   // census: reporter election over fighters only
                 {
                     if (pp == null || pp.ActorNumber == p.ActorNumber) continue;  // skip the leaver
@@ -4068,9 +4146,19 @@ namespace CompetitiveRounds
                     if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey("u_id"))
                         ppSid = pp.CustomProperties["u_id"]?.ToString();
                     if (string.IsNullOrEmpty(ppSid) || ppSid.StartsWith("photon_")) continue;
-                    if (long.TryParse(ppSid, out long ppVal) && ppVal < myVal) { iAmLowest = false; break; }
+                    long ppVal;
+                    if (!long.TryParse(ppSid, out ppVal) || ppVal >= myVal) continue;
+                    lowestOverall = false;
+                    // Defer the TEAM claim only to a peer that also looks eligible.
+                    // Deferring to one the server would refuse is how this produced no
+                    // report at all in the first place.
+                    if (lowestOnMyTeam && TeamIdOf(pp) == myTeam) lowestOnMyTeam = false;
+                    if (!lowestOverall && !lowestOnMyTeam) break;
                 }
-                if (!iAmLowest) return;
+                if (!lowestOverall && !lowestOnMyTeam) return;
+                if (!lowestOverall)
+                    Plugin.Log.LogInfo("[2v2-DC] reporting as the non-disconnected team's lowest id "
+                        + "(another seat holds the room-wide election)");
 
                 // Pull current point totals from the in-game state. Per the DC rule,
                 // a match with combined points >= 2 awards the match to the non-DC team.
@@ -9208,12 +9296,24 @@ namespace CompetitiveRounds
                                     // Green-hunt diagnostic: name every art part with its vanilla
                                     // + applied color so any hue that still looks wrong on screen
                                     // is attributable to a specific object from one log line.
+                                    //
+                                    // BOUNDED since report #359, where this wrote 216 lines in one
+                                    // session. The hunt it was built for is over, and a per-part,
+                                    // per-map-load line with no ceiling is a standing cost in every
+                                    // player's bundle. The budget is per PROCESS — nothing calls
+                                    // ResetDiag on this key — so it covers roughly one map's worth
+                                    // of parts after launch: enough to attribute a wrong hue, not
+                                    // enough to drown the report it is attached to. Reserve BEFORE
+                                    // building the message; the interpolation is the expensive half.
                                     try
                                     {
-                                        var psr0 = ps.GetComponent<ParticleSystemRenderer>();
-                                        var b = psr0 != null ? psr0.bounds.size : Vector3.zero;
-                                        Color applied = ps.main.startColor.color;
-                                        Plugin.Log.LogInfo($"[MAPCOLOR-ART] part='{ps.gameObject.name}' vanilla=#{(int)(vanilla.r*255):X2}{(int)(vanilla.g*255):X2}{(int)(vanilla.b*255):X2} applied=#{(int)(Mathf.Clamp01(applied.r)*255):X2}{(int)(Mathf.Clamp01(applied.g)*255):X2}{(int)(Mathf.Clamp01(applied.b)*255):X2} size={b.x:F0}x{b.y:F0}");
+                                        if (VanillaFixSupport.TryReserveDiag("mapcolor-art", 24))
+                                        {
+                                            var psr0 = ps.GetComponent<ParticleSystemRenderer>();
+                                            var b = psr0 != null ? psr0.bounds.size : Vector3.zero;
+                                            Color applied = ps.main.startColor.color;
+                                            VanillaFixSupport.WriteReservedDiag($"[MAPCOLOR-ART] part='{ps.gameObject.name}' vanilla=#{(int)(vanilla.r*255):X2}{(int)(vanilla.g*255):X2}{(int)(vanilla.b*255):X2} applied=#{(int)(Mathf.Clamp01(applied.r)*255):X2}{(int)(Mathf.Clamp01(applied.g)*255):X2}{(int)(Mathf.Clamp01(applied.b)*255):X2} size={b.x:F0}x{b.y:F0}");
+                                        }
                                     }
                                     catch { }
                                 }

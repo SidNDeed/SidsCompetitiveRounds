@@ -35,7 +35,10 @@ namespace CompetitiveRounds
         // Version check
         public static string LatestModVersion { get; private set; } = null;
         public static string MinModVersion { get; private set; } = null;
-        // Set when the server returns 426 to any request — UI hides everything and prompts update.
+        // Set when the server answers with the GLOBAL mod-version floor — UI hides
+        // everything and prompts update. NOT every 426: several narrow refusals use
+        // that status too, and HandleVersionGate deliberately lets those through to
+        // their own callers rather than locking the menu (r3/r4 findings).
         public static bool ForceUpdateRequired { get; private set; } = false;
 
         // Recent ranked series (for leaderboard sidebar)
@@ -3724,9 +3727,14 @@ namespace CompetitiveRounds
         private static int _pcCacheEpoch;   // advanced on every identity edge (c4): a landing from an older epoch never touches the cache
 
         /// <summary>The identity/consent generation. It is bumped by
-        /// OnLocalIdentityChanged and by the consent revoke, BEFORE either
-        /// clears anything, so any answer dispatched under the previous account
-        /// or the previous consent state can be recognised and dropped. The
+        /// OnLocalIdentityChanged and by the consent revoke, before either clears
+        /// THE CACHES THIS EPOCH FENCES, so any answer dispatched under the
+        /// previous account or the previous consent state can be recognised and
+        /// dropped. Note the narrower claim: other state goes first in both paths
+        /// (the shop caches on one, a dozen caches and the music stores on the
+        /// other), and `Plugin.DataConsentGranted` flips later still, so a reader
+        /// who needs "nothing has been cleared yet" does not get it here (r4
+        /// finding). The
         /// Player Cards reads have always fenced on it; it is the same edge for
         /// every other read, which is why it is named here rather than left as
         /// a Player Cards detail.</summary>
@@ -4164,7 +4172,14 @@ namespace CompetitiveRounds
             {
                 int k = j + 1;
                 while (k < n) { if (json[k] == '\\') { k += 2; continue; } if (json[k] == '"') break; k++; }
-                return json.Substring(j, Math.Min(n, k + 1) - j);
+                // An UNTERMINATED string token means a truncated body, not a value.
+                // Returning the fragment let a cut-off `{"error":"outdated` read back
+                // as the global version floor and gate the whole UI — precisely the
+                // direction HandleVersionGate documents it must never take, and the
+                // gate is sticky once set (r5 finding). Null here is what every caller
+                // of this parser wants from a body it cannot fully read.
+                if (k >= n) return null;
+                return json.Substring(j, k + 1 - j);
             }
             if (c == '{' || c == '[')
             {
@@ -20634,6 +20649,11 @@ namespace CompetitiveRounds
                 try { PlayerCardFaces.Clear(); } catch { }
                 try { PlayerCardsUI.OnIdentityChanged(); } catch { }
                 try { PortraitRender.OnIdentityChanged(); } catch { }
+                // The held chat draft is the player's own words under the consent
+                // they just withdrew. Dropped HERE rather than only in the chat
+                // loop's own guard, which a throwing draw path can keep from ever
+                // running (r4 finding).
+                try { CompetitiveUI.DropChatDraftOnRevoke(); } catch { }
                 ChatClient.Disconnect();
                 // Flip ranked off — if the user is in queue, server rejects further polls (410)
                 // and the queue entry expires via the cleanup cron. No more match reports will
@@ -20653,16 +20673,46 @@ namespace CompetitiveRounds
 
         // Detect server-side version-gate rejection. UnityWebRequest treats 4xx as
         // ProtocolError, so we look at responseCode rather than result.
+        /// <summary>True when this response is the GLOBAL mod-version floor, which
+        /// gates the whole UI until the player updates.
+        ///
+        /// <para>Keyed on the version middleware's own payload — <c>"error":
+        /// "outdated"</c> — and not on the 426 status, because 426 is also how the
+        /// server says several much narrower things: the spectator protocol floor for
+        /// one room (a friendly-fire-off room raises its own), the music-purchase
+        /// minimum, and the admin flag-review client. Status alone turned every one of
+        /// those into "your mod is below the required version" and hid the entire menu
+        /// from a client that was perfectly current for playing — one WATCH click on
+        /// the wrong room was enough (r3 finding, widened: the report named the
+        /// spectate case, the conflation covers four).</para>
+        ///
+        /// <para>Failure direction: an unreadable or unexpected body does NOT gate.
+        /// The middleware answers EVERY request, so a real global floor re-presents
+        /// itself on the next call and gates then; the opposite default locks a
+        /// working client out of the mod on one malformed reply.</para></summary>
         private static bool HandleVersionGate(UnityWebRequest req)
         {
-            if (req.responseCode == 426)
+            if (req.responseCode != 426) return false;
+            string body = null;
+            try { body = req.downloadHandler != null ? req.downloadHandler.text : null; } catch { }
+            // The middleware's payload is {"error": "outdated", "required": ...}.
+            // Read the `error` FIELD, not the token: a narrow refusal whose own
+            // detail happened to be the word "outdated" — {"detail":"outdated"} —
+            // would otherwise still lock the whole menu, which is the exact
+            // conflation this function was rewritten to end (r4 finding).
+            string err = null;
+            try { err = PcTopLevel(body, "error"); } catch { }
+            if (err != null) err = err.Trim().Trim('"');
+            if (!string.Equals(err, "outdated", StringComparison.Ordinal))
             {
-                if (!ForceUpdateRequired)
-                    Plugin.Log.LogWarning("[VERSION] Server returned 426 — mod is below required version, gating UI");
-                ForceUpdateRequired = true;
-                return true;
+                Plugin.Log.LogInfo("[VERSION] 426 that is not the global version floor — "
+                    + "letting the caller report its own reason");
+                return false;
             }
-            return false;
+            if (!ForceUpdateRequired)
+                Plugin.Log.LogWarning("[VERSION] Server returned the global version floor — gating UI");
+            ForceUpdateRequired = true;
+            return true;
         }
 
         // Heartbeat — track the most recent ATTEMPT and the most recent SUCCESS, separately.
@@ -22706,6 +22756,85 @@ namespace CompetitiveRounds
             public string disabled_reason = "";
         }
 
+        /// <summary>A spectate refusal reason as a full SENTENCE, for a notification
+        /// that owns a whole line (bug #375). <see cref="SpectateReasonShort"/> is the
+        /// same answer sized for a list cell; both are renderings of the one table in
+        /// <see cref="SpectateReason"/>, which is where the reason is actually decided.
+        ///
+        /// <para>The server computes a reason for every game it lists and ships it as
+        /// <c>disabled_reason</c>, and it sends the same vocabulary back when a grant is
+        /// refused. Both consumers go through that table so the listing and the grant can
+        /// never disagree about what a reason means — previously the grant path had this
+        /// mapping inline and the LISTING had no mapping at all, which is why a game that
+        /// could not be watched simply vanished from the panel with nothing said.</para>
+        ///
+        /// <para>Accepts either a bare reason token or a raw response body containing
+        /// one, so the grant path can hand it the server's reply unchanged.</para></summary>
+        internal static string SpectateReasonText(string reason)
+        {
+            return SpectateReason(reason, full: true);
+        }
+
+        /// <summary>The same answers, sized for a list CELL rather than a toast.
+        ///
+        /// <para>The sentences above are right for a notification, which owns a whole
+        /// line; the live-games lists render the reason in a ~190px no-wrap cell where
+        /// they are clipped mid-word and every one of them loses the clause that makes
+        /// it an answer — "…has spectating disabled" and "…not accepting spectators
+        /// right now" both survive only as far as their shared, useless prefix (r2
+        /// finding). Bounding the STRING to the cell is the codebase's own remedy for a
+        /// fixed-width one-line cell; bounding the cell to the string is not available
+        /// here, because these are translated and the longest locale is not knowable
+        /// from this side. Every label below is short enough that it still fits with
+        /// roughly twice the width to spare, which is the margin translation needs.</para></summary>
+        internal static string SpectateReasonShort(string reason)
+        {
+            return SpectateReason(reason, full: false);
+        }
+
+        /// <summary>THE reason table. One ordered chain, two renderings.
+        ///
+        /// <para>The short and full forms used to be two separate chains, which is two
+        /// places to decide which reason a string matched — and two chains drift: one
+        /// gains a key, the other does not, and the list and the toast then explain the
+        /// same refusal differently or one of them stops explaining it at all (r3
+        /// finding). Here a key can only be added to both at once.</para>
+        ///
+        /// <para>`Contains` rather than equality because the caller may hand over a
+        /// whole formatted error line ("HTTP 409: {"detail":"mode_not_ready"}"), which
+        /// is what the grant path's failure text actually looks like.</para></summary>
+        private static string SpectateReason(string reason, bool full)
+        {
+            string r = reason ?? "";
+            if (r.Contains("spectator_full"))
+                return I18n.Tr(full ? "All spectator seats are taken." : "Seats full");
+            if (r.Contains("spectating_disabled"))
+                return I18n.Tr(full ? "A player in this game has spectating disabled." : "Player opted out");
+            if (r.Contains("game_not_live"))
+                return I18n.Tr(full ? "That game is no longer live." : "Game ended");
+            if (r.Contains("already_in_game"))
+                return I18n.Tr(full ? "Leave your current game first." : "You're in a game");
+            // Order is fixed, but nothing ENFORCES that a future key is not a
+            // substring of a later one — no longest-match rule, no exact-field parse.
+            // Today no key contains another, which is a property of this list and not
+            // a guarantee of the mechanism (r4 finding). Adding a key that is a
+            // substring of one below it would shadow that one silently, so put a new
+            // key ABOVE anything it could be contained by.
+            if (r.Contains("room_not_ready"))
+                return I18n.Tr(full ? "That game is not ready to watch yet." : "Not ready yet");
+            if (r.Contains("mode_not_ready"))
+                return I18n.Tr(full ? "That mode is not accepting spectators right now." : "Mode closed");
+            if (r.Contains("spectator_upgrade_required"))
+                return I18n.Tr(full ? "Update the mod to watch this game." : "Update required");
+            // The grant refuses an unauthenticated caller with 401 session_required.
+            // It was missing, so the one refusal that clears itself — the session
+            // renews on its own — read as a permanent "could not spectate" and the
+            // player stopped trying (r3 finding).
+            if (r.Contains("session_required"))
+                return I18n.Tr(full ? "Steam session expired — try again in a moment." : "Session expired");
+            return I18n.Tr(full ? "Could not spectate this game." : "Unavailable");
+        }
+
         public static List<SpectateGameInfo> CachedSpectateGames = new List<SpectateGameInfo>();
         private static float lastSpectateGamesFetch = -999f;
         private static string spectateLeaseId = "";
@@ -23039,11 +23168,7 @@ namespace CompetitiveRounds
                     }
                     if (!ok)
                     {
-                        string why = I18n.Tr("Could not spectate this game.");
-                        if (resp.Contains("spectator_full")) why = I18n.Tr("All spectator seats are taken.");
-                        else if (resp.Contains("spectating_disabled")) why = I18n.Tr("A player in this game has spectating disabled.");
-                        else if (resp.Contains("game_not_live")) why = I18n.Tr("That game is no longer live.");
-                        else if (resp.Contains("already_in_game")) why = I18n.Tr("Leave your current game first.");
+                        string why = SpectateReasonText(resp);
                         Plugin.Log.LogInfo($"[SPECTATE] grant refused: {resp}");
                         CompetitiveUI.ShowNotification(why, Color.yellow, 5f);
                         return;
