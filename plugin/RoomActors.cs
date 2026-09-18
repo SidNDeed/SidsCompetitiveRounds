@@ -22,22 +22,34 @@ namespace CompetitiveRounds
     /// opponent.
     ///
     /// ── THE INERTNESS GUARANTEE ────────────────────────────────────────
-    /// When no actor in the room carries the spectator role property, EVERY
-    /// helper here returns exactly what the raw Photon call returns, in the
-    /// same ORDER (ActorNumber ascending — reporter election and slot
-    /// mapping depend on ordering determinism). `AnySpectatorPresent()` is
-    /// the O(n) fast path all of them take first, so migrating a call site
-    /// to RoomActors is a provable no-op until a spectator actually joins.
-    /// That is what makes it safe to migrate the ~40 sites listed in the
-    /// design doc BEFORE the spectator seat itself exists.
+    /// When no actor carries the spectator role property AND no roster is
+    /// frozen, EVERY helper here returns exactly what the raw Photon call
+    /// returns, in the same ORDER (ActorNumber ascending — reporter election
+    /// and slot mapping depend on ordering determinism). BOTH conditions are
+    /// load-bearing: this paragraph originally named the spectator one alone,
+    /// which the PRECISION line and the 2026-09-17 correction below already
+    /// contradict, and a reader who stopped here would have believed it
+    /// (headline corrected 2026-09-18, Codex b4yssbnuh).
     ///
-    /// PRECISION (Codex round 2): the fast path is "no spectator AND no frozen
-    /// roster". Nothing calls FreezeFighterRoster in the shipped build, so
-    /// RosterFrozen is false everywhere and the guarantee holds exactly as
-    /// stated. Once Phase 2 freezes a roster, these helpers additionally
-    /// exclude actors that are not ON it — which is the point of freezing, and
-    /// is a deliberate divergence from raw PlayerList, not a violation of the
-    /// inertness claim.
+    /// So migrating a call site here is a provable no-op only in a room that
+    /// is BOTH spectator-free and unfrozen — which is not a competitive
+    /// match, since every one of those freezes its roster.
+    ///
+    /// PRECISION: the fast path is "no spectator AND no frozen roster".
+    ///
+    /// CORRECTED 2026-09-17 — the inertness half of this note is no longer
+    /// true and had outlived the build it described. It read "nothing calls
+    /// FreezeFighterRoster in the shipped build, so RosterFrozen is false
+    /// everywhere". Three sites call it today:
+    /// GameStateWatcher.cs:1572, :5006 and :6398. Spectators are likewise
+    /// live — SpectatorSession.cs:419 stages cr_spec as a pre-join property.
+    ///
+    /// So BOTH conjuncts of the fast path now go false in ordinary play, and
+    /// these helpers really do diverge from raw PlayerList in a shipped
+    /// build. That divergence is the POINT of freezing — once a roster is
+    /// frozen, a non-spectator actor is a fighter only if it is ON that
+    /// roster — but it is no longer correct to read any of this as inert, and
+    /// anything reasoning about these helpers must assume both filters fire.
     ///
     /// Classification is CACHED BY ActorNumber at first sight and is
     /// immutable for the lifetime of the room (design §3.2): an actor that
@@ -382,9 +394,11 @@ namespace CompetitiveRounds
         // ── the inertness fast path ──────────────────────────────────────
 
         /// <summary>True only if at least one actor in the room declared the
-        /// spectator role. Every helper below short-circuits on this, so with
-        /// no spectator present they are byte-for-byte equivalent to the raw
-        /// Photon reads they replace.
+        /// spectator role. Helpers below short-circuit on this TOGETHER WITH
+        /// RosterFrozen: with no spectator present AND no roster frozen they
+        /// are byte-for-byte equivalent to the raw Photon reads they replace.
+        /// With a roster frozen they are not — and that is the ordinary case
+        /// in a competitive match (corrected 2026-09-18, Codex b4yssbnuh).
         ///
         /// ALLOCATION-FREE (Codex r1 find 12): PUN's PlayerList getter sorts
         /// and ToArray()s on every access, so using it here would make every
@@ -407,8 +421,11 @@ namespace CompetitiveRounds
         // ── fighter views ────────────────────────────────────────────────
 
         /// <summary>Every actor that is playing, ActorNumber-ascending.
-        /// Identical to PhotonNetwork.PlayerList when no spectator is in the
-        /// room (including the SAME array instance, so no allocation).</summary>
+        /// Identical to PhotonNetwork.PlayerList — including the SAME array
+        /// instance, so no allocation — only when no spectator is in the room
+        /// AND no roster is frozen. A frozen roster takes the filtering branch
+        /// and allocates, spectator or not (corrected 2026-09-18, Codex
+        /// b4yssbnuh).</summary>
         // Per-frame result cache (Codex r2 find 10): with a roster frozen —
         // every competitive match — the fast path is off, and the 10 Hz
         // pollers would otherwise allocate a PlayerList + filtered array per
@@ -460,8 +477,11 @@ namespace CompetitiveRounds
                 // roster — otherwise freezing {A,B} and then admitting a late
                 // actor C with no spectator in the room returned C as a
                 // fighter, defeating the freeze in exactly the case it exists
-                // for. Still fully inert in the shipped build: nothing calls
-                // FreezeFighterRoster, so RosterFrozen is false everywhere.
+                // for. CORRECTED 2026-09-17: the trailing claim here — "still
+                // fully inert in the shipped build: nothing calls
+                // FreezeFighterRoster" — is stale. GameStateWatcher.cs:1572,
+                // :5006 and :6398 all call it, so this branch is live and the
+                // RosterFrozen conjunct is load-bearing, not decorative.
                 if (!AnySpectatorPresent() && !RosterFrozen) return list;   // inert: same instance
                 var keep = new List<PhotonPlayer>(list.Length);
                 for (int i = 0; i < list.Length; i++)
