@@ -363,12 +363,12 @@ def _rank_fallback_color(name: str) -> str:
 
 # 5-minute cache over rank_role_colors so per-row leaderboard lookups don't
 # hammer the table. Refreshed lazily; bot pushes invalidate it directly.
-_rank_colors_cache: dict = {"at": 0.0, "map": {}}
+_rank_colors_cache: dict = {"at": 0.0, "ok": False, "map": {}}
 
 
 async def _rank_colors(db: AsyncSession) -> dict:
     now = time.monotonic()
-    if now - _rank_colors_cache["at"] > 300:
+    if not _rank_colors_cache["ok"] or now - _rank_colors_cache["at"] > 300:
         try:
             # Savepoint (#235): this swallows its own error and serves the
             # stale map, but 21 call sites carry on issuing SQL on the same
@@ -377,9 +377,16 @@ async def _rank_colors(db: AsyncSession) -> dict:
             async with db.begin_nested():
                 rows = (await db.execute(select(RankRoleColor))).scalars().all()
             _rank_colors_cache["map"] = {r.name: r.color_hex for r in rows}
+            # SUCCESS ONLY. Fourth instance of the same shape as the podium
+            # caches. It does NOT raise when cold, and that is deliberate: the
+            # cost of an empty map is a rank title rendering without its colour,
+            # which is cosmetic, and 21 call sites should not 500 over a colour.
+            # Stamping on success alone is still worth it — it turns a failure
+            # cached for a full 300s into one that retries on the next call.
+            _rank_colors_cache["ok"] = True
+            _rank_colors_cache["at"] = now
         except Exception as ex:
             print(f"[RANK] color cache refresh failed: {ex}")
-        _rank_colors_cache["at"] = now
     return _rank_colors_cache["map"]
 
 
@@ -451,7 +458,7 @@ PODIUM_TITLES = {
 # DESC. Shared by the 'title_podium' dynamic title and the Top-3 x3 match XP
 # multiplier. Keys/values are str(player_id) so UUIDs from text() queries and
 # ORM lookups compare equal.
-_podium_cache: dict = {"at": 0.0, "ids": [], "map": {}}
+_podium_cache: dict = {"at": 0.0, "ok": False, "ids": [], "map": {}}
 
 # Item d: the same LEADERBOARD_ACTIVE_DAYS filter the boards apply, so the
 # titles and the doubled bonus follow the ACTIVE top 3 (a returning player's
@@ -600,25 +607,46 @@ async def _grant_podium_titles(player_ids: list) -> None:
 
 async def _podium_player_ids(db: AsyncSession) -> list:
     """Ordered [1st, 2nd, 3rd] player ids (as strings) per the visible
-    leaderboard. 60s TTL; failures serve the stale copy and never raise."""
+    leaderboard. 60s TTL. A refresh failure serves the last GOOD copy; if there
+    has never been one it RAISES, because an empty list is indistinguishable
+    from a real "nobody qualifies" answer."""
     now = time.monotonic()
-    if now - _podium_cache["at"] > 60:
+    if not _podium_cache["ok"] or now - _podium_cache["at"] > 60:
         try:
-            # Savepoint (#235): "failures serve the stale copy and never raise"
-            # is only true if the failure stays local. This swallows its own
-            # exception, so callers (submit_match's series-gold bonus among
-            # them) never see it — unguarded, they just died on their next
-            # statement with the transaction already aborted.
+            # Savepoint (#235): "failures serve the stale copy" is only true if
+            # the failure stays local. This contains its own exception, so
+            # callers (submit_match's series-gold bonus among them) are not
+            # left holding an aborted transaction.
             async with db.begin_nested():
                 rows = (await db.execute(text(_PODIUM_QUERY),
                                          {"active_days": LEADERBOARD_ACTIVE_DAYS})).scalars().all()
             ids = [str(r) for r in rows]
             _podium_cache["ids"] = ids
             _podium_cache["map"] = {pid: i + 1 for i, pid in enumerate(ids)}
+            # Set on SUCCESS ONLY, and BEFORE the title grant so a title-grant
+            # failure does not invalidate a podium we did fetch.
+            # Setting them in the failure path (as this did) had two effects,
+            # and the second is the worse one: it served an unfetched copy for
+            # 60s, AND it made `usable()` — the freshness guard the title-grant
+            # path relies on — report a failed refresh as fresh. A failure that
+            # marks itself successful defeats the guard built to catch it.
+            # `ok` rather than a non-zero `at`: "never successfully filled" is a
+            # FACT, not something to infer from the magnitude of a monotonic
+            # clock. Inferring it left a cold-start hole — on a host where
+            # time.monotonic() is still under 60, `now - 0 > 60` is false, so
+            # the refresh was skipped entirely and this returned [] WITHOUT
+            # entering the except, and therefore without raising.
+            _podium_cache["ok"] = True
+            _podium_cache["at"] = now
             await _grant_podium_titles(ids)
         except Exception as ex:
             print(f"[PODIUM] cache refresh failed: {ex}")
-        _podium_cache["at"] = now
+            # Cold: never once populated, so `ids` below is [] — which is not
+            # "nobody is on the podium" but "we do not know". Callers that
+            # award on this must not be handed the first as if it were the
+            # second.
+            if not _podium_cache["ok"]:
+                raise
     return _podium_cache["ids"]
 
 
@@ -652,8 +680,8 @@ PODIUM_TITLES_FFA = {
 # resolve to 1. Matching the board is the whole point — a title that attaches
 # to someone displayed at #4 is a bug (that is exactly what a >= 5 filter did
 # to the 1v1 podium once).
-_podium_2v2_cache: dict = {"at": 0.0, "ids": [], "map": {}}
-_podium_ffa_cache: dict = {"at": 0.0, "ids": [], "map": {}}
+_podium_2v2_cache: dict = {"at": 0.0, "ok": False, "ids": [], "map": {}}
+_podium_ffa_cache: dict = {"at": 0.0, "ok": False, "ids": [], "map": {}}
 
 # Item d: both mode podiums carry the boards' activity filter too (bound as
 # :active_days, see _PODIUM_QUERY).
@@ -689,8 +717,14 @@ async def _grant_mode_podium_titles(sku: str, player_ids: list) -> None:
 
 
 async def _mode_podium_map(db: AsyncSession, cache: dict, clause, sku: str) -> dict:
-    """{str(player_id): 1|2|3} for one mode's podium. 60s TTL; a failure serves
-    the stale copy and never raises.
+    """{str(player_id): 1|2|3} for one mode's podium. 60s TTL.
+
+    A refresh failure serves the last GOOD copy and does NOT raise — unlike the
+    1v1 `_podium_player_ids`, every consumer here is cosmetic (title render,
+    player card, and the ladder bootstrap which explicitly must not take down a
+    leaderboard), and `_sync_podium_holders` already refuses to revoke on an
+    empty podium. Raising would spend a leaderboard to protect a badge.
+    What it does NOT do any more is record a failure as a success: see below.
 
     SAVEPOINT-wrapped (#235): these run from render paths that can sit inside a
     match-report transaction, and under asyncpg a caught statement error would
@@ -699,17 +733,28 @@ async def _mode_podium_map(db: AsyncSession, cache: dict, clause, sku: str) -> d
     before migration 216 has seeded the skus: the grant is a separate session,
     but the SELECT here must not poison a live report either way."""
     now = time.monotonic()
-    if now - cache["at"] > 60:
+    if not cache.get("ok") or now - cache["at"] > 60:
         try:
             async with db.begin_nested():
                 rows = (await db.execute(clause, {"active_days": LEADERBOARD_ACTIVE_DAYS})).scalars().all()
             ids = [str(r) for r in rows]
             cache["ids"] = ids
             cache["map"] = {pid: i + 1 for i, pid in enumerate(ids)}
+            # SUCCESS ONLY, and this function is why the sweep that fixed its
+            # two siblings missed it: they write module-level identifiers
+            # (`_podium_cache[...]`, `_ovt_podium_cache[...]`) and this one
+            # takes the cache as a PARAMETER and writes `cache[...]`. Grepping
+            # the NAME finds two sites; grepping the OPERATION finds all of
+            # them. The member that escapes a sweep is the one spelled
+            # differently (#432).
+            # It matters most here, not least: this is the sole writer of TWO
+            # of the three caches `usable()` guards, so the unconditional stamp
+            # defeated that guard across two thirds of the surface it protects.
+            cache["ok"] = True
+            cache["at"] = now
             await _grant_mode_podium_titles(sku, ids)
         except Exception as ex:
             print(f"[PODIUM] {sku} cache refresh failed: {ex}")
-        cache["at"] = now
     return cache["map"]
 
 
@@ -755,8 +800,15 @@ def _podium_maps_cached(skus) -> tuple[dict, dict, dict]:
     now = time.monotonic()
 
     def usable(cache: dict) -> bool:
+        # `ok` FIRST, and it is the load-bearing half. `at > 0` alone cannot
+        # distinguish "filled successfully" from "a refresh failed and stamped
+        # itself anyway" — that was the defect these caches carried, and this
+        # guard is the thing it defeated. It also removes a cold-start hole:
+        # `at > 0` silently depends on time.monotonic() being large, which is
+        # not guaranteed on a freshly booted host.
         at = cache.get("at")
-        return isinstance(at, (int, float)) and at > 0 and (now - at) <= _PODIUM_CACHED_MAX_AGE_S
+        return bool(cache.get("ok")) and isinstance(at, (int, float)) \
+            and (now - at) <= _PODIUM_CACHED_MAX_AGE_S
 
     return (
         dict(_podium_cache.get("map") or {}) if TITLE_PODIUM_SKU in s and usable(_podium_cache) else {},
@@ -6688,30 +6740,56 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     # is casual (the row is simply left alone).
     if True:
         _pre_series = None
+        _pre_is_tournament = False
         try:
-            _pre_series = await _find_current_active_series(
-                db, p1.id, p2.id, room_id=report.photon_room_id)
-            if _pre_series is not None:
-                # Shared with deadline-check-in actions. Deliberately
-                # acquired before the RankedSeries row lock so neither path
-                # can form series<->match ABBA.
-                _pre_tournament_match_id = (
-                    await _acquire_tournament_report_action_gate(db, _pre_series))
-                await db.execute(
-                    text("SELECT 1 FROM ranked_series WHERE id = :sid FOR NO KEY UPDATE"),
-                    {"sid": _pre_series.id},
-                )
-                # The bracket row may have closed while this report waited on
-                # the action gate. Never award/rate a closed bracket row.
-                await _assert_tournament_report_match_open(
-                    db, _pre_tournament_match_id)
+            # SAVEPOINT (#235) — the one swallow-prone read the Sept 16 sweep
+            # missed. Without it a caught statement error here left the
+            # TRANSACTION aborted, and the report then died several hundred
+            # lines downstream under InFailedSQLTransaction, logged as whatever
+            # statement happened to run next rather than as this one.
+            # SPAN, stated because it is the load-bearing part: the savepoint
+            # opens INSIDE this block and closes at the end of it. On SUCCESS
+            # it is RELEASED, and Postgres retains work released that way — so
+            # the FOR NO KEY UPDATE row lock this block exists to take is still
+            # held for the rest of the request, which is the entire point of
+            # taking it early. Only ROLLBACK TO SAVEPOINT undoes it, and that
+            # is precisely the path where the lock was not taken anyway.
+            # The advisory-lock asymmetry does not reach this path. A savepoint
+            # rollback releases row locks while NOT releasing advisory xact
+            # locks, but the only advisory lock reachable here comes from
+            # _acquire_tournament_report_action_gate, which returns None
+            # immediately for a non-tournament series — and tournament series
+            # re-raise below instead of being swallowed. So the swallowed path
+            # never holds one.
+            async with db.begin_nested():
+                _pre_series = await _find_current_active_series(
+                    db, p1.id, p2.id, room_id=report.photon_room_id)
+                if _pre_series is not None:
+                    # Captured as a plain bool BEFORE anything can roll back:
+                    # the handler below decides whether re-raising is REQUIRED,
+                    # and it must not have to read a rolled-back ORM object to
+                    # find that out.
+                    _pre_is_tournament = bool(_pre_series.is_tournament)
+                    # Shared with deadline-check-in actions. Deliberately
+                    # acquired before the RankedSeries row lock so neither path
+                    # can form series<->match ABBA.
+                    _pre_tournament_match_id = (
+                        await _acquire_tournament_report_action_gate(db, _pre_series))
+                    await db.execute(
+                        text("SELECT 1 FROM ranked_series WHERE id = :sid FOR NO KEY UPDATE"),
+                        {"sid": _pre_series.id},
+                    )
+                    # The bracket row may have closed while this report waited on
+                    # the action gate. Never award/rate a closed bracket row.
+                    await _assert_tournament_report_match_open(
+                        db, _pre_tournament_match_id)
         except HTTPException:
             raise
         except Exception as _ple:
             # Tournament reports must never bypass the cross-path gate: that
             # would reopen the report-vs-action state race. Preserve
             # the historical best-effort behavior only for ordinary series.
-            if _pre_series is not None and _pre_series.is_tournament:
+            if _pre_is_tournament:
                 raise
             print(f"[SERIES-LOCK] early lock skipped: {_ple}")
     # Server-side ranked enforcement (bug #42). ranked_enabled defaults TRUE
@@ -7239,7 +7317,38 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
                         " GREATEST(COALESCE(record_bounce_kill, 0), :v) WHERE id = :pid"
                     ), {"v": int(_bounce), "pid": str(_pid)})
     except Exception as _rec_ex:
-        print(f"[MATCH] career-record update failed (non-fatal): {_rec_ex}")
+        # DELIBERATELY still swallows, and this is the ONE site in the Sept 18
+        # sweep that keeps the swallow. The other seven re-raise, so the
+        # exception is worth stating rather than leaving to be "corrected" by a
+        # future reader applying the rule uniformly.
+        # The rule those seven follow is that a contained failure must not be
+        # indistinguishable from a successful negative result. It still applies
+        # here, and the omission is real: these records are per-match maxima, so
+        # a record set in THIS match is lost permanently — the next match
+        # re-attempts with its own values, never with these.
+        # What differs is the PROPORTION. Everywhere else the omission was XP,
+        # gold or an award — value the player is owed, where an outage costs one
+        # retry and silence costs them the payment. Here the omission is a
+        # leaderboard maximum, and the worst failure mode is persistent rather
+        # than transient: code reaching production ahead of its migration, which
+        # fails EVERY report identically. Re-raising would convert a cosmetic
+        # degradation into a total match-report outage for as long as the schema
+        # is behind, and that is worse for every player in the game than a lost
+        # record is for one.
+        # STATED PLAINLY, because the clause above names only the persistent
+        # case while `except Exception` catches every case: a TRANSIENT fault
+        # here — a deadlock, a timeout — also loses a real record, silently,
+        # under a log line implying the loss was reasoned about. It was: the
+        # same trade is accepted for both, because the caller cannot tell them
+        # apart at this point and narrowing the catch to the schema-shaped error
+        # would let a transient fault abort the report instead — which is the
+        # outage this block exists to avoid.
+        # So the asymmetry is deliberate: re-raise where the player is owed
+        # value, degrade where the player is owed a number on a board. If a
+        # reconciler ever exists, this becomes a recorded debt instead and the
+        # swallow goes.
+        print(f"[MATCH] career-record update failed, records skipped "
+              f"(deliberate, see note): {_rec_ex}")
 
     # Award XP to both players
     winner_rounds = max(report.p1_rounds_won, report.p2_rounds_won)
@@ -7253,22 +7362,34 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     _pair_ratings: dict = {}
     if report.is_ranked:
         try:
-            # begin_nested, not a bare try/except (#235) — exactly as the 1v2
+            # begin_nested, not a bare try/except (#235) — exactly as the 2v2
             # twin further down: a caught statement error still leaves the
-            # TRANSACTION aborted, so a fallback that only LOOKED real would be a
-            # lie and the next statement in this report would 500 instead.
-            # The fallback is 1500, which _tier_mult_for maps to Intermediate
-            # x1.5 — NOT x1.0. Saying x1.0 here is the exact sentence that
-            # hid the 1v2-vs-2v2 economy gap for a release (bug #129), which
-            # is why that function's docstring calls it out by name.
+            # TRANSACTION aborted, so the next statement in this report would
+            # die under InFailedSQLTransaction rather than report the real
+            # fault. The savepoint keeps the failure legible; it does not make
+            # a failed read survivable — see the re-raise below.
+            # _tier_mult_for maps 1500 to Intermediate x1.5 — NOT x1.0. Saying
+            # x1.0 is the exact sentence that hid the 1v2-vs-2v2 economy gap
+            # for a release (bug #129), which is why that function's docstring
+            # calls it out by name.
             async with db.begin_nested():
                 _rrows = (await db.execute(text(
                     "SELECT player_id, rating FROM glicko_ratings WHERE player_id IN (:pa, :pb)"
                 ), {"pa": str(p1.id), "pb": str(p2.id)})).all()
             _pair_ratings = {str(r[0]): float(r[1]) for r in _rrows}
         except Exception as ex:
-            print(f"[MATCH] tier-mult rating fetch failed "
-                  f"(defaulting to rating 1500 = Intermediate x1.5): {ex}")
+            print(f"[MATCH] tier-mult rating READ FAILED: {ex}")
+            # RE-RAISE — twin of the 2v2 block. 1500 is the correct default for
+            # a player with no glicko_ratings row: that read SUCCEEDED and
+            # found nothing. It is not a safe answer when the read itself
+            # FAILED, because both players then silently become 1500 and
+            # calculate_match_xp commits XP and XP-derived gold computed from a
+            # tier nobody measured. A contained failure must never be
+            # indistinguishable from a successful negative result.
+            # Safe to raise here: the only commit above this point is inside
+            # the invalidation branch, which returns, so nothing on this path
+            # is durable yet and the outbox redelivers the report.
+            raise
     p1_xp, p1_bonuses = await calculate_match_xp(
         won=p1_won, is_ranked=report.is_ranked,
         winner_rounds=winner_rounds, loser_rounds=loser_rounds,
@@ -7569,15 +7690,20 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
             winner_bonus = int(SERIES_GOLD_BASE * _w_mult) * 2
             if _w_mult > 1.0:
                 _series_gold_winner_labels.append(f"{_w_label} opp x{_w_mult:g}")
-            try:
-                if str(series_loser.id) in await _podium_map(db):
-                    winner_bonus *= 2
-                    # "Podium", not "Top 3": shipped v1.33.0 clients scan the
-                    # raw response with Contains("Top 3") to render a defunct
-                    # "Top 3 x3" XP label — this string must not contain it.
-                    _series_gold_winner_labels.append("Podium beaten x2")
-            except Exception:
-                pass
+            # NOT wrapped in a swallow. _podium_map raises only when the
+            # podium could not be determined AND no good copy has ever been
+            # cached; "this player is not on the podium" returns normally and
+            # is the common case. Swallowing here made those two outcomes
+            # identical, so an undeterminable podium silently withheld a x2 the
+            # winner had earned. Nothing has committed at this point in the
+            # handler, so letting it raise returns 5xx and the client's outbox
+            # redelivers the report.
+            if str(series_loser.id) in await _podium_map(db):
+                winner_bonus *= 2
+                # "Podium", not "Top 3": shipped v1.33.0 clients scan the
+                # raw response with Contains("Top 3") to render a defunct
+                # "Top 3 x3" XP label — this string must not contain it.
+                _series_gold_winner_labels.append("Podium beaten x2")
             if series.p1_series_wins == 0 or series.p2_series_wins == 0:
                 winner_bonus += 2
                 _series_gold_winner_labels.append("Sweep +2")
@@ -13207,8 +13333,24 @@ async def _check_steam_session(request, steam_id: str, db: AsyncSession) -> None
             elif row["steam_id"] != steam_id:
                 reason = "steam_id_mismatch"
         except Exception as ex:
-            print(f"[STEAM-AUTH] session lookup error (soft): {type(ex).__name__}")
-            return
+            print(f"[STEAM-AUTH] session lookup UNDETERMINED: {type(ex).__name__}")
+            # A `reason`, NOT a `return`. The bare return exited before the
+            # enforcement decision below was ever evaluated, so a request whose
+            # session could not be read was handled more permissively than one
+            # whose session was read and found unverified — the failure removed
+            # the check instead of failing it.
+            # Required behaviour: a session that cannot be read is not a
+            # verified session. Setting a reason lets this fall through to the
+            # same decision every other unverified request reaches, so an
+            # unreadable session and a rejected session are treated alike.
+            # `_mark_session_verified(request, False)` at the top of this
+            # function already stands, so callers asking whether the claimed id
+            # was ESTABLISHED still correctly get "no".
+            # This does not make the check able to take down the write path it
+            # protects: under the soak switch the decision below is log-only,
+            # and once armed it returns the same 401 any unverified request
+            # gets rather than propagating the database error.
+            reason = "lookup_undetermined"
     if reason is None:
         _mark_session_verified(request, True)
         return
@@ -13276,7 +13418,23 @@ async def _check_steam_session(request, steam_id: str, db: AsyncSession) -> None
             if armed:
                 enforce = True
         except Exception as ex:
-            print(f"[STEAM-AUTH] per-account arm lookup error (soft): {type(ex).__name__}")
+            print(f"[STEAM-AUTH] per-account arm lookup UNDETERMINED: {type(ex).__name__}")
+            # Deliberately does NOT arm on an undetermined read, and this is
+            # the one place in this sweep that keeps the permissive outcome.
+            # The asymmetry with the session-lookup handler above is intended:
+            # that one resolves an unreadable session to "not verified", which
+            # is the same outcome an ordinary unverified request already gets.
+            # This one would resolve an unreadable row to "this account is
+            # armed", which asserts a fact about the account that was never
+            # read, and the consequence of being wrong is refusing a core
+            # action to a player who may never have been armed at all.
+            # So the fallback is the version gate's answer — the documented
+            # carve-out for accounts that cannot mint tickets yet. The residual
+            # is real and named rather than hidden: while this read is failing,
+            # an armed account is enforced only if the version gate already
+            # enforces it. Whether that should instead fail closed once
+            # STEAM_AUTH_ENFORCE is armed is an owner's call, not this sweep's;
+            # it is inert today because the master switch is off.
     if enforce:
         raise HTTPException(status_code=401, detail="session_required")
     path = ""
@@ -34649,7 +34807,11 @@ async def _check_match_achievements(db: AsyncSession, report, winner_id,
                                     loser_rounds: int, winner_is_p1: bool) -> None:
     """v1.30 (item 5): server-side per-match achievement detection for the
     winner. Runs at submit time from the reporter's payload — covers BOTH
-    players (only the reporter needs an up-to-date mod). Never raises."""
+    players (only the reporter needs an up-to-date mod).
+
+    DETECTION tolerates an unreadable payload and yields no keys. A failed
+    GRANT propagates — see the note below."""
+    keys: list = []
     try:
         counts: dict[str, int] = {}
         first_pick_norm = ""
@@ -34677,12 +34839,24 @@ async def _check_match_achievements(db: AsyncSession, report, winner_id,
                         break
             except Exception:
                 pass
-        for k in keys:
-            await _grant_achievement_inline(db, winner_id, k)
-        if keys:
-            print(f"[ACHIEVEMENT] match-combo grants for {winner_id}: {keys}")
     except Exception as e:
-        print(f"[ACHIEVEMENT] match-combo check failed: {e}")
+        # Everything above is pure Python over the reporter's payload, so a
+        # failure here means the payload could not be read and no achievement
+        # is provably due. Continuing with none is the honest answer.
+        print(f"[ACHIEVEMENT] match-combo detection failed (no keys due): {e}")
+        keys = []
+    # The grants sit OUTSIDE the tolerant block. Inside it, "the payload was
+    # unreadable" and "the grant did not write" were the same outcome — and
+    # since _grant_achievement_inline gained its savepoint, the second no
+    # longer aborts the transaction, so the match committed and the award and
+    # its gold were permanently omitted with a log line as their only trace.
+    # Letting a write failure propagate returns 5xx and the outbox redelivers;
+    # _grant_achievement_inline is idempotent, so the replay grants exactly
+    # what is still missing and nothing twice.
+    for k in keys:
+        await _grant_achievement_inline(db, winner_id, k)
+    if keys:
+        print(f"[ACHIEVEMENT] match-combo grants for {winner_id}: {keys}")
 
 
 async def _check_twins_achievement(db: AsyncSession, report, p1_id, p2_id) -> None:
@@ -34692,8 +34866,10 @@ async def _check_twins_achievement(db: AsyncSession, report, p1_id, p2_id) -> No
     the reporter's payload carries both card lists. Card names normalize via
     _norm_card (the two clients can carry display vs GameObject spellings,
     learning #19). An opponent with no shared cards (no mod / cr_cards drop)
-    yields an empty list and fails the exactly-5 gate naturally. Never
-    raises."""
+    yields an empty list and fails the exactly-5 gate naturally.
+
+    DETECTION tolerates an unreadable payload and grants nothing. A failed
+    GRANT propagates — see the note below."""
     try:
         def multiset(cards):
             counts: dict[str, int] = {}
@@ -34705,14 +34881,25 @@ async def _check_twins_achievement(db: AsyncSession, report, p1_id, p2_id) -> No
             return counts
         m1 = multiset(report.player1.cards)
         m2 = multiset(report.player2.cards)
-        if sum(m1.values()) != 5 or sum(m2.values()) != 5 or m1 != m2:
-            return
-        await _grant_achievement_inline(db, p1_id, "twins")
-        await _grant_achievement_inline(db, p2_id, "twins")
-        print(f"[ACHIEVEMENT] Twins! granted to {p1_id} + {p2_id} "
-              f"(build: {sorted(m1.items())})")
+        due = (sum(m1.values()) == 5 and sum(m2.values()) == 5 and m1 == m2)
     except Exception as e:
-        print(f"[ACHIEVEMENT] twins check failed: {e}")
+        # Payload could not be read, so no grant is provably due.
+        print(f"[ACHIEVEMENT] twins detection failed (no grant due): {e}")
+        return
+    if not due:
+        return
+    # The grants sit OUTSIDE the tolerant block. Inside it, "the payload was
+    # unreadable" and "the grant did not write" were the same outcome — and
+    # since _grant_achievement_inline gained its savepoint, the second no
+    # longer aborts the transaction, so the match committed and the award was
+    # permanently omitted with a log line as its only trace. Letting a write
+    # failure propagate returns 5xx and the outbox redelivers the report;
+    # _grant_achievement_inline is idempotent, so the replay grants exactly
+    # what is still missing and nothing twice.
+    await _grant_achievement_inline(db, p1_id, "twins")
+    await _grant_achievement_inline(db, p2_id, "twins")
+    print(f"[ACHIEVEMENT] Twins! granted to {p1_id} + {p2_id} "
+          f"(build: {sorted(m1.items())})")
 
 
 async def _grant_title_item(db: AsyncSession, player_id, sku: str) -> None:
@@ -40430,7 +40617,7 @@ def _ovt_difficulty_mult(is_solo: bool, extra_pick: bool,
 # NOT _podium_map (1v1-only) and deliberately does NOT grant title_podium: that
 # shop item is defined as the 1v1 podium, and cross-granting would silently
 # widen an existing cosmetic's meaning.
-_ovt_podium_cache: dict = {"at": 0.0, "ids": []}
+_ovt_podium_cache: dict = {"at": 0.0, "ok": False, "ids": []}
 
 # Item d: activity filter as on /ovt/leaderboard (f-string over the int).
 _OVT_PODIUM_QUERY = """
@@ -40459,10 +40646,11 @@ _OVT_PODIUM_QUERY = """
 
 
 async def _ovt_podium_ids(db: AsyncSession) -> list:
-    """[1st, 2nd, 3rd] player ids as strings. 60s TTL; a failure serves the
-    stale copy and never raises — a podium lookup must not fail a match report."""
+    """[1st, 2nd, 3rd] player ids as strings. 60s TTL. A refresh failure serves
+    the last GOOD copy; if there has never been one it RAISES, because an empty
+    list is indistinguishable from a real "nobody qualifies" answer."""
     now = time.monotonic()
-    if now - _ovt_podium_cache["at"] > 60:
+    if not _ovt_podium_cache["ok"] or now - _ovt_podium_cache["at"] > 60:
         try:
             # SAVEPOINT-wrapped: this runs inside the caller's match-report
             # transaction, and under asyncpg a caught statement error would
@@ -40472,9 +40660,15 @@ async def _ovt_podium_ids(db: AsyncSession) -> list:
                 rows = (await db.execute(text(_OVT_PODIUM_QUERY),
                                          {"active_days": LEADERBOARD_ACTIVE_DAYS})).scalars().all()
             _ovt_podium_cache["ids"] = [str(r) for r in rows]
+            # `ok` and `at` are set on SUCCESS ONLY. Stamping `at` in the failure
+            # path (as this did) makes the next 60s of callers read a copy that
+            # was never fetched, and records the failure as a fresh result.
+            _ovt_podium_cache["ok"] = True
+            _ovt_podium_cache["at"] = now
         except Exception as ex:
             print(f"[OVT-PODIUM] cache refresh failed: {ex}")
-        _ovt_podium_cache["at"] = now
+            if not _ovt_podium_cache["ok"]:
+                raise
     return _ovt_podium_cache["ids"]
 
 
@@ -49396,18 +49590,32 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
     try:
         # begin_nested, not a bare try/except (#235): a caught statement error
         # still leaves the TRANSACTION aborted — the XP/gold writes below would
-        # raise InFailedSQLTransaction and 500 the report. The SAVEPOINT is what
-        # makes the fallback real. The fallback itself is 1500, which
-        # _tier_mult_for maps to Intermediate x1.5 and NOT x1.0; that wrong
-        # sentence is what hid the 1v2-vs-2v2 economy gap for a release (#129).
+        # raise InFailedSQLTransaction and 500 the report. The savepoint is what
+        # keeps the failure legible, so the handler can refuse cleanly with the
+        # original error instead of dying later under a cascade of
+        # InFailedSQLTransaction. It does NOT make a failed read survivable:
+        # see the re-raise below for why 1500 cannot stand in for a read that
+        # never completed. _tier_mult_for maps 1500 to Intermediate x1.5 and NOT
+        # x1.0 — the sentence claiming otherwise hid the 1v2-vs-2v2 economy gap
+        # for a release (#129).
         async with db.begin_nested():
             _t2v2_rows = (await db.execute(text(
                 "SELECT player_id, rating FROM glicko_ratings_2v2 WHERE player_id IN (:a, :b, :c, :d)"
             ), {"a": str(p_t1a.id), "b": str(p_t1b.id), "c": str(p_t2a.id), "d": str(p_t2b.id)})).all()
         _t2v2_ratings = {str(r[0]): float(r[1]) for r in _t2v2_rows}
     except Exception as _rex:
-        print(f"[TEAM-ECON] 2v2 tier-mult rating fetch failed "
-              f"(defaulting to rating 1500 = Intermediate x1.5): {_rex}")
+        print(f"[TEAM-ECON] 2v2 tier-mult rating READ FAILED: {_rex}")
+        # RE-RAISE. 1500 is the right default for a player who has no 2v2 rating
+        # row yet: that read SUCCEEDED and correctly found nothing, and
+        # _tier_mult_for maps the default to Intermediate x1.5 by design. It is
+        # NOT a safe answer when the read itself FAILED, because then all four
+        # players silently become 1500, the economy block below succeeds, and it
+        # COMMITS the resulting XP and gold as though they had been measured.
+        # The rule this encodes: a contained failure must never be
+        # indistinguishable from a successful negative result. The
+        # `.get(..., 1500.0)` defaults just below exist to serve the unrated
+        # player, and must not be quietly made to serve this case as well.
+        raise
     _t1_avg_rating = (_t2v2_ratings.get(str(p_t1a.id), 1500.0) + _t2v2_ratings.get(str(p_t1b.id), 1500.0)) / 2.0
     _t2_avg_rating = (_t2v2_ratings.get(str(p_t2a.id), 1500.0) + _t2v2_ratings.get(str(p_t2b.id), 1500.0)) / 2.0
     try:
@@ -49520,16 +49728,27 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
         # UPDATE, no GoldTransaction row and no accumulator delta survived.
         # These two dicts are plain Python and a SAVEPOINT cannot roll them
         # back, so a partial loop leaves them claiming awards nobody received.
-        # Nothing downstream reads them now that the accumulator write lives
-        # inside the same savepoint, but they are cleared anyway: they are the
-        # in-memory record of "what this match paid", and leaving them stating
-        # payments that were rolled back is the same false claim one refactor
-        # away from being consumed again. (Before the savepoint the whole
-        # request 500'd here, which is why this state was previously
-        # unreachable.)
+        # They are the in-memory record of "what this match paid", and leaving
+        # them stating payments that were rolled back is a false claim one
+        # refactor away from being consumed again.
         series_xp_by_pid.clear()
         series_gold_by_pid.clear()
         print(f"[TEAM-ECON] per-match XP failed for match {new_match.id}: {xpex}")
+        # RE-RAISE, deliberately. The savepoint makes this block ATOMIC; it does
+        # not make it OPTIONAL, and the difference is the whole finding. Falling
+        # through here would run on to the single `await db.commit()` below and
+        # answer 200 with all four players' per-match XP, XP-derived gold and
+        # accumulator deltas rolled back. A 2xx is precisely what tells the
+        # client to delete the report from its outbox, so that omission would be
+        # both permanent and silent — the players are simply never paid for the
+        # match and nothing anywhere records that they are owed.
+        # Raising returns 5xx instead, which the outbox treats as retryable: its
+        # `permanent` predicate is 4xx-or-duplicate-key only, so the report is
+        # redelivered and paid on a later attempt.
+        # Nothing durable is lost by raising. The ONLY commit in this handler is
+        # the one below, so the match row and every write above it roll back
+        # with the request, and the retry re-derives them from the same report.
+        raise
 
     # (The per-slot accumulators are rolled in above, inside the same savepoint
     # as the payments they describe — see the note there for why they cannot be
@@ -51014,7 +51233,20 @@ async def _service_player_uuids(db: AsyncSession) -> "set[str]":
             # fallback. A previous fill is reused instead: staleness up to an
             # hour is already this cache's accepted contract, and a refresh
             # failure is not a reason to widen what gets allowed.
-            if _service_player_uuid_cache is None:
+            # `not ...` rather than `is None`, and that is the whole fix. The
+            # paragraph above is the correct rule and the test below used to
+            # break it: a previous fill that SUCCEEDED and returned set() is
+            # not None, so it was served as a usable fallback — and an empty
+            # set makes the intersection at the call site match nothing, which
+            # is the refusal guard answering "allowed" for every account it
+            # exists to refuse. `not` covers both states that mean the same
+            # thing operationally: never filled, and filled with nothing.
+            # An empty fill was ALREADY known to be abnormal here — the TTL
+            # line above deliberately re-asks in ~60s instead of an hour when
+            # the set comes back empty. It was treated as suspect for cache
+            # freshness and as authoritative for the guard decision, and only
+            # one of those can be right.
+            if not _service_player_uuid_cache:
                 print(f"[SERVICE-POLICY] uuid cache could not be filled: {ex}")
                 raise HTTPException(
                     status_code=503,
