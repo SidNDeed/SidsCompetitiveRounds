@@ -210,7 +210,15 @@
     <MusicPreviewsToCopy Include="music\*_preview.ogg" />
     <MusicPreviewsToCopy Include="music\*.png" />
     <MusicFullToCopy Include="music\*.ogg" Exclude="music\*_preview.ogg" />
-    <MusicManifestToCopy Include="music\manifest.json" />
+    <!-- Exists() is REQUIRED here, unlike the three siblings above. Those are
+         wildcards, so MSBuild globs them and they come back genuinely empty
+         when music\ is absent. This one is a LITERAL path, and MSBuild adds a
+         literal Include to the item whether or not the file is there - so the
+         item is never empty, the Condition on the Copy that consumes it
+         (="'@(MusicManifestToCopy)' != ''") can never be false, and the copy
+         hard-fails MSB3030 in any tree without music assets. The guard was
+         written to tolerate their absence and could not do it. -->
+    <MusicManifestToCopy Include="music\manifest.json" Condition="Exists('music\manifest.json')" />
   </ItemGroup>
 
   <!-- Home-tab logo: EMBEDDED in the DLL (not a loose file) because the
