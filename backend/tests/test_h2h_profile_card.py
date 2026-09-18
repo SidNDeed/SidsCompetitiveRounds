@@ -798,8 +798,13 @@ def test_a_the_profile_card_reads_the_podium_maps_without_refreshing_or_granting
         for c in (main._podium_cache, main._podium_2v2_cache, main._podium_ffa_cache):
             c.clear()
         assert main._podium_maps_cached((main.TITLE_PODIUM_SKU,)) == ({}, {}, {})   # cold: nothing, no refresh
-        main._podium_cache.update({"map": {"abc": 1}, "at": time.monotonic()})
-        main._podium_ffa_cache.update({"map": {"fff": 3}, "at": time.monotonic()})
+        # `ok` is required, not decorative: usable() gates on it FIRST because
+        # `at` alone cannot tell a successful fill from a failed refresh that
+        # stamped itself anyway. Priming with `at` only is what the old code
+        # meant by "fresh" and it is exactly the inference the repair removed,
+        # so a primer without `ok` now simulates a FAILED refresh.
+        main._podium_cache.update({"map": {"abc": 1}, "at": time.monotonic(), "ok": True})
+        main._podium_ffa_cache.update({"map": {"fff": 3}, "at": time.monotonic(), "ok": True})
         m, m2, mf = main._podium_maps_cached((main.TITLE_PODIUM_SKU, main.TITLE_PODIUM_2V2_SKU))
         assert (m, m2, mf) == ({"abc": 1}, {}, {})                                  # only the asked-for ladders
         m["zzz"] = 2
