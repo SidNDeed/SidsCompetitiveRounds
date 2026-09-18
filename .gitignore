@@ -95,3 +95,8 @@ backend/api/assets/fonts/*.otf
 backend/api/assets/fonts/*.ttc
 backend/api/assets/fonts/*.part
 backend/tests/_out/
+
+# Session scratch: fetched player log bundles, review transcripts, throwaway
+# probes. 63MB of it today, and the bundles are other players's log files -
+# never a commit candidate, and named here so an `add -A` cannot make it one.
+scratchpad/
