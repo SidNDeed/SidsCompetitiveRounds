@@ -2434,12 +2434,63 @@ namespace CompetitiveRounds
             return null;
         }
 
+        /// <summary>PlayerID -> body. Null-safe replacement for vanilla
+        /// PlayerManager.GetPlayerWithID, which every FFA caller here used to
+        /// use directly.
+        ///
+        /// Vanilla dereferences players[i].PlayerID with NO null guard
+        /// (decompile PlayerManager.cs:169-177), and vanilla RegisterPlayer
+        /// pads the list with literal nulls whenever forceIndex exceeds Count
+        /// (:227-236). Both online registration paths force-index: REMOTE
+        /// bodies via Player.Start, whose forceIndex = PlayerID branch sits
+        /// inside the !data.view.IsMine arm (Player.cs:88-96), and the LOCAL
+        /// body via this mod at Plugin.cs:3439-3441.
+        ///
+        /// CORRECTED after Codex round b4yssbnuh. This comment first claimed
+        /// the hole was reached by FFA compacting the list in
+        /// PurgeDepartedPlayers (:1233) and a later high-PlayerID
+        /// re-registration re-padding it. That chain does not close in
+        /// today's supported fighter flow: a relaunched seat is refused a
+        /// mid-game rejoin outright (ApiClient.cs:16776-16785), so the
+        /// re-registration step never happens, and a re-registration at a
+        /// LOWER id would overwrite a shifted fighter rather than re-pad.
+        /// Codex reads the reachable source as late-spectator replay, which
+        /// populates without compacting - recorded as its finding, not as
+        /// something verified here.
+        ///
+        /// So this is a GUARD, not the fix for a hole demonstrated in the
+        /// fighter path. Still worth having: vanilla's throw is unguarded and
+        /// the shape of that list is not this code's to promise.
+        ///
+        /// Resolution is the same linear search on PlayerID that vanilla
+        /// does. THREE behaviour differences, stated precisely because the
+        /// first draft of this comment claimed only holes are skipped: a
+        /// literal null is skipped; a DESTROYED body is also skipped, since
+        /// the p != null test on a UnityEngine.Object is the overloaded
+        /// fake-null comparison; and the catch-all returns null where vanilla
+        /// would propagate an unexpected exception.</summary>
+        internal static Player ResolveFighter(int playerId)
+        {
+            try
+            {
+                var list = PlayerManager.instance?.players;
+                if (list == null) return null;
+                for (int i = 0; i < list.Count; i++)
+                {
+                    var p = list[i];
+                    if (p != null && p.PlayerID == playerId) return p;
+                }
+                return null;
+            }
+            catch { return null; }
+        }
+
         private static int CountStillPresent(List<int> manifest)
         {
             int n = 0;
             foreach (var pid in manifest)
             {
-                var p = PlayerManager.instance?.GetPlayerWithID(pid);
+                var p = ResolveFighter(pid);
                 if (p != null && p.gameObject != null && p.data?.view?.Owner != null) n++;
             }
             return Math.Max(1, n);
@@ -2640,7 +2691,7 @@ namespace CompetitiveRounds
                 string prefix = $"{RoomNonce()}:{game}:{cycle}:";
                 foreach (var pid in manifest)
                 {
-                    var pl = PlayerManager.instance?.GetPlayerWithID(pid);
+                    var pl = ResolveFighter(pid);
                     var owner = pl?.data?.view?.Owner;
                     var props = owner?.CustomProperties;
                     if (props == null || !props.ContainsKey(PropPick)) continue;
@@ -2667,7 +2718,7 @@ namespace CompetitiveRounds
                 var counts = new Dictionary<string, int>();
                 foreach (var pid in manifest)
                 {
-                    var pl = PlayerManager.instance?.GetPlayerWithID(pid);
+                    var pl = ResolveFighter(pid);
                     var props = pl?.data?.view?.Owner?.CustomProperties;
                     if (props == null || !props.ContainsKey(PropPick)) continue;
                     string v = props[PropPick] as string ?? "";
@@ -3049,7 +3100,7 @@ namespace CompetitiveRounds
             // between Add and Remove, this pid's card-bar adds would stay
             // suppressed for the rest of the game — clear on every new apply.
             deckViewRebuilds.Remove(pid);
-            var player = PlayerManager.instance?.GetPlayerWithID(pid);
+            var player = ResolveFighter(pid);
             if (player == null || player.gameObject == null || player.data == null)
             {
                 Plugin.Log.LogWarning($"[FFA] apply skipped — player {pid} gone (card {cardName})");
