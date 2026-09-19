@@ -2956,6 +2956,12 @@ namespace CompetitiveRounds
             PcMeError = null; PcCollectionError = null;
             PcMeFetchedAt = -1f; PcMeDispatchedAt = -1f; PcCollectionFetchedAt = -1f;
             pcMeAttemptAt = -100f; pcCollAttemptAt = -100f;
+            // Title ladders (item 12): the board names which rungs the account
+            // OWNS and which one it wears. Same ordering — epoch first, so an
+            // answer already on the wire is dropped, then the clears.
+            _ladderEpoch++;
+            CachedTitleLadders = null; TitleLaddersError = null;
+            TitleLaddersFetchedAt = -1f; ladderAttemptAt = -100f;
             NativeUI.MarkDirty();
         }
 
@@ -4461,6 +4467,237 @@ namespace CompetitiveRounds
                 prints = ParsePcPrints(prints, PcStr(PcTopLevel(json, "locale")) ?? "en"),
             };
             return c;
+        }
+
+        // ── Animal title ladders (v1.41.0 item 12) ─────────────────────────
+        //
+        // GET /api/v1/players/{steam_id}/title-ladders answers
+        //   {steam_id, active_line, ladders:[{line, name, games, tier,
+        //     max_tier, next_tier, next_threshold, next_names, games_to_next,
+        //     rungs:[{tier, sku, item_id, name, description, rarity,
+        //             preview_color, threshold, price, owned, active}]}]}
+        //
+        // Depth-aware reads are not a style choice here. `name`, `tier`, `sku`
+        // and `threshold` ALL recur inside `rungs[]`, and
+        // `ExtractJson*(json, key)` answers with the first occurrence anywhere
+        // in the text — an order the server never promised (#608). A line's
+        // display name and its first rung's name are different strings and the
+        // flat helper cannot tell them apart. `JsonUtility` drops the nested
+        // arrays outright (#25). Every read below is `PcTopLevel` against the
+        // object that OWNS the key, so depth decides, never position.
+
+        /// <summary>One rung of one line. `item_id` is the `shop_items` row id
+        /// the equip call needs; 0 means the server named no row and the rung
+        /// is not equippable from here.</summary>
+        internal class TitleLadderRung
+        {
+            public int tier;
+            public string sku, name, description, rarity, preview_color;
+            public long item_id;
+            public int threshold, price;
+            public bool owned, active;
+        }
+
+        /// <summary>One animal line. `has_next` is false at the top of the
+        /// line, where the server sends JSON null for next_tier /
+        /// next_threshold / games_to_next — a 0 read out of that null would
+        /// render as "0 more to go", the opposite of what it means.</summary>
+        internal class TitleLadderLine
+        {
+            public string line, name;
+            public int games, tier, max_tier;
+            public bool has_next;
+            public int next_tier, next_threshold, games_to_next;
+            public string[] next_names = new string[0];
+            public List<TitleLadderRung> rungs = new List<TitleLadderRung>();
+
+            /// <summary>Does the player hold any rung of this line? A line with
+            /// none is NOT STARTED — it can show no progress at all, because
+            /// progress only accrues while a rung of the line is equipped.</summary>
+            internal bool AnyOwned
+            {
+                get { for (int i = 0; i < rungs.Count; i++) if (rungs[i].owned) return true; return false; }
+            }
+        }
+
+        internal class TitleLadders
+        {
+            public string steam_id, active_line;
+            public List<TitleLadderLine> lines = new List<TitleLadderLine>();
+        }
+
+        /// <summary>A raw token → `long`. `shop_items.id` is a bigint and is
+        /// carried as `long` everywhere else in this file (ShopItemData.id,
+        /// every SetActive* signature); reading it through `PcInt` would
+        /// silently TRUNCATE a row id past 2^31 into a different, valid-looking
+        /// id, and the equip call would then name someone else's row.</summary>
+        internal static long PcLong(string raw)
+        {
+            if (string.IsNullOrEmpty(raw) || raw == "null") return 0L;
+            long v;
+            return long.TryParse(PcStr(raw), System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out v) ? v : 0L;
+        }
+
+        /// <summary>The strings of a RAW json array token (`["a","b"]`), in
+        /// order. A non-array token, or one holding no strings, answers
+        /// empty — never null, so no caller needs a second check.</summary>
+        internal static string[] PcStrArray(string rawArray)
+        {
+            var outp = new List<string>();
+            if (string.IsNullOrEmpty(rawArray) || rawArray == "null") return outp.ToArray();
+            int n = rawArray.Length;
+            for (int i = 0; i < n; i++)
+            {
+                if (rawArray[i] != '"') continue;
+                int k = i + 1;
+                while (k < n) { if (rawArray[k] == '\\') { k += 2; continue; } if (rawArray[k] == '"') break; k++; }
+                if (k >= n) break;                       // truncated body: keep what parsed
+                outp.Add(PcStr(rawArray.Substring(i, k + 1 - i)) ?? "");
+                i = k;
+            }
+            return outp.ToArray();
+        }
+
+        /// <summary>One rung object → a rung. A rung whose `sku` is missing is
+        /// DROPPED rather than rendered as a blank chip: the sku is what the
+        /// equip path and the Shop deep-link are keyed on, so a rung without
+        /// one cannot be acted on and must not claim a slot.</summary>
+        internal static TitleLadderRung ParseTitleLadderRung(string obj)
+        {
+            if (string.IsNullOrEmpty(obj)) return null;
+            string sku = PcStr(PcTopLevel(obj, "sku"));
+            if (string.IsNullOrEmpty(sku)) return null;
+            return new TitleLadderRung
+            {
+                tier = PcInt(PcTopLevel(obj, "tier")),
+                sku = sku,
+                name = PcStr(PcTopLevel(obj, "name")),
+                description = PcStr(PcTopLevel(obj, "description")),
+                rarity = PcStr(PcTopLevel(obj, "rarity")),
+                preview_color = PcStr(PcTopLevel(obj, "preview_color")),
+                item_id = PcLong(PcTopLevel(obj, "item_id")),
+                threshold = PcInt(PcTopLevel(obj, "threshold")),
+                price = PcInt(PcTopLevel(obj, "price")),
+                owned = PcBool(PcTopLevel(obj, "owned")),
+                active = PcBool(PcTopLevel(obj, "active")),
+            };
+        }
+
+        /// <summary>The whole answer, or null when the body carries no
+        /// `ladders` array at all — which is what an error page, a truncated
+        /// body and another route's 200 all look like. Null is the caller's
+        /// signal to render UNAVAILABLE rather than a board of zeroes.</summary>
+        internal static TitleLadders ParseTitleLadders(string json)
+        {
+            if (string.IsNullOrEmpty(json)) return null;
+            string arr = PcTopLevel(json, "ladders");
+            if (string.IsNullOrEmpty(arr) || arr == "null") return null;
+            var d = new TitleLadders
+            {
+                steam_id = PcStr(PcTopLevel(json, "steam_id")),
+                active_line = PcStr(PcTopLevel(json, "active_line")),
+            };
+            foreach (var obj in SliceTopLevelObjects(arr))
+            {
+                string line = PcStr(PcTopLevel(obj, "line"));
+                if (string.IsNullOrEmpty(line)) continue;
+                var ln = new TitleLadderLine
+                {
+                    line = line,
+                    name = PcStr(PcTopLevel(obj, "name")) ?? line,
+                    games = PcInt(PcTopLevel(obj, "games")),
+                    tier = PcInt(PcTopLevel(obj, "tier")),
+                    max_tier = PcInt(PcTopLevel(obj, "max_tier")),
+                    next_names = PcStrArray(PcTopLevel(obj, "next_names")),
+                };
+                // Presence, not value: at the top of a line the server sends
+                // null for all three, and PcInt reads a null as 0.
+                string nt = PcTopLevel(obj, "next_tier");
+                ln.has_next = !string.IsNullOrEmpty(nt) && nt != "null";
+                if (ln.has_next)
+                {
+                    ln.next_tier = PcInt(nt);
+                    ln.next_threshold = PcInt(PcTopLevel(obj, "next_threshold"));
+                    ln.games_to_next = PcInt(PcTopLevel(obj, "games_to_next"));
+                }
+                string rungs = PcTopLevel(obj, "rungs");
+                if (!string.IsNullOrEmpty(rungs) && rungs != "null")
+                    foreach (var ro in SliceTopLevelObjects(rungs))
+                    {
+                        var r = ParseTitleLadderRung(ro);
+                        if (r != null) ln.rungs.Add(r);
+                    }
+                d.lines.Add(ln);
+            }
+            return d;
+        }
+
+        // internal, not public: the type it exposes is internal, and a public
+        // property of an internal type does not compile (CS0053).
+        internal static TitleLadders CachedTitleLadders { get; private set; }
+        /// <summary>Why the last attempt produced no board. "route" = this
+        /// server does not serve the ladder route (404); "parse" = a 200 whose
+        /// body carried no ladders; anything else is the transport's own text.
+        /// Null while a board is in hand.</summary>
+        public static string TitleLaddersError { get; private set; }
+        public static float TitleLaddersFetchedAt = -1f;
+        private static float ladderAttemptAt = -100f;
+        private static bool ladderInFlight;
+        private static int _ladderEpoch;
+
+        /// <summary>Fetch the ladder board for one account. Pure read, no HMAC
+        /// — the route is a public read like /achievements/{id}. `force`
+        /// bypasses the 20 s floor (an equip has to be seen immediately).</summary>
+        public static void FetchTitleLadders(string steamId, bool force = false)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
+            if (ladderInFlight) return;
+            if (!force && Time.realtimeSinceStartup - ladderAttemptAt < 20f) return;
+            ladderInFlight = true; ladderAttemptAt = Time.realtimeSinceStartup;
+            int epoch = _ladderEpoch;
+            Plugin.Instance.StartCoroutine(GetRequest(
+                $"{baseUrl}/api/v1/players/{Escape(steamId)}/title-ladders",
+                (success, response) =>
+                {
+                    ladderInFlight = false;
+                    // The account this answer describes is no longer the one on
+                    // screen: committing it would show one player's owned rungs
+                    // under another player's name.
+                    if (epoch != _ladderEpoch)
+                    {
+                        Plugin.Log.LogInfo("[LADDER] answer dropped: identity changed");
+                        return;
+                    }
+                    if (success)
+                    {
+                        var d = ParseTitleLadders(response);
+                        if (d != null)
+                        {
+                            CachedTitleLadders = d;
+                            TitleLaddersError = null;
+                            TitleLaddersFetchedAt = Time.realtimeSinceStartup;
+                            Plugin.Log.LogInfo($"[LADDER] fetched {d.lines.Count} lines (active={d.active_line ?? "none"})");
+                        }
+                        else
+                        {
+                            TitleLaddersError = "parse";
+                            Plugin.Log.LogWarning($"[LADDER] 200 with no ladders array: {PcShort(response)}");
+                        }
+                    }
+                    else
+                    {
+                        // A server that never had the route answers 404. That is
+                        // a DEPLOYMENT fact, not a player fact, and it gets its
+                        // own wording — "you have no ladders" would be a lie
+                        // about the account.
+                        bool noRoute = response != null
+                            && response.IndexOf("HTTP 404", StringComparison.Ordinal) >= 0;
+                        TitleLaddersError = noRoute ? "route" : (response ?? "transport");
+                        Plugin.Log.LogInfo($"[LADDER] fetch failed: {PcShort(response)}");
+                    }
+                    try { NativeUI.MarkDirty(); } catch { }
+                }, detailedErrors: true));
         }
 
         /// <summary>The machine-readable reason of a failed Player Cards call:

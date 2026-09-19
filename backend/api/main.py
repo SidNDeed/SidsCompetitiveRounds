@@ -4606,6 +4606,23 @@ from auto_logs import router as auto_logs_router, internal_router as auto_logs_i
 app.include_router(auto_logs_router)
 app.include_router(auto_logs_internal_router)
 
+# Animal title ladders (v1.41.0 item 12): the READ route only,
+# GET /api/v1/players/{steam_id}/title-ladders, which the Titles tab draws its
+# progress bars from. Pure read, no writes, safe on the replica.
+#
+# The module's per-series completion hook is NOT called from here. Wiring it
+# into the four completion paths is a separate change on a separate tree, and
+# until it lands this route answers games=0 for every account — which the
+# client renders as NOT STARTED per line rather than as a countdown.
+#
+# Deliberately not naming that hook's symbol in this comment:
+# test_title_ladders.py decides whether to run its per-mode coverage assertion
+# by testing whether the symbol appears in this file at all, so a mention here
+# would switch that test on and fail it against four paths this change was
+# told not to touch. The gate is a substring test; a comment is not a call.
+import title_ladders
+app.include_router(title_ladders.router)
+
 
 # ── Version gate ───────────────────────────────────────────────
 # Clients send X-Mod-Version on every request. If the version is below
