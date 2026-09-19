@@ -6138,10 +6138,21 @@ namespace CompetitiveRounds
         // BepInEx logs (which are usually the triage signal) when Unity's log
         // happened to be large.
         //
-        // Budget split (~3.4M total, under ApiClient.BUG_REPORT_LOG_CAP_CHARS=3.5M):
+        // Budget split:
         //   BepInEx current     1.5M  — most important for live diagnosis
         //   BepInEx prev        1.0M  — crash-on-prior-launch context
         //   Unity Player.log    1.0M  — engine-side hint when needed
+        // That is 3.5M of LOG TEXT, which is exactly
+        // ApiClient.BUG_REPORT_LOG_CAP_CHARS and not under it — and the
+        // section headers and the audio self-check are on top. The comment
+        // here used to claim "~3.4M total, under 3.5M", which was arithmetic
+        // nobody had done (Codex r1 LOW, CompetitiveUI.cs:6141). Both senders
+        // therefore TAIL-TRIM to the cap, and the trim is deliberate rather
+        // than an accident the numbers were supposed to avoid: the audio
+        // self-check rides at the END for that reason, and what a full bundle
+        // gives up is the oldest lines of the previous session's log. If the
+        // per-section budgets are ever meant to fit whole, they have to come
+        // down — not the comment.
         // Tail-most slice of each (most recent N chars) is taken. Each section
         // emits a clearly delimited header so a triage reader can split the
         // concatenation back into pieces.
@@ -6150,38 +6161,78 @@ namespace CompetitiveRounds
         private const int BUNDLE_CAP_UNITY       = 1_000_000;
 
         /// <summary>Replacement count from the most recent BuildLogBundle()
-        /// scrub. Read by the automatic post-match upload so its acceptance
-        /// line can state what the scrub removed rather than assert that it
-        /// ran.</summary>
+        /// scrub. Read by the BUG FORM's own logging. The automatic upload does
+        /// NOT read it — it takes the count ComposeLogBundle hands back, so two
+        /// bundles in flight cannot report each other's figure.</summary>
         internal static int LastScrubReplacements { get; private set; }
 
-        /// <summary>Internal, not private: the automatic post-match upload
-        /// (AutoLogUpload) sends the SAME bundle the bug form does, so the
-        /// scrub below has exactly one site and the two paths cannot
-        /// diverge.</summary>
-        internal static string BuildLogBundle()
+        /// <summary>Everything a log bundle needs that can only be read on the
+        /// GAME THREAD, captured as plain values. The three log paths walk the
+        /// assembly location and Application.persistentDataPath; the audio
+        /// self-check reads AudioListener, PlayerPrefs and the vanilla mixer.
+        /// None of that is legal off the main thread, and all of it is O(1) —
+        /// which is what lets the expensive half run somewhere else.</summary>
+        internal sealed class LogBundleInputs
         {
-            string bep     = ApiClient.ReadLogTail(BepInExLogPath(),         maxChars: BUNDLE_CAP_BEP_CURRENT);
-            string bepPrev = ApiClient.ReadLogTail(BepInExLogPreviousPath(), maxChars: BUNDLE_CAP_BEP_PREV);
-            string uni     = ApiClient.ReadLogTail(UnityLogPath(),           maxChars: BUNDLE_CAP_UNITY);
-            var sb = new System.Text.StringBuilder();
-            if (!string.IsNullOrEmpty(bepPrev))
-            {
-                sb.AppendLine($"===== BepInEx LogOutput-prev.log [{BepInExLogPreviousPath()}]  ({bepPrev.Length:N0} chars, cap {BUNDLE_CAP_BEP_PREV:N0}) =====");
-                sb.AppendLine(bepPrev);
-                sb.AppendLine();
-            }
-            sb.AppendLine($"===== BepInEx LogOutput.log [{BepInExLogPath() ?? "(path unknown)"}]  ({(bep?.Length ?? 0):N0} chars, cap {BUNDLE_CAP_BEP_CURRENT:N0}) =====");
-            sb.AppendLine(string.IsNullOrEmpty(bep) ? "(not found)" : bep);
-            sb.AppendLine();
-            sb.AppendLine($"===== Unity Player.log [{UnityLogPath() ?? "(path unknown)"}]  ({(uni?.Length ?? 0):N0} chars, cap {BUNDLE_CAP_UNITY:N0}) =====");
-            sb.AppendLine(string.IsNullOrEmpty(uni) ? "(not found)" : uni);
+            internal string BepPath;
+            internal string BepPrevPath;
+            internal string UniPath;
+            internal string AudioSnapshot;
+        }
+
+        /// <summary>MAIN THREAD. A fixed, small amount of work: three path
+        /// computations and one audio snapshot. Nothing here scales with the
+        /// size of a log.</summary>
+        internal static LogBundleInputs CaptureLogBundleInputs()
+        {
+            var i = new LogBundleInputs();
+            try { i.BepPath = BepInExLogPath(); } catch { }
+            try { i.BepPrevPath = BepInExLogPreviousPath(); } catch { }
+            try { i.UniPath = UnityLogPath(); } catch { }
             // Bug 337: the audio self-check rides at the END of the bundle.
             // SubmitBugReport keeps the tail-most window of the text, so a
             // block at the head could be trimmed away with the oldest log.
+            try { i.AudioSnapshot = AudioSelfCheck.Snapshot(); }
+            catch (Exception ex) { i.AudioSnapshot = "(audio self-check unavailable: " + ex.GetType().Name + ")"; }
+            return i;
+        }
+
+        /// <summary>THREAD-SAFE by contract — this is the expensive half, and
+        /// the automatic post-match upload runs it on a worker thread (Codex r1
+        /// HIGH, AutoLogUpload.cs:184: reading, scrubbing and escaping up to
+        /// 3.5 M characters at room exit was a visible freeze on the game
+        /// thread). It touches NO Unity API, NO Photon state, NO logger and NO
+        /// mutable static: every input arrives in <paramref name="inputs"/> and
+        /// every output leaves through a parameter or the return value. Keep it
+        /// that way — a single Plugin.Log call or Application.* read here puts
+        /// the freeze back, silently, on a worker thread where it may instead
+        /// throw.
+        ///
+        /// <paramref name="scrubbed"/> is -1 when the scrub could not complete;
+        /// the returned text is then the withheld-content sentence, never the
+        /// unscrubbed bundle. <paramref name="diagnostic"/> is the line the
+        /// CALLER logs once it is back on the main thread.</summary>
+        internal static string ComposeLogBundle(LogBundleInputs inputs, out int scrubbed, out string diagnostic)
+        {
+            if (inputs == null) inputs = new LogBundleInputs();
+            string bep     = ApiClient.ReadLogTail(inputs.BepPath,     maxChars: BUNDLE_CAP_BEP_CURRENT);
+            string bepPrev = ApiClient.ReadLogTail(inputs.BepPrevPath, maxChars: BUNDLE_CAP_BEP_PREV);
+            string uni     = ApiClient.ReadLogTail(inputs.UniPath,     maxChars: BUNDLE_CAP_UNITY);
+            var sb = new System.Text.StringBuilder();
+            if (!string.IsNullOrEmpty(bepPrev))
+            {
+                sb.AppendLine($"===== BepInEx LogOutput-prev.log [{inputs.BepPrevPath}]  ({bepPrev.Length:N0} chars, cap {BUNDLE_CAP_BEP_PREV:N0}) =====");
+                sb.AppendLine(bepPrev);
+                sb.AppendLine();
+            }
+            sb.AppendLine($"===== BepInEx LogOutput.log [{inputs.BepPath ?? "(path unknown)"}]  ({(bep?.Length ?? 0):N0} chars, cap {BUNDLE_CAP_BEP_CURRENT:N0}) =====");
+            sb.AppendLine(string.IsNullOrEmpty(bep) ? "(not found)" : bep);
+            sb.AppendLine();
+            sb.AppendLine($"===== Unity Player.log [{inputs.UniPath ?? "(path unknown)"}]  ({(uni?.Length ?? 0):N0} chars, cap {BUNDLE_CAP_UNITY:N0}) =====");
+            sb.AppendLine(string.IsNullOrEmpty(uni) ? "(not found)" : uni);
             sb.AppendLine();
             sb.AppendLine("===== audio self-check (at submit) =====");
-            sb.AppendLine(AudioSelfCheck.Snapshot());
+            sb.AppendLine(inputs.AudioSnapshot ?? "(audio self-check not captured)");
 
             // THE scrub site. It is here, and not at either sender, because
             // both senders ship this exact text: a scrub at one call site
@@ -6194,16 +6245,31 @@ namespace CompetitiveRounds
             // job. The text is withheld in that case: a bug report or an
             // upload that arrives as one honest sentence is a far better
             // outcome than one that arrives carrying a machine's account name.
-            int scrubbed;
             string cleaned = LogScrub.Scrub(sb.ToString(), out scrubbed);
             if (cleaned == null)
             {
-                LastScrubReplacements = -1;
-                Plugin.Log.LogError("[LOG-SCRUB] scrub failed — log bundle withheld rather than sent unscrubbed");
+                scrubbed = -1;
+                diagnostic = "[LOG-SCRUB] scrub failed — log bundle withheld rather than sent unscrubbed";
                 return "[log bundle withheld: the local-path scrub failed on this machine]";
             }
+            diagnostic = $"[LOG-SCRUB] bundle {cleaned.Length:N0} chars, {scrubbed} local-identity replacement(s)";
+            return cleaned;
+        }
+
+        /// <summary>The BUG FORM's producer: capture + compose in one go, on
+        /// the thread that called it. The form is a menu click with a modal
+        /// already on screen and a spinner the player is watching, so a pause
+        /// there is the expected cost of pressing Send; the ROOM-EXIT producer
+        /// is the one that may not pause, and it schedules the same two halves
+        /// itself. Internal, not private, because AutoLogUpload used to call
+        /// this and the shape is still the single producer of the TEXT.</summary>
+        internal static string BuildLogBundle()
+        {
+            int scrubbed; string diagnostic;
+            string cleaned = ComposeLogBundle(CaptureLogBundleInputs(), out scrubbed, out diagnostic);
             LastScrubReplacements = scrubbed;
-            Plugin.Log.LogInfo($"[LOG-SCRUB] bundle {cleaned.Length:N0} chars, {scrubbed} local-identity replacement(s)");
+            if (scrubbed < 0) Plugin.Log.LogError(diagnostic);
+            else Plugin.Log.LogInfo(diagnostic);
             return cleaned;
         }
 

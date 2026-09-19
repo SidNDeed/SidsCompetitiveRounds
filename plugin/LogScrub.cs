@@ -26,21 +26,70 @@ namespace CompetitiveRounds
     ///    naming nobody. The pattern is written against `Users\&lt;anything&gt;`
     ///    rather than against this machine's own directory so that a second
     ///    account's path in the same log is scrubbed too.
-    ///  * THE ACCOUNT NAME on its own, with no path around it. Bounded on both
-    ///    sides so a longer identifier that merely starts with the same
-    ///    letters keeps its own spelling, and skipped entirely for names under
-    ///    three characters, where the bound is not narrow enough to be safe.
+    ///  * THE ACCOUNT NAME on its own, with no path around it.
+    ///
+    /// WHAT "LOCAL PATHS" DOES NOT MEAN (Codex r1 MEDIUM, this class's three
+    /// findings). The old wording invited the reading "any local path is
+    /// removed", and that was never what the passes do. Stated as a bound
+    /// rather than a promise, so it can be checked:
+    ///
+    ///    REMOVED — a path whose prefix is `&lt;drive&gt;:&lt;sep&gt;Users&lt;sep&gt;&lt;segment&gt;`
+    ///    with the SAME separator spelling throughout, in any of the four
+    ///    spellings; and this process's own profile directory, wherever it
+    ///    lives, in those same four spellings.
+    ///
+    ///    NOT REMOVED — a path with MIXED separators; a UNC share
+    ///    (`\\host\share\...`); a POSIX path; any other local directory that
+    ///    is neither under Users nor the profile; Steam IDs; display or
+    ///    player names; room and series IDs; IP addresses; e-mail addresses;
+    ///    the machine's name; tokens.
+    ///
+    /// The Settings caption says the same thing in a player's words, and the
+    /// two are edited together: a consent that claims more than this list is
+    /// the defect, not a wording preference.
+    ///
+    /// THE SHORT-NAME POLICY, stated rather than left as a silent skip. The
+    /// bare-name pass needs a name long enough that "the same letters, alone"
+    /// is evidence of the account rather than a coincidence, so it runs only
+    /// for names of THREE characters or more. A one- or two-character account
+    /// is still removed by the PATH passes — it is a path segment there like
+    /// any other — so what the floor gives up is the standalone mention only,
+    /// and a two-letter standalone token is not identifying on its own. The
+    /// consent caption states this floor; it is not a hidden exception.
     ///
     /// Failure is fail-CLOSED by contract: <see cref="Scrub(string,string,string,out int)"/>
     /// returns null if any pass throws, and a null return means the caller must
-    /// withhold the text rather than send it (CompetitiveUI.BuildLogBundle does
-    /// exactly that). A scrub that silently passed the text through on an
+    /// withhold the text rather than send it (CompetitiveUI.ComposeLogBundle
+    /// does exactly that). A scrub that silently passed the text through on an
     /// exception would be a check that cannot fail.
     /// </summary>
     internal static class LogScrub
     {
         internal const string PathPlaceholder = "<userprofile>";
         internal const string NamePlaceholder = "<user>";
+
+        /// <summary>The floor under which the bare-name pass does not run.
+        /// Named, not inlined, so the policy has one home and the consent
+        /// caption's "three characters or longer" can be checked against
+        /// it.</summary>
+        internal const int MinBareNameLength = 3;
+
+        /// <summary>The boundary either side of a BARE account name. '_', '.'
+        /// and '-' are inside the class, not outside it: they join identifiers
+        /// (`cr_admin_ready`, `Landfall.User.Config`, `map-test-3`), and an
+        /// account name that happens to be an ordinary word must not rewrite
+        /// every one of them.
+        ///
+        /// Shared with the residue counter deliberately, and it is the one
+        /// thing they do share. The counter's PATH check is independently
+        /// written (a plain `Users&lt;sep&gt;` scan, not the scrub's regexes) so a
+        /// broken pattern cannot certify itself — but the BOUNDARY is the
+        /// policy itself, not an implementation of it, and two copies of a
+        /// policy drift (#279). What keeps the counter honest here is the
+        /// self-test's before/after control: every positive case asserts the
+        /// residue count was non-zero BEFORE the scrub ran.</summary>
+        internal const string NameBoundaryBefore = "(?<![A-Za-z0-9_.\\-])";
+        internal const string NameBoundaryAfter = "(?![A-Za-z0-9_.\\-])";
 
         /// <summary>One separator, four spellings a real log carries: a plain
         /// backslash; the doubled backslash of anything that was JSON- or
@@ -107,12 +156,32 @@ namespace CompetitiveRounds
                 foreach (Regex rx in UsersDirPatterns)
                     s = rx.Replace(s, m => { n++; return PathPlaceholder; });
 
-                // 3. The bare account name. Bounded so "name2" and "xname"
-                //    keep their spelling; skipped under three characters,
-                //    where the bound is too loose to be safe.
-                if (!string.IsNullOrEmpty(userName) && userName.Length >= 3)
+                // 3. The bare account name, at a TRUE word boundary.
+                //
+                //    The bound used to be [A-Za-z0-9] on both sides, which
+                //    treats '_', '.' and '-' as boundaries — so an account
+                //    called "admin", "user", "test" or "game" (all of them
+                //    ordinary account names) rewrote `cr_admin_ready`,
+                //    `Landfall.User.Config` and `map-test-3` in every
+                //    diagnostic line that carried one (Codex r1 MEDIUM,
+                //    LogScrub.cs:115). Those are identifiers, not mentions of
+                //    a person, and a scrub that mangles them makes the log it
+                //    was protecting useless to read.
+                //
+                //    NameBoundary adds '_', '.' and '-' to the class, so the
+                //    pass fires only where the name stands genuinely alone —
+                //    which is exactly what the consent caption claims. The
+                //    account name inside a PATH is not this pass's job: passes
+                //    1 and 2 already removed the whole prefix it sat in, and a
+                //    UNC or otherwise-uncovered path still has separators on
+                //    both sides of the segment, which are not in the class.
+                //
+                //    Bounded on both sides, so "name2" and "xname" keep their
+                //    spelling. Skipped under three characters — see THE
+                //    SHORT-NAME POLICY on the class.
+                if (!string.IsNullOrEmpty(userName) && userName.Length >= MinBareNameLength)
                 {
-                    var rx = new Regex("(?<![A-Za-z0-9])" + Regex.Escape(userName) + "(?![A-Za-z0-9])",
+                    var rx = new Regex(NameBoundaryBefore + Regex.Escape(userName) + NameBoundaryAfter,
                                        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
                     s = rx.Replace(s, m => { n++; return NamePlaceholder; });
                 }
@@ -190,9 +259,9 @@ namespace CompetitiveRounds
                 // "is any of it still here" gauge, and every assertion built on
                 // it compares against zero, never against a specific total.
             }
-            if (!string.IsNullOrEmpty(userName) && userName.Length >= 3)
+            if (!string.IsNullOrEmpty(userName) && userName.Length >= MinBareNameLength)
             {
-                var rx = new Regex("(?<![A-Za-z0-9])" + Regex.Escape(userName) + "(?![A-Za-z0-9])",
+                var rx = new Regex(NameBoundaryBefore + Regex.Escape(userName) + NameBoundaryAfter,
                                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
                 n += rx.Matches(text).Count;
             }
@@ -247,6 +316,25 @@ namespace CompetitiveRounds
                 new[] { "another account at " + JoinUsers("C", Bsl, "someoneelse", "Desktop", "a.txt"), "Desktop", "" },
                 new[] { "testuser2 is a different identifier", "testuser2", "neg" },
                 new[] { "no identity here at all", "identity", "neg" },
+                // The boundary cases. An account name that is also an ordinary
+                // word used to rewrite every identifier that contained it, and
+                // all of these must come back untouched (Codex r1 MEDIUM,
+                // LogScrub.cs:115).
+                //
+                // The first three are surrounded on BOTH sides, so each of them
+                // survives a widening of either boundary on its own — which
+                // makes them useless as controls for one side. The four after
+                // them touch the name on ONE side each, so a widening of the
+                // LEADING boundary is caught by the two that lead with a
+                // joiner, and a widening of the TRAILING boundary by the two
+                // that follow with one. Keep both groups.
+                new[] { "cr_testuser_ready staged", "cr_testuser_ready", "neg" },
+                new[] { "Landfall.testuser.Config loaded", "Landfall.testuser.Config", "neg" },
+                new[] { "map-testuser-3 selected", "map-testuser-3", "neg" },
+                new[] { "testuser_ready was staged", "testuser_ready", "neg" },     // trailing '_'
+                new[] { "testuser.log rotated", "testuser.log", "neg" },            // trailing '.'
+                new[] { "queued cr_testuser now", "cr_testuser", "neg" },           // leading '_'
+                new[] { "selected map-testuser now", "map-testuser", "neg" },       // leading '-'
             };
 
             foreach (var c in cases)
@@ -265,11 +353,19 @@ namespace CompetitiveRounds
                           && (isNegativeCase ? (before == 0 && reps == 0) : (before > 0 && reps > 0));
 
                 if (ok) r.Passed++; else r.Failed++;
+                // BOTH sides of the case on the line. Printing only the OUTPUT
+                // is how a reader — human or gate — loses the ability to say
+                // WHICH case a line belongs to the moment the scrub starts
+                // rewriting the very text being searched for: the identifier
+                // cases exist to prove a token survives, and a line that no
+                // longer contains that token is indistinguishable from a line
+                // that was never run.
                 r.Report.Append(ok ? "PASS " : "FAIL ")
                         .Append("before=").Append(before)
                         .Append(" after=").Append(after)
                         .Append(" reps=").Append(reps)
-                        .Append(" | ").Append(outp ?? "(null)")
+                        .Append(" | in=").Append(input)
+                        .Append(" | out=").Append(outp ?? "(null)")
                         .Append('\n');
             }
 

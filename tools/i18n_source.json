@@ -511,7 +511,7 @@
   "Admins...",
   "Advanced",
   "After 60s unfocused at the menu, drops the engine to 15 FPS. Never active in online rooms or when a match is found; wakes instantly on focus.",
-  "After a game, send the same logs the bug-report form sends, so a problem can be looked at without you filing one. Local paths and this PC's Windows account name are removed first. One upload per five minutes.",
+  "After a game you played in, this sends the same logs the bug-report form sends, so a problem can be looked at without you filing a report. Also sent: your Steam ID and name, the other players' Steam IDs, the room name, the game mode, the series ID, and the mod and game version. Removed first: every path through a Windows Users folder, this PC's own profile folder, and this PC's Windows account name on its own when it is three characters or longer (a shorter name is removed only inside a path). Nothing else is removed. At most one upload every five minutes, and never while this is off.",
   "Aged metallic bronze with a warm gleam.",
   "Aged wine — deep red with a brown undertone.",
   "Albums have unlimited stock",
@@ -5482,7 +5482,7 @@
    "location": "BuildSettingsTab",
    "kind": "SettingsToggle"
   },
-  "After a game, send the same logs the bug-report form sends, so a problem can be looked at without you filing one. Local paths and this PC's Windows account name are removed first. One upload per five minutes.": {
+  "After a game you played in, this sends the same logs the bug-report form sends, so a problem can be looked at without you filing a report. Also sent: your Steam ID and name, the other players' Steam IDs, the room name, the game mode, the series ID, and the mod and game version. Removed first: every path through a Windows Users folder, this PC's own profile folder, and this PC's Windows account name on its own when it is three characters or longer (a shorter name is removed only inside a path). Nothing else is removed. At most one upload every five minutes, and never while this is off.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
    "kind": "SettingsToggle"

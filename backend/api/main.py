@@ -4599,9 +4599,13 @@ app.include_router(tournaments_router)
 import mail_discord
 app.include_router(mail_discord.router)
 
-# Opt-in automatic post-match log upload (v1.41.0 Item 3). INERT in this
-# release: no client calls POST /api/v1/logs/auto yet. The module's own
-# docstring says what a working call looks like and what it prints.
+# Opt-in automatic post-match log upload (v1.41.0 Item 3). The CLIENT half
+# landed in the same release and DOES call POST /api/v1/logs/auto -- once per
+# qualifying room exit, and only while the player has turned the Settings
+# toggle on, which ships off. This comment used to read "INERT: no client calls
+# it", which was true when the route was written and stopped being true in the
+# same batch. The module's own docstring says what a working call looks like
+# and what it prints.
 from auto_logs import router as auto_logs_router, internal_router as auto_logs_internal_router
 app.include_router(auto_logs_router)
 app.include_router(auto_logs_internal_router)

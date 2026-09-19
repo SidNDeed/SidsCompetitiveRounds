@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    EXECUTES the client rule files that are deliberately free of Unity, Photon
+    and BepInEx, under a plain compiler. Same arrangement as
+    tools/h2h-harness, and for the same reason: a rule whose only gate is a
+    source-shape test is asserted ABOUT, never run (#391).
+
+      LogScrub.cs       what a log bundle stops carrying before it leaves the
+                        process. Its SelfTest is two-way: every case is
+                        measured with the scrub and without it, and a case
+                        passes only when the unscrubbed measurement is
+                        non-zero.
+
+    net10.0 because that is the runtime installed on the build seat, matching
+    the h2h harness; RollForward keeps the next SDK rotation from turning this
+    into a green-looking nothing.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RollForward>LatestMajor</RollForward>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>client-rules-harness</AssemblyName>
+    <RootNamespace>CompetitiveRounds.Harness</RootNamespace>
+    <!-- Only the files named below. A default glob would drag in the whole
+         plugin tree, which does not compile without Unity. -->
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Main.cs" />
+    <Compile Include="../../plugin/LogScrub.cs" />
+  </ItemGroup>
+
+</Project>

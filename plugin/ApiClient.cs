@@ -21147,16 +21147,36 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>The string form. Delegates so there is ONE POST body: the
+        /// consent gate, the sensitive-transport gate, the version header, the
+        /// session handling and the error formatting cannot differ between a
+        /// caller that hands over text and one that hands over bytes.</summary>
         private static IEnumerator PostRequest(string url, string json, Action<bool, string> callback)
         {
+            return PostRequestRaw(url,
+                                  string.IsNullOrEmpty(json) ? null : Encoding.UTF8.GetBytes(json),
+                                  callback, json);
+        }
+
+        /// <param name="sensitiveProbe">The body as TEXT for
+        /// SensitiveTransportBlocked's two body-level token checks
+        /// (`"admin_steam_id":` / `"password":`). Null means "this caller has
+        /// no text form", which GetRequest has always passed; the URL-level
+        /// and admin-credential halves of that gate still run. The automatic
+        /// log upload passes null and is sound doing so: its body carries
+        /// neither key, and every value inside it — the log text included — is
+        /// JSON-escaped, so neither raw token sequence can appear.</param>
+        private static IEnumerator PostRequestRaw(string url, byte[] bodyRaw,
+                                                  Action<bool, string> callback,
+                                                  string sensitiveProbe = null)
+        {
             if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
-            if (SensitiveTransportBlocked(url, json, callback)) yield break;
+            if (SensitiveTransportBlocked(url, sensitiveProbe, callback)) yield break;
             NoteAttempt();
             using (var request = new UnityWebRequest(url, "POST"))
             {
-                if (!string.IsNullOrEmpty(json))
+                if (bodyRaw != null && bodyRaw.Length > 0)
                 {
-                    byte[] bodyRaw = Encoding.UTF8.GetBytes(json);
                     request.uploadHandler = new UploadHandlerRaw(bodyRaw);
                 }
                 request.downloadHandler = new DownloadHandlerBuffer();
@@ -21827,22 +21847,69 @@ namespace CompetitiveRounds
             ));
         }
 
-        // Reads the tail of a log file (BepInEx LogOutput.log or Unity output_log.txt)
-        // with sane caps so we don't blow out memory on a multi-MB log.
+        /// <summary>Reads the tail of a log file (BepInEx LogOutput.log or
+        /// Unity output_log.txt).
+        ///
+        /// THE INPUT IS BOUNDED BEFORE THE READ, not after it. The previous
+        /// shape called ReadToEnd and trimmed afterwards, so a 40 MB log cost
+        /// 40 MB of allocation and 40 MB of decoding to keep 1.5 MB (Codex r1
+        /// HIGH, AutoLogUpload.cs:184 — the room-exit bundle is built from
+        /// three of these). The stream is SEEKED to the last
+        /// <paramref name="maxChars"/> BYTES and nothing before that offset is
+        /// ever touched.
+        ///
+        /// THE STATED CAP IS IN BYTES AND THE CHARACTER CAP RIDES ON IT: one
+        /// byte can only ever produce one character or fewer in UTF-8, so a
+        /// `maxChars`-byte window yields at most `maxChars` characters and
+        /// usually exactly that many (these logs are overwhelmingly ASCII). A
+        /// multi-byte-heavy log therefore returns LESS than the character cap,
+        /// never more, which is the conservative direction for a bundle whose
+        /// whole point is an upper bound.
+        ///
+        /// A mid-file seek can land inside a UTF-8 sequence, so the first
+        /// continuation bytes (10xxxxxx) after the offset are skipped — at
+        /// most three, since that is the longest tail a sequence has. Without
+        /// that, the first character of the window decodes as U+FFFD.</summary>
         public static string ReadLogTail(string path, int maxChars = BUG_REPORT_LOG_CAP_CHARS)
         {
             try
             {
                 if (string.IsNullOrEmpty(path) || !System.IO.File.Exists(path)) return "";
+                if (maxChars <= 0) return "";
                 // FileShare.ReadWrite — BepInEx + Unity keep these handles open.
                 using (var fs = new System.IO.FileStream(path, System.IO.FileMode.Open,
                                                         System.IO.FileAccess.Read,
                                                         System.IO.FileShare.ReadWrite))
-                using (var sr = new System.IO.StreamReader(fs))
                 {
-                    string all = sr.ReadToEnd();
-                    if (all.Length <= maxChars) return all;
-                    return all.Substring(all.Length - maxChars);
+                    long len = 0;
+                    try { len = fs.Length; } catch { }
+                    bool seeked = false;
+                    if (len > maxChars && fs.CanSeek)
+                    {
+                        fs.Position = len - maxChars;
+                        seeked = true;
+                        // Step past a partial UTF-8 sequence. Bounded at 3:
+                        // a sequence carries at most three continuation bytes.
+                        for (int i = 0; i < 3; i++)
+                        {
+                            int b = fs.ReadByte();
+                            if (b < 0) break;
+                            if ((b & 0xC0) != 0x80) { fs.Position = fs.Position - 1; break; }
+                        }
+                    }
+                    // BOM detection only makes sense at offset 0; a mid-file
+                    // window has no preamble to read.
+                    using (var sr = new System.IO.StreamReader(
+                               fs, new UTF8Encoding(false),
+                               detectEncodingFromByteOrderMarks: !seeked))
+                    {
+                        string all = sr.ReadToEnd();
+                        // Belt and braces: the byte window already bounds this,
+                        // and a decoder that somehow produced more characters
+                        // than bytes would still not get past the caller's cap.
+                        if (all.Length <= maxChars) return all;
+                        return all.Substring(all.Length - maxChars);
+                    }
                 }
             }
             catch (Exception ex)
@@ -21872,8 +21939,10 @@ namespace CompetitiveRounds
         //    session, so an un-deployed server costs one request per launch.
         //
         // The caller passes the log text ALREADY SCRUBBED (CompetitiveUI
-        // .BuildLogBundle is the only producer, and it scrubs); nothing here
-        // re-scrubs, because two scrub sites is how one of them rots.
+        // .ComposeLogBundle is the only producer of that text — the bug form
+        // and the automatic upload differ in where they RUN it, not in what it
+        // builds — and it scrubs); nothing here re-scrubs, because two scrub
+        // sites is how one of them rots.
         public static void SubmitAutoLog(string steamId, string displayName, string mode,
                                          string roomName, string opponentSteamId, string seriesId,
                                          string logText, Action<bool, long, string> done)
@@ -21894,26 +21963,72 @@ namespace CompetitiveRounds
                 done?.Invoke(false, 0, "log empty");
                 return;
             }
-            if (logText.Length > BUG_REPORT_LOG_CAP_CHARS)
-                logText = logText.Substring(logText.Length - BUG_REPORT_LOG_CAP_CHARS); // tail-most window
+            string body = BuildAutoLogBody(steamId, displayName, Plugin.ModVersion,
+                                           SafeApplicationVersion(), mode, roomName,
+                                           opponentSteamId, seriesId, logText);
+            SubmitAutoLogBody(Encoding.UTF8.GetBytes(body), done);
+        }
 
+        /// <summary>Application.version, read HERE because it is a Unity API
+        /// and BuildAutoLogBody is deliberately callable off the main
+        /// thread.</summary>
+        internal static string SafeApplicationVersion()
+        {
+            try { return UnityEngine.Application.version ?? ""; }
+            catch { return ""; }
+        }
+
+        /// <summary>THREAD-SAFE by contract, and that is the whole reason it is
+        /// its own member (Codex r1 HIGH, AutoLogUpload.cs:184): building this
+        /// body means JSON-escaping up to 3.5 M characters, and on the game
+        /// thread at room exit that is a visible freeze. It touches no Unity
+        /// API, no Photon state, no logger and no mutable static — every value
+        /// it needs is a parameter, captured by the caller while it was still
+        /// on the main thread.
+        ///
+        /// Nothing here re-scrubs: CompetitiveUI's bundle composer is the only
+        /// producer of <paramref name="logText"/> and it scrubs, because two
+        /// scrub sites is how one of them rots.</summary>
+        internal static string BuildAutoLogBody(string steamId, string displayName,
+                                                string modVersion, string gameVersion,
+                                                string mode, string roomName,
+                                                string opponentSteamId, string seriesId,
+                                                string logText)
+        {
+            if (logText != null && logText.Length > BUG_REPORT_LOG_CAP_CHARS)
+                logText = logText.Substring(logText.Length - BUG_REPORT_LOG_CAP_CHARS); // tail-most window
             var sb = new System.Text.StringBuilder();
             sb.Append("{");
             sb.Append($"\"steam_id\":\"{JsonEscapeFull(steamId)}\"");
             sb.Append($",\"display_name\":\"{JsonEscapeFull(displayName ?? "")}\"");
-            sb.Append($",\"mod_version\":\"{JsonEscapeFull(Plugin.ModVersion)}\"");
-            sb.Append($",\"game_version\":\"{JsonEscapeFull(UnityEngine.Application.version ?? "")}\"");
+            sb.Append($",\"mod_version\":\"{JsonEscapeFull(modVersion ?? "")}\"");
+            sb.Append($",\"game_version\":\"{JsonEscapeFull(gameVersion ?? "")}\"");
             sb.Append($",\"mode\":\"{JsonEscapeFull(mode ?? "")}\"");
             sb.Append($",\"room_name\":\"{JsonEscapeFull(roomName ?? "")}\"");
             if (!string.IsNullOrEmpty(opponentSteamId))
                 sb.Append($",\"opponent_steam_id\":\"{JsonEscapeFull(opponentSteamId)}\"");
             if (!string.IsNullOrEmpty(seriesId))
                 sb.Append($",\"series_id\":\"{JsonEscapeFull(seriesId)}\"");
-            sb.Append($",\"log_text\":\"{JsonEscapeFull(logText)}\"");
+            sb.Append($",\"log_text\":\"{JsonEscapeFull(logText ?? "")}\"");
             sb.Append("}");
+            return sb.ToString();
+        }
 
-            Plugin.Instance.StartCoroutine(PostRequest(
-                $"{baseUrl}/api/v1/logs/auto", sb.ToString(),
+        /// <summary>Post an ALREADY-ENCODED automatic-log body. MAIN THREAD
+        /// ONLY (it starts a coroutine), but the only work it does that scales
+        /// with the log is handing the finished byte[] to the upload handler —
+        /// no read, no scan, no escape, no encode.</summary>
+        internal static void SubmitAutoLogBody(byte[] body, Action<bool, long, string> done)
+        {
+            if (Plugin.Instance == null) { done?.Invoke(false, 0, "not ready"); return; }
+            if (body == null || body.Length == 0) { done?.Invoke(false, 0, "log empty"); return; }
+            if (string.IsNullOrEmpty(SteamAuth.SessionToken))
+            {
+                done?.Invoke(false, 0, "session_required");   // strict-session endpoint
+                return;
+            }
+            Plugin.Instance.StartCoroutine(PostRequestRaw(
+                $"{baseUrl}/api/v1/logs/auto", body,
                 (ok, response) =>
                 {
                     // FormatRequestError's "HTTP <code>: <body>" prefix is the

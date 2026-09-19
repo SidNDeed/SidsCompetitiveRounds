@@ -13266,8 +13266,20 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // bottom of their fixed-height boxes — so a caption visually attached
         // to the PREVIOUS toggle. Grouping makes the association unambiguous;
         // the section box's wider spacing (10) separates whole settings.
+        /// <param name="descWrap">Let the caption WRAP and take the height its
+        /// own text needs, instead of being clipped at <paramref name="descH"/>
+        /// (Codex r1 MEDIUM, the automatic-log consent caption). CreateText
+        /// pins prefH AND minH from sizeDelta.y and defaults overflow to
+        /// Truncate, so a caption longer than one line at 700 px silently loses
+        /// everything past the first — which is how a disclosure came to hide
+        /// the sentences that make it a disclosure, and would do it again in
+        /// any locale that runs 30% longer. With this on, descH is the FLOOR and
+        /// TMP's measured height is the actual one; the Settings tab is a
+        /// ScrollView, so growing is free. Off by default: every other caption
+        /// in this file is a deliberate one-liner.</param>
         private static GameObject SettingsToggle(Transform parent, string name, Vector2 size,
-            UnityEngine.Events.UnityAction onClick, string desc = null, float descH = 18f)
+            UnityEngine.Events.UnityAction onClick, string desc = null, float descH = 18f,
+            bool descWrap = false)
         {
             var group = new GameObject(name + "_grp");
             group.transform.SetParent(parent, false);
@@ -13276,8 +13288,22 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             UIFactory.AddLE(group, flexH: 0);
             var btn = SettingsButton(group.transform, name, "", C_WHITE, C_BTN, size, onClick);
             if (!string.IsNullOrEmpty(desc))
-                UIFactory.CreateText(name + "_d", group.transform, desc, 13f, C_DIM,
+            {
+                var d = UIFactory.CreateText(name + "_d", group.transform, desc, 13f, C_DIM,
                     sizeDelta: new Vector2(700, descH));
+                if (descWrap)
+                {
+                    UIFactory.SetWordWrap(d, true);
+                    // Overflow (0) so every laid-out line PAINTS — Truncate is
+                    // the file-wide default and it is exactly what clipped this
+                    // caption. The auto-height below is what makes the box the
+                    // right size for those lines, so nothing bleeds onto the
+                    // next setting; the two go together and neither is enough
+                    // on its own.
+                    UIFactory.SetOverflowMode(d, 0);
+                    UIFactory.SetTextAutoHeight(d, descH);
+                }
+            }
             return btn;
         }
 
@@ -14103,16 +14129,27 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
 
             /* v1.41.0 item (a): automatic log upload. A LOCAL config toggle
              * (no server round-trip, so there is no optimistic flip to roll
-             * back), opt-IN, default off. The caption says what is sent, when
-             * it is sent and what is removed first, because a data toggle
-             * whose caption only names itself is not consent. The caption is
-             * kept to one line at the shipped panel width: the layout does not
-             * wrap it, it CLIPS it at the panel edge, and a longer first draft
-             * lost its final sentence that way in game. A comment must not sit
-             * between the arguments either — the i18n extractor splits this
-             * call's arguments on top-level commas, and a comma inside such a
-             * comment shifts the caption out of position 4, which drops the
-             * key from every locale (#357). */
+             * back), opt-IN, default off.
+             *
+             * THE CAPTION NAMES EVERY FIELD THE POST CARRIES (Codex r1, two
+             * MEDIUMs). The body ApiClient.BuildAutoLogBody assembles is
+             * steam_id, display_name, mod_version, game_version, mode,
+             * room_name, opponent_steam_id, series_id and log_text — so the
+             * caption lists the identity and match fields as well as the log,
+             * because a consent that names only the obvious half is not
+             * consent for the other half. If a field is ever added to that
+             * body, it is added here in the same edit or it is not sent.
+             *
+             * The caption also used to be CLIPPED rather than wrapped: the
+             * label was a fixed 700x18 box with TMP's Truncate default, so
+             * everything past the first line was invisible and the earlier
+             * draft's closing sentences never reached a player. descWrap: true
+             * is the fix, and it is what makes a longer locale safe too.
+             *
+             * A comment must not sit between the arguments — the i18n
+             * extractor splits this call's arguments on top-level commas, and
+             * a comma inside such a comment shifts the caption out of position
+             * 4, which drops the key from every locale (#357). */
             autoLogToggleBtn = SettingsToggle(consentBox.transform, "SAutoLog", new Vector2(340, 28),
                 () =>
                 {
@@ -14121,7 +14158,9 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                         Plugin.AutoLogUploadEnabled.Value = !Plugin.AutoLogUploadEnabled.Value;
                     dirty = true;
                 },
-                "After a game, send the same logs the bug-report form sends, so a problem can be looked at without you filing one. Local paths and this PC's Windows account name are removed first. One upload per five minutes.");
+                "After a game you played in, this sends the same logs the bug-report form sends, so a problem can be looked at without you filing a report. Also sent: your Steam ID and name, the other players' Steam IDs, the room name, the game mode, the series ID, and the mod and game version. Removed first: every path through a Windows Users folder, this PC's own profile folder, and this PC's Windows account name on its own when it is three characters or longer (a shorter name is removed only inside a path). Nothing else is removed. At most one upload every five minutes, and never while this is off.",
+                descH: 100f,
+                descWrap: true);
             autoLogToggleTxt = UIFactory.GetButtonText(autoLogToggleBtn);
 
             // -- Language & Translation --

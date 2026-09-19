@@ -1,4 +1,6 @@
 using System;
+using System.Text;
+using System.Threading;
 using BepInEx.Configuration;
 using Photon.Pun;
 using UnityEngine;
@@ -34,6 +36,31 @@ namespace CompetitiveRounds
     ///  * the transport fails with no response — also terminal for this exit.
     ///    The next qualifying exit tries again; nothing queues, nothing
     ///    accumulates, and an offline sitting costs one request per match.
+    ///
+    /// NOTHING PROPORTIONAL TO THE LOG RUNS ON THE GAME THREAD (Codex r1 HIGH,
+    /// this file's old line 184). The room-exit handler used to call
+    /// CompetitiveUI.BuildLogBundle() inline, which read three log files whole,
+    /// ran five string passes over the result and JSON-escaped it — a visible
+    /// freeze at every qualifying exit, and seconds long for a player whose
+    /// LogOutput.log has grown to tens of megabytes. The work is now split:
+    ///
+    ///   MAIN THREAD, at room exit: the gates below (a dozen field reads),
+    ///   CompetitiveUI.CaptureLogBundleInputs() (three path computations and
+    ///   one audio snapshot) and starting a thread. All O(1).
+    ///
+    ///   WORKER THREAD: the bounded tail reads, the assembly, the scrub, the
+    ///   JSON body and the UTF-8 encoding. ApiClient.ReadLogTail now SEEKS to
+    ///   the last N bytes, so the disk input is bounded before the read as well
+    ///   as after it — a 40 MB log costs 3.5 MB of reading, not 40.
+    ///
+    ///   MAIN THREAD, on the next Tick after the worker finishes: the dedup
+    ///   compare and handing the finished byte[] to the upload handler. The
+    ///   largest single act is that hand-off.
+    ///
+    /// The worker is a background thread, so it cannot hold the process open,
+    /// and it touches no engine API — everything it reads is either a parameter
+    /// or a local. One at a time: _bundling is the gate, and a second exit
+    /// while a bundle is being built simply says so and skips.
     /// </summary>
     internal static class AutoLogUpload
     {
@@ -59,6 +86,30 @@ namespace CompetitiveRounds
         private static bool _inFlight;
         private static float _skipLoggedAt = -99999f;
 
+        // ── worker hand-off ──────────────────────────────────────────────
+        // _bundling is written on the main thread only (set before the worker
+        // starts, cleared on the main thread when the result is consumed or
+        // the start fails), so it is a plain bool. Everything the worker
+        // PRODUCES is published under _gate and read under _gate, which is
+        // both the mutual exclusion and the memory barrier — a volatile bool
+        // plus unsynchronised fields would publish the flag before the
+        // payload on a weak model.
+        private static readonly object _gate = new object();
+        private static bool _bundling;
+        private static BundleResult _ready;
+
+        /// <summary>What the worker hands back. Immutable once published.</summary>
+        private sealed class BundleResult
+        {
+            internal byte[] Body;          // the finished, UTF-8 encoded POST body
+            internal int Hash;             // FNV-1a over the bundle TEXT (dedup key)
+            internal int Chars;            // bundle length, for the acceptance line
+            internal int Scrubbed;         // replacements, or -1 when the scrub failed
+            internal string Mode;          // carried so the acceptance line stays truthful
+            internal string Diagnostic;    // ComposeLogBundle's line, logged on the main thread
+            internal string Failure;       // non-null = do not send; this is why
+        }
+
         private static bool _startupDone;
         private static ConfigEntry<bool> _selfTestLever;
 
@@ -77,6 +128,10 @@ namespace CompetitiveRounds
         internal static void Tick()
         {
             EnsureStartup();
+            // The worker's hand-off point. FIRST, and outside the in-room
+            // early return: a bundle is built BECAUSE we left a room, so the
+            // frame it finishes on is almost never a frame we are in one.
+            PumpFinishedBundle();
             try
             {
                 if (!PhotonNetwork.InRoom)
@@ -164,6 +219,7 @@ namespace CompetitiveRounds
             {
                 if (_endpointAbsent) return;     // already said so, once, this session
                 if (_inFlight) return;
+                if (_bundling) { NoteSkip("the previous room's bundle is still being built"); return; }
 
                 if (!Enabled) { NoteSkip("the setting is off"); return; }
                 if (!Plugin.DataConsentGranted) { NoteSkip("data reporting is not consented"); return; }
@@ -179,26 +235,120 @@ namespace CompetitiveRounds
                 string name = MatchTracker.LocalDisplayName ?? "";
                 if (string.IsNullOrEmpty(steamId) || steamId == "unknown") { NoteSkip("no local Steam id"); return; }
 
-                // BuildLogBundle SCRUBS; this is the only producer, and it is
-                // the same text the bug form sends.
-                string bundle = CompetitiveUI.BuildLogBundle();
-                int scrubbed = CompetitiveUI.LastScrubReplacements;
-                if (string.IsNullOrEmpty(bundle) || scrubbed < 0)
+                // EVERY Unity/Photon read the bundle needs, taken HERE, while
+                // we are still on the game thread. Past this point the worker
+                // sees nothing but the values it was handed.
+                var inputs = CompetitiveUI.CaptureLogBundleInputs();
+                string modVersion = Plugin.ModVersion;
+                string gameVersion = ApiClient.SafeApplicationVersion();
+
+                _bundling = true;
+                StartBundleWorker(inputs, steamId, name, modVersion, gameVersion, mode, room, opp, series);
+            }
+            catch (Exception ex)
+            {
+                _bundling = false;
+                _inFlight = false;
+                Plugin.Log.LogWarning("[AUTO-LOG] room-exit handling failed: " + ex.Message);
+            }
+        }
+
+        /// <summary>The worker. Reads, assembles, scrubs, escapes and encodes —
+        /// all of it off the game thread — then publishes one BundleResult.
+        ///
+        /// It logs NOTHING: BepInEx's log sinks are not documented thread-safe
+        /// and a diagnostic written from here would interleave with the game's
+        /// own lines. Every sentence it wants to say travels back in the result
+        /// and is written on the main thread by PumpFinishedBundle.</summary>
+        private static void StartBundleWorker(CompetitiveUI.LogBundleInputs inputs,
+                                              string steamId, string name,
+                                              string modVersion, string gameVersion,
+                                              string mode, string room, string opp, string series)
+        {
+            var t = new Thread(() =>
+            {
+                var result = new BundleResult { Mode = mode };
+                try
                 {
-                    Plugin.Log.LogWarning("[AUTO-LOG] not uploading: the log scrub did not complete");
+                    int scrubbed; string diagnostic;
+                    string bundle = CompetitiveUI.ComposeLogBundle(inputs, out scrubbed, out diagnostic);
+                    result.Diagnostic = diagnostic;
+                    result.Scrubbed = scrubbed;
+                    if (string.IsNullOrEmpty(bundle) || scrubbed < 0)
+                    {
+                        result.Failure = "the log scrub did not complete";
+                    }
+                    else
+                    {
+                        result.Chars = bundle.Length;
+                        result.Hash = StableHash(bundle);
+                        string body = ApiClient.BuildAutoLogBody(steamId, name, modVersion, gameVersion,
+                                                                 mode, room, opp, series, bundle);
+                        result.Body = Encoding.UTF8.GetBytes(body);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // The type name only: an exception MESSAGE from a file read
+                    // can carry the path that produced it, and this one has not
+                    // been through the scrub.
+                    result.Failure = "the bundle could not be built (" + ex.GetType().Name + ")";
+                }
+                lock (_gate) { _ready = result; }
+            });
+            t.IsBackground = true;          // must never hold the process open
+            t.Name = "SCR-AutoLogBundle";
+            try { t.Start(); }
+            catch (Exception ex)
+            {
+                _bundling = false;
+                Plugin.Log.LogWarning("[AUTO-LOG] could not start the bundle thread: " + ex.Message);
+            }
+        }
+
+        /// <summary>MAIN THREAD, from Tick. Consumes at most one finished
+        /// bundle per frame and does the only two things that could not be
+        /// done on the worker: the dedup compare against the last upload, and
+        /// starting the request.</summary>
+        private static void PumpFinishedBundle()
+        {
+            BundleResult r;
+            lock (_gate)
+            {
+                r = _ready;
+                _ready = null;
+            }
+            if (r == null) return;
+            _bundling = false;
+
+            try
+            {
+                if (!string.IsNullOrEmpty(r.Diagnostic))
+                {
+                    if (r.Scrubbed < 0) Plugin.Log.LogError(r.Diagnostic);
+                    else Plugin.Log.LogInfo(r.Diagnostic);
+                }
+                if (r.Failure != null || r.Body == null)
+                {
+                    Plugin.Log.LogWarning("[AUTO-LOG] not uploading: " + (r.Failure ?? "no body was produced"));
                     return;
                 }
-
-                int hash = StableHash(bundle);
-                if (hash == _lastUploadedHash)
+                // The setting can be turned off, or the session lost, while the
+                // bundle was being built. Re-check rather than inherit the
+                // answer from the frame the room closed on.
+                if (!Enabled) { NoteSkip("the setting was turned off while the bundle was being built"); return; }
+                if (!Plugin.DataConsentGranted) { NoteSkip("data reporting is not consented"); return; }
+                if (_endpointAbsent || _inFlight) return;
+                if (r.Hash == _lastUploadedHash)
                 {
                     NoteSkip("the log is byte-identical to the one already uploaded");
                     return;
                 }
 
-                int chars = bundle.Length;
+                int chars = r.Chars, scrubbed = r.Scrubbed, hash = r.Hash;
+                string mode = r.Mode;
                 _inFlight = true;
-                ApiClient.SubmitAutoLog(steamId, name, mode, room, opp, series, bundle,
+                ApiClient.SubmitAutoLogBody(r.Body,
                     (ok, code, resp) =>
                     {
                         _inFlight = false;
@@ -239,7 +389,7 @@ namespace CompetitiveRounds
             catch (Exception ex)
             {
                 _inFlight = false;
-                Plugin.Log.LogWarning("[AUTO-LOG] room-exit handling failed: " + ex.Message);
+                Plugin.Log.LogWarning("[AUTO-LOG] handing the finished bundle over failed: " + ex.Message);
             }
         }
 

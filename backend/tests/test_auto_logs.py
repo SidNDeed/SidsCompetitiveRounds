@@ -1,11 +1,14 @@
 """Opt-in automatic post-match log upload — the server half (v1.41.0 Item 3).
 
-The route is INERT in this release: no client calls POST /api/v1/logs/auto.
-That is exactly the condition under which a feature ships doing nothing while
-every log line looks clean (#438/#443), so this file drives the handler
-directly against a scripted session and asserts the POSITIVE things a real
-call produces — a kind='auto' row, a blob on disk with the OS username gone,
-and the [AUTO-LOG] line — rather than the absence of errors.
+This file was written while the route was INERT — no client called
+POST /api/v1/logs/auto — which is exactly the condition under which a feature
+ships doing nothing while every log line looks clean (#438/#443). So it drives
+the handler directly against a scripted session and asserts the POSITIVE things
+a real call produces — a kind='auto' row, a blob on disk with the OS username
+gone, and the [AUTO-LOG] line — rather than the absence of errors. It is still
+worth doing that way, but the premise has changed: the CLIENT half landed in
+the same release, so a player who turns the Settings toggle on does reach this
+handler. `test_auto_log_client.py` is the other half.
 
 Mutation controls are explicit where the assertion would otherwise pass for
 the wrong reason: the scrub test re-runs with the scrub neutered and requires
