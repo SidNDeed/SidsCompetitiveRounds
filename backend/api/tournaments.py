@@ -3169,7 +3169,12 @@ async def _ensure_next_tournament(db: AsyncSession) -> None:
     tournament exists in voting/locked/running state OR if a scheduled one is
     already queued for a future date within the next 14 days.
 
-    Also drives async tournament creation on the ASYNC_CADENCE_DAYS schedule."""
+    Also drives async tournament creation — which follows the BRACKET, not a
+    calendar: the next one opens ASYNC_POST_COMPLETION_DAYS after the previous
+    one's ended_at (the check at the bottom of this function).
+    ASYNC_CADENCE_DAYS is legacy and drives nothing; this line named it for
+    months after the post-completion rule replaced it, which is how the FAQ
+    ended up telling players "every ~6 weeks" (item 11)."""
     now = datetime.now(timezone.utc)
     # Active already?
     aq = select(Tournament).where(and_(

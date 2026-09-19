@@ -26,8 +26,13 @@ SRC = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "
 TEXT = open(SRC, encoding="utf-8").read()
 TREE = ast.parse(TEXT)
 
+# Item 11 added two module-level helpers that poll_channel_posts CALLS, so they
+# have to be lifted with it. Leaving them out does not skip them — the loop's
+# broad `except Exception` swallows the NameError and logs "send failed", which
+# looks like a transport hiccup and silently costs every ack.
 WANT_FUNC = {"_modcase_uuid_ok", "_modcase_parse", "_modcase_custom_id", "_modcase_parse_custom_id",
-             "_modcase_view", "_modcase_render", "_modcase_click", "poll_channel_posts", "on_interaction"}
+             "_modcase_view", "_modcase_render", "_modcase_click", "poll_channel_posts", "on_interaction",
+             "_channel_post_ack_params", "_adopt_channel_post_message"}
 WANT_ASSIGN = {"MODCASE_MARKER", "_MODCASE_BUTTONS", "_channel_post_sent", "_TDLC_ANSWERS"}
 
 
@@ -117,7 +122,11 @@ class _Api:
 
     async def get(self, path, timeout=8.0):
         self.calls.append(("GET", path, None))
-        assert path == "/internal/channel-posts/pending", path
+        # revisions=true since migration 338 (item 11): the bot declaring that
+        # it can edit a corrected message in place. These posts carry no
+        # posted_revision, which is the "never delivered" case, so every
+        # assertion below is still about the original fire-once path.
+        assert path == "/internal/channel-posts/pending?revisions=true", path
         return {"posts": list(self.posts)}
 
     async def post(self, path, params=None, timeout=None):
@@ -298,10 +307,15 @@ def test_tick_posts_with_buttons_then_stamps_then_acks_in_order():
     assert [b.kw["custom_id"] for b in view.children] == [f"modcase:{k}:{case_id}" for k, *_ in ns["_MODCASE_BUTTONS"]]
     assert view.timeout is None and "view" not in ch.sent[1].kw       # a plain post carries no buttons
     assert ch.sent[0].kw["allowed_mentions"].kw == {"users": True, "everyone": False, "roles": False}
+    # Item 11: the ack now carries the Discord message id, so a later
+    # correction of this row edits that message instead of queueing a new one
+    # under it. `revision` is absent because these fixtures answer the
+    # pre-338 payload, and the endpoint reads an absent revision as "whatever
+    # is current" — the fire-once ack this test has always asserted.
     assert [c for c in api.calls if c[0] == "POST"] == [
         ("POST", f"/internal/moderation-cases/{case_id}/notified", None),    # M1: the stamp precedes the ack
-        ("POST", "/internal/channel-posts/ack", {"post_id": 1}),
-        ("POST", "/internal/channel-posts/ack", {"post_id": 2})]
+        ("POST", "/internal/channel-posts/ack", {"post_id": 1, "message_id": str(ch.sent[0].id)}),
+        ("POST", "/internal/channel-posts/ack", {"post_id": 2, "message_id": str(ch.sent[1].id)})]
     assert ns["_channel_post_sent"] == {} and api.posts == []
 
 

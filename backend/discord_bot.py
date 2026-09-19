@@ -1268,7 +1268,7 @@ FAQ_ENTRIES = [
                    "team's tier) on top of match XP.\n"
                    "• **Play up in ranked** — gold and XP scale by your opponent's tier (up to ×3 vs a "
                    "Grand Master), win or lose; series wins pay 10-30g and even series losses pay 5-15g.\n"
-                   "• **Earn achievements** — 100g each, the Sid/Stan Slayer trophies pay 1000g.\n"
+                   "• **Earn achievements** — 100g by default; the harder ones pay 300g, 500g or 1000g.\n"
                    "• **Win tournaments** — trophy payouts.\n"
                    "• **Make and sell cosmetics** — artists earn a 30% royalty on every sale "
                    "(ask me *how do I become an artist*).\n"
@@ -1310,14 +1310,21 @@ FAQ_ENTRIES = [
             r"my \b(art|drawing|design)\b.{0,25}\b(game|mod|shop)\b",
         ],
         "examples": ["how do i make cosmetics", "how do i become an artist"],
+        # Every sentence here tracks the shipped uploader, not the plan it was
+        # written against: the 512x512 / transparency / 1 MB checks are
+        # NativeUI.ValidateCosmeticPngBytes, the GIF branch and the __fN frame
+        # walk are ValidateAndNameCosmetic, and the server accepts frame_count
+        # 2..COSMETIC_MAX_FRAMES (16). The previous answer said animation was
+        # not supported yet and routed it to a side channel — it had been
+        # supported since Aug 7.
         "answer": ("**DM Sid** with some art you'd like to upload — that's the whole application.\n"
-                   "Format: **512×512 PNG** with real transparency, drawn for a character slot (eyes, mouth, or "
-                   "detail/accessory).\n"
-                   "The in-game uploader currently submits **one static PNG** and lets you preview its true size "
-                   "against the player body before review. It does **not** bundle animation frames yet.\n"
-                   "For an animated submission, upload frame 1 for review and send the remaining frames plus the "
-                   "intended FPS to Sid separately. Shipped files use `myitem.png`, then `myitem__f2.png`, "
-                   "`myitem__f3.png`, …\n"
+                   "Format: **512×512 PNG** with real transparency, under 1 MB, drawn for a character slot "
+                   "(eyes, mouth, or detail/accessory).\n"
+                   "**Animated work goes through the in-game uploader too.** Either drop a **GIF**, or name "
+                   "your frames `myitem.png`, `myitem__f2.png`, `myitem__f3.png`, … and pick the base file — "
+                   "up to **16 frames**. Every frame gets the same size and transparency check.\n"
+                   "Either way you position the art on a live on-body preview — slot, scale and offset — at "
+                   "true size before it goes to review.\n"
                    "Approved artists get the in-game **Artist tab** (F5): upload cosmetics, set price and stock "
                    "after the art ships, gift copies, and earn a **30% royalty** on every sale."),
     },
@@ -8909,10 +8916,26 @@ async def poll_channel_posts():
     notified stamp — is retried by the outbox itself on the next tick, while
     the sent-memory above keeps that retry from posting twice. A row whose
     ack did not answer "acked" stays pending and is re-driven, never treated
-    as done."""
+    as done.
+
+    Migration 338 added a SECOND case: a row whose content was corrected. It
+    carries revision > posted_revision and is EDITED in place, never re-sent
+    — a correction posted as a new message sits below the wrong text, which
+    is what 134's Part C had to do and why #scr-faq has a duplicate RANKED
+    section. `revisions=true` is this build declaring it can do that; an
+    older api ignores the parameter and simply answers with never-posted
+    rows, so nothing about the old behaviour depends on the new one.
+
+    The six FAQ messages predate the column and have no stored id. For those
+    the row carries adopt_fingerprint — the exact text that was sent — and
+    the message is adopted only on an EXACT match against the bot's own
+    messages in that channel. When nothing matches, the row is skipped and
+    the old text stays up; this path must never fall through to a send,
+    because the only failure it could produce that way is the duplicate it
+    exists to prevent (#276: pick which direction the unhandled case fails)."""
     if http_session is None or not API_SECRET_KEY:
         return
-    data = await api_get("/internal/channel-posts/pending")
+    data = await api_get("/internal/channel-posts/pending?revisions=true")
     if not data or not data.get("posts"):
         return
     for p in data["posts"]:
@@ -8931,6 +8954,52 @@ async def poll_channel_posts():
             # Mute/Ban/Dismiss buttons (custom_id = case id only, B-2), stamp
             # notified_at, THEN ack. Any other post is unchanged.
             case_id, content = _modcase_parse(p["content"])
+            revision = p.get("revision")
+            # posted_revision NULL is the ONLY "never delivered" signal; a
+            # pre-338 api omits the key entirely, and .get() then reads None,
+            # which is the same answer it gave before the column existed.
+            first_post = p.get("posted_revision") is None
+
+            if not first_post:
+                # ── Correction: edit the live message, or do nothing ──
+                # Memory before the stored id, for the stream loop's reason
+                # (round-2 f2): the in-process id is only ever set by our own
+                # send or adopt, so after an ack failure it is the fresher of
+                # the two.
+                mid = _channel_post_sent.get(p["id"]) or p.get("message_id")
+                if mid is True:          # legacy marker from a send that
+                    mid = None           # could not report its id
+                if not mid:
+                    mid = await _adopt_channel_post_message(ch, p)
+                if not mid:
+                    print(f"[CHANNEL-POST] no message id for {p['id']} in {p['channel_id']} — "
+                          f"correction skipped, existing text left in place")
+                    continue   # an edit has no position, so skipping it cannot
+                               # disorder the queue — and returning here would
+                               # stall every later announcement behind it
+                try:
+                    msg = await ch.fetch_message(int(mid))
+                except discord.NotFound:
+                    # Somebody deleted the message. Re-sending would put the
+                    # sheet back in a channel it was removed from; leave it.
+                    print(f"[CHANNEL-POST] message {mid} for post {p['id']} is gone — correction skipped")
+                    continue
+                except discord.Forbidden:
+                    print(f"[CHANNEL-POST] cannot read history in {p['channel_id']} (forbidden) — "
+                          f"post {p['id']} left pending")
+                    continue
+                await msg.edit(content=content[:2000],
+                               allowed_mentions=discord.AllowedMentions(users=True, everyone=False, roles=False))
+                _channel_post_sent[p["id"]] = msg.id
+                print(f"[CHANNEL-POST] edited {p['id']} (rev {revision}) in {p['channel_id']}")
+                ack = await api_post("/internal/channel-posts/ack",
+                                     params=_channel_post_ack_params(p["id"], revision, msg.id))
+                if not ack or ack.get("status") != "acked":
+                    print(f"[CHANNEL-POST] ack failed for {p['id']}: {ack} — row stays pending, edit remembered")
+                    return
+                _channel_post_sent.pop(p["id"], None)
+                continue
+
             if p["id"] not in _channel_post_sent:
                 send_kw = {"allowed_mentions": discord.AllowedMentions(users=True, everyone=False, roles=False)}
                 if case_id:
@@ -8947,7 +9016,15 @@ async def poll_channel_posts():
                 if not stamped or stamped.get("status") != "ok":
                     print(f"[MODCASE] notified stamp failed for {case_id}: {stamped} — will retry")
                     return
-            ack = await api_post("/internal/channel-posts/ack", params={"post_id": p["id"]})
+            # The id rides along so the NEXT correction can edit this message
+            # rather than adopting it. `revision` is None against a pre-338
+            # api, and the endpoint's COALESCE then means "whatever is
+            # current" — the old fire-once ack, unchanged.
+            remembered = _channel_post_sent.get(p["id"])
+            ack = await api_post("/internal/channel-posts/ack",
+                                 params=_channel_post_ack_params(
+                                     p["id"], revision,
+                                     remembered if isinstance(remembered, int) else None))
             if not ack or ack.get("status") != "acked":
                 print(f"[CHANNEL-POST] ack failed for {p['id']}: {ack} — row stays pending, send remembered")
                 return
@@ -8958,6 +9035,58 @@ async def poll_channel_posts():
         except Exception as e:
             print(f"[CHANNEL-POST] send failed for {p['id']}: {e} — will retry")
             return  # keep strict ordering; retry from this post next tick
+
+
+def _channel_post_ack_params(post_id, revision, message_id):
+    """Query params for the channel-post ack, with the optional halves
+    dropped rather than sent as None — aiohttp refuses a None param value,
+    and the endpoint's COALESCE already treats an absent field as "leave it
+    alone". Against a pre-338 api `revision` arrives None here and the ack
+    degrades to exactly the call this loop used to make."""
+    params = {"post_id": post_id}
+    if revision is not None:
+        params["revision"] = int(revision)
+    if message_id is not None:
+        params["message_id"] = str(message_id)
+    return params
+
+
+async def _adopt_channel_post_message(ch, p):
+    """Recover the Discord message id of a row that was delivered before
+    migration 338 existed, or return None.
+
+    The six #scr-faq messages were posted by a bot that discarded the id, and
+    nobody has them written down. The row carries adopt_fingerprint — exactly
+    what was sent for it, i.e. content[:2000] — and this walks the channel
+    oldest-first looking for a message of OURS whose current content is that
+    string. Identity is the full text, not a position or a prefix: a
+    positional guess would adopt confidently and edit the wrong message,
+    which is the class of check that cannot fail (#342/#431).
+
+    Returns None on anything unexpected, and the caller then leaves the post
+    alone. Bounded scan — a channel whose sheet has scrolled past the limit
+    reports nothing rather than adopting something plausible."""
+    fingerprint = (p.get("adopt_fingerprint") or "").strip()
+    if not fingerprint:
+        return None
+    me = getattr(bot, "user", None)
+    if me is None:
+        return None
+    try:
+        async for msg in ch.history(limit=200, oldest_first=True):
+            if msg.author.id != me.id:
+                continue
+            if (msg.content or "").strip() == fingerprint:
+                print(f"[CHANNEL-POST] adopted message {msg.id} for post {p['id']} "
+                      f"in {p['channel_id']} (content match)")
+                return msg.id
+    except discord.Forbidden:
+        print(f"[CHANNEL-POST] cannot read history in {p['channel_id']} (forbidden) — no adoption")
+        return None
+    except Exception as e:
+        print(f"[CHANNEL-POST] history scan failed in {p['channel_id']}: {e} — no adoption")
+        return None
+    return None
 
 
 @poll_channel_posts.before_loop

@@ -676,7 +676,7 @@ Crash guards and dead-state repairs run everywhere - they repair states vanilla 
 - Decline puts both of you back in the queue and blocks the two of you from re-pairing for 5 minutes. Once the room has been issued, decline no longer works.
 - When both are ready the server issues a private ranked room and picks the Photon region: if both clients report the same home region, that wins; otherwise it falls back through the players' live regions, then either home region, then US.
 - Your client pins that region before joining, so both of you land in one room instead of two same-named rooms on two continents.
-- If your opponent never arrives: a warning at 25 seconds, then an automatic return to the menu at 60. <color=#7FE87F>No penalty for either side.</color>
+- If your opponent never arrives: a warning at 15 seconds, then an automatic return to the menu at 60. <color=#7FE87F>No penalty for either side.</color>
 
 <color=#FFD94D><b>RANKED IN A PRIVATE ROOM</b></color>
 
@@ -1169,8 +1169,8 @@ FFA pays for FIGHTING, not for time in the lobby. The formula, in readable form:
 Every achievement pays <color=#7FE87F>100g</color> unless listed here:
 
 - <color=#7FD4FF>1000g</color> - Sid Slayer, Stan Slayer, Grand Master (reach 2330), Touch Grass, Babel.
-- <color=#7FD4FF>500g</color> - Master (reach 1980), Tag Team Sweep, Rise from the Ashes, Casual Conqueror, Twins!, Immortal, Hostile Takeover, Bodycount.
-- <color=#7FD4FF>300g</color> - Stacked Deck, Flawless, Silly Drill, Into the Deep End, Century Club, Unstoppable, Party Crasher, Heartbreak, Dragoman.
+- <color=#7FD4FF>500g</color> - Master (reach 1980), Tag Team Sweep, Rise from the Ashes, Casual Conqueror, Twins!, Immortal, Hostile Takeover, Bodycount, Sync Champion, Async Champion.
+- <color=#7FD4FF>300g</color> - Stacked Deck, Flawless, Silly Drill, Into the Deep End, Century Club, Unstoppable, Party Crasher, Heartbreak, Dragoman, Sync Finalist, Async Finalist.
 
 The FFA shutouts nest: one 5-0 win in a 5-player lobby pays Clean House (100g) + Party Crasher (300g) + Hostile Takeover (500g) in a single game. The translator achievements (Rosetta, Dragoman, Babel) trigger at 10, 100 and 1000 approved live strings.
 
@@ -1679,7 +1679,7 @@ The translator tiers come from the translation portal, not from matches. A live 
 
 Community artists make a large share of the catalog. The pipeline:
 
-- An artist (a role granted in-game) submits art from the Artist tab: a PNG or animated frames, positioned on a live on-body preview with slot, scale and offset.
+- An artist (a role granted in-game) submits art from the Artist tab: one 512x512 PNG, a GIF, or up to 16 numbered PNG frames, positioned on a live on-body preview with slot, scale and offset.
 - The submission goes to review. Approval alone doesn't put it on sale: the art has to ship inside a mod release first, because cosmetics are bundled into the mod so every player's game can render them.
 - Once shipped, the artist opens sales and controls the price, the stock cap, and who may buy - an artist can block specific players from buying their items.
 - The artist earns <color=#7FE87F>a 30% royalty</color> (rounded down to whole Gold) when another player buys their item. No royalty on gifts.

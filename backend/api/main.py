@@ -34422,33 +34422,75 @@ async def internal_linked_players(
 
 @app.get("/api/v1/internal/channel-posts/pending", tags=["Internal"])
 async def pending_channel_posts(
+    revisions: bool = Query(False),
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
     db: AsyncSession = Depends(get_db),
 ):
+    """Channel-bus rows the bot still has to render.
+
+    Migration 338 gave this table the revision-acked shape
+    stream_channel_posts already had, so a correction now edits the posted
+    message instead of appending a new one under the wrong text — which is
+    what 134's Part C had to do. One predicate covers both cases: a
+    never-posted row has posted_revision NULL, and NULL IS DISTINCT FROM 1.
+
+    `revisions` is the bot DECLARING that it can edit in place, and it is
+    what makes the deploy order safe. A pre-338 bot omits it, sees only
+    never-posted rows, and so never meets a correction it would "deliver" by
+    posting a duplicate. It fails the safe way in the other direction too: an
+    api build that does not know the parameter ignores it (bug #266's shape)
+    and answers with the un-corrected set, leaving the old text up rather
+    than adding a second copy.
+
+    message_id is NULL for every row delivered before 338 — those ids were
+    never captured. adopt_fingerprint carries the exact text that was sent
+    for such a row (content[:2000], because the bot sends content[:2000]),
+    which is how the bot identifies the live message once and records its id
+    from then on."""
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
+    # Two fixed literals chosen by a bool — no caller text reaches the SQL.
+    where = ("posted_revision IS DISTINCT FROM revision" if revisions
+             else "posted_at IS NULL")
     rows = (await db.execute(text(
-        "SELECT id, channel_id, content FROM pending_channel_posts "
-        "WHERE posted_at IS NULL ORDER BY sort_order, id LIMIT 20"
+        "SELECT id, channel_id, content, revision, posted_revision, "
+        "       message_id, adopt_fingerprint "
+        "FROM pending_channel_posts "
+        "WHERE " + where + " ORDER BY sort_order, id LIMIT 20"
     ))).mappings().all()
-    return {"posts": [{"id": r["id"], "channel_id": r["channel_id"], "content": r["content"]} for r in rows]}
+    return {"posts": [dict(r) for r in rows]}
 
 
 @app.post("/api/v1/internal/channel-posts/ack", tags=["Internal"])
 async def ack_channel_post(
     post_id: int = Query(...),
+    revision: int | None = Query(None, ge=1),
+    message_id: str | None = Query(None, max_length=32),
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
     db: AsyncSession = Depends(get_db),
 ):
+    """Bind the ack to the revision the bot actually rendered (#175): a
+    correction landing between the bot's fetch and its ack leaves
+    revision > posted_revision, so the row stays pending and the newer text
+    is delivered next tick instead of being marked done.
+
+    Both new parameters are optional, so a pre-338 bot acks exactly as it
+    always did: COALESCE(:rev, revision) means "whatever is current", which
+    is the old fire-once semantics. posted_at keeps its ORIGINAL stamp — it
+    records when the message first appeared, not when it was last edited."""
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
     await db.execute(text(
-        "UPDATE pending_channel_posts SET posted_at = NOW() WHERE id = :pid"
-    ), {"pid": post_id})
+        "UPDATE pending_channel_posts "
+        "   SET posted_at       = COALESCE(posted_at, NOW()), "
+        "       posted_revision = COALESCE(CAST(:rev AS INTEGER), revision), "
+        "       message_id      = COALESCE(CAST(:mid AS TEXT), message_id) "
+        " WHERE id = :pid"
+    ), {"pid": post_id, "rev": revision, "mid": message_id})
     await db.commit()
-    return {"status": "acked", "id": post_id}
+    return {"status": "acked", "id": post_id, "revision": revision}
 
 
 @app.get("/api/v1/internal/stream-posts/pending", tags=["Internal"])
