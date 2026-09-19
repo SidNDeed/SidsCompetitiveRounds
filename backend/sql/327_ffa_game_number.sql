@@ -36,8 +36,13 @@
 -- (`expected_game`) and the live-points UPDATE carries, so a match row, its
 -- wagers and its live figure name one game by construction. The report room id
 -- `<photon room>_<HHmmss>_r<N>` -- built by the reporting client
--- (GameStateWatcher.cs) and covered by the report HMAC -- is kept as a
--- cross-check that has to agree, never as the source.
+-- (GameStateWatcher.cs) and covered by the report HMAC -- is a cross-check,
+-- never the source, and it HAS TO AGREE: a report whose tail names a number
+-- this lobby already holds is compared against that row, and a report whose
+-- tail is any other number than the lobby's next slot is refused and kept for
+-- review. Nothing is ever stored under a number the report did not name, so
+-- for every row this api writes, game_number and the `_rN` tail are one
+-- number. (Historical rows are a different matter -- see the backfill below.)
 --
 -- WHERE THE NUMBER COMES FROM, HISTORICALLY. The backfill below numbers EVERY
 -- pre-existing row, and records in game_number_source which rule gave it its
@@ -72,11 +77,28 @@ SET LOCAL lock_timeout = '5s';
 
 ALTER TABLE ffa_matches ADD COLUMN IF NOT EXISTS game_number SMALLINT;
 ALTER TABLE ffa_matches ADD COLUMN IF NOT EXISTS game_number_source VARCHAR(16);
+-- The two race lengths a settlement can involve. They are equal on every
+-- normally configured lobby; they differ when a client that missed the
+-- score-target room property plays a real, complete game to the module
+-- default. That game IS settled -- refusing it would cost an honest player the
+-- whole record -- but not with the frozen target's economics: its wagers were
+-- priced for the frozen race length and are refunded, and its Glicko weight
+-- takes the length actually played. Recorded here so the difference is a
+-- readable fact about the row rather than a log line somebody has to still
+-- have. NULL on every pre-327 row: `played` is not derivable for rows whose
+-- per-player tallies may have been reversed, and a guessed number in a column
+-- that decides pricing is worse than an honest absence.
+ALTER TABLE ffa_matches ADD COLUMN IF NOT EXISTS score_target_frozen SMALLINT;
+ALTER TABLE ffa_matches ADD COLUMN IF NOT EXISTS score_target_played SMALLINT;
 
 COMMENT ON COLUMN ffa_matches.game_number IS
-    'Which game of the sitting this row records (1..999, NOT NULL). Live rows take the lobby''s own games_played + 1; historical rows were backfilled by migration 327. Not unique: a second row for one game is a recorded contradiction, not a key violation.';
+    'Which game of the sitting this row records (1..999, NOT NULL). Live rows take the lobby''s own games_played + 1, which the report room id''s _rN tail has to equal; historical rows were backfilled by migration 327. Not unique: a second row for one game is a recorded contradiction, not a key violation.';
 COMMENT ON COLUMN ffa_matches.game_number_source IS
-    'How this row got its number: room_tail = the report room id''s _rN tail; sequence = the lobby''s ended_at order (migration 327''s backfill, or the insert trigger for a writer that supplied none).';
+    'How this row got its number. writer = the inserting statement supplied it (the api, which supplies the lobby''s games_played + 1). room_tail = the report room id''s _rN tail, taken by migration 327''s backfill or by the insert trigger when the writer supplied none. sequence = neither was available: the lobby''s ended_at order for the backfill, one above the lobby''s highest number for the trigger.';
+COMMENT ON COLUMN ffa_matches.score_target_frozen IS
+    'The lobby''s frozen first-to-N at the time this game settled (NULL before migration 327).';
+COMMENT ON COLUMN ffa_matches.score_target_played IS
+    'The first-to-N this game was actually played to. Differs from score_target_frozen only on an accepted config skew, whose wagers are refunded rather than paid (NULL before migration 327).';
 
 -- The pace anchor asks one question per report: the earliest receipt of each
 -- of this lobby's OTHER games. The duplicate lookup asks a second: does this
@@ -106,10 +128,20 @@ BEGIN
     SELECT COALESCE(MAX(game_number), 0) + 1 INTO tail
       FROM ffa_matches
      WHERE lobby_id IS NOT DISTINCT FROM NEW.lobby_id;
-    -- LEAST only so the function is total against the CHECK below. The real
-    -- domain is bounded far lower: FFA_MAX_GAMES_PER_LOBBY is 40, and the
-    -- endpoint refuses a report once a lobby has settled that many.
-    NEW.game_number := LEAST(tail, 999)::SMALLINT;
+    -- One above the lobby's highest number -- not "the next FREE number", which
+    -- this expression does not compute and never did. A lobby holding 1, 2 and
+    -- 999 gets 1000 here, and 1000 is REFUSED rather than clamped: an earlier
+    -- revision wrote LEAST(tail, 999), which hands back a number the lobby is
+    -- already using, and a number that silently collides is worse than an
+    -- insert that names its own problem. The real domain is bounded far lower
+    -- (FFA_MAX_GAMES_PER_LOBBY is 40 and the endpoint refuses a report once a
+    -- lobby has settled that many), so this arm is a guard, not a path.
+    IF tail > 999 THEN
+        RAISE EXCEPTION
+            'ffa_matches: lobby % already numbers up to %, so an unnumbered '
+            'insert has no number left inside 1..999', NEW.lobby_id, tail - 1;
+    END IF;
+    NEW.game_number := tail::SMALLINT;
     NEW.game_number_source := 'sequence';
     RETURN NEW;
 END
@@ -187,6 +219,15 @@ UPDATE ffa_matches m
 --      backfill that ran in the wrong order and sequenced a derivable row.
 -- The third is the one a count of NULLs cannot see, and it is what the
 -- 'neuter the backfill's WHERE' mutation control reddens.
+--
+-- The third covers rows of EVERY provenance, `writer` included. An earlier
+-- revision restricted it to game_number_source = 'sequence', which made it
+-- blind to exactly the rows it would matter most for on a re-run; and since
+-- the api refuses any report whose tail is not the number it stores, a writer
+-- row whose tail disagrees with its number is a real fault and not a
+-- legitimate shape. Backfilled 'sequence' rows are excluded by the predicate
+-- itself: a row was sequenced only because its tail was not usable, so the
+-- `photon_room_id ~ ...` test never matches one.
 DO $$
 DECLARE
     nulls    BIGINT;
@@ -210,11 +251,12 @@ BEGIN
        AND CAST(substring(photon_room_id FROM '_r([0-9]{1,4})$') AS INTEGER)
            BETWEEN 1 AND 999
        AND game_number IS DISTINCT FROM
-           CAST(substring(photon_room_id FROM '_r([0-9]{1,4})$') AS SMALLINT)
-       AND game_number_source = 'sequence';
+           CAST(substring(photon_room_id FROM '_r([0-9]{1,4})$') AS SMALLINT);
     IF wrong > 0 THEN
         RAISE EXCEPTION
-            'game_number backfill sequenced % row(s) whose room id carries a derivable _rN tail', wrong;
+            'game_number: % row(s) carry a derivable _rN tail that is not their '
+            'game_number (a backfill that sequenced a derivable row, or a writer '
+            'that stored a number it did not name)', wrong;
     END IF;
     SELECT COUNT(*) INTO by_tail FROM ffa_matches WHERE game_number_source = 'room_tail';
     SELECT COUNT(*) INTO by_seq  FROM ffa_matches WHERE game_number_source = 'sequence';
