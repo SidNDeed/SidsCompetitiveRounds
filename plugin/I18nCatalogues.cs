@@ -2912,6 +2912,7 @@ namespace CompetitiveRounds
             // rendered English (#578/#583). Sorted among themselves; entries above
             // are untouched.
             ["Room rule: same cards for everyone"] = "Regla de sala: mismas cartas para todos",
+            ["Room rule: same cards is off this game"] = "Regla de sala: mismas cartas desactivada en esta partida",
             ["Room rules: friendly fire OFF"] = "Reglas de sala: fuego amigo DESACTIVADO",
             ["Room rules: friendly fire OFF, same cards for everyone"] = "Reglas de sala: fuego amigo DESACTIVADO, mismas cartas para todos",
             ["Room rules: same cards for everyone"] = "Reglas de sala: mismas cartas para todos",
@@ -5793,6 +5794,7 @@ namespace CompetitiveRounds
             // rendered English (#578/#583). Sorted among themselves; entries above
             // are untouched.
             ["Room rule: same cards for everyone"] = "Правило комнаты: одинаковые карты у всех",
+            ["Room rule: same cards is off this game"] = "Правило комнаты: одинаковые карты отключены в этой игре",
             ["Room rules: friendly fire OFF"] = "Правила комнаты: огонь по своим ВЫКЛ",
             ["Room rules: friendly fire OFF, same cards for everyone"] = "Правила комнаты: огонь по своим ВЫКЛ, одинаковые карты у всех",
             ["Room rules: same cards for everyone"] = "Правила комнаты: одинаковые карты у всех",
@@ -8600,6 +8602,7 @@ namespace CompetitiveRounds
             // rendered English (#578/#583). Sorted among themselves; entries above
             // are untouched.
             ["Room rule: same cards for everyone"] = "Правило кімнати: однакові карти у всіх",
+            ["Room rule: same cards is off this game"] = "Правило кімнати: однакові карти вимкнено в цій грі",
             ["Room rules: friendly fire OFF"] = "Правила кімнати: вогонь по своїх ВИМК",
             ["Room rules: friendly fire OFF, same cards for everyone"] = "Правила кімнати: вогонь по своїх ВИМК, однакові карти у всіх",
             ["Room rules: same cards for everyone"] = "Правила кімнати: однакові карти у всіх",
@@ -11407,6 +11410,7 @@ namespace CompetitiveRounds
             // rendered English (#578/#583). Sorted among themselves; entries above
             // are untouched.
             ["Room rule: same cards for everyone"] = "Rumsregel: samma kort för alla",
+            ["Room rule: same cards is off this game"] = "Rumsregel: samma kort är avstängt den här matchen",
             ["Room rules: friendly fire OFF"] = "Rumsregler: friendly fire AV",
             ["Room rules: friendly fire OFF, same cards for everyone"] = "Rumsregler: friendly fire AV, samma kort för alla",
             ["Room rules: same cards for everyone"] = "Rumsregler: samma kort för alla",

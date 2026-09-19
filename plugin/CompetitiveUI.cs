@@ -628,7 +628,16 @@ namespace CompetitiveRounds
         private static Vector2 ffaPickBannerMeasured;
         private static string ffaPickBannerMeasuredText;
         private static int ffaPickBannerMeasuredFont = -1;
+        // Band-ABSOLUTE bottom of the pick banner's drawn (or empty) slot; the
+        // settings and match-point banners chain off it. Written by
+        // DrawFfaPickBanner every Repaint, never by the layout refresh — the
+        // refresh runs before the band origin is known.
         private static float ffaPickBannerYMax;
+        // The band DrawFfaScoreStrip opens for the three banners: its origin,
+        // and the lowest edge any of them painted (still the origin when none
+        // did, which is how the band consumes nothing).
+        private static float ffaBannerBandTop;
+        private static float ffaBannerBandBottom;
 
         // Bug #132: 5s "FFA starting" countdown between the host's Start and
         // the room join. Realtime clock — the countdown must tick at menu
@@ -694,9 +703,20 @@ namespace CompetitiveRounds
                 EnsureFfaHudResources();
                 RefreshFfaHudLayout();
                 if (inMatch) DrawFfaScoreRows();
+                // The three banners below are ONE claimant of the top-centre
+                // column: they chain downward off each other through
+                // ffaPickBannerYMax, so the band is opened once here and closed
+                // with the lowest edge any of them actually painted. Before
+                // this they took no part in the column at all and the leaver
+                // and tournament bars painted straight across them.
+                // (The per-player score rows above are top-LEFT, not in this
+                // column, and deliberately claim nothing.)
+                ffaBannerBandTop = OpenTopStrip();
+                ffaBannerBandBottom = ffaBannerBandTop;
                 DrawFfaPickBanner(now);
                 DrawFfaSettingsBanner(now);
                 DrawFfaMatchPointBanner(now);
+                CloseTopStrip(ffaBannerBandBottom);
             }
             catch { }
         }
@@ -900,11 +920,13 @@ namespace CompetitiveRounds
             }
 
             float bannerW = 260f * ffaHudScale;
+            // The y here is the banner stack's INSET inside its band, not a
+            // screen coordinate: DrawFfaPickBanner adds the band origin. Not a
+            // place to set ffaPickBannerYMax — this runs before the band is
+            // opened, so anything it wrote would be band-relative and the two
+            // banners chaining off it would paint into the column above.
             ffaPickBannerRect = new Rect((width - bannerW) * 0.5f, 6f * ffaHudScale,
                 bannerW, 28f * ffaHudScale);
-            // Default until a banner draws taller this frame — consumers below
-            // the banner stack off the REAL drawn edge, not the layout slot.
-            ffaPickBannerYMax = ffaPickBannerRect.yMax;
             ffaHudNameStyle.fontSize = Mathf.Max(1, Mathf.RoundToInt(12f * ffaHudScale));
             ffaPickBannerStyle.fontSize = Mathf.Max(1, Mathf.RoundToInt(14f * ffaHudScale));
         }
@@ -1054,6 +1076,7 @@ namespace CompetitiveRounds
                 ffaCfgBannerSize = ffaCfgBannerStyle.CalcSize(new GUIContent(ffaCfgBannerText));
             float w = ffaCfgBannerSize.x + 34f, h = ffaCfgBannerSize.y + 14f;
             var rect = new Rect((Screen.width - w) * 0.5f, ffaPickBannerYMax + 8f, w, h);
+            if (rect.yMax > ffaBannerBandBottom) ffaBannerBandBottom = rect.yMax;
             float fade = Mathf.Clamp01(ffaCfgBannerUntil - now);   // last second fades out
             Color previous = GUI.color;
             GUI.color = new Color(0.10f, 0.13f, 0.20f, 0.90f * fade);
@@ -1203,6 +1226,7 @@ namespace CompetitiveRounds
             if (!string.IsNullOrEmpty(ffaCfgBannerText) && now <= ffaCfgBannerUntil)
                 y += ffaCfgBannerSize.y + 20f;
             var rect = new Rect((Screen.width - w) * 0.5f, y, w, h);
+            if (rect.yMax > ffaBannerBandBottom) ffaBannerBandBottom = rect.yMax;
             float pulse = 0.80f + 0.20f * Mathf.Sin(now * 5f);
             Color previous = GUI.color;
             GUI.color = new Color(0.36f, 0.26f, 0.03f, 0.92f * pulse);
@@ -1216,7 +1240,11 @@ namespace CompetitiveRounds
         {
             if (string.IsNullOrEmpty(ffaPickBannerText))
             {
-                ffaPickBannerYMax = ffaPickBannerRect.yMax;
+                // Empty slot: the two banners below still chain off it (their
+                // own layout is unchanged), but nothing painted, so the band's
+                // bottom is NOT advanced here. Only a banner that actually
+                // paints moves ffaBannerBandBottom.
+                ffaPickBannerYMax = ffaBannerBandTop + ffaPickBannerRect.yMax;
                 return;
             }
             Color background;
@@ -1254,8 +1282,10 @@ namespace CompetitiveRounds
             float bw = Mathf.Min(Mathf.Max(ffaPickBannerRect.width, ffaPickBannerMeasured.x + 26f),
                 Screen.width - 20f);
             float bh = Mathf.Max(ffaPickBannerRect.height, ffaPickBannerMeasured.y + 8f);
-            var bannerRect = new Rect((Screen.width - bw) * 0.5f, ffaPickBannerRect.y, bw, bh);
+            var bannerRect = new Rect((Screen.width - bw) * 0.5f,
+                ffaBannerBandTop + ffaPickBannerRect.y, bw, bh);
             ffaPickBannerYMax = bannerRect.yMax;
+            if (bannerRect.yMax > ffaBannerBandBottom) ffaBannerBandBottom = bannerRect.yMax;
 
             Color previous = GUI.color;
             GUI.color = background;
@@ -1325,8 +1355,11 @@ namespace CompetitiveRounds
             float pulse = 0.78f + 0.14f * Mathf.Sin(Time.unscaledTime * 5f);
             float fade = Mathf.Clamp01(_leaverUntil - Time.unscaledTime);
             bg.a = 0.92f * pulse * fade;
-            ReserveTopStrip(barH);
-            GUI.DrawTexture(new Rect(0, 0, Screen.width, barH), Texture2D.whiteTexture,
+            // Full-width bar, but it no longer assumes y=0: the match status
+            // lines and the FFA banners claim the column above it, and this bar
+            // used to paint straight over both.
+            float barY = ClaimTopStrip(barH);
+            GUI.DrawTexture(new Rect(0, barY, Screen.width, barH), Texture2D.whiteTexture,
                 ScaleMode.StretchToFill, true, 0, bg, 0, 0);
             if (_leaverStyle == null)
                 _leaverStyle = new GUIStyle(GUI.skin.label)
@@ -1336,7 +1369,7 @@ namespace CompetitiveRounds
                 };
             var prev = GUI.color;
             GUI.color = new Color(1f, 1f, 1f, Mathf.Clamp01(fade * 1.5f));
-            GUI.Label(new Rect(0, 0, Screen.width, barH), _leaverText, _leaverStyle);
+            GUI.Label(new Rect(0, barY, Screen.width, barH), _leaverText, _leaverStyle);
             GUI.color = prev;
         }
 
@@ -1462,7 +1495,9 @@ namespace CompetitiveRounds
                 }
 
                 if (text == null) return;
-                ReserveTopStrip(barH);
+                // Claimed AFTER the last early return, so a frame on which this
+                // banner decides not to paint leaves no hole in the column.
+                float barY = ClaimTopStrip(barH);
                 if (tourneyBannerStyle == null)
                     tourneyBannerStyle = new GUIStyle(GUI.skin.label)
                     { fontSize = 17, alignment = TextAnchor.MiddleCenter, fontStyle = FontStyle.Bold, richText = false };
@@ -1477,9 +1512,9 @@ namespace CompetitiveRounds
                 try
                 {
                     GUI.color = new Color(bg.r, bg.g, bg.b, bg.a * pulse);
-                    GUI.DrawTexture(new Rect(0, 0, Screen.width, barH), Texture2D.whiteTexture, ScaleMode.StretchToFill);
+                    GUI.DrawTexture(new Rect(0, barY, Screen.width, barH), Texture2D.whiteTexture, ScaleMode.StretchToFill);
                     GUI.color = Color.white;
-                    GUI.Label(new Rect(0, 0, Screen.width, barH), text, tourneyBannerStyle);
+                    GUI.Label(new Rect(0, barY, Screen.width, barH), text, tourneyBannerStyle);
                 }
                 finally { GUI.color = prev; }
             }
@@ -1568,7 +1603,11 @@ namespace CompetitiveRounds
         // room's worth of Repaints emits ONE line and the next room emits
         // another. Not a "once ever" flag — a seat that leaves and rejoins
         // should log again, because that is a second arrival.
-        private static bool roomRuleLogged;
+        // Holds the STATE it logged, not a bool: the strip's claim changes when
+        // the dealer falls back mid-room, and one line per room would have hid
+        // exactly the transition worth reading.
+        private static FfaCardSequence.RuleDisplayState roomRuleLogged
+            = FfaCardSequence.RuleDisplayState.Off;
 
         private static void DrawRoomRulesBanner()
         {
@@ -1576,19 +1615,29 @@ namespace CompetitiveRounds
             // Whole body guarded: DrawUI has no outer try/catch (#255).
             try
             {
-                bool on;
-                try { on = FfaCardSequence.RuleOn(); } catch { on = false; }
-                if (!on) { roomRuleLogged = false; return; }
+                // The DEALER'S LATCHED STATE, not the configuration. RuleOn()
+                // stays true after LatchForGame takes any of its fallbacks
+                // (capability adverts, seed prop, card pool, pool hash), so a
+                // strip drawn from it promised "same cards for everyone" for a
+                // whole game in which this seat rolled privately. StripState()
+                // reads the two fields the dealer itself reads.
+                FfaCardSequence.RuleDisplayState state;
+                try { state = FfaCardSequence.StripState(); }
+                catch { state = FfaCardSequence.RuleDisplayState.Off; }
+                if (state == FfaCardSequence.RuleDisplayState.Off)
+                { roomRuleLogged = FfaCardSequence.RuleDisplayState.Off; return; }
                 // Item 4: yields to anything the player opened. See RoomStripHidden.
                 if (RoomStripHidden) return;
-                if (!roomRuleLogged)
+                bool fellBack = state == FfaCardSequence.RuleDisplayState.FellBack;
+                if (roomRuleLogged != state)
                 {
-                    roomRuleLogged = true;
-                    // Written on the first PAINTING Repaint of a room, never per
-                    // frame (#162): it claims the strip was shown, so it is
+                    roomRuleLogged = state;
+                    // Written on the first PAINTING Repaint of each state, never
+                    // per frame (#162): it claims the strip was shown, so it is
                     // emitted past the hidden gate rather than at the rule edge.
                     // The only place this tag is written (#306).
-                    Plugin.Log.LogInfo("[ROOM-RULES] indicator shown: same cards");
+                    Plugin.Log.LogInfo("[ROOM-RULES] indicator shown: same cards ("
+                        + state + ")");
                 }
                 if (roomRuleStyle == null)
                 {
@@ -1597,13 +1646,22 @@ namespace CompetitiveRounds
                         fontSize = 13, fontStyle = FontStyle.Bold, richText = false,
                         alignment = TextAnchor.MiddleCenter, clipping = TextClipping.Overflow,
                     };
-                    // Same cyan family as the room-rules toast (0.6, 0.9, 1).
-                    roomRuleStyle.normal.textColor = new Color(0.78f, 0.92f, 1f, 1f);
                 }
-                string text = I18n.Tr("Room rule: same cards for everyone");
+                // Colour is per-state and set every frame, not once at style
+                // creation: the style is cached across states, so a colour
+                // written only inside the "if (style == null)" block would stay
+                // whatever the FIRST state of the session painted.
+                roomRuleStyle.normal.textColor = fellBack
+                    ? new Color(1f, 0.86f, 0.55f, 1f)          // amber: a downgrade
+                    : new Color(0.78f, 0.92f, 1f, 1f);          // cyan, as the toast
+                // Pending renders the configured rule (a room lobby should show
+                // its own rule) — only a LATCHED fallback changes the claim.
+                string text = fellBack
+                    ? I18n.Tr("Room rule: same cards is off this game")
+                    : I18n.Tr("Room rule: same cards for everyone");
                 // CalcSize on CHANGE only — never per Repaint (#162). The text
-                // moves when the locale does, and the reference compare below
-                // costs one ordinal string compare of ~40 chars per frame.
+                // moves when the locale or the state does, and the reference
+                // compare below costs one ordinal string compare per frame.
                 if (!string.Equals(text, roomRuleText, StringComparison.Ordinal))
                 {
                     roomRuleText = text;
@@ -1612,7 +1670,9 @@ namespace CompetitiveRounds
                 const float barH = 22f;
                 float w = Mathf.Min(roomRuleWidth, Screen.width - 8f);
                 float x = (Screen.width - w) / 2f;
-                float y = TopStripBottom() + 2f;
+                // Last claimant in DrawUI's order, so this band starts below
+                // everything else painting in the top-centre column.
+                float y = ClaimTopStrip(barH);
                 var prev = GUI.color;
                 // try/finally, not a trailing restore (Sept 15 review item 3):
                 // this whole body sits inside catch { }, so a throw out of
@@ -1621,7 +1681,9 @@ namespace CompetitiveRounds
                 // in the same IMGUI pass.
                 try
                 {
-                    GUI.color = new Color(0.10f, 0.22f, 0.40f, 0.72f);
+                    GUI.color = fellBack
+                        ? new Color(0.30f, 0.22f, 0.06f, 0.78f)
+                        : new Color(0.10f, 0.22f, 0.40f, 0.72f);
                     GUI.DrawTexture(new Rect(x, y, w, barH), Texture2D.whiteTexture, ScaleMode.StretchToFill);
                     GUI.color = Color.white;
                     GUI.Label(new Rect(x, y, w, barH), text, roomRuleStyle);
@@ -1631,37 +1693,70 @@ namespace CompetitiveRounds
             catch { }
         }
 
-        // ── Top-centre strip reservation ───────────────────────────────────
-        // Anything painting in the top-centre strip declares its BOTTOM edge
-        // here, so anything stacking under it (today: the room-rules strip) can
-        // dock without re-deriving that surface's own conditions. Writers, all
-        // of them earlier in DrawUI than the readers: DrawMatchStatus (the
-        // in-match banner/series/H2H lines), DrawLeaverBanner and
-        // DrawTournamentBanner (full-width bars at y=0, where the bar height IS
-        // the bottom edge). The reservation is the MAX of the writers, which is
-        // what the room-rules strip needs — the leaver bar and the match-status
-        // lines already overlap each other, and that is unchanged here.
-        // Written on Repaint only and stamped with the frame it belongs to, so
-        // a surface that stops drawing simply stops stamping and the reading
-        // falls back to 0 — never one frame stale.
+        // ── Top-centre strip: a band ALLOCATOR, not a maximum ──────────────
+        // Every surface painting in the top-centre column CLAIMS a band of its
+        // own height and is told the y to paint at; the next claim starts below
+        // it. The previous shape stored only the MAX bottom edge, which laid
+        // out exactly one surface (the room-rules strip, which read the max and
+        // docked under it) and left every other pair overlapping: the leaver
+        // bar and the tournament bar are both full-width at y=0, the match
+        // status lines start at y=8 under both of them, the spectator live bar
+        // sits at y=4, and the FFA pick/configuration/match-point banners start
+        // near y=6 and did not take part at all.
+        //
+        // CLAIM ORDER IS DrawUI'S CALL ORDER, and that is the whole contract —
+        // there is no priority table to keep in sync with it. In DrawUI:
+        //   SpectatorHud.Draw()  →  DrawFfaScoreStrip()  →  DrawMatchStatus()
+        //   →  DrawLeaverBanner()  →  DrawTournamentBanner()
+        //   →  DrawRoomRulesBanner()
+        // so a seat's own mode HUD keeps the top of the column and the
+        // transient alert bars stack beneath it. test_same_cards_indicator.py
+        // pins that order against a reordering edit.
+        //
+        // Claims are made on Repaint ONLY (every claimant is repaint-gated) and
+        // the running total is stamped with the frame it belongs to, so a
+        // surface that stops drawing simply stops claiming and the ones below
+        // it move up — never one frame stale, and a Layout pass in the same
+        // frame cannot double-count.
+        //
         // KNOWN AND ACCEPTED (Sept 15 review item 5): when a leaver or
-        // tournament banner ends, or a match stops being tracked, that writer
-        // simply stops stamping and the strip snaps up - one frame after the
-        // surface above it disappeared. Cosmetic, one frame, no state damage;
-        // the alternative is a decay timer holding a reservation for a surface
+        // tournament banner ends, or a match stops being tracked, that
+        // claimant simply stops claiming and the strip snaps up - one frame
+        // after the surface above it disappeared. Cosmetic, one frame, no state
+        // damage; the alternative is a decay timer holding a band for a surface
         // that is already gone. Deliberate. Please do not file it as a bug.
-        private static float topStripH;
-        private static int topStripFrame = -1;
-        // internal, not private: SpectatorHud.DrawLiveBar is the fourth writer
-        // (the spectator seat's own top-centre live bar) and is its own class.
-        internal static void ReserveTopStrip(float bottomY)
+        // The arithmetic itself lives in TopStripBand, which is free of Unity
+        // so tools/client-rules-harness can EXECUTE it: the ordering and the
+        // never-climbs-back guarantee are proven by running, not by a test
+        // reading this file (#391). Everything below is the Unity edge —
+        // supplying the frame number and nothing else.
+        private static TopStripBand topStrip;
+
+        /// <summary>Claim a band of <paramref name="height"/> at the bottom of
+        /// the top-centre column and return the y to paint at. internal, not
+        /// private: SpectatorHud.DrawLiveBar is a claimant and is its own
+        /// class.</summary>
+        internal static float ClaimTopStrip(float height)
         {
-            if (topStripFrame != Time.frameCount) { topStripFrame = Time.frameCount; topStripH = 0f; }
-            if (bottomY > topStripH) topStripH = bottomY;
+            return topStrip.Claim(Time.frameCount, height);
         }
-        private static float TopStripBottom()
+
+        /// <summary>Open a band for a claimant that lays ITSELF out downward
+        /// and only knows its bottom edge once it has painted (DrawMatchStatus'
+        /// optional banner/series/H2H lines; the FFA banner chain). Returns the
+        /// y to start at; the claimant must call CloseTopStrip with the lowest
+        /// edge it actually painted.</summary>
+        internal static float OpenTopStrip()
         {
-            return topStripFrame == Time.frameCount ? topStripH : 0f;
+            return topStrip.Open(Time.frameCount);
+        }
+
+        /// <summary>Close the band OpenTopStrip returned, stating the lowest y
+        /// the claimant painted. A bottom at or above the band's own origin
+        /// means it painted nothing and consumes no space.</summary>
+        internal static void CloseTopStrip(float bottomY)
+        {
+            topStrip.Close(Time.frameCount, bottomY);
         }
 
         // Bottom-center toast naming the map skin you just Shift-cycled to, so you can
@@ -9019,18 +9114,25 @@ namespace CompetitiveRounds
             if (Time.unscaledTime >= matchStatusCacheUntil || matchStatusCachedRanked != isRanked)
                 RefreshMatchStatusCache(isRanked);
             var oc = GUI.contentColor;
-            // Bottom edge of everything this block paints in the top-centre
-            // strip, accumulated as a RUNNING MAX over the lines and declared
-            // at the end so the room-rules strip (DrawRoomRulesBanner, later in
-            // DrawUI) docks under it instead of over it. Tracked PER LINE rather
-            // than re-derived from the conditions, so a later edit to these
-            // lines carries the reservation with it.
+            // This block lays ITSELF out downward over a variable number of
+            // lines, so it opens a band rather than claiming a fixed height:
+            // bandTop is the y its first line starts from, and CloseTopStrip
+            // below states the lowest edge it actually reached. Opened after
+            // every early return above, so a frame on which nothing paints
+            // leaves no hole in the column.
+            float bandTop = OpenTopStrip();
+            // Bottom edge of everything this block paints, accumulated as a
+            // RUNNING MAX over the lines and declared at the end so whatever
+            // claims next (today: the leaver bar, the tournament bar and the
+            // room-rules strip, all later in DrawUI) starts under it instead of
+            // over it. Tracked PER LINE rather than re-derived from the
+            // conditions, so a later edit to these lines carries it along.
             //
             // Max, not plain assignment (Sept 15 review item 2): every path
             // below is monotone TODAY, so last-write-wins returns the same
             // number - but the first HUD row inserted above the H2H row would
             // then report a bottom edge SMALLER than the rows above it, and the
-            // room-rules strip would climb back onto the series line with a
+            // surfaces below would climb back onto the series line with a
             // screenshot as the first signal. The guarantee belongs here, in
             // this function, not in what the next editor happens to know.
             // 0 = this block painted nothing.
@@ -9044,7 +9146,7 @@ namespace CompetitiveRounds
             float scoreY;
             if (showBanner)
             {
-                float bannerY = 8f;
+                float bannerY = bandTop + 8f;
                 // Bug 231 (Sid: "make it gold and have it above the RANKED -
                 // Recording message"): tournament matches get a GOLD line
                 // ABOVE the ranked banner. The label comes from the
@@ -9070,7 +9172,7 @@ namespace CompetitiveRounds
             }
             else
             {
-                scoreY = 8;
+                scoreY = bandTop + 8f;
             }
 
             // Two HUD lines under the RANKED banner — both pulled from
@@ -9101,7 +9203,11 @@ namespace CompetitiveRounds
                     matchStatusH2H, scoreStyle);
                 stackBottom = Mathf.Max(stackBottom, nextLineY + 20f);
             }
-            if (stackBottom > 0f) ReserveTopStrip(stackBottom);
+            // Closes the band opened above. A stackBottom still at 0, or at or
+            // above bandTop, means no line painted and the band consumes
+            // nothing — the casual-match path (no banner, no series line, no
+            // H2H) reaches here exactly that way.
+            CloseTopStrip(stackBottom);
             GUI.contentColor = oc;
         }
 

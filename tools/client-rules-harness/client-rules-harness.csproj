@@ -12,6 +12,11 @@
                         passes only when the unscrubbed measurement is
                         non-zero.
 
+      TopStripBand.cs   the top-centre column's band allocator: which y each
+                        surface gets when several paint at once. It takes the
+                        frame number as a PARAMETER precisely so it can be
+                        driven from here instead of asserted about.
+
     net10.0 because that is the runtime installed on the build seat, matching
     the h2h harness; RollForward keeps the next SDK rotation from turning this
     into a green-looking nothing.
@@ -34,6 +39,7 @@
   <ItemGroup>
     <Compile Include="Main.cs" />
     <Compile Include="../../plugin/LogScrub.cs" />
+    <Compile Include="../../plugin/TopStripBand.cs" />
   </ItemGroup>
 
 </Project>

@@ -1988,6 +1988,7 @@
   "Rolling block % (15 s window)",
   "Rolling hit % (15 s window)",
   "Room rule: same cards for everyone",
+  "Room rule: same cards is off this game",
   "Room rules: friendly fire OFF",
   "Room rules: friendly fire OFF, same cards for everyone",
   "Room rules: same cards for everyone",
@@ -12863,6 +12864,11 @@
    "kind": "Tr"
   },
   "Room rule: same cards for everyone": {
+   "surface": "CompetitiveUI",
+   "location": "DrawRoomRulesBanner",
+   "kind": "Tr"
+  },
+  "Room rule: same cards is off this game": {
    "surface": "CompetitiveUI",
    "location": "DrawRoomRulesBanner",
    "kind": "Tr"

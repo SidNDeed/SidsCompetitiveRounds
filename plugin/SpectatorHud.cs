@@ -295,7 +295,7 @@ namespace CompetitiveRounds
             var rect = new Rect(0, 6, w, 26);
             var barBackdrop = new Rect(w * 0.5f - _cachedBarWidth * 0.5f, 4, _cachedBarWidth, 28);
             // Sept 15: on a spectator seat this bar is USUALLY the only thing
-            // in the top-centre band, and nothing else reserved it.
+            // in the top-centre column, and nothing else claimed it.
             // DrawMatchStatus cannot: GameStateWatcher.OnMatchStarted returns
             // immediately for a spectator, so MatchTracker never reports a
             // match. DrawLeaverBanner cannot either (its midGame predicate is
@@ -303,21 +303,26 @@ namespace CompetitiveRounds
             // read a bottom edge of 0 and painted across this line all sitting.
             // NOT an exclusive claim: DrawTournamentBanner has NO spectator
             // gate, so a viewer whose own tournament match turns ready paints
-            // its 0..44 bar while spectating and reserves 44. That case is
-            // correct only because ReserveTopStrip accumulates by MAX over the
-            // frame - do not weaken it to an assignment, and do not assume this
-            // is the sole writer on this seat.
-            // Reserved only on the DrawLiveBar path. Before activation, Draw
+            // its bar while spectating. It now claims its own band UNDER this
+            // one instead of painting over it (SpectatorHud.Draw runs first in
+            // DrawUI, so this claim is first) — do not assume this is the sole
+            // claimant on this seat.
+            // Claimed only on the DrawLiveBar path. Before activation, Draw
             // routes to DrawBlackout, which reaches this line only while the
-            // F5 menu is open; the bare cover reserves nothing and needs to,
+            // F5 menu is open; the bare cover claims nothing and needs to,
             // since its own text starts around h*0.34.
-            // Derived from the two rects above rather than from a copy of their
-            // numbers, so a later layout edit here carries the reservation with
-            // it. Repaint only, matching the helper's contract and the other
-            // three writers; the reader is repaint-gated too, so the other
-            // event passes have nothing to contribute.
+            // The HEIGHT is derived from the two rects above rather than from a
+            // copy of their numbers, and the band origin is then added back to
+            // both, so a later layout edit here carries the claim with it.
+            // Repaint only, matching the allocator's contract and the other
+            // claimants; the reader is repaint-gated too, so the other event
+            // passes have nothing to contribute.
             if (Event.current != null && Event.current.type == EventType.Repaint)
-                CompetitiveUI.ReserveTopStrip(Mathf.Max(rect.yMax, barBackdrop.yMax));
+            {
+                float band = CompetitiveUI.ClaimTopStrip(Mathf.Max(rect.yMax, barBackdrop.yMax));
+                rect.y += band;
+                barBackdrop.y += band;
+            }
             GUI.color = new Color(0f, 0f, 0f, 0.55f);
             GUI.DrawTexture(barBackdrop, BlackTex());
             GUI.color = Color.white;

@@ -1,12 +1,16 @@
 """Runs the client rule self-tests. Not a source-shape gate - an execution.
 
-`plugin/LogScrub.cs` is kept free of Unity, Photon and BepInEx so that what a
-log bundle stops carrying can be EXECUTED rather than asserted about as source
-text -- the arrangement `tools/h2h-harness` already uses for H2HRules, and the
-reason its own class comment gives for the shape it is written in. Until now
-nothing in the repository ran it: the self-test existed behind a Debug config
-lever that fires once at startup on a developer's machine, so its numbers were
-not reproducible from a checkout and no pytest run ever touched them.
+`plugin/LogScrub.cs` and `plugin/TopStripBand.cs` are kept free of Unity,
+Photon and BepInEx so that what a log bundle stops carrying, and which y each
+surface gets when several paint in the top-centre column at once, can be
+EXECUTED rather than asserted about as source text -- the arrangement
+`tools/h2h-harness` already uses for H2HRules, and the reason LogScrub's own
+class comment gives for the shape it is written in. Until now nothing in the
+repository ran the scrub: its self-test existed behind a Debug config lever
+that fires once at startup on a developer's machine, so its numbers were not
+reproducible from a checkout and no pytest run ever touched them. The column
+allocator had no self-test at all -- it stored a plain maximum for a job that
+needed a layout, and the only gate over it read the source.
 
 Three separate ways this can look green while proving nothing, and one
 assertion each: a suite that stopped running cases (run == the lines printed),
@@ -80,6 +84,63 @@ def test_the_log_scrub_suite_ran_every_case_and_none_failed(harness_run):
     assert run >= 18, "the LogScrub suite shrank to %d cases" % run
 
 
+def test_the_top_strip_suite_ran_every_case_and_none_failed(harness_run):
+    suites = _suites(harness_run)
+    assert "topstrip" in suites, "the TopStripBand suite did not report"
+    run, fail, verdict = suites["topstrip"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[topstrip\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+    assert run >= 14, "the TopStripBand suite shrank to %d cases" % run
+
+
+def _named_case(proc, name):
+    """One `[topstrip]` case line, matched on its NAME.
+
+    Safe to match on the name here (unlike the LogScrub cases, which are
+    matched on their input): every case prints its name whatever its verdict,
+    so a mutation that breaks the case reds it rather than making it vanish.
+    """
+    hits = [l for l in proc.stdout.splitlines()
+            if l.startswith("[topstrip] ") and (" | case=" + name + " |") in l]
+    assert len(hits) == 1, "expected one %r case, found %d" % (name, len(hits))
+    return hits[0]
+
+
+def test_the_column_lays_simultaneous_surfaces_out_disjointly(harness_run):
+    """The MEDIUM this suite exists for: six surfaces painting in the same
+    frame used to be given the same y, because the column stored only the
+    maximum bottom edge. Asserted on the case's printed MEASUREMENT, not on its
+    verdict alone -- a case that stopped measuring would otherwise still say
+    PASS."""
+    line = _named_case(harness_run, "six claimants are disjoint")
+    assert line.startswith("[topstrip] PASS"), line
+    got = line.split(" | got=", 1)[1]
+    ys = [float(v) for v in got.split(",")]
+    assert len(ys) == 6, got
+    assert ys == sorted(ys) and len(set(ys)) == 6, (
+        "the claimants were not given six distinct increasing positions: " + got)
+    assert ys[0] == 0.0, "the first claimant no longer starts at the top: " + got
+
+
+@pytest.mark.parametrize("name", [
+    "two claims stack",
+    "short close does not climb back",
+    "close does not undo a claim made inside the band",
+    "empty open band consumes nothing",
+    "painted open band advances",
+    "NaN claim consumes nothing",
+    "band does not survive a frame tick",
+    "stale frame reads zero",
+])
+def test_the_column_guarantees_each_have_a_case(harness_run, name):
+    line = _named_case(harness_run, name)
+    assert line.startswith("[topstrip] PASS"), line
+    assert " | got=" in line and not line.rstrip().endswith("| got="), (
+        "the case printed no measurement: " + line)
+
+
 def test_the_suite_carries_its_own_two_way_control(harness_run):
     """Every PASS above is a measurement of nothing unless the SAME corpus,
     unscrubbed, still counts residues. The suite's last case is that control
@@ -146,4 +207,6 @@ def test_the_harness_compiles_only_the_rule_files():
     assert "<EnableDefaultCompileItems>false</EnableDefaultCompileItems>" in csproj
     included = re.findall(r'<Compile Include="([^"]+)"', csproj)
     assert "Main.cs" in included
-    assert any(p.endswith("plugin/LogScrub.cs") for p in included)
+    for rule_file in ("plugin/LogScrub.cs", "plugin/TopStripBand.cs"):
+        assert any(p.endswith(rule_file) for p in included), (
+            "%s is not compiled into the harness" % rule_file)

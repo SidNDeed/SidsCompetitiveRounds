@@ -221,6 +221,36 @@ namespace CompetitiveRounds
         /// find N7).</summary>
         public static bool IsLatchedFor(int game) => _latchedGame == game;
 
+        /// <summary>What a standing surface may truthfully say about the
+        /// same-card rule. RuleOn() alone is the CONFIGURATION and stays true
+        /// through every fallback in LatchForGame, so a surface that reads it
+        /// keeps promising shared hands while this seat rolls privately.
+        /// Off — the rule is not configured for this room.
+        /// Pending — configured, no verdict yet this game (between games, or
+        ///   inside the retryable budget). The configuration is all that is
+        ///   known, and it is what a room lobby should show.
+        /// Active — a shared sequence latched: everyone is dealt the same set.
+        /// FellBack — a verdict latched and it was a fallback (capability,
+        ///   seed, pool or hash). This seat rolls privately this game, and a
+        ///   surface must not claim otherwise.</summary>
+        internal enum RuleDisplayState { Off = 0, Pending = 1, Active = 2, FellBack = 3 }
+
+        /// <summary>The tri-state above, derived from the SAME two fields the
+        /// dealer reads (_latchedGame, _active) rather than from the rule
+        /// flags, so a strip drawn from it cannot contradict what is dealt.
+        /// internal, not private: CompetitiveUI.DrawRoomRulesBanner is the
+        /// caller.</summary>
+        internal static RuleDisplayState StripState()
+        {
+            if (!RuleOn()) return RuleDisplayState.Off;
+            // Deliberately "_latchedGame < 0" and not IsLatchedFor(game): this
+            // surface has no game number of its own and asking for one would
+            // give it a second source of truth to drift from. OnGameStart
+            // clears the latch, so "< 0" is exactly "no verdict this game".
+            if (_latchedGame < 0) return RuleDisplayState.Pending;
+            return _active ? RuleDisplayState.Active : RuleDisplayState.FellBack;
+        }
+
         public static void LatchForGame(int game)
         {
             if (_latchedGame == game) return;
