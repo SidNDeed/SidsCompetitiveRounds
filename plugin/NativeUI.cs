@@ -7725,19 +7725,22 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         public static bool InfoPopupOpen => infoPopupGO != null;
 
         // ── Utility popup (Sept 7 item 1, design v2 section 7) ─────────────
-        // Mail and Music open as popups over the page from the two header
-        // icons (BuildUtilityStrip) instead of holding tab slots. The popup is
+        // Mail and Music open as popups over the page from two of the three
+        // header icons (BuildUtilityStrip) instead of holding tab slots; the
+        // third, Bug, raises an IMGUI modal and is not a UtilKind. The popup is
         // built ONCE per page build as the LAST child of pageGO, so it draws
         // above the page in the same canvas and dies with the page at every
         // pageBuilt=false site — no persistent-canvas teardown class (#369).
         // Input: UtilityPopupOpen is OR'd into CompetitiveUI.AnyModalOwnsInput
         // (#200), so every ClickHandler outside the popup is blocked while it
-        // is up (the icons included — one popup at a time) and the hotkey
-        // guards stay closed; the popup's own handlers carry bypassModalBlock
-        // via MarkPopupChildrenInteractive (bug 230), re-run after row rebuilds.
+        // is up — the Mail and Music icons included, one popup at a time — and
+        // the hotkey guards stay closed; the popup's own handlers carry
+        // bypassModalBlock via MarkPopupChildrenInteractive (bug 230), re-run
+        // after row rebuilds. The Bug icon carries bypassModalBlock itself so a
+        // click on it closes the popup and opens the modal (see OnBugIcon).
         internal enum UtilKind { None, Mail, Music }
         private static UtilKind utilKind = UtilKind.None;
-        private static GameObject utilStripGO, utilMailIconGO, utilMusicIconGO, utilBadgeGO;
+        private static GameObject utilStripGO, utilMailIconGO, utilMusicIconGO, utilBugIconGO, utilBadgeGO;
         private static object utilBadgeTxt, utilTitleTxt;
         private static GameObject utilPopupGO, utilBoxGO, utilBodyGO, mailBodyGO, musicBodyGO;
         private static RectTransform utilBoxRT;
@@ -7752,7 +7755,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             get { try { return MailUI.ModalOpen || CompetitiveUI.PromptOpen; } catch { return false; } }
         }
 
-        /// <summary>BuildPage: the two 40 px icon buttons in the title row's
+        /// <summary>BuildPage: the three 40 px icon buttons in the title row's
         /// 195 px balancer slot, plus the unread badge on the mail icon.</summary>
         private static void BuildUtilityStrip(Transform titleRow)
         {
@@ -7767,12 +7770,31 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // hover tint; the pressed feedback is the popup opening.
             utilMusicIconGO = UIFactory.CreateIconButton(utilStripGO.transform, "UtilMusic", "ic_music.png", 40f, () => OpenUtilityPopup(UtilKind.Music));
             utilMailIconGO = UIFactory.CreateIconButton(utilStripGO.transform, "UtilMail", "ic_mail.png", 40f, () => OpenUtilityPopup(UtilKind.Mail));
-            // Right inset 14 keeps the badge's overhang short of the BACK button.
+            utilBugIconGO = UIFactory.CreateIconButton(utilStripGO.transform, "UtilBug", "ic_bug.png", 40f, OnBugIcon);
+            // Right inset 14 keeps the badge's overhang short of the BACK button,
+            // so Mail keeps that slot: the badge reaches 19 px right of its
+            // icon's right edge (anchor (1,1), offset 6, half of 26), which from
+            // -14 stops 5 px past the strip edge, while from -66 it would reach
+            // -47 and collide with the 12 px gap and the icon beyond it. Bug
+            // takes the slot Music held and Music moves one pitch further left;
+            // 118 + 40 = 158 is still inside the 195 px balancer and prefW is
+            // unchanged, so the title's optical centre does not move.
+            const float utilPitch = 40f + 12f;
             PlaceUtilIcon(utilMailIconGO, -14f);
-            PlaceUtilIcon(utilMusicIconGO, -14f - 40f - 12f);
+            PlaceUtilIcon(utilBugIconGO, -14f - utilPitch);
+            PlaceUtilIcon(utilMusicIconGO, -14f - 2f * utilPitch);
             var tint = new Color(0.85f, 0.87f, 0.92f, 1f);
             UIFactory.SetImageColor(utilMusicIconGO, tint);
             UIFactory.SetImageColor(utilMailIconGO, tint);
+            UIFactory.SetImageColor(utilBugIconGO, tint);
+            // The bug icon's click has to survive the mail/music popup's own
+            // ModalBlockInput, so its ClickHandler carries bypassModalBlock;
+            // OnBugIcon re-checks WHICH surface is blocking (see there).
+            if (utilBugIconGO != null)
+            {
+                var bugClick = utilBugIconGO.GetComponent<ClickHandler>();
+                if (bugClick != null) bugClick.bypassModalBlock = true;
+            }
             if (utilMailIconGO != null)
             {
                 utilBadgeGO = new GameObject("UtilBadge");
@@ -7803,6 +7825,36 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 utilBadgeGO.SetActive(false);
             }
             RefreshUtilityStrip();
+            // Acceptance signal for the third icon: a POSITIVE emission, not the
+            // absence of the loader's miss warning (#438/#443). The tag exists
+            // for nothing else, so no feature can quietly capture it (#306).
+            // GetEmbeddedSprite caches by suffix, so this read costs a dictionary
+            // hit and reports what CreateIconButton actually got.
+            Plugin.Log.LogInfo("[UTIL-STRIP] icons=3 bug=" + (GetEmbeddedSprite("ic_bug.png") != null ? 1 : 0));
+        }
+
+        /// <summary>Bug icon: raises the IMGUI bug-report modal, closing the
+        /// mail/music popup first so one surface owns the page. The handler
+        /// carries bypassModalBlock because the popup's backdrop absorbs the
+        /// EventSystem half and the popup asserts ModalBlockInput over the
+        /// raw-poll half (#141/#200), which would otherwise leave the icon dead
+        /// under a popup. bypassModalBlock is per-handler and blind to WHICH
+        /// surface is blocking, so the first line narrows it back to the popup:
+        /// quick chat and the dance wheel set that same static while drawing
+        /// over the page (wave-2 find 10). The modal itself needs no term here
+        /// — bugModalOpen is in
+        /// BackdroplessModalOpen (CompetitiveUI.cs:278), which drives
+        /// ClickHandler.BypassSuspended (:474), so the handler refuses at
+        /// ClickHandler.Update once the modal is up.</summary>
+        private static void OnBugIcon()
+        {
+            if (ClickHandler.ModalBlockInput && !UtilityPopupOpen) return;
+            if (UtilityPopupOpen) CloseUtilityPopup();
+            // Emitted only here, so its presence or absence is what says whether
+            // a click at this icon reached the body — the one observable that
+            // separates "blocked" from "fired but did nothing" (#438).
+            Plugin.Log.LogInfo("[UTIL-STRIP] bug icon -> report modal");
+            CompetitiveUI.OpenBugReportModal();
         }
 
         private static void PlaceUtilIcon(GameObject go, float right)
@@ -14522,19 +14574,11 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // (Chat notifications toggle moved into the Interface box above —
             // July 26 item 3 reorg.)
 
-            // -- Bug report --
-            var bugBox = UIFactory.CreatePanel("SBugB", panel.transform, C_PANEL);
-            UIFactory.AddVLG(bugBox, spacing: 4, padL: 12, padR: 12, padT: 8, padB: 8);
-            UIFactory.AddLE(bugBox, flexH: 0);
-            UIFactory.CreateText("SBugL", bugBox.transform,
-                "Report a bug", 17f, new Color(1f, 0.9f, 0.6f),
-                sizeDelta: new Vector2(700, 24));
-            UIFactory.CreateText("SBugD", bugBox.transform,
-                "Send a bug report straight to the mod team — description, severity, and optionally your game logs. Use the Preview button to see what gets attached.",
-                13f, C_DIM, sizeDelta: new Vector2(700, 38));
-            var bugBtn = SettingsButton(bugBox.transform, "SBugBtn", I18n.Tr("Open Report Form"),
-                C_WHITE, new Color(0.20f, 0.30f, 0.45f, 0.9f), new Vector2(260, 28),
-                () => { CompetitiveUI.OpenBugReportModal(); });
+            // ("Report a bug" box removed v1.41.0 — the entry point is the Bug
+            // icon in the page title row, beside Mail. Its blurb named the
+            // description, the severity, the optional logs and the Preview
+            // button; DrawBugReportModal shows all four as labelled controls of
+            // its own, so nothing moved into the modal with it.)
 
             // (No filler spacer — when the panel lives inside a ScrollView the
             // content sizes to fit its children, so a flex spacer would collapse

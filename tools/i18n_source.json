@@ -1648,7 +1648,6 @@
   "Only the host decides this.",
   "Open",
   "Open Packs",
-  "Open Report Form",
   "Open Tier List Folder",
   "Open Upload Folder",
   "Open a pack",
@@ -1944,7 +1943,6 @@
   "Reply all is not available for this message.",
   "Reply to all",
   "Report",
-  "Report a bug",
   "Report approved for recovery - an ordered replay is still required.",
   "Report dismissed for good.",
   "Report failed to send - try again in a moment.",
@@ -2048,7 +2046,6 @@
   "Self-Inflicted Deaths % (boundary + own bullet)",
   "Self-awareness is a virtue.",
   "Send",
-  "Send a bug report straight to the mod team — description, severity, and optionally your game logs. Use the Preview button to see what gets attached.",
   "Send ping",
   "Send report",
   "Sending...",
@@ -11141,11 +11138,6 @@
    "location": "BuildInto",
    "kind": "CreateButton"
   },
-  "Open Report Form": {
-   "surface": "NativeUI",
-   "location": "BuildSettingsTab",
-   "kind": "Tr"
-  },
   "Open Tier List Folder": {
    "surface": "NativeUI",
    "location": "BuildCardStatsTab",
@@ -12621,11 +12613,6 @@
    "location": "BuildReaderView",
    "kind": "Tr"
   },
-  "Report a bug": {
-   "surface": "NativeUI",
-   "location": "BuildSettingsTab",
-   "kind": "CreateText"
-  },
   "Report approved for recovery - an ordered replay is still required.": {
    "surface": "NativeUI",
    "location": "OnAdminQuarantineAction",
@@ -13140,11 +13127,6 @@
    "surface": "MailUI",
    "location": "BuildComposerView",
    "kind": "Tr"
-  },
-  "Send a bug report straight to the mod team — description, severity, and optionally your game logs. Use the Preview button to see what gets attached.": {
-   "surface": "NativeUI",
-   "location": "BuildSettingsTab",
-   "kind": "CreateText"
   },
   "Send ping": {
    "surface": "CompetitiveUI",
