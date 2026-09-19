@@ -1,11 +1,23 @@
 -- 327: ffa_matches.game_number -- which game of the sitting a row records
 -- (2026-09-19, RJ-4).
 --
--- RUN THIS BEFORE THE CODE. The api's pace anchor selects on this column;
--- against a schema without it every FFA report answers 500. The column is
--- nullable with no default, so the CURRENT api -- which never names it --
--- keeps working unchanged against a database that already carries it. Order:
--- this file, then deploy the api to the primary, then to the standby.
+-- RUN THIS BEFORE THE CODE, on the primary; the standby takes it by streaming
+-- replication. Then deploy the api to the primary, then to the standby.
+--
+-- WHAT THE OLD CODE DOES AGAINST THIS COLUMN DURING THE WINDOW. Between this
+-- file and the new api, the CURRENT api (0266237) is what answers reports. It
+-- never names game_number, so its INSERT supplies no value -- and this file
+-- makes the column NOT NULL, which would reject that INSERT and 500 every FFA
+-- report for the length of the window. The BEFORE INSERT trigger below is
+-- what stops that: it numbers any row whose writer did not, from the row's own
+-- room id when that carries a usable `_rN` tail and otherwise from the lobby's
+-- own sequence. So the old api keeps working, unchanged, and every row it
+-- writes in the window is numbered by the same rule the backfill used. The new
+-- api supplies the number itself (the lobby's games_played + 1) and the
+-- trigger leaves it alone.
+-- The reverse order is what does NOT work: the new api's pace anchor and
+-- duplicate lookup both select on this column, and against a schema without it
+-- every FFA report answers 500.
 --
 -- WHAT THE COLUMN IS FOR. `paid_battles` is metered against a window measured
 -- from server receipt times: the anchor was `MAX(ended_at)` over every row of
@@ -14,76 +26,219 @@
 -- 0ea879a4-..., 2026-08-07) metered its second row against the 57-second gap
 -- between the two receipts instead of the ~686-second game, and paid about a
 -- tenth. The same arithmetic throttles the next legitimate game in any sitting
--- that carries such a row. Naming the game makes the anchor able to ask for
--- the PREVIOUS game rather than the previous row.
+-- that carries such a row. Naming the game lets the anchor ask for the other
+-- GAMES of the sitting rather than the other ROWS.
 --
--- WHERE THE NUMBER COMES FROM. The report room id is
--- `<photon room>_<HHmmss>_r<N>`, built by the reporting client
--- (GameStateWatcher.cs) and covered by the report HMAC; `N` is that sitting's
--- game counter. The api already parses that tail for bet settlement
--- (main._ffa_room_game_no), so nothing new is asked of any client and a
--- 1.40.3 build keeps reporting exactly as it does today -- the number is
--- derived server-side from what it already sends.
+-- WHERE THE NUMBER COMES FROM, LIVE. From the LOBBY, not the report:
+-- submit_ffa_match stores `ffa_lobbies.games_played + 1`, read under the lobby
+-- row's FOR UPDATE and incremented once per settlement in the same
+-- transaction. It is the same expression ffa_bet_place requires of every wager
+-- (`expected_game`) and the live-points UPDATE carries, so a match row, its
+-- wagers and its live figure name one game by construction. The report room id
+-- `<photon room>_<HHmmss>_r<N>` -- built by the reporting client
+-- (GameStateWatcher.cs) and covered by the report HMAC -- is kept as a
+-- cross-check that has to agree, never as the source.
 --
--- NOT A DEDUP KEY, DELIBERATELY. The index below is NOT unique and no
--- constraint is added. The two rows of the verified instance disagree about
--- who won; folding them would make the server pick one unreconciled account
--- over the other, which a client-attested input may not do (learning #283).
--- Nothing here rewrites, invalidates or reverses any historical row: the only
--- write to existing rows is the backfill of this new column.
+-- WHERE THE NUMBER COMES FROM, HISTORICALLY. The backfill below numbers EVERY
+-- pre-existing row, and records in game_number_source which rule gave it its
+-- number:
+--   'room_tail' -- the room id's `_rN` tail, 1..999, taken as-is.
+--   'sequence'  -- everything else (no tail, an unparseable one, zero, or one
+--                  out of range): the lobby's rows in ended_at order, numbered
+--                  above the highest tail that lobby already carries, so a
+--                  sequenced row can never collide with a tail-derived one.
+-- Measured against production before writing this (read-only probe,
+-- 2026-09-19): 246 rows over 126 lobbies, every one of them carrying a tail in
+-- 1..9, no NULL lobby_id, and exactly one (lobby, tail) pair holding two rows
+-- -- the 2026-08-07 instance. So the 'sequence' arm numbers nothing today; it
+-- exists because the post-check refuses to leave a NULL behind and the column
+-- becomes NOT NULL.
 --
--- BACKFILL DOMAIN. One to four digits, value 1..999. The column is SMALLINT,
--- the room id is free text up to 64 characters, and a tail outside that
--- domain must not become a value: a row whose tail is unparseable or out of
--- range is left NULL, and the api treats a NULL row as "some earlier game" --
--- the same thing it assumed before this column existed, so an unbackfilled
--- row meters exactly as it does today.
+-- NOT A DEDUP KEY, DELIBERATELY. The index below is NOT unique. The two rows
+-- of the verified instance disagree about who won; folding them would make the
+-- server pick one unreconciled account over the other, which a client-attested
+-- input may not do (learning #283). Nothing here rewrites, invalidates or
+-- reverses any historical row: the only writes to existing rows are the two
+-- new columns' backfill.
+--
+-- IDEMPOTENT. Re-running is a no-op: every DDL step is IF NOT EXISTS or a
+-- guarded DO block, the backfills are `WHERE game_number IS NULL`, the trigger
+-- is replaced rather than added, and the post-check re-asserts what the first
+-- run established. Explicit BEGIN/COMMIT because `psql -f` autocommits each
+-- statement otherwise (learning #340); every bind is CAST (#275/#448).
 
 BEGIN;
 SET LOCAL lock_timeout = '5s';
 
 ALTER TABLE ffa_matches ADD COLUMN IF NOT EXISTS game_number SMALLINT;
+ALTER TABLE ffa_matches ADD COLUMN IF NOT EXISTS game_number_source VARCHAR(16);
 
 COMMENT ON COLUMN ffa_matches.game_number IS
-    'Which game of the sitting this row records, from the report room id''s _rN tail (1..999). NULL = not derivable; the pace anchor then treats the row as an earlier game. Not unique: a second row for one game is a recorded contradiction, not a key violation.';
+    'Which game of the sitting this row records (1..999, NOT NULL). Live rows take the lobby''s own games_played + 1; historical rows were backfilled by migration 327. Not unique: a second row for one game is a recorded contradiction, not a key violation.';
+COMMENT ON COLUMN ffa_matches.game_number_source IS
+    'How this row got its number: room_tail = the report room id''s _rN tail; sequence = the lobby''s ended_at order (migration 327''s backfill, or the insert trigger for a writer that supplied none).';
 
 -- The pace anchor asks one question per report: the earliest receipt of each
--- game of this lobby below the one being reported.
+-- of this lobby's OTHER games. The duplicate lookup asks a second: does this
+-- lobby already hold a row for either of two candidate numbers.
 CREATE INDEX IF NOT EXISTS idx_ffa_matches_lobby_game
     ON ffa_matches (lobby_id, game_number);
 
+-- ── Insert-time derivation ────────────────────────────────────────────────
+-- A total function from a row to a number, so NOT NULL below is survivable by
+-- any writer, including the api revision that predates this column and the one
+-- that follows it. It NEVER overrides a number the writer supplied.
+CREATE OR REPLACE FUNCTION ffa_matches_derive_game_number()
+RETURNS trigger AS $fn$
+DECLARE
+    tail INTEGER;
+BEGIN
+    IF NEW.game_number IS NOT NULL THEN
+        NEW.game_number_source := COALESCE(NEW.game_number_source, 'writer');
+        RETURN NEW;
+    END IF;
+    tail := NULLIF(substring(NEW.photon_room_id FROM '_r([0-9]{1,4})$'), '')::INTEGER;
+    IF tail IS NOT NULL AND tail BETWEEN 1 AND 999 THEN
+        NEW.game_number := tail::SMALLINT;
+        NEW.game_number_source := 'room_tail';
+        RETURN NEW;
+    END IF;
+    SELECT COALESCE(MAX(game_number), 0) + 1 INTO tail
+      FROM ffa_matches
+     WHERE lobby_id IS NOT DISTINCT FROM NEW.lobby_id;
+    -- LEAST only so the function is total against the CHECK below. The real
+    -- domain is bounded far lower: FFA_MAX_GAMES_PER_LOBBY is 40, and the
+    -- endpoint refuses a report once a lobby has settled that many.
+    NEW.game_number := LEAST(tail, 999)::SMALLINT;
+    NEW.game_number_source := 'sequence';
+    RETURN NEW;
+END
+$fn$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_ffa_matches_game_number ON ffa_matches;
+CREATE TRIGGER trg_ffa_matches_game_number
+    BEFORE INSERT ON ffa_matches
+    FOR EACH ROW EXECUTE FUNCTION ffa_matches_derive_game_number();
+
+-- ── Backfill 1: the tail, where it is usable ──────────────────────────────
 UPDATE ffa_matches
-   SET game_number = CAST(substring(photon_room_id FROM '_r([0-9]{1,4})$') AS SMALLINT)
+   SET game_number = CAST(substring(photon_room_id FROM '_r([0-9]{1,4})$') AS SMALLINT),
+       game_number_source = 'room_tail'
  WHERE game_number IS NULL
    AND photon_room_id ~ '_r[0-9]{1,4}$'
    AND CAST(substring(photon_room_id FROM '_r([0-9]{1,4})$') AS INTEGER)
        BETWEEN 1 AND 999;
 
--- Post-check. The failure this must catch is a backfill that silently skipped
--- rows it could have derived -- a check that only counted NULLs would pass on
--- a table of legacy rows that never carried the tail, and fail on a healthy
--- one, so it measures the derivable set instead. The underivable count is
--- reported, not enforced.
+-- ── Pre-check: can the sequence arm stay inside the column's domain? ──────
+-- Asserted BEFORE the UPDATE so a refusal names its cause instead of arriving
+-- as a CHECK violation on a row nobody can point at.
 DO $$
 DECLARE
-    missed  BIGINT;
-    unknown BIGINT;
-    total   BIGINT;
+    over BIGINT;
 BEGIN
-    SELECT COUNT(*) INTO missed
+    SELECT COUNT(*) INTO over FROM (
+        SELECT COALESCE(b.top, 0) + row_number() OVER (
+                   PARTITION BY m.lobby_id ORDER BY m.ended_at, m.id) AS n
+          FROM ffa_matches m
+          LEFT JOIN (SELECT lobby_id, MAX(game_number) AS top
+                       FROM ffa_matches
+                      WHERE game_number IS NOT NULL
+                      GROUP BY lobby_id) b
+                 ON b.lobby_id IS NOT DISTINCT FROM m.lobby_id
+         WHERE m.game_number IS NULL
+    ) q WHERE q.n > 999;
+    IF over > 0 THEN
+        RAISE EXCEPTION
+            'game_number sequence backfill would place % row(s) above 999; '
+            'inspect ffa_matches for a lobby carrying an out-of-domain tail', over;
+    END IF;
+END $$;
+
+-- ── Backfill 2: everything the tail could not number ──────────────────────
+-- Above the lobby's highest tail-derived number, in ended_at order, so a
+-- sequenced row can never take a number a tail-derived row already holds.
+-- `IS NOT DISTINCT FROM` because lobby_id is nullable (ffa_lobbies deletion
+-- sets it NULL): those rows share one synthetic sequence and no live report
+-- can ever look them up, since the lookup keys on lobby_id = :lid.
+WITH top_per_lobby AS (
+    SELECT lobby_id, MAX(game_number) AS top
+      FROM ffa_matches
+     WHERE game_number IS NOT NULL
+     GROUP BY lobby_id
+),
+todo AS (
+    SELECT id, lobby_id,
+           row_number() OVER (PARTITION BY lobby_id ORDER BY ended_at, id) AS rn
       FROM ffa_matches
      WHERE game_number IS NULL
-       AND photon_room_id ~ '_r[0-9]{1,4}$'
-       AND CAST(substring(photon_room_id FROM '_r([0-9]{1,4})$') AS INTEGER)
-           BETWEEN 1 AND 999;
-    IF missed > 0 THEN
-        RAISE EXCEPTION
-            'game_number backfill left % row(s) whose room id carries a derivable _rN tail', missed;
+)
+UPDATE ffa_matches m
+   SET game_number = CAST(COALESCE(b.top, 0) + t.rn AS SMALLINT),
+       game_number_source = 'sequence'
+  FROM todo t
+  LEFT JOIN top_per_lobby b ON b.lobby_id IS NOT DISTINCT FROM t.lobby_id
+ WHERE m.id = t.id;
+
+-- ── Post-check ────────────────────────────────────────────────────────────
+-- Three assertions, each of which a plausible mistake makes FAIL:
+--   1. no row was left NULL -- a backfill whose predicate skipped rows;
+--   2. no row is outside 1..999 -- a sequence arm that ran past the domain;
+--   3. every row whose room id carries a usable tail took THAT tail -- a
+--      backfill that ran in the wrong order and sequenced a derivable row.
+-- The third is the one a count of NULLs cannot see, and it is what the
+-- 'neuter the backfill's WHERE' mutation control reddens.
+DO $$
+DECLARE
+    nulls    BIGINT;
+    outside  BIGINT;
+    wrong    BIGINT;
+    by_tail  BIGINT;
+    by_seq   BIGINT;
+BEGIN
+    SELECT COUNT(*) INTO nulls FROM ffa_matches WHERE game_number IS NULL;
+    IF nulls > 0 THEN
+        RAISE EXCEPTION 'game_number backfill left % row(s) NULL', nulls;
     END IF;
-    SELECT COUNT(*) INTO unknown FROM ffa_matches WHERE game_number IS NULL;
-    SELECT COUNT(*) INTO total   FROM ffa_matches;
-    RAISE NOTICE 'ffa_matches.game_number: % of % row(s) numbered, % left NULL (no derivable tail)',
-                 total - unknown, total, unknown;
+    SELECT COUNT(*) INTO outside
+      FROM ffa_matches WHERE game_number NOT BETWEEN 1 AND 999;
+    IF outside > 0 THEN
+        RAISE EXCEPTION 'game_number backfill left % row(s) outside 1..999', outside;
+    END IF;
+    SELECT COUNT(*) INTO wrong
+      FROM ffa_matches
+     WHERE photon_room_id ~ '_r[0-9]{1,4}$'
+       AND CAST(substring(photon_room_id FROM '_r([0-9]{1,4})$') AS INTEGER)
+           BETWEEN 1 AND 999
+       AND game_number IS DISTINCT FROM
+           CAST(substring(photon_room_id FROM '_r([0-9]{1,4})$') AS SMALLINT)
+       AND game_number_source = 'sequence';
+    IF wrong > 0 THEN
+        RAISE EXCEPTION
+            'game_number backfill sequenced % row(s) whose room id carries a derivable _rN tail', wrong;
+    END IF;
+    SELECT COUNT(*) INTO by_tail FROM ffa_matches WHERE game_number_source = 'room_tail';
+    SELECT COUNT(*) INTO by_seq  FROM ffa_matches WHERE game_number_source = 'sequence';
+    RAISE NOTICE 'ffa_matches.game_number: % row(s) from the room tail, % sequenced',
+                 by_tail, by_seq;
+END $$;
+
+-- ── The column's own guarantees, once the data satisfies them ─────────────
+ALTER TABLE ffa_matches ALTER COLUMN game_number SET NOT NULL;
+
+-- SMALLINT is a storage width, not a bound: it accepts 32767, and the api's
+-- own domain for this number is 1..999 (FFA_GAME_NUMBER_MAX). Postgres has no
+-- ADD CONSTRAINT IF NOT EXISTS, hence the guard.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conname = 'ck_ffa_matches_game_number_domain'
+           AND conrelid = 'ffa_matches'::regclass
+    ) THEN
+        ALTER TABLE ffa_matches
+            ADD CONSTRAINT ck_ffa_matches_game_number_domain
+            CHECK (game_number BETWEEN 1 AND 999);
+    END IF;
 END $$;
 
 COMMIT;
