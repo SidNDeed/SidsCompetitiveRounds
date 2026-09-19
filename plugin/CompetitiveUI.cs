@@ -445,6 +445,7 @@ namespace CompetitiveRounds
             DrawFlagEvidence();
             DrawLeaverBanner();
             DrawTournamentBanner();
+            DrawRoomRulesBanner();    // Sept 15: persistent same-cards strip, docked under the top-centre stack
             // Block clicks to the F5 page behind any open IMGUI modal (lopi #14:
             // clicks on the bug-report form were also hitting F5 buttons underneath).
             // TWO independent input paths must be blocked: the uGUI EventSystem
@@ -1324,6 +1325,7 @@ namespace CompetitiveRounds
             float pulse = 0.78f + 0.14f * Mathf.Sin(Time.unscaledTime * 5f);
             float fade = Mathf.Clamp01(_leaverUntil - Time.unscaledTime);
             bg.a = 0.92f * pulse * fade;
+            ReserveTopStrip(barH);
             GUI.DrawTexture(new Rect(0, 0, Screen.width, barH), Texture2D.whiteTexture,
                 ScaleMode.StretchToFill, true, 0, bg, 0, 0);
             if (_leaverStyle == null)
@@ -1460,6 +1462,7 @@ namespace CompetitiveRounds
                 }
 
                 if (text == null) return;
+                ReserveTopStrip(barH);
                 if (tourneyBannerStyle == null)
                     tourneyBannerStyle = new GUIStyle(GUI.skin.label)
                     { fontSize = 17, alignment = TextAnchor.MiddleCenter, fontStyle = FontStyle.Bold, richText = false };
@@ -1467,13 +1470,198 @@ namespace CompetitiveRounds
                 // Pulse the big banners' alpha slightly so they read as live.
                 float pulse = barH > 30f ? 0.85f + 0.15f * Mathf.PingPong(Time.unscaledTime * 1.6f, 1f) : 1f;
                 var prev = GUI.color;
-                GUI.color = new Color(bg.r, bg.g, bg.b, bg.a * pulse);
-                GUI.DrawTexture(new Rect(0, 0, Screen.width, barH), Texture2D.whiteTexture, ScaleMode.StretchToFill);
-                GUI.color = Color.white;
-                GUI.Label(new Rect(0, 0, Screen.width, barH), text, tourneyBannerStyle);
-                GUI.color = prev;
+                // Same shape, same reason as DrawRoomRulesBanner (review item
+                // 3): this body is wrapped in catch { } too, so the restore has
+                // to run from a finally or a throw mid-bar leaks the banner tint
+                // into every surface drawn later in the pass.
+                try
+                {
+                    GUI.color = new Color(bg.r, bg.g, bg.b, bg.a * pulse);
+                    GUI.DrawTexture(new Rect(0, 0, Screen.width, barH), Texture2D.whiteTexture, ScaleMode.StretchToFill);
+                    GUI.color = Color.white;
+                    GUI.Label(new Rect(0, 0, Screen.width, barH), text, tourneyBannerStyle);
+                }
+                finally { GUI.color = prev; }
             }
             catch { }
+        }
+
+        // ── Room rules: the persistent "same cards" strip (Sept 15) ────────
+        // The game-start toast (RoomRules.OnGameStart) is an ARRIVAL cue: one
+        // 6 s bottom-centre notification per latched room, behind its own
+        // `announced` latch. It cannot serve a seat that joins after it fired,
+        // and once it fades nothing on screen says the rule is still live. This
+        // strip is the standing statement of the same fact: it re-reads the
+        // rule every Repaint — no event, no timer — so a late joiner, a
+        // reconnect and a mid-series spectator all see it from the frame their
+        // own join latches the rules. Both are kept, and they sit at opposite
+        // edges (toast bottom-centre, strip top-centre), so neither covers the
+        // other.
+        //
+        // ONE PREDICATE, BOTH MODES. The rule it names is read from
+        // FfaCardSequence.RuleOn() — the same call that gates MasterPublishSeed
+        // and LatchForGame, i.e. the test that decides whether a set is dealt
+        // identically. A second copy here would be free to drift, and the first
+        // copy (RoomRules.SameCards) had already drifted: it is the VANILLA
+        // half only, so an FFA room running its lobby's same-card rule showed
+        // nothing. RuleOn picks the flag belonging to the room's own mode
+        // (RoomRules.SameCards for the vanilla pick modes, FfaMode.SameCardRule
+        // for an FFA lobby), so label and deal cannot disagree by construction.
+        //
+        // The rule dies with the room, and that is also this strip's off
+        // switch. Outside any room FfaMode.EngineActive() is false, so RuleOn
+        // answers on the vanilla flag — which RoomRules.ResetLatched clears on
+        // the left-room and disconnect edges — and nothing paints, whatever an
+        // FFA lobby left behind in its own field. A mismatching room latches
+        // the DEFAULTS before leaving, so the strip never shows on the way out
+        // either. Exactly one of the two flags is ever READ, because RuleOn
+        // chooses by mode: whichever side answers, the strip says the one
+        // sentence and says it once.
+        //
+        // NOT stated here: friendly fire. The game-start toast already names it
+        // (RoomRules.OnGameStart's three variants), and the standing statement
+        // is deliberately the one rule that changes what you are handed.
+        //
+        // RECT: a centred pill, 22px tall, docked under whatever else painted in
+        // the top-centre strip in THIS Repaint — the in-match banner/series/H2H
+        // lines (DrawMatchStatus, y 8..84 worst case) and the full-width leaver
+        // and tournament bars — via the reservation below; y=2 when the strip is
+        // otherwise empty, which is the between-games and card-pick case the
+        // late joiner actually arrives into. Clear of the top-LEFT column (FPS
+        // label, the H2H line at x 6..906 y 22..42, the opt-in lag notices at
+        // x 6..646 y 24..88) at ordinary widths; on a narrow window it can reach
+        // their right end, and since both are drawn EARLIER in DrawUI this paints
+        // over them — the precedence those two already take from every later
+        // overlay.
+        //
+        // Sept 15 review item 4 - WHY THIS ONE IS GATED AND THE OTHER TWO ARE
+        // NOT. DrawLeaverBanner and DrawTournamentBanner paint over popups too,
+        // and that is correct for them: they are seconds long and
+        // match-critical. This strip lasts as long as the room, so the same
+        // behaviour means floating over the F5 page, the shop, Player Cards and
+        // the bug-report form for a whole sitting. It is a standing reminder,
+        // not an alert; the rule is still there when the popup closes.
+        //
+        // The flag is NOT PageImguiHidden, which is the gate the page-level
+        // IMGUI block uses: that one means "a uGUI popup covers the F5 PAGE",
+        // so it is FALSE for the backdrop-less IMGUI modals (bug report, log
+        // viewer, confirms, admin prompt, session report - they live in
+        // BackdroplessModalOpen) and FALSE for a plainly open F5 menu, which
+        // are most of what this strip was painting over. AnyModalOwnsInput is
+        // the superset: it contains every term of PageImguiHidden (via
+        // OtherModalOwnsInput) plus those modals. NativeUI.IsOpen adds the menu
+        // itself, and it is live at OnGUI time - SpectatorHud.DrawBlackout
+        // already chooses the bar over the cover by reading it there.
+        // Deliberately absent: quickChatOpen / danceWheelOpen (held wheels, not
+        // pages, and excluded from AnyModalOwnsInput by design).
+        //
+        // PAINT ONLY. The reservation writers upstream are untouched, so the
+        // stack arithmetic keeps running while this is hidden and the strip
+        // comes back at the right y on the frame the popup closes.
+        private static bool RoomStripHidden => AnyModalOwnsInput || NativeUI.IsOpen;
+
+        private static GUIStyle roomRuleStyle;
+        private static string roomRuleText;
+        private static float roomRuleWidth;
+        // Edge latch for the log line below: set on the first Repaint that
+        // actually PAINTS the strip, cleared when the rule goes off, so a
+        // room's worth of Repaints emits ONE line and the next room emits
+        // another. Not a "once ever" flag — a seat that leaves and rejoins
+        // should log again, because that is a second arrival.
+        private static bool roomRuleLogged;
+
+        private static void DrawRoomRulesBanner()
+        {
+            if (Event.current == null || Event.current.type != EventType.Repaint) return;
+            // Whole body guarded: DrawUI has no outer try/catch (#255).
+            try
+            {
+                bool on;
+                try { on = FfaCardSequence.RuleOn(); } catch { on = false; }
+                if (!on) { roomRuleLogged = false; return; }
+                // Item 4: yields to anything the player opened. See RoomStripHidden.
+                if (RoomStripHidden) return;
+                if (!roomRuleLogged)
+                {
+                    roomRuleLogged = true;
+                    // Written on the first PAINTING Repaint of a room, never per
+                    // frame (#162): it claims the strip was shown, so it is
+                    // emitted past the hidden gate rather than at the rule edge.
+                    // The only place this tag is written (#306).
+                    Plugin.Log.LogInfo("[ROOM-RULES] indicator shown: same cards");
+                }
+                if (roomRuleStyle == null)
+                {
+                    roomRuleStyle = new GUIStyle(GUI.skin.label)
+                    {
+                        fontSize = 13, fontStyle = FontStyle.Bold, richText = false,
+                        alignment = TextAnchor.MiddleCenter, clipping = TextClipping.Overflow,
+                    };
+                    // Same cyan family as the room-rules toast (0.6, 0.9, 1).
+                    roomRuleStyle.normal.textColor = new Color(0.78f, 0.92f, 1f, 1f);
+                }
+                string text = I18n.Tr("Room rule: same cards for everyone");
+                // CalcSize on CHANGE only — never per Repaint (#162). The text
+                // moves when the locale does, and the reference compare below
+                // costs one ordinal string compare of ~40 chars per frame.
+                if (!string.Equals(text, roomRuleText, StringComparison.Ordinal))
+                {
+                    roomRuleText = text;
+                    roomRuleWidth = roomRuleStyle.CalcSize(new GUIContent(text)).x + 26f;
+                }
+                const float barH = 22f;
+                float w = Mathf.Min(roomRuleWidth, Screen.width - 8f);
+                float x = (Screen.width - w) / 2f;
+                float y = TopStripBottom() + 2f;
+                var prev = GUI.color;
+                // try/finally, not a trailing restore (Sept 15 review item 3):
+                // this whole body sits inside catch { }, so a throw out of
+                // DrawTexture or Label would swallow the restore and leave
+                // GUI.color navy-tinted for every surface drawn after this one
+                // in the same IMGUI pass.
+                try
+                {
+                    GUI.color = new Color(0.10f, 0.22f, 0.40f, 0.72f);
+                    GUI.DrawTexture(new Rect(x, y, w, barH), Texture2D.whiteTexture, ScaleMode.StretchToFill);
+                    GUI.color = Color.white;
+                    GUI.Label(new Rect(x, y, w, barH), text, roomRuleStyle);
+                }
+                finally { GUI.color = prev; }
+            }
+            catch { }
+        }
+
+        // ── Top-centre strip reservation ───────────────────────────────────
+        // Anything painting in the top-centre strip declares its BOTTOM edge
+        // here, so anything stacking under it (today: the room-rules strip) can
+        // dock without re-deriving that surface's own conditions. Writers, all
+        // of them earlier in DrawUI than the readers: DrawMatchStatus (the
+        // in-match banner/series/H2H lines), DrawLeaverBanner and
+        // DrawTournamentBanner (full-width bars at y=0, where the bar height IS
+        // the bottom edge). The reservation is the MAX of the writers, which is
+        // what the room-rules strip needs — the leaver bar and the match-status
+        // lines already overlap each other, and that is unchanged here.
+        // Written on Repaint only and stamped with the frame it belongs to, so
+        // a surface that stops drawing simply stops stamping and the reading
+        // falls back to 0 — never one frame stale.
+        // KNOWN AND ACCEPTED (Sept 15 review item 5): when a leaver or
+        // tournament banner ends, or a match stops being tracked, that writer
+        // simply stops stamping and the strip snaps up - one frame after the
+        // surface above it disappeared. Cosmetic, one frame, no state damage;
+        // the alternative is a decay timer holding a reservation for a surface
+        // that is already gone. Deliberate. Please do not file it as a bug.
+        private static float topStripH;
+        private static int topStripFrame = -1;
+        // internal, not private: SpectatorHud.DrawLiveBar is the fourth writer
+        // (the spectator seat's own top-centre live bar) and is its own class.
+        internal static void ReserveTopStrip(float bottomY)
+        {
+            if (topStripFrame != Time.frameCount) { topStripFrame = Time.frameCount; topStripH = 0f; }
+            if (bottomY > topStripH) topStripH = bottomY;
+        }
+        private static float TopStripBottom()
+        {
+            return topStripFrame == Time.frameCount ? topStripH : 0f;
         }
 
         // Bottom-center toast naming the map skin you just Shift-cycled to, so you can
@@ -8733,6 +8921,22 @@ namespace CompetitiveRounds
             if (Time.unscaledTime >= matchStatusCacheUntil || matchStatusCachedRanked != isRanked)
                 RefreshMatchStatusCache(isRanked);
             var oc = GUI.contentColor;
+            // Bottom edge of everything this block paints in the top-centre
+            // strip, accumulated as a RUNNING MAX over the lines and declared
+            // at the end so the room-rules strip (DrawRoomRulesBanner, later in
+            // DrawUI) docks under it instead of over it. Tracked PER LINE rather
+            // than re-derived from the conditions, so a later edit to these
+            // lines carries the reservation with it.
+            //
+            // Max, not plain assignment (Sept 15 review item 2): every path
+            // below is monotone TODAY, so last-write-wins returns the same
+            // number - but the first HUD row inserted above the H2H row would
+            // then report a bottom edge SMALLER than the rows above it, and the
+            // room-rules strip would climb back onto the series line with a
+            // screenshot as the first signal. The guarantee belongs here, in
+            // this function, not in what the next editor happens to know.
+            // 0 = this block painted nothing.
+            float stackBottom = 0f;
 
             // Top banner: "RANKED - Recording" only on ranked; 1v2 gets its own
             // honest label (unranked beta). Casual gets no banner — the score
@@ -8758,10 +8962,12 @@ namespace CompetitiveRounds
                         string.IsNullOrEmpty(tLabel) ? I18n.Tr("TOURNAMENT MATCH") : tLabel,
                         statusStyle);
                     bannerY += 18f;
+                    stackBottom = Mathf.Max(stackBottom, bannerY);
                 }
                 GUI.contentColor = ovt ? new Color(0.55f, 0.8f, 1f) : Color.green;
                 GUI.Label(new Rect((Screen.width - 220) / 2f, bannerY, 220, 18),
                     ovt ? I18n.Tr("1v2 - UNRATED") : I18n.Tr("RANKED - Recording"), statusStyle);
+                stackBottom = Mathf.Max(stackBottom, bannerY + 18f);
                 scoreY = bannerY + 20f;   // 28 when no tournament line — unchanged layout
             }
             else
@@ -8784,6 +8990,7 @@ namespace CompetitiveRounds
                 GUI.contentColor = new Color(1f, 0.85f, 0.3f);
                 GUI.Label(new Rect((Screen.width - 380) / 2f, scoreY, 380, 22),
                     matchStatusSeries, scoreStyle);
+                stackBottom = Mathf.Max(stackBottom, scoreY + 22f);
                 nextLineY = scoreY + 18;
             }
 
@@ -8794,7 +9001,9 @@ namespace CompetitiveRounds
                 GUI.contentColor = matchStatusH2HTint;
                 GUI.Label(new Rect((Screen.width - hw) / 2f, nextLineY, hw, 20),
                     matchStatusH2H, scoreStyle);
+                stackBottom = Mathf.Max(stackBottom, nextLineY + 20f);
             }
+            if (stackBottom > 0f) ReserveTopStrip(stackBottom);
             GUI.contentColor = oc;
         }
 

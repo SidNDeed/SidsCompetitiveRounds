@@ -1979,6 +1979,7 @@ namespace CompetitiveRounds
             "Rolling DPS (15 s window)",
             "Rolling block % (15 s window)",
             "Rolling hit % (15 s window)",
+            "Room rule: same cards for everyone",
             "Room rules: friendly fire OFF",
             "Room rules: friendly fire OFF, same cards for everyone",
             "Room rules: same cards for everyone",

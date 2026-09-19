@@ -293,8 +293,33 @@ namespace CompetitiveRounds
             }
 
             var rect = new Rect(0, 6, w, 26);
+            var barBackdrop = new Rect(w * 0.5f - _cachedBarWidth * 0.5f, 4, _cachedBarWidth, 28);
+            // Sept 15: on a spectator seat this bar is USUALLY the only thing
+            // in the top-centre band, and nothing else reserved it.
+            // DrawMatchStatus cannot: GameStateWatcher.OnMatchStarted returns
+            // immediately for a spectator, so MatchTracker never reports a
+            // match. DrawLeaverBanner cannot either (its midGame predicate is
+            // false for the same reason). So without this the room-rules strip
+            // read a bottom edge of 0 and painted across this line all sitting.
+            // NOT an exclusive claim: DrawTournamentBanner has NO spectator
+            // gate, so a viewer whose own tournament match turns ready paints
+            // its 0..44 bar while spectating and reserves 44. That case is
+            // correct only because ReserveTopStrip accumulates by MAX over the
+            // frame - do not weaken it to an assignment, and do not assume this
+            // is the sole writer on this seat.
+            // Reserved only on the DrawLiveBar path. Before activation, Draw
+            // routes to DrawBlackout, which reaches this line only while the
+            // F5 menu is open; the bare cover reserves nothing and needs to,
+            // since its own text starts around h*0.34.
+            // Derived from the two rects above rather than from a copy of their
+            // numbers, so a later layout edit here carries the reservation with
+            // it. Repaint only, matching the helper's contract and the other
+            // three writers; the reader is repaint-gated too, so the other
+            // event passes have nothing to contribute.
+            if (Event.current != null && Event.current.type == EventType.Repaint)
+                CompetitiveUI.ReserveTopStrip(Mathf.Max(rect.yMax, barBackdrop.yMax));
             GUI.color = new Color(0f, 0f, 0f, 0.55f);
-            GUI.DrawTexture(new Rect(w * 0.5f - _cachedBarWidth * 0.5f, 4, _cachedBarWidth, 28), BlackTex());
+            GUI.DrawTexture(barBackdrop, BlackTex());
             GUI.color = Color.white;
             GUI.Label(rect, _cachedBarLine, _sub);
         }

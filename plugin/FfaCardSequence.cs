@@ -115,8 +115,11 @@ namespace CompetitiveRounds
         // three, so neither host can see the other's setting.
         private static bool Vanilla() { try { return !FfaMode.EngineActive(); } catch { return true; } }
         private static string ModeTag() => Vanilla() ? "vanilla" : "ffa";
-        /// <summary>The same-card rule in force for THIS room.</summary>
-        private static bool RuleOn() => Vanilla() ? RoomRules.SameCards : FfaMode.SameCardRule;
+        /// <summary>The same-card rule in force for THIS room. internal, not
+        /// private: CompetitiveUI.DrawRoomRulesBanner labels the rule from this
+        /// same call, so what the strip says and what the engine deals cannot
+        /// disagree. Body unchanged.</summary>
+        internal static bool RuleOn() => Vanilla() ? RoomRules.SameCards : FfaMode.SameCardRule;
         /// <summary>Candidates per set: the FFA lobby's knob, or vanilla's
         /// five slots.</summary>
         private static int CandidateCount()
