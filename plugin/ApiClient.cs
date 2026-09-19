@@ -996,6 +996,25 @@ namespace CompetitiveRounds
                 && url.EndsWith("/api/v1/matches/macro-evidence", StringComparison.Ordinal);
         }
 
+        /// <summary>A SETTLED refusal: the server understood the report and
+        /// the state it names has already moved on. Re-sending the identical
+        /// body cannot change that answer, so it is terminal for the sender —
+        /// the same rule OutboxPass has always applied to a 409, stated here
+        /// so the FIRST attempt can apply it too instead of queueing a report
+        /// whose only future is to be dropped on its first retry.
+        ///
+        /// Matched on the STATUS CODE, deliberately, and not on the phrase the
+        /// server sends with it: that phrase is product-facing text that gets
+        /// reworded (the FFA report endpoint alone refuses with three
+        /// different ones), and a check keyed on wording passes silently
+        /// forever once the wording moves (#306).</summary>
+        /// One definition, in FfaReportRules, so the status-code test in the
+        /// POST loop and the response-text test here cannot drift apart.
+        internal static bool IsSettledConflictResponse(string resp)
+        {
+            return FfaReportRules.IsSettledRefusal(resp);
+        }
+
         /// <summary>The disconnect report, whichever series it names. The
         /// series id sits in the query string, so match on the path.</summary>
         internal static bool IsDisconnectReportUrl(string url)
@@ -20224,12 +20243,27 @@ namespace CompetitiveRounds
                             myPlace == 1 ? I18n.TrF("FFA VICTORY! +{0}xp", xp) : I18n.TrF("FFA: placed #{0} (+{1}xp)", myPlace, xp),
                             myPlace == 1 ? Color.green : new Color(0.6f, 0.8f, 1f), 6f);
                 }
+                else if (IsSettledConflictResponse(resp))
+                {
+                    // TERMINAL, and deliberately not queued. The server settles
+                    // a game once: a second report of a game it already holds
+                    // is answered 200 with an echo when it AGREES (the branch
+                    // above, which needs nothing from us) and 409 when it
+                    // disagrees — and the disagreement is recorded server-side
+                    // for recovery, so re-sending ours adds no information and
+                    // cannot displace what is stored. Queueing it would put a
+                    // report in the outbox whose only future is to be dropped
+                    // on its first retry, 30 s later, after one more request.
+                    // Logged, once, because a disagreement is worth seeing in
+                    // a seat's log next to the game it belongs to.
+                    Plugin.Log.LogWarning($"[FFA] report refused — this game is already recorded; not queued: {Trunc(resp, 160)}");
+                }
                 else
                 {
                     Plugin.Log.LogWarning($"[FFA] report failed: {resp}");
                     EnqueueFailedReport($"{baseUrl}/api/v1/ffa/matches", json);
                 }
-            }, maxRetries: 3, retryDelay: 2f));
+            }, maxRetries: 3, retryDelay: 2f, stopOnConflict: true));
         }
 
         // ── Player Blocks (permanent, from leaderboard) ──────────
@@ -21232,8 +21266,18 @@ namespace CompetitiveRounds
             }
         }
 
-        /// <summary>POST with automatic retry on failure (DNS hiccups, timeouts).</summary>
-        private static IEnumerator PostRequestWithRetry(string url, string json, Action<bool, string> callback, int maxRetries = 3, float retryDelay = 2f)
+        /// <summary>POST with automatic retry on failure (DNS hiccups, timeouts).
+        ///
+        /// <paramref name="stopOnConflict"/> ends the loop on a 409 instead of
+        /// re-sending. The loop's premise is that the failure was the
+        /// TRANSPORT's — a hiccup two seconds apart is a different roll of the
+        /// dice — and a 409 breaks that premise: the server read the body,
+        /// understood it, and refused on state that the next attempt will find
+        /// in the same place. Off by default, so every existing caller retries
+        /// exactly as it did; the match-report callers opt in, because for
+        /// them each extra attempt is another settlement request for a game
+        /// the server has already settled.</summary>
+        private static IEnumerator PostRequestWithRetry(string url, string json, Action<bool, string> callback, int maxRetries = 3, float retryDelay = 2f, bool stopOnConflict = false)
         {
             if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
             if (SensitiveTransportBlocked(url, json, callback)) yield break;
@@ -21267,6 +21311,13 @@ namespace CompetitiveRounds
                     }
 
                     Plugin.Log.LogWarning($"[HTTP] POST attempt {attempt}/{maxRetries} failed: {request.error}");
+
+                    if (stopOnConflict && FfaReportRules.IsSettledRefusal(request.responseCode))
+                    {
+                        Plugin.Log.LogWarning("[HTTP] 409 is settled — not retrying");
+                        callback(false, FormatRequestError(request));
+                        yield break;
+                    }
 
                     if (attempt < maxRetries)
                         // Network recovery must keep moving while ROUNDS pauses

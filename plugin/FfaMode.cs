@@ -344,6 +344,50 @@ namespace CompetitiveRounds
         public static bool InFfaMatch => EngineActive() && matchStartRealtime > 0f;
         public static float MatchStartRealtime => matchStartRealtime;
 
+        // ── Per-game witness (RJ-3) ──
+
+        /// <summary>PLAYER property carrying the highest FFA game number this
+        /// seat observed the START of. Published by
+        /// GameStateWatcher.OnFfaMatchStarted — the one hook that clears this
+        /// seat's per-game tally tables — so "carries game N" and "has game N's
+        /// scores" are the same statement.
+        ///
+        /// It exists because the reporter election had no such qualifier: it
+        /// took the lowest Steam ID among PRESENT fighters, and a seat that
+        /// relaunched into the room mid-sitting is present with empty tables.
+        /// Elected, it ships a near-zero scoreboard for a game it never saw.
+        /// A relaunched seat is a NEW Photon connection whose Player object
+        /// carries no properties at all (#670), so the absence is structural
+        /// rather than something it has to volunteer.
+        ///
+        /// NOT an activation barrier (#280/#287): nothing waits on it, no
+        /// client switches behaviour when it arrives, and it is read minutes
+        /// after it is written, at game over. Where it has not converged the
+        /// election falls back rather than stalling — see TryReportFfaMatch.
+        ///
+        /// In-room SetCustomProperties is the correct delivery here for the
+        /// same reason: the pre-join staging #287 requires is for values that
+        /// must be un-observable-before-use, and a per-GAME value cannot be
+        /// staged before a room it changes inside.</summary>
+        internal const string PropGameWitness = "cr_ffa_gw";
+
+        /// <summary>The game number an actor's witness property advertises, or
+        /// -1 when absent/unreadable. -1 is the relaunched seat and the
+        /// pre-1.41.0 client alike: both are ineligible to report, and both
+        /// are covered by the election's fallback if they are all there is.</summary>
+        internal static int WitnessedGameOf(Photon.Realtime.Player actor)
+        {
+            try
+            {
+                var props = actor != null ? actor.CustomProperties : null;
+                object v;
+                if (props != null && props.TryGetValue(PropGameWitness, out v) && v is int)
+                    return (int)v;
+            }
+            catch { }
+            return -1;
+        }
+
         // ── Score access ──
 
         public static int RoundsFor(int teamId) { return rounds.TryGetValue(teamId, out var v) ? v : 0; }

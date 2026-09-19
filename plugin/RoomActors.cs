@@ -81,6 +81,12 @@ namespace CompetitiveRounds
         // could never be made monotonic against Photon's property cache.)
         private static readonly HashSet<int> _rejectedActors = new HashSet<int>();
 
+        // Actors RecordRejected declined to latch because they are on the
+        // frozen roster (RJ-2). Log-once bookkeeping only: nothing reads it as
+        // a verdict, and it shares the rejected set's lifetime so the line
+        // reappears in a new room rather than being suppressed forever.
+        private static readonly HashSet<int> _rosterLatchDeclined = new HashSet<int>();
+
         // ActorNumber -> "has been seen carrying a u_id". Seeded at first
         // classification and PROMOTABLE (r10 find 1): a false entry re-reads
         // live props on each query and can only move to true — so a fighter
@@ -108,6 +114,7 @@ namespace CompetitiveRounds
             {
                 _roleByActor.Clear();
                 _rejectedActors.Clear();
+                _rosterLatchDeclined.Clear();
                 _hasUidByActor.Clear();
                 _cacheRoom = room;
                 // Deliberately NOT clearing _fighterSteamIds here: the roster
@@ -122,6 +129,7 @@ namespace CompetitiveRounds
         {
             _roleByActor.Clear();
             _rejectedActors.Clear();
+            _rosterLatchDeclined.Clear();
             _hasUidByActor.Clear();
             _cacheRoom = "";
             _fighterSteamIds.Clear();
@@ -132,13 +140,37 @@ namespace CompetitiveRounds
         /// <summary>Record an actor this room has rejected (unauthorized
         /// entrant / impostor). Called on EVERY client the moment the actor
         /// is classified unauthorized — before the master's CloseConnection
-        /// lands — so its later departure is provably not a fighter leaving.</summary>
+        /// lands — so its later departure is provably not a fighter leaving.
+        ///
+        /// RJ-2: a seat whose Steam ID is ON the frozen roster is NOT latched.
+        /// The latch is permanent for the room — cleared only by a room change
+        /// or Reset() — and it exists for an UNKNOWN entrant, so latching a
+        /// known fighter outlives the condition that produced it: a roster
+        /// snapshot taken while that fighter happened to be absent. The live
+        /// rules in IsUnauthorized still apply to them on every call, so this
+        /// declines the PERMANENCE, not the rejection.
+        ///
+        /// The impostor case keeps its latch. An actor duplicating a live
+        /// roster fighter's u_id is on the roster BY STEAM ID and would
+        /// otherwise be waved through here, and the latch is exactly what
+        /// survives its property teardown at departure — the point being that
+        /// its leave must not be read as a fighter's leave.</summary>
         internal static void RecordRejected(PhotonPlayer actor)
         {
             if (actor == null) return;
             try
             {
                 EnsureCacheRoom();
+                if (RosterFrozen && !IsImpostorReplicated(actor))
+                {
+                    string sid = SteamIdOf(actor);
+                    if (!string.IsNullOrEmpty(sid) && _fighterSteamIds.Contains(sid))
+                    {
+                        if (_rosterLatchDeclined.Add(actor.ActorNumber))
+                            Plugin.Log.LogInfo($"[ROSTER] not latching actor {actor.ActorNumber} — on the frozen roster");
+                        return;
+                    }
+                }
                 _rejectedActors.Add(actor.ActorNumber);
             }
             catch { }
@@ -255,6 +287,53 @@ namespace CompetitiveRounds
             foreach (var s in steamIds)
                 if (!string.IsNullOrEmpty(s)) _fighterSteamIds.Add(s);
         }
+
+        /// <summary>Widen the frozen roster without narrowing it (RJ-2). For a
+        /// mode that re-freezes per GAME rather than per room: FFA runs several
+        /// games in one room, and the per-game snapshot is "who is present at
+        /// this instant", so a seat between games — loading, alt-tabbed, on a
+        /// slow rejoin — was dropped from the roster it was already on. From
+        /// there IsUnauthorized reads true (fail-closed by design), the seat is
+        /// rejected and closed, and ActiveFighters() stops returning it on
+        /// every client in the room.
+        ///
+        /// Replace is still right for the modes that freeze ONCE per room, so
+        /// they keep calling FreezeFighterRoster: a 1v1/2v2 roster taken at
+        /// match start is the whole truth for that room's lifetime, and
+        /// widening it there would admit entrants the freeze exists to refuse.
+        ///
+        /// Growth is bounded by the room: the union only ever accumulates
+        /// Steam IDs that ActiveFighters() returned — i.e. seats already
+        /// admitted by this room's own rules — and OnJoinedNewRoom() clears it,
+        /// so nothing crosses a room boundary.</summary>
+        internal static void UnionFighterRoster(IEnumerable<string> steamIds)
+        {
+            if (steamIds == null) return;
+            foreach (var s in steamIds)
+                if (!string.IsNullOrEmpty(s)) _fighterSteamIds.Add(s);
+        }
+
+        /// <summary>The whole per-GAME roster rule, in one place so the call
+        /// site cannot hold half of it: the first roster of a room is FROZEN
+        /// from a snapshot of at least two resolvable fighters, and every
+        /// later game of the same room UNIONS.
+        ///
+        /// The two-name bar governs the freeze and not the union, and the
+        /// asymmetry is the point. Freezing a one-name roster would make
+        /// RosterFrozen true and turn every other seat in the room
+        /// unauthorized, so the bar protects the room from a thin snapshot; a
+        /// union cannot narrow anything, so a thin snapshot there is merely
+        /// uninformative.</summary>
+        internal static void RefreezeFighterRosterForGame(List<string> presentSteamIds)
+        {
+            if (RosterFrozen) UnionFighterRoster(presentSteamIds);
+            else if (presentSteamIds != null && presentSteamIds.Count >= 2)
+                FreezeFighterRoster(presentSteamIds);
+        }
+
+        /// <summary>The frozen roster, for logging and diagnosis. Never a
+        /// membership test — IsUnauthorized carries the rule set.</summary>
+        internal static int FrozenRosterSize { get { return _fighterSteamIds.Count; } }
 
         internal static bool RosterFrozen => _fighterSteamIds.Count > 0;
 

@@ -6431,8 +6431,21 @@ namespace CompetitiveRounds
             try { NetworkReplicaDiagnostics.OnGameStarted(); } catch { }
             try { NetworkSeatTelemetry.OnMatchStarted(); } catch { }   // lag-332 W1 (bundle-only in FFA)
             try { RoomRules.OnGameStart(); } catch { }                 // room rules: per-game counters (FFA plays the defaults)
-            // Roster freeze — same rule as OnMatchStarted (r1 find 1). Re-run
-            // per game: FFA leavers shrink the roster between games.
+            // Roster freeze (r1 find 1), re-run per game because an FFA room
+            // plays several. NOT the same rule as OnMatchStarted any more, and
+            // the difference is the fix below — that path freezes once for a
+            // room and may keep replacing.
+            //
+            // RJ-2: the re-run UNIONS once a roster exists, where it used to
+            // REPLACE. "Who is present at this instant" is a fair snapshot of
+            // a room at match assembly and a poor one at a game boundary: a
+            // seat that is loading, alt-tabbed or part-way through a rejoin
+            // between games fell off the roster it was already on, and from
+            // there IsUnauthorized reads true (fail-closed), the seat is
+            // rejected and closed, and every client drops it from
+            // ActiveFighters(). The union never narrows, so crossing a
+            // boundary cannot cost a fighter its place. The freeze-vs-union
+            // rule itself lives in RefreezeFighterRosterForGame.
             try
             {
                 var ids = new List<string>();
@@ -6441,7 +6454,9 @@ namespace CompetitiveRounds
                     var s = RoomActors.SteamIdOf(f);
                     if (!string.IsNullOrEmpty(s)) ids.Add(s);
                 }
-                if (ids.Count >= 2) RoomActors.FreezeFighterRoster(ids);
+                RoomActors.RefreezeFighterRosterForGame(ids);
+                Plugin.Log.LogInfo($"[FFA] roster after game {FfaMode.GameNumber} freeze: "
+                                   + $"{RoomActors.FrozenRosterSize} (present {ids.Count})");
             }
             catch { }
             try
@@ -6467,9 +6482,23 @@ namespace CompetitiveRounds
                 {
                     var clearProps = new Hashtable();
                     clearProps[CARD_PROP_KEY] = "";
+                    // RJ-3 witness, published in the SAME op as the card clear
+                    // so the two cannot disagree: this hook is the only site
+                    // that clears this seat's per-game tallies, so the seat
+                    // that carries game N is exactly the seat that holds game
+                    // N's scores. The reporter election reads it at game over.
+                    clearProps[FfaMode.PropGameWitness] = FfaMode.GameNumber;
                     PhotonNetwork.LocalPlayer?.SetCustomProperties(clearProps);
+                    Plugin.Log.LogInfo($"[FFA] witness published {FfaMode.PropGameWitness}={FfaMode.GameNumber}");
                 }
-                catch { }
+                catch (Exception wex)
+                {
+                    // Not fatal and not silent: an unpublished witness makes
+                    // this seat ineligible to report, which the election's
+                    // fallback covers — but it is the thing to look for if a
+                    // sitting reports witness-fallback.
+                    Plugin.Log.LogWarning($"[FFA] witness publish failed: {wex.Message}");
+                }
 
                 ResetPerMatchCombatCounters();
                 if (string.IsNullOrEmpty(localSteamId) || localSteamId == "unknown")
@@ -6709,6 +6738,11 @@ namespace CompetitiveRounds
 
             var entries = new List<ApiClient.FfaReportPlayer>();
             var presentSteams = new List<string>();
+            // RJ-3: present fighters that also WITNESSED this game's start.
+            // Every seat computes this from the same replicated properties, so
+            // it is the same set on every client — which is what keeps the
+            // election single-valued.
+            var witnessSteams = new List<string>();
             string winnerSteam = null;
 
             // Census: the FFA report roster is fighters only — a spectator
@@ -6809,6 +6843,13 @@ namespace CompetitiveRounds
                     endStats = EndStatsFor(sid),
                 });
                 presentSteams.Add(sid);
+                // Witness test, read from the replicated property rather than
+                // from anything this seat knows privately: a locally-privileged
+                // input would make this client's eligible set differ from the
+                // one its peers compute for it, which is the split-brain #280
+                // describes. -1 (no property) covers both the relaunched seat
+                // and a pre-1.41.0 client.
+                if (FfaMode.WitnessedGameOf(pp) >= FfaMode.GameNumber) witnessSteams.Add(sid);
                 if (teamId == winnerTeam) winnerSteam = sid;
             }
 
@@ -6871,11 +6912,35 @@ namespace CompetitiveRounds
                 return false;
             }
 
-            // Reporter election: lowest Steam ID among PRESENT players (all FFA
-            // players carry the mod — the queue is the only entry path).
-            string lowest = null; long lowVal = long.MaxValue;
-            foreach (var sid in presentSteams)
-                if (long.TryParse(sid, out long v) && v < lowVal) { lowVal = v; lowest = sid; }
+            // Reporter election: lowest Steam ID among the players who
+            // WITNESSED this game's start (all FFA players carry the mod — the
+            // queue is the only entry path).
+            //
+            // RJ-3: membership used to be the whole qualifier, and the tallies
+            // shipped at the bottom of this method come from THIS client's
+            // per-game tables, which OnFfaMatchStarted clears. A seat that
+            // relaunched into the room mid-sitting is present, holds the lowest
+            // Steam ID as often as anyone else, and has empty tables — so it
+            // was elected and submitted a scoreboard for a game it never saw.
+            //
+            // THE ELECTION STAYS TOTAL. An empty eligible set falls back to the
+            // old rule rather than refusing: a guard that only the seats it
+            // disqualifies would evaluate is how a sitting ends with nobody
+            // submitting and silently voids itself (#430). The fallback is
+            // min(presentSteams), which every client computes identically, so
+            // the all-ineligible case still elects exactly one reporter. The
+            // narrow mixed case — one client sees witness properties and
+            // another sees none at all — can elect two, and that direction is
+            // chosen deliberately: the server settles a game once and answers
+            // the second report terminally, where nobody reporting loses the
+            // sitting outright.
+            string lowest = FfaReportRules.ElectReporter(presentSteams, witnessSteams, out bool witnessFallback);
+            if (witnessFallback && presentSteams.Count > 0)
+                Plugin.Log.LogWarning($"[FFA-REPORT] witness-fallback: no seat carries "
+                                      + $"{FfaMode.PropGameWitness}>={FfaMode.GameNumber} among {presentSteams.Count} present "
+                                      + "— electing on presence alone");
+            else if (!witnessFallback && witnessSteams.Count < presentSteams.Count)
+                Plugin.Log.LogInfo($"[FFA-REPORT] witnesses {witnessSteams.Count}/{presentSteams.Count} for game {FfaMode.GameNumber}");
             if (lowest == null) lowest = localSteamId;
             if (lowest != localSteamId)
             {
