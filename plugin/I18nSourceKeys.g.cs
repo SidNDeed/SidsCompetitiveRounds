@@ -2404,6 +2404,7 @@ namespace CompetitiveRounds
             "The same actions in a different order",
             "The selected cosmetic is still loading.",
             "The server could not answer about your pack - checking again shortly",
+            "The server kept asking us to pause - we waited as long as we can; the rest are still in your binder",
             "The server refused that - try again in a moment",
             "The server refused the title change.",
             "The server refused this request ({0}).",

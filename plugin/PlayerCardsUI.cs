@@ -93,13 +93,26 @@ namespace CompetitiveRounds
         private static string armedPrintId; private static bool armedDupes; private static float armedAt;
         private static bool discardInFlight; private static readonly List<string> discardQueue = new List<string>();
         private static int discardDone, discardShards;
-        private static bool discardRetried;   // the one wait-and-retry a rate-limited copy gets (Sept 14 batch, C2)
+        // The copies that have already had their ONE wait-and-retry, keyed
+        // by print id.
+        //
+        // This was a run-wide bool that DiscardAfter cleared on every
+        // resumption, which made it mean "one retry IN FLIGHT" while the
+        // comment beside it said "one retry per copy". The difference is not
+        // academic: with the default 3 s pause, one stubborn copy could be
+        // re-asked six times over on its own and spend the entire run budget,
+        // so the copies queued behind it never got the retry the rule
+        // promised them. Per copy, the latch is set once and never cleared
+        // until the run ends.
+        private static readonly HashSet<string> discardRetriedIds = new HashSet<string>();
         private static float discardWaited;   // seconds THIS run has already spent waiting a refusal out
-        // Ceiling on the waiting a single discard run may do. discardRetried is
-        // cleared again on every resumption, so without a run-wide budget a
-        // persistently refused run waits and retries with no end: the binder
-        // stays "discarding...", the button stays dead and nothing is ever
-        // said. Past the budget the run finishes and shows its reason.
+        // Ceiling on the waiting a single discard run may do, ACROSS copies.
+        // The per-copy latch bounds how often ONE copy may be re-asked; this
+        // bounds the RUN, so a long queue of individually-once-retried copies
+        // cannot leave the binder saying "discarding..." indefinitely with the
+        // button dead and nothing said. Past the budget the run finishes, and
+        // it reports the exhausted budget as its own reason rather than as a
+        // plain refusal - those are different events to the player.
         private const float DiscardWaitBudget = 20f;
         // info
         private static object txtInfo;
@@ -218,6 +231,12 @@ namespace CompetitiveRounds
                 case "outdated": return I18n.Tr("Update the mod first");
                 case "transport": return I18n.Tr("No answer from the server - try again in a moment");
                 case "rate_limited": return I18n.Tr("Too many requests at once - wait a few seconds and try again");
+                // Distinct from the line above ON PURPOSE. "Too many requests"
+                // describes a refusal the player can retry straight away; this
+                // one means we already waited, for as long as a run may, and
+                // the queue did not drain. Folding them together told a player
+                // who had been waiting twenty seconds to wait a few seconds.
+                case "rate_limit_waited": return I18n.Tr("The server kept asking us to pause - we waited as long as we can; the rest are still in your binder");
                 default: return I18n.Tr("The server refused that - try again in a moment");
             }
         }
@@ -344,7 +363,7 @@ namespace CompetitiveRounds
             // FinishDiscard is not on this path, so the run state it clears is
             // cleared here too: a retry flag left set would spend the NEXT
             // account's first refusal.
-            discardQueue.Clear(); discardRetried = false; discardWaited = 0f;
+            discardQueue.Clear(); discardRetriedIds.Clear(); discardWaited = 0f;
             armedPrintId = null; priceChangedAt = -1f;
             recoverAt = 0f; meRefreshAt = 0f; unparseableStrikes = 0;
             try { NativeUI.MarkDirty(); } catch { }
@@ -2003,7 +2022,7 @@ namespace CompetitiveRounds
                         if (o.print_id != p.print_id && FaceKey(o) == key) discardQueue.Add(o.print_id);
             }
             if (discardQueue.Count == 0) return;
-            discardDone = 0; discardShards = 0; discardWaited = 0f; discardRetried = false; discardInFlight = true;
+            discardDone = 0; discardShards = 0; discardWaited = 0f; discardRetriedIds.Clear(); discardInFlight = true;
             NativeUI.MarkDirty();
             DiscardNext(id);
         }
@@ -2036,13 +2055,22 @@ namespace CompetitiveRounds
                 // chain of refetches on top of the limit. The waiting a run may
                 // do is capped by DiscardWaitBudget - past it the run ends and
                 // says so instead of retrying without a ceiling.
-                if (code == "rate_limited" && !discardRetried && discardWaited + wait <= DiscardWaitBudget)
+                if (code == "rate_limited" && !discardRetriedIds.Contains(pid))
                 {
-                    discardRetried = true;
-                    discardWaited += wait;
-                    discardQueue.Insert(0, pid);
-                    Say(I18n.TrF("Slowing down - the server asked for a {0} s pause", (int)wait), C_WARN);
-                    Plugin.Instance.StartCoroutine(DiscardAfter(id, wait, ep));
+                    if (discardWaited + wait <= DiscardWaitBudget)
+                    {
+                        discardRetriedIds.Add(pid);
+                        discardWaited += wait;
+                        discardQueue.Insert(0, pid);
+                        Say(I18n.TrF("Slowing down - the server asked for a {0} s pause", (int)wait), C_WARN);
+                        Plugin.Instance.StartCoroutine(DiscardAfter(id, wait, ep));
+                        return;
+                    }
+                    // This copy still had its retry; the RUN has no waiting
+                    // time left. Reported as its own reason - a player who has
+                    // just watched us wait out two pauses is not being told
+                    // the same thing as one whose first request was refused.
+                    FinishDiscard(id, "rate_limit_waited");
                     return;
                 }
                 FinishDiscard(id, code);
@@ -2053,13 +2081,16 @@ namespace CompetitiveRounds
         {
             yield return new WaitForSecondsRealtime(seconds);
             if (ep != uiEpoch || !discardInFlight) yield break;
-            discardRetried = false;
+            // DELIBERATELY does not clear the per-copy latch. Resuming IS the
+            // retry; clearing it here was what turned "one retry per copy"
+            // into "one retry in flight" and let a single copy loop until the
+            // run budget ran out. The latch is cleared only by FinishDiscard.
             DiscardNext(id);
         }
 
         private static void FinishDiscard(string id, string errorCode)
         {
-            discardInFlight = false; discardQueue.Clear(); discardRetried = false; discardWaited = 0f;
+            discardInFlight = false; discardQueue.Clear(); discardRetriedIds.Clear(); discardWaited = 0f;
             // One line for both halves: what was discarded stays reported when
             // the next discard fails (c4).
             if (discardDone > 0 && errorCode != null)
@@ -2072,7 +2103,12 @@ namespace CompetitiveRounds
             // the two refetches after every discard were what the rate limit
             // saw first). A refusal other than the limit itself re-reads both,
             // since the local copy may be what was wrong (not_owned).
-            if (id != null && errorCode != null && errorCode != "rate_limited" && errorCode != "transport")
+            // rate_limit_waited is excluded for the same reason rate_limited
+            // is: two refetches on top of a limit that is already refusing us
+            // are exactly what C2 removed. A budget we exhausted is the one
+            // moment we most need to stop asking.
+            if (id != null && errorCode != null && errorCode != "rate_limited"
+                && errorCode != "rate_limit_waited" && errorCode != "transport")
             {
                 ApiClient.FetchPcCollection(id, true); ApiClient.FetchPcMe(id, true);
             }

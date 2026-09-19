@@ -32,12 +32,14 @@ in-game run (ten fast discards, ten `[PC] discard` lines, no `rate_limited`).
 from __future__ import annotations
 
 import re
+import functools
 from pathlib import Path
 
 import pytest
 
 from _cs_structure import (CsParseError, and_terms, cs_block, guard_chain,
-                           initialiser, mask_code, method_spans)
+                           initialiser, mask_code, method_spans,
+                           strip_comments_only)
 
 PLUGIN = Path(__file__).resolve().parents[2] / "plugin"
 PLAYER_CARDS = PLUGIN / "PlayerCardsUI.cs"
@@ -49,11 +51,30 @@ FINISH_DISCARD = "FinishDiscard(string id, string errorCode)"
 IDENTITY_CHANGED = "OnIdentityChanged()"
 
 _CALL = re.compile(r"\bApiClient\.(\w+)\s*\(")
-_REQUEST_STARTERS = ("PostRequest(", "GetRequest(")
+_BARE_CALL = re.compile(r"\b(\w+)\s*\(")
+# The three coroutines that actually put bytes on the wire. SendRequest is the
+# one the old two-name list missed, and it is not an obscure corner: every
+# session-authenticated call reaches the network through SessionSend, which
+# delegates to it and starts no Post/GetRequest of its own.
+_REQUEST_STARTERS = ("PostRequest(", "GetRequest(", "SendRequest(")
+_MAX_DELEGATION_DEPTH = 6
 
 
 # ── classifying an ApiClient member by its own body ──────────────────────
 
+@functools.lru_cache(maxsize=1)
+def _api_masked() -> tuple:
+    """ApiClient's source and its mask, read and masked ONCE.
+
+    The delegation walk asks for many bodies and revisits some; without this
+    each ask re-read and re-masked a twenty-thousand-line file, which turned a
+    two-second module into a two-minute one.
+    """
+    src = API_CLIENT.read_text(encoding="utf-8")
+    return src, mask_code(src)
+
+
+@functools.lru_cache(maxsize=None)
 def _api_member_body(name: str) -> str:
     """The masked body of `ApiClient.<name>`, located structurally.
 
@@ -61,8 +82,7 @@ def _api_member_body(name: str) -> str:
     gate that silently stopped measuring, which is the failure this module is
     written against.
     """
-    src = API_CLIENT.read_text(encoding="utf-8")
-    masked = mask_code(src)
+    src, masked = _api_masked()
     decl = re.compile(rf"\bstatic\s+[\w<>,\[\]\?\. ]+?\b{re.escape(name)}\s*\(")
     hits = list(decl.finditer(masked))
     if not hits:
@@ -105,9 +125,44 @@ def _api_member_body(name: str) -> str:
     return "\n".join(bodies)
 
 
-def _issues_a_request(name: str) -> bool:
+@functools.lru_cache(maxsize=1)
+def _api_member_names() -> frozenset:
+    """Every name ApiClient declares as a static member.
+
+    Used to tell an intra-class call apart from a BCL call, so the walk below
+    follows the former and ignores the latter.
+    """
+    _, masked = _api_masked()
+    return frozenset(
+        re.findall(r"\bstatic\s+[\w<>,\[\]\?\. ]+?\b(\w+)\s*\(", masked)
+    )
+
+
+def _issues_a_request(name: str, _seen: frozenset = frozenset()) -> bool:
+    """Whether `ApiClient.<name>` ends up putting a request on the wire.
+
+    TRANSITIVE, and that is the whole point of the rewrite. This used to look
+    at one level only -- does this member's own body start a coroutine over
+    PostRequest or GetRequest -- so a member that DELEGATES answered False and
+    was counted as costing nothing. SessionSend is the live example: it starts
+    SendRequest, which was in neither name, so anything routed through it read
+    as free. A gate that undercounts requests is the same defect this module
+    exists to catch, wearing the reviewer's clothes.
+
+    Bounded by a visited set and a depth cap, so a mutual call pair terminates
+    rather than recursing until Python gives up.
+    """
+    if name in _seen or len(_seen) >= _MAX_DELEGATION_DEPTH:
+        return False
     body = _api_member_body(name)
-    return "StartCoroutine(" in body and any(s in body for s in _REQUEST_STARTERS)
+    if any(s in body for s in _REQUEST_STARTERS):
+        return True
+    members = _api_member_names()
+    seen = _seen | {name}
+    for callee in sorted(set(_BARE_CALL.findall(body))):
+        if callee in members and callee not in seen and _issues_a_request(callee, seen):
+            return True
+    return False
 
 
 def _requests_in(signature: str) -> list:
@@ -125,6 +180,10 @@ def test_the_request_classifier_separates_a_fetch_from_a_parse_helper():
     assert _issues_a_request("PcDiscard")
     assert _issues_a_request("FetchPcMe")
     assert _issues_a_request("FetchPcCollection")
+    # A member that reaches the network only through a SIBLING. It answered
+    # False while the classifier looked one level deep, which made every
+    # session-authenticated call invisible to the counts below.
+    assert _issues_a_request("SessionSend")
     assert not _issues_a_request("PcErrorCode")
     assert not _issues_a_request("PcRetryAfter")
     assert not _issues_a_request("PcInt")
@@ -172,17 +231,132 @@ def test_a_refused_discard_run_is_bounded_by_a_wait_budget():
     # Control: delete this term from the condition -> red.
     budgeted = [t for t in terms if "discardWaited" in t and "DiscardWaitBudget" in t]
     assert budgeted, f"the retry is not compared against a budget: {terms}"
+    # The pause we are ABOUT to take counts too. Comparing only the pauses
+    # already taken lets the last retry overshoot by a whole Retry-After.
+    assert any("wait" in t for t in budgeted), budgeted
 
     value = initialiser(PLAYER_CARDS, PC_CLASS, "DiscardWaitBudget")
     assert float(value.rstrip("fF")) > 0
 
 
+def test_the_wait_budget_is_compared_against_a_value_that_moves():
+    """The assertion above passes on an expression that can never be false.
+
+    `discardWaited + wait <= DiscardWaitBudget` bounds NOTHING if discardWaited
+    is never advanced: it stays 0f, every ordinary Retry-After clears
+    0 + wait <= 20, and the run retries without end -- which is the exact
+    behaviour the budget was added to stop. Reading the comparison and not the
+    accumulator is how a bound-shaped expression passes for a bound
+    (#306/#342/#431). The increment has to be on the same branch that spends
+    the wait, so it is looked for BETWEEN the comparison and the coroutine.
+    """
+    block = mask_code(cs_block(PLAYER_CARDS, DISCARD_NEXT))
+    cond = block.index("DiscardWaitBudget")
+    start = block.index("StartCoroutine(DiscardAfter")
+    assert cond < start, "the budget is no longer tested before the wait starts"
+    branch = block[cond:start]
+    assert re.search(r"discardWaited\s*\+=\s*wait\s*;", branch), (
+        "the branch that spends a wait does not advance the accumulator it is "
+        f"compared against: {branch!r}"
+    )
+
+
 def test_an_identity_change_clears_the_discard_run_state():
-    # FinishDiscard is not on this path, so a retry flag left set here would be
-    # spent on the next account's first refusal.
+    # FinishDiscard is not on this path, so a retry latch left set here would
+    # be spent on the next account's first refusal.
     code = mask_code(cs_block(PLAYER_CARDS, IDENTITY_CHANGED))
-    assert "discardRetried = false" in code
+    assert "discardRetriedIds.Clear()" in code
     assert "discardWaited = 0f" in code
+
+
+# ── the retry is ONE PER COPY, inside the run budget ─────────────────────
+
+def test_the_retry_latch_is_keyed_by_the_copy():
+    """A run-wide bool is not "one retry per copy", however the comment reads.
+
+    It was cleared on every resumption, so it meant "one retry IN FLIGHT":
+    a single stubborn print could be re-asked over and over -- six times at the
+    default 3 s pause -- and spend the whole run budget by itself, leaving the
+    copies queued behind it with none of the retry the rule promised them.
+    """
+    code = mask_code(cs_block(PLAYER_CARDS, DISCARD_NEXT))
+    assert "discardRetriedIds.Contains(pid)" in code, (
+        "the retry is not gated on THIS copy having had one")
+    assert "discardRetriedIds.Add(pid)" in code, (
+        "taking the retry does not record which copy took it")
+
+
+def test_the_resumption_does_not_return_the_copys_retry():
+    """Resuming IS the retry. Clearing the latch there gives it straight back,
+    which is what turned per-copy into per-in-flight."""
+    code = mask_code(cs_block(PLAYER_CARDS, "DiscardAfter(string id, float seconds, int ep)"))
+    assert "DiscardNext(id)" in code, "the resumption no longer resumes"
+    assert "discardRetried" not in code, (
+        f"the resumption still touches the retry latch: {code!r}")
+
+
+def test_an_exhausted_budget_is_reported_as_its_own_reason():
+    # Comments stripped, literals KEPT: the reason code is a literal, so the
+    # mask used everywhere else would blank the very thing being read.
+    code = strip_comments_only(cs_block(PLAYER_CARDS, DISCARD_NEXT))
+    assert 'FinishDiscard(id, "rate_limit_waited")' in code, (
+        "an exhausted wait budget still finishes as a plain rate_limited "
+        "refusal, so the player is told to wait a few seconds after we have "
+        "already waited twenty")
+
+
+RATE_LIMIT_REASONS = ("rate_limited", "rate_limit_waited")
+LOCALES = ("es", "ru", "uk", "sv")
+
+
+def _reason_sentences() -> dict:
+    """code -> English sentence, read from ReasonText's own switch.
+
+    Derived, not listed: a hand-written copy of these sentences would go on
+    passing after the code reworded one of them.
+    """
+    block = cs_block(PLAYER_CARDS, "ReasonText(string code)")
+    return dict(re.findall(
+        r'case "([\w-]+)":\s*return I18n\.Tr\("([^"]+)"\);', block))
+
+
+def test_the_two_rate_limit_reasons_are_different_sentences():
+    pairs = _reason_sentences()
+    for code in RATE_LIMIT_REASONS:
+        assert code in pairs, f"ReasonText has no sentence for {code}: {sorted(pairs)}"
+    assert pairs["rate_limited"] != pairs["rate_limit_waited"], (
+        "both rate-limit outcomes render the same sentence")
+
+
+@pytest.mark.parametrize("lang", LOCALES)
+def test_both_rate_limit_sentences_are_translated_in_every_locale(lang):
+    """The artifact that RENDERS is the DLL-bundled catalogue, never a SQL
+    seed (#583); a key with no entry renders English with every other gate
+    green (#578). Nothing else in the tree covered a PlayerCardsUI reason --
+    each surface carries its own gate and this one had none -- and the
+    exhausted-budget sentence is seen only after twenty seconds of waiting,
+    which is the worst moment to hand somebody untranslated text.
+    """
+    from test_pc_sept12 import _bundled_catalogues
+
+    pairs = _reason_sentences()
+    catalogue = _bundled_catalogues()[lang]
+    missing = [c for c in RATE_LIMIT_REASONS
+               if not (catalogue.get(pairs[c]) or "").strip()]
+    echoed = [c for c in RATE_LIMIT_REASONS if catalogue.get(pairs[c]) == pairs[c]]
+    assert not missing, f"{lang}: no catalogue entry for {missing}"
+    assert not echoed, f"{lang}: {echoed} still render the English sentence"
+
+
+def test_an_exhausted_budget_does_not_trigger_the_refetches():
+    """Two refetches on top of a limit that is already refusing us are exactly
+    what the one-request-per-copy change removed. A budget we just exhausted is
+    the moment we most need to stop asking."""
+    for needle in ("ApiClient.FetchPcCollection(", "ApiClient.FetchPcMe("):
+        terms = [t for c in guard_chain(PLAYER_CARDS, FINISH_DISCARD, needle)
+                 for t in and_terms(c)]
+        assert 'errorCode != "rate_limit_waited"' in terms, (
+            f"{needle} is not excluded for an exhausted budget: {terms}")
 
 
 # ── the negative control for the reader itself ───────────────────────────
