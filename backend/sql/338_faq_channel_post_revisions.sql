@@ -23,6 +23,18 @@
 -- message matches, the row stays pending and nothing is posted: the failure
 -- direction is "the old text stays up", never "a duplicate appears" (#276).
 --
+-- The capture below covers every row delivered before this file runs. A row an
+-- OLDER bot delivers AFTERWARDS is not covered by it and is not covered by a
+-- write anywhere else either: what was sent for such a row is only recoverable
+-- while its revision is still 1 (any rewrite bumps revision), and that is a
+-- condition the api re-derives on each poll rather than a column anybody
+-- freezes. A row corrected between an old bot's send and its ack therefore
+-- ends up "delivered, revision unknown, unlocatable" — pending, never
+-- re-sent, and holding no id and no fingerprint, so NOTHING can find its
+-- message afterwards. Upgrading the bot does not rescue it: there is nothing
+-- left to match on. Its old text stays up until somebody supplies the message
+-- id by hand, which is the direction this chooses over a duplicate post.
+--
 -- MIGRATION NUMBER
 -- 338 is item 11's reservation in ai-collab/LEDGER.md §5b, which is the only
 -- register of numbers for this release: 339 belongs to the Discord-collection
@@ -50,6 +62,16 @@ ALTER TABLE pending_channel_posts ADD COLUMN IF NOT EXISTS message_id        TEX
 ALTER TABLE pending_channel_posts ADD COLUMN IF NOT EXISTS revision          INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE pending_channel_posts ADD COLUMN IF NOT EXISTS posted_revision   INTEGER;
 ALTER TABLE pending_channel_posts ADD COLUMN IF NOT EXISTS adopt_fingerprint TEXT;
+-- The poller's claim. This bus had none: the pending SELECT was a plain read,
+-- so two pollers could each receive the same never-posted row and each send
+-- it, with the ack — which happens AFTER the send — as the only thing between
+-- them and two copies in the channel. The api now hands out and claims in one
+-- statement. NULL means unclaimed; a claim EXPIRES rather than needing to be
+-- released, so a poller that dies mid-batch costs one lease and not a stuck
+-- row, and the DELIVERY ack clears it so the nominal path never waits on a
+-- lease at all. The bind_only ack deliberately leaves it set: that row is
+-- mid-render and the claim is what should still be held (#276/#430).
+ALTER TABLE pending_channel_posts ADD COLUMN IF NOT EXISTS claimed_at        TIMESTAMPTZ;
 
 -- Everything already delivered rendered revision 1. Without this backfill
 -- every historical row would read as "revision 1 never rendered" and the bot
@@ -104,7 +126,10 @@ CREATE INDEX IF NOT EXISTS idx_pending_channel_posts_unrendered
 --          1000 for the keys listed in ACHIEVEMENT_GOLD_OVERRIDES. Bet
 --          refunds are _prune_stale_series' cutoff_min (30 min, no game ever
 --          reported) and stalled_min (60 min, stalled mid-series) — two
---          windows, where the sheet quoted one "~1 hour".
+--          windows, where the sheet quoted one "~1 hour". Both of those
+--          modes select `rs.is_tournament = FALSE`, so a tournament series is
+--          in NEITHER clock; its stakes are settled by mode 3 off the
+--          bracket's own terminal row, which the sheet now says.
 --   msg 6  the lone-room return is per mode, not a flat 60s: GameStateWatcher
 --          bails at 60 / 90 / 120 / 360 s for a 1v1 / 2v2-or-1v2 / FFA /
 --          tournament room.
@@ -116,9 +141,13 @@ CREATE INDEX IF NOT EXISTS idx_pending_channel_posts_unrendered
 -- sort_order), so there is one row per message before and after. The single
 -- contact sentence, in msg 6, is carried through byte-for-byte from
 -- 110_faq_channel_post.sql:88 rather than re-authored; that line is the one
--- entry that owns it, and test_no_new_contact_line_is_introduced in
--- backend/tests/test_faq_surfaces.py fails if this file ever states a routing
--- contact that 110 did not already state.
+-- entry that owns it. test_no_new_contact_line_is_introduced in
+-- backend/tests/test_faq_surfaces.py extracts every line of these bodies that
+-- routes a reader to a person — an @handle, or a DM/ping/contact/reach-out
+-- verb — and compares the MULTISET against 110's own bodies, so a genuinely
+-- new routing sentence fails, and so does a SECOND copy of this one in
+-- another message. What it does not do is judge wording it cannot recognise
+-- as routing; that bound is stated in the test rather than implied here.
 WITH want (sort_order, content) AS (
     VALUES
     (1, $faq1$**INSTALLING THE MOD**
@@ -164,14 +193,14 @@ Everything else records as **casual** (still tracked, no rating change). The mod
 - **1v2:** F5 → 1v2 tab. One solo against a duo — separate Solo and Duo leaderboards, and the solo can take an extra starting pick if the lobby enables it.
 - **FFA:** F5 → FFA tab. 3-10 players, everyone for themselves — last one standing scores, first to **5** points wins by default (the host can set that target anywhere from 3 to 10), everyone picks cards at the same time. Own rating and leaderboard.
 - Queue searches cap at **30 minutes** in every mode — you'll get an in-game notice if you hit it; just rejoin if you're still around.
-- **Tournaments:** F5 → Tournaments. A sync (same-time) tournament runs weekly — sign up, vote a time, the bracket auto-connects your matches. An async tournament opens **2 days after the previous one ends** — it follows the bracket, not a calendar — and each round has a **7-day** deadline; coordinate with your opponent on Discord.
+- **Tournaments:** F5 → Tournaments. A sync (same-time) tournament runs weekly — sign up, vote a time, the bracket auto-connects your matches. An async tournament follows the bracket, not a calendar: the next one opens **2 days after the previous one finishes**, and if that one was cancelled (or never recorded a finish) only **24 hours** after it was created, so a bracket that failed to fill doesn't cost everyone a wait. Each round has a **7-day** deadline; coordinate with your opponent on Discord.
 - **Playing a friend directly?** Private-room games between two modded, ranked-enabled players count as ranked automatically.$faq4$)
   , (5, $faq5$**ECONOMY & COSMETICS**
 
 - You earn **gold + XP** from every recorded match; ranked pays roughly double, winning pays more.
 - **Shop (F5):** titles, trails, map color skins, nametag styles, body colors, cursors, effects — and community-made **character cosmetics** (faces, accessories), equipped in ROUNDS' own character editor (F8 or main-menu Characters).
 - **Achievements (F5):** one-time challenges paying **100g** by default — the hardest pay 300g, 500g or 1000g; some unlock exclusive titles.
-- **Betting:** you can bet gold on other players' live ranked series — in-game from the Leaderboard tab's live panel, or from Discord via the live-bet buttons the bot posts. Bets lock once game 1 reaches 2 points. If a series never finishes, stakes are refunded automatically: after 30 minutes when no game was ever reported, after 60 minutes when it stalls mid-series.
+- **Betting:** you can bet gold on other players' live ranked series — in-game from the Leaderboard tab's live panel, or from Discord via the live-bet buttons the bot posts. Bets lock once game 1 reaches 2 points. If a series never finishes, stakes are refunded automatically: after 30 minutes when no game was ever reported, after 60 minutes when it stalls mid-series. Tournament series sit outside both clocks — a tournament bet settles on the bracket instead, and a forfeited or bye'd match refunds its stakes.
 - **Link your Discord** with `/link` in the Discord server — connects your accounts for bet buttons, bug-report DMs, and server-booster gold perks.
 - In-game chat: press **T** during a game. It bridges both ways with the #in-game-chat channel.$faq5$)
   , (6, $faq6$**WHEN SOMETHING BREAKS**
@@ -205,9 +234,10 @@ BEGIN
   SELECT COUNT(*) INTO cols
     FROM information_schema.columns
    WHERE table_name = 'pending_channel_posts'
-     AND column_name IN ('message_id', 'revision', 'posted_revision', 'adopt_fingerprint');
-  IF cols <> 4 THEN
-    RAISE EXCEPTION 'migration 338: expected 4 revision columns on pending_channel_posts, found % - nothing committed', cols;
+     AND column_name IN ('message_id', 'revision', 'posted_revision',
+                         'adopt_fingerprint', 'claimed_at');
+  IF cols <> 5 THEN
+    RAISE EXCEPTION 'migration 338: expected 5 revision columns on pending_channel_posts, found % - nothing committed', cols;
   END IF;
 
   SELECT COUNT(*) INTO idx

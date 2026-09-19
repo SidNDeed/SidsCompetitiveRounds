@@ -33068,7 +33068,13 @@ async def artist_submit_cosmetic(request: Request, payload: dict = Body(...),
     if len(name) < 2:
         raise HTTPException(status_code=400, detail="name too short (letters/numbers/spaces only)")
     if not b64 or len(b64) > COSMETIC_MAX_B64:
-        raise HTTPException(status_code=400, detail="PNG missing or too large (1 MB max)")
+        # The number in the message is the number the check enforces. The two
+        # said different things: COSMETIC_MAX_B64 is 1,600,000 base64
+        # characters and the text said 1 MB, so an artist with a 1.1 MB file
+        # was told to shrink something the endpoint would have accepted. Same
+        # defect as NativeUI's own "1 MB max", swept with it (#432).
+        raise HTTPException(status_code=400,
+                            detail="PNG missing or too large (1,600,000 base64 characters max)")
     if submission_fingerprint is not None:
         existing_id = (await db.execute(text(
             "SELECT id FROM cosmetic_submissions "
@@ -34420,6 +34426,81 @@ async def internal_linked_players(
     ]}
 
 
+# How long one poller's claim on a channel-post batch lasts. Deliberately
+# LONGER than the bot's 30 s tick: the claim exists so two pollers cannot both
+# receive — and both send — one fresh row, and a lease shorter than a tick's
+# work would expire while the first poller was still inside it. The cost of the
+# longer lease is that a row whose tick died is re-driven up to four ticks
+# later, which for a queued announcement or an in-place correction is nothing;
+# the cost of the shorter one is the second copy this item exists to remove
+# (#276 — decide which direction the unhandled case fails).
+CHANNEL_POST_CLAIM_SECONDS = 120
+
+# Hand out and claim, in one statement. Held as a module constant with ONE
+# placeholder so the whole statement exists as a single literal a test can lift
+# and execute verbatim: reimplementing it in the test would prove only that the
+# test agrees with itself (#391). `{where}` is filled from two fixed literals
+# chosen by a bool — no caller text reaches the SQL.
+#
+# FOR NO KEY UPDATE is the weakest mode that conflicts with this statement's
+# own later write (claimed_at is not a key column), so it self-conflicts
+# between two pollers without enrolling anybody's foreign-key check in the wait
+# graph (#202). SKIP LOCKED makes the second poller take the next rows instead
+# of queueing behind the first (#207).
+#
+# The adopt_fingerprint projection is a DERIVATION, not a stored value: see the
+# endpoint's docstring for why revision = 1 on a delivered row is a proof that
+# the stored content is still the text that was sent, and why no write is made
+# on the strength of it.
+_CHANNEL_POST_PENDING_SQL = (
+    "WITH pick AS ("
+    "  SELECT p.id FROM pending_channel_posts p"
+    "   WHERE {where}"
+    "     AND (p.claimed_at IS NULL"
+    "          OR p.claimed_at < NOW() - make_interval(secs => :lease))"
+    "   ORDER BY p.sort_order, p.id LIMIT 20"
+    "   FOR NO KEY UPDATE SKIP LOCKED"
+    "), taken AS ("
+    "  UPDATE pending_channel_posts p SET claimed_at = NOW()"
+    "    FROM pick k WHERE p.id = k.id"
+    "  RETURNING p.id, p.channel_id, p.content, p.revision, p.posted_revision,"
+    "            p.posted_at, p.message_id, p.sort_order,"
+    "            CASE WHEN p.adopt_fingerprint IS NOT NULL"
+    "                 THEN p.adopt_fingerprint"
+    "                 WHEN p.posted_at IS NOT NULL AND p.revision = 1"
+    "                      AND p.content NOT LIKE '[MODCASE:%'"
+    "                 THEN LEFT(p.content, 2000) END AS adopt_fingerprint"
+    ") SELECT id, channel_id, content, revision, posted_revision, posted_at,"
+    "         message_id, adopt_fingerprint"
+    "    FROM taken ORDER BY sort_order, id"
+)
+_CHANNEL_POST_WHERE_UNRENDERED = "p.posted_revision IS DISTINCT FROM p.revision"
+_CHANNEL_POST_WHERE_UNPOSTED = "p.posted_at IS NULL"
+
+
+def _channel_post_ack_reply(post_id, named_revision, row):
+    """What the ack tells the caller: finished, or the row has moved on.
+
+    A named revision that did not become the row's posted_revision means the
+    compare-and-set declined it — the text moved while the caller was
+    rendering — so the caller is handed the current revision AND the current
+    content and can edit forward in the same tick instead of leaving the
+    channel a revision behind until the next one.
+
+    A caller that named NO revision is never told "stale": it has no way to
+    act on the answer (it cannot edit, which is why it could not name one),
+    and its delivery was recorded either way. Telling it otherwise would make
+    every pre-338 ack look like a failure in its own logs.
+
+    A named predicate rather than an inline condition, because a rule inlined
+    at its only call site can only be re-implemented by a test, never
+    exercised by one (#391)."""
+    if named_revision is not None and row["posted_revision"] != row["revision"]:
+        return {"status": "stale", "id": post_id,
+                "revision": row["revision"], "content": row["content"]}
+    return {"status": "acked", "id": post_id, "revision": row["posted_revision"]}
+
+
 @app.get("/api/v1/internal/channel-posts/pending", tags=["Internal"])
 async def pending_channel_posts(
     revisions: bool = Query(False),
@@ -34437,57 +34518,60 @@ async def pending_channel_posts(
     omits it and still gets the fire-once set (posted_at IS NULL), so it never
     meets a correction row at all.
 
-    WHAT THIS DOES NOT CLAIM. "posted_revision IS DISTINCT FROM revision"
-    alone is NOT a delivery test, and a row can carry posted_at with
-    posted_revision still NULL: the pre-338 ack wrote only posted_at, so every
-    row an OLD bot delivered while 338 was already applied looks exactly like
-    a never-posted one. Believing that predicate would re-send each of them.
-    posted_at is the delivery fact, and it is returned so the bot keys on it
-    (see poll_channel_posts) rather than on a revision number that a mixed
-    fleet can legitimately leave NULL.
+    THIS ENDPOINT RECORDS NO DELIVERY FACT. It hands rows out and claims them;
+    it never writes posted_revision. An earlier build did: every row carrying
+    posted_at without a rendered revision was set to revision 1 here. That is
+    a statement about what is on Discord, made by the side of the wire that
+    cannot see Discord — and when the row had been corrected to revision 2
+    since the old bot delivered it, the write recorded a revision while
+    capturing no fingerprint, which left the correction findable by neither of
+    the two handles. Only the bot can prove which text is up, by matching the
+    live message against the fingerprint, so only the bot's ack may record a
+    revision (round-3 findings at this endpoint and at ack_channel_post).
 
-    The ADOPTION UPDATE below is what resolves such a row instead of merely
-    surviving it. Run only for a caller that can edit, it is the api half of
-    the bot's own adoption: a delivered row with no rendered revision is
-    recorded as delivered at the SEED revision (1, the column default), and —
-    when its content has not been rewritten since (revision = 1) — the text
-    that was sent for it is captured as adopt_fingerprint, exactly as 338's
-    backfill captured it for the rows that predate the column. A row that WAS
-    rewritten in the meantime gets no fingerprint, because nobody can
+    WHAT posted_revision DOES NOT MEAN. "posted_revision IS DISTINCT FROM
+    revision" alone is NOT a delivery test, and a row can carry posted_at with
+    posted_revision still NULL: the pre-338 ack wrote only posted_at, and this
+    build's ack deliberately leaves posted_revision NULL for a caller that
+    cannot name the revision it rendered AND whose row has moved on. posted_at
+    is the delivery fact, and it is returned so the bot keys on it (see
+    poll_channel_posts) rather than on a revision number a mixed fleet can
+    legitimately leave NULL.
+
+    adopt_fingerprint IS DERIVED HERE WHEN THE COLUMN IS EMPTY. message_id is
+    NULL for every row delivered before 338 — those ids were never captured —
+    and adopt_fingerprint is the exact text that was sent (content[:2000],
+    because the bot sends content[:2000]), which is how the bot identifies the
+    live message once and records its id from then on. 338's backfill stored
+    it for the rows that predate the column; a row an OLD bot delivered
+    against the OLD api afterwards has neither. For that row the projection
+    supplies LEFT(content, 2000) — but ONLY while revision = 1, because any
+    rewrite bumps revision, so revision = 1 on a delivered row is a PROOF that
+    the stored content is still the text that was sent. A row that was
+    rewritten in the meantime is offered no fingerprint, because nobody can
     reconstruct the superseded text; it stays pending and the bot leaves the
-    old message alone rather than posting a second one (#276).
+    old message alone rather than posting a second one (#276). Nothing is
+    written either way, so the proof is re-derived on every poll rather than
+    frozen into a column by the one caller that could not check it.
 
-    Idempotent: the WHERE clause is false the moment the row has a rendered
-    revision, so the statement is a no-op on every later poll.
-
-    message_id is NULL for every row delivered before 338 — those ids were
-    never captured. adopt_fingerprint carries the exact text that was sent
-    for such a row (content[:2000], because the bot sends content[:2000]),
-    which is how the bot identifies the live message once and records its id
-    from then on."""
+    ONE STATEMENT HANDS OUT AND CLAIMS. The batch is claimed as it is read, in
+    a single CTE: the previous SELECT had no claim, so two pollers could both
+    receive one posted_at-NULL row and both send it, with the ack — which
+    happens after the send — as the only thing between them and two copies.
+    The claim EXPIRES rather than needing release (CHANNEL_POST_CLAIM_SECONDS
+    above), and the DELIVERY ack clears it, so a row that was rendered is
+    available again at once and only an abandoned one waits out a lease. The
+    bind_only ack deliberately does NOT clear it: that row is mid-render, and
+    the claim is precisely what should still be held."""
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
-    if revisions:
-        await db.execute(text(
-            "UPDATE pending_channel_posts "
-            "   SET posted_revision   = 1, "
-            "       adopt_fingerprint = CASE "
-            "           WHEN adopt_fingerprint IS NULL AND revision = 1 "
-            "                AND content NOT LIKE '[MODCASE:%' "
-            "           THEN LEFT(content, 2000) ELSE adopt_fingerprint END "
-            " WHERE posted_at IS NOT NULL AND posted_revision IS NULL"
-        ))
-        await db.commit()
-    # Two fixed literals chosen by a bool — no caller text reaches the SQL.
-    where = ("posted_revision IS DISTINCT FROM revision" if revisions
-             else "posted_at IS NULL")
-    rows = (await db.execute(text(
-        "SELECT id, channel_id, content, revision, posted_revision, posted_at, "
-        "       message_id, adopt_fingerprint "
-        "FROM pending_channel_posts "
-        "WHERE " + where + " ORDER BY sort_order, id LIMIT 20"
-    ))).mappings().all()
+    where = (_CHANNEL_POST_WHERE_UNRENDERED if revisions
+             else _CHANNEL_POST_WHERE_UNPOSTED)
+    rows = (await db.execute(
+        text(_CHANNEL_POST_PENDING_SQL.format(where=where)),
+        {"lease": CHANNEL_POST_CLAIM_SECONDS})).mappings().all()
+    await db.commit()
     return {"posts": [{k: (v.isoformat() if hasattr(v, "isoformat") else v)
                        for k, v in r.items()} for r in rows]}
 
@@ -34501,15 +34585,43 @@ async def ack_channel_post(
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Bind the ack to the revision the bot actually rendered (#175): a
-    correction landing between the bot's fetch and its ack leaves
-    revision > posted_revision, so the row stays pending and the newer text
-    is delivered next tick instead of being marked done.
+    """Record the revision the bot ACTUALLY RENDERED, and nothing else (#175).
 
-    revision and message_id are optional, so a pre-338 bot acks exactly as it
-    always did: COALESCE(:rev, revision) means "whatever is current", which
-    is the old fire-once semantics. posted_at keeps its ORIGINAL stamp — it
-    records when the message first appeared, not when it was last edited.
+    COMPARE-AND-SET, NOT COALESCE. The old statement wrote
+    `posted_revision = COALESCE(:rev, revision)`, so an ack that named no
+    revision recorded whatever the row happened to say at ack time. A
+    correction landing between a pre-338 bot's send and its ack was therefore
+    consumed by that ack: the row read "revision 2 rendered" while Discord
+    still showed revision 1, and the correction was never delivered by anyone.
+    Now the ack's own number is the only one that can be written, it may not
+    exceed the row's revision (nobody renders a future text), and it may not
+    move posted_revision backwards. Everything else is left exactly as found.
+
+    WHEN THE ACK NAMES NO REVISION (a pre-338 bot, which cannot), the server
+    records only what it can PROVE. A rewrite always bumps revision, so a
+    delivered row still at revision 1 has content that is still the text that
+    was sent: posted_revision 1 and adopt_fingerprint are both provable and
+    both written, and the row is resolved. A row already past revision 1
+    cannot be reasoned about at all — the text that was sent is gone — so
+    posted_revision stays NULL and no fingerprint is invented. That row reads
+    as "delivered, revision unknown", stays pending, and the correction waits
+    for a bot that can name what it rendered rather than being recorded as
+    done by one that cannot. The moderation-case exclusion is 338's: that
+    row's stored content opens with a marker the bot strips before sending, so
+    LEFT(content, 2000) is not what was posted for it.
+
+    posted_at keeps its ORIGINAL stamp — it records when the message first
+    appeared, not when it was last edited — and it is stamped on EVERY
+    delivery ack including a stale one, because a delivery that is not
+    recorded is a delivery that gets made twice.
+
+    STALE ANSWER. When the write leaves posted_revision behind the row's
+    revision — the text moved on while the bot was rendering — the response
+    says so and carries the current revision and content, so the caller edits
+    forward and acks again inside the same tick instead of leaving the channel
+    on old text for another one. An ack that named no revision is never
+    reported stale: that caller has no way to act on it, and its delivery is
+    recorded either way.
 
     bind_only=true writes the message id and NOTHING else. It exists because
     editing a message destroys the only other way to find it again: the
@@ -34519,16 +34631,7 @@ async def ack_channel_post(
     the row still pending, with either a fingerprint that still matches or an
     id that does. Advancing posted_revision here would mark the correction
     delivered before it had been rendered, so this arm touches neither it nor
-    posted_at.
-
-    An ack that reports NO message id and is the row's FIRST delivery captures
-    adopt_fingerprint from the text that was just sent. That is the ack a
-    pre-338 bot makes against this build: it records a rendered revision and
-    can never report an id, which would otherwise leave the row permanently
-    un-correctable — a revision with neither an id nor a fingerprint to find
-    the message by. The moderation-case exclusion is 338's: that row's stored
-    content opens with a marker the bot strips before sending, so
-    LEFT(content, 2000) is not what was posted for it."""
+    posted_at."""
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
@@ -34540,19 +34643,31 @@ async def ack_channel_post(
         ), {"pid": post_id, "mid": message_id})
         await db.commit()
         return {"status": "acked", "id": post_id, "revision": None, "bound": True}
-    await db.execute(text(
+    row = (await db.execute(text(
         "UPDATE pending_channel_posts "
         "   SET posted_at       = COALESCE(posted_at, NOW()), "
-        "       posted_revision = COALESCE(CAST(:rev AS INTEGER), revision), "
         "       message_id      = COALESCE(CAST(:mid AS TEXT), message_id), "
+        "       claimed_at      = NULL, "
+        "       posted_revision = CASE "
+        "           WHEN CAST(:rev AS INTEGER) IS NOT NULL "
+        "                AND CAST(:rev AS INTEGER) <= revision "
+        "                AND CAST(:rev AS INTEGER) >= COALESCE(posted_revision, 0) "
+        "           THEN CAST(:rev AS INTEGER) "
+        "           WHEN CAST(:rev AS INTEGER) IS NULL AND revision = 1 "
+        "           THEN 1 "
+        "           ELSE posted_revision END, "
         "       adopt_fingerprint = CASE "
         "           WHEN adopt_fingerprint IS NULL AND CAST(:mid AS TEXT) IS NULL "
-        "                AND posted_at IS NULL AND content NOT LIKE '[MODCASE:%' "
+        "                AND posted_at IS NULL AND revision = 1 "
+        "                AND content NOT LIKE '[MODCASE:%' "
         "           THEN LEFT(content, 2000) ELSE adopt_fingerprint END "
-        " WHERE id = :pid"
-    ), {"pid": post_id, "rev": revision, "mid": message_id})
+        " WHERE id = :pid "
+        "RETURNING revision, posted_revision, content"
+    ), {"pid": post_id, "rev": revision, "mid": message_id})).mappings().first()
     await db.commit()
-    return {"status": "acked", "id": post_id, "revision": revision}
+    if row is None:
+        raise HTTPException(status_code=404, detail="unknown channel post")
+    return _channel_post_ack_reply(post_id, revision, row)
 
 
 @app.get("/api/v1/internal/stream-posts/pending", tags=["Internal"])

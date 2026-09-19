@@ -20,15 +20,20 @@
 -- that 255 had to clean up. That run cannot be made from this seat (#443), so
 -- section 2 below performs 255's two writes: retire the three predecessors,
 -- supersede their pending machine proposals. It carries 255's guard too — it
--- refuses if a translator has APPROVED work on a predecessor (#168) — and is
--- idempotent, because both UPDATEs are predicated on the state they leave.
+-- refuses if a translator has APPROVED work on a predecessor (#168) — and the
+-- count, the refusal and both writes are one locked operation against the
+-- review endpoint rather than a count followed by a write on a second snapshot
+-- (#208; see section 2 for the lock modes and why they conflict). Idempotent,
+-- because both UPDATEs are predicated on the state they leave.
 --
 -- key_id = sha1("client" || chr(0) || source)[:16], source_hash =
 -- sha1(source), sensitive and context from tools/i18n_sync_keys.py — IMPORTED
 -- by the generator, never re-implemented. The three predecessor ids were
--- derived by the same formula from the PARENT commit's tools/i18n_source.json,
--- which is the only place the superseded English sources still exist; they are
--- the ids 251_i18n_keys_info_library.sql registered for these three articles.
+-- derived by the same formula from the PARENT commit's tools/i18n_source.json;
+-- they are the ids 251_i18n_keys_info_library.sql registered for these three
+-- articles, and 251's own dollar-quoted sources are still in the repo, which
+-- is how backend/tests/test_faq_surfaces.py recomputes each id from that text
+-- instead of trusting the three literals below.
 --
 -- Explicit transaction (#340). The conflict arm is the sync endpoint's own
 -- full update, but it carries a WHERE so an unchanged row is not rewritten: a
@@ -249,14 +254,52 @@ ON CONFLICT (key_id) DO UPDATE
     OR i18n_keys.retired_at  IS NOT NULL;
 
 -- ── 2. Retire the three predecessor keys ─────────────────────────────────
--- Their English sources no longer exist in tools/i18n_source.json, so no
--- client can render them and the portal would be offering translators work on
--- text nothing displays. 255_retire_orphan_keys.sql is the shape, including
--- its refusal: a translator's finished (approved) work must never be silently
--- retired by a hygiene pass, so this RAISEs instead.
+-- tools/i18n_source.json no longer extracts their English, so nothing built
+-- from this tree renders them and the portal would be offering translators
+-- work on text no current client displays. (A player still running an older
+-- DLL keeps rendering that DLL's own bundled strings — the portal was never
+-- what fed them, so retiring the key changes nothing for that player.)
+-- 255_retire_orphan_keys.sql is the shape, including its refusal: a
+-- translator's finished (approved) work must never be silently retired by a
+-- hygiene pass, so this RAISEs instead.
+--
+-- THE COUNT AND THE RETIREMENT ARE ONE LOCKED OPERATION (#208). Counting
+-- approved entries and then retiring on the strength of that count is two
+-- snapshots: /i18n/review/{id} can approve a proposal in between, and the
+-- migration would then retire work a translator had just finished, exactly
+-- what the refusal exists to prevent. That endpoint reads the proposal's
+-- key_id UNLOCKED first (it is all the request carries — #197's
+-- discover-then-lock), and the FIRST LOCK it then takes is
+-- `SELECT 1 FROM i18n_keys WHERE key_id = :k FOR NO KEY UPDATE`, before it
+-- touches the proposal or any entry. So taking the same mode on the same
+-- three key rows, in key order, serializes this file against it:
+-- FOR NO KEY UPDATE self-conflicts, and it is the weakest mode that also
+-- conflicts with this file's own later non-key UPDATE of retired_at, so it
+-- adds no conflict with the FOR KEY SHARE that every i18n_entries insert
+-- takes on these rows for its foreign key (#202). A review that got there
+-- first commits before we see anything, and the re-read below then finds its
+-- row; one that arrives after we hold the lock waits, and when it proceeds
+-- its own authoritative re-read requires `retired_at IS NULL` and answers
+-- 409 "key retired since proposal" instead of approving into a retired key.
 DO $$
 DECLARE v_approved INTEGER;
 BEGIN
+    PERFORM 1 FROM i18n_keys
+     WHERE key_id IN ('c4facebcda2e750a','c14135018e41f6f6','c84c43c265080ec2')
+     ORDER BY key_id
+       FOR NO KEY UPDATE;
+    -- Belt and braces, not the load-bearing lock. The only writer that makes
+    -- an entry 'approved' today is /i18n/review, and the key lock above
+    -- already serializes it. This second lock covers the class rather than
+    -- that one caller (#432): a future writer that flips an entry's state
+    -- WITHOUT taking the key row first would otherwise move the predicate
+    -- under us. Deterministic order, and taken before the count is read.
+    PERFORM 1 FROM i18n_entries
+     WHERE key_id IN ('c4facebcda2e750a','c14135018e41f6f6','c84c43c265080ec2')
+     ORDER BY key_id, language_code
+       FOR NO KEY UPDATE;
+    -- Authoritative re-read UNDER the locks. Anything committed before we got
+    -- here is visible now, and nothing can move it until this file commits.
     SELECT COUNT(*) INTO v_approved
       FROM i18n_entries e
      WHERE e.key_id IN ('c4facebcda2e750a','c14135018e41f6f6','c84c43c265080ec2')
@@ -264,17 +307,17 @@ BEGIN
     IF v_approved <> 0 THEN
         RAISE EXCEPTION 'migration 340: % approved entr(ies) exist on the item-11 predecessor keys - refusing to retire translator-approved work; investigate first', v_approved;
     END IF;
+
+    UPDATE i18n_keys
+       SET retired_at = NOW(), updated_at = NOW()
+     WHERE key_id IN ('c4facebcda2e750a','c14135018e41f6f6','c84c43c265080ec2')
+       AND retired_at IS NULL;
+
+    UPDATE i18n_proposals
+       SET status = 'superseded'
+     WHERE key_id IN ('c4facebcda2e750a','c14135018e41f6f6','c84c43c265080ec2')
+       AND status = 'pending';
 END $$;
-
-UPDATE i18n_keys
-   SET retired_at = NOW(), updated_at = NOW()
- WHERE key_id IN ('c4facebcda2e750a','c14135018e41f6f6','c84c43c265080ec2')
-   AND retired_at IS NULL;
-
-UPDATE i18n_proposals
-   SET status = 'superseded'
- WHERE key_id IN ('c4facebcda2e750a','c14135018e41f6f6','c84c43c265080ec2')
-   AND status = 'pending';
 
 -- ── 3. Post-check ────────────────────────────────────────────────────────
 -- Enforcing: every successor live with the expected source_hash and context,
@@ -285,6 +328,7 @@ DECLARE
     v_ok INT;
     v_old_live INT;
     v_old_pending INT;
+    v_old_approved INT;
 BEGIN
     SELECT COUNT(*) INTO v_ok
       FROM i18n_keys k
@@ -308,6 +352,21 @@ BEGIN
        AND status = 'pending';
     IF v_old_live <> 0 OR v_old_pending <> 0 THEN
         RAISE EXCEPTION 'post-check FAILED: % predecessor key(s) still live, % proposal(s) still pending on them', v_old_live, v_old_pending;
+    END IF;
+
+    -- FAIL CLOSED on the refusal itself. Section 2 reads the approved count
+    -- under the key and entry locks and this re-reads it after the writes, so
+    -- the file cannot commit a retirement of translator-approved work under
+    -- ANY interleaving: if the lock discipline above were ever weakened or
+    -- removed, an approval that slipped in is caught here and the whole
+    -- transaction rolls back, rather than the count being the only thing
+    -- standing between a review and a silent retirement. A post-check that
+    -- only looks at what the migration itself wrote cannot fail (#342).
+    SELECT COUNT(*) INTO v_old_approved FROM i18n_entries
+     WHERE key_id IN ('c4facebcda2e750a','c14135018e41f6f6','c84c43c265080ec2')
+       AND state = 'approved';
+    IF v_old_approved <> 0 THEN
+        RAISE EXCEPTION 'post-check FAILED: % approved entr(ies) on the retired predecessor keys - a review landed during this migration; nothing committed', v_old_approved;
     END IF;
     RAISE NOTICE 'post-check OK: % item-11 client keys live, 3 predecessors retired', v_ok;
 END $$;

@@ -1390,7 +1390,7 @@
           ],
           "main",
           "artist_submit_cosmetic",
-          "46f4f207a1ea803815184e721e5e9bff3e0163a7"
+          "442a089b5f206a1407ed6669e7bef6fe9ba3cb9b"
         ],
         [
           "/api/v1/artist/submit-cosmetic-finalize",
@@ -1912,7 +1912,7 @@
           ],
           "main",
           "ack_channel_post",
-          "9e79cef8837ad343aab30938d26d27e99645c5d0"
+          "c59193ce17160a03391b41e6bd5691a7d8d2dd8a"
         ],
         [
           "/api/v1/internal/channel-posts/pending",
@@ -1921,7 +1921,7 @@
           ],
           "main",
           "pending_channel_posts",
-          "8b5221614b35557481a9b08b8721b7f5a76a9eb2"
+          "f442e9b19e56a6ce108c0dc1306f69748dbd4f0d"
         ],
         [
           "/api/v1/internal/chat/bridge",
