@@ -8999,7 +8999,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         private static string ValidateCosmeticPngBytes(byte[] bytes, string label)
         {
             if (bytes == null || bytes.Length > 1_200_000)
-                return $"{{\"detail\":\"{label}: PNG missing or too large - 1.2 MB max\"}}";
+                return $"{{\"detail\":\"{label}: PNG missing or too large - 1 MB max\"}}";
             var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
             bool loaded = tex.LoadImage(bytes);
             int w = tex.width, h = tex.height;

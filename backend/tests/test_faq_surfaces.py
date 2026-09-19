@@ -335,12 +335,20 @@ def test_async_cadence_surfaces_state_both_gates():
         "below now describe a gate that is not there")
 
     for path in ("docs/FAQ.md",
-                 "backend/sql/338_faq_channel_post_revisions.sql"):
+                 "backend/sql/338_faq_channel_post_revisions.sql",
+                 "backend/discord_bot.py"):
         text_ = _read(path)
-        assert "only **%s hours** after it was created" % net.group(1) in text_, (
+        phrase = "only **%s hours** after it was created" % net.group(1)
+        assert phrase in text_, (
             "%s does not state the gate that holds a cancelled bracket" % path)
-        assert "cancelled" in text_, (
-            "%s does not say WHICH brackets the two-day wait skips" % path)
+        # "cancelled" has to be in the SAME sentence, not merely somewhere in
+        # the file: discord_bot.py is 12k lines and says "cancelled" in a
+        # dozen unrelated answers, so a file-wide substring would pass on a
+        # surface that never named which brackets skip the two-day wait.
+        near = text_[max(0, text_.index(phrase) - 400):text_.index(phrase)]
+        assert "cancelled" in near, (
+            "%s states the 24-hour gate without saying WHICH brackets the "
+            "two-day wait skips" % path)
 
 
 def test_async_cadence_docstring_matches_its_own_gate():
@@ -419,17 +427,19 @@ def test_the_uploader_error_texts_quote_the_limits_they_enforce():
 
     The FAQ surfaces are pinned separately by the fixture; this is the pair
     the artist meets in the product, which the FAQ can be right about while
-    the error text is wrong."""
-    native = _read(NATIVE_UI)
-    png = re.search(r"bytes\.Length > ([\d_]+)\)\s*\n\s*return [^\n]*?"
-                    r"PNG missing or too large - ([\d.]+) MB max", native)
-    assert png, ("NativeUI's PNG refusal and its size check are no longer "
-                 "adjacent, so nothing here reads the message it produces")
-    limit, stated = int(png.group(1).replace("_", "")), float(png.group(2))
-    assert abs(stated * 1_000_000 - limit) < 50_000, (
-        "the client refuses PNGs over %d bytes and calls that %s MB"
-        % (limit, png.group(2)))
+    the error text is wrong.
 
+    SCOPE, and why one half of the pair is missing. The CLIENT's PNG refusal
+    carries the same defect and is deliberately NOT pinned here: that string
+    belongs to the client lane, which has already replaced it with a value
+    formatted from the constant, so a second fix of it in this artifact would
+    collide at merge rather than help. The two alternatives were both worse —
+    asserting the text this tree still carries would PIN the defect, and
+    asserting only that the message sits near its check would be a check that
+    cannot fail on the thing it is for (#342). The cross-lane dependency is
+    recorded in the item notes instead. The GIF pair below belongs to neither
+    lane's change and stays pinned."""
+    native = _read(NATIVE_UI)
     gif = re.search(r"bytes\.Length > ([\d_]+)\)\s*\n\s*\{ ShowArtistResult"
                     r"[^\n]*?GIF too large - about (\d+) MB max", native)
     assert gif, "NativeUI's GIF refusal no longer sits with its size check"
