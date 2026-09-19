@@ -1053,3 +1053,470 @@ def test_ovt_is_excluded_while_it_reports_unrated():
         "ladder and move it from EXCLUDED_SITES to COMPLETION_SITES (or "
         "record why it stays out). This is a design call, not a test fix."
         % written)
+
+
+# ── The release migration, EXECUTED ────────────────────────────────
+#
+# 342 flips catalog_ready on the eight tier-1 rungs. Reading it proves
+# nothing: the statement it runs fires a BEFORE UPDATE trigger that neither
+# the migration text nor the ORM mentions (#714), and its idempotence is a
+# property of that trigger's guard rather than of the SQL. So it is RUN, both
+# halves, against a live throwaway Postgres (#313/#340) -- 331 first, then 342
+# twice.
+#
+#   TITLE_LADDER_TEST_PG_DSN=postgresql://postgres@127.0.0.1:55432/laddertest
+#       python -m pytest backend/tests/test_title_ladders.py
+#
+# Without the variable these skip and the rest of the module still runs.
+
+import urllib.parse as _urlparse   # noqa: E402
+
+RELEASE_MIGRATION = os.path.join(SQL_DIR, "342_release_title_ladder_entry_rungs.sql")
+DSN_VAR = "TITLE_LADDER_TEST_PG_DSN"
+DSN = os.environ.get(DSN_VAR)
+
+# Pinned from OUT here, like the relay suite's: a live test that quietly stops
+# collecting reads as a clean run, and the count is what makes that visible.
+LIVE_TESTS = 5
+
+if os.environ.get("TITLE_LADDER_TESTS_REQUIRED") == "1" and not DSN:
+    raise RuntimeError(
+        "TITLE_LADDER_TESTS_REQUIRED=1 but %s is unset -- refusing to report a "
+        "green run for tests that would not collect. Check the variable NAME."
+        % DSN_VAR)
+
+
+def _refuse_unless_throwaway(dsn):
+    """`_fresh` DROPs shop_items, players and the three ladder tables. One
+    environment variable stands between this module and a real database, so
+    the DSN has to name itself disposable before anything here runs (#721).
+    Loopback only -- "is not one of the production names I thought of" is not
+    the same claim as "is a throwaway"."""
+    parsed = _urlparse.urlsplit(dsn)
+    try:
+        host = (parsed.hostname or "").lower()
+    except ValueError:                       # malformed authority
+        host = "?"
+    if host not in ("", "localhost", "127.0.0.1", "::1"):
+        raise RuntimeError(
+            "%s points at host %r. These tests DROP core tables and run "
+            "against a database on this machine only." % (DSN_VAR, host))
+    tail = (parsed.path or "").lstrip("/").split("?")[0].strip().lower()
+    if not tail:
+        tail = dsn.rsplit("/", 1)[-1].split("?")[0].strip().lower()
+    if not (tail.startswith("laddertest") or tail.startswith("scratch")
+            or tail.startswith("test")):
+        raise RuntimeError(
+            "%s names database %r. These tests DROP core tables, so they run "
+            "only against a database named laddertest*/scratch*/test*."
+            % (DSN_VAR, tail))
+    low = dsn.lower()
+    for marker in ("192.168.", "duckdns", "competitive-rounds", "scr-a", "scr-b"):
+        if marker in low:
+            raise RuntimeError(
+                "%s contains %r, which names a real host. These tests DROP "
+                "core tables and run against a local throwaway only."
+                % (DSN_VAR, marker))
+
+
+if DSN:
+    _refuse_unless_throwaway(DSN)
+
+needs_pg = pytest.mark.skipif(
+    not DSN, reason="%s unset; live release-migration check" % DSN_VAR)
+
+# The minimum real schema 331 and 342 touch, taken from the migrations that
+# own each piece rather than from the ORM -- models.py declares neither the
+# trigger nor catalog_ready's default, and a schema rebuilt from it would be a
+# test of a database that exists nowhere (#714).
+#
+#   021_shop.sql               shop_items, player_items
+#   131_shop_released_at.sql   released_at
+#   147_*                      catalog_ready BOOLEAN NOT NULL DEFAULT TRUE
+#   148_*                      stamp_shop_item_catalog_release + its trigger
+FIXTURE_DDL = """
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+CREATE TABLE players (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    steam_id    VARCHAR(32) UNIQUE NOT NULL
+);
+CREATE TABLE shop_items (
+    id              BIGSERIAL PRIMARY KEY,
+    sku             VARCHAR(64) UNIQUE NOT NULL,
+    kind            VARCHAR(16) NOT NULL,
+    name            VARCHAR(128) NOT NULL,
+    description     VARCHAR(256),
+    price           INTEGER NOT NULL CHECK (price >= 0),
+    rarity          VARCHAR(16) NOT NULL DEFAULT 'common',
+    rotation_pool   VARCHAR(32),
+    preview_color   VARCHAR(16),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    released_at     TIMESTAMPTZ,
+    catalog_ready   BOOLEAN NOT NULL DEFAULT TRUE
+);
+CREATE TABLE player_items (
+    player_id      UUID NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+    item_id        BIGINT NOT NULL REFERENCES shop_items(id) ON DELETE CASCADE,
+    purchased_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    purchase_price INTEGER NOT NULL,
+    PRIMARY KEY (player_id, item_id)
+);
+CREATE TABLE cosmetic_submissions (
+    shop_sku                      VARCHAR(64),
+    status                        VARCHAR(16),
+    approved_placement_revision   INTEGER,
+    published_placement_revision  INTEGER NOT NULL DEFAULT 0
+);
+CREATE OR REPLACE FUNCTION stamp_shop_item_catalog_release()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $fn$
+DECLARE
+    approved_rev INTEGER;
+BEGIN
+    IF NEW.catalog_ready AND NOT OLD.catalog_ready THEN
+        IF EXISTS (SELECT 1 FROM cosmetic_submissions cs WHERE cs.shop_sku = NEW.sku) THEN
+            SELECT cs.approved_placement_revision INTO approved_rev
+              FROM cosmetic_submissions cs
+             WHERE cs.shop_sku = NEW.sku
+               AND cs.status = 'approved'
+               AND cs.approved_placement_revision IS NOT NULL
+             ORDER BY cs.approved_placement_revision DESC LIMIT 1;
+            IF approved_rev IS NULL THEN
+                RAISE EXCEPTION
+                    'catalog_ready requires an admin-approved cosmetic placement revision for %', NEW.sku;
+            END IF;
+            UPDATE cosmetic_submissions
+               SET published_placement_revision = approved_rev
+             WHERE shop_sku = NEW.sku AND status = 'approved'
+               AND approved_placement_revision = approved_rev
+               AND published_placement_revision < approved_rev;
+        END IF;
+        IF NEW.released_at IS NULL THEN
+            NEW.released_at = NOW();
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$fn$;
+DROP TRIGGER IF EXISTS trg_shop_item_catalog_release ON shop_items;
+CREATE TRIGGER trg_shop_item_catalog_release
+    BEFORE UPDATE OF catalog_ready ON shop_items
+    FOR EACH ROW EXECUTE FUNCTION stamp_shop_item_catalog_release();
+"""
+
+DROP_ALL = """
+DROP TABLE IF EXISTS title_ladder_credits, title_ladder_progress, title_ladders,
+                     player_items, shop_items, cosmetic_submissions, players CASCADE;
+DROP FUNCTION IF EXISTS stamp_shop_item_catalog_release() CASCADE;
+"""
+
+LADDER_SKU_PREFIX = "title_ladder_"
+
+
+def _run_pg(coro):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+async def _connect():
+    import asyncpg
+    # The DSN is written in SQLAlchemy's spelling elsewhere in this suite;
+    # asyncpg does not know that prefix.
+    return await asyncpg.connect(DSN.replace("postgresql+asyncpg://", "postgresql://"))
+
+
+async def _fresh(conn, apply_release=True):
+    """A clean schema, then 331, then (by default) 342."""
+    await conn.execute(DROP_ALL)
+    await conn.execute(FIXTURE_DDL)
+    await conn.execute(_read(MIGRATION))
+    if apply_release:
+        await conn.execute(_read(RELEASE_MIGRATION))
+
+
+async def _ready_entry_skus(conn):
+    rows = await conn.fetch(
+        "SELECT tl.sku FROM title_ladders tl JOIN shop_items si ON si.sku = tl.sku "
+        " WHERE tl.tier = 1 AND si.catalog_ready IS TRUE ORDER BY tl.sku")
+    return [r["sku"] for r in rows]
+
+
+@needs_pg
+def test_331_alone_leaves_every_entry_rung_off_sale():
+    """The precondition 342 exists to change, measured rather than assumed.
+    If this ever comes back non-empty, 342 is not the thing putting the rungs
+    on sale and its post-check would be passing on someone else's work."""
+    async def go():
+        conn = await _connect()
+        try:
+            await _fresh(conn, apply_release=False)
+            assert await _ready_entry_skus(conn) == []
+            # ...and the granted-only rungs are ALREADY ready. What hides them
+            # is the pool, not this flag -- a 342 post-check written against
+            # their readiness would assert something that was never true.
+            hidden_ready = await conn.fetchval(
+                "SELECT COUNT(*) FROM title_ladders tl JOIN shop_items si ON si.sku = tl.sku "
+                " WHERE tl.tier > 1 AND si.catalog_ready IS TRUE")
+            assert hidden_ready == 40, hidden_ready
+        finally:
+            await conn.close()
+    _run_pg(go())
+
+
+@needs_pg
+def test_342_puts_exactly_the_eight_entry_rungs_on_sale():
+    async def go():
+        conn = await _connect()
+        try:
+            await _fresh(conn)
+            ready = await _ready_entry_skus(conn)
+            entry = sorted(tl.ENTRY_SKUS)
+            # Compared by SKU, not by count: "8 rows are ready" is also true
+            # of any other 8.
+            assert ready == entry
+            assert len(entry) == 8
+            # One line each -- a WHERE that widened or narrowed shows up here
+            # as a line with two entry rungs, or with none.
+            assert sorted(tl.SKU_TO_RUNG[s]["line"] for s in ready) == \
+                sorted(ld["line"] for ld in tl.LADDERS)
+            # The other 40 stay granted-only, which is the pool and the price.
+            leaked = await conn.fetchval(
+                "SELECT COUNT(*) FROM title_ladders tl JOIN shop_items si ON si.sku = tl.sku "
+                " WHERE tl.tier > 1 AND (si.rotation_pool IS DISTINCT FROM 'achievement' "
+                "                        OR si.price <> 0)")
+            assert leaked == 0, leaked
+            priced = await conn.fetchval(
+                "SELECT COUNT(*) FROM title_ladders tl JOIN shop_items si ON si.sku = tl.sku "
+                " WHERE tl.tier = 1 AND si.price <> 1000")
+            assert priced == 0, priced
+        finally:
+            await conn.close()
+    _run_pg(go())
+
+
+@needs_pg
+def test_342_stamps_released_at_through_the_trigger():
+    """Nothing in 342 writes released_at; the trigger from 148 does, and only
+    on a FALSE->TRUE transition. A missing stamp means the trigger is gone,
+    and this release left no record of having happened."""
+    async def go():
+        conn = await _connect()
+        try:
+            await _fresh(conn)
+            unstamped = await conn.fetchval(
+                "SELECT COUNT(*) FROM title_ladders tl JOIN shop_items si ON si.sku = tl.sku "
+                " WHERE tl.tier = 1 AND si.released_at IS NULL")
+            assert unstamped == 0
+        finally:
+            await conn.close()
+    _run_pg(go())
+
+
+@needs_pg
+def test_342_applied_twice_changes_nothing():
+    """Idempotence as the operator will meet it: apply, snapshot every column
+    the file can reach, apply again, compare. released_at is the one that
+    would move silently."""
+    async def go():
+        conn = await _connect()
+        try:
+            await _fresh(conn)
+            snap = ("SELECT sku, catalog_ready, released_at, price, rotation_pool "
+                    "  FROM shop_items WHERE sku LIKE $1 ORDER BY sku")
+            pattern = LADDER_SKU_PREFIX + "%"
+            before = [tuple(r) for r in await conn.fetch(snap, pattern)]
+            assert len(before) == 48
+            await conn.execute(_read(RELEASE_MIGRATION))
+            after = [tuple(r) for r in await conn.fetch(snap, pattern)]
+            assert after == before, "a second application of 342 moved a row"
+        finally:
+            await conn.close()
+    _run_pg(go())
+
+
+@needs_pg
+def test_342_refuses_a_catalogue_that_is_not_all_there():
+    """The guard, exercised. A partial 331 must abort the release rather than
+    put whichever rungs happen to exist on sale -- at which point "exactly 8
+    are ready" would be satisfied by a different 8."""
+    import asyncpg
+
+    async def go():
+        conn = await _connect()
+        try:
+            await _fresh(conn, apply_release=False)
+            await conn.execute(
+                "DELETE FROM title_ladders WHERE sku = 'title_ladder_shark_6'")
+            with pytest.raises(asyncpg.exceptions.RaiseError) as exc:
+                await conn.execute(_read(RELEASE_MIGRATION))
+            assert "47" in str(exc.value), str(exc.value)
+            # The file's own BEGIN is still open and aborted -- its COMMIT
+            # was never reached. That is the correct outcome and it is also
+            # why the connection needs winding back before it can be read:
+            # the ROLLBACK here is the test's housekeeping, and it is ALSO
+            # what proves the abort was a real transaction abort rather than
+            # a RAISE the migration somehow recovered from.
+            await conn.execute("ROLLBACK")
+            # ...and nothing was flipped.
+            assert await _ready_entry_skus(conn) == []
+        finally:
+            await conn.close()
+    _run_pg(go())
+
+
+def test_the_release_migration_is_pure_crlf():
+    """342 is tracked .sql in a CRLF repo, and the parametrized gate above
+    was written before it existed. Same check, same reason (#675/#592): a
+    text-mode rewrite converts the whole file and shows up as a diff of every
+    line."""
+    raw = open(RELEASE_MIGRATION, "rb").read()
+    crlf, cr, lf = raw.count(b"\r\n"), raw.count(b"\r"), raw.count(b"\n")
+    assert cr == crlf == lf, "342: CRLF=%d CR=%d LF=%d" % (crlf, cr, lf)
+
+
+def test_the_live_migration_tests_are_all_still_gated():
+    """The count is pinned so that a live test quietly ceasing to collect --
+    renamed, deleted, or moved out from behind the gate -- is a failure rather
+    than a slightly shorter green run."""
+    src = _read(os.path.join(HERE, "test_title_ladders.py"))
+    # DECORATOR LINES, not occurrences of the string. This function's own
+    # source names the decorator twice -- in the count call and in the failure
+    # message -- so a plain `.count()` measures itself as well as the tests
+    # and answered 7 for 5. A check that counts the wrong thing is the same
+    # defect as a filter that discards the line it is measuring (#441).
+    found = sum(1 for ln in src.split("\n") if ln.strip() == "@" + "needs_pg")
+    assert found == LIVE_TESTS, (
+        "expected %d gated tests, found %d -- update LIVE_TESTS "
+        "deliberately" % (LIVE_TESTS, found))
+
+import json   # noqa: E402  (the i18n registry read below)
+
+
+# ── The client's own strings ───────────────────────────────────────
+#
+# The artifact that RENDERS a translation is the DLL-bundled catalogue,
+# `plugin/I18nCatalogues.cs` -- never a SQL seed (#583). A key with no entry
+# there renders English with every other gate green (#578), so the Titles tab
+# would ship looking translated in a menu that is otherwise not.
+#
+# The keys are re-derived from the UI source rather than listed by hand: a
+# hand-list is a second copy of the truth and goes stale silently, which is
+# precisely how a new string ships untranslated. The comparison is EXACT-KEY
+# (#680) -- `"Not started"` is a strict prefix of `"Not started."` and of
+# `"Not started - buy {0} in the Shop to begin this line."`, so an unanchored
+# test would score the short one as covered by its neighbours.
+
+LADDER_UI = os.path.abspath(os.path.join(HERE, "..", "..", "plugin", "TitleLaddersUI.cs"))
+LOCALES = ("es", "ru", "uk", "sv")
+
+# I18n.Tr("...") / I18n.TrF("...", ...) with a plain (non-verbatim,
+# non-interpolated) literal as the first argument. That is the only form this
+# file uses, and a form it does not use is a form this test cannot vouch for.
+_TR_SITE = re.compile(r'I18n\.Trf?\(\s*"((?:[^"\\]|\\.)*)"', re.IGNORECASE)
+
+
+def _cs_unescape(s):
+    return (s.replace('\\"', '"').replace("\\n", "\n")
+             .replace("\\r", "\r").replace("\\t", "\t").replace("\\\\", "\\"))
+
+
+def ladder_ui_keys():
+    src = _read(LADDER_UI)
+    return sorted({_cs_unescape(m.group(1)) for m in _TR_SITE.finditer(src)})
+
+
+def test_the_ladder_screen_has_translation_sites_at_all():
+    """The negative control for everything below (#391). If the regex stops
+    matching -- a refactor to a helper, a verbatim literal -- every coverage
+    assertion below passes over an EMPTY set and reports a fully translated
+    screen that has no strings in it."""
+    keys = ladder_ui_keys()
+    assert len(keys) >= 20, (
+        "found only %d I18n.Tr sites in TitleLaddersUI.cs. Either the screen "
+        "lost its text or this test can no longer see it -- in both cases the "
+        "coverage checks below are vacuous." % len(keys))
+    assert "Title Ladders" in keys
+
+
+def test_every_ladder_string_is_in_the_extracted_registry():
+    """The generated registry is what the translation pipeline works from, and
+    it is produced by a tool with a FIXED file list: a new plugin file's keys
+    are unharvestable until it is named in it (#357). This is that gate, from
+    the consuming end."""
+    with io.open(os.path.join(HERE, "..", "..", "tools", "i18n_source.json"),
+                 encoding="utf-8") as fh:
+        registry = set(json.load(fh)["strings"])
+    missing = [k for k in ladder_ui_keys() if k not in registry]
+    assert not missing, (
+        "%d ladder string(s) are not in tools/i18n_source.json -- is "
+        "TitleLaddersUI.cs listed in FILES in tools/i18n_extract.py? %r"
+        % (len(missing), missing[:3]))
+
+
+@pytest.mark.parametrize("lang", LOCALES)
+def test_every_ladder_string_is_translated_in_every_locale(lang):
+    from test_pc_sept12 import _bundled_catalogues
+    catalogue = _bundled_catalogues()
+    assert lang in catalogue, "no %s dictionary in I18nCatalogues.cs" % lang
+    bad = []
+    for key in ladder_ui_keys():
+        if key not in catalogue[lang]:
+            bad.append(("missing", key))
+            continue
+        value = catalogue[lang][key]
+        if not value.strip():
+            bad.append(("empty", key))
+        elif value == key:
+            # An entry echoing the English is not a translation. This is the
+            # assertion the "set one value to the English string" control
+            # fires.
+            bad.append(("english", key))
+    assert not bad, "%s: %r" % (lang, bad[:4])
+
+
+@pytest.mark.parametrize("lang", LOCALES)
+def test_no_ladder_translation_drops_a_placeholder(lang):
+    """`TrF` runs string.Format over the TRANSLATED template. A translation
+    that loses {1} silently drops the number it was carrying; one that gains a
+    {3} throws FormatException, which TrF catches by returning the untranslated
+    template -- so both failures are invisible at runtime and visible only
+    here."""
+    from test_pc_sept12 import _bundled_catalogues
+    catalogue = _bundled_catalogues()
+    ph = re.compile(r"\{\d+\}")
+    drift = []
+    for key in ladder_ui_keys():
+        value = catalogue[lang].get(key)
+        if value is None:
+            continue
+        if sorted(ph.findall(key)) != sorted(ph.findall(value)):
+            drift.append((key, sorted(ph.findall(value))))
+    assert not drift, "%s: %r" % (lang, drift[:4])
+
+
+def test_the_exact_key_lookup_is_really_exact():
+    """#680's short-key control. "Not started" is a strict prefix of two other
+    ladder keys, so if the lookups above ever become substring tests it would
+    score as covered without an entry of its own."""
+    keys = ladder_ui_keys()
+    short = "Not started"
+    longer = [k for k in keys if k != short and k.startswith(short)]
+    assert longer, "no longer key starts with %r -- pick a different control" % short
+    from test_pc_sept12 import _bundled_catalogues
+    catalogue = _bundled_catalogues()
+    for lang in LOCALES:
+        assert short in catalogue[lang], "%s: exact-key lookup lost %r" % (lang, short)
+        for other in longer:
+            assert catalogue[lang][short] != catalogue[lang][other], (
+                "%s: %r and %r translate identically, so the short key's "
+                "coverage cannot be told from the long one's" % (lang, short, other))
+
+
+def test_the_ladder_ui_is_pure_crlf():
+    raw = open(LADDER_UI, "rb").read()
+    crlf, cr, lf = raw.count(b"\r\n"), raw.count(b"\r"), raw.count(b"\n")
+    assert cr == crlf == lf, "TitleLaddersUI.cs: CRLF=%d CR=%d LF=%d" % (crlf, cr, lf)
