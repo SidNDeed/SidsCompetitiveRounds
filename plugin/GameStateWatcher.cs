@@ -4118,8 +4118,8 @@ namespace CompetitiveRounds
                 {
                     var myProps = PhotonNetwork.LocalPlayer?.CustomProperties;
                     if (p.CustomProperties != null && myProps != null
-                        && p.CustomProperties.ContainsKey("t_id") && myProps.ContainsKey("t_id"))
-                        isTeammate = p.CustomProperties["t_id"]?.ToString() == myProps["t_id"]?.ToString();
+                        && p.CustomProperties.ContainsKey(Player.VAR_TEAMID) && myProps.ContainsKey(Player.VAR_TEAMID))
+                        isTeammate = p.CustomProperties[Player.VAR_TEAMID]?.ToString() == myProps[Player.VAR_TEAMID]?.ToString();
                 }
                 catch { }
 
@@ -4155,8 +4155,8 @@ namespace CompetitiveRounds
                             if (p.CustomProperties != null && p.CustomProperties.ContainsKey("u_id"))
                                 luSid = p.CustomProperties["u_id"]?.ToString();
                             int luTeam = -1;
-                            if (p.CustomProperties != null && p.CustomProperties.ContainsKey("t_id"))
-                                int.TryParse(p.CustomProperties["t_id"]?.ToString(), out luTeam);
+                            if (p.CustomProperties != null && p.CustomProperties.ContainsKey(Player.VAR_TEAMID))
+                                int.TryParse(p.CustomProperties[Player.VAR_TEAMID]?.ToString(), out luTeam);
                             if (!string.IsNullOrEmpty(luSid) && luTeam >= 0)
                                 FfaMode.RecordLeaver(luSid, name, luTeam);
                         }
@@ -4471,9 +4471,9 @@ namespace CompetitiveRounds
             try
             {
                 var localProps = PhotonNetwork.LocalPlayer?.CustomProperties;
-                if (localProps != null && localProps.ContainsKey("t_id"))
+                if (localProps != null && localProps.ContainsKey(Player.VAR_TEAMID))
                 {
-                    localTeamId = System.Convert.ToInt32(localProps["t_id"]);
+                    localTeamId = System.Convert.ToInt32(localProps[Player.VAR_TEAMID]);
                     Plugin.Log.LogInfo($"[POLL] Local team: {localTeamId} (from Photon t_id)");
                     CardChoiceEndPickPatch.FlushPendingPicks(localTeamId);
                     return;
@@ -4492,27 +4492,73 @@ namespace CompetitiveRounds
                     var pv = playerObj.GetComponent<PhotonView>();
                     if (pv != null && pv.IsMine)
                     {
-                        var charData = playerObj.GetComponent<CharacterData>();
-                        if (charData != null)
+                        // Player.TeamID -- NOT CharacterData.teamID. CharacterData
+                        // carries no such field, so the reflection below returned
+                        // null and this branch has never once fired on any seat:
+                        // every client has silently been taking the index fallback.
+                        // That is the same mistake that took the whole 2v2 report
+                        // path down in v1.25.11 (see the comment above the report
+                        // builder, which fixed it there by reading Player.TeamID);
+                        // this site was missed by that sweep.
+                        //
+                        // Index is NOT a safe stand-in for the team id. It happens
+                        // to agree in 1v1, where the list holds two entries in team
+                        // order, and it is exactly the assumption the rejoin work
+                        // makes load-bearing at four new points -- a readmitted
+                        // player's position in pm.players is not their team.
+                        // Reaching here is itself a fact about assignment, not
+                        // an accident of ordering. Vanilla (decompiled Player.cs
+                        // :177) sets m_teamID and THEN publishes the key -- but
+                        // only when it is online:
+                        //
+                        //   public void AssignTeamID(int ID) {
+                        //       m_teamID = ID;
+                        //       if (!PhotonNetwork.OfflineMode) {
+                        //           customProperties[VAR_TEAMID] = m_teamID;
+                        //           ...SetCustomProperties(customProperties); } }
+                        //
+                        // and Player.VAR_TEAMID is "t_id" -- the same key the arm
+                        // at the top of this method reads, and the same one our
+                        // pre-join writes seed ahead of vanilla. So the cases
+                        // split cleanly, with no inference required:
+                        //
+                        //  * ONLINE -- an assigned seat ALWAYS carries t_id, so
+                        //    the arm above has already returned. Getting here
+                        //    means this seat is not assigned, m_teamID is still
+                        //    its default, and reading TeamID would report team 0
+                        //    authoritatively for a player who has no team yet.
+                        //  * OFFLINE -- nothing ever publishes t_id, so that arm
+                        //    can never fire and TeamID is the ONLY valid source.
+                        //
+                        // This replaced a `TeamID >= 0` guard that could never be
+                        // false: m_teamID is a plain private int with no
+                        // [SerializeField] and no initializer, and Player's .ctor
+                        // never stores to it (18 IL bytes, one stfld, not this
+                        // field), so its pre-assignment value is 0 -- and 0 is a
+                        // real team. A check that cannot fail is worse than no
+                        // check (#342/#431/#441).
+                        if (PhotonNetwork.OfflineMode)
                         {
-                            var field = typeof(CharacterData).GetField("teamID",
-                                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                            if (field != null)
-                            {
-                                localTeamId = (int)field.GetValue(charData);
-                                Plugin.Log.LogInfo($"[POLL] Local team: {localTeamId} (from CharacterData)");
-                                CardChoiceEndPickPatch.FlushPendingPicks(localTeamId);
-                                return;
-                            }
+                            localTeamId = playerObj.TeamID;
+                            Plugin.Log.LogInfo($"[POLL] Local team: {localTeamId} (from Player.TeamID)");
+                            CardChoiceEndPickPatch.FlushPendingPicks(localTeamId);
+                            return;
                         }
 
+                        // Online and past the t_id arm: this seat has not been
+                        // assigned, so there is no team to read. Index is a
+                        // guess and says so -- but it at least differs per
+                        // seat, where TeamID would hand every unassigned
+                        // player team 0.
                         for (int i = 0; i < pm.players.Count; i++)
                         {
                             var ipv = pm.players[i]?.GetComponent<PhotonView>();
                             if (ipv != null && ipv.IsMine)
                             {
                                 localTeamId = i;
-                                Plugin.Log.LogInfo($"[POLL] Local team: {localTeamId} (from index)");
+                                Plugin.Log.LogWarning($"[POLL] Local team: {localTeamId} (from index -- "
+                                    + "Player.TeamID was unassigned; this is a GUESS, correct only while "
+                                    + "list position happens to equal team)");
                                 CardChoiceEndPickPatch.FlushPendingPicks(localTeamId);
                                 return;
                             }
@@ -5395,8 +5441,8 @@ namespace CompetitiveRounds
                     int ppTeam = -1;
                     try
                     {
-                        if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey("t_id"))
-                            ppTeam = System.Convert.ToInt32(pp.CustomProperties["t_id"]);
+                        if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey(Player.VAR_TEAMID))
+                            ppTeam = System.Convert.ToInt32(pp.CustomProperties[Player.VAR_TEAMID]);
                     }
                     catch { }
                     bool isTeammate = ppTeam >= 0 && localTeamId >= 0 && ppTeam == localTeamId;
@@ -6097,8 +6143,8 @@ namespace CompetitiveRounds
                     string sid = ResolvePhotonSteamId(pp);
                     if (string.IsNullOrEmpty(sid) || sid.StartsWith("photon_")) return;
                     int team = -1;
-                    if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey("t_id"))
-                    { try { team = Convert.ToInt32(pp.CustomProperties["t_id"]); } catch { } }
+                    if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey(Player.VAR_TEAMID))
+                    { try { team = Convert.ToInt32(pp.CustomProperties[Player.VAR_TEAMID]); } catch { } }
                     if (team != 0 && team != 1) return;
                     sids[i] = sid; teams[i] = team;
                 }

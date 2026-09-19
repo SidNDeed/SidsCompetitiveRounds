@@ -419,7 +419,7 @@ namespace CompetitiveRounds
                     { RoomActors.SPEC_PROP, PROTOCOL },
                     { RoomActors.SPEC_LEASE_PROP, GrantId ?? "" },
                     { "p_id", null },
-                    { "t_id", null },
+                    { Player.VAR_TEAMID, null },
                     { "cr_cards", null },
                     { "cr_fps", null },
                     { "cr_gstats", null },

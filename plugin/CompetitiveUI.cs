@@ -8606,8 +8606,8 @@ namespace CompetitiveRounds
                 {
                     int myTeam = -1;
                     var mp = Photon.Pun.PhotonNetwork.LocalPlayer?.CustomProperties;
-                    if (mp != null && mp.ContainsKey("t_id"))
-                        int.TryParse(mp["t_id"]?.ToString(), out myTeam);
+                    if (mp != null && mp.ContainsKey(Player.VAR_TEAMID))
+                        int.TryParse(mp[Player.VAR_TEAMID]?.ToString(), out myTeam);
                     foreach (var pp in RoomActors.ActiveFighters())   // census: a spectator is neither mate nor foe
                     {
                         if (pp == null || pp.IsLocal) continue;
@@ -8615,8 +8615,8 @@ namespace CompetitiveRounds
                         if (string.IsNullOrEmpty(nm)) nm = "?";
                         if (nm.Length > 14) nm = nm.Substring(0, 14);
                         int t = -1;
-                        if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey("t_id"))
-                            int.TryParse(pp.CustomProperties["t_id"]?.ToString(), out t);
+                        if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey(Player.VAR_TEAMID))
+                            int.TryParse(pp.CustomProperties[Player.VAR_TEAMID]?.ToString(), out t);
                         // Missing t_id => treat as opponent (same convention the
                         // leaver banner uses); self-corrects on the next refresh.
                         if (t >= 0 && myTeam >= 0 && t == myTeam) mates.Add(nm); else foes.Add(nm);

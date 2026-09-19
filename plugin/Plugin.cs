@@ -3937,7 +3937,7 @@ namespace CompetitiveRounds
                 if (p.CustomProperties != null)
                 {
                     if (p.CustomProperties.ContainsKey("p_id")) int.TryParse(p.CustomProperties["p_id"].ToString(), out slot);
-                    if (p.CustomProperties.ContainsKey("t_id")) int.TryParse(p.CustomProperties["t_id"].ToString(), out team);
+                    if (p.CustomProperties.ContainsKey(Player.VAR_TEAMID)) int.TryParse(p.CustomProperties[Player.VAR_TEAMID].ToString(), out team);
                 }
                 Plugin.Log.LogInfo($"[2v2-DIAG] PlayerEntered: nick='{p.NickName}' actor={p.ActorNumber} p_id={slot} t_id={team} {Diag2v2.DescribeRoom()}");
             }
@@ -7630,9 +7630,15 @@ namespace CompetitiveRounds
                     {
                         var srcCD = damagingPlayer != null ? damagingPlayer.GetComponent<CharacterData>() : null;
                         var tgtCD = __instance != null ? __instance.GetComponentInParent<CharacterData>() : null;
-                        var teamField = typeof(CharacterData).GetField("teamID", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                        int srcTeam = (srcCD != null && teamField != null) ? (int)teamField.GetValue(srcCD) : -1;
-                        int tgtTeam = (tgtCD != null && teamField != null) ? (int)teamField.GetValue(tgtCD) : -1;
+                        // Player.TeamID via CharacterData.player -- CharacterData has
+                        // no teamID field of its own, so the reflection this replaced
+                        // resolved to null on every call and BOTH teams read -1, which
+                        // made same_team permanently false. A friendly-fire diagnostic
+                        // that cannot ever report friendly fire is worse than none
+                        // (#441). Decompile: CharacterData.player is a public Player
+                        // field; Player.TeamID is a public getter over m_teamID.
+                        int srcTeam = (srcCD != null && srcCD.player != null) ? srcCD.player.TeamID : -1;
+                        int tgtTeam = (tgtCD != null && tgtCD.player != null) ? tgtCD.player.TeamID : -1;
                         bool sameTeam = (srcTeam >= 0 && srcTeam == tgtTeam);
                         _ffDiagRemaining--;
                         Plugin.Log.LogInfo($"[FF-DIAG] dmg={damage.magnitude:F1} src_team={srcTeam} tgt_team={tgtTeam} same_team={sameTeam} weapon='{(damagingWeapon != null ? damagingWeapon.name : "(null)")}'");

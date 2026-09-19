@@ -13704,7 +13704,7 @@ namespace CompetitiveRounds
                     {
                         var prejoin = new ExitGames.Client.Photon.Hashtable();
                         prejoin["p_id"] = slot;
-                        prejoin["t_id"] = slot / 2;
+                        prejoin[Player.VAR_TEAMID] = slot / 2;
                         // Publish our Steam ID under "u_id" so peers can resolve
                         // actor → Steam ID at match-end time. Vanilla
                         // PlayerAssigner.CreatePlayer normally calls AssignUserID
@@ -15174,7 +15174,7 @@ namespace CompetitiveRounds
                         {
                             var prejoin = new ExitGames.Client.Photon.Hashtable();
                             prejoin["p_id"] = slot;
-                            prejoin["t_id"] = slot == 0 ? 0 : 1;
+                            prejoin[Player.VAR_TEAMID] = slot == 0 ? 0 : 1;
                             prejoin["u_id"] = sid;
                             if (PhotonNetwork.LocalPlayer != null)
                                 PhotonNetwork.LocalPlayer.SetCustomProperties(prejoin);
@@ -16910,7 +16910,7 @@ namespace CompetitiveRounds
                         {
                             var prejoin = new ExitGames.Client.Photon.Hashtable();
                             prejoin["p_id"] = FfaMySlot;
-                            prejoin["t_id"] = FfaMySlot;   // FFA: every player own team
+                            prejoin[Player.VAR_TEAMID] = FfaMySlot;   // FFA: every player own team
                             prejoin["u_id"] = sid;
                             // Capability advert (rope-scale fix): the map-object
                             // rescale keys off the MASTER's copy of this prop —
