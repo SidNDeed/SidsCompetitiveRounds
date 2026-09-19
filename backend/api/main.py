@@ -42359,6 +42359,88 @@ def _ffa_battle_rate(n_live: int) -> float:
     return gpm * _ffa_sec_per_battle(n_live) / 60.0
 
 
+# ── Which game of the sitting a report records (RJ-4, migration 327) ───────
+# The report room id is "<photon room>_<HHmmss>_r<N>" (GameStateWatcher.cs),
+# HMAC-covered, and N is the reporting client's game counter for the sitting.
+# The bet-settle branch has parsed that tail since v1.36 (_ffa_room_game_no),
+# so numbering a match row asks nothing new of any client and a 1.40.3 build
+# keeps reporting exactly as it does today.
+# The bound is the column's, not the game's: photon_room_id is 64 characters
+# of free text, ffa_matches.game_number is SMALLINT, and FFA_MAX_GAMES_PER_LOBBY
+# is 40 -- so a tail outside 1..999 is treated as no number at all rather than
+# handed to the database as a value.
+FFA_GAME_NUMBER_MAX = 999
+
+
+def _ffa_report_game_number(room_id: str | None, games_played) -> int:
+    """The game number a report is for -- always a usable one.
+
+    Falls back to the lobby's own counter + 1 when the room id carries no
+    tail, or one outside the column's domain. Under the anchor's IS DISTINCT
+    FROM rule every OTHER game of the lobby counts whatever number comes back,
+    so an underivable report meters exactly as it did before the column
+    existed; the fallback's job is to give the row a plausible non-NULL number
+    and to leave the bet settle pointing at the game it always pointed at.
+
+    (_ffa_room_game_no is defined further down the module, next to the bet
+    settle that has always used it; one definition of the tail's grammar.)
+    """
+    n = _ffa_room_game_no(room_id)
+    if n is not None and 1 <= n <= FFA_GAME_NUMBER_MAX:
+        return int(n)
+    return int(games_played or 0) + 1
+
+
+# ── Pace anchor: the window a report's payout is metered against (RJ-4) ────
+# paid_battles is capped by what the elapsed window could honestly have
+# produced, and that window is measured from SERVER receipt times only. Until
+# migration 327 its start was MAX(ended_at) over every row of the lobby, so any
+# earlier row moved it -- including a second row recording the SAME game. The
+# one verified instance (lobby 0ea879a4-..., 2026-08-07) metered its second row
+# against the 57-second gap between the two receipts rather than the ~686-second
+# game and paid about a tenth; the same arithmetic would have throttled the next
+# real game of that sitting.
+#
+# The anchor now takes the FIRST receipt of each OTHER game of the lobby and
+# keeps the latest of those:
+#   * MIN per game -- a second row for an earlier game cannot pull the anchor
+#     forward to its own receipt time;
+#   * IS DISTINCT FROM :g, not < :g -- the game being reported is excluded, so
+#     a same-game row can never be its own anchor, while every other game still
+#     counts. A `<` bound would let the reported number choose how far back the
+#     window starts (a report numbered 1 arriving late in a long sitting would
+#     meter against lobby creation), and a client-derived input may only ever
+#     move the server toward the conservative outcome (#283).
+#   * a row with no derivable number (pre-327, or a room id without the tail)
+#     counts on its own, exactly as it did before the column existed.
+# Invalidated rows are NOT excluded: a reversal does not give back the
+# wall-clock the game consumed, and skipping them would only widen the window.
+_FFA_PACE_ANCHOR_SQL = """
+    SELECT MAX(e) FROM (
+        SELECT MIN(ended_at) AS e
+          FROM ffa_matches
+         WHERE lobby_id = CAST(:lid AS uuid)
+           AND game_number IS NOT NULL
+           AND game_number IS DISTINCT FROM CAST(:g AS SMALLINT)
+         GROUP BY game_number
+        UNION ALL
+        SELECT ended_at AS e
+          FROM ffa_matches
+         WHERE lobby_id = CAST(:lid AS uuid)
+           AND game_number IS NULL
+    ) q
+"""
+
+
+def _ffa_paid_battles(battles_total, elapsed_seconds: float, n_live: int) -> float:
+    """Battles a report may be paid for: the claimed count, capped by what the
+    elapsed window could have produced at FFA_PACE_HEADROOM x the fitted pace.
+    One definition, so the endpoint and its tests read the same arithmetic."""
+    return min(float(battles_total),
+               float(elapsed_seconds) * FFA_PACE_HEADROOM
+               / _ffa_sec_per_battle(max(2, int(n_live))))
+
+
 def _ffa_pool_shape(place: int, beaten: int, n_live: int) -> float:
     """Placement shape on the per-player pool: FFA_SHAPE_TOP at 1st, its
     mirror at last, linear in the beaten-fraction, mean 1.0 absent ties."""
@@ -46693,6 +46775,20 @@ async def _ffa_replay_echo(db: AsyncSession, report, lobby_uuid, id_by_steam, n)
         return None
     if str(prior["lobby_id"]) != str(lobby_uuid):
         raise HTTPException(409, "Room already recorded for a different lobby")
+    echo = await _ffa_match_echo(db, prior, lobby_uuid, id_by_steam, report, n)
+    if echo is None:
+        raise HTTPException(409, "Duplicate room id")
+    return echo
+
+
+async def _ffa_match_echo(db: AsyncSession, prior, lobby_uuid, id_by_steam, report, n):
+    """The recorded result of one already-stored match, as this reporter's own
+    response — or None when the recorded roster is not the submitted one.
+
+    Split out of _ffa_replay_echo (RJ-3) because two different questions reach
+    the same answer: a retry of the SAME room id, and a second report of the
+    same GAME under a different room id that agrees with what is stored. Both
+    return the stored result; neither settles anything a second time."""
     # The detailed echo requires the submitted roster to BE the recorded one
     # (Codex Aug-3 r5 find 1: running before the endpoint's exact-roster
     # validation, a bare existence check would hand match details to any
@@ -46702,7 +46798,7 @@ async def _ffa_replay_echo(db: AsyncSession, report, lobby_uuid, id_by_steam, n)
         "SELECT player_id FROM ffa_match_players WHERE match_id = :m"
     ), {"m": prior["id"]})).scalars().all())
     if set(id_by_steam.values()) != rec_ids:
-        raise HTTPException(409, "Duplicate room id")
+        return None
     mine = (await db.execute(text(
         "SELECT placement, rating_change, xp_gained, gold_gained FROM ffa_match_players"
         " WHERE match_id = :m AND player_id = :p"
@@ -46719,6 +46815,87 @@ async def _ffa_replay_echo(db: AsyncSession, report, lobby_uuid, id_by_steam, n)
         xp_gained=int(mine["xp_gained"] or 0) if mine else 0,
         gold_gained=int(mine["gold_gained"] or 0) if mine else 0,
         message="Already recorded")
+
+
+# ── One game, one settlement (RJ-3) ───────────────────────────────────────
+# The row this lobby already holds for one game, if any. ORDER BY ended_at so a
+# lobby that acquired two rows for a game before this check existed (the
+# 2026-08-07 pair) is compared against the one that settled FIRST — the one
+# whose rating and gold are live. Invalidated rows are skipped: a reversal is
+# the one signal saying the recorded result is no longer the defended one.
+_FFA_PRIOR_GAME_SQL = """
+    SELECT id, winner_id, photon_room_id, player_count, ended_at
+      FROM ffa_matches
+     WHERE lobby_id = CAST(:lid AS uuid)
+       AND game_number = CAST(:g AS SMALLINT)
+       AND invalidated_at IS NULL
+     ORDER BY ended_at
+     LIMIT 1
+"""
+
+_FFA_PRIOR_VECTOR_SQL = """
+    SELECT p.steam_id, fmp.rounds_won, fmp.points_total
+      FROM ffa_match_players fmp
+      JOIN players p ON p.id = fmp.player_id
+     WHERE fmp.match_id = CAST(:m AS uuid)
+"""
+
+
+def _ffa_score_shape_error(report, score_target: int, n_players: int) -> str | None:
+    """Why a report's tallies cannot be a completed game of this lobby, or None.
+
+    The FFA engine ends a game when one player reaches the lobby's FROZEN score
+    target, so on a real report the winner holds exactly that many rounds and
+    nobody holds more. That is also what a report assembled from a partial view
+    of the game fails: a client that watched only part of it cannot show anyone
+    at the target, whether its tallies are all-zero or merely short. A floor on
+    the SUMMED rounds adds nothing on top of the first rule — rounds_won is
+    non-negative (schemas.FfaPlayerResult) and the winner alone already
+    contributes score_target, so such a floor could never fire.
+
+    Extracted from submit_ffa_match unchanged (RJ-3) so the rule can be
+    exercised directly; the endpoint quarantines whatever this names."""
+    max_rounds = max(p.rounds_won for p in report.players)
+    max_pts = _ffa_max_points(n_players, score_target)
+    if max_rounds != score_target:
+        return f"winner must hold exactly {score_target} rounds"
+    if any(p.rounds_won > score_target for p in report.players):
+        return "round tally above the game limit"
+    if any(p.points_total > max_pts for p in report.players):
+        return "point tally above the game limit"
+    return None
+
+
+def _ffa_report_contradiction(prior_winner_steam, prior_vec: dict, report) -> str | None:
+    """None when an incoming report says the same thing about a game as the row
+    already recorded for it; otherwise a short phrase naming the first
+    disagreement, for the log line. (The quarantine row's own reason is the
+    fixed 'ffa_game_contradiction'; the full payload rides in it.)
+
+    Compares only the signed, settlement-deciding fields: the winner, and every
+    player's (rounds_won, points_total) — the pair that drives placement,
+    rating and the battle count. Kills, timings and telemetry are not compared:
+    two honest clients of one game routinely differ there, and none of it
+    changes what was paid.
+
+    This is a DETECTOR, not an arbiter. It never says which report is right,
+    and no caller may use it to replace a recorded result with a later one."""
+    if prior_winner_steam != report.winner_steam_id:
+        return (f"winner {report.winner_steam_id} vs recorded "
+                f"{prior_winner_steam if prior_winner_steam is not None else 'none'}")
+    seen = set()
+    for p in report.players:
+        seen.add(p.steam_id)
+        rec = prior_vec.get(p.steam_id)
+        if rec is None:
+            return f"{p.steam_id} is not in the recorded roster"
+        if rec != (int(p.rounds_won), int(p.points_total)):
+            return (f"{p.steam_id} {p.rounds_won}r/{p.points_total}p vs recorded "
+                    f"{rec[0]}r/{rec[1]}p")
+    missing = set(prior_vec) - seen
+    if missing:
+        return f"recorded roster also holds {sorted(missing)[0]}"
+    return None
 
 
 @app.post("/api/v1/ffa/matches", response_model=FfaMatchResponse, tags=["FFA Matches"])
@@ -46874,14 +47051,7 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # exact-roster + slot + HMAC binding, so it is not a capture-before-binding
     # write primitive; a crafted score from a real roster member lands in the
     # admin queue instead of silently vanishing either way.
-    max_pts = _ffa_max_points(len(report.players), _score_target)
-    _shape_error = None
-    if max_rounds != _score_target:
-        _shape_error = f"winner must hold exactly {_score_target} rounds"
-    elif any(p.rounds_won > _score_target for p in report.players):
-        _shape_error = "round tally above the game limit"
-    elif any(p.points_total > max_pts for p in report.players):
-        _shape_error = "point tally above the game limit"
+    _shape_error = _ffa_score_shape_error(report, _score_target, len(report.players))
     if _shape_error:
         print(f"[FFA] score-shape mismatch vs lobby {lobby_uuid} config "
               f"(target={_score_target}): {_shape_error} — quarantining")
@@ -46924,6 +47094,64 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
             reporter_id=id_by_steam.get(report.reported_by_steam_id),
             player_ids=list(id_by_steam.values()))
         raise HTTPException(403, "This lobby requires the current report signature")
+
+    # ── One game, one settlement (RJ-3) ───────────────────────────────────
+    # Which game of the sitting this is, derived server-side from the room id
+    # the client already sends. Read four times below: by the duplicate check
+    # here, by the pace anchor, into the stored column, and by the bet settle.
+    _game_number = _ffa_report_game_number(report.photon_room_id, lobby["games_played"])
+    # A game this lobby has already recorded does not settle a second time.
+    # The room-id replay echo at the top of the endpoint catches a retry of the
+    # same room; this catches what it cannot see — two clients of ONE game,
+    # each stamping its own start time into its own room id, so the two strings
+    # differ and both used to insert. That is the 2026-08-07 instance: two
+    # rows, two different winners, both rated, both paid.
+    # Which of the two is right is not a question this endpoint can answer, so
+    # it does not answer it (#283). The recorded row stands untouched, the
+    # second report settles nothing, and when the two disagree the whole
+    # payload is kept in the quarantine queue with the disagreement named. No
+    # rating, XP or gold is written by this branch, and nothing already applied
+    # is reversed or clawed back.
+    # An AGREEING second report is an ordinary duplicate delivery and gets the
+    # same idempotent echo a same-room retry gets. Refusing to settle it also
+    # keeps one game to one row, which is what the pace anchor's per-game rule
+    # assumes — without it, re-sending one result under a fresh room id would
+    # settle and pay it again.
+    # Placement: after the roster/slot/shape/limit binding above, so it is not
+    # a capture-before-binding write primitive, and before the players lock
+    # pass below, because _quarantine_report rolls back to run.
+    _prior_game = (await db.execute(text(_FFA_PRIOR_GAME_SQL),
+                                    {"lid": lobby_uuid, "g": _game_number})).mappings().first()
+    if _prior_game is not None:
+        _prior_vec = {r["steam_id"]: (int(r["rounds_won"] or 0), int(r["points_total"] or 0))
+                      for r in (await db.execute(
+                          text(_FFA_PRIOR_VECTOR_SQL),
+                          {"m": _prior_game["id"]})).mappings().all()}
+        _prior_winner = next((s for s, pid in id_by_steam.items()
+                              if pid == _prior_game["winner_id"]), None)
+        _contra = _ffa_report_contradiction(_prior_winner, _prior_vec, report)
+        if _contra is None:
+            print(f"[FFA] lobby {lobby_uuid} game {_game_number} is already "
+                  f"recorded as room {_prior_game['photon_room_id']}; this "
+                  f"report of room {report.photon_room_id} agrees with it — "
+                  f"echoing the recorded result, not settling again "
+                  f"(reporter {report.reported_by_steam_id})")
+            _echo = await _ffa_match_echo(db, _prior_game, lobby_uuid, id_by_steam,
+                                          report, len(report.players))
+            if _echo is not None:
+                return _echo
+            _contra = "recorded roster is not the submitted one"
+        print(f"[FFA] lobby {lobby_uuid} game {_game_number} is already recorded "
+              f"as room {_prior_game['photon_room_id']}; this report of room "
+              f"{report.photon_room_id} disagrees ({_contra}) — recorded for "
+              f"review, not settled (reporter {report.reported_by_steam_id})")
+        await _quarantine_report(
+            db, mode="ffa", reason="ffa_game_contradiction", status_code=409,
+            payload=report.model_dump(), group_id=lobby_uuid,
+            photon_room_id=report.photon_room_id,
+            reporter_id=id_by_steam.get(report.reported_by_steam_id),
+            player_ids=list(id_by_steam.values()))
+        raise HTTPException(409, "This game is already recorded")
 
     # Players pass: sorted FOR NO KEY UPDATE (#202/#203 — never FOR UPDATE,
     # and this pass is the real gate; glicko rows may not exist yet).
@@ -47033,16 +47261,18 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
 
     # ── Economy meter inputs (v1.36.0, §5 of the config-lobby spec). ──
     # battles = Σ points_total (signed — inside the HMAC canonical).
-    # elapsed is measured from SERVER receipt times only: the previous game's
-    # ended_at (or lobby activation for game 1), never the client-supplied
-    # started_at/duration. GREATEST + floor guards the admin-replay case where
-    # a re-inserted historical row leaves MAX(ended_at) in the future
-    # (monotonic guard — elapsed can never go negative or absurdly small).
+    # elapsed is measured from SERVER receipt times only: the first receipt of
+    # the lobby's most recent OTHER game (or lobby activation for game 1),
+    # never the client-supplied started_at/duration. _FFA_PACE_ANCHOR_SQL is
+    # where per-game and per-row differ, and why. max() + floor guards the
+    # admin-replay case where a re-inserted historical row leaves the anchor in
+    # the future (monotonic guard — elapsed can never go negative or absurdly
+    # small).
     _n_live_meter = len(report.players) - len(unrated)
     battles_total = sum(max(0, int(p.points_total)) for p in report.players)
-    _max_prior_end = (await db.execute(text(
-        "SELECT MAX(ended_at) FROM ffa_matches WHERE lobby_id = :lid"
-    ), {"lid": lobby_uuid})).scalar()
+    _max_prior_end = (await db.execute(
+        text(_FFA_PACE_ANCHOR_SQL),
+        {"lid": lobby_uuid, "g": _game_number})).scalar()
     _anchor_candidates = [t for t in (lobby["created_at"], _max_prior_end) if t is not None]
     # ONE post-lock DB clock for BOTH the elapsed computation and the stored
     # ended_at (Codex find 4): the first draft measured elapsed with a
@@ -47055,9 +47285,7 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     _now_dt = (await db.execute(text("SELECT clock_timestamp()"))).scalar()
     _anchor = max(_anchor_candidates) if _anchor_candidates else _now_dt
     elapsed_seconds = max(30.0, (_now_dt - _anchor).total_seconds())
-    _sec_per_battle = _ffa_sec_per_battle(max(2, _n_live_meter))
-    paid_battles = min(float(battles_total),
-                       elapsed_seconds * FFA_PACE_HEADROOM / _sec_per_battle)
+    paid_battles = _ffa_paid_battles(battles_total, elapsed_seconds, _n_live_meter)
 
     match_id = uuid.uuid4()
     n = len(report.players)
@@ -47066,10 +47294,11 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
             INSERT INTO ffa_matches (id, lobby_id, photon_room_id, player_count, winner_id,
                 duration_seconds, game_version, region, hmac_signature, reported_by,
                 is_ranked, started_at, ended_at, timeline,
-                battles_total, paid_battles, elapsed_seconds)
+                battles_total, paid_battles, elapsed_seconds, game_number)
             VALUES (:id, :lid, :room, :n, :win, :dur, :gv, :reg, :hmac, :rep, :ranked, :started, :endts, :tl,
-                :bt, :pb, :es)
+                :bt, :pb, :es, CAST(:gn AS SMALLINT))
         """), {"id": match_id, "lid": lobby_uuid, "room": (report.photon_room_id or "")[:64],
+               "gn": _game_number,
                "n": n, "win": id_by_steam[report.winner_steam_id],
                "dur": report.match_duration, "gv": (report.game_version or "")[:32] or None,
                "reg": (report.region or "")[:8] or None,
@@ -47234,20 +47463,20 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # alike (lens find 6): the cause is recorded per LOBBY — per sitting —
     # while the label it produces is stamped per MATCH ROW. The lobby has one
     # cause slot per player for the whole sitting, and this read applies no
-    # time and no game bound, because neither side offers one: the cause map
-    # stores a bare string with no attestation time, and a match carries no
-    # game index, only its lobby. (`ffa_matches` does carry `started_at` and
-    # `ended_at`, so it is the CAUSE side that lacks the timestamp — a time
-    # bound would mean changing the map's value shape, not adding a predicate
-    # here.) So in a multi-game sitting the label reads "the seat attested an
+    # time and no game bound. The cause map stores a bare string with no
+    # attestation time and no game index. (`ffa_matches` carries `started_at`
+    # and `ended_at`, and since migration 327 `game_number`, so it is the CAUSE
+    # side that lacks the timestamp — a time bound would mean changing the
+    # map's value shape, not adding a predicate here.) So in a multi-game
+    # sitting the label reads "the seat attested an
     # involuntary departure from this sitting", not "...from this game".
     # Two consequences, both display
     # and both accepted here rather than left implied: a report for an earlier
     # game submitted late — the handler tolerates a late report by design —
     # takes a cause attested after that game ended, and a frozen-roster row
     # carried into a later game inherits the same cause. Bounding it needs a
-    # per-match game number, which another lane is adding; when that column
-    # exists this read gains one predicate. Recorded in the notes as an
+    # per-match game number; migration 327 adds `ffa_matches.game_number` and
+    # this read does not take it as a predicate. Recorded in the notes as an
     # ACCEPTED residual — display-only, and it cannot move a placement, a
     # rating, gold or XP, nor reach another player's row, because the set is
     # keyed by player id and the label is gated on that row's own left_early —
@@ -47548,7 +47777,10 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # report instead of being swallowed here. Every statement of the bet
     # block lives inside the guard now.
     try:
-        game_no = _ffa_room_game_no(report.photon_room_id) or (int(lobby["games_played"] or 0) + 1)
+        # The SAME number the row was written with (_ffa_report_game_number,
+        # computed above the insert) — a second derivation here could pay
+        # game N's wagers against a row stored as something else.
+        game_no = _game_number
         async with db.begin_nested():
             winner_pid = id_by_steam[report.winner_steam_id]
             await _settle_ffa_bets_for_game(db, lobby_uuid, game_no, winner_pid)
