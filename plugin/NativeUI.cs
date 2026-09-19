@@ -8994,6 +8994,27 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // and tags the slot. Client validates EXACTLY what the server enforces
         // (PNG, 512x512, transparency) plus a real per-pixel alpha check the
         // server can't do without an image library.
+
+        // The caps this client enforces, and the only place each figure is
+        // written down: every message that states one is formatted FROM the
+        // constant beside it, so a cap cannot be raised while the artist is
+        // still told the old number. They mirror the server's COSMETIC_MAX_B64
+        // (1.6M base64 chars = 1.2 MB decoded), COSMETIC_GIF_MAX_B64 (3M = 2.2
+        // MB decoded) and COSMETIC_MAX_FRAMES, which bound the same payloads
+        // after encoding.
+        private const int CosmeticPngMaxBytes = 1_200_000;
+        private const int CosmeticGifMaxBytes = 2_200_000;
+        private const int CosmeticMaxFrames = 16;
+
+        /// <summary>A byte cap as a message states it ("1.2 MB"). Invariant
+        /// culture: the figure is part of a JSON detail string and must read
+        /// the same whatever the machine's number format is.</summary>
+        private static string SizeCapLabel(int bytes)
+        {
+            return (bytes / 1_000_000.0).ToString(
+                "0.#", System.Globalization.CultureInfo.InvariantCulture) + " MB";
+        }
+
         private static string CosmeticUploadDir()
         {
             string dllDir = System.IO.Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location);
@@ -9052,8 +9073,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         /// ShowArtistResult-ready error JSON.</summary>
         private static string ValidateCosmeticPngBytes(byte[] bytes, string label)
         {
-            if (bytes == null || bytes.Length > 1_200_000)
-                return $"{{\"detail\":\"{label}: PNG missing or too large - 1 MB max\"}}";
+            if (bytes == null || bytes.Length > CosmeticPngMaxBytes)
+                return $"{{\"detail\":\"{label}: PNG missing or too large - {SizeCapLabel(CosmeticPngMaxBytes)} max\"}}";
             var tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
             bool loaded = tex.LoadImage(bytes);
             int w = tex.width, h = tex.height;
@@ -9090,7 +9111,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 var frames = new List<byte[]> { bytes };
                 string dir = System.IO.Path.GetDirectoryName(path);
                 string baseName = System.IO.Path.GetFileNameWithoutExtension(path);
-                for (int n = 2; n <= 16; n++)
+                for (int n = 2; n <= CosmeticMaxFrames; n++)
                 {
                     string fp = System.IO.Path.Combine(dir, $"{baseName}__f{n}.png");
                     if (!System.IO.File.Exists(fp)) break;
@@ -9125,8 +9146,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             try
             {
                 var bytes = System.IO.File.ReadAllBytes(path);
-                if (bytes.Length > 2_200_000)
-                { ShowArtistResult(false, "{\"detail\":\"GIF too large - about 2 MB max\"}"); return; }
+                if (bytes.Length > CosmeticGifMaxBytes)
+                { ShowArtistResult(false, $"{{\"detail\":\"GIF too large - {SizeCapLabel(CosmeticGifMaxBytes)} max\"}}"); return; }
                 if (bytes.Length < 6 || bytes[0] != (byte)'G' || bytes[1] != (byte)'I' || bytes[2] != (byte)'F')
                 { ShowArtistResult(false, "{\"detail\":\"that file is not a GIF\"}"); return; }
                 CompetitiveUI.OpenArtistInput("Name your cosmetic", "Display name (letters/numbers, max 40)", "",
