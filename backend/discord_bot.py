@@ -331,9 +331,8 @@ async def _handle_ticket_dm(message):
     """A user DMed the bot (not a command). Parse '#N <text>' / 'ticket N <text>'
     and post it as a comment on bug report N. The API verifies the DMer actually
     owns ticket N (their linked Discord must match the report's reporter)."""
-    import re
     content = (message.content or "").strip()
-    m = re.match(r'^(?:ticket\s*)?#?\s*(\d+)\s*[:.\-]?\s+(.+)$', content, re.IGNORECASE | re.DOTALL)
+    m = _TICKET_DM_RE.match(content)
     if not m:
         await message.channel.send(
             "💬 To add to one of your bug reports, DM me like:\n"
@@ -377,6 +376,379 @@ async def _handle_ticket_dm(message):
     except Exception as ex:
         print(f"[TICKET-DM] post error: {ex}")
         await message.channel.send("⚠️ Couldn't reach the report system — try again shortly.")
+
+async def _mail_reply_post(payload):
+    """POST the bot-only reply route. Returns (status, json_or_none)."""
+    if http_session is None or not API_SECRET_KEY:
+        return 0, None
+    try:
+        async with http_session.post(
+            f"{API_BASE_URL}/api/v1/internal/mail/reply-from-discord",
+            json=payload, headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=8),
+        ) as r:
+            try:
+                return r.status, await r.json()
+            except Exception:
+                return r.status, None
+    except Exception as ex:
+        print(f"[MAIL-DM] post error: {ex}")
+        return 0, None
+
+
+def _is_registered_command(content):
+    """True when this DM text invokes a command the bot actually has.
+
+    The Reply branch sits above the "!" guard so a mail reply reading
+    "!important" is mail text and not a failed command. That is right for
+    text which only LOOKS like a command and wrong for one that IS one: a
+    player who replies to a relay DM with `!link ABC123` means the command,
+    and mailing that line to whoever sent the mail both loses the command
+    and sends an answer nobody asked for. The bot's own command table is
+    the discriminator -- no list to keep in step."""
+    s = content or ""
+    # NO lstrip and NO lowercasing: this has to agree with the parser that
+    # will actually run, and discord.py leaves `strip_after_prefix` and
+    # `case_insensitive` at their False defaults. Being more generous here
+    # than the parser is the worst of both -- "  !link x" was withheld
+    # from mail as a command and then never dispatched as one, so the
+    # message did nothing at all.
+    prefix = getattr(bot, "command_prefix", "!")
+    if not isinstance(prefix, str) or not s.startswith(prefix):
+        return False
+    parts = s[len(prefix):].split(None, 1)
+    word = parts[0] if parts else ""
+    if not word:
+        return False
+    try:
+        return bot.get_command(word) is not None
+    except Exception:
+        # Fail CLOSED. Treating an unanswerable question as "not a
+        # command" mails whatever the player typed to another player, and
+        # `!link <code>` is exactly the text that must never go there.
+        return True
+
+
+def _mail_sent_line(info):
+    """The confirmation. `known` is false when the server could not read
+    the thread back -- saying "to them - (no subject)" there states two
+    facts it does not have, about a reply that did send."""
+    if not (info or {}).get("known"):
+        return "\u2709\ufe0f Sent your reply."
+    who = (info.get("sender_name") or "").strip() or "them"
+    subj = (info.get("subject") or "").strip() or "(no subject)"
+    return "\u2709\ufe0f Sent your reply to **%s** — *%s*" % (who, subj)
+
+
+# ── Item 5: the thread marker ──────────────────────────────────────────────
+#
+# DUPLICATED VERBATIM from backend/api/mail_discord.py. The bot is a separate
+# container and imports nothing from the api, so these literals have to exist
+# twice; `test_the_bot_and_the_api_agree_on_the_marker` compares them across
+# the two files, because two copies of one contract silently drifting apart
+# is a failure this project has already paid for (#329/#341).
+RELAY_CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+RELAY_CODE_LEN = 12
+_CODE_BODY = "[0-9A-HJKMNP-TV-Z]{%d}" % RELAY_CODE_LEN
+# The ONE definition of "this message names a thread". Anchored to a whole
+# line: `_mail_discord_safe` escapes a line-leading `-#` and collapses
+# intra-line whitespace, so no player-authored field can render as this line.
+RELAY_CODE_RE = re.compile(r"(?m)^-# \u21a9 (SCR-" + _CODE_BODY + r")[ \t]*$")
+# "one of ours, and MENTIONS threads without naming one" -- the listing below
+# prints several codes and must never be read as pointing at any of them.
+RELAY_CODE_ANY_RE = re.compile(r"SCR-" + _CODE_BODY)
+# A code the player TYPED, in leading position only. A code sitting anywhere
+# in the body of a message that carries a Discord Reply is text, not a
+# target: the pointer they used outranks anything quoted inside their words.
+# IGNORECASE is load-bearing, not tidiness: `normalize_relay_code` accepts a
+# code in any case and repairs I/L/O by eye, and this is the gate in front of
+# it. Without the flag the gate was strictly narrower than the thing it
+# guards, so a lowercase code -- what you get pasting from most phone
+# keyboards -- was never even offered to the normalizer.
+_RELAY_CODE_LEAD_RE = re.compile(
+    r"^\s*(SCR[- ]?[0-9A-Za-z]{12})\b[\s:,.\-]*(.*)$", re.DOTALL | re.IGNORECASE)
+
+
+def relay_code_line(code):
+    return "\n-# \u21a9 %s" % code
+
+
+def normalize_relay_code(s):
+    """A code the PLAYER typed -> the stored form, or "" if it is not one.
+
+    Crockford decoding: case-insensitive, and I/L read as 1 while O reads as
+    0, because those are the substitutions a person makes copying a code by
+    eye. U is not in the alphabet and is deliberately NOT remapped -- it is
+    simply not a code."""
+    t = re.sub(r"[^0-9A-Z]", "", (s or "").strip().upper())
+    if not t.startswith("SCR"):
+        return ""
+    t = t[3:].replace("I", "1").replace("L", "1").replace("O", "0")
+    if len(t) != RELAY_CODE_LEN or any(c not in RELAY_CODE_ALPHABET for c in t):
+        return ""
+    return "SCR-" + t
+
+
+# ── The pick-a-thread listing ──────────────────────────────────────────────
+#
+# What a tap still has to know: the words the player already typed, the id
+# that makes the send idempotent, and who is allowed to tap. None of it can
+# live in the custom_id -- Discord caps that at 100 characters and a player's
+# message does not belong in a component id -- so it is held here, keyed by
+# the listing's own message id, and evicted oldest-first.
+#
+# This state is deliberately PROCESS-LOCAL, which is the opposite of the maps
+# this change deletes. The difference is what its loss costs (#430): losing a
+# map made the bot guess a thread, and losing this makes it print a sentence
+# telling the player what to type. The codes are in the listing TEXT as well,
+# so a restart leaves a durable route in the message itself.
+_mailpick: dict = {}
+_MAILPICK_MAX = 500
+
+
+async def _relay_threads(discord_id):
+    """The threads a reply could be naming, newest first. None on failure --
+    which is NOT the same as an empty list, and the callers keep them apart."""
+    if http_session is None or not API_SECRET_KEY:
+        return None
+    try:
+        async with http_session.post(
+            f"{API_BASE_URL}/api/v1/internal/mail/relay-threads",
+            json={"discord_id": str(discord_id)},
+            headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=8),
+        ) as r:
+            if r.status == 404:
+                body = await r.json() if r.content_type == "application/json" else {}
+                if (body or {}).get("detail") == "not_linked":
+                    # A fact, not a failure, and the two callers want
+                    # opposite things from it: the DM chain falls through to
+                    # the ticket path, `/mail reply` says how to link.
+                    return "not_linked"
+                # The ROUTE is missing: this bot is newer than the api it is
+                # talking to. Named, because "no threads" and "the deploy is
+                # half-done" must not read the same in a log.
+                print("[MAIL-DM] relay-threads 404 — api predates this bot")
+                return None
+            if r.status != 200:
+                return None
+            return ((await r.json()) or {}).get("threads") or []
+    except Exception as ex:
+        print(f"[MAIL-DM] relay-threads error: {ex}")
+        return None
+
+
+def _mailpick_view(threads, disabled=False):
+    """One button per thread. `timeout=None` and no live callbacks: routing
+    is by custom_id through on_interaction, the same shape as the tournament
+    buttons at :10915, so nothing here depends on a newer component API."""
+    view = discord.ui.View(timeout=None)
+    for t in threads[:5]:
+        label = "%s \u2014 %s" % ((t.get("sender_name") or "?").strip(),
+                                  (t.get("subject") or "(no subject)").strip())
+        view.add_item(discord.ui.Button(
+            style=discord.ButtonStyle.secondary, label=label[:80],
+            custom_id="scrmail:%s" % t.get("relay_code"), disabled=disabled))
+    return view
+
+
+async def _ask_which_mail(message_or_ctx, body, *, discord_id, channel,
+                          source_message_id, unreadable=False, bad_code=False):
+    """Refuse, and make the refusal cost one tap.
+
+    Returns "HANDLED" or "ASK" when the player was answered, and "NOT_MAIL"
+    when they have no relay threads at all -- so the ticket chain still gets
+    every message it gets today from a player who has never had mail."""
+    threads = await _relay_threads(discord_id)
+    if threads == "not_linked":
+        return "NOT_LINKED"
+    if not threads:
+        if unreadable:
+            await channel.send(
+                "\u26a0\ufe0f I couldn\u2019t read the message you replied to "
+                "\u2014 reply in game (F5 \u2192 Mail).")
+            return "HANDLED"
+        # Not ours to answer. `threads is None` (the api was unreachable)
+        # lands here too, and deliberately: with no list to offer there is
+        # nothing this path can do that the ticket path cannot.
+        return "NOT_MAIL"
+    lead = ("\u274c That thread code doesn\u2019t match any mail sent to you."
+            if bad_code else
+            "\u26a0\ufe0f I couldn\u2019t read the message you replied to."
+            if unreadable else
+            "\u2753 I couldn\u2019t tell which mail that answers.")
+    lines = [lead, "Tap the one you meant \u2014 or use Discord\u2019s **Reply** on its DM."]
+    for t in threads[:5]:
+        lines.append("**%s** \u2014 *%s* \u00b7 `%s`"
+                     % ((t.get("sender_name") or "?").strip(),
+                        (t.get("subject") or "(no subject)").strip(),
+                        t.get("relay_code")))
+    lines.append("-# Or send `SCR-XXXXXXXXXXXX your message` at any time.")
+    sent = await channel.send("\n".join(lines), view=_mailpick_view(threads))
+    if sent is not None:
+        while len(_mailpick) >= _MAILPICK_MAX:
+            _mailpick.pop(next(iter(_mailpick)), None)
+        _mailpick[str(sent.id)] = {
+            "body": body, "author_id": int(discord_id),
+            "source_message_id": source_message_id,
+            "codes": {t.get("relay_code") for t in threads[:5]},
+            "threads": threads[:5]}
+    return "ASK"
+
+
+async def _post_mail_reply(channel, discord_id, code, body, source_message_id):
+    """POST one reply that NAMES its thread. Returns a dispatch verdict."""
+    status, data = await _mail_reply_post({
+        "discord_id": str(discord_id), "relay_code": code, "body": body,
+        # Idempotency across the retry boundary (#172): Discord may redeliver
+        # a message, and a reply can commit while its confirmation fails.
+        # Both are a repeat of the SAME message and must not become two.
+        "source_message_id": source_message_id})
+    if status == 200:
+        info = (data or {}).get("replied_to") or {}
+        out = _mail_sent_line(info)
+        # The confirmation carries the marker too, so replying to IT stays on
+        # the same thread -- exactly one marker line, so it resolves.
+        if info.get("relay_code"):
+            out += relay_code_line(info["relay_code"])
+        await channel.send(out)
+        return "HANDLED"
+    detail = (data or {}).get("detail") or "unknown"
+    if status == 404 and detail == "not_linked":
+        # Unchanged: the ticket path still gets its chance at this message.
+        return "NOT_MAIL"
+    if status == 404 and detail in ("unknown_code", "target_required"):
+        return await _ask_which_mail(
+            None, body, discord_id=discord_id, channel=channel,
+            source_message_id=source_message_id, bad_code=True)
+    if status == 0:
+        await channel.send("\u26a0\ufe0f Mail is temporarily unreachable \u2014 try again shortly.")
+        return "HANDLED"
+    if detail == "not_found":
+        # Specifically NOT the blocks/length/rate line: nothing the player
+        # did was refused, the mail they are answering no longer exists.
+        await channel.send(
+            "\u274c That mail isn\u2019t there any more \u2014 it was deleted, so "
+            "there is nothing to reply to.")
+        return "HANDLED"
+    # Everything else is a real refusal from the SAME rules the in-game reply
+    # obeys (blocked, rate-limited, too long, censor). Surface the reason.
+    await channel.send(
+        f"\u274c Couldn\u2019t send that reply: `{detail}`. The same rules apply as "
+        f"in-game (blocks, length, and a short rate limit).")
+    return "HANDLED"
+
+
+async def _handle_mail_dm(message):
+    """Turn a DM into a reply on the mail it answers.
+
+    Returns exactly one of "HANDLED", "ASK", "NOT_MAIL". Three values and not
+    a boolean on purpose: one boolean used to mean both "not our DM" and "we
+    could not look", and those two need opposite outcomes (#430).
+
+    The actor is never sent as a steam id -- the bot forwards the Discord id
+    and the server resolves the player from players.discord_id (#545)."""
+    ref = getattr(message, "reference", None)
+    ref_id = getattr(ref, "message_id", None) if ref is not None else None
+    # NOT stripped before posting. The core judges prohibited control
+    # characters BEFORE any trim, so a body ending in LF, U+0085 or U+2028 is
+    # refused in game; stripping here would make the Discord path quietly
+    # more permissive than the one it must match. The strip only decides
+    # whether there is anything worth posting at all.
+    body = message.content or ""
+    if not body.strip():
+        return "NOT_MAIL"
+    did = str(message.author.id)
+    src = str(getattr(message, "id", "") or "")
+    if ref_id:
+        r = getattr(ref, "resolved", None)
+        if r is None or isinstance(r, discord.DeletedReferencedMessage):
+            try:
+                r = await message.channel.fetch_message(int(ref_id))
+            except Exception as ex:
+                # UNKNOWN, not "not ours". The router could not establish
+                # which thread was named, so it asks -- it does not guess and
+                # it does not silently re-route the player's words.
+                print(f"[MAIL-DM] could not read referenced message {ref_id}: {ex}")
+                return await _ask_which_mail(
+                    message, body, discord_id=did, channel=message.channel,
+                    source_message_id=src, unreadable=True)
+        me = getattr(bot, "user", None)
+        if r is None or me is None or getattr(getattr(r, "author", None), "id", None) != me.id:
+            return "NOT_MAIL"
+        found = RELAY_CODE_RE.findall(r.content or "")
+        if len(found) == 1:
+            return await _post_mail_reply(message.channel, did, found[0], body, src)
+        if len(found) > 1:
+            # Unreachable for our own messages -- a relay DM and a
+            # confirmation each carry exactly one marker line. Asking is what
+            # KEEPS it unreachable: picking one of two would answer a thread
+            # the player did not point at, silently, with their words.
+            return await _ask_which_mail(
+                message, body, discord_id=did, channel=message.channel,
+                source_message_id=src)
+        if RELAY_CODE_ANY_RE.search(r.content or ""):
+            # They replied to the listing itself rather than tapping it.
+            return await _ask_which_mail(
+                message, body, discord_id=did, channel=message.channel,
+                source_message_id=src)
+        return "NOT_MAIL"
+    lead = _RELAY_CODE_LEAD_RE.match(body)
+    if lead:
+        code = normalize_relay_code(lead.group(1))
+        if code:
+            return await _post_mail_reply(message.channel, did, code,
+                                          lead.group(2), src)
+    # A plain DM with no reference and no code. This is the one behavioural
+    # loss in the change: it used to reach the most recent mail by guessing,
+    # and now reaches a list the player picks from. It returns "NOT_MAIL" for
+    # a player with no relay threads, so the ticket chain is untouched for
+    # everyone who has never received relayed mail.
+    return await _ask_which_mail(message, body, discord_id=did,
+                                 channel=message.channel, source_message_id=src)
+
+
+async def _mailpick_click(interaction, custom_id):
+    """A tap on the listing. All of the refusals are ephemeral: the listing
+    is in the player's own DMs, but a stale tap should not read as a send."""
+    code = (custom_id or "").split(":", 1)[1] if ":" in (custom_id or "") else ""
+    key = str(getattr(getattr(interaction, "message", None), "id", "") or "")
+    st = _mailpick.get(key)
+    if st is None:
+        # The process restarted, or the listing aged out. A sentence, not a
+        # dead button -- and the code is still printed in the message above.
+        await interaction.response.send_message(
+            "\u23f3 That list has expired \u2014 send `%s your message` and I\u2019ll "
+            "put it on that thread." % (code or "SCR-XXXXXXXXXXXX"), ephemeral=True)
+        return
+    if interaction.user.id != st["author_id"]:
+        await interaction.response.send_message("That isn\u2019t your reply.", ephemeral=True)
+        return
+    if code not in st["codes"]:
+        await interaction.response.send_message("\u26a0\ufe0f Unrecognized button.", ephemeral=True)
+        return
+    # Defer first: the internal POST is allowed 8s and the interaction window
+    # is 3 (the same correction as `/mail reply`, :4996).
+    try:
+        await interaction.response.defer()
+    except Exception:
+        pass
+    # Consume BEFORE the post. A double tap must collapse onto one in-game
+    # reply; `source_message_id` already makes the server idempotent (#172),
+    # and this keeps the second tap from spending a request to find that out.
+    _mailpick.pop(key, None)
+    verdict = await _post_mail_reply(interaction.channel, st["author_id"], code,
+                                     st["body"], st["source_message_id"])
+    if verdict != "HANDLED":
+        # The post refused in a way that re-listed the threads; the buttons
+        # on THIS message are spent either way.
+        pass
+    try:
+        await interaction.message.edit(
+            view=_mailpick_view(st["threads"], disabled=True))
+    except Exception:
+        pass
+
 
 def get_rank_name(rating):
     for threshold, name in RANK_ROLES:
@@ -554,6 +926,15 @@ async def backfill_discord_usernames():
 # rephrasings). Cooldowns keep it from spamming: one answer per topic per
 # channel per 3 min, one answer per user per 20s.
 import re as _faq_re
+
+# The ONE definition of "this DM is a bug-report follow-up" (#N <text> /
+# ticket N <text>). _handle_ticket_dm parses with it, and on_message's
+# item-5 precedence chain tests with it before letting the mail relay claim
+# a plain DM -- so a message the ticket handler would have accepted can
+# never be swallowed by the relay, and the two can never drift apart.
+_TICKET_DM_RE = _faq_re.compile(
+    r'^(?:ticket\s*)?#?\s*(\d+)\s*[:.\-]?\s+(.+)$',
+    _faq_re.IGNORECASE | _faq_re.DOTALL)
 import time as _faq_time
 import difflib as _faq_difflib
 import os as _faq_os   # block-local like the others: the harness execs ONLY
@@ -2735,6 +3116,13 @@ async def on_message(message: discord.Message):
     # §2.6: ANY mapped bridge channel relays, tagged with its language code
     # (the old single-channel check generalized — global keeps its id).
     _relay_lang = CHAT_LANG_BY_CHAN.get(getattr(message.channel, "id", 0)) if message.channel else None
+    if _relay_lang and _is_registered_command(message.content):
+        # A command is an instruction to the bot, not chat. Relaying one
+        # into the game shows players a line they cannot act on, and for
+        # the two commands that carry a secret -- `!mail reply <private
+        # text>` and `!link <code>` -- it publishes it to everyone in the
+        # game and everyone in the channel. Dispatch still happens below.
+        _relay_lang = None
     if _relay_lang:
         content = _discord_chat_plain_content(message)
         display = getattr(message.author, "global_name", None) or message.author.name
@@ -2782,10 +3170,57 @@ async def on_message(message: discord.Message):
                         return
             except Exception as e:
                 print(f"[CHAT] Failed to relay Discord -> API: {e}")
+    # Item 5, ABOVE the "!" guard on purpose. A Discord Reply aimed at a
+    # relayed mail DM is the one unambiguous signal in this whole chain --
+    # the player pointed at the message -- and its BODY is mail text, which
+    # may perfectly well start with "!". Left inside the guard below, a
+    # reply reading "!important" went to command dispatch and was lost.
+    # Text that only looks like a command ("!important") is mail; text that
+    # IS one is left for dispatch, because a player replying `!link ABC123`
+    # means the command and not a mail carrying their link code.
+    if isinstance(message.channel, discord.DMChannel) and message.content \
+            and getattr(getattr(message, "reference", None), "message_id", None) \
+            and not _is_registered_command(message.content):
+        try:
+            if await _handle_mail_dm(message) in ("HANDLED", "ASK"):
+                return
+        except Exception as ex:
+            print(f"[MAIL-DM] reply handler error: {ex}")
     # A plain (non-command) DM to the bot is treated as a follow-up on one of
     # the sender's own bug reports (e.g. "#12 still happens after relaunch").
+    # `_is_registered_command`, NOT `startswith("!")`. The bare prefix test
+    # was a second, cruder answer to the question the helper above already
+    # answers properly, and it disagreed with it: a DM reading "!important"
+    # is not a command, was withheld from this whole chain anyway, and then
+    # dispatched as nothing -- so it did nothing at all. Same predicate on
+    # both gates, one definition of "this is a command" (#432).
     if isinstance(message.channel, discord.DMChannel) and message.content \
-            and not message.content.startswith("!"):
+            and not _is_registered_command(message.content):
+        # Item 5 precedence, and the order is the whole design:
+        #   1. a Discord Reply aimed at a relayed mail DM -> mail reply
+        #      (handled ABOVE this block, so that a reply whose body starts
+        #      with "!" is mail text and not a failed command)
+        #   2. '#N <text>'                                -> ticket comment
+        #   3. a leading thread code                      -> mail reply
+        #   4. otherwise                                  -> ticket usage text
+        # 1 is first because it is the only unambiguous signal. 2 outranks 3
+        # so that no ticket comment that works today can be swallowed by the
+        # relay -- and the two can never both match anyway: a code starts
+        # with "S" and _TICKET_DM_RE requires a digit after an optional "#".
+        # Step 3 no longer claims a bare DM for the most recent mail; it
+        # offers the list and the player picks. That is the ONE behavioural
+        # loss in this change, and it is the whole point of it.
+        if _TICKET_DM_RE.match((message.content or "").strip()):
+            try:
+                await _handle_ticket_dm(message)
+            except Exception as ex:
+                print(f"[TICKET-DM] handler error: {ex}")
+            return
+        try:
+            if await _handle_mail_dm(message) in ("HANDLED", "ASK"):
+                return
+        except Exception as ex:
+            print(f"[MAIL-DM] handler error: {ex}")
         try:
             await _handle_ticket_dm(message)
         except Exception as ex:
@@ -4688,6 +5123,130 @@ async def cmd_link(ctx, code: str = None):
     if data and "rating" in data:
         rank = await update_member_role(ctx.author, data["rating"])
         await ctx.send(f"{rank_emoji(rank)} Rank: **{rank}** ({data['rating']:.0f})")
+
+@bot.hybrid_group(name="mail", description="In-game mail: Discord relay settings")
+async def cmd_mail(ctx):
+    """Group body. discord.py invokes this when no subcommand was given."""
+    if ctx.invoked_subcommand is None:
+        await ctx.send(
+            "**In-game mail**\n"
+            "\u2022 `/mail relay on` / `/mail relay off` \u2014 whether new in-game "
+            "mail is also DMed to you here.\n"
+            "\u2022 To answer a mail, hit Discord\u2019s **Reply** on its DM and type "
+            "your message.\n"
+            "\u2022 `/mail reply <text>` \u2014 for when you are not in that DM "
+            "thread: start with the `SCR-` code printed under the mail, or leave "
+            "it off and pick from a list.\n"
+            "Your mail always arrives in game at F5 \u2192 Mail, whatever this is set to.")
+
+
+@cmd_mail.command(name="relay",
+                  description="Turn Discord DMs for new in-game mail on or off")
+@app_commands.describe(state="on or off")
+async def cmd_mail_relay(ctx, state: str):
+    want = (state or "").strip().lower()
+    if want not in ("on", "off"):
+        await ctx.send("Use `/mail relay on` or `/mail relay off`.")
+        return
+    if http_session is None or not API_SECRET_KEY:
+        await ctx.send("\u26a0\ufe0f Mail settings are temporarily unreachable \u2014 try again shortly.")
+        return
+    try:
+        async with http_session.post(
+            f"{API_BASE_URL}/api/v1/internal/mail/relay-pref",
+            json={"discord_id": str(ctx.author.id), "enabled": want == "on"},
+            headers={"X-Internal-Key": API_SECRET_KEY},
+            timeout=aiohttp.ClientTimeout(total=8),
+        ) as r:
+            if r.status == 404:
+                await ctx.send(
+                    "\u274c Your Discord isn\u2019t linked to a ROUNDS account yet \u2014 "
+                    "in game press F5 \u2192 Home tab \u2192 **Get Link Code**, then "
+                    "`!link YOUR_CODE` here.")
+                return
+            if r.status != 200:
+                print(f"[MAIL-RELAY] pref {r.status}: {(await r.text())[:120]}")
+                await ctx.send("\u26a0\ufe0f Couldn\u2019t change that right now \u2014 try again in a moment.")
+                return
+    except Exception as ex:
+        print(f"[MAIL-RELAY] pref error: {ex}")
+        await ctx.send("\u26a0\ufe0f Couldn\u2019t reach mail settings \u2014 try again shortly.")
+        return
+    await ctx.send(
+        "\u2705 Mail relay **on** \u2014 new in-game mail will be DMed to you here."
+        if want == "on" else
+        "\u2705 Mail relay **off** \u2014 no more DMs for new in-game mail. "
+        "Your mail still arrives in game at F5 \u2192 Mail.")
+
+
+@cmd_mail.command(name="reply",
+                  description="Reply to a mail that was DMed to you")
+@app_commands.describe(
+    text="Your reply \u2014 start with the thread code, or leave it off to pick from a list")
+async def cmd_mail_reply(ctx, *, text: str):
+    """PLAN.md item 5. Discord's Reply on the DM is exact and is the way the
+    marker line teaches; this exists for the player who is not in that DM
+    thread -- on mobile, or after clearing the conversation.
+
+    It names a thread the same two ways every other path does: the code the
+    player leads with, or the one they tap. It does NOT fall back to the most
+    recent mail. That fallback read arrival time as identity (#174) and was
+    wrong exactly when it mattered -- a second mail landing between the DM
+    and the reply silently redirected the answer to the wrong person."""
+    # DM ONLY. The body of this command is private mail. Typed as
+    # `!mail reply ...` in a bridged channel it is relayed into in-game
+    # chat before dispatch (the relay above now skips commands, but the
+    # channel itself still saw it), and answering in a guild would have
+    # the bot name the sender and subject to everyone reading.
+    if getattr(ctx, "guild", None) is not None:
+        await ctx.send(
+            "\U0001f512 Send that to me in a **direct message** \u2014 a mail "
+            "reply is private, and anything typed here is not.",
+            ephemeral=True)
+        return
+    body = text or ""
+    if not body.strip():
+        await ctx.send("Use `/mail reply <your message>`.")
+        return
+    # Before the request, not after: a slash interaction hard-fails at 3s
+    # and this call is allowed 8, so a slow api turned a reply that DID
+    # send into "the application did not respond" -- and the retry that
+    # invites carries a new interaction id, so it is a new key and a
+    # second mail.
+    await _maybe_defer(ctx)
+    # The invocation is the idempotency source here, exactly as the message
+    # id is for a DM reply: a retried interaction must not become a second
+    # mail. A slash invocation has no real message, so the interaction id
+    # stands in -- and a tap on the listing below reuses this SAME id, so
+    # picking a thread cannot become a second send either (#172).
+    src_id = str(getattr(getattr(ctx, "message", None), "id", None)
+                 or getattr(getattr(ctx, "interaction", None), "id", None) or "")
+    # A leading thread code names the thread; without one there is nothing
+    # left to name it with, and the player picks from a list. The recency
+    # lookup that used to stand in here named a thread by WHEN it arrived,
+    # which is not what identifies it (#174).
+    lead = _RELAY_CODE_LEAD_RE.match(body)
+    code = normalize_relay_code(lead.group(1)) if lead else ""
+    if code:
+        verdict = await _post_mail_reply(ctx, str(ctx.author.id), code,
+                                         lead.group(2), src_id)
+    else:
+        verdict = await _ask_which_mail(None, body, discord_id=str(ctx.author.id),
+                                        channel=ctx, source_message_id=src_id)
+    if verdict == "NOT_LINKED":
+        await ctx.send(
+            "\u274c Your Discord isn\u2019t linked to a ROUNDS account yet \u2014 "
+            "in game press F5 \u2192 Home tab \u2192 **Get Link Code**, then "
+            "`!link YOUR_CODE` here.")
+    elif verdict == "NOT_MAIL":
+        # Reached only with no threads to offer. In a DM this falls through
+        # to the ticket chain; here the player asked for mail by name, so
+        # silence would be the wrong answer.
+        await ctx.send(
+            "\u274c No mail has been relayed to you yet, so there is nothing to "
+            "reply to. Mail you receive in game is DMed here when the relay is "
+            "on (`/mail relay on`).")
+
 
 @bot.hybrid_command(name="rank", description="Ranked stats: rating, tier, streaks, leaderboard position")
 @app_commands.describe(member="Player to look up (defaults to yourself)")
@@ -11194,23 +11753,72 @@ async def before_tournament_notices():
 # Rows are inserted by migrations/admin SQL; this loop DMs the linked player.
 # Durable ack pattern (learning #105); the server serializes the pk as
 # "dm_id" and this reads the same key (learning #152).
-_pdm_seen_ids: set = set()
+# dm_id -> (undeliverable, discord_message_id or None). A SET was not
+# enough (H4): a re-ack after a failed ack has to reproduce the SAME outcome
+# and the SAME message id, or a row whose DM was refused gets re-acked as
+# delivered, and a relay loses the mapping its "Reply to this message"
+# footer depends on.
+_pdm_seen: dict = {}
+
+# dm_ids whose most recent ack did NOT land. The >2000 trim used to run
+# unconditionally, so a rollover that coincided with a failing ack forgot a
+# just-delivered row while the server still had it queued -- and the next
+# poll DMed it again. A duplicate with no crash involved is wider than the
+# at-least-once window this queue documents, so the trim keeps exactly the
+# rows still waiting to be acked.
+_pdm_unacked: set = set()
+
+# NO process map from Discord message id to mail. There used to be two --
+# one keyed by message id, one by Discord id -- because the server could only
+# resolve a reply after the ack had stamped the row, and the bot knew the
+# answer first. Both were reconstructions of an identity that is now written
+# into the DM TEXT inside the mail's own transaction, so there is nothing
+# left for them to bridge. They were also process-local state whose loss made
+# the bot GUESS a thread, which is the failure this whole change removes.
 
 
-async def _ack_pending_dms(dm_ids, undeliverable=False):
-    if not dm_ids or http_session is None or not API_SECRET_KEY:
-        return
+async def _ack_pending_dms(dm_ids, undeliverable=False, claims=None,
+                           retry_ids=None, not_attempted_ids=None):
+    """Report what became of the rows this poll was handed.
+
+    `claims` is {dm_id: claim} straight from the poll response. A settlement
+    is a statement about ONE hand-out, so it has to name which: without the
+    claim, a report that arrived late -- or was replayed -- was applied to
+    whatever the row was doing by then, including a hand-out some later poll
+    was in the middle of. The server ignores an id whose claim it cannot
+    match, so a stale report costs nothing.
+
+    Two settlement buckets, and the difference is whether anything was
+    attempted. `retry_ids` were REACHED and failed for a reason this loop
+    could not name -- they count against the bound, and the bot is the only
+    witness to them. `not_attempted_ids` were handed out and never reached
+    because the batch was cut short; they cost nothing, or an interrupted
+    poll would retire a DM nothing ever tried to send.
+
+    Returns True when the server accepted the ack, and the caller needs that
+    answer: an ack that did not land leaves the row queued, so what this poll
+    learned about it has to outlive the next trim or the row is sent twice."""
+    if not dm_ids and not retry_ids and not not_attempted_ids:
+        return True
+    if http_session is None or not API_SECRET_KEY:
+        return False
     try:
         async with http_session.post(
             f"{API_BASE_URL}/api/v1/internal/pending-dms/ack",
-            json={"dm_ids": list(dm_ids), "undeliverable": bool(undeliverable)},
+            json={"dm_ids": list(dm_ids), "undeliverable": bool(undeliverable),
+                  "claims": {k: v for k, v in (claims or {}).items() if v},
+                  "retry_ids": list(retry_ids or []),
+                  "not_attempted_ids": list(not_attempted_ids or [])},
             headers={"X-Internal-Key": API_SECRET_KEY},
             timeout=aiohttp.ClientTimeout(total=8),
         ) as resp:
             if resp.status != 200:
                 print(f"[PDM] ack failed: {resp.status} {(await resp.text())[:120]}")
+                return False
+            return True
     except Exception as ex:
         print(f"[PDM] ack error: {ex}")
+        return False
 
 
 @tasks.loop(seconds=60)
@@ -11220,64 +11828,139 @@ async def poll_pending_dms():
         data = await api_get("/internal/pending-dms")
         if not data or not data.get("dms"):
             return
-        delivered, dead = [], []
-        for d in data["dms"]:
-            if not isinstance(d, dict):
-                continue
-            did_key = d.get("dm_id")
-            if did_key is None:
-                continue
-            if did_key in _pdm_seen_ids:
-                # Handled this process-lifetime — earlier ack must have
-                # failed; re-ack, don't re-DM.
-                delivered.append(did_key)
-                continue
-            discord_id = d.get("discord_id")
-            content = (d.get("content") or "").strip()
-            if not discord_id or not content:
-                # Unlinked player / empty row — permanently undeliverable.
-                _pdm_seen_ids.add(did_key)
-                dead.append(did_key)
-                continue
-            # Unparseable discord_id = permanently undeliverable — without
-            # this, one bad row at the head of the created_at ASC LIMIT 20
-            # window would starve the whole queue forever (the poll would
-            # refetch it every 60s and never ack).
-            try:
-                did_int = int(discord_id)
-            except (TypeError, ValueError):
-                print(f"[PDM] bad discord_id {discord_id!r} — flagging undeliverable")
-                _pdm_seen_ids.add(did_key)
-                dead.append(did_key)
-                continue
-            try:
-                user = bot.get_user(did_int) or await bot.fetch_user(did_int)
-            except discord.NotFound:
-                _pdm_seen_ids.add(did_key)
-                dead.append(did_key)
-                continue
-            except Exception as ex:
-                print(f"[PDM] fetch_user({discord_id}) failed: {ex}")
-                continue
-            if user is None:
-                continue
-            try:
-                await user.send(content[:2000])
-                print(f"[PDM] dm {did_key} → {user} ({d.get('display_name') or d.get('steam_id')})")
-                _pdm_seen_ids.add(did_key)
-                delivered.append(did_key)
-            except discord.Forbidden:
-                print(f"[PDM] {discord_id} has DMs closed — flagging undeliverable")
-                _pdm_seen_ids.add(did_key)
-                dead.append(did_key)
-            except Exception as ex:
-                # Transient (rate limit / gateway blip) — no ack, retried next poll.
-                print(f"[PDM] DM to {discord_id} failed: {ex}")
-            await asyncio.sleep(0.15)
-        if len(_pdm_seen_ids) > 2000:
-            _pdm_seen_ids.clear()
-        await _ack_pending_dms(delivered, undeliverable=False)
-        await _ack_pending_dms(dead, undeliverable=True)
+        delivered, dead, retry = [], [], []
+        handed = [str(x.get("dm_id")) for x in data["dms"]
+                  if isinstance(x, dict) and x.get("dm_id") is not None]
+        # {dm_id: claim} for THIS hand-out. Every settlement below quotes it,
+        # so a report that is replayed, or that arrives after the row has
+        # been handed out again, applies to the hand-out it was about and to
+        # no other.
+        claim_of = {str(x.get("dm_id")): str(x.get("claim") or "")
+                    for x in data["dms"]
+                    if isinstance(x, dict) and x.get("dm_id") is not None}
+        reached = set()
+        try:
+            for d in data["dms"]:
+                if not isinstance(d, dict):
+                    continue
+                did_key = d.get("dm_id")
+                if did_key is None:
+                    continue
+                reached.add(str(did_key))
+                if did_key in _pdm_seen:
+                    # Handled this process-lifetime — earlier ack must have
+                    # failed; re-ack, don't re-DM.
+                    (dead if _pdm_seen[did_key] else delivered).append(did_key)
+                    continue
+                discord_id = d.get("discord_id")
+                content = (d.get("content") or "").strip()
+                if not discord_id or not content:
+                    # Unlinked player / empty row — permanently undeliverable.
+                    _pdm_seen[did_key] = True
+                    dead.append(did_key)
+                    continue
+                # Unparseable discord_id = permanently undeliverable — without
+                # this, one bad row at the head of the created_at ASC LIMIT 20
+                # window would starve the whole queue forever (the poll would
+                # refetch it every 60s and never ack).
+                try:
+                    did_int = int(discord_id)
+                except (TypeError, ValueError):
+                    print(f"[PDM] bad discord_id {discord_id!r} — flagging undeliverable")
+                    _pdm_seen[did_key] = True
+                    dead.append(did_key)
+                    continue
+                try:
+                    user = bot.get_user(did_int) or await bot.fetch_user(did_int)
+                except discord.NotFound:
+                    _pdm_seen[did_key] = True
+                    dead.append(did_key)
+                    continue
+                except Exception as ex:
+                    print(f"[PDM] fetch_user({discord_id}) failed "
+                          f"(hand-out {d.get('attempts')}): {ex}")
+                    retry.append(did_key)
+                    continue
+                if user is None:
+                    retry.append(did_key)
+                    continue
+                try:
+                    sent = await user.send(content[:2000])
+                    print(f"[PDM] dm {did_key} → {user} ({d.get('display_name') or d.get('steam_id')})")
+                    # The DM text carries its own thread code, so nothing
+                    # about the message that just went out needs recording:
+                    # a reply to it resolves from what the player can see.
+                    _pdm_seen[did_key] = False
+                    delivered.append(did_key)
+                except discord.Forbidden:
+                    print(f"[PDM] {discord_id} has DMs closed — flagging undeliverable")
+                    _pdm_seen[did_key] = True
+                    dead.append(did_key)
+                except Exception as ex:
+                    # Unnamed: a rate limit or gateway blip, or something
+                    # permanent this code has no case for. No ack, so it is
+                    # retried next poll -- and bounded, because the api charged
+                    # the hand-out before this row ever reached the bot.
+                    print(f"[PDM] DM to {discord_id} failed "
+                          f"(hand-out {d.get('attempts')}): {ex}")
+                    retry.append(did_key)
+                await asyncio.sleep(0.15)
+        except Exception as ex:
+            # The batch was cut short. Every line below still has to
+            # run: a row this poll already DMed must be acked or the
+            # next poll DMs it again, and a row charged at hand-out
+            # but never reached must be credited back or an
+            # interrupted poll retires a DM nothing ever tried to
+            # send. Without this handler the escape went straight to
+            # the loop's outer guard and skipped all of it -- which
+            # made the credit-back unreachable, not merely rare.
+            print(f"[PDM] batch cut short after {len(reached)} of "
+                  f"{len(handed)} row(s): {ex}")
+        # Ack FIRST, then trim. Clearing before the ack meant a failed ack
+        # right after a clear reposted the whole batch -- a duplicate with
+        # no crash involved, which is wider than the at-least-once window
+        # this queue documents.
+        ok_live = await _ack_pending_dms(delivered, undeliverable=False,
+                                         claims=claim_of)
+        ok_dead = await _ack_pending_dms(dead, undeliverable=True,
+                                         claims=claim_of)
+        if retry:
+            # REACHED and failed for a reason this loop could not name. This
+            # is the one report only the bot can make, and it is what the
+            # attempt bound counts: nothing is charged at hand-out any more,
+            # so a row nobody tried is never spent. By id, because these are
+            # DMs somebody is waiting on.
+            print("[PDM] %d row(s) failed and were charged one attempt: %s"
+                  % (len(retry), ", ".join(str(x) for x in retry[:10])))
+            await _ack_pending_dms([], retry_ids=retry, claims=claim_of)
+        # Rows this poll was handed and never got to -- the loop was cut
+        # short. Settled at charge 0 and released immediately, so the next
+        # poll picks them up without waiting out the claim.
+        unreached = [i for i in handed if i not in reached]
+        if unreached:
+            print("[PDM] %d row(s) handed out and not reached this poll"
+                  % len(unreached))
+            await _ack_pending_dms([], not_attempted_ids=unreached,
+                                   claims=claim_of)
+        for keys, landed in ((delivered, ok_live), (dead, ok_dead)):
+            for k in keys:
+                if landed:
+                    _pdm_unacked.discard(k)
+                else:
+                    _pdm_unacked.add(k)
+        # An unacked id the server has stopped handing back is retired --
+        # it hit the cap, or another path acked it. Nothing will ever
+        # mention it again, so keeping it would grow this set until
+        # restart. Anything still queued reappears in `handed`.
+        _pdm_unacked.intersection_update(set(handed) | set(_pdm_unacked) & reached)
+        if len(_pdm_seen) > 2000:
+            # Forget only what the server has confirmed. Anything still
+            # unacked is a row the next poll will hand back, and its
+            # recorded outcome is the only thing stopping a second DM.
+            keep = {k: v for k, v in _pdm_seen.items() if k in _pdm_unacked}
+            _pdm_seen.clear()
+            _pdm_seen.update(keep)
+            _pdm_unacked.intersection_update(set(_pdm_seen))
     except Exception as ex:
         print(f"poll_pending_dms error: {ex}")
 
@@ -11546,6 +12229,10 @@ async def on_interaction(interaction: discord.Interaction):
         if interaction.type != discord.InteractionType.component:
             return
         cid = (interaction.data or {}).get("custom_id", "")
+        if cid.startswith("scrmail:"):
+            # Item 5: a tap on the pick-a-thread listing.
+            await _mailpick_click(interaction, cid)
+            return
         if cid.startswith("modcase:"):
             # Mail moderation buttons (Sept 6 item b, B-2): routed to the api
             # with the clicker's Discord id; the server decides.

@@ -18,6 +18,8 @@ import asyncio
 import hashlib
 import hmac
 import inspect
+import textwrap
+import ast
 import json
 import math
 import os
@@ -74,8 +76,12 @@ class _Scalars:
 
 
 class _Res:
-    def __init__(self, rows=()):
+    def __init__(self, rows=(), rowcount=0):
         self._rows = list(rows)
+        # Item 5's relay fan-out reads res.rowcount. Without it the access
+        # raises, queue_mail_relay swallows it, and every send test quietly
+        # exercises the fail-soft branch while looking green.
+        self.rowcount = rowcount
 
     def mappings(self):
         return self
@@ -127,6 +133,7 @@ class FakeDb:
         self.bulk_grants = {}
         self.messages = {}
         self.recipients = {}
+        self.pending_dms = []               # item 5: the Discord relay queue
         self.blocks = set()
         self.played = set()
         self.cases = {}
@@ -147,11 +154,15 @@ class FakeDb:
 
     # seeding -------------------------------------------------------------
     def add_player(self, sid, name=None, mod_seen=True, mail_from="everyone", deleted=False,
-                   discord_id=None):
+                   discord_id=None, mail_discord_relay=True):
         pid = uuid.uuid4()
+        # mail_discord_relay defaults True here because migration 330 gives
+        # the COLUMN that default, for every row and not only linked ones
+        # (item 5). A fake that defaulted it False would make the relay look
+        # off by default and hide a regression in the real default.
         self.players[pid] = {"id": pid, "steam_id": sid, "display_name": name or f"P{sid[-1]}",
                              "mod_seen_at": (NOW - timedelta(days=1)) if mod_seen is True else mod_seen,
-                             "mail_from": mail_from,
+                             "mail_from": mail_from, "mail_discord_relay": mail_discord_relay,
                              "deleted_at": NOW if deleted else None, "discord_id": discord_id}
         return pid
 
@@ -168,13 +179,14 @@ class FakeDb:
 
     def seed_message(self, sender_id, recipients, subject="Hello", body="body text", created_at=None,
                      kind="direct", key=None, read=False, deleted_by_sender_at=None, thread_id=None,
-                     in_reply_to=None):
+                     in_reply_to=None, via="game"):
         mid = uuid.uuid4()
         self.messages[mid] = {"id": mid, "sender_id": sender_id, "kind": kind,
                               "thread_id": thread_id or mid, "in_reply_to": in_reply_to,
                               "subject": subject, "body": body, "idempotency_key": key or uuid.uuid4(),
                               "created_at": created_at or NOW,
-                              "deleted_by_sender_at": deleted_by_sender_at}
+                              "deleted_by_sender_at": deleted_by_sender_at,
+                              "via": via}      # item 5 / migration 330
         for rid, rkind, delivery in recipients:
             self.recipients[(mid, rid)] = {"kind": rkind, "delivery": delivery,
                                            "read_at": NOW if read else None, "deleted_at": None}
@@ -279,7 +291,10 @@ class FakeDb:
             p = self.player_by_sid(params["sid"])
             if p is None or p["deleted_at"] is not None:
                 return _Res([])
-            return _Res([{k: p[k] for k in ("id", "steam_id", "display_name", "mod_seen_at", "mail_from")}])
+            keys = ["id", "steam_id", "display_name", "mod_seen_at", "mail_from"]
+            if "mail_discord_relay" in sql:      # _mail_caller's longer form
+                keys += ["mail_discord_relay", "discord_id"]
+            return _Res([{k: p[k] for k in keys}])
         if "SELECT id, steam_id FROM players" in sql and "= ANY(" in sql:
             return _Res([{"id": p["id"], "steam_id": p["steam_id"]} for p in self.players.values()
                          if p["steam_id"] in set(params["sids"]) and p["deleted_at"] is None])
@@ -295,6 +310,31 @@ class FakeDb:
             return _Res([(hits[0]["steam_id"],)] if hits else [])
         if "UPDATE players SET mail_from" in sql:
             self.players[params["me"]]["mail_from"] = params["v"]
+            return _Res()
+        if "INSERT INTO pending_dms (steam_id, content, mail_id, relay_code)" in sql:
+            # Item 5's relay fan-out. Mirrors the statement's own predicate
+            # -- delivered envelopes, linked Discord, relay on -- so a send
+            # test exercises the real path and the queue is observable.
+            #
+            # `relay_code` is carried here because the row cannot exist
+            # without it (ck_pending_dms_relay_code), and because it is the
+            # whole of the redesign: the thread identity is written in the
+            # mail's own transaction, before any Discord message exists.
+            n = 0
+            for (mid_k, rid), r in self.recipients.items():
+                if str(mid_k) != str(params["mid"]) or r["delivery"] != "delivered":
+                    continue
+                p = self.players.get(rid)
+                if p and p["discord_id"] is not None and p["mail_discord_relay"]:
+                    self.pending_dms.append({"steam_id": p["steam_id"],
+                                             "content": params["content"],
+                                             "mail_id": params["mid"],
+                                             "relay_code": params["code"],
+                                             "cancelled_at": None})
+                    n += 1
+            return _Res(rowcount=n)
+        if "UPDATE players SET mail_discord_relay" in sql:
+            self.players[params["me"]]["mail_discord_relay"] = params["r"]
             return _Res()
         # the deletion ledger (review r3)
         if "FROM deleted_steam_ids" in sql:
@@ -447,7 +487,11 @@ class FakeDb:
                                   "in_reply_to": params.get("irt"), "subject": params["subj"],
                                   "body": params["body"], "idempotency_key": params["key"],
                                   "created_at": self.message_created_at, "deleted_by_sender_at": None,
-                                  "recipient_count": None}
+                                  "recipient_count": None,
+                                  # Item 5: the send core binds it; the
+                                  # broadcast insert does not, and takes the
+                                  # column default exactly as the table does.
+                                  "via": params.get("via", "game")}
             return _Res()
         if "UPDATE mail_messages SET recipient_count" in sql:
             self.messages[params["mid"]]["recipient_count"] = int(params["n"])
@@ -769,6 +813,38 @@ class FakeDb:
             assert (sql.rstrip().endswith("DEFAULT")
                     or str(main.FORMATION_LOCK_TIMEOUT_MS) in sql), sql
             return _Res([])
+        # Deleting a mail WITHDRAWS the relay DM that has not gone out
+        # yet. Undelivered only -- a DM already sent is out, and its row has
+        # to survive because the thread code printed in that DM resolves
+        # through it. Cancelled rather than deleted for exactly that reason,
+        # which is why this arm marks the row instead of dropping it: an arm
+        # that deleted would let a test pass while the player's reply to an
+        # already-sent mail stopped resolving.
+        if sql.startswith("UPDATE pending_dms SET cancelled_at = NOW()") \
+                and "WHERE mail_id = :mid" in sql:
+            hit = 0
+            for row in self.pending_dms:
+                if str(row.get("mail_id")) == str(params["mid"]) \
+                        and row.get("steam_id") == params["sid"] \
+                        and row.get("cancelled_at") is None:
+                    row["cancelled_at"] = NOW
+                    hit += 1
+            return _Res(rowcount=hit)
+        # ...and turning the relay OFF withdraws the whole backlog. Same
+        # statement shape, different predicate and a different caller: the
+        # bot's `/mail relay off` and the client's mail-settings PUT both
+        # run mail_discord.RELAY_OFF_CANCEL_SQL, which is defined once so
+        # the two cannot drift into meaning different things (#329/#341).
+        if sql.startswith("UPDATE pending_dms SET cancelled_at = NOW()") \
+                and "WHERE steam_id = :sid" in sql:
+            hit = 0
+            for row in self.pending_dms:
+                if row.get("steam_id") == params["sid"] \
+                        and row.get("mail_id") is not None \
+                        and row.get("cancelled_at") is None:
+                    row["cancelled_at"] = NOW
+                    hit += 1
+            return _Res(rowcount=hit)
         raise AssertionError(f"unexpected statement: {sql[:120]}")
 
 
@@ -952,7 +1028,12 @@ def test_advisory_lock_is_taken_first_and_pinned_in_the_send_span():
     ident_i = next(i for i, s in enumerate(db.statements) if "pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))" in s)
     assert ident_i < lock_i < idem_i < ins_i                          # identity lattice -> sender lock -> replay -> write
     assert db.locks == [("identity", A_SID), ("mail", ids[A_SID])]
-    for fn in (main.mail_send, main.mail_reply):
+    # _mail_reply_core, not mail_reply: item 5 extracted the reply body so
+    # the Discord reply route runs the identical gates, and the lock block
+    # moved with it verbatim. This is the only check on the REPLY path's
+    # ordering -- the behavioural half above exercises mail_send -- so it
+    # follows the code rather than being dropped.
+    for fn in (main.mail_send, main._mail_reply_core):
         src = inspect.getsource(fn)
         assert src.index("_mail_lock_identities(") < src.index("_mail_lock_sender(") \
             < src.index("_mail_prior_send(") < src.index("_mail_sender_gates(")
@@ -1372,7 +1453,8 @@ def test_read_delete_detail_and_status_revision_monotonic():
     db.message_created_at = NOW
     m2 = _send(db, [B_SID], cc=[C_SID], subject="two")["id"]
     st = _status(db, "tokB")
-    assert st == {"unread": 2, "revision": "2", "mail_from": "everyone"}
+    assert st == {"unread": 2, "revision": "2", "mail_from": "everyone",
+                  "discord_relay": True, "discord_linked": False}
     read = _run(main.mail_read(m1, _req("tokB"), db))
     assert read["read_at"] == NOW.isoformat() and _status(db, "tokB")["unread"] == 1
     detail = _run(main.mail_detail(m2, _req("tokB"), db))
@@ -1416,11 +1498,155 @@ def test_block_list_is_owner_only():
 
 def test_settings_route_owns_mail_from():
     db, ids = _world()
-    assert _run(main.mail_settings_get(_req("tokA"), db)) == {"mail_from": "everyone"}
+    assert _run(main.mail_settings_get(_req("tokA"), db)) == {
+        "mail_from": "everyone", "discord_relay": True, "discord_linked": False}
     assert _run(main.mail_settings_put(main._MailSettingsReq(mail_from="Played"), _req("tokA"), db)) == {"mail_from": "played"}
     assert db.players[ids[A_SID]]["mail_from"] == "played"
     assert _raises(main.mail_settings_put(main._MailSettingsReq(mail_from="friends"), _req("tokA"), db)).detail == "mail_from_invalid"
     assert db.players[ids[A_SID]]["mail_from"] == "played"
+
+
+def test_the_relay_flag_is_left_alone_by_a_client_that_does_not_send_it():
+    """Item 5. A 1.40.3 client PUTs {mail_from} and knows nothing about the
+    relay. If an absent field meant False, every settings save from an old
+    client would silently turn the relay off for a player who never asked
+    -- so absent must mean "leave it alone", and it is asserted here rather
+    than trusted to the Optional default."""
+    db, ids = _world()
+    assert db.players[ids[A_SID]]["mail_discord_relay"] is True
+    _run(main.mail_settings_put(main._MailSettingsReq(mail_from="played"), _req("tokA"), db))
+    assert db.players[ids[A_SID]]["mail_discord_relay"] is True, \
+        "an old client's save must not reset a preference it cannot see"
+    out = _run(main.mail_settings_put(
+        main._MailSettingsReq(mail_from="played", discord_relay=False), _req("tokA"), db))
+    # Both fields were SENT, so both are echoed. `withdrawn` rides along
+    # as a report of what turning the relay off did to the queue.
+    assert out["mail_from"] == "played" and out["discord_relay"] is False
+    assert out["withdrawn"] == 0, "nothing was queued, so nothing was withdrawn"
+    assert db.players[ids[A_SID]]["mail_discord_relay"] is False
+    # ...and the GET reports what was stored, not the column default.
+    got = _run(main.mail_settings_get(_req("tokA"), db))
+    assert got["discord_relay"] is False and got["discord_linked"] is False
+
+
+def test_the_mail_policy_is_left_alone_by_a_put_that_only_moves_the_relay():
+    """THE SYMMETRIC CASE, and the one the first round got wrong.
+
+    The test above asserts an old client cannot clobber the relay. It passed
+    while the opposite direction was fully broken: `_MailSettingsReq` still
+    carried a second `mail_from: str = "everyone"` below the Optional one,
+    Pydantic takes the later declaration, and so a PUT meaning "just turn
+    the relay off" quietly reset a player's "who may mail me" to everyone.
+    One direction asserted is not the rule asserted -- the rule is that an
+    ABSENT field never writes, whichever field is absent."""
+    db, ids = _world()
+    _run(main.mail_settings_put(main._MailSettingsReq(mail_from="nobody"), _req("tokA"), db))
+    assert db.players[ids[A_SID]]["mail_from"] == "nobody"
+
+    req = main._MailSettingsReq(discord_relay=False)
+    assert req.mail_from is None, "an unset mail_from must not materialise a value"
+    out = _run(main.mail_settings_put(req, _req("tokA"), db))
+    # The RULE, not the whole dict: an absent field must not be echoed as
+    # written. `withdrawn` is not an echo of an unsent field -- it reports
+    # what turning the relay off did to the queue -- so pinning the dict
+    # whole would fail here for a reason this test is not about.
+    assert "mail_from" not in out, "a field nobody sent must not be echoed as written"
+    assert out["discord_relay"] is False
+    assert out["withdrawn"] == 0, "nothing was queued, so nothing was withdrawn"
+    assert db.players[ids[A_SID]]["mail_from"] == "nobody", \
+        "toggling the relay must not rewrite who may mail this player"
+    assert db.players[ids[A_SID]]["mail_discord_relay"] is False
+
+    # ...and a PUT that carries neither field is a caller bug, not a no-op.
+    assert _raises(main.mail_settings_put(
+        main._MailSettingsReq(), _req("tokA"), db)).detail == "mail_from_or_relay_required"
+
+
+def test_turning_the_relay_off_withdraws_what_is_still_queued():
+    """The preference used to be consulted only by the fan-out that CREATES
+    rows, so it governed nothing that already existed: a player who turned
+    the relay off while the bot was down still received the whole backlog
+    when it came back.
+
+    Undelivered only, and CANCELLED rather than deleted -- a DM already sent
+    is out, and its row is what makes the thread code printed in that DM
+    resolve. Deleting it would turn "that mail is gone" into a reply that
+    names nothing at all.
+
+    This is also the negative control for the three `withdrawn == 0`
+    assertions elsewhere in this file: a statement matching no rows would
+    satisfy all of them."""
+    db, ids = _world()
+    mid = "11111111-2222-3333-4444-555555555555"
+    db.pending_dms.extend([
+        # this player's, still queued -- the one that must go
+        {"steam_id": A_SID, "content": "queued relay", "mail_id": mid,
+         "relay_code": "SCR-AAAAAAAAAAAA", "cancelled_at": None},
+        # this player's, already DMed: it is out, and its row is the route
+        # a reply to that DM still resolves through
+        {"steam_id": A_SID, "content": "sent relay", "mail_id": mid,
+         "relay_code": "SCR-BBBBBBBBBBBB", "cancelled_at": None,
+         "delivered_at": NOW},
+        # an operational DM -- nothing to do with any mail, and not the
+        # relay preference's business
+        {"steam_id": A_SID, "content": "your bug report was answered",
+         "mail_id": None, "relay_code": None, "cancelled_at": None},
+        # someone else's queued relay
+        {"steam_id": B_SID, "content": "other player relay", "mail_id": mid,
+         "relay_code": "SCR-CCCCCCCCCCCC", "cancelled_at": None},
+    ])
+    out = _run(main.mail_settings_put(
+        main._MailSettingsReq(discord_relay=False), _req("tokA"), db))
+    assert out["discord_relay"] is False
+    cancelled = [r["content"] for r in db.pending_dms if r["cancelled_at"]]
+    assert out["withdrawn"] >= 1, (
+        "the backlog was not withdrawn: %s" % out)
+    assert "queued relay" in cancelled, cancelled
+    assert "your bug report was answered" not in cancelled, (
+        "an operational DM was withdrawn by a MAIL relay preference")
+    assert "other player relay" not in cancelled, (
+        "the withdrawal reached another player's queue")
+    # ...and turning it back ON withdraws nothing, because the statement runs
+    # on the OFF edge only.
+    before = len(cancelled)
+    out2 = _run(main.mail_settings_put(
+        main._MailSettingsReq(discord_relay=True), _req("tokA"), db))
+    assert "withdrawn" not in out2 or out2["withdrawn"] == 0, out2
+    assert len([r for r in db.pending_dms if r["cancelled_at"]]) == before
+
+
+def test_both_relay_toggles_run_the_same_withdrawal_statement():
+    """`/mail relay off` in Discord and the in-game settings PUT are two
+    routes onto one decision. Written out twice they would drift into meaning
+    different things by the same name, which is a cost this project has
+    already paid (#329/#341) -- so there is one statement and both import it.
+
+    MUTATION: paste a second copy of the UPDATE into main.py. Must fail."""
+    import mail_discord as _md
+    assert isinstance(_md.RELAY_OFF_CANCEL_SQL, str)
+    src_ = inspect.getsource(main.mail_settings_put)
+    assert "mail_discord.RELAY_OFF_CANCEL_SQL" in src_, (
+        "the client toggle does not use the shared statement")
+    assert "UPDATE pending_dms SET cancelled_at" not in src_, (
+        "the client toggle has grown its own copy of the withdrawal")
+    # The statement withdraws UNDELIVERED mail rows for one player, and says
+    # so in its predicate rather than relying on the caller.
+    flat = " ".join(_md.RELAY_OFF_CANCEL_SQL.split())
+    for clause in ("steam_id = :sid", "mail_id IS NOT NULL",
+                   "delivered_at IS NULL", "cancelled_at IS NULL"):
+        assert clause in flat, (clause, flat)
+    assert "DELETE" not in flat.upper(), flat
+
+
+def test_neither_settings_field_carries_a_default_that_could_write():
+    """The defect above was a DUPLICATE DECLARATION, which reads as perfectly
+    normal code and which a behavioural test only catches for the field it
+    happens to exercise. Pin the model itself: a non-None default on either
+    field means an absent field writes, for every caller at once."""
+    for name in ("mail_from", "discord_relay"):
+        f = main._MailSettingsReq.model_fields[name]
+        assert f.default is None and not f.is_required(), \
+            "%s defaults to %r -- an absent field would write it" % (name, f.default)
 
 
 # ── delete-account (B-8) and retention ────────────────────────────────────
@@ -1434,13 +1660,38 @@ def test_delete_account_handles_every_new_table_by_name():
                     ("DELETE FROM mail_censor_hits WHERE sender_id = :pid", 1),
                     ("UPDATE moderation_cases SET resolved_by = :tomb WHERE resolved_by = :sid", 1),     # M11
                     ("UPDATE mail_bulk_grants SET granted_by = :tomb WHERE granted_by = :sid", 1),       # M11
-                    ("DELETE FROM mail_inbox_rev WHERE recipient_id = :pid", 1)):                         # migration 300
+                    ("DELETE FROM mail_inbox_rev WHERE recipient_id = :pid", 1),                          # migration 300
+                    # item 5 / migration 330: a queued relay DM is a COPY of the
+                    # mail held outside the envelope tables, and mail_id's cascade
+                    # cannot reach it because this endpoint anonymises rather than
+                    # deletes. Both directions -- addressed to, and sent by.
+                    ("DELETE FROM pending_dms WHERE mail_id IS NOT NULL AND steam_id = :sid", 1),
+                    ("DELETE FROM pending_dms WHERE mail_id IN", 1)):
         assert src.count(stmt) == n, stmt
+    # ...and the WHOLE of each, predicate included. The second one was
+    # matched on its prefix, and the prefix does not contain the clause
+    # that decides whose rows go: `sender_id <> :pid` kept every DM this
+    # player sent and deleted everyone else's, and read as correct.
+    # Python folds adjacent literals into one Constant, so the statement
+    # is whole here even though no single line of source holds it.
+    stmts = {n.value for n in ast.walk(ast.parse(textwrap.dedent(src)))
+             if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    for whole in (
+            "DELETE FROM pending_dms WHERE mail_id IS NOT NULL AND steam_id = :sid",
+            "DELETE FROM pending_dms WHERE mail_id IN"
+            " (SELECT id FROM mail_messages WHERE sender_id = :pid)"):
+        assert whole in stmts, (
+            "the queued-DM sweep does not run exactly this statement, so "
+            "its predicate is not the one this test names:\n  %s" % whole)
     # H3: the second envelope sweep and the revision row go AFTER the anonymising rewrite has been flushed
     rewrite = src.index('player.steam_id = f"deleted_')
     flush = src.index("await db.flush()", rewrite)
     assert rewrite < flush < src.rindex("DELETE FROM mail_recipients WHERE recipient_id = :pid") \
         < src.index("DELETE FROM mail_inbox_rev") < src.index("await db.commit()", flush)
+    # The relay queue goes after the flush too, and for the same reason: a
+    # send racing the deletion either committed before the rewrite (its rows
+    # are caught here) or blocks and then finds deleted_at set.
+    assert flush < src.index("DELETE FROM pending_dms") < src.index("await db.commit()", flush)
     assert "FOR KEY SHARE OF p" in main._MAIL_FANOUT_SQL and "FOR KEY SHARE OF p" in main._MAIL_BROADCAST_FANOUT_SQL
     # sent messages and the moderation evidence are retained (the recipients' and the moderators' property)
     assert "DELETE FROM mail_messages" not in src and "DELETE FROM moderation_cases" not in src
@@ -1711,7 +1962,8 @@ def test_status_revision_advances_in_commit_order_not_created_at():
     db, ids = _world()
     db.message_created_at = NOW
     first = _send(db, [B_SID], subject="newer timestamp, committed first")
-    assert _status(db, "tokB") == {"unread": 1, "revision": "1", "mail_from": "everyone"}
+    assert _status(db, "tokB") == {"unread": 1, "revision": "1", "mail_from": "everyone",
+                                   "discord_relay": True, "discord_linked": False}
     fan_i = next(i for i, s in enumerate(db.statements) if "INSERT INTO mail_recipients" in s)
     bump_i = next(i for i, s in enumerate(db.statements) if "INSERT INTO mail_inbox_rev" in s)
     assert fan_i < bump_i < db.commit_marks[0]                       # the bump is INSIDE the sending transaction: after its fan-out, before its commit (review r2 pin)
@@ -1955,12 +2207,18 @@ def test_client_parser_reads_the_keys_the_server_emits():
         return out
     server_keys = keys(payloads, set())
     required = {"messages", "next_cursor", "id", "thread_id", "kind", "sender", "steam_id", "name", "title_color",
-                "subject", "created_at", "read_at", "addressees", "in_reply_to", "body", "to", "cc",
-                "unread", "revision", "mail_from", "blocks"}
+                "subject", "created_at", "read_at", "addressees", "in_reply_to", "body", "to", "cc", "via",
+                "unread", "revision", "mail_from", "blocks",
+                "discord_relay", "discord_linked"}
     assert required <= client_keys, sorted(required - client_keys)  # the client still reads each of them
     assert required <= server_keys, sorted(required - server_keys)  # and the server still emits each
     assert set(payloads["sent"]["messages"][-1]["addressees"][0]) == {"steam_id", "name", "kind"}
-    assert set(payloads["status"]) == {"unread", "revision", "mail_from"}
+    # Item 5 added two keys here. They are in `required` above as well, so
+    # this pins BOTH halves: the server emits them and the C# parser binds
+    # them. (`required <= client_keys` is a subset check -- on its own it
+    # would never have noticed the server growing a key nothing reads.)
+    assert set(payloads["status"]) == {"unread", "revision", "mail_from",
+                                       "discord_relay", "discord_linked"}
 
 
 def test_report_reason_bound_matches_the_client():

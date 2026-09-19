@@ -957,6 +957,15 @@ class AchievementListResponse(BaseModel):
 
 # ── Bug reports (v1.26.7) ─────────────────────────────────────
 
+# The log-bundle ceiling, in CHARACTERS, pre-gzip. Named because there are
+# THREE different clamps on BugReportRequest below -- 64 for the short
+# identity fields, 8000 for the free-text ones and this one for the log --
+# and a plan citing the wrong one of them is what this constant exists to
+# stop. backend/api/auto_logs.py imports it so the automatic upload and the
+# bug form cannot end up with two different ideas of how much log fits.
+BUG_REPORT_LOG_MAX_CHARS = 12_000_000
+
+
 class BugReportRequest(BaseModel):
     """In-game bug report submission. log_text is optional plain-text — server
     gzips it before persisting to disk.
@@ -1001,10 +1010,10 @@ class BugReportRequest(BaseModel):
     @classmethod
     def _clamp_log(cls, v):
         # Keep the TAIL of the log — the most recent events are what matter for a
-        # bug report. 12MB pre-gzip ceiling (matches the prior intent) but as a
-        # truncation, not a 422-triggering hard cap.
-        if isinstance(v, str) and len(v) > 12_000_000:
-            return v[-12_000_000:]
+        # bug report. BUG_REPORT_LOG_MAX_CHARS pre-gzip, applied as a truncation
+        # and not as a 422-triggering hard cap.
+        if isinstance(v, str) and len(v) > BUG_REPORT_LOG_MAX_CHARS:
+            return v[-BUG_REPORT_LOG_MAX_CHARS:]
         return v
 
 

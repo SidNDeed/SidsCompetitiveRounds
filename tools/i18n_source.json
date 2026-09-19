@@ -532,6 +532,7 @@
   "Allow spectators: <color=#FF9966>OFF</color>",
   "Allow the mod to report your match results and stats to the community server.",
   "Already a recipient.",
+  "Also DM new mail to your linked Discord. You can reply from there.",
   "Also removes your Player Cards: your binder is emptied, and every card of you is removed from every other player's binder.",
   "Amber",
   "Amber Name",
@@ -973,6 +974,10 @@
   "Disco Fever",
   "Discord",
   "Discord Link",
+  "Discord relay: <color=#88FF88>On</color>",
+  "Discord relay: <color=#AAAAAA>checking...</color>",
+  "Discord relay: <color=#AAAAAA>link Discord first</color>",
+  "Discord relay: <color=#FF9966>Off</color>",
   "Dismiss (1 min)",
   "Displays your live rank tier (updates automatically as you rank up or down)",
   "Do nothing",
@@ -1404,6 +1409,7 @@
   "Link codes are disabled on the broadcast seat.",
   "Link your Discord account first (Home tab) to use RLFP pings.",
   "Link your Discord first (Home tab)",
+  "Link your Discord first: Home tab -> Get Link Code, then !link YOUR_CODE in Discord.",
   "Lists players who have not run the mod for 90+ days on every leaderboard, greyed and tagged (inactive).",
   "Little Pink Buddy",
   "Live competitive games in every mode can be watched from inside the mod - ranked 1v1, 2v2, 1v2 and FFA (ordinary casual 1v1 rooms aren't listed). You see the real game, live, from a seat that is built so it cannot touch the match.\n\n<color=#FFD94D><b>HOW TO WATCH</b></color>\n\n- <color=#7FD4FF>WATCH</color> buttons appear on live-game rows across the F5 menu: the Leaderboard's live series strip, the FFA tab's live lobbies, the 1v2 tab's live panel and the Home tab's live rows. You never see WATCH on your own game.\n- Clicking one puts you into the real Photon room as a non-playing seat. You can't start spectating while you're in an online room or mid-queue.\n- A game is joinable while its fighters are in live combat, a spectator seat is free, and every fighter allows spectators.\n\n<color=#FFD94D><b>WHAT YOU SEE</b></color>\n\n- The true live game - real movement and real projectiles, not a replay or a delayed feed.\n- The screen stays black until the first clean round boundary, then the game appears in sync. If your client ever has to catch up mid-round, you see the live scene with a Syncing note instead of black.\n- Card picks are visible, and every round boundary carries everyone's full decks. In FFA you see pick results and decks, not each picker's private hand of candidates.\n- A minimal top bar shows the score and the fighters' names, titles and ratings. Hold Tab for the stats board. Chat works (and can be muted). Esc opens the leave menu.\n\n<color=#FFD94D><b>WHY A SPECTATOR CAN'T TOUCH THE GAME</b></color>\n\nThe spectator seat is an observer by construction, not by politeness:\n\n- <color=#7FE87F>It cannot deal damage or cause a death.</color> A seat-wide clamp makes the death branch unreachable from every damage path on that seat - the deaths you see happen on the fighters' clients and only render on yours.\n- It cannot spawn a player, ready up, or take a slot - even the press-jump-to-join prompt is suppressed.\n- It never answers or sends the sync-up requests fighters use to stay in lockstep, and never reports map loads, so it can't slow or desync the match.\n- It cannot pick cards and runs none of the game lifecycle - it only applies the scores the master broadcasts.\n- It is invisible to every fighter count: quorum checks, reporter election and match-start counts all exclude spectators.\n- <color=#7FE87F>A spectator leaving never ends the fighters' match.</color>\n\n<color=#FFD94D><b>PRIVACY, COUNTS AND LIMITS</b></color>\n\n- Fighters always know: every seat in the room - fighters and spectators alike - sees a bottom-right Spectators line with names while anyone is watching, and the games list shows spectator counts publicly.\n- <color=#7FD4FF>Allow Spectators</color> is a per-player toggle in F5 Settings, on by default. If any one fighter in a game has it off, that game can't be watched - and the reason shown is generic, never who opted out. Flipping it off mid-match removes seated spectators within moments.\n- The one exception: sync tournament matches are always spectatable.\n- Public spectator seats cap at 4 per game, and one extra seat is reserved for the official broadcast account that runs the community stream, so public spectators can never crowd it out. A full game answers 'spectator full'.\n\n<color=#FFD94D><b>LEAVING, AND BEING RETURNED</b></color>\n\n- Esc, then leave. Leaving never disturbs the match - your name just drops off the Spectators line.\n- Your seat is a lease your client refreshes every few seconds. When the game ends or a fighter opts out, the lease ends and you're returned to the menu automatically. <color=#7FE87F>A network hiccup never kicks you</color> - only a definitive answer from the server does.\n\n<color=#FFD94D><b>SPECTATING AND BETTING</b></color>\n\n- Spectators can bet. The early bet-close windows are the information gate: 1v1 and 2v2 bets lock once 2 points are scored in game 1, and FFA bets lock once 2 half points are scored in the game being bet on (earlier in short lobbies) - so a lingering seat learns nothing useful before the window shuts.\n- The only barred group is a lobby's own members: you can never bet on your own lobby.",
@@ -2197,6 +2203,7 @@
   "Steam sign-in is required to view session reports",
   "Steam sign-in still pending - try again in a moment.",
   "Steel Gradient",
+  "Still checking your Discord link - try again in a moment.",
   "Still joining - one moment...",
   "Still leaving the 1v2 queue — try again in a moment.",
   "Still leaving the 2v2 queue — try again in a moment.",
@@ -2248,8 +2255,6 @@
   "THE DUO",
   "THE ROAD TO LEVEL 100",
   "THE SOLO",
-  "TOP CARD",
-  "TOP CARD\u0004pc.top_card",
   "TOURNAMENT MATCH",
   "TOURNAMENT MATCH vs {0} - connecting automatically, hold tight...{1}",
   "TOURNAMENT MATCH vs {0} IS WAITING - LEAVE THIS GAME NOW!{1}",
@@ -2818,6 +2823,7 @@
   "unlimited",
   "update mod",
   "utility",
+  "via Discord",
   "vs {0}",
   "vs {0}: first game this session",
   "vs {0}: {1}-{2} this session",
@@ -5555,6 +5561,11 @@
    "location": "AddRecipient",
    "kind": "Tr"
   },
+  "Also DM new mail to your linked Discord. You can reply from there.": {
+   "surface": "MailUI",
+   "location": "BuildSettingsRow",
+   "kind": "CreateText"
+  },
   "Also removes your Player Cards: your binder is emptied, and every card of you is removed from every other player's binder.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
@@ -7760,6 +7771,26 @@
    "location": "BuildHomeTab",
    "kind": "CreateText"
   },
+  "Discord relay: <color=#88FF88>On</color>": {
+   "surface": "MailUI",
+   "location": "RefreshSettingsRow",
+   "kind": "Tr"
+  },
+  "Discord relay: <color=#AAAAAA>checking...</color>": {
+   "surface": "MailUI",
+   "location": "RefreshSettingsRow",
+   "kind": "Tr"
+  },
+  "Discord relay: <color=#AAAAAA>link Discord first</color>": {
+   "surface": "MailUI",
+   "location": "RefreshSettingsRow",
+   "kind": "Tr"
+  },
+  "Discord relay: <color=#FF9966>Off</color>": {
+   "surface": "MailUI",
+   "location": "RefreshSettingsRow",
+   "kind": "Tr"
+  },
   "Dismiss (1 min)": {
    "surface": "CompetitiveUI",
    "location": "DrawMatchFoundStuckOverlay",
@@ -9914,6 +9945,11 @@
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
    "kind": "ShowNotification"
+  },
+  "Link your Discord first: Home tab -> Get Link Code, then !link YOUR_CODE in Discord.": {
+   "surface": "MailUI",
+   "location": "ToggleMailRelay",
+   "kind": "Tr"
   },
   "Lists players who have not run the mod for 90+ days on every leaderboard, greyed and tagged (inactive).": {
    "surface": "NativeUI",
@@ -13880,6 +13916,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Still checking your Discord link - try again in a moment.": {
+   "surface": "MailUI",
+   "location": "ToggleMailRelay",
+   "kind": "Tr"
+  },
   "Still joining - one moment...": {
    "surface": "ApiClient",
    "location": "EnrollGateBegin",
@@ -14134,16 +14175,6 @@
    "surface": "InfoViz",
    "location": "BuildOvtFormat",
    "kind": "Tr"
-  },
-  "TOP CARD": {
-   "surface": "PcLabels",
-   "location": "Tr",
-   "kind": "TrC fallback"
-  },
-  "TOP CARD\u0004pc.top_card": {
-   "surface": "PcLabels",
-   "location": "Tr",
-   "kind": "TrC:pc.top_card"
   },
   "TOURNAMENT MATCH": {
    "surface": "CompetitiveUI",
@@ -16983,6 +17014,11 @@
   "utility": {
    "surface": "NativeUI",
    "location": "TrKindWord",
+   "kind": "Tr"
+  },
+  "via Discord": {
+   "surface": "MailUI",
+   "location": "PaintReader",
    "kind": "Tr"
   },
   "vs {0}": {

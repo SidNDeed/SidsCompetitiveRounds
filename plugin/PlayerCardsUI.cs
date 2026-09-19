@@ -983,15 +983,33 @@ namespace CompetitiveRounds
             PlaceTopCard(t);
         }
 
-        // ── the Top card overlay (Sept 14 batch, C3) ─────────────────────────
+        // ── the Top card overlay (Sept 14 batch, C3; regeometried for 9a) ────
         // The face draws its Top card badge at [58,642,178,754] of 750x1050
-        // (backend face_layout_v1.json): a silhouette above the TOP CARD label.
-        // In game the silhouette is covered by the actual card art from
-        // CardSnapshot; outside the game (Discord) the badge stands as drawn.
-        // Fractions of the face, top-left origin; the art box keeps the
-        // snapshot's own aspect inside it (preserveAspect).
-        private const float TC_BACK_X = 88f / 750f, TC_BACK_Y = 650f / 1050f, TC_BACK_W = 60f / 750f, TC_BACK_H = 77f / 1050f;
-        private const float TC_ART_X = 93f / 750f, TC_ART_Y = 652f / 1050f, TC_ART_W = 50f / 750f, TC_ART_H = 73f / 1050f;
+        // (backend face_layout_v1.json). Since 9a that badge is a NAME COLUMN
+        // up the left -- the ROUNDS card's own name, sideways, in the card's
+        // theme colour -- and an empty ART AREA beside it, which is what this
+        // overlay fills with the real card art from CardSnapshot. Outside the
+        // game (Discord, the bot) the badge stands as drawn: name, framed
+        // empty area.
+        //
+        // The art area is [100,646,172,750] -- 72x104. Its HEIGHT is the badge
+        // frame's full clear run: BadgeFrame.png's rails own y 642-645 and
+        // y 751-754, so 646..750 is every row the art can use, and the card's
+        // top and bottom edges meet the box. It starts at x=100, four pixels
+        // clear of the name column, which ends at x=96.
+        //
+        // preserveAspect (CreatePanelCentred) does the scaling: a ROUNDS card
+        // is taller than this box is proportionally, so the fit is HEIGHT-
+        // limited -- the card fills 104 px vertically and takes whatever width
+        // its own aspect gives, centred, with the framed backing showing
+        // either side. A card wider than the box would fit to width instead,
+        // which is the same rule and never overlaps the name.
+        //
+        // Before 9a these were 60x77 and 50x73, inset and offset up-left
+        // inside the old silhouette; the art did not reach the box edges.
+        // Fractions of the face, top-left origin.
+        private const float TC_BACK_X = 100f / 750f, TC_BACK_Y = 646f / 1050f, TC_BACK_W = 72f / 750f, TC_BACK_H = 104f / 1050f;
+        private const float TC_ART_X = 100f / 750f, TC_ART_Y = 646f / 1050f, TC_ART_W = 72f / 750f, TC_ART_H = 104f / 1050f;
         private static readonly Color C_BADGE_DARK = new Color(0.08f, 0.08f, 0.10f, 1f);
         private static readonly Color C_FACE_DIM = new Color(0.42f, 0.42f, 0.48f, 1f);
 

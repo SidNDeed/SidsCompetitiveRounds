@@ -3406,6 +3406,11 @@ async def lifespan(app: FastAPI):
             # stack imported; the health word says which of those it is.
             if not IS_REPLICA and _pcs is not None:
                 tasks.append(asyncio.create_task(_pc_steam_sweep_loop()))
+        # Awaited, before anything can render: a face keyed off a colour
+        # this box has not read yet is a promise about pixels it cannot make.
+        if _pcf is not None:
+            async with async_session() as _theme_db:
+                await _pc_load_card_themes(_theme_db)
         # The Steam-render probe (v3 §9) runs on BOTH roles: each box
         # composites a stored Steam picture through its own face path and
         # reports the word on /health; the standby serves faces too.
@@ -4587,6 +4592,20 @@ app.add_middleware(
 from tournaments import router as tournaments_router
 app.include_router(tournaments_router)
 
+# Mail <-> Discord relay (v1.41.0 item 5). Importing here is safe because
+# mail_discord imports nothing from main; the reverse dependency is supplied
+# by mail_discord.bind(...), called further down as soon as the shared reply
+# core exists.
+import mail_discord
+app.include_router(mail_discord.router)
+
+# Opt-in automatic post-match log upload (v1.41.0 Item 3). INERT in this
+# release: no client calls POST /api/v1/logs/auto yet. The module's own
+# docstring says what a working call looks like and what it prints.
+from auto_logs import router as auto_logs_router, internal_router as auto_logs_internal_router
+app.include_router(auto_logs_router)
+app.include_router(auto_logs_internal_router)
+
 
 # ── Version gate ───────────────────────────────────────────────
 # Clients send X-Mod-Version on every request. If the version is below
@@ -5015,6 +5034,14 @@ _RL_SENSITIVE_PREFIXES = (
     # would throttle every player read. The trailing slash keeps it from
     # matching any sibling path.
     "/api/v1/h2h/",
+    # Automatic post-match log upload: a single accepted request can carry up
+    # to 14 MiB and writes a disk artifact, so it belongs in the tighter
+    # bucket rather than the 150/10s one it inherited. THE TRAILING SLASH IS
+    # LOAD-BEARING for the same reason as /bug-reports/ above. It does not
+    # cover /api/v1/internal/logs (a different prefix), whose callers carry
+    # X-Internal-Key and bypass the limiter anyway. A real client uploads once
+    # per match, so 20/10s is nowhere near binding.
+    "/api/v1/logs/",
     "/api/v1/ffa/matches", # quarantine-capture write path (Codex v1.36 find 6)
     "/api/v1/ffa/bets",
     # Lobby-phase wagers (migration 207). startswith also covers
@@ -25859,8 +25886,157 @@ async def _pc_snapshot_due(db: AsyncSession):
     return "daily"
 
 
+# The Discord channel the edition notice posts to: the gambler chat, the
+# same channel the bot's pack-pull announcements land in. Hardcoded for the
+# reason _CHAT_GLOBAL_DISCORD_CHANNEL above is -- docker-compose passes the
+# channel environment to the BOT service only, so the api cannot read the
+# bot's value. This id is the bot's compiled default: LIVE_BETS_CHANNEL is
+# not in the compose environment at all, so the bot always resolves it to
+# this, and PC_EVENTS_CHANNEL (which is) falls back to it when unset. An
+# operator who sets PC_EVENTS_CHANNEL moves the pull posts and not this one.
+_PC_EDITION_DISCORD_CHANNEL = "1456460424831701074"
+
+# ── Player Cards: the edition schedule (2026-09-18) ──────────────────────
+# Editions are seasonal -- four months each, ending on the 21st of December,
+# April and August at 00:00 UTC. The schedule lives in DATA, in the open
+# row's pc_editions.ends_at_planned (migration 332), and not in a constant
+# here: moving a boundary is one UPDATE and needs no deploy. A row whose
+# ends_at_planned is NULL never rolls at all -- no schedule stops the clock
+# rather than starting it early, which is the direction this has to fail in
+# (#276).
+#
+# The successor's planned end comes from the INCUMBENT's planned end, never
+# from now() and never from the successor's started_at. A rollover that runs
+# late -- the api was down across the boundary -- must still put the next
+# boundary on the 21st. generate_series picks the first four-month multiple
+# after the incumbent's planned end that is still in the future, so an
+# outage spanning two boundaries yields ONE successor on the right anchor
+# instead of a chain of empty editions.
+#
+# The month arithmetic runs on a naive UTC timestamp and converts back (AT
+# TIME ZONE 'UTC' both ways, the idiom _pc_snapshot_due already uses):
+# adding months to a timestamptz is evaluated in the SESSION's TimeZone, so
+# on a box whose TimeZone is not UTC the anchor would land on another day.
+#
+# IDEMPOTENT, WHICH IS LOAD-BEARING HERE rather than tidy. This runs on
+# EVERY janitor pass -- queue_cleanup_loop's ~60 s tick, plus once on the
+# primary's boot path via _pc_snapshot_boot_retake -- because it sits
+# AHEAD of the snapshot's due gate and inherits none of that gate's
+# conditions. So it is called some fourteen hundred times a day and must
+# do nothing fourteen hundred times a day. Every case hangs off the
+# incumbent's ended_at:
+#   * not due yet           -> cur is empty, nothing happens;
+#   * already rolled        -> the new row's planned end is months away;
+#   * two api processes     -> the loser's UPDATE blocks on the row lock,
+#     re-checks its own e.ended_at IS NULL against the committed version,
+#     matches no row, and an empty `closed` means no INSERT and no post.
+# That last case is why the close and the insert are ONE statement and why
+# the UPDATE repeats the predicate the CTE already applied: the partial
+# unique index pc_editions_one_active (308:35) makes close-before-insert
+# mandatory, and a second successor would violate it.
+#
+# WHAT IT DOES NOT CLAIM. A pack opened while the rollover TRANSACTION is
+# open -- the statement plus the caller's commit -- can still be refused
+# no_edition. The mint reads the open row FOR SHARE, so it waits on the row
+# lock and is then skipped: the row it waited for no longer satisfies
+# ended_at IS NULL, and the LIMIT 1 above the lock means it does not go
+# looking for another. Nothing is lost -- that refusal is step 2 of the
+# open, before the debit, and a held pack goes back to 'unopened' -- and a
+# retry lands on the new edition. But the refusal is REACHABLE, for the
+# width of one transaction, once every four months. Closing it means
+# teaching the mint path to re-read once before rejecting, which is a
+# change to a route body and belongs to whoever owns that route.
+_PC_EDITION_ROLLOVER_SQL = """
+    WITH cur AS (
+        SELECT id, ends_at_planned
+          FROM pc_editions
+         WHERE ended_at IS NULL
+           AND ends_at_planned IS NOT NULL
+           AND ends_at_planned <= now()
+    ), nxt AS (
+        SELECT COALESCE(MAX(id), 0) + 1 AS id FROM pc_editions
+    ), closed AS (
+        -- The schedule predicates are repeated here against the LIVE row e,
+        -- not carried from cur. cur is materialized from this statement's
+        -- snapshot, so if an operator clears or postpones a due edition and
+        -- commits while this UPDATE is waiting on their lock, cur still holds
+        -- the old due timestamp. Under READ COMMITTED the UPDATE re-evaluates
+        -- its OWN WHERE against the new row version after the wait, so naming
+        -- e.ends_at_planned here is what lets the operator's edit win: the row
+        -- stops qualifying, closed is empty, and ins -- which selects FROM
+        -- closed -- inserts nothing. Matching on e.id = cur.id alone would
+        -- close the edition anyway and mint a successor from the stale anchor.
+        UPDATE pc_editions e
+           SET ended_at = now()
+          FROM cur
+         WHERE e.id = cur.id
+           AND e.ended_at IS NULL
+           AND e.ends_at_planned IS NOT NULL
+           AND e.ends_at_planned <= now()
+        RETURNING e.id AS prev_id, e.ends_at_planned AS prev_planned
+    ), ins AS (
+        -- The successor's anchor comes from closed.prev_planned -- the value
+        -- on the row this statement actually closed, re-read under its lock --
+        -- and never from cur.ends_at_planned, which is the snapshot value the
+        -- comment above explains can be stale.
+        INSERT INTO pc_editions (id, name, started_at, ends_at_planned)
+        SELECT nxt.id,
+               'Edition ' || nxt.id,
+               now(),
+               (SELECT ((closed.prev_planned AT TIME ZONE 'UTC')
+                        + make_interval(months => 4 * n)) AT TIME ZONE 'UTC'
+                  FROM generate_series(1, 1000) AS n
+                 WHERE ((closed.prev_planned AT TIME ZONE 'UTC')
+                        + make_interval(months => 4 * n)) AT TIME ZONE 'UTC' > now()
+                 ORDER BY n
+                 LIMIT 1)
+          FROM closed, cur, nxt
+        RETURNING id, ends_at_planned
+    ), post AS (
+        INSERT INTO pending_channel_posts (channel_id, content)
+        SELECT CAST(:ch AS text),
+               'Edition ' || ins.id || ' begins. Edition ' || closed.prev_id
+                          || ' prints are out of print.'
+          FROM ins, closed
+    )
+    SELECT ins.id AS id,
+           ins.ends_at_planned AS ends_at_planned,
+           setval(pg_get_serial_sequence('pc_editions', 'id'), ins.id) AS seq
+      FROM ins
+"""
+
+
+async def _pc_edition_rollover(db: AsyncSession) -> dict | None:
+    """Close the scheduled-out edition and open its successor, or do
+    nothing. One statement, so the close, the insert and the Discord notice
+    commit together or not at all; see _PC_EDITION_ROLLOVER_SQL for why that
+    is also what makes it safe to run on every janitor pass. The caller
+    commits.
+
+    setval keeps pc_editions' SERIAL aligned with the explicit id: the id
+    is explicit so the row's name and its id can never disagree.
+
+    Neither `name` nor anything else written here reaches a CARD. The face
+    footer is built at render time from the print's edition_id and the
+    'pc.edition' label (a key in pc_face.LABEL_IDS and assets/pc/
+    catalogue.json, projected per locale by _pc_labels), so an edition
+    number is translated wherever it is drawn and no English literal from
+    this function can leak into a locale. The Discord notice the statement
+    queues IS player-visible and IS English -- like every other
+    pending_channel_posts row; that outbox has no locale.
+    """
+    row = (await db.execute(text(_PC_EDITION_ROLLOVER_SQL),
+                            {"ch": _PC_EDITION_DISCORD_CHANNEL})).mappings().first()
+    if row is None:
+        return None
+    print(f"[PC-EDITION] rolled over to edition {int(row['id'])}; "
+          f"next planned end {row['ends_at_planned']}")
+    return {"edition_id": int(row["id"]), "ends_at_planned": row["ends_at_planned"]}
+
+
 async def _pc_snapshot_janitor_step() -> None:
-    """Janitor: event retention on every step, then a pool snapshot when
+    """Janitor: event retention on every step, then the edition rollover
+    when pc_editions says the season is over, then a pool snapshot when
     none exists (first boot after the migration), when the latest one was
     taken under an older pool rule than this build carries (`_pc_snapshot_due`'s
     'rule' -- the members scan that term used to be is gone since the
@@ -25883,6 +26059,21 @@ async def _pc_snapshot_janitor_step() -> None:
         # ten unreferenced minutes, each under its P lock.
         await _pc_portrait_blob_janitor(db)
         await db.commit()
+        # The edition schedule: four-month seasons, the boundary carried by
+        # pc_editions.ends_at_planned. Deliberately placed BEFORE the
+        # snapshot's due gate below and not inside it -- the gate returns
+        # None for the rest of a day whose snapshot has already been taken
+        # (by an older build mid-deploy, or by the admin route), and a
+        # rollover behind it would then wait until tomorrow. Its own commit
+        # and its own try: a rollover that fails must not cost the pool its
+        # snapshot, and the retry is the next pass a minute later.
+        try:
+            await _pc_edition_rollover(db)
+            await db.commit()
+        except Exception as e:
+            await db.rollback()
+            print(f"[PC-EDITION] rollover skipped ({type(e).__name__}: {e}) -- "
+                  "the janitor retries on its next pass")
         # Derived faces age out in _pc_face_cache_expire_loop, on BOTH roles
         # (v4 §4): this step runs on the primary alone, and the standby owns
         # a cache of its own.
@@ -27182,6 +27373,52 @@ def _pc_hex_rgb(hex_color):
         return None
 
 
+# The ROUNDS card -> ink colour map the top-card badge draws its name in,
+# seeded by migration 333 from the game's own assets.
+_PC_CARD_THEMES: dict = {}
+
+
+async def _pc_load_card_themes(db: AsyncSession) -> None:
+    """Once, at startup. Deliberately NOT a TTL cache like `_rank_colors`
+    (:369): that one serves an empty map on failure because a rank title
+    without its colour is cosmetic. This value is a cache KEY. An empty map
+    does not dim a colour -- it re-keys every top-card face onto the band
+    colour, re-renders that whole generation under fresh one-year immutable
+    URLs, and re-keys it back when the read next succeeds. Two full
+    re-renders out of one transient failure, logged as nothing worse than a
+    colour refresh. So it is loaded once and the face routes refuse while it
+    is empty (`_pc_renderer_unavailable`)."""
+    rows = (await db.execute(text("SELECT card_name, hex FROM pc_card_themes"))).mappings().all()
+    loaded = {}
+    for row in rows:
+        rgb = _pc_hex_rgb(row["hex"])
+        if rgb is not None:
+            loaded[row["card_name"]] = rgb
+    _PC_CARD_THEMES.clear()
+    _PC_CARD_THEMES.update(loaded)
+    # The JOIN count, not just the row count. A table seeded on the asset
+    # names ("Poison bullets") instead of the canonical ones ("Poison") loads
+    # 67 rows and matches nothing, and every face then falls back to the band
+    # -- which is indistinguishable from this feature never having shipped.
+    # This one line is where that failure is visible.
+    joined = 0
+    distinct = 0
+    try:
+        stats = (await db.execute(text(
+            "SELECT count(*) AS n,"
+            " count(*) FILTER (WHERE EXISTS (SELECT 1 FROM pc_card_themes t"
+            "                                WHERE t.card_name = p.top_card)) AS hit"
+            " FROM (SELECT DISTINCT top_card FROM pc_prints"
+            "        WHERE top_card IS NOT NULL AND top_card <> '') p"))).mappings().first()
+        if stats is not None:
+            distinct = int(stats["n"] or 0)
+            joined = int(stats["hit"] or 0)
+    except Exception as ex:                                   # pragma: no cover
+        print(f"[PC-THEME] live join count unavailable: {ex}")
+    print(f"[PC-THEME] {len(_PC_CARD_THEMES)} card themes loaded; "
+          f"{joined} of {distinct} distinct pc_prints.top_card values mapped")
+
+
 async def _pc_labels(db: AsyncSession, locale: str) -> dict:
     """The effective pc.* projection of one locale: the identifier's English
     unless a client-namespace entry under the COMPOSITE msgctxt
@@ -27252,6 +27489,11 @@ def _pc_renderer_unavailable():
         return "renderer_fingerprint_unavailable"
     if _pcp.coverage_ready() is not None:
         return "name_coverage_unavailable"
+    if not _PC_CARD_THEMES:
+        # The top card's colour is part of `face_rev`. A box that could not
+        # load the map would key its faces differently from the box that
+        # could, which is the half-deploy failure with no error anywhere.
+        return "card_themes_unavailable"
     if not _pc_raqm():
         # The coverage projection admits Arabic, Hebrew, Thai, Devanagari,
         # Bengali, Tamil, Georgian and Armenian because the renderer carries
@@ -27321,6 +27563,11 @@ def _pc_face_inputs(row, ctx):
     # (no `unranked` local: the spec's `rating` is None for exactly that case,
     # and the rev is now derived from the spec)
     minted = row["minted_at"]
+    # The NAME, projected before it enters the spec so a modded card carrying
+    # an undrawable cluster cannot become a tofu box under a `face_rev` that
+    # promises the pixels are right. "" and None tokenise differently in
+    # `spec_records`, so the empty case is spelled once, here, as "".
+    top_name = _pcp.coverage_strip(row["top_card"] or "")
     spec = {
         "band": band, "name": name or "", "title": title, "title_rgb": _pc_hex_rgb(title_hex),
         "subtitle": subtitle,
@@ -27332,7 +27579,8 @@ def _pc_face_inputs(row, ctx):
         "edition_label": f"{labels.get('pc.edition', 'Edition')} {int(row['edition_id'])}",
         "minted_on": minted.strftime("%Y-%m-%d") if minted is not None else "",
         "print_short": "#" + str(row["print_id"]).replace("-", "")[:6],
-        "top_card": bool(row["top_card"]),
+        "top_card": top_name,
+        "top_card_rgb": _PC_CARD_THEMES.get(top_name),
     }
     # AFTER the spec, and over the spec: the key is derived from the argument
     # the renderer draws from, so a field added above is in the key with it.
@@ -28078,7 +28326,12 @@ async def _pc_steam_render_probe() -> str:
     spec = {"band": "common", "name": _pcp.public_render_name(sub["display_name"]) or "", "title": None,
             "subtitle": None, "title_rgb": None, "rating": None, "pool_rank": 1, "board_rank": None,
             "wins": 0, "losses": 0, "foil": False, "signed": False, "sign": None, "edition_label": "Probe",
-            "minted_on": "", "print_short": "", "top_card": False}
+            "minted_on": "", "print_short": "",
+            # A real name, not False: this probe is the ONLY always-on render
+            # on either box, and with a falsy top card it never entered the
+            # badge at all -- a check that could not fail for the one part of
+            # the face this release rewrites.
+            "top_card": "Poison", "top_card_rgb": _PC_CARD_THEMES.get("Poison")}
     data = await _pcp.in_pool(_pcf.render_face, spec, labels, pbytes, "card")
     if not data or bytes(data[:8]) != b"\x89PNG\r\n\x1a\n":
         return "failed:bytes"
@@ -28826,7 +29079,8 @@ async def internal_pc_face_preview(
         "wins": int(member["series_wins"] or 0), "losses": int(member["series_losses"] or 0),
         "foil": False, "signed": False, "sign": None,
         "edition_label": labels.get("pc.preview_footer", "Preview"), "minted_on": "", "print_short": "",
-        "top_card": bool(member["top_card"]),
+        "top_card": _pcp.coverage_strip(member["top_card"] or ""),
+        "top_card_rgb": _PC_CARD_THEMES.get(_pcp.coverage_strip(member["top_card"] or "")),
     }
     rev = _pcp.preview_rev(ctx["renderer_fp"], ctx["cat_rev"], spec, kind, phash)
     bucket = int(time.time() // _pcp.PREVIEW_TTL_S)
@@ -34582,14 +34836,37 @@ async def internal_pending_dms(
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
-    rows = (await db.execute(text("""
-        SELECT d.id AS dm_id, d.steam_id, d.content, d.created_at,
-               p.discord_id, p.display_name
-          FROM pending_dms d
-          LEFT JOIN players p ON p.steam_id = d.steam_id
-         WHERE d.delivered_at IS NULL AND NOT d.undeliverable
-      ORDER BY d.created_at ASC
-         LIMIT 20"""))).mappings().all()
+    # Retire anything past the bound BEFORE picking a batch, so a row about
+    # to be removed cannot occupy a slot in the window it is leaving. Each
+    # one is logged by id AND by which condition fired: it is a DM somebody
+    # was waiting on, and a count alone cannot be requeued.
+    for r in (await db.execute(text(_PENDING_DM_RETIRE_SQL),
+                               {"cap": PENDING_DM_MAX_ATTEMPTS,
+                                "max_age": PENDING_DM_MAX_AGE_SECONDS,
+                                })).mappings().all():
+        why = ("reached %d hand-outs" % PENDING_DM_MAX_ATTEMPTS
+               if int(r["attempts"] or 0) >= PENDING_DM_MAX_ATTEMPTS
+               else "was handed out and never settled for %ds"
+                    % PENDING_DM_MAX_AGE_SECONDS)
+        print("[PDM] row %s (steam %s, mail %s, attempts %s, queued %s) %s "
+              "and was flagged undeliverable"
+              % (r["id"], r["steam_id"], r["mail_id"], r["attempts"],
+                 r["created_at"], why))
+    # ONE statement: pick, lock, claim, return.
+    #
+    # What makes a double hand-out impossible is the CLAIM, not the lock.
+    # FOR UPDATE SKIP LOCKED only holds for as long as this transaction is
+    # open -- the moment it commits, the row is visible to the next poll
+    # again, and the previous comment here claimed the lock covered that.
+    # The claim is what survives the commit: a claimed row fails the
+    # claimable test until it is settled or its claim expires.
+    rows = (await db.execute(text(_PENDING_DM_CLAIM_SQL), {
+        "lim": PENDING_DM_BATCH,
+        "k_op": _PDM_K_OP,
+        "k_relay": _PDM_K_RELAY,
+        "claim_secs": PENDING_DM_CLAIM_SECONDS,
+    })).mappings().all()
+    await db.commit()
     return {
         "dms": [
             {
@@ -34598,16 +34875,255 @@ async def internal_pending_dms(
                 "discord_id": r["discord_id"],
                 "display_name": r["display_name"] or "",
                 "content": r["content"],
+                # Item 5: present only on a mail relay row. It is the
+                # DISCRIMINATOR for this otherwise generic queue -- the bot
+                # appends nothing to a generic row and treats only these as
+                # answerable mail.
+                "mail_id": str(r["mail_id"]) if r["mail_id"] else None,
                 "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                # This hand-out's identity. The bot quotes it back when it
+                # settles a row it could not deliver, which is what makes a
+                # settlement apply to THIS hand-out and not to whatever the
+                # row is doing by the time the report arrives.
+                "claim": str(r["claim_id"]),
+                # Hand-outs so far that produced no delivery. NOT "which
+                # hand-out this is": nothing is charged at hand-out any
+                # more, so this is the count BEFORE the current one, and a
+                # row at PENDING_DM_MAX_ATTEMPTS - 1 is on its last.
+                "attempts": int(r["attempts"] or 0),
             }
             for r in rows
         ],
     }
 
 
+# Ten hand-outs at 60s: ten minutes of trying before a row nothing can
+# deliver is given up on. Long enough to ride out a rate limit or a gateway
+# outage, short enough that a permanently poisoned row cannot hold a drain
+# slot for a day.
+#
+# An attempt is counted at SETTLEMENT or at expiry-supersession -- never at
+# hand-out. Charging at hand-out is what let an api worker killed after the
+# commit charge an entire batch with zero attempted sends, and it is what
+# made a credit-back statement necessary to undo that; the credit could be
+# replayed across requests and could cancel a LATER hand-out's charge.
+PENDING_DM_MAX_ATTEMPTS = 10
+
+# The queue's statements, named so a test can run the ones production runs
+# rather than a retyped copy of them (the pattern _RELAY_FANOUT_SQL set).
+# 50 per poll; at the bot's 0.15s spacing a full batch is under 8s of a
+# 60s loop. One slot in every RELAY_WEIGHT goes to a mail relay row.
+PENDING_DM_BATCH = 50
+
+# A WEIGHTED FAIR QUEUE, replacing "operational first, relay rows aged in
+# after five minutes". That rule protected operational DMs and then
+# inverted itself: a thousand relay rows past the age threshold sat in
+# front of a ticket answer queued a second ago, for twenty polls.
+#
+# Weight 5 means the Nth-oldest relay row sorts at 5N and the Nth-oldest
+# operational row at N, so a full batch is 40 operational and 10 relay --
+# a bug-report answer is never behind a bulk grant's notifications, and a
+# bulk grant is never behind a queue of operational rows that never
+# empties. Whichever class is short, the other fills the batch.
+PENDING_DM_RELAY_WEIGHT = 5
+# The weights as the statement uses them. Spelling them out is what makes
+# the documented 40/10 split TRUE: ranking op at `rn` against relay at
+# `5 * rn` yields 42/8, because op rank 41 and 42 sort below relay rank 9.
+# Ranking op at `1 * rn` against relay at `4 * rn` puts the boundary where
+# the comment above says it is.
+_PDM_K_OP = 1
+_PDM_K_RELAY = PENDING_DM_RELAY_WEIGHT - 1
+
+# How long a hand-out's claim survives without settlement. This is a
+# BACKSTOP for a bot that cannot report at all, not a mutual-exclusion
+# timer, which is why it can be short: the normal release is the explicit
+# settlement below, which returns the row on the very next poll. 2.5 poll
+# periods.
+PENDING_DM_CLAIM_SECONDS = 150
+
+# The floor under the attempt bound. A row can only be retired by the
+# counter if something keeps handing it out; a row that was handed out once
+# and then never again -- because the bot stopped reporting entirely -- can
+# sit at attempts=1 forever. Six hours, so that no ordinary outage reaches
+# it: a shorter floor would retire a whole in-flight batch that a twenty
+# minute outage prevented anyone from trying.
+PENDING_DM_MAX_AGE_SECONDS = 21600
+
+# A hand-out takes a CLAIM; it does not charge. `claim_id` is what lets the
+# settlement that arrives later be matched to the hand-out that caused it,
+# which is the property nothing here had before -- and the reason a replayed
+# or superseded report used to be applied to whatever the row was doing now.
+#
+# FOR UPDATE SKIP LOCKED now sits INSIDE each class's LIMIT rather than in a
+# later CTE. Applying the limit first meant rows skipped for contention were
+# already inside the window and simply shrank the batch, so a worker holding
+# the oldest rows made every other worker return short instead of claiming
+# the rows behind them.
+#
+# The window function sits OUTSIDE the locked subquery because PostgreSQL
+# rejects a locking clause alongside a window function; row_number() is
+# computed over the already-locked set.
+#
+# The emitted ORDER BY is the WEIGHTED order (pk.k), not class-first. The
+# previous `ORDER BY (mail_id IS NOT NULL)` put every operational row ahead
+# of every relay row, discarding the interleave the CTE had just computed --
+# so a batch that stopped early always shed relay rows, and the same relay
+# rows were reported unreached and re-selected indefinitely.
+_PENDING_DM_CLAIM_SQL = """
+        WITH op AS (
+            SELECT id, 0 AS cls,
+                   row_number() OVER (ORDER BY created_at, id) AS rn
+              FROM (SELECT id, created_at FROM pending_dms
+                     WHERE delivered_at IS NULL AND NOT undeliverable
+                       AND cancelled_at IS NULL AND mail_id IS NULL
+                       AND (claim_until IS NULL OR claim_until <= NOW())
+                     ORDER BY created_at, id
+                     LIMIT :lim FOR UPDATE SKIP LOCKED) o
+        ), relay AS (
+            SELECT id, 1 AS cls,
+                   row_number() OVER (ORDER BY created_at, id) AS rn
+              FROM (SELECT id, created_at FROM pending_dms
+                     WHERE delivered_at IS NULL AND NOT undeliverable
+                       AND cancelled_at IS NULL AND mail_id IS NOT NULL
+                       AND (claim_until IS NULL OR claim_until <= NOW())
+                       -- Consent is rechecked HERE, not only at enqueue.
+                       -- A player who turns the relay off still has rows
+                       -- queued from when it was on, and those were being
+                       -- DMed to them regardless; the fan-out's filter
+                       -- only ever governed rows it was creating.
+                       AND EXISTS (SELECT 1 FROM players cp
+                                    WHERE cp.steam_id = pending_dms.steam_id
+                                      AND cp.mail_discord_relay)
+                     ORDER BY created_at, id
+                     LIMIT :lim FOR UPDATE SKIP LOCKED) r
+        ), picked AS (
+            SELECT id, cls, rn * :k_op    AS k FROM op
+             UNION ALL
+            SELECT id, cls, rn * :k_relay AS k FROM relay
+             ORDER BY k, cls, id
+             LIMIT :lim
+        ), claimed AS (
+            UPDATE pending_dms u
+               SET attempts = u.attempts
+                            + CASE WHEN u.claim_until IS NOT NULL
+                                   THEN 1 ELSE 0 END,
+                   claim_id = gen_random_uuid(),
+                   claim_until = NOW() + make_interval(secs => :claim_secs)
+              FROM picked pk
+             WHERE u.id = pk.id
+         RETURNING u.id, u.steam_id, u.content, u.created_at, u.mail_id,
+                   u.attempts, u.claim_id
+        )
+        SELECT c.id AS dm_id, c.steam_id, c.content, c.created_at, c.mail_id,
+               c.attempts, c.claim_id, p.discord_id, p.display_name
+          FROM claimed c
+          JOIN picked pk ON pk.id = c.id
+          LEFT JOIN players p ON p.steam_id = c.steam_id
+      ORDER BY pk.k, pk.cls, c.id"""
+# The supersession charge reads the PRE-update row: the only way a row that
+# passed the claimable test carries a non-NULL claim_until is that a previous
+# claim expired unsettled, which is exactly one hand-out that produced no
+# delivery. A row never handed out charges 0.
+#
+# make_interval(secs => :claim_secs) keeps the bind typed; never
+# `:p || ' seconds'` (#275/#448).
+
+# Delivery is TERMINAL TRUTH and is deliberately not claim-gated. Gating it
+# would refuse a late ACK for a DM that genuinely went out, and that refusal
+# costs a duplicate DM to a player plus a permanently lost reply mapping --
+# strictly worse than the correlation it would buy (#430). Stated plainly so
+# nobody reads "settlement quotes its claim" as covering both halves: a
+# garbled dm_id from the bot can still retire the wrong row, exactly as it
+# can today. That is unchanged, not closed.
+_PENDING_DM_ACK_SQL = (
+    "UPDATE pending_dms SET delivered_at = NOW(), undeliverable = :und, "
+    "claim_id = NULL, claim_until = NULL "
+    "WHERE id::text = ANY(:ids) AND delivered_at IS NULL")
+
+# Settlement of a hand-out that produced NO delivery. Called once per charge
+# bucket: 1 for a row the bot reached and could not send, 0 for a row a
+# short batch never tried.
+#
+# `u.claim_id = s.sclaim` is the whole point. Releasing the claim is what
+# makes this idempotent -- a replay finds claim_id NULL, or a different
+# claim, and matches zero rows. That is what a replayed `not_attempted_ids`
+# report and a report arriving after the row was handed out again both hit,
+# and neither can touch the later hand-out's state.
+_PENDING_DM_SETTLE_SQL = (
+    "UPDATE pending_dms u "
+    "   SET claim_id = NULL, claim_until = NULL, "
+    "       attempts = u.attempts + CAST(:charge AS INTEGER) "
+    "  FROM unnest(CAST(:ids AS TEXT[]), CAST(:claims AS UUID[])) "
+    "         AS s(sid, sclaim) "
+    " WHERE u.id::text = s.sid AND u.claim_id = s.sclaim "
+    "   AND u.delivered_at IS NULL AND NOT u.undeliverable "
+    "   AND u.cancelled_at IS NULL")
+
+# A relay DM that has NOT gone out yet is a copy of a mail its recipient has
+# just deleted, held outside the envelope tables where deleted_at cannot
+# reach it. CANCELLED, not DELETED: a deleted row takes its `relay_code` with
+# it, and for a DM already sent that makes the message permanently
+# unanswerable -- the player replies to a real DM and is told the code names
+# nothing. Cancelling closes the endpoint's question with a guarantee rather
+# than a mechanism (#310): it never has to know whether the row is in flight.
+#   not yet handed out -> it is no longer claimable, so it is never sent
+#   in flight, unsent  -> same, and the bot's settlement matches zero rows
+#   already sent       -> the DM is out and no design can recall it; the row
+#                         survives, so the ACK still lands and the reply
+#                         still resolves
+# Three predicates stay load-bearing: this MAIL, this PLAYER (a fan-out row
+# for anyone else is their copy, not theirs to cancel), and UNDELIVERED only.
+_MAIL_CANCEL_PENDING_DM_SQL = (
+    "UPDATE pending_dms SET cancelled_at = NOW(), "
+    "       claim_id = NULL, claim_until = NULL"
+    " WHERE mail_id = :mid AND steam_id = :sid"
+    "   AND delivered_at IS NULL AND cancelled_at IS NULL")
+
+
+# Not scoped to the batch: a row can be over the bound while sitting
+# outside the current window, and the point of the sweep is that nothing
+# past the bound is ever handed out again.
+#
+# Two terminal conditions in one guard. `attempts >= :cap` is the working
+# bound. The age branch is a FLOOR for the row the counter cannot reach --
+# handed out once and then never again, because the bot stopped reporting --
+# and it is gated on `claim_until IS NOT NULL`, the witness that the row was
+# ever handed to anybody. A row that merely aged during an api outage,
+# having never been handed out at all, is NOT retired; the counter alone
+# cannot express that difference.
+#
+# The outer `(claim_until IS NULL OR claim_until <= NOW())` means a row the
+# bot is holding right now is never retired underfoot.
+_PENDING_DM_RETIRE_SQL = (
+    "UPDATE pending_dms SET undeliverable = true, delivered_at = NOW() "
+    "WHERE delivered_at IS NULL AND NOT undeliverable "
+    "  AND cancelled_at IS NULL "
+    "  AND (claim_until IS NULL OR claim_until <= NOW()) "
+    "  AND (attempts >= :cap "
+    "       OR (claim_until IS NOT NULL "
+    "           AND created_at < NOW() - make_interval(secs => :max_age))) "
+    "RETURNING id, steam_id, mail_id, attempts, created_at")
+
+
 class _PendingDmAck(BaseModel):
     dm_ids: list[str]
     undeliverable: bool = False
+    # {dm_id: claim} -- the claim each of these rows was handed out under,
+    # echoed back from the poll response. A settlement is a statement about
+    # ONE hand-out, so it has to name which; without this an
+    # `not_attempted_ids` report replayed, or arriving after the row had
+    # been handed out again, was applied to whatever the row was doing by
+    # then. An id with no claim here settles nothing and its claim simply
+    # expires, which is the right degradation for a bot mid-rollout.
+    claims: dict[str, str] = {}
+    # Rows the bot REACHED and could not send, for a reason it cannot name.
+    # Revived as the charge-1 bucket: this is the half of a failed hand-out
+    # the bot is the only witness to.
+    retry_ids: list[str] = []
+    # Rows this poll was handed and never reached -- a batch cut short.
+    # Charge 0: nothing was attempted, so nothing is counted against the
+    # bound, and the row returns to the queue on the next poll.
+    not_attempted_ids: list[str] = []
 
 
 @app.post("/api/v1/internal/pending-dms/ack", tags=["Internal"])
@@ -34622,14 +35138,35 @@ async def ack_pending_dms(
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
     ids = [i for i in body.dm_ids[:200] if i]
+    done = set(ids)
+    claims = body.claims or {}
+
+    def _settle_pairs(reported):
+        """(ids, claims) for rows this report settles, in matching order.
+
+        An id already in `dm_ids` is delivered and is not a settlement; an
+        id with no claim cannot be matched to a hand-out and is dropped
+        rather than applied to the row's current state."""
+        pairs = [(i, claims.get(i)) for i in (reported or [])[:200]
+                 if i and i not in done and claims.get(i)]
+        return [p[0] for p in pairs], [p[1] for p in pairs]
+
+    settled = 0
+    for bucket, charge in ((body.retry_ids, 1), (body.not_attempted_ids, 0)):
+        sids, sclaims = _settle_pairs(bucket)
+        if not sids:
+            continue
+        r0 = await db.execute(text(_PENDING_DM_SETTLE_SQL),
+                              {"ids": sids, "claims": sclaims,
+                               "charge": charge})
+        settled += r0.rowcount or 0
     if not ids:
-        return {"acked": 0}
-    res = await db.execute(text(
-        "UPDATE pending_dms SET delivered_at = NOW(), undeliverable = :und "
-        "WHERE id::text = ANY(:ids) AND delivered_at IS NULL"
-    ), {"ids": ids, "und": bool(body.undeliverable)})
+        await db.commit()
+        return {"acked": 0, "settled": settled}
+    res = await db.execute(text(_PENDING_DM_ACK_SQL),
+                           {"ids": ids, "und": bool(body.undeliverable)})
     await db.commit()
-    return {"acked": res.rowcount or 0}
+    return {"acked": res.rowcount or 0, "settled": settled}
 
 
 # ── Routes: LFP Discord ping (July 21) ───────────────────────
@@ -35378,6 +35915,25 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     await db.flush()
     await db.execute(text("DELETE FROM mail_recipients WHERE recipient_id = :pid"), {"pid": pid})
     await db.execute(text("DELETE FROM mail_inbox_rev WHERE recipient_id = :pid"), {"pid": pid})
+    # Item 5 (migration 330). A queued relay DM is a COPY of the mail held
+    # outside the envelope tables: the addressee's raw Steam ID, the body
+    # text, the sender's display name as it read when the mail was sent, and
+    # the Discord message id once delivered. mail_id's ON DELETE CASCADE
+    # does not reach it, because this endpoint ANONYMISES the player row
+    # rather than deleting it and nothing deletes mail_messages (#437).
+    # Both directions go, and queued-DM rows only:
+    #   - addressed TO this account: their property, and after the steam_id
+    #     rewrite the poll's LEFT JOIN finds no player, so the row could
+    #     never be delivered anyway -- it would sit here holding the data.
+    #   - SENT by this account: the queued text has the pre-anonymisation
+    #     display name baked in and, unlike a delivered mail, cannot be
+    #     re-rendered from the anonymised row. The recipient keeps the mail
+    #     itself in-game; only the notification is dropped.
+    await db.execute(text(
+        "DELETE FROM pending_dms WHERE mail_id IS NOT NULL AND steam_id = :sid"), {"sid": steam_id})
+    await db.execute(text(
+        "DELETE FROM pending_dms WHERE mail_id IN"
+        " (SELECT id FROM mail_messages WHERE sender_id = :pid)"), {"pid": pid})
 
     await db.commit()
     print(f"[PRIVACY] Anonymized steam_id={steam_id} (placeholder={player.steam_id})")
@@ -35853,8 +36409,18 @@ async def _check_twins_achievement(db: AsyncSession, report, p1_id, p2_id) -> No
           f"(build: {sorted(m1.items())})")
 
 
-async def _grant_title_item(db: AsyncSession, player_id, sku: str) -> None:
-    """Idempotently grant a shop title item (used for achievement titles)."""
+async def _grant_title_item(db: AsyncSession, player_id, sku: str) -> bool:
+    """Idempotently grant a shop title item. True if the player now holds it.
+
+    The return value exists because a MISSING shop row is indistinguishable
+    from success to a caller that ignores it, and one caller must not ignore
+    it: the title-ladder hook grants a run of consecutive rungs and then
+    advances the player's tier past all of them. Told nothing, it advances
+    past a rung the player never received, and that hole is permanent -- the
+    threshold is already behind them. Every other caller may keep ignoring it;
+    for them a cosmetic title that did not land is not worth failing a match
+    report over.
+    """
     # Savepoint (#235): _grant_achievement_inline calls this inside a try that
     # prints "title grant failed" and carries on. Unguarded, a failure here left
     # the TRANSACTION aborted, so the caller's own writes — and the whole
@@ -35864,7 +36430,7 @@ async def _grant_title_item(db: AsyncSession, player_id, sku: str) -> None:
             select(ShopItem.id).where(ShopItem.sku == sku))).scalar_one_or_none()
     if item_id is None:
         print(f"[ACHIEVEMENT] title sku {sku} missing from shop_items — run the titles migration")
-        return
+        return False
     async with db.begin_nested():
         owned = (await db.execute(
             select(PlayerItem).where(PlayerItem.player_id == player_id,
@@ -35880,6 +36446,7 @@ async def _grant_title_item(db: AsyncSession, player_id, sku: str) -> None:
                 "ON CONFLICT (player_id, item_id) DO NOTHING"
             ), {"pid": player_id, "iid": item_id})
         print(f"[ACHIEVEMENT] granted title item {sku} to {player_id}")
+    return True
 
 
 async def _achievement_payment_eligible(db: AsyncSession, player_id, achievement_key: str) -> bool:
@@ -36534,7 +37101,13 @@ async def submit_bug_report(req: BugReportRequest, request: Request, db: AsyncSe
     if not admin_exempt:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
         recent = await db.execute(
-            text("SELECT COUNT(*) FROM bug_reports WHERE steam_id = :sid AND created_at >= :cutoff"),
+            # kind = 'report' is what keeps the two budgets apart: automatic
+            # post-match uploads (kind='auto', migration 336) live in their
+            # own 12-per-24h bucket in auto_logs.py and must not consume a
+            # player's ten reports a day. Without this predicate a player who
+            # turned the setting on would silently lose the ability to file.
+            text("SELECT COUNT(*) FROM bug_reports "
+                 "WHERE steam_id = :sid AND kind = 'report' AND created_at >= :cutoff"),
             {"sid": req.steam_id, "cutoff": cutoff},
         )
         if (recent.scalar() or 0) >= BUG_REPORT_PER_STEAM_PER_DAY:
@@ -36666,11 +37239,23 @@ async def recent_bug_report_events(
     while the bot was restarting/deploying — which is exactly when comment
     sweeps happen — so DMs looked 'inconsistent'. Ack-based delivery makes
     them at-least-once."""
+    # kind = 'report' on BOTH arms, for the same reason recent_bug_reports
+    # filters it -- and this one matters more. An automatic post-match log
+    # upload (kind='auto', migration 336) is not a ticket the player filed:
+    # it creates no initial event, so it never appears here on its own. But
+    # the moment an admin comments on one or changes its status, THAT writes
+    # a bug_report_events row, and this feed hands it to the bot with the
+    # linked player's discord_id attached -- which DMs them that staff acted
+    # on 'your report' for something they never filed and cannot see.
+    # Filtering the feed is the fix rather than filtering in the bot: the
+    # reporter_discord_id join above is what makes the row deliverable, and
+    # it should not be built for a row that is not a player's ticket.
     if unnotified:
-        where = "bre.notified_at IS NULL AND bre.created_at >= NOW() - INTERVAL '7 days'"
+        where = ("br.kind = 'report' AND bre.notified_at IS NULL "
+                 "AND bre.created_at >= NOW() - INTERVAL '7 days'")
         params = {}
     else:
-        where = "bre.created_at >= :cutoff"
+        where = "br.kind = 'report' AND bre.created_at >= :cutoff"
         params = {"cutoff": datetime.now(timezone.utc) - timedelta(seconds=seconds)}
     rows = (await db.execute(
         text(f"""SELECT bre.id              AS event_id,
@@ -36777,10 +37362,18 @@ async def recent_bug_reports(
     unposted=true (v1.29): ack-based variant — reports not yet posted to the
     feed channel (up to 7 days back), so a bot restart can't drop one."""
     if unposted:
-        where = "channel_posted_at IS NULL AND created_at >= NOW() - INTERVAL '7 days'"
+        # kind = 'report' on BOTH arms. This is the feed the bot turns into
+        # #bug-reports posts, and an automatic log upload is not something to
+        # announce -- it is not a report, nobody wrote it, and a player with
+        # the setting on would spam the channel after every match. The gate
+        # lives here rather than in the bot because the bot is a separate
+        # deployable and a server-side feed should not hand out rows whose
+        # only correct handling is to drop them.
+        where = ("kind = 'report' AND channel_posted_at IS NULL "
+                 "AND created_at >= NOW() - INTERVAL '7 days'")
         params = {}
     else:
-        where = "created_at >= :cutoff"
+        where = "kind = 'report' AND created_at >= :cutoff"
         params = {"cutoff": datetime.now(timezone.utc) - timedelta(seconds=seconds)}
     rows = (await db.execute(
         text(f"""SELECT id, bug_number, created_at, steam_id, display_name, mod_version,
@@ -56241,7 +56834,15 @@ class _MailBlockReq(BaseModel):
 
 
 class _MailSettingsReq(BaseModel):
-    mail_from: str = "everyone"
+    # BOTH fields are Optional and None means "leave it alone". Uniformity
+    # is the point: mail_from used to default to "everyone" because it was
+    # the only field, which meant a PUT saying "just turn the relay off"
+    # would ALSO quietly reset who may mail this player. One rule for the
+    # whole route, so a caller that knows about one field cannot clobber
+    # the other -- including a 1.40.3 client that has never heard of the
+    # relay.
+    mail_from: str | None = None
+    discord_relay: bool | None = None
 
 
 class _AdminModCaseActReq(BaseModel):
@@ -56356,13 +56957,70 @@ def _mail_norm_body(body: str) -> str:
     return " ".join((body or "").casefold().split())
 
 
-def _mail_discord_safe(s: str, limit: int) -> str:
+def _mail_settings_payload(me: dict) -> dict:
+    """The mail preference block, rendered identically wherever it appears.
+
+    /mail/status carries it because that is the only mail route the client
+    actually polls (MailClient.cs:594: there is no read of /mail/settings),
+    and /mail/settings returns it so the route is complete on its own. One
+    function, so the two can never disagree about what a preference means.
+
+    discord_linked is reported SEPARATELY from the flag because the two are
+    independent: the relay defaults on for every row and only FIRES where a
+    Discord is linked, so a client that inferred one from the other would
+    show the wrong state to a player who has not linked yet."""
+    return {"mail_from": me.get("mail_from") or "everyone",
+            "discord_relay": bool(me.get("mail_discord_relay")),
+            "discord_linked": bool(me.get("discord_id"))}
+
+
+def _mail_discord_safe(s: str, limit: int, *, keep_lines: bool = False) -> str:
     """Outbox content is sent by the bot with users-allowed mentions (#261):
-    neutralise mention syntax and code fences, collapse whitespace, bound."""
-    s = " ".join((s or "").split())[:limit]
+    neutralise mention syntax and code fences, collapse whitespace, bound.
+
+    keep_lines preserves line structure for item 5's mail relay, where the
+    body IS the message and collapsing a mail onto one line makes it
+    unreadable. It changes WHITESPACE handling and nothing else -- every
+    caller gets the same mention, fence and angle-bracket neutralisation, so
+    no escaping rule is reachable from one caller and not another. It
+    defaults False, so the existing callers keep their exact behaviour."""
+    if keep_lines:
+        # Per line, so a run of spaces still collapses; then at most one
+        # blank line survives, which is what makes a long mail readable in
+        # a DM without letting a sender push the footer off the screen.
+        kept, blanks = [], 0
+        for line in (s or "").splitlines():
+            line = " ".join(line.split())
+            if line:
+                blanks = 0
+                kept.append(line)
+            else:
+                blanks += 1
+                if blanks <= 1:
+                    kept.append("")
+        s = "\n".join(kept).strip()
+    else:
+        s = " ".join((s or "").split())
     s = s.replace("<", "(").replace(">", ")").replace("`", "'")
     s = _re.sub(r"@everyone", "everyone", s, flags=_re.IGNORECASE)
     s = _re.sub(r"@here", "here", s, flags=_re.IGNORECASE)
+    # Discord markdown. Mentions and fences were already neutralised; bold,
+    # italic, underline, strikethrough and spoiler were not, and neither was
+    # a line-leading heading -- and `-#` is the exact subtext syntax the
+    # relay's own footer uses, so a sender could write a line that renders
+    # as the bot's own. A backslash escape is invisible in the rendered
+    # message, so this costs the reader nothing.
+    s = _re.sub(r"([\\*_~|])", r"\\\1", s)
+    s = _re.sub(r"(?m)^(-?)#", r"\1\\#", s)
+    # Bound LAST. Escaping can only grow the string, so truncating first
+    # would let a maximal mail exceed the caller's budget -- and the relay's
+    # budget is what keeps a whole DM under Discord's 2000-character limit.
+    # A cut landing between a backslash and the character it escapes leaves
+    # a dangling backslash, which would escape whatever follows it.
+    if len(s) > limit:
+        s = s[:limit]
+        if (len(s) - len(s.rstrip("\\"))) % 2:
+            s = s[:-1]
     return s
 
 
@@ -56452,7 +57110,8 @@ async def _mail_caller(request: Request, db: AsyncSession) -> dict:
     if row is None or not await _strict_steam_session_ok(request, row["steam_id"], db):
         raise HTTPException(status_code=401, detail="session_required")
     player = (await db.execute(text(
-        "SELECT id, steam_id, display_name, mod_seen_at, mail_from"
+        "SELECT id, steam_id, display_name, mod_seen_at, mail_from,"
+        "       mail_discord_relay, discord_id"
         "  FROM players WHERE steam_id = :sid AND deleted_at IS NULL"
     ), {"sid": row["steam_id"]})).mappings().first()
     if player is None:
@@ -56835,7 +57494,7 @@ async def _mail_spam_check(db: AsyncSession, sender: dict, message_id, subject: 
 
 async def _mail_finish_send(db: AsyncSession, sender: dict, *, subject: str, body: str,
                             addressees: list, thread_id, in_reply_to, idempotency_key: UUID,
-                            cap: int | None = None) -> dict:
+                            cap: int | None = None, via: str = "game") -> dict:
     """Second half of the send transaction, shared by POST /mail and
     /mail/{id}/reply: plain-text rules (judged on the RAW text, then
     trimmed), censor, cap, rate window, the message row, the ONE fan-out
@@ -56857,15 +57516,28 @@ async def _mail_finish_send(db: AsyncSession, sender: dict, *, subject: str, bod
     mid = uuid.uuid4()
     await db.execute(text(
         "INSERT INTO mail_messages"
-        "   (id, sender_id, kind, thread_id, in_reply_to, subject, body, idempotency_key)"
-        " VALUES (:id, :sid, 'direct', :tid, :irt, :subj, :body, :key)"
+        "   (id, sender_id, kind, thread_id, in_reply_to, subject, body, idempotency_key, via)"
+        " VALUES (:id, :sid, 'direct', :tid, :irt, :subj, :body, :key, :via)"
     ), {"id": mid, "sid": sender["id"], "tid": thread_id or mid, "irt": in_reply_to,
-        "subj": subject, "body": body, "key": idempotency_key})
+        "subj": subject, "body": body, "key": idempotency_key,
+        "via": via if via in ("game", "discord") else "game"})
     await db.execute(text(_MAIL_FANOUT_SQL), {
         "mid": mid, "sid": sender["id"],
         "rids": [a[0] for a in addressees], "kinds": [a[1] for a in addressees]})
     await db.execute(text(_MAIL_REV_BUMP_SQL), {"mid": mid})
     await _mail_spam_check(db, sender, mid, subject, body)
+    # Item 5: queue the Discord relay LAST, inside this same transaction and
+    # after the spam check, so a mail that rolls back queues no DM and a
+    # mail that commits always has its DMs queued. The helper reads the
+    # fan-out rows this transaction just wrote and relays only the copies
+    # marked 'delivered', so a block or mail_from = 'nobody' suppresses the
+    # DM by construction rather than by a second copy of the rule. It never
+    # raises into this path -- a relay is an extra, and must not be able to
+    # fail a mail that is already durable here.
+    await mail_discord.queue_mail_relay(
+        db, mail_id=mid, sender_name=sender.get("display_name") or "",
+        sender_steam_id=sender.get("steam_id") or "",
+        subject=subject, body=body)
     await db.commit()
     return {"id": str(mid), "accepted": True}
 
@@ -56943,16 +57615,33 @@ async def mail_send(req: _MailSendReq, request: Request, db: AsyncSession = Depe
 @app.post("/api/v1/mail/{message_id}/reply", tags=["Mail"])
 async def mail_reply(message_id: str, req: _MailReplyReq, request: Request,
                      db: AsyncSession = Depends(get_db)):
+    """The in-game reply route. It resolves WHO is speaking and hands the
+    whole of the work to _mail_reply_core, which the Discord reply route
+    (mail_discord.py, item 5) also calls — so no gate, lock, rule or
+    ordering is reachable from one caller and not the other."""
+    me = await _mail_caller(request, db)
+    return await _mail_reply_core(
+        db, me, message_id=message_id, body=req.body, reply_all=req.all,
+        idempotency_key=req.idempotency_key, via="game")
+
+
+async def _mail_reply_core(db: AsyncSession, me: dict, *, message_id: str,
+                           body: str, reply_all: bool, idempotency_key: str,
+                           via: str = "game") -> dict:
     """B-9: recipients are derived SERVER-side from the original's envelope
     — the original sender, plus every DELIVERED addressee minus self when
-    all=true (never a suppressed one); all=true on a system_broadcast is
+    reply_all (never a suppressed one); reply_all on a system_broadcast is
     refused. thread_id/in_reply_to are set here; the subject is the
     original's prefixed "Re: " once. The reply then goes through the same
     gates, rules, cap, rate window and fan-out (recipients' preferences and
-    blocks apply to replies exactly as to first messages)."""
-    me = await _mail_caller(request, db)
+    blocks apply to replies exactly as to first messages).
+
+    `me` is the ONLY thing a caller supplies about identity, and it is the
+    only thing that differs between the in-game route (Steam session) and
+    the Discord route (players.discord_id, resolved server-side, #545).
+    Everything below this line runs identically for both."""
     mid = _mail_parse_uuid(message_id, "message_id")
-    key = _mail_parse_uuid(req.idempotency_key, "idempotency_key")
+    key = _mail_parse_uuid(idempotency_key, "idempotency_key")
     await _mail_lock_identities(db, me["steam_id"], handles={me["steam_id"]: me["id"]})
     await _mail_lock_sender(db, me["id"])
     prior = await _mail_prior_send(db, me["id"], key)
@@ -56970,10 +57659,10 @@ async def mail_reply(message_id: str, req: _MailReplyReq, request: Request,
     ), {"mid": mid, "me": me["id"]})).mappings().first()
     if orig is None:
         raise HTTPException(status_code=404, detail="not_found")
-    if req.all and orig["kind"] == "system_broadcast":
+    if reply_all and orig["kind"] == "system_broadcast":
         raise HTTPException(status_code=400, detail="reply_all_refused")
     pairs = [(orig["sender_id"], "to")]
-    if req.all:
+    if reply_all:
         rows = (await db.execute(text(
             "SELECT recipient_id, kind FROM mail_recipients"
             " WHERE message_id = :mid AND delivery = 'delivered'"
@@ -56983,8 +57672,21 @@ async def mail_reply(message_id: str, req: _MailReplyReq, request: Request,
     subj = orig["subject"] or ""
     subject = subj if subj.startswith("Re: ") else ("Re: " + subj)[:MAIL_SUBJECT_MAX]
     return await _mail_finish_send(
-        db, me, subject=subject, body=req.body, addressees=addressees,
-        thread_id=orig["thread_id"], in_reply_to=orig["id"], idempotency_key=key)
+        db, me, subject=subject, body=body, addressees=addressees,
+        thread_id=orig["thread_id"], in_reply_to=orig["id"], idempotency_key=key,
+        via=via)
+
+
+# Item 5 wiring. It lives HERE, immediately after the core it binds, rather
+# than beside the other routers: bind() cannot run before _mail_reply_core
+# exists, and an assert at import is what turns a half-finished wiring into
+# a startup failure instead of a 500 on some player's first reply.
+mail_discord.bind(
+    reply_core=_mail_reply_core,
+    discord_safe=_mail_discord_safe,
+    internal_key=lambda: os.getenv("API_SECRET_KEY", ""),
+)
+assert mail_discord.bound_ok(), "mail_discord is not fully bound"
 
 
 @app.get("/api/v1/mail/inbox", tags=["Mail"])
@@ -57067,9 +57769,14 @@ async def mail_status(request: Request, db: AsyncSession = Depends(get_db)):
         "  (SELECT rev FROM mail_inbox_rev WHERE recipient_id = :me) AS revision"
     ), {"me": me["id"]})).mappings().first()
     rev = int((row or {}).get("revision") or 0)
-    return {"unread": int((row or {}).get("unread") or 0),
-            "revision": str(rev) if rev > 0 else "",
-            "mail_from": me.get("mail_from") or "everyone"}
+    out = {"unread": int((row or {}).get("unread") or 0),
+           "revision": str(rev) if rev > 0 else ""}
+    # The Settings pane renders from THIS response (see the docstring above
+    # and MailClient.cs:594), so the relay flag rides it too -- otherwise
+    # the 1.41.0 Mail settings row would have nothing to show its state
+    # from without a second call the client does not make.
+    out.update(_mail_settings_payload(me))
+    return out
 
 
 @app.get("/api/v1/mail/blocks", tags=["Mail"])
@@ -57133,7 +57840,7 @@ async def mail_block_remove(steam_id: str, request: Request, db: AsyncSession = 
 @app.get("/api/v1/mail/settings", tags=["Mail"])
 async def mail_settings_get(request: Request, db: AsyncSession = Depends(get_db)):
     me = await _mail_caller(request, db)
-    return {"mail_from": me.get("mail_from") or "everyone"}
+    return _mail_settings_payload(me)
 
 
 @app.put("/api/v1/mail/settings", tags=["Mail"])
@@ -57143,14 +57850,33 @@ async def mail_settings_put(req: _MailSettingsReq, request: Request,
     (~22929), which is HMAC-over-the-mod-secret with no ownership gate — a
     preference that decides who may reach you needs the session."""
     me = await _mail_caller(request, db)
-    value = (req.mail_from or "").strip().lower()
-    if value not in MAIL_FROM_VALUES:
-        raise HTTPException(status_code=400, detail="mail_from_invalid")
-    await db.execute(text(
-        "UPDATE players SET mail_from = :v WHERE id = :me"
-    ), {"v": value, "me": me["id"]})
+    if req.mail_from is None and req.discord_relay is None:
+        # A PUT that changes nothing is a caller bug, not a no-op to
+        # swallow: it usually means a field was renamed on one side.
+        raise HTTPException(status_code=400, detail="mail_from_or_relay_required")
+    out = {}
+    if req.mail_from is not None:
+        value = (req.mail_from or "").strip().lower()
+        if value not in MAIL_FROM_VALUES:
+            raise HTTPException(status_code=400, detail="mail_from_invalid")
+        await db.execute(text(
+            "UPDATE players SET mail_from = :v WHERE id = :me"
+        ), {"v": value, "me": me["id"]})
+        out["mail_from"] = value
+    if req.discord_relay is not None:
+        await db.execute(text(
+            "UPDATE players SET mail_discord_relay = :r WHERE id = :me"
+        ), {"r": bool(req.discord_relay), "me": me["id"]})
+        out["discord_relay"] = bool(req.discord_relay)
+        if not req.discord_relay:
+            # Withdraw what is still queued, exactly as `/mail relay off`
+            # does -- the same statement, so the two routes cannot drift
+            # into meaning different things by the same name.
+            out["withdrawn"] = (await db.execute(
+                text(mail_discord.RELAY_OFF_CANCEL_SQL),
+                {"sid": me["steam_id"]})).rowcount or 0
     await db.commit()
-    return {"mail_from": value}
+    return out
 
 
 @app.get("/api/v1/mail/{message_id}", tags=["Mail"])
@@ -57161,7 +57887,7 @@ async def mail_detail(message_id: str, request: Request, db: AsyncSession = Depe
     me = await _mail_caller(request, db)
     mid = _mail_parse_uuid(message_id, "message_id")
     row = (await db.execute(text(
-        "SELECT m.id, m.thread_id, m.in_reply_to, m.kind, m.subject, m.body, m.created_at,"
+        "SELECT m.id, m.thread_id, m.in_reply_to, m.kind, m.subject, m.body, m.created_at, m.via,"
         "       m.sender_id, s.steam_id AS sender_steam_id, s.display_name AS sender_name,"
         "       CAST(s.id AS text) AS sender_pid, COALESCE(gr.rating, 1500) AS rating,"
         "       si.name AS title, si.preview_color AS title_color, si.sku AS title_sku,"
@@ -57187,6 +57913,11 @@ async def mail_detail(message_id: str, request: Request, db: AsyncSession = Depe
         "sender": {"steam_id": row["sender_steam_id"], "name": row["sender_name"],
                    "title_color": colors.get(row["sender_pid"], "")},
         "subject": row["subject"], "body": row["body"],
+        # Item 5. Provenance: 'game' or 'discord' (migration 330's CHECK).
+        # Written since the relay shipped and read by nothing until now,
+        # which made the column storage rather than provenance -- a reader
+        # could not tell a reply typed at F5 from one sent from a DM.
+        "via": row["via"] or "game",
         "created_at": _mail_iso(row["created_at"]), "read_at": _mail_iso(row["read_at"]),
         "to": [{"steam_id": a["steam_id"], "name": a["name"]} for a in addr if a["kind"] == "to"],
         "cc": [{"steam_id": a["steam_id"], "name": a["name"]} for a in addr if a["kind"] == "cc"],
@@ -57229,6 +57960,22 @@ async def mail_delete(message_id: str, request: Request, db: AsyncSession = Depe
     ), {"mid": mid, "me": me["id"]})).first()
     if as_recipient is None and as_sender is None:
         raise HTTPException(status_code=404, detail="not_found")
+    if as_recipient is not None:
+        # A relay DM that has NOT gone out yet is a copy of a mail this
+        # player has just deleted, held outside the envelope tables where
+        # deleted_at cannot reach it. Delivering it afterwards sends the
+        # full text of something they deleted.
+        #
+        # CANCELLED, not deleted. The endpoint used to DELETE the row, which
+        # forced it to know whether the row was in flight -- and it could
+        # not, because nothing marked a row as handed out. Cancelling
+        # answers all three states without asking: a row not yet handed out
+        # stops being claimable, a row in flight stops being claimable and
+        # the bot's settlement matches nothing, and a row already sent keeps
+        # its `relay_code`, so the DM the player is holding still resolves.
+        # Deleting it made that last case answer "this code names nothing".
+        await db.execute(text(_MAIL_CANCEL_PENDING_DM_SQL),
+                         {"mid": mid, "sid": me["steam_id"]})
     await db.commit()
     return {"status": "deleted", "id": str(mid)}
 

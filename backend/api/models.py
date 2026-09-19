@@ -81,6 +81,28 @@ class Player(Base):
     # PUT /api/v1/mail/settings in SQL; declared so the ORM and the schema
     # agree (an undeclared column is a silent no-op on assignment, #346).
     mail_from = Column(Text, nullable=False, default="everyone")
+    # Whether a delivered mail is also DMed on Discord (migration 330,
+    # item 5). Read by the relay fan-out in SQL and written by
+    # PUT /api/v1/mail/settings and the bot's /mail relay; declared so an
+    # ORM assignment is not a silent no-op (#346), as mail_from is above.
+    #
+    # `server_default` is LOAD-BEARING and is not the same thing as "no
+    # default". An unset column that declares neither a Python default nor a
+    # server_default is not omitted from the INSERT -- SQLAlchemy sends it
+    # explicitly as NULL, so PostgreSQL never applies its own DEFAULT and the
+    # NOT NULL constraint refuses the row. `get_or_create_player()` does not
+    # set this field, so every first contact from a new Steam ID would fail at
+    # `db.flush()`. `server_default=FetchedValue()` is what tells the ORM the
+    # database supplies the value: the column is then left out of the INSERT
+    # and read back afterwards.
+    #
+    # The earlier comment here cited `ranked_enabled` as the pattern. That was
+    # wrong in a way worth naming: `ranked_enabled` carries `default=False`, a
+    # PYTHON default, so it was never an example of leaving the value to SQL.
+    # The hard rule it was reaching for -- the SQL default is the one that
+    # wins -- is real, and `FetchedValue` is how you actually get it.
+    mail_discord_relay = Column(Boolean, nullable=False,
+                                server_default=FetchedValue())
     # Lifetime gun accuracy + block success counters (migration 038).
     # Accumulated from each submitted non-invalidated match's local_* fields on the reporter.
     bullets_fired = Column(BigInteger, nullable=False, default=0)
@@ -714,6 +736,27 @@ class BugReport(Base):
     log_bytes = Column(Integer, nullable=True)
     status = Column(String(16), nullable=False, default="open")
     triage_notes = Column(Text, nullable=True)
+    # DELIBERATELY UNMAPPED: `kind` (migration 336, 'report' | 'auto').
+    # Not mapped because an ORM assignment to an undeclared column is a SILENT
+    # no-op, invisible at the call site (#346), and auto_logs.py -- the only
+    # writer of a non-default value -- uses raw SQL.
+    #
+    # MIGRATION 336 MUST BE APPLIED BEFORE THIS CODE REACHES A BOX. Leaving the
+    # column unmapped does NOT make the reverse order safe, which is what an
+    # earlier version of this comment claimed. Being absent from the ORM keeps
+    # `kind` out of submit_bug_report's INSERT, but three raw-SQL sites READ it
+    # and they decide the ordering:
+    #   * the 10-per-24h rate-limit COUNT inside submit_bug_report itself,
+    #     `WHERE steam_id = :sid AND kind = 'report' AND created_at >= :cutoff`
+    #   * the bug_report_events feed both arms
+    #   * the channel-post feed both arms
+    # On a box running this code without 336, that first one raises
+    # UndefinedColumn before any INSERT is attempted, so NO player can file a
+    # bug report at all -- the precise outcome the old comment promised the
+    # unmapping prevented. Migration 336's own header states the requirement
+    # correctly; this comment now agrees with it.
+    # channel_posted_at (migration 102) is also unmapped and is read and
+    # written by raw SQL in main.py; no reason was ever recorded for that one.
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 
@@ -1319,6 +1362,18 @@ class MailMessage(Base):
     # transaction and replayed verbatim by a same-key retry (migration 300,
     # review r2). NULL on direct messages.
     recipient_count = Column(Integer, nullable=True)
+    # Where this message was composed: 'game' or 'discord' (migration 330,
+    # item 5). Written by the send core from the route that called it and
+    # shown in the in-game reader; CHECK-constrained in SQL, whose
+    # DEFAULT 'game' is the only default -- see mail_discord_relay above, and
+    # note that letting SQL supply a value is what `server_default` DECLARES,
+    # not what omitting a default does. Nothing constructs a MailMessage
+    # through the ORM today -- both writers are raw INSERTs, main.py:57396
+    # which sets `via` explicitly and main.py:58193 which omits it so the
+    # broadcast takes 'game' -- so this is latent rather than live. The
+    # mapping exists precisely so that the day something does construct one,
+    # the column is not sent as an explicit NULL against its own NOT NULL.
+    via = Column(Text, nullable=False, server_default=FetchedValue())
 
     __table_args__ = (
         UniqueConstraint("sender_id", "idempotency_key", name="uq_mail_messages_sender_idem"),
