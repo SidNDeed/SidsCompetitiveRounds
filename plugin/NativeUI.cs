@@ -13185,6 +13185,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         private static GameObject menuMusicToggleBtn, musicCreditToggleBtn;
         private static object menuMusicToggleTxt, musicCreditToggleTxt;
         private static GameObject appearOfflineBtn; private static object appearOfflineTxt;
+        // v1.41.0 item (a): automatic post-match log upload, opt-in, default off.
+        private static GameObject autoLogToggleBtn; private static object autoLogToggleTxt;
         private static GameObject prefSameCardsBtn; private static object prefSameCardsTxt;   // room rules (Sept 10)
         private static bool prefSameCardsInFlight; private static float prefSameCardsAt;       // c1 M5: single-flight
         private static GameObject showDiscordBtn; private static object showDiscordTxt;
@@ -14078,6 +14080,29 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 "Allow other players to spectate your ranked games. Turning this off also removes current spectators.");
             allowSpectatorsTxt = UIFactory.GetButtonText(allowSpectatorsBtn);
 
+            /* v1.41.0 item (a): automatic log upload. A LOCAL config toggle
+             * (no server round-trip, so there is no optimistic flip to roll
+             * back), opt-IN, default off. The caption says what is sent, when
+             * it is sent and what is removed first, because a data toggle
+             * whose caption only names itself is not consent. The caption is
+             * kept to one line at the shipped panel width: the layout does not
+             * wrap it, it CLIPS it at the panel edge, and a longer first draft
+             * lost its final sentence that way in game. A comment must not sit
+             * between the arguments either — the i18n extractor splits this
+             * call's arguments on top-level commas, and a comma inside such a
+             * comment shifts the caption out of position 4, which drops the
+             * key from every locale (#357). */
+            autoLogToggleBtn = SettingsToggle(consentBox.transform, "SAutoLog", new Vector2(340, 28),
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] automatic log upload toggled");
+                    if (Plugin.AutoLogUploadEnabled != null)
+                        Plugin.AutoLogUploadEnabled.Value = !Plugin.AutoLogUploadEnabled.Value;
+                    dirty = true;
+                },
+                "After a game, send the same logs the bug-report form sends, so a problem can be looked at without you filing one. Local paths and this PC's Windows account name are removed first. One upload per five minutes.");
+            autoLogToggleTxt = UIFactory.GetButtonText(autoLogToggleBtn);
+
             // -- Language & Translation --
             // Sid, Aug 3: pulled out of "Visuals & Effects" (where it sat
             // between chromatic aberration and map lighting) and placed
@@ -14881,6 +14906,11 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                             ? I18n.Tr("Allow spectators: <color=#88FF88>ON</color>")
                             : I18n.Tr("Allow spectators: <color=#FF9966>OFF</color>")));
             }
+            if (autoLogToggleTxt != null && Plugin.AutoLogUploadEnabled != null)
+                UIFactory.SetText(autoLogToggleTxt,
+                    Plugin.AutoLogUploadEnabled.Value
+                        ? "Send logs automatically: <color=#88FF88>ON</color>"
+                        : "Send logs automatically: <color=#FF9966>OFF</color>");
             if (pingToggleTxt != null && Plugin.ShowRegionPing != null)
                 UIFactory.SetText(pingToggleTxt,
                     Plugin.ShowRegionPing.Value

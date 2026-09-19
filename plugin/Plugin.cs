@@ -60,6 +60,10 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> ShowRegionPing;
         internal static ConfigEntry<bool> ShowInactiveOnBoards;   // [UI] item d: default off -- boards hide players inactive 90+ days
         internal static ConfigEntry<bool> LagNoticesEnabled;   // [Network] LagNotices — Release B §4, default off
+        // [Data] AutoLogUpload — v1.41.0 item (a). Opt-IN, default off. Named
+        // ...Enabled rather than AutoLogUpload so the entry and the
+        // AutoLogUpload class that reads it cannot be mistaken for each other.
+        internal static ConfigEntry<bool> AutoLogUploadEnabled;
         // Streamed-playback measurement (MusicStreamProbe), both in [Music].
         // Opt-in, default off; the command names the track and the mode.
         internal static ConfigEntry<bool> MusicProbeEnabled;
@@ -672,6 +676,17 @@ namespace CompetitiveRounds
                 "Network", "LagNotices",
                 false,
                 "Show short corner notices when this seat measures dropped frames, high ping to the relay, or late-arriving opponent updates. 1v1 fighter seats only; informational, nothing is sent."
+            );
+
+            // v1.41.0 item (a): opt-IN automatic log upload. A NEW key with a
+            // false default — Config.Bind writes a default once and never
+            // revisits it (#190) — so it ships OFF for every existing install
+            // as well as every fresh one, and a config that has never seen the
+            // key gets the false.
+            AutoLogUploadEnabled = Config.Bind(
+                "Data", "AutoLogUpload",
+                false,
+                "Off by default. When on, the mod sends the same log bundle the bug-report form sends (this session's BepInEx log, the previous session's, and Unity's) to the community server after you leave a room where a game was played. Local paths and this machine's Windows account name are removed before anything is sent. At most one upload every five minutes."
             );
 
             ShowIngameChat = Config.Bind(
@@ -2894,6 +2909,10 @@ namespace CompetitiveRounds
             // patch covers the ordering the polling cannot).
             try { GrowNormalize.StageCapability("tick"); GrowNormalize.SyncRankedIntent("tick"); }
             catch { }
+            // Automatic post-match log upload (item a): keeps the room
+            // snapshot the room-exit callback needs, because OnLeftRoom runs
+            // after PhotonNetwork has already let go of the room.
+            try { AutoLogUpload.Tick(); } catch { }
             // Quick-chat sends through the vanilla chat RPC since Sept 1 and
             // needs no receive hook (event code 48 is retired, never shipped).
             // Dance emotes (Aug 31 item 5) ride event code 49; Tick runs the
@@ -4956,6 +4975,14 @@ namespace CompetitiveRounds
             // caller, so the flush the r4 cap depends on never ran and a
             // filled cache stayed capped for the rest of the process.
             try { CardBarTeamColor.Reset(); } catch { }
+            // Automatic post-match log upload (item a). On the RELIABLE edge,
+            // not the room-state poll: the poll turns false during Leaving and
+            // cannot see a leave+rejoin that lands between two samples. It sits
+            // ABOVE the Diag2v2 early return below, which would otherwise skip
+            // it on every seat that has no pending 2v2 slot — i.e. almost all
+            // of them. Off unless the player opted in; it clears its own
+            // room-bound snapshot on every path, including the refusals.
+            try { AutoLogUpload.OnRoomLeft(); } catch { }
             // (A room-leave flush of the #308 birth tally was tried here and
             // REMOVED in review r3 find 3: it neither reset nor marked the tally,
             // so leaving room A and joining room B emitted the same numbers twice

@@ -511,6 +511,7 @@
   "Admins...",
   "Advanced",
   "After 60s unfocused at the menu, drops the engine to 15 FPS. Never active in online rooms or when a match is found; wakes instantly on focus.",
+  "After a game, send the same logs the bug-report form sends, so a problem can be looked at without you filing one. Local paths and this PC's Windows account name are removed first. One upload per five minutes.",
   "Aged metallic bronze with a warm gleam.",
   "Aged wine — deep red with a brown undertone.",
   "Albums have unlimited stock",
@@ -2060,6 +2061,8 @@
   "Self-Inflicted Deaths % (boundary + own bullet)",
   "Self-awareness is a virtue.",
   "Send",
+  "Send logs automatically: <color=#88FF88>ON</color>",
+  "Send logs automatically: <color=#FF9966>OFF</color>",
   "Send ping",
   "Send report",
   "Sending...",
@@ -5475,6 +5478,11 @@
    "kind": "Tr"
   },
   "After 60s unfocused at the menu, drops the engine to 15 FPS. Never active in online rooms or when a match is found; wakes instantly on focus.": {
+   "surface": "NativeUI",
+   "location": "BuildSettingsTab",
+   "kind": "SettingsToggle"
+  },
+  "After a game, send the same logs the bug-report form sends, so a problem can be looked at without you filing one. Local paths and this PC's Windows account name are removed first. One upload per five minutes.": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
    "kind": "SettingsToggle"
@@ -13223,6 +13231,16 @@
    "surface": "MailUI",
    "location": "BuildComposerView",
    "kind": "Tr"
+  },
+  "Send logs automatically: <color=#88FF88>ON</color>": {
+   "surface": "NativeUI",
+   "location": "RefreshSettings",
+   "kind": "SetText"
+  },
+  "Send logs automatically: <color=#FF9966>OFF</color>": {
+   "surface": "NativeUI",
+   "location": "RefreshSettings",
+   "kind": "SetText"
   },
   "Send ping": {
    "surface": "CompetitiveUI",

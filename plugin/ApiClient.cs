@@ -21851,6 +21851,101 @@ namespace CompetitiveRounds
             }
         }
 
+        // ── Automatic post-match log upload ──────────────────────────────────
+        //
+        // POST /api/v1/logs/auto. Same transport and same body shape as
+        // SubmitBugReport, three deliberate differences:
+        //
+        //  * ONE ATTEMPT. PostRequest, never PostRequestWithRetry. The server
+        //    answers 429 at its own 12-per-24h bucket and 409-class refusals on
+        //    state a second attempt would find in exactly the same place, so a
+        //    retry loop could only ever turn a refusal into two refusals. The
+        //    single attempt is what makes "a refusal is terminal" a property of
+        //    the code rather than a promise in a comment.
+        //  * STRICT SESSION. The route creates a disk artifact attributed to a
+        //    Steam id and refuses a claim it cannot prove, so the call is not
+        //    made at all without a token — an anonymous attempt can only spend
+        //    a request to be told 401.
+        //  * A 404 IS AN ANSWER, not a failure. The client may ship before the
+        //    server half; a route that is not there means the feature is off at
+        //    this backend. AutoLogUpload latches that and stops for the
+        //    session, so an un-deployed server costs one request per launch.
+        //
+        // The caller passes the log text ALREADY SCRUBBED (CompetitiveUI
+        // .BuildLogBundle is the only producer, and it scrubs); nothing here
+        // re-scrubs, because two scrub sites is how one of them rots.
+        public static void SubmitAutoLog(string steamId, string displayName, string mode,
+                                         string roomName, string opponentSteamId, string seriesId,
+                                         string logText, Action<bool, long, string> done)
+        {
+            if (Plugin.Instance == null) { done?.Invoke(false, 0, "not ready"); return; }
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown")
+            {
+                done?.Invoke(false, 0, "steam_id missing");
+                return;
+            }
+            if (string.IsNullOrEmpty(SteamAuth.SessionToken))
+            {
+                done?.Invoke(false, 0, "session_required");   // strict-session endpoint
+                return;
+            }
+            if (string.IsNullOrEmpty(logText))
+            {
+                done?.Invoke(false, 0, "log empty");
+                return;
+            }
+            if (logText.Length > BUG_REPORT_LOG_CAP_CHARS)
+                logText = logText.Substring(logText.Length - BUG_REPORT_LOG_CAP_CHARS); // tail-most window
+
+            var sb = new System.Text.StringBuilder();
+            sb.Append("{");
+            sb.Append($"\"steam_id\":\"{JsonEscapeFull(steamId)}\"");
+            sb.Append($",\"display_name\":\"{JsonEscapeFull(displayName ?? "")}\"");
+            sb.Append($",\"mod_version\":\"{JsonEscapeFull(Plugin.ModVersion)}\"");
+            sb.Append($",\"game_version\":\"{JsonEscapeFull(UnityEngine.Application.version ?? "")}\"");
+            sb.Append($",\"mode\":\"{JsonEscapeFull(mode ?? "")}\"");
+            sb.Append($",\"room_name\":\"{JsonEscapeFull(roomName ?? "")}\"");
+            if (!string.IsNullOrEmpty(opponentSteamId))
+                sb.Append($",\"opponent_steam_id\":\"{JsonEscapeFull(opponentSteamId)}\"");
+            if (!string.IsNullOrEmpty(seriesId))
+                sb.Append($",\"series_id\":\"{JsonEscapeFull(seriesId)}\"");
+            sb.Append($",\"log_text\":\"{JsonEscapeFull(logText)}\"");
+            sb.Append("}");
+
+            Plugin.Instance.StartCoroutine(PostRequest(
+                $"{baseUrl}/api/v1/logs/auto", sb.ToString(),
+                (ok, response) =>
+                {
+                    // FormatRequestError's "HTTP <code>: <body>" prefix is the
+                    // contract the status is read back out of — the same one
+                    // the report outbox pattern-matches for permanence.
+                    long code = ok ? 200 : ExtractHttpStatus(response);
+                    done?.Invoke(ok, code, response);
+                }
+            ));
+        }
+
+        /// <summary>Reads the numeric status out of FormatRequestError's
+        /// "HTTP &lt;code&gt;: ..." prefix; 0 when the failure had no response at
+        /// all (a transport timeout), which is a different thing from a server
+        /// refusal and must not be confused with one.</summary>
+        private static long ExtractHttpStatus(string err)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(err) || !err.StartsWith("HTTP ", StringComparison.Ordinal)) return 0;
+                int colon = err.IndexOf(':', 5);
+                if (colon <= 5) return 0;
+                long code;
+                if (long.TryParse(err.Substring(5, colon - 5).Trim(),
+                                  System.Globalization.NumberStyles.Integer,
+                                  System.Globalization.CultureInfo.InvariantCulture, out code))
+                    return code;
+            }
+            catch { }
+            return 0;
+        }
+
 
         // ── Tournaments ──────────────────────────────────────────────────────
         //

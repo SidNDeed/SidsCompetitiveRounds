@@ -6149,7 +6149,17 @@ namespace CompetitiveRounds
         private const int BUNDLE_CAP_BEP_PREV    = 1_000_000;
         private const int BUNDLE_CAP_UNITY       = 1_000_000;
 
-        private static string BuildLogBundle()
+        /// <summary>Replacement count from the most recent BuildLogBundle()
+        /// scrub. Read by the automatic post-match upload so its acceptance
+        /// line can state what the scrub removed rather than assert that it
+        /// ran.</summary>
+        internal static int LastScrubReplacements { get; private set; }
+
+        /// <summary>Internal, not private: the automatic post-match upload
+        /// (AutoLogUpload) sends the SAME bundle the bug form does, so the
+        /// scrub below has exactly one site and the two paths cannot
+        /// diverge.</summary>
+        internal static string BuildLogBundle()
         {
             string bep     = ApiClient.ReadLogTail(BepInExLogPath(),         maxChars: BUNDLE_CAP_BEP_CURRENT);
             string bepPrev = ApiClient.ReadLogTail(BepInExLogPreviousPath(), maxChars: BUNDLE_CAP_BEP_PREV);
@@ -6172,7 +6182,29 @@ namespace CompetitiveRounds
             sb.AppendLine();
             sb.AppendLine("===== audio self-check (at submit) =====");
             sb.AppendLine(AudioSelfCheck.Snapshot());
-            return sb.ToString();
+
+            // THE scrub site. It is here, and not at either sender, because
+            // both senders ship this exact text: a scrub at one call site
+            // would leave the other one unscrubbed the first time somebody
+            // added a third sender. The section headers above embed the log
+            // FILE PATHS, and Unity's log lives under the user profile, so the
+            // scrub has to run after they are appended.
+            //
+            // A null return is the scrub reporting that it could not do its
+            // job. The text is withheld in that case: a bug report or an
+            // upload that arrives as one honest sentence is a far better
+            // outcome than one that arrives carrying a machine's account name.
+            int scrubbed;
+            string cleaned = LogScrub.Scrub(sb.ToString(), out scrubbed);
+            if (cleaned == null)
+            {
+                LastScrubReplacements = -1;
+                Plugin.Log.LogError("[LOG-SCRUB] scrub failed — log bundle withheld rather than sent unscrubbed");
+                return "[log bundle withheld: the local-path scrub failed on this machine]";
+            }
+            LastScrubReplacements = scrubbed;
+            Plugin.Log.LogInfo($"[LOG-SCRUB] bundle {cleaned.Length:N0} chars, {scrubbed} local-identity replacement(s)");
+            return cleaned;
         }
 
         // Walks from the plugin assembly's location back to <ROUNDS>/BepInEx/.
