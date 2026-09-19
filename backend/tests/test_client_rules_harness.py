@@ -95,17 +95,87 @@ def test_the_top_strip_suite_ran_every_case_and_none_failed(harness_run):
     assert run >= 14, "the TopStripBand suite shrank to %d cases" % run
 
 
-def _named_case(proc, name):
-    """One `[topstrip]` case line, matched on its NAME.
+def test_the_ffa_report_suite_ran_every_case_and_none_failed(harness_run):
+    suites = _suites(harness_run)
+    assert "ffareport" in suites, "the FfaReportRules suite did not report"
+    run, fail, verdict = suites["ffareport"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[ffareport\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+    assert run >= 13, "the FfaReportRules suite shrank to %d cases" % run
+
+
+def _named_case(proc, name, suite="topstrip"):
+    """One case line, matched on its NAME.
 
     Safe to match on the name here (unlike the LogScrub cases, which are
     matched on their input): every case prints its name whatever its verdict,
     so a mutation that breaks the case reds it rather than making it vanish.
     """
     hits = [l for l in proc.stdout.splitlines()
-            if l.startswith("[topstrip] ") and (" | case=" + name + " |") in l]
+            if l.startswith("[" + suite + "] ") and (" | case=" + name + " |") in l]
     assert len(hits) == 1, "expected one %r case, found %d" % (name, len(hits))
     return hits[0]
+
+
+def test_two_electors_file_one_ffa_game_under_one_key(harness_run):
+    """The HIGH this suite exists for.
+
+    The election can return two reporters, deliberately: a seat that has
+    received no witness property falls back while its peers do not, because
+    nobody reporting loses the sitting outright. That is only survivable if
+    the server can SEE the duplicate, and the key used to carry each seat's
+    own clock and its own game counter -- so the two reports collided with
+    nothing and one game settled twice.
+
+    Asserted on the printed keys, not on the verdict: a case that stopped
+    comparing would still say PASS.
+    """
+    line = _named_case(harness_run, "two seats agree on the key", "ffareport")
+    assert line.startswith("[ffareport] PASS"), line
+    got = line.split(" | got=", 1)[1]
+    m = re.match(r"^a=(\S+) b=(\S+)$", got.strip())
+    assert m, got
+    assert m.group(1) == m.group(2), "the two seats produced different keys: " + got
+    assert re.search(r"_r\d+$", m.group(1)), (
+        "the key lost the suffix the server parses: " + m.group(1))
+
+
+def test_the_report_key_still_satisfies_the_server_contract(harness_run):
+    """backend/api/main.py's _ffa_room_game_no pulls the game number out of
+    this key with an anchored `_r(\\d+)$` and settles that game's bets on it.
+    A key ending any other way falls back to "games_played + 1", which settles
+    the wrong game's wagers on an out-of-order report -- and nothing errors."""
+    line = _named_case(harness_run, "the server can recover the game number", "ffareport")
+    assert line.startswith("[ffareport] PASS"), line
+    assert "value=11" in line, (
+        "the server's own regex no longer recovers the number the key carries: " + line)
+    # And the same regex the server uses, evaluated here on the production
+    # source rather than on a copy of it.
+    server = (REPO / "backend" / "api" / "main.py").read_text(encoding="utf-8")
+    assert r'_re.search(r"_r(\d+)$", room_id or "")' in server, (
+        "the server's room-id parser moved; the client key must move with it")
+
+
+@pytest.mark.parametrize("name", [
+    "the key is a pure function of its inputs",
+    "the published number wins when behind",
+    "absent published number falls back to local",
+    "different games get different keys",
+    "the key fits the column",
+    "degenerate inputs still produce a legal key",
+    "election is total without witnesses",
+    "witnesses are the electorate",
+    "election is order-independent",
+    "an empty room elects nobody",
+    "a settled refusal is recognised, a neighbour is not",
+])
+def test_the_ffa_report_guarantees_each_have_a_case(harness_run, name):
+    line = _named_case(harness_run, name, "ffareport")
+    assert line.startswith("[ffareport] PASS"), line
+    assert " | got=" in line and not line.rstrip().endswith("| got="), (
+        "the case printed no measurement: " + line)
 
 
 def test_the_column_lays_simultaneous_surfaces_out_disjointly(harness_run):
@@ -207,6 +277,7 @@ def test_the_harness_compiles_only_the_rule_files():
     assert "<EnableDefaultCompileItems>false</EnableDefaultCompileItems>" in csproj
     included = re.findall(r'<Compile Include="([^"]+)"', csproj)
     assert "Main.cs" in included
-    for rule_file in ("plugin/LogScrub.cs", "plugin/TopStripBand.cs"):
+    for rule_file in ("plugin/LogScrub.cs", "plugin/TopStripBand.cs",
+                      "plugin/FfaReportRules.cs"):
         assert any(p.endswith(rule_file) for p in included), (
             "%s is not compiled into the harness" % rule_file)

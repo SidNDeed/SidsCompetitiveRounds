@@ -17,6 +17,11 @@
                         frame number as a PARAMETER precisely so it can be
                         driven from here instead of asserted about.
 
+      FfaReportRules.cs who submits an FFA game's report, what key it is filed
+                        under, and whether a refusal is final. The key must be
+                        identical on every seat in the room and must still
+                        carry the suffix the server parses out of it.
+
     net10.0 because that is the runtime installed on the build seat, matching
     the h2h harness; RollForward keeps the next SDK rotation from turning this
     into a green-looking nothing.
@@ -40,6 +45,7 @@
     <Compile Include="Main.cs" />
     <Compile Include="../../plugin/LogScrub.cs" />
     <Compile Include="../../plugin/TopStripBand.cs" />
+    <Compile Include="../../plugin/FfaReportRules.cs" />
   </ItemGroup>
 
 </Project>

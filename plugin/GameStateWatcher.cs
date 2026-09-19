@@ -6714,9 +6714,16 @@ namespace CompetitiveRounds
             int duration = (int)(DateTime.UtcNow - matchStartTime).TotalSeconds;
             if (duration <= 0 || duration > 86400)
                 duration = (int)Math.Max(1f, Time.realtimeSinceStartup - FfaMode.MatchStartRealtime);
-            // Per-game report room id: same shape the other modes use — the
-            // per-game suffix is the server-side replay-dedup key.
-            string reportRoomId = $"{photonRoomId}_{matchStartTime:HHmmss}_r{FfaMode.GameNumber}";
+            // Per-game report room id: the server-side replay-dedup key, and
+            // therefore a value every seat in the room has to compute
+            // IDENTICALLY. The rule and the reasoning live in
+            // FfaReportRules.ReportRoomId. What stood here mixed this seat's
+            // local clock (matchStartTime, DateTime.UtcNow at its own
+            // match-start hook) with this seat's local game counter, so the two
+            // reporters the election can deliberately produce filed under two
+            // different keys, nothing collided, and one game settled twice.
+            string reportRoomId = FfaReportRules.ReportRoomId(
+                photonRoomId, FfaMode.PublishedGameNumber(), FfaMode.GameNumber);
             try
             {
                 if (!TryReportFfaMatch(reportRoomId, duration, winnerTeam))
@@ -6931,9 +6938,22 @@ namespace CompetitiveRounds
             // the all-ineligible case still elects exactly one reporter. The
             // narrow mixed case — one client sees witness properties and
             // another sees none at all — can elect two, and that direction is
-            // chosen deliberately: the server settles a game once and answers
-            // the second report terminally, where nobody reporting loses the
-            // sitting outright.
+            // chosen deliberately, because nobody reporting loses the sitting
+            // outright.
+            //
+            // WHAT THE SERVER SEES FROM TWO ELECTORS, now that both file under
+            // the same key (FfaReportRules.ReportRoomId): the first insert
+            // takes ffa_matches' UNIQUE (photon_room_id); the second loses it
+            // and the endpoint answers with the FIRST report's idempotent echo,
+            // or HTTP 409 when the stored row cannot be echoed. One match row,
+            // one rating application, one bet settlement. The 409 is terminal
+            // by FfaReportRules.IsSettledRefusal, so the losing seat's outbox
+            // drops the entry instead of retrying it forever.
+            //
+            // That paragraph was NOT true before the shared key. The two seats
+            // stamped their own clocks and their own game counters into the
+            // room id, so the ids differed, the unique index had nothing to
+            // collide with, and one game settled twice.
             string lowest = FfaReportRules.ElectReporter(presentSteams, witnessSteams, out bool witnessFallback);
             if (witnessFallback && presentSteams.Count > 0)
                 Plugin.Log.LogWarning($"[FFA-REPORT] witness-fallback: no seat carries "

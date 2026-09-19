@@ -388,6 +388,60 @@ namespace CompetitiveRounds
             return -1;
         }
 
+        /// <summary>Re-advertise this seat's witness under the game number it
+        /// holds RIGHT NOW. The witness is published once per game, in the same
+        /// op as the card clear (GameStateWatcher's FFA match-start hook), and
+        /// that is still the only site that publishes it FIRST. This is the
+        /// re-stamp: a drift adoption moves gameNumber forward mid-phase, and
+        /// without it the prop keeps advertising the game the seat entered the
+        /// phase under. The election reads `witness &gt;= GameNumber`, so every
+        /// adopted seat would fail its own witness test — and when they have
+        /// all adopted, the electorate is empty and the election falls back to
+        /// presence, which is the exact hole the witness exists to close.
+        ///
+        /// Reads gameNumber live rather than taking it as a parameter: the
+        /// adoption sites assign gameNumber and then call this, so a parameter
+        /// would be a second copy of the value with nothing forcing it to
+        /// agree.</summary>
+        internal static void RepublishGameWitness(string why)
+        {
+            try
+            {
+                if (gameNumber < 0 || !PhotonNetwork.InRoom) return;
+                var h = new ExitGames.Client.Photon.Hashtable();
+                h[PropGameWitness] = gameNumber;
+                PhotonNetwork.LocalPlayer?.SetCustomProperties(h);
+                Plugin.Log.LogInfo($"[FFA] witness re-published {PropGameWitness}={gameNumber} ({why})");
+            }
+            catch (Exception ex)
+            {
+                // Same failure direction as the first publish: this seat drops
+                // out of the witness electorate, which the election's fallback
+                // covers. Logged because it is what to look for in a sitting
+                // that reports witness-fallback after a drift line.
+                Plugin.Log.LogWarning($"[FFA] witness re-publish failed ({why}): {ex.Message}");
+            }
+        }
+
+        /// <summary>The game number the HOST last published in the room's
+        /// pick-cycle property, or -1 when it is absent or unreadable.
+        ///
+        /// This is the one game number every seat in the room can read the
+        /// same value of. Each seat's own `GameNumber` is a local counter that
+        /// drift adoption moves independently, so two seats can hold different
+        /// numbers for the same game — which is fine for anything local and
+        /// wrong for anything that has to MATCH across seats. The report id is
+        /// the second kind: see FfaReportRules.ReportRoomId.</summary>
+        internal static int PublishedGameNumber()
+        {
+            try
+            {
+                var parsed = ParseCycleProp(ReadRawRoomProp(PropCycle));
+                return parsed != null ? parsed.Item1 : -1;
+            }
+            catch { return -1; }
+        }
+
         // ── Score access ──
 
         public static int RoundsFor(int teamId) { return rounds.TryGetValue(teamId, out var v) ? v : 0; }
@@ -2083,6 +2137,13 @@ namespace CompetitiveRounds
                         // the adopted identity already. If any of them ever
                         // moves above this loop, this site must funnel too.
                         RepublishLocalPickFor(phaseNonce, game, cycle);
+                        // The witness prop is NOT one of the funnel's locals:
+                        // it was written at game start, under the number this
+                        // seat held then, and the reporter election compares it
+                        // against the number the seat holds at game over. Both
+                        // adoption sites re-stamp it — this one cannot reach
+                        // the funnel by design, so the call has to be here too.
+                        RepublishGameWitness("manifest-prop adoption");
                         break;
                     }
                 }
@@ -2235,6 +2296,12 @@ namespace CompetitiveRounds
                     SetRoomProp(PropCycle, $"{newGame}:{newCycle}:{string.Join(",", pickerIds)}");
                 }
                 RepublishLocalPickFor(phaseNonce, newGame, newCycle);
+                // Witness re-stamp: see RepublishGameWitness. Not one of the
+                // locals catalogued above because it is not a local — it is a
+                // replicated property written at game start, and an adoption
+                // is the only thing that can make it disagree with the number
+                // this seat now holds.
+                RepublishGameWitness("pick-phase adoption");
                 adoptedAt = Time.realtimeSinceStartup;
                 lastGotCount = 0;
                 lastPublishedPhotonDeadline = -1.0;   // force a republish under the new key

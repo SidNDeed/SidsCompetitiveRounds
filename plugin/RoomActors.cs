@@ -32,12 +32,16 @@ namespace CompetitiveRounds
     /// design doc BEFORE the spectator seat itself exists.
     ///
     /// PRECISION (Codex round 2): the fast path is "no spectator AND no frozen
-    /// roster". Nothing calls FreezeFighterRoster in the shipped build, so
-    /// RosterFrozen is false everywhere and the guarantee holds exactly as
-    /// stated. Once Phase 2 freezes a roster, these helpers additionally
-    /// exclude actors that are not ON it — which is the point of freezing, and
-    /// is a deliberate divergence from raw PlayerList, not a violation of the
-    /// inertness claim.
+    /// roster". CORRECTED — the "nothing freezes a roster, so RosterFrozen is
+    /// false everywhere" that stood here was true when it was written and has
+    /// not been true for releases. Three sites freeze today, all in
+    /// GameStateWatcher: the match-assembly freeze (:1572), the late
+    /// identity-resolution freeze (:5052), and the per-game FFA refreeze
+    /// (:6457). So the fast path is NOT taken in a frozen room, and these
+    /// helpers do additionally exclude actors that are not ON the roster —
+    /// which is the point of freezing, and is a deliberate divergence from raw
+    /// PlayerList rather than a violation of the inertness claim. Read the
+    /// inertness guarantee as covering an UNFROZEN room only.
     ///
     /// Classification is CACHED BY ActorNumber at first sight and is
     /// immutable for the lifetime of the room (design §3.2): an actor that
@@ -143,12 +147,18 @@ namespace CompetitiveRounds
         /// lands — so its later departure is provably not a fighter leaving.
         ///
         /// RJ-2: a seat whose Steam ID is ON the frozen roster is NOT latched.
-        /// The latch is permanent for the room — cleared only by a room change
-        /// or Reset() — and it exists for an UNKNOWN entrant, so latching a
-        /// known fighter outlives the condition that produced it: a roster
-        /// snapshot taken while that fighter happened to be absent. The live
-        /// rules in IsUnauthorized still apply to them on every call, so this
-        /// declines the PERMANENCE, not the rejection.
+        /// The latch outlives the actor's properties — it is cleared by a room
+        /// change, by Reset(), or by a roster write that now covers the seat
+        /// (ReleaseLatchesTheRosterNowCovers) — and it exists for an UNKNOWN
+        /// entrant, so latching a known fighter outlives the condition that
+        /// produced it: a roster snapshot taken while that fighter happened to
+        /// be absent. The live rules in IsUnauthorized still apply to them on
+        /// every call, so this declines the PERMANENCE, not the rejection.
+        ///
+        /// This rule can only be applied with the roster THIS CALL can see. A
+        /// seat rejected before the roster widened to include it is the same
+        /// defect one step later in time, and the release at the roster write
+        /// is where that half is closed.
         ///
         /// The impostor case keeps its latch. An actor duplicating a live
         /// roster fighter's u_id is on the roster BY STEAM ID and would
@@ -283,9 +293,10 @@ namespace CompetitiveRounds
         internal static void FreezeFighterRoster(IEnumerable<string> steamIds)
         {
             _fighterSteamIds.Clear();
-            if (steamIds == null) return;
+            if (steamIds == null) { ReleaseLatchesTheRosterNowCovers(); return; }
             foreach (var s in steamIds)
                 if (!string.IsNullOrEmpty(s)) _fighterSteamIds.Add(s);
+            ReleaseLatchesTheRosterNowCovers();
         }
 
         /// <summary>Widen the frozen roster without narrowing it (RJ-2). For a
@@ -311,6 +322,72 @@ namespace CompetitiveRounds
             if (steamIds == null) return;
             foreach (var s in steamIds)
                 if (!string.IsNullOrEmpty(s)) _fighterSteamIds.Add(s);
+            ReleaseLatchesTheRosterNowCovers();
+        }
+
+        /// <summary>Re-evaluate every rejection latch against the roster AS IT
+        /// NOW STANDS. Called from both roster writers, because the latch is a
+        /// conclusion drawn from a roster and a roster change is exactly the
+        /// event that can invalidate it.
+        ///
+        /// The defect this closes: RecordRejected (RJ-2) declines to latch a
+        /// seat already ON the roster, but it can only apply that rule with the
+        /// roster it has at rejection time. A seat rejected while the roster
+        /// was thin — mid-load, alt-tabbed, a slow rejoin, or simply a first
+        /// game it sat out — stayed latched after the next game's union added
+        /// it, and IsUnauthorized tests the latch BEFORE membership, so it
+        /// never got its membership tested again. The latch cleared only on a
+        /// room change or Reset, so that seat was unauthorized for the rest of
+        /// the room on every client.
+        ///
+        /// The release predicate is RecordRejected's own, re-read: on the
+        /// roster, by a readable identity, and not an impostor. So this cannot
+        /// admit anything the live rules in IsUnauthorized would refuse:
+        ///   * unreadable identity — no release. IsUnauthorized reads an
+        ///     unreadable identity as unauthorized once the roster is frozen,
+        ///     so the latch and the live rule agree; nothing is lost.
+        ///   * impostor — no release, same carve-out RecordRejected keeps: an
+        ///     actor duplicating a live fighter's u_id is on the roster by
+        ///     Steam ID and the latch is precisely what survives its property
+        ///     teardown at departure.
+        ///   * not in the room any more — never considered. A departed actor's
+        ///     latch is what proves its leave was not a fighter's leave, and
+        ///     its identity is no longer resolvable to test anyway.
+        /// A narrowing freeze is handled by the same predicate for free: it
+        /// asks about the roster that now exists, not about the change.</summary>
+        private static void ReleaseLatchesTheRosterNowCovers()
+        {
+            try
+            {
+                EnsureCacheRoom();
+                if (_rejectedActors.Count == 0) return;
+                var room = PhotonNetwork.CurrentRoom;
+                var players = room != null ? room.Players : null;
+                if (players == null) return;
+                List<int> release = null;
+                foreach (var kv in players)
+                {
+                    var actor = kv.Value;
+                    if (actor == null) continue;
+                    if (!_rejectedActors.Contains(actor.ActorNumber)) continue;
+                    if (IsImpostorReplicated(actor)) continue;
+                    string sid = SteamIdOf(actor);
+                    if (string.IsNullOrEmpty(sid)) continue;
+                    if (!_fighterSteamIds.Contains(sid)) continue;
+                    if (release == null) release = new List<int>();
+                    release.Add(actor.ActorNumber);
+                }
+                if (release == null) return;
+                foreach (int actorNumber in release)
+                {
+                    _rejectedActors.Remove(actorNumber);
+                    // Not log-once: a release is a state change worth one line
+                    // every time it happens, and it can legitimately happen
+                    // more than once in a room.
+                    Plugin.Log.LogInfo($"[ROSTER] releasing the rejection latch on actor {actorNumber} — the roster now covers them");
+                }
+            }
+            catch { }
         }
 
         /// <summary>The whole per-GAME roster rule, in one place so the call
@@ -385,8 +462,14 @@ namespace CompetitiveRounds
         internal static bool IsUnauthorized(PhotonPlayer actor)
         {
             if (actor == null) return false;
-            // Once rejected, always rejected — the cache outlives the actor's
-            // properties (design-review blocker 2).
+            // Rejected stays rejected until the ROSTER says otherwise — the
+            // cache outlives the actor's properties (design-review blocker 2),
+            // which is what makes a departure provably not a fighter's. It is
+            // re-evaluated at exactly one event, a roster write
+            // (ReleaseLatchesTheRosterNowCovers), because that is the only
+            // thing that can invalidate the conclusion. Tested BEFORE
+            // membership on purpose: after departure there are no properties
+            // left to test membership with.
             if (IsRejected(actor)) return true;
             if (!RosterFrozen) return false;
             if (IsSpectator(actor)) return false;
