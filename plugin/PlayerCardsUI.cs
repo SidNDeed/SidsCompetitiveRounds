@@ -94,6 +94,13 @@ namespace CompetitiveRounds
         private static bool discardInFlight; private static readonly List<string> discardQueue = new List<string>();
         private static int discardDone, discardShards;
         private static bool discardRetried;   // the one wait-and-retry a rate-limited copy gets (Sept 14 batch, C2)
+        private static float discardWaited;   // seconds THIS run has already spent waiting a refusal out
+        // Ceiling on the waiting a single discard run may do. discardRetried is
+        // cleared again on every resumption, so without a run-wide budget a
+        // persistently refused run waits and retries with no end: the binder
+        // stays "discarding...", the button stays dead and nothing is ever
+        // said. Past the budget the run finishes and shows its reason.
+        private const float DiscardWaitBudget = 20f;
         // info
         private static object txtInfo;
         // state
@@ -334,7 +341,11 @@ namespace CompetitiveRounds
             if (previewSprite != null) { try { UnityEngine.Object.Destroy(previewSprite); } catch { } previewSprite = null; }
             previewShown = -1;
             if (presetPreview != null) { try { PlayerCardFaces.SetFace(presetPreview, null); } catch { } }
-            discardQueue.Clear(); armedPrintId = null; priceChangedAt = -1f;
+            // FinishDiscard is not on this path, so the run state it clears is
+            // cleared here too: a retry flag left set would spend the NEXT
+            // account's first refusal.
+            discardQueue.Clear(); discardRetried = false; discardWaited = 0f;
+            armedPrintId = null; priceChangedAt = -1f;
             recoverAt = 0f; meRefreshAt = 0f; unparseableStrikes = 0;
             try { NativeUI.MarkDirty(); } catch { }
         }
@@ -1992,7 +2003,7 @@ namespace CompetitiveRounds
                         if (o.print_id != p.print_id && FaceKey(o) == key) discardQueue.Add(o.print_id);
             }
             if (discardQueue.Count == 0) return;
-            discardDone = 0; discardShards = 0; discardInFlight = true;
+            discardDone = 0; discardShards = 0; discardWaited = 0f; discardRetried = false; discardInFlight = true;
             NativeUI.MarkDirty();
             DiscardNext(id);
         }
@@ -2017,16 +2028,19 @@ namespace CompetitiveRounds
                     return;
                 }
                 string code = ApiClient.PcErrorCode(resp);
-                // A dupes discard is one request per copy, and the api's
-                // sensitive-path limit is 20 in 10 s (Sept 14 batch, C2): a
-                // rate-limited answer is waited out and the same copy asked
-                // again, once per copy; not a refusal, and not a chain of
-                // refetches on top of the limit.
-                if (code == "rate_limited" && !discardRetried)
+                float wait = ApiClient.PcRetryAfter(resp, 3);
+                // A dupes discard is one request per copy, and the card routes
+                // carry a request budget of their own that one request per copy
+                // stays inside: a rate-limited answer is waited out and the same
+                // copy asked again, once per copy; not a refusal, and not a
+                // chain of refetches on top of the limit. The waiting a run may
+                // do is capped by DiscardWaitBudget - past it the run ends and
+                // says so instead of retrying without a ceiling.
+                if (code == "rate_limited" && !discardRetried && discardWaited + wait <= DiscardWaitBudget)
                 {
                     discardRetried = true;
+                    discardWaited += wait;
                     discardQueue.Insert(0, pid);
-                    float wait = ApiClient.PcRetryAfter(resp, 3);
                     Say(I18n.TrF("Slowing down - the server asked for a {0} s pause", (int)wait), C_WARN);
                     Plugin.Instance.StartCoroutine(DiscardAfter(id, wait, ep));
                     return;
@@ -2045,7 +2059,7 @@ namespace CompetitiveRounds
 
         private static void FinishDiscard(string id, string errorCode)
         {
-            discardInFlight = false; discardQueue.Clear(); discardRetried = false;
+            discardInFlight = false; discardQueue.Clear(); discardRetried = false; discardWaited = 0f;
             // One line for both halves: what was discarded stays reported when
             // the next discard fails (c4).
             if (discardDone > 0 && errorCode != null)
