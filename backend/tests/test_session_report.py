@@ -922,8 +922,14 @@ def test_series_completion_links_its_snapshots_to_the_series():
     """The writer half of the identity: the Glicko update stamps the two
     snapshots it just added with the series id, by raw SQL under a savepoint
     (the column is deliberately not on the model — a pre-299 box keeps the
-    rating update and skips the link)."""
-    submit = inspect.getsource(main.submit_match)
+    rating update and skips the link).
+
+    The pass moved out of submit_match into `_apply_series_rating_pass` when
+    the report's commit moved below it, so this reads the helper. Both halves
+    are asserted: the helper carries the link, and submit_match is what calls
+    it — a pin on a helper nobody invokes certifies nothing (#286)."""
+    submit = inspect.getsource(main._apply_series_rating_pass)
+    assert "await _apply_series_rating_pass(" in inspect.getsource(main.submit_match)
     assert submit.count("_RATING_HISTORY_LINK_SQL") == 1
     link = " ".join(main._RATING_HISTORY_LINK_SQL.split())
     assert link == ("UPDATE rating_history SET series_id = CAST(:sid AS uuid) "

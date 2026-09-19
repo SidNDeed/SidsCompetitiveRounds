@@ -363,12 +363,52 @@ def _rank_fallback_color(name: str) -> str:
 
 # 5-minute cache over rank_role_colors so per-row leaderboard lookups don't
 # hammer the table. Refreshed lazily; bot pushes invalidate it directly.
-_rank_colors_cache: dict = {"at": 0.0, "ok": False, "map": {}}
+# `failed_at` is the NEGATIVE half of the same cache: the monotonic stamp of
+# the last refresh that raised, or None for "no refresh has failed since the
+# last good fill". None rather than 0.0 for the same reason `ok` exists beside
+# `at` — "never failed" is a fact to record, not something to infer from the
+# magnitude of a monotonic clock, which starts near zero on a fresh host.
+_RANK_COLORS_TTL_SECONDS = 300.0
+_rank_colors_cache: dict = {"at": 0.0, "ok": False, "map": {}, "failed_at": None}
+
+
+def _rank_colors_invalidate() -> None:
+    """Drop the cached colour map so the next read refetches.
+
+    Clears all three state fields together. `at = 0.0` alone did not
+    invalidate anything during the first 300 seconds of process uptime: the
+    staleness test is `now - at > 300`, and with `ok` still True and
+    time.monotonic() still under 300 on a fresh host, `now - 0.0 > 300` is
+    False, so a pushed colour was ignored until uptime passed the TTL.
+    Clearing `ok` is what makes the push win, because the refresh gate reads
+    `not ok` first and that test does not involve the clock at all. Clearing
+    `failed_at` is what lets a push retry immediately after a failed refresh
+    rather than waiting out the suppression window below."""
+    _rank_colors_cache["ok"] = False
+    _rank_colors_cache["at"] = 0.0
+    _rank_colors_cache["failed_at"] = None
 
 
 async def _rank_colors(db: AsyncSession) -> dict:
     now = time.monotonic()
-    if not _rank_colors_cache["ok"] or now - _rank_colors_cache["at"] > 300:
+    if not _rank_colors_cache["ok"] or now - _rank_colors_cache["at"] > _RANK_COLORS_TTL_SECONDS:
+        # NEGATIVE CACHING. A persistent fault — the table absent because code
+        # reached production ahead of its migration is the realistic one —
+        # leaves the map permanently stale, so without this every render call
+        # on every board re-issued the same failing SELECT and logged the same
+        # line. That multiplies one outage by the request rate across ~21 call
+        # sites. A failed refresh is therefore cached for the same 300s a
+        # successful one is: the map served in that window is exactly what the
+        # previous behaviour served (the last good map, or {} when there has
+        # never been one), and the only thing suppressed is the repeat of a
+        # read that has just been shown to fail.
+        # The suppression is bounded and clock-forward: it expires after the
+        # window, and a bot push clears it outright via
+        # _rank_colors_invalidate(), so an operator fixing the table does not
+        # have to wait it out.
+        _failed_at = _rank_colors_cache["failed_at"]
+        if _failed_at is not None and now - _failed_at <= _RANK_COLORS_TTL_SECONDS:
+            return _rank_colors_cache["map"]
         try:
             # Savepoint (#235): this swallows its own error and serves the
             # stale map, but 21 call sites carry on issuing SQL on the same
@@ -381,12 +421,17 @@ async def _rank_colors(db: AsyncSession) -> dict:
             # caches. It does NOT raise when cold, and that is deliberate: the
             # cost of an empty map is a rank title rendering without its colour,
             # which is cosmetic, and 21 call sites should not 500 over a colour.
-            # Stamping on success alone is still worth it — it turns a failure
-            # cached for a full 300s into one that retries on the next call.
+            # `ok` and `at` therefore mean "a read completed at this moment",
+            # and the handler below records a failure under its own key rather
+            # than under these — so the freshness test and the suppression test
+            # never have to be told apart by the magnitude of one timestamp.
             _rank_colors_cache["ok"] = True
             _rank_colors_cache["at"] = now
+            _rank_colors_cache["failed_at"] = None
         except Exception as ex:
-            print(f"[RANK] color cache refresh failed: {ex}")
+            _rank_colors_cache["failed_at"] = now
+            print(f"[RANK] color cache refresh failed, suppressed for "
+                  f"{int(_RANK_COLORS_TTL_SECONDS)}s: {ex}")
     return _rank_colors_cache["map"]
 
 
@@ -458,7 +503,11 @@ PODIUM_TITLES = {
 # DESC. Shared by the 'title_podium' dynamic title and the Top-3 x3 match XP
 # multiplier. Keys/values are str(player_id) so UUIDs from text() queries and
 # ORM lookups compare equal.
-_podium_cache: dict = {"at": 0.0, "ok": False, "ids": [], "map": {}}
+# `refresh_failed` records whether the LAST attempt to refresh these ids
+# completed. It is what tells a renderer (which may serve the kept copy)
+# apart from an award decision (which may not) — see _podium_map_for_award.
+_podium_cache: dict = {"at": 0.0, "ok": False, "ids": [], "map": {},
+                       "refresh_failed": False}
 
 # Item d: the same LEADERBOARD_ACTIVE_DAYS filter the boards apply, so the
 # titles and the doubled bonus follow the ACTIVE top 3 (a returning player's
@@ -607,9 +656,16 @@ async def _grant_podium_titles(player_ids: list) -> None:
 
 async def _podium_player_ids(db: AsyncSession) -> list:
     """Ordered [1st, 2nd, 3rd] player ids (as strings) per the visible
-    leaderboard. 60s TTL. A refresh failure serves the last GOOD copy; if there
-    has never been one it RAISES, because an empty list is indistinguishable
-    from a real "nobody qualifies" answer."""
+    leaderboard. 60s TTL. COSMETIC POLARITY: a refresh failure serves the last
+    GOOD copy; if there has never been one it RAISES, because an empty list is
+    indistinguishable from a real "nobody qualifies" answer.
+
+    Serving a stale copy is the right answer for a renderer and the wrong one
+    for a payment, so the two questions are asked through two entry points
+    (#412): this one and `_podium_map` for rendering, `_podium_map_for_award`
+    for anything that pays on podium membership. The difference is recorded in
+    `_podium_cache["refresh_failed"]`, which says out loud whether the ids
+    below are a completed read or a copy kept past its bound."""
     now = time.monotonic()
     if not _podium_cache["ok"] or now - _podium_cache["at"] > 60:
         try:
@@ -638,21 +694,62 @@ async def _podium_player_ids(db: AsyncSession) -> list:
             # entering the except, and therefore without raising.
             _podium_cache["ok"] = True
             _podium_cache["at"] = now
-            await _grant_podium_titles(ids)
+            # The read completed, so the copy below is current. Cleared here
+            # and nowhere else, so this field answers exactly one question:
+            # did the most recent attempt to refresh these ids finish?
+            _podium_cache["refresh_failed"] = False
         except Exception as ex:
             print(f"[PODIUM] cache refresh failed: {ex}")
+            _podium_cache["refresh_failed"] = True
             # Cold: never once populated, so `ids` below is [] — which is not
             # "nobody is on the podium" but "we do not know". Callers that
             # award on this must not be handed the first as if it were the
             # second.
             if not _podium_cache["ok"]:
                 raise
+        else:
+            # The title sync is OUTSIDE the read's try on purpose. It opens its
+            # own session and writes shop rows; its failure says nothing about
+            # whether the podium read completed, and inside the try it would
+            # have marked a podium we did fetch as unfetched — the same
+            # conflation `refresh_failed` exists to prevent. It is logged and
+            # dropped here, which is what the previous shape did with it too
+            # (`ok`/`at` were already stamped before it ran).
+            try:
+                await _grant_podium_titles(ids)
+            except Exception as ex:
+                print(f"[PODIUM] holder sync after refresh failed: {ex}")
     return _podium_cache["ids"]
 
 
 async def _podium_map(db: AsyncSession) -> dict:
-    """{str(player_id): 1|2|3} for the current leaderboard podium."""
+    """{str(player_id): 1|2|3} for the current leaderboard podium.
+
+    COSMETIC polarity — see `_podium_player_ids`. Use
+    `_podium_map_for_award` wherever the answer decides gold or XP."""
     await _podium_player_ids(db)
+    return _podium_cache["map"]
+
+
+async def _podium_map_for_award(db: AsyncSession) -> dict:
+    """{str(player_id): 1|2|3}, but only from a podium read that COMPLETED.
+
+    DECISION polarity, the opposite of `_podium_map` (#412). A renderer that
+    shows last minute's podium for another few seconds is showing a slightly
+    old truth; a payment that reads membership from a copy kept past its
+    bound pays for a position the player may no longer hold, and there is no
+    later pass that corrects it. So when the refresh did not complete, this
+    refuses with a retryable 503 instead of answering from the kept copy.
+
+    What the refusal costs (#430): the caller is a match report, nothing in it
+    has committed when this is asked, and the client's outbox redelivers a
+    5xx. A redelivery, against a silent overpayment or underpayment that
+    stands permanently."""
+    await _podium_player_ids(db)
+    if _podium_cache["refresh_failed"]:
+        print("[PODIUM] refusing an award decision on a podium copy whose "
+              "refresh did not complete")
+        raise HTTPException(status_code=503, detail="podium_unavailable")
     return _podium_cache["map"]
 
 
@@ -6609,6 +6706,184 @@ async def submit_macro_evidence(
     }
 
 
+async def _apply_series_rating_pass(db: AsyncSession, series, p1, p2) -> bool:
+    """Apply the completed series' Glicko period, its history snapshots and
+    the rating achievements it unlocks, in the CALLER's transaction.
+
+    Returns True when both players had a glicko_ratings row and the period was
+    applied, False when one of them had none — a read that succeeded and
+    correctly found nothing, which is a player's first-ever rated series.
+
+    NO savepoint and NO swallow, and that is the point of the function. This
+    pass used to run AFTER the match had committed, inside a savepoint, under
+    a handler that printed and carried on: a failed players lock or a failed
+    glicko read then returned 200 for a completed series with no rating
+    change, no rating_history rows and no rating achievement, and the
+    identical retry collided with the committed match row rather than
+    re-deriving any of it. Run inside the report's own transaction, a failure
+    propagates, the report rolls back whole, and the retry is an ordinary
+    first report.
+
+    LOCK ORDER. The sorted players pass comes first and is kept even though
+    the caller already holds those rows: it is the statement that records the
+    players-then-glicko order this pass shares with admin_reverse_series, and
+    it also serializes two completions sharing a player, whose unlocked glicko
+    read-modify-writes could otherwise clobber each other's update. FOR NO KEY
+    UPDATE, not FOR UPDATE — the weakest mode that still conflicts with the
+    writes below, so it does not enrol every FK insert against players in this
+    lock graph (#202)."""
+    for _pid in sorted([p1.id, p2.id], key=str):
+        await db.execute(
+            text("SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"),
+            {"pid": _pid},
+        )
+    # Read both ratings BEFORE any updates (avoids ordering bug)
+    g1 = (await db.execute(
+        select(GlickoRating).where(GlickoRating.player_id == p1.id))).scalar_one_or_none()
+    g2 = (await db.execute(
+        select(GlickoRating).where(GlickoRating.player_id == p2.id))).scalar_one_or_none()
+    if not (g1 and g2):
+        return False
+
+    p1_won_series = (series.winner_id == p1.id)
+
+    # Calculate both new ratings using pre-update opponent values
+    new_r1, new_rd1, new_vol1 = calculate_new_rating(
+        g1.rating, g1.rating_deviation, g1.volatility,
+        [(g2.rating, g2.rating_deviation, 1.0 if p1_won_series else 0.0)],
+        GLICKO2_TAU,
+    )
+    new_r2, new_rd2, new_vol2 = calculate_new_rating(
+        g2.rating, g2.rating_deviation, g2.volatility,
+        [(g1.rating, g1.rating_deviation, 0.0 if p1_won_series else 1.0)],
+        GLICKO2_TAU,
+    )
+
+    # Store rating changes on the series for UI display
+    # Must map match-report p1/p2 to the series' player1/player2
+    # (match report order can differ from series order)
+    rc_match_p1 = round(new_r1 - g1.rating, 1)
+    rc_match_p2 = round(new_r2 - g2.rating, 1)
+    if p1.id == series.player1_id:
+        series.p1_rating_change = rc_match_p1
+        series.p2_rating_change = rc_match_p2
+    else:
+        series.p1_rating_change = rc_match_p2
+        series.p2_rating_change = rc_match_p1
+
+    # Apply updates
+    now = datetime.now(timezone.utc)
+    g1.rating = new_r1
+    g1.rating_deviation = new_rd1
+    g1.volatility = new_vol1
+    g1.peak_rating = max(g1.peak_rating or new_r1, new_r1)
+    g1.updated_at = now
+    g2.rating = new_r2
+    g2.rating_deviation = new_rd2
+    g2.volatility = new_vol2
+    g2.peak_rating = max(g2.peak_rating or new_r2, new_r2)
+    g2.updated_at = now
+
+    # Save rating history snapshots (powers the Elo-over-time graph)
+    snapshot_ids = []
+    for pid, r, rd, vol in [
+        (p1.id, new_r1, new_rd1, new_vol1),
+        (p2.id, new_r2, new_rd2, new_vol2),
+    ]:
+        snapshot_id = uuid.uuid4()
+        snapshot_ids.append(str(snapshot_id))
+        db.add(RatingHistory(
+            id=snapshot_id,
+            player_id=pid,
+            rating=r,
+            rating_deviation=rd,
+            volatility=vol,
+            period_end=now,
+        ))
+    # Sept 6 batch (Group 4 item c, migration 299): link the two snapshots to
+    # THIS series by identity, so the session report joins
+    # rating_history.series_id instead of guessing from a time window. Raw SQL
+    # under a SAVEPOINT on purpose, and this savepoint STAYS while the pass's
+    # outer one goes: the column is deliberately NOT declared on the model
+    # (see RatingHistory), so a box whose schema predates 299 skips the link
+    # and keeps the rating update. That is a schema-window tolerance for a
+    # column no rating depends on — not a swallow of the rating work
+    # (#477/#235).
+    await db.flush()
+    try:
+        async with db.begin_nested():
+            await db.execute(text(_RATING_HISTORY_LINK_SQL),
+                             {"sid": str(series.id), "ids": snapshot_ids})
+    except Exception as _lx:
+        print(f"[REPORT] rating_history series link skipped: {_lx}")
+
+    # Auto-grant rating achievements (Master / Grand Master) when either
+    # player crosses a threshold on this Glicko update.
+    await _grant_rating_achievements(db, p1.id, new_r1)
+    await _grant_rating_achievements(db, p2.id, new_r2)
+    return True
+
+
+async def _take_early_series_lock(db: AsyncSession, p1_id, p2_id, room_id) -> None:
+    """Take the pair's current-series row lock at the top of a match report.
+
+    Lock-only: the authoritative load happens later in the report, and holding
+    the row means it cannot change underneath that load. Taking it here, the
+    moment both players are known, is what stops a concurrent /bets from
+    taking the series lock first, reading the persisted pre-report score and
+    accepting a wager on a game that has already been decided.
+
+    A fault FAILS THE REQUEST with a retryable 503. It used to be swallowed
+    for ordinary (non-tournament) series, and the swallow is what made the
+    wager window reachable by ordinary means: a lock wait that times out is
+    the normal way this statement fails, the report then continued unlocked
+    through every line the lock exists to cover, and the wager it admitted
+    settled against the result the same request was recording. Re-raising as
+    503 costs a redelivery — nothing in the handler has committed at this
+    point — and that is the only outcome that keeps the window shut.
+
+    Tournament series already refused, on the separate ground that skipping
+    the cross-path action gate reopens the report-vs-action state race. They
+    refused by re-raising the original error, which surfaced as a 500; they
+    now take the same 503 as every other series, so the distinction no longer
+    has to be carried as a special case. Both are 5xx and both are redelivered
+    by the report outbox, so nothing about the tournament path's outcome
+    changes beyond the status code.
+
+    SAVEPOINT (#235): under asyncpg a failed statement leaves the TRANSACTION
+    aborted, so without the savepoint the 503 below could not be raised
+    cleanly — the caller's later statements would die first and the report
+    would surface as whatever ran next. On SUCCESS the savepoint is RELEASED,
+    and Postgres retains work released that way, so the FOR NO KEY UPDATE row
+    lock is still held for the rest of the request, which is the entire point
+    of taking it early."""
+    try:
+        async with db.begin_nested():
+            _pre_series = await _find_current_active_series(
+                db, p1_id, p2_id, room_id=room_id)
+            if _pre_series is not None:
+                # Shared with deadline check-in actions. Deliberately acquired
+                # before the RankedSeries row lock so neither path can form
+                # series<->match ABBA.
+                _pre_tournament_match_id = (
+                    await _acquire_tournament_report_action_gate(db, _pre_series))
+                await db.execute(
+                    text("SELECT 1 FROM ranked_series WHERE id = :sid FOR NO KEY UPDATE"),
+                    {"sid": _pre_series.id},
+                )
+                # The bracket row may have closed while this report waited on
+                # the action gate. Never award/rate a closed bracket row.
+                await _assert_tournament_report_match_open(
+                    db, _pre_tournament_match_id)
+    except HTTPException:
+        # Already a decided answer (409 on a closed bracket row) — pass it
+        # through rather than restating it as an availability problem.
+        raise
+    except Exception as _ple:
+        print(f"[SERIES-LOCK] early series lock FAILED, refusing the report: {_ple}")
+        raise HTTPException(status_code=503, detail="series_lock_unavailable")
+
+
 @app.post("/api/v1/matches", response_model=MatchResponse, tags=["Matches"])
 async def submit_match(report: MatchReport, request: Request, db: AsyncSession = Depends(get_db)):
     """
@@ -6767,60 +7042,7 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     # the upgrade path would then run all its work before any lock. Locking an
     # existing current series for this pair is harmless when the report really
     # is casual (the row is simply left alone).
-    if True:
-        _pre_series = None
-        _pre_is_tournament = False
-        try:
-            # SAVEPOINT (#235) — the one swallow-prone read the Sept 16 sweep
-            # missed. Without it a caught statement error here left the
-            # TRANSACTION aborted, and the report then died several hundred
-            # lines downstream under InFailedSQLTransaction, logged as whatever
-            # statement happened to run next rather than as this one.
-            # SPAN, stated because it is the load-bearing part: the savepoint
-            # opens INSIDE this block and closes at the end of it. On SUCCESS
-            # it is RELEASED, and Postgres retains work released that way — so
-            # the FOR NO KEY UPDATE row lock this block exists to take is still
-            # held for the rest of the request, which is the entire point of
-            # taking it early. Only ROLLBACK TO SAVEPOINT undoes it, and that
-            # is precisely the path where the lock was not taken anyway.
-            # The advisory-lock asymmetry does not reach this path. A savepoint
-            # rollback releases row locks while NOT releasing advisory xact
-            # locks, but the only advisory lock reachable here comes from
-            # _acquire_tournament_report_action_gate, which returns None
-            # immediately for a non-tournament series — and tournament series
-            # re-raise below instead of being swallowed. So the swallowed path
-            # never holds one.
-            async with db.begin_nested():
-                _pre_series = await _find_current_active_series(
-                    db, p1.id, p2.id, room_id=report.photon_room_id)
-                if _pre_series is not None:
-                    # Captured as a plain bool BEFORE anything can roll back:
-                    # the handler below decides whether re-raising is REQUIRED,
-                    # and it must not have to read a rolled-back ORM object to
-                    # find that out.
-                    _pre_is_tournament = bool(_pre_series.is_tournament)
-                    # Shared with deadline-check-in actions. Deliberately
-                    # acquired before the RankedSeries row lock so neither path
-                    # can form series<->match ABBA.
-                    _pre_tournament_match_id = (
-                        await _acquire_tournament_report_action_gate(db, _pre_series))
-                    await db.execute(
-                        text("SELECT 1 FROM ranked_series WHERE id = :sid FOR NO KEY UPDATE"),
-                        {"sid": _pre_series.id},
-                    )
-                    # The bracket row may have closed while this report waited on
-                    # the action gate. Never award/rate a closed bracket row.
-                    await _assert_tournament_report_match_open(
-                        db, _pre_tournament_match_id)
-        except HTTPException:
-            raise
-        except Exception as _ple:
-            # Tournament reports must never bypass the cross-path gate: that
-            # would reopen the report-vs-action state race. Preserve
-            # the historical best-effort behavior only for ordinary series.
-            if _pre_is_tournament:
-                raise
-            print(f"[SERIES-LOCK] early lock skipped: {_ple}")
+    await _take_early_series_lock(db, p1.id, p2.id, report.photon_room_id)
     # Server-side ranked enforcement (bug #42). ranked_enabled defaults TRUE
     # and every explicit opt-in path (queue join, toggle) sets it, so a FALSE
     # here means the player deliberately turned ranked off. The old behavior
@@ -7346,18 +7568,22 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
                         " GREATEST(COALESCE(record_bounce_kill, 0), :v) WHERE id = :pid"
                     ), {"v": int(_bounce), "pid": str(_pid)})
     except Exception as _rec_ex:
-        # DELIBERATELY still swallows, and this is the ONE site in the Sept 18
-        # sweep that keeps the swallow. The other seven re-raise, so the
-        # exception is worth stating rather than leaving to be "corrected" by a
-        # future reader applying the rule uniformly.
-        # The rule those seven follow is that a contained failure must not be
-        # indistinguishable from a successful negative result. It still applies
+        # DELIBERATELY still swallows. It is NOT the only swallow left in this
+        # handler's neighbourhood and the earlier note claiming a count was
+        # wrong to state one: the bet settlement, the earned-pack grant, the
+        # rating_history series link and the cosmetic colour/podium caches all
+        # still contain their own failures on purpose, each for a reason
+        # written where it sits. What this note is for is the reason THIS one
+        # stays, so a future reader applying the re-raise rule uniformly can
+        # see the trade rather than guess at it.
+        # The rule the re-raising sites follow is that a contained failure
+        # must not be indistinguishable from a successful negative result. It still applies
         # here, and the omission is real: these records are per-match maxima, so
         # a record set in THIS match is lost permanently — the next match
         # re-attempts with its own values, never with these.
         # What differs is the PROPORTION. Everywhere else the omission was XP,
-        # gold or an award — value the player is owed, where an outage costs one
-        # retry and silence costs them the payment. Here the omission is a
+        # gold or an award — value the player is owed, where an outage costs a
+        # redelivery and silence costs them the payment. Here the omission is a
         # leaderboard maximum, and the worst failure mode is persistent rather
         # than transient: code reaching production ahead of its migration, which
         # fails EVERY report identically. Re-raising would convert a cosmetic
@@ -7719,15 +7945,19 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
             winner_bonus = int(SERIES_GOLD_BASE * _w_mult) * 2
             if _w_mult > 1.0:
                 _series_gold_winner_labels.append(f"{_w_label} opp x{_w_mult:g}")
-            # NOT wrapped in a swallow. _podium_map raises only when the
-            # podium could not be determined AND no good copy has ever been
-            # cached; "this player is not on the podium" returns normally and
-            # is the common case. Swallowing here made those two outcomes
-            # identical, so an undeterminable podium silently withheld a x2 the
-            # winner had earned. Nothing has committed at this point in the
-            # handler, so letting it raise returns 5xx and the client's outbox
-            # redelivers the report.
-            if str(series_loser.id) in await _podium_map(db):
+            # The AWARD-polarity accessor, and NOT wrapped in a swallow.
+            # "This player is not on the podium" returns normally and is the
+            # common case. The two ways the answer can be unavailable both
+            # raise: no good copy has ever been cached, and — the case the
+            # cosmetic accessor serves through — a refresh that did not
+            # complete, leaving a copy from before the standings moved.
+            # Doubling this bonus on membership the server did not re-read
+            # pays a x2 for a position the loser may no longer hold, and
+            # withholding it on a copy we could not fetch takes away a x2 the
+            # winner earned; neither is correctable afterwards, and only a
+            # refusal is. Nothing has committed at this point in the handler,
+            # so raising returns 5xx and the client's outbox redelivers.
+            if str(series_loser.id) in await _podium_map_for_award(db):
                 winner_bonus *= 2
                 # "Podium", not "Top 3": shipped v1.33.0 clients scan the
                 # raw response with Contains("Top 3") to render a defunct
@@ -7800,6 +8030,87 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
             # continues, so extend the fence across the gap to the next game.
             await _ranked_ingame_lease_renew(db, series)
 
+    # ── Series finalization, INSIDE the match's own transaction ────────────
+    # (for non-ranked matches, Glicko is not affected)
+    #
+    # The match write used to commit HERE, above this point, and the rating
+    # pass and the grants then ran afterwards in transactions of their own,
+    # each under a handler that swallowed. A failure in any of them returned
+    # 200 with the Glicko update, the rating_history rows, the rating
+    # achievements or the slayer title and its gold simply absent, and
+    # nothing re-derived them afterwards: the only retry is the client
+    # resending the identical report, and that report collides with the match
+    # row the first attempt had already committed. The note that used to sit
+    # here — "at most a skipped grant that the next report re-derives" —
+    # described a repair that does not exist.
+    #
+    # Moving the commit BELOW this work removes the class rather than the
+    # instances. The report now records the match, the ratings, the history
+    # and the grants together, or records none of them and answers 5xx; and
+    # because a refused report writes no match row, the identical retry is an
+    # ordinary first report that derives all of it. Longer lock retention is
+    # the accepted cost.
+    #
+    # The lock ORDER the split pass was built to preserve survives the merge.
+    # By the time this runs, the transaction already holds both players' rows
+    # and has held them since before it touched any rating table: the sorted
+    # pass at the top of the handler takes the rows that already existed, the
+    # sorted steam-id advisory pass beside it covers a player whose row this
+    # report creates, and the XP and gold deltas above take both again. So
+    # the sequence is still players-then-glicko, which is the order
+    # admin_reverse_series takes.
+    #
+    # The two authoritative re-reads the split shape needed are gone with the
+    # gap they guarded. There is no window between the match commit and the
+    # rating pass any more, and a concurrent admin_reverse_series must take
+    # these same players rows and this series row, so it waits for this
+    # transaction to finish rather than landing inside it. A re-read that
+    # could only ever return this transaction's own uncommitted write would
+    # be a check that cannot fail (#342).
+    if series_completed:
+        await _apply_series_rating_pass(db, series, p1, p2)
+
+        # ── Auto-grant slayer achievements (Sid Slayer / Stan Slayer) ──
+        # Beat one of the SLAYER_TARGETS players in a ranked series → unlock.
+        # _grant_achievement_inline also grants the matching equippable title.
+        # No separate transaction and no swallow: these hand out a permanent
+        # title and gold for the series THIS transaction is completing, so
+        # they belong to it, and a failure takes the report down with them
+        # rather than reporting a win that paid nothing.
+        # The winner is read from the series row this handler just wrote,
+        # which is the authoritative value inside this transaction. Both
+        # series players are p1 and p2 because the series was located for
+        # exactly this pair, so no second lookup is needed to turn the id
+        # into a steam_id — but that is an invariant, so it is TESTED rather
+        # than assumed. This block hands out a permanent title and gold, and
+        # picking a player from an id that resolves to neither is a worse
+        # answer than refusing the report.
+        if series.winner_id not in (p1.id, p2.id):
+            print(f"[ACH] series {series.id} completed with winner_id "
+                  f"{series.winner_id}, which is neither reported player — "
+                  f"refusing rather than granting against a guess")
+            raise HTTPException(status_code=500, detail="series_winner_unresolved")
+        _winner_player = p1 if series.winner_id == p1.id else p2
+        _loser_player = p2 if _winner_player is p1 else p1
+        winner_steam = _winner_player.steam_id
+        loser_steam = _loser_player.steam_id
+        slayer_key = SLAYER_TARGETS.get(loser_steam or "")
+        if slayer_key and winner_steam and winner_steam != loser_steam:
+            if await _grant_achievement_inline(db, _winner_player.id, slayer_key):
+                print(f"[ACH] {slayer_key} auto-granted to {winner_steam} for beating {loser_steam} in a ranked series")
+        # v1.30 streak achievements (thresholds per Sid July 12: 25/50/100).
+        if winner_steam:
+            streak = await get_ranked_streak(db, winner_steam)
+            granted_streak = False
+            if streak >= 25:
+                granted_streak |= await _grant_achievement_inline(db, _winner_player.id, "on_fire")
+            if streak >= 50:
+                granted_streak |= await _grant_achievement_inline(db, _winner_player.id, "unstoppable")
+            if streak >= 100:
+                granted_streak |= await _grant_achievement_inline(db, _winner_player.id, "immortal")
+            if granted_streak:
+                print(f"[ACH] streak achievement(s) granted to {winner_steam} (streak={streak})")
+
     try:
         await db.commit()
     except IntegrityError:
@@ -7832,273 +8143,47 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     if _region_sighting:
         _note_region_seen(*_region_sighting)
 
-    # Trigger Glicko recalculation only when a series completes
-    # (for non-ranked matches, Glicko is not affected)
-    if series_completed:
-        # Set before the try so the post-rating blocks below can never NameError
-        # on it if the rating pass throws before the authoritative re-read — and
-        # set FALSE, because the only honest answer before that re-read is "we
-        # have not checked". It defaulted True, which was safe only while the
-        # whole pass either completed or 500'd. Now that the pass is savepointed
-        # and its handler swallows, an exception BEFORE the re-read (the lock
-        # waits below are the realistic one: an admin reversal holding the
-        # players rows) rolled the SAVEPOINT back and left this Python flag
-        # still True — and the slayer grant, the title and 1000 gold then went
-        # out for a series that had just been reversed. A SAVEPOINT rolls back
-        # DATABASE state; it cannot roll back a local. Failing closed here costs
-        # at most a skipped grant that the next report re-derives.
-        _series_still_valid = False
-        # Inline recalculation for the two series players
+    # Tournament bracket advancement. Noop for non-tournament series.
+    #
+    # DELIBERATELY STILL A SECOND TRANSACTION, and the one piece of the
+    # finalization that the merge above does not cover. Folding it in was
+    # considered and rejected: this transaction holds both reporters' players
+    # rows, and the advance writes rows for players OUTSIDE this pair (third
+    # place, prizes). Holding participant locks across it is the exact shape
+    # tournament review rounds 25-27 built and refuted — a third-place advance
+    # ABBA'ing against a semifinal reversal through out-of-pair podium writes
+    # — and `advance_tournament_match`'s own SCOPE NOTE records that saga and
+    # says not to reintroduce it.
+    #
+    # So its failure direction is a known, NAMED residual rather than a
+    # closure: the report is already committed when this runs, an exception
+    # leaves the bracket unadvanced, and the only retry the client has is a
+    # resend that collides with the committed match row. It is logged as an
+    # operator-actionable line, NOT swallowed quietly, and it is deliberately
+    # not turned into a 5xx: the report itself succeeded, and answering 5xx
+    # would have the outbox redeliver a report that can never do anything but
+    # collide, without advancing the bracket either. Closing it properly needs
+    # an idempotent finalizer the duplicate path can also reach; that
+    # mechanism does not exist and is reported rather than improvised (#331).
+    #
+    # No `_series_still_valid` gate any more. That flag described a re-read
+    # across a gap this handler no longer has, and the authority on whether a
+    # reversal has landed since the commit is advance_tournament_match itself:
+    # it re-reads the series with populate_existing and returns without
+    # advancing when the row is invalidated or no longer completed.
+    if series_completed and series.is_tournament:
         try:
-            # SAVEPOINT (#235): the rating pass is the whole point of this
-            # block, but its handler below swallows and the request carries
-            # on into the slayer grant and the tournament advance. Under
-            # asyncpg a caught statement error still leaves the TRANSACTION
-            # aborted, so those continuations died instead, logged as a
-            # Glicko error. begin_nested makes the pass atomic: it is either
-            # applied and committed below, or rolled back to the savepoint
-            # with the transaction still usable. The commit itself stays
-            # OUTSIDE the savepoint.
-            async with db.begin_nested():
-                # This is a NEW transaction (the match write committed above), so
-                # it holds no locks. Its old shape — glicko reads, ORM updates,
-                # then players achievement-gold UPDATEs — acquired glicko-then-
-                # players in report order, invertible against admin_reverse_series
-                # (players-then-glicko, sorted). Same canonical pass first; it
-                # also serializes two completions sharing a player, whose
-                # unlocked glicko read-modify-writes could otherwise clobber
-                # each other's rating update.
-                for _pid in sorted([p1.id, p2.id], key=str):
-                    await db.execute(
-                        text("SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"),
-                        {"pid": _pid},
-                    )
-                # AUTHORITATIVE RE-READ under the locks (learning #197's own rule,
-                # which the first version of this block invoked and then skipped —
-                # Codex cold review). `series` is a pre-commit ORM object and
-                # expire_on_commit=False, so its attributes are a snapshot from
-                # BEFORE the commit above. An admin_reverse_series that wins these
-                # locks in the gap between the two transactions invalidates the
-                # series and claws its gold/XP back — and this block would then
-                # happily apply a FORWARD Glicko period, rating achievements,
-                # slayer/streak titles and a tournament advance to a series that
-                # no longer exists. Re-read the row and bail if it is gone,
-                # invalidated, or no longer completed.
-                _live = (await db.execute(
-                    text("SELECT status, invalidated_at, winner_id FROM ranked_series WHERE id = :sid"),
-                    {"sid": series.id},
-                )).mappings().first()
-                _series_still_valid = (
-                    _live is not None
-                    and _live["invalidated_at"] is None
-                    and _live["status"] == "completed"
-                )
-                if not _series_still_valid:
-                    print(f"[MATCH] series {series.id} was invalidated/changed between the match "
-                          f"commit and the rating pass — skipping Glicko, achievements and "
-                          f"tournament advance for it")
-                # Read both ratings BEFORE any updates (avoids ordering bug)
-                g1_r = await db.execute(select(GlickoRating).where(GlickoRating.player_id == p1.id))
-                g1 = g1_r.scalar_one_or_none()
-                g2_r = await db.execute(select(GlickoRating).where(GlickoRating.player_id == p2.id))
-                g2 = g2_r.scalar_one_or_none()
-
-                if g1 and g2 and _series_still_valid:
-                    p1_won_series = (series.winner_id == p1.id)
-
-                    # Calculate both new ratings using pre-update opponent values
-                    new_r1, new_rd1, new_vol1 = calculate_new_rating(
-                        g1.rating, g1.rating_deviation, g1.volatility,
-                        [(g2.rating, g2.rating_deviation, 1.0 if p1_won_series else 0.0)],
-                        GLICKO2_TAU,
-                    )
-                    new_r2, new_rd2, new_vol2 = calculate_new_rating(
-                        g2.rating, g2.rating_deviation, g2.volatility,
-                        [(g1.rating, g1.rating_deviation, 0.0 if p1_won_series else 1.0)],
-                        GLICKO2_TAU,
-                    )
-
-                    # Store rating changes on the series for UI display
-                    # Must map match-report p1/p2 to the series' player1/player2
-                    # (match report order can differ from series order)
-                    rc_match_p1 = round(new_r1 - g1.rating, 1)
-                    rc_match_p2 = round(new_r2 - g2.rating, 1)
-                    if p1.id == series.player1_id:
-                        series.p1_rating_change = rc_match_p1
-                        series.p2_rating_change = rc_match_p2
-                    else:
-                        series.p1_rating_change = rc_match_p2
-                        series.p2_rating_change = rc_match_p1
-
-                    # Apply updates
-                    now = datetime.now(timezone.utc)
-                    g1.rating = new_r1
-                    g1.rating_deviation = new_rd1
-                    g1.volatility = new_vol1
-                    g1.peak_rating = max(g1.peak_rating or new_r1, new_r1)
-                    g1.updated_at = now
-                    g2.rating = new_r2
-                    g2.rating_deviation = new_rd2
-                    g2.volatility = new_vol2
-                    g2.peak_rating = max(g2.peak_rating or new_r2, new_r2)
-                    g2.updated_at = now
-
-                    # Save rating history snapshots (powers the Elo-over-time graph)
-                    snapshot_ids = []
-                    for pid, r, rd, vol in [
-                        (p1.id, new_r1, new_rd1, new_vol1),
-                        (p2.id, new_r2, new_rd2, new_vol2),
-                    ]:
-                        snapshot_id = uuid.uuid4()
-                        snapshot_ids.append(str(snapshot_id))
-                        db.add(RatingHistory(
-                            id=snapshot_id,
-                            player_id=pid,
-                            rating=r,
-                            rating_deviation=rd,
-                            volatility=vol,
-                            period_end=now,
-                        ))
-                    # Sept 6 batch (Group 4 item c, migration 299): link the two
-                    # snapshots to THIS series by identity, so the session report
-                    # joins rating_history.series_id instead of guessing from a
-                    # time window. Raw SQL under a SAVEPOINT on purpose: the column
-                    # is deliberately NOT declared on the model (see RatingHistory),
-                    # so a box whose schema predates 299 skips the link here and
-                    # keeps the rating update — an ORM column would have failed the
-                    # whole Glicko commit in the deploy window (#477/#235).
-                    await db.flush()
-                    try:
-                        async with db.begin_nested():
-                            await db.execute(text(_RATING_HISTORY_LINK_SQL),
-                                             {"sid": str(series.id), "ids": snapshot_ids})
-                    except Exception as _lx:
-                        print(f"[REPORT] rating_history series link skipped: {_lx}")
-
-                    # Auto-grant rating achievements (Master / Grand Master) when
-                    # either player crosses a threshold on this Glicko update.
-                    await _grant_rating_achievements(db, p1.id, new_r1)
-                    await _grant_rating_achievements(db, p2.id, new_r2)
-
+            from tournaments import advance_tournament_match
+            await advance_tournament_match(db, series.id)
             await db.commit()
         except Exception as ex:
-            print(f"Series Glicko update error: {ex}")
-
-        # ── Auto-grant slayer achievements (Sid Slayer / Stan Slayer) ──
-        # Beat one of the SLAYER_TARGETS players in a ranked series → unlock.
-        # _grant_achievement_inline also grants the matching equippable title.
-        # Gated on the authoritative re-read above: these grant permanent
-        # titles + gold off `series.winner_id`, which is stale ORM state, so a
-        # series reversed in the gap must not hand out a slayer title for a
-        # win that no longer stands (Codex cold review).
-        try:
-            if _series_still_valid:
-                # RE-VERIFY, UNDER THE LOCKS, IN THIS TRANSACTION.
-                # `_series_still_valid` was decided in the rating pass above —
-                # which then COMMITTED, and a commit releases every lock it
-                # held. The flag is therefore a statement about a moment that
-                # has passed, and an admin reversal landing in the gap left it
-                # saying True while the series it describes no longer stands:
-                # a permanent Slayer title and 1000 gold for a reversed winner
-                # (r2 HIGH). Re-taking the players locks in the same canonical
-                # order admin_reverse_series uses (sorted, players first) makes
-                # the reversal either finish before this read — so the re-read
-                # sees it — or wait behind this transaction's commit. The
-                # winner is then taken from the ROW rather than from the stale
-                # ORM object, so a reversal that rewrote it cannot be granted
-                # against either.
-                #
-                # Savepoint (#235) around the reads: the handler below swallows
-                # and the request continues into the tournament advance, so an
-                # unguarded failure here aborted the TRANSACTION and took that
-                # with it. The grants below commit, and a commit never goes in
-                # a savepoint.
-                winner_steam = loser_steam = None
-                live_winner_id = None
-                async with db.begin_nested():
-                    for _pid in sorted([p1.id, p2.id], key=str):
-                        await db.execute(
-                            text("SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"),
-                            {"pid": _pid},
-                        )
-                    _live2 = (await db.execute(
-                        text("SELECT status, invalidated_at, winner_id "
-                             "  FROM ranked_series WHERE id = :sid"),
-                        {"sid": series.id},
-                    )).mappings().first()
-                    if (_live2 is not None
-                            and _live2["invalidated_at"] is None
-                            and _live2["status"] == "completed"
-                            and _live2["winner_id"] is not None):
-                        live_winner_id = _live2["winner_id"]
-                        winner_steam = (await db.execute(
-                            select(Player.steam_id).where(Player.id == live_winner_id)
-                        )).scalar_one_or_none()
-                        loser_id = (series.player2_id if live_winner_id == series.player1_id
-                                    else series.player1_id)
-                        loser_steam = (await db.execute(
-                            select(Player.steam_id).where(Player.id == loser_id)
-                        )).scalar_one_or_none()
-                if live_winner_id is None:
-                    print(f"[ACH] series {series.id} no longer stands at the slayer grant — "
-                          f"skipping achievements and titles for it")
-                    # Commit anyway: the re-verification above took FOR NO KEY
-                    # UPDATE on both players, and those locks must not be
-                    # carried into the tournament advance below — that saga is
-                    # deliberately lock-free precisely because early player
-                    # locks ABBA'd against it (see its SCOPE NOTE), and holding
-                    # them across it would hand it the shape four review rounds
-                    # removed.
-                    await db.commit()
-                else:
-                    slayer_key = SLAYER_TARGETS.get(loser_steam or "")
-                    if slayer_key and winner_steam and winner_steam != loser_steam:
-                        if await _grant_achievement_inline(db, live_winner_id, slayer_key):
-                            print(f"[ACH] {slayer_key} auto-granted to {winner_steam} for beating {loser_steam} in a ranked series")
-                    # v1.30 streak achievements (thresholds per Sid July 12: 25/50/100).
-                    if winner_steam:
-                        streak = await get_ranked_streak(db, winner_steam)
-                        granted_streak = False
-                        if streak >= 25:
-                            granted_streak |= await _grant_achievement_inline(db, live_winner_id, "on_fire")
-                        if streak >= 50:
-                            granted_streak |= await _grant_achievement_inline(db, live_winner_id, "unstoppable")
-                        if streak >= 100:
-                            granted_streak |= await _grant_achievement_inline(db, live_winner_id, "immortal")
-                        if granted_streak:
-                            print(f"[ACH] streak achievement(s) granted to {winner_steam} (streak={streak})")
-                    # ONE commit, unconditional, covering everything the block
-                    # may have written. The old shape committed only when a
-                    # grant returned True — and `_grant_achievement_inline`
-                    # returns False for an ALREADY-UNLOCKED achievement even
-                    # when it repaired that achievement's missing title on the
-                    # way through, so a winner who earned no new tier dropped
-                    # out of here with the repair still uncommitted and lost it
-                    # on the next rollback (r2 MEDIUM). Committing an empty
-                    # session is free; guessing whether it is empty is not.
-                    await db.commit()
-        except Exception as ex:
-            print(f"Slayer auto-grant error: {ex}")
-            # Same reason as the skip path: an exception after the
-            # re-verification leaves this transaction holding FOR NO KEY UPDATE
-            # on both players, and the lock-free tournament advance below must
-            # not inherit them. Nothing here is worth keeping after a failure,
-            # so let the transaction go.
+            print(f"[TOURNAMENT] advance FAILED for series {series.id}; the match "
+                  f"is recorded and rated but the bracket is NOT advanced and no "
+                  f"retry re-derives it — needs an operator: {ex}")
             try:
                 await db.rollback()
             except Exception as _rbx:
-                print(f"[ACH] rollback after slayer-grant failure also failed: {_rbx}")
-
-        # Tournament bracket advancement. Noop for non-tournament series.
-        # Also gated: advancing a bracket off a reversed series would promote
-        # the wrong player and is not self-correcting.
-        try:
-            if series.is_tournament and _series_still_valid:
-                from tournaments import advance_tournament_match
-                await advance_tournament_match(db, series.id)
-                await db.commit()
-        except Exception as ex:
-            print(f"[TOURNAMENT] advance_tournament_match error: {ex}")
+                print(f"[TOURNAMENT] rollback after a failed advance also failed: {_rbx}")
 
     # Compile gold breakdown for the reporter so the notification can show
     # "+12 gold [XP +4]  [Series win +10]" type details. July 20 item 6: uses
@@ -13332,18 +13417,23 @@ async def _check_steam_session(request, steam_id: str, db: AsyncSession) -> None
     enforcement is armed: key set AND (caller claims >= STEAM_AUTH_MIN_VERSION
     OR the claimed account is per-account armed — see below); otherwise one
     soft-fail log line. X-Mod-Version is attacker-controlled, so the version
-    check alone is a compatibility carve-out, not a security boundary. Infra
-    failures (table missing mid-deploy, DB blip) are always soft — this must
-    never take down the write path it protects. Internal callers (bot) send
-    no X-Mod-Version, so enforce is always False for them; `request` may be
-    None on direct internal function calls (place_discord_bet → place_bet)."""
+    check alone is a compatibility carve-out, not a security boundary. A read
+    that does not COMPLETE (table missing mid-deploy, DB blip) is neither
+    valid nor invalid, and is answered 503: it is not soft-failed, because
+    that admits a write whose subject was never established, and it is not
+    401'd, because no read supports calling the token invalid. Internal
+    callers (bot) send no X-Mod-Version, so enforce is always False for them;
+    `request` may be None on direct internal function calls
+    (place_discord_bet → place_bet), and those never reach the SELECT because
+    a request-less call carries no token."""
     # Record the verdict on the request so a caller can ask whether the
     # claimed steam_id was ESTABLISHED, not merely accepted. The soft-fail
-    # conditions above are deliberate — this check must never take down the
-    # write path it protects — but that makes "we did not raise" a weaker fact
-    # than "we verified", and anything treating the id as evidence needs the
-    # stronger one. Set false first: every later exit either raises or leaves
-    # this alone, so an unreachable code path cannot read as verified.
+    # exit for a token that is MISSING or that read as unverified is
+    # deliberate and unchanged — that is the soak carve-out — but it makes "we
+    # did not raise" a weaker fact than "we verified", and anything treating
+    # the id as evidence needs the stronger one. Set false first: every later
+    # exit either raises or leaves this alone, so an unreachable code path
+    # cannot read as verified.
     _mark_session_verified(request, False)
     token = None
     try:
@@ -13371,23 +13461,33 @@ async def _check_steam_session(request, steam_id: str, db: AsyncSession) -> None
                 reason = "steam_id_mismatch"
         except Exception as ex:
             print(f"[STEAM-AUTH] session lookup UNDETERMINED: {type(ex).__name__}")
-            # A `reason`, NOT a `return`. The bare return exited before the
-            # enforcement decision below was ever evaluated, so a request whose
-            # session could not be read was handled more permissively than one
-            # whose session was read and found unverified — the failure removed
-            # the check instead of failing it.
-            # Required behaviour: a session that cannot be read is not a
-            # verified session. Setting a reason lets this fall through to the
-            # same decision every other unverified request reaches, so an
-            # unreadable session and a rejected session are treated alike.
-            # `_mark_session_verified(request, False)` at the top of this
-            # function already stands, so callers asking whether the claimed id
-            # was ESTABLISHED still correctly get "no".
-            # This does not make the check able to take down the write path it
-            # protects: under the soak switch the decision below is log-only,
-            # and once armed it returns the same 401 any unverified request
-            # gets rather than propagating the database error.
-            reason = "lookup_undetermined"
+            # REFUSE, RETRYABLY. Neither of the two outcomes this could fall
+            # through to is correct for a read that did not complete:
+            #   - the soft-fail exit admits the request, so the mutation below
+            #     records a result, rating, XP and gold against a claimed
+            #     steam_id this function never matched to a session row;
+            #   - the 401 exit reports the session as INVALID, which is a
+            #     statement about the token that no read supports; the player
+            #     is told to re-authenticate over what is a server-side fault.
+            # 503 is the only answer the evidence supports: the check could
+            # not be performed, so ask again. The report outbox redelivers a
+            # 5xx — its permanent cases are a 4xx response or a duplicate-key
+            # body, with 401 and 429 carved back out as transient — so the
+            # cost of being wrong here is a redelivery, bounded by that
+            # outbox's own attempt cap.
+            # This DOES mean a steam_sessions outage refuses the write path
+            # this check guards, which the earlier note said it must never do.
+            # That trade is taken deliberately and is stated here rather than
+            # left to be discovered: the alternative is admitting writes whose
+            # subject was never established, and this endpoint's writes are
+            # match results, ratings and money. The savepoint above is what
+            # keeps the refusal clean — the transaction is still usable, so
+            # the 503 is raised by this function and not by some later
+            # statement dying on an aborted transaction.
+            # `_mark_session_verified(request, False)` at the top of the
+            # function already stands and is not weakened by the raise.
+            raise HTTPException(status_code=503,
+                                detail="session_check_unavailable")
     if reason is None:
         _mark_session_verified(request, True)
         return
@@ -13456,22 +13556,27 @@ async def _check_steam_session(request, steam_id: str, db: AsyncSession) -> None
                 enforce = True
         except Exception as ex:
             print(f"[STEAM-AUTH] per-account arm lookup UNDETERMINED: {type(ex).__name__}")
-            # Deliberately does NOT arm on an undetermined read, and this is
-            # the one place in this sweep that keeps the permissive outcome.
-            # The asymmetry with the session-lookup handler above is intended:
-            # that one resolves an unreadable session to "not verified", which
-            # is the same outcome an ordinary unverified request already gets.
-            # This one would resolve an unreadable row to "this account is
-            # armed", which asserts a fact about the account that was never
-            # read, and the consequence of being wrong is refusing a core
-            # action to a player who may never have been armed at all.
-            # So the fallback is the version gate's answer — the documented
-            # carve-out for accounts that cannot mint tickets yet. The residual
-            # is real and named rather than hidden: while this read is failing,
-            # an armed account is enforced only if the version gate already
-            # enforces it. Whether that should instead fail closed once
-            # STEAM_AUTH_ENFORCE is armed is an owner's call, not this sweep's;
-            # it is inert today because the master switch is off.
+            # REFUSE, RETRYABLY — the same answer as the session lookup, for
+            # the same reason. This block is only reached when the master
+            # switch and the key are both set, so the question being asked is
+            # "may this request skip the session requirement because the
+            # account has never been seen with a ticket-auth client?". An
+            # unreadable arming row does not answer that, and the two ways of
+            # pretending it did are not symmetric in cost:
+            #   - treating it as NOT armed lets the version carve-out stand,
+            #     and X-Mod-Version is supplied by the caller, so the skip is
+            #     available for the asking while this read is failing;
+            #   - treating it as ARMED asserts nothing about the account and
+            #     simply does not let the guarded mutation proceed.
+            # The second is the conservative direction and the correct answer
+            # here is the second one expressed honestly: the mutation does not
+            # proceed, and the status says "ask again" rather than "your
+            # session is invalid", because no read supports the latter.
+            # Refusal cost (#430): a retry, and only while this SELECT is
+            # failing, and only once STEAM_AUTH_ENFORCE is on. It is inert
+            # today because the master switch is off.
+            raise HTTPException(status_code=503,
+                                detail="session_check_unavailable")
     if enforce:
         raise HTTPException(status_code=401, detail="session_required")
     path = ""
@@ -16308,6 +16413,18 @@ async def presence_ping(request: Request,
     # and (b) the pinger is a recorded MEMBER of the named group. A failed
     # check silently drops the claim — the ping itself (presence, last_seen)
     # is still honoured, and old clients never send in_match at all.
+    #
+    # THAT SWALLOW IS DELIBERATE AND IS THE CONSERVATIVE DIRECTION HERE,
+    # stated because `_check_steam_session` now refuses an unreadable session
+    # with a 503 and this is the one caller that catches it. This claim only
+    # ever ADDS protection: it vetoes destruction and renews a lease.
+    # Dropping it lets the lease expire and the group be cleaned up, which is
+    # the self-healing direction (#276); honouring an unverified claim is what
+    # would let a ping naming a public series id hold a group open. So a
+    # session check that cannot complete must LOSE the claim, not keep it —
+    # the opposite polarity to the write paths, for the opposite reason. The
+    # check contains its own failure in a savepoint, so the transaction the
+    # last_seen stamp below needs is still usable after this.
     if in_match:
         _im_ok = False
         _im_mode = None
@@ -16598,8 +16715,12 @@ async def push_rank_role_colors(
         ), {"n": name, "c": color})
         updated += 1
     await db.commit()
-    # Invalidate the cache so the new colors serve immediately.
-    _rank_colors_cache["at"] = 0.0
+    # Invalidate the cache so the new colors serve immediately. Through the
+    # helper, not by stamping `at`: clearing `at` alone left `ok` True, and on
+    # a host whose uptime is still under the TTL the staleness test
+    # (`now - at > 300`) is False, so the pushed colour did not serve until
+    # the process had been up 300 seconds.
+    _rank_colors_invalidate()
     return {"updated": updated}
 
 
@@ -18917,7 +19038,9 @@ async def get_ranked_streak(db: AsyncSession, steam_id: str) -> int:
     called from submit_match's achievement block, where the name simply does not
     exist - so every streak-achievement grant since v1.30.0 has died on
     `NameError: name 'get_ranked_streak' is not defined`, caught and logged as
-    "Slayer auto-grant error". on_fire and its 25/50/100 tiers have never been
+    "Slayer auto-grant error" by the swallow that used to wrap that block (the
+    swallow is gone now; the grants run inside the report's transaction).
+    on_fire and its 25/50/100 tiers had never been
     awarded to anyone. Third occurrence of learning #135 (a function-local name
     referenced from another function); the general rule is that anything called
     from more than one place belongs at module scope, and `db` is a parameter
@@ -41858,7 +41981,9 @@ def _ovt_difficulty_mult(is_solo: bool, extra_pick: bool,
 # NOT _podium_map (1v1-only) and deliberately does NOT grant title_podium: that
 # shop item is defined as the 1v1 podium, and cross-granting would silently
 # widen an existing cosmetic's meaning.
-_ovt_podium_cache: dict = {"at": 0.0, "ok": False, "ids": []}
+# `refresh_failed`: same role as the 1v1 podium cache's field — see there.
+_ovt_podium_cache: dict = {"at": 0.0, "ok": False, "ids": [],
+                           "refresh_failed": False}
 
 # Item d: activity filter as on /ovt/leaderboard (f-string over the int).
 _OVT_PODIUM_QUERY = """
@@ -41887,9 +42012,15 @@ _OVT_PODIUM_QUERY = """
 
 
 async def _ovt_podium_ids(db: AsyncSession) -> list:
-    """[1st, 2nd, 3rd] player ids as strings. 60s TTL. A refresh failure serves
-    the last GOOD copy; if there has never been one it RAISES, because an empty
-    list is indistinguishable from a real "nobody qualifies" answer."""
+    """[1st, 2nd, 3rd] player ids as strings. 60s TTL. COSMETIC POLARITY: a
+    refresh failure serves the last GOOD copy; if there has never been one it
+    RAISES, because an empty list is indistinguishable from a real "nobody
+    qualifies" answer.
+
+    `_ovt_podium_ids_for_award` is the decision-polarity twin (#412). The
+    report sink's XP and gold read THAT one, because a kept copy answers
+    "this player was top-3 a while ago", and the reward is paid for being
+    top-3 now."""
     now = time.monotonic()
     if not _ovt_podium_cache["ok"] or now - _ovt_podium_cache["at"] > 60:
         try:
@@ -41906,11 +42037,65 @@ async def _ovt_podium_ids(db: AsyncSession) -> list:
             # was never fetched, and records the failure as a fresh result.
             _ovt_podium_cache["ok"] = True
             _ovt_podium_cache["at"] = now
+            # The read completed, so the ids below are current. Set here and
+            # nowhere else: this field answers one question only — did the
+            # most recent refresh attempt finish?
+            _ovt_podium_cache["refresh_failed"] = False
         except Exception as ex:
             print(f"[OVT-PODIUM] cache refresh failed: {ex}")
+            _ovt_podium_cache["refresh_failed"] = True
             if not _ovt_podium_cache["ok"]:
                 raise
     return _ovt_podium_cache["ids"]
+
+
+async def _ovt_podium_ids_for_award(db: AsyncSession) -> list:
+    """[1st, 2nd, 3rd] ids, but only from a podium read that COMPLETED.
+
+    DECISION polarity, opposite to `_ovt_podium_ids` (#412). The 1v2 report
+    sink multiplies XP — and the gold derived from it — on membership of this
+    list, so a copy kept past its 60s bound pays a podium bonus for standings
+    that have since changed, with nothing downstream to correct it. When the
+    refresh did not complete, refuse with a retryable 503.
+
+    Refusal cost (#430): the sink has committed nothing when this is asked,
+    and the client's outbox redelivers a 5xx, weighed against a mispayment
+    that stands."""
+    await _ovt_podium_ids(db)
+    if _ovt_podium_cache["refresh_failed"]:
+        print("[OVT-PODIUM] refusing an award decision on a podium copy whose "
+              "refresh did not complete")
+        raise HTTPException(status_code=503, detail="podium_unavailable")
+    return _ovt_podium_cache["ids"]
+
+
+async def _ovt_tier_ratings(db: AsyncSession, solo_id, duo_a_id, duo_b_id) -> dict:
+    """{str(player_id): rating} from glicko_ratings for the three 1v2 seats.
+
+    A player with no rating row is simply absent from the map, and the caller
+    substitutes 1500 for them — that read SUCCEEDED and correctly found
+    nothing. A read that FAILED is a different answer and this raises it,
+    because the substitute is not economically neutral: `_tier_mult_for` maps
+    1500 to Intermediate x1.5 on the `>=` row, so swallowing here would pay a
+    measured-looking multiplier on XP and on the gold derived from it for a
+    tier nobody measured. Same rule and same shape as the 2v2 fetch.
+
+    begin_nested (#235) keeps the failure legible rather than survivable:
+    under asyncpg a caught statement error leaves the TRANSACTION aborted, so
+    without the savepoint the caller's own error handling would run against a
+    dead transaction and surface some later statement instead of this one."""
+    out: dict = {}
+    try:
+        async with db.begin_nested():
+            for _row in (await db.execute(text(
+                "SELECT player_id, rating FROM glicko_ratings "
+                " WHERE player_id IN (:a, :b, :c)"
+            ), {"a": solo_id, "b": duo_a_id, "c": duo_b_id})).mappings().all():
+                out[str(_row["player_id"])] = float(_row["rating"])
+    except Exception as ex:
+        print(f"[OVT-ECON] 1v1 tier-mult rating READ FAILED: {ex}")
+        raise
+    return out
 
 
 def _verify_ovt_hmac(report: OvtMatchReport) -> bool:
@@ -42839,39 +43024,35 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
         raise HTTPException(400, "Report room does not match the series room")
 
     # ── Difficulty inputs (bug #129) ──────────────────────────────────────
-    # Opponents' 1v1 Glicko drives the tier multiplier; guarded exactly like
-    # 2v2's fetch so a ratings hiccup degrades to the 1500 DEFAULT RATING
-    # instead of failing the report.
+    # Opponents' 1v1 Glicko drives the tier multiplier. A MISSING rating row
+    # degrades to the 1500 DEFAULT RATING; a FAILED read does not degrade at
+    # all, it fails the report — see `_ovt_tier_ratings`.
     #
-    # That default is Intermediate **x1.5**, NOT x1.0: the multiplier table's
-    # 1500 row is `>=` and the substituted value is exactly 1500 (see
-    # `_tier_mult_for`). A hiccup here is therefore NOT economically neutral —
-    # it pays the Intermediate multiplier on XP and gold.
+    # Why the two are not interchangeable: 1500 is Intermediate **x1.5**, NOT
+    # x1.0, because the multiplier table's 1500 row is `>=` and the
+    # substituted value is exactly 1500 (see `_tier_mult_for`). Substituting
+    # it for a read that never completed pays a multiplier on XP and gold for
+    # a tier nobody measured.
     #
-    # This line used to read "x1.0-at-1500", which is the exact sentence
-    # `_tier_mult_for`'s own docstring records as having hidden the
-    # 1v2-vs-2v2 economy gap for a release (bug #129) — written again, in the
-    # feature that bug was about. Do not restate the multiplier here; name the
-    # RATING and let the one table own the mapping.
-    # begin_nested, not a bare try/except (#235, and review-confirmed): under
-    # asyncpg a caught statement error still leaves the TRANSACTION aborted, so
-    # the "degrade to 1500" promise below would be a lie — the very next
-    # statement (the ovt_matches INSERT) would raise InFailedSQLTransaction and
-    # 500 the whole report. The SAVEPOINT is what makes the fallback real.
-    _r_by_pid: dict = {}
-    try:
-        async with db.begin_nested():
-            for _row in (await db.execute(text(
-                "SELECT player_id, rating FROM glicko_ratings "
-                " WHERE player_id IN (:a, :b, :c)"
-            ), {"a": solo_id, "b": duo_a_id, "c": duo_b_id})).mappings().all():
-                _r_by_pid[str(_row["player_id"])] = float(_row["rating"])
-    except Exception as ex:
-        print(f"[OVT-ECON] 1v1 tier-mult rating fetch failed (defaulting 1500): {ex}")
+    # Two corrections have landed on this comment. It first read
+    # "x1.0-at-1500" — the exact sentence `_tier_mult_for`'s own docstring
+    # records as having hidden the 1v2-vs-2v2 economy gap for a release (bug
+    # #129), written again in the feature that bug was about. It then said
+    # this fetch was guarded "exactly like 2v2's", which was also untrue: 2v2
+    # re-raised and this one caught. The code is what changed this time. Do
+    # not restate the multiplier here; name the RATING and let the one table
+    # own the mapping.
+    # A FAILED read re-raises, exactly as the 2v2 twin does. The two used to
+    # be described as matching and did not: 2v2 re-raises before its only
+    # commit, while this one caught, substituted 1500 for all three players
+    # and committed Intermediate-rate XP and gold. Nothing has committed in
+    # this handler at this point, so the raise rolls the report back and the
+    # client's outbox redelivers it.
+    _r_by_pid = await _ovt_tier_ratings(db, solo_id, duo_a_id, duo_b_id)
     _solo_r = _r_by_pid.get(str(solo_id), 1500.0)
     _duo_avg_r = (_r_by_pid.get(str(duo_a_id), 1500.0)
                   + _r_by_pid.get(str(duo_b_id), 1500.0)) / 2.0
-    _ovt_pod = set(await _ovt_podium_ids(db))
+    _ovt_pod = set(await _ovt_podium_ids_for_award(db))
     # Verify the three reported players are exactly the series' three (a client
     # can't swap in a different opponent). Keep the client's solo/duo LABELING
     # though — it's derived from the actual in-game team sizes (team-of-1 = solo),
@@ -52997,21 +53178,46 @@ async def _assert_no_service_subject(
 
 
 _service_player_uuid_cache: "set[str] | None" = None
+# When the next refresh is ATTEMPTED. Deliberately moved backwards after an
+# empty fill (see below), so it is a schedule and not an age.
 _service_uuid_cache_monotonic = 0.0
+# When the cached set was actually READ. Never adjusted, so it is the only
+# field an age bound may be computed from. None means "never filled".
+_service_uuid_cache_filled_monotonic: "float | None" = None
+# The refresh is ATTEMPTED at 50 minutes; the fill HARD-EXPIRES at 60. The gap
+# between the two is what makes the "<= 1 h" staleness bound a bound rather
+# than a description: a refresh that fails may serve the previous set through
+# the remaining ten minutes, and past that the guard refuses rather than
+# answering from a set whose subject rows may since have been replaced. Two
+# numbers rather than one so that both arms are reachable — a keep-previous
+# arm that could never be taken is decoration, and so is a bound that could
+# never be exceeded.
+_SERVICE_UUID_REFRESH_SECONDS = 3000.0
+_SERVICE_UUID_MAX_AGE_SECONDS = 3600.0
 
 
 async def _service_player_uuids(db: AsyncSession) -> "set[str]":
     """Player-UUID mirror of SPECTATE_BROADCAST_STEAM_IDS, cached hourly.
 
-    Staleness bound: a service players row created after a cache fill is
-    invisible for <=1 h. Acceptable because the set is a hand-edited constant
-    (SHOP_OWNER pattern) whose rows predate the policy; extending the set is
-    a deploy, which restarts the process and empties the cache anyway.
+    Staleness bound, ENFORCED rather than described: a fill is served for at
+    most _SERVICE_UUID_MAX_AGE_SECONDS. Past that, a failing refresh refuses
+    with 503 instead of serving the old set. The bound matters because these
+    UUIDs identify the accounts a ~90-site policy guard REFUSES: if a service
+    players row is replaced, the cached UUID no longer names that account, and
+    an unbounded reuse would let every UUID-only guard pass the replacement —
+    including ones that credit gold. A refusal costs a retry; passing costs a
+    payment that stands.
+
+    A row created after a fill is likewise invisible until the bound expires,
+    which stays acceptable for the same reason as before: the set is a
+    hand-edited constant (SHOP_OWNER pattern) and extending it is a deploy,
+    which restarts the process and empties the cache anyway.
     """
     global _service_player_uuid_cache, _service_uuid_cache_monotonic
+    global _service_uuid_cache_filled_monotonic
     now_mono = time.monotonic()
     if (_service_player_uuid_cache is None
-            or now_mono - _service_uuid_cache_monotonic > 3600.0):
+            or now_mono - _service_uuid_cache_monotonic > _SERVICE_UUID_REFRESH_SECONDS):
         # SAVEPOINT the refresh. This is the one hour-marked moment when a
         # ~90-call-site policy guard executes SQL, and several of those callers
         # sit inside handlers that swallow — so an unguarded failure here left
@@ -53040,8 +53246,14 @@ async def _service_player_uuids(db: AsyncSession) -> "set[str]":
             # traffic this cache was added for.
             _service_uuid_cache_monotonic = (
                 now_mono if _service_player_uuid_cache
-                else now_mono - 3540.0   # empty: re-ask in ~60s, not in an hour
+                # empty: re-ask in ~60s rather than at the normal interval
+                else now_mono - (_SERVICE_UUID_REFRESH_SECONDS - 60.0)
             )
+            # The AGE stamp is the real read time in both cases. The schedule
+            # above is moved backwards to bring the next attempt forward, and
+            # an age computed from a moved stamp would report this fill as
+            # nearly an hour old the moment it was taken.
+            _service_uuid_cache_filled_monotonic = now_mono
         except Exception as ex:
             # FAILURE DIRECTION (#276). An empty set here does not mean "no
             # service accounts" — it means "we could not look". Answering with
@@ -53068,8 +53280,25 @@ async def _service_player_uuids(db: AsyncSession) -> "set[str]":
                     status_code=503,
                     detail="service_policy_unavailable",
                 )
+            # AGE BOUND. Reuse of the previous fill is what the docstring
+            # promises and it is promised for a bounded time, so the bound is
+            # tested here rather than assumed from the refresh interval. Past
+            # it, these UUIDs are no longer evidence about which players rows
+            # the service steam_ids resolve to: a row replaced in the interim
+            # keeps the guard matching an id that is not the account any more,
+            # and every UUID-only guard downstream would then pass the
+            # replacement. Refuse, retryably, rather than decide on it.
+            _filled = _service_uuid_cache_filled_monotonic
+            if (_filled is None
+                    or now_mono - _filled > _SERVICE_UUID_MAX_AGE_SECONDS):
+                print(f"[SERVICE-POLICY] uuid cache refresh failed and the "
+                      f"previous set is past its age bound: {ex}")
+                raise HTTPException(
+                    status_code=503,
+                    detail="service_policy_unavailable",
+                )
             print(f"[SERVICE-POLICY] uuid cache refresh failed, keeping the "
-                  f"previous set: {ex}")
+                  f"previous set within its age bound: {ex}")
     return _service_player_uuid_cache
 
 
