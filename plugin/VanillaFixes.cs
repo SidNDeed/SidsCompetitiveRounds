@@ -2853,6 +2853,14 @@ namespace CompetitiveRounds
                 // seconds of process startup.
                 GrowNormalize.StageCapability("pre-join");
                 GrowNormalize.SyncRankedIntent("pre-join");
+                // #379's capability rides the same fence, for the same reason
+                // and with the same one-shot self-guard: a join racing the
+                // first post-compat tick would otherwise snapshot no cr_wcd1
+                // and the seat stays incapable for that whole room. The class
+                // name on this patch is GROW's only because it was written
+                // first — the fence is a property of the join op, not of a
+                // feature.
+                WeaponCooldownReset.StageCapability("pre-join");
             }
             catch (Exception ex) { VanillaFixSupport.LogError("GrowPreJoinSync", ex); }
         }
@@ -2862,6 +2870,373 @@ namespace CompetitiveRounds
         {
             if (original != null) return exception;
             return VanillaFixSupport.Cleanup("GrowPreJoinSync", exception);
+        }
+    }
+
+    /// <summary>Bug #379 — a revive never reset the weapon's since-attack
+    /// timer, so the first shot of a round landed early or late depending on
+    /// what the player happened to be doing when they died the round before.
+    /// #372 is the same state reported from the other end and is covered by
+    /// the same reset.
+    ///
+    /// MECHANISM, from the decompile. <c>Weapon.sinceAttack</c> (Weapon.cs:8)
+    /// starts at 10f and is advanced by <c>Gun.Update</c> (Gun.cs:330).
+    /// <c>Gun.Attack</c> refuses while <c>sinceAttack &lt; usedCooldown</c>
+    /// (Gun.cs:354) and zeroes it on a shot (:362); <c>Gun.IsReady</c> tests
+    /// <c>sinceAttack + readyIn &gt; usedCooldown</c> (:344). Dying deactivates
+    /// the player GameObject, which stops that Update, so the timer FREEZES at
+    /// the value it held at the instant of death and thaws at the next revive.
+    /// <c>HealthHandler.Revive</c> (HealthHandler.cs:328-362) resets health,
+    /// velocity, angular velocity, stun, silence, all three slows, overheat,
+    /// the block cooldown (<c>Block.sinceBlock = +Infinity</c>) and the gun's
+    /// ammo — and not this one field.
+    ///
+    /// So two players start round N+1 in different gun states, decided by the
+    /// last second of round N: whoever fired just before dying carries the
+    /// remainder of that cooldown into the new round, whoever held fire starts
+    /// ready. Round ONE has no such split, because the 10f initial value
+    /// exceeds every cooldown the game ships and every gun is therefore ready.
+    /// The fix restores round one's condition at every round start rather than
+    /// levelling every player down to the worst carry.
+    ///
+    /// VALUE: <c>float.PositiveInfinity</c>, which is the base game's own
+    /// spelling of "this weapon is ready". <c>HealthHandler.Revive</c> writes
+    /// exactly that into <c>Block.sinceBlock</c> two statements earlier, and
+    /// <c>CharacterStatModifiers.DealtDamage</c> (:135) writes it into THIS
+    /// field for <c>refreshOnDamage</c>, so it is a state the UI and the
+    /// trigger already handle. <c>usedCooldown</c> was considered and
+    /// rejected: <c>IsReady</c> tests <c>&gt;</c> while <c>Attack</c> tests
+    /// <c>&lt;</c>, so that exact boundary value reads "not ready" to the
+    /// cooldown ring and "may fire" to the trigger at the same instant.
+    ///
+    /// SITE: <c>PlayerManager.RevivePlayers</c>, NOT
+    /// <c>HealthHandler.Revive</c>. Revive has four other callers, and
+    /// patching the round boundary excludes the two that matter BY
+    /// CONSTRUCTION instead of by a parameter test: the Phoenix respawn
+    /// (DeathEffect.cs:92, <c>Revive(isFullRevive: false)</c>) and the card
+    /// application at ApplyCardStats.cs:198. A mid-round Phoenix revive
+    /// deliberately keeps the carried cooldown — resuming where you died is
+    /// the fair answer INSIDE a round, and handing a revived player a free
+    /// ready gun mid-fight is a balance change rather than a fix. That
+    /// exclusion is asserted rather than assumed:
+    /// <see cref="WeaponCooldownPhoenixDiagPatch"/> emits its own line saying
+    /// the reset did not run there, so the evidence is a log line and not the
+    /// absence of one.
+    ///
+    /// GATE: a whole-room capability quorum over the pre-join <c>cr_wcd1</c>
+    /// player property — the shape <c>cr_pois2</c>, <c>cr_grow2</c> and
+    /// <c>cr_msv2</c> already use, and the one the house rule for non-visual
+    /// vanilla changes requires. NOT a room-name prefix: a 6-character ROUNDS
+    /// room code matches none of them and roughly 63% of rated 1v1 play is
+    /// played in one (#286). NOT <c>mod_version</c>: a locally built Release
+    /// DLL reports the last SHIPPED version, so that field cannot tell a dev
+    /// build from a release (#301). Empty roster fails CLOSED. Offline is true
+    /// by construction — the sandbox's whole room is this client.
+    ///
+    /// Said out loud once, because it otherwise reads as a broken fix: in a
+    /// MIXED room nobody gets the reset, so a playtest against a peer running
+    /// a released build sees the old behaviour, and that is the gate working
+    /// as designed (#301).</summary>
+    internal static class WeaponCooldownReset
+    {
+        /// <summary>Capability prop. A key is NEVER reused for changed
+        /// semantics (the PoisonSync rule): a client advertising cr_wcd1 is
+        /// saying "I reset the gun cooldown at every round start". Any future
+        /// change to WHAT is reset, or to the value written, takes cr_wcd2,
+        /// and a mixed room then falls back to vanilla on every seat rather
+        /// than running two rules at once.</summary>
+        internal const string CapabilityProp = "cr_wcd1";
+        internal const int CapabilityValue = 1;
+
+        /// <summary>Fixed diagnostic key with a per-sitting budget, reset from
+        /// both room-exit edges. A dynamic per-room key grows the dictionary
+        /// per room and cannot see a direct rejoin (VanillaFixSupport.ResetDiag
+        /// records why).</summary>
+        internal const string DiagKey = "weapon-cooldown-reset";
+        internal const string PhoenixDiagKey = "weapon-cooldown-phoenix";
+
+        /// <summary>Set by the round-boundary patch's Harmony cleanup, and only
+        /// when it actually attached. Advertising a capability this client
+        /// cannot deliver is how a peer ends up applying a rule alone (#83).
+        /// </summary>
+        internal static bool PatchesLive;
+
+        private static bool _staged;
+        private static bool _stageFailedPermanently;
+        private static string _lastLogKey = "";
+
+        /// <summary>Identical state rules to GrowNormalize.StageCapability
+        /// (#287): refuse in a room, merge only from an idle client state,
+        /// one-shot, retried from the persistent tick, and only AFTER the
+        /// compat verdict — a capability staged before it and revoked in-room
+        /// afterwards reaches peers late and leaves them counting us capable.
+        /// </summary>
+        internal static void StageCapability(string source)
+        {
+            try
+            {
+                if (_staged || _stageFailedPermanently) return;
+                if (!PatchesLive)
+                {
+                    _stageFailedPermanently = true;
+                    Plugin.Log.LogError("[WPN-CD] RevivePlayers patch did NOT attach — "
+                        + "the round-start gun reset is disabled for this session (vanilla everywhere)");
+                    return;
+                }
+                if (!Plugin.compatCheckComplete) return;
+                if (Plugin.modDisabled) { _stageFailedPermanently = true; return; }
+
+                if (PhotonNetwork.InRoom)
+                {
+                    Plugin.Log.LogError("[WPN-CD] refusing to stage while in a room ("
+                        + source + ") — an in-room write is the racy path this protocol forbids");
+                    return;
+                }
+
+                var st = PhotonNetwork.NetworkClientState;
+                if (st != Photon.Realtime.ClientState.Disconnected
+                    && st != Photon.Realtime.ClientState.PeerCreated
+                    && st != Photon.Realtime.ClientState.ConnectedToMasterServer
+                    && st != Photon.Realtime.ClientState.JoinedLobby)
+                    return;   // connecting/joining: a merge here can be silently undelivered
+
+                var local = PhotonNetwork.LocalPlayer;
+                if (local == null) return;
+                local.SetCustomProperties(new ExitGames.Client.Photon.Hashtable
+                {
+                    { CapabilityProp, CapabilityValue }
+                });
+                _staged = true;
+                Plugin.Log.LogInfo("[WPN-CD] staged " + CapabilityProp + "=" + CapabilityValue
+                    + " pre-join (" + source + ", state=" + st + ")");
+            }
+            catch (Exception ex)
+            {
+                _stageFailedPermanently = true;
+                Plugin.Log.LogError("[WPN-CD] staging failed, the round-start gun reset is "
+                    + "disabled for this session: " + ex.Message);
+            }
+        }
+
+        /// <summary>Withdraw on compat-disable, same as PoisonSync and
+        /// GrowNormalize: peers must not count us capable when the patch will
+        /// not run.</summary>
+        internal static void RevokeCapability()
+        {
+            try
+            {
+                if (!_staged) return;
+                _staged = false;
+                _stageFailedPermanently = true;   // never re-stage this session
+                var local = PhotonNetwork.LocalPlayer;
+                if (local == null) return;
+                local.SetCustomProperties(new ExitGames.Client.Photon.Hashtable
+                {
+                    { CapabilityProp, 0 }
+                });
+                Plugin.Log.LogWarning("[WPN-CD] revoked " + CapabilityProp
+                    + " — mod disabled, vanilla cooldown carry everywhere");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("[WPN-CD] revoke failed: " + ex.Message); }
+        }
+
+        /// <summary>Quorum from REPLICATED inputs only. Basis: the raw
+        /// PhotonNetwork.PlayerList filtered by the replicated spectator role
+        /// prop, NOT RoomActors.ActiveFighters — that filter includes the
+        /// frozen roster, which is LOCAL state, so two seats freezing at
+        /// different moments classify a prop-less intruder differently and
+        /// split the rule in steady state (the same finding that settled
+        /// GrowNormalize.Quorum and PoisonSync.ScanRoster). With the raw list
+        /// every seat counts the same actors from the same replicated data and
+        /// an unmodded peer reads incapable on every seat symmetrically.
+        /// Empty fails closed: every(∅) must not apply.</summary>
+        private static bool AllFightersCapable(out int fighterCount, out int missingActor)
+        {
+            fighterCount = 0;
+            missingActor = -1;
+            var list = PhotonNetwork.PlayerList;
+            if (list == null || list.Length == 0) return false;
+            bool all = true;
+            for (int i = 0; i < list.Length; i++)
+            {
+                var actor = list[i];
+                if (actor == null) continue;
+                if (RoomActors.IsSpectator(actor)) continue;
+                fighterCount++;
+                object v = null;
+                var props = actor.CustomProperties;
+                if (props != null) props.TryGetValue(CapabilityProp, out v);
+                if (!(v is int) || (int)v != CapabilityValue)
+                {
+                    all = false;
+                    if (missingActor < 0) missingActor = actor.ActorNumber;
+                }
+            }
+            if (fighterCount == 0) return false;
+            return all;
+        }
+
+        /// <summary>Evaluated once per round boundary. Fail-closed on every
+        /// arm, and it logs a CHANGE in the verdict rather than every round, so
+        /// a sitting carries one line per state it was actually in.</summary>
+        internal static bool ShouldApply()
+        {
+            try
+            {
+                // A disabled mod, or a patch that never attached, must never
+                // apply — even if peers still hold our stale advertisement.
+                if (Plugin.modDisabled || !PatchesLive) return false;
+
+                bool offline = false;
+                try { offline = PhotonNetwork.OfflineMode; } catch { }
+                if (offline)
+                {
+                    NoteVerdict("apply", "offline", 1, -1);
+                    return true;   // the whole room is this client, by construction
+                }
+                if (!PhotonNetwork.InRoom) return false;
+
+                int fighters, missing;
+                bool all = AllFightersCapable(out fighters, out missing);
+                NoteVerdict(all ? "apply" : "vanilla", "online", fighters, missing);
+                return all;
+            }
+            catch (Exception ex)
+            {
+                VanillaFixSupport.LogError("WeaponCooldownReset", ex);
+                return false;
+            }
+        }
+
+        private static void NoteVerdict(string verdict, string where, int fighters, int missingActor)
+        {
+            try
+            {
+                string key = verdict + "|" + where + "|" + fighters + "|" + missingActor;
+                if (key == _lastLogKey) return;
+                _lastLogKey = key;
+                Plugin.Log.LogInfo("[WPN-CD] " + verdict + " (" + where + ", fighters=" + fighters
+                    + (missingActor >= 0 ? ", first actor without " + CapabilityProp + "=" + missingActor : "")
+                    + ")");
+            }
+            catch { }
+        }
+
+        internal static void ResetForRoomChange()
+        {
+            _lastLogKey = "";
+        }
+
+        /// <summary>Writes the ready value into every live player's gun and
+        /// reports how many of them the game then considers ready. The READY
+        /// COUNT is the point of the diagnostic: it is read back out of
+        /// Gun.IsReady() rather than inferred from the write, so a wrong value
+        /// written here shows up as a ready count that does not match the
+        /// number of guns touched.</summary>
+        internal static int ApplyToAll(PlayerManager manager, out int ready)
+        {
+            int touched = 0;
+            ready = 0;
+            if (manager == null || manager.players == null) return 0;
+            for (int i = 0; i < manager.players.Count; i++)
+            {
+                try
+                {
+                    var p = manager.players[i];
+                    if (p == null || p.data == null) continue;
+                    var wh = p.data.weaponHandler;
+                    if (wh == null) continue;
+                    // The gun IS the held holdable in vanilla — HealthHandler
+                    // .Revive reaches the same object through
+                    // data.weaponHandler.gun to reload its ammo, two statements
+                    // from where this field should have been reset.
+                    var gun = wh.gun;
+                    if (gun == null) continue;
+                    gun.sinceAttack = float.PositiveInfinity;
+                    touched++;
+                    try { if (gun.IsReady()) ready++; } catch { }
+                }
+                catch (Exception ex) { VanillaFixSupport.LogError("WeaponCooldownReset", ex); }
+            }
+            return touched;
+        }
+    }
+
+    /// <summary>#379's round boundary. Postfix, so vanilla's own revive work
+    /// (including the ammo reload and the block-cooldown reset) has already
+    /// run and this writes the last word on the gun's state.</summary>
+    [HarmonyPatch(typeof(PlayerManager), "RevivePlayers")]
+    internal static class PlayerManagerRevivePlayersWeaponCooldownPatch
+    {
+        [HarmonyPostfix]
+        private static void AfterRevivePlayers(PlayerManager __instance)
+        {
+            try
+            {
+                if (!WeaponCooldownReset.ShouldApply()) return;
+                int ready;
+                int touched = WeaponCooldownReset.ApplyToAll(__instance, out ready);
+                VanillaFixSupport.DiagLimited(WeaponCooldownReset.DiagKey,
+                    "WeaponCooldownReset: round start, " + touched.ToString(CultureInfo.InvariantCulture)
+                    + " gun(s) reset, " + ready.ToString(CultureInfo.InvariantCulture)
+                    + " reported ready by Gun.IsReady()", 6);
+            }
+            catch (Exception ex) { VanillaFixSupport.LogError("WeaponCooldownReset", ex); }
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            if (exception == null) WeaponCooldownReset.PatchesLive = true;
+            return VanillaFixSupport.Cleanup("WeaponCooldownReset", exception);
+        }
+    }
+
+    /// <summary>Diagnostic ONLY — it writes nothing and changes nothing.
+    ///
+    /// The #379 fix deliberately does not cover the Phoenix respawn, and
+    /// "deliberately excluded" and "silently missed" look identical in a log
+    /// that says nothing about the path. This prefix makes the exclusion an
+    /// ASSERTED line carrying the value that is being kept, so the claim in
+    /// WeaponCooldownReset's summary can be checked against a running game
+    /// rather than taken on trust. <c>isFullRevive == false</c> is Phoenix and
+    /// only Phoenix: PlayerManager.RevivePlayers, PlayerManager's single-player
+    /// path and ApplyCardStats.cs:198 all call the parameterless overload.
+    /// </summary>
+    [HarmonyPatch(typeof(HealthHandler), "Revive")]
+    internal static class WeaponCooldownPhoenixDiagPatch
+    {
+        [HarmonyPrefix]
+        private static void BeforeRevive(HealthHandler __instance, bool isFullRevive)
+        {
+            try
+            {
+                if (isFullRevive) return;                        // round boundary, handled elsewhere
+                if (!VanillaFixSupport.AnyGameScope()) return;   // never at the menu
+                if (!VanillaFixSupport.TryReserveDiag(WeaponCooldownReset.PhoenixDiagKey, 4)) return;
+
+                string carried = "unknown";
+                try
+                {
+                    var data = __instance.GetComponent<CharacterData>();
+                    var gun = data != null && data.weaponHandler != null ? data.weaponHandler.gun : null;
+                    if (gun != null) carried = VanillaFixSupport.Float(gun.sinceAttack);
+                }
+                catch { }
+                VanillaFixSupport.WriteReservedDiag(
+                    "WeaponCooldownReset: PHOENIX revive for player " + VanillaFixSupport.PlayerId(__instance)
+                    + " — sinceAttack NOT reset, carried value " + carried
+                    + " (mid-round revives keep their cooldown by design, #379)");
+            }
+            catch (Exception ex) { VanillaFixSupport.LogError("WeaponCooldownPhoenixDiag", ex); }
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            return VanillaFixSupport.Cleanup("WeaponCooldownPhoenixDiag", exception);
         }
     }
 

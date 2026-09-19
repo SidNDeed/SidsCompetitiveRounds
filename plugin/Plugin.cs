@@ -2909,6 +2909,10 @@ namespace CompetitiveRounds
             // patch covers the ordering the polling cannot).
             try { GrowNormalize.StageCapability("tick"); GrowNormalize.SyncRankedIntent("tick"); }
             catch { }
+            // Weapon-cooldown reset capability stage retry (#379): the same
+            // one-shot, compat-gated, idle-states-only staging the two above
+            // use, on the same always-on tick for the same reason.
+            try { WeaponCooldownReset.StageCapability("tick"); } catch { }
             // Automatic post-match log upload (item a): keeps the room
             // snapshot the room-exit callback needs, because OnLeftRoom runs
             // after PhotonNetwork has already let go of the room.
@@ -2982,6 +2986,7 @@ namespace CompetitiveRounds
                         // this client will never publish.
                         try { PoisonSync.RevokeCapability(); } catch { }
                         try { GrowNormalize.RevokeCapability(); } catch { }
+                        try { WeaponCooldownReset.RevokeCapability(); } catch { }
                         // r3 find 4: same shape for the base-game locale
                         // injector. It has been inert (activation is gated on
                         // the compat clear below), but Shutdown is idempotent
@@ -4949,6 +4954,12 @@ namespace CompetitiveRounds
             // The poll's Left-room branch keeps a lossy backup copy.
             try { VanillaFixSupport.ResetDiag(StaleProjectileSweepPatch.DiagKey); } catch { }
             try { VanillaFixSupport.ResetDiag(RoundSoundSweep.DiagKey); } catch { }
+            // #379: same per-sitting budgets, same reliable edge — and the
+            // gate's log dedup key goes with them, so the next room states its
+            // verdict instead of inheriting the previous room's line.
+            try { VanillaFixSupport.ResetDiag(WeaponCooldownReset.DiagKey); } catch { }
+            try { VanillaFixSupport.ResetDiag(WeaponCooldownReset.PhoenixDiagKey); } catch { }
+            try { WeaponCooldownReset.ResetForRoomChange(); } catch { }
             // A ghost loop at the MENU is the most audible variant of the
             // sound leak — sweep once on the reliable exit edge (Aug 22).
             try { RoundSoundSweep.Schedule("room-leave"); } catch { }
