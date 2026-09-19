@@ -70,6 +70,19 @@ def _read(path):
         return fh.read()
 
 
+# Whether any production path calls the ladder credit hook. Evaluated at
+# collection because the marker below needs it at collection.
+#
+# It gates an XFAIL, never a skip. A skip reads as "not applicable here" and
+# is what let the hook-coverage assertion sit green for releases while the
+# thing it checks did not exist -- a check that cannot fail (#306/#342/#431).
+# An xfail says the opposite: this SHOULD pass, it does not, and here is why.
+# strict=True closes the other end: the moment the hook lands and the
+# assertions start passing, an XPASS is reported as a FAILURE, so nobody can
+# wire the hook and leave a stale "expected to fail" behind it.
+HOOK_IS_WIRED = HOOK in _read(MAIN_PY)
+
+
 # ── The catalogue ──────────────────────────────────────────────────
 
 def test_eight_lines_with_unique_skus():
@@ -533,8 +546,25 @@ def test_every_completion_symbol_exists():
     assert not missing, f"completion sites not found by symbol: {missing}"
 
 
-def test_hook_coverage_is_per_mode_once_anything_is_wired():
-    """INERT UNTIL THE HOOKS LAND, and it says so rather than passing quietly.
+@pytest.mark.xfail(
+    not HOOK_IS_WIRED,
+    strict=True,
+    reason=(
+        f"{HOOK} is not called from any production path in main.py, so the "
+        f"four completion sites credit nothing. The hook belongs to a SERVER "
+        f"pass owned by the integrator and is deliberately not written here. "
+        f"This is an expected failure, not a skip: the assertion runs, it "
+        f"reds, and strict=True turns the day it starts passing into a "
+        f"FAILURE so the marker cannot outlive the wiring."
+    ),
+)
+def test_hook_coverage_is_per_mode():
+    """RED UNTIL THE HOOKS LAND, and marked as such rather than skipped.
+
+    This used to skip itself when the hook was absent, which is the one shape
+    a coverage check must never take: it reported green for every release in
+    which the thing it checks did not exist (#306/#342/#431). The assertions
+    below now RUN in that state and fail, under an xfail that names why.
 
     The check that must never be written is "exactly one call per function":
     it passes with 2v2's forfeit path unhooked, because that path is a
@@ -543,9 +573,6 @@ def test_hook_coverage_is_per_mode_once_anything_is_wired():
     none, since an unrated mode crediting a rated-only ladder is the same
     class of defect pointing the other way."""
     src = _read(MAIN_PY)
-    if HOOK not in src:
-        pytest.skip(f"{HOOK} is not wired into main.py yet — hooks are blocked "
-                    f"behind another session's rewrite of the lease surface")
     lines = src.split("\n")
     counts = {}
     for mode, fn in COMPLETION_SITES.items():

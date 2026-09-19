@@ -4706,17 +4706,59 @@ namespace CompetitiveRounds
                     }
                     else
                     {
-                        // A server that never had the route answers 404. That is
-                        // a DEPLOYMENT fact, not a player fact, and it gets its
-                        // own wording — "you have no ladders" would be a lie
-                        // about the account.
-                        bool noRoute = response != null
-                            && response.IndexOf("HTTP 404", StringComparison.Ordinal) >= 0;
-                        TitleLaddersError = noRoute ? "route" : (response ?? "transport");
-                        Plugin.Log.LogInfo($"[LADDER] fetch failed: {PcShort(response)}");
+                        TitleLaddersError = TitleLadderFailure(response);
+                        Plugin.Log.LogInfo($"[LADDER] fetch failed ({TitleLaddersError}): {PcShort(response)}");
                     }
                     try { NativeUI.MarkDirty(); } catch { }
                 }, detailedErrors: true));
+        }
+
+        /// <summary>The marker the ladder route puts in its OWN 404 body so
+        /// this client can tell "you have no ladder yet" from "this server has
+        /// no such route". It exists for no other purpose and appears in no
+        /// player-facing text, which is the only kind of probe that survives a
+        /// rewording of the message beside it (#306).</summary>
+        internal const string LadderNoAccountMarker = "ladder_no_account";
+
+        /// <summary>Classify a failed title-ladder fetch.
+        ///
+        /// THE DEFECT: every 404 was read as "this server does not serve the
+        /// ladder route yet", and the route answers 404 for an UNKNOWN ACCOUNT
+        /// too. A player whose account the ladder table has never seen — which
+        /// is every player until they buy an entry rung — was told the service
+        /// was unavailable.
+        ///
+        /// Three outcomes, and the order below is the discrimination:
+        ///
+        ///   "empty"  — EXACT when the 404 body carries LadderNoAccountMarker.
+        ///              That marker is the route's own, so its presence proves
+        ///              the request reached the route.
+        ///   "route"  — a 404 with no body at all, or a body that is not JSON
+        ///              (an HTML error page from a proxy, a bare status). The
+        ///              route always answers JSON, so neither shape can be it.
+        ///   "empty"  — PRESUMED for any other 404 carrying a JSON body. This
+        ///              is the case a server without the marker lands in, and
+        ///              it is a judgement, not a deduction: an unrouted path
+        ///              also answers JSON ({"detail":"Not Found"}), and telling
+        ///              the two apart by that wording is exactly the check that
+        ///              goes on passing after a rewording. The direction is
+        ///              chosen: an empty board shown to a player on a server
+        ///              without the route is a quiet, true-looking tab, while
+        ///              "the service is unavailable" shown to a new account is
+        ///              alarming and false. It becomes EXACT the moment the
+        ///              server carrying the marker is deployed.
+        ///
+        /// Anything that is not a 404 keeps its own response text, and a
+        /// response with no status at all is "transport".</summary>
+        internal static string TitleLadderFailure(string response)
+        {
+            if (string.IsNullOrEmpty(response)) return "transport";
+            if (response.IndexOf("HTTP 404", StringComparison.Ordinal) < 0)
+                return response;
+            if (response.IndexOf(LadderNoAccountMarker, StringComparison.Ordinal) >= 0)
+                return "empty";
+            int brace = response.IndexOf('{');
+            return brace >= 0 ? "empty" : "route";
         }
 
         /// <summary>The machine-readable reason of a failed Player Cards call:

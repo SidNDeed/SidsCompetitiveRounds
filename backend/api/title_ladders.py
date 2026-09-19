@@ -18,8 +18,8 @@ Three pieces live here and nothing else does:
     which take numbers and return numbers, no database, no clock.
   * ``record_completed_games`` — the hook the four completion paths WILL
     call, and the ``GET /api/v1/players/{steam_id}/title-ladders`` read route
-    the client WILL draw the progress bar from. Neither is reachable in
-    production today; see WHAT IS NOT WIRED below.
+    the client DOES draw the progress bar from. The route is served; the hook
+    is not called. See WHAT IS NOT WIRED below.
 
 WHAT IS NOT HERE. No mail. A rung-up should tell the player, and the system
 mail + Discord relay that would carry that message is a different item's
@@ -28,11 +28,9 @@ caller decides what to do with it. No client rendering: rung names are
 ``shop_items`` rows like every other title and render through the existing
 title path.
 
-WHAT IS NOT WIRED. This module is the DATA HALF of item 12, and production
-does not import it AT ALL: searching the backend for ``title_ladders`` outside
-the tests matches only this file. Two separate things follow from that, and an
-earlier version of this docstring named only the first — which is why the
-second is spelled out here.
+WHAT IS NOT WIRED. This module is the DATA HALF of item 12. ONE of its two
+halves is still unwired, and which one has changed since this paragraph was
+written — read both points below rather than the heading.
 
   1. THE HOOK. Nothing in main.py calls ``record_completed_games``. The four
      call sites belong to a rewrite of the lease surface that is in flight in
@@ -40,11 +38,16 @@ second is spelled out here.
      the failure this was deliberately kept out of. See that function's
      docstring for the exact call shape, and note in particular that 2v2 has
      TWO completion paths, not one.
-  2. THE ROUTER. main.py never calls ``include_router`` for the ``router``
-     defined below, so ``GET /api/v1/players/{steam_id}/title-ladders``
-     answers 404 in production. The route is written and unit-tested; it is
-     not served. Do not cite it as the client's progress surface until an
-     ``include_router`` line exists.
+  2. THE ROUTER — WIRED, and this entry used to say the opposite. main.py
+     imports this module and calls ``app.include_router(title_ladders.router)``
+     (main.py:4627-4628), so ``GET /api/v1/players/{steam_id}/title-ladders``
+     IS served and the client's Titles tab reads it. The old text — "main.py
+     never calls include_router, so the route answers 404 in production" — was
+     the claim a reader used to decide the route could not be the source of a
+     404 they were looking at. It can; that 404 is an unknown account, and it
+     now carries ``NO_ACCOUNT_MARKER`` so the client can say so.
+     The sentence above about production "not importing this module AT ALL"
+     went with it: main.py imports it.
 
 Migration 331 is therefore inert on its own: every tier-1 rung lands
 ``catalog_ready = FALSE``, so nothing is listed, nothing can be bought, and no
@@ -60,6 +63,13 @@ from database import get_db
 from models import Player, PlayerItem, ShopItem
 
 router = APIRouter(tags=["Titles"])
+
+# The read route's own 404 carries this in its detail so the client can tell
+# "this account has no ladder yet" from "this server has no such route". Both
+# are 404 with a JSON body, and the only other difference is wording. Never put
+# it in anything a player reads: the whole value of a probe is that nothing
+# else has a reason to touch it (#306).
+NO_ACCOUNT_MARKER = "ladder_no_account"
 
 
 # ── The hidden pool ────────────────────────────────────────────────
@@ -513,12 +523,23 @@ async def get_title_ladders(steam_id: str, db: AsyncSession = Depends(get_db)):
     to draw a progress bar for an account it believes exists, and a silent
     all-zeroes answer would render as "you have made no progress" for what is
     actually a wrong id.
+
+    That 404 carries ``NO_ACCOUNT_MARKER`` because the client has to tell it
+    apart from the 404 a server WITHOUT this route answers, and the two are
+    otherwise the same status with the same JSON shape. Telling them apart by
+    the wording beside them -- "Player not found" versus FastAPI's stock "Not
+    Found" -- is the check that keeps passing after a rewording, so the marker
+    exists for no other purpose and appears in no player-facing text. The
+    client's half is ``ApiClient.TitleLadderFailure``; until a server carrying
+    this marker is deployed it presumes rather than proves, and says so.
     """
     player = (await db.execute(
         select(Player).where(Player.steam_id == steam_id)
     )).scalar_one_or_none()
     if player is None:
-        raise HTTPException(status_code=404, detail="Player not found")
+        raise HTTPException(status_code=404,
+                            detail={"error": NO_ACCOUNT_MARKER,
+                                    "message": "Player not found"})
 
     owned_skus = {
         s for (s,) in (await db.execute(

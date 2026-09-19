@@ -236,7 +236,12 @@ namespace CompetitiveRounds
         /// applied inside CreateButton, so nothing here re-claims it (#158).</summary>
         internal static void OnTabEntered()
         {
-            SelfCheckOnce();
+            // Behind a Debug config lever, off by default — the same shape
+            // AutoLogUpload gives the log-scrub self-test, and for the same
+            // reason: every player opening this tab was building synthetic
+            // JSON and running assertions over it, which is test work on a
+            // release path. See SelfCheckOnce.
+            if (SelfCheckLever()) SelfCheckOnce();
             var id = LocalId;
             if (id == null) return;
             ApiClient.FetchTitleLadders(id);
@@ -253,10 +258,10 @@ namespace CompetitiveRounds
                 // not for sale at any price — it says what earns it instead of
                 // offering a button that cannot work.
                 if (r.tier <= 1) { NativeUI.SwitchToShopTab(); return; }
-                SetMsg(I18n.TrF("{0} is earned at {1} series on this line.", r.name, r.threshold), C_LABEL);
+                SetMsg(I18n.TrF("{0} is earned at {1} series on this line.", LadderName(r.name), r.threshold), C_LABEL);
                 return;
             }
-            if (r.active) { SetMsg(I18n.TrF("{0} is already your title.", r.name), C_LABEL); return; }
+            if (r.active) { SetMsg(I18n.TrF("{0} is already your title.", LadderName(r.name)), C_LABEL); return; }
             if (r.item_id <= 0)
             {
                 // The server named no shop row for this sku. Saying so is
@@ -270,14 +275,18 @@ namespace CompetitiveRounds
             if (id == null) { SetMsg(I18n.Tr("No Steam account resolved yet."), C_WARN); return; }
             if (equipInFlight && Time.realtimeSinceStartup - equipAt < 10f) return;
             equipInFlight = true; equipAt = Time.realtimeSinceStartup;
-            SetMsg(I18n.TrF("Putting on {0}...", r.name), C_LABEL);
+            SetMsg(I18n.TrF("Putting on {0}...", LadderName(r.name)), C_LABEL);
+            // RAW on purpose: this is the value echoed back into the
+            // success message below, and it is the same name the server
+            // was asked for. Translating it here would translate it
+            // twice, since the echo is composed like every other site.
             string wanted = r.name;
             ApiClient.SetActiveTitle(id, r.item_id, (ok, resp) =>
             {
                 equipInFlight = false;
                 if (ok)
                 {
-                    SetMsg(I18n.TrF("{0} is now your title.", wanted), C_OK);
+                    SetMsg(I18n.TrF("{0} is now your title.", LadderName(wanted)), C_OK);
                     // Forced: the 20 s floor is a poll rule, and this is a
                     // demand — the answer in hand predates the equip that made
                     // us ask, so without the force the chip would keep showing
@@ -288,6 +297,36 @@ namespace CompetitiveRounds
                 else SetMsg(I18n.Tr("The server refused the title change."), C_WARN);
                 try { NativeUI.MarkDirty(); } catch { }
             });
+        }
+
+        /// <summary>A server-provided ladder name, ready to be COMPOSED into a
+        /// larger string.
+        ///
+        /// Rung and line names arrive from the server as data, so no call site
+        /// can carry them as a literal and the extractor cannot harvest them
+        /// from this file. They are shop_items rows like every other title and
+        /// the Shop already renders them through I18n (NativeUI's own item-name
+        /// sites), so the Titles tab was the outlier: it interpolated the raw
+        /// English straight into a translated template, and a Spanish player
+        /// read "Puesto: Rat Queen".
+        ///
+        /// Used ONLY where the name is about to be interpolated. A name passed
+        /// WHOLE to UIFactory.SetText is already translated there — SetText is
+        /// the L10n chokepoint — and wrapping it here as well would translate
+        /// it twice.
+        ///
+        /// THE FALLBACK IS I18n.Tr'S OWN, and it is the documented behaviour
+        /// rather than a happy accident: a key with no catalogue entry comes
+        /// back unchanged. So a rung the server adds after this build shipped
+        /// renders in English, which is worse than a translation and far better
+        /// than blank or missing. The catalogue entries for the 48 names the
+        /// catalogue defines today ride in tools/shop_strings.json, which is
+        /// where server-data display strings are registered for extraction.
+        /// A throw cannot reach the caller: this runs inside repaint.</summary>
+        private static string LadderName(string serverName)
+        {
+            if (string.IsNullOrEmpty(serverName)) return serverName;
+            try { return I18n.Tr(serverName); } catch { return serverName; }
         }
 
         private static void SetMsg(string s, Color c) { lastMsg = s; lastMsgColor = c; try { NativeUI.MarkDirty(); } catch { } }
@@ -342,6 +381,14 @@ namespace CompetitiveRounds
                 // Named for what it is. The alternative — an empty board — is
                 // a claim about the ACCOUNT, and it would be false.
                 return I18n.Tr("Ladders unavailable: this server does not serve the ladder route yet.");
+            if (e == "empty")
+                // A 404 the ROUTE itself answered: this account has no ladder
+                // row yet, which is every account until it buys an entry rung.
+                // It used to render as the "route" line above, telling a new
+                // player the service was broken. ApiClient.TitleLadderFailure
+                // says which 404s reach here and which of them are presumed
+                // rather than proved.
+                return I18n.Tr("No ladder yet - buy a title line in the Shop to start one.");
             if (e == "parse") return I18n.Tr("Ladders unavailable: the server's answer could not be read.");
             return I18n.Tr("Ladders unavailable: the server could not be reached.");
         }
@@ -370,7 +417,7 @@ namespace CompetitiveRounds
 
             if (wornHere != null)
             {
-                UIFactory.SetText(card.txtState, I18n.TrF("Worn: {0}", wornHere.name));
+                UIFactory.SetText(card.txtState, I18n.TrF("Worn: {0}", LadderName(wornHere.name)));
                 UIFactory.SetColor(card.txtState, C_OK);
             }
             else if (started)
@@ -428,7 +475,7 @@ namespace CompetitiveRounds
                 UIFactory.SetFill(card.fill, 0f);
                 UIFactory.SetText(card.txtCaption,
                     entry != null
-                        ? I18n.TrF("Not started - buy {0} in the Shop to begin this line.", entry.name)
+                        ? I18n.TrF("Not started - buy {0} in the Shop to begin this line.", LadderName(entry.name))
                         : I18n.Tr("Not started."));
                 UIFactory.SetColor(card.txtCaption, C_DIM);
                 return;
@@ -443,8 +490,14 @@ namespace CompetitiveRounds
             }
 
             // The bar spans THIS tier's threshold to the next one, not 0 to
-            // the next one: a player at 80 of 150 with the tier-4 rung has
-            // covered a third of that rung, not four fifths of it.
+            // the next one. Worked through with the real thresholds
+            // (TIER_THRESHOLDS in backend/api/title_ladders.py: 0, 10, 30, 75,
+            // 150, 300): a player at 80 series wearing the tier-4 rung sits
+            // between 75 and 150, so the bar is 5 of 75 — under 7%, where a
+            // 0-to-next bar would have shown 80 of 150, or 53%. The comment
+            // that stood here said "a third", which is not what either
+            // calculation produces for those numbers and is the sort of
+            // worked example that gets copied instead of re-derived.
             int floorT = 0;
             for (int i = 0; i < ln.rungs.Count; i++)
                 if (ln.rungs[i].tier == ln.tier && ln.rungs[i].threshold > floorT) floorT = ln.rungs[i].threshold;
@@ -452,7 +505,11 @@ namespace CompetitiveRounds
             float frac = span > 0 ? (float)(ln.games - floorT) / span : 0f;
             UIFactory.SetFill(card.fill, Mathf.Clamp01(frac));
 
-            string nextName = ln.next_names.Length > 0 ? string.Join(" / ", ln.next_names) : "";
+            // Each name translated BEFORE the join: the joined string is not a
+            // catalogue key and would never match one.
+            string nextName = "";
+            for (int i = 0; i < ln.next_names.Length; i++)
+                nextName += (i > 0 ? " / " : "") + LadderName(ln.next_names[i]);
             UIFactory.SetText(card.txtCaption,
                 string.IsNullOrEmpty(nextName)
                     ? I18n.TrF("{0} series - {1} to go.", ln.games, ln.games_to_next)
@@ -463,11 +520,46 @@ namespace CompetitiveRounds
         // ── parser self-check (acceptance §3) ────────────────────────────
 
         private static bool selfChecked;
+        private static BepInEx.Configuration.ConfigEntry<bool> selfCheckLever;
+        private static bool selfCheckLeverBound;
 
-        /// <summary>One shot, first time the tab opens: run a fixture whose
-        /// `rungs[]` REPEAT the keys `name`, `tier`, `sku` and `threshold`
-        /// through the real parser and log whether each field came back with
-        /// the rung's value or the line's.
+        /// <summary>Whether the parser self-check below may run at all. False
+        /// on every seat that has not deliberately turned it on.
+        ///
+        /// Bound once, lazily, and never re-bound on failure: a config file
+        /// that cannot be read is not going to start working because the tab
+        /// was opened again, and retrying would put the failure on a path a
+        /// player touches. Fails CLOSED — an unbindable lever means the check
+        /// does not run, which is the release behaviour anyway.</summary>
+        private static bool SelfCheckLever()
+        {
+            if (!selfCheckLeverBound)
+            {
+                selfCheckLeverBound = true;
+                try
+                {
+                    var cf = Plugin.ConfigFileForLevers;
+                    if (cf != null)
+                        selfCheckLever = cf.Bind(
+                            "Debug", "TitleLadderParserSelfCheck",
+                            false,
+                            "Development only: the first time the Titles tab opens, run the "
+                            + "ladder parser over a canned response whose rungs repeat the "
+                            + "line's own keys, and log one [LADDER] line saying which fields "
+                            + "came back with the rung's value. Nothing is sent, shown or "
+                            + "persisted.");
+                }
+                catch (Exception ex)
+                { Plugin.Log?.LogWarning("[LADDER] self-check bind failed: " + ex.Message); }
+            }
+            try { return selfCheckLever != null && selfCheckLever.Value; }
+            catch { return false; }
+        }
+
+        /// <summary>One shot, first time the tab opens ON A SEAT THAT ASKED
+        /// FOR IT: run a fixture whose `rungs[]` REPEAT the keys `name`,
+        /// `tier`, `sku` and `threshold` through the real parser and log
+        /// whether each field came back with the rung's value or the line's.
         ///
         /// This exists because there is no C# test runner on this project, and
         /// the failure it guards is silent by construction: a flat
@@ -475,7 +567,16 @@ namespace CompetitiveRounds
         /// body, so it would answer "Rat" for a line's name and "Rat" for
         /// every rung's name and every assertion about the shape would still
         /// pass (#608). The check is a POSITIVE signal the feature emits into
-        /// the log (#438), and the log line is what the in-game pass reads.</summary>
+        /// the log (#438), and the log line is what the in-game pass reads.
+        ///
+        /// BEHIND A LEVER, off by default (SelfCheckLever). Unconditional, it
+        /// meant every player who opened this tab built a synthetic JSON
+        /// document and ran assertions over it — test work on a release path,
+        /// down to the allocations. The lever is the same arrangement
+        /// AutoLogUpload gives the log-scrub self-test; the parser cannot go
+        /// into tools/client-rules-harness with the scrub because it lives on
+        /// ApiClient's JSON helper family, which the harness has no way to
+        /// compile. That is the reason this shape survives at all.</summary>
         private static void SelfCheckOnce()
         {
             if (selfChecked) return;

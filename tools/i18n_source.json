@@ -532,6 +532,7 @@
   "Allow spectators: <color=#88FF88>ON</color>",
   "Allow spectators: <color=#FF9966>OFF</color>",
   "Allow the mod to report your match results and stats to the community server.",
+  "Alpha Cat",
   "Already a recipient.",
   "Also DM new mail to your linked Discord. You can reply from there.",
   "Also removes your Player Cards: your binder is emptied, and every card of you is removed from every other player's binder.",
@@ -551,6 +552,7 @@
   "Another Round",
   "Anti-cheat",
   "Apex",
+  "Apex Shark",
   "Appear offline (Home lists): <color=#88FF88>ON</color>",
   "Appear offline (Home lists): <color=#FF9966>OFF</color>",
   "Apple Stem",
@@ -599,6 +601,9 @@
   "Banned Players",
   "Banned players - type to search",
   "Be right back",
+  "Bear",
+  "Bear Boss",
+  "Bear God",
   "Beat Sid in a ranked series",
   "Beat Stan in a ranked series",
   "Begin the window",
@@ -623,6 +628,8 @@
   "Betting",
   "Betting Record",
   "Between 5 and 10",
+  "Big Cat",
+  "Big Dog",
   "Bigger Name",
   "Bigger than Bigger, smaller than Huge.",
   "Binder",
@@ -688,6 +695,7 @@
   "Bullet spd",
   "Bullet-hit particle cap (2/frame)",
   "Bullets",
+  "Bunny",
   "Burgundy",
   "Bursts",
   "Buy",
@@ -739,6 +747,8 @@
   "Casual: {0}W / {1}L",
   "Casual: {0}W / {1}L ({2})",
   "Casual: {0}W/{1}L",
+  "Cat",
+  "Cat Deity",
   "Cat Eyes",
   "Cat Mouth",
   "Category:",
@@ -888,6 +898,7 @@
   "Crimson",
   "Crimson Streak",
   "Crown",
+  "Cub",
   "Current Game: {0}",
   "Current Rank",
   "Current Series: {0}",
@@ -983,6 +994,8 @@
   "Dismiss (1 min)",
   "Displays your live rank tier (updates automatically as you rank up or down)",
   "Do nothing",
+  "Dog",
+  "Dog God",
   "Done.",
   "Double KO - nobody scored this round.",
   "Double Nova",
@@ -1017,6 +1030,9 @@
   "Each player's worst ranked 1v1 opponents - minimum 3 series, top 5",
   "Each seat simulates its own replicas. Damage is computed on the shooter's seat and relayed as a final number.",
   "Each unlocks once per account and pays on the spot: most pay 100g; the hardest pay 300g, 500g or 1000g.",
+  "Eagle",
+  "Eagle God",
+  "Eaglet",
   "Earned",
   "Earned by {0} player  <color=#888>(in the order they got it - click again to close)</color>",
   "Earned by {0} players  <color=#888>(in the order they got it - click again to close)</color>",
@@ -1032,6 +1048,7 @@
   "Edition",
   "Edition\u0004pc.edition",
   "Effects",
+  "Elder Turtle",
   "Electric sparks snap and dart around you.",
   "Electric-cyan neon name with a soft glow halo. Visible to everyone; modded players also see the glow.",
   "Elo",
@@ -1210,7 +1227,9 @@
   "Gold Name",
   "Gold Sources",
   "Gold betting runs on live 1v1, 2v2 and FFA games. This page covers who can bet, how the odds are priced, exactly when windows open and close, and what happens to your stake.\n\n<color=#FFD94D><b>WHO CAN BET</b></color>\n\n- Any registered player, staking 1 to 2000 Gold per bet. The stake is taken the moment the bet is placed.\n- You cannot bet on a match or lobby you are playing in, and banned players cannot bet.\n- <color=#7FE87F>Spectators CAN bet.</color> That is safe by design: the windows below close on early scoring, so watching a game never gets you a bet on a result that is already decided.\n- One bet per series in 1v1 and 2v2; one bet per game in FFA.\n- If any participant runs a mod older than 1.38.1, betting on that game is refused. Older clients cannot report live points, so the scoring cutoff could never fire - <color=#FF6666>the system fails closed rather than leave a window open.</color>\n- A linked Discord account can place the same bets through the bot's commands.\n\n<color=#FFD94D><b>ODDS: 1v1 AND 2v2</b></color>\n\n- Your multiplier is 1 divided by your side's win chance, computed from both sides' ratings AND their RD (see <color=#7FD4FF>Ratings (Glicko-2)</color>). Floor: 1.01x.\n- Uncertainty caps the price. With both sides established (RD 100 or below) the multiplier can reach 3.0x; the cap slides down to 1.0x as the higher RD rises to 300. A fresh account at RD 350 caps the price below the 1.10x acceptance gate - <color=#FF6666>an unknown simply can't be bet on, so a smurf can't be farmed for Gold.</color>\n- A side only accepts bets at 1.10x or better; below that it is locked.\n- 2v2 prices off the pair's average rating. A player's own 2v2 rating counts once they have 10 completed series; before that their 1v1 rating stands in.\n\n<color=#FFD94D><b>ODDS: FFA</b></color>\n\n- The server races every player to the lobby's score target and computes your pick's true chance of banking it first. Your multiplier is half of the fair price - the house keeps the other half.\n- Floors: 2.0x in lobbies of 5 or more, 1.4x at 3-4 players. For heavy favourites the floor gives way to 0.95 divided by their win chance, so a guaranteed-profit bet cannot exist.\n- Cap: 5.0x, or half the lobby size if that is lower, and it shrinks when ratings are uncertain.\n- A player with no FFA games yet is priced off their 1v1 rating at full uncertainty.\n\n<color=#FFD94D><b>WHEN BETS OPEN AND CLOSE</b></color>\n\nThe cutoff is scored points, never a clock:\n\n- <color=#7FD4FF>1v1 and 2v2</color> - open from the moment the series exists. Closed once 2 total points are scored in game 1, or the moment any game of the series is decided. Tournament series stay listed through the whole multi-day wait before the pair actually plays.\n- <color=#7FD4FF>FFA</color> - each bet targets the lobby's NEXT game. The window closes when the field scores 2 points in that game (1 point if the lobby's score target is 3 or lower). A lobby is only listed while a next game is plausible: up to 15 minutes while assembling with no games yet, and up to 30 minutes after its last recorded game. <color=#FF6666>Casual lobbies are never bettable.</color> Departed members are not valid targets.\n- <color=#7FD4FF>Lobby-phase bets</color> - hosted 2v2 and FFA lobbies take wagers while still FILLING. No odds are quoted yet; at Start the bet is priced from the final field and becomes a normal bet - provided your target is still there and the usual checks pass. Anything else (target left, odds too low, lobby never starts within 6 hours) refunds the stake.\n- 1v2 has no betting at all.\n\n<color=#FFD94D><b>PAYOUTS AND THE FIGHTER TAX</b></color>\n\n- A winning payout includes your stake back. 1v1 and 2v2 pay stake x odds rounded to the nearest Gold; FFA rounds DOWN.\n- If your winning bet's stored odds were 1.50x or below, 20% of the PROFIT goes to the fighter or team you backed - being worth betting on pays them too. The potential payout quoted when you place the bet already includes this tax.\n\n<color=#FFD94D><b>REFUNDS, AND WHERE TO SEE IT ALL</b></color>\n\nA refund returns exactly your stake:\n\n- 1v1: a non-tournament series with no game reported in its first 30 minutes is abandoned and refunds its bets. A series stalled for 60 minutes mid-series refunds its bets too, while the series itself stays resumable - <color=#FF6666>a refunded bet stays refunded even if that series is finished later.</color>\n- 2v2: refunds only when a series is cancelled. Disconnect-paused series wait for the admin ruling before anything settles.\n- FFA: refunds only for a game that never produced a recorded result. Played games always settle as won or lost.\n- At tiny stakes a WIN can pay exactly your stake (1g at 1.10x pays 1g). It is still a win: every bet's stored state - open, won, lost or refunded - is what displays, not the arithmetic.\n- Your full bet history across all modes is the bets ledger in the F5 menu. Live bettable games are listed in-game and mirrored in the Discord live-bets channel and its bet commands.",
+  "Golden Eagle",
   "Goober",
+  "Good Dog",
   "Good game!",
   "Good luck, have fun!",
   "Got 10 translations approved",
@@ -1226,9 +1245,11 @@
   "Grant a translation role - find the player",
   "Grant data consent first (Settings)",
   "Graphs {0}/{1}",
+  "Great White",
   "Green Cursor",
   "Green Name",
   "Grey Cat",
+  "Grizzly",
   "Grounded",
   "Grow",
   "Grow is the one card whose damage depends on the shooter's FRAME RATE. In vanilla, the same Grow bullet fired by a 60 FPS player hits far harder than one fired at 400 FPS - and the mod normalizes it in competitive play.\n\n<color=#FFD94D><b>THE REAL MATH</b></color>\n\nGrow multiplies the bullet's damage a little every rendered frame while it flies, through the first 40 units of travel. Compounding a per-frame multiplier has a strange consequence: the bullet's speed cancels out of the total, and what actually sets the final multiplier is the length of the shooter's frames. Fewer, longer frames compound harder.\n\nUn-stacked, over a full flight:\n\n- 400 FPS shooter: about <color=#7FD4FF>x1.4</color>\n- 60 FPS shooter: about <color=#7FD4FF>x9.4</color>\n- 30 FPS shooter: about <color=#7FD4FF>x82</color>\n\nStacking multiplies the growth rate, so the gap explodes. At three copies: about x2.8 at 400 FPS, <color=#FF6666>x737 at 60 FPS, and x285,000 at 30 FPS</color>.\n\nHitches are the worst case: <color=#FF6666>a single 200 ms freeze frame multiplies the bullet by about x5.6 on its own</color>. One stutter mid-flight can turn a normal shot into a one-shot.\n\n<color=#FFD94D><b>WHY THEIR FPS BECOMES YOUR PROBLEM</b></color>\n\nDamage in ROUNDS is shooter-authoritative: the shooter's machine computes what the victim takes, and everyone else applies that number (see <color=#7FD4FF>Netcode & Photon</color>). Grow's growth happens on the shooter's frames, so a low-FPS or stuttering opponent's Grow bullets genuinely hit harder. It is not lag, it is not your imagination, and in vanilla it is not cheating either - it is the card's math.\n\n<color=#FFD94D><b>THE MOD'S NORMALIZATION</b></color>\n\nIn eligible rooms, the mod pins Grow's growth clock: <color=#7FE87F>every Grow bullet grows as if its shooter ran at 120 FPS, on every machine</color>. One copy is about x3.1 over a full flight, two copies x9.6, three x30 - the same for everybody, every game. The reference rate is compiled into the mod on purpose: if it were a setting, changing it would change your own damage.\n\nWhere it applies:\n\n- Every fighter in the room must run a current mod build (spectators don't count). <color=#FF6666>One vanilla or outdated fighter means vanilla growth for the whole room</color>, the same on every screen - a mixed lobby is never half-normalized.\n- Mod queue rooms (ranked 1v1, 2v2, 1v2, FFA, tournament rooms) normalize whenever everyone is current.\n- Private room-code and quickplay games normalize only when, on top of that, every fighter had the Ranked toggle ON when they connected.\n- The decision is locked per bullet at launch and never flips mid-flight. It is never active offline.\n\nOne honest residual: at very low frame rates a normalized bullet can grow slightly LESS than the target (a few percent stacked; more on a heavy hitch). The error always points down - never toward the one-shot.",
@@ -1245,7 +1266,9 @@
   "Halo",
   "Harassment",
   "Hard to hit",
+  "Hare Apparent",
   "Hasty",
+  "Hatchling",
   "He/him",
   "Healer",
   "Healing Field main",
@@ -1330,6 +1353,7 @@
   "Is RefreshValid true?",
   "Italic",
   "Ivory",
+  "Jackrabbit",
   "Join",
   "Join Competitive Rounds!",
   "Joined the match!",
@@ -1346,6 +1370,7 @@
   "Kick",
   "Kills",
   "Kingslayer",
+  "Kitten",
   "Knight Great-Helm",
   "Knockback",
   "Known vanilla bugs",
@@ -1489,6 +1514,7 @@
   "Max cards:",
   "Max {0} cards",
   "Max {0} players",
+  "Megalodon",
   "Menu music: <color=#88CCFF>Default</color>",
   "Menu music: <color=#88FF88>My playlist</color>",
   "Menu music: <color=#FF9966>None</color>",
@@ -1512,6 +1538,7 @@
   "Modes",
   "Monochrome",
   "Month/Day/Year (US)",
+  "Moon Rabbit",
   "Moonlit",
   "More",
   "More ranked than not.",
@@ -1604,6 +1631,7 @@
   "No games recorded for this session yet.",
   "No games this session",
   "No games together yet",
+  "No ladder yet - buy a title line in the Shop to start one.",
   "No leaderboard data",
   "No line started yet.",
   "No mail yet.",
@@ -1798,6 +1826,7 @@
   "Premium: northern-lights walls shimmering between polar teal and violet in a polar night",
   "Preparing your card picture...",
   "Preset {0}",
+  "President Meow",
   "Press Enable on the RANKED row first - the RLFP ping is only for ranked matches.",
   "Press Esc to leave",
   "Preview",
@@ -1821,6 +1850,7 @@
   "Prizes & Rules",
   "Prizes are announced when signups open.",
   "Pronoun title.",
+  "Pup",
   "Pure aggression",
   "Pure greyscale — minimum visual distraction.",
   "Purple Cursor",
@@ -1863,6 +1893,8 @@
   "RMB",
   "ROUNDS OST",
   "ROUNDS ships with real bugs - some cosmetic, some that decide rounds. The catalogue: symptom, real cause, and whether the mod repairs it. Repair details: (see <color=#7FD4FF>Bug fixes the mod ships</color>).\n\n<color=#FFD94D><b>INPUT AND LOBBY BUGS</b></color>\n\n<color=#7FD4FF>Escape key permanently dead, or inputs frozen as a match is found</color> - the game toggles input across all players with no null checks; one half-spawned player crashes the loop. <color=#7FE87F>Fixed by the mod, always on.</color>\n\n<color=#7FD4FF>'No space to ready up' - you cannot spawn into a lobby</color> - the game tries to spawn your character before you are actually in a room, crashes, and never recovers. <color=#7FE87F>Fixed by the mod, always on</color>; 30 seconds stuck returns you to the menu.\n\n<color=#7FD4FF>Typing confirms a card pick, Enter opens the room-code box, Space readies you up mid-sentence</color> - three places read the raw keyboard without checking for an open text box. <color=#7FE87F>Fixed for the mod's own chat</color>; the vanilla chat box keeps its quirks.\n\n<color=#FFD94D><b>COMBAT BUGS</b></color>\n\n<color=#7FD4FF>After a rematch, your block goes on cooldown but absorbs nothing - or Shield Charge stops firing while basic block works</color> - the between-games teardown can destroy card objects half-way, stranding dead hooks on your block. <color=#7FE87F>Fixed by the mod everywhere</color> (see <color=#7FD4FF>Blocking</color>).\n\n<color=#7FD4FF>Poison health bars disagree between screens, and blocking poison is a coin flip</color> - every machine ticks its own copy of the poison against its own copy of your shield; health is never re-synced. <color=#7FE87F>Replaced by the mod's victim-authoritative poison</color> when the victim runs the mod (see <color=#7FD4FF>Poison & damage over time</color>).\n\n<color=#7FD4FF>A poison tick kills someone during the round-won animation, awarding a phantom round</color> - damage-over-time keeps landing after the round is decided. <color=#7FE87F>Fixed on every modded client, in any room</color> - full protection just needs the room's (usually modded) host seat patched too.\n\n<color=#7FD4FF>A leftover bullet from the previous point hits you just after everyone respawns</color> - nothing in vanilla despawns mid-air bullets at the point boundary. <color=#7FE87F>Fixed: modded clients clear their own leftover bullets.</color>\n\n<color=#7FD4FF>Shots visibly connect but do no damage on your screen, or a point-blank drill bullet turns invisible</color> - the bullet's special components can register in the wrong order on the receiving machine. <color=#7FE87F>Fixed by the mod in any room.</color>\n\n<color=#7FD4FF>Grow one-shots you out of nowhere</color> - broken math more than a bug: Grow's damage compounds per frame on the shooter's machine, so low frame rates and hitches multiply it massively. <color=#7FE87F>Normalized by the mod in competitive play</color> (see <color=#7FD4FF>Grow</color>).\n\n<color=#7FD4FF>After one game with Demonic Pact, hold-to-fire guns like Spray stop auto-firing all session</color> - the no-auto-fire flag is copied one way and never reset between games. <color=#7FE87F>Fixed by the mod in any game.</color>\n\n<color=#7FD4FF>Radiance visibly sweeps through a crowd and hits one person</color> - the wave only ever checks the single closest target and stops after one hit. <color=#FF6666>Fixed in FFA only</color> - there it hits everyone it sweeps; other modes keep vanilla.\n\n<color=#7FD4FF>Chase's card text lists a Health bonus</color> - dead data the game never applies; the card has never granted it. <color=#7FE87F>The mod fixes the label.</color>\n\n<color=#7FD4FF>Being offered a card you already own</color> - not a bug; the second copy levels up the first.\n\n<color=#FFD94D><b>MODE AND VISUAL BUGS</b></color>\n\n<color=#7FD4FF>In 2v2 or 1v2, a card picker stands on an empty stage, or the wrong body is shown picking</color> - vanilla only ever presents one picker per round, using a team number as a player number. <color=#7FE87F>Fixed in 2v2 and 1v2 mod rooms.</color>\n\n<color=#7FD4FF>Phoenix revives someone into thin air - invisible, unhittable, stuck</color> - the revive finds the player by list position, wrong once the list has changed (an FFA leaver), and the death flag is never set. <color=#7FE87F>Fixed by the mod everywhere.</color>\n\n<color=#7FD4FF>Another player's name shows as the literal placeholder PlayerName</color> - a failed Steam name lookup is never retried. <color=#7FE87F>Fixed: the mod retries the lookup (up to 15 tries over half a minute) and repaints the name when it lands.</color>\n\n<color=#7FD4FF>A saw's spinning loop plays forever, or audio goes muffled for the session</color> - looping sounds outlive their owner and starve the sound engine of voices. <color=#7FE87F>Fixed: leaked loops are swept after every round.</color>\n\n<color=#7FD4FF>Harmless error spam in the log during map transitions</color> - the map-move animation holds references to pieces replaced mid-move. <color=#8A8A93>Not fixed - benign noise. (Anything that must touch the map mid-move, like the mod's own map skins, defers around that window instead.)</color>\n\n<color=#FFD94D><b>WHERE THE FIXES RUN</b></color>\n\nCrash guards and dead-state repairs run everywhere - they repair states vanilla never intended, without changing any rule. Rule changes are gated: mode logic needs its own mod-issued room, Grow normalization needs every fighter modded and consenting, and poison authority follows the poisoned player - an unmodded victim keeps vanilla poison. <color=#7FE87F>A non-modded player always gets pure vanilla gameplay</color> - and the only things they can ever see of the mod are nametag styling and quick-chat phrases you deliberately send through the game's own chat (see <color=#7FD4FF>Vanilla stays vanilla</color>).",
+  "Rabbit",
+  "Rabbit God",
   "Radioactive green with lime droplets. Probably safe.",
   "Radioactive yellow-green neon name with a hot glow halo. Visible to everyone; modded players also see the glow.",
   "Rage Quit %",
@@ -1904,6 +1936,12 @@
   "Rare pulls may be posted to the Discord gambler chat with your name.",
   "Rarest Hand",
   "Rarity",
+  "Rat",
+  "Rat God",
+  "Rat King",
+  "Rat Leader",
+  "Rat Lord",
+  "Rat Queen",
   "Rates",
   "Rating",
   "Rating History  ({0} Elo, {1} rating updates)",
@@ -2102,6 +2140,9 @@
   "Settings",
   "Severity:",
   "Shades for those who want to show that they are the true genius of the battlefield",
+  "Shark",
+  "Shark God",
+  "Shark Pup",
   "She/her",
   "Shifts through the spectrum as you move. Pure show-off.",
   "Shock Shades",
@@ -2150,6 +2191,7 @@
   "Size",
   "Skip MenuControllerHandler.Update during an active match.",
   "Sky",
+  "Sky Lord",
   "Slate",
   "Sleek black body color.",
   "Slow connection — still trying to join the match...",
@@ -2158,6 +2200,7 @@
   "Smaller Name",
   "Smart Specs",
   "Smoking",
+  "Snapper",
   "Sniper",
   "Sniper Medal",
   "So close!",
@@ -2381,6 +2424,7 @@
   "This rung has no shop row on the server, so it cannot be worn.",
   "Thorn Crown",
   "Three orbiting spheres of raw energy. ANIMATED.",
+  "Thunderbird",
   "Thunderstore",
   "Tidepool",
   "Tie",
@@ -2408,6 +2452,7 @@
   "Too many messages - wait a minute and try again.",
   "Too many recipients for one message.",
   "Too many requests at once - wait a few seconds and try again",
+  "Top Dog",
   "Top Pickers",
   "Top Streaks",
   "Top Winners",
@@ -2439,6 +2484,8 @@
   "True",
   "Tryhard",
   "Trying, hard.",
+  "Turtle",
+  "Turtle Sage",
   "Twilight",
   "Twilight Gradient",
   "Twins!",
@@ -2498,6 +2545,7 @@
   "Update the mod to watch this game.",
   "Updates",
   "Upload a Cosmetic...",
+  "Ursa Major",
   "Usage: /report [name] [reason]",
   "Usage: /report [name] [reason]  (quote multi-word names: /report \"Bad Actor\" reason)",
   "Use",
@@ -2606,6 +2654,7 @@
   "Wisps of grey smoke drift off your body.",
   "Wisps of living shadow crown your head. ANIMATED.",
   "Won",
+  "World Turtle",
   "Worn by those who climbed the mountain.",
   "Worn: {0}",
   "Worst Cards",
@@ -5588,6 +5637,11 @@
    "location": "BuildSettingsTab",
    "kind": "SettingsToggle"
   },
+  "Alpha Cat": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Already a recipient.": {
    "surface": "MailUI",
    "location": "AddRecipient",
@@ -5679,6 +5733,11 @@
    "kind": "Tr"
   },
   "Apex": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Apex Shark": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -5923,6 +5982,21 @@
    "location": "Phrases",
    "kind": "table"
   },
+  "Bear": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Bear Boss": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Bear God": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Beat Sid in a ranked series": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -6042,6 +6116,16 @@
    "surface": "InfoViz",
    "location": "BuildRefreshFlow, TextFallback",
    "kind": "Tr"
+  },
+  "Big Cat": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Big Dog": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
   },
   "Bigger Name": {
    "surface": "shop catalog",
@@ -6368,6 +6452,11 @@
    "location": "EnsureLocaleStrings",
    "kind": "Tr"
   },
+  "Bunny": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Burgundy": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -6622,6 +6711,16 @@
    "surface": "NativeUI",
    "location": "RefreshSession",
    "kind": "TrF"
+  },
+  "Cat": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Cat Deity": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
   },
   "Cat Eyes": {
    "surface": "shop catalog",
@@ -7368,6 +7467,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Cub": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Current Game: {0}": {
    "surface": "SpectatorHud",
    "location": "ComposeBarLine",
@@ -7843,6 +7947,16 @@
    "location": "BuildRefreshFlow, TextFallback",
    "kind": "Tr"
   },
+  "Dog": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Dog God": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Done.": {
    "surface": "NativeUI",
    "location": "ShowArtistResult",
@@ -8013,6 +8127,21 @@
    "location": "BuildAchievementTiers",
    "kind": "Tr"
   },
+  "Eagle": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Eagle God": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Eaglet": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Earned": {
    "surface": "NativeUI",
    "location": "BuildCompareShopSalesPanel",
@@ -8087,6 +8216,11 @@
    "surface": "NativeUI",
    "location": "(file scope)",
    "kind": "Tr"
+  },
+  "Elder Turtle": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
   },
   "Electric sparks snap and dart around you.": {
    "surface": "shop catalog",
@@ -8978,7 +9112,17 @@
    "location": "(file scope)",
    "kind": "Tr"
   },
+  "Golden Eagle": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Goober": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Good Dog": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -9058,6 +9202,11 @@
    "location": "BuildGraphPages",
    "kind": "TrF"
   },
+  "Great White": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Green Cursor": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -9069,6 +9218,11 @@
    "kind": "shop"
   },
   "Grey Cat": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Grizzly": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -9153,7 +9307,17 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Hare Apparent": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Hasty": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Hatchling": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -9578,6 +9742,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Jackrabbit": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Join": {
    "surface": "NativeUI",
    "location": "CreateFfaBrowserRow, CreateHostLobbyBrowserRow",
@@ -9654,6 +9823,11 @@
    "kind": "Tr"
   },
   "Kingslayer": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Kitten": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -10373,6 +10547,11 @@
    "location": "ToggleCompareSelect",
    "kind": "TrF"
   },
+  "Megalodon": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Menu music: <color=#88CCFF>Default</color>": {
    "surface": "NativeUI",
    "location": "RefreshSettings",
@@ -10487,6 +10666,11 @@
    "surface": "NativeUI",
    "location": "BuildSettingsTab, RefreshSettings",
    "kind": "Tr"
+  },
+  "Moon Rabbit": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
   },
   "Moonlit": {
    "surface": "shop catalog",
@@ -10946,6 +11130,11 @@
   "No games together yet": {
    "surface": "ProfileCard",
    "location": "Render",
+   "kind": "Tr"
+  },
+  "No ladder yet - buy a title line in the Shop to start one.": {
+   "surface": "TitleLaddersUI",
+   "location": "EmptyText",
    "kind": "Tr"
   },
   "No leaderboard data": {
@@ -11918,6 +12107,11 @@
    "location": "PresetLabel",
    "kind": "TrF"
   },
+  "President Meow": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Press Enable on the RANKED row first - the RLFP ping is only for ranked matches.": {
    "surface": "NativeUI",
    "location": "OnLfpButton",
@@ -12029,6 +12223,11 @@
    "kind": "ShowInfoPopup"
   },
   "Pronoun title.": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Pup": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -12243,6 +12442,16 @@
    "location": "(file scope)",
    "kind": "Tr"
   },
+  "Rabbit": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Rabbit God": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Radioactive green with lime droplets. Probably safe.": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -12447,6 +12656,36 @@
    "surface": "NativeUI, PlayerCardsUI",
    "location": "BuildAchievementsTab, BuildCardStatsTab, RefreshCardStats +1",
    "kind": "CreateButton, Tr"
+  },
+  "Rat": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Rat God": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Rat King": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Rat Leader": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Rat Lord": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Rat Queen": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
   },
   "Rates": {
    "surface": "SessionReportModel",
@@ -13438,6 +13677,21 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Shark": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Shark God": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Shark Pup": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "She/her": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -13678,6 +13932,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Sky Lord": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Slate": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -13714,6 +13973,11 @@
    "kind": "shop"
   },
   "Smoking": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Snapper": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -14833,6 +15097,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Thunderbird": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
   "Thunderstore": {
    "surface": "NativeUI",
    "location": "BuildPage",
@@ -14967,6 +15236,11 @@
    "surface": "PlayerCardsUI",
    "location": "ReasonText",
    "kind": "Tr"
+  },
+  "Top Dog": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
   },
   "Top Pickers": {
    "surface": "NativeUI",
@@ -15119,6 +15393,16 @@
    "kind": "shop"
   },
   "Trying, hard.": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Turtle": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Turtle Sage": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -15417,6 +15701,11 @@
    "surface": "NativeUI",
    "location": "BuildArtistTab",
    "kind": "CreateButton"
+  },
+  "Ursa Major": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
   },
   "Usage: /report [name] [reason]": {
    "surface": "NativeUI",
@@ -15957,6 +16246,11 @@
    "surface": "NativeUI",
    "location": "BuildCompareBarChart",
    "kind": "Tr"
+  },
+  "World Turtle": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
   },
   "Worn by those who climbed the mountain.": {
    "surface": "shop catalog",
