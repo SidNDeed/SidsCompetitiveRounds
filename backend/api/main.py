@@ -34431,16 +34431,34 @@ async def pending_channel_posts(
     Migration 338 gave this table the revision-acked shape
     stream_channel_posts already had, so a correction now edits the posted
     message instead of appending a new one under the wrong text — which is
-    what 134's Part C had to do. One predicate covers both cases: a
-    never-posted row has posted_revision NULL, and NULL IS DISTINCT FROM 1.
+    what 134's Part C had to do.
 
-    `revisions` is the bot DECLARING that it can edit in place, and it is
-    what makes the deploy order safe. A pre-338 bot omits it, sees only
-    never-posted rows, and so never meets a correction it would "deliver" by
-    posting a duplicate. It fails the safe way in the other direction too: an
-    api build that does not know the parameter ignores it (bug #266's shape)
-    and answers with the un-corrected set, leaving the old text up rather
-    than adding a second copy.
+    `revisions` is the bot DECLARING that it can edit in place. A pre-338 bot
+    omits it and still gets the fire-once set (posted_at IS NULL), so it never
+    meets a correction row at all.
+
+    WHAT THIS DOES NOT CLAIM. "posted_revision IS DISTINCT FROM revision"
+    alone is NOT a delivery test, and a row can carry posted_at with
+    posted_revision still NULL: the pre-338 ack wrote only posted_at, so every
+    row an OLD bot delivered while 338 was already applied looks exactly like
+    a never-posted one. Believing that predicate would re-send each of them.
+    posted_at is the delivery fact, and it is returned so the bot keys on it
+    (see poll_channel_posts) rather than on a revision number that a mixed
+    fleet can legitimately leave NULL.
+
+    The ADOPTION UPDATE below is what resolves such a row instead of merely
+    surviving it. Run only for a caller that can edit, it is the api half of
+    the bot's own adoption: a delivered row with no rendered revision is
+    recorded as delivered at the SEED revision (1, the column default), and —
+    when its content has not been rewritten since (revision = 1) — the text
+    that was sent for it is captured as adopt_fingerprint, exactly as 338's
+    backfill captured it for the rows that predate the column. A row that WAS
+    rewritten in the meantime gets no fingerprint, because nobody can
+    reconstruct the superseded text; it stays pending and the bot leaves the
+    old message alone rather than posting a second one (#276).
+
+    Idempotent: the WHERE clause is false the moment the row has a rendered
+    revision, so the statement is a no-op on every later poll.
 
     message_id is NULL for every row delivered before 338 — those ids were
     never captured. adopt_fingerprint carries the exact text that was sent
@@ -34450,16 +34468,28 @@ async def pending_channel_posts(
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
+    if revisions:
+        await db.execute(text(
+            "UPDATE pending_channel_posts "
+            "   SET posted_revision   = 1, "
+            "       adopt_fingerprint = CASE "
+            "           WHEN adopt_fingerprint IS NULL AND revision = 1 "
+            "                AND content NOT LIKE '[MODCASE:%' "
+            "           THEN LEFT(content, 2000) ELSE adopt_fingerprint END "
+            " WHERE posted_at IS NOT NULL AND posted_revision IS NULL"
+        ))
+        await db.commit()
     # Two fixed literals chosen by a bool — no caller text reaches the SQL.
     where = ("posted_revision IS DISTINCT FROM revision" if revisions
              else "posted_at IS NULL")
     rows = (await db.execute(text(
-        "SELECT id, channel_id, content, revision, posted_revision, "
+        "SELECT id, channel_id, content, revision, posted_revision, posted_at, "
         "       message_id, adopt_fingerprint "
         "FROM pending_channel_posts "
         "WHERE " + where + " ORDER BY sort_order, id LIMIT 20"
     ))).mappings().all()
-    return {"posts": [dict(r) for r in rows]}
+    return {"posts": [{k: (v.isoformat() if hasattr(v, "isoformat") else v)
+                       for k, v in r.items()} for r in rows]}
 
 
 @app.post("/api/v1/internal/channel-posts/ack", tags=["Internal"])
@@ -34467,6 +34497,7 @@ async def ack_channel_post(
     post_id: int = Query(...),
     revision: int | None = Query(None, ge=1),
     message_id: str | None = Query(None, max_length=32),
+    bind_only: bool = Query(False),
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
     db: AsyncSession = Depends(get_db),
 ):
@@ -34475,18 +34506,49 @@ async def ack_channel_post(
     revision > posted_revision, so the row stays pending and the newer text
     is delivered next tick instead of being marked done.
 
-    Both new parameters are optional, so a pre-338 bot acks exactly as it
+    revision and message_id are optional, so a pre-338 bot acks exactly as it
     always did: COALESCE(:rev, revision) means "whatever is current", which
     is the old fire-once semantics. posted_at keeps its ORIGINAL stamp — it
-    records when the message first appeared, not when it was last edited."""
+    records when the message first appeared, not when it was last edited.
+
+    bind_only=true writes the message id and NOTHING else. It exists because
+    editing a message destroys the only other way to find it again: the
+    fingerprint describes the text that is on Discord, and the edit replaces
+    that text. So the bot persists the id it just adopted, gets a committed
+    answer, and only then edits — a restart anywhere in that sequence finds
+    the row still pending, with either a fingerprint that still matches or an
+    id that does. Advancing posted_revision here would mark the correction
+    delivered before it had been rendered, so this arm touches neither it nor
+    posted_at.
+
+    An ack that reports NO message id and is the row's FIRST delivery captures
+    adopt_fingerprint from the text that was just sent. That is the ack a
+    pre-338 bot makes against this build: it records a rendered revision and
+    can never report an id, which would otherwise leave the row permanently
+    un-correctable — a revision with neither an id nor a fingerprint to find
+    the message by. The moderation-case exclusion is 338's: that row's stored
+    content opens with a marker the bot strips before sending, so
+    LEFT(content, 2000) is not what was posted for it."""
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
+    if bind_only:
+        await db.execute(text(
+            "UPDATE pending_channel_posts "
+            "   SET message_id = COALESCE(CAST(:mid AS TEXT), message_id) "
+            " WHERE id = :pid"
+        ), {"pid": post_id, "mid": message_id})
+        await db.commit()
+        return {"status": "acked", "id": post_id, "revision": None, "bound": True}
     await db.execute(text(
         "UPDATE pending_channel_posts "
         "   SET posted_at       = COALESCE(posted_at, NOW()), "
         "       posted_revision = COALESCE(CAST(:rev AS INTEGER), revision), "
-        "       message_id      = COALESCE(CAST(:mid AS TEXT), message_id) "
+        "       message_id      = COALESCE(CAST(:mid AS TEXT), message_id), "
+        "       adopt_fingerprint = CASE "
+        "           WHEN adopt_fingerprint IS NULL AND CAST(:mid AS TEXT) IS NULL "
+        "                AND posted_at IS NULL AND content NOT LIKE '[MODCASE:%' "
+        "           THEN LEFT(content, 2000) ELSE adopt_fingerprint END "
         " WHERE id = :pid"
     ), {"pid": post_id, "rev": revision, "mid": message_id})
     await db.commit()

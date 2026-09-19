@@ -3170,11 +3170,20 @@ async def _ensure_next_tournament(db: AsyncSession) -> None:
     already queued for a future date within the next 14 days.
 
     Also drives async tournament creation — which follows the BRACKET, not a
-    calendar: the next one opens ASYNC_POST_COMPLETION_DAYS after the previous
-    one's ended_at (the check at the bottom of this function).
-    ASYNC_CADENCE_DAYS is legacy and drives nothing; this line named it for
-    months after the post-completion rule replaced it, which is how the FAQ
-    ended up telling players "every ~6 weeks" (item 11)."""
+    calendar. Two gates, in this order (see the bottom of this function):
+
+      * 24 hours since the previous async tournament's created_at, whatever
+        state it ended in. This one always applies.
+      * ASYNC_POST_COMPLETION_DAYS since its ended_at — but ONLY when that
+        tournament is status 'completed' AND carries an ended_at. A CANCELLED
+        bracket, or a completed row whose ended_at was never written, is held
+        by the 24-hour net alone, so the next one can open the following day.
+
+    "Opens N days after the previous one ends" is therefore the ordinary path,
+    not one rule covering every row. ASYNC_CADENCE_DAYS is legacy and drives
+    nothing; this line named it for months after the post-completion rule
+    replaced it, which is how the FAQ ended up telling players "every ~6
+    weeks" (item 11)."""
     now = datetime.now(timezone.utc)
     # Active already?
     aq = select(Tournament).where(and_(

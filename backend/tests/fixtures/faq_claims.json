@@ -90,12 +90,55 @@
       "value": "1000",
       "anchor": {
         "file": "backend/api/main.py",
-        "pattern": "\"rosetta\": 100, \"dragoman\": 300, \"babel\": (\\d+),"
+        "pattern": "^    \"regicide\": (\\d+), \"stan_slayer\": \\d+, \"grand_master\": \\d+, \"touch_grass\": \\d+,$"
       },
+      "also": [
+        {"file": "backend/api/main.py", "pattern": "\"rosetta\": 100, \"dragoman\": 300, \"babel\": (\\d+),"}
+      ],
       "surfaces": [
         {"file": "docs/FAQ.md", "text": "the hardest pay 300g, 500g or 1000g"},
         {"file": "backend/discord_bot.py", "text": "the harder ones pay 300g, 500g or 1000g"},
         {"file": "plugin/InfoLibrary.cs", "text": "up to <color=#7FE87F>1000</color> for the hardest"}
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "achievement_gold_mid_tier",
+      "what": "the middle achievement payout tier",
+      "value": "500",
+      "display": "500g",
+      "anchor": {
+        "file": "backend/api/main.py",
+        "pattern": "^    \"master_rank\": (\\d+), \"team_sweep\": \\d+, \"rise_from_the_ashes\": \\d+,$"
+      },
+      "also": [
+        {"file": "backend/api/main.py", "pattern": "^    \"ffa_shutout_5\": (\\d+),"},
+        {"file": "backend/api/main.py", "pattern": "\"tourn_champion_sync\": (\\d+), \"tourn_champion_async\": \\d+,"}
+      ],
+      "surfaces": [
+        {"file": "docs/FAQ.md", "text": "the hardest pay 300g, 500g or 1000g"},
+        {"file": "backend/discord_bot.py", "text": "the harder ones pay 300g, 500g or 1000g"},
+        {"file": "plugin/InfoLibrary.cs", "text": "- <color=#7FD4FF>500g</color> - Master (reach 1980), Tag Team Sweep"}
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "achievement_gold_hard_tier",
+      "what": "the lowest above-default achievement payout tier",
+      "value": "300",
+      "display": "300g",
+      "anchor": {
+        "file": "backend/api/main.py",
+        "pattern": "^    \"stacked_deck\": (\\d+), \"flawless\": \\d+, \"silent_drill\": \\d+,$"
+      },
+      "also": [
+        {"file": "backend/api/main.py", "pattern": "^    \"ffa_shutout_4\": (\\d+),"},
+        {"file": "backend/api/main.py", "pattern": "\"tourn_second_sync\": (\\d+), \"tourn_second_async\": \\d+,"}
+      ],
+      "surfaces": [
+        {"file": "docs/FAQ.md", "text": "the hardest pay 300g, 500g or 1000g"},
+        {"file": "backend/discord_bot.py", "text": "the harder ones pay 300g, 500g or 1000g"},
+        {"file": "plugin/InfoLibrary.cs", "text": "- <color=#7FD4FF>300g</color> - Stacked Deck, Flawless"}
       ],
       "verdict": "verified"
     },
@@ -191,7 +234,9 @@
       },
       "surfaces": [
         {"file": "docs/FAQ.md", "text": "after 30 minutes when no game was ever reported"},
-        {"file": "plugin/InfoLibrary.cs", "text": "no game reported in its first 30 minutes"}
+        {"file": "plugin/InfoLibrary.cs", "text": "no game reported in its first 30 minutes"},
+        {"file": "backend/discord_bot.py", "text": "stakes **auto-refund** — there are two windows: after 30 minutes"},
+        {"file": "backend/discord_bot.py", "text": "auto-refund: 30 minutes when no game was "}
       ],
       "verdict": "verified"
     },
@@ -205,7 +250,9 @@
       },
       "surfaces": [
         {"file": "docs/FAQ.md", "text": "after 60 minutes when it stalls mid-series"},
-        {"file": "plugin/InfoLibrary.cs", "text": "A series stalled for 60 minutes mid-series refunds its bets"}
+        {"file": "plugin/InfoLibrary.cs", "text": "A series stalled for 60 minutes mid-series refunds its bets"},
+        {"file": "backend/discord_bot.py", "text": "reported, after 60 minutes when it stalls mid-series."},
+        {"file": "backend/discord_bot.py", "text": "ever reported, 60 minutes when it stalls mid-series."}
       ],
       "verdict": "verified"
     },
@@ -217,9 +264,54 @@
         "file": "backend/api/main.py",
         "pattern": "^COSMETIC_MAX_FRAMES = (\\d+)$"
       },
+      "also": [
+        {"file": "plugin/NativeUI.cs", "pattern": "for \\(int n = 2; n <= (\\d+); n\\+\\+\\)"}
+      ],
       "surfaces": [
         {"file": "backend/discord_bot.py", "text": "up to **16 frames**"},
         {"file": "plugin/InfoLibrary.cs", "text": "or up to 16 numbered PNG frames"}
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "cosmetic_max_png_bytes",
+      "what": "bytes the in-game uploader accepts per PNG frame",
+      "value": "1_200_000",
+      "display": "1.2 MB",
+      "anchor": {
+        "file": "plugin/NativeUI.cs",
+        "pattern": "bytes == null \\|\\| bytes\\.Length > ([\\d_]+)\\)"
+      },
+      "surfaces": [
+        {"file": "backend/discord_bot.py", "text": "with real transparency, **up to 1.2 MB** per file"}
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "cosmetic_max_gif_bytes",
+      "what": "bytes the in-game uploader accepts for a GIF submission",
+      "value": "2_200_000",
+      "display": "2.2 MB",
+      "anchor": {
+        "file": "plugin/NativeUI.cs",
+        "pattern": "if \\(bytes\\.Length > ([\\d_]+)\\)$"
+      },
+      "surfaces": [
+        {"file": "backend/discord_bot.py", "text": "2.2 MB**), or name your frames"}
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "cosmetic_upload_max_b64",
+      "what": "base64 characters the submission endpoint accepts for one image",
+      "value": "1_600_000",
+      "display": "1,600,000 base64 characters",
+      "anchor": {
+        "file": "backend/api/main.py",
+        "pattern": "^COSMETIC_MAX_B64 = ([\\d_]+)\\s"
+      },
+      "surfaces": [
+        {"file": "backend/discord_bot.py", "text": "**1,600,000 base64 characters**, so the in-game check"}
       ],
       "verdict": "verified"
     },
@@ -281,13 +373,50 @@
       "id": "ffa_default_target_score",
       "what": "points that win an FFA game when the host changes nothing",
       "value": "5",
+      "note": "A game plays to the LOBBY ROW's score_target, whose DEFAULT is the SQL column default (176) and which _ffa_lobby_config reads through FFA_CONFIG_DEFAULTS. FFA_ROUNDS_TO_WIN is the validation fallback for a row predating the column, so anchoring there let the gameplay default move without failing anything.",
       "anchor": {
-        "file": "backend/api/main.py",
-        "pattern": "^FFA_ROUNDS_TO_WIN = (\\d+)$"
+        "file": "backend/sql/176_ffa_lobby_config.sql",
+        "pattern": "score_target\\s+SMALLINT\\s+NOT NULL DEFAULT (\\d+);"
       },
+      "also": [
+        {"file": "backend/api/main.py", "pattern": "^    \"score_target\": (\\d+), \"card_candidates\": \\d+, \"initial_picks\": \\d+,$"},
+        {"file": "plugin/FfaMode.cs", "pattern": "public static int RoundsToWin = (\\d+);"}
+      ],
       "surfaces": [
         {"file": "docs/FAQ.md", "text": "first to **5** points wins by default"},
         {"file": "plugin/FfaMode.cs", "text": "public static int RoundsToWin = 5;"}
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "ffa_target_score_min",
+      "what": "the lowest point target an FFA host may set",
+      "value": "3",
+      "anchor": {
+        "file": "backend/sql/176_ffa_lobby_config.sql",
+        "pattern": "CHECK \\(score_target BETWEEN (\\d+) AND \\d+\\)"
+      },
+      "also": [
+        {"file": "plugin/FfaMode.cs", "pattern": "RoundsToWin = Mathf\\.Clamp\\(scoreTarget, (\\d+), \\d+\\);"}
+      ],
+      "surfaces": [
+        {"file": "docs/FAQ.md", "text": "the host can set that target anywhere from 3 to 10"}
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "ffa_target_score_max",
+      "what": "the highest point target an FFA host may set",
+      "value": "10",
+      "anchor": {
+        "file": "backend/sql/176_ffa_lobby_config.sql",
+        "pattern": "CHECK \\(score_target BETWEEN \\d+ AND (\\d+)\\)"
+      },
+      "also": [
+        {"file": "plugin/FfaMode.cs", "pattern": "RoundsToWin = Mathf\\.Clamp\\(scoreTarget, \\d+, (\\d+)\\);"}
+      ],
+      "surfaces": [
+        {"file": "docs/FAQ.md", "text": "the host can set that target anywhere from 3 to 10"}
       ],
       "verdict": "verified"
     }

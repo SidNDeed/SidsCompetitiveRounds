@@ -1061,7 +1061,8 @@ FAQ_ENTRIES = [
                    "• Bets **lock** once game 1 reaches 2 points or any game is decided.\n"
                    "• Gross payout = stake × odds. A winning heavy-favorite bet (stored odds ≤ 1.5×) can redirect part "
                    "of its profit—not the stake—to the fighter/team you backed. If a series never finishes, "
-                   "stakes **auto-refund** (~1 hour).\n"
+                   "stakes **auto-refund** — there are two windows: after 30 minutes when no game was ever "
+                   "reported, after 60 minutes when it stalls mid-series.\n"
                    "• Want a ping when betting opens? Grab the **Gambler** role — react 🎲 on the signup message "
                    "in the bets channel."),
     },
@@ -1310,19 +1311,30 @@ FAQ_ENTRIES = [
             r"my \b(art|drawing|design)\b.{0,25}\b(game|mod|shop)\b",
         ],
         "examples": ["how do i make cosmetics", "how do i become an artist"],
-        # Every sentence here tracks the shipped uploader, not the plan it was
-        # written against: the 512x512 / transparency / 1 MB checks are
-        # NativeUI.ValidateCosmeticPngBytes, the GIF branch and the __fN frame
-        # walk are ValidateAndNameCosmetic, and the server accepts frame_count
-        # 2..COSMETIC_MAX_FRAMES (16). The previous answer said animation was
-        # not supported yet and routed it to a side channel — it had been
-        # supported since Aug 7.
+        # Every NUMBER and every capability claim here is pinned by
+        # backend/tests/fixtures/faq_claims.json to the constant that enforces
+        # it, so a knob that moves without this text fails a test rather than
+        # quietly making the answer wrong. The 512x512 / transparency / size
+        # checks are NativeUI.ValidateCosmeticPngBytes (1,200,000 bytes per PNG)
+        # and ValidateAndNameGifCosmetic (2,200,000 bytes for a GIF); the
+        # server's own upload ceiling is COSMETIC_MAX_B64 = 1,600,000 base64
+        # characters, so for a PNG the in-game number is the one a submission
+        # meets first. The GIF branch and the __fN frame walk are
+        # ValidateAndNameCosmetic, and the frame cap is enforced twice —
+        # COSMETIC_MAX_FRAMES on the server and the client's own scan bound —
+        # which the fixture cross-checks rather than trusting either copy. The
+        # contact line is unchanged from its parent; routing artist
+        # applications is a community decision, not a code fact. The previous
+        # answer said animation was not supported yet and routed it to a side
+        # channel — it had been supported since Aug 7.
         "answer": ("**DM Sid** with some art you'd like to upload — that's the whole application.\n"
-                   "Format: **512×512 PNG** with real transparency, under 1 MB, drawn for a character slot "
-                   "(eyes, mouth, or detail/accessory).\n"
-                   "**Animated work goes through the in-game uploader too.** Either drop a **GIF**, or name "
-                   "your frames `myitem.png`, `myitem__f2.png`, `myitem__f3.png`, … and pick the base file — "
-                   "up to **16 frames**. Every frame gets the same size and transparency check.\n"
+                   "Format: **512×512 PNG** with real transparency, **up to 1.2 MB** per file, drawn for a "
+                   "character slot (eyes, mouth, or detail/accessory). The upload endpoint's own ceiling is "
+                   "**1,600,000 base64 characters**, so the in-game check is the one you meet first.\n"
+                   "**Animated work goes through the in-game uploader too.** Either drop a **GIF** (**up to "
+                   "2.2 MB**), or name your frames `myitem.png`, `myitem__f2.png`, `myitem__f3.png`, … and "
+                   "pick the base file — up to **16 frames**. Every PNG frame gets the same size and "
+                   "transparency check.\n"
                    "Either way you position the art on a live on-body preview — slot, scale and offset — at "
                    "true size before it goes to review.\n"
                    "Approved artists get the in-game **Artist tab** (F5): upload cosmetics, set price and stock "
@@ -1547,7 +1559,8 @@ FAQ_ENTRIES = [
                    "• In 2v2, leaving can immediately forfeit the series when the other team was already up a "
                    "game and the abandoned game had meaningful play. Other 2v2 DCs are marked incomplete for "
                    "an admin to award or void; they do not silently become a loss.\n"
-                   "• If a series never finishes, any bets on it auto-refund (~1 hour).\n"
+                   "• If a series never finishes, any bets on it auto-refund: 30 minutes when no game was "
+                   "ever reported, 60 minutes when it stalls mid-series.\n"
                    "• Game crashed mid-match? Relaunch and rejoin your opponent — the series picks back up."),
     },
     {
@@ -8919,25 +8932,46 @@ async def poll_channel_posts():
     as done.
 
     Migration 338 added a SECOND case: a row whose content was corrected. It
-    carries revision > posted_revision and is EDITED in place, never re-sent
-    — a correction posted as a new message sits below the wrong text, which
-    is what 134's Part C had to do and why #scr-faq has a duplicate RANKED
-    section. `revisions=true` is this build declaring it can do that; an
-    older api ignores the parameter and simply answers with never-posted
-    rows, so nothing about the old behaviour depends on the new one.
+    is EDITED in place, never re-sent — a correction posted as a new message
+    sits below the wrong text, which is what 134's Part C had to do and why
+    #scr-faq has a duplicate RANKED section. `revisions=true` is this build
+    declaring it can do that; an older api ignores the parameter and simply
+    answers with never-posted rows, so nothing about the old behaviour
+    depends on the new one.
 
-    The six FAQ messages predate the column and have no stored id. For those
-    the row carries adopt_fingerprint — the exact text that was sent — and
-    the message is adopted only on an EXACT match against the bot's own
-    messages in that channel. When nothing matches, the row is skipped and
-    the old text stays up; this path must never fall through to a send,
-    because the only failure it could produce that way is the duplicate it
-    exists to prevent (#276: pick which direction the unhandled case fails)."""
+    THE SEND/EDIT DECISION IS posted_at. Not posted_revision: a row delivered
+    by a pre-338 bot after 338 had been applied carries posted_at with a NULL
+    posted_revision, because that bot's ack wrote only the stamp. Treating
+    NULL as "never delivered" would post a second copy of every such row —
+    the exact duplicate this item exists to remove. The api resolves those
+    rows on the first poll from a build that sends revisions=true (it records
+    them as delivered at the seed revision and captures the fingerprint), and
+    this loop additionally refuses to send anything that already has a
+    posted_at, so neither half depends on the other having run.
+
+    A row with no stored id is adopted from adopt_fingerprint — the exact
+    text that was sent — and only when exactly one of the bot's own messages
+    in that channel carries it. When nothing matches, or more than one does,
+    the row is skipped and the old text stays up; this path must never fall
+    through to a send, because the only failure it could produce that way is
+    the duplicate it exists to prevent (#276: pick which direction the
+    unhandled case fails).
+
+    ORDER WITHIN A CORRECTION: adopt, then make the id durable (bind_only),
+    then edit, then ack the revision. The edit is what invalidates the
+    fingerprint, so it must not be the step that a crash can leave unrecorded
+    — after the bind, the row can be found by its id; before it, by its
+    fingerprint; there is no window in which it can be found by neither."""
     if http_session is None or not API_SECRET_KEY:
         return
     data = await api_get("/internal/channel-posts/pending?revisions=true")
     if not data or not data.get("posts"):
         return
+    # Ids already spoken for this tick: a message another row in THIS batch
+    # already owns is not a candidate for adoption. Six FAQ rows arrive
+    # together, so this is where two of them could otherwise select one
+    # message.
+    claimed = {str(q["message_id"]) for q in data["posts"] if q.get("message_id")}
     for p in data["posts"]:
         try:
             ch = bot.get_channel(int(p["channel_id"]))
@@ -8955,10 +8989,16 @@ async def poll_channel_posts():
             # notified_at, THEN ack. Any other post is unchanged.
             case_id, content = _modcase_parse(p["content"])
             revision = p.get("revision")
-            # posted_revision NULL is the ONLY "never delivered" signal; a
-            # pre-338 api omits the key entirely, and .get() then reads None,
-            # which is the same answer it gave before the column existed.
-            first_post = p.get("posted_revision") is None
+            # DELIVERY IS posted_at, NOT posted_revision. The pre-338 ack wrote
+            # only posted_at, so a row an OLD bot delivered while 338 was
+            # already applied carries posted_at with posted_revision still
+            # NULL — indistinguishable from a never-posted row by the revision
+            # columns alone, and re-sending it is the duplicate this whole item
+            # exists to prevent. A pre-338 api omits the key, and .get() then
+            # reads None, which is the same answer it gave before the column
+            # existed — that build only ever returns rows with posted_at NULL,
+            # so every row it hands over is genuinely a first post.
+            first_post = p.get("posted_at") is None
 
             if not first_post:
                 # ── Correction: edit the live message, or do nothing ──
@@ -8970,13 +9010,34 @@ async def poll_channel_posts():
                 if mid is True:          # legacy marker from a send that
                     mid = None           # could not report its id
                 if not mid:
-                    mid = await _adopt_channel_post_message(ch, p)
+                    mid = await _adopt_channel_post_message(ch, p, claimed)
                 if not mid:
                     print(f"[CHANNEL-POST] no message id for {p['id']} in {p['channel_id']} — "
                           f"correction skipped, existing text left in place")
                     continue   # an edit has no position, so skipping it cannot
                                # disorder the queue — and returning here would
                                # stall every later announcement behind it
+                claimed.add(str(mid))
+                if not p.get("message_id"):
+                    # PERSIST THE ID BEFORE THE EDIT. The edit is what destroys
+                    # the fingerprint's subject: after it, the live message no
+                    # longer reads as the text 338 recorded, so a restart that
+                    # happened between "edited" and "acked" could never find
+                    # this message again and the row would stay pending
+                    # forever. Binding first is ordered the other way round —
+                    # if the bind commits and nothing else does, the next tick
+                    # re-reads the row with a durable id; if the bind does not
+                    # commit, the fingerprint is still true because no edit has
+                    # happened yet. bind_only leaves posted_revision alone, so
+                    # the row stays pending either way and the correction is
+                    # re-driven rather than marked delivered.
+                    bound = await api_post(
+                        "/internal/channel-posts/ack",
+                        params=_channel_post_ack_params(p["id"], None, mid, bind_only=True))
+                    if not bound or bound.get("status") != "acked":
+                        print(f"[CHANNEL-POST] could not persist message id {mid} for {p['id']}: "
+                              f"{bound} — correction deferred, existing text left in place")
+                        continue
                 try:
                     msg = await ch.fetch_message(int(mid))
                 except discord.NotFound:
@@ -9037,31 +9098,50 @@ async def poll_channel_posts():
             return  # keep strict ordering; retry from this post next tick
 
 
-def _channel_post_ack_params(post_id, revision, message_id):
+def _channel_post_ack_params(post_id, revision, message_id, bind_only=False):
     """Query params for the channel-post ack, with the optional halves
     dropped rather than sent as None — aiohttp refuses a None param value,
     and the endpoint's COALESCE already treats an absent field as "leave it
     alone". Against a pre-338 api `revision` arrives None here and the ack
-    degrades to exactly the call this loop used to make."""
+    degrades to exactly the call this loop used to make.
+
+    bind_only asks the endpoint for the id write ALONE — no posted_at, no
+    posted_revision — which is how a correction makes its message id durable
+    without claiming to have rendered anything yet."""
     params = {"post_id": post_id}
     if revision is not None:
         params["revision"] = int(revision)
     if message_id is not None:
         params["message_id"] = str(message_id)
+    if bind_only:
+        params["bind_only"] = "true"
     return params
 
 
-async def _adopt_channel_post_message(ch, p):
-    """Recover the Discord message id of a row that was delivered before
-    migration 338 existed, or return None.
+async def _adopt_channel_post_message(ch, p, claimed=()):
+    """Recover the Discord message id of a row that was delivered before its
+    id was ever recorded, or return None.
 
     The six #scr-faq messages were posted by a bot that discarded the id, and
     nobody has them written down. The row carries adopt_fingerprint — exactly
-    what was sent for it, i.e. content[:2000] — and this walks the channel
-    oldest-first looking for a message of OURS whose current content is that
-    string. Identity is the full text, not a position or a prefix: a
-    positional guess would adopt confidently and edit the wrong message,
-    which is the class of check that cannot fail (#342/#431).
+    what was sent for it, i.e. content[:2000], which for a message Discord
+    accepted IS its whole text — and this walks the channel oldest-first
+    looking for messages of OURS that carry it.
+
+    WHAT IS COMPARED: nothing is hashed and no prefix is taken. The candidate's
+    entire content and the entire fingerprint are compared verbatim after
+    stripping leading and trailing whitespace, which is the one transformation
+    Discord itself applies to a posted body. Position is never consulted: a
+    positional guess would adopt confidently and edit the wrong message, the
+    class of check that cannot fail (#342/#431).
+
+    AMBIGUITY REFUSES. The scan does not stop at the first hit; it collects
+    every match in the window and adopts only when there is exactly ONE. Two
+    rows whose sent text is identical — or which differ only past Discord's
+    2,000-character ceiling, so that the same text was posted for both — are
+    genuinely indistinguishable from outside, and "first match wins" would
+    hand them the same message and edit it twice. `claimed` excludes ids other
+    rows in the same batch already own for the same reason.
 
     Returns None on anything unexpected, and the caller then leaves the post
     alone. Bounded scan — a channel whose sheet has scrolled past the limit
@@ -9072,21 +9152,30 @@ async def _adopt_channel_post_message(ch, p):
     me = getattr(bot, "user", None)
     if me is None:
         return None
+    claimed = {str(c) for c in claimed}
+    hits = []
     try:
         async for msg in ch.history(limit=200, oldest_first=True):
             if msg.author.id != me.id:
                 continue
+            if str(msg.id) in claimed:
+                continue
             if (msg.content or "").strip() == fingerprint:
-                print(f"[CHANNEL-POST] adopted message {msg.id} for post {p['id']} "
-                      f"in {p['channel_id']} (content match)")
-                return msg.id
+                hits.append(msg.id)
     except discord.Forbidden:
         print(f"[CHANNEL-POST] cannot read history in {p['channel_id']} (forbidden) — no adoption")
         return None
     except Exception as e:
         print(f"[CHANNEL-POST] history scan failed in {p['channel_id']}: {e} — no adoption")
         return None
-    return None
+    if len(hits) != 1:
+        if hits:
+            print(f"[CHANNEL-POST] {len(hits)} messages in {p['channel_id']} carry post {p['id']}'s "
+                  f"recorded text — ambiguous, no adoption")
+        return None
+    print(f"[CHANNEL-POST] adopted message {hits[0]} for post {p['id']} "
+          f"in {p['channel_id']} (content match)")
+    return hits[0]
 
 
 @poll_channel_posts.before_loop

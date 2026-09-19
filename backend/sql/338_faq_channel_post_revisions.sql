@@ -90,10 +90,16 @@ CREATE INDEX IF NOT EXISTS idx_pending_channel_posts_unrendered
 -- anything above it moves (#432). The executable version of this list is
 -- backend/tests/fixtures/faq_claims.json, which re-reads the code itself.
 --   msg 4  async tournaments follow the BRACKET, not a 6-week calendar:
---          tournaments.ASYNC_POST_COMPLETION_DAYS (2), applied in
---          _ensure_next_tournament. ASYNC_CADENCE_DAYS is legacy and drives
---          nothing. The FFA target is a host setting: FFA_ROUNDS_TO_WIN (5),
---          clamped to 3-10 by FfaMode.SetPendingConfig.
+--          tournaments.ASYNC_POST_COMPLETION_DAYS (2), applied to a COMPLETED
+--          bracket's ended_at in _ensure_next_tournament; a cancelled bracket
+--          is held only by the 24h safety net above it. ASYNC_CADENCE_DAYS is
+--          legacy and drives nothing. The FFA target a game actually plays to
+--          is the LOBBY ROW's score_target (ffa_lobbies.score_target, DEFAULT
+--          5 since 176, mirrored by FFA_CONFIG_DEFAULTS and read through
+--          _ffa_lobby_config); FFA_ROUNDS_TO_WIN is the validation fallback
+--          for a row that predates the column. The host may set 3-10, bounded
+--          by ck_ffa_lobby_score_target server-side and clamped by
+--          FfaMode.SetPendingConfig client-side.
 --   msg 5  achievements pay ACHIEVEMENT_GOLD (100) by default and 300/500/
 --          1000 for the keys listed in ACHIEVEMENT_GOLD_OVERRIDES. Bet
 --          refunds are _prune_stale_series' cutoff_min (30 min, no game ever
@@ -104,6 +110,15 @@ CREATE INDEX IF NOT EXISTS idx_pending_channel_posts_unrendered
 --          tournament room.
 -- The content guard makes this convergent, not just idempotent: a re-run
 -- after the text already landed matches nothing and bumps no revision.
+--
+-- NO CONTACT LINE IS INTRODUCED HERE. These bodies REPLACE the content of the
+-- six rows 110_faq_channel_post.sql seeded (matched on channel_id +
+-- sort_order), so there is one row per message before and after. The single
+-- contact sentence, in msg 6, is carried through byte-for-byte from
+-- 110_faq_channel_post.sql:88 rather than re-authored; that line is the one
+-- entry that owns it, and test_no_new_contact_line_is_introduced in
+-- backend/tests/test_faq_surfaces.py fails if this file ever states a routing
+-- contact that 110 did not already state.
 WITH want (sort_order, content) AS (
     VALUES
     (1, $faq1$**INSTALLING THE MOD**

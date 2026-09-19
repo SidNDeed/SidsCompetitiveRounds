@@ -7,22 +7,36 @@
 --   * the artist pipeline takes a GIF or numbered frames, not only "a PNG"
 --     (NativeUI.ValidateAndNameCosmetic; COSMETIC_MAX_FRAMES = 16)
 --
--- A client key IS its English source string, so each edit produced a NEW
--- key_id and retired the old one. plugin/I18nCatalogues.cs was re-keyed in the
--- same pass and carries all four locales for the new sources — that is the
--- artifact a player actually renders (#583); this file and 341 are the portal
--- half, so a human translator can see and refine the same text.
+-- A client key IS its English source string, so each edit produces a NEW
+-- key_id and leaves the old one behind. plugin/I18nCatalogues.cs was re-keyed
+-- in the same pass and carries all four locales for the new sources — that is
+-- the artifact a player actually renders (#583); this file and 341 are the
+-- portal half, so a human translator can see and refine the same text.
 --
--- Additive-only, per 248/266/282/286/288/302/312/317: the predecessor keys are
--- left for the real sync tool's retire pass. Written through the migration
--- channel because this seat cannot sign the admin HMAC (#443).
+-- THE RE-KEY IS COMPLETED HERE, not deferred. Registering the successors and
+-- leaving the predecessors live keeps three articles' worth of text in the
+-- portal that no client can render, in four locales each — the state 251 left
+-- behind when it assigned retirement to "the next real sync-keys run", and
+-- that 255 had to clean up. That run cannot be made from this seat (#443), so
+-- section 2 below performs 255's two writes: retire the three predecessors,
+-- supersede their pending machine proposals. It carries 255's guard too — it
+-- refuses if a translator has APPROVED work on a predecessor (#168) — and is
+-- idempotent, because both UPDATEs are predicated on the state they leave.
 --
 -- key_id = sha1("client" || chr(0) || source)[:16], source_hash =
 -- sha1(source), sensitive and context from tools/i18n_sync_keys.py — IMPORTED
--- by the generator, never re-implemented. Explicit transaction (#340); the
--- conflict arm is the sync endpoint's own full update, and the post-check
--- RAISEs if any key is missing, retired, or carries a different source_hash,
--- context or a stray max_px.
+-- by the generator, never re-implemented. The three predecessor ids were
+-- derived by the same formula from the PARENT commit's tools/i18n_source.json,
+-- which is the only place the superseded English sources still exist; they are
+-- the ids 251_i18n_keys_info_library.sql registered for these three articles.
+--
+-- Explicit transaction (#340). The conflict arm is the sync endpoint's own
+-- full update, but it carries a WHERE so an unchanged row is not rewritten: a
+-- re-run of this file must change ZERO rows, and an updated_at that advances
+-- on every apply is a write the deploy log reports as work. The post-check
+-- RAISEs if any successor is missing, retired, or carries a different
+-- source_hash, context or a stray max_px, and if any predecessor is still
+-- live.
 --
 -- RUN ORDER: deploy API -> apply this file -> apply 341. Independent of 338:
 -- 338 is the Discord bus, this is the translation portal. The game text itself
@@ -225,13 +239,52 @@ ON CONFLICT (key_id) DO UPDATE
    SET namespace = EXCLUDED.namespace, msgctxt = EXCLUDED.msgctxt,
        source_hash = EXCLUDED.source_hash, sensitive = EXCLUDED.sensitive,
        max_px = EXCLUDED.max_px, context = EXCLUDED.context,
-       retired_at = NULL, updated_at = NOW();
+       retired_at = NULL, updated_at = NOW()
+ WHERE i18n_keys.namespace   IS DISTINCT FROM EXCLUDED.namespace
+    OR i18n_keys.msgctxt     IS DISTINCT FROM EXCLUDED.msgctxt
+    OR i18n_keys.source_hash IS DISTINCT FROM EXCLUDED.source_hash
+    OR i18n_keys.sensitive   IS DISTINCT FROM EXCLUDED.sensitive
+    OR i18n_keys.max_px      IS DISTINCT FROM EXCLUDED.max_px
+    OR i18n_keys.context     IS DISTINCT FROM EXCLUDED.context
+    OR i18n_keys.retired_at  IS NOT NULL;
 
--- Post-check (enforcing): every expected key live with the expected source_hash and context.
+-- ── 2. Retire the three predecessor keys ─────────────────────────────────
+-- Their English sources no longer exist in tools/i18n_source.json, so no
+-- client can render them and the portal would be offering translators work on
+-- text nothing displays. 255_retire_orphan_keys.sql is the shape, including
+-- its refusal: a translator's finished (approved) work must never be silently
+-- retired by a hygiene pass, so this RAISEs instead.
+DO $$
+DECLARE v_approved INTEGER;
+BEGIN
+    SELECT COUNT(*) INTO v_approved
+      FROM i18n_entries e
+     WHERE e.key_id IN ('c4facebcda2e750a','c14135018e41f6f6','c84c43c265080ec2')
+       AND e.state = 'approved';
+    IF v_approved <> 0 THEN
+        RAISE EXCEPTION 'migration 340: % approved entr(ies) exist on the item-11 predecessor keys - refusing to retire translator-approved work; investigate first', v_approved;
+    END IF;
+END $$;
+
+UPDATE i18n_keys
+   SET retired_at = NOW(), updated_at = NOW()
+ WHERE key_id IN ('c4facebcda2e750a','c14135018e41f6f6','c84c43c265080ec2')
+   AND retired_at IS NULL;
+
+UPDATE i18n_proposals
+   SET status = 'superseded'
+ WHERE key_id IN ('c4facebcda2e750a','c14135018e41f6f6','c84c43c265080ec2')
+   AND status = 'pending';
+
+-- ── 3. Post-check ────────────────────────────────────────────────────────
+-- Enforcing: every successor live with the expected source_hash and context,
+-- and no predecessor still live or still offering pending work.
 DO $$
 DECLARE
     v_expected INT := 3;
     v_ok INT;
+    v_old_live INT;
+    v_old_pending INT;
 BEGIN
     SELECT COUNT(*) INTO v_ok
       FROM i18n_keys k
@@ -246,7 +299,17 @@ BEGIN
     IF v_ok <> v_expected THEN
         RAISE EXCEPTION 'post-check FAILED: % of % expected item-11 client keys are live with the expected source_hash and context', v_ok, v_expected;
     END IF;
-    RAISE NOTICE 'post-check OK: % item-11 client keys live', v_ok;
+
+    SELECT COUNT(*) INTO v_old_live FROM i18n_keys
+     WHERE key_id IN ('c4facebcda2e750a','c14135018e41f6f6','c84c43c265080ec2')
+       AND retired_at IS NULL;
+    SELECT COUNT(*) INTO v_old_pending FROM i18n_proposals
+     WHERE key_id IN ('c4facebcda2e750a','c14135018e41f6f6','c84c43c265080ec2')
+       AND status = 'pending';
+    IF v_old_live <> 0 OR v_old_pending <> 0 THEN
+        RAISE EXCEPTION 'post-check FAILED: % predecessor key(s) still live, % proposal(s) still pending on them', v_old_live, v_old_pending;
+    END IF;
+    RAISE NOTICE 'post-check OK: % item-11 client keys live, 3 predecessors retired', v_ok;
 END $$;
 
 COMMIT;
