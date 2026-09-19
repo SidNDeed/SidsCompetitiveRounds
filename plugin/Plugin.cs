@@ -3964,7 +3964,7 @@ namespace CompetitiveRounds
             {
                 if (pl == null || pl.CustomProperties == null) return -1;
                 object v;
-                if (!pl.CustomProperties.TryGetValue("t_id", out v) || v == null) return -1;
+                if (!pl.CustomProperties.TryGetValue(Player.VAR_TEAMID, out v) || v == null) return -1;
                 int t;
                 if (!int.TryParse(v.ToString(), out t)) return -1;
                 return (t == 0 || t == 1) ? t : -1;
