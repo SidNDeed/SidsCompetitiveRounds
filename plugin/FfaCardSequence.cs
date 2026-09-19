@@ -115,10 +115,17 @@ namespace CompetitiveRounds
         // three, so neither host can see the other's setting.
         private static bool Vanilla() { try { return !FfaMode.EngineActive(); } catch { return true; } }
         private static string ModeTag() => Vanilla() ? "vanilla" : "ffa";
-        /// <summary>The same-card rule in force for THIS room. internal, not
-        /// private: CompetitiveUI.DrawRoomRulesBanner labels the rule from this
-        /// same call, so what the strip says and what the engine deals cannot
-        /// disagree. Body unchanged.</summary>
+        /// <summary>Whether the same-card rule is CONFIGURED for this room.
+        /// internal, not private, because StripState() below answers the
+        /// display question and starts here.
+        ///
+        /// This is configuration, not the dealer's state. It used to say the
+        /// banner "labels the rule from this same call, so what the strip says
+        /// and what the engine deals cannot disagree" — and they could, which
+        /// is what the strip got wrong: a latched game that fell back still
+        /// read RuleOn() == true and the strip went on announcing a rule the
+        /// engine was no longer applying. The banner reads StripState(), which
+        /// consults the latch.</summary>
         internal static bool RuleOn() => Vanilla() ? RoomRules.SameCards : FfaMode.SameCardRule;
         /// <summary>Candidates per set: the FFA lobby's knob, or vanilla's
         /// five slots.</summary>

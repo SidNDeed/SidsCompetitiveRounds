@@ -15,9 +15,17 @@ structurally and fail when the shape the reports depend on is edited away.
 
 Two things they deliberately do NOT do:
 
-* They never assert on raw C# text. Everything is decided on `_cs_structure`'s
-  mask, so a brace or a needle inside a comment, a string or an inactive `#if`
-  branch is not structure (learnings #342/#431/#441).
+* They never decide STRUCTURE on raw C# text. Every structural claim -- what
+  is called, what guards it, what a constant is -- is decided on
+  `_cs_structure`'s mask, so a brace or a needle inside a comment, a string or
+  an inactive `#if` branch is not structure (learnings #342/#431/#441).
+
+  Two gates read other views on purpose, and neither is a structural claim.
+  The stale-wording gate reads the block WITH its comments, because prose is
+  the thing it is about. The reason-code gates read a view that keeps string
+  literals, because a reason code IS a literal and the mask blanks it. Saying
+  "never raw C# text" made both look like violations of a rule this module
+  does not actually hold.
 * They never carry a hand-written list of "the methods that issue a request".
   Such a list is a check that cannot fail: the next fetch helper added to
   `ApiClient` is absent from it, so re-introducing a refetch under a new name
@@ -208,9 +216,14 @@ def test_a_clean_discard_run_ends_without_refetching_anything():
         assert conditions, f"{needle} is reachable unconditionally"
         for condition in conditions:
             terms.extend(and_terms(condition))
-    # Control: delete this term from the condition -> red.
+    # Control: delete any one of these terms from the condition -> red.
     assert "errorCode != null" in terms
     assert 'errorCode != "rate_limited"' in terms
+    # The transport exclusion was absent here, so deleting it stayed green. It
+    # is not decoration: "transport" means no answer arrived, and answering a
+    # silent network by immediately asking it two more questions is the same
+    # pile-on the rate-limit exclusions exist to prevent.
+    assert 'errorCode != "transport"' in terms
 
 
 def test_the_discard_block_names_no_superseded_rate_limit():
@@ -267,6 +280,11 @@ def test_an_identity_change_clears_the_discard_run_state():
     code = mask_code(cs_block(PLAYER_CARDS, IDENTITY_CHANGED))
     assert "discardRetriedIds.Clear()" in code
     assert "discardWaited = 0f" in code
+    # discardInFlight was missing from this list, so dropping it from the reset
+    # stayed green -- and it is the field that WEDGES the surface: left true
+    # across an identity change, the binder keeps saying "discarding..." and
+    # the button stays dead for an account that never started a run.
+    assert "discardInFlight = false" in code
 
 
 # ── the retry is ONE PER COPY, inside the run budget ─────────────────────

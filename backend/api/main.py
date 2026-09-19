@@ -32930,7 +32930,12 @@ async def list_artists(db: AsyncSession = Depends(get_db)):
 # ships with the next mod bundle (pulled from the DB at packaging time).
 
 COSMETIC_SLOTS = {"eyes", "mouth", "detail"}
-COSMETIC_MAX_B64 = 1_600_000          # ~1.2 MB decoded — 512px flat art is ~50-300 KB
+COSMETIC_MAX_B64 = 1_600_000          # 1.2 MB decoded — 512px flat art is ~50-300 KB
+# Decoded byte caps, DERIVED, and the only figures the copy may quote.
+# The PNG rejection advertised "1 MB max" against a 1.2 MB cap for as long
+# as the route has existed: an artist whose 1.1 MB file was accepted had
+# been told it would not be, and one at 1.3 MB was told the wrong reason.
+COSMETIC_MAX_BYTES = COSMETIC_MAX_B64 * 3 // 4
 COSMETIC_MAX_PENDING_PER_ARTIST = 5
 COSMETIC_SCALE_MIN = 0.50
 COSMETIC_SCALE_MAX = 2.25
@@ -32945,7 +32950,10 @@ COSMETIC_OFFSET_RADIUS_MAX = 4.50
 COSMETIC_MAX_FRAMES = 16
 COSMETIC_FPS_CENTI_MIN = 50           # 0.5 fps
 COSMETIC_FPS_CENTI_MAX = 1500         # 15 fps
-COSMETIC_GIF_MAX_B64 = 3_000_000      # ~2.2 MB decoded GIF
+COSMETIC_GIF_MAX_B64 = 3_000_000      # 2.25 MB decoded GIF — the client
+# stops at 2.2 MB, deliberately tighter, so a local pass is never followed
+# by a remote rejection.
+COSMETIC_GIF_MAX_BYTES = COSMETIC_GIF_MAX_B64 * 3 // 4
 try:
     from PIL import Image as _PILImage, ImageSequence as _PILImageSequence
     _PIL_AVAILABLE = True
@@ -33209,7 +33217,7 @@ async def artist_submit_cosmetic(request: Request, payload: dict = Body(...),
     if len(name) < 2:
         raise HTTPException(status_code=400, detail="name too short (letters/numbers/spaces only)")
     if not b64 or len(b64) > COSMETIC_MAX_B64:
-        raise HTTPException(status_code=400, detail="PNG missing or too large (1 MB max)")
+        raise HTTPException(status_code=400, detail=f"PNG missing or too large ({COSMETIC_MAX_BYTES / 1_000_000:.1f} MB max)")
     if submission_fingerprint is not None:
         existing_id = (await db.execute(text(
             "SELECT id FROM cosmetic_submissions "

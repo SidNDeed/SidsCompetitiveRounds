@@ -103,12 +103,17 @@ namespace CompetitiveRounds
         ///
         /// Two properties, both load-bearing.
         ///
-        /// TOTAL. For any non-empty <paramref name="present"/> this returns a
-        /// seat, and the fallback is what makes that true. A qualifier that
-        /// can disqualify every candidate is a guard only the disqualified
-        /// seats evaluate: the sitting then ends with nobody submitting and
-        /// voids itself silently, which is strictly worse than the defect the
-        /// qualifier exists for (#430).
+        /// TOTAL. For any <paramref name="present"/> holding at least one
+        /// non-empty id this returns a seat. The witness fallback is one half
+        /// of that; the ordinal pass below is the other, and it was missing.
+        /// A qualifier that can disqualify every candidate is a guard only the
+        /// disqualified seats evaluate: the sitting then ends with nobody
+        /// submitting and voids itself silently, which is strictly worse than
+        /// the defect the qualifier exists for (#430). "Every id in the
+        /// electorate fails long.TryParse" was exactly such a qualifier — the
+        /// method returned null, every caller took its own last resort, and
+        /// every seat self-elected. One unparseable id costs that seat its
+        /// candidacy; ALL of them used to cost the game its single reporter.
         ///
         /// SINGLE-VALUED ACROSS SEATS. Both inputs are derived from replicated
         /// Photon state, so every client computes the same answer and exactly
@@ -133,12 +138,25 @@ namespace CompetitiveRounds
             foreach (var sid in electorate)
             {
                 long v;
-                // An unparseable id is not a candidate. It is also invisible
-                // to its peers' comparisons, so a seat carrying one can never
-                // be deferred TO — which is why the fallback above is about
-                // the electorate being empty, not about this skip.
+                // An unparseable id is not a candidate WHILE ANY id parses. It
+                // is also invisible to its peers' comparisons, so a seat
+                // carrying one can never be deferred TO.
                 if (!long.TryParse(sid, out v)) continue;
                 if (v < lowVal) { lowVal = v; lowest = sid; }
+            }
+            if (lowest != null) return lowest;
+
+            // Nothing parsed, and the electorate is not empty. Numeric order
+            // has no meaning over these ids, but ORDINAL order does, and it is
+            // a property of the SET rather than of the order it arrived in —
+            // so every seat, reading the same replicated membership, picks the
+            // same one and exactly one submits. Returning null here made each
+            // caller fall back to self-election, i.e. all of them submitting.
+            // Empty entries are not seats and take no part.
+            foreach (var sid in electorate)
+            {
+                if (string.IsNullOrEmpty(sid)) continue;
+                if (lowest == null || string.CompareOrdinal(sid, lowest) < 0) lowest = sid;
             }
             return lowest;
         }
@@ -165,6 +183,33 @@ namespace CompetitiveRounds
         {
             var r = new SelfTestResult();
             const string room = "ffa_7f3a9c21b4e8";
+
+            // 0. The electorate exists but nothing in it parses. Before the
+            //    ordinal pass this returned null and every seat self-elected.
+            {
+                bool fb;
+                var odd = new List<string> { "steam:beta", "steam:alpha", "steam:gamma" };
+                string a = ElectReporter(odd, null, out fb);
+                var shuffled = new List<string> { "steam:gamma", "steam:alpha", "steam:beta" };
+                string b = ElectReporter(shuffled, null, out fb);
+                Check(r, "an unparseable electorate still elects one seat",
+                      a != null && a == b && a == "steam:alpha",
+                      "a=" + (a ?? "<null>") + " b=" + (b ?? "<null>"));
+            }
+
+            // 0b. A single parseable id among unparseable ones still wins: the
+            //     ordinal pass is a LAST resort, not a peer of the numeric one.
+            {
+                bool fb;
+                // "007-alpha" sorts ORDINALLY BEFORE the Steam id, so a
+                //     build that let the ordinal pass outrank the numeric
+                //     one picks it and this case reds. An unparseable id
+                //     sorting after would have passed either way.
+                var mixed = new List<string> { "007-alpha", "76561198040410653" };
+                string a = ElectReporter(mixed, null, out fb);
+                Check(r, "one parseable id outranks the ordinal fallback",
+                      a == "76561198040410653", "a=" + (a ?? "<null>"));
+            }
 
             // 1. THE FIX. Two seats holding different local game counters, both
             //    reading the host's published number, file under one key.

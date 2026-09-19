@@ -360,9 +360,15 @@ namespace CompetitiveRounds
             if (previewSprite != null) { try { UnityEngine.Object.Destroy(previewSprite); } catch { } previewSprite = null; }
             previewShown = -1;
             if (presetPreview != null) { try { PlayerCardFaces.SetFace(presetPreview, null); } catch { } }
-            // FinishDiscard is not on this path, so the run state it clears is
-            // cleared here too: a retry flag left set would spend the NEXT
-            // account's first refusal.
+            // FinishDiscard is not on this path, so the run state it clears
+            // is cleared here too. A per-copy retry latch left populated
+            // would be carried into the NEXT account's run, where those
+            // print ids are not even its own; and discardInFlight left true
+            // WEDGES the surface outright - the binder goes on saying
+            // "discarding..." and the button stays dead for an account that
+            // never started a run. Nothing clears it afterwards, because the
+            // epoch check drops the answer that would have.
+            discardInFlight = false;
             discardQueue.Clear(); discardRetriedIds.Clear(); discardWaited = 0f;
             armedPrintId = null; priceChangedAt = -1f;
             recoverAt = 0f; meRefreshAt = 0f; unparseableStrikes = 0;

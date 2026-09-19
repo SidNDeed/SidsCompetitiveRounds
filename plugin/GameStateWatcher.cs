@@ -6705,9 +6705,16 @@ namespace CompetitiveRounds
             // OnGameOver path, so its session bookkeeping lives here.
             try { RecordFfaSession(myPlace, localWon, myTeam); } catch (Exception ex)
             { Plugin.Log.LogWarning($"[SESSION] ffa record failed: {ex.Message}"); }
+            // The placement is FORMATTED FROM A KEY, not interpolated
+            // before the lookup. ShowNotification calls I18n.Tr on what it is
+            // given, so an already-composed "FFA over - you placed #3" is not
+            // a catalogue key and never matches one: every non-winning FFA
+            // player read English while the victory line beside it, passed
+            // whole, was translated.
             CompetitiveUI.ShowNotification(localWon
-                ? "FFA VICTORY!"
-                : $"FFA over - you placed #{myPlace}", localWon ? Color.green : new Color(0.7f, 0.85f, 1f), 6f);
+                ? I18n.Tr("FFA VICTORY!")
+                : I18n.TrF("FFA over - you placed #{0}", myPlace),
+                localWon ? Color.green : new Color(0.7f, 0.85f, 1f), 6f);
             AccumulateSessionTime();
             SaveSessionState();
 
@@ -6746,9 +6753,16 @@ namespace CompetitiveRounds
             var entries = new List<ApiClient.FfaReportPlayer>();
             var presentSteams = new List<string>();
             // RJ-3: present fighters that also WITNESSED this game's start.
-            // Every seat computes this from the same replicated properties, so
-            // it is the same set on every client — which is what keeps the
-            // election single-valued.
+            // Derived from replicated properties, so seats that have RECEIVED
+            // those properties agree. It is NOT the same set on every client
+            // unconditionally, and the difference is deliberate: a seat that
+            // has received no witness property at all falls back to the
+            // merely-present electorate while its peers do not, and two seats
+            // then submit. FfaReportRules.ElectReporter chooses that over
+            // nobody submitting, and FfaMode.RepublishGameWitness narrows the
+            // window by re-publishing after an adoption. What makes the
+            // duplicate survivable is that both reports carry the same key,
+            // not that the sets always match.
             var witnessSteams = new List<string>();
             string winnerSteam = null;
 

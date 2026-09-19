@@ -1115,6 +1115,7 @@ namespace CompetitiveRounds
             "FFA games",
             "FFA lobby never filled — returning to menu. Requeue when ready.",
             "FFA match found, but you're in a game — removed from the FFA queue.",
+            "FFA over - you placed #{0}",
             "FFA session - {0} players",
             "FFA session - {0} players, {1} games",
             "FFA: placed #{0} (+{1}xp)",

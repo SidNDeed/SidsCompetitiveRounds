@@ -8998,10 +8998,19 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // The caps this client enforces, and the only place each figure is
         // written down: every message that states one is formatted FROM the
         // constant beside it, so a cap cannot be raised while the artist is
-        // still told the old number. They mirror the server's COSMETIC_MAX_B64
-        // (1.6M base64 chars = 1.2 MB decoded), COSMETIC_GIF_MAX_B64 (3M = 2.2
-        // MB decoded) and COSMETIC_MAX_FRAMES, which bound the same payloads
-        // after encoding.
+        // still told the old number.
+        //
+        // Against the server's own envelopes, and NOT a mirror throughout:
+        //   PNG    1.6M base64 chars = 1,200,000 bytes exactly. Identical.
+        //   GIF    3.0M base64 chars = 2,250,000 bytes; this client stops at
+        //          2,200,000. TIGHTER BY 50,000 BYTES, on purpose and in the
+        //          safe direction: everything this client accepts the server
+        //          accepts, so the artist never gets a local pass followed by
+        //          a remote rejection. A GIF between the two figures is
+        //          refused here and would have been taken there.
+        //   frames COSMETIC_MAX_FRAMES, identical.
+        // "They mirror the server's ... (3M = 2.2 MB decoded)" is what stood
+        // here, and 3M base64 chars have never decoded to 2.2 MB.
         private const int CosmeticPngMaxBytes = 1_200_000;
         private const int CosmeticGifMaxBytes = 2_200_000;
         private const int CosmeticMaxFrames = 16;

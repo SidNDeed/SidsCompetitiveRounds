@@ -4655,10 +4655,23 @@ namespace CompetitiveRounds
         // internal, not public: the type it exposes is internal, and a public
         // property of an internal type does not compile (CS0053).
         internal static TitleLadders CachedTitleLadders { get; private set; }
-        /// <summary>Why the last attempt produced no board. "route" = this
-        /// server does not serve the ladder route (404); "parse" = a 200 whose
-        /// body carried no ladders; anything else is the transport's own text.
-        /// Null while a board is in hand.</summary>
+        /// <summary>Why the last attempt produced no board. Set from
+        /// TitleLadderFailure, which is where the reasoning lives:
+        ///
+        ///   "route"     — a 404 with no body of the route's own. The server
+        ///                 does not serve the ladder route.
+        ///   "empty"     — a 404 the ROUTE answered: this account has no
+        ///                 ladder row yet, which is every account until it
+        ///                 buys an entry rung. Proved by the route's marker,
+        ///                 presumed when a 404 carries a JSON body without it.
+        ///   "parse"     — a 200 whose body carried no ladders.
+        ///   "transport" — no answer at all.
+        ///   anything else is the transport's own text.
+        ///
+        /// Null while a board is in hand. This list said only route/parse/
+        /// transport for as long as every 404 was read as route absence, so
+        /// the docstring agreed with the defect rather than with the route.
+        /// </summary>
         public static string TitleLaddersError { get; private set; }
         public static float TitleLaddersFetchedAt = -1f;
         private static float ladderAttemptAt = -100f;
@@ -20287,11 +20300,16 @@ namespace CompetitiveRounds
                 }
                 else if (IsSettledConflictResponse(resp))
                 {
-                    // TERMINAL, and deliberately not queued. The server settles
-                    // a game once: a second report of a game it already holds
-                    // is answered 200 with an echo when it AGREES (the branch
-                    // above, which needs nothing from us) and 409 when it
-                    // disagrees — and the disagreement is recorded server-side
+                    // TERMINAL, and deliberately not queued. The server
+                    // settles a game once. Which of the two answers a second
+                    // report gets is NOT a comparison of the two scoreboards:
+                    // the echo branch above is returned when the resubmission
+                    // matches on room id, lobby and roster, and this 409 is
+                    // what a second report of an already-settled game gets
+                    // otherwise. Two reports that share a key and contradict
+                    // each other on placements are not reconciled anywhere —
+                    // the first one settles the game and the second is refused
+                    // — and the disagreement is recorded server-side
                     // for recovery, so re-sending ours adds no information and
                     // cannot displace what is stored. Queueing it would put a
                     // report in the outbox whose only future is to be dropped

@@ -18,12 +18,20 @@ namespace CompetitiveRounds
     /// entry rung shows its price and a button that DEEP-LINKS to the Shop
     /// tab, and the buying happens in exactly one place.
     ///
-    /// ZERO PROGRESS IS THE NORMAL CASE AT SHIP. `title_ladder_progress` gains
-    /// rows only from the completion hook, which is a separate item; until it
-    /// is live every player reads back games=0, tier=1 and owns nothing. That
-    /// is rendered as NOT STARTED per line — the bar is empty and the caption
-    /// names the entry rung and its price. It is never drawn as "0 of 10 to
-    /// Rat Leader", which would promise progress the account cannot make.
+    /// ZERO PROGRESS IS THE NORMAL CASE AT SHIP, and it arrives two ways.
+    /// `title_ladder_progress` gains rows only from the completion hook, which
+    /// is a separate item, so until it is live nobody advances.
+    ///
+    ///   * An account the route KNOWS reads back games=0, tier=1 and owns
+    ///     nothing. Rendered as NOT STARTED per line — the bar is empty and
+    ///     the caption names the entry rung and its price. It is never drawn
+    ///     as "0 of 10 to Rat Leader", which would promise progress the
+    ///     account cannot make.
+    ///   * An account the route does not know at all gets a 404, which is
+    ///     every account until it buys an entry rung. That is a whole-screen
+    ///     message, not a board: EmptyText's "empty" branch. Saying "every
+    ///     player reads back games=0" skipped this case entirely, and it is
+    ///     the one a new player actually meets.
     ///
     /// UNAVAILABLE IS NOT ZERO. A server without the route answers 404. The
     /// board is then hidden entirely and one line says so. A board of zeroes
@@ -467,9 +475,11 @@ namespace CompetitiveRounds
             }
 
             // NOT STARTED draws an EMPTY bar and says what starts the line.
-            // The server reports games=0/tier=1 for an account with no
+            // The server reports games=0/tier=1 for a KNOWN account with no
             // progress row, and a "0 / 10 to Rat Leader" caption off those
-            // numbers would promise a countdown the account is not in.
+            // numbers would promise a countdown the account is not in. An
+            // account the route has never seen does not reach this method at
+            // all — it 404s and the tab shows EmptyText's "empty" line.
             if (!started)
             {
                 UIFactory.SetFill(card.fill, 0f);

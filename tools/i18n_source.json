@@ -1109,6 +1109,7 @@
   "FFA games",
   "FFA lobby never filled — returning to menu. Requeue when ready.",
   "FFA match found, but you're in a game — removed from the FFA queue.",
+  "FFA over - you placed #{0}",
   "FFA session - {0} players",
   "FFA session - {0} players, {1} games",
   "FFA: placed #{0} (+{1}xp)",
@@ -8496,7 +8497,7 @@
   "FFA VICTORY!": {
    "surface": "GameStateWatcher",
    "location": "OnFfaGameOver",
-   "kind": "ShowNotification"
+   "kind": "ShowNotification, Tr"
   },
   "FFA VICTORY! +{0}xp": {
    "surface": "ApiClient",
@@ -8522,6 +8523,11 @@
    "surface": "ApiClient",
    "location": "UpdateFfaQueuePoll",
    "kind": "ShowNotification"
+  },
+  "FFA over - you placed #{0}": {
+   "surface": "GameStateWatcher",
+   "location": "OnFfaGameOver",
+   "kind": "TrF"
   },
   "FFA session - {0} players": {
    "surface": "PostSessionReport",

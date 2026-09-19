@@ -2948,10 +2948,17 @@ namespace CompetitiveRounds
         internal const string CapabilityProp = "cr_wcd1";
         internal const int CapabilityValue = 1;
 
-        /// <summary>Fixed diagnostic key with a per-sitting budget, reset from
-        /// both room-exit edges. A dynamic per-room key grows the dictionary
-        /// per room and cannot see a direct rejoin (VanillaFixSupport.ResetDiag
-        /// records why).</summary>
+        /// <summary>Fixed diagnostic key with a per-sitting budget, reset
+        /// from the RELIABLE room-exit callback. The polled exit backup does
+        /// not clear it: a sitting whose exit is only ever noticed by the poll
+        /// keeps the budget it had spent, so the next room in that sitting
+        /// logs less than a full allowance. Diagnostics only — nothing the
+        /// rule does depends on it — which is why the gap is recorded here
+        /// rather than closed by adding a second writer to a path that exists
+        /// to be a backup. The claim of "both room-exit edges" was wrong from
+        /// the start. A dynamic per-room key grows the dictionary per room and
+        /// cannot see a direct rejoin (VanillaFixSupport.ResetDiag records
+        /// why).</summary>
         internal const string DiagKey = "weapon-cooldown-reset";
         internal const string PhoenixDiagKey = "weapon-cooldown-phoenix";
 

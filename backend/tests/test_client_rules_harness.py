@@ -103,7 +103,7 @@ def test_the_ffa_report_suite_ran_every_case_and_none_failed(harness_run):
     printed = len(re.findall(r"^\[ffareport\] (PASS|FAIL) ", harness_run.stdout, re.M))
     assert printed == run, (
         "the suite declared run=%d but printed %d case lines" % (run, printed))
-    assert run >= 13, "the FfaReportRules suite shrank to %d cases" % run
+    assert run >= 15, "the FfaReportRules suite shrank to %d cases" % run
 
 
 def _named_case(proc, name, suite="topstrip"):
@@ -169,6 +169,8 @@ def test_the_report_key_still_satisfies_the_server_contract(harness_run):
     "witnesses are the electorate",
     "election is order-independent",
     "an empty room elects nobody",
+    "an unparseable electorate still elects one seat",
+    "one parseable id outranks the ordinal fallback",
     "a settled refusal is recognised, a neighbour is not",
 ])
 def test_the_ffa_report_guarantees_each_have_a_case(harness_run, name):
