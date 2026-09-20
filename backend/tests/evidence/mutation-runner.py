@@ -27,10 +27,20 @@ Files are restored from byte-exact copies taken here, never with
 uncommitted work). The md5 of every touched file is compared at the end and the
 run fails loudly if any file did not come back.
 
-Rounds 6 and 7 are both here. Round 6's are re-run rather than trusted: the
-round-7 edits moved code around several of their anchors, and a control that is
-not re-run on the tree it certifies is an assertion about a different tree.
+Rounds 6, 7 and 8 are all here. Earlier rounds' are re-run rather than trusted:
+each round's edits move code around several of the previous anchors, and a
+control that is not re-run on the tree it certifies is an assertion about a
+different tree.
+
+IT PRINTS ITS OWN INVOCATION, and that is round 8's correction to round 7's
+log. A report that shows fourteen RED lines and a tally, with no record of what
+was actually run, is a summary of a selection nobody can check -- a different
+selection would look identical. The invocation block below the anchor pre-check
+names the command, the interpreter, the working directory and the exact pytest
+command line of every control, all of them REPOSITORY-RELATIVE so the committed
+log names paths a clone has rather than this machine's checkout.
 """
+import datetime
 import hashlib
 import io
 import os
@@ -42,7 +52,7 @@ BACKEND = os.path.dirname(os.path.dirname(HERE))           # backend
 ROOT = os.path.dirname(BACKEND)                            # repository root
 MAIN = os.path.join(BACKEND, "api", "main.py")
 TESTS = os.path.join(BACKEND, "tests", "test_ffa_game_number_anchor.py")
-SUITES = os.path.join(HERE, "r7-suites.txt")
+SUITES = os.path.join(HERE, "r8-suites.txt")
 DSN = os.environ.get("FFA_TEST_PG_DSN")
 
 # name -> (file, anchor, mutant, inert, test)
@@ -184,16 +194,16 @@ CONTROLS = [
      '            await db.rollback()\n'
      '        except Exception:\n'
      '            pass\n'
-     '        print(f"[FFA-REPORT] could not re-read lobby {lobby_uuid} progress after "\n',
+     '        # ...and now ASK AGAIN, on the session the rollback just cleared. The\n',
      '    except Exception as _relock_ex:\n'
-     '        print(f"[FFA-REPORT] could not re-read lobby {lobby_uuid} progress after "\n',
+     '        # ...and now ASK AGAIN, on the session the rollback just cleared. The\n',
      '    except Exception as _relock_ex:\n'
      '        # (inert: a comment at the same site)\n'
      '        try:\n'
      '            await db.rollback()\n'
      '        except Exception:\n'
      '            pass\n'
-     '        print(f"[FFA-REPORT] could not re-read lobby {lobby_uuid} progress after "\n',
+     '        # ...and now ASK AGAIN, on the session the rollback just cleared. The\n',
      "test_the_relock_leaves_a_transaction_the_next_read_can_run_in"),
 
     # This one mutates the EVIDENCE, because the rule it guards is about the
@@ -233,6 +243,126 @@ CONTROLS = [
      '            print(f"[SERIES] stale-series sweep could not refund {_sid} and "\n',
      (os.path.join("tests", "test_report_disconnect_durability.py"),
       "test_the_prune_batch_commits_per_series_so_it_cannot_hold_the_chain")),
+
+    # -- round 8 ----------------------------------------------------------
+    # The transaction SCOPE, as a mutation rather than as a description. The
+    # test has asserted it structurally since round 4 and the mutation had
+    # never been run, so "it reds on a commit between the lock and the slot"
+    # was a sentence about a run nobody could check. The INERT twin is a
+    # COMMENT at the same site, which is the negative control that matters
+    # here: the test measures comment-stripped source, so a comment must leave
+    # it green (#441).
+    ("commit-between", MAIN,
+     '    lobby, _expected_game = await _ffa_lock_lobby_slot(db, lobby_uuid)\n'
+     '    if lobby is None:\n',
+     '    lobby, _expected_game = await _ffa_lock_lobby_slot(db, lobby_uuid)\n'
+     '    await db.commit()\n'
+     '    if lobby is None:\n',
+     '    lobby, _expected_game = await _ffa_lock_lobby_slot(db, lobby_uuid)\n'
+     '    # (inert: a comment at the same site)\n'
+     '    if lobby is None:\n',
+     "test_the_lock_the_derivation_and_the_increment_are_one_transaction"),
+
+    # The LIVE contention control. settlement-takes-for-update above proves the
+    # mode is the weaker one; this proves the row lock is there at all, on two
+    # real connections, and round 7 carried it only as "(hand-run)" prose.
+    ("settlement-lock-removed-live", MAIN,
+     '_FFA_LOBBY_LOCK_SQL = "SELECT * FROM ffa_lobbies WHERE id = :lid FOR NO KEY UPDATE"\n',
+     '_FFA_LOBBY_LOCK_SQL = "SELECT * FROM ffa_lobbies WHERE id = :lid"\n',
+     '_FFA_LOBBY_LOCK_SQL = ("SELECT * FROM ffa_lobbies WHERE id = :lid FOR NO KEY UPDATE")\n',
+     "test_pg_two_reports_for_one_lobby_cannot_settle_the_same_number"),
+
+    # A refusal raised after a capture answers from the copy read before it.
+    ("refusal-after-capture-reuses-stale-progress", MAIN,
+     '    fresh = await _ffa_progress_relocked(db, lobby_uuid, progress)\n',
+     '    fresh = dict(progress or {})\n',
+     '    # (inert: a comment at the same site)\n'
+     '    fresh = await _ffa_progress_relocked(db, lobby_uuid, progress)\n',
+     "test_pg_a_refusal_raised_after_a_capture_reads_the_lobby_again"),
+
+    # The number every refusal advertises stops being the one that settles, so
+    # a room realigning onto it is refused again for naming a game the sitting
+    # has already passed.
+    ("advertised-number-is-not-the-settling-one", MAIN,
+     '    out = {"games_played": gp, "expected_game": gp + 1}\n',
+     '    out = {"games_played": gp, "expected_game": gp}\n',
+     '    out = {"games_played": gp, "expected_game": (gp + 1)}\n',
+     "test_pg_a_realigned_resubmission_is_echoed_and_never_settled_twice"),
+
+    # This one mutates a SHIPPED file, because the rule it guards is about
+    # shipped files. The forbidden path is ASSEMBLED for the same reason the
+    # evidence control assembles it: this runner is itself under evidence/.
+    # Anchored on the room-rules header in main.py, one of the lines the
+    # sweep cleaned, and the mutant restores the citation that header carried
+    # before the sweep.
+    ("production-cites-a-gitignored-path", MAIN,
+     '# ── Room rules (Sept 10 batch; schema and shape decisions: migration 306) ───\n',
+     '# ── Room rules (Sept 10 batch, '
+     + "ai-" + 'collab/sept10-batch/01-room-rules.md) ──────\n',
+     '# ── Room rules  (Sept 10 batch; schema and shape decisions: migration 306) ───\n',
+     "test_no_production_file_cites_the_gitignored_scratch"),
+
+    # B3's other clause: a re-read that failed once answers stale-low instead
+    # of asking again on the session its own rollback just cleared.
+    ("relock-gives-up-after-one-attempt", MAIN,
+     '        try:\n'
+     '            _lobby, _expected = await _ffa_lock_lobby_slot(db, lobby_uuid)\n'
+     '        except Exception as _retry_ex:\n',
+     '        try:\n'
+     '            raise _relock_ex\n'
+     '        except Exception as _retry_ex:\n',
+     '        try:\n'
+     '            # (inert: a comment at the same site)\n'
+     '            _lobby, _expected = await _ffa_lock_lobby_slot(db, lobby_uuid)\n'
+     '        except Exception as _retry_ex:\n',
+     "test_pg_the_relock_retries_once_and_answers_from_the_lobby_not_the_snapshot"),
+
+    # The evidence check's result pattern learned a new artifact type this
+    # round -- the re-pin states its result as `rows rewritten now : 0` -- and
+    # a widened pattern is a check that got EASIER to satisfy, which is the
+    # direction ending in a check that cannot fail (#342). So the widening
+    # brings a control, and this control mutates a TEST file because the rule
+    # it guards lives there rather than in the server.
+    #
+    # Dropping the token reds the check TWICE OVER, and which assertion fires
+    # first is worth stating because it changes over the life of the file. The
+    # directory sweep fires today: r8-repin.txt carries `rows rewritten now`
+    # and no other recognised token, so losing that token leaves the report
+    # looking resultless, and the observed red is
+    # `r8-repin.txt states no executed result`. That reason is TEMPORARY -- the
+    # re-pin log later gains the closing check's own pytest summary, and from
+    # then on the sweep is satisfied by `N passed` no matter what the pattern
+    # forgets. What survives that is the both-directions block inside the
+    # check, which asserts the pattern matches one line of each artifact type
+    # and does not match prose. It reds from an assertion ABOUT the pattern
+    # rather than from whatever evidence/ happens to contain, so this control
+    # keeps meaning what it says after the directory's contents move on.
+    ("evidence-result-pattern-forgets-the-repin", TESTS,
+     '    result_token = re.compile(\n'
+     r'        r"\d+ passed|second run|rows identical|RED:|rows rewritten now")'
+     '\n',
+     '    result_token = re.compile(\n'
+     r'        r"\d+ passed|second run|rows identical|RED:")'
+     '\n',
+     # Inert: the same alternation, reordered. Every use is a boolean
+     # `search`, so which branch matches first cannot be observed.
+     '    result_token = re.compile(\n'
+     r'        r"rows rewritten now|\d+ passed|second run|rows identical|RED:")'
+     '\n',
+     "test_the_committed_evidence_re_derives_its_own_numbers"),
+
+    # The check added beside that one derives the control set from THIS
+    # file instead of restating it, and a derived check is still only
+    # worth what it reds on. Misspell the inventory's entry for the
+    # control above by one letter -- the drift that actually happens --
+    # and the derived check must notice that a control the runner carries
+    # is named nowhere. The inert twin rewords the same entry's
+    # DESCRIPTION and leaves its name alone.
+    ("control-list-drifts-from-the-inventory", TESTS,
+     '  evidence-result-pattern-forgets-the-repin (r8)  the result pattern in\n',
+     '  evidence-result-pattern-forgets-the-repln (r8)  the result pattern in\n',
+     '  evidence-result-pattern-forgets-the-repin (r8)  the result-pattern in\n',
+     "test_every_mutation_control_the_runner_carries_is_named_and_paired"),
 ]
 
 
@@ -280,14 +410,54 @@ def split_test(test):
     return ANCHOR_TESTS, test
 
 
+def rel(path):
+    """A path relative to the repository root, POSIX-style.
+
+    Everything this log prints goes through here. A committed report that names
+    an absolute path names THIS machine's checkout, which is both unfollowable
+    from a clone and a local path in a tracked file."""
+    try:
+        out = os.path.relpath(path, ROOT)
+    except ValueError:
+        return "(outside the repository)"
+    if out.startswith(".."):
+        return "(outside the repository)"
+    out = out.replace(os.sep, "/")
+    return "<repo>" if out == "." else "<repo>/" + out
+
+
+def redacted(dsn):
+    """scheme://user@host:port/db with every part a placeholder.
+
+    The connection is an input to the run and belongs in the log; the values
+    are this seat's and do not."""
+    if not dsn:
+        return "(unset)"
+    scheme = dsn.split("://", 1)[0] if "://" in dsn else "postgresql+asyncpg"
+    return scheme + "://<user>@<host>:<port>/<db>"
+
+
+def pytest_argv(test_file, name):
+    return [sys.executable, "-m", "pytest", test_file,
+            "-q", "--tb=line", "-p", "no:cacheprovider", "-k", name]
+
+
+def shown(argv):
+    """The same argv as a command line, with the interpreter as `python` and
+    the -k expression quoted, so it can be pasted rather than reconstructed."""
+    parts = ["python"]
+    for a in argv[1:]:
+        parts.append('"%s"' % a if " " in a or " or " in a else a)
+    return " ".join(parts)
+
+
 def run_test(test):
     test_file, name = split_test(test)
     env = dict(os.environ)
     if DSN:
         env["FFA_TEST_PG_DSN"] = DSN
     proc = subprocess.run(
-        [sys.executable, "-m", "pytest", test_file,
-         "-q", "--tb=line", "-p", "no:cacheprovider", "-k", name],
+        pytest_argv(test_file, name),
         cwd=BACKEND, env=env, capture_output=True, text=True)
     out = proc.stdout + proc.stderr
     red = [ln.strip() for ln in out.splitlines()
@@ -321,8 +491,31 @@ def main():
         for p in problems:
             print("  " + p)
         return 2
-    print("anchor pre-check: %d controls, every anchor resolves exactly once\n"
+    print("anchor pre-check: %d controls, every anchor resolves exactly once"
           % len(CONTROLS))
+
+    # THE INVOCATION, immediately above the results it produced. Round 7's log
+    # printed the results alone, so the set that produced them could not be
+    # told from any other set.
+    argv = list(sys.argv)
+    argv[0] = rel(os.path.abspath(argv[0]))
+    print("")
+    print("=" * 70)
+    print("INVOCATION")
+    print("  command   FFA_TEST_PG_DSN=%s python %s"
+          % (redacted(DSN), " ".join(argv[0:])))
+    print("  cwd       %s" % rel(os.getcwd()))
+    print("  pytest    run with cwd=%s, one invocation per half of each"
+          % rel(BACKEND))
+    print("            control, printed in full beside it below")
+    print("  python    %s" % sys.version.split()[0])
+    print("  started   %s UTC"
+          % datetime.datetime.now(datetime.timezone.utc)
+                    .strftime("%Y-%m-%d %H:%M:%S"))
+    print("  controls  %d, each RED under its mutation and GREEN under an "
+          "inert edit" % len(CONTROLS))
+    print("=" * 70)
+    print("")
 
     failures = []
     try:
@@ -333,6 +526,8 @@ def main():
                   % (name, _tname,
                      "" if _tfile == ANCHOR_TESTS
                      else "  [%s]" % os.path.basename(_tfile)))
+            print("  file     %s" % rel(path))
+            print("  command  %s" % shown(pytest_argv(_tfile, _tname)))
             sys.stdout.flush()
             write(path, originals[path].replace(anchor, mutant))
             rc, red, ran, out = run_test(test)

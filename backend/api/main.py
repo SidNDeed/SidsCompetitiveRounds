@@ -14483,8 +14483,8 @@ def _region_pings_from_header(value):
 
 
 # ── Multiplayer room region (2v2 / 1v2 / FFA rooms and hosted lobbies) ──────
-# Sept 10 batch — ai-collab/sept10-batch/02-region-v4.md (policy) over
-# ai-collab/sept9-plans/02-multiplayer-region.md §2 (data path). Each member's
+# Sept 10 batch: a bounded-minimax pick over a cost bound (policy) reading the
+# per-member ping map of migration 307 (data path). Each member's
 # own ping map is stored in player_region_pings (migration 307) by the four
 # session-bound writer polls — the 2v2 / 1v2 / FFA queue polls and the 2v2 /
 # 1v2 lobby state poll — from the same X-Region-Pings header the 1v1 poll
@@ -18336,8 +18336,8 @@ def _chat_spam_ok(conn_key: int, message: str) -> bool:
     return True
 
 
-# ── Cross-platform chat moderation support (design: ai-collab/chat-moderation-
-# design.md v3). Everything below is single-worker in-process state (#125). ──
+# ── Cross-platform chat moderation support (schema: migration 263, which
+# carries the shape decisions). Single-worker in-process state (#125). ──
 
 import unicodedata as _unicodedata
 
@@ -26217,8 +26217,8 @@ async def internal_pc_card(
 
 
 # ── Player Cards: portraits, delivery leases and faces ──────────────────────
-# Design: ai-collab/sept10-batch/21-player-cards-look-v22.md §1.7, §2.2, §3,
-# §6, §8 as amended by look-r18-dispositions.md. Pure helpers live in
+# Schema: migrations 308, 310 and 311, which carry the shape decisions.
+# Pure helpers live in
 # pc_portrait.py, pixels in pc_face.py. Every route here is answered by the
 # PRIMARY only (§2.2 routing): the face route is not on the edge's routed
 # list and the bot calls the primary's local api.
@@ -42766,7 +42766,7 @@ FFA_CONFIG_DEFAULTS = {
     "sudden_death": False,
 }
 
-# ── Room rules (Sept 10 batch, ai-collab/sept10-batch/01-room-rules.md) ──────
+# ── Room rules (Sept 10 batch; schema and shape decisions: migration 306) ───
 # Every server-issued 1v1 / 2v2 / 1v2 room carries a rules record {ff, sc}:
 # friendly fire (default ON, which is today's behaviour) and the Same Cards
 # rule (default OFF). Decided BEFORE the room exists (host knobs on the 2v2 /
@@ -47458,6 +47458,16 @@ async def _ffa_progress_relocked(db: AsyncSession, lobby_uuid, fallback: dict) -
     _ffa_lock_lobby_slot has no row to derive from and 'games_played = 0' would
     be an invention rather than a reading.
 
+    IT TRIES TWICE BEFORE IT SETTLES FOR THE SNAPSHOT. The fallback is safe,
+    not good: stale-low means the client is refused once more and the sitting
+    loses one more game before it realigns, so an exit that CAN answer the
+    lobby should not answer a snapshot instead. The rollback below is what makes
+    a second attempt worth making -- the likeliest cause of the first failure is
+    a statement that failed earlier in this transaction, and that is exactly
+    what the rollback clears. So the handler rolls back and asks again, once. A
+    second failure over a cleared session is a connection or a lock problem
+    rather than a poisoned one, and THAT is where the fallback belongs.
+
     SWALLOWING THE EXCEPTION IS NOT BY ITSELF ENOUGH TO KEEP THAT PROMISE, and
     an earlier draft of this docstring stated it as an absolute while the code
     could still break it. Under asyncpg one failed statement poisons the whole
@@ -47469,7 +47479,15 @@ async def _ffa_progress_relocked(db: AsyncSession, lobby_uuid, fallback: dict) -
     back in a state the caller's remaining reads can run in. The one residue
     left is a connection that is gone, where the rollback cannot succeed
     either; nothing in this process can answer over that, and it is a stated
-    residue rather than a silent one."""
+    residue rather than a silent one.
+
+    WHAT STILL ANSWERS STALE, stated rather than claimed away: a lobby row that
+    is gone by now (there is nothing to derive from, and `games_played = 0`
+    would be an invention rather than a reading), and a re-read that fails
+    TWICE across a rollback -- a lock timeout or a deadlock hitting both
+    attempts, or a connection that is gone, over which no answer is delivered at
+    all. Both answer stale-LOW, never stale-high, so the worst they cost is one
+    more refusal with the right number on it."""
     try:
         _lobby, _expected = await _ffa_lock_lobby_slot(db, lobby_uuid)
     except Exception as _relock_ex:
@@ -47477,12 +47495,77 @@ async def _ffa_progress_relocked(db: AsyncSession, lobby_uuid, fallback: dict) -
             await db.rollback()
         except Exception:
             pass
-        print(f"[FFA-REPORT] could not re-read lobby {lobby_uuid} progress after "
-              f"a rollback; answering with the locked snapshot: {_relock_ex}")
-        return dict(fallback or {})
+        # ...and now ASK AGAIN, on the session the rollback just cleared. The
+        # first attempt's likeliest cause is a statement that failed earlier in
+        # this transaction, which the rollback has just ended; answering from
+        # the snapshot without retrying would spend one more game of the
+        # sitting for a condition that no longer holds.
+        try:
+            _lobby, _expected = await _ffa_lock_lobby_slot(db, lobby_uuid)
+        except Exception as _retry_ex:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            print(f"[FFA-REPORT] could not re-read lobby {lobby_uuid} progress "
+                  f"after a rollback, twice; answering with the locked "
+                  f"snapshot: {_relock_ex} / then {_retry_ex}")
+            return dict(fallback or {})
+        print(f"[FFA-REPORT] lobby {lobby_uuid} progress re-read succeeded on the "
+              f"second attempt, once the failed statement was cleared: {_relock_ex}")
     if _lobby is None:
         return dict(fallback or {})
     return _ffa_progress(max(0, int(_expected) - 1))
+
+
+async def _ffa_progress_after_capture(db: AsyncSession, lobby_uuid,
+                                      progress: dict) -> dict:
+    """The lobby's progress for an answer given AFTER a quarantine capture.
+
+    A capture is not a passive write. `_quarantine_report` rolls this request's
+    transaction back before it takes its advisory lock, and commits its own row
+    -- so the lobby lock the endpoint was holding is RELEASED inside it, and a
+    report of the same sitting that had been waiting on that row can derive its
+    slot and settle in the gap. The `progress` the caller is still holding was
+    read before all of that. Answering with it tells a resynchronising client to
+    name a number the sitting has already taken, which earns it the very refusal
+    this endpoint is trying to stop it earning -- and, on the replay arm, can
+    put `settled_game` and `expected_game` on the same number, the pair of
+    instructions that cancel (see _ffa_progress).
+
+    So the two counters are re-derived under a FRESH lock. `settled_game` is not
+    re-derived with them: it is a claim about a ROW that this report named, the
+    row does not move when the counter does, and re-deriving it here would need
+    the named number the caller has already resolved. It is CARRIED across
+    instead -- but only while it still satisfies the pair's own inequality,
+    `settled_game < expected_game`.
+
+    That re-check should never fire: `games_played` is incremented by one per
+    settlement and brought forward by `_ffa_lock_lobby_slot`'s catch-up, never
+    decremented, so a fresh read can only have moved `expected_game` UP. It is
+    written as a check rather than as a sentence because the sentence is exactly
+    the kind this round was told to stop writing -- a guarantee about the whole
+    state space, asserted from the one state its author had in mind. If it ever
+    fires, the answer keeps the two counters and says nothing about a settled
+    game, which is the retryable direction and the conservative one.
+
+    A re-read that FAILS falls back to the pre-rollback copy, which is
+    stale-LOW: it names a number at or below the sitting's real position, so a
+    client acting on it is refused once more and told the right number then.
+    That is `_ffa_progress_relocked`'s own contract and this function adds
+    nothing to it."""
+    _named_settled = None
+    if isinstance(progress, dict) and progress.get("settled_game") is not None:
+        _named_settled = int(progress["settled_game"])
+    fresh = await _ffa_progress_relocked(db, lobby_uuid, progress)
+    if _named_settled is not None and "settled_game" not in fresh:
+        if _named_settled < int(fresh.get("expected_game", 0)):
+            fresh["settled_game"] = _named_settled
+        else:
+            print(f"[FFA-REPORT] lobby {lobby_uuid} moved past settled_game "
+                  f"{_named_settled} while this report was captured; the answer "
+                  f"carries the counters alone")
+    return fresh
 
 
 def _ffa_named_game_number(room_id: str | None) -> int | None:
@@ -48013,7 +48096,10 @@ async def _ffa_record_and_refuse(db: AsyncSession, *, report, lobby_uuid, id_by_
     games_played/expected_game, and settled_game where the caller knows the
     named game is already settled — so a refused client can resynchronise
     instead of naming a number one further out on every later game of the
-    sitting. This function always raises."""
+    sitting. The two counters in it are RE-READ under a fresh lobby lock after
+    the capture, because the capture ends this request's transaction and the
+    caller's copy predates that; `_ffa_progress_after_capture` is where that is
+    written down. This function always raises."""
     _kept = await _quarantine_report(
         db, mode="ffa", reason=reason, status_code=status,
         payload=report.model_dump(), group_id=lobby_uuid,
@@ -48023,6 +48109,12 @@ async def _ffa_record_and_refuse(db: AsyncSession, *, report, lobby_uuid, id_by_
     print(f"[FFA] lobby {lobby_uuid} report of room {report.photon_room_id} "
           f"refused ({reason}: {why}) — capture={_kept} "
           f"(reporter {report.reported_by_steam_id})")
+    # THE CAPTURE ABOVE ENDED THIS REQUEST'S TRANSACTION AND RELEASED THE LOBBY
+    # LOCK, so `progress` is a reading of a sitting that may have moved. Both
+    # exits below answer from the re-derivation instead. See
+    # _ffa_progress_after_capture for why settled_game is carried rather than
+    # re-derived, and for the direction a failed re-read takes.
+    progress = await _ffa_progress_after_capture(db, lobby_uuid, progress)
     if _kept not in ("recorded", "already", "variant"):
         raise FfaReportRefusal(503, "Could not record this report for review - retry",
                                progress)
@@ -56211,8 +56303,8 @@ async def get_set_report(request: Request, steam_id: str = "",
 # ── Sept 6 item b1: in-game mail (server half) follows the session-report block ──
 
 # Routes: in-game mail (Sept 6 batch, Group 4 item b — server half;
-# migration 297). Design: ai-collab/sept6-triage/group4-design-v2.md §b
-# (B-1 .. B-14, B-L1 .. B-L3); the schema's shape decisions are recorded on
+# migration 297), items B-1 .. B-14 and B-L1 .. B-L3. The schema's shape
+# decisions are recorded on
 # the migration. Player routes resolve their caller from X-Session-Token
 # ALONE — the API contract carries no steam_id — and then run the SAME
 # fail-closed gate the h2h route uses on the id the token names

@@ -3315,7 +3315,7 @@ async def chat_ws_listener():
 # Twitch: the VM overlay keeps its own native IRC read, so bridged twitch
 # copies are dropped there by source. YouTube: this bridge is the ONLY reader
 # anywhere — the VM overlay renders the bridged copies it receives over the
-# SCR websocket (ai-collab/streaming-design-addendum-chat.md).
+# SCR websocket.
 STREAM_BRIDGE_TWITCH_CHANNEL = os.getenv("STREAM_BRIDGE_TWITCH_CHANNEL", "sidscompetitiverounds").lower().lstrip("#")
 # The prefix (`:login!login@login.tmi...`) carries the sender's LOGIN — the
 # stable lowercase handle, captured for mute identity (design S1). The tags
@@ -3487,7 +3487,7 @@ async def youtube_chat_bridge():
     (video id via poll_stream_posts). Polls the OFFICIAL YouTube Data API —
     the previous chat_downloader reader was deleted, not bypassed (#310):
     0.2.8 (its latest release, 2023) is parse-broken against current YouTube
-    page variants, reproduced in ai-collab/streaming-design-addendum-chat.md.
+    page variants.
     Missing creds degrade to a one-time log; Twitch is unaffected. Replays
     after a re-attach are harmless — the server's native-id guard drops them.
 

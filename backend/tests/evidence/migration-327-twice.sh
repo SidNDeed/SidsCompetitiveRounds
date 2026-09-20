@@ -28,8 +28,14 @@ DB="${MIG327_DB:-rj327check}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "${HERE}/../../.." && pwd)"
-FIXTURE="${HERE}/migration-327-fixture.sql"
-MIG="${REPO}/backend/sql/327_ffa_game_number.sql"
+# ROUND 8: run FROM the repository root and name both files RELATIVE to it.
+# psql echoes the path it was handed in every NOTICE it raises, so an absolute
+# path here writes this seat's checkout into a committed evidence file -- which
+# round 7 handled by editing the log afterwards. A path is a fact about the run,
+# so the fix belongs at the site that produces it and not in the transcript.
+cd "${REPO}" || exit 1
+FIXTURE="backend/tests/evidence/migration-327-fixture.sql"
+MIG="backend/sql/327_ffa_game_number.sql"
 ROWS1="$(mktemp)"
 ROWS2="$(mktemp)"
 trap 'rm -f "${ROWS1}" "${ROWS2}"' EXIT
@@ -41,6 +47,25 @@ DUMP="SELECT photon_room_id, game_number, game_number_source
         FROM ffa_matches ORDER BY photon_room_id;"
 
 {
+  # THE INVOCATION, immediately above the results it produced. A log that
+  # prints two runs and no record of what produced them is two transcripts
+  # from a command nobody can rebuild; round 7 carried the usage template
+  # above instead of the line that actually ran.
+  echo "== invocation =="
+  echo "script    backend/tests/evidence/migration-327-twice.sh"
+  echo "cwd       <repo> (the script cd's there; every path below is relative to it)"
+  echo "psql      $("$PSQL" --version 2>&1)"
+  echo "fixture   ${FIXTURE}"
+  echo "migration ${MIG}"
+  echo "database  ${DB} on <host>:<port> as <user>, dropped and recreated above"
+  # The relative path is written out rather than taken from $0, which carries
+  # whatever the caller typed and would put an absolute path here the moment
+  # someone invoked the script by one.
+  echo "command   PSQL=<psql> PGHOST=<host> PGPORT=<port> PGUSER=<user> \\"
+  echo "            MIG327_DB=${DB} bash backend/tests/evidence/migration-327-twice.sh"
+  echo "started   $(date -u '+%Y-%m-%d %H:%M:%S') UTC"
+  echo
+
   echo "== fixture =="
   "$PSQL" -h "$HOST" -p "$PORT" -U "$USER" -d "$DB" -v ON_ERROR_STOP=1 -q -f "$FIXTURE" \
     && echo "fixture applied"

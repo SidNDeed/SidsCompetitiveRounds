@@ -85,9 +85,10 @@ contradicts it is the same defect class as a comment asserting a guarantee the
 code does not supply, so the numbers here are the ones in the list, counted off
 it: 22 unmarked and still live (rounds 1 and 2), 1 unmarked and RETIRED because
 round 4 deleted the code it mutated (prior-tail-only, annotated in place), 16
-marked (r3), 15 marked (r4), 10 marked (r5), 7 marked (r6), 7 marked (r7), and
+marked (r3), 15 marked (r4), 10 marked (r5), 7 marked (r6), 7 marked (r7), 8
+marked (r8), and
 one more that is a committed test rather than a hand-run control
-(backfill-neutered, at the end). Rounds 4 through 7's are the ones with a
+(backfill-neutered, at the end). Rounds 4 through 8's are the ones with a
 NEGATIVE control — an inert edit at the same site that must leave the same
 test GREEN — so each test is shown to redden for the mutation and not for any
 edit at all (#391); the runner, the red line of every mutant and the
@@ -246,6 +247,44 @@ All KILLED:
                            test_report_disconnect_durability.py, which owns the
                            prune sweep's shape -- the one control in this set
                            that names a file other than this one.
+
+  commit-between (r8)      submit_ffa_match: `await db.commit()` between the
+                           lock and the slot it consumes, which unlocks the row
+                           with games_played unchanged. Described as a
+                           structural assertion for four rounds and never RUN
+                           as a mutation; its inert twin is a COMMENT at the
+                           same site, which is the negative control that matters
+                           for a test measured on comment-stripped source
+                           (#441).
+  settlement-lock-removed-live (r8)  _FFA_LOBBY_LOCK_SQL: the row lock comes
+                           off entirely, and the LIVE two-connection contention
+                           test reds -- round 7 had this one as prose saying it
+                           had been hand-run.
+  refusal-after-capture-reuses-stale-progress (r8)  _ffa_progress_after_capture:
+                           return the caller's copy instead of re-reading the
+                           lobby under a fresh lock after the capture.
+  advertised-number-is-not-the-settling-one (r8)  _ffa_progress: emit
+                           `expected_game = games_played`, so the number every
+                           refusal advertises is one the endpoint would refuse.
+  production-cites-a-gitignored-path (r8)  backend/api/main.py: put a citation
+                           of the gitignored scratch back into a shipped file.
+                           The forbidden path is ASSEMBLED in the runner, for
+                           the same reason the evidence control assembles it.
+  relock-gives-up-after-one-attempt (r8)  _ffa_progress_relocked: delete the
+                           second attempt, so a re-read that failed once
+                           answers with the caller's stale-low snapshot
+  evidence-result-pattern-forgets-the-repin (r8)  the result pattern in
+                           test_the_committed_evidence_re_derives_its_own
+                           _numbers: drop the token the re-pin's own
+                           result line uses, so a pattern that was WIDENED
+                           is shown to still red when it stops covering an
+                           artifact this directory actually holds.
+  control-list-drifts-from-the-inventory (r8)  this docstring: misspell the
+                           entry above by one letter, so the check that
+                           every control the runner carries is named here
+                           and pairs with a live test is shown to red on a
+                           control that exists in the runner and nowhere
+                           else.
 
 ...and one more that is a COMMITTED TEST rather than a hand-run control:
   backfill-neutered        327's room_tail backfill: WHERE FALSE. See
@@ -1548,6 +1587,7 @@ def test_the_control_tally_matches_the_list_it_sits_next_to():
         "r5": sum(1 for ln in entries if "(r5)" in ln),
         "r6": sum(1 for ln in entries if "(r6)" in ln),
         "r7": sum(1 for ln in entries if "(r7)" in ln),
+        "r8": sum(1 for ln in entries if "(r8)" in ln),
         "retired": sum(1 for ln in entries if "(retired)" in ln),
     }
     counted["plain"] = len(entries) - sum(counted.values())
@@ -1559,19 +1599,19 @@ def test_the_control_tally_matches_the_list_it_sits_next_to():
     claimed = re.search(
         r"counted off\s*\n?it: (\d+) unmarked and still live .*?(\d+) unmarked and RETIRED"
         r".*?(\d+)\s*\n?marked \(r3\), (\d+) marked \(r4\), (\d+) marked \(r5\),"
-        r" (\d+) marked \(r6\), (\d+) marked \(r7\)",
+        r" (\d+) marked \(r6\), (\d+) marked \(r7\), (\d+)\s*\n?marked \(r8\)",
         doc, re.S)
     assert claimed, "the docstring no longer states a tally in a readable form"
     want = tuple(int(g) for g in claimed.groups())
     have = (counted["plain"], counted["retired"],
             counted["r3"], counted["r4"], counted["r5"], counted["r6"],
-            counted["r7"])
+            counted["r7"], counted["r8"])
     assert want == have, (
         f"the docstring's tally and its own list disagree: claimed {want}, "
         f"listed {have}")
     # ...and the list is not empty, or the whole check passes on nothing.
     assert counted["r4"] >= 10 and counted["r5"] >= 5 and counted["r6"] >= 5
-    assert counted["r7"] >= 5
+    assert counted["r7"] >= 5 and counted["r8"] >= 5
     assert counted["plain"] >= 10
     # The evidence sentence names a path that EXISTS in this repository. Round
     # 5 pointed at two files under the gitignored ai-collab scratch, so the
@@ -1815,6 +1855,7 @@ def test_the_live_checks_cannot_be_skipped_by_a_missing_dsn_alone():
 # Dropping the constraints is harmless in both directions, because each schema
 # block drops and recreates its own tables before using them.
 SCHEMA = """
+DROP TABLE IF EXISTS match_report_quarantine;
 DROP TABLE IF EXISTS ffa_match_players;
 DROP TABLE IF EXISTS ffa_matches;
 DROP TABLE IF EXISTS ffa_lobbies;
@@ -1867,6 +1908,29 @@ CREATE TABLE ffa_match_players (
     gold_gained INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (match_id, player_id)
 );
+-- The capture table, as 169_match_report_quarantine.sql declares the columns
+-- the writer touches, INCLUDING the partial unique index -- that index is the
+-- retry-idempotency the writer keys on, and a test table without it would let
+-- a second delivery insert a second row and call the difference production.
+CREATE TABLE match_report_quarantine (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    mode            VARCHAR(8)  NOT NULL,
+    reason          VARCHAR(64) NOT NULL,
+    http_status     SMALLINT    NOT NULL,
+    group_id        UUID,
+    photon_room_id  VARCHAR(64),
+    reporter_id     UUID REFERENCES players(id) ON DELETE SET NULL,
+    player_ids      UUID[]      NOT NULL DEFAULT '{}',
+    payload         JSONB       NOT NULL,
+    status          VARCHAR(16) NOT NULL DEFAULT 'pending',
+    reviewed_by     UUID REFERENCES players(id) ON DELETE SET NULL,
+    reviewed_at     TIMESTAMPTZ,
+    review_note     TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX uq_quarantine_room
+    ON match_report_quarantine (mode, photon_room_id)
+    WHERE photon_room_id IS NOT NULL;
 """
 
 LOBBY = uuid.UUID("0ea879a4-ff42-44c4-9473-4c58f89ef934")
@@ -2263,8 +2327,11 @@ def test_pg_two_reports_for_one_lobby_cannot_settle_the_same_number():
     `main._ffa_advance_lobby_slot` directly, so the derivation, the lock and
     the increment under test are the ones the endpoint runs.
 
-    Control (hand-run): drop `FOR UPDATE` from `_FFA_LOBBY_LOCK_SQL` and B
-    returns immediately with games_played = 0, deriving 1 exactly as A did."""
+    Control: settlement-lock-removed-live (r8) -- the row lock comes off
+    `_FFA_LOBBY_LOCK_SQL` entirely and B returns immediately with
+    games_played = 0, deriving 1 exactly as A did. Round 7 described that
+    mutation as hand-run, which is a sentence about a run nobody can check; it
+    is in the committed runner now, with its RED line and its inert twin."""
     require_pg()
 
     async def go():
@@ -3085,9 +3152,17 @@ class _FakeRequest:
     url = "http://test/api/v1/ffa/matches"
 
 
-def _endpoint_report(vec, winner, room, *, lobby=None, leave=None, reporter=None):
+def _endpoint_report(vec, winner, room, *, lobby=None, leave=None, reporter=None,
+                     with_slots=False):
     """A real schemas.FfaMatchReport, which is what the endpoint is annotated
-    with and what FastAPI would have validated."""
+    with and what FastAPI would have validated.
+
+    `with_slots` numbers the entries in the order _endpoint_fixture writes
+    member_ids, which is what the endpoint's slot binding compares against. It
+    is off by default because every report built before round 8 is answered by
+    the room-keyed replay echo, which returns ABOVE that binding -- a report
+    that has to travel past it needs the slots, and a report that does not must
+    keep the shape its own test was written against."""
     leave = leave or {}
     return schemas.FfaMatchReport(
         lobby_id=str(lobby or LOBBY),
@@ -3097,10 +3172,11 @@ def _endpoint_report(vec, winner, room, *, lobby=None, leave=None, reporter=None
         is_ranked=True,
         players=[schemas.FfaPlayerEntry(
             steam_id=s, rounds_won=r, points_total=p, kills=k,
+            slot=(i if with_slots else 0),
             left_early=leave.get(s, PRESENT)[0],
             absent=leave.get(s, PRESENT)[1],
             game_points_at_leave=leave.get(s, PRESENT)[2])
-            for s, (r, p, k) in vec.items()])
+            for i, (s, (r, p, k)) in enumerate(vec.items())])
 
 
 async def _endpoint_fixture(games_played, recorded_number, recorded_room,
@@ -3376,6 +3452,30 @@ def test_every_progress_the_endpoint_builds_comes_from_a_locked_slot():
     assert "_race_progress = await _ffa_progress_relocked(" in race
     assert (race.index("_race_progress = await _ffa_progress_relocked(")
             < race.index('"uq_ffa_match_room" not in str('))
+
+    # ...and the exits below a CAPTURE, which round 7 left out. A capture is
+    # not a passive write: _quarantine_report rolls this request's transaction
+    # back and commits its own row, so the lobby lock is released inside it and
+    # every number the caller still holds is a snapshot of a sitting that may
+    # have moved. Both of _ffa_record_and_refuse's raises must answer from a
+    # re-derivation taken AFTER the capture.
+    refuse = _code_lines(inspect.getsource(main._ffa_record_and_refuse))
+    capture = refuse.index("_quarantine_report(")
+    rederive = refuse.index("progress = await _ffa_progress_after_capture(")
+    assert capture < rederive, (
+        "the re-read runs before the capture, so it re-reads a lobby whose "
+        "lock this request is still holding")
+    for arm in ("raise FfaReportRefusal(503,", "raise FfaReportRefusal(status,"):
+        assert arm in refuse, arm
+        assert refuse.index(arm) > rederive, (
+            f"{arm} answers from the copy read before the capture")
+    # The re-derivation is the LOCKED one, not a second bare read of the
+    # counter, and settled_game is carried only while the pair's own
+    # inequality still holds.
+    after = _code_lines(inspect.getsource(main._ffa_progress_after_capture))
+    assert "_ffa_progress_relocked(db, lobby_uuid, progress)" in after
+    assert "SELECT games_played" not in after
+    assert '< int(fresh.get("expected_game", 0))' in after
 
 
 # ── round 6: the exact stake, the bounded scan, the weaker lock ───────────
@@ -4044,6 +4144,17 @@ def test_the_relock_leaves_a_transaction_the_next_read_can_run_in():
     which is the one residue the docstring now states rather than hides."""
     relock = inspect.getsource(main._ffa_progress_relocked)
     body = relock[relock.index("except Exception as _relock_ex:"):]
+    # Round 8 gave the handler a SECOND attempt, which moved the thing this
+    # assertion has to measure. "A rollback somewhere before the fallback is
+    # returned" is now satisfiable by the retry's own rollback, so it would
+    # stay green with the first one deleted -- the defect it exists for. What
+    # is pinned is the rollback BEFORE THE RETRY: a second attempt made inside
+    # a transaction that is still aborted raises for the reason the first one
+    # did, which is a retry that cannot succeed.
+    retry = body.index("await _ffa_lock_lobby_slot(db, lobby_uuid)")
+    assert "await db.rollback()" in body[:retry], (
+        "the relock retries without clearing the failed statement, so the "
+        "second attempt raises for the reason the first one did")
     assert "await db.rollback()" in body[:body.index("return dict(fallback")], (
         "the relock returns its fallback without clearing the failed statement")
     assert "#235" in relock, "the docstring no longer names why the rollback is there"
@@ -4085,11 +4196,34 @@ def test_the_committed_evidence_re_derives_its_own_numbers():
         assert "ai-collab/" not in body, (
             f"{path.name} points at a gitignored path; evidence has to carry "
             f"the output it is evidence of and name instruments a clone has")
+    # ...and each report actually carries run output rather than prose. The
+    # alternation holds one token per ARTIFACT TYPE this directory keeps: a
+    # pytest summary, the migration's second run and its dump comparison, a
+    # mutation RED, and the re-pin's own count. Round 8 added the last of
+    # those. The re-pin states its result as `rows rewritten now : 0`, and
+    # with no token for it this check reddened a report that carried exactly
+    # the result it exists to carry. A rule that refuses a legitimate artifact
+    # does not hold the line; it teaches the next author to pad the file until
+    # the pattern is satisfied, and the padding is what the rule was meant to
+    # catch. So the pattern learns the artifact, rather than the artifact
+    # learning the pattern.
+    result_token = re.compile(
+        r"\d+ passed|second run|rows identical|RED:|rows rewritten now")
     for path in reports:
-        # ...and each report actually carries run output rather than prose.
         body = path.read_text(encoding="utf-8", errors="replace")
-        assert re.search(r"\d+ passed|second run|rows identical|RED:", body), (
-            f"{path.name} states no executed result")
+        assert result_token.search(body), f"{path.name} states no executed result"
+    # Both directions on that pattern, in the test that uses it: a typo in the
+    # alternation would otherwise make the sweep above pass on every file
+    # forever, which is the check that cannot fail (#342/#391). One line of
+    # each artifact type has to match, and prose that describes a run without
+    # reporting one has to not.
+    for positive in ("47 passed, 100 deselected in 10.13s",
+                     "rows rewritten now : 0",
+                     "IDENTICAL: the second run changed no row",
+                     "    RED: E   AssertionError: boom"):
+        assert result_token.search(positive), positive
+    assert not result_token.search(
+        "The runner ran against a real server and everything was fine.")
     # The instruments are here too, or the reports cannot be re-derived.
     names = {p.name for p in files}
     assert any(n.endswith("mutation-runner.py") for n in names), sorted(names)
@@ -4117,3 +4251,363 @@ def test_every_round_seven_control_names_a_test_that_exists():
             in neighbour.read_text(encoding="utf-8")), (
         "the refusal-skips-without-ending-the-transaction control names a "
         "test that is no longer in test_report_disconnect_durability.py")
+
+
+# ── round 8: the capture exits, the realigned resubmission, the shipped files ─
+
+def test_pg_a_refusal_raised_after_a_capture_reads_the_lobby_again():
+    """Control: refusal-after-capture-reuses-stale-progress (r8).
+
+    `_quarantine_report` rolls this request's transaction back before it takes
+    its advisory lock, and commits its own row -- so the lobby lock the endpoint
+    was holding is RELEASED inside the capture, and a report of the same sitting
+    that had been waiting on that row can derive its slot and settle in the gap.
+    The progress the caller is still holding was read before all of that.
+
+    Driven on a real server, through the production refusal path and the
+    production capture writer: the counters are read under the lock, the sitting
+    then advances exactly as a waiting report would advance it, and
+    `_ffa_record_and_refuse` is called with the copy read before the advance.
+    The refusal it raises has to carry the lobby's CURRENT numbers.
+
+    `settled_game` is the other half. It is a claim about a ROW, it does not
+    move when the counter does, and it has to survive the re-read -- while
+    staying strictly below the fresh `expected_game`, which is the pair's own
+    invariant and the one an answer must never break."""
+    require_pg()
+
+    async def go():
+        engine, sm, pids, _mid = await _endpoint_fixture(
+            games_played=1, recorded_number=1, recorded_room="rm_211531_r1")
+        try:
+            async with sm() as db:
+                _row, expected = await main._ffa_lock_lobby_slot(db, LOBBY)
+                # What every answer of this request would have carried: this
+                # report named game 1 and the lobby holds a row for it.
+                stale = main._ffa_progress(expected - 1, settled_game=1)
+                await db.rollback()
+            # The waiting report settles game 2 and consumes the slot.
+            async with sm() as db:
+                await db.execute(text(
+                    "INSERT INTO ffa_matches (id, lobby_id, photon_room_id,"
+                    " winner_id, ended_at, game_number) VALUES"
+                    " (:i, :l, :r, :w, NOW(), CAST(:g AS SMALLINT))"),
+                    {"i": uuid.uuid4(), "l": LOBBY, "r": "rm_211531_r2",
+                     "w": pids[S3], "g": 2})
+                await main._ffa_advance_lobby_slot(db, LOBBY)
+                await db.commit()
+            raised = None
+            async with sm() as db:
+                try:
+                    await main._ffa_record_and_refuse(
+                        db, report=_endpoint_report(ROW_A, S3, "rm_211531_r1"),
+                        lobby_uuid=LOBBY, id_by_steam=dict(pids),
+                        reason="ffa_game_contradiction",
+                        why="game 1 recorded as rm_211531_r1: test",
+                        detail="This game is already recorded",
+                        progress=stale)
+                except main.FfaReportRefusal as ex:
+                    raised = ex
+            async with sm() as db:
+                kept = (await db.execute(text(
+                    "SELECT COUNT(*) FROM match_report_quarantine"
+                    " WHERE group_id = :g"), {"g": LOBBY})).scalar()
+            return stale, raised, int(kept)
+        finally:
+            await engine.dispose()
+
+    stale, raised, kept = run(go())
+    assert stale == {"games_played": 1, "expected_game": 2, "settled_game": 1}
+    assert raised is not None, "_ffa_record_and_refuse did not raise"
+    # The capture really happened, so this is the terminal arm and not the 503.
+    assert kept == 1
+    assert raised.status_code == 409
+    # The counters are the sitting's CURRENT ones, not the pre-capture copy.
+    assert raised.progress["games_played"] == 2, (
+        "the refusal answered with the counter read before the capture")
+    assert raised.progress["expected_game"] == 3
+    # ...and the row claim survived the re-read, still strictly below it.
+    assert raised.progress["settled_game"] == 1
+    assert raised.progress["settled_game"] < raised.progress["expected_game"]
+
+
+def test_pg_a_realigned_resubmission_is_echoed_and_never_settled_twice():
+    """Control: advertised-number-is-not-the-settling-one (r8).
+
+    The client lane's realignment rests on one property of this endpoint, and
+    this is the executed statement of it: the number a terminal refusal
+    ADVERTISES is the number the room must key its next delivery at, and a
+    delivery of one physical game under the room-wide corrected key is answered
+    ONCE -- settled, or echoed against the row that already holds it -- never
+    settled twice.
+
+    Three steps, through the real endpoint, in the order the contract's
+    realignment section describes them:
+
+      1. a report whose tail is AHEAD of the lobby is refused, and the refusal
+         names the lobby's own next slot, in the body field and in the detail
+         string both;
+      2. the room realigns to that number and the first elector settles there;
+         the SECOND elector's delivery of the same physical game carries the
+         same key and the same body, and is answered by the identical-body echo
+         rather than settled again -- which is what makes a room-wide re-key
+         safe where a per-seat one is not;
+      3. a DIFFERENT account under that same key is not echoed and settles
+         nothing: the lobby still holds exactly one row for that game.
+
+    Step 1's settlement is written directly rather than driven through the
+    endpoint. What it stands in for is pinned by
+    test_pg_a_settlement_commits_the_catch_up_and_lands_on_the_free_number;
+    what THIS test is about is the pair -- advertised number, and the answer a
+    delivery keyed at it receives."""
+    require_pg()
+
+    async def go():
+        engine, sm, pids, _mid = await _endpoint_fixture(
+            games_played=2, recorded_number=1, recorded_room="rm_211531_r1")
+        try:
+            # 1. the room is four games ahead of the lobby.
+            ahead = None
+            try:
+                await _call_endpoint(sm, _endpoint_report(
+                    ROW_A, S3, "rm_211531_r7", with_slots=True))
+            except main.FfaReportRefusal as ex:
+                ahead = ex
+            if ahead is None:
+                # Five, because the caller unpacks five: a failure here has to
+                # reach its own assertion rather than a tuple-size error.
+                return ahead, None, None, None, 0
+            advertised = int(ahead.progress["expected_game"])
+            # 2. the room realigns onto `advertised`, and the first elector
+            #    settles the physical game there.
+            async with sm() as db:
+                mid = uuid.uuid4()
+                await db.execute(text(
+                    "INSERT INTO ffa_matches (id, lobby_id, photon_room_id,"
+                    " player_count, winner_id, ended_at, game_number) VALUES"
+                    " (:i, :l, :r, 3, :w, NOW(), CAST(:g AS SMALLINT))"),
+                    {"i": mid, "l": LOBBY,
+                     "r": f"rm_211531_r{advertised}", "w": pids[S3],
+                     "g": advertised})
+                for s, (r, p, k) in ROW_A.items():
+                    await db.execute(text(
+                        "INSERT INTO ffa_match_players (match_id, player_id,"
+                        "  rounds_won, points_total, kills, placement,"
+                        "  rating_change, xp_gained, gold_gained)"
+                        " VALUES (:m, :p, :r, :pt, :k, :pl, :rc, :xp, :gd)"),
+                        {"m": mid, "p": pids[s], "r": r, "pt": p, "k": k,
+                         "pl": 1 if s == S3 else 3, "rc": 2.5 if s == S3 else -1.0,
+                         "xp": 40 if s == S3 else 0, "gd": 7 if s == S3 else 0})
+                await main._ffa_advance_lobby_slot(db, LOBBY)
+                await db.commit()
+            # the second elector, same key, same body.
+            echo = await _call_endpoint(sm, _endpoint_report(
+                ROW_A, S3, f"rm_211531_r{advertised}", with_slots=True))
+            # 3. a different account of that same game, same key.
+            disagreeing = None
+            try:
+                await _call_endpoint(sm, _endpoint_report(
+                    ROW_B, S1, f"rm_211531_r{advertised}", with_slots=True))
+            except Exception as ex:          # noqa: BLE001 - the class is the point
+                disagreeing = ex
+            async with sm() as db:
+                rows = (await db.execute(text(
+                    "SELECT COUNT(*) FROM ffa_matches WHERE lobby_id = :l"
+                    "   AND game_number = CAST(:g AS SMALLINT)"),
+                    {"l": LOBBY, "g": advertised})).scalar()
+            return ahead, advertised, echo, disagreeing, int(rows)
+        finally:
+            await engine.dispose()
+
+    ahead, advertised, echo, disagreeing, rows = run(go())
+    # 1. the refusal is terminal and it names the lobby's own next slot.
+    assert ahead is not None, "an ahead tail was not refused"
+    assert ahead.status_code == 409
+    assert advertised == 3
+    assert ahead.progress == {"games_played": 2, "expected_game": 3}, (
+        "the refusal did not advertise the lobby's free slot")
+    # The same number is in the detail string too, which is the marker the
+    # shipped live-points path already reads (ApiClient.cs:2844).
+    assert "expected_game=3" in ahead.detail
+    # ...and it is a number this endpoint would SETTLE, which is the whole
+    # point of advertising it: a realignment onto a number the rule refuses
+    # would loop the sitting rather than recover it.
+    assert main._ffa_game_number_refusal(advertised, advertised) is None
+    # 2. the second elector's identical body is echoed, not settled again.
+    assert echo is not None
+    assert echo.message == "Already recorded"
+    assert echo.settled_game == advertised
+    assert echo.games_played == 3 and echo.expected_game == 4
+    assert echo.settled_game < echo.expected_game
+    # 3. a different account under that key settles nothing.
+    assert disagreeing is not None, "a contradicting account was not refused"
+    assert rows == 1, "one physical game holds more than one row"
+
+
+def test_no_production_file_cites_the_gitignored_scratch():
+    """Control: production-cites-a-gitignored-path (r8).
+
+    Round 7 closed this for `backend/tests/evidence/` and left the shipped
+    server outside the rule, so main.py went on sending the next reader to the
+    rejoin lane's own brief under the gitignored scratch -- an authority nobody
+    reading this repository can open (#302). The rule is not about that one
+    line: a file we SHIP must not name a path this repository does not contain.
+    The sweep behind this check removed the citation from SEVEN shipped files,
+    on sixteen lines: main.py, pc_portrait.py, discord_bot.py and four
+    migrations. Counted by the grep the sweep itself ran, not by memory.
+
+    Scoped to the shipped server deliberately. A TEST may name the review
+    document it pins -- this file does -- and the evidence directory has its own
+    rule in test_the_committed_evidence_re_derives_its_own_numbers."""
+    root = pathlib.Path(__file__).resolve().parent.parent.parent
+    files = sorted((root / "backend" / "api").glob("*.py"))
+    files.append(root / "backend" / "discord_bot.py")
+    files += sorted((root / "backend" / "sql").glob("*.sql"))
+    # A check over an empty set passes for ever (#342), so the set is asserted
+    # before it is used, and the two files the sweep is anchored on by name.
+    assert len(files) >= 20, [f.name for f in files]
+    assert all(f.is_file() for f in files), [f.name for f in files if not f.is_file()]
+    names = {f.name for f in files}
+    assert {"main.py", "discord_bot.py"} <= names, sorted(names)
+
+    scratch = "ai-collab/"
+
+    def offends(body):
+        return scratch in body
+
+    offenders = [f.relative_to(root).as_posix() for f in files
+                 if offends(f.read_text(encoding="utf-8", errors="replace"))]
+    assert not offenders, (
+        f"a shipped file cites the gitignored scratch: {offenders} -- a comment "
+        f"has to name an authority a reader of this repository can open")
+    # The predicate is exercised in BOTH directions on the same code path, so a
+    # typo in `scratch` cannot make the sweep above pass on everything (#391).
+    assert offends("# Design: " + scratch + "rejoin/A1-BRIEF.md")
+    assert not offends("# Schema: backend/sql/327_ffa_game_number.sql")
+
+
+def test_every_round_eight_control_names_a_test_that_exists():
+    """The same pairing for round 8. Two of these name a test this round did
+    not write -- the point of those two is that a mutation nobody had ever RUN
+    is now run against the test that was already there."""
+    mod = sys.modules[__name__]
+    for name in ("test_the_lock_the_derivation_and_the_increment_are_one_transaction",
+                 "test_pg_two_reports_for_one_lobby_cannot_settle_the_same_number",
+                 "test_pg_a_refusal_raised_after_a_capture_reads_the_lobby_again",
+                 "test_pg_a_realigned_resubmission_is_echoed_and_never_settled_twice",
+                 "test_no_production_file_cites_the_gitignored_scratch",
+                 "test_the_committed_evidence_re_derives_its_own_numbers",
+                 "test_every_mutation_control_the_runner_carries_is_named_and_paired",
+                 "test_pg_the_relock_retries_once_and_answers_from_the_lobby_not_the_snapshot"):
+        assert callable(getattr(mod, name, None)), name
+
+
+def test_every_mutation_control_the_runner_carries_is_named_and_paired():
+    """Control: control-list-drifts-from-the-inventory (r8).
+
+    The pairing tests above are hand-written lists, and a hand-written list
+    of a set that GROWS under-covers the moment someone forgets to extend
+    it. Round 8 proved that on itself: it added a twenty-first control and
+    every existing check stayed green without it. The tally check has the
+    same shape from the other side -- it reads the docstring's claimed
+    numbers against the docstring's own list -- so a control living in the
+    RUNNER and in neither list was invisible to both at once.
+
+    This derives the set instead of restating it. It loads the committed
+    runner and, for every control it carries, requires two things: this
+    module's docstring inventory NAMES it, and the test it names EXISTS.
+    Adding a control without listing it, or naming a test that has since
+    been renamed, reds here rather than passing quietly (#342).
+    """
+    import importlib.util
+
+    evidence = pathlib.Path(__file__).resolve().parent / "evidence"
+    runner_path = evidence / "mutation-runner.py"
+    assert runner_path.is_file(), runner_path
+    spec = importlib.util.spec_from_file_location(
+        "_scr_mutation_runner", runner_path)
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+
+    controls = list(runner.CONTROLS)
+    assert len(controls) >= 22, len(controls)
+
+    # The SAME parse the tally check uses, so the two cannot disagree
+    # about what counts as an inventory entry.
+    doc = sys.modules[__name__].__doc__
+    listed = set()
+    for line in doc.splitlines():
+        m = re.match(r"^  ([a-z0-9-]+)( \((?:r3|r4|retired)\))? +\S", line)
+        if m:
+            listed.add(m.group(1))
+    assert len(listed) >= 60, len(listed)
+
+    backend = pathlib.Path(__file__).resolve().parent.parent
+    for control in controls:
+        name, test = control[0], control[5]
+        assert name in listed, (
+            f"{name} is a control the runner carries and this module's "
+            f"docstring inventory does not name")
+        rel_path, func = runner.split_test(test)
+        target = backend / rel_path
+        assert target.is_file(), (name, rel_path)
+        body = target.read_text(encoding="utf-8", errors="replace")
+        assert f"def {func}(" in body, (
+            f"{name} names {func}, which does not exist in {rel_path}")
+
+    # Both directions, or the two sweeps above pass on a parse that
+    # accidentally swallowed the whole docstring.
+    assert "definitely-not-a-control" not in listed
+    assert "relock-gives-up-after-one-attempt" in listed
+    assert "evidence-result-pattern-forgets-the-repin" in listed
+
+
+def test_pg_the_relock_retries_once_and_answers_from_the_lobby_not_the_snapshot():
+    """Control: relock-gives-up-after-one-attempt (r8).
+
+    The r5 gate's other B3 clause: a re-read that failed once answered with the
+    caller's pre-rollback copy. That copy is stale-LOW -- safe, in that a client
+    acting on it is refused rather than misled, and expensive, in that the
+    refusal costs one more game of the sitting before it realigns.
+
+    Under asyncpg one failed statement poisons the whole transaction (#235), so
+    the likeliest reason the first attempt failed is a statement that the
+    handler's own rollback has just cleared. This drives exactly that state on a
+    real server: a statement is failed on purpose, the transaction is left
+    aborted, and `_ffa_progress_relocked` is called with a fallback that is
+    deliberately nothing like the truth. The answer has to be the LOBBY's."""
+    require_pg()
+
+    async def go():
+        engine, sm, _pids, _mid = await _endpoint_fixture(
+            games_played=4, recorded_number=1, recorded_room="rm_211531_r1")
+        try:
+            async with sm() as db:
+                # Poison it the way a real failure does. Nothing else in this
+                # transaction can run until it is ended.
+                poisoned = False
+                try:
+                    await db.execute(text("SELECT no_such_column_anywhere"))
+                except Exception:
+                    poisoned = True
+                # Prove the transaction really is unusable, or the retry is
+                # being credited for a state that never existed (#342).
+                still_broken = False
+                try:
+                    await db.execute(text("SELECT 1"))
+                except Exception:
+                    still_broken = True
+                snapshot = {"games_played": 0, "expected_game": 1}
+                answer = await main._ffa_progress_relocked(db, LOBBY, snapshot)
+            return poisoned, still_broken, snapshot, answer
+        finally:
+            await engine.dispose()
+
+    poisoned, still_broken, snapshot, answer = run(go())
+    assert poisoned, "the statement that was supposed to fail did not"
+    assert still_broken, (
+        "the transaction was not left aborted, so this test never posed the "
+        "question it exists to pose")
+    assert snapshot == {"games_played": 0, "expected_game": 1}
+    assert answer == {"games_played": 4, "expected_game": 5}, (
+        "the re-read gave up after one attempt and answered with the snapshot")

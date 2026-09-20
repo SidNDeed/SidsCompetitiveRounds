@@ -1,0 +1,118 @@
+The route manifest re-pin, RUN LAST, 2026-09-20 (round 8)
+=========================================================
+
+B14 asks that `backend/tests/route_manifest_net_seat.json` be re-pinned by its
+OWN tool after the last edit of any kind. Round 7 met the first half and left
+no record of the second: its notes asserted that the final hashes passed, with
+no command and no result committed, and a manual edit or a pre-final run would
+look exactly the same from outside. This file is that record.
+
+Instrument: `backend/tests/repin_route_manifest.py`, which calls the same
+`_route_identities` the gate compares against, so the tool and the gate cannot
+disagree by construction (#596 -- a previous re-pin tool computed the
+fingerprint a second way and the gate then failed closed on a route nobody had
+touched).
+
+== when this ran ==
+LAST, and this round that word had to be earned twice. It runs after the final
+source edit, after both full suites, after the PostgreSQL-gated selection, and
+after the mutation runner -- that is, after everything in the round that reads
+or touches the tree. The order is deliberate: the gate that reads this manifest
+runs INSIDE those suites, so a re-pin that moved a fingerprint afterwards would
+leave a green suite standing behind a manifest it never saw.
+
+The mutation runner runs between the suites and this re-pin, which is safe for
+one stated reason rather than by assumption: it restores every file it touches
+from a byte-exact copy and compares md5 before and after, printing the
+comparison in its own log. `route_manifest_net_seat.json` is not among the
+files it touches at all.
+
+== what a clean result means here ==
+`rows rewritten now : 0` is the result this round expects and requires. The
+manifest already held every fingerprint the live tree produces, so the tool
+changed nothing -- which is the positive statement that the committed manifest
+and the committed code agree at the tip. A non-zero count at this point would
+mean the tree moved after the suites certified it, and the suites would have to
+be re-run rather than the number explained away.
+
+That `rows rewritten now : 0` IS a result, rather than the absence of one, had
+to be settled this round rather than assumed. The evidence check that reads
+this directory did not recognise the phrase at all, and so reddened this report
+as though it carried nothing but prose -- reddening the one artifact that was
+carrying exactly the result it exists to carry. The
+pattern learned the artifact rather than the artifact learning the pattern: a
+rule that refuses a legitimate result does not hold a line, it teaches the next
+author to pad the file until the rule is satisfied, and the padding is what the
+rule exists to catch. The widening carries its own proof -- a both-directions
+block inside the check and the `evidence-result-pattern-forgets-the-repin`
+mutation control, which drops the new token and reds.
+
+`MOVED vs HEAD` is a different question and is NOT zero: it compares this
+working copy against the manifest committed at HEAD, so it names the routes
+this BRANCH changes. Two are expected and both are routes this round touched:
+
+  main.submit_ffa_match        -- the refusal path re-derives its progress
+                                  under a fresh lock after a capture
+  main.team_series_report_dc   -- a comment in it cited the gitignored scratch
+                                  and was replaced by a tracked authority
+
+A route that moved for a reason nobody can name is a finding, not a re-pin;
+these two are named.
+
+== the one row the counts differ by, also named ==
+The run prints `manifest rows : 362` and `fingerprinted : 361`, and an
+unexplained gap of one is a stop sign rather than a rounding error. It is a
+single row that carries no fingerprint element at all --
+`GET /api/v1/matches/by-code/{code}` (`main.get_match_by_code`) -- so the tool
+skips it by the same length test it has always used. It predates this round,
+this round does not touch that route, and nothing here changes the rule. It is
+named so that the next reader can tell a deliberate omission from a row that
+went missing.
+
+------------------------------------------------------------------------------
+THE RUN, verbatim from here down
+------------------------------------------------------------------------------
+command   python backend/tests/repin_route_manifest.py
+cwd       <repo>
+run at    2026-09-20 23:29:47 UTC
+
+manifest rows      : 362
+fingerprinted      : 361
+rows rewritten now : 0
+MOVED vs HEAD      : 2
+   main.submit_ffa_match                      b4a2693a -> 9a1f0ead
+   main.team_series_report_dc                 34380c55 -> 8abce0df
+ENTRY POINTS moved vs HEAD: 0
+(dry run; pass --write)
+repin rc=0
+
+------------------------------------------------------------------------------
+THE CLOSING CHECK, run against this directory AS COMMITTED
+------------------------------------------------------------------------------
+Every check that reads this directory, re-run after each file in it
+was final -- including this one, up to the line above. It is the only
+way the directory's own rules (each report carries an executed result,
+none cites a path outside the repository, and every mutation control
+the runner carries is named in the inventory and pairs with a test
+that exists) are checked against the bytes that ship rather than
+against an earlier draft of them.
+
+command   python -m pytest tests/test_ffa_game_number_anchor.py -q -p no:cacheprovider -k "committed_evidence or round_eight_control or round_seven_control or production_file or runner_carries"
+cwd       <repo>/backend
+run at    2026-09-20 23:31:07 UTC
+.....                                                                    [100%]
+5 passed, 143 deselected in 9.34s
+pytest rc=0
+
+This file grew by the section you are reading AFTER that run, which is
+stated rather than hidden. So the check was run once more, on the
+final bytes, and its result is the last line of this file.
+
+That does not regress forever, and the reason is worth one sentence:
+what the check tests is a PROPERTY of each file -- it carries an
+executed result, and it cites no path outside the repository -- and
+appending a line that itself carries an executed result and no path
+preserves both. The second run is therefore the fixed point, not the
+start of a third.
+
+Re-run on the final bytes of this file, same command and cwd: 5 passed, 143 deselected in 4.13s
