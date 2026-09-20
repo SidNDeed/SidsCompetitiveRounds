@@ -32,12 +32,18 @@ namespace CompetitiveRounds
     /// design doc BEFORE the spectator seat itself exists.
     ///
     /// PRECISION (Codex round 2): the fast path is "no spectator AND no frozen
-    /// roster". Nothing calls FreezeFighterRoster in the shipped build, so
-    /// RosterFrozen is false everywhere and the guarantee holds exactly as
-    /// stated. Once Phase 2 freezes a roster, these helpers additionally
-    /// exclude actors that are not ON it — which is the point of freezing, and
-    /// is a deliberate divergence from raw PlayerList, not a violation of the
-    /// inertness claim.
+    /// roster", so the inertness above is conditional on BOTH.
+    ///
+    /// CORRECTED: this used to say "nothing calls FreezeFighterRoster in the
+    /// shipped build, so RosterFrozen is false everywhere". That stopped being
+    /// true when the match-start freeze landed. GameStateWatcher calls
+    /// FreezeFighterRoster at three sites, and from the first of them in a
+    /// match these helpers additionally exclude actors that are not ON the
+    /// frozen roster. That exclusion is the point of freezing and a deliberate
+    /// divergence from raw PlayerList; what is no longer true is the claim that
+    /// it never happens. A consumer that must see the RAW roster — the bug-391
+    /// roster census is one — reads PhotonNetwork.PlayerList itself rather than
+    /// relying on these helpers being inert.
     ///
     /// Classification is CACHED BY ActorNumber at first sight and is
     /// immutable for the lifetime of the room (design §3.2): an actor that
@@ -382,9 +388,11 @@ namespace CompetitiveRounds
         // ── the inertness fast path ──────────────────────────────────────
 
         /// <summary>True only if at least one actor in the room declared the
-        /// spectator role. Every helper below short-circuits on this, so with
-        /// no spectator present they are byte-for-byte equivalent to the raw
-        /// Photon reads they replace.
+        /// spectator role. Every helper below short-circuits on this AND on an
+        /// unfrozen roster, so with no spectator present and no frozen roster
+        /// they are byte-for-byte equivalent to the raw Photon reads they
+        /// replace. Once a match has frozen its roster the short-circuit stops
+        /// applying, spectator or no spectator.
         ///
         /// ALLOCATION-FREE (Codex r1 find 12): PUN's PlayerList getter sorts
         /// and ToArray()s on every access, so using it here would make every
@@ -460,9 +468,11 @@ namespace CompetitiveRounds
                 // roster — otherwise freezing {A,B} and then admitting a late
                 // actor C with no spectator in the room returned C as a
                 // fighter, defeating the freeze in exactly the case it exists
-                // for. Still fully inert in the shipped build: nothing calls
-                // FreezeFighterRoster, so RosterFrozen is false everywhere.
-                if (!AnySpectatorPresent() && !RosterFrozen) return list;   // inert: same instance
+                // for. The freeze is LIVE: the match-start sites in
+                // GameStateWatcher freeze the roster, so this fast path stops
+                // applying from there and the filtered branch below is the one a
+                // match actually runs.
+                if (!AnySpectatorPresent() && !RosterFrozen) return list;   // fast path: same instance
                 var keep = new List<PhotonPlayer>(list.Length);
                 for (int i = 0; i < list.Length; i++)
                 {
@@ -506,7 +516,7 @@ namespace CompetitiveRounds
                 if (!PhotonNetwork.InRoom) return 0;
                 var room = PhotonNetwork.CurrentRoom;
                 if (room == null) return 0;
-                if (!AnySpectatorPresent() && !RosterFrozen) return room.PlayerCount;   // inert
+                if (!AnySpectatorPresent() && !RosterFrozen) return room.PlayerCount;   // fast path
                 // Same frozen-roster rule as ActiveFighters — this count feeds
                 // quorum and start decisions, so the two MUST agree.
                 return ActiveFighters().Length;
@@ -538,7 +548,7 @@ namespace CompetitiveRounds
                 var room = PhotonNetwork.CurrentRoom;
                 if (room == null) return 0;
                 if (!AnySpectatorPresent() && !RosterFrozen)
-                    return Math.Max(0, room.PlayerCount - 1);  // inert
+                    return Math.Max(0, room.PlayerCount - 1);  // fast path
                 return Math.Max(0, ActiveFighterCount() - (LocalIsSpectator ? 0 : 1));
             }
             catch { return 0; }
