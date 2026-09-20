@@ -217,6 +217,45 @@ def test_the_refusal_constant_does_not_promise_a_capture_the_server_may_not_make
         "503 has been pulled into the terminal set")
 
 
+def test_the_corrected_403_doc_does_not_put_the_game_number_behind_a_403():
+    """The correction's own claim, pinned against the endpoint it describes.
+
+    The retracted sentence said 403 was the answer to a key whose tail is not
+    games_played + 1. The first rewrite of it kept that cause in the list while
+    retracting it in the same breath -- the same defect one layer down, because
+    this endpoint has no 403 keyed on the game number at all: a tail naming a
+    game the lobby already recorded gets the idempotent replay echo, and a tail
+    past the lobby's limit gets 409, the settled code this client already
+    treats as terminal. So the doc is asserted NOT to name the tail among the
+    403 causes, and the endpoint is READ to check that this stays true, rather
+    than the doc being trusted about the far side.
+    """
+    doc = _doc_before(_read("plugin", "FfaReportRules.cs"),
+                      "internal const long QuarantinedRefusalStatus = 403;")
+    flat = " ".join(doc.replace("///", " ").split())
+    assert "no 403 keyed on the game number" in flat, (
+        "the doc no longer states the thing its retraction turns on")
+    assert "game tail" not in flat, (
+        "the doc has re-acquired the cause it retracts")
+
+    main_py = _read("backend", "api", "main.py")
+    i = main_py.index("async def submit_ffa_match(")
+    j = main_py.index(chr(10) + "@app.", i)
+    span = main_py[i:j]
+    seen = span.split("HTTPException(403")
+    assert len(seen) > 1, "no 403 in the endpoint at all -- wrong span"
+    for piece in seen[1:]:
+        detail = piece.split(")")[0].lower()
+        for word in ("game limit", "duplicate", "games_played", "game number"):
+            assert word not in detail, (
+                "the endpoint now answers 403 to %r; the client doc says it "
+                "does not" % word)
+    assert 'HTTPException(409, "Lobby game limit reached")' in span, (
+        "the limit refusal is no longer the settled code the doc names")
+    assert "_ffa_replay_echo" in span, (
+        "the idempotent echo the doc names is gone from the endpoint")
+
+
 def test_a_terminally_refused_report_is_kept_by_the_seat_that_filed_it():
     """The behaviour half. The client stopped queueing 409/403 (correctly -- a
     resend is refused identically and a re-key is a second settlement), which

@@ -27,15 +27,20 @@ namespace CompetitiveRounds
         /// WHAT THIS CODE DOES NOT MEAN. It used to be documented here as the
         /// endpoint's answer to a key whose tail is not the lobby's
         /// games_played + 1, refused "and captured for recovery". Neither half
-        /// survives contact with the endpoint: 403 is the answer to a signature
-        /// that does not verify, to a player set that is not exactly the
-        /// lobby's frozen roster, to a player count that disagrees with the
-        /// row, and to a slot that disagrees with the lobby's ordering, as
-        /// well as to a rejected game tail — and capture-for-recovery is a
-        /// property of SOME of those paths and not of the code. A comment that
-        /// promises a capture the server may not have made tells the next
-        /// reader a refused game is recoverable on the far side when it may
-        /// exist nowhere at all.
+        /// survives contact with the endpoint, and the tail is the plainer miss:
+        /// the endpoint has no 403 keyed on the game number at all. A key whose
+        /// tail names a game the lobby already recorded is answered with the
+        /// idempotent replay echo rather than a refusal, and a tail past the
+        /// lobby's game limit is answered 409 -- the SETTLED code, which this
+        /// client already treats as terminal. What 403 does answer is a
+        /// signature that does not verify, a player set that is not exactly the
+        /// lobby's frozen roster, a player count that disagrees with the row, a
+        /// slot that disagrees with the lobby's ordering, and a v1 signature
+        /// sent to a lobby that requires the current form. Only that last one
+        /// captures anything -- it quarantines the payload for an admin -- so
+        /// capture is a property of ONE of those paths and not of the code, and
+        /// a comment that promises it tells the next reader a refused game is
+        /// recoverable on the far side when it may exist nowhere at all.
         ///
         /// So what this constant names is only what every 403 from this
         /// endpoint has in common: the server read the body, understood it,
