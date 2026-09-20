@@ -1213,7 +1213,7 @@
           ],
           "main",
           "team_series_report_dc",
-          "c320986e22d61d00a4eaf59e73ede7e50989a240"
+          "6cd18f23beca780e939e5d3a67b29beda769425d"
         ],
         [
           "/api/v1/team/series/{series_id}/spawn-confirm",
@@ -1231,7 +1231,7 @@
           ],
           "main",
           "team_series_state",
-          "7cb9b40deb99657310762d471f25f8249906c334"
+          "c61701ef73acc513d5290ffe7ded5752657a3ac1"
         ]
       ]
     },
@@ -2749,7 +2749,7 @@
           ],
           "main",
           "team_queue_poll",
-          "82207fb97e7f0e1ec19ed8d58db22e9807d8aa60"
+          "8ee2c8dc2ef3659280dfb036e7d00f2effcbb8c7"
         ],
         [
           "/api/v1/team/queue/preferred-team",
@@ -3317,7 +3317,7 @@
       [
         "main",
         "lifespan",
-        "f037943aaece916ad3585ccd36a2520ee787339a"
+        "16447dee1bb3a017f05924a3c94dbcbd2abd3d00"
       ]
     ]
   },
