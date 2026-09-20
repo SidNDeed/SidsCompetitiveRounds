@@ -3514,10 +3514,19 @@ namespace CompetitiveRounds
                     string ffaCause;
                     if (TransportExit.TryGetFreshInvoluntary(TransportExit.NowSeconds(), out ffaCause))
                     {
-                        Plugin.Log.LogInfo($"[POLL] FFA exit followed an involuntary disconnect cause={ffaCause}");
-                        CompetitiveUI.ShowNotification(
+                        // The toast is the nicer surface, not the carrying
+                        // one: it declines the message when the player has
+                        // notifications off or a critical cue owns the slot,
+                        // and says so by returning false. The amber transport
+                        // line raised at the disconnect is what guarantees the
+                        // player is told; this is an upgrade on top of it.
+                        // The result is LOGGED rather than discarded so the
+                        // witness shows which surface actually spoke.
+                        bool toasted = CompetitiveUI.ShowNotification(
                             "Match interrupted - the connection to the match server was lost",
                             new Color(1f, 0.7f, 0.3f));
+                        Plugin.Log.LogInfo(
+                            $"[POLL] FFA exit followed an involuntary disconnect cause={ffaCause} toast={(toasted ? "shown" : "declined")}");
                     }
                 }
                 else if (isTracking && !gameOverReported)
@@ -3603,13 +3612,17 @@ namespace CompetitiveRounds
                         string dcCause;
                         bool involuntaryExit = TransportExit.TryGetFreshInvoluntary(
                             TransportExit.NowSeconds(), out dcCause);
-                        if (involuntaryExit)
-                            Plugin.Log.LogInfo($"[POLL] exit followed an involuntary disconnect cause={dcCause}");
-                        CompetitiveUI.ShowNotification(
+                        // Same handover as the FFA path above: this toast may
+                        // be declined, and on an involuntary exit the amber
+                        // transport line is the surface that cannot decline.
+                        bool toasted = CompetitiveUI.ShowNotification(
                             involuntaryExit
                                 ? "Match interrupted - the connection to the match server was lost"
                                 : "Match canceled (disconnect)",
                             new Color(1f, 0.7f, 0.3f));
+                        if (involuntaryExit)
+                            Plugin.Log.LogInfo(
+                                $"[POLL] exit followed an involuntary disconnect cause={dcCause} toast={(toasted ? "shown" : "declined")}");
                     }
                 }
 

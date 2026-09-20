@@ -188,6 +188,7 @@ namespace CompetitiveRounds
             _causeAtS = 0.0;
             _noticeUntilS = 0.0;
             _noticeSilentMs = 0;
+            _lossUntilS = 0.0;
         }
 
         // ── cause recording ──────────────────────────────────────────────
@@ -245,14 +246,83 @@ namespace CompetitiveRounds
             return !wasActive;
         }
 
-        /// <summary>Recovery, room edge, disconnect handled: the notice goes
-        /// away. Idempotent - the sample loop calls it on every healthy
-        /// sample.</summary>
+        /// <summary>Recovery, room edge, disconnect handled: the PRE-disconnect
+        /// notice goes away. Idempotent - the sample loop calls it on every
+        /// healthy sample.
+        ///
+        /// Deliberately does NOT touch the transport-loss notice below. The
+        /// two are raised by different events and cleared by different ones:
+        /// this one is about a silence that may still recover, that one is
+        /// about a connection that did not. A shared clear would take the
+        /// post-disconnect line down on the room edge that follows the
+        /// disconnect, which is the exact moment the player arrives in the
+        /// menu to read it.</summary>
         internal static void ClearSilence()
         {
             _noticeUntilS = 0.0;
             _noticeSilentMs = 0;
         }
+
+        // ── the post-disconnect notice ───────────────────────────────────
+
+        private static double _lossUntilS;
+
+        /// <summary>The transport failed and Photon has given up: replace the
+        /// "you may be dropped" warning with the one that says it happened.
+        ///
+        /// This is raised on the same surface as the pre-disconnect line, and
+        /// for the same reason that line is not behind the [Network] opt-in: a
+        /// warning that only appears for seats that switched a diagnostic on
+        /// would never reach the player it is for (#438/#443). The toast
+        /// surface cannot carry this message on its own - it renders nothing
+        /// when the player has notifications switched off and nothing when a
+        /// critical cue still owns the slot, and it reports both by returning
+        /// false. Handing the message to a surface that can silently decline
+        /// it, while tearing down the surface that cannot, is how a player
+        /// ends up staring at the menu with no explanation at all.
+        ///
+        /// Supersedes the silence warning rather than sitting beside it: by
+        /// now there is nothing to pre-warn about. Expires by default, on the
+        /// same hold window and for the same reason (#276) - after the
+        /// disconnect no further sample arrives to clear it, so a notice that
+        /// waited to be cleared would stay up for the rest of the
+        /// session.</summary>
+        internal static void NoteTransportLoss(double nowSeconds)
+        {
+            ClearSilence();
+            _lossUntilS = nowSeconds + NoticeHoldSeconds;
+        }
+
+        /// <summary>The whole notice decision for a disconnect, in one place
+        /// the harness can execute rather than as a branch inside the Photon
+        /// callback it cannot compile. An involuntary cause REPLACES the
+        /// pre-disconnect warning with the post-disconnect line; any other
+        /// cause clears the warning and raises nothing, because a player who
+        /// chose to leave needs no explanation. Returns TRUE when the
+        /// post-disconnect line was raised.</summary>
+        internal static bool NoteDisconnectNotice(string causeName, double nowSeconds)
+        {
+            if (IsInvoluntaryCause(causeName))
+            {
+                NoteTransportLoss(nowSeconds);
+                return true;
+            }
+            ClearSilence();
+            return false;
+        }
+
+        /// <summary>Whether the post-disconnect line should be on screen.</summary>
+        internal static bool TransportLossActive(double nowSeconds)
+        {
+            if (_lossUntilS <= 0.0) return false;
+            if (nowSeconds > _lossUntilS) return false;
+            return true;
+        }
+
+        // A NEW room is not the place to still be explaining the last one, and
+        // the join edge already handles that: OnJoinedRoom calls ResetAll,
+        // which clears this notice with everything else. The room-EXIT path
+        // deliberately does not - see ClearSilence.
 
         /// <summary>Whether a notice should be on screen now, and the worst
         /// silence it was raised on.</summary>

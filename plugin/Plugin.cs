@@ -4050,13 +4050,31 @@ namespace CompetitiveRounds
             // to leave, and the player was told nothing about why the game
             // ended. Record it before anything below can return early. The
             // store keeps ONLY involuntary causes, only for a short validity
-            // window, and any other cause clears it. The pre-disconnect notice
-            // has done its job by the time we are here — the room-exit toast
-            // is what explains this — so it comes down in the same statement.
+            // window, and any other cause clears it.
+            //
+            // The notice is HANDED OVER here, not torn down. An earlier
+            // version cleared it and left the explaining to the room-exit
+            // toast, which is a surface that can decline the message: it
+            // renders nothing when the player has notifications switched off,
+            // and nothing while a critical cue still owns the slot, reporting
+            // both by returning false. The amber line is deliberately not
+            // behind the [Network] opt-in so that it reaches the player it is
+            // for, so clearing it and promising a toast instead moved the one
+            // guaranteed message onto the one that is not — and removed it a
+            // full hold window before it would have expired. A player with
+            // notifications off then saw the warning vanish and nothing take
+            // its place, which is the complaint this item exists to fix.
+            //
+            // So: an involuntary cause REPLACES the "you may be dropped"
+            // warning with the one that says it happened, on the same
+            // surface; a cause the player chose clears it as before, because
+            // someone who pressed Leave needs no explanation.
             try
             {
-                TransportExit.NoteDisconnect(cause.ToString(), TransportExit.NowSeconds());
-                TransportExit.ClearSilence();
+                double nowS = TransportExit.NowSeconds();
+                string dcCause = cause.ToString();
+                TransportExit.NoteDisconnect(dcCause, nowS);
+                TransportExit.NoteDisconnectNotice(dcCause, nowS);
             }
             catch { }
             // Release B §1: the head-to-head line dies with the room — first

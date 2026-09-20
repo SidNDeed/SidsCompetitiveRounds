@@ -9595,9 +9595,9 @@
    "kind": "Tr"
   },
   "Match interrupted - the connection to the match server was lost": {
-   "surface": "GameStateWatcher",
-   "location": "PollRoomState",
-   "kind": "ShowNotification"
+   "surface": "GameStateWatcher, LagNotices",
+   "location": "PollRoomState, TransportSilenceLine",
+   "kind": "ShowNotification, Tr"
   },
   "Match recorded": {
    "surface": "ApiClient",

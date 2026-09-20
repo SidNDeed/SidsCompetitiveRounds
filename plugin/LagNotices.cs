@@ -373,8 +373,24 @@ namespace CompetitiveRounds
         {
             try
             {
+                double now = TransportExit.NowSeconds();
+                // The post-disconnect line first: once the connection is gone
+                // there is nothing left to pre-warn about. The two are
+                // mutually exclusive by construction (NoteTransportLoss clears
+                // the silence notice); the order here means the screen still
+                // cannot carry both if a later caller raises them together.
+                //
+                // NOT a new catalogue entry: this is the same string the toast
+                // already shows, so both surfaces say the same words and the
+                // existing es/ru/uk/sv entries cover it. The toast stays where
+                // it is — it is the nicer surface when it is available — but
+                // it is no longer the only one carrying the message, because
+                // it renders nothing when the player has notifications off or
+                // a critical cue owns the slot.
+                if (TransportExit.TransportLossActive(now))
+                    return I18n.Tr("Match interrupted - the connection to the match server was lost");
                 int silentMs;
-                if (!TransportExit.SilenceNoticeActive(TransportExit.NowSeconds(), out silentMs)) return null;
+                if (!TransportExit.SilenceNoticeActive(now, out silentMs)) return null;
                 return I18n.TrF("No data from the match server for {0}s - you may be dropped",
                                 TransportExit.SilenceSeconds(silentMs));
             }
