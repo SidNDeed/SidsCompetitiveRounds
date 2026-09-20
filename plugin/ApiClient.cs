@@ -15538,6 +15538,15 @@ namespace CompetitiveRounds
                 url += $"&expected_lobby_id={UnityWebRequest.EscapeURL(expectedLobby)}";
             if (!string.IsNullOrEmpty(cause))
                 url += $"&cause={UnityWebRequest.EscapeURL(cause)}";
+            // Bug 392: the cause that actually goes on the wire, named in the
+            // log. Without it the attestation is unobservable on this seat —
+            // the URL is not logged, and the difference between the two
+            // in-room tags is the whole point of the change, so a run that
+            // cannot show which one was sent proves nothing (#438/#443). One
+            // line per leave: the "leaving" early-return above bounds it.
+            Plugin.Log.LogInfo(
+                $"[FFA] leave cause={(string.IsNullOrEmpty(cause) ? "(none)" : cause)} " +
+                $"involuntaryCapability={ServerAcceptsInvoluntaryFfaCause}");
             Plugin.Instance.StartCoroutine(PostRequestWithRetry(url, "",
                 (ok, resp) =>
                 {
