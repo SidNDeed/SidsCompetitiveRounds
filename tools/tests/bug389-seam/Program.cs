@@ -16,6 +16,12 @@ using CompetitiveRounds;
 //   mutation flat     : F8 must FAIL;  F3a control must PASS
 //   mutation selpos   : F9 must FAIL;  F5 control must PASS
 //   mutation misindex : F10 must FAIL; F11 control must PASS
+//   mutation unread   : F14 must FAIL; F15 control must PASS
+//   mutation capkey   : C1 must FAIL;  C2 control must PASS
+//   mutation reason   : S1 must FAIL;  S2 control must PASS
+//   mutation sqrange  : F16 must FAIL; F3a control must PASS
+//   mutation fighterkeys : K1 must FAIL; K2 control must PASS
+//   mutation prefixwrite : P2 must FAIL; P1 control must PASS
 //
 // THE SELECTION BRANCH IS CHOSEN PER MODE, because vanilla has more than one
 // rule and this mod replaces one of them in FFA only. Tests that describe an FFA
@@ -59,7 +65,23 @@ internal static class Program
         return c;
     }
 
-    private static readonly Func<int, bool> SeesAll = delegate (int id) { return true; };
+    /// <summary>Vanilla's CanSeePlayer is a live scene query, so the seam takes
+    /// three answers rather than a bool: it can say yes, it can say no, and it
+    /// can fail to answer. Only the last one defers.</summary>
+    private static readonly Func<int, ProximityVision> SeesAll =
+        delegate (int id) { return ProximityVision.Visible; };
+
+    /// <summary>A candidate the marshaller could not read. It keeps its SLOT in
+    /// the roster - the team branch indexes positionally - and every other field
+    /// stays at its default, which is exactly what must never reach a
+    /// selection.</summary>
+    private static ProximityCandidate PUnreadable(int id)
+    {
+        var c = new ProximityCandidate();
+        c.Id = id;
+        c.Unreadable = true;
+        return c;
+    }
 
     private static int Main()
     {
@@ -120,7 +142,8 @@ internal static class Program
         var unseen = new List<ProximityCandidate> {
             P(h4, 0, 0f, 0f, false), P(401, 1, 1f, 0f, false), P(402, 2, 2f, 0f, false) };
         int blocked = ProximityVictim.Choose(unseen, h4, 0, ProximitySelection.NearestEnemyFfa,
-            0f, 0f, 0f, 0f, 0f, 4f, delegate (int id) { return id != 401; });
+            0f, 0f, 0f, 0f, 0f, 4f,
+            delegate (int id) { return id == 401 ? ProximityVision.Blocked : ProximityVision.Visible; });
         Check("F3b Victim_DeclinesWhenTheChosenOneIsNotVisible",
             blocked == ProximityVictim.None,
             "got " + blocked + " (want None; picking 402 would drain the one vanilla excluded)");
@@ -290,6 +313,229 @@ internal static class Program
 
         Check("G3 Gate_AllowsWhenCapableAndTargetingOther",
             ProximityVictim.ShouldRepair(true, true), "should repair");
+
+
+        // ---- F14: an unreadable roster entry defers the WHOLE resolution. ------
+        // RED under the "unread" mutation, which drops the refusal and lets the
+        // entry through at its defaults.
+        //
+        // This is the r1 HIGH. The marshaller cannot always read a roster entry -
+        // a destroyed Player, a missing CharacterData, a missing rigidbody - and
+        // an entry that arrives with its fields defaulted is NOT the entry
+        // vanilla's own loop read. Team is the sharpest: a defaulted team of zero
+        // puts the entry into whichever subset the enemy-team branch walks, so ONE
+        // unread entry changes which candidates that branch even considers.
+        //
+        // Roster here is [0]=holder(t0), [1]=UNREADABLE, [2]=E1(t1) at 3,
+        // [3]=E2(t1) at 2. If [1] is admitted at its defaults it reads as an alive
+        // team-0 entry, the positional liveness gate then admits E2, and the seam
+        // answers E2 - a player it has no evidence the trigger matched. The
+        // correct answer is Defer: vanilla resolves its own victim, which costs
+        // one tick of today's shipped behaviour and one log line.
+        const int h14 = 1400;
+        var unreadable = new List<ProximityCandidate> {
+            P(h14,  0, 0f,   0f, false),
+            PUnreadable(1401),
+            P(1402, 1, 3f,   0f, false),
+            P(1403, 1, 2f,   0f, false) };
+        int unread = ProximityVictim.Choose(unreadable, h14, 0, ProximitySelection.NearestEnemyTeam,
+            0f, 0f, 0f, 0f, 0f, 4f, SeesAll);
+        Check("F14 Victim_DefersWhenARosterEntryIsUnreadable",
+            unread == ProximityVictim.Defer,
+            "got " + unread + " (want Defer; 1403 means a defaulted team decided the subset)");
+
+        // ---- F15: NEGATIVE CONTROL for the unread mutation. --------------------
+        // The same board with slot 1 READ - and dead, which is the state the
+        // unreadable entry used to be marshalled as. No entry carries the flag, so
+        // this test cannot see the mutation, which is what leaves F14 measuring
+        // the flag itself rather than the branch being reachable.
+        const int h15 = 1500;
+        var readable = new List<ProximityCandidate> {
+            P(h15,  0, 0f,   0f, false),
+            P(1501, 0, 9f,   0f, true),
+            P(1502, 1, 3f,   0f, false),
+            P(1503, 1, 2f,   0f, false) };
+        int readOk = ProximityVictim.Choose(readable, h15, 0, ProximitySelection.NearestEnemyTeam,
+            0f, 0f, 0f, 0f, 0f, 4f, SeesAll);
+        Check("F15 Victim_ResolvesNormallyWhenEveryEntryIsReadable",
+            readOk == 1502,
+            "got " + readOk + " (want 1502: roster slot 1 is dead, so E2 is never considered)");
+
+        // ---- F16: the predicate arms at exact overlap. -------------------------
+        // RED under the "sqrange" mutation, which compares squares instead.
+        //
+        // Vanilla is `Vector3.Distance(...) < range * root.localScale.x`
+        // (PlayerInRangeTrigger.cs:58-67). Squaring is monotonic in exact
+        // arithmetic but not in float: for a small enough positive range the
+        // product underflows to zero, and `0 >= 0` then refuses a candidate
+        // standing exactly on the trigger while vanilla's `0 < range` arms. A
+        // repair that decides who takes damage answers in vanilla's own domain
+        // with vanilla's own operator, rather than one that agrees almost
+        // everywhere.
+        const int h16 = 1600;
+        var overlap = new List<ProximityCandidate> {
+            P(h16,  0, 0f, 0f, false),
+            P(1601, 1, 5f, 0f, false) };
+        int atOverlap = ProximityVictim.Choose(overlap, h16, 0, ProximitySelection.NearestEnemyTeam,
+            0f, 0f, 5f, 0f, 0f, 1e-23f, SeesAll);
+        Check("F16 Victim_ArmsAtExactOverlapForATinyRange",
+            atOverlap == 1601,
+            "got " + atOverlap + " (want 1601: distance 0 < range, which vanilla arms on)");
+
+        // ---- F17: an unanswerable vision query defers, it does not refuse. -----
+        // "It threw" is a different fact from "it said no". Treating the two
+        // alike would suppress a tick vanilla applies and log it as a
+        // contradiction, which is a false statement about the call.
+        const int h17 = 1700;
+        var sightless = new List<ProximityCandidate> {
+            P(h17,  0, 0f, 0f, false), P(1701, 1, 1f, 0f, false) };
+        int noSight = ProximityVictim.Choose(sightless, h17, 0, ProximitySelection.NearestEnemyTeam,
+            0f, 0f, 0f, 0f, 0f, 4f,
+            delegate (int id) { return ProximityVision.Unreadable; });
+        Check("F17 Victim_DefersWhenTheVisionQueryCannotBeAnswered",
+            noSight == ProximityVictim.Defer,
+            "got " + noSight + " (want Defer, not None: None would drop a tick vanilla applies)");
+
+        // ---- C1: the capability cache re-derives on a same-frame change. -------
+        // RED under the "capkey" mutation, which drops the change stamp from the
+        // key and leaves the frame alone.
+        //
+        // An actor can join, an actor can leave, and a property delivery can land
+        // inside one frame - one PUN Dispatch drains several with no frame
+        // boundary between them. A cached TRUE that survives such a change says
+        // "every seat in this room carries the repair" about a room that has since
+        // changed, and this gate decides whether seats re-resolve the victim.
+        var cache1 = new ProximityCapabilityCache();
+        bool capBefore = cache1.Evaluate(7, 1, delegate { return true; });
+        bool capAfter = cache1.Evaluate(7, 2, delegate { return false; });
+        Check("C1 Cache_ReDerivesWhenTheRoomChangesInsideAFrame",
+            capBefore && !capAfter,
+            "before=" + capBefore + " after=" + capAfter + " (want true then false)");
+
+        // ---- C2: NEGATIVE CONTROL for the capkey mutation. ---------------------
+        // With BOTH key terms unchanged the answer must be reused, and the census
+        // run exactly once. A frame-only key reuses it here too, so this control
+        // cannot see the mutation - which is what makes C1 a measurement of the
+        // stamp specifically and not of caching in general.
+        var cache2 = new ProximityCapabilityCache();
+        int censusRuns = 0;
+        Func<bool> counting = delegate { censusRuns++; return true; };
+        bool reuse1 = cache2.Evaluate(11, 4, counting);
+        bool reuse2 = cache2.Evaluate(11, 4, counting);
+        Check("C2 Cache_ReusesTheAnswerWhenNothingChanged",
+            reuse1 && reuse2 && censusRuns == 1,
+            "runs=" + censusRuns + " (want 1) answers=" + reuse1 + "/" + reuse2);
+
+        // ---- C3: a cache with no census answers the inert way. -----------------
+        // A missing census is an unreadable input, and the gate's false direction
+        // costs one tick of vanilla.
+        Check("C3 Cache_WithoutACensusIsInert",
+            new ProximityCapabilityCache().Evaluate(1, 1, null) == false,
+            "a cache with nothing to ask must not report a capable room");
+
+        // ---- S1: every outcome and every reason gets its own budget. -----------
+        // RED under the "reason" mutation, which drops the reason from the key.
+        //
+        // A feature that is INACTIVE and a feature that is active and declining
+        // must not produce the same silence (#438/#443). Three outcomes and one
+        // reason each is the whole requirement: a stale-cache fallback has to be
+        // distinguishable in the log from a repair with nothing to do.
+        string kDefer = ProximityVictim.SignalKey("DealDamageToPlayer", "defer", "a roster entry could not be read");
+        string kDefer2 = ProximityVictim.SignalKey("DealDamageToPlayer", "defer", "the holder is not on the roster");
+        string kRefuse = ProximityVictim.SignalKey("DealDamageToPlayer", "refuse", "a roster entry could not be read");
+        string kInactive = ProximityVictim.SignalKey("DealDamageToPlayer", "inactive", "a roster entry could not be read");
+        Check("S1 Signals_EachOutcomeAndReasonGetsItsOwnBudget",
+            kDefer != kDefer2 && kDefer != kRefuse && kDefer != kInactive && kRefuse != kInactive,
+            "keys collided: " + kDefer + " | " + kDefer2 + " | " + kRefuse + " | " + kInactive);
+
+        // ---- S2: NEGATIVE CONTROL for the reason mutation. ---------------------
+        // The LINE keeps naming all three things whatever the key does, so this
+        // stays green when the key drops the reason.
+        string line = ProximityVictim.SignalText("StunPlayer", "defer", "no owning trigger");
+        Check("S2 Signals_TheLineNamesSiteOutcomeAndReason",
+            line.Contains("StunPlayer") && line.Contains("defer") && line.Contains("no owning trigger"),
+            "got " + line);
+
+        // ---- S3: one line per reason, not one per tick. ------------------------
+        Check("S3 Signals_AreBoundedToOnePerReason",
+            ProximityVictim.MaxOutcomeSignals == 1,
+            "got " + ProximityVictim.MaxOutcomeSignals + " (a per-tick effect may not repeat itself)");
+
+        // ---- K1: the fighter capability list carries this key. -----------------
+        // RED under the "fighterkeys" mutation, which empties the list.
+        //
+        // Photon player properties persist across rooms (#182), so a seat that
+        // fought a match and then joins one to watch still advertises whatever it
+        // last set. A spectator simulates none of a fighter's effects and is
+        // excluded from the census that reads this key, so the key must be cleared
+        // in the same pre-join merge that sets the spectator role. The list lives
+        // here because the staging code loops over it - a key added here cannot be
+        // forgotten there.
+        bool carriesProx = false;
+        foreach (var key in ProximityVictim.FighterCapabilityKeys)
+            if (key == ProximityVictim.CapabilityProp) carriesProx = true;
+        Check("K1 Capability_SpectatorStagingClearsTheProximityKey",
+            carriesProx && ProximityVictim.FighterCapabilityKeys.Length > 0,
+            "the key a spectator must stop advertising is not in the cleared set");
+
+        // ---- K2: NEGATIVE CONTROL for the fighterkeys mutation. ----------------
+        // The key's NAME carries the protocol version and is read by peers; it is
+        // unaffected by what the cleared set contains, so it survives the
+        // mutation.
+        Check("K2 Capability_KeyIsTheVersionedName",
+            ProximityVictim.CapabilityProp == "cr_prox1" && ProximityVictim.CapabilityValue == 1,
+            "got " + ProximityVictim.CapabilityProp + "=" + ProximityVictim.CapabilityValue);
+
+        // ---- P1: Defer runs vanilla untouched. NEGATIVE CONTROL for prefixwrite. --
+        // Defer means this seam has no standing to answer, so nothing is written
+        // and the original runs. Unaffected by a mutation to the Victim branch.
+        Check("P1 Prefix_DeferRunsVanillaUntouched",
+            ProximityVictim.PrefixAction(ProximityResolution.Defer, false) == ProximityPrefixAction.RunVanillaUntouched
+            && ProximityVictim.PrefixAction(ProximityResolution.Defer, true) == ProximityPrefixAction.RunVanillaUntouched,
+            "a deferral must neither write vanilla's field nor skip the original");
+
+        // ---- P2: the field is written ONLY with a victim in hand. --------------
+        // RED under the "prefixwrite" mutation, which drops the victim term.
+        // Vanilla dereferences the field with no null guard
+        // (DealDamageToPlayer.cs:45, StunPlayer.cs:27, TeleportToOpponent.cs:24).
+        Check("P2 Prefix_NeverWritesWithoutAVictim",
+            ProximityVictim.PrefixAction(ProximityResolution.Victim, false) == ProximityPrefixAction.SkipOriginal
+            && ProximityVictim.PrefixAction(ProximityResolution.Refuse, true) == ProximityPrefixAction.SkipOriginal,
+            "only a resolved victim may be written into vanilla's own field");
+
+        // ---- P3: the run decision is order-independent against a sibling. ------
+        // StunPlayer.Go carries a second, unrelated prefix
+        // (PerfPatches.StunPlayerGoNullGuard) and neither declares a priority, so
+        // their order is undefined. HarmonyX calls EVERY prefix regardless of what
+        // a sibling returned and ANDs the returns into __runOriginal (#352), so
+        // the run decision is a conjunction - and a conjunction commutes. This
+        // exercises both orders over the real decision function for every
+        // resolution, and asserts the only write stays on the accepting branch.
+        //
+        // It is green by construction rather than a mutation target: what a
+        // mutation could reach is the WRITE, which P2 measures. The remaining
+        // half - a future edit making either prefix read the field the other
+        // writes - is recorded as a residual on the patch class itself.
+        bool orderStable = true;
+        bool writeOnlyOnAccept = true;
+        var resolutions = new[] { ProximityResolution.Victim, ProximityResolution.Refuse, ProximityResolution.Defer };
+        foreach (var res in resolutions)
+            foreach (bool known in new[] { true, false })
+                foreach (bool siblingRuns in new[] { true, false })
+                {
+                    ProximityPrefixAction act = ProximityVictim.PrefixAction(res, known);
+                    bool oursRuns = act != ProximityPrefixAction.SkipOriginal;
+                    // HarmonyX ANDs both returns into __runOriginal whichever ran
+                    // first; the two orders below are the same conjunction.
+                    bool oursFirst = oursRuns && siblingRuns;
+                    bool siblingFirst = siblingRuns && oursRuns;
+                    if (oursFirst != siblingFirst) orderStable = false;
+                    if (act == ProximityPrefixAction.WriteVictimAndRun && !(res == ProximityResolution.Victim && known))
+                        writeOnlyOnAccept = false;
+                }
+        Check("P3 Prefix_RunDecisionIsOrderIndependentWithASiblingPrefix",
+            orderStable && writeOnlyOnAccept,
+            "orderStable=" + orderStable + " writeOnlyOnAccept=" + writeOnlyOnAccept);
 
         Console.WriteLine("=== passed=" + _passed + " failed=" + _failed + " ===");
         return _failed == 0 ? 0 : 1;

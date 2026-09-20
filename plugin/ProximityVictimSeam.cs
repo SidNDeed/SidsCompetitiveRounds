@@ -5,11 +5,12 @@ namespace CompetitiveRounds
 {
     /// <summary>Bug 389 - the PURE half of the proximity-victim repair.
     ///
-    /// References nothing from Unity, Harmony or Photon, so the victim choice and
-    /// the capability gate can be compiled and EXECUTED by a plain console harness
-    /// (#340/#465). ProximityVictimPatches.cs marshals real players into these
-    /// structs and calls in here, so the shipped path IS the tested path - a seam
-    /// that only the tests use would prove nothing about what runs in a match.
+    /// References nothing from Unity, Harmony or Photon, so the victim choice,
+    /// the capability gate, its cache key and the outcome signals can be compiled
+    /// and EXECUTED by a plain console harness (#340/#465).
+    /// ProximityVictimPatches.cs marshals real players into these structs and
+    /// calls in here, so the shipped path IS the tested path - a seam that only
+    /// the tests use would prove nothing about what runs in a match.
     ///
     /// WHAT IT REPRODUCES. Vanilla PlayerInRangeTrigger.Update re-evaluates who is
     /// nearby every frame (PlayerInRangeTrigger.cs:58-67) and then invokes a
@@ -33,7 +34,17 @@ namespace CompetitiveRounds
     /// and offline play - and those two do NOT agree. Reproducing one of them in
     /// both modes makes the seam choose a player the trigger could not have chosen,
     /// which is the whole failure this seam exists to avoid. The enum below names
-    /// the vanilla function each branch reproduces; keep them separate.</summary>
+    /// the vanilla function each branch reproduces; keep them separate.
+    ///
+    /// AN INPUT THE SEAM COULD NOT READ IS NOT AN INPUT. Every field marshalled
+    /// here is one the vanilla rule reads, so a field that cannot be read leaves
+    /// the seam unable to show that its candidate set is the set vanilla built.
+    /// The answer is then Defer - vanilla resolves its own victim, exactly as an
+    /// unpatched build would - and never a partial set, a default team or a
+    /// guess. That is a BOUND rather than a per-branch mechanism (#310): it costs
+    /// one deferred tick, which is today's shipped behaviour and no new symptom,
+    /// and it cannot be defeated by a later branch reading a field this one did
+    /// not think about.</summary>
     internal struct ProximityCandidate
     {
         /// <summary>Caller-assigned identity, and LOAD-BEARING: it must be the
@@ -76,10 +87,22 @@ namespace CompetitiveRounds
         public float AnyX;
         public float AnyY;
 
-        /// <summary>data.dead, and true also for a candidate whose Player or
-        /// CharacterData could not be read. Which branches consult it differs by
-        /// mode and is part of the fidelity - see Choose.</summary>
+        /// <summary>data.dead. Which branches consult it differs by mode and is
+        /// part of the fidelity - see Choose.</summary>
         public bool Dead;
+
+        /// <summary>At least one field above could not be read from this roster
+        /// entry - a destroyed Player, a missing CharacterData, a missing
+        /// rigidbody, or a property access that threw.
+        ///
+        /// It is a FLAG rather than an omission on purpose. The roster handed to
+        /// Choose must keep its length and its order, because the NearestEnemyTeam
+        /// branch indexes it positionally; dropping the entry would renumber every
+        /// later one. Choose refuses the whole resolution when any entry carries
+        /// this, so the unread Team, X, Y, Z, AnyX, AnyY and Dead of such an entry
+        /// are never consulted - which is what stops a default team of zero from
+        /// deciding who the enemy subset contains.</summary>
+        public bool Unreadable;
     }
 
     /// <summary>Each value names the ONE vanilla function it reproduces. The
@@ -107,6 +130,62 @@ namespace CompetitiveRounds
         NearestAny
     }
 
+    /// <summary>The vision term of vanilla's predicate, with the case vanilla does
+    /// not have: the answer could not be obtained. PlayerManager.CanSeePlayer is a
+    /// live scene query, so "it threw" is a different fact from "it said no", and
+    /// folding the two together would turn an unreadable input into a suppressed
+    /// tick. See Choose for which outcome each one produces.</summary>
+    internal enum ProximityVision
+    {
+        /// <summary>CanSeePlayer(...).canSee was true.</summary>
+        Visible,
+
+        /// <summary>CanSeePlayer(...).canSee was false - vanilla's own predicate
+        /// rejects this candidate.</summary>
+        Blocked,
+
+        /// <summary>The query could not be answered.</summary>
+        Unreadable
+    }
+
+    /// <summary>What the resolver concluded. Three outcomes, because two would
+    /// force a genuinely different case into one of the others: Refuse means the
+    /// trigger's own rule admitted nobody and nothing should be applied, while
+    /// Defer means this seam has no standing to answer and an unpatched build's
+    /// behaviour is the correct one. Folding Defer into Refuse would drop ticks
+    /// vanilla applies; folding it into Victim would require inventing a victim.</summary>
+    internal enum ProximityResolution
+    {
+        /// <summary>A victim was resolved and is handed back.</summary>
+        Victim,
+
+        /// <summary>The trigger's own rule admits nobody - a contradiction on a
+        /// trigger-driven call, so the effect applies nothing and says so.</summary>
+        Refuse,
+
+        /// <summary>Not this seam's question: run vanilla untouched.</summary>
+        Defer
+    }
+
+    /// <summary>What a prefix does with a resolution. Named as an action rather
+    /// than left as three copies of an if-ladder because all three prefixes must
+    /// take the SAME action for the same resolution (#432), and because the
+    /// relationship between "wrote vanilla's field" and "let the original run" is
+    /// the half of the sibling-ordering claim that can be tested here - see
+    /// PrefixAction.</summary>
+    internal enum ProximityPrefixAction
+    {
+        /// <summary>Return true without touching anything.</summary>
+        RunVanillaUntouched,
+
+        /// <summary>Write the resolved victim into vanilla's own field, then
+        /// return true so vanilla runs with it.</summary>
+        WriteVictimAndRun,
+
+        /// <summary>Return false. Nothing is written and nothing is applied.</summary>
+        SkipOriginal
+    }
+
     internal static class ProximityVictim
     {
         /// <summary>No victim: the trigger's own rule admits nobody. The repair
@@ -128,9 +207,61 @@ namespace CompetitiveRounds
         /// evaluated.</summary>
         internal const float SelfEpsilon = 0.01f;
 
-        /// <summary>Bound on refusal diagnostics, so a contradiction that repeats
-        /// every tick cannot flood the log.</summary>
-        internal const int MaxRefusalDiagnostics = 8;
+        /// <summary>Bound on the once-per-reason outcome signals below. One line
+        /// is the whole point: a second one carries no information the first did
+        /// not, and this runs inside a per-tick effect.</summary>
+        internal const int MaxOutcomeSignals = 1;
+
+        /// <summary>Capability key. The KEY carries the protocol version: any later
+        /// SEMANTIC change to who this repair chooses takes cr_prox2, because a
+        /// client advertising cr_prox1 has answered a different question. Same
+        /// family and same pre-join discipline as cr_pois2 / cr_msv2.
+        ///
+        /// It lives in the pure half because three different places have to agree
+        /// on it - the staging call, the census, and the spectator staging that
+        /// must stop advertising it - and a key that three files spell for
+        /// themselves is a key that can drift.</summary>
+        internal const string CapabilityProp = "cr_prox1";
+        internal const int CapabilityValue = 1;
+
+        /// <summary>The capability keys that describe a FIGHTER and must therefore
+        /// be cleared when a seat stages as a spectator.
+        ///
+        /// Photon player properties persist across rooms (#182), so a seat that
+        /// fought a match and then joins one to watch still carries whatever it
+        /// last advertised. A spectator does not simulate these effects and is not
+        /// counted by the census, so a key left behind describes a role the actor
+        /// is not filling. SpectatorSession.StagePreJoinProperties nulls every key
+        /// in this array in the same pre-join merge that sets the role, beside the
+        /// fighter-only keys it already cleared.</summary>
+        internal static readonly string[] FighterCapabilityKeys = new string[] { CapabilityProp };
+
+        /// <summary>Root of the bounded-diagnostic budget keys. One root, three
+        /// outcomes, one reason each - see SignalKey.</summary>
+        internal const string DiagKeyRoot = "ProximityVictim389";
+
+        /// <summary>The budget key a single outcome signal is charged to.
+        ///
+        /// Site, outcome AND reason are all in the key, so "the room does not all
+        /// carry the repair", "this call has no owning trigger", "the roster could
+        /// not be read" and "the trigger's own rule admits nobody" each get their
+        /// own line. That is the whole requirement: a feature that is INACTIVE and
+        /// a feature that is active and declining must not produce the same
+        /// silence, or a stale answer reads exactly like a feature with nothing to
+        /// do (#438/#443). Charged against MaxOutcomeSignals, so each distinct
+        /// reason is stated once per session and never repeats per tick.</summary>
+        internal static string SignalKey(string site, string outcome, string reason)
+        {
+            return DiagKeyRoot + "/" + site + "/" + outcome + "/" + reason;
+        }
+
+        /// <summary>The line itself. Reads as a sentence in the log and names the
+        /// three things a reader needs: which effect, what this seam did, and
+        /// why.</summary>
+        internal static string SignalText(string site, string outcome, string reason)
+        {
+            return "[PROX-TARGET] " + outcome + " site=" + site + " why=" + reason;
+        }
 
         /// <summary>The capability gate, as a pure predicate so the inert case is
         /// testable.
@@ -156,9 +287,33 @@ namespace CompetitiveRounds
             return roomCapable && targetsOther;
         }
 
+        /// <summary>One resolution, one action, for all three prefixes.
+        ///
+        /// THE WRITE AND THE RUN ARE THE SAME DECISION. Vanilla's field is written
+        /// only by WriteVictimAndRun, which also lets the original run; every
+        /// declining action leaves the field exactly as it found it. That matters
+        /// beyond tidiness: StunPlayer.Go carries a second, unrelated prefix
+        /// (PerfPatches.StunPlayerGoNullGuard) and neither declares a priority, so
+        /// their order is undefined. HarmonyX calls EVERY prefix regardless of what
+        /// a sibling returned and ANDs the returns into __runOriginal (#352), so
+        /// the run decision is a conjunction and is order-independent by
+        /// construction; what the order could still expose is a SIDE EFFECT one
+        /// prefix leaves behind for the other to read. Keeping the only write on
+        /// the accepting path - and asserting it here - closes that half. The
+        /// other half is recorded as a residual: nothing in the tree stops a future
+        /// edit from making either prefix read the field the other writes.</summary>
+        internal static ProximityPrefixAction PrefixAction(ProximityResolution outcome, bool victimKnown)
+        {
+            if (outcome == ProximityResolution.Defer) return ProximityPrefixAction.RunVanillaUntouched;
+            if (outcome != ProximityResolution.Victim || !victimKnown) return ProximityPrefixAction.SkipOriginal;
+            return ProximityPrefixAction.WriteVictimAndRun;
+        }
+
         /// <summary>Planar squared distance, for the SELECTION only. All three
         /// vanilla selectors are Vector2.Distance (PlayerManager.cs:71 and :115,
-        /// FfaMode.cs:3815), so a planar measure is the faithful one here.</summary>
+        /// FfaMode.cs:3815) and each is used only to rank candidates against one
+        /// another, so squaring is order-preserving there and changes no answer.
+        /// The PREDICATE is a different matter - see Distance3D.</summary>
         private static float DistanceSquared(float ax, float ay, float bx, float by)
         {
             float dx = ax - bx;
@@ -166,19 +321,29 @@ namespace CompetitiveRounds
             return (dx * dx) + (dy * dy);
         }
 
-        /// <summary>Squared distance in THREE dimensions, for the PREDICATE.
-        /// PlayerInRangeTrigger.cs:67 is a Vector3.Distance, so the range test
-        /// follows it into three dimensions. Planar distance is less than or equal
-        /// to its 3D counterpart, so a planar range test admits every candidate
-        /// vanilla admits AND some it rejects. For a repair whose whole purpose is
-        /// to change which player takes the damage, widening the set is the failure
-        /// direction that costs another player the match (#276/#430).</summary>
-        private static float DistanceSquared3D(float ax, float ay, float az, float bx, float by, float bz)
+        /// <summary>Distance in THREE dimensions, in the DOMAIN vanilla compares
+        /// in. PlayerInRangeTrigger.cs:67 is `Vector3.Distance(...) < range *
+        /// root.localScale.x`, and Vector3.Distance is Mathf.Sqrt of the squared
+        /// sum, so this is that expression.
+        ///
+        /// Comparing squares instead is not the same test. Squaring is monotonic in
+        /// exact arithmetic but not in float: for a small positive range the
+        /// product underflows to zero, and `0 >= 0` then REFUSES a candidate
+        /// standing exactly on the trigger while vanilla's `0 < range` arms. A
+        /// repair that decides who takes damage has to answer the question vanilla
+        /// asked, in vanilla's own domain and with vanilla's own operator, rather
+        /// than one that agrees with it almost everywhere.
+        ///
+        /// Three dimensions, not two: planar distance is less than or equal to its
+        /// 3D counterpart, so a planar range test admits every candidate vanilla
+        /// admits AND some it rejects - the widening direction, which is the one
+        /// that costs another player the match (#276/#430).</summary>
+        private static float Distance3D(float ax, float ay, float az, float bx, float by, float bz)
         {
             float dx = ax - bx;
             float dy = ay - by;
             float dz = az - bz;
-            return (dx * dx) + (dy * dy) + (dz * dz);
+            return (float)Math.Sqrt((dx * dx) + (dy * dy) + (dz * dz));
         }
 
         /// <summary>Re-execute the trigger's own selection and its own predicate,
@@ -195,20 +360,23 @@ namespace CompetitiveRounds
         /// counter at :69, one line before the invoke, so that term is unreadable
         /// from inside Go(). Dropping a term only RELAXES the predicate - but a
         /// relaxed predicate only guarantees a pass when it is applied to the SAME
-        /// candidate vanilla selected. That is why each branch below reproduces one
-        /// named vanilla selector exactly, including a mis-indexed liveness test
-        /// that a "tidier" loop would quietly repair. Change a branch so that it
-        /// selects a different player and the relaxation argument no longer holds:
-        /// a None would then mean nothing worse than "our candidate failed a test
-        /// vanilla's candidate passed", and the caller's refusal - and the refusal
-        /// diagnostic that names it a contradiction - would both be wrong (#351).
+        /// candidate vanilla selected. Two things deliver that premise and both are
+        /// below: every branch reproduces one named vanilla selector exactly,
+        /// including a mis-indexed liveness test that a "tidier" loop would quietly
+        /// repair; and a roster this seam could not read completely is refused
+        /// outright rather than selected from, because a candidate set built on a
+        /// default team is not the set vanilla built. Break either one and the
+        /// relaxation argument no longer holds: a None would then mean nothing
+        /// worse than "our candidate failed a test vanilla's candidate passed", and
+        /// the caller's refusal - and the refusal diagnostic that names it a
+        /// contradiction - would both be wrong (#351).
         ///
         /// SELECTION and PREDICATE measure different things, and each is matched to
-        /// the vanilla call it reproduces: the selection is planar, against the
-        /// position the corresponding vanilla selector reads; the predicate is 3D,
-        /// against transform.position, because :67 is a Vector3.Distance. Do not
-        /// unify them - the two mismatches point in opposite directions and one of
-        /// them widens the card.</summary>
+        /// the vanilla call it reproduces: the selection is planar and ranks
+        /// candidates against the position the corresponding vanilla selector
+        /// reads; the predicate is 3D, against transform.position, and is compared
+        /// in vanilla's own domain with vanilla's own operator. Do not unify
+        /// them.</summary>
         internal static int Choose(
             IList<ProximityCandidate> candidates,
             int holderId,
@@ -217,9 +385,22 @@ namespace CompetitiveRounds
             float selectX, float selectY,
             float triggerX, float triggerY, float triggerZ,
             float effectiveRange,
-            Func<int, bool> canSee)
+            Func<int, ProximityVision> canSee)
         {
             if (candidates == null || candidates.Count == 0) return None;
+
+            // A ROSTER WITH AN UNREADABLE ENTRY IS NOT THE ROSTER VANILLA READ.
+            // Vanilla's own loops read players[i].data.dead, the team subset's
+            // transform.position and, on the Any path, data.playerVel.position
+            // (PlayerManager.cs:69-71, :113-115); an entry whose fields could not
+            // be obtained would have thrown there, and cannot be stood in for by
+            // defaults. A defaulted Team is the sharpest case: team zero puts the
+            // entry into whichever subset the enemy-team branch walks, so ONE
+            // unread entry changes which candidates that branch even considers.
+            // Deferring costs a vanilla tick and one log line; guessing costs
+            // another player the health that left them.
+            for (int i = 0; i < candidates.Count; i++)
+                if (candidates[i].Unreadable) return Defer;
 
             // Every caller is an effect whose own rule acts on someone other than
             // its holder (see ShouldRepair). Identifying the holder is therefore a
@@ -265,11 +446,9 @@ namespace CompetitiveRounds
                     ProximityCandidate c = candidates[i];
                     if (c.Team != enemyTeam) continue;
 
-                    // The mis-indexed gate, read positionally from the roster. A
-                    // candidate we could not read is marked Dead, so an entry
-                    // vanilla would have thrown on closes the gate here instead -
-                    // the narrow direction, and the trigger cannot have fired off a
-                    // throwing Update in any case.
+                    // The mis-indexed gate, read positionally from the roster.
+                    // Every entry is readable by the time control reaches here, so
+                    // this consults the same Dead flag vanilla's :113 consulted.
                     bool gateAlive = teamIndex < candidates.Count && !candidates[teamIndex].Dead;
                     teamIndex++;
                     if (!gateAlive) continue;
@@ -342,15 +521,65 @@ namespace CompetitiveRounds
 
             // Vanilla's predicate (PlayerInRangeTrigger.cs:67), evaluated from the
             // TRIGGER's position - not from the position the selection was measured
-            // from - and in three dimensions, against transform.position, because
-            // that is what vanilla's Vector3.Distance does.
-            if (effectiveRange <= 0f) return None;
-            float rangeSquared = effectiveRange * effectiveRange;
-            if (DistanceSquared3D(triggerX, triggerY, triggerZ, chosen.X, chosen.Y, chosen.Z) >= rangeSquared) return None;
-            if (canSee != null && !canSee(chosen.Id)) return None;
+            // from - and in vanilla's own term ORDER: CanSeePlayer first, then the
+            // range test, then the dead flag. The order changes no boolean, but it
+            // decides WHICH term is reported as the reason, and reporting a term
+            // vanilla never reached would be a false statement about the call.
+            if (canSee != null)
+            {
+                ProximityVision sight = canSee(chosen.Id);
+                // An unanswerable vision query is an unreadable input, not a
+                // negative answer: vanilla would have thrown out of Update rather
+                // than declined. Defer hands the call back to vanilla; None would
+                // suppress a tick vanilla applies and log it as a contradiction.
+                if (sight == ProximityVision.Unreadable) return Defer;
+                if (sight != ProximityVision.Visible) return None;
+            }
+            if (!(Distance3D(triggerX, triggerY, triggerZ, chosen.X, chosen.Y, chosen.Z) < effectiveRange)) return None;
             if (chosen.Dead) return None;
 
             return chosen.Id;
+        }
+    }
+
+    /// <summary>The capability census answer, cached under a key that moves
+    /// whenever the answer can.
+    ///
+    /// The frame alone is NOT that key. A census taken early in a frame can be
+    /// overtaken inside the same frame by an actor joining, an actor leaving, or a
+    /// property delivery, and one PUN Dispatch can drain several of those with no
+    /// frame boundary between them. A cached TRUE that survives such a change says
+    /// "every seat in this room carries the repair" about a room that has since
+    /// changed - and this gate decides whether seats re-resolve the victim, so two
+    /// seats disagreeing on it is the same drain tick debiting different players
+    /// on different screens. A cached FALSE that survives one costs a tick of
+    /// vanilla, which is today's shipped behaviour.
+    ///
+    /// So the key is the frame AND a change stamp the caller derives from the
+    /// room callbacks. Both terms are required: the stamp catches a same-frame
+    /// change, and the frame bounds any change the stamp's callback set does not
+    /// name to a single frame. There is no separate invalidation call, because
+    /// there is no edge that would need one: the room teardown and the room
+    /// change move the stamp themselves (RoomActors.Reset and EnsureCacheRoom),
+    /// so an answer cached in one room cannot be read in another.</summary>
+    internal sealed class ProximityCapabilityCache
+    {
+        private bool _has;
+        private int _frame;
+        private long _stamp;
+        private bool _value;
+
+        /// <summary>Re-derive unless BOTH key terms are unchanged.</summary>
+        internal bool Evaluate(int frame, long stamp, Func<bool> census)
+        {
+            if (census == null) return false;
+            if (_has && frame == _frame && stamp == _stamp) return _value;
+            bool value = census();
+            _has = true;
+            _frame = frame;
+            _stamp = stamp;
+            _value = value;
+            return value;
         }
     }
 }

@@ -1,4 +1,4 @@
-# Bug 389 - run the victim-choice seam clean, then under six mutations. Each
+# Bug 389 - run the victim-choice seam clean, then under twelve mutations. Each
 # mutation names a test that MUST redden and a control that MUST stay green
 # (#391): a suite that reddens at any change measures nothing, and one with no
 # control cannot tell "the mutation was detected" from "the build broke".
@@ -135,7 +135,7 @@ Say ''
 
 # ---------- 4. remove the range bound ----------
 $mutRange = New-Mutant 'range' @(
-    @('            if (DistanceSquared3D(triggerX, triggerY, triggerZ, chosen.X, chosen.Y, chosen.Z) >= rangeSquared) return None;',
+    @('            if (!(Distance3D(triggerX, triggerY, triggerZ, chosen.X, chosen.Y, chosen.Z) < effectiveRange)) return None;',
       '            if (false) return None;')
 )
 $runRange = Invoke-Suite 'mut-range' $mutRange
@@ -148,8 +148,8 @@ Say ''
 # plane is still refused, so the control cannot notice the z term - which is
 # exactly what makes F8 a measurement of the z term specifically.
 $mutFlat = New-Mutant 'flat' @(
-    @('            if (DistanceSquared3D(triggerX, triggerY, triggerZ, chosen.X, chosen.Y, chosen.Z) >= rangeSquared) return None;',
-      '            if (DistanceSquared(triggerX, triggerY, chosen.X, chosen.Y) >= rangeSquared) return None;')
+    @('            if (!(Distance3D(triggerX, triggerY, triggerZ, chosen.X, chosen.Y, chosen.Z) < effectiveRange)) return None;',
+      '            if (!((float)Math.Sqrt(DistanceSquared(triggerX, triggerY, chosen.X, chosen.Y)) < effectiveRange)) return None;')
 )
 $runFlat = Invoke-Suite 'mut-flat' $mutFlat
 if (-not (Assert-Mutation 'flat-predicate mutation' $runFlat 'F8' 'F3a')) { $overall = 1 }
@@ -181,6 +181,82 @@ $mutMis = New-Mutant 'misindex' @(
 )
 $runMis = Invoke-Suite 'mut-misindex' $mutMis
 if (-not (Assert-Mutation 'mis-index mutation' $runMis 'F10' 'F11')) { $overall = 1 }
+Say ''
+
+
+# ---------- 8. admit an unreadable roster entry at its defaults ----------
+# The r1 HIGH put back: let a candidate the marshaller could not read through
+# to the selection, where its defaulted team of zero decides which subset the
+# enemy branch walks. F15 is the control - the same board with every entry
+# read, so no entry carries the flag and the mutation is invisible to it.
+$mutUnread = New-Mutant 'unread' @(
+    @('                if (candidates[i].Unreadable) return Defer;',
+      '                if (false) return Defer;')
+)
+$runUnread = Invoke-Suite 'mut-unread' $mutUnread
+if (-not (Assert-Mutation 'unreadable-entry mutation' $runUnread 'F14' 'F15')) { $overall = 1 }
+Say ''
+
+# ---------- 9. key the capability cache on the frame alone ----------
+# The r1 HIGH on the gate: drop the change stamp, so a join, a leave or a
+# property delivery inside one frame cannot reach the cached answer. C2 is the
+# control - both key terms are unchanged there, so a frame-only key reuses the
+# answer exactly as the real one does.
+$mutCapKey = New-Mutant 'capkey' @(
+    @('            if (_has && frame == _frame && stamp == _stamp) return _value;',
+      '            if (_has && frame == _frame) return _value;')
+)
+$runCapKey = Invoke-Suite 'mut-capkey' $mutCapKey
+if (-not (Assert-Mutation 'capability-cache-key mutation' $runCapKey 'C1' 'C2')) { $overall = 1 }
+Say ''
+
+# ---------- 10. collapse the outcome signals onto one budget ----------
+# Drop the reason from the diagnostic key, so two different reasons under one
+# outcome share a budget and the second is never printed. S2 is the control: the
+# LINE still names all three things, so it cannot see the key change.
+$mutReason = New-Mutant 'reason' @(
+    @('            return DiagKeyRoot + "/" + site + "/" + outcome + "/" + reason;',
+      '            return DiagKeyRoot + "/" + site;')
+)
+$runReason = Invoke-Suite 'mut-reason' $mutReason
+if (-not (Assert-Mutation 'outcome-signal mutation' $runReason 'S1' 'S2')) { $overall = 1 }
+Say ''
+
+# ---------- 11. compare the predicate in squares ----------
+# Restore the squared comparison. It agrees with vanilla almost everywhere,
+# which is the point: only at exact overlap with a range small enough for the
+# product to underflow does it refuse where vanilla arms. F3a is the control -
+# its candidate is far outside the ring, where both forms agree.
+$mutSqRange = New-Mutant 'sqrange' @(
+    @('            if (!(Distance3D(triggerX, triggerY, triggerZ, chosen.X, chosen.Y, chosen.Z) < effectiveRange)) return None;',
+      '            { float mutRange = effectiveRange * effectiveRange; float mutDist = Distance3D(triggerX, triggerY, triggerZ, chosen.X, chosen.Y, chosen.Z); if (mutDist * mutDist >= mutRange) return None; }')
+)
+$runSqRange = Invoke-Suite 'mut-sqrange' $mutSqRange
+if (-not (Assert-Mutation 'squared-predicate mutation' $runSqRange 'F16' 'F3a')) { $overall = 1 }
+Say ''
+
+# ---------- 12. stop clearing the fighter capability on spectator staging ----------
+# Empty the list the spectator pre-join merge loops over, so a seat that fought
+# a match keeps advertising the fighter capability while watching one. K2 is the
+# control - the key's own name and value are untouched by the list.
+$mutKeys = New-Mutant 'fighterkeys' @(
+    @('        internal static readonly string[] FighterCapabilityKeys = new string[] { CapabilityProp };',
+      '        internal static readonly string[] FighterCapabilityKeys = new string[0];')
+)
+$runKeys = Invoke-Suite 'mut-fighterkeys' $mutKeys
+if (-not (Assert-Mutation 'fighter-capability-keys mutation' $runKeys 'K1' 'K2')) { $overall = 1 }
+Say ''
+
+# ---------- 13. write vanilla's field without a victim ----------
+# Drop the victim term from the prefix decision, so a Victim resolution with
+# nothing resolved still writes. Vanilla dereferences that field with no null
+# guard. P1 is the control: the Defer branch is untouched.
+$mutPrefix = New-Mutant 'prefixwrite' @(
+    @('            if (outcome != ProximityResolution.Victim || !victimKnown) return ProximityPrefixAction.SkipOriginal;',
+      '            if (outcome != ProximityResolution.Victim) return ProximityPrefixAction.SkipOriginal;')
+)
+$runPrefix = Invoke-Suite 'mut-prefixwrite' $mutPrefix
+if (-not (Assert-Mutation 'prefix-write mutation' $runPrefix 'P2' 'P1')) { $overall = 1 }
 Say ''
 
 if ($overall -eq 0) { Say 'BUG 389 SEAM SUITE: ALL CHECKS PASSED' }

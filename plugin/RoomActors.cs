@@ -120,6 +120,12 @@ namespace CompetitiveRounds
                 _rejectedActors.Clear();
                 _hasUidByActor.Clear();
                 _cacheRoom = room;
+                // A new room is the largest roster change there is - every
+                // actor is replaced - so it moves the generation like any
+                // other. A consumer that keys a cached answer on this counter
+                // would otherwise be able to carry a previous room's answer
+                // across the boundary.
+                _rosterGeneration++;
                 // Deliberately NOT clearing _fighterSteamIds here: the roster
                 // is frozen by the match-assembly path, which owns its own
                 // lifetime (a room change without a re-freeze must not
@@ -137,6 +143,11 @@ namespace CompetitiveRounds
             _fighterSteamIds.Clear();
             _fighterCacheFrame = -1;
             _fighterCache = null;
+            // The roster is GONE, which is a change consumers keyed on this
+            // counter have to see. Clearing a cache tells the next reader to
+            // read again; moving the counter is what tells a reader that
+            // CACHED an answer against it that the answer is void.
+            NoteRosterIdentityChange();
         }
 
         /// <summary>Record an actor this room has rejected (unauthorized
@@ -417,8 +428,15 @@ namespace CompetitiveRounds
         // ── fighter views ────────────────────────────────────────────────
 
         /// <summary>Every actor that is playing, ActorNumber-ascending.
-        /// Identical to PhotonNetwork.PlayerList when no spectator is in the
-        /// room (including the SAME array instance, so no allocation).</summary>
+        ///
+        /// The raw PhotonNetwork.PlayerList array comes back unchanged — the
+        /// SAME instance, no allocation — only when no spectator is present AND
+        /// the roster is not frozen. This line used to promise that identity
+        /// whenever no spectator was in the room, which is false for every
+        /// competitive match: FreezeFighterRoster runs from
+        /// GameStateWatcher.cs:1564, :4965 and :6351, and a frozen roster takes
+        /// the filtering path below, which allocates and can return fewer
+        /// actors than PlayerList holds (#302/#351).</summary>
         // Per-frame result cache (Codex r2 find 10): with a roster frozen —
         // every competitive match — the fast path is off, and the 10 Hz
         // pollers would otherwise allocate a PlayerList + filtered array per

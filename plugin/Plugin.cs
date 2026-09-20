@@ -3979,12 +3979,21 @@ namespace CompetitiveRounds
             // the key itself, so the generation counter is the trace. Only the
             // properties that participate in that key — bumping on every card
             // or cosmetic property would discard usable windows for nothing.
+            //
+            // cr_prox1 joins that set (bug 389). The proximity-victim census
+            // asks whether EVERY fighter advertises it, caches the answer, and
+            // keys that cache on this counter; a seat whose key arrives after
+            // the census ran would otherwise leave one seat re-resolving the
+            // victim while another drains a stale one on the same damage tick.
+            // The two spectator keys above already move the counter, and they
+            // are the other half of that census's denominator.
             try
             {
                 if (changedProps == null) return;
                 if (changedProps.ContainsKey("u_id")
                     || changedProps.ContainsKey(RoomActors.SPEC_PROP)
-                    || changedProps.ContainsKey(RoomActors.SPEC_LEASE_PROP))
+                    || changedProps.ContainsKey(RoomActors.SPEC_LEASE_PROP)
+                    || changedProps.ContainsKey(ProximityVictim.CapabilityProp))
                     RoomActors.NoteRosterIdentityChange();
             }
             catch { }

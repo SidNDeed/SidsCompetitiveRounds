@@ -63,13 +63,6 @@ namespace CompetitiveRounds
     /// </summary>
     internal static class ProximityVictimGate
     {
-        /// <summary>Capability key. The KEY carries the protocol version: any later
-        /// SEMANTIC change to who this repair chooses takes cr_prox2, because a
-        /// client advertising cr_prox1 has answered a different question. Same
-        /// family and same pre-join discipline as cr_pois2 / cr_msv2.</summary>
-        internal const string CapabilityProp = "cr_prox1";
-        internal const int CapabilityValue = 1;
-
         /// <summary>Set by the Harmony cleanup of each patch below, and only when
         /// that patch actually attached. A patch can silently fail to attach and
         /// produce nothing for release cycles (#83); advertising a repair we cannot
@@ -118,7 +111,7 @@ namespace CompetitiveRounds
             {
                 if (PatchesLive)
                 {
-                    prejoin[CapabilityProp] = CapabilityValue;
+                    prejoin[ProximityVictim.CapabilityProp] = ProximityVictim.CapabilityValue;
                     return;
                 }
 
@@ -127,22 +120,63 @@ namespace CompetitiveRounds
                     _stageFailedPermanently = true;
                     Plugin.Log.LogError("[PROX-CAP] proximity-victim patches did NOT attach ("
                         + _attached + "/" + RequiredAttachments + ") - not advertising "
-                        + CapabilityProp + "; this seat stays on vanilla for the session");
+                        + ProximityVictim.CapabilityProp + "; this seat stays on vanilla for the session");
                 }
             }
             catch { }
         }
 
-        // Capability cache, keyed on the FRAME rather than on the room and a
-        // count. A count is not a sufficient key: an actor's properties replicate
-        // after it appears in PlayerList, so a census taken at the instant a seat
-        // joins can read "no key" and then never re-read it, because the count it
-        // was keyed on never changes again. Re-deriving once per frame removes the
-        // staleness question rather than arguing about its window; the census is a
-        // dictionary probe per actor over at most a handful of actors, and Go()
-        // runs a few times per frame at most.
-        private static int _capFrame = -1;
-        private static bool _capValue;
+        // THE FRAME ALONE IS NOT A KEY FOR THIS ANSWER. An actor can join, an
+        // actor can leave, and a property delivery can land, all inside one frame
+        // - one PUN Dispatch drains several with no frame boundary between them -
+        // so a census taken early in a frame and reused for the rest of it can
+        // describe a room that has since changed. The direction that matters is a
+        // stale TRUE: this gate decides whether a seat re-resolves the victim, so
+        // two seats disagreeing on it is the same damage tick debiting different
+        // players on different screens. A stale FALSE costs a tick of vanilla,
+        // which is today's shipped behaviour.
+        //
+        // So the key is the frame AND RoomActors.RosterGeneration, the monotonic
+        // counter the room callbacks already bump: Plugin.cs:3714
+        // (OnPlayerEnteredRoom) and :3830 (OnPlayerLeftRoom) through
+        // InvalidateFighterCache, and Plugin.cs:3974 (OnPlayerPropertiesUpdate)
+        // through NoteRosterIdentityChange for the properties this answer reads -
+        // u_id and the spectator keys, which decide the denominator, and
+        // cr_prox1, which is the answer itself. A counter rather than a flag on
+        // purpose: a change that lands and reverts between two reads leaves
+        // nothing behind in the room state, and the counter is the trace that
+        // survives it (the same reasoning RoomActors states on its own key).
+        private static readonly ProximityCapabilityCache _cap = new ProximityCapabilityCache();
+
+        /// <summary>Cached delegate so the per-tick census path allocates
+        /// nothing.</summary>
+        private static readonly Func<bool> CensusDelegate = Census;
+
+        /// <summary>The census itself: every actor that can simulate the effect
+        /// must advertise the key. Split out so the cache above holds the ONLY
+        /// copy of the staleness rule.</summary>
+        private static bool Census()
+        {
+            PhotonPlayer[] actors = PhotonNetwork.PlayerList;
+            if (actors == null || actors.Length == 0) return false;
+            foreach (var p in actors)
+            {
+                // An unreadable actor is not a reason to stop looking at it: it
+                // may still be simulating. Treat it as a seat that does not
+                // advertise.
+                if (p == null) return false;
+                if (RoomActors.IsSpectator(p)) continue;
+
+                var props = p.CustomProperties;
+                object v;
+                if (props == null
+                    || !props.TryGetValue(ProximityVictim.CapabilityProp, out v)
+                    || !(v is int)
+                    || ((int)v) != ProximityVictim.CapabilityValue)
+                    return false;
+            }
+            return true;
+        }
 
         /// <summary>True when EVERY fighter in the room advertises a build carrying
         /// this repair.
@@ -186,61 +220,14 @@ namespace CompetitiveRounds
                 if (PhotonNetwork.OfflineMode) return true;
                 if (!PhotonNetwork.InRoom) return false;
 
-                int frame = Time.frameCount;
-                if (frame == _capFrame) return _capValue;
-
-                PhotonPlayer[] actors = PhotonNetwork.PlayerList;
-                bool ok = actors != null && actors.Length > 0;
-                if (ok)
-                {
-                    foreach (var p in actors)
-                    {
-                        // An unreadable actor is not a reason to stop looking at
-                        // it: it may still be simulating. Treat it as a seat that
-                        // does not advertise.
-                        if (p == null) { ok = false; break; }
-                        if (RoomActors.IsSpectator(p)) continue;
-
-                        var props = p.CustomProperties;
-                        object v;
-                        if (props == null || !props.TryGetValue(CapabilityProp, out v) || !(v is int) || ((int)v) != CapabilityValue)
-                        {
-                            ok = false;
-                            break;
-                        }
-                    }
-                }
-
-                _capFrame = frame;
-                _capValue = ok;
-                return ok;
+                return _cap.Evaluate(Time.frameCount, RoomActors.RosterGeneration, CensusDelegate);
             }
             catch { return false; }
         }
     }
 
-    /// <summary>What the resolver concluded. Three outcomes, because two would
-    /// force a genuinely different case into one of the others: Refuse means the
-    /// trigger's own rule admitted nobody and nothing should be applied, while
-    /// Defer means this seam has no standing to answer and an unpatched build's
-    /// behaviour is the correct one. Folding Defer into Refuse would drop ticks
-    /// vanilla applies; folding it into Victim would require inventing a victim.</summary>
-    internal enum ProximityResolution
-    {
-        /// <summary>A victim was resolved and is handed back.</summary>
-        Victim,
-
-        /// <summary>The trigger's own rule admits nobody - a contradiction on a
-        /// trigger-driven call, so the effect applies nothing and says so.</summary>
-        Refuse,
-
-        /// <summary>Not this seam's question: run vanilla untouched.</summary>
-        Defer
-    }
-
     internal static class ProximityVictimResolver
     {
-        internal const string DiagKey = "ProximityVictim389";
 
         /// <summary>Nearest-ancestor PlayerInRangeTrigger, the association vanilla
         /// itself uses to decide which trigger a subtree belongs to. Two triggers on
@@ -262,41 +249,70 @@ namespace CompetitiveRounds
 
         /// <summary>Re-execute the trigger's own selection and predicate through the
         /// pure seam. Returns null when the trigger's own rule admits nobody.</summary>
-        internal static ProximityResolution ResolveFromTrigger(PlayerInRangeTrigger trigger, out Player victim)
+        internal static ProximityResolution ResolveFromTrigger(PlayerInRangeTrigger trigger, string site, out Player victim)
         {
             victim = null;
-            if (trigger == null) return ProximityResolution.Defer;
+            if (trigger == null) { NoteOutcome(site, "defer", "no owning trigger"); return ProximityResolution.Defer; }
             PlayerManager pm = PlayerManager.instance;
-            if (pm == null || pm.players == null || pm.players.Count == 0) return ProximityResolution.Defer;
+            if (pm == null || pm.players == null || pm.players.Count == 0)
+            {
+                NoteOutcome(site, "defer", "the player roster is unavailable");
+                return ProximityResolution.Defer;
+            }
 
             var players = pm.players;
             var candidates = new List<ProximityCandidate>(players.Count);
+            bool rosterUnreadable = false;
             for (int i = 0; i < players.Count; i++)
             {
                 Player p = players[i];
                 var c = new ProximityCandidate();
                 c.Id = i;
-                if (p == null || p.data == null)
+                // EVERY FIELD SET HERE IS ONE THE VANILLA RULE READS
+                // (PlayerManager.cs:69-71 and :113-115), so a field that cannot
+                // be read leaves this seam unable to show that its candidate set
+                // is the set vanilla built. The entry keeps its SLOT and its
+                // order - the team branch indexes the roster positionally, so
+                // dropping one would renumber every later entry - and carries a
+                // flag that makes Choose defer the WHOLE resolution rather than
+                // select from a set with a defaulted team in it.
+                bool readable = false;
+                try
                 {
-                    c.Dead = true;
-                    candidates.Add(c);
-                    continue;
+                    // The NearestAny selection is vanilla's GetClosestPlayer,
+                    // which measures data.playerVel.position and NOT
+                    // transform.position (PlayerManager.cs:71). Marshal both, so
+                    // each vanilla path is reproduced against the position
+                    // vanilla itself read. A null playerVel is UNREADABLE rather
+                    // than a reason to substitute the transform: vanilla
+                    // dereferences it and would have thrown, and standing a
+                    // different position in its place would rank candidates
+                    // vanilla's own loop never measured.
+                    if (p != null && p.data != null && p.data.playerVel != null)
+                    {
+                        Vector3 pos = p.transform.position;
+                        Vector2 velPos = p.data.playerVel.position;
+                        c.Team = p.TeamID;
+                        c.X = pos.x;
+                        c.Y = pos.y;
+                        c.Z = pos.z;
+                        c.AnyX = velPos.x;
+                        c.AnyY = velPos.y;
+                        c.Dead = p.data.dead;
+                        readable = true;
+                    }
                 }
-                Vector3 pos = p.transform.position;
-                c.Team = p.TeamID;
-                c.X = pos.x;
-                c.Y = pos.y;
-                c.Z = pos.z;
-                // The NearestAny selection is vanilla's GetClosestPlayer, which
-                // measures data.playerVel.position and NOT transform.position
-                // (PlayerManager.cs:71). Marshal both so each vanilla path is
-                // reproduced against the position vanilla itself read.
-                Vector2 velPos = new Vector2(pos.x, pos.y);
-                try { if (p.data.playerVel != null) velPos = p.data.playerVel.position; }
-                catch { }
-                c.AnyX = velPos.x;
-                c.AnyY = velPos.y;
-                c.Dead = p.data.dead;
+                catch { readable = false; }
+                if (!readable)
+                {
+                    // Discard whatever was written before the read failed: a
+                    // half-filled entry is exactly the partial candidate this
+                    // flag exists to keep out of the selection.
+                    c = new ProximityCandidate();
+                    c.Id = i;
+                    c.Unreadable = true;
+                    rosterUnreadable = true;
+                }
                 candidates.Add(c);
             }
 
@@ -308,11 +324,19 @@ namespace CompetitiveRounds
             // that acts on someone else), and the only way to honour that is to
             // know which candidate the holder is. Without it, vanilla's own rule
             // is the honest answer.
-            if (holder == null) return ProximityResolution.Defer;
+            if (holder == null)
+            {
+                NoteOutcome(site, "defer", "the trigger has no owning player");
+                return ProximityResolution.Defer;
+            }
             int holderId = ProximityVictim.None;
             for (int i = 0; i < players.Count; i++)
                 if (ReferenceEquals(players[i], holder)) { holderId = i; break; }
-            if (holderId == ProximityVictim.None) return ProximityResolution.Defer;
+            if (holderId == ProximityVictim.None)
+            {
+                NoteOutcome(site, "defer", "the holder is not on the roster");
+                return ProximityResolution.Defer;
+            }
             int holderTeam = holder.TeamID;
 
             // WHICH vanilla selector the trigger actually evaluated. GetOtherPlayer
@@ -323,7 +347,11 @@ namespace CompetitiveRounds
             // be read there is no selector to reproduce and vanilla keeps the call.
             bool ffa;
             try { ffa = FfaMode.EngineActive(); }
-            catch { return ProximityResolution.Defer; }
+            catch
+            {
+                NoteOutcome(site, "defer", "the game mode could not be read");
+                return ProximityResolution.Defer;
+            }
 
             ProximitySelection selection;
             if (trigger.targetType == PlayerInRangeTrigger.TargetType.OtherPlayer)
@@ -340,6 +368,12 @@ namespace CompetitiveRounds
             float effectiveRange = trigger.range * trigger.transform.root.localScale.x;
             Vector2 seeFrom = new Vector2(triggerPos.x, triggerPos.y);
 
+            // PlayerManager.CanSeePlayer is a live scene query, so "it threw"
+            // is a different fact from "it said no". Folding the two together
+            // would turn an unreadable input into a suppressed tick, which is
+            // the direction that costs a player health vanilla would not have
+            // taken; the seam defers on Unreadable instead.
+            bool visionUnreadable = false;
             int chosen = ProximityVictim.Choose(
                 candidates,
                 holderId,
@@ -352,20 +386,83 @@ namespace CompetitiveRounds
                 {
                     try
                     {
-                        if (id < 0 || id >= players.Count) return false;
+                        if (id < 0 || id >= players.Count) { visionUnreadable = true; return ProximityVision.Unreadable; }
                         Player p = players[id];
-                        if (p == null) return false;
-                        return pm.CanSeePlayer(seeFrom, p).canSee;
+                        if (p == null) { visionUnreadable = true; return ProximityVision.Unreadable; }
+                        return pm.CanSeePlayer(seeFrom, p).canSee
+                            ? ProximityVision.Visible
+                            : ProximityVision.Blocked;
                     }
-                    catch { return false; }
+                    catch { visionUnreadable = true; return ProximityVision.Unreadable; }
                 });
 
-            if (chosen == ProximityVictim.Defer) return ProximityResolution.Defer;
+            if (chosen == ProximityVictim.Defer)
+            {
+                // Which unreadable input produced the deferral, in the order the
+                // seam consults them: the roster is read before anything is
+                // selected, the vision query only for the candidate selected,
+                // and a deferral with neither means the trigger's own rule
+                // resolved the holder for an effect that acts on someone else.
+                NoteOutcome(site, "defer",
+                    rosterUnreadable ? "a roster entry could not be read"
+                    : visionUnreadable ? "the vision query could not be answered"
+                    : "the trigger's own rule resolves the holder");
+                return ProximityResolution.Defer;
+            }
             if (chosen < 0 || chosen >= players.Count) return ProximityResolution.Refuse;
             Player resolved = players[chosen];
             if (resolved == null) return ProximityResolution.Refuse;
             victim = resolved;
             return ProximityResolution.Victim;
+        }
+
+        /// <summary>THE WHOLE PREFIX DECISION, ONCE, FOR ALL THREE EFFECTS.
+        ///
+        /// The defect this repair exists for is a CLASS, not a line, and the
+        /// three prefixes below must take the SAME action for the same
+        /// resolution (#432). Three copies of an if-ladder is how they stop
+        /// doing that. Each caller keeps only the one statement that is genuinely
+        /// its own - writing its own field - and the mapping from resolution to
+        /// action lives in the pure seam, where it is tested.</summary>
+        internal static ProximityPrefixAction DecidePrefix(
+            string site, Component instance, bool targetsOther, out Player fresh)
+        {
+            fresh = null;
+            try
+            {
+                if (instance == null) return ProximityPrefixAction.RunVanillaUntouched;
+                if (!ProximityVictim.ShouldRepair(ProximityVictimGate.RoomCarriesFix(), targetsOther))
+                {
+                    // NOT a refusal and not a deferral: the repair has nothing to
+                    // do here. It still gets a line, because a feature that is
+                    // INACTIVE and a feature that is active and declining must
+                    // not produce the same silence (#438/#443). Bounded to one
+                    // line per reason per session, so behaviour and log volume
+                    // both stay what an unpatched seat produces.
+                    NoteOutcome(site, "inactive", targetsOther
+                        ? "the room does not all carry the repair"
+                        : "the effect targets its own player");
+                    return ProximityPrefixAction.RunVanillaUntouched;
+                }
+
+                PlayerInRangeTrigger trigger = OwningTrigger(instance.transform);
+                ProximityResolution outcome = ResolveFromTrigger(trigger, site, out fresh);
+                ProximityPrefixAction action = ProximityVictim.PrefixAction(outcome, fresh != null);
+                if (action == ProximityPrefixAction.SkipOriginal)
+                    NoteOutcome(site, "refuse", "trigger-driven call admits nobody");
+                return action;
+            }
+            catch (Exception ex)
+            {
+                // LogError, NOT Cleanup. Cleanup is the Harmony ATTACH reporter
+                // and its first statement returns immediately on a non-null
+                // exception (VanillaFixes.cs:69-72), so routing a runtime failure
+                // through it emits nothing at all.
+                VanillaFixSupport.LogError(site + "FreshVictim", ex);
+                NoteOutcome(site, "refuse", "resolution threw");
+                fresh = null;
+                return ProximityPrefixAction.SkipOriginal;   // conservative: apply nothing
+            }
         }
 
         /// <summary>NO OWNING TRIGGER - and therefore no repair. The effect is
@@ -393,12 +490,12 @@ namespace CompetitiveRounds
         /// rule that this seam does not model, so the honest answer for it is
         /// vanilla's, unchanged. Whether that card carries the same victim-cache
         /// defect is a separate question and is flagged rather than guessed.</summary>
-        internal static void NoteRefusal(string site, string why)
+        internal static void NoteOutcome(string site, string outcome, string why)
         {
             VanillaFixSupport.DiagLimited(
-                DiagKey,
-                "[PROX-TARGET] refused site=" + site + " why=" + why,
-                ProximityVictim.MaxRefusalDiagnostics);
+                ProximityVictim.SignalKey(site, outcome, why),
+                ProximityVictim.SignalText(site, outcome, why),
+                ProximityVictim.MaxOutcomeSignals);
         }
     }
 
@@ -409,53 +506,28 @@ namespace CompetitiveRounds
         [HarmonyPrefix]
         private static bool BeforeGo(DealDamageToPlayer __instance)
         {
-            try
+            Player fresh;
+            // A contradiction, not a routine outcome, is what SkipOriginal means
+            // here - and it is that only because the seam reproduces the SAME
+            // selector the trigger evaluated, then applies a predicate that is
+            // vanilla's minus one unreadable term, microseconds later, in the
+            // same frame, over the same transforms. The selection fidelity is
+            // what carries that claim; see the seam's note on Choose.
+            switch (ProximityVictimResolver.DecidePrefix(
+                "DealDamageToPlayer", __instance,
+                __instance != null && __instance.targetPlayer == DealDamageToPlayer.TargetPlayer.Other,
+                out fresh))
             {
-                if (__instance == null) return true;
-                bool targetsOther = __instance.targetPlayer == DealDamageToPlayer.TargetPlayer.Other;
-                if (!ProximityVictim.ShouldRepair(ProximityVictimGate.RoomCarriesFix(), targetsOther)) return true;
-
-                PlayerInRangeTrigger trigger = ProximityVictimResolver.OwningTrigger(__instance.transform);
-                // No owning trigger, no predicate to reproduce: vanilla, untouched.
-                if (trigger == null) return true;
-
-                Player fresh;
-                ProximityResolution outcome = ProximityVictimResolver.ResolveFromTrigger(trigger, out fresh);
-
-                // Nothing to reproduce, or nothing this seam may answer: vanilla
-                // resolves its own victim, exactly as an unpatched build would.
-                if (outcome == ProximityResolution.Defer) return true;
-
-                if (outcome != ProximityResolution.Victim || fresh == null)
-                {
-                    // A contradiction, not a routine outcome - and it is that only
-                    // because the seam reproduces the SAME selector the trigger
-                    // evaluated, then applies a predicate that is vanilla's minus
-                    // one unreadable term, microseconds later, in the same frame,
-                    // over the same transforms. The selection fidelity is what
-                    // carries this claim; see the seam's note on Choose.
-                    ProximityVictimResolver.NoteRefusal("DealDamageToPlayer", "trigger-driven call admits nobody");
+                case ProximityPrefixAction.WriteVictimAndRun:
+                    // Hand the answer to vanilla. Writing on EVERY call is not
+                    // reinstating the cache: nothing ever reads a value this
+                    // prefix did not just write on this call.
+                    __instance.target = fresh;
+                    return true;
+                case ProximityPrefixAction.SkipOriginal:
                     return false;
-                }
-
-                // Hand the answer to vanilla. Writing on EVERY call is not
-                // reinstating the cache: nothing ever reads a value this prefix did
-                // not just write on this call.
-                __instance.target = fresh;
-                return true;
-            }
-            catch (Exception ex)
-            {
-                // LogError, NOT Cleanup. Cleanup is the Harmony ATTACH reporter and
-                // its first statement returns immediately on a non-null exception
-                // (VanillaFixes.cs:69-72), so routing a runtime failure through it
-                // emits nothing at all - the refusal below would be invisible and
-                // an inert feature would be indistinguishable from one with nothing
-                // to do (#438/#443). Both signals here are bounded: LogError is
-                // rate-limited per name, NoteRefusal by MaxRefusalDiagnostics.
-                VanillaFixSupport.LogError("DealDamageToPlayerFreshVictim", ex);
-                ProximityVictimResolver.NoteRefusal("DealDamageToPlayer", "resolution threw");
-                return false;   // conservative: apply nothing
+                default:
+                    return true;
             }
         }
 
@@ -485,46 +557,47 @@ namespace CompetitiveRounds
     /// version of this patch that invents a selection rule when no trigger owns the
     /// call - see the resolver's note on why the no-trigger path falls through.
     ///
-    /// PerfPatches.StunPlayerGoNullGuard is a separate Prefix on the same method; it
-    /// suppresses an NRE when the ancestor Player is gone and does not touch the
-    /// cache, so the two do not overlap. Either returning false skips the original,
-    /// which is the conservative direction for both, and neither can turn the
-    /// other's refusal into an application.</summary>
+    /// PerfPatches.StunPlayerGoNullGuard is a separate Prefix on the same method
+    /// and neither declares a priority, so their ORDER IS UNDEFINED. What that
+    /// order can and cannot reach is two different questions.
+    ///
+    /// It cannot change whether the original runs. HarmonyX calls every prefix on
+    /// a method regardless of what a sibling returned and ANDs the returns into
+    /// __runOriginal (#352 - verified there from the shipped 0Harmony.dll:
+    /// WritePrefixes emits every prefix call unconditionally). A conjunction is
+    /// order-independent, so either prefix refusing suppresses the original
+    /// whichever ran first, and neither can turn the other's refusal into an
+    /// application. Both halves of that are exercised by the harness case
+    /// P1/P2, over both orders.
+    ///
+    /// What it could still reach is a SIDE EFFECT one prefix leaves for the other
+    /// to read. This one writes __instance.target, and only on the accepting
+    /// path; the null guard reads the ancestor Player and writes nothing. So
+    /// today there is no shared state to order. That is a statement about
+    /// today's two bodies rather than a property of the arrangement, and it is
+    /// recorded as a residual: nothing in the tree stops a later edit from making
+    /// either prefix read the field the other writes. The consequence to watch
+    /// for is a stun applied to, or withheld from, a player the ring did not
+    /// match.</summary>
     [HarmonyPatch(typeof(StunPlayer), "Go")]
     internal static class StunPlayerFreshVictimPatch
     {
         [HarmonyPrefix]
         private static bool BeforeGo(StunPlayer __instance)
         {
-            try
+            Player fresh;
+            switch (ProximityVictimResolver.DecidePrefix(
+                "StunPlayer", __instance,
+                __instance != null && __instance.targetPlayer == StunPlayer.TargetPlayer.OtherPlayer,
+                out fresh))
             {
-                if (__instance == null) return true;
-                bool targetsOther = __instance.targetPlayer == StunPlayer.TargetPlayer.OtherPlayer;
-                if (!ProximityVictim.ShouldRepair(ProximityVictimGate.RoomCarriesFix(), targetsOther)) return true;
-
-                PlayerInRangeTrigger trigger = ProximityVictimResolver.OwningTrigger(__instance.transform);
-                // No owning trigger, no predicate to reproduce: vanilla, untouched.
-                if (trigger == null) return true;
-
-                Player fresh;
-                ProximityResolution outcome = ProximityVictimResolver.ResolveFromTrigger(trigger, out fresh);
-                if (outcome == ProximityResolution.Defer) return true;
-                if (outcome != ProximityResolution.Victim || fresh == null)
-                {
-                    ProximityVictimResolver.NoteRefusal("StunPlayer", "trigger-driven call admits nobody");
+                case ProximityPrefixAction.WriteVictimAndRun:
+                    __instance.target = fresh;
+                    return true;
+                case ProximityPrefixAction.SkipOriginal:
                     return false;
-                }
-
-                __instance.target = fresh;
-                return true;
-            }
-            catch (Exception ex)
-            {
-                // See the note on DealDamageToPlayer's catch: Cleanup is the attach
-                // reporter and logs nothing when handed an exception.
-                VanillaFixSupport.LogError("StunPlayerFreshVictim", ex);
-                ProximityVictimResolver.NoteRefusal("StunPlayer", "resolution threw");
-                return false;
+                default:
+                    return true;
             }
         }
 
@@ -562,34 +635,17 @@ namespace CompetitiveRounds
         [HarmonyPrefix]
         private static bool BeforeGo(TeleportToOpponent __instance)
         {
-            try
+            Player fresh;
+            switch (ProximityVictimResolver.DecidePrefix(
+                "TeleportToOpponent", __instance, true, out fresh))
             {
-                if (__instance == null) return true;
-                if (!ProximityVictim.ShouldRepair(ProximityVictimGate.RoomCarriesFix(), true)) return true;
-
-                PlayerInRangeTrigger trigger = ProximityVictimResolver.OwningTrigger(__instance.transform);
-                // No owning trigger, no predicate to reproduce: vanilla, untouched.
-                if (trigger == null) return true;
-
-                Player fresh;
-                ProximityResolution outcome = ProximityVictimResolver.ResolveFromTrigger(trigger, out fresh);
-                if (outcome == ProximityResolution.Defer) return true;
-                if (outcome != ProximityResolution.Victim || fresh == null)
-                {
-                    ProximityVictimResolver.NoteRefusal("TeleportToOpponent", "trigger-driven call admits nobody");
+                case ProximityPrefixAction.WriteVictimAndRun:
+                    __instance.target = fresh;
+                    return true;
+                case ProximityPrefixAction.SkipOriginal:
                     return false;
-                }
-
-                __instance.target = fresh;
-                return true;
-            }
-            catch (Exception ex)
-            {
-                // See the note on DealDamageToPlayer's catch: Cleanup is the attach
-                // reporter and logs nothing when handed an exception.
-                VanillaFixSupport.LogError("TeleportToOpponentFreshVictim", ex);
-                ProximityVictimResolver.NoteRefusal("TeleportToOpponent", "resolution threw");
-                return false;
+                default:
+                    return true;
             }
         }
 
