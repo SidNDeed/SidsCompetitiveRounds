@@ -159,12 +159,26 @@ class MatchReport(BaseModel):
     # cr_gstats field 24 and reaches opp_freeze_epoch the same way opp_freeze_*
     # already does. reporter_mod_version cannot substitute: a locally built DLL
     # reports the last shipped version (learning #301).
-    # Pydantic v2 ignores undeclared fields (no model here sets
-    # extra="forbid" — checked against the deployed main.py at cc92498), so the
-    # additions are inert until a server pass declares them, stores them, and
-    # makes the advisory freeze classifier and the admin evidence view refuse to
-    # compare rows whose epochs differ. That pass is OUT OF SCOPE for the client
-    # batch that added the fields.
+    # Pydantic v2 ignores undeclared fields, so the additions are inert on the
+    # deployed server and an older server keeps working. The pin that statement
+    # is checked against is PRODUCTION 0cc7f75 — the revision running on both
+    # backend boxes — and not the cc92498 tail this comment used to name: that
+    # tail is retired and was never deployed, so a contract validated against it
+    # is validated against a model production does not run (#302 — a claim has
+    # to be traceable to the thing it describes). On 0cc7f75 no model in this
+    # file sets extra="forbid", and the reporting endpoints in main.py neither
+    # store nor classify these two fields.
+    #
+    # THE CLIENT'S GUARANTEE STOPS AT THE WIRE. What the Sept 16 client batch
+    # delivers is that every row a CURRENT client reports carries a counting
+    # semantic on the body, and that a peer's value reaches the reporter tagged
+    # or not at all. It does NOT deliver a partitioned history: nothing on
+    # 0cc7f75 persists either field, so stored rows have no partition key and
+    # the advisory freeze classifier and the admin evidence view still compare
+    # across the two eras. That is a server pass — declare both fields, store
+    # them beside the counters they describe, treat pre-batch rows as epoch 1,
+    # and make both consumers refuse a comparison whose epochs differ — and it
+    # is OUT OF SCOPE for the client batch that added them.
     local_ping_avg: int | None = Field(None, ge=0, le=30000)
     local_ping_max: int | None = Field(None, ge=0, le=30000)
     local_recv_gap_count: int | None = Field(None, ge=0, le=30000)

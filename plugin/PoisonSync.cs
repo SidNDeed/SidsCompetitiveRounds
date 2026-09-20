@@ -212,6 +212,7 @@ namespace CompetitiveRounds
 
         private static bool _staged;
         private static bool _stageFailedPermanently;
+        private static bool _deferLogged;
 
         /// <summary>Stage the capability property BEFORE ever joining a room, so it
         /// rides the join operation itself. Called from Plugin.Awake (after Harmony
@@ -238,6 +239,29 @@ namespace CompetitiveRounds
                     _stageFailedPermanently = true;
                     Plugin.Log.LogError("[POISON-CAP] scheduler patch did NOT attach — "
                         + "authoritative poison disabled for this session (falling back to v1.35.5 behaviour)");
+                    return;
+                }
+
+                // AND NOT BEFORE THE COMPATIBILITY VERDICT. Awake stages this, and
+                // the verdict lands about three seconds later; a seat that joined a
+                // room inside that window and was then disabled could only withdraw
+                // the advertisement with an IN-ROOM write, the racy path this
+                // protocol forbids. The tick retry above runs only after
+                // DoInitialize, so the verdict is always in by the time it stages —
+                // this gate closes the Awake path, and only that one. Deliberately
+                // BELOW the PatchesLive arm so the loud "did NOT attach" failure
+                // still fires at Awake rather than a few seconds later (#83).
+                // Swept here although the review flagged cr_dc2 and cr_saw1: a flag
+                // names a line and the defect is the operation (#432).
+                if (!Plugin.compatCheckComplete)
+                {
+                    if (!_deferLogged)
+                    {
+                        _deferLogged = true;
+                        Plugin.Log.LogInfo("[POISON-CAP] deferred staging " + CapabilityProp
+                            + " (" + source + ") — the compatibility verdict is not in yet; "
+                            + "the first post-verdict tick stages it");
+                    }
                     return;
                 }
 
@@ -438,6 +462,27 @@ namespace CompetitiveRounds
             catch { }
         }
 
+        // THE FILTER IS THE REPLICATED READ, NOT THE FIRST-SIGHT CACHE.
+        //
+        // Both helpers below feed ScanRoster, whose output is a fail-closed
+        // capability REFUSAL: an actor in this list that does not advertise the
+        // poison capability makes THIS seat sticky-incapable, arms the roster
+        // quarantine, and stops it honouring blocks. Those are cross-seat
+        // decisions — they only behave if every seat reaches the same one from
+        // the same bytes — and RoomActors.IsSpectator cannot deliver that: it
+        // writes its answer into _roleByActor at THIS seat's FIRST SIGHT of an
+        // actor and never re-reads the property, so what it returns is a
+        // function of when this seat happened to look. Two seats that first
+        // touch an actor at different moments hold different rosters for the
+        // whole room, and a rule computed from two rosters is two rules — which
+        // reaches fighter damage through block honouring.
+        //
+        // These two sites were argued the other way one round ago, on the
+        // reading that this roster GRANTS authority and the cache therefore
+        // usefully holds "joined as a spectator" fixed. It does not grant: it
+        // refuses. Where the replicated read is wrong it is wrong on every seat
+        // at once and self-heals on the next call, and it errs toward counting an
+        // actor as a FIGHTER, which is the fail-closed direction here (#276).
         private static int RawNonSpectatorCount()
         {
             try
@@ -446,7 +491,7 @@ namespace CompetitiveRounds
                 if (list == null) return 0;
                 int n = 0;
                 for (int i = 0; i < list.Length; i++)
-                    if (list[i] != null && !RoomActors.IsSpectator(list[i])) n++;
+                    if (list[i] != null && !RoomActors.IsSpectatorReplicated(list[i])) n++;
                 return n;
             }
             catch { return 0; }
@@ -460,7 +505,7 @@ namespace CompetitiveRounds
                 var list = PhotonNetwork.PlayerList;
                 if (list == null) return keep;
                 for (int i = 0; i < list.Length; i++)
-                    if (list[i] != null && !RoomActors.IsSpectator(list[i])) keep.Add(list[i]);
+                    if (list[i] != null && !RoomActors.IsSpectatorReplicated(list[i])) keep.Add(list[i]);
             }
             catch { }
             return keep;

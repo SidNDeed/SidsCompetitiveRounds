@@ -133,12 +133,26 @@ detector tripped from `Math.Max(unscaledDeltaTime, wallGap)` with both sources
 sampled every tick, so one stall was credited on the resume tick and again on
 the next. Those figures are inflated roughly 2x, in the same columns and the
 same range as correct ones, so a mixed window looks like a real difference
-between two players rather than like two definitions. Partition on
+between two players rather than like two definitions. The discriminator is
 `local_freeze_epoch` / `opp_freeze_epoch` (1 = the doubled definition, 2 = the
 monotonic single-trip one, absent/0 = a client older than the tag, which is
-UNKNOWN and belongs in neither bucket). Do not partition on
-`reporter_mod_version`: a locally built DLL reports the last shipped version,
-so the label cannot identify which counter produced a row (learning #301).
+UNKNOWN and belongs in neither bucket). Do not use `reporter_mod_version`: a
+locally built DLL reports the last shipped version, so the label cannot
+identify which counter produced a row (learning #301).
+
+**What that discriminator gives you today, and what it does not.** The
+September 16 client batch put the epoch on the WIRE and nowhere else: the
+reporter sends both integers on the match-report body, and a peer's value rides
+`cr_gstats` field 24. The DEPLOYED server (`0cc7f75`, the revision on both
+backend boxes) does not declare, store or classify either field, so there is no
+epoch column to group by and every stored row — old and new alike — is still
+unlabelled. Until a server pass declares and stores them, treat any query
+spanning this window as mixed-era and read the two ranges as incomparable; the
+partition above is the shape that pass should take, not a column that can be
+grouped on now. The advisory freeze classifier and the admin evidence view
+compare across the eras for the same reason. The client half of this correction
+is what the batch can be held to; the storage half is filed and unbuilt.
+
 Separately, the 0.2 s freeze-log trip sits ABOVE the band this audit is about —
 in-combat stalls clustered at 50–199 ms — so an empty freeze log is not
 evidence that nothing stuttered; read the `[FREEZE-BAND]` aggregates instead.

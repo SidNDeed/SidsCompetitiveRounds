@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using Photon.Pun;
 using UnityEngine;
 using PhotonPlayer = Photon.Realtime.Player;
@@ -326,12 +327,25 @@ namespace CompetitiveRounds
         ///
         /// <para>WHICH ONE A CALLER WANTS. Use this where the answer must AGREE
         /// with another seat's and a wrong answer only ever REFUSES something —
-        /// capability quorums, the DC census. Keep <see cref="IsSpectator"/>
-        /// where the answer GRANTS a role or an authority (PoisonSync's
-        /// authority roster, the master-client rule): there the cache is doing
-        /// real work, because it holds "joined as a spectator" fixed even if the
-        /// property were to vanish mid-room, which design §3.2 forbids but this
-        /// read could not tell from a legitimate fighter.</para></summary>
+        /// every capability quorum (the saw and grow quorums, PoisonSync's
+        /// capability census and its roster-quarantine edge gates), and the DC
+        /// census. Keep <see cref="IsSpectator"/> where the answer is LOCAL to
+        /// this seat or GRANTS a role that only this seat acts on: the master
+        /// client's spectator validation and kick, the face re-send, the
+        /// spectator render/ownership predicates. Those are decisions one seat
+        /// takes alone, and a seat disagreeing with another about them costs
+        /// nothing but this seat's own view.</para>
+        ///
+        /// <para>PoisonSync USED to be listed here as a cache caller, on the
+        /// reading that its roster "grants authority". That was wrong, and the
+        /// sentence is corrected rather than quietly deleted (#302):
+        /// <c>ScanRoster</c> decides a fail-closed capability REFUSAL — an
+        /// unmarked actor makes every seat read INCAPABLE — and a refusal that
+        /// must agree across seats is exactly the first case above. Two seats
+        /// caching different first-sight answers there split the sticky
+        /// incapability flag, the roster quarantine and victim-side block
+        /// honouring, which changes fighter damage. It reads the replicated
+        /// property now.</para></summary>
         internal static bool IsSpectatorReplicated(PhotonPlayer actor)
         {
             try
@@ -705,19 +719,45 @@ namespace CompetitiveRounds
         internal const string CapabilityProp = "cr_dc2";
         internal const int CapabilityValue = 1;
 
-        private static bool _staged, _stageFailedPermanently;
+        private static bool _staged, _stageFailedPermanently, _deferLogged;
 
         /// <summary>Stage PRE-JOIN only. An in-room write is present locally
         /// immediately and may reach peers after they have already evaluated a
         /// census — a silently false-capable seat, which is the one state this
         /// protocol must not be in. Idle client states provably precede the join
-        /// op's parameter snapshot (#287, same reasoning as PoisonSync).</summary>
+        /// op's parameter snapshot (#287, same reasoning as PoisonSync).
+        ///
+        /// <para>AND NOT BEFORE THE COMPATIBILITY VERDICT. The verdict lands about
+        /// three seconds into the process (Plugin.DoInitialize), and a join inside
+        /// that window used to snapshot <c>cr_dc2=1</c> from a seat that the verdict
+        /// then disabled — leaving the only correction an IN-ROOM revoke, the exact
+        /// write this protocol forbids. Staging now WAITS for the verdict: the tick
+        /// retry stages it a few ticks later, and a join that beats the verdict
+        /// simply plays that room on the floor election. What the refusal costs is
+        /// one room's census arm, which is the behaviour every older peer in the
+        /// room is running anyway (#430). The deferral is LOGGED rather than
+        /// silent — an unstaged capability and a capability whose staging was
+        /// refused are different facts (#342), and the deferred line is what a
+        /// bundle is read for. Same gate as GrowNormalize.StageCapability, which is
+        /// where the shape comes from.</para></summary>
         internal static void StageCapability(string source)
         {
             try
             {
                 if (_staged || _stageFailedPermanently) return;
                 if (Plugin.modDisabled) { _stageFailedPermanently = true; return; }
+                if (!Plugin.compatCheckComplete)
+                {
+                    if (!_deferLogged)
+                    {
+                        _deferLogged = true;
+                        Plugin.Log.LogInfo("[2v2-DC] deferred staging " + CapabilityProp
+                            + " (" + source + ") — the compatibility verdict is not in yet; "
+                            + "a room joined before it plays the floor election, and the tick "
+                            + "stages this once the verdict clears");
+                    }
+                    return;
+                }
                 if (PhotonNetwork.InRoom)
                 {
                     Plugin.Log.LogError("[2v2-DC] refusing to stage " + CapabilityProp
@@ -804,6 +844,288 @@ namespace CompetitiveRounds
                 if (missingActor < 0) missingActor = a.ActorNumber;
             }
             return all;
+        }
+
+        // ── the elected seat's prompt-report outcome, and the fallback it gates ──
+        //
+        // WHY THIS EXISTS AT ALL. The census arm elects exactly one PROMPT
+        // reporter, which removes the arrival race — and with it the accidental
+        // redundancy the previous OR'd election had. If that one seat's request
+        // never lands, the series stays `active` and every survivor keeps a live
+        // 2v2 hold until its lease TTL expires. Something has to stand behind it.
+        //
+        // WHY IT IS NOT A TIMER. The first repair armed the other non-DC survivor
+        // with a delayed post at +45 s, chosen to sit past the prompt seat's
+        // nominal retry budget (3 x 10 s timeout + 2 x 2 s backoff). That is an
+        // ELAPSED-TIME guess about somebody else's transaction, and Unity's
+        // `timeout` is not a hard ceiling under a stalled socket: a last attempt
+        // completing after the delayed post makes the arrival order decide a rated
+        // completion versus `dc_incomplete` again — the exact defect the census
+        // arm exists to close. No number is the right number, because the quantity
+        // being guessed is not a duration.
+        //
+        // WHAT REPLACES IT. The fallback fires on a TERMINAL OUTCOME of the
+        // elected seat's transaction and on nothing else. The elected seat
+        // publishes that outcome as a replicated player property, `cr_dcr`, tagged
+        // with the series it describes:
+        //
+        //   <series>:send  dispatched — a request is or may be in flight. NOT
+        //                  terminal: the fallback waits.
+        //   <series>:ok    the server ANSWERED (any 2xx — completed,
+        //                  dc_incomplete, or ignored because the series was
+        //                  already settled or the room fence refused it).
+        //                  TERMINAL: the fallback stands down permanently.
+        //   <series>:no    every attempt failed, or the server refused. TERMINAL
+        //                  the other way: nothing landed, the fallback fires.
+        //
+        // and one more terminal signal the property cannot carry: the elected seat
+        // LEAVING THE ROOM having published nothing at all for this series. It
+        // never dispatched, so nothing is in flight. That one is terminal only in
+        // combination with the SERVER's own answer — the watcher reads
+        // GET /team/series/{id}/state first and posts only while the series is
+        // still open (ApiClient.ReadTeamSeriesStatusOnce).
+        //
+        // WHERE NO TERMINAL OUTCOME IS KNOWN, THIS SEAT POSTS NOTHING. The elected
+        // seat leaving with `send` outstanding is precisely that state: a request
+        // may still be in flight and no client-side observation can settle it.
+        // Posting there would reopen the race; not posting leaves the series to the
+        // elected seat's own request, or failing that to the server's lease expiry
+        // and the admin path. That is the direction the unhandled case must fail
+        // (#276), and what the refusal costs is a series that closes late rather
+        // than one that closes wrongly (#430).
+        //
+        // AND THE FORM. When it does fire, the fallback posts ZERO point totals.
+        // The deployed endpoint reaches its lead-forfeit branch only when
+        // `total_points >= 2` (backend/api/main.py at 0cc7f75), so a zero-total
+        // report cannot select the rated completion under ANY ordering: the single
+        // UPDATE it can reach writes `status='dc_incomplete'`. The prompt report is
+        // the only report in this arm that can complete a series with ratings and
+        // gold, which is what makes "which of the two arrived first" stop being a
+        // question about the outcome.
+        //
+        // The zeros withdrawn in the previous round are a different rule and stay
+        // withdrawn: those were posted by EVERY seat whenever the census failed on
+        // ANY seat, so the leaver's own surviving team-mate could force them for the
+        // whole room by withholding one property. This one is reachable only by the
+        // elected seat — a member of the ABANDONED team — failing to deliver its own
+        // report. The party with a motive to suppress a forfeit is on the other
+        // team and has no lever on it (#283).
+        internal const string OutcomeProp = "cr_dcr";
+        internal const string OutcomeSent = "send";
+        internal const string OutcomeAnswered = "ok";
+        internal const string OutcomeFailed = "no";
+
+        private static string _watchSeries;
+        private static int _watchActor = -1;
+        private static string _watchReporter, _watchDc, _watchRoom;
+        private static string _watchOutcome = "";
+        private static bool _watchGone, _watchSettled, _watchHeldLogged;
+
+        /// <summary>The series tag that scopes an outcome value. A `cr_dcr`
+        /// written for the PREVIOUS series must never read as an answer about
+        /// this one — the property is retained on the actor and a sitting can run
+        /// several series.</summary>
+        private static string Tag(string seriesId)
+        {
+            if (string.IsNullOrEmpty(seriesId)) return "";
+            string s = seriesId.Trim().ToLowerInvariant();
+            return s.Length <= 8 ? s : s.Substring(0, 8);
+        }
+
+        /// <summary>Elected seat only: announce where its own report has got to.
+        /// An in-room write, deliberately — unlike a CAPABILITY, which has to be in
+        /// the join snapshot before any peer evaluates a census, this is a fact
+        /// PRODUCED in the room, after the event it describes, and the seats that
+        /// read it are reacting to its arrival rather than sampling it at a moment
+        /// of their own choosing.</summary>
+        internal static void PublishOutcome(string seriesId, string outcome)
+        {
+            try
+            {
+                string tag = Tag(seriesId);
+                if (tag.Length == 0 || string.IsNullOrEmpty(outcome)) return;
+                var local = PhotonNetwork.LocalPlayer;
+                if (local == null || !PhotonNetwork.InRoom) return;
+                local.SetCustomProperties(new ExitGames.Client.Photon.Hashtable
+                {
+                    { OutcomeProp, tag + ":" + outcome }
+                });
+                Plugin.Log.LogInfo("[2v2-DC] published " + OutcomeProp + "=" + tag + ":" + outcome
+                    + " — the seats behind this report read their next move from it");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning("[2v2-DC] publishing " + OutcomeProp + " failed: " + ex.Message);
+            }
+        }
+
+        /// <summary>This actor's announced outcome FOR THIS SERIES, or "" when it
+        /// has announced nothing about it. Anything unparseable, or tagged with
+        /// another series, is "" — never a terminal answer.</summary>
+        internal static string OutcomeOf(PhotonPlayer actor, string seriesId)
+        {
+            try
+            {
+                string tag = Tag(seriesId);
+                if (actor == null || tag.Length == 0) return "";
+                var props = actor.CustomProperties;
+                if (props == null) return "";
+                object v;
+                if (!props.TryGetValue(OutcomeProp, out v)) return "";
+                string s = v as string;
+                if (string.IsNullOrEmpty(s)) return "";
+                int i = s.IndexOf(':');
+                if (i <= 0 || i + 1 >= s.Length) return "";
+                if (!string.Equals(s.Substring(0, i), tag, StringComparison.Ordinal)) return "";
+                string o = s.Substring(i + 1);
+                return (o == OutcomeSent || o == OutcomeAnswered || o == OutcomeFailed) ? o : "";
+            }
+            catch { return ""; }
+        }
+
+        /// <summary>The non-elected non-DC survivor arms the watch and posts
+        /// NOTHING. Every later move comes from <see cref="Evaluate"/>.</summary>
+        internal static void ArmFallback(string seriesId, PhotonPlayer elected,
+                                         string reporterSteamId, string dcSteamId,
+                                         string observedRoom)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(seriesId) || elected == null
+                    || string.IsNullOrEmpty(reporterSteamId) || string.IsNullOrEmpty(dcSteamId))
+                {
+                    Plugin.Log.LogWarning("[2v2-DC] fallback NOT armed — the elected seat or the "
+                        + "report's own fields could not be resolved; this seat posts nothing");
+                    return;
+                }
+                _watchSeries = seriesId;
+                _watchActor = elected.ActorNumber;
+                _watchReporter = reporterSteamId;
+                _watchDc = dcSteamId;
+                _watchRoom = observedRoom ?? "";
+                _watchOutcome = OutcomeOf(elected, seriesId);   // it may already have spoken
+                _watchGone = false;
+                _watchSettled = false;
+                _watchHeldLogged = false;
+                Plugin.Log.LogInfo("[2v2-DC] fallback armed on actor "
+                    + _watchActor.ToString(CultureInfo.InvariantCulture) + " — no timer: it fires only on a "
+                    + "TERMINAL outcome of that seat's report (" + OutcomeProp + "="
+                    + OutcomeFailed + ", or that seat leaving having dispatched nothing), and then only "
+                    + "in the zero-total form, which the deployed endpoint can only record as dc_incomplete");
+                Evaluate("armed");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("[2v2-DC] arming the fallback failed: " + ex.Message); }
+        }
+
+        /// <summary>Wired to OnPlayerPropertiesUpdate: the elected seat has spoken.</summary>
+        internal static void NoteActorProps(PhotonPlayer actor)
+        {
+            try
+            {
+                if (_watchSeries == null || actor == null || actor.ActorNumber != _watchActor) return;
+                string o = OutcomeOf(actor, _watchSeries);
+                if (o.Length == 0) return;
+                _watchOutcome = o;
+                Evaluate("outcome " + o);
+            }
+            catch { }
+        }
+
+        /// <summary>Wired to OnPlayerLeftRoom: the elected seat is gone. Its
+        /// property payload is still on the object Photon hands us, so latch the
+        /// last thing it said BEFORE deciding what its absence means.</summary>
+        internal static void NoteActorLeft(PhotonPlayer actor)
+        {
+            try
+            {
+                if (_watchSeries == null || actor == null || actor.ActorNumber != _watchActor) return;
+                string o = OutcomeOf(actor, _watchSeries);
+                if (o.Length > 0) _watchOutcome = o;
+                _watchGone = true;
+                Evaluate("the elected seat left the room");
+            }
+            catch { }
+        }
+
+        /// <summary>The watch is a fact of ONE room and one series. Called on every
+        /// room edge, the same three the saw verdict line is reset on.</summary>
+        internal static void ResetForRoomChange()
+        {
+            _watchSeries = null; _watchActor = -1;
+            _watchReporter = null; _watchDc = null; _watchRoom = null;
+            _watchOutcome = ""; _watchGone = false; _watchSettled = false; _watchHeldLogged = false;
+        }
+
+        private static void Evaluate(string why)
+        {
+            if (_watchSeries == null || _watchSettled) return;
+            if (_watchOutcome == OutcomeAnswered)
+            {
+                _watchSettled = true;
+                Plugin.Log.LogInfo("[2v2-DC] fallback stood down (" + why + ") — the elected seat's "
+                    + "report was ANSWERED by the server; the series is settled or the server has "
+                    + "refused both seats' reports alike, and a second one changes nothing");
+                return;
+            }
+            if (_watchOutcome == OutcomeFailed)
+            {
+                _watchSettled = true;
+                Fire("the elected seat's report failed on every attempt (" + OutcomeProp + "="
+                     + OutcomeFailed + ")");
+                return;
+            }
+            if (_watchGone && _watchOutcome.Length == 0)
+            {
+                _watchSettled = true;
+                Fire("the elected seat left the room having dispatched nothing for this series");
+                return;
+            }
+            if (_watchGone && _watchOutcome == OutcomeSent)
+            {
+                // NOT terminal, and deliberately not made terminal by waiting: a
+                // request may still be in flight in that seat's process.
+                if (_watchHeldLogged) return;
+                _watchHeldLogged = true;
+                Plugin.Log.LogInfo("[2v2-DC] fallback WITHHELD — the elected seat left with "
+                    + OutcomeProp + "=" + OutcomeSent + " outstanding. No terminal outcome is known, "
+                    + "so this seat posts nothing: a report may still be in flight, and a fallback "
+                    + "beside it would decide the series by arrival order again");
+                return;
+            }
+        }
+
+        private static void Fire(string reason)
+        {
+            string series = _watchSeries, reporter = _watchReporter, dc = _watchDc, room = _watchRoom;
+            Plugin.Log.LogInfo("[2v2-DC] fallback triggered — " + reason
+                + "; asking the server whether the series is still open before posting anything");
+            try
+            {
+                ApiClient.ReadTeamSeriesStatusOnce(series, (ok, status) =>
+                {
+                    try
+                    {
+                        if (!ok)
+                        {
+                            Plugin.Log.LogWarning("[2v2-DC] fallback withheld — the series state could "
+                                + "not be read; nothing is posted on an UNKNOWN server state");
+                            return;
+                        }
+                        if (status != "active" && status != "dc_paused")
+                        {
+                            Plugin.Log.LogInfo("[2v2-DC] fallback stood down — the server already reports "
+                                + "the series as '" + status + "'; there is nothing left to close");
+                            return;
+                        }
+                        Plugin.Log.LogInfo("[2v2-DC] fallback posting — the server still reports the series "
+                            + "as '" + status + "'. ZERO point totals, which is the only form the deployed "
+                            + "endpoint can record as dc_incomplete and can never turn into a rated completion");
+                        ApiClient.ReportTeamSeriesDc(series, reporter, dc, 0, 0, room, true);
+                    }
+                    catch (Exception ex) { Plugin.Log.LogWarning("[2v2-DC] fallback dispatch failed: " + ex.Message); }
+                });
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("[2v2-DC] fallback state read failed: " + ex.Message); }
         }
     }
 }

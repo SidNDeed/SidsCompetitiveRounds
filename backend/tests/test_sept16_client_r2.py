@@ -106,8 +106,43 @@ def _method_body(src, signature):
 # one reporter whenever it claims the right to send real totals.
 
 
-SAFETY_NET_SEC = 45          # Plugin.cs DC_SAFETY_NET_SEC
-RETRY_BUDGET_SEC = 34        # PostRequestWithRetry: 3 x 10s timeout + 2 x 2s backoff
+def retry_budget_seconds():
+    """The prompt report's transport budget, DERIVED from the source instead of
+    written down.  The previous round's control hardcoded 34 seconds, so raising
+    any transport term -- attempts, timeout or backoff -- left the named control
+    green: a check that cannot fail (#342).
+
+    Nothing in the client depends on this number any more, and that is the
+    point: it is computed here so a test can assert the ABSENCE of any bound
+    derived from it.
+    """
+    api = _src("ApiClient.cs")
+    body = _method_body(api, "private static IEnumerator PostRequestWithRetry")
+    assert body, "the retry helper's own text could not be delimited"
+    attempts = int(re.search(r"int maxRetries = (\d+)", body).group(1))
+    backoff = float(re.search(r"float retryDelay = ([\d.]+)f", body).group(1))
+    timeout = int(re.search(r"request\.timeout = (\d+);", body).group(1))
+    return attempts * timeout + (attempts - 1) * backoff
+
+
+# ── the deployed endpoint, transliterated from the PRODUCTION pin ────────────
+#
+# backend/api/main.py at 0cc7f75, team_series_report_dc.  Three facts decide
+# everything below:
+#   * the row is re-read FOR NO KEY UPDATE and a status outside
+#     (active, dc_paused) returns {"ignored": true} WITHOUT writing;
+#   * the lead-forfeit branch needs other_team_existing_wins >= 1 AND
+#     t1_points_total + t2_points_total >= 2, and only that branch reaches
+#     _complete_team_series_with_ratings;
+#   * every other path writes status='dc_incomplete'.
+
+def endpoint(status, other_team_wins, points):
+    """The series status AFTER this report.  `points` is the report's t1+t2."""
+    if status not in ("active", "dc_paused"):
+        return status                      # {"ignored": true}; nothing is written
+    if other_team_wins >= 1 and points >= 2:
+        return "completed"                 # ratings + gold
+    return "dc_incomplete"
 
 
 def elect(seats, leaver, capable=None):
@@ -118,13 +153,20 @@ def elect(seats, leaver, capable=None):
     {uid, team}.  `capable` is the set of uids advertising cr_dc2 -- None means
     the whole room advertises it, which is the case the census arm needs.
 
-    Returns one entry per seat that POSTS, as (uid, totals, delay_seconds).
-    `totals` is always "REAL": the arm-(2) zeros were withdrawn this round, and
-    a test asserting a seat can produce "ZERO" would now be asserting the defect
-    (a seat on the LEAVER's team could force every other seat's report to zero
-    by withholding one property, turning a forfeit the other team had earned
-    into dc_incomplete).  `delay_seconds` is 0 for the prompt report and
-    SAFETY_NET_SEC for the seat that only reports if the prompt one never lands.
+    Returns one entry per seat that ACTS, as (uid, totals, role).
+
+    `totals` is always "REAL": the arm-(2) zeros were withdrawn a round ago, and
+    a test asserting a seat can produce "ZERO" here would be asserting the defect
+    (a seat on the LEAVER's team could force every other seat's report to zero by
+    withholding one property, turning a forfeit the other team had earned into
+    dc_incomplete).
+
+    `role` is "prompt" for a seat that POSTS NOW, and "watch" for the census
+    arm's other non-DC survivor, which posts NOTHING and arms a watch on the
+    elected seat's TERMINAL outcome.  There is no delay in this model because
+    there is no delay in the client: the +45 s net this replaces was an
+    elapsed-time guess about another seat's transaction, and what the watch
+    eventually posts (if anything) is decided by `fallback` below.
     """
     posts = []
     for me in seats:
@@ -167,7 +209,7 @@ def elect(seats, leaver, capable=None):
             if my_team == dc_team:
                 continue                  # the other team elects; the server refuses us
             posts.append((my_val, "REAL",
-                          0 if my_val == lowest_non_dc else SAFETY_NET_SEC))
+                          "prompt" if my_val == lowest_non_dc else "watch"))
             continue
 
         # arm (2): the floor election, unchanged, with this seat's own snapshot
@@ -191,28 +233,57 @@ def elect(seats, leaver, capable=None):
             continue
         if not lowest_overall and not lowest_on_my_team:
             continue
-        posts.append((my_val, "REAL", 0))
+        posts.append((my_val, "REAL", "prompt"))
     return posts
 
 
 def _prompt(posts):
-    return [p for p in posts if p[2] == 0]
+    return [p for p in posts if p[2] == "prompt"]
 
 
-def _net(posts):
-    return [p for p in posts if p[2] > 0]
+def _watch(posts):
+    return [p for p in posts if p[2] == "watch"]
+
+
+# ── the fallback's own rule, transliterated from DcReportSync.Evaluate ───────
+
+def fallback(outcome, gone, server_status):
+    """What the WATCHING seat does.
+
+    `outcome` is the last cr_dcr value it latched for this series: "" (the
+    elected seat has said nothing), "send", "ok" or "no".  `gone` is whether
+    that seat has left the room.  `server_status` is what
+    GET /team/series/{id}/state answered, or None when the read FAILED.
+
+    Returns "nothing", "stand-down", or "post" -- and "post" always means the
+    zero-total form.
+    """
+    if outcome == "ok":
+        return "stand-down"                       # terminal: the server answered
+    if outcome == "no" or (gone and outcome == ""):
+        # terminal the other way: nothing landed, or nothing was ever dispatched.
+        # Ask the server before writing anything.
+        if server_status is None:
+            return "nothing"                      # UNKNOWN state: never post on it
+        if server_status not in ("active", "dc_paused"):
+            return "stand-down"
+        return "post"
+    # everything else -- still in the room, or gone with a request in flight --
+    # is NOT terminal, and where no terminal outcome is known this seat posts
+    # nothing at all.
+    return "nothing"
 
 
 def _seats(ids_teams):
     return [{"uid": u, "team": t, "local": i} for i, (u, t) in enumerate(ids_teams)]
 
 
-def test_h1_healthy_2v2_elects_exactly_one_prompt_reporter_plus_a_safety_net():
+def test_h1_healthy_2v2_elects_exactly_one_prompt_reporter_plus_a_watcher():
     # leaver on team 0; survivors: its teammate (team 0) and both of team 1.
     seats = _seats([(10, 0), (20, 1), (30, 1)])
     posts = elect(seats, {"uid": 40, "team": 0})
-    assert _prompt(posts) == [(20, "REAL", 0)], posts
-    assert _net(posts) == [(30, "REAL", SAFETY_NET_SEC)], posts
+    assert _prompt(posts) == [(20, "REAL", "prompt")], posts
+    assert _watch(posts) == [(30, "REAL", "watch")], posts
     # the leaver's own team-mate is silent either way: the server refuses it
     assert 10 not in [u for u, _t, _d in posts]
 
@@ -226,30 +297,201 @@ def test_h1_every_healthy_permutation_yields_one_prompt_report():
             posts = elect(seats, {"uid": leaver_id, "team": dc_team})
             prompt = _prompt(posts)
             assert len(prompt) == 1, (ids, dc_team, posts)
-            uid, totals, delay = prompt[0]
-            assert totals == "REAL" and delay == 0
+            uid, totals, role = prompt[0]
+            assert totals == "REAL" and role == "prompt"
             assert uid == min(b, c)
             # and exactly one seat behind it, never a second prompt report
-            assert [u for u, _t, _d in _net(posts)] == [max(b, c)], posts
+            assert [u for u, _t, _d in _watch(posts)] == [max(b, c)], posts
 
 
-def test_h1_the_safety_net_cannot_overtake_the_prompt_report():
-    """The net exists because a single un-retried request used to be the whole
-    mechanism, and the disruption that produced the disconnect is the one that
-    drops it.  It must wait out the prompt seat's ENTIRE budget, or the two race
-    and the arrival order decides a rated completion again -- the defect the
-    census arm exists to remove."""
-    assert SAFETY_NET_SEC > RETRY_BUDGET_SEC
-    src = _src("Plugin.cs")
+def test_h1_no_elapsed_time_arms_the_fallback():
+    """The METHOD change.  The previous round put the second non-DC survivor on
+    a +45 s timer, sized against the prompt seat's NOMINAL retry budget.  That
+    is a guess about another seat's transaction: Unity's request timeout is not
+    a hard ceiling under a stalled socket, so a last attempt completing after the
+    delayed post makes arrival order decide a rated completion versus
+    dc_incomplete -- the defect the census arm exists to remove, landing inside
+    its own fix.
+
+    The bar is an ABSENCE: no duration, anywhere on this path, may decide
+    whether the second seat posts.  Asserted against the retry budget DERIVED
+    from source rather than a number written here, so raising a transport term
+    cannot leave this green (#342)."""
+    plug = _src("Plugin.cs")
+    api = _src("ApiClient.cs")
+
+    budget = retry_budget_seconds()
+    assert budget > 0
+    # Scoped to the DC callback's own span, not the whole file: "34" occurs as a
+    # substring of unrelated bug numbers, and a file-wide absence check for a
+    # two-digit string is a claim the tree cannot satisfy -- which is how such a
+    # check gets weakened until it cannot fail (#342; #432 says to assert the
+    # occurrence count within the FUNCTION span, never file-wide).
+    dc = plug[plug.index("// Reporter election: exactly ONE PROMPT report"):]
+    dc = dc[:dc.index('Plugin.Log.LogWarning($"[2v2-DC] report error')]
+    # ...and over the CODE, with the comment lines removed.  The prose above the
+    # election says what the +45 s net was and why it is gone; deleting that
+    # sentence to satisfy a text search would delete the record of the change.
+    code = "\n".join(l for l in dc.splitlines() if not l.strip().startswith("//"))
+    for magic in (str(int(budget)), str(int(budget) + 11), "DC_SAFETY_NET_SEC",
+                  "WaitForSeconds", "delaySec"):
+        assert magic not in code, magic
+    assert "delaySeconds" not in _method_body(api, "public static void ReportTeamSeriesDc")
+    dispatch = _method_body(api, "private static IEnumerator SendTeamSeriesDcReport")
+    assert dispatch, "the dispatch method's own text could not be delimited"
+    assert "WaitForSeconds" not in dispatch
 
     def claim(s):
-        return "const float DC_SAFETY_NET_SEC = 45f;" in s and "delaySec = DC_SAFETY_NET_SEC;" in s
+        b = _method_body(s, "private static IEnumerator SendTeamSeriesDcReport")
+        return bool(b) and "WaitForSeconds" not in b and "PostRequestWithRetry(url" in b
 
     _assert_discriminating(
-        claim, src,
-        _mutate(src, "const float DC_SAFETY_NET_SEC = 45f;",
-                "const float DC_SAFETY_NET_SEC = 1f;", "H1 net delay"),
-        "H1 safety-net delay")
+        claim, api,
+        _mutate(api,
+                "            yield return Plugin.Instance.StartCoroutine(PostRequestWithRetry(url",
+                "            yield return new WaitForSecondsRealtime(45f);\n"
+                "            yield return Plugin.Instance.StartCoroutine(PostRequestWithRetry(url",
+                "H1 elapsed-time net"),
+        "H1 no elapsed-time arming")
+
+
+def test_h1_the_fallback_fires_only_on_a_terminal_outcome():
+    """Every state the watching seat can be in, and what it does there.  The one
+    that carries the whole method change is (gone, "send"): the elected seat left
+    with a request possibly in flight, no terminal outcome is known, and this
+    seat posts NOTHING."""
+    # terminal: the server answered the prompt report
+    for gone in (False, True):
+        assert fallback("ok", gone, "active") == "stand-down"
+        assert fallback("ok", gone, None) == "stand-down"
+    # terminal: every attempt failed
+    assert fallback("no", False, "active") == "post"
+    assert fallback("no", True, "dc_paused") == "post"
+    # terminal: it left having dispatched nothing at all
+    assert fallback("", True, "active") == "post"
+    # NOT terminal, in either of its two shapes
+    assert fallback("", False, "active") == "nothing"      # still here, silent so far
+    assert fallback("send", False, "active") == "nothing"  # still here, in flight
+    assert fallback("send", True, "active") == "nothing"   # gone, in flight: UNKNOWN
+    # a terminal trigger still defers to the server's own answer
+    assert fallback("no", False, "completed") == "stand-down"
+    assert fallback("no", False, "dc_incomplete") == "stand-down"
+    assert fallback("no", False, None) == "nothing"        # unreadable: post nothing
+
+    # and the source runs the same table
+    ra = _src("RoomActors.cs")
+    body = ra[ra.index("private static void Evaluate(string why)"):]
+    body = body[:body.index("private static void Fire(")]
+    assert "_watchOutcome == OutcomeAnswered" in body
+    assert "_watchOutcome == OutcomeFailed" in body
+    assert '_watchGone && _watchOutcome.Length == 0' in body
+    assert "_watchGone && _watchOutcome == OutcomeSent" in body
+
+    def claim(s):
+        if "private static void Evaluate(string why)" not in s:
+            return False
+        b = s[s.index("private static void Evaluate(string why)"):]
+        b = b[:b.index("private static void Fire(")] if "private static void Fire(" in b else b
+        return ("_watchGone && _watchOutcome == OutcomeSent" in b
+                and "_watchOutcome == OutcomeFailed" in b)
+
+    _assert_discriminating(
+        claim, ra,
+        _mutate(ra, "            if (_watchGone && _watchOutcome == OutcomeSent)",
+                "            if (false)", "H1 terminal table"),
+        "H1 terminal-outcome table")
+
+
+def test_h1_no_ordering_of_prompt_and_fallback_can_select_the_rated_completion():
+    """The proof the round is judged on, over the DEPLOYED endpoint.
+
+    Two things make it hold, and the harness separates them.  First, the two
+    requests never coexist: a fallback is emitted only from a state in which the
+    prompt transaction is terminal, so the set of schedules containing both an
+    in-flight prompt report and a fallback is EMPTY.  Second -- belt and braces,
+    because the first rests on a client-side observation -- the fallback's FORM
+    carries zero totals, and the endpoint's lead-forfeit branch needs >= 2, so
+    even if the two were somehow interleaved the fallback could never be the
+    report that completes a series with ratings and gold."""
+    coexist = []
+    for outcome in ("", "send", "ok", "no"):
+        for gone in (False, True):
+            for server_status in ("active", "dc_paused", "completed",
+                                  "dc_incomplete", "canceled", None):
+                act = fallback(outcome, gone, server_status)
+                # a prompt request is still live exactly while the elected seat
+                # has dispatched and not announced a terminal answer
+                prompt_in_flight = (outcome == "send")
+                if act == "post" and prompt_in_flight:
+                    coexist.append((outcome, gone, server_status))
+    assert coexist == [], coexist
+
+    # ...and the form, against the endpoint itself.  Over every series state and
+    # every series-lead the endpoint distinguishes, in BOTH arrival orders.
+    for other_team_wins in (0, 1, 2):
+        for prompt_points in (0, 1, 2, 5):
+            # prompt first, then a fallback that the endpoint sees second
+            after_prompt = endpoint("active", other_team_wins, prompt_points)
+            after_both = endpoint(after_prompt, other_team_wins, 0)
+            assert after_both == after_prompt, (other_team_wins, prompt_points)
+            # fallback first, then the prompt report
+            after_fallback = endpoint("active", other_team_wins, 0)
+            assert after_fallback == "dc_incomplete"
+            assert endpoint(after_fallback, other_team_wins, prompt_points) == "dc_incomplete"
+            # in NEITHER order is the fallback the report that rates the series
+            assert endpoint("active", other_team_wins, 0) != "completed"
+
+    # the negative control: a fallback carrying the prompt seat's real totals
+    # DOES select the rated completion, which is what the zero form removes
+    assert endpoint("active", 1, 3) == "completed"
+
+    # and the client forces the form rather than trusting its caller
+    api = _src("ApiClient.cs")
+
+    def claim(s):
+        return "if (fallback) { t1PointsTotal = 0; t2PointsTotal = 0; }" in s
+
+    _assert_discriminating(
+        claim, api,
+        _mutate(api, "if (fallback) { t1PointsTotal = 0; t2PointsTotal = 0; }",
+                "// the caller is trusted to zero them", "H1 fallback form"),
+        "H1 fallback form")
+
+
+def test_h1_the_fallback_asks_the_server_before_it_writes_anything():
+    """report-dc is not a probe: for an OPEN series it WRITES.  The read is
+    GET /team/series/{id}/state, and a read that fails is an UNKNOWN server
+    state on which nothing is posted -- which is why it cannot reuse
+    PollTeamSeriesState, whose callback never fires on a failure at all."""
+    ra = _src("RoomActors.cs")
+    api = _src("ApiClient.cs")
+    fire = ra[ra.index("private static void Fire(string reason)"):]
+    assert "ApiClient.ReadTeamSeriesStatusOnce(series" in fire
+    assert 'if (!ok)' in fire
+    assert 'status != "active" && status != "dc_paused"' in fire
+    # the post is the LAST thing, after both refusals
+    assert fire.index("if (!ok)") < fire.index("ApiClient.ReportTeamSeriesDc(")
+    assert fire.index('status != "active"') < fire.index("ApiClient.ReportTeamSeriesDc(")
+
+    read = _method_body(api, "public static void ReadTeamSeriesStatusOnce")
+    assert read, "the read helper's own text could not be delimited"
+    assert "onDone(false, \"\")" in read          # a failure is REPORTED, not dropped
+
+    def claim(s):
+        if "private static void Fire(string reason)" not in s:
+            return False
+        f = s[s.index("private static void Fire(string reason)"):]
+        if ("ApiClient.ReadTeamSeriesStatusOnce(series" not in f
+                or "if (!ok)" not in f
+                or "ApiClient.ReportTeamSeriesDc(" not in f):
+            return False
+        return f.index("if (!ok)") < f.index("ApiClient.ReportTeamSeriesDc(")
+
+    _assert_discriminating(
+        claim, ra,
+        _mutate(ra, "                        if (!ok)", "                        if (false)",
+                "H1 unknown state"),
+        "H1 fallback server read")
 
 
 def test_h1_a_peer_on_the_older_election_drops_the_room_to_the_floor_rule():
@@ -260,12 +502,12 @@ def test_h1_a_peer_on_the_older_election_drops_the_room_to_the_floor_rule():
     seats = _seats([(10, 0), (20, 1), (30, 1)])
     leaver = {"uid": 40, "team": 0}
     every = elect(seats, leaver, capable={10, 20, 30})
-    assert len(_prompt(every)) == 1 and len(_net(every)) == 1
+    assert len(_prompt(every)) == 1 and len(_watch(every)) == 1
 
     # one survivor on the old build: every seat falls to the floor election,
     # which is the rule that seat is already running.
     mixed = elect(seats, leaver, capable={20, 30})
-    assert all(d == 0 for _u, _t, d in mixed), mixed
+    assert all(r == "prompt" for _u, _t, r in mixed), mixed
     assert _prompt(mixed), "the floor election still reports (#276)"
     assert all(t == "REAL" for _u, t, _d in mixed), mixed
 
@@ -296,7 +538,7 @@ def test_h1_the_leavers_own_team_cannot_downgrade_the_report():
 def test_h1_degenerate_seats_always_report_and_never_wait_for_a_seat_that_will_not():
     """Every way the census can be incomplete.  The bar: at least one PROMPT
     report in every one of them (#276 -- zero reporters is worse than the bug),
-    and no seat sitting on a safety net when no census elected anyone."""
+    and no seat sitting on a watch when no census elected anyone."""
     cases = [
         # a survivor with no advertised u_id
         (_seats([(10, 0), (None, 1), (30, 1)]), {"uid": 40, "team": 0}),
@@ -317,7 +559,7 @@ def test_h1_degenerate_seats_always_report_and_never_wait_for_a_seat_that_will_n
         posts = elect(seats, leaver)
         assert posts, ("zero reporters", seats, leaver)
         assert _prompt(posts), ("nobody reports promptly", seats, leaver, posts)
-        assert not _net(posts), ("a net without an election", seats, leaver, posts)
+        assert not _watch(posts), ("a watch without an election", seats, leaver, posts)
 
 
 def test_h1_mutation_dropping_the_split_check_reopens_the_race():
@@ -345,7 +587,7 @@ def test_h1_mutation_dropping_the_split_check_reopens_the_race():
     # the real election refuses the census (the split is 1 non-DC vs 3) and runs
     # the floor rule, which is what every peer in that room is running too.
     real = elect(seats, leaver)
-    assert real and all(d == 0 for _u, _t, d in real), real
+    assert real and all(r == "prompt" for _u, _t, r in real), real
 
 
 def test_h1_source_matches_the_model():
@@ -588,8 +830,23 @@ def test_m3_no_silent_return_remains_before_the_grant_dispatch():
         if len(chunks) < 4:
             return False
         for c in chunks:
-            owner = c[c.rfind("if ("):] if "if (" in c else c
-            if "Plugin.Log.Log" not in owner and "ShowNotification" not in owner:
+            # The owner window is the GUARD that owns the return -- the last
+            # statement-level `if (` before it, at the method's own indentation.
+            # Taking the last `if (` of any depth would take the nested
+            # `if (!broadcastTicket)` instead, which is precisely the conditional
+            # voice this predicate has to see past.
+            cut = c.rfind("\n            if (")
+            owner = c[cut:] if cut >= 0 else c
+            # It must speak to SOMEBODY, whoever asked.  The first version of
+            # this predicate accepted a ShowNotification, full stop -- and the
+            # broadcast-transport arm's only voice was a toast nested under
+            # `if (!broadcastTicket)`, so with a broadcast ticket the method
+            # returned zero in silence and this check stayed green.  A guard
+            # whose only voice is conditional on the caller is a silent guard
+            # for the other caller (#430).
+            speaks_always = "Plugin.Log.Log" in owner
+            toast_only = "ShowNotification" in owner and "if (!broadcastTicket)" not in owner
+            if not (speaks_always or toast_only):
                 return False
         return True
 
@@ -677,21 +934,48 @@ def test_l2_the_stash_reader_applies_the_identity_rule_its_comment_states():
     assert "chatDraftStashIdentity = who;" in src
 
 
-def test_l2_an_unresolved_identity_is_not_treated_as_a_change():
-    """First resolution is deliberately not an account change -- the same rule
-    DropChatOnAccountChange follows.  Model + the guard it mirrors."""
+def test_l2_the_null_writer_contract_is_enforced_and_is_not_symmetric():
+    """The field's doc says "null means stashed before an identity was
+    resolvable, and only matches another null".  The reader applied half of
+    that: a known writer against a different reader destroyed the stash, but a
+    NULL writer was handed to whatever account resolved afterwards, as long as
+    the channel and the TTL still matched.
+
+    The two unresolved cases are deliberately NOT symmetric.  An unresolved
+    READER leaves the question open -- that is the first-resolution shape
+    DropChatOnAccountChange also refuses to treat as a change.  An unresolved
+    WRITER answers it against resuming: it is not evidence that the line was
+    this account's, and a draft is not worth resuming into an account that
+    cannot be shown to have written it."""
     def keeps(writer, reader):
-        if reader and reader != "unknown" and writer and writer != reader:
+        resolved = bool(reader) and reader != "unknown"
+        if resolved and writer and writer != reader:
+            return False
+        if resolved and not writer:
             return False
         return True
 
     assert keeps("A", "A") is True
     assert keeps("A", "B") is False
-    assert keeps("A", None) is True
+    assert keeps("A", None) is True        # unresolved reader: keep
     assert keeps("A", "unknown") is True
-    assert keeps(None, "B") is True
+    assert keeps(None, "B") is False       # unresolved WRITER, resolved reader: drop
+    assert keeps(None, None) is True       # null matches null
+    assert keeps(None, "unknown") is True
+
     src = _src("CompetitiveUI.cs")
-    assert 'if (!string.IsNullOrEmpty(reader) && reader != "unknown"' in src
+    body = _method_body(src, "private static string TakeStashedDraft()")
+    assert body, "the reader's own text could not be delimited"
+
+    def claim(s):
+        b = _method_body(s, "private static string TakeStashedDraft()")
+        return bool(b) and "if (readerResolved && string.IsNullOrEmpty(writer))" in b
+
+    _assert_discriminating(
+        claim, src,
+        _mutate(src, "if (readerResolved && string.IsNullOrEmpty(writer))",
+                "if (false)", "L2 null writer"),
+        "L2 null-writer contract")
 
 
 def test_m4_the_351_citation_names_which_351():
@@ -930,8 +1214,8 @@ def test_m7_a_membership_change_inside_the_window_is_not_overwritten():
 
     _assert_discriminating(
         claim, src,
-        _mutate(src, "bool sameSet = players != null && players.Count == _order.Count;",
-                "bool sameSet = players != null;", "M7 membership"),
+        _mutate(src, "bool sameCount = players != null && players.Count == _order.Count;",
+                "bool sameCount = players != null;", "M7 membership"),
         "M7 membership guard")
 
 
@@ -949,13 +1233,16 @@ def test_m7_the_ungated_postfix_stands_down_inside_the_window():
         b = s[s.index("internal static class SawDeadTargetPatch"):]
         b = b[:b.index("\n    }\n") + 6]
         # the stand-down is BEFORE the selector re-run, or it is not a stand-down
-        return ("if (SawLiveTargetPatch.WindowOpen) return;" in b
-                and b.index("if (SawLiveTargetPatch.WindowOpen) return;")
-                    < b.index("Player vanillaTarget = Select("))
+        anchor = "if (SawLiveTargetPatch.WindowOpen) {"
+        if anchor not in b or "Player vanillaTarget = Select(" not in b:
+            return False
+        return b.index(anchor) < b.index("Player vanillaTarget = Select(")
 
     _assert_discriminating(
         claim, src,
-        _mutate(src, "                if (SawLiveTargetPatch.WindowOpen) return;",
+        _mutate(src,
+                "                if (SawLiveTargetPatch.WindowOpen) "
+                "{ SawLiveTargetPatch.NotePostfixStoodDown(); return; }",
                 "                // postfix runs inside the window", "M7 stand-down"),
         "M7 postfix stand-down")
 
@@ -1192,11 +1479,16 @@ def test_every_cross_seat_roster_filter_reads_the_replicated_property():
     the property.  Two seats that first look at different moments can hold
     different rosters for the whole room, which is two rules, not one.
 
-    PoisonSync is deliberately NOT swept: its roster GRANTS authority, and there
-    the cache is doing real work by holding "joined as a spectator" fixed.  The
-    rule this test encodes is the distinction, not "never use the cache"."""
+    PoisonSync was ruled OUT of that sweep one round ago, on the reading that
+    its roster GRANTS authority.  It does not: ScanRoster decides a fail-closed
+    capability REFUSAL, and an actor read as a fighter on one seat and a
+    spectator on another splits the sticky incapability flag, the roster
+    quarantine and victim-side block honouring -- which reaches fighter damage.
+    It is swept now, together with the two room-edge gates that feed it, and the
+    helper's own doc no longer names it as a cache caller (#302, #432)."""
     plug = _src("Plugin.cs")
     vf = _src("VanillaFixes.cs")
+    ps = _src("PoisonSync.cs")
 
     # the census
     census = plug[plug.index("var survivors = new List<Photon.Realtime.Player>();"):]
@@ -1208,11 +1500,36 @@ def test_every_cross_seat_roster_filter_reads_the_replicated_property():
     assert vf.count("RoomActors.IsSpectatorReplicated(actor)") == 2
     assert "RoomActors.IsSpectator(actor)" not in vf
 
+    # PoisonSync's own capability roster, both halves of it
+    assert ps.count("RoomActors.IsSpectatorReplicated(list[i])") == 2
+    assert "RoomActors.IsSpectator(list[i])" not in ps
+
+    # the two room-edge gates that arm the same rule.  Each is asserted inside
+    # the span of the statement it belongs to, not file-wide: Plugin.cs keeps
+    # LOCAL IsSpectator callers on purpose (the master's spectator validation,
+    # the face re-send), and a file-wide absence check would be a claim the tree
+    # cannot satisfy and would have to be weakened into one that cannot fail.
+    entry = plug[plug.index("bool entrantIsSpectatorReplicated = false;"):]
+    entry = entry[:entry.index("PoisonSync.NoteRosterChange(\"PlayerEntered\");") + 45]
+    assert "RoomActors.IsSpectatorReplicated(p)" in entry
+    assert "if (!entrantIsSpectatorReplicated)" in entry
+
+    leave = plug[plug.index("bool leaverIsSpectatorReplicated = false;"):]
+    leave = leave[:leave.index("catch { }")]
+    assert "RoomActors.IsSpectatorReplicated(p)" in leave
+    assert "RoomActors.IsSpectator(p)" not in leave
+
     # and the helper itself reads the property every call -- no cache to fall back on
     ra = _src("RoomActors.cs")
     body = _method_body(ra, "internal static bool IsSpectatorReplicated(PhotonPlayer actor)")
     assert body and "props.ContainsKey(SPEC_PROP)" in body
     assert "_roleByActor" not in body
+
+    # the doc that told the next caller which one to pick no longer sends them
+    # to the cache for this case
+    doc = ra[ra.index("/// <para>WHICH ONE A CALLER WANTS."):
+             ra.index("internal static bool IsSpectatorReplicated(PhotonPlayer actor)")]
+    assert "PoisonSync" in doc and "authority roster" not in doc
 
     def claim(s):
         return ("RoomActors.IsSpectatorReplicated(actor)" in s
@@ -1224,18 +1541,33 @@ def test_every_cross_seat_roster_filter_reads_the_replicated_property():
                 "if (RoomActors.IsSpectator(actor)) continue;", "sweep"),
         "cross-seat roster basis")
 
+    def poison_claim(s):
+        return (s.count("RoomActors.IsSpectatorReplicated(list[i])") == 2
+                and "RoomActors.IsSpectator(list[i])" not in s)
+
+    _assert_discriminating(
+        poison_claim, ps,
+        _mutate(ps, "if (list[i] != null && !RoomActors.IsSpectatorReplicated(list[i])) n++;",
+                "if (list[i] != null && !RoomActors.IsSpectator(list[i])) n++;", "poison sweep"),
+        "PoisonSync roster basis")
+
 
 def test_the_dc_report_is_retried_and_carries_the_room_it_was_observed_in():
     """A single un-retried request was the whole mechanism, on the path whose
     failure leaves the series open and every survivor holding a 2v2 lease.  The
     retry is safe against the DEPLOYED endpoint, which re-reads the row under
-    FOR UPDATE and answers {"ignored": true} unless the status is still
+    FOR NO KEY UPDATE and answers {"ignored": true} unless the status is still
     active/dc_paused -- so a repeat cannot double-apply ratings or gold."""
     src = _src("ApiClient.cs")
     body = _method_body(src, "private static IEnumerator SendTeamSeriesDcReport")
     assert body, "the dispatch method's own text could not be delimited"
     assert "PostRequestWithRetry(url" in body
-    assert "WaitForSecondsRealtime(delaySeconds)" in body
+    # the lock mode is the DEPLOYED one, read off production 0cc7f75 rather than
+    # remembered: the row re-read takes FOR NO KEY UPDATE; FOR UPDATE is what the
+    # completion helper beneath it takes, and the doc used to name the wrong one.
+    assert "FOR NO KEY UPDATE" in src
+    doc = src[src.index("/// <para>DELIVERY."):src.index("public static void ReportTeamSeriesDc")]
+    assert "FOR NO KEY UPDATE" in doc and "re-reads the row under FOR UPDATE" not in doc
 
     def claim(s):
         b = _method_body(s, "private static IEnumerator SendTeamSeriesDcReport")
@@ -1253,7 +1585,7 @@ def test_the_dc_report_is_retried_and_carries_the_room_it_was_observed_in():
     # passes straight through the bug-245 resume fence.
     def room_claim(s):
         return ("string dcRoom = observedRoom;" in s
-                and "string observedRoom = null, float delaySeconds = 0f)" in s)
+                and "string observedRoom = null, bool fallback = false)" in s)
 
     _assert_discriminating(
         room_claim, src,
@@ -1261,7 +1593,12 @@ def test_the_dc_report_is_retried_and_carries_the_room_it_was_observed_in():
         "DC observed room")
 
     plug = _src("Plugin.cs")
-    assert "ApiClient.ReportTeamSeriesDc(seriesId, myId, dcSteamId, t1Points, t2Points,\n                                             observedRoom, delaySec);" in plug
+    assert "ApiClient.ReportTeamSeriesDc(seriesId, myId, dcSteamId, t1Points, t2Points,\n                                             observedRoom, false);" in plug
+    # and the room is captured at the OBSERVATION, before either arm can leave:
+    # the watch arm returns without posting, so its eventual fallback carries the
+    # room the disconnect was seen in and not whatever room it is in by then.
+    head = plug[plug.index("string observedRoom = \"\";"):]
+    assert head.index("DcReportSync.ArmFallback(") < head.index("ApiClient.ReportTeamSeriesDc(")
 
 
 def test_the_dc_election_capability_follows_the_pre_join_protocol():
@@ -1276,6 +1613,14 @@ def test_the_dc_election_capability_follows_the_pre_join_protocol():
     assert "if (PhotonNetwork.InRoom)" in body            # refuses an in-room write
     assert "if (Plugin.modDisabled) { _stageFailedPermanently = true; return; }" in body
     assert "if (survivors == null || survivors.Count == 0) return false;" in body   # every(empty)
+    # ...and not before the compatibility verdict: a capability staged inside
+    # that window by a seat the verdict then disables can only be withdrawn with
+    # an IN-ROOM write, which is the path the line above refuses.
+    stage = body[body.index("internal static void StageCapability(string source)"):]
+    stage = stage[:stage.index("internal static void RevokeCapability()")]
+    assert "if (!Plugin.compatCheckComplete)" in stage
+    assert stage.index("if (!Plugin.compatCheckComplete)") < stage.index("if (PhotonNetwork.InRoom)")
+    assert "deferred staging" in stage                    # the refusal SPEAKS
 
     plug = _src("Plugin.cs")
     vf = _src("VanillaFixes.cs")
@@ -1317,3 +1662,228 @@ def test_the_freeze_log_budget_is_spent_per_match_not_per_process():
 
     # the band's own caps were already per match; all three now share the unit
     assert src.count("_bandSummaries = 0; _bandSummarisedCount = 0;") == 2
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Round-3 -- the class sweeps behind the round-2 findings
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_every_capability_stage_waits_for_the_compatibility_verdict():
+    """The flag named cr_dc2 and cr_saw1; the defect is the OPERATION (#432).
+
+    Four protocols stage a per-seat capability property, and every one of them
+    stages PRE-JOIN because an in-room write reaches peers after they have
+    already evaluated the census it feeds.  The compatibility verdict lands
+    about three seconds into the process, and a join inside that window used to
+    snapshot a capability from a seat the verdict then disabled -- leaving an
+    in-room revoke as the only correction, i.e. the exact write all four refuse.
+
+    All four now refuse before the verdict, and all four SAY SO once: a silent
+    refusal and a stage that was never attempted read identically in a bundle
+    (#342)."""
+    protocols = [
+        ("VanillaFixes.cs", "GrowNormalize", "[GROW-CAP]"),
+        ("VanillaFixes.cs", "SawTargetSync", "[SAW-CAP]"),
+        ("RoomActors.cs", "DcReportSync", "[2v2-DC]"),
+        ("PoisonSync.cs", "PoisonSync", "[POISON-CAP]"),
+    ]
+    for fname, cls, tag in protocols:
+        src = _src(fname)
+        cut = src[src.index("class " + cls):] if ("class " + cls) in src else src
+        stage = cut[cut.index("internal static void StageCapability(string source)"):]
+        stage = stage[:stage.index("internal static void RevokeCapability()")]
+        assert "if (!Plugin.compatCheckComplete)" in stage, cls
+        assert "deferred staging" in stage, cls
+        assert tag in stage, cls
+        # the verdict gate precedes the in-room refusal it exists to avoid
+        assert (stage.index("if (!Plugin.compatCheckComplete)")
+                < stage.index("if (PhotonNetwork.InRoom)")), cls
+
+    # a control per FILE, because the three files are three separate edits
+    for fname in ("RoomActors.cs", "VanillaFixes.cs", "PoisonSync.cs"):
+        src = _src(fname)
+        want = 2 if fname == "VanillaFixes.cs" else 1
+
+        def claim(s, _w=want):
+            return s.count("if (!Plugin.compatCheckComplete)") >= _w
+
+        _assert_discriminating(
+            claim, src,
+            src.replace("if (!Plugin.compatCheckComplete)", "if (false)"),
+            "compat gate in " + fname)
+
+
+def test_the_dc_outcome_property_is_scoped_to_the_series_it_describes():
+    """cr_dcr is retained on the actor and a sitting can run several series, so
+    an outcome published for the PREVIOUS series must not read as a terminal
+    answer about this one -- that would stand a watch down over a report that
+    was never sent."""
+    ra = _src("RoomActors.cs")
+    body = _method_body(ra, "internal static string OutcomeOf(PhotonPlayer actor, string seriesId)")
+    assert body, "OutcomeOf's own text could not be delimited"
+    assert "Tag(seriesId)" in body
+    assert "s.Substring(0, i), tag" in body
+    # and an unrecognised token is NOT terminal
+    assert "OutcomeSent || o == OutcomeAnswered || o == OutcomeFailed" in body
+
+    # the model of the same rule, including the three ways it must answer ""
+    def outcome_of(prop, series):
+        tag = series[:8].lower()
+        if not prop or ":" not in prop:
+            return ""
+        head, _, rest = prop.partition(":")
+        if head != tag or rest not in ("send", "ok", "no"):
+            return ""
+        return rest
+
+    assert outcome_of("abcdef12:ok", "ABCDEF12-1111") == "ok"
+    assert outcome_of("99999999:ok", "abcdef12-1111") == ""      # a previous series
+    assert outcome_of("abcdef12:maybe", "abcdef12-1111") == ""   # unrecognised
+    assert outcome_of("", "abcdef12-1111") == ""
+    # and the watch treats "" as NOT terminal while the seat is still present
+    assert fallback(outcome_of("99999999:no", "abcdef12"), False, "active") == "nothing"
+
+    def claim(s):
+        b = _method_body(s, "internal static string OutcomeOf(PhotonPlayer actor, string seriesId)")
+        return bool(b) and "s.Substring(0, i), tag" in b
+
+    _assert_discriminating(
+        claim, ra,
+        _mutate(ra, "if (!string.Equals(s.Substring(0, i), tag, StringComparison.Ordinal)) return " + '""' + ";",
+                "// any series' answer will do", "outcome scope"),
+        "DC outcome series scope")
+
+
+def test_the_dc_fallback_watch_dies_with_the_room():
+    """A watch carried across a room edge waits on an ACTOR NUMBER that now
+    names somebody else.  Same lifetime, and the same three edges, as the
+    [SAW-TARGET] verdict line beside it."""
+    plug = _src("Plugin.cs")
+    ra = _src("RoomActors.cs")
+    assert "internal static void ResetForRoomChange()" in ra
+    assert plug.count("DcReportSync.ResetForRoomChange();") >= 3   # join, leave, disconnect
+    assert "DcReportSync.NoteActorLeft(p);" in plug
+    assert "DcReportSync.NoteActorProps(target);" in plug
+
+    def claim(s):
+        return s.count("DcReportSync.ResetForRoomChange();") >= 3
+
+    _assert_discriminating(
+        claim, plug,
+        plug.replace("DcReportSync.ResetForRoomChange();", "// no reset"),
+        "DC watch per room")
+
+    # the property hook runs BEFORE the null-payload return that ends the method
+    upd = plug[plug.index("public void OnPlayerPropertiesUpdate("):]
+    upd = upd[:upd.index("RoomActors.NoteRosterIdentityChange();")]
+    assert upd.index("DcReportSync.NoteActorProps(target);") < upd.index("if (changedProps == null) return;")
+
+
+def test_the_masking_witness_line_is_measured_and_bounded():
+    """[SAW-TARGET] apply says the quorum was evaluated; it says nothing about
+    whether a frame was ever masked or put back.  The positive line that does
+    must MEASURE its terms rather than assert them: same-list is a reference
+    comparison against the object the window opened over, and the postfix
+    stand-down is that postfix's own count inside this window (#342)."""
+    vf = _src("VanillaFixes.cs")
+    restore = vf[vf.index("private static void RestoreOrder()"):]
+    restore = restore[:restore.index("[HarmonyFinalizer]")]
+    assert "ReferenceEquals(players, _maskedList)" in restore
+    assert "[SAW-TARGET] masked/restored same-list=true same-count=true" in restore
+    assert "postfix-stand-down=" in restore
+    assert "_maskedLines < 3" in restore                     # bounded, per room
+    # identity is part of the restore GUARD, not only of the line
+    assert restore.index("bool sameSet = sameList && sameCount;") < restore.index("players[i] = _order[i];")
+    # the postfix COUNTS its stand-down rather than the line claiming it
+    assert ("if (SawLiveTargetPatch.WindowOpen) { SawLiveTargetPatch.NotePostfixStoodDown(); return; }"
+            in vf)
+    # and the budget is reset on the same room edge as the verdict line
+    reset = vf[vf.index("internal static void ResetForRoomChange()"):]
+    reset = reset[:reset.index("\n    }")]
+    assert "SawLiveTargetPatch.ResetForRoomChange();" in reset
+
+    def claim(s):
+        if "private static void RestoreOrder()" not in s:
+            return False
+        r = s[s.index("private static void RestoreOrder()"):]
+        r = r[:r.index("[HarmonyFinalizer]")] if "[HarmonyFinalizer]" in r else r
+        return "ReferenceEquals(players, _maskedList)" in r and "_maskedLines < 3" in r
+
+    _assert_discriminating(
+        claim, vf,
+        _mutate(vf, "bool sameList = players != null && ReferenceEquals(players, _maskedList);",
+                "bool sameList = players != null;", "saw witness"),
+        "saw masking witness")
+
+
+def test_the_broadcast_transport_refusal_speaks_whoever_asked():
+    """The one pre-dispatch refusal whose only voice was a toast nested under
+    `if (!broadcastTicket)`.  On the seat where that guard is the only one that
+    can arm at all, the method returned zero and the bundle showed nothing --
+    so "a grant was declined" and "no grant was ever requested" read alike."""
+    src = _src("ApiClient.cs")
+    arm = src[src.index("if (BroadcastGrantTransportUnsettled)"):]
+    arm = arm[:arm.index("return 0;")]
+    assert "[SPECTATE] WATCH declined before dispatch: a broadcast-issued" in arm
+    # the log precedes the conditional toast, and is not inside it
+    assert arm.index("Plugin.Log.LogInfo") < arm.index("if (!broadcastTicket)")
+
+    def claim(s):
+        if "if (BroadcastGrantTransportUnsettled)" not in s:
+            return False
+        a = s[s.index("if (BroadcastGrantTransportUnsettled)"):]
+        a = a[:a.index("return 0;")] if "return 0;" in a else a
+        if "Plugin.Log.Log" not in a or "if (!broadcastTicket)" not in a:
+            return False
+        return a.index("Plugin.Log.Log") < a.index("if (!broadcastTicket)")
+
+    _assert_discriminating(
+        claim, src,
+        _mutate(src,
+                'Plugin.Log.LogInfo("[SPECTATE] WATCH declined before dispatch: a broadcast-issued "',
+                "// silent", "broadcast diag"),
+        "broadcast transport refusal speaks")
+
+
+def test_the_epoch_guarantee_is_narrowed_to_what_the_client_emits():
+    """The audit's correction told a reader to PARTITION on local_freeze_epoch.
+    Nothing on the deployed server stores it, so there is no column to group by
+    and the instruction described a capability that does not exist (#302).  The
+    client's guarantee stops at the wire; the storage half is a server pass."""
+    raw = (ROOT / "docs" / "performance-audit-2026-07-23.md").read_text(encoding="utf-8")
+    doc = " ".join(raw.split())          # the claims are sentences, not lines
+    assert "0cc7f75" in doc
+    assert "does not declare, store or classify either field" in doc
+    assert "no epoch column to group by" in doc
+    assert "Partition on `local_freeze_epoch`" not in doc
+
+    def claim(s):
+        return ("0cc7f75" in s
+                and "does not declare, store or classify either field" in s)
+
+    _assert_discriminating(
+        claim, doc,
+        _mutate(doc, "does not declare, store or classify either field",
+                "stores both fields", "epoch doc"),
+        "epoch doc narrowed")
+
+
+def test_the_schema_note_names_the_deployed_pin():
+    """A contract note pinned to a retired, never-deployed tail validates against
+    a model production does not run."""
+    sch = (ROOT / "backend" / "api" / "schemas.py").read_text(encoding="utf-8")
+    note = sch[sch.index("local_freeze_epoch, opp_freeze_epoch"):sch.index("local_ping_avg")]
+    assert "PRODUCTION 0cc7f75" in note
+    assert "THE CLIENT" in note and "STOPS AT THE WIRE" in note
+    # the retired tail may only appear as the thing being corrected
+    for line in note.splitlines():
+        if "cc92498" in line and "0cc7f75" not in line:
+            assert "used to name" in line or "tail" in line, line
+
+    def claim(s):
+        return "PRODUCTION 0cc7f75" in s and "STOPS AT THE WIRE" in s
+
+    _assert_discriminating(
+        claim, sch,
+        _mutate(sch, "PRODUCTION 0cc7f75", "the deployed main.py at cc92498", "schema pin"),
+        "schema note pin")

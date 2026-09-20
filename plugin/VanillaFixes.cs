@@ -319,7 +319,13 @@ namespace CompetitiveRounds
                 // therefore chosen, so there is no corpse in the slot to correct, and
                 // this postfix's verdict must not become a function of the other
                 // patch's quorum.
-                if (SawLiveTargetPatch.WindowOpen) return;
+                //
+                // The stand-down is COUNTED, not only performed: "the postfix stood
+                // down inside the window" is the one half of the masking invariant
+                // that cannot be read off the roster afterwards, and a witness line
+                // that asserted it instead of measuring it would be a check that
+                // cannot fail (#342).
+                if (SawLiveTargetPatch.WindowOpen) { SawLiveTargetPatch.NotePostfixStoodDown(); return; }
 
                 bool faithful;
                 Player vanillaTarget = Select(__instance, out faithful);
@@ -404,7 +410,7 @@ namespace CompetitiveRounds
         /// protocol must not reach.</summary>
         internal static bool PatchesLive;
 
-        private static bool _staged, _stageFailedPermanently;
+        private static bool _staged, _stageFailedPermanently, _deferLogged;
         private static string _lastLogKey = "";
         private static int _verdictFrame = -1;
         private static bool _verdict;
@@ -413,7 +419,19 @@ namespace CompetitiveRounds
         /// protocol forbids, and a merge landing mid-join is present locally
         /// and never delivered to peers — a silently false-capable client,
         /// the worst state this can be in. Idle client states provably precede
-        /// any join op's parameter snapshot.</summary>
+        /// any join op's parameter snapshot.
+        ///
+        /// <para>AND NOT BEFORE THE COMPATIBILITY VERDICT, which lands about three
+        /// seconds into the process. A join inside that window used to snapshot
+        /// <c>cr_saw1=1</c> from a seat the verdict then disabled, leaving an
+        /// IN-ROOM revoke as the only correction — the write this protocol
+        /// forbids. Staging waits for the verdict now; the tick retry does it a
+        /// few ticks later, and a room joined before the verdict plays vanilla
+        /// targeting for that room, which is exactly what the refusal costs
+        /// (#430). The deferral is LOGGED, once: "not staged" and "staging
+        /// refused, and why" are different facts and only the second can be read
+        /// out of a bundle (#342). Same gate and same shape as
+        /// GrowNormalize.StageCapability.</para></summary>
         internal static void StageCapability(string source)
         {
             try
@@ -423,6 +441,18 @@ namespace CompetitiveRounds
                 if (Plugin.modDisabled)
                 {
                     _stageFailedPermanently = true;
+                    return;
+                }
+                if (!Plugin.compatCheckComplete)
+                {
+                    if (!_deferLogged)
+                    {
+                        _deferLogged = true;
+                        Plugin.Log.LogInfo("[SAW-CAP] deferred staging " + CapabilityProp
+                            + " (" + source + ") — the compatibility verdict is not in yet; "
+                            + "a room joined before it plays vanilla targeting, and the tick "
+                            + "stages this once the verdict clears");
+                    }
                     return;
                 }
                 if (PhotonNetwork.InRoom)
@@ -557,7 +587,12 @@ namespace CompetitiveRounds
             catch { }
         }
 
-        internal static void ResetForRoomChange() { _lastLogKey = ""; _verdictFrame = -1; }
+        internal static void ResetForRoomChange()
+        {
+            _lastLogKey = ""; _verdictFrame = -1;
+            // The masking witness line's budget belongs to the same room edge.
+            try { SawLiveTargetPatch.ResetForRoomChange(); } catch { }
+        }
     }
 
     /// <summary>Bug #380, second half: a corpse must never hold the saw's target
@@ -647,6 +682,24 @@ namespace CompetitiveRounds
         /// therefore runs inside the window. See the class doc.</summary>
         internal static bool WindowOpen { get { return _masked; } }
 
+        /// <summary>The list object the window was opened over. The masking claim
+        /// is "the SAME list, same members, same count, different order", and the
+        /// first of those four is the one that is otherwise unmeasurable after the
+        /// fact — so it is held rather than assumed.</summary>
+        private static List<Player> _maskedList;
+        private static int _postfixStandDowns;
+        private static int _maskedLines;
+
+        /// <summary>Counted by the companion postfix when it stands down inside a
+        /// window. Part of the witness line below.</summary>
+        internal static void NotePostfixStoodDown() { _postfixStandDowns++; }
+
+        /// <summary>The witness line's budget is per ROOM, like the verdict line
+        /// beside it: a per-process budget spent in a session's first room leaves
+        /// the second room's bundle reading exactly like a room where the patch
+        /// never attached.</summary>
+        internal static void ResetForRoomChange() { _maskedLines = 0; }
+
         [HarmonyPrefix]
         private static void BeforeUpdate(Saw __instance)
         {
@@ -699,6 +752,8 @@ namespace CompetitiveRounds
                     if (!(q != null && q.data != null && q.data.dead)) players[w++] = q;
                 }
                 _masked = true;
+                _maskedList = players;
+                _postfixStandDowns = 0;
             }
             catch (Exception ex)
             {
@@ -717,13 +772,18 @@ namespace CompetitiveRounds
         /// cosmetic to everything but vanilla's saw loop, the membership is not.</summary>
         private static void RestoreOrder()
         {
-            if (!_masked) { _order.Clear(); return; }
+            if (!_masked) { _order.Clear(); _maskedList = null; return; }
             _masked = false;
             try
             {
                 var pm = PlayerManager.instance;
                 var players = pm != null ? pm.players : null;
-                bool sameSet = players != null && players.Count == _order.Count;
+                // Identity FIRST. If the game swapped the list object itself, the
+                // members below could all match and the write would still be into
+                // a list this window never touched.
+                bool sameList = players != null && ReferenceEquals(players, _maskedList);
+                bool sameCount = players != null && players.Count == _order.Count;
+                bool sameSet = sameList && sameCount;
                 if (sameSet)
                     for (int i = 0; i < _order.Count; i++)
                         if (!players.Contains(_order[i])) { sameSet = false; break; }
@@ -731,7 +791,8 @@ namespace CompetitiveRounds
                 {
                     VanillaFixSupport.DiagLimited(
                         "SawLiveTarget",
-                        "the roster changed while a saw frame was masked ("
+                        "the roster changed while a saw frame was masked (same-list="
+                        + (sameList ? "true" : "false") + ", "
                         + (players == null ? "null" : players.Count.ToString(CultureInfo.InvariantCulture))
                         + " now, " + _order.Count.ToString(CultureInfo.InvariantCulture)
                         + " at entry) — leaving the game's own list exactly as it is",
@@ -739,9 +800,26 @@ namespace CompetitiveRounds
                     return;
                 }
                 for (int i = 0; i < _order.Count; i++) players[i] = _order[i];
+                // The positive half, bounded per room. Every term is MEASURED:
+                // same-list is a reference comparison against the object the window
+                // opened over, same-count and same-members are the guard above, and
+                // postfix-stand-down is the companion postfix's own count inside
+                // this window. Without this line a bundle can show that the quorum
+                // was evaluated ([SAW-TARGET] apply) and still say nothing about
+                // whether a frame was ever masked or put back (#438).
+                if (_maskedLines < 3)
+                {
+                    _maskedLines++;
+                    Plugin.Log.LogInfo("[SAW-TARGET] masked/restored same-list=true same-count=true "
+                        + "same-members=true postfix-stand-down="
+                        + _postfixStandDowns.ToString(CultureInfo.InvariantCulture)
+                        + " (roster=" + _order.Count.ToString(CultureInfo.InvariantCulture)
+                        + ", " + _maskedLines.ToString(CultureInfo.InvariantCulture)
+                        + "/3 this room)");
+                }
             }
             catch (Exception ex) { VanillaFixSupport.LogError("SawLiveTarget", ex); }
-            finally { _order.Clear(); }
+            finally { _order.Clear(); _maskedList = null; }
         }
 
         [HarmonyFinalizer]
@@ -3024,6 +3102,7 @@ namespace CompetitiveRounds
         internal static bool PatchesLive;
         private static bool _staged;
         private static bool _stageFailedPermanently;
+        private static bool _deferLogged;
 
         /// <summary>Identical state rules to PoisonSync.StageCapability (#287):
         /// refuse in-room, merge only while Disconnected/PeerCreated, one-shot,
@@ -3049,7 +3128,21 @@ namespace CompetitiveRounds
                 // join a room, so staging still always precedes the first
                 // connect. (This is why there is no "Awake" stage call for
                 // cr_grow2, unlike cr_pois2.)
-                if (!Plugin.compatCheckComplete) return;
+                //
+                // The refusal SPEAKS now, once, like the three siblings: this gate
+                // was silent, and a silent refusal is indistinguishable in a bundle
+                // from a stage that was never attempted (#342).
+                if (!Plugin.compatCheckComplete)
+                {
+                    if (!_deferLogged)
+                    {
+                        _deferLogged = true;
+                        Plugin.Log.LogInfo("[GROW-CAP] deferred staging " + CapabilityProp
+                            + " (" + source + ") — the compatibility verdict is not in yet; "
+                            + "the tick stages it once the verdict clears");
+                    }
+                    return;
+                }
 
                 if (PhotonNetwork.InRoom)
                 {
@@ -3422,6 +3515,12 @@ namespace CompetitiveRounds
                 // running the older election, which drops the WHOLE room to the floor
                 // rule for that sitting.
                 DcReportSync.StageCapability("pre-join");
+                // ALL FOUR calls above now refuse before the compatibility verdict,
+                // not just the Grow pair: a capability staged by a seat the verdict
+                // then disables can only be withdrawn by an in-room write, which is
+                // the racy path every one of these protocols forbids. Each logs its
+                // own deferral once, so the refusal is readable rather than inferred
+                // from an absence.
             }
             catch (Exception ex) { VanillaFixSupport.LogError("GrowPreJoinSync", ex); }
         }

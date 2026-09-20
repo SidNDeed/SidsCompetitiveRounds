@@ -3868,7 +3868,18 @@ namespace CompetitiveRounds
             // symmetrically — fair and fail-closed — until the master's
             // close removes it. Never gate this on IsUnauthorized: that
             // reads the LOCAL frozen roster, which seats legally disagree on.
-            try { if (!entrantIsSpectator) PoisonSync.NoteRosterChange("PlayerEntered"); } catch { }
+            //
+            // ...and for the same reason not on the line above either. The
+            // paragraph said REPLICATED while the gate read `entrantIsSpectator`,
+            // which is RoomActors.IsSpectator — a first-sight cache, i.e. the
+            // per-seat timing dependence this whole rule exists to remove, one
+            // layer up from the property it names (#302: the comment was a claim
+            // the code below it did not keep). The cache is still computed above,
+            // because the RecordRejected arm beside it is genuinely local; the
+            // POISON arm now reads the property.
+            bool entrantIsSpectatorReplicated = false;
+            try { entrantIsSpectatorReplicated = RoomActors.IsSpectatorReplicated(p); } catch { }
+            try { if (!entrantIsSpectatorReplicated) PoisonSync.NoteRosterChange("PlayerEntered"); } catch { }
 
             // Spectator entry: the master validates the claimed lease with the
             // server immediately (design §6.6) — invalid actors get kicked,
@@ -4016,6 +4027,14 @@ namespace CompetitiveRounds
             // (Codex r3 — two same-frame departures vs the DC reporter).
             try { RoomActors.InvalidateFighterCache(); } catch { }
 
+            // A 2v2 DC fallback watch, if one is armed, is watching for exactly
+            // this: the ELECTED seat leaving. Before any of the classification
+            // below, because the watch reads the property payload Photon still
+            // has on the departing actor, and because its answer ("it dispatched
+            // nothing", "it left with a request in flight") does not depend on
+            // whether this leaver is a fighter, a spectator or an impostor.
+            try { DcReportSync.NoteActorLeft(p); } catch { }
+
             // A SPECTATOR (or unauthorized impostor — r3 CRITICAL: a copied
             // u_id leaving must never read as the REAL fighter's DC) leaving
             // is invisible to the match (design §3.6): no leaver banner, no
@@ -4043,10 +4062,14 @@ namespace CompetitiveRounds
             // 2, r9): cr_spec, the SCOPED u_id-absence rule and the
             // impostor-duplicate rule are computed from replicated data
             // identically on every seat; the local caches are not consulted.
+            // The cr_spec term said that and called IsSpectator, which IS a
+            // local cache — the same divergence as the entry gate above, and
+            // corrected the same way (#302, #432: the flag named one line, the
+            // defect is the operation).
             bool leaverIsSpectatorReplicated = false;
             try
             {
-                leaverIsSpectatorReplicated = RoomActors.IsSpectator(p)
+                leaverIsSpectatorReplicated = RoomActors.IsSpectatorReplicated(p)
                     || (RoomActors.ReplicatedIdentityGuaranteed()
                         && !RoomActors.HasReplicatedFighterIdentity(p))
                     || RoomActors.IsImpostorReplicated(p);
@@ -4170,15 +4193,24 @@ namespace CompetitiveRounds
                 //      (RoomActors.DcReportSync). Then the lower `u_id` of the
                 //      non-DC team's two survivors is the reporter, it is the same
                 //      seat on every seat, and it posts at once. Its team-mate does
-                //      NOT post a second report: it arms a SAFETY NET, one delayed
-                //      post after the prompt seat's entire retry budget has run out,
-                //      so ONE seat's request failing — dropped by the same disruption
-                //      that produced the disconnect, or never sent because that seat
-                //      quit with it — no longer leaves the series open, while the
-                //      arrival race stays closed in the normal case. What it does not
-                //      cover is a refusal that would apply to both seats (a room the
-                //      series no longer names, a series already gone): that is the
-                //      endpoint's answer, not a delivery failure.
+                //      NOT post a second report and does NOT arm a timer: it arms a
+                //      watch on that seat's TERMINAL OUTCOME (DcReportSync.ArmFallback
+                //      — the `cr_dcr` property the prompt seat publishes, plus that
+                //      seat leaving the room having dispatched nothing) and posts
+                //      nothing at all until one is known. An earlier cut of this arm
+                //      armed a DELAYED post at +45 s, sized against the prompt seat's
+                //      nominal retry budget; that is an elapsed-time guess about
+                //      another seat's transaction, Unity's request timeout is not a
+                //      hard ceiling under a stalled socket, and a last attempt landing
+                //      after the delayed post decides a rated completion versus
+                //      `dc_incomplete` by arrival order — the very defect this arm
+                //      exists to remove. When the watch does fire it posts ZERO point
+                //      totals, the one form the deployed endpoint can only record as
+                //      `dc_incomplete`, so no ordering of the two can select the rated
+                //      completion. What neither covers is a refusal that would apply
+                //      to both seats (a room the series no longer names, a series
+                //      already gone): that is the endpoint's answer, not a delivery
+                //      failure, and the watch reads it as terminal and stands down.
                 //
                 //  (2) EVERYTHING ELSE — a seat without `u_id`, duplicate ids, a
                 //      `t_id` outside {0,1}, a census that is not 2/2, a roster
@@ -4217,12 +4249,17 @@ namespace CompetitiveRounds
                 //     election the room was already running. It no longer changes
                 //     WHAT is reported, only which seats report it — that is the
                 //     whole reason the zeros are gone.
-                //   * Going silent after winning arm (1): its team-mate's safety net
-                //     closes the series when the budget runs out. Both seats are on
-                //     the non-DC team, so neither has a motive to suppress a report
-                //     that forfeits in their favour, but the series no longer depends
-                //     on one seat's request surviving the same disruption that
-                //     produced the disconnect.
+                //   * Going silent after winning arm (1): its team-mate's watch sees
+                //     a TERMINAL outcome — a published failure, or that seat leaving
+                //     having dispatched nothing — and closes the series with a
+                //     zero-total report. Both seats are on the non-DC team, so the
+                //     only party who can reach that downgrade is the abandoned team
+                //     itself, and it downgrades its OWN forfeit; the leaver's side
+                //     has no lever on it (#283). A seat that dispatches and then goes
+                //     silent WITHOUT a terminal answer is the one state where its
+                //     team-mate posts nothing at all, because a request may still be
+                //     in flight and a fallback beside it would decide the series by
+                //     arrival order again.
                 //   * Submitting inflated points while legitimately elected: unchanged
                 //     by this election and NOT closable from the client — the totals
                 //     are client-attested and ride outside the signature. The server
@@ -4315,13 +4352,14 @@ namespace CompetitiveRounds
                 // replicated cross-check that catches it.
                 if (unique && (!sawSelf || dcTeamCount != 2 || nonDcCount != 2)) unique = false;
 
-                // How long this seat waits before posting. 0 = now. The safety net
-                // waits out the prompt seat's ENTIRE budget (PostRequestWithRetry:
-                // 3 attempts x 10s timeout + 2 x 2s backoff ~= 34s), so the two can
-                // only ever race when the prompt one has already failed — and the
-                // 2v2 hold it protects runs for minutes, not seconds.
-                const float DC_SAFETY_NET_SEC = 45f;
-                float delaySec = 0f;
+                // The room is a fact of the OBSERVATION, not of the dispatch — read
+                // it HERE, before either arm can leave the room. A delayed or
+                // watch-driven post reading `PhotonNetwork.CurrentRoom` at send time
+                // would hand the server an empty hint, losing the bug-245 fence that
+                // stops a report about an abandoned room lead-forfeiting the sitting
+                // that resumed it.
+                string observedRoom = "";
+                try { observedRoom = PhotonNetwork.InRoom ? (PhotonNetwork.CurrentRoom?.Name ?? "") : ""; } catch { }
 
                 if (unique)
                 {
@@ -4332,12 +4370,20 @@ namespace CompetitiveRounds
                             + DcReportSync.CapabilityProp + ") — the one prompt reporter");
                     else
                     {
-                        // The other non-DC survivor. Not a second report: a report the
-                        // server will only ever act on if the elected one did not
-                        // arrive, because by then the series is no longer active.
-                        delaySec = DC_SAFETY_NET_SEC;
-                        Plugin.Log.LogInfo("[2v2-DC] not the elected seat — arming the safety net at +"
-                            + $"{(int)DC_SAFETY_NET_SEC}s in case the elected report never lands");
+                        // The other non-DC survivor. NO TIMER, and no report now: it
+                        // watches the elected seat's transaction and acts only on a
+                        // terminal outcome of it. See DcReportSync's protocol note for
+                        // why an elapsed-time net was the wrong instrument and what
+                        // "terminal" means here.
+                        Photon.Realtime.Player elected = null;
+                        for (int i = 0; i < survivors.Count; i++)
+                            if (SteamIdOf(survivors[i]) == lowestNonDc) { elected = survivors[i]; break; }
+                        Plugin.Log.LogInfo("[2v2-DC] not the elected seat — watching actor "
+                            + (elected != null ? elected.ActorNumber.ToString() : "?")
+                            + " for a terminal outcome of its report (" + DcReportSync.OutcomeProp
+                            + "); this seat posts NOTHING until one is known");
+                        DcReportSync.ArmFallback(seriesId, elected, myId, dcSteamId, observedRoom);
+                        return;
                     }
                 }
                 else
@@ -4385,18 +4431,14 @@ namespace CompetitiveRounds
                 // paragraph above for why the arm-(2) zeros are gone.
                 int t1Points = GameStateWatcher.LastP1Points;
                 int t2Points = GameStateWatcher.LastP2Points;
-                // The room is a fact of the OBSERVATION, not of the dispatch. A
-                // delayed post can leave the room before it sends, and reading the
-                // room at send time would hand the server an empty hint — losing the
-                // bug-245 fence that stops a report about an abandoned room
-                // lead-forfeiting the sitting that resumed it.
-                string observedRoom = "";
-                try { observedRoom = PhotonNetwork.InRoom ? (PhotonNetwork.CurrentRoom?.Name ?? "") : ""; } catch { }
+                // Every seat reaching this line is posting PROMPTLY: the census arm's
+                // elected reporter, or a floor-election seat. The watch arm returned
+                // above without posting, so there is no delay parameter left to get
+                // wrong.
                 ApiClient.ReportTeamSeriesDc(seriesId, myId, dcSteamId, t1Points, t2Points,
-                                             observedRoom, delaySec);
+                                             observedRoom, false);
                 Plugin.Log.LogInfo($"[2v2-DC] reporter={myId} dc={dcSteamId} series={seriesId} "
-                    + $"pts={t1Points}/{t2Points} census={unique} room={observedRoom}"
-                    + (delaySec > 0f ? $" (safety net, +{(int)delaySec}s)" : " (prompt)"));
+                    + $"pts={t1Points}/{t2Points} census={unique} room={observedRoom} (prompt)");
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[2v2-DC] report error: {ex.Message}"); }
         }
@@ -4413,6 +4455,14 @@ namespace CompetitiveRounds
 
         public void OnPlayerPropertiesUpdate(Photon.Realtime.Player target, ExitGames.Client.Photon.Hashtable changedProps)
         {
+            // The elected 2v2 DC reporter announces where its report has got to
+            // through this callback (cr_dcr). FIRST statement: the very next
+            // block returns from the whole method on a null payload, and this
+            // one reads the actor, not the payload — a coalesced update that
+            // arrives with nothing we recognise still carries the actor's
+            // current properties.
+            try { DcReportSync.NoteActorProps(target); } catch { }
+
             // r8 M4: identity and role are what the lag-notice window keys on,
             // and both of them change through this callback. A change that
             // lands and reverts between two frames leaves nothing behind in
@@ -4483,6 +4533,10 @@ namespace CompetitiveRounds
             try { H2HSummary.Invalidate(); } catch { }
             try { GameStateWatcher.ClearSessionUuid(); } catch { }   // Sept 6 item c: the id dies with the room
             try { SawTargetSync.ResetForRoomChange(); } catch { }    // and so does its verdict line (see OnJoinedRoom)
+            // ...and the 2v2 DC fallback watch, which is a fact of ONE room and
+            // one series: a watch carried across a room edge would be waiting on an
+            // actor number that now names somebody else.
+            try { DcReportSync.ResetForRoomChange(); } catch { }
             try { RoomRules.ResetLatched(); } catch { }              // room rules die with the room (§5.2)
             try { VanillaCardSequence.OnRoomLeft(); } catch { }      // and the vanilla-mode card sequence with them (§6)
             // lag-332 W1 (impl-review r5 MEDIUM 7): a disconnect that produces no
@@ -4529,6 +4583,7 @@ namespace CompetitiveRounds
             // never attached", which is the one question the line is there to
             // answer (#342 — a diagnostic that cannot speak proves nothing).
             try { SawTargetSync.ResetForRoomChange(); } catch { }
+            try { DcReportSync.ResetForRoomChange(); } catch { }   // same room-scoped lifetime
             // Sept 6 item c: the reliable join edge mints the session id too (the
             // poll can miss a leave+join inside one tick); no game precedes either.
             try { GameStateWatcher.MintSessionUuid(); } catch { }
@@ -5120,6 +5175,10 @@ namespace CompetitiveRounds
             try { H2HSummary.Invalidate(); } catch { }
             try { GameStateWatcher.ClearSessionUuid(); } catch { }   // Sept 6 item c: the id dies with the room
             try { SawTargetSync.ResetForRoomChange(); } catch { }    // and so does its verdict line (see OnJoinedRoom)
+            // ...and the 2v2 DC fallback watch, which is a fact of ONE room and
+            // one series: a watch carried across a room edge would be waiting on an
+            // actor number that now names somebody else.
+            try { DcReportSync.ResetForRoomChange(); } catch { }
             try { RoomRules.ResetLatched(); } catch { }              // room rules die with the room (§5.2)
             try { VanillaCardSequence.OnRoomLeft(); } catch { }      // and the vanilla-mode card sequence with them (§6)
             // A teardown window is bound to the room it was opened in. Without

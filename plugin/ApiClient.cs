@@ -14012,26 +14012,51 @@ namespace CompetitiveRounds
         /// mechanism, on a path whose failure leaves the series open and every
         /// survivor holding a 2v2 lease until its TTL expires — and the disruption
         /// that produced the disconnect is exactly the one that drops it. It now
-        /// goes through PostRequestWithRetry, and a second seat may send the same
-        /// report later still (<paramref name="delaySeconds"/>). Both are safe
-        /// against the DEPLOYED endpoint, which is not merely tolerant of a repeat
-        /// but explicitly ignores one: it re-reads the row under FOR UPDATE and
-        /// returns `{"ignored": true}` unless the status is still active/dc_paused,
-        /// and the completion helper beneath it no-ops on an already-completed
-        /// series. A duplicate therefore cannot double-apply ratings or gold.</para>
+        /// goes through PostRequestWithRetry, and a second seat may send a
+        /// <paramref name="fallback"/> report behind it. Both are safe against the
+        /// DEPLOYED endpoint, which is not merely tolerant of a repeat but
+        /// explicitly ignores one: it re-reads the row under FOR NO KEY UPDATE
+        /// (backend/api/main.py at 0cc7f75, read rather than remembered — the
+        /// previous wording here said FOR UPDATE, which is the mode the COMPLETION
+        /// helper beneath it takes, not this one) and returns `{"ignored": true}`
+        /// unless the status is still active/dc_paused; the completion helper then
+        /// no-ops on an already-completed series. A duplicate therefore cannot
+        /// double-apply ratings or gold.</para>
+        ///
+        /// <para>THE FALLBACK FORM. <paramref name="fallback"/> is not a statement
+        /// about WHO is sending; it is the shape of what is sent. A fallback report
+        /// carries ZERO point totals, forced here rather than trusted from the
+        /// caller, because `total_points >= 2` is half of the endpoint's
+        /// lead-forfeit condition: a zero-total report cannot take that branch, so
+        /// the only write it can reach is the one recording
+        /// `status='dc_incomplete'`. That is what stops arrival order deciding the
+        /// outcome — the prompt report is the only one of the two that can complete
+        /// a series with ratings and gold. WHO may send one, and on what terminal
+        /// signal, is DcReportSync's rule, not this method's.</para>
+        ///
+        /// <para>OUTCOME PUBLICATION. A prompt report announces its own progress on
+        /// the `cr_dcr` player property — `send` before the request exists, then
+        /// `ok` on any server answer or `no` when every attempt failed — because
+        /// the seat behind it decides what to do from that and from nothing else.
+        /// A fallback publishes nothing: nobody is watching it, and a second writer
+        /// on that property would make the value ambiguous.</para>
         ///
         /// <para><paramref name="observedRoom"/> is the room the disconnect was
-        /// SEEN in, passed in rather than read here: a delayed send can leave the
-        /// room first, and this method reading `PhotonNetwork.CurrentRoom` at that
-        /// point would send an empty hint — which the endpoint treats as an old
-        /// client and lets through the bug-245 resume fence. Null keeps the old
-        /// read-it-here behaviour for any caller that has no observation to
-        /// name.</para></summary>
+        /// SEEN in, passed in rather than read here: a fallback send happens after
+        /// its watch settles and can be outside the room by then, and this method
+        /// reading `PhotonNetwork.CurrentRoom` at that point would send an empty
+        /// hint — which the endpoint treats as an old client and lets through the
+        /// bug-245 resume fence. Null keeps the old read-it-here behaviour for any
+        /// caller that has no observation to name.</para></summary>
         public static void ReportTeamSeriesDc(
             string seriesId, string reporterSteamId, string dcPlayerSteamId,
             int t1PointsTotal, int t2PointsTotal,
-            string observedRoom = null, float delaySeconds = 0f)
+            string observedRoom = null, bool fallback = false)
         {
+            // The form is enforced HERE, not asked of the caller: a fallback that
+            // carried real totals could select the rated completion, which is the
+            // one property the watch behind it is built on.
+            if (fallback) { t1PointsTotal = 0; t2PointsTotal = 0; }
             // §2c identity fence: the broadcast service account never reports.
             if (BroadcastMode.FenceBlocksFighterPath("report-2v2-dc")) return;
             if (string.IsNullOrEmpty(seriesId) || string.IsNullOrEmpty(reporterSteamId) || string.IsNullOrEmpty(dcPlayerSteamId)) return;
@@ -14056,29 +14081,79 @@ namespace CompetitiveRounds
                          $"&t2_points_total={t2PointsTotal}" +
                          $"&photon_room_id={UnityWebRequest.EscapeURL(dcRoom)}" +
                          $"&hmac_sig={UnityWebRequest.EscapeURL(sig)}";
-            // The URL is complete BEFORE any wait. Every field in it is a fact of
-            // the disconnect — the reporter, the leaver, the points as they stood,
-            // the room it happened in — and none of them may be re-read from a
-            // client state that has moved on by the time the request goes out.
-            Plugin.Instance.StartCoroutine(SendTeamSeriesDcReport(url, delaySeconds));
+            // The URL is complete BEFORE the request exists. Every field in it is a
+            // fact of the disconnect — the reporter, the leaver, the points as they
+            // stood, the room it happened in — and none of them may be re-read from
+            // a client state that has moved on by the time the request goes out.
+            //
+            // `send` is published BEFORE the coroutine starts, so the announcement
+            // that a request exists cannot be overtaken by the request itself. A
+            // seat that then vanishes has told the room "a report may be in flight",
+            // which is the state in which the seat behind it posts nothing.
+            if (!fallback)
+            {
+                try { DcReportSync.PublishOutcome(seriesId, DcReportSync.OutcomeSent); }
+                catch { }
+            }
+            Plugin.Instance.StartCoroutine(SendTeamSeriesDcReport(url, seriesId, fallback));
         }
 
-        /// <summary>Dispatch half of <see cref="ReportTeamSeriesDc"/>: an optional
-        /// wait, then the retried POST. Realtime wait — ROUNDS slows or pauses game
-        /// time on the result and menu screens, which is precisely where a seat
-        /// sits after a team-mate disconnects.</summary>
-        private static IEnumerator SendTeamSeriesDcReport(string url, float delaySeconds)
+        /// <summary>Dispatch half of <see cref="ReportTeamSeriesDc"/>: the retried
+        /// POST, and — for a PROMPT report — the terminal announcement the seat
+        /// behind it is waiting on. There is no wait here any more: the delayed
+        /// send this method used to open with was an elapsed-time guess about
+        /// another seat's transaction, and the seat that used to schedule it now
+        /// watches for a terminal outcome instead.</summary>
+        private static IEnumerator SendTeamSeriesDcReport(string url, string seriesId, bool fallback)
         {
-            if (delaySeconds > 0f)
-            {
-                yield return new WaitForSecondsRealtime(delaySeconds);
-                Plugin.Log.LogInfo("[2v2-DC] safety-net window elapsed — sending this seat's report; "
-                    + "the endpoint ignores it if the elected seat's already closed the series");
-            }
             yield return Plugin.Instance.StartCoroutine(PostRequestWithRetry(url, "", (ok, resp) =>
             {
                 if (ok) Plugin.Log.LogInfo($"[2v2-DC] report accepted: {resp}");
                 else Plugin.Log.LogWarning($"[2v2-DC] report failed after every retry: {resp}");
+                if (fallback) return;
+                // ANY server answer is terminal for the seat behind us, including
+                // `{"ignored": true}`: the series is already settled, or the room
+                // fence refused this report — and a fallback carrying the same
+                // observed room would be refused identically. `no` is the other
+                // terminal answer: every attempt failed, nothing landed, and a
+                // report from the other seat is the only thing that can close the
+                // series.
+                try
+                {
+                    DcReportSync.PublishOutcome(
+                        seriesId,
+                        ok ? DcReportSync.OutcomeAnswered
+                           : DcReportSync.OutcomeFailed);
+                }
+                catch { }
+            }));
+        }
+
+        /// <summary>GET /team/series/{id}/state, once, reporting the status and
+        /// whether the read succeeded at all. The DC fallback watch asks this
+        /// before posting anything, so "the read failed" and "the series is still
+        /// open" must be different answers: the first is an UNKNOWN server state
+        /// and nothing is posted on it.
+        ///
+        /// <para>Deliberately separate from <see cref="PollTeamSeriesState"/>: that
+        /// one drops every failure on the floor (no callback at all) and writes a
+        /// dozen cached fields for the assembly loop, which a post-disconnect probe
+        /// has no business republishing. Same endpoint, and the endpoint's own
+        /// assembly-cancel arm still applies — it needs fewer than four
+        /// spawn-confirms, past the deadline, with no live game, which is a series
+        /// that was never assembled rather than one a disconnect interrupted; a
+        /// cancel there is also a terminal state that releases the holds, and no
+        /// rating or economy effect exists on that path.</para></summary>
+        public static void ReadTeamSeriesStatusOnce(string seriesId, Action<bool, string> onDone)
+        {
+            if (string.IsNullOrEmpty(seriesId) || onDone == null) return;
+            string url = $"{baseUrl}/api/v1/team/series/{seriesId}/state";
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
+            {
+                if (!ok || string.IsNullOrEmpty(resp)) { onDone(false, ""); return; }
+                string status = ExtractJsonString(resp, "status") ?? "";
+                if (status.Length == 0) { onDone(false, ""); return; }
+                onDone(true, status);
             }));
         }
 
@@ -23251,6 +23326,17 @@ namespace CompetitiveRounds
             // straggler. Only ever armed on the broadcast seat.
             if (BroadcastGrantTransportUnsettled)
             {
+                // The LOG line is unconditional; the TOAST is not. Every other
+                // refusal before the dispatch speaks in the log whoever asked,
+                // and this one did not: with broadcastTicket=true the toast guard
+                // is false, the method returns zero, and the bundle from the one
+                // seat where this guard can arm at all shows nothing. "A grant was
+                // declined" and "no grant was ever requested" then read identically
+                // (#430 — a guard is judged by what its refusal costs, and an
+                // unexplained refusal costs the ability to tell those apart).
+                Plugin.Log.LogInfo("[SPECTATE] WATCH declined before dispatch: a broadcast-issued "
+                    + "grant request is still unresolved on the wire"
+                    + (broadcastTicket ? " (broadcast ticket — no toast)" : ""));
                 // Deliberately NOT I18n.Tr: this toast is reachable only on
                 // the broadcast seat (the guard arms nowhere else), and
                 // bot-seat-only strings must not enter the translation

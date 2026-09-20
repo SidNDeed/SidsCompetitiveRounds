@@ -6575,17 +6575,45 @@ namespace CompetitiveRounds
             // DropChatOnAccountChange. That hook is still the primary mechanism; this
             // is the arm for a transition it never observes. A resolvable identity
             // that differs from the one the text was written under destroys the
-            // stash. An UNRESOLVED identity now is not evidence of a change and is
-            // deliberately not treated as one — that is the first-resolution case
-            // the hook already refuses to fire on.
+            // stash, and so does a resolvable identity over a stash that names NO
+            // writer — null matches only null, which is what the field's own doc
+            // has always claimed. An UNRESOLVED identity NOW is the case that is
+            // not evidence of a change and is deliberately not treated as one —
+            // that is the first-resolution shape the hook already refuses to fire
+            // on. The two are not symmetric on purpose: an unknown reader leaves
+            // the question open, an unknown WRITER answers it against resuming.
             string writer = chatDraftStashIdentity;
             string reader = null;
             try { reader = MatchTracker.LocalSteamId; } catch { }
-            if (!string.IsNullOrEmpty(reader) && reader != "unknown"
+            bool readerResolved = !string.IsNullOrEmpty(reader) && reader != "unknown";
+            if (readerResolved
                 && !string.IsNullOrEmpty(writer)
                 && !string.Equals(writer, reader, StringComparison.Ordinal))
             {
                 Plugin.Log.LogInfo("[CHAT] a held draft belonged to a different account — discarded unread");
+                DropStash();
+                return "";
+            }
+            // A NULL writer only matches a null reader — the rule the field's own
+            // doc states, and which the reader did not apply: a stash written
+            // before identity resolution was handed to whatever account resolved
+            // afterwards, as long as the channel and the TTL still matched.
+            // "Stashed before an identity was resolvable" is not evidence that the
+            // line was THIS account's; it is the absence of evidence either way,
+            // and a draft is not worth resuming into an account that cannot be
+            // shown to have written it. The reverse case is deliberately NOT
+            // symmetric: an unresolved READER over a known writer keeps the stash,
+            // because that is the first-resolution shape DropChatOnAccountChange
+            // also refuses to treat as a change.
+            //
+            // What the refusal costs (#430): a draft typed in the seconds before
+            // the local id resolves is dropped instead of resumed. That window is
+            // bounded by sign-in, and the alternative is the one outcome this
+            // mechanism exists to prevent.
+            if (readerResolved && string.IsNullOrEmpty(writer))
+            {
+                Plugin.Log.LogInfo("[CHAT] a held draft was written before any account was resolved — "
+                    + "discarded unread rather than resumed under the account that has resolved since");
                 DropStash();
                 return "";
             }
