@@ -1,4 +1,5 @@
 ﻿using ExitGames.Client.Photon;
+using HarmonyLib;
 using Photon.Pun;
 using Steamworks;
 using System;
@@ -4946,6 +4947,10 @@ namespace CompetitiveRounds
             // Spectator: never tracks a match (defense in depth — the GM
             // lifecycle that fires this is suppressed on a spectator).
             if (RoomActors.LocalIsSpectator) return;
+            // Roster census (bug 391 §4.1), BEFORE OnGameStarted: that call
+            // resets the per-actor view window, so a census taken after it
+            // would read every batch counter as zero.
+            try { RosterCensusEmitter.OnGameBoundary(); } catch { }
             try { NetworkReplicaDiagnostics.OnGameStarted(); } catch { }
             try { NetworkSeatTelemetry.OnMatchStarted(); } catch { }   // lag-332 W1
             // Freeze the fighter roster at match start (design §3.2, Codex r1
@@ -5260,6 +5265,9 @@ namespace CompetitiveRounds
             if (!isTracking || gameOverReported) return;
             gameOverReported = true;
             sessionMatchCount++;
+            // Roster census (bug 391 §4.1) — the last reading of the roster
+            // this game, taken before the diagnostics windows are closed.
+            try { RosterCensusEmitter.OnGameBoundary(); } catch { }
             try { NetworkReplicaDiagnostics.OnGameEnded(); } catch { }
             // lag-332 W1: close the seat instrument BEFORE the report below
             // reads its aggregates (windows flushed, peer deltas sampled).
@@ -6336,6 +6344,9 @@ namespace CompetitiveRounds
         public static void OnFfaMatchStarted()
         {
             if (RoomActors.LocalIsSpectator) return;   // spectator: no tracking
+            // Roster census (bug 391 §4.1) — same ordering rule as
+            // OnMatchStarted: before the view window is reset.
+            try { RosterCensusEmitter.OnGameBoundary(); } catch { }
             try { NetworkReplicaDiagnostics.OnGameStarted(); } catch { }
             try { NetworkSeatTelemetry.OnMatchStarted(); } catch { }   // lag-332 W1 (bundle-only in FFA)
             // Roster freeze — same rule as OnMatchStarted (r1 find 1). Re-run
@@ -6528,6 +6539,8 @@ namespace CompetitiveRounds
             gameOverReported = true;
             isTracking = false;    // the next game re-arms via OnFfaMatchStarted
             sessionMatchCount++;
+            // Roster census (bug 391 §4.1) — same ordering rule as OnGameOver.
+            try { RosterCensusEmitter.OnGameBoundary(); } catch { }
             try { NetworkReplicaDiagnostics.OnGameEnded(); } catch { }
             try { NetworkSeatTelemetry.OnMatchEnded("ffa-game-over"); } catch { }   // lag-332 W1
 
@@ -8103,5 +8116,278 @@ namespace CompetitiveRounds
         // pass-tracking fallback when the regular cardIDs[] loop can't identify the picked card.
         private static string _lastLocalPickedCardName;
         public static string LastLocalPickedCardName => _lastLocalPickedCardName;
+    }
+
+    // ── roster census (bug 391 §4.1) ─────────────────────────────────────
+
+    /// <summary>Reads the roster the way the REPORTING seat sees it and hands
+    /// it to <see cref="RosterCensus"/> to format. Everything contextual —
+    /// the actor list, the Player bodies, the view counters — is read here;
+    /// nothing about the LINE is decided here, so the line is testable by a
+    /// harness that has no Unity (#391).
+    ///
+    /// ── WHAT IT DOES NOT DO ───────────────────────────────────────────────
+    /// It gates nothing, skips nothing and aborts nothing. The only thing it
+    /// can decline is to LOG, and the one decline it has — the session budget
+    /// — prints its own reason (#430). An exception anywhere in here is
+    /// caught and logged: an observer that can break a boundary is worse than
+    /// no observer.
+    ///
+    /// ── THE CENSUS SET IS THE RAW ONE ─────────────────────────────────────
+    /// Seats come from PhotonNetwork.PlayerList minus spectators, NOT from
+    /// RoomActors.ActiveFighters(). ActiveFighters applies IsUnauthorized once
+    /// the roster is frozen, so a latched actor is removed from the census
+    /// before it can be counted — and a seat that has gone missing from the
+    /// reporting client's view is exactly the row this instrument exists to
+    /// show. The FFA lane learned the same thing about a different census
+    /// (RosterCensusRules, Codex r2 HIGH): a census that consults the latch
+    /// hides the evidence it was taken for. This one consults nothing.
+    ///
+    /// ── ROOM GATE ─────────────────────────────────────────────────────────
+    /// CompetitiveRoomDetect.IsCompetitiveRoom(), the existing capability
+    /// path, and only for log volume — the census changes no behaviour, so it
+    /// needs no vanilla-scope gate. Never a room-name prefix of its own
+    /// (#286) and never mod_version (#301).
+    ///
+    /// ── SPECTATORS ────────────────────────────────────────────────────────
+    /// A spectator seat emits no census. The acceptance bar in §5.2 is about
+    /// what a FIGHTER's own log lets a reader say, and the game-boundary call
+    /// sites already sit behind the spectator early-return; gating the map
+    /// boundary the same way makes the census mean one thing rather than two.
+    /// The cost of that refusal is a spectator-seat census nothing asks
+    /// for.</summary>
+    internal static class RosterCensusEmitter
+    {
+        private static readonly RosterCensus.SessionLineBudget Budget =
+            new RosterCensus.SessionLineBudget(RosterCensus.SessionLineCap);
+
+        /// <summary>Per-actor cumulative view batches as of the previous
+        /// census, so the line can report a DELTA. Cleared whenever
+        /// NetworkReplicaDiagnostics starts a new room generation, which is
+        /// also what makes the dictionary bounded.</summary>
+        private static readonly Dictionary<int, long> BatchesAtLastBoundary = new Dictionary<int, long>();
+        private static int _batchesRoomGeneration = int.MinValue;
+
+        internal static void OnMapBoundary() { Emit(RosterCensus.BoundaryMap); }
+
+        internal static void OnGameBoundary() { Emit(RosterCensus.BoundaryGame); }
+
+        private static void Emit(string boundary)
+        {
+            try
+            {
+                if (!PhotonNetwork.InRoom) return;
+                if (RoomActors.LocalIsSpectator) return;
+                if (!CompetitiveRoomDetect.IsCompetitiveRoom()) return;
+
+                SyncRoomGeneration();
+
+                int generation = 0;
+                try { generation = RoomActors.RosterGeneration; } catch { generation = -1; }
+
+                var seats = ReadSeats();
+                string notice;
+                if (!Budget.TryReserve(generation, boundary, seats.Count, out notice))
+                {
+                    if (notice != null) Plugin.Log.LogInfo(notice);
+                    return;
+                }
+
+                var lines = RosterCensus.FormatCensus(generation, boundary, seats);
+                for (int i = 0; i < lines.Count; i++) Plugin.Log.LogInfo(lines[i]);
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    Plugin.Log.LogWarning("[ROSTER-CENSUS] emit failed: "
+                                          + ex.GetType().Name + ": " + ex.Message);
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>A new room restarts ActorNumbers at 1 and resets the view
+        /// counters, so a batch total carried across rooms would be measured
+        /// against a stranger. Dropping the map at the room edge is what keeps
+        /// it small as well as correct.</summary>
+        private static void SyncRoomGeneration()
+        {
+            int roomGeneration;
+            try { roomGeneration = NetworkReplicaDiagnostics.RoomGeneration; }
+            catch { return; }
+            if (roomGeneration == _batchesRoomGeneration) return;
+            BatchesAtLastBoundary.Clear();
+            _batchesRoomGeneration = roomGeneration;
+        }
+
+        /// <summary>Every non-spectator actor the room holds, ordered by
+        /// ActorNumber so two seats reading the same room print the same
+        /// order. A seat whose spectator role cannot be read is treated as a
+        /// fighter: an extra row never hides a seat, a missing row does.</summary>
+        private static List<RosterCensus.SeatObservation> ReadSeats()
+        {
+            var seats = new List<RosterCensus.SeatObservation>(4);
+
+            Photon.Realtime.Player[] actors;
+            try { actors = PhotonNetwork.PlayerList; } catch { return seats; }
+            if (actors == null) return seats;
+
+            var ordered = new List<Photon.Realtime.Player>(actors.Length);
+            for (int i = 0; i < actors.Length; i++)
+            {
+                var actor = actors[i];
+                if (actor == null) continue;
+                bool spectator;
+                try { spectator = RoomActors.IsSpectator(actor); } catch { spectator = false; }
+                if (spectator) continue;
+                ordered.Add(actor);
+            }
+            ordered.Sort((a, b) => a.ActorNumber.CompareTo(b.ActorNumber));
+
+            var bodies = ResolveBodiesByActor();
+            for (int i = 0; i < ordered.Count; i++)
+                seats.Add(ReadSeat(ordered[i].ActorNumber, bodies));
+            return seats;
+        }
+
+        /// <summary>ActorNumber to the local Player object that represents it.
+        /// Ownership is read live off the PhotonView (never creator
+        /// arithmetic); the first body found for an actor wins, so a duplicate
+        /// cannot turn one seat into two rows.</summary>
+        private static Dictionary<int, Player> ResolveBodiesByActor()
+        {
+            var map = new Dictionary<int, Player>(4);
+            try
+            {
+                var manager = PlayerManager.instance;
+                var list = manager != null ? manager.players : null;
+                if (list == null) return map;
+                for (int i = 0; i < list.Count; i++)
+                {
+                    var body = list[i];
+                    if (body == null) continue;
+                    int owner = -1;
+                    try
+                    {
+                        var view = body.GetComponent<PhotonView>();
+                        if (view != null) owner = view.OwnerActorNr;
+                    }
+                    catch { owner = -1; }
+                    if (owner < 0) continue;
+                    if (!map.ContainsKey(owner)) map[owner] = body;
+                }
+            }
+            catch { }
+            return map;
+        }
+
+        /// <summary>One seat, read field by field through independent
+        /// accesses so that a failure on any one of them costs that field and
+        /// not the row. A seat with no resolvable body is an UnreadableSeat,
+        /// which still produces a line (§4.1 / #441).</summary>
+        private static RosterCensus.SeatObservation ReadSeat(int actor, Dictionary<int, Player> bodies)
+        {
+            long batches = BatchesSinceLastBoundary(actor);
+
+            Player body = null;
+            if (bodies != null) bodies.TryGetValue(actor, out body);
+            if (body == null) return RosterCensus.UnreadableSeat(actor, batches);
+
+            int playerId = -1, team = -1;
+            try { playerId = body.PlayerID; } catch { playerId = -1; }
+            try { team = body.TeamID; } catch { team = -1; }
+
+            bool activeKnown = false, active = false;
+            try
+            {
+                var go = body.gameObject;
+                if (go != null) { active = go.activeInHierarchy; activeKnown = true; }
+            }
+            catch { activeKnown = false; }
+
+            bool deadKnown = false, dead = false;
+            try
+            {
+                var data = body.data;
+                if (data != null) { dead = data.dead; deadKnown = true; }
+            }
+            catch { deadKnown = false; }
+
+            // THE load-bearing field: where this client is drawing that seat.
+            bool positionKnown = false;
+            float x = 0f, y = 0f;
+            try
+            {
+                var t = body.transform;
+                if (t != null)
+                {
+                    Vector3 p = t.position;
+                    x = p.x;
+                    y = p.y;
+                    positionKnown = true;
+                }
+            }
+            catch { positionKnown = false; }
+
+            return RosterCensus.ReadSeat(actor, playerId, team,
+                                         activeKnown, active,
+                                         deadKnown, dead,
+                                         positionKnown, x, y,
+                                         batches);
+        }
+
+        /// <summary>View batches observed for this actor since the previous
+        /// census, from the counters NetworkReplicaDiagnostics already keeps.
+        /// A negative result means "not a count" and prints as a question
+        /// mark: the game window resets at game start, so the first census
+        /// after a reset would otherwise report a negative difference as if
+        /// it were data. Context only — §4.1 and #1.4 of the diagnosis are
+        /// explicit that this must never be read as an aliveness signal.</summary>
+        private static long BatchesSinceLastBoundary(int actor)
+        {
+            long cumulative;
+            try { cumulative = NetworkReplicaDiagnostics.GameViewBatches(actor); }
+            catch { return -1; }
+            if (cumulative < 0) return -1;
+
+            long previous;
+            if (!BatchesAtLastBoundary.TryGetValue(actor, out previous)) previous = 0;
+            BatchesAtLastBoundary[actor] = cumulative;
+
+            long delta = cumulative - previous;
+            return delta < 0 ? -1 : delta;
+        }
+    }
+
+    /// <summary>The map boundary. Every point and round transition calls
+    /// MapManager.RPCA_CallInNewMapAndMovePlayers on every client in the room
+    /// — that call is what prints ROUNDS' own "CALL IN NEW MAP AND MOVE
+    /// PLAYERS" marker, which is how the report's log was read in the first
+    /// place, so pairing a census with it makes the two readable together.
+    ///
+    /// TargetMethods RESOLVES the method and throws when it cannot, rather
+    /// than naming it in an attribute and hoping. Plugin's Harmony bootstrap
+    /// catches that and prints "[HARMONY] Failed to patch
+    /// RosterCensus_MapBoundary_Patch" — learning #83: a diagnostic patch
+    /// that fails to attach produces zero data and says nothing, which is why
+    /// the witness plan greps the startup log for "Failed to patch" before
+    /// trusting a single census line.</summary>
+    [HarmonyPatch]
+    internal static class RosterCensus_MapBoundary_Patch
+    {
+        private static IEnumerable<MethodBase> TargetMethods()
+        {
+            var target = AccessTools.Method(typeof(MapManager), "RPCA_CallInNewMapAndMovePlayers");
+            if (target == null)
+                throw new Exception(
+                    "MapManager.RPCA_CallInNewMapAndMovePlayers not found - the roster census has no map boundary");
+            return new MethodBase[] { target };
+        }
+
+        private static void Postfix()
+        {
+            try { RosterCensusEmitter.OnMapBoundary(); } catch { }
+        }
     }
 }
