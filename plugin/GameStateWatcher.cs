@@ -1837,6 +1837,12 @@ namespace CompetitiveRounds
             // spectator seat needs the ping/fps/dispatch line most (bug 217:
             // the whole latency question was unanswerable from a bundle).
             try { NetDiag.Tick(); } catch { }
+            // Roster census, settled half (bug 391): the map-boundary
+            // Postfix fires BEFORE vanilla moves and revives the bodies, so
+            // the second sample is taken here, a fixed delay later. Before
+            // the spectator early-return because the census applies its own
+            // gates and announces what it declines.
+            try { RosterCensusEmitter.TickSettle(); } catch { }
             // Battle-resume rising edge closes PoisonSync's boundary-orphan
             // window (bug 221 review r1: a flat window overshot into real
             // combat). Every seat, every mode — FfaMode sets battleOngoing in
@@ -8128,38 +8134,80 @@ namespace CompetitiveRounds
     ///
     /// ── WHAT IT DOES NOT DO ───────────────────────────────────────────────
     /// It gates nothing, skips nothing and aborts nothing. The only thing it
-    /// can decline is to LOG, and the one decline it has — the session budget
-    /// — prints its own reason (#430). An exception anywhere in here is
-    /// caught and logged: an observer that can break a boundary is worse than
-    /// no observer.
+    /// can decline is to LOG — and every decline it has now prints its own
+    /// reason, throttled but never to silence (#430). An exception anywhere in
+    /// here is caught and logged: an observer that can break a boundary is
+    /// worse than no observer.
+    ///
+    /// ── TWO SAMPLES PER MAP LOAD ──────────────────────────────────────────
+    /// <see cref="OnMapCallIn"/> fires from the RPCA_CallInNewMapAndMovePlayers
+    /// Postfix, which runs when the RPC is RECEIVED — BEFORE vanilla's map
+    /// coroutine (wait for map, enter, clear objects, move players) has run.
+    /// SpectatorPatches.cs and SpectatorSync.cs both state that ordering about
+    /// this same method, and FfaMapScale's MovePlayers patch records that
+    /// MovePlayers itself runs inside that coroutine. So the call-in sample
+    /// carries the previous point's terminal positions and pre-revive dead
+    /// flags: the state this seat INHERITED, which is worth recording and is
+    /// misleading if read as the state on the map being loaded.
+    ///
+    /// <see cref="TickSettle"/> emits the second sample from the per-frame
+    /// tick, <see cref="SettleDelaySeconds"/> after the call-in, carrying the
+    /// delay it actually measured. See RosterCensus's remarks for why the pair
+    /// — not the settled row alone — is the instrument.
     ///
     /// ── THE CENSUS SET IS THE RAW ONE ─────────────────────────────────────
     /// Seats come from PhotonNetwork.PlayerList minus spectators, NOT from
     /// RoomActors.ActiveFighters(). ActiveFighters applies IsUnauthorized once
-    /// the roster is frozen, so a latched actor is removed from the census
-    /// before it can be counted — and a seat that has gone missing from the
-    /// reporting client's view is exactly the row this instrument exists to
-    /// show. The FFA lane learned the same thing about a different census
-    /// (RosterCensusRules, Codex r2 HIGH): a census that consults the latch
-    /// hides the evidence it was taken for. This one consults nothing.
+    /// the roster is frozen — and the roster IS frozen on this branch, at the
+    /// three FreezeFighterRoster call sites in this file — so a latched actor
+    /// would be removed from the census before it could be counted, and a seat
+    /// that has gone missing from the reporting client's view is exactly the
+    /// row this instrument exists to show. The FFA lane learned the same thing
+    /// about a different census (RosterCensusRules, Codex r2 HIGH): a census
+    /// that consults the latch hides the evidence it was taken for.
+    ///
+    /// The latch-filtered count still reaches the LINE, as <c>fighters=</c>,
+    /// beside the row count as <c>seats=</c>. The two sets are different by
+    /// design, so a reader who has to compare them must not have to guess
+    /// either number — and the expected relation is <c>seats &gt;= fighters</c>,
+    /// not equality.
     ///
     /// ── ROOM GATE ─────────────────────────────────────────────────────────
-    /// CompetitiveRoomDetect.IsCompetitiveRoom(), the existing capability
-    /// path, and only for log volume — the census changes no behaviour, so it
-    /// needs no vanilla-scope gate. Never a room-name prefix of its own
-    /// (#286) and never mod_version (#301).
+    /// CompetitiveRoomDetect.IsCompetitiveRoom(), and only for log volume: the
+    /// census changes no behaviour, so it needs no vanilla-scope gate. That
+    /// predicate is the existing MOD-ISSUED-ROOM test — the cr_ff room property,
+    /// or a ranked_/team_/sct-/ovt_ name prefix, or an ffa_ name while
+    /// FfaMode.EngineActive(). Calling it a capability path would be a claim the
+    /// code does not support (#302): it is a name-and-property test, and it has
+    /// a dead zone, because an FFA room before ActiveFfaLobbyId or cr_ffa_n
+    /// lands does not match. Reusing the one existing predicate rather than
+    /// inventing a prefix test of our own is still the right call (#286) — but
+    /// a boundary it declines now SAYS so, so a window that declined every
+    /// boundary cannot be read as an instrument that never attached (#83).
     ///
     /// ── SPECTATORS ────────────────────────────────────────────────────────
     /// A spectator seat emits no census. The acceptance bar in §5.2 is about
     /// what a FIGHTER's own log lets a reader say, and the game-boundary call
     /// sites already sit behind the spectator early-return; gating the map
     /// boundary the same way makes the census mean one thing rather than two.
-    /// The cost of that refusal is a spectator-seat census nothing asks
-    /// for.</summary>
+    /// That decline is announced on the same terms as the room decline.</summary>
     internal static class RosterCensusEmitter
     {
         private static readonly RosterCensus.SessionLineBudget Budget =
             new RosterCensus.SessionLineBudget(RosterCensus.SessionLineCap);
+
+        /// <summary>One throttle per REASON. Sharing one across reasons would
+        /// let a generation edge spend its notice on whichever decline
+        /// happened to come first and leave the other unmarked.</summary>
+        private static readonly RosterCensus.NoticeThrottle EmptyRosterNotices =
+            new RosterCensus.NoticeThrottle(RosterCensus.EmptyRosterNoticeInterval,
+                                            RosterCensus.EmptyRosterNoticeCeiling);
+        private static readonly RosterCensus.NoticeThrottle NotModRoomNotices =
+            new RosterCensus.NoticeThrottle(RosterCensus.DeclineNoticeInterval,
+                                            RosterCensus.DeclineNoticeCeiling);
+        private static readonly RosterCensus.NoticeThrottle SpectatorNotices =
+            new RosterCensus.NoticeThrottle(RosterCensus.DeclineNoticeInterval,
+                                            RosterCensus.DeclineNoticeCeiling);
 
         /// <summary>Per-actor cumulative view batches as of the previous
         /// census, so the line can report a DELTA. Cleared whenever
@@ -8168,43 +8216,204 @@ namespace CompetitiveRounds
         private static readonly Dictionary<int, long> BatchesAtLastBoundary = new Dictionary<int, long>();
         private static int _batchesRoomGeneration = int.MinValue;
 
-        internal static void OnMapBoundary() { Emit(RosterCensus.BoundaryMap); }
+        /// <summary>How long after a call-in the settled sample is taken.
+        /// Vanilla's per-player Move coroutine runs on the order of a second
+        /// (learning #304 reads one CALL IN NEW MAP block as N MOVE PLAYERS
+        /// START lines and N END lines about a second apart), and learning #45
+        /// uses a ~2s deferral for exactly this "let the transition finish"
+        /// purpose. The sample reports the delay it measured, so a frame hitch
+        /// that stretches this is visible rather than assumed away.</summary>
+        private const double SettleDelaySeconds = 2.0;
 
-        internal static void OnGameBoundary() { Emit(RosterCensus.BoundaryGame); }
+        private static long _settleDueTicks = -1;
+        private static long _settleArmedTicks;
+        private static int _settleRoomGeneration = int.MinValue;
 
-        private static void Emit(string boundary)
+        internal static void OnMapCallIn()
+        {
+            // Arm only when the call-in was actually admitted: arming through a
+            // declined gate would double every decline notice and tell a reader
+            // nothing the call-in's own notice did not.
+            if (Emit(RosterCensus.BoundaryMapCallIn, -1)) ArmSettle();
+        }
+
+        internal static void OnGameBoundary() { Emit(RosterCensus.BoundaryGame, -1); }
+
+        /// <summary>Per-frame, from GameStateWatcher.TickFrame. Expiring by
+        /// default (#276): a pending sample that never comes due — the seat
+        /// left the room, the room changed, the tick stopped — is dropped and
+        /// costs one missing settled row, where a blocking-by-default design
+        /// would need a cleanup that always runs.</summary>
+        internal static void TickSettle()
         {
             try
             {
-                if (!PhotonNetwork.InRoom) return;
-                if (RoomActors.LocalIsSpectator) return;
-                if (!CompetitiveRoomDetect.IsCompetitiveRoom()) return;
+                if (_settleDueTicks < 0) return;
+                if (!PhotonNetwork.InRoom) { DisarmSettle(); return; }
+
+                // A new room restarts ActorNumbers, so a settled sample armed
+                // in the previous room would describe strangers.
+                int roomGeneration;
+                try { roomGeneration = NetworkReplicaDiagnostics.RoomGeneration; }
+                catch { roomGeneration = _settleRoomGeneration; }
+                if (roomGeneration != _settleRoomGeneration) { DisarmSettle(); return; }
+
+                long now = System.Diagnostics.Stopwatch.GetTimestamp();
+                if (now < _settleDueTicks) return;
+
+                long armedAt = _settleArmedTicks;
+                DisarmSettle();
+                Emit(RosterCensus.BoundaryMapSettled, MillisecondsBetween(armedAt, now));
+            }
+            catch (Exception ex)
+            {
+                DisarmSettle();
+                try
+                {
+                    Plugin.Log.LogWarning("[ROSTER-CENSUS] settle tick failed: "
+                                          + ex.GetType().Name + ": " + ex.Message);
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>A call-in arriving before the previous one settled REPLACES
+        /// the pending sample rather than queueing it: the older one would be
+        /// measured against a map that is already gone. The call-in rows are
+        /// all still emitted, so the sequence stays legible.</summary>
+        private static void ArmSettle()
+        {
+            try
+            {
+                long now = System.Diagnostics.Stopwatch.GetTimestamp();
+                _settleArmedTicks = now;
+                _settleDueTicks = now + (long)(SettleDelaySeconds * System.Diagnostics.Stopwatch.Frequency);
+                try { _settleRoomGeneration = NetworkReplicaDiagnostics.RoomGeneration; }
+                catch { _settleRoomGeneration = int.MinValue; }
+            }
+            catch { DisarmSettle(); }
+        }
+
+        private static void DisarmSettle()
+        {
+            _settleDueTicks = -1;
+            _settleRoomGeneration = int.MinValue;
+        }
+
+        private static long MillisecondsBetween(long fromTicks, long toTicks)
+        {
+            long delta = toTicks - fromTicks;
+            if (delta < 0) return 0;
+            long frequency = System.Diagnostics.Stopwatch.Frequency;
+            if (frequency <= 0) return -1;
+            return (long)(delta * 1000.0 / frequency);
+        }
+
+        /// <summary>True when the gates admitted this boundary — whether or not
+        /// any rows were printed. False means the census declined it, and said
+        /// so. The distinction is what <see cref="OnMapCallIn"/> arms on.</summary>
+        private static bool Emit(string boundary, long sinceCallInMs)
+        {
+            try
+            {
+                if (!PhotonNetwork.InRoom) return false;
+
+                int generation = ReadGeneration();
+                int fighters = ReadFighterCount();
+                var ctx = RosterCensus.BoundaryContext.For(generation, boundary, sinceCallInMs, fighters);
+
+                // Room gate first, so a casual room only ever produces the
+                // not-a-mod-room notice and the spectator notice stays a signal
+                // about rooms the census was meant to cover.
+                if (!CompetitiveRoomDetect.IsCompetitiveRoom())
+                {
+                    AnnounceDecline(NotModRoomNotices, ctx, RosterCensus.ReasonNotModRoom);
+                    return false;
+                }
+                if (RoomActors.LocalIsSpectator)
+                {
+                    AnnounceDecline(SpectatorNotices, ctx, RosterCensus.ReasonLocalSpectator);
+                    return false;
+                }
 
                 SyncRoomGeneration();
 
-                int generation = 0;
-                try { generation = RoomActors.RosterGeneration; } catch { generation = -1; }
+                string emptyReason;
+                var seats = ReadSeats(out emptyReason);
 
-                var seats = ReadSeats();
-                string notice;
-                if (!Budget.TryReserve(generation, boundary, seats.Count, out notice))
+                // The one case in which the census fails to measure must not be
+                // the one case it says nothing about. Without this line a reader
+                // counting rows finds a map load with none and cannot separate a
+                // detached patch, a declined gate, an exhausted cap and a roster
+                // read that came back empty (#441, one level up from the row).
+                if (seats.Count == 0)
                 {
-                    if (notice != null) Plugin.Log.LogInfo(notice);
-                    return;
+                    AnnounceEmpty(ctx, emptyReason ?? RosterCensus.ReasonRosterEmpty);
+                    return true;
                 }
 
-                var lines = RosterCensus.FormatCensus(generation, boundary, seats);
+                string notice;
+                if (!Budget.TryReserve(ctx, seats.Count, out notice))
+                {
+                    if (notice != null) Plugin.Log.LogInfo(notice);
+                    return true;
+                }
+
+                var lines = RosterCensus.FormatCensus(ctx, seats);
                 for (int i = 0; i < lines.Count; i++) Plugin.Log.LogInfo(lines[i]);
+                return true;
             }
             catch (Exception ex)
             {
                 try
                 {
                     Plugin.Log.LogWarning("[ROSTER-CENSUS] emit failed: "
-                                          + ex.GetType().Name + ": " + ex.Message);
+                                          + ex.GetType().Name + ": " + ex.Message
+                                          + " " + RosterCensus.Probe);
                 }
                 catch { }
+                return false;
             }
+        }
+
+        private static void AnnounceDecline(RosterCensus.NoticeThrottle throttle,
+                                            RosterCensus.BoundaryContext ctx, string reason)
+        {
+            try
+            {
+                int suppressed;
+                bool final;
+                if (!throttle.ShouldFire(ctx.Generation, out suppressed, out final)) return;
+                Plugin.Log.LogInfo(RosterCensus.FormatDeclinedNotice(ctx, reason, suppressed, final));
+            }
+            catch { }
+        }
+
+        private static void AnnounceEmpty(RosterCensus.BoundaryContext ctx, string reason)
+        {
+            try
+            {
+                int suppressed;
+                bool final;
+                if (!EmptyRosterNotices.ShouldFire(ctx.Generation, out suppressed, out final)) return;
+                // A warning, not info: every other decline is a scoping
+                // decision, this one is the instrument failing to read.
+                Plugin.Log.LogWarning(RosterCensus.FormatEmptyRosterNotice(ctx, reason, suppressed, final));
+            }
+            catch { }
+        }
+
+        private static int ReadGeneration()
+        {
+            try { return RoomActors.RosterGeneration; } catch { return -1; }
+        }
+
+        /// <summary>RoomActors.ActiveFighterCount() — the latch-filtered count,
+        /// carried on the line for comparison and never used to build the
+        /// census set. Unreadable is -1, which prints as a question mark.</summary>
+        private static int ReadFighterCount()
+        {
+            try { return RoomActors.ActiveFighterCount(); } catch { return -1; }
         }
 
         /// <summary>A new room restarts ActorNumbers at 1 and resets the view
@@ -8222,16 +8431,28 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Every non-spectator actor the room holds, ordered by
-        /// ActorNumber so two seats reading the same room print the same
-        /// order. A seat whose spectator role cannot be read is treated as a
-        /// fighter: an extra row never hides a seat, a missing row does.</summary>
-        private static List<RosterCensus.SeatObservation> ReadSeats()
+        /// ActorNumber so two seats reading the same room print the same order.
+        /// A seat whose spectator role cannot be read is treated as a fighter:
+        /// an extra row never hides a seat, a missing row does.
+        ///
+        /// <paramref name="emptyReason"/> is set whenever the result is empty,
+        /// and distinguishes the four ways that happens — the read threw, the
+        /// list was null, the room really held no actors, or every actor was a
+        /// spectator. An empty result with no reason would be the filter
+        /// discarding the very measurement it was taken for.</summary>
+        private static List<RosterCensus.SeatObservation> ReadSeats(out string emptyReason)
         {
+            emptyReason = null;
             var seats = new List<RosterCensus.SeatObservation>(4);
 
             Photon.Realtime.Player[] actors;
-            try { actors = PhotonNetwork.PlayerList; } catch { return seats; }
-            if (actors == null) return seats;
+            try { actors = PhotonNetwork.PlayerList; }
+            catch { emptyReason = RosterCensus.ReasonRosterReadFailed; return seats; }
+            if (actors == null) { emptyReason = RosterCensus.ReasonRosterReadFailed; return seats; }
+            if (actors.Length == 0) { emptyReason = RosterCensus.ReasonRosterEmpty; return seats; }
+
+            int localActor;
+            bool selfKnown = TryReadLocalActor(out localActor);
 
             var ordered = new List<Photon.Realtime.Player>(actors.Length);
             for (int i = 0; i < actors.Length; i++)
@@ -8243,12 +8464,34 @@ namespace CompetitiveRounds
                 if (spectator) continue;
                 ordered.Add(actor);
             }
+            if (ordered.Count == 0) { emptyReason = RosterCensus.ReasonAllSpectators; return seats; }
+
             ordered.Sort((a, b) => a.ActorNumber.CompareTo(b.ActorNumber));
 
             var bodies = ResolveBodiesByActor();
             for (int i = 0; i < ordered.Count; i++)
-                seats.Add(ReadSeat(ordered[i].ActorNumber, bodies));
+            {
+                int actorNumber = ordered[i].ActorNumber;
+                seats.Add(ReadSeat(actorNumber, bodies, selfKnown, selfKnown && actorNumber == localActor));
+            }
             return seats;
+        }
+
+        /// <summary>The reporting seat's own ActorNumber. Read once per
+        /// boundary, and its failure is carried as "undecided" rather than
+        /// collapsed into "not me" — see SeatObservation.Self for why the local
+        /// row has to be distinguishable at all.</summary>
+        private static bool TryReadLocalActor(out int localActor)
+        {
+            localActor = 0;
+            try
+            {
+                var local = PhotonNetwork.LocalPlayer;
+                if (local == null) return false;
+                localActor = local.ActorNumber;
+                return localActor > 0;
+            }
+            catch { return false; }
         }
 
         /// <summary>ActorNumber to the local Player object that represents it.
@@ -8282,17 +8525,18 @@ namespace CompetitiveRounds
             return map;
         }
 
-        /// <summary>One seat, read field by field through independent
-        /// accesses so that a failure on any one of them costs that field and
-        /// not the row. A seat with no resolvable body is an UnreadableSeat,
-        /// which still produces a line (§4.1 / #441).</summary>
-        private static RosterCensus.SeatObservation ReadSeat(int actor, Dictionary<int, Player> bodies)
+        /// <summary>One seat, read field by field through independent accesses
+        /// so that a failure on any one of them costs that field and not the
+        /// row. A seat with no resolvable body is an UnreadableSeat, which
+        /// still produces a line (§4.1 / #441).</summary>
+        private static RosterCensus.SeatObservation ReadSeat(
+            int actor, Dictionary<int, Player> bodies, bool selfKnown, bool self)
         {
             long batches = BatchesSinceLastBoundary(actor);
 
             Player body = null;
             if (bodies != null) bodies.TryGetValue(actor, out body);
-            if (body == null) return RosterCensus.UnreadableSeat(actor, batches);
+            if (body == null) return RosterCensus.UnreadableSeat(actor, batches, selfKnown, self);
 
             int playerId = -1, team = -1;
             try { playerId = body.PlayerID; } catch { playerId = -1; }
@@ -8334,16 +8578,24 @@ namespace CompetitiveRounds
                                          activeKnown, active,
                                          deadKnown, dead,
                                          positionKnown, x, y,
-                                         batches);
+                                         batches,
+                                         selfKnown, self);
         }
 
         /// <summary>View batches observed for this actor since the previous
         /// census, from the counters NetworkReplicaDiagnostics already keeps.
-        /// A negative result means "not a count" and prints as a question
-        /// mark: the game window resets at game start, so the first census
-        /// after a reset would otherwise report a negative difference as if
-        /// it were data. Context only — §4.1 and #1.4 of the diagnosis are
-        /// explicit that this must never be read as an aliveness signal.</summary>
+        /// A negative result means "not a count" and prints as a question mark.
+        ///
+        /// The LOCAL seat is always negative here, and not because anything
+        /// failed: NetworkReplicaDiagnostics excludes the local actor by
+        /// construction. That is why the line carries <c>self=</c> — without it
+        /// the reporting seat's own row is indistinguishable from a remote seat
+        /// that had gone silent.
+        ///
+        /// The game window also resets at game start, so the first census after
+        /// a reset would otherwise report a negative difference as if it were
+        /// data. Context only — §4.1 and #1.4 of the diagnosis are explicit that
+        /// this must never be read as an aliveness signal.</summary>
         private static long BatchesSinceLastBoundary(int actor)
         {
             long cumulative;
@@ -8360,11 +8612,16 @@ namespace CompetitiveRounds
         }
     }
 
-    /// <summary>The map boundary. Every point and round transition calls
+    /// <summary>The map call-in. Every point and round transition calls
     /// MapManager.RPCA_CallInNewMapAndMovePlayers on every client in the room
     /// — that call is what prints ROUNDS' own "CALL IN NEW MAP AND MOVE
     /// PLAYERS" marker, which is how the report's log was read in the first
     /// place, so pairing a census with it makes the two readable together.
+    ///
+    /// This Postfix observes the CALL-IN, not the move: vanilla's coroutine
+    /// runs afterwards, and PlayerManager.MovePlayers is dispatched from
+    /// inside it. The settled sample on the far side is
+    /// RosterCensusEmitter.TickSettle — see that class's remarks.
     ///
     /// TargetMethods RESOLVES the method and throws when it cannot, rather
     /// than naming it in an attribute and hoping. Plugin's Harmony bootstrap
@@ -8387,7 +8644,7 @@ namespace CompetitiveRounds
 
         private static void Postfix()
         {
-            try { RosterCensusEmitter.OnMapBoundary(); } catch { }
+            try { RosterCensusEmitter.OnMapCallIn(); } catch { }
         }
     }
 }
