@@ -1846,13 +1846,31 @@ namespace CompetitiveRounds
             {
                 string ver = ExtractJsonString(req.downloadHandler.text, "version");
                 string minVer = ExtractJsonString(req.downloadHandler.text, "min_version");
-                // Read on EVERY successful response, not only the first: an
+                // Re-read on EVERY successful response, not only the first: an
                 // absent field extracts as false (the same shape the FFA lobby
-                // config uses for sudden_death), so a box that stops
+                // config uses for sudden_death), so a response that stops
                 // advertising takes the capability away again.
+                //
+                // What that does NOT buy, stated because the earlier wording
+                // here claimed more than the code does (#302/#351): this route
+                // is fetched at STARTUP only — the two callers are at :642 and
+                // :1817 — so within one game session the value is read once and
+                // then held. "A box that stops advertising" is only observed if
+                // something fetches again, and nothing does. The residual that
+                // follows (a client that latched TRUE against a box later rolled
+                // back below the tag) is a named cross-lane dependency in the
+                // batch notes, and its conservative handling belongs to the
+                // side that reads the tag.
                 bool involuntaryCause = ExtractJsonBool(req.downloadHandler.text, TransportExit.CapabilityField);
-                if (involuntaryCause != ServerAcceptsInvoluntaryFfaCause)
-                    Plugin.Log.LogInfo($"[VERSION] server involuntary-cause capability: {involuntaryCause}");
+                // Logged on every check, not only on a change: with the field
+                // absent the value equals its own default, so a change-only
+                // line is silent in exactly the case worth seeing — a feature
+                // that is gated shut. The field NAME is in the line because the
+                // failure this lane actually shipped was a name disagreement,
+                // which a bare "False" would not have distinguished from a box
+                // that simply has not deployed yet (#281/#438/#443).
+                Plugin.Log.LogInfo(
+                    $"[VERSION] involuntary-cause capability: probed '{TransportExit.CapabilityField}' -> {involuntaryCause}");
                 ServerAcceptsInvoluntaryFfaCause = involuntaryCause;
                 if (!string.IsNullOrEmpty(ver))
                 {

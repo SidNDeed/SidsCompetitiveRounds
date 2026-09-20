@@ -69,8 +69,29 @@ namespace CompetitiveRounds
         /// <summary>The field in the /api/v1/mod-version response by which the
         /// server advertises that it recognises the involuntary tag. Absent =
         /// not advertised = this client sends exactly what it sends today.
-        /// Named here, next to the tag it gates, so the client's half of the
-        /// contract is one place.</summary>
+        ///
+        /// This literal is half of a wire contract, and the two lanes of this
+        /// bug were built in trees that cannot see each other: the server's
+        /// first build advertised `"involuntary_leave_cause"` while this
+        /// constant read `"ffa_involuntary_cause"`, so the gate could never
+        /// open and every column, writer and renderer the bug added was live
+        /// and inert. Both suites were green throughout — the server asserted
+        /// its own key was present, this one asserted its own key was read,
+        /// and nothing compared the two literals (#438/#443).
+        ///
+        /// The server lane resolved it toward the CONSUMER and pinned its
+        /// canonical name to this constant, transcribed byte-for-byte
+        /// (`backend/api/main.py`, `_INVOLUNTARY_CAUSE_CAPABILITY_FIELD`), so
+        /// the value here is unchanged and is the name to keep. The server's
+        /// other spelling survives only as a transitional ALIAS that its own
+        /// notes schedule for removal once the lanes merge — so this constant
+        /// must never be moved onto it.
+        ///
+        /// What changed is that the agreement is now CHECKED: the harness
+        /// reads the server's declared canonical out of its source and pins
+        /// this literal against it (cases X1–X4), in both directions. A test
+        /// that injects the flag by hand agrees with whatever name it is
+        /// handed and cannot fail (#342).</summary>
         internal const string CapabilityField = "ffa_involuntary_cause";
 
         /// <summary>The Photon DisconnectCause values that are NOT this
