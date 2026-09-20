@@ -38,11 +38,26 @@
 --      copy of what 086's sequence already guarantees.
 --
 -- WHY A NEW FILE AND NOT AN EDIT TO 336. The deploy wrapper applies a
--- migration once BY FILE NAME. 336 is carried byte-identical from the
--- unshipped wave B/C lane precisely so that the later lane deploy finds it
--- already applied; changing its content here would leave the lane's own copy
--- of 336 permanently unapplied. So this is a separate file, and it rides the
--- same sql-only precursor commit.
+-- migration once BY FILE NAME, so whichever copy of a file reaches a database
+-- first is the only one that will ever run there; editing 336 in place would
+-- have left the wave B/C lane's own copy permanently unapplied. So this is a
+-- separate file, and it rides the same sql-only precursor commit.
+--
+-- AND THE TWO COPIES OF 336 ARE NOT BYTE-IDENTICAL, WHICH THIS FILE USED TO
+-- GUARANTEE THEY WERE. The hotfix copy is 22,384 bytes; the lane's is 19,445;
+-- they agree up to line 216 and diverge at 217, where the post-check was
+-- rebuilt to OFFER rows to the CHECK rather than read the constraint's
+-- rendered text. The hotfix copy is a strict SUPERSET: both create the same
+-- three objects -- the `kind` column, its `bug_reports_kind_known` CHECK and
+-- its `'report'` default -- and only the self-verification differs. Lane
+-- adoption of this copy is filed in the notes (section 9).
+--
+-- SO THIS FILE DOES NOT DEPEND ON WHICH COPY RAN. Its precondition below asks
+-- for the three OBJECTS by name and refuses by name when one is missing,
+-- rather than assuming a file. A guarantee about bytes was the wrong shape:
+-- it could not be checked from inside a migration, it was false, and the
+-- thing that actually matters to this file is the schema it inherits (#302,
+-- #351).
 --
 -- NUMBERING (#553). The v1.41.0 lane has reserved 330-344 across its item
 -- briefs -- 336 and 337 in the tree, 338/339/340/341/342/343/344 in the
@@ -79,14 +94,50 @@
 
 BEGIN;
 
--- ── guard: 336 must already be applied ───────────────────────────────────────
+-- ── guard: the SHAPE 336 leaves must already be here, object by object ───────
+--
+-- ASKED FOR BY OBJECT, NOT BY FILE. Two copies of 336 exist (see the header)
+-- and they differ in their self-verification only, so "did 336 run" is not a
+-- question this file can answer and not the question it needs answered. What
+-- it needs is the three objects its own CHECK and its own handler are written
+-- against, and each one is named separately so a partial shape says WHICH
+-- part is missing instead of failing later as a bare UndefinedColumn or, in
+-- the default's case, not failing at all until a row arrives.
 DO $m350g$
+DECLARE
+    v_default text;
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM information_schema.columns
          WHERE table_name = 'bug_reports' AND column_name = 'kind'
     ) THEN
-        RAISE EXCEPTION '350: bug_reports.kind is missing, so 336 has not been applied on this database. Apply 336_bug_reports_kind.sql first; this file constrains the automatic rows that column identifies';
+        RAISE EXCEPTION '350: bug_reports.kind is missing, so the shape 336 installs is not on this database. Apply 336_bug_reports_kind.sql first; this file constrains the automatic rows that column identifies';
+    END IF;
+
+    -- The CHECK. Without it `kind` is a free-text column: 'auto' would carry
+    -- no meaning the schema enforces, and this file's own constraint --
+    -- `kind <> 'auto' OR bug_number < 0` -- would be written against a value
+    -- anything at all could hold.
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+         WHERE conname = 'bug_reports_kind_known'
+           AND conrelid = 'bug_reports'::regclass
+    ) THEN
+        RAISE EXCEPTION '350: bug_reports.kind exists but the bug_reports_kind_known CHECK does not, so the column admits any string and kind = ''auto'' is not a fact the schema enforces. Apply 336_bug_reports_kind.sql (either copy) before this file';
+    END IF;
+
+    -- The DEFAULT. Every row written by code that does not name the column --
+    -- which is every row the bug form writes on the deploy's old-code half --
+    -- relies on it to land as 'report'. Without it such a row takes NULL, and
+    -- a NULL kind passes this file's CHECK for free: `NULL <> 'auto'` is NULL,
+    -- `NULL OR false` is NULL, and a CHECK that evaluates to NULL ADMITS the
+    -- row. So a missing default does not fail loudly here -- it makes the
+    -- human/automatic split a thing the schema no longer enforces, quietly.
+    SELECT column_default INTO v_default
+      FROM information_schema.columns
+     WHERE table_name = 'bug_reports' AND column_name = 'kind';
+    IF v_default IS NULL OR v_default NOT LIKE '%report%' THEN
+        RAISE EXCEPTION '350: bug_reports.kind has no ''report'' default (it reads %), so a writer that does not name the column leaves it NULL and the human/automatic split is not enforced. Apply 336_bug_reports_kind.sql (either copy) before this file', COALESCE(v_default, 'NULL');
     END IF;
 END $m350g$;
 
