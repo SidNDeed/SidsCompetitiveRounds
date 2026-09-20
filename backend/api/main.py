@@ -3599,7 +3599,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (main.py:41252) and `created_at` defaults to NOW(). `ovt_matches.started_at`
+    (main.py:41254) and `created_at` defaults to NOW(). `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
     conservative outcome, and a future-dated one would hold its own series open
@@ -3656,7 +3656,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         # it, and KEY SHARE conflicts with exactly one mode — FOR UPDATE. NO KEY
         # UPDATE is the weakest mode that still self-conflicts, so two sweeps
         # serialize, and so does a sweep against the report sink's own lock on
-        # this row (main.py:41162) — deliberately, that is what #208 re-checks
+        # this row (main.py:41164) — deliberately, that is what #208 re-checks
         # after. What NO KEY UPDATE keeps out of the wait is the FK check: a
         # report's INSERT INTO ovt_matches never waits on the janitor.
         "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
@@ -3680,7 +3680,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     if still_idle is None:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
-    # continuation's prior-series lookup filters on it (main.py:41069); the
+    # continuation's prior-series lookup filters on it (main.py:41071); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
