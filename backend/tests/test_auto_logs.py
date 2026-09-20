@@ -52,8 +52,21 @@ import auto_logs  # noqa: E402
 import main  # noqa: E402
 import schemas  # noqa: E402
 
-STEAM = "76561198040410653"
-OTHER = "76561198720512419"
+# SYNTHETIC ACCOUNT IDS, and the fixture needs them to be.
+#
+# These two were the maintainer's own real test accounts. Nothing here reads
+# an account's history, so a fixture never needed a real one -- and this is a
+# public tree, where a value like that is republished on every clone and
+# permanently links a stable identifier to a file. `76561198000000001` and
+# `...002` are the shape the rest of the suite already uses: a valid 17-digit
+# Steam64 with a filler account part that resolves to nobody.
+#
+# `test_this_files_account_ids_are_synthetic` below is what keeps them that
+# way. It names no real id -- a test that asserted "the real one is absent"
+# would have to write the real one down -- and instead requires every Steam
+# -shaped literal in the files THIS BRANCH owns to come from _SYNTHETIC_IDS.
+STEAM = "76561198000000001"
+OTHER = "76561198000000002"
 TOKEN = "a-session-token"
 WINPATH = r"C:\Users\Someone\AppData\Roaming\ROUNDS\BepInEx\LogOutput.log"
 BUNDLE = ("=== LogOutput.log (" + WINPATH + ") ===\n"
@@ -1000,13 +1013,24 @@ def test_an_empty_secret_never_authorises_the_prune(logdir, monkeypatch):
 
 
 def test_the_opportunistic_prune_never_fails_an_upload(logdir, verified, monkeypatch, capsys):
-    monkeypatch.setattr(auto_logs, "_LAST_PRUNE", [0.0])
+    # `[0.0]` -- which is what this line used to say -- makes the prune due
+    # only on a machine whose UPTIME already exceeds _PRUNE_MIN_INTERVAL_S,
+    # because the throttle reads `time.monotonic()`. On a box booted within the
+    # last hour the throttle fired, `_maybe_prune` returned immediately, and
+    # this test passed its first assertion while exercising nothing at all
+    # (#342). A NEGATIVE stamp is due regardless of uptime.
+    monkeypatch.setattr(auto_logs, "_LAST_PRUNE", [-1e12])
     db = Scripted({COUNT_KEY: [[_bucket(0)]], PLAYER_KEY: [[{"id": PID}]],
                    INSERT_KEY: [[{"bug_number": 11}]]}, fail_on=DUE_KEY)
     out = _run(auto_logs.upload_auto_log(_request(), db))
     assert out["bug_number"] == 11
+    # The positive signal that the prune RAN, read before the count it implies:
+    # a missing line here means the throttle swallowed the pass, which is the
+    # failure the stamp above exists to prevent.
+    assert "[AUTO-LOG] prune failed" in capsys.readouterr().out, (
+        "the opportunistic prune did not run at all, so this test asserts "
+        "nothing about what an upload does when it fails")
     assert db.rolled_back == 1
-    assert "[AUTO-LOG] prune failed" in capsys.readouterr().out
 
 
 # ── the published numbers ────────────────────────────────────────────────────
@@ -1604,41 +1628,75 @@ def test_the_upload_lock_is_not_in_the_applications_identity_namespace(logdir, v
         % auto_logs.AUTO_LOG_LOCK_CLASS)
 
 
-def test_the_expensive_work_is_not_done_inside_the_lock(logdir, verified):
-    """The scrub, the gzip and the blob write happen BEFORE the lock is taken.
+def test_the_scrub_and_the_compression_are_not_done_inside_the_lock(logdir, verified):
+    """The SCRUB and the GZIP happen before the lock. The blob write does not,
+    and that is deliberate.
 
-    They are work on this request's own bundle: they touch no shared row and
-    need no exclusion, so a hold across them buys nothing and costs the next
-    caller all of it -- by main's own measurement the scrub alone reaches
-    ~2.4 s on a large bundle, and the api runs one worker.
+    THIS TEST CHANGED DIRECTION FOR ONE HALF OF ITS SUBJECT, so it says which
+    half and why. It used to require the blob write outside the lock too. That
+    ordering had a cost the earlier round did not price: a lock wait or a count
+    that raised, AFTER the write, left a file on disk that no row would ever
+    name -- invisible to `prune_auto_logs`, which walks rows -- and answered
+    500, which the client half retries. The admission decision now comes first,
+    so a blob exists only for an upload the cap has already accepted.
 
-    Measured by where the blob appears relative to the lock: the write is the
-    last of the three, so a blob on disk before the lock statement is proof
-    that all of it ran outside.
+    What must stay outside is the expensive part, and it is the part that was
+    always the point: the scrub reaches ~2.4 s on a large bundle by main's own
+    measurement and the gzip is the same order. The write is neither -- it is
+    bounded by `_BUG_LOG_MAX_GZ` (8 MiB), it runs on a worker thread, and the
+    exclusion it sits inside is keyed on ONE account, so the only request that
+    can wait on it is the same seat uploading twice inside its own 300 s
+    client debounce.
+
+    Measured on the two call sites, not on the prose: the scrub and the
+    compression must both record a statement index at or before the lock's.
     """
     seen = {}
+    real_scrub = main._scrub_pass_one
+    real_compress = auto_logs._compress_blob
     real_write = auto_logs._write_blob
+
+    def note_scrub(text):
+        seen["scrub_at"] = len(db.log)
+        return real_scrub(text)
+
+    def note_compress(scrubbed):
+        seen["gzip_at"] = len(db.log)
+        return real_compress(scrubbed)
 
     def note_write(path, data):
         seen["blob_at"] = len(db.log)
         return real_write(path, data)
 
     db = _ok_db()
+    main._scrub_pass_one = note_scrub
+    auto_logs._compress_blob = note_compress
     auto_logs._write_blob = note_write
     try:
         _run(auto_logs.upload_auto_log(_request(), db))
     finally:
+        main._scrub_pass_one = real_scrub
+        auto_logs._compress_blob = real_compress
         auto_logs._write_blob = real_write
 
     order = [sql for sql, _ in db.log]
     lock_at = next((i for i, s in enumerate(order) if LOCK_KEY in s), None)
     assert lock_at is not None, "no advisory lock taken at all"
+    for label, key in (("scrub", "scrub_at"), ("compression", "gzip_at")):
+        assert key in seen, "the %s never ran, so this test measured nothing" % label
+        assert seen[key] <= lock_at, (
+            "the %s ran at statement %d, AFTER the lock at %d -- the expensive "
+            "pass over the whole bundle is being held inside one account's "
+            "advisory lock" % (label, seen[key], lock_at))
+
+    # THE OTHER HALF, ASSERTED POSITIVELY so the new ordering cannot quietly
+    # revert: the write is INSIDE the hold, which is what makes the admitted
+    # -upload-only property true.
     assert "blob_at" in seen, "the blob was never written"
-    assert seen["blob_at"] <= lock_at, (
-        "the blob was written at statement %d, AFTER the lock at %d -- the "
-        "scrub, the compression and a multi-megabyte write are all being "
-        "held inside one account's advisory lock"
-        % (seen["blob_at"], lock_at))
+    assert seen["blob_at"] > lock_at, (
+        "the blob was written at statement %d, BEFORE the lock at %d -- a "
+        "failure of the lock or the count would then leave a file no row "
+        "names and nothing collects" % (seen["blob_at"], lock_at))
 
 
 def test_a_log_that_compresses_past_the_readers_ceiling_is_refused(logdir, verified,
@@ -1918,6 +1976,41 @@ _KIND_CARRIERS = {
     "get_bug_report": ("created_at, updated_at, kind", "created_at, updated_at"),
 }
 
+# ── the readers left UNSCOPED ON PURPOSE, each with its own control ──────────
+#
+# THE MATRIX ABOVE COVERED ONLY THE SITES THAT WERE CHANGED, which made the
+# sweep it claims to be a sweep of one direction. Three of the nine
+# `bug_reports` readers were dispositioned "unscoped on purpose" in the notes
+# (§1) and NOTHING held them to it: a later change that added `kind =
+# 'report'` to the log download would make every automatic upload
+# undownloadable -- the admin opens an auto row, clicks the log, gets a 404 --
+# and every test in this file would still be green, because a sweep that only
+# checks the scoped sites cannot see a site becoming scoped.
+#
+# So each one is pinned by its own statement, with the mutation being the
+# ADDITION of a kind predicate rather than its removal. Log download first:
+# it is the one whose accidental scoping costs the most, because serving an
+# automatic log to an admin is the entire point of storing one.
+#
+# name -> (anchor that must appear, the scoped version that must NOT, why)
+_KIND_UNSCOPED = {
+    "download_bug_report_log": (
+        "FROM bug_reports WHERE id = :rid",
+        "FROM bug_reports WHERE kind = 'report' AND id = :rid",
+        "downloading an automatic log is the whole reason one is stored; a "
+        "kind predicate here 404s every auto row's log in admin triage"),
+    "ack_bug_report_posted": (
+        "UPDATE bug_reports SET channel_posted_at = NOW() ",
+        "UPDATE bug_reports SET channel_posted_at = NOW() WHERE kind = 'report' ",
+        "an id-targeted ack of a row the feed never emits; scoping it would "
+        "make the bot's at-least-once ack silently stop acking"),
+    "_record_bug_event": (
+        "UPDATE bug_reports SET updated_at = NOW() WHERE id = :rid",
+        "UPDATE bug_reports SET updated_at = NOW() WHERE kind = 'report' AND id = :rid",
+        "an id-targeted touch reached only through gated callers; scoping it "
+        "would stop an automatic row's activity timestamp moving at all"),
+}
+
 
 def _fn_source(name):
     return inspect.getsource(getattr(main, name))
@@ -1970,6 +2063,50 @@ def test_each_kind_carrying_reader_has_a_mutation_that_reddens_it(name):
     assert mutant != live, "%s: the mutation changed nothing" % name
     assert not check(mutant), (
         "%s: the check passes with kind dropped from the select list" % name)
+
+
+@pytest.mark.parametrize("name", sorted(_KIND_UNSCOPED))
+def test_each_deliberately_unscoped_reader_stays_unscoped(name):
+    """The three readers §1 dispositioned "unscoped on purpose".
+
+    A disposition nothing enforces is a comment. The mutation here runs the
+    other way round from the two matrices above: the predicate is ADDED, and
+    the check must fail -- so the day someone "completes the sweep" by scoping
+    the log download, this reddens and says what it costs.
+
+    Anchored on the statement rather than on the function, and the anchor is
+    asserted to occur EXACTLY ONCE inside that function's span before anything
+    is concluded from it (#432/#279): a handler holding two `UPDATE
+    bug_reports` statements would otherwise let a check pass on the one nobody
+    asked about.
+    """
+    anchor, scoped, why = _KIND_UNSCOPED[name]
+    live = _normalise(_fn_source(name))
+
+    assert live.count(anchor) == 1, (
+        "%s: the statement this control is anchored on occurs %d time(s) in "
+        "the function, not once -- the anchor has to be re-derived before the "
+        "result below means anything (%r)" % (name, live.count(anchor), anchor))
+
+    def check(src):
+        # The property: this reader reads/writes by id, and says nothing about
+        # kind. Two halves, because either alone can pass for the wrong
+        # reason -- the anchor alone would survive a second scoped copy, and
+        # "no kind" alone would survive the statement being deleted outright.
+        return anchor in src and "kind" not in src.split(anchor)[1][:120]
+
+    # CONTROL: the live source is unscoped, which is the disposition §1 records.
+    assert check(live), (
+        "%s is no longer unscoped, and the note says it must be: %s"
+        % (name, why))
+
+    # MUTATION: scope it, the way a later "consistency" pass would.
+    mutant = live.replace(anchor, scoped)
+    assert mutant != live, "%s: the mutation changed nothing" % name
+    assert not check(mutant), (
+        "%s: the check still passes with a kind predicate added to the "
+        "statement, so it proves nothing about the reader staying unscoped "
+        "(%s)" % (name, why))
 
 
 def test_the_reporter_door_mutation_reddens_the_refusal_itself(monkeypatch):
@@ -2406,10 +2543,24 @@ def test_an_upload_stops_before_it_eats_the_reserve_the_bug_form_needs(logdir, v
     monkeypatch.setattr(auto_logs, "_free_bytes", lambda d: 10 ** 12)
     assert _run(auto_logs.upload_auto_log(_request(), _ok_db()))["log_persisted"] is True
 
-    # CONTROL 2: a volume that will not report its free space must not become
-    # a refusal. An unknown figure is no reason to drop a log.
+    # CONTROL 2 -- AND ITS DIRECTION IS NOW THE OPPOSITE OF WHAT IT WAS.
+    # This block used to assert that an unmeasurable volume "must not become a
+    # refusal". That made the reserve evaporate in exactly the conditions that
+    # stop a volume answering: a guard at its weakest when it matters most
+    # (#276). Unknown is a refusal, and the whole cost of that choice is one
+    # 503 and one retry after the next match.
     monkeypatch.setattr(auto_logs, "_free_bytes", lambda d: -1)
-    assert _run(auto_logs.upload_auto_log(_request(), _ok_db()))["log_persisted"] is True
+    # Against the directory as CONTROL 1 left it, not against empty: control 1
+    # deliberately landed a blob, and asserting `== []` here would fail for
+    # that blob rather than for anything this arm did.
+    before = sorted(_blobs(logdir))
+    with pytest.raises(HTTPException) as ei:
+        _run(auto_logs.upload_auto_log(_request(), _ok_db()))
+    assert ei.value.status_code == 503, (
+        "an unmeasurable volume must refuse retryably, got %s"
+        % ei.value.status_code)
+    assert sorted(_blobs(logdir)) == before, (
+        "a blob was written on a volume whose free space could not be read")
 
 
 # ── the player-filed path's own half of the shared volume ────────────────────
@@ -2502,3 +2653,441 @@ def test_a_bug_report_filed_with_no_log_is_still_distinguishable(logdir, monkeyp
     assert out["log_persisted"] is True
     assert kept.log_bytes and kept.log_bytes > 0, (
         "a stored log records %r bytes" % (kept.log_bytes,))
+
+
+# ── ROUND 2: the admission order, the reserve's serialisation, the collector ──
+
+
+def test_an_admission_failure_leaves_no_blob_and_is_retryable(logdir, verified):
+    """A lock or a count that raises must answer 503 and leave nothing behind.
+
+    THE DEFECT THIS PINS. The advisory lock and the deciding count used to sit
+    AFTER the blob write, outside any try. A lost connection, a lock wait
+    killed by `idle_in_transaction_session_timeout`, a deadlock detector --
+    each of them propagated as a 500 and left a file on disk that no row would
+    ever name. `prune_auto_logs` walks ROWS, so nothing could ever find it, and
+    500 is a code the client half retries, so the next match wrote another one.
+
+    Two arms, because the two statements fail independently, plus a control so
+    the refusals are about the failure and not about the route refusing
+    everything.
+    """
+    # ARM 1: the lock statement itself raises.
+    db = _ok_db()
+    db.fail_on = LOCK_KEY
+    with pytest.raises(HTTPException) as ei:
+        _run(auto_logs.upload_auto_log(_request(), db))
+    assert ei.value.status_code == 503, (
+        "a failed advisory lock must be retryable (503), not a 500 the client "
+        "retries against a server that has already written a file, got %s"
+        % ei.value.status_code)
+    assert _blobs(logdir) == [], (
+        "the lock failed and a blob was left behind: %r" % (_blobs(logdir),))
+
+    # ARM 2: the DECIDING count raises -- the second read, not the cheap one.
+    calls = {"n": 0}
+    real_bucket = auto_logs._auto_bucket
+
+    async def flaky_bucket(db_, steam_id):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise RuntimeError("scripted failure of the count under the lock")
+        return await real_bucket(db_, steam_id)
+
+    auto_logs._auto_bucket = flaky_bucket
+    try:
+        with pytest.raises(HTTPException) as ei:
+            _run(auto_logs.upload_auto_log(_request(), _ok_db()))
+    finally:
+        auto_logs._auto_bucket = real_bucket
+    assert ei.value.status_code == 503, (
+        "a failed authoritative count must be retryable, got %s"
+        % ei.value.status_code)
+    assert calls["n"] == 2, (
+        "the route made %d bucket read(s); this arm is only about the LOCKED "
+        "one, so a run that never reached it proves nothing" % calls["n"])
+    assert _blobs(logdir) == [], (
+        "the count failed and a blob was left behind: %r" % (_blobs(logdir),))
+
+    # CONTROL: the same request with neither failure lands, so the two
+    # emptiness assertions above are not satisfied by a route that never
+    # writes at all.
+    assert _run(auto_logs.upload_auto_log(_request(), _ok_db()))["log_persisted"] is True
+    assert len(_blobs(logdir)) == 1, (
+        "the control upload did not store its blob")
+
+
+def test_the_bucket_refusal_now_happens_before_anything_is_written(logdir, verified):
+    """The 429 on the locked re-check has no blob to discard.
+
+    It used to. The write came first, so a seat that filled its bucket in the
+    window between the cheap read and the locked one paid a full scrub, a gzip
+    and a multi-megabyte write and then had it unlinked again. The count
+    decides first now, and the write never happens.
+    """
+    seen = {}
+    real_write = auto_logs._write_blob
+
+    def note_write(path, data):
+        seen["wrote"] = True
+        return real_write(path, data)
+
+    # The cheap read passes; the locked read finds a full bucket.
+    db = Scripted({
+        COUNT_KEY: [[_bucket(0)], [_bucket(auto_logs.AUTO_LOG_PER_STEAM_PER_DAY)]],
+        PLAYER_KEY: [[{"id": PID}]],
+        INSERT_KEY: [[{"bug_number": 1}]],
+    })
+    auto_logs._write_blob = note_write
+    try:
+        with pytest.raises(HTTPException) as ei:
+            _run(auto_logs.upload_auto_log(_request(), db))
+    finally:
+        auto_logs._write_blob = real_write
+
+    assert ei.value.status_code == 429, (
+        "a bucket full on the locked re-check must be the cap refusal, got %s"
+        % ei.value.status_code)
+    assert "wrote" not in seen, (
+        "the blob was written before the cap refused; a write is supposed to "
+        "happen only for an upload the count has already admitted")
+    assert _blobs(logdir) == [], (
+        "a blob survives a 429: %r" % (_blobs(logdir),))
+
+
+def test_an_indeterminate_commit_names_a_blob_the_sweep_can_collect(logdir, verified,
+                                                                    capsys):
+    """The one arm that deliberately keeps a file says WHICH file, and the
+    retention loop's orphan sweep is what removes it.
+
+    Keeping the blob is right: PostgreSQL may have committed and lost only the
+    acknowledgement, and deleting the log a committed row promises reads as
+    corruption. What was missing is the other half -- nothing collected it, on
+    a volume shared with player-filed attachments.
+    """
+    db = _ok_db()
+    db.fail_commit = True
+    with pytest.raises(HTTPException) as ei:
+        _run(auto_logs.upload_auto_log(_request(), db))
+    assert ei.value.status_code == 503
+    kept = _blobs(logdir)
+    assert len(kept) == 1, (
+        "the indeterminate arm must KEEP its blob; found %r" % (kept,))
+
+    out = capsys.readouterr().out
+    assert ("%s=%s" % (auto_logs._ORPHAN_MARKER, kept[0])) in out, (
+        "the indeterminate line does not name the file it kept, so the "
+        "recovery identifier the sweep matches on is missing. Printed: %r"
+        % (out,))
+
+
+def test_the_orphan_sweep_collects_an_unreferenced_blob_and_only_that(logdir):
+    """Three files, one sweep: the unreferenced one goes, the referenced one
+    stays, the too-young one stays.
+
+    The referenced control is a PLAYER-FILED row, not an automatic one. This
+    sweep walks FILES on a shared volume, so what protects a file is a row of
+    ANY kind naming it -- a `kind = 'auto'` predicate here would make every
+    bug-report attachment look unreferenced.
+    """
+    orphan = logdir / "aaaaaaaa-0000-4000-8000-000000000001.log.gz"
+    owned = logdir / "bbbbbbbb-0000-4000-8000-000000000002.log.gz"
+    fresh = logdir / "cccccccc-0000-4000-8000-000000000003.log.gz"
+    for p in (orphan, owned, fresh):
+        p.write_bytes(b"x")
+    old = time.time() - 10_000
+    os.utime(orphan, (old, old))
+    os.utime(owned, (old, old))
+
+    db = Scripted({
+        "COUNT(*) AS n FROM bug_reports": [[{"n": 7}]],
+        "SELECT log_filename FROM bug_reports": [[{"log_filename": owned.name}]],
+    })
+    out = _run(auto_logs.prune_orphan_blobs(db, min_age_s=3600))
+
+    assert out["refused"] is False
+    assert out["unlinked"] == 1, out
+    assert not orphan.exists(), "the unreferenced blob was not collected"
+    assert owned.exists(), (
+        "a blob a bug_reports row names was deleted -- on a volume shared with "
+        "player-filed attachments that is the report's only copy")
+    assert fresh.exists(), (
+        "a blob younger than one retention tick was collected; the row for it "
+        "may still be in flight")
+
+    names = db.params_for("SELECT log_filename FROM bug_reports")[0]["names"]
+    assert fresh.name not in names, (
+        "a file too young to be a candidate was still offered to the database")
+
+    # CONTROL: the same sweep with the file referenced removes nothing, so the
+    # deletion above is about the reference and not about the sweep deleting
+    # whatever it finds.
+    orphan.write_bytes(b"x")
+    os.utime(orphan, (old, old))
+    db2 = Scripted({
+        "COUNT(*) AS n FROM bug_reports": [[{"n": 7}]],
+        "SELECT log_filename FROM bug_reports": [
+            [{"log_filename": orphan.name}, {"log_filename": owned.name}]],
+    })
+    out2 = _run(auto_logs.prune_orphan_blobs(db2, min_age_s=3600))
+    assert out2["unlinked"] == 0 and orphan.exists(), (
+        "the sweep removed a file the table names")
+
+
+def test_the_orphan_sweep_refuses_a_database_that_knows_no_blobs(logdir, capsys):
+    """`bug_reports` naming no blob AT ALL does not read as a directory full
+    of orphans. It reads as a process talking to a database that does not own
+    the directory -- a restored volume, a mis-set BUG_REPORT_LOG_DIR, a
+    scratch database -- and the honest answer to that is to delete nothing
+    (#276).
+    """
+    stale = logdir / "dddddddd-0000-4000-8000-000000000004.log.gz"
+    stale.write_bytes(b"x")
+    old = time.time() - 10_000
+    os.utime(stale, (old, old))
+
+    db = Scripted({"COUNT(*) AS n FROM bug_reports": [[{"n": 0}]]})
+    out = _run(auto_logs.prune_orphan_blobs(db, min_age_s=3600))
+    assert out["refused"] is True
+    assert stale.exists(), "the sweep deleted a file on a database that names none"
+    assert "orphan sweep REFUSED" in capsys.readouterr().out
+    assert db.sql_for("SELECT log_filename FROM bug_reports") == [], (
+        "the sweep went on to ask which files are known after deciding the "
+        "database does not own this directory")
+
+
+def test_the_retention_loop_runs_the_orphan_sweep():
+    """The collector has to be WIRED, not merely written: a sweep nothing
+    calls is the same leak with more code in it (#438/#443)."""
+    src = _normalise(inspect.getsource(auto_logs.auto_log_retention_loop))
+    assert "await prune_orphan_blobs(db)" in src, (
+        "the retention loop does not call prune_orphan_blobs, so the blob the "
+        "indeterminate-commit arm keeps is still permanent")
+    assert "prune_orphan_blobs" not in _normalise(
+        inspect.getsource(auto_logs._maybe_prune)), (
+        "the opportunistic per-request prune calls the orphan sweep; a "
+        "directory listing does not belong on a request")
+
+
+def test_two_concurrent_uploads_cannot_both_spend_the_same_reserve(logdir, verified,
+                                                                   monkeypatch):
+    """THE BOUND: at most ONE automatic blob is written per free-space reading.
+
+    `disk_usage().free` is a reading of the past. Two seats that both measure
+    before either writes both pass, and the reserve held for player-filed
+    reports is short by whatever the second one stores. The per-account
+    advisory lock cannot close that -- two seats are two keys -- so the
+    measure-and-write pair is taken under one process-wide asyncio lock, which
+    is box-wide because the api runs a single uvicorn worker by design
+    (#125/#651).
+
+    Driven deterministically rather than hopefully: the first upload's write is
+    HELD inside its worker thread until the second upload has had every chance
+    to reach its own measurement. With the lock, the second cannot measure
+    until the first has finished writing; without it, both read the same
+    number and both land.
+    """
+    import threading
+
+    blob_size = {"n": 0}
+    writes_done = {"n": 0}
+    room = {"n": 0}
+    readings = []
+    started = threading.Event()
+    release = threading.Event()
+    real_write = auto_logs._write_blob
+
+    def held_write(path, data):
+        blob_size["n"] = len(data)
+        if not started.is_set():
+            started.set()
+            release.wait(10.0)
+        real_write(path, data)
+        writes_done["n"] += 1
+
+    def fake_free(d):
+        readings.append(writes_done["n"])
+        return (auto_logs.AUTO_LOG_FREE_SPACE_RESERVE_BYTES
+                + room["n"] - writes_done["n"] * blob_size["n"])
+
+    async def drive():
+        first = asyncio.create_task(auto_logs.upload_auto_log(_request(), _ok_db()))
+        for _ in range(1000):
+            if started.is_set():
+                break
+            await asyncio.sleep(0.005)
+        assert started.is_set(), "the first upload never reached its write"
+        second = asyncio.create_task(auto_logs.upload_auto_log(_request(), _ok_db()))
+        # Every chance for the second to reach its own measurement while the
+        # first is still inside its write.
+        await asyncio.sleep(0.25)
+        release.set()
+        return await asyncio.gather(first, second, return_exceptions=True)
+
+    # One preliminary upload, only to learn the blob size this bundle makes --
+    # so the "room for exactly one" figure is DERIVED and cannot drift when
+    # the fixture bundle changes.
+    monkeypatch.setattr(auto_logs, "_free_bytes", lambda d: 10 ** 12)
+    auto_logs._write_blob = held_write
+    try:
+        _run(auto_logs.upload_auto_log(_request(), _ok_db()))
+        release.set()
+        assert blob_size["n"] > 0
+        room["n"] = blob_size["n"] + 16
+        started.clear()
+        release.clear()
+        writes_done["n"] = 0
+        readings.clear()
+        for p in list(logdir.iterdir()):
+            p.unlink()
+        monkeypatch.setattr(auto_logs, "_free_bytes", fake_free)
+        results = _run(drive())
+    finally:
+        auto_logs._write_blob = real_write
+        release.set()
+
+    codes = [r.status_code if isinstance(r, HTTPException) else 200 for r in results]
+    assert sorted(codes) == [200, 503], (
+        "with room above the reserve for exactly one blob the two uploads "
+        "answered %r. Both landing means both measured the same free space "
+        "and the reserve was spent twice." % (codes,))
+    assert len(_blobs(logdir)) == 1, (
+        "%d blob(s) on disk; the volume had room above the reserve for one"
+        % len(_blobs(logdir)))
+    assert sorted(readings) == [0, 1], (
+        "the two measurements saw %r completed writes. They have to see "
+        "different numbers, or the second measured a volume the first had not "
+        "finished writing to." % (readings,))
+
+
+def test_a_seat_that_cannot_take_the_blob_lock_in_time_refuses(logdir, verified,
+                                                               monkeypatch):
+    """The wait is BOUNDED, and running out of it is a refusal.
+
+    A wedged volume blocks `_write_blob` inside its worker thread with the lock
+    held. Without a ceiling every later upload would await it for ever and the
+    route would stop answering at all -- the unhandled case failing in the
+    worst available direction (#276/#430). With one, the seat is told 503 and
+    tries after its next match.
+    """
+    monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK_WAIT_S", 0.05)
+
+    async def blocked():
+        async with auto_logs._BLOB_RESERVE_LOCK:
+            return await asyncio.gather(
+                auto_logs.upload_auto_log(_request(), _ok_db()),
+                return_exceptions=True)
+
+    (result,) = _run(blocked())
+    assert isinstance(result, HTTPException), (
+        "the upload returned %r instead of refusing while the blob lock was "
+        "held by somebody else" % (result,))
+    assert result.status_code == 503, result.status_code
+    assert _blobs(logdir) == [], "a blob was written without the lock"
+
+    # CONTROL: with the lock free the same upload lands, so the refusal above
+    # is about the wait and not about the route.
+    assert _run(auto_logs.upload_auto_log(_request(), _ok_db()))["log_persisted"] is True
+
+
+# ── privacy: the fixtures name no real account ───────────────────────────────
+
+_SYNTHETIC_IDS = {"76561198000000001", "76561198000000002"}
+
+# The files THIS BRANCH owns. A tree-wide rule cannot be enforced against
+# migrations that ran years ago against real accounts on purpose, and pinning
+# the whole tree here would be a check that fails for reasons this branch
+# cannot fix.
+_BRANCH_FILES = (
+    "api/auto_logs.py",
+    "tests/test_auto_logs.py",
+    "sql/336_bug_reports_kind.sql",
+    "sql/350_bug_reports_auto_number.sql",
+)
+
+
+def test_this_branchs_files_name_no_real_account():
+    """Every Steam-shaped literal in the files this branch adds is synthetic.
+
+    STATED AS AN ALLOW-LIST, NOT A DENY-LIST, and that is the point: a test
+    asserting "the maintainer's id is absent" would have to write that id down,
+    in a public tree, for ever. This names only the synthetic values and
+    requires every 17-digit Steam64 literal in these files to be one of them --
+    so a real id pasted into a fixture reddens without a real id ever appearing
+    here.
+    """
+    backend = pathlib.Path(HERE).parent
+    found = {}
+    for rel in _BRANCH_FILES:
+        path = backend / rel
+        assert path.exists(), "%s is missing; this check pins a file that moved" % rel
+        for hit in re.findall(r"7656119\d{10}", path.read_text(encoding="utf-8")):
+            found.setdefault(hit, []).append(rel)
+
+    # The control: this check is worthless if the files carry no such literal
+    # at all, because then it passes over anything.
+    assert found, (
+        "no Steam64 literal was found in %r, so this test asserted nothing. "
+        "Either the fixtures stopped using one or the file list is stale."
+        % (list(_BRANCH_FILES),))
+
+    stray = {k: v for k, v in found.items() if k not in _SYNTHETIC_IDS}
+    assert not stray, (
+        "account ids outside the synthetic set appear in this branch's files: "
+        "%r. Use a filler id (7656119800000000N); a real one is republished on "
+        "every clone of a public tree." % (stray,))
+
+
+# ── migration 350 does not depend on WHICH copy of 336 ran ───────────────────
+
+def _sql_350():
+    return (pathlib.Path(HERE).parent / "sql"
+            / "350_bug_reports_auto_number.sql").read_text(encoding="utf-8")
+
+
+def test_350_preconditions_on_the_objects_336_creates_not_on_its_bytes():
+    """336 exists in two copies and they are NOT byte-identical.
+
+    The hotfix copy is a superset: its post-check was rebuilt to OFFER rows to
+    the constraint instead of reading the constraint's rendered text. The
+    wrapper applies a migration once by FILE NAME, so whichever copy reaches a
+    database first is the only one that ever runs there -- which means 350 has
+    to be correct after EITHER, and has to say so by checking the objects 336
+    leaves behind rather than assuming which file produced them.
+
+    The three objects, by name: the `kind` column, its `bug_reports_kind_known`
+    CHECK, and its `'report'` default. Both copies create all three; neither
+    copy's identity is a premise of anything here.
+    """
+    sql = _sql_350()
+
+    # THE COMMENTS COME OFF FIRST, and that is the whole difference between
+    # this check and one that cannot fail. Every name below also appears in
+    # 350's header prose, so searching the raw file would go on passing after
+    # the guard stopped asking for the object -- the first cut of this test did
+    # exactly that and a mutation proved it (#342). What is searched is the
+    # EXECUTABLE text.
+    executable = "\n".join(ln for ln in sql.splitlines()
+                           if not ln.lstrip().startswith("--"))
+    assert "RAISE EXCEPTION" in executable, (
+        "the comment stripper removed the statements too; this check is "
+        "searching nothing")
+
+    for needle, why in (
+        ("column_name = 'kind'", "the column 350's CHECK is written against"),
+        ("bug_reports_kind_known",
+         "the CHECK 336 installs -- without it `kind` is a free-text column "
+         "and 'auto' means nothing"),
+        ("column_default", "the 'report' default every pre-336 row relies on"),
+    ):
+        assert needle in executable, (
+            "350's precondition does not name %s in any statement (%s), so it "
+            "can apply on a database where 336 left a partial shape"
+            % (needle, why))
+
+    assert "byte-identical" not in sql, (
+        "350 still claims the two copies of 336 are byte-identical. They are "
+        "not -- the hotfix copy is 22,384 bytes against the lane's 19,445, "
+        "diverging at line 217 where the post-check was rebuilt -- and a "
+        "migration whose header states a guarantee the tree refutes is a "
+        "finding (#302/#351)")

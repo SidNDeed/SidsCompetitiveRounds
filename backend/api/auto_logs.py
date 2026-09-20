@@ -66,24 +66,35 @@ which is a database question this path deliberately does not ask.
 
 FAILURE DIRECTION. An auto upload exists only to carry its log, so a row
 without one is noise an admin has to triage. The blob is therefore written
-BEFORE the row is inserted, under an id this module generates, and every
-DETERMINATE failure leaves neither artifact: a failed write unlinks its own
-partial file, a failed INSERT unlinks the blob it just wrote. The client is
-told 503 in both cases and can try again after the next match.
+BEFORE the row is inserted, under an id this module generates -- but only
+AFTER the cap has admitted the upload. Admission (the per-account advisory
+lock and the count that decides) comes first precisely so that a failure
+there, where the handler holds nothing but this request's own bytes, cannot
+leave a file behind. Every DETERMINATE failure after it leaves neither
+artifact: a failed write unlinks its own partial file, a failed INSERT
+unlinks the blob it just wrote. The client is told 503 in every one of these
+cases -- never 500 -- and can try again after the next match.
 
   THE ONE CASE THAT CANNOT BE MADE ATOMIC is a ``commit()`` that raises. That
   is indeterminate, not failed -- PostgreSQL may have committed and the
   acknowledgement been lost on the way back -- so the blob is deliberately
-  KEPT and its id printed. Deleting it is irreversible and, when the row did
-  commit, destroys the only copy of the log that row promises, which presents
-  to the next admin as corruption rather than as a failed upload. An orphan
-  blob only costs disk. Cheap reversible error over expensive irreversible
-  one (#276). Nothing collects such a blob -- ``prune_auto_logs`` unlinks only
-  files named by rows it is deleting -- so the printed id is the whole of the
-  recovery story, and that is a deliberate trade rather than an oversight.
+  KEPT. Deleting it is irreversible and, when the row did commit, destroys the
+  only copy of the log that row promises, which presents to the next admin as
+  corruption rather than as a failed upload. An orphan blob only costs disk.
+  Cheap reversible error over expensive irreversible one (#276).
 
-  An earlier version of this paragraph claimed atomicity across both halves
-  unconditionally. It was false of the write arm, which raised without
+  THAT ARM NOW NAMES WHAT IT KEPT AND SOMETHING COLLECTS IT. The line carries
+  ``orphan-candidate=<file>``, and ``prune_orphan_blobs`` -- run by the
+  retention loop, not by a request -- removes a file that no ``bug_reports``
+  row of ANY kind names once it is a full retention tick old. If the commit
+  did land, a row names the file and the sweep passes over it for ever; if it
+  did not, the file is collected without anybody having to remember it. An
+  earlier version of this paragraph said "nothing collects such a blob ... a
+  deliberate trade": the trade was real, and it left a slow leak on a volume
+  shared with player-filed attachments, which this route may not spend.
+
+  An earlier version of this paragraph also claimed atomicity across both
+  halves unconditionally. It was false of the write arm, which raised without
   unlinking, and it was not achievable across the commit at all.
 
 RETENTION REQUIRES A SWEEP THAT RUNS WHETHER OR NOT ANYBODY UPLOADS. Nothing
@@ -232,6 +243,45 @@ _SESSION_REJECT = "session_required"
 # of the volume to the path that has a person waiting on it.
 AUTO_LOG_FREE_SPACE_RESERVE_BYTES = 64 * 1024 * 1024
 
+# THE RESERVE IS A DECISION, SO IT HAS TO BE SERIALISED LIKE ONE.
+#
+# `disk_usage(...).free` is a reading of the past. Measured by two coroutines
+# before either has written, it admits both, and the reserve is then short by
+# whatever the second one stores. The per-account advisory lock below cannot
+# close that: it is keyed on the steam id and two SEATS have different keys,
+# which is exactly the shape of the gap.
+#
+# So the measure-and-write pair is taken under ONE process-wide asyncio lock.
+# The api runs a single uvicorn worker BY DESIGN and the flag is pinned on the
+# compose command (#125/#651), so process-wide is box-wide here; that pin is
+# the premise this bound rests on, and if the api ever runs N workers this
+# reserve is short by (N-1) blobs and the bound below has to be restated.
+#
+# THE BOUND, STATED SO IT CAN BE TESTED (#651). At most ONE automatic blob of
+# at most `_BUG_LOG_MAX_GZ` bytes may be written against any one free-space
+# reading: the lock is taken before the measurement and released after the
+# write returns, so the next measurement sees the previous write. N = 1, and
+# `test_two_concurrent_uploads_cannot_both_spend_the_same_reserve` is what
+# holds it. The writers this bound does NOT cover are named rather than
+# waved at: `submit_bug_report`, which never consults the reserve on purpose
+# (see above), and anything outside this process.
+#
+# BOUNDED WAIT, because an unbounded one is a different failure. A wedged
+# volume makes `_write_blob` block inside its worker thread with the lock
+# held; without a ceiling every later upload would await it forever and the
+# route would stop answering at all. With one, a seat that cannot take the
+# lock in time refuses 503 and retries after its next match -- the same
+# direction every other refusal on this path takes (#276/#430).
+_BLOB_RESERVE_LOCK = asyncio.Lock()
+_BLOB_RESERVE_LOCK_WAIT_S = 20.0
+
+# The token the indeterminate-commit arm prints and the orphan sweep matches.
+# ONE literal for both halves: the handler writes a blob it cannot prove has a
+# row, and the sweep is the only thing that ever removes it, so two spellings
+# of the marker would be two chances for the recovery line to name something
+# nothing collects (#432).
+_ORPHAN_MARKER = "orphan-candidate"
+
 # The advisory-lock CLASS for this route's per-account serialisation. See the
 # lock site in upload_auto_log for why the route does not use the bare
 # `hashtext(steam_id)` idiom the rest of main.py uses. The value is arbitrary
@@ -278,6 +328,26 @@ _PRUNE_HELD: dict[str, float] = {}
 # connections.
 AUTO_LOG_SWEEP_EVERY_S = 3600.0
 AUTO_LOG_SWEEP_BOOT_DELAY_S = 120.0
+
+# ORPHAN SWEEP: how old a blob has to be before "no row names it" is read as
+# "no row will ever name it".
+#
+# ONE RETENTION TICK, and the number is DERIVED from the tick rather than
+# written down beside it, so the two cannot be tuned apart. A file is a
+# candidate only once it has survived a whole period in which any request that
+# was going to commit a row for it has long since finished or died; the write
+# -to-commit span on both the automatic and the player-filed path is seconds.
+#
+# The sweep exists because ONE arm of the upload deliberately keeps a blob it
+# cannot prove has a row -- the indeterminate commit. Without a collector that
+# arm is a slow leak on a volume shared with player-filed attachments, which
+# is the one thing this route is not allowed to spend.
+_ORPHAN_MIN_AGE_S = AUTO_LOG_SWEEP_EVERY_S
+
+# Files examined per pass. Same bound and the same reason as `_PRUNE_BATCH`: a
+# backlog drains over consecutive ticks instead of one pass holding a
+# directory listing and a transaction open over an unbounded loop.
+_ORPHAN_BATCH = _PRUNE_BATCH
 
 
 # The widths are the DATABASE's, per column, not one number for all of them:
@@ -492,10 +562,17 @@ def _write_blob(path, data: bytes) -> None:
 def _free_bytes(directory) -> int:
     """Free space on the blob volume, or -1 if it cannot be determined.
 
-    -1 rather than an exception: a platform or a mount that will not answer
-    must not turn an otherwise good upload into a refusal. The caller treats
-    an unknown figure as "no reason to refuse", which is the same direction
-    this guard had before it existed.
+    -1 rather than an exception so the CALLER owns the direction -- and the
+    caller REFUSES. An earlier version of this docstring said the opposite
+    ("an unknown figure is no reason to refuse") and the caller agreed with
+    it, which made a reserve whose whole job is to hold the last of a shared
+    volume for player-filed reports evaporate in precisely the conditions
+    that stop a volume answering. A guard that admits on measurement failure
+    is weakest exactly when it matters most (#276).
+
+    The cost of refusing is one 503 and one retry after the next match. The
+    cost of admitting is a player's attachment lost on a full volume with the
+    form answering 200. So unknown means no.
     """
     try:
         return shutil.disk_usage(str(directory)).free
@@ -664,6 +741,84 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
               f"ceiling -- stored, it would be undownloadable")
         raise HTTPException(status_code=413,
                             detail="log too large once compressed")
+    # ── ADMISSION: the lock and the count that decides, BEFORE anything lands ──
+    #
+    # ONE INVARIANT NEEDS THIS LOCK -- count-then-INSERT of kind='auto' rows
+    # for one account -- and it holds for exactly that. There is no row to take
+    # FOR UPDATE, because the row being counted is the one about to be written,
+    # which is the case the repo keys an advisory lock on a VALUE for
+    # (#202/#203/#207).
+    #
+    # IT SITS BEFORE THE BLOB WRITE, AND THAT POSITION IS THE FIX.
+    # It used to sit after it. A lock wait that lost its connection, or a count
+    # that raised, then left a blob on disk that no row would ever name: no
+    # prune could find it (the prune walks ROWS), no operator could tell it
+    # from a live artifact, and the caller got a 500 -- a code the client half
+    # retries, so the next match wrote another one. Nothing before this line
+    # touches shared state, and nothing after it writes to disk until the count
+    # has admitted the upload, so the only blob that exists is one the cap
+    # already said yes to.
+    #
+    # WHAT MOVED INSIDE THE LOCK, AND WHAT DID NOT. The scrub (up to ~2.4 s by
+    # main's own measurement) and the gzip stay OUTSIDE it -- they were the
+    # expensive tenants the earlier round evicted and they are not coming back.
+    # What is inside now is the blob write, the INSERT and the commit. The
+    # exclusion is per ACCOUNT, so the seat that waits is the same seat that is
+    # uploading twice, and the client's own 300 s debounce makes that rare;
+    # nobody else's upload waits on it.
+    #
+    # AND IT IS CLASS-DISCRIMINATED, not the bare `hashtext(steam_id)` idiom.
+    # That one-argument expression is this application's IDENTITY lock: match
+    # reporting, queue join, session refresh and account deletion all take it
+    # on the same key, and their own comments fix the order "identity ->
+    # lobby/series -> queue -> lease". An automatic log upload is not an
+    # identity operation and has no business in that namespace -- a seat
+    # leaving a match would have had its match report wait behind its own log
+    # upload. The two-argument overload is a SEPARATE lock space (the same form
+    # and the same reasoning as `_pc_lock_blob` in main.py), and moving to it
+    # is only safe because of what must exclude this route: the
+    # count-then-INSERT is over kind='auto' rows, this handler is their only
+    # writer, and nothing else in the tree counts them (#707 -- the question to
+    # ask is never "which keyspace" but "which other sites must exclude this
+    # one").
+    try:
+        await db.execute(
+            text("SELECT pg_advisory_xact_lock(CAST(:cls AS integer), hashtext(CAST(:h AS text)))"),
+            {"cls": AUTO_LOG_LOCK_CLASS, "h": req.steam_id})
+
+        # The authoritative count. Re-read under the lock and re-checked,
+        # because the number the cheap arm saw was read without it and a
+        # concurrent upload may have landed since (#208). This is the read the
+        # cap is made of; the earlier one only saved work.
+        count, oldest = await _auto_bucket(db, req.steam_id)
+    except HTTPException:
+        # Nothing in this span raises one today. The arm is here so that if
+        # anything ever does, its own status code survives instead of being
+        # rewritten into the generic 503 below -- the same discipline the blob
+        # block uses, and the reason the reserve refusal still says WHY.
+        raise
+    except Exception as ex:
+        # 503 AND NOT 500. A lost connection, a lock wait killed by
+        # `idle_in_transaction_session_timeout`, a deadlock detector -- every
+        # one of them is "this exact request would work later", which is what
+        # 503 means to the client half and what 500 does not. Nothing has been
+        # written, so there is nothing to clean up; the rollback is explicit
+        # because under asyncpg a caught statement error leaves the whole
+        # transaction ABORTED and the next statement on this session would
+        # raise on that and not on its own fault.
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        print(f"[AUTO-LOG] refused 503: admission failed for {req.steam_id} "
+              f"before anything was written ({type(ex).__name__})")
+        raise HTTPException(status_code=503, detail="log storage unavailable")
+
+    if count >= AUTO_LOG_PER_STEAM_PER_DAY:
+        # Nothing to discard: this refusal now happens before the write, which
+        # is the whole point of moving the lock up.
+        raise _bucket_full(req.steam_id, oldest, "on the locked re-check")
+
     # The path resolution is INSIDE the try, not before it: _bug_report_log_path
     # creates the directory, so an unusable BUG_REPORT_LOG_DIR fails there and
     # not at open(). Outside the try that becomes a 500, and 500 vs 503 is not
@@ -671,36 +826,74 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
     # the code that says the same request will work later.
     path = None
     try:
-        path = _bug_report_log_path(str(report_id))
-
-        # LEAVE THE LAST OF THE VOLUME TO THE PATH THAT HAS A PERSON WAITING.
-        #
-        # This corpus and the bug form's attachments share one directory, and
-        # this is the half that grows by itself: up to twelve blobs per
-        # opted-in account per day, held fourteen days. When the volume fills,
-        # THIS route handles it correctly -- it unlinks, answers 503, and the
-        # client tries after the next match. `submit_bug_report` does not: its
-        # write failure is caught, logged and fallen through, so the report
-        # commits with no attachment and the player is answered 200 by a
-        # server that just lost their log.
-        #
-        # So the automatic path stops first, while there is still room for the
-        # one that cannot retry. Refusing here rather than at ENOSPC also means
-        # no partial file is written on a volume that is already out of space.
-        free = _free_bytes(path.parent)
-        if free >= 0 and free - len(data) < AUTO_LOG_FREE_SPACE_RESERVE_BYTES:
-            print(f"[AUTO-LOG] refused 503: {free} bytes free on the blob "
-                  f"volume, and storing {len(data)} would leave less than the "
-                  f"{AUTO_LOG_FREE_SPACE_RESERVE_BYTES}-byte reserve held for "
-                  f"player-filed reports")
+        # THE MEASURE-AND-WRITE PAIR, UNDER ONE PROCESS-WIDE LOCK.
+        # See `_BLOB_RESERVE_LOCK` for the bound this holds (N = 1 blob per
+        # reading) and for why the per-account advisory lock above cannot hold
+        # it: two seats have two keys, and the reserve is one volume.
+        try:
+            await asyncio.wait_for(_BLOB_RESERVE_LOCK.acquire(),
+                                   _BLOB_RESERVE_LOCK_WAIT_S)
+        except (asyncio.TimeoutError, TimeoutError):
+            print(f"[AUTO-LOG] refused 503: waited {_BLOB_RESERVE_LOCK_WAIT_S}s "
+                  f"for the blob-volume lock and did not get it -- refusing "
+                  f"rather than measuring the reserve against a reading this "
+                  f"request never took")
             raise HTTPException(status_code=503, detail="log storage unavailable")
+        try:
+            path = _bug_report_log_path(str(report_id))
 
-        # Off the event loop, like the compression above: this is a write of
-        # up to 8 MiB, and on a slow or contended volume it blocks every other
-        # request on this worker for as long as it takes. The path resolution
-        # stays on the loop -- it is a mkdir, and keeping it here is what binds
-        # `path` for the unlink below.
-        await asyncio.to_thread(_write_blob, path, data)
+            # LEAVE THE LAST OF THE VOLUME TO THE PATH THAT HAS A PERSON WAITING.
+            #
+            # This corpus and the bug form's attachments share one directory,
+            # and this is the half that grows by itself: up to twelve blobs per
+            # opted-in account per day, held fourteen days. When the volume
+            # fills, THIS route handles it correctly -- it unlinks, answers
+            # 503, and the client tries after the next match.
+            # `submit_bug_report` does not: its write failure is caught,
+            # logged and fallen through, so the report commits with no
+            # attachment and the player is answered 200 by a server that just
+            # lost their log.
+            #
+            # So the automatic path stops first, while there is still room for
+            # the one that cannot retry. Refusing here rather than at ENOSPC
+            # also means no partial file is written on a volume that is
+            # already out of space.
+            free = _free_bytes(path.parent)
+            if free < 0:
+                # UNKNOWN IS A REFUSAL. This arm used to be the admitting one
+                # -- `free >= 0 and ...` skipped the whole guard when the
+                # volume would not answer -- so the reserve stopped existing
+                # in exactly the conditions that produce an unreadable volume.
+                # Which direction the unhandled case fails in is the question
+                # (#276), and the answer here is: toward the path that has a
+                # person waiting on it.
+                print("[AUTO-LOG] refused 503: free space on the blob volume "
+                      "could not be measured, so the reserve held for "
+                      "player-filed reports cannot be shown to survive this "
+                      "write")
+                raise HTTPException(status_code=503,
+                                    detail="log storage unavailable")
+            if free - len(data) < AUTO_LOG_FREE_SPACE_RESERVE_BYTES:
+                print(f"[AUTO-LOG] refused 503: {free} bytes free on the blob "
+                      f"volume, and storing {len(data)} would leave less than "
+                      f"the {AUTO_LOG_FREE_SPACE_RESERVE_BYTES}-byte reserve "
+                      f"held for player-filed reports")
+                raise HTTPException(status_code=503,
+                                    detail="log storage unavailable")
+
+            # Off the event loop, like the compression above: this is a write
+            # of up to 8 MiB, and on a slow or contended volume it blocks
+            # every other request on this worker for as long as it takes. The
+            # path resolution stays on the loop -- it is a mkdir, and keeping
+            # it here is what binds `path` for the unlink below.
+            #
+            # INSIDE the reserve lock, not after it. The measurement above is
+            # only a decision about this write if this write is the one that
+            # follows it; releasing between the two is the gap the lock exists
+            # to close.
+            await asyncio.to_thread(_write_blob, path, data)
+        finally:
+            _BLOB_RESERVE_LOCK.release()
     except HTTPException:
         # The reserve refusal above is already the answer it wants to give,
         # and nothing has been written for it to clean up. Re-raised as-is so
@@ -716,50 +909,6 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
         _discard_blob(path)
         print(f"[AUTO-LOG] blob write failed for {report_id}: {type(ex).__name__}")
         raise HTTPException(status_code=503, detail="log storage unavailable")
-
-    # ── the cap's real guard: lock, then the count that decides ──────────────
-    #
-    # ONE INVARIANT NEEDS THIS LOCK -- count-then-INSERT of kind='auto' rows
-    # for one account -- and it now holds for exactly that. There is no row to
-    # take FOR UPDATE, because the row being counted is the one about to be
-    # written, which is the case the repo keys an advisory lock on a VALUE for
-    # (#202/#203/#207).
-    #
-    # TAKEN HERE AND NOT AT THE TOP OF THE HANDLER. It used to be the first
-    # thing the accepted path did, which put the scrub (up to ~2.4 s by main's
-    # own measurement), the gzip and a multi-megabyte blob write inside it.
-    # Everything before this line is work on this request's own bundle: it
-    # touches no shared row and needs no exclusion, so holding a lock across it
-    # bought nothing and cost the next caller all of it.
-    #
-    # AND IT IS CLASS-DISCRIMINATED, not the bare `hashtext(steam_id)` idiom.
-    # That one-argument expression is this application's IDENTITY lock: match
-    # reporting, queue join, session refresh and account deletion all take it
-    # on the same key, and their own comments fix the order "identity ->
-    # lobby/series -> queue -> lease". An automatic log upload is not an
-    # identity operation and has no business in that namespace -- a seat
-    # leaving a match would have had its match report wait behind its own log
-    # upload's compression. The two-argument overload is a SEPARATE lock space
-    # (the same form and the same reasoning as `_pc_lock_blob` in main.py),
-    # and moving to it is only safe because of what must exclude this route:
-    # the count-then-INSERT is over kind='auto' rows, this handler is their
-    # only writer, and nothing else in the tree counts them (#707 -- the
-    # question to ask is never "which keyspace" but "which other sites must
-    # exclude this one").
-    await db.execute(
-        text("SELECT pg_advisory_xact_lock(CAST(:cls AS integer), hashtext(CAST(:h AS text)))"),
-        {"cls": AUTO_LOG_LOCK_CLASS, "h": req.steam_id})
-
-    # The authoritative count. Re-read under the lock and re-checked, because
-    # the number the cheap arm saw was read without it and a concurrent upload
-    # may have landed since (#208). This is the read the cap is made of; the
-    # earlier one only saved work.
-    count, oldest = await _auto_bucket(db, req.steam_id)
-    if count >= AUTO_LOG_PER_STEAM_PER_DAY:
-        # The blob is already on disk and no row will ever name it, so it goes
-        # with the refusal -- the same disposition as a failed INSERT.
-        _discard_blob(path)
-        raise _bucket_full(req.steam_id, oldest, "on the locked re-check")
 
     room = req.room_name or "an unnamed room"
     description = f"auto-upload after {req.mode or 'a match'} in {room}"
@@ -826,13 +975,24 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
         # This is the one arm that deliberately leaves an artifact behind, and
         # removing the `_discard_blob` call from it is the mutation that turns
         # a lost acknowledgement into a destroyed log.
+        #
+        # AND IT IS THE ONE ARM THAT CAN STILL PRODUCE AN UNREFERENCED BLOB, so
+        # it names it. `_ORPHAN_MARKER` is the token `prune_orphan_blobs` uses
+        # for the same file, so the line an operator greps for and the line the
+        # sweep prints when it removes it are the same word. If the commit did
+        # land, a row names the file and the sweep leaves it alone for ever; if
+        # it did not, the file is collected one retention tick later and
+        # nothing has to be remembered by anybody. A kept artifact with no
+        # collector is how a shared volume fills, which is why the recovery
+        # identifier and the sweep are one change and neither works alone.
         try:
             await db.rollback()
         except Exception:
             pass
         print(f"[AUTO-LOG] commit INDETERMINATE for {report_id}: "
               f"{type(ex).__name__}; blob KEPT as {path.name} -- a row may or "
-              f"may not exist for it")
+              f"may not exist for it; {_ORPHAN_MARKER}={path.name}, collected "
+              f"by the retention loop's orphan sweep if no row names it")
         raise HTTPException(status_code=503, detail="log storage unavailable")
 
     bug_number = (row or {}).get("bug_number") or 0
@@ -1012,6 +1172,131 @@ async def prune_auto_logs(db: AsyncSession, *, days: int = AUTO_LOG_RETENTION_DA
             "due": len(due), "held": len(_PRUNE_HELD)}
 
 
+def _stale_blob_names(base, cutoff: float, limit: int) -> list[str]:
+    """Up to `limit` file names under `base` last modified before `cutoff`.
+
+    On the worker thread, because it is a directory walk plus one `stat` per
+    entry and the corpus is thousands of files on a contended volume.
+
+    A name whose `stat` raises is SKIPPED rather than reported: the only thing
+    this pass does with a name is delete the file, and a file that will not
+    answer about its own age is not one to act on. Nothing is lost -- the next
+    tick asks again.
+    """
+    out: list[str] = []
+    try:
+        entries = os.scandir(str(base))
+    except OSError:
+        return out
+    with entries:
+        for e in entries:
+            if len(out) >= limit:
+                break
+            try:
+                if not e.is_file():
+                    continue
+                if e.stat().st_mtime >= cutoff:
+                    continue
+            except OSError:
+                continue
+            out.append(e.name)
+    return out
+
+
+async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None,
+                             limit: int = _ORPHAN_BATCH) -> dict:
+    """Remove blobs that no `bug_reports` row names, once they are old enough
+    that no row ever will.
+
+    WHY THIS EXISTS. `upload_auto_log` has exactly one arm that leaves a file
+    behind it cannot account for: a commit whose outcome is UNKNOWN. That arm
+    keeps the blob on purpose -- destroying a log because an acknowledgement
+    was lost is the worse error -- and it prints `<marker>=<name>`. This is the
+    other half of that decision. Without it the kept file is permanent, and the
+    volume it is permanent on is shared with player-filed attachments.
+
+    NOT SCOPED TO kind='auto', AND THAT IS THE SAFETY PROPERTY, NOT AN
+    OVERSIGHT. `prune_auto_logs` above walks ROWS and must never touch a bug
+    report; this walks FILES, where the only thing that protects a file is a
+    row naming it -- and a player-filed report's row names its attachment
+    exactly as an automatic row does. Scoping this query to kind='auto' would
+    make every player-filed attachment look unreferenced and delete the lot. So
+    the predicate is `log_filename = ANY(...)` over the WHOLE table, and the
+    test that reds when someone adds `kind = 'auto'` to it is named after this
+    paragraph.
+
+    THREE GUARDS, each with its own failure direction (#276):
+
+    * AGE. A file is a candidate only after `_ORPHAN_MIN_AGE_S`, one whole
+      retention tick. The window between writing a blob and committing its row
+      is seconds on both paths, so this is four orders of magnitude of margin
+      against deleting a file whose row is still in flight.
+    * THE TABLE MUST KNOW ABOUT THIS CORPUS AT ALL. If `bug_reports` names no
+      blob whatsoever while the directory holds candidates, this pass REFUSES
+      and says so. That reading is not "everything here is an orphan"; it is
+      "this process is talking to a database that does not own this
+      directory" -- a restored volume, a mis-set BUG_REPORT_LOG_DIR, a
+      pointed-at scratch database -- and the honest answer to it is to delete
+      nothing.
+    * BOUNDED. `limit` files per pass, so a mistake is bounded by the batch and
+      a backlog drains over ticks.
+
+    Read-only on the database: the transaction the SELECT opens is ENDED with a
+    rollback, for the same reason the early returns above are (an
+    idle-in-transaction connection holds back the vacuum horizon).
+    """
+    from main import BUG_REPORT_LOG_DIR
+
+    base = pathlib.Path(BUG_REPORT_LOG_DIR)
+    cutoff = time.time() - float(_ORPHAN_MIN_AGE_S if min_age_s is None else min_age_s)
+    names = await asyncio.to_thread(_stale_blob_names, base, cutoff, int(limit))
+    if not names:
+        return {"candidates": 0, "orphans": 0, "unlinked": 0, "refused": False}
+
+    named_total = (await db.execute(
+        text("SELECT COUNT(*) AS n FROM bug_reports WHERE log_filename IS NOT NULL")
+    )).mappings().first()
+    if not (named_total or {}).get("n"):
+        await db.rollback()
+        print(f"[AUTO-LOG] orphan sweep REFUSED: {len(names)} aged file(s) under "
+              f"{base}, and bug_reports names no blob at all. That reads as a "
+              f"database which does not own this directory, not as a directory "
+              f"full of orphans -- nothing removed")
+        return {"candidates": len(names), "orphans": 0, "unlinked": 0,
+                "refused": True}
+
+    known = {r["log_filename"] for r in (await db.execute(
+        text("""SELECT log_filename FROM bug_reports
+                 WHERE log_filename = ANY(CAST(:names AS text[]))"""),
+        {"names": list(names)},
+    )).mappings().all()}
+    await db.rollback()
+
+    orphans = [n for n in names if n not in known]
+    unlinked = 0
+    for name in orphans:
+        try:
+            (base / name).unlink()
+        except FileNotFoundError:
+            # Someone else got there first. Not an error -- the file is gone,
+            # which is the outcome this pass wanted.
+            unlinked += 1
+            continue
+        except OSError as ex:
+            print(f"[AUTO-LOG] orphan sweep: {_ORPHAN_MARKER}={name} could not "
+                  f"be removed ({type(ex).__name__}); the next tick retries it")
+            continue
+        unlinked += 1
+        print(f"[AUTO-LOG] orphan sweep: removed {_ORPHAN_MARKER}={name} -- "
+              f"older than {int(_ORPHAN_MIN_AGE_S)}s and no bug_reports row "
+              f"names it")
+
+    print(f"[AUTO-LOG] orphan sweep: {len(names)} aged file(s) examined, "
+          f"{len(orphans)} unreferenced, {unlinked} removed")
+    return {"candidates": len(names), "orphans": len(orphans),
+            "unlinked": unlinked, "refused": False}
+
+
 async def _maybe_prune(db: AsyncSession) -> None:
     """Opportunistic retention, throttled per process. Never fails an upload."""
     now = time.monotonic()
@@ -1072,6 +1357,12 @@ async def auto_log_retention_loop() -> None:
         try:
             async with async_session() as db:
                 result = await prune_auto_logs(db)
+                # The row-walking sweep above cannot see a file no row names,
+                # and the upload's indeterminate-commit arm deliberately leaves
+                # one. This is the only thing in the tree that collects it, and
+                # it runs HERE and not from `_maybe_prune`: a directory listing
+                # does not belong on a request.
+                await prune_orphan_blobs(db)
             if failures:
                 print(f"[AUTO-LOG] retention sweep recovered after "
                       f"{failures} failed pass(es)")
