@@ -14,14 +14,24 @@
 -- message_id is deliberately left NULL for the six rows posted before this
 -- migration existed: the bot that sent them discarded the id, so there is
 -- nothing to backfill from.
--- Instead each already-delivered row keeps adopt_fingerprint: the exact text
--- the bot sent for it, i.e. LEFT(content, 2000), because discord_bot.py sends
+-- Instead each already-delivered row keeps adopt_fingerprint: the text its
+-- message carries, i.e. LEFT(content, 2000), because discord_bot.py sends
 -- content[:2000]. (A moderation-case row is excluded — see section 1 — since
 -- its marker is stripped before sending, so that equality would not hold.)
 -- The bot adopts a live message ONLY on an exact match of
 -- that fingerprint, records the id it found, and edits from then on. When no
 -- message matches, the row stays pending and nothing is posted: the failure
 -- direction is "the old text stays up", never "a duplicate appears" (#276).
+--
+-- The column is seeded here and MAINTAINED by the api from then on: the ack
+-- that finishes a row — the one that holds the claim and names the row's
+-- current revision — rewrites it to the text it just rendered. It has a second
+-- reader besides the adoption scan, the hand-out's ambiguity test, which asks
+-- whether any other row in the channel would scan for the same text; a value
+-- frozen at delivery makes an already-corrected twin block its sibling for
+-- ever over text its own message no longer carries. It lags for one window,
+-- between a stale ack and the ack that finishes the row, on a row that by then
+-- carries its message id and is therefore never found by text again.
 --
 -- The capture below covers every row delivered before this file runs. A row an
 -- OLDER bot delivers AFTERWARDS is covered by handed_revision /
@@ -80,29 +90,48 @@ ALTER TABLE pending_channel_posts ADD COLUMN IF NOT EXISTS adopt_fingerprint TEX
 -- could take the row while the first was still rendering it, and two renderers
 -- then wrote two revisions to one message in an order nobody controls. The
 -- claim is now the UNIT OF EXCLUSIVE RENDERING: claimed_token identifies the
--- holder, every ack that names a revision must present it, an ack from a
--- non-claimant writes nothing, and a stale answer keeps the claim so the SAME
--- poller renders forward. The claim is released when the row is fully current
--- (acked revision = revision), when the caller asks for release at the
--- two-render cap, or by lease expiry — the only route a crash takes, which is
--- why it expires rather than needing a cleanup that might never run
--- (#276/#430). bind_only never releases: that row is mid-render.
+-- holder, every ack that records a revision or moves the fingerprint must
+-- present it, an ack from a non-claimant does neither, and a stale answer
+-- keeps the claim so the SAME poller renders forward. A non-claimant's ack is
+-- not discarded whole, though: a DELIVERY it reports is recorded, because the
+-- bot's sent-memory is in-process and a delivery the database never heard
+-- about is re-sent at the next restart (#105).
+--
+-- The claim is released when the row is fully current (acked revision =
+-- revision), when the caller asks for release at the two-render cap, when the
+-- revisionless poller the row was handed to acks (it can render nothing
+-- further), or by lease expiry — the only route a crash takes, which is why it
+-- expires rather than needing a cleanup that might never run (#276/#430). Each
+-- of the first three is refused to a caller that is neither the holder nor
+-- that poller, so none of them is a way to take a claim off somebody else.
+-- bind_only never releases: that row is mid-render.
 ALTER TABLE pending_channel_posts ADD COLUMN IF NOT EXISTS claimed_at        TIMESTAMPTZ;
 ALTER TABLE pending_channel_posts ADD COLUMN IF NOT EXISTS claimed_token     UUID;
 
--- What the last hand-out SERVED, recorded by the hand-out itself. These are
--- not delivery facts — nothing here says anything is on Discord — they are the
--- api's record of what it put on the wire, which is the only thing a caller
--- that cannot name a revision could possibly have rendered. The revisionless
--- ack (a pre-338 bot) persists this pair as posted_revision /
--- adopt_fingerprint, so a correction committed between hand-out and ack leaves
--- the row locatable by an EXACT fingerprint instead of by a derivation.
--- handed_fingerprint is LEFT(content, 2000) because the bot sends
--- content[:2000]; a moderation-case row gets NULL, because the bot strips that
--- row's marker before sending and the stored string is therefore not what goes
--- to Discord.
+-- What the last hand-out SERVED, and WHO it served, recorded by the hand-out
+-- itself. The first two are not delivery facts — nothing here says anything is
+-- on Discord — they are the api's record of what it put on the wire, which is
+-- the only thing a caller that cannot name a revision could possibly have
+-- rendered. The revisionless ack (a pre-338 bot) persists this pair as
+-- posted_revision / adopt_fingerprint, so a correction committed between
+-- hand-out and ack leaves the row locatable by an EXACT fingerprint instead of
+-- by a derivation. handed_fingerprint is LEFT(content, 2000) because the bot
+-- sends content[:2000]; a moderation-case row gets NULL, because the bot strips
+-- that row's marker before sending and the stored string is therefore not what
+-- goes to Discord.
+--
+-- handed_revisionless is what makes reading that pair back safe. It is TRUE
+-- when the poll that took the row did NOT ask for revisions — i.e. the caller
+-- can neither name a revision nor present a token, which is the pre-338 shape
+-- and nothing else. The pair always describes the LAST hand-out, so without
+-- this flag a tokenless ack arriving after a revision-capable poller had taken
+-- the row would read that poller's record as its own and clear its claim
+-- mid-render. FALSE is the safe default: a row nobody has been handed since
+-- this file ran authorizes no revisionless ack, and the first poll of either
+-- kind sets the flag to what is true of that poll.
 ALTER TABLE pending_channel_posts ADD COLUMN IF NOT EXISTS handed_revision   INTEGER;
 ALTER TABLE pending_channel_posts ADD COLUMN IF NOT EXISTS handed_fingerprint TEXT;
+ALTER TABLE pending_channel_posts ADD COLUMN IF NOT EXISTS handed_revisionless BOOLEAN NOT NULL DEFAULT FALSE;
 
 -- Everything already delivered rendered revision 1. Without this backfill
 -- every historical row would read as "revision 1 never rendered" and the bot
@@ -132,6 +161,15 @@ UPDATE pending_channel_posts
 -- at all (section 2 below is the first, and it runs after this statement).
 -- handed_revision is 1 because the column did not exist before this file and
 -- every delivered row is at the seed revision until section 2 moves it.
+--
+-- handed_revisionless is deliberately NOT set here, and keeps its FALSE
+-- default. These rows have already been delivered and acked; the flag exists
+-- to authorize the NEXT tokenless ack, so claiming one on a row no bot is
+-- holding would be an authorization backdated to a hand-out this file never
+-- made. The first poll of either kind sets it to what is true of that poll,
+-- and for a row the pre-338 api handed out and an old bot acks afterwards the
+-- pair is NULL anyway, so the ack records the delivery and nothing else —
+-- which is exactly what that ack could prove.
 UPDATE pending_channel_posts
    SET adopt_fingerprint   = LEFT(content, 2000),
        handed_fingerprint  = LEFT(content, 2000),
@@ -279,9 +317,10 @@ BEGIN
    WHERE table_name = 'pending_channel_posts'
      AND column_name IN ('message_id', 'revision', 'posted_revision',
                          'adopt_fingerprint', 'claimed_at', 'claimed_token',
-                         'handed_revision', 'handed_fingerprint');
-  IF cols <> 8 THEN
-    RAISE EXCEPTION 'migration 338: expected 8 revision columns on pending_channel_posts, found % - nothing committed', cols;
+                         'handed_revision', 'handed_fingerprint',
+                         'handed_revisionless');
+  IF cols <> 9 THEN
+    RAISE EXCEPTION 'migration 338: expected 9 revision columns on pending_channel_posts, found % - nothing committed', cols;
   END IF;
 
   SELECT COUNT(*) INTO idx

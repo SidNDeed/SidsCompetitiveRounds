@@ -13,7 +13,7 @@
 -- four locales) are the artifact a player actually renders (#583) and belong
 -- to the client lane; this branch carries no change to either, and the three
 -- corrections plus the catalogue entries they need are written out in
--- ai-collab/ITEM11-CLIENT-FAQ-CONTRACT.md. The ids below are derived from the
+-- docs/faq-refresh-client-contract.md. The ids below are derived from the
 -- CORRECTED English, so the two halves meet at exactly the text that document
 -- specifies; backend/tests/test_faq_surfaces.py recomputes all three from the
 -- bodies in this file and matches each to the predecessor it replaces.
@@ -268,7 +268,7 @@ ON CONFLICT (key_id) DO UPDATE
 -- this tree, and tools/i18n_source.json — its extraction artifact — still
 -- extracts it. Both belong to the client lane, which applies the same three
 -- corrections and adds the successors' catalogue entries as its own step
--- (ai-collab/ITEM11-CLIENT-FAQ-CONTRACT.md). Until it does, the successor keys
+-- (docs/faq-refresh-client-contract.md). Until it does, the successor keys
 -- exist with no client asking for them and the predecessors are off the
 -- translator surface. Nothing a PLAYER sees changes either way: a client of
 -- any version renders its own DLL's bundled strings, and the portal was never

@@ -8980,11 +8980,22 @@ async def poll_channel_posts():
 
     THE CLAIM IS THE UNIT OF EXCLUSIVE RENDERING. The hand-out returns a
     `claim_token`; every ack this loop makes presents it. An ack from a caller
-    that does not hold the claim writes nothing and comes back
+    that does not hold the claim records no revision and comes back
     "not_claimant" — never "acked" — so a tick that lost its lease learns that
     instead of believing it finished. A "stale" answer KEEPS the claim, which
     is what lets this loop render forward under the same token while no other
     poller can be handed the row.
+
+    A REFUSED ACK STILL RECORDS THE MESSAGE. The one thing this loop knows and
+    the api cannot is whether a message went out, and the sent-memory that
+    holds it here is in-process: a restart drops it. So the api keeps the
+    DELIVERY half of a refused ack — posted_at, and an id for a row that has
+    none — and refuses only the revision, the fingerprint and the claim. That
+    is what stops a tick whose lease expired inside ch.send from becoming a
+    second copy of the announcement after the next bot restart (#105). The
+    answer is still a failure here, and this loop still stops: the row belongs
+    to whoever holds the claim, and it will be handed out again as a
+    correction rather than as a send.
 
     RELEASING: this loop hands a row back when it DECIDES not to render it
     (nothing to adopt, the message is gone, the render cap) — a decision made
@@ -9166,8 +9177,10 @@ async def poll_channel_posts():
                     continue
                 if not ack or ack.get("status") != "acked":
                     # "not_claimant" arrives here too, and it is NOT success:
-                    # this tick wrote nothing, so the row stays exactly as it
-                    # was for whoever does hold the claim.
+                    # no revision was recorded, so the row stays pending for
+                    # whoever does hold the claim. The delivery half the api
+                    # keeps from a refused ack changes nothing on this path —
+                    # a correction row already carries posted_at and its id.
                     print(f"[CHANNEL-POST] ack failed for {p['id']}: {ack} — row stays pending, edit remembered")
                     return
                 _channel_post_sent.pop(p["id"], None)
@@ -9235,8 +9248,12 @@ async def poll_channel_posts():
                 await _release_channel_post_claim(p["id"], token)
                 continue
             if not ack or ack.get("status") != "acked":
-                # "not_claimant" lands here as a failure, which is what it is:
-                # nothing was recorded by THIS tick.
+                # "not_claimant" lands here as a failure, which is what it is
+                # for the RENDER: no revision was recorded and this tick may
+                # not edit. The SEND is not lost with it — the api records
+                # posted_at and the reported id from a refused ack too, which
+                # is what makes a lost lease cost a retry instead of a second
+                # message after the next restart clears the memory below.
                 print(f"[CHANNEL-POST] ack failed for {p['id']}: {ack} — row stays pending, send remembered")
                 return
             _channel_post_sent.pop(p["id"], None)
@@ -9347,9 +9364,19 @@ async def _adopt_channel_post_message(ch, p, claimed=()):
     surviving message or two, whichever it happens to hold — which beats one
     correct message overwritten with the wrong row's text.
 
-    `claimed` is a different and much smaller thing: ids another row in THIS
-    response already owns by a stored message_id. It is a within-tick guard,
-    not the ownership rule.
+    IDS THAT BELONG TO SOMEBODY ELSE ARE SKIPPED, and there are two sources.
+    `claimed` is the within-tick one: ids another row in THIS response already
+    owns, including ones adopted or sent a moment ago in this same loop, which
+    the api's snapshot predates. `bound_message_ids` is the api's, and it is
+    channel-wide: every id another row in this channel already holds, in this
+    response or not. The api excludes a BOUND row from the `ambiguous` test on
+    the strength of this list being applied here — a bound twin is no longer
+    treated as a rival for the same text, so if its message were left in the
+    scan this row would find it and adopt somebody else's message. Skipping
+    them is not an optimisation; it is the other half of that flag.
+
+    Neither list is the ownership rule. That is `ambiguous`, and it is the
+    api's.
 
     Returns None on anything unexpected, and the caller then leaves the post
     alone. Bounded scan — a channel whose sheet has scrolled past the limit
@@ -9365,6 +9392,7 @@ async def _adopt_channel_post_message(ch, p, claimed=()):
     if me is None:
         return None
     claimed = {str(c) for c in claimed}
+    claimed.update(str(b) for b in (p.get("bound_message_ids") or []) if b)
     hits = []
     try:
         async for msg in ch.history(limit=200, oldest_first=True):

@@ -33077,7 +33077,7 @@ async def artist_submit_cosmetic(request: Request, payload: dict = Body(...),
         # THIS ARTIFACT. plugin/NativeUI.cs still refuses at 1_200_000 bytes
         # while telling the artist "1 MB max"; that file belongs to the client
         # lane, and the required change is written down for it in
-        # ai-collab/ITEM11-CLIENT-FAQ-CONTRACT.md. Nothing in this branch's
+        # docs/faq-refresh-client-contract.md. Nothing in this branch's
         # tests goes red if it is never made — which is exactly why it is
         # recorded rather than described as handled (#302).
         raise HTTPException(status_code=400,
@@ -34461,19 +34461,55 @@ CHANNEL_POST_CLAIM_SECONDS = 120
 # is not enough to keep a second poller from finishing a render the first one
 # is still inside.
 #
-# THE HAND-OUT RECORDS WHAT IT HANDED. handed_revision and handed_fingerprint
-# are the api's note of what it put on the wire — not a delivery fact, since
-# nothing here says anything reached Discord. They are what lets a caller that
-# CANNOT name a revision (a pre-338 bot) still be recorded accurately: it
-# rendered what it was handed, whatever the row says by the time its ack
-# arrives.
+# THE PICK ASKS ONLY ABOUT THE LEASE, and the token is deliberately not part of
+# that question. claimed_at and claimed_token are written together by this
+# statement and cleared together by the ack, and :token is a uuid minted per
+# call that is never NULL, so "claimed_at fresh, claimed_token NULL" is a state
+# no writer produces. Reading the token here anyway — as a third way to decide
+# a row is free — would hand out a row whose lease is live on the strength of a
+# column that says nothing about whether anybody is rendering, and it made the
+# predicate admit a route out of a claim that this endpoint's docstring denies.
+# A row that somehow reached that state is still freed, by lease expiry, which
+# is the route the docstring already names for a holder that cannot speak for
+# itself (#276 — the unhandled case has to fail toward self-healing, and a
+# 120-second wait is the cheap direction; a second renderer is not).
+#
+# THE HAND-OUT RECORDS WHAT IT HANDED, AND WHO IT HANDED IT TO. handed_revision
+# and handed_fingerprint are the api's note of what it put on the wire — not a
+# delivery fact, since nothing here says anything reached Discord. They are what
+# lets a caller that CANNOT name a revision (a pre-338 bot) still be recorded
+# accurately: it rendered what it was handed, whatever the row says by the time
+# its ack arrives. handed_revisionless records which KIND of caller that note
+# was made for — `revisions=true` is the bot declaring it can name a revision
+# and will present its token, so a hand-out to it sets the flag false. The ack
+# needs that half: a tokenless ack is only "the poller this row was handed to"
+# when the hand-out it is answering was revisionless. Without it the call shape
+# alone would let a tokenless ack take whichever handed_* pair happened to be
+# on the row and clear whichever claim happened to be live.
 #
 # AMBIGUITY IS COMPUTED HERE, OVER THE WHOLE CHANNEL. A row is ambiguous when
-# any OTHER row in the same channel — in any state, in this response or not —
-# would scan for the same text. The bot cannot compute this: it sees one
-# response, so a LIMIT boundary or a concurrent poller would change its answer,
-# and two channels that happen to carry the same text would block each other.
+# any other UNBOUND row in the same channel — in this response or not — would
+# scan for the same text. The bot cannot compute this: it sees one response, so
+# a LIMIT boundary or a concurrent poller would change its answer, and two
+# channels that happen to carry the same text would block each other.
 # Fingerprints are scoped per (channel_id, text) by construction here.
+#
+# A ROW THAT ALREADY HOLDS AN ID IS NOT A COLLISION SOURCE — but only because
+# this statement also takes its message OUT OF EVERY SCAN in the channel.
+# `bound_message_ids` is that list, and the two are one mechanism: a bound row
+# never scans (it edits by id), and its message is excluded from the scans of
+# the rows that do, so a sibling with the same recorded text can no longer be
+# confused with it. Excluding bound rows from the EXISTS without publishing
+# that list would be the unsafe half on its own: the sibling would be told it
+# is unambiguous and would then find the bound row's message and adopt it,
+# leaving two rows editing one message. The pair is computed in ONE statement,
+# so the sibling cannot be told "unambiguous" against a snapshot in which the
+# twin was still unbound; and no writer here ever sets message_id back to NULL
+# (every arm COALESCEs onto it), so a binding observed once stays observed and
+# the list can only grow. Without this, a delivered twin blocked its sibling
+# for the life of the row on the strength of text it had already been edited
+# past — the r5 fingerprint refresh ends that only for a twin somebody
+# CORRECTS, and an uncorrected one blocked forever.
 #
 # The adopt_fingerprint projection is a DERIVATION, not a stored value: see the
 # endpoint's docstring for why revision = 1 on a delivered row is a proof that
@@ -34483,17 +34519,18 @@ _CHANNEL_POST_PENDING_SQL = (
     "WITH pick AS ("
     "  SELECT p.id FROM pending_channel_posts p"
     "   WHERE {where}"
-    "     AND (p.claimed_token IS NULL OR p.claimed_at IS NULL"
+    "     AND (p.claimed_at IS NULL"
     "          OR p.claimed_at < NOW() - make_interval(secs => :lease))"
     "   ORDER BY p.sort_order, p.id LIMIT 20"
     "   FOR NO KEY UPDATE SKIP LOCKED"
     "), taken AS ("
     "  UPDATE pending_channel_posts p"
-    "     SET claimed_at         = NOW(),"
-    "         claimed_token      = CAST(:token AS uuid),"
-    "         handed_revision    = p.revision,"
-    "         handed_fingerprint = CASE WHEN p.content NOT LIKE '[MODCASE:%'"
-    "                                   THEN LEFT(p.content, 2000) END"
+    "     SET claimed_at           = NOW(),"
+    "         claimed_token        = CAST(:token AS uuid),"
+    "         handed_revision      = p.revision,"
+    "         handed_revisionless  = CAST(:revisionless AS BOOLEAN),"
+    "         handed_fingerprint   = CASE WHEN p.content NOT LIKE '[MODCASE:%'"
+    "                                     THEN LEFT(p.content, 2000) END"
     "    FROM pick k WHERE p.id = k.id"
     "  RETURNING p.id, p.channel_id, p.content, p.revision, p.posted_revision,"
     "            p.posted_at, p.message_id, p.sort_order,"
@@ -34505,9 +34542,13 @@ _CHANNEL_POST_PENDING_SQL = (
     ") SELECT t.id, t.channel_id, t.content, t.revision, t.posted_revision,"
     "         t.posted_at, t.message_id, t.adopt_fingerprint,"
     "         CAST(CAST(:token AS uuid) AS TEXT) AS claim_token,"
+    "         ARRAY(SELECT o.message_id FROM pending_channel_posts o"
+    "                WHERE o.channel_id = t.channel_id AND o.id <> t.id"
+    "                  AND o.message_id IS NOT NULL) AS bound_message_ids,"
     "         (t.adopt_fingerprint IS NOT NULL AND EXISTS ("
     "             SELECT 1 FROM pending_channel_posts o"
     "              WHERE o.channel_id = t.channel_id AND o.id <> t.id"
+    "                AND o.message_id IS NULL"
     "                AND CASE WHEN o.adopt_fingerprint IS NOT NULL"
     "                         THEN o.adopt_fingerprint"
     "                         WHEN o.posted_at IS NOT NULL AND o.revision = 1"
@@ -34521,36 +34562,88 @@ _CHANNEL_POST_WHERE_UNPOSTED = "p.posted_at IS NULL"
 
 # The ack, as ONE compare-and-set. Everything it does — authorize, record,
 # release — is decided inside this statement, so there is no window between a
-# check and the write it justifies (#208), and an unauthorized caller leaves no
-# trace at all rather than a partial one.
+# check and the write it justifies (#208).
 #
 # `target` reads the row once and derives the two ways a caller can be
 # authorized:
 #   holds_claim    it presented the token this row's claim carries, and the
-#                  claim has not expired. Required of anything that names a
-#                  revision or binds an id.
-#   legacy_caller  it presented no token, named no revision and is not binding
-#                  — exactly and only the call shape a pre-338 bot can make.
-#                  That caller cannot hold a claim, so it is authorized by its
-#                  shape and gets what the hand-out recorded it was handed.
-# `written` runs only for an authorized caller (the WHERE), so a non-claimant
-# writes NOTHING and the outer SELECT reports authorized = false. Round three
-# answered such a caller by re-reading the row, which another poller had
-# already advanced, and reported success — the database then suppressed every
-# repair, because the row looked finished to everyone.
+#                  claim has not expired. Required of anything that records a
+#                  revision, moves the fingerprint, replaces an id, or lets
+#                  go of the claim. It is three-valued — a token presented
+#                  against a row whose claim was already released compares
+#                  NULL — so every arm that reads it treats NULL as "no", and
+#                  the reported `authorized` is squashed with IS TRUE rather
+#                  than handed to the caller as an empty third answer.
+#   legacy_caller  it presented no token, named no revision, is not binding,
+#                  AND the row's last hand-out went to a poller that did not
+#                  declare it can name one — the pre-338 bot meeting its own
+#                  hand-out. That caller cannot hold a claim, so it is
+#                  authorized by the pair, and is recorded at what the
+#                  hand-out served. The call SHAPE alone is not enough: the
+#                  handed_* pair belongs to whoever polled last, so a
+#                  tokenless ack arriving after a revision-capable poller took
+#                  the row would otherwise stamp that poller's record onto it
+#                  and clear that poller's claim mid-render.
+#
+# NEITHER OF THOSE GOVERNS THE DELIVERY FACTS. `reports_delivery` is exactly
+# the call shape that stamps posted_at — anything that is neither a bind nor a
+# pure hand-back — and for that shape posted_at, plus a message id on a row
+# that has none, are recorded whether or not the caller holds the claim. They
+# say a message is in the channel, and the one thing a dropped delivery fact
+# produces is a second copy of that message: the bot's sent-memory is
+# in-process, so a lease that expires inside a Discord call leaves a sent row
+# reading "never posted", and the next restart sends it again (#105 — a
+# poller's in-memory dedup is not a delivery record, and a restart is exactly
+# when it is lost). What an unauthorized caller may NOT do is claim a revision,
+# move the fingerprint, replace an id the row already has, or release somebody
+# else's claim. A bind and a pure hand-back carry no delivery fact, so from a
+# non-claimant they write nothing at all.
+#
+# The outer SELECT reports AUTHORIZATION — not "did anything get written",
+# which is no longer the same question. Round three answered a losing caller
+# by re-reading the row, which another poller had already advanced, and
+# reported success; the database then suppressed every repair, because the row
+# looked finished to everyone.
 #
 # A RELEASE THAT NAMES NO REVISION IS A PURE HAND-BACK: it clears the claim and
 # writes nothing else, not even posted_at. That is what the bot sends when it
 # DECIDES not to render a row this tick (nothing to adopt, message deleted), and
 # a hand-back must never be able to mark an undelivered row delivered.
 #
-# THE CLAIM IS RELEASED ONLY WHEN THE ROW IS DONE WITH. `:rev = revision` means
-# the row is fully current (posted_revision is bounded by revision at every
-# writer, so naming the current revision implies the write was accepted), the
-# explicit `:release` is the two-render cap saying "record what I rendered and
-# let go", and a legacy caller can do no more by construction. A STALE answer
-# releases nothing: the same holder renders forward under the same token.
-# bind_only releases nothing either — that row is mid-render.
+# THE CLAIM IS RELEASED ONLY WHEN THE ROW IS DONE WITH, AND ONLY BY SOMEBODY
+# ENTITLED TO IT. `:rev = revision` means the row is fully current
+# (posted_revision is bounded by revision at every writer, so naming the
+# current revision implies the write was accepted), the explicit `:release` is
+# the two-render cap saying "record what I rendered and let go", and a legacy
+# caller lets go by construction because it can render nothing further. Those
+# three, plus lease expiry, are ALL the routes out of a claim, and each of the
+# three requires holds_claim or legacy_caller — so a caller that reports a
+# delivery without holding the claim records the delivery and leaves the claim
+# where it found it. A STALE answer releases nothing: the same holder renders
+# forward under the same token. bind_only releases nothing either — that row
+# is mid-render.
+#
+# adopt_fingerprint IS THE TEXT THE ROW'S MESSAGE CARRIES, and this statement
+# keeps it that way. It used to be written once — by 338's backfill, or by a
+# revisionless ack — and then left alone, which made it a claim about Discord
+# that went stale the moment its holder edited the message. Two consumers read
+# it and both want the live text: the adoption scan, which compares it byte for
+# byte against the messages in the channel, and the hand-out's ambiguity test,
+# which asks whether any OTHER row in the channel would match the same text. A
+# stale value is wrong for both, and for the second one it is wrong
+# permanently: a twin already corrected and edited went on blocking its sibling
+# on the strength of text its message no longer carried. So an ack that holds
+# the claim and names the row's CURRENT revision refreshes it to the content it
+# just rendered. Only that ack — a stale ack rendered a text nobody stored, a
+# bind renders nothing at all, and a moderation-case row keeps the NULL 338
+# gave it, because the bot strips that row's marker before sending and the
+# stored string is therefore not what is on Discord.
+#
+# THE ONE WINDOW IN WHICH IT LAGS, stated rather than assumed away: between a
+# stale ack and the ack that finishes the row, the message shows a revision
+# whose text nothing stored. That row was bound to its message before it was
+# ever edited, so no scan is keyed on its text any more, and the lag closes at
+# the next ack that makes the row current.
 _CHANNEL_POST_ACK_SQL = (
     "WITH target AS ("
     "  SELECT p.id, p.revision, p.posted_revision, p.content,"
@@ -34561,7 +34654,12 @@ _CHANNEL_POST_ACK_SQL = (
     "             AS holds_claim,"
     "         (CAST(:token AS uuid) IS NULL"
     "          AND CAST(:rev AS INTEGER) IS NULL"
-    "          AND NOT CAST(:bind AS BOOLEAN)) AS legacy_caller"
+    "          AND NOT CAST(:bind AS BOOLEAN)"
+    "          AND p.handed_revisionless) AS legacy_caller,"
+    "         (NOT (CAST(:bind AS BOOLEAN)"
+    "               OR (CAST(:release AS BOOLEAN)"
+    "                   AND CAST(:rev AS INTEGER) IS NULL)))"
+    "             AS reports_delivery"
     "    FROM pending_channel_posts p WHERE p.id = :pid"
     "), written AS ("
     "  UPDATE pending_channel_posts p SET"
@@ -34569,7 +34667,10 @@ _CHANNEL_POST_ACK_SQL = (
     "         WHEN CAST(:bind AS BOOLEAN)"
     "              OR (CAST(:release AS BOOLEAN) AND CAST(:rev AS INTEGER) IS NULL)"
     "         THEN p.posted_at ELSE COALESCE(p.posted_at, NOW()) END,"
-    "     message_id = COALESCE(CAST(:mid AS TEXT), p.message_id),"
+    "     message_id = CASE"
+    "         WHEN t.holds_claim OR t.legacy_caller"
+    "         THEN COALESCE(CAST(:mid AS TEXT), p.message_id)"
+    "         ELSE COALESCE(p.message_id, CAST(:mid AS TEXT)) END,"
     "     posted_revision = CASE"
     "         WHEN CAST(:bind AS BOOLEAN) THEN p.posted_revision"
     "         WHEN t.legacy_caller THEN"
@@ -34577,32 +34678,41 @@ _CHANNEL_POST_ACK_SQL = (
     "                    AND t.handed_revision <= p.revision"
     "                    AND t.handed_revision >= COALESCE(p.posted_revision, 0)"
     "                   THEN t.handed_revision ELSE p.posted_revision END"
-    "         WHEN CAST(:rev AS INTEGER) IS NOT NULL"
+    "         WHEN t.holds_claim"
+    "              AND CAST(:rev AS INTEGER) IS NOT NULL"
     "              AND CAST(:rev AS INTEGER) <= p.revision"
     "              AND CAST(:rev AS INTEGER) >= COALESCE(p.posted_revision, 0)"
     "         THEN CAST(:rev AS INTEGER)"
     "         ELSE p.posted_revision END,"
     "     adopt_fingerprint = CASE"
     "         WHEN t.legacy_caller AND p.adopt_fingerprint IS NULL"
-    "         THEN t.handed_fingerprint ELSE p.adopt_fingerprint END,"
+    "         THEN t.handed_fingerprint"
+    "         WHEN t.holds_claim AND NOT CAST(:bind AS BOOLEAN)"
+    "              AND CAST(:rev AS INTEGER) = p.revision"
+    "              AND p.content NOT LIKE '[MODCASE:%'"
+    "         THEN LEFT(p.content, 2000)"
+    "         ELSE p.adopt_fingerprint END,"
     "     claimed_token = CASE"
     "         WHEN NOT CAST(:bind AS BOOLEAN)"
+    "              AND (t.holds_claim OR t.legacy_caller)"
     "              AND (CAST(:release AS BOOLEAN) OR t.legacy_caller"
     "                   OR CAST(:rev AS INTEGER) = p.revision)"
     "         THEN NULL ELSE p.claimed_token END,"
     "     claimed_at = CASE"
     "         WHEN NOT CAST(:bind AS BOOLEAN)"
+    "              AND (t.holds_claim OR t.legacy_caller)"
     "              AND (CAST(:release AS BOOLEAN) OR t.legacy_caller"
     "                   OR CAST(:rev AS INTEGER) = p.revision)"
     "         THEN NULL ELSE p.claimed_at END"
     "   FROM target t"
-    "  WHERE p.id = t.id AND (t.holds_claim OR t.legacy_caller)"
+    "  WHERE p.id = t.id"
+    "    AND (t.holds_claim OR t.legacy_caller OR t.reports_delivery)"
     "  RETURNING p.id, p.revision, p.posted_revision, p.content"
     ") SELECT t.id AS id,"
     "         COALESCE(w.revision, t.revision) AS revision,"
     "         COALESCE(w.posted_revision, t.posted_revision) AS posted_revision,"
     "         COALESCE(w.content, t.content) AS content,"
-    "         (w.id IS NOT NULL) AS authorized"
+    "         ((t.holds_claim OR t.legacy_caller) IS TRUE) AS authorized"
     "    FROM target t LEFT JOIN written w ON w.id = t.id"
 )
 
@@ -34629,6 +34739,22 @@ def _channel_post_ack_reply(post_id, named_revision, row):
     on the answer (it cannot edit, which is why it could not name one), and its
     delivery was recorded either way. Telling it otherwise would make every
     pre-338 ack look like a failure in its own logs.
+
+    WHAT `revision` REPORTS DEPENDS ON `status`, and the three are different
+    questions, so read the status first:
+
+      not_claimant  posted_revision — how far the row is actually rendered,
+                    which is NULL when nothing has rendered it. It is NOT this
+                    caller's work and NOT the row's current revision; the
+                    caller wrote nothing, and this is only the state it found.
+      stale         revision — where the row is NOW, which is what the caller
+                    must edit forward to. `content` comes with it.
+      acked         posted_revision — what this caller's write recorded, i.e.
+                    the revision it rendered.
+
+    A consumer that reads `revision` without branching on `status` will read a
+    refusal as progress; the field is stated here rather than left to be
+    inferred because the bot branches on status alone and would not catch it.
 
     A named predicate rather than an inline condition, because a rule inlined
     at its only call site can only be re-implemented by a test, never
@@ -34719,22 +34845,49 @@ async def pending_channel_posts(
     receive one posted_at-NULL row and both send it, with the ack — which
     happens after the send — as the only thing between them and two copies.
     One token is minted per poll and returned on every row as `claim_token`;
-    every ack that names a revision or binds an id must present it back, and
-    an ack that cannot is refused by name rather than answered "acked". The
-    claim is released when the row is fully current, when the caller asks for
-    release at its render cap, or by LEASE EXPIRY — which is the only route a
-    crashed poller can take and the reason the lease exists at all. A stale
-    answer releases nothing: the holder is still rendering."""
+    every ack that records a revision, moves the fingerprint or releases the
+    claim must present it back, and an ack that cannot is refused by name
+    rather than answered "acked" — though it still records a delivery it
+    reports, because a dropped delivery fact is a second message. The claim is
+    released when the row is fully current, when the caller asks for release at
+    its render cap, when the revisionless poller this row was handed to acks,
+    or by LEASE EXPIRY — the only route a crashed poller can take and the
+    reason the lease exists at all. A stale answer releases nothing: the holder
+    is still rendering. Those four are the whole list, and the pick keeps it
+    that way by asking only whether the LEASE is live: a released claim is a
+    NULL claimed_at, and no writer leaves a fresh claimed_at behind without the
+    token that goes with it.
+
+    A ROW THAT HOLDS AN ID DOES NOT SCAN, AND ITS MESSAGE IS OFF THE TABLE FOR
+    THE ROWS THAT DO. `ambiguous` asks whether another UNBOUND row in the
+    channel would scan for this row's recorded text, and `bound_message_ids`
+    carries the ids every other row in the channel already owns so the scan can
+    skip them. The two are answered together, from one snapshot, because either
+    on its own is wrong: the flag alone blocked a correction behind a twin that
+    had long since been bound and edited, and the exclusion alone would let the
+    sibling adopt that twin's message. A binding is never undone here, so the
+    list a caller is given can only have grown by the time it scans.
+
+    WHICH KIND OF CALLER WAS SERVED IS RECORDED TOO. `revisions=true` is the
+    bot declaring it can name the revision it rendered and will present its
+    token; a poll without it can do neither, and handed_revisionless says so on
+    every row that poll takes. The ack reads it to tell a pre-338 bot answering
+    its own hand-out apart from a tokenless call arriving after a
+    revision-capable poller has taken the row."""
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
     where = (_CHANNEL_POST_WHERE_UNRENDERED if revisions
              else _CHANNEL_POST_WHERE_UNPOSTED)
     # One token per POLL, not per row: it identifies the caller, and every row
-    # this call takes is taken by the same caller.
+    # this call takes is taken by the same caller. `revisionless` is the same
+    # declaration read the other way round — a caller that did not ask for
+    # revisions cannot name one back, and the ack refuses to treat a tokenless
+    # answer as that caller's unless the row says this is who it was handed to.
     rows = (await db.execute(
         text(_CHANNEL_POST_PENDING_SQL.format(where=where)),
         {"lease": CHANNEL_POST_CLAIM_SECONDS,
+         "revisionless": not revisions,
          "token": str(uuid.uuid4())})).mappings().all()
     await db.commit()
     return {"posts": [{k: (v.isoformat() if hasattr(v, "isoformat") else v)
@@ -34754,15 +34907,30 @@ async def ack_channel_post(
 ):
     """Record the revision the bot ACTUALLY RENDERED, and nothing else (#175).
 
-    THE CLAIM IS THE UNIT OF EXCLUSIVE RENDERING. Anything that names a
-    revision or binds an id must present the claim_token the hand-out gave it,
-    and the claim must not have expired. An ack that cannot writes NOTHING and
-    is answered "not_claimant". Round three released the claim on the FIRST ack
-    of any kind — including the "stale" one that exists to say "keep going" —
-    so a second poller could take a row the first was still rendering, and the
-    loser's late ack was then reported as success because the ROW had reached
-    the state it asked for. That reading is gone: authorization is decided
-    inside the write, and the answer reports what THIS caller did.
+    THE CLAIM IS THE UNIT OF EXCLUSIVE RENDERING. Anything that records a
+    revision, moves the fingerprint, replaces a stored message id or releases
+    the claim must present the claim_token the hand-out gave it, and the claim
+    must not have expired. An ack that cannot is answered "not_claimant" and
+    none of those things happen. Round three released the claim on the FIRST
+    ack of any kind — including the "stale" one that exists to say "keep
+    going" — so a second poller could take a row the first was still rendering,
+    and the loser's late ack was then reported as success because the ROW had
+    reached the state it asked for. That reading is gone: the answer reports
+    whether THIS caller held the claim, never what the row looks like now.
+
+    A REFUSAL IS NOT A REASON TO FORGET A MESSAGE. The delivery facts —
+    posted_at, and a message id for a row that has none — are recorded for
+    whoever reports them, claim or no claim. A tick whose lease expires inside
+    a Discord call has already put the message in the channel; refusing its ack
+    outright leaves the row reading "never posted", and since the bot's
+    sent-memory is in-process, the next restart sends a second copy (#105 — an
+    in-memory dedup is not a delivery record, and a restart is exactly when it
+    is lost). So such a caller is told "not_claimant", which is true and which
+    stops it editing, while the fact that a message exists is kept. It cannot
+    replace an id the row already carries: an unauthorized caller may fill that
+    column, never overwrite it. The two shapes that report NO delivery — a bind
+    and a pure hand-back — write nothing at all from a non-claimant, so a tick
+    that has rendered nothing cannot leave a mark on a row it does not hold.
 
     COMPARE-AND-SET, NOT COALESCE. An older statement wrote
     `posted_revision = COALESCE(:rev, revision)`, so an ack that named no
@@ -34774,17 +34942,27 @@ async def ack_channel_post(
     exceed the row's revision (nobody renders a future text), and it may not
     move posted_revision backwards.
 
-    WHEN THE ACK NAMES NO REVISION (a pre-338 bot, which cannot), the row is
-    recorded at WHAT IT WAS HANDED. The hand-out wrote handed_revision and
-    handed_fingerprint when it put that text on the wire, and a bot that cannot
-    name a revision can only have rendered what it was given. So a correction
-    committed between the hand-out and the ack leaves posted_revision behind
-    revision, with adopt_fingerprint holding the exact text that is on
-    Discord — and the upgraded bot locates that message, binds its id and edits
-    forward. This replaces a derivation that only worked while revision was
-    still 1, and with it the state where a corrected row held neither handle.
-    A moderation-case row gets no fingerprint either way (338's exclusion: its
-    stored content opens with a marker the bot strips before sending).
+    WHEN THE ACK NAMES NO REVISION (a pre-338 bot, which cannot) AND THE ROW
+    WAS HANDED TO A REVISIONLESS POLLER, the row is recorded at WHAT IT WAS
+    HANDED. The hand-out wrote handed_revision and handed_fingerprint when it
+    put that text on the wire, and a bot that cannot name a revision can only
+    have rendered what it was given. So a correction committed between the
+    hand-out and the ack leaves posted_revision behind revision, with
+    adopt_fingerprint holding the exact text that is on Discord — and the
+    upgraded bot locates that message, binds its id and edits forward. This
+    replaces a derivation that only worked while revision was still 1, and with
+    it the state where a corrected row held neither handle. A moderation-case
+    row gets no fingerprint either way (338's exclusion: its stored content
+    opens with a marker the bot strips before sending).
+
+    BOTH HALVES ARE REQUIRED, and handed_revisionless is the second. The
+    handed_* pair describes the LAST hand-out, so on a row taken since by a
+    revision-capable poller it describes that poller's render, not this
+    caller's. A tokenless ack authorized by its shape alone would stamp that
+    record and clear that poller's live claim — a row nobody had delivered
+    could be marked delivered at a revision nobody rendered, and it would then
+    be in neither poll set. The flag is what the hand-out wrote about the
+    caller it served, so the two must agree before the pair is read back.
 
     posted_at keeps its ORIGINAL stamp — it records when the message first
     appeared, not when it was last edited — and it is stamped on EVERY
@@ -34798,12 +34976,33 @@ async def ack_channel_post(
     row. An ack that named no revision is never reported stale: that caller has
     no way to act on it, and its delivery is recorded either way.
 
-    RELEASE. The claim is dropped when the ack names the row's current revision
-    (it is done), or when the caller passes release=true — the render cap,
-    which says "record what I rendered and let go; the next poll continues".
-    Nothing is sent twice by that hand-off, because by then the row carries its
-    message id and the send path only runs for a row with no posted_at. A
-    crashed holder releases nothing and is cleaned up by lease expiry alone.
+    RELEASE, and the whole list of routes. The claim is dropped when the ack
+    names the row's current revision (it is done), when the caller passes
+    release=true — the render cap, which says "record what I rendered and let
+    go; the next poll continues" — and when the revisionless poller this row
+    was handed to acks, which is a release because that caller can render
+    nothing further. Each of the three is refused to a caller that is neither
+    the holder nor that poller. Everything else is lease expiry: a crashed
+    holder releases nothing, and neither does a stale answer, a bind, or an ack
+    whose lease ran out while it was inside Discord. Nothing is sent twice by a
+    hand-off, because by then the row carries posted_at and its message id and
+    the send path only runs for a row with no posted_at.
+
+    THE FINGERPRINT IS REFRESHED BY THE ACK THAT FINISHES THE ROW. An ack that
+    holds the claim and names the row's current revision has just put that
+    text on Discord, so adopt_fingerprint becomes LEFT(content, 2000) — the
+    column goes on describing what the message carries instead of what it
+    carried the first time anyone wrote the column. Two readers depend on that
+    being true: the bot's adoption scan, and the hand-out's ambiguity test,
+    which asks whether another row in the channel would scan for the same
+    text. Left stale, an already-corrected twin blocked its sibling's
+    correction on every tick, for ever, over text its own message no longer
+    carried. A stale ack refreshes nothing (it rendered a revision whose text
+    is not the one stored), a bind refreshes nothing (it has rendered nothing
+    yet), and a moderation-case row keeps its NULL. So the column lags for one
+    window — between a stale ack and the ack that finishes the row — on a row
+    that by then carries its message id and is therefore never found by text
+    again.
 
     bind_only=true writes the message id and NOTHING else, and keeps the claim.
     It exists because editing a message destroys the only other way to find it

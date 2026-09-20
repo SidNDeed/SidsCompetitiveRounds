@@ -29,8 +29,18 @@ The Postgres tests are skipped unless FAQ_TEST_PG_DSN points at a database, the
 same convention test_a1_predicate_sql.py uses so the ordinary suite stays
 hermetic:
 
-    FAQ_TEST_PG_DSN="postgresql://postgres@127.0.0.1:55432/faqtest" \
+    FAQ_TEST_PG_DSN="postgresql://postgres@127.0.0.1:5432/faqtest" \
         python -m pytest backend/tests/test_faq_surfaces.py -q
+
+The port is 5432 because that is the port this seat's PostgreSQL 16.9 actually
+serves: its postgresql.conf leaves `port` commented out, so the built-in
+default applies. An earlier version of this line said 55432, which nothing has
+ever answered on — and a documented DSN that refuses to connect is worse than
+no line at all, because the runs then happen against some other string and the
+evidence stops naming the server that produced it.
+test_the_harness_names_the_server_it_ran_on pins the connection instead of the
+prose: it reports what actually answered, and reds if that is not the server
+the DSN asked for.
 """
 import io
 import json
@@ -147,18 +157,21 @@ def test_a_client_lane_surface_is_recorded_as_owed_not_as_present():
     """Three of item 11's numbers live in text only plugin/InfoLibrary.cs can
     state, and round four restored every plugin/ file to the branch base: that
     half is the client lane's step, written down for it in
-    ai-collab/ITEM11-CLIENT-FAQ-CONTRACT.md. Listing those as surfaces would
+    docs/faq-refresh-client-contract.md. Listing those as surfaces would
     assert an edit this branch deliberately does not carry, so they sit in
     `owed_to_client_lane` instead — and this is the tripwire that fires the
     moment the client lane applies them, so the row moves back into `surfaces`
     in the same change instead of being forgotten there.
 
-    THIS FIXTURE ROW IS THE HAND-OFF. The fuller note with the code anchors
-    lives in ai-collab/, which is gitignored, so nothing here may depend on it:
-    an assertion against a file no other checkout has is one that fails
-    everywhere else, and a conditional one passes vacuously (#342). The row
-    carries what the client lane needs — the file, the sentence to write and
-    the sentence it replaces — and is held to it here.
+    THIS FIXTURE ROW IS THE HAND-OFF, and the fuller note with the code
+    anchors is TRACKED beside it in docs/. It used to live in ai-collab/,
+    which is gitignored, so every file that pointed at it pointed at nothing
+    on every other checkout — the row said work was owed and the document
+    saying WHAT was owed did not exist there.
+    test_no_shipped_file_points_into_the_gitignored_scratch is what holds that
+    now. The row still carries what the client lane needs on its own — the
+    file, the sentence to write and the sentence it replaces — so it remains
+    checkable without reading any prose.
 
     Each owed row is held to four things: it states the claim's number, it
     names a file under plugin/ (the lane that owes it), that file still carries
@@ -209,6 +222,87 @@ def test_a_client_lane_surface_is_recorded_as_owed_not_as_present():
     assert owed == 3, (
         "expected item 11's three client-lane surfaces to be recorded as "
         "owed, found %d" % owed)
+
+
+_SHIPPED_TREES = (
+    ("backend", (".py", ".sql")),
+    ("docs", (".md",)),
+    ("plugin", (".cs",)),
+    ("tools", (".py", ".json")),
+)
+_SCRATCH_REF = re.compile(r"ai-collab/[A-Za-z0-9_./-]+")
+
+
+def _shipped_files():
+    for top, exts in _SHIPPED_TREES:
+        root = os.path.join(REPO, top)
+        if not os.path.isdir(root):
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames
+                           if d not in ("__pycache__", "bin", "obj", "node_modules")]
+            for name in filenames:
+                if name.endswith(exts):
+                    yield os.path.join(dirpath, name)
+
+
+def test_no_shipped_file_points_into_the_gitignored_scratch():
+    """A shipped file may not send its reader to a path no other clone has.
+
+    `ai-collab/` is gitignored (.gitignore), so a comment, a migration header
+    or a test docstring naming a file under it resolves to nothing on the
+    desktop seat, in a fresh checkout, in the client lane's own worktree and
+    on GitHub. The rationale it pointed at — what the client lane still owes,
+    why a constant reads the way it does, which document the two halves of a
+    re-key meet in — is simply absent there, and nothing goes red to say so:
+    the backend ships claiming its twin is "recorded" while the record is
+    local (#302 — a claim that cannot be traced to the tree is a finding).
+
+    So the rule is mechanical rather than remembered, and it is swept over the
+    whole shipped tree rather than over the four files this round repointed: a
+    flag names a line, the defect is a class (#432).
+
+    WHAT THE SWEEP IS SCOPED TO, and why it is not the whole class. Every
+    scratch path THIS work created — anything under ai-collab/ naming item 11
+    or the v1.41.0 batch — must be gone from backend/, docs/, plugin/ and
+    tools/. It is not scoped to a list of files: main.py and discord_bot.py
+    are shared, and a rule that named the files rather than the paths would go
+    quiet the moment the reference moved. It is not the whole directory
+    either, because dozens of comments written by OTHER lanes point into
+    ai-collab/ in those same two files and in plugin/; that is the same defect
+    and it is recorded as an open item rather than swept from here, since
+    rewriting another lane's comments is not this branch's to do."""
+    scratch = []
+    for path in _shipped_files():
+        rel = os.path.relpath(path, REPO).replace("\\", "/")
+        for hit in set(_SCRATCH_REF.findall(_read(path))):
+            if "item11" in hit.lower() or "v1410" in hit.lower():
+                scratch.append("%s -> %s" % (rel, hit))
+    assert not scratch, (
+        "shipped files point into the gitignored scratch directory, so the "
+        "reasoning they cite does not exist on any other checkout:\n"
+        + "\n".join(sorted(scratch)))
+    # The positive half. The rule above is satisfied by deleting every
+    # reference as surely as by tracking the document, so the document the
+    # client lane is sent to has to be there AND has to carry the three
+    # corrections the fixture records as owed.
+    contract = os.path.join(REPO, "docs", "faq-refresh-client-contract.md")
+    assert os.path.isfile(contract), (
+        "docs/faq-refresh-client-contract.md is gone — the owed_to_client_lane "
+        "rows in the fixture no longer have a tracked specification")
+    body = _read(contract)
+    for c in claims():
+        for row in c.get("owed_to_client_lane", []):
+            assert row["text"] in body, (
+                "%s: the contract does not carry the owed text %r, so the "
+                "fixture row names work no tracked document specifies"
+                % (c["id"], row["text"]))
+    # ...and it is not gitignored by name, which is how the internal docs in
+    # the same directory are excluded.
+    ignored = [ln.strip() for ln in _read(".gitignore").splitlines()]
+    assert "docs/faq-refresh-client-contract.md" not in ignored, (
+        ".gitignore excludes the client contract by name — it would be local "
+        "again with every reference to it still in shipped files")
 
 
 def test_no_claim_unknown():
@@ -303,7 +397,7 @@ def test_every_achievement_is_on_the_tier_line_that_pays_it():
     the article in this tree is still the PREDECESSOR — it lists the ladder
     without the four tournament achievements. It is checked anyway, and
     against the same table the contract hands the client lane
-    (REKEY_EDITS["economy article"], ai-collab/ITEM11-CLIENT-FAQ-CONTRACT.md):
+    (REKEY_EDITS["economy article"], docs/faq-refresh-client-contract.md):
     applying that correction to the article must produce 340's ladder exactly.
     So the two lanes are still held to one list — this one just says which
     lane owes which half instead of pretending both have landed."""
@@ -543,7 +637,7 @@ def test_the_uploader_error_texts_quote_the_limits_they_enforce():
     while telling the artist "1 MB max", this branch does not change that file,
     and nothing here goes red for it. That is a residual, not a fix: the file
     belongs to the client lane and the required change is written down for it
-    in ai-collab/ITEM11-CLIENT-FAQ-CONTRACT.md. The two alternatives were both
+    in docs/faq-refresh-client-contract.md. The two alternatives were both
     worse — asserting the text this tree carries would PIN the defect, and
     asserting only that the message sits near its check would be a check that
     cannot fail on the thing it is for (#342). The GIF pair below is a
@@ -705,7 +799,7 @@ def test_338_revision_columns():
     sql = _read(MIGRATION)
     cols = ("message_id", "revision", "posted_revision", "adopt_fingerprint",
             "claimed_at", "claimed_token", "handed_revision",
-            "handed_fingerprint")
+            "handed_fingerprint", "handed_revisionless")
     for col in cols:
         assert re.search(
             r"ADD COLUMN IF NOT EXISTS %s\b" % col, sql), (
@@ -821,6 +915,33 @@ def _await_session(marker, want="active", timeout=30.0):
         "the %s session never reached state %r within %ss" % (marker, want, timeout))
 
 
+def _channel_post_table():
+    """Every column 338 writes, for every row, as one string.
+
+    "Applies twice" is a claim about the whole table, so the thing compared
+    across the second run has to be the whole table. An earlier version of the
+    test below read all of this BEFORE the second apply and then compared only
+    SUM(revision) afterwards — which is blind to a backfill that rewrote a
+    fingerprint, re-stamped handed_revision, or moved a message id, i.e. to
+    exactly the non-convergence the second run exists to catch (#441: never let
+    the projection hide the field you are judging by). content is hashed rather
+    than quoted because the FAQ bodies are kilobytes; any rewrite moves the
+    hash."""
+    return _psql(
+        "SELECT string_agg(sort_order || ':' || revision"
+        "       || ':' || COALESCE(posted_revision::text, '-')"
+        "       || ':' || COALESCE(adopt_fingerprint, '-')"
+        "       || ':' || COALESCE(handed_revision::text, '-')"
+        "       || ':' || COALESCE(handed_fingerprint, '-')"
+        "       || ':' || handed_revisionless"
+        "       || ':' || COALESCE(message_id, '-')"
+        "       || ':' || COALESCE(posted_at::text, '-')"
+        "       || ':' || COALESCE(claimed_at::text, '-')"
+        "       || ':' || COALESCE(claimed_token::text, '-')"
+        "       || ':' || md5(content), E'\\n' ORDER BY sort_order) "
+        "  FROM pending_channel_posts;").stdout
+
+
 @pytest.mark.skipif(not DSN, reason=_DSN_REASON)
 def test_338_applies_twice():
     """A migration is not reviewed until its statements have RUN (#340/#465),
@@ -835,10 +956,21 @@ def test_338_applies_twice():
         "WHERE table_name = 'pending_channel_posts' "
         "AND column_name IN "
         "('message_id','revision','posted_revision','adopt_fingerprint',"
-        "'claimed_at','claimed_token','handed_revision','handed_fingerprint');"
+        "'claimed_at','claimed_token','handed_revision','handed_fingerprint',"
+        "'handed_revisionless');"
     ).stdout
     assert ("adopt_fingerprint,claimed_at,claimed_token,handed_fingerprint,"
-            "handed_revision,message_id,posted_revision,revision" in cols), cols
+            "handed_revision,handed_revisionless,message_id,posted_revision,"
+            "revision" in cols), cols
+    # handed_revisionless decides whether a tokenless ack may read the
+    # handed_* pair back, so it must never be NULL: a three-valued flag would
+    # make that test neither true nor false and the ack would quietly refuse
+    # every pre-338 delivery.
+    assert _psql(
+        "SELECT is_nullable || '/' || COALESCE(column_default,'-') "
+        "FROM information_schema.columns "
+        "WHERE table_name = 'pending_channel_posts' "
+        "AND column_name = 'handed_revisionless';").stdout.strip() == "NO/false"
     # claimed_token has to be a uuid, not free text: the ack CASTs it, and a
     # TEXT column would compare a malformed token as merely unequal instead of
     # refusing it.
@@ -878,12 +1010,18 @@ def test_338_applies_twice():
         "SELECT count(*) FROM pending_channel_posts "
         "WHERE message_id IS NOT NULL;").stdout.strip() == "0"
 
-    before = _psql("SELECT sum(revision) FROM pending_channel_posts;").stdout
+    # The convergence bar, measured over every column the file writes rather
+    # than over one aggregate of one of them. A relaxed backfill guard — say
+    # keying section 1 on handed_fingerprint instead of adopt_fingerprint —
+    # re-derives the fingerprints from the content section 2 already replaced
+    # and re-stamps handed_revision = 1 on rows now at revision 2, which
+    # SUM(revision) cannot see at all.
+    before = _channel_post_table()
     _psql_file(MIGRATION)
-    after = _psql("SELECT sum(revision) FROM pending_channel_posts;").stdout
+    after = _channel_post_table()
     assert before == after, (
-        "a second apply bumped revision again — the content guard is not "
-        "convergent:\n%s\n%s" % (before, after))
+        "a second apply changed the table — the guards are not convergent:\n"
+        "%s\n---\n%s" % (before, after))
 
     # The header's claim about the state it CANNOT rescue, pinned with the
     # behaviour: a prose-only reversion that quietly promises to recover a
@@ -1052,6 +1190,45 @@ def test_an_ack_is_only_called_stale_when_the_caller_can_act_on_it():
                            "authorized": False})["status"] == "not_claimant"
 
 
+def test_the_reply_revision_means_what_the_status_says_it_means():
+    """One key, three questions — so the answer is pinned per status.
+
+    `revision` reports the row's CURRENT revision on a stale answer, because
+    that is the number the caller must edit forward to. On acked and on
+    not_claimant it reports posted_revision, which is how far the row is
+    actually rendered. Every case above happens to be a row where those two
+    numbers are equal or where only one of them is interesting, so none of
+    them can tell the meanings apart; these rows make them differ.
+
+    The NULL matters most. A refused caller on a row nothing has ever rendered
+    is told revision=None, and a consumer that read the key as "how far behind
+    is this row" without branching on status would take that as an answer
+    rather than as a refusal — it would skip the row instead of retrying under
+    a fresh claim. The bot branches on status alone and would never catch it,
+    so the contract is stated in the docstring and pinned here."""
+    reply = _lift_py("_channel_post_ack_reply")["_channel_post_ack_reply"]
+    behind = {"revision": 5, "posted_revision": 1, "content": "new"}
+
+    assert reply(7, 1, dict(behind, authorized=True)) == {
+        "status": "stale", "id": 7, "revision": 5, "content": "new"}, (
+        "a stale answer must hand back the revision the caller has to reach")
+    assert reply(7, 1, dict(behind, authorized=False)) == {
+        "status": "not_claimant", "id": 7, "revision": 1}, (
+        "a refusal must report how far the row is RENDERED, not where it is")
+    assert reply(7, 5, {"revision": 5, "posted_revision": 5, "content": "n",
+                        "authorized": True}) == {
+        "status": "acked", "id": 7, "revision": 5}, (
+        "an acked answer must report what this caller's write recorded")
+    assert reply(7, 2, {"revision": 4, "posted_revision": None, "content": "n",
+                        "authorized": False}) == {
+        "status": "not_claimant", "id": 7, "revision": None}, (
+        "a refusal on a row nothing has rendered must say so with NULL, not "
+        "borrow the row's current revision and look like progress")
+
+    _states_at(API_MAIN, "_channel_post_ack_reply",
+               "WHAT `revision` REPORTS DEPENDS ON `status`")
+
+
 TOKEN_A = "aaaaaaaa-0000-4000-8000-00000000000a"
 TOKEN_B = "bbbbbbbb-0000-4000-8000-00000000000b"
 
@@ -1072,8 +1249,16 @@ def _pending_sql(revisions=True, lease=None, token=TOKEN_A):
     if lease is None:
         lease = _lease()
     sql = _lift_module_str("_CHANNEL_POST_PENDING_SQL").format(where=where)
-    return (sql.replace("CAST(:token AS uuid)", "CAST('%s' AS uuid)" % token)
-               .replace(":lease", str(lease)))
+    # `revisionless` is the endpoint's own `not revisions`, bound here the way
+    # the endpoint binds it, so a hand-out in this file records the same kind
+    # of caller a real poll of that shape would.
+    out = (sql.replace("CAST(:token AS uuid)", "CAST('%s' AS uuid)" % token)
+              .replace("CAST(:revisionless AS BOOLEAN)",
+                       "CAST(%s AS BOOLEAN)" % ("false" if revisions else "true"))
+              .replace(":lease", str(lease)))
+    leftover = re.search(r"(?<![:\w]):[a-z_]{2,}", out)
+    assert not leftover, "unbound parameter %r left in %r" % (leftover.group(0), out)
+    return out
 
 
 def _bind(sql, pid, rev="NULL", mid="NULL", token="NULL", bind="false",
@@ -1109,6 +1294,18 @@ def _state(order):
         "       CASE WHEN posted_at IS NULL THEN 'unposted' ELSE 'posted' END "
         "  FROM pending_channel_posts WHERE sort_order = %d;" % order
     ).stdout.strip()
+
+
+def _handed_kind(order):
+    """handed_revisionless — WHICH KIND of poller the row was last handed to.
+
+    Read on its own rather than folded into _claim, whose three-field shape is
+    asserted verbatim in a dozen places. It decides whether a tokenless ack may
+    read the handed_* pair back at all, so a test that means "a pre-338 bot
+    answering its own hand-out" and a test that means "a tokenless call after a
+    revision-capable poller took the row" differ in exactly this column."""
+    return _psql("SELECT handed_revisionless FROM pending_channel_posts "
+                 "WHERE sort_order = %d;" % order).stdout.strip()
 
 
 def _claim(order):
@@ -1254,6 +1451,11 @@ def test_the_pending_read_derives_a_legacy_fingerprint_and_writes_no_delivery_fa
     # fingerprint: its marker is stripped before sending, so LEFT(content,
     # 2000) is not what a bot would put on Discord for it.
     assert _claim(15) == "%s|1|null" % TOKEN_A, _claim(15)
+    # ...and the hand-out records WHICH KIND of caller it served. This one
+    # asked for revisions, so a later tokenless ack is not the poller this row
+    # was handed to and may not read the pair above back as its own.
+    assert _handed_kind(9) == "f", _handed_kind(9)
+    assert _handed_kind(11) == "f", _handed_kind(11)
 
     _states_at(API_MAIN, "pending_channel_posts",
                "THIS ENDPOINT RECORDS NO DELIVERY FACT. It DOES write",
@@ -1350,7 +1552,10 @@ def test_a_legacy_ack_records_what_the_hand_out_gave_it():
     full = _ack_sql()
 
     # The nominal legacy delivery: handed at revision 1, acked at revision 1.
+    # The hand-out is the revisionless shape, which is what authorizes the
+    # tokenless ack below — the shape of the ACK alone does not.
     _hand_out(revisions=False)
+    assert _handed_kind(9) == "t", _handed_kind(9)
     _psql(_bind(full, _pid(9)))
     assert _state(9) == "1|never posted|null|posted", _state(9)
 
@@ -1369,14 +1574,18 @@ def test_a_legacy_ack_records_what_the_hand_out_gave_it():
                  "revision;").stdout.strip() == "1", (
         "the correction was recorded as delivered by a bot that never saw it")
 
-    # A bot that CAN report an id needs no fingerprint — the id is the better
-    # handle, and a fingerprint nothing consults is a claim about the channel
-    # that nothing maintains.
+    # A bot that CAN report an id records the id AND the fingerprint: the id
+    # is the better handle for editing, but the fingerprint has a second
+    # reader — the hand-out's ambiguity test, which asks whether any other row
+    # in the channel would scan for this text. Left unwritten (or left stale)
+    # that test answers about text this row's message does not carry. So the
+    # ack that names the row's current revision refreshes it to what it just
+    # rendered.
     _psql("INSERT INTO pending_channel_posts (channel_id, content, sort_order) "
           "VALUES ('999', 'delivered by a current bot', 12);")
     _hand_out(revisions=False)
     _psql(_bind(full, _pid(12), rev="1", mid="'7788'", token="'%s'" % TOKEN_A))
-    assert _state(12) == "1|null|7788|posted", _state(12)
+    assert _state(12) == "1|delivered by a current bot|7788|posted", _state(12)
 
     # A moderation case's stored content is not what was posted for it, so it
     # gets no fingerprint however it is acked (338's exclusion, carried into
@@ -1389,13 +1598,76 @@ def test_a_legacy_ack_records_what_the_hand_out_gave_it():
     assert _state(13) == "1|null|null|posted", _state(13)
 
     _states_at(API_MAIN, "ack_channel_post",
-               "WHEN THE ACK NAMES NO REVISION (a pre-338 bot, which cannot), "
-               "the row is\nrecorded at WHAT IT WAS HANDED.")
+               "WHEN THE ACK NAMES NO REVISION (a pre-338 bot, which cannot) "
+               "AND THE ROW\nWAS HANDED TO A REVISIONLESS POLLER, the row is "
+               "recorded at WHAT IT WAS\nHANDED.",
+               "BOTH HALVES ARE REQUIRED, and handed_revisionless is the second.")
 
 
 @pytest.mark.skipif(not DSN, reason=_DSN_REASON)
-def test_an_ack_from_a_non_claimant_writes_nothing_and_says_so():
-    """THE ROUND-THREE HIGH, at its root.
+def test_a_tokenless_ack_is_the_pre_338_bot_only_when_the_hand_out_agrees():
+    """The revisionless arm is authorized by a PAIR, not by a call shape.
+
+    handed_revision / handed_fingerprint describe the LAST hand-out. Reading
+    them back on the strength of the call's shape alone means any tokenless
+    ack takes whichever pair happens to be on the row — including one recorded
+    for a revision-capable poller that is still inside its render. That caller
+    would then stamp a revision nobody rendered, capture a fingerprint for
+    text it never sent, and clear a live claim; the row would satisfy
+    posted_revision = revision and carry posted_at, which removes it from BOTH
+    poll sets, so an announcement nobody delivered is never delivered by
+    anyone and nothing says so.
+
+    The hand-out records which kind of caller it served, and the two must
+    agree. What a tokenless ack can always do is report a DELIVERY — that is
+    not the claim's to refuse — and this test pins the boundary between the
+    two."""
+    _psql(_BASE_TABLE)
+    _psql_file(MIGRATION)
+    full = _ack_sql()
+
+    # Handed to a poller that asked for revisions: it will ack with its token.
+    _psql("INSERT INTO pending_channel_posts (channel_id, content, sort_order) "
+          "VALUES ('999', 'rendered by the current bot', 20);")
+    _hand_out(token=TOKEN_A)
+    assert _handed_kind(20) == "f", _handed_kind(20)
+    claim_before = _claim(20)
+
+    out = _psql(_bind(full, _pid(20)) + " ;").stdout.strip()
+    assert out.endswith("|f"), (
+        "a tokenless ack was authorized on a row handed to a revision-capable "
+        "poller: %r" % out)
+    assert _state(20) == "null|null|null|posted", (
+        "the tokenless ack took the other poller's handed record: %s"
+        % _state(20))
+    assert _claim(20) == claim_before, (
+        "the tokenless ack cleared a claim it does not hold: %s -> %s"
+        % (claim_before, _claim(20)))
+    # ...and the row is still owed a render, which is the difference between
+    # "recorded as delivered at a revision nobody rendered" and "delivered,
+    # still behind". A row that satisfied both poll predicates would be in
+    # neither set and would simply stop existing for the bus.
+    assert "20" in _handed_orders(TOKEN_A, lease=0), (
+        "the row left the correction set after a tokenless ack — nothing "
+        "will ever render it again")
+
+    # The negative control: the SAME call shape, on a row whose hand-out was
+    # revisionless, is the pre-338 bot answering its own hand-out and is
+    # recorded in full. A predicate that refused every tokenless ack would
+    # pass everything above.
+    _psql("INSERT INTO pending_channel_posts (channel_id, content, sort_order) "
+          "VALUES ('999', 'rendered by an old bot', 21);")
+    _hand_out(revisions=False, token=TOKEN_A)
+    assert _handed_kind(21) == "t", _handed_kind(21)
+    _psql(_bind(full, _pid(21)))
+    assert _state(21) == "1|rendered by an old bot|null|posted", _state(21)
+    assert _claim(21).startswith("null|"), (
+        "the revisionless ack did not release the claim: %s" % _claim(21))
+
+
+@pytest.mark.skipif(not DSN, reason=_DSN_REASON)
+def test_a_refused_ack_records_the_delivery_and_nothing_else():
+    """THE ROUND-THREE HIGH at its root — and the cost of over-correcting it.
 
     A claim that says only "somebody is rendering" cannot tell two pollers
     apart at ack time. Round three therefore answered a losing ack by
@@ -1403,9 +1675,19 @@ def test_an_ack_from_a_non_claimant_writes_nothing_and_says_so():
     the state the loser asked for, the loser was told "acked". The database
     then looked finished to everyone and suppressed every repair.
 
-    The claim carries its holder now. An ack that does not present it writes
-    NOTHING — no revision, no id, no posted_at, no release — and the answer
-    names the refusal rather than describing the row."""
+    The claim carries its holder now, and an ack that does not present it
+    records NO revision, moves NO fingerprint, replaces NO stored id and
+    releases NO claim. What it DOES record is the delivery it reports:
+    posted_at, and an id for a row that has none. That half was never the
+    claim's to refuse. A tick whose lease expires inside ch.send has already
+    put the message in the channel; refusing its report whole leaves the row
+    reading "never posted" while the only other memory of that send is the
+    bot's in-process dict, so the next restart posts a second copy (#105) —
+    the exact duplicate this bus exists to remove.
+
+    Round four refused the whole ack, and this test asserted that as correct
+    with mid='999001' on an unposted row. That is what a check written from
+    the state you had in mind looks like (#351)."""
     _psql(_BASE_TABLE)
     _psql_file(MIGRATION)
     full = _ack_sql()
@@ -1413,31 +1695,99 @@ def test_an_ack_from_a_non_claimant_writes_nothing_and_says_so():
           "VALUES ('999', 'one renderer only', 30);")
     _hand_out(revisions=False, token=TOKEN_A)      # A holds the claim
 
-    before = _state(30) + "//" + _claim(30)
+    claim_before = _claim(30)
     # B acks with ITS token, naming the revision it thinks it rendered.
     out = _psql(_bind(full, _pid(30), rev="1", mid="'999001'",
                       token="'%s'" % TOKEN_B) +
                 " ;").stdout.strip()
-    assert _state(30) + "//" + _claim(30) == before, (
-        "a non-claimant's ack changed the row: %s -> %s"
-        % (before, _state(30) + "//" + _claim(30)))
     assert out.endswith("|f"), (
         "the statement reported the non-claimant's ack as authorized: %r" % out)
+    assert _claim(30) == claim_before, (
+        "a non-claimant's ack moved the claim: %s -> %s"
+        % (claim_before, _claim(30)))
+    # No revision and no fingerprint — and the delivery it reported IS kept.
+    assert _state(30) == "null|null|999001|posted", (
+        "a refused ack must record the message it reported and nothing else: "
+        "%s" % _state(30))
+    # The consequence that matters, as a positive signal: the row has left the
+    # SEND set, so a restarted bot with an empty sent-memory cannot post a
+    # second copy. lease=0 is what makes this a real question — with the lease
+    # live, A's claim would hide the row whether or not the delivery landed,
+    # and the assertion could not fail for the reason it names (#342).
+    assert "30" not in _handed_orders(TOKEN_B, revisions=False, lease=0), (
+        "a row whose send was reported by a refused ack is still visible to "
+        "the SEND path — the next restart posts a second copy of it")
 
-    # ...and an expired claim is not a claim either, even for its own holder.
-    out = _psql(_bind(full, _pid(30), rev="1", mid="'999001'",
+    # The same rule for the case it exists for: the holder's OWN lease running
+    # out while it was inside Discord.
+    _psql("INSERT INTO pending_channel_posts (channel_id, content, sort_order) "
+          "VALUES ('999', 'sent while the lease ran out', 31);")
+    _hand_out(revisions=False, token=TOKEN_A)
+    out = _psql(_bind(full, _pid(31), rev="1", mid="'999031'",
                       token="'%s'" % TOKEN_A, lease=0) + " ;").stdout.strip()
     assert out.endswith("|f"), (
         "an expired claim still authorized its holder: %r" % out)
-    assert _state(30) + "//" + _claim(30) == before
+    assert _state(31) == "null|null|999031|posted", (
+        "the message this tick had already sent was not recorded: %s"
+        % _state(31))
+    assert "31" not in _handed_orders(TOKEN_B, revisions=False, lease=0), (
+        "the row whose send was refused is still in the SEND set")
 
-    # The negative control for the two above: the HOLDER, inside the lease,
-    # does write. A predicate that refused everyone would pass both.
-    _psql(_bind(full, _pid(30), rev="1", mid="'999001'", token="'%s'" % TOKEN_A))
-    assert _state(30) == "1|null|999001|posted", _state(30)
+    # The two shapes that report NO delivery write nothing at all from a
+    # non-claimant: a bind has rendered nothing yet, and a pure hand-back is a
+    # decision not to render. Neither may leave a mark on a row it does not
+    # hold — and a bind in particular must not be able to point a row somebody
+    # else is rendering at a message of its own choosing.
+    _psql("INSERT INTO pending_channel_posts (channel_id, content, sort_order) "
+          "VALUES ('999', 'held by somebody else', 32);")
+    _hand_out(revisions=False, token=TOKEN_A)
+    before32 = _state(32) + "//" + _claim(32)
+    _psql(_bind(full, _pid(32), mid="'999032'", bind="true",
+                token="'%s'" % TOKEN_B))
+    _psql(_bind(full, _pid(32), token="'%s'" % TOKEN_B, release="true"))
+    assert _state(32) + "//" + _claim(32) == before32, (
+        "a bind or a pure hand-back from a non-claimant changed a row it does "
+        "not hold: %s -> %s" % (before32, _state(32) + "//" + _claim(32)))
+
+    # ...and an id a row ALREADY carries is not the refused caller's to
+    # replace. A first-writer-wins column is the difference between "fill in
+    # what nobody recorded" and "point this row at my message instead".
+    _psql("UPDATE pending_channel_posts SET message_id = '555000' "
+          "WHERE sort_order = 32;")
+    _psql(_bind(full, _pid(32), rev="1", mid="'999032'",
+                token="'%s'" % TOKEN_B))
+    assert _state(32).split("|")[2] == "555000", (
+        "a non-claimant replaced the id the row already had: %s" % _state(32))
+
+    # The negative control for every refusal above: the HOLDER, inside its
+    # lease, writes the whole set — including the id, which it may correct
+    # where the refused caller could only fill an empty one. That asymmetry is
+    # the point: the holder is the caller that can see the channel. A
+    # predicate that refused everyone would pass every assertion above.
+    _psql(_bind(full, _pid(32), rev="1", mid="'999032'", token="'%s'" % TOKEN_A))
+    assert _state(32) == "1|held by somebody else|999032|posted", _state(32)
+    assert _claim(32).startswith("null|"), (
+        "the completing ack did not release the claim: %s" % _claim(32))
+
+    # A token presented against a row whose claim is already GONE compares
+    # NULL, not false — three-valued logic, and an authorized column that
+    # answered NULL would reach the caller as an empty third answer that
+    # _channel_post_ack_reply reads as a refusal by accident rather than by
+    # rule. It has to say f.
+    out = _psql(_bind(full, _pid(32), rev="1", mid="'999032'",
+                      token="'%s'" % TOKEN_A) + " ;").stdout.strip()
+    assert out.endswith("|f"), (
+        "an ack against a released claim answered neither true nor false: %r"
+        % out)
 
     _states_at(API_MAIN, "ack_channel_post",
-               "THE CLAIM IS THE UNIT OF EXCLUSIVE RENDERING")
+               "THE CLAIM IS THE UNIT OF EXCLUSIVE RENDERING",
+               "A REFUSAL IS NOT A REASON TO FORGET A MESSAGE.")
+    # ...and the loop's own copy. The bot is the side that decides a refused
+    # ack is a failure and stops; if its docstring goes back to "writes
+    # nothing", the next reader re-derives the duplicate this test rules out.
+    _states_at(BOT, "poll_channel_posts",
+               "A REFUSED ACK STILL RECORDS THE MESSAGE.")
 
 
 @pytest.mark.skipif(not DSN, reason=_DSN_REASON)
@@ -1474,9 +1824,12 @@ def test_a_stale_ack_keeps_the_claim_so_one_renderer_finishes_the_row():
     assert "40" not in _handed_orders(TOKEN_B), (
         "a second poller was handed a row the first is still rendering")
 
-    # A renders forward and acks what it rendered. NOW the claim goes.
+    # A renders forward and acks what it rendered. NOW the claim goes — and
+    # the fingerprint moves with it, because the message on Discord now reads
+    # 'rev 3 text' and that is the text any other row's adoption scan would
+    # find on it.
     _psql(_bind(full, _pid(40), rev="3", mid="'4242'", token="'%s'" % TOKEN_A))
-    assert _state(40) == "3|null|4242|posted", _state(40)
+    assert _state(40) == "3|rev 3 text|4242|posted", _state(40)
     assert _claim(40).startswith("null|"), (
         "the claim survived a completing ack: %s" % _claim(40))
 
@@ -1568,6 +1921,107 @@ def test_ambiguity_is_a_property_of_the_channel_not_of_the_response():
         "which blocks both corrections forever: %s" % got)
 
 
+_TWIN_ROWS = """
+INSERT INTO pending_channel_posts
+       (channel_id, content, sort_order, posted_at, posted_revision, revision,
+        adopt_fingerprint, message_id)
+VALUES ('903', 'first corrected',  61, now(), 1, 2, 'the shared body', '6101'),
+       ('903', 'second corrected', 62, now(), 1, 2, 'the shared body', NULL);
+"""
+
+
+_BOUND_IDS_PROJECT = (
+    "COALESCE(string_agg(p.sort_order || '=' || h.ambiguous || '/' || "
+    "COALESCE(ARRAY_TO_STRING(h.bound_message_ids, '+'), ''), ' ; ' "
+    "ORDER BY p.sort_order), '') "
+    "FROM handed h JOIN pending_channel_posts p ON p.id = h.id")
+
+
+@pytest.mark.skipif(not DSN, reason=_DSN_REASON)
+def test_a_bound_twin_is_not_a_rival_for_its_siblings_message():
+    """A row that holds an id does not scan, so it cannot be scanned INTO.
+
+    Two rows in one channel were posted with the same text — two sheets
+    differing only past Discord's 2,000-character ceiling is enough — so 338
+    backfills both with the same fingerprint. While both are unbound that is a
+    real collision and both must refuse; that case is
+    test_ambiguity_is_a_property_of_the_channel_not_of_the_response. This is
+    the other one: row 61 already HOLDS its message id, so it will never scan
+    for anything — it edits 6101 directly. Treating it as a rival left its
+    sibling blocked for the life of the row, and nothing the sibling or anyone
+    else could do would clear it, because 61 need never be corrected again.
+
+    BOTH HALVES ARE ASSERTED HERE, because either alone is wrong. Excluding 61
+    from the flag says the sibling may scan; publishing 6101 in
+    bound_message_ids is what stops that scan adopting 61's message and
+    leaving two rows editing one message. If a later change drops the array
+    while keeping the exclusion, this reds — which is the failure that would
+    otherwise be silent and destructive."""
+    _psql(_BASE_TABLE)
+    _psql_file(MIGRATION)
+    _psql("DELETE FROM pending_channel_posts;")
+    _psql(_TWIN_ROWS)
+
+    got = _hand_out(project=_BOUND_IDS_PROJECT)
+    assert got == "61=true/ ; 62=false/6101", (
+        "a bound twin is still being treated as a rival for its sibling's "
+        "message, or its id is not being handed to the sibling's scan — the "
+        "first blocks the sibling's correction for ever, the second lets the "
+        "sibling adopt the twin's message: %s" % got)
+
+    _states_at(API_MAIN, "pending_channel_posts",
+               "A ROW THAT HOLDS AN ID DOES NOT SCAN, AND ITS MESSAGE IS OFF "
+               "THE TABLE FOR")
+
+
+@pytest.mark.skipif(not DSN, reason=_DSN_REASON)
+def test_the_ack_that_finishes_a_row_refreshes_its_fingerprint():
+    """adopt_fingerprint must describe the text the row's message CARRIES.
+
+    The column was written once — by 338's backfill or by a revisionless ack —
+    and then left alone, which made it a claim about Discord that went stale
+    the moment its holder edited the message. The ack that takes a row to its
+    current revision knows exactly what it just rendered, and is the only
+    caller that does.
+
+    This is now an INVARIANT rather than the thing that unblocks a sibling:
+    since a bound row is no longer a rival in the ambiguity test, a stale
+    fingerprint on a bound row no longer blocks anybody. It is kept, and
+    tested, because the column is documented as describing the live message
+    and two readers are entitled to rely on that — the scan compares it byte
+    for byte, and the ambiguity test derives from it. A column whose stated
+    meaning is false is the comment-shaped defect (#351), not a spare part.
+
+    A STALE ack must NOT move it: that caller rendered a revision whose text
+    nobody stored, so writing its content would make the column describe
+    neither the message nor the row."""
+    _psql(_BASE_TABLE)
+    _psql_file(MIGRATION)
+    _psql("DELETE FROM pending_channel_posts;")
+    _psql(_TWIN_ROWS)
+    full = _ack_sql()
+
+    # The hand-out is what makes the acks below AUTHORIZED. Without it the
+    # statement refuses them both and the row simply stays as the fixture left
+    # it — which looks exactly like "the stale ack did not move the
+    # fingerprint" and would pass the first assertion for the wrong reason.
+    _hand_out(token=TOKEN_A)
+
+    _psql(_bind(full, _pid(61), rev="1", mid="'6101'", token="'%s'" % TOKEN_A))
+    assert _state(61) == "1|the shared body|6101|posted", (
+        "an ack behind the row's revision moved the fingerprint: %s"
+        % _state(61))
+
+    _psql(_bind(full, _pid(61), rev="2", mid="'6101'", token="'%s'" % TOKEN_A))
+    assert _state(61) == "2|first corrected|6101|posted", (
+        "the ack that finished the row did not refresh the fingerprint, so "
+        "the column still describes text the message no longer carries: %s"
+        % _state(61))
+
+    _states_at(API_MAIN, "ack_channel_post",
+               "THE FINGERPRINT IS REFRESHED BY THE ACK THAT FINISHES THE ROW.")
+
+
 @pytest.mark.skipif(not DSN, reason=_DSN_REASON)
 def test_a_duplicate_split_across_two_limit_pages_is_still_ambiguous():
     """The reason this cannot live in the bot.
@@ -1598,6 +2052,104 @@ def test_a_duplicate_split_across_two_limit_pages_is_still_ambiguous():
         "cannot see: %s" % got)
 
 
+_LEASE_ROW = """
+INSERT INTO pending_channel_posts (channel_id, content, sort_order, revision)
+VALUES ('905', 'a queued announcement', 81, 1);
+"""
+
+
+@pytest.mark.skipif(not DSN, reason=_DSN_REASON)
+def test_a_live_lease_is_not_voided_by_a_missing_token():
+    """The pick asks about the LEASE, and about nothing else.
+
+    The endpoint documents four routes out of a claim — the row is current,
+    the caller asks for release at its render cap, the revisionless poller it
+    was handed to acks, or the lease expires. The predicate used to admit a
+    fifth by reading claimed_token: a row whose claim was live but whose token
+    was absent was handed straight back out, lease or no lease. No writer
+    produces that state — claimed_at and claimed_token are written together
+    here and cleared together by the ack, and the token is a uuid minted per
+    call — so this forces it by hand, which is the only way to reach it.
+
+    The direction is what matters. Respecting an unexplained claim costs one
+    lease, after which the row is driven again; ignoring it costs a second
+    renderer on a row whose posted_at is NULL, i.e. the announcement posted
+    twice, which is the duplicate the claim exists to prevent (#276).
+
+    The second half is the one that keeps this from becoming a deadlock: the
+    row must still come free on expiry. A predicate that refuses forever would
+    be worse than the one being replaced."""
+    _psql(_BASE_TABLE)
+    _psql_file(MIGRATION)
+    _psql("DELETE FROM pending_channel_posts;")
+    _psql(_LEASE_ROW)
+
+    assert _handed_orders() == ["81"], "the fixture row is not handed out at all"
+
+    _psql("UPDATE pending_channel_posts SET claimed_at = NOW(), "
+          "claimed_token = NULL WHERE sort_order = 81;")
+    assert _handed_orders(token=TOKEN_B) == [], (
+        "a row whose lease is live was handed to a second poller because its "
+        "token was absent — on a row that has never been posted, that is the "
+        "announcement sent twice")
+
+    assert _handed_orders(token=TOKEN_B, lease=0) == ["81"], (
+        "the row never comes free: refusing on a missing token is only safe "
+        "because expiry still releases it")
+
+    _states_at(API_MAIN, "pending_channel_posts",
+               "asking only whether the LEASE is live")
+
+
+@pytest.mark.skipif(not DSN, reason=_DSN_REASON)
+def test_the_harness_names_the_server_it_ran_on():
+    """Evidence that does not name its server is not reproducible evidence.
+
+    The DSN in this file's own docstring said 55432 for several rounds, and
+    nothing has ever listened on that port; the runs that produced the
+    migration results therefore used a string typed somewhere else, and no
+    artifact recorded which server answered. The name guard above only asks
+    that the DATABASE be a scratch one, which a different server on a
+    different port satisfies just as well.
+
+    So the connection is asserted against the DSN it was asked for, rather
+    than described: a tunnel, a pooler or a second instance that answers on
+    another port reds here instead of quietly producing results attributed to
+    the documented one. The version and directory are printed so the log of a
+    run says what produced it (#438 — acceptance is a positive signal, and an
+    unnamed server is not one)."""
+    m = re.search(r":(\d+)/", DSN)
+    assert m, (
+        "FAQ_TEST_PG_DSN names no port, so a run cannot say which server "
+        "produced it: %r" % DSN)
+    got = _psql("SELECT inet_server_port() || '|' || current_database() "
+                "|| '|' || current_setting('server_version');").stdout.strip()
+    port, dbname, version = got.split("|")
+    assert port == m.group(1), (
+        "the DSN asked for port %s and the server that answered is on %s — "
+        "the results of this run would be attributed to a server that did "
+        "not produce them" % (m.group(1), port))
+    assert ("/" + dbname) in DSN, (
+        "connected to database %r, which the DSN does not name: %r"
+        % (dbname, DSN))
+    # ...and the line at the top of this file that tells the next person how
+    # to run these must name that same port. That line is the only instruction
+    # anybody has; when it drifts, runs move to a string typed somewhere else
+    # and the evidence stops being reproducible from the repo — which is the
+    # defect this test exists for, so it is checked rather than described.
+    doc_ports = re.findall(r"FAQ_TEST_PG_DSN=\"[^\"]*:(\d+)/", __doc__ or "")
+    assert doc_ports, "this file no longer shows how to run its Postgres tests"
+    assert set(doc_ports) == {port}, (
+        "the DSN this file documents names port(s) %s, but these tests ran "
+        "against %s — following the documented line would not reproduce this "
+        "run" % (sorted(set(doc_ports)), port))
+
+    datadir = _psql("SELECT current_setting('data_directory');",
+                    expect_ok=False).stdout.strip() or "(not readable)"
+    print("[FAQ-DSN] PostgreSQL %s on port %s, database %s, data_directory %s"
+          % (version, port, dbname, datadir))
+
+
 @pytest.mark.skipif(not DSN, reason=_DSN_REASON)
 def test_an_ack_persists_the_revision_it_names_and_no_other():
     """Compare-and-set, all four directions.
@@ -1626,9 +2178,11 @@ def test_an_ack_persists_the_revision_it_names_and_no_other():
                  "WHERE sort_order = 21 AND posted_revision IS DISTINCT FROM "
                  "revision;").stdout.strip() == "1"
 
-    # Forward to the current revision: accepted.
+    # Forward to the current revision: accepted — and THAT ack, the one that
+    # leaves the row current, is also the one that refreshes the fingerprint
+    # to the text it just put on Discord.
     _psql(_bind(full, pid, rev="2", mid="'100'", token=tok))
-    assert _state(21) == "2|null|100|posted", _state(21)
+    assert _state(21) == "2|now at rev 2|100|posted", _state(21)
 
     # ...and that completing ack released the claim, so the re-claims below
     # are the caller taking it again rather than never having lost it.
@@ -1638,13 +2192,13 @@ def test_an_ack_persists_the_revision_it_names_and_no_other():
     # Backwards: refused, or a late duplicate ack would re-open a delivered
     # correction and the bot would edit the same text again every tick.
     _psql(_bind(full, pid, rev="1", mid="'100'", token=tok))
-    assert _state(21) == "2|null|100|posted", (
+    assert _state(21) == "2|now at rev 2|100|posted", (
         "posted_revision moved backwards: %s" % _state(21))
 
     # Past the row's own revision: refused. Nobody renders a future text, so
     # an ack claiming one is a bug in the caller, not an instruction.
     _psql(_bind(full, pid, rev="9", mid="'100'", token=tok))
-    assert _state(21) == "2|null|100|posted", (
+    assert _state(21) == "2|now at rev 2|100|posted", (
         "an ack advanced the row past its own revision: %s" % _state(21))
 
     _states_at(API_MAIN, "ack_channel_post", "COMPARE-AND-SET, NOT COALESCE")
@@ -1747,7 +2301,7 @@ REKEYED = {
 # they are what makes "this successor replaces that predecessor" a checkable
 # claim rather than an assertion about two opaque 16-hex ids. The same three
 # edits are what the client lane owes plugin/InfoLibrary.cs
-# (ai-collab/ITEM11-CLIENT-FAQ-CONTRACT.md); this file cannot see that lane, so
+# (docs/faq-refresh-client-contract.md); this file cannot see that lane, so
 # it holds the migration to them instead.
 REKEY_EDITS = {
     "ranked 1v1 article": [
@@ -1766,7 +2320,7 @@ REKEY_EDITS = {
 # plugin/I18nCatalogues.cs is NOT read from here any more. Round four
 # restored every plugin/ file and tools/i18n_source.json to the branch
 # base: the client half of this re-key is the client lane's step, listed
-# for it in ai-collab/ITEM11-CLIENT-FAQ-CONTRACT.md. The helpers that
+# for it in docs/faq-refresh-client-contract.md. The helpers that
 # parsed the catalogue went with them rather than being left as a reader
 # trap (#432) — what this file can still hold the migration to is below.
 
@@ -1785,7 +2339,7 @@ def test_the_client_keys_340_registers_are_derived_from_the_text_it_carries():
     artifact tools/i18n_source.json are the client lane's, and round four
     restored all four to the branch base; the exact edits and the catalogue
     entries they need are written out in
-    ai-collab/ITEM11-CLIENT-FAQ-CONTRACT.md. So there is nothing in this tree
+    docs/faq-refresh-client-contract.md. So there is nothing in this tree
     to assert the four locale entries against, and a test that asserted them
     against the tree as it stands would be asserting the client lane HAS NOT
     done its half — a check that passes by pinning the gap (#342).
@@ -1840,6 +2394,26 @@ def test_i18n_pair_shape():
     assert "are owed to plugin/I18nCatalogues.cs" in seed_sql, (
         "341's header no longer says the catalogue entries are OWED rather "
         "than shipped with it")
+    # ...and WHAT the twelve strings are. The header used to call each target
+    # "the PREVIOUS approved article with only the corrected sentence
+    # rewritten" — a claim no state this pair can run against satisfies: 340
+    # goes first and REFUSES if a predecessor key carries an approved entry,
+    # so there is never an approved predecessor left to carry forward. A
+    # reviewer who believes it approves twelve unreviewed machine strings as
+    # human work somebody already signed off.
+    assert "ALL TWELVE ARE UNREVIEWED MACHINE OUTPUT" in seed_sql, (
+        "341's header no longer says its targets are unreviewed machine "
+        "output, so a reviewer can read them as carried-forward human work")
+    assert "PREVIOUS approved article" not in seed_sql, (
+        "341's header claims its targets preserve a previous approved "
+        "translation, which 340's own guard refuses to run alongside")
+    # The guard that makes the sentence above true rather than merely stated.
+    # If 340 stopped refusing, an approved predecessor could survive into this
+    # state and 341's claim would need re-deciding, not re-wording.
+    assert re.search(r"IF v_approved <> 0 THEN\s*\n\s*RAISE EXCEPTION",
+                     keys_sql), (
+        "340 no longer refuses when a predecessor carries approved work, "
+        "which is what 341's header rests on")
     for name, sql in (("340", keys_sql), ("341", seed_sql)):
         assert sql.count("BEGIN;") == 1 and sql.rstrip().endswith("COMMIT;"), (
             "%s needs its own explicit transaction (#340)" % name)
@@ -2428,7 +3002,7 @@ _TOK = "aaaaaaaa-0000-4000-8000-00000000000a"
 
 def _row(pid, channel, content, revision, posted_revision, message_id=None,
          fingerprint=None, posted_at="derive", ambiguous=False,
-         claim_token=_TOK):
+         claim_token=_TOK, bound_message_ids=()):
     # posted_at is the delivery fact and the loop's send/edit decision, so the
     # default mirrors the ordinary states rather than being left absent: a row
     # with a rendered revision was delivered, one without was not. The
@@ -2446,6 +3020,7 @@ def _row(pid, channel, content, revision, posted_revision, message_id=None,
             "revision": revision, "posted_revision": posted_revision,
             "posted_at": posted_at, "ambiguous": ambiguous,
             "claim_token": claim_token,
+            "bound_message_ids": [str(b) for b in bound_message_ids],
             "message_id": message_id, "adopt_fingerprint": fingerprint}
 
 
@@ -2550,6 +3125,63 @@ def test_two_identical_MESSAGES_are_ambiguous_and_adopt_nothing():
     assert twin_a.edits == [] and twin_b.edits == []
     assert not _acks(api)
     assert any("ambiguous" in line for line in out), out
+
+
+def test_the_scan_skips_a_message_another_row_in_the_channel_owns():
+    """The other half of excluding a bound twin from `ambiguous`.
+
+    The api stops treating a row that holds an id as a rival for the same
+    text, which is what lets this row scan at all. That is only safe because
+    the same response hands over every id the channel's other rows already
+    own, and the scan takes them out of the running. Message 41 is the bound
+    twin's; 42 is this row's; both carry the shared body. Skipping 41 leaves
+    exactly one hit and the row adopts its own message.
+
+    Drop the bound-id skip and the scan sees two hits, calls it ambiguous and
+    adopts nothing — so the correction never renders. That is the benign
+    direction of the same mistake; the destructive one is the fixture below,
+    where the row's OWN message is gone and the only hit left is the twin's."""
+    twins = _Channel(555, existing=[
+        _Msg(41, "the shared body", _Channel.BOT_ID),
+        _Msg(42, "the shared body", _Channel.BOT_ID)])
+    api = _Api([_row(9, 555, "corrected", revision=2, posted_revision=1,
+                     message_id=None, fingerprint="the shared body",
+                     bound_message_ids=[41])])
+    out = []
+    ns = _bot_ns(api, _Bot({555: twins}), out=out)
+    asyncio.run(ns["poll_channel_posts"]())
+
+    assert [m.id for m in twins.messages if m.edits] == [42], (
+        "the scan did not skip the id another row in the channel owns: %s"
+        % [(m.id, m.edits) for m in twins.messages])
+
+
+def test_the_scan_adopts_nothing_when_the_only_hit_is_another_rows_message():
+    """The destructive direction, refused.
+
+    Same shape as above, except this row's own message is gone — deleted, or
+    never sent. The single surviving message carrying the shared body belongs
+    to the bound twin. Without the skip the scan finds exactly one hit and
+    adopts confidently, and the twin's message is then edited into this row's
+    text: one correct message destroyed and two rows pointing at one id.
+
+    With the skip there are no hits, the row refuses, and the channel is left
+    as it is — which is the answer a scan that cannot identify its own message
+    has to give (#276/#430)."""
+    ch = _Channel(555, existing=[_Msg(41, "the shared body", _Channel.BOT_ID)])
+    api = _Api([_row(9, 555, "corrected", revision=2, posted_revision=1,
+                     message_id=None, fingerprint="the shared body",
+                     bound_message_ids=[41])])
+    out = []
+    ns = _bot_ns(api, _Bot({555: ch}), out=out)
+    asyncio.run(ns["poll_channel_posts"]())
+
+    assert ch.messages[0].edits == [], (
+        "the row adopted a message another row owns and edited it into its "
+        "own text: %s" % ch.messages[0].edits)
+    assert ch.sent == [], "a correction re-sent the sheet instead of refusing"
+    assert not _acks(api), (
+        "a row that adopted nothing still reported a render: %s" % _acks(api))
 
 
 def test_two_identical_ROWS_with_one_message_bind_nothing():

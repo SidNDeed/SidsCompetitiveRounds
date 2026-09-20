@@ -12,12 +12,22 @@
 -- lane ships, a player renders the PREDECESSOR article from their own DLL and
 -- these rows are the only place the corrected translations exist. They are
 -- here so a human translator can see and refine them through the portal, where
--- an approval overrides the bundled value via the pack overlay. Each target is
--- the PREVIOUS approved article with only the corrected sentence rewritten,
--- so the rest of a reviewed translation is not thrown away. The twelve strings
--- the client lane needs are the ones below; the step that carries them into
--- the catalogue, and where to recover them from, is written out for that lane
--- in ai-collab/ITEM11-CLIENT-FAQ-CONTRACT.md.
+-- an approval overrides the bundled value via the pack overlay.
+--
+-- ALL TWELVE ARE UNREVIEWED MACHINE OUTPUT, and none of them is a revision of
+-- an earlier translation. There is nothing to revise: 340 runs first and
+-- REFUSES (its section-2 guard) if any of the three PREDECESSOR keys carries
+-- an approved entry, so at the moment these rows land no approved predecessor
+-- text exists that could have been carried forward — and a pending
+-- predecessor proposal is superseded by 340, never edited into one of these.
+-- Whoever reviews these in the portal is reading a fresh machine translation
+-- against the English, not checking a diff against something a human already
+-- signed off. A header claiming the opposite would license exactly the
+-- light-touch approval this paragraph exists to prevent.
+--
+-- The twelve strings the client lane needs are the ones below; the step that
+-- carries them into the catalogue, and where to recover them from, is written
+-- out for that lane in docs/faq-refresh-client-contract.md.
 --
 -- key_id = sha1("client" || chr(0) || source)[:16] — the NUL-separator form
 -- tools/i18n_sync_keys.py uses.
