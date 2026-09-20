@@ -4074,7 +4074,34 @@ namespace CompetitiveRounds
                 double nowS = TransportExit.NowSeconds();
                 string dcCause = cause.ToString();
                 TransportExit.NoteDisconnect(dcCause, nowS);
-                TransportExit.NoteDisconnectNotice(dcCause, nowS);
+                bool noticeRaised = TransportExit.NoteDisconnectNotice(dcCause, nowS);
+                // The handover decision is LOGGED rather than discarded,
+                // for the reason the room-exit toast logs which surface
+                // spoke: the amber line is drawn only from
+                // CompetitiveUI.DrawLagNotices, which returns on the
+                // broadcast identity and on a spectator seat BEFORE it
+                // computes the line. On those seats the notice is raised
+                // and never drawn, so a screen reading cannot witness this
+                // item there at all, and an acceptance row that can only
+                // be read off the screen is unsatisfiable on them by
+                // construction (#476/#570: confirm the gate admits the
+                // seat the acceptance needs).
+                //
+                // seatCanDraw reports those same two gates as they read
+                // HERE, at the disconnect - it is a reading, not a claim
+                // about a later repaint. It is independent of the
+                // [Network] notices opt-in, which the transport line
+                // deliberately does not sit behind.
+                bool seatCanDraw = false;
+                try
+                {
+                    seatCanDraw = !BroadcastMode.IsBroadcastIdentity
+                                  && !RoomActors.LocalIsSpectator;
+                }
+                catch { }
+                Plugin.Log.LogInfo(
+                    $"[LAG-DIAG] transport notice handover cause={dcCause} " +
+                    $"raised={noticeRaised} seatCanDraw={seatCanDraw}");
             }
             catch { }
             // Release B §1: the head-to-head line dies with the room — first
