@@ -14162,12 +14162,25 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
              * moved toward each other in the same pass rather than one being
              * reworded to survive the other.
              *
-             * AND "NOTHING IS SENT WHILE THIS IS OFF" IS NOW TRUE OF A
-             * REQUEST ALREADY ON THE WIRE. Turning the setting off aborts it
-             * (AutoLogUpload passes `abortIf: () => !Enabled` into
+             * AND THE OFF SWITCH REACHES A REQUEST ALREADY ON THE WIRE, TO
+             * THE EXACT EXTENT THE MECHANISM ALLOWS. Turning the setting off
+             * aborts it (AutoLogUpload passes `abortIf: () => !Enabled` into
              * SubmitAutoLogBody); it used to stop only the NEXT dispatch,
              * which made the sentence false in exactly the moment a player
              * changing their mind cares about.
+             *
+             * What it does NOT do is unsend. UnityWebRequest.Abort() tears
+             * down this end of the transfer; bytes the server has already read
+             * are read, and a body that was all but complete may well have
+             * been persisted there. The caption said "turning it off stops an
+             * upload that is already running" next to "Nothing is sent while
+             * this is off", and the pair reads as a promise that withdrawing
+             * permission mid-transfer keeps the data off the server — which no
+             * abort can give (r3 lens LOW). It now promises the two separable
+             * things: nothing NEW is dispatched, the upload in progress is cut
+             * off, and a part that already arrived stays where it arrived. The
+             * sentence was moved to the mechanism rather than the mechanism
+             * being described more generously.
              *
              * The caption also used to be CLIPPED rather than wrapped: the
              * label was a fixed 700x18 box with TMP's Truncate default, so
@@ -14187,7 +14200,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                         Plugin.AutoLogUploadEnabled.Value = !Plugin.AutoLogUploadEnabled.Value;
                     dirty = true;
                 },
-                "After a game you played in, this sends the same logs the bug-report form sends, so a problem can be looked at without you filing a report. Also sent: your Steam ID and name, your opponent's Steam ID when the game had one, the room name, the game mode, the series ID, and the mod and game version. Removed first: every path through a Users folder, however the slashes are written, and this PC's own profile folder; and this PC's Windows account name where it stands on its own in a line, when it is three characters or longer. Nothing else is removed - the same name inside a path we did not recognise, or in an e-mail address, stays. At most one upload every five minutes. Nothing is sent while this is off, and turning it off stops an upload that is already running.",
+                "After a game you played in, this sends the same logs the bug-report form sends, so a problem can be looked at without you filing a report. Also sent: your Steam ID and name, your opponent's Steam ID when the game had one, the room name, the game mode, the series ID, and the mod and game version. Removed first: every path through a Users folder, however the slashes are written, and this PC's own profile folder; and this PC's Windows account name where it stands on its own in a line, when it is three characters or longer. Nothing else is removed - the same name inside a path we did not recognise, or in an e-mail address, stays. At most one upload every five minutes. Nothing new is sent while this is off, and turning it off cuts off an upload already in progress - though any part of it that had already reached the server stays there.",
                 descH: 100f,
                 descWrap: true);
             autoLogToggleTxt = UIFactory.GetButtonText(autoLogToggleBtn);

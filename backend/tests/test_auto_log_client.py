@@ -344,8 +344,14 @@ def test_turning_the_setting_off_stops_a_transfer_already_running():
     player is entitled to after turning it back on).
     """
     caption = _settings_toggle_literal("SAutoLog")
-    assert "turning it off stops an upload that is already running" in caption, (
+    assert "cuts off an upload already in progress" in caption, (
         "the caption no longer claims cancellation")
+    # ...and claims only what an abort can give. Abort() tears down this end of
+    # the transfer; it cannot recall bytes the server has already read, and the
+    # clause used to sit beside "Nothing is sent while this is off" in a way
+    # that read as a promise that it could (r3 lens LOW).
+    assert "already reached the server stays there" in caption, (
+        "the caption promises a cancellation stronger than Abort() gives")
 
     upload = AUTO_LOG.read_text(encoding="utf-8")
     assert "abortIf: () => !Enabled" in upload, (
