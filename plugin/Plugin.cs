@@ -4195,19 +4195,53 @@ namespace CompetitiveRounds
                 //      seat on every seat, and it posts at once. Its team-mate does
                 //      NOT post a second report and does NOT arm a timer: it arms a
                 //      watch on that seat's TERMINAL OUTCOME (DcReportSync.ArmFallback
-                //      — the `cr_dcr` property the prompt seat publishes, plus that
-                //      seat leaving the room having dispatched nothing) and posts
-                //      nothing at all until one is known. An earlier cut of this arm
-                //      armed a DELAYED post at +45 s, sized against the prompt seat's
-                //      nominal retry budget; that is an elapsed-time guess about
-                //      another seat's transaction, Unity's request timeout is not a
-                //      hard ceiling under a stalled socket, and a last attempt landing
-                //      after the delayed post decides a rated completion versus
-                //      `dc_incomplete` by arrival order — the very defect this arm
-                //      exists to remove. When the watch does fire it posts ZERO point
-                //      totals, the one form the deployed endpoint can only record as
-                //      `dc_incomplete`, so no ordering of the two can select the rated
-                //      completion. What neither covers is a refusal that would apply
+                //      — the `cr_dcr` property the prompt seat publishes, and ONLY
+                //      that) and posts nothing at all until one is known. It also
+                //      requires every fighter seat to advertise `cr_dc3`, the outcome
+                //      protocol's own key: a room running two outcome protocols is a
+                //      room where a `cr_dcr` value does not mean what this build reads
+                //      it as, and the watch is not armed there at all.
+                //
+                //      DEPARTURE IS NOT A TRIGGER — it STANDS THE WATCH DOWN. This
+                //      note used to name "that seat leaving the room having dispatched
+                //      nothing" as a second terminal signal, and the tree has not done
+                //      that since the round that wrote the rule: the elected seat's
+                //      departure is ITSELF a disconnect in this same series, the
+                //      election runs again for it in the very next statements of this
+                //      method, and a REAL-TOTALS report about it is composed in a
+                //      process this watch holds no property from. Firing on the
+                //      departure would put a zero-total post beside that report. The
+                //      watch stands down instead and posts nothing (RoomActors
+                //      DcReportSync.Evaluate, the `_watchGone` arm, checked BEFORE the
+                //      failure arm).
+                //
+                //      An earlier cut of this arm armed a DELAYED post at +45 s, sized
+                //      against the prompt seat's nominal retry budget; that is an
+                //      elapsed-time guess about another seat's transaction, Unity's
+                //      request timeout is not a hard ceiling under a stalled socket,
+                //      and a last attempt landing after the delayed post decides a
+                //      rated completion versus `dc_incomplete` by arrival order — the
+                //      very defect this arm exists to remove. When the watch does fire
+                //      it posts ZERO point totals, the one form the deployed endpoint
+                //      can only record as `dc_incomplete`, so a fallback can never BE
+                //      the report that rates a series.
+                //
+                //      THAT IS THE WHOLE CLAIM, AND IT IS NARROWER THAN THE ONE THIS
+                //      NOTE USED TO MAKE. "No ordering of the two can select the rated
+                //      completion" is FALSE and was withdrawn: a zero-total fallback
+                //      that takes the row lock FIRST writes `dc_incomplete`, and a
+                //      real-totals report behind it is answered `{"ignored": true}` —
+                //      a rated lead-forfeit lost. The client-side table removes every
+                //      schedule one seat can observe; a SECOND disconnect on a
+                //      different seat is not orderable from inside any one client.
+                //      Closing it is the SERVER lane's half: this client now sends
+                //      `is_fallback=true` on exactly its fallback reports, and a
+                //      server carrying the deferral rule records the fallback without
+                //      settling, so a later real-totals report still rates the series.
+                //      Against a server that does not carry it the parameter is
+                //      ignored (#266) and the residual above stands unchanged — which
+                //      is why it is written here as a residual and not as a closure.
+                //      What neither covers is a refusal that would apply
                 //      to both seats (a room the series no longer names, a series
                 //      already gone): that is the endpoint's answer, not a delivery
                 //      failure, and the watch reads it as terminal and stands down.
@@ -4250,12 +4284,16 @@ namespace CompetitiveRounds
                 //     WHAT is reported, only which seats report it — that is the
                 //     whole reason the zeros are gone.
                 //   * Going silent after winning arm (1): its team-mate's watch sees
-                //     a TERMINAL outcome — a published failure, or that seat leaving
-                //     having dispatched nothing — and closes the series with a
-                //     zero-total report. Both seats are on the non-DC team, so the
-                //     only party who can reach that downgrade is the abandoned team
-                //     itself, and it downgrades its OWN forfeit; the leaver's side
-                //     has no lever on it (#283). A seat that dispatches and then goes
+                //     ONE terminal outcome — a published `cr_dcr=no`, i.e. every
+                //     attempt answered and refused, or nothing ever dispatched — and
+                //     closes the series with a zero-total report. Leaving the room is
+                //     NOT that outcome and never was in the shipped rule: a departure
+                //     stands the watch DOWN, because it is a fresh disconnect that the
+                //     election closes with a real-totals report. Both seats are on the
+                //     non-DC team, so the only party who can reach that downgrade is
+                //     the abandoned team itself, and it downgrades its OWN forfeit;
+                //     the leaver's side has no lever on it (#283). A seat that
+                //     dispatches and then goes
                 //     silent WITHOUT a terminal answer is the one state where its
                 //     team-mate posts nothing at all, because a request may still be
                 //     in flight and a fallback beside it would decide the series by
@@ -4382,7 +4420,12 @@ namespace CompetitiveRounds
                             + (elected != null ? elected.ActorNumber.ToString() : "?")
                             + " for a terminal outcome of its report (" + DcReportSync.OutcomeProp
                             + "); this seat posts NOTHING until one is known");
-                        DcReportSync.ArmFallback(seriesId, elected, myId, dcSteamId, observedRoom);
+                        // `survivors` is the fighter seats still present — the same
+                        // census list arm (1) elected from. ArmFallback takes the
+                        // OUTCOME-protocol quorum over it and refuses, audibly, in a
+                        // room where any of them is running a different one.
+                        DcReportSync.ArmFallback(seriesId, elected, myId, dcSteamId,
+                                                 observedRoom, survivors);
                         return;
                     }
                 }
@@ -4847,11 +4890,27 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Poll /team/series/{id}/state every 2s for the first ~20s
-        /// after joining a cr_ff room. Server cancels the series after 15s if
-        /// fewer than 4 of 4 spawn-confirms have arrived. When we see status=
-        /// 'canceled' with reason 'assembly_timeout', show a notification and
-        /// leave the room — saves the remaining clients from sitting on the
-        /// ready screen until our 30s force-StartGame timeout.</summary>
+        /// after joining a cr_ff room. THE ONLY PERMITTED CALLER of the mutating
+        /// route (ApiClient.PollTeamSeriesStateAssemblyOnly) — everything else
+        /// reads series status through the read-only route.
+        ///
+        /// <para>The server cancels the series when the row has been issued for
+        /// more than 180 SECONDS (main.py `_ASSEMBLY_DEADLINE_SECONDS` on
+        /// production 0cc7f75) with fewer than 4 of 4 spawn-confirms and no
+        /// live-game evidence. This comment said 15 seconds for months; 15 s is
+        /// not a bound this loop or the server has ever had, and the number
+        /// mattered because it made the loop look like the thing that outlives
+        /// the deadline when in fact the opposite is true: 3 s + 22 s of loop
+        /// life is entirely inside 180 s, which is exactly why this caller
+        /// cannot reach the cancel arm. The loop's duration bounds only the
+        /// loop; it does not bound the ROW's age, which is measured from
+        /// `room_issued_at` on the server and can already be hours old on the
+        /// first read after a bug-245 resume relock.</para>
+        ///
+        /// <para>When we see status='canceled' with reason 'assembly_timeout',
+        /// show a notification and leave the room — saves the remaining clients
+        /// from sitting on the ready screen until our 30s force-StartGame
+        /// timeout.</para></summary>
         private static System.Collections.IEnumerator PollAssemblyStateLoop()
         {
             yield return new WaitForSeconds(3f);
@@ -4864,7 +4923,7 @@ namespace CompetitiveRounds
                 if (string.IsNullOrEmpty(sid)) yield break;
 
                 bool gotResponse = false;
-                ApiClient.PollTeamSeriesState(sid, (status, reason, conf) =>
+                ApiClient.PollTeamSeriesStateAssemblyOnly(sid, (status, reason, conf) =>
                 {
                     gotResponse = true;
                     if (status == "canceled" && reason == "assembly_timeout")

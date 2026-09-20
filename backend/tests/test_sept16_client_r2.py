@@ -1874,7 +1874,10 @@ def test_the_dc_election_capability_follows_the_pre_join_protocol():
     assert 'internal const string CapabilityProp = "cr_dc2";' in body
     assert "if (PhotonNetwork.InRoom)" in body            # refuses an in-room write
     assert "if (Plugin.modDisabled) { _stageFailedPermanently = true; return; }" in body
-    assert "if (survivors == null || survivors.Count == 0) return false;" in body   # every(empty)
+    # every(empty) must not apply.  The rule now lives on the key-parameterised
+    # AllCapableOf, which is what BOTH capabilities of this class go through, so
+    # one reading of "capable" cannot apply to one key and miss the other (#432).
+    assert "if (seats == null || seats.Count == 0) return false;" in body
     # ...and not before the compatibility verdict: a capability staged inside
     # that window by a seat the verdict then disables can only be withdrawn with
     # an IN-ROOM write, which is the path the line above refuses.
@@ -2308,3 +2311,701 @@ def test_the_schema_note_names_the_deployed_pin():
         claim, sch,
         _mutate(sch, "PRODUCTION 0cc7f75", "the deployed main.py at cc92498", "schema pin"),
         "schema note pin")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ROUND 4 -- the two-lane close, and the GET that writes
+# ══════════════════════════════════════════════════════════════════════════
+#
+# Five of the round-3 review's HIGHs landed INSIDE the round-3 closure.  That is
+# the signal that the METHOD was wrong and not one implementation of it
+# (#252/#405), so the closing rule changed shape:
+#
+#   * it is no longer "a client-only guard plus a server NOTE".  It is a
+#     two-lane change.  The SERVER defers a fallback settlement so a real-totals
+#     report always wins the race; the CLIENT says which of its reports is a
+#     fallback (is_fallback) and advances its own capability so a mixed-version
+#     room never arms the new protocol at all.
+#   * the sixth was a plain sweep miss -- a second caller of the mutating state
+#     route -- and the control that should have caught it counted a URL literal.
+#
+# Every test below is the CLIENT half.  Each one that needs the server lane says
+# so, and says what this client does against a server without it.
+
+
+_CS_MEMBER = re.compile(
+    r"^ {8}(?:internal|private|public|protected)\s+[^;{}]*?\b([A-Za-z_0-9]+)\s*\(")
+
+
+def _all_sources():
+    return {p.name: p.read_text(encoding="utf-8") for p in sorted(PLUGIN.glob("*.cs"))}
+
+
+def _call_sites(method_name, sources=None):
+    """Every CALL SITE of a method across the whole client, as a set of
+    (file, enclosing member) pairs.
+
+    THIS IS THE CHECK THE PREVIOUS ROUND DID NOT HAVE.  Its H1 control counted
+    the mutating route's URL literal and asserted the count was 1 -- but a route
+    has ONE literal whether one method calls it or five, so that assertion was
+    true on a tree that had a second live caller in the team tab, and could
+    never have gone red for the defect it was named after.  A flag names a LINE;
+    the defect is a CLASS (#432).  The operation here is "a caller of a GET that
+    writes", so the thing to count is callers.
+
+    Declaration lines and comment lines are excluded; any other line mentioning
+    `name(` is a call site.  Reading the ENCLOSING member rather than the line
+    number is deliberate: it survives line drift, and the identity of the caller
+    is what the rule is about."""
+    if sources is None:
+        sources = _all_sources()
+    found = set()
+    for fname in sorted(sources):
+        member = "<file scope>"
+        for line in sources[fname].split("\n"):
+            m = _CS_MEMBER.match(line)
+            if m:
+                member = m.group(1)
+            stripped = line.strip()
+            if stripped.startswith("//"):
+                continue
+            if method_name + "(" not in line:
+                continue
+            if m is not None and m.group(1) == method_name:
+                continue                       # the declaration itself
+            found.add((fname, member))
+    return found
+
+
+def _member_owning(source, fragment):
+    """The member whose text contains `fragment`, by the same walk-back rule."""
+    member = "<file scope>"
+    for line in source.split("\n"):
+        m = _CS_MEMBER.match(line)
+        if m:
+            member = m.group(1)
+        if fragment in line:
+            return member
+    return None
+
+
+# The client-reachable GET routes whose PRODUCTION handler writes a lifecycle or
+# economy row.  Swept out of backend/api/main.py on the production pin by taking
+# every @app.get handler, delimiting it at the next top-level construct, and
+# keeping the ones that UPDATE a series/lobby/player table or call a bet
+# reconciler -- then intersecting that with the routes this client actually
+# builds.  Six survive:
+#
+#   /api/v1/presence/ping           UPDATE players            (last-seen stamp)
+#   /api/v1/queue/poll/{id}         UPDATE/DELETE ranked_queue, queue_blocks
+#   /api/v1/team/queue/poll/{id}    UPDATE team_series + reconcile bets
+#   /api/v1/ovt/queue/poll/{id}     UPDATE ovt_series
+#   /api/v1/ffa/queue/poll/{id}     UPDATE ffa_lobbies + reconcile bets
+#   /api/v1/team/series/{id}/state  UPDATE team_series + reconcile bets
+#
+# FIVE OF THE SIX ARE QUEUE TICKS, and their write is the thing the poll exists
+# to do: it is keyed on the CALLER'S OWN pre-start queue row, and its cancel
+# reasons are ready_timeout, member_banned, sitting_abandoned and a dead-lock
+# reset -- a sitting that has not begun.  A client that is polling its own queue
+# row is inside the window that write is designed for by construction.
+#
+# THE SIXTH IS DIFFERENT.  Its arm cancels a series that HAS begun
+# (status='active') on three conditions a healthy played 2v2 satisfies, and it
+# reconciles that series' bets.  It was the only one of the six with a caller
+# outside the window its write is designed for, and that caller was a menu tab.
+_MUTATING_GET_OWNERS = {
+    "/api/v1/presence/ping": "PresenceLoop",
+    "/api/v1/queue/poll/{steamId}": "UpdateQueuePoll",
+    "/api/v1/team/queue/poll/{steamId}": "UpdateTeamQueuePoll",
+    "/api/v1/ovt/queue/poll/{sid}": "UpdateOvtQueuePoll",
+    "/api/v1/ffa/queue/poll/{sid}": "UpdateFfaQueuePoll",
+    "/api/v1/team/series/{seriesId}/state": "PollTeamSeriesStateAssemblyOnly",
+}
+
+
+def test_r4_h1_every_mutating_get_is_built_in_exactly_one_method():
+    """The sweep, as an OPERATION over the whole class rather than one route.
+
+    Each of the six routes above is constructed in exactly ONE client method, so
+    each has a single choke point where its rule can be stated and enforced.  A
+    second construction site anywhere reddens this."""
+    api = _src("ApiClient.cs")
+    for route, owner in sorted(_MUTATING_GET_OWNERS.items()):
+        assert api.count(route) == 1, (route, api.count(route))
+        assert _member_owning(api, route) == owner, (route, _member_owning(api, route))
+
+    # and no OTHER file builds one of them
+    for name, src in _all_sources().items():
+        if name == "ApiClient.cs":
+            continue
+        for route in _MUTATING_GET_OWNERS:
+            assert route not in src, (name, route)
+
+    def claim(s):
+        return all(s.count(r) == 1 and _member_owning(s, r) == o
+                   for r, o in _MUTATING_GET_OWNERS.items())
+
+    # the mutation: a second construction site for the dangerous one
+    _assert_discriminating(
+        claim, api,
+        _mutate(api,
+                'string url = $"{baseUrl}/api/v1/team/series/{seriesId}/status";',
+                'string url = $"{baseUrl}/api/v1/team/series/{seriesId}/state";',
+                "R4 second state-route construction"),
+        "R4 H1 one construction site per mutating GET")
+
+    # NEGATIVE CONTROL: an unrelated edit in the same method leaves it true
+    assert claim(_mutate(api, "[VERSION] series_status_readonly=",
+                         "[VERSION] series-status-readonly=",
+                         "R4 H1 sweep negative control"))
+
+
+def test_r4_h1_the_mutating_state_route_has_exactly_one_caller_in_the_whole_client():
+    """COUNTING CALLERS, NOT LITERALS -- the finding this round closes.
+
+    The round-3 tree had two: Plugin.PollAssemblyStateLoop, which is the
+    assembly window the cancel arm was written for and whose whole life (3 s of
+    delay plus a 22 s loop, exited the moment the seat is out of the room) sits
+    inside the server's 180 s deadline; and ApiClient.UpdateTeamSeriesStatePoll,
+    the team tab's DC-grace banner, running from the MENU against whatever
+    series id was cached for as long as the tab was open.
+
+    The second one could reach the arm.  A played series reads fewer than four
+    spawn-confirms after a lost confirm POST or a bug-245 resume relock, the
+    relock also NULLs room_issued_at so the endpoint's COALESCE measures age
+    from created_at, and the live-game veto reads an in-process map that every
+    api restart empties.  The arm then sets status='canceled' with
+    invalidation_reason='assembly_timeout', reconciles the series' bets and
+    commits -- a played match voided as never assembled, its bets settled on the
+    wrong reason, and the real report afterwards answered {"ignored": true}.
+
+    The method's NAME now carries the rule, so a call site cannot be written
+    without reading it."""
+    sites = _call_sites("PollTeamSeriesStateAssemblyOnly")
+    assert sites == {("Plugin.cs", "PollAssemblyStateLoop")}, sites
+
+    # the read-only twin is the one the rest of the client uses
+    ro = _call_sites("PollTeamSeriesStatusReadOnly")
+    assert ("ApiClient.cs", "UpdateTeamSeriesStatePoll") in ro
+    assert ("Plugin.cs", "PollAssemblyStateLoop") not in ro
+
+    srcs = _all_sources()
+
+    def claim(api_text):
+        if "public static void PollTeamSeriesStateAssemblyOnly(" not in api_text:
+            return False
+        s = dict(srcs)
+        s["ApiClient.cs"] = api_text
+        return _call_sites("PollTeamSeriesStateAssemblyOnly", s) == {
+            ("Plugin.cs", "PollAssemblyStateLoop")}
+
+    # the mutation that reopens it: the banner calls the mutating route again
+    _assert_discriminating(
+        claim, srcs["ApiClient.cs"],
+        _mutate(srcs["ApiClient.cs"],
+                "            PollTeamSeriesStatusReadOnly(sid, null);",
+                "            PollTeamSeriesStateAssemblyOnly(sid, null);",
+                "R4 second caller of the mutating route"),
+        "R4 H1 one caller of the mutating GET")
+
+    # NEGATIVE CONTROL: renaming a log string does not move the caller set
+    assert claim(_mutate(srcs["ApiClient.cs"], "[2v2] DC-grace banner NOT polling series ",
+                         "[2v2] DC-grace banner is not polling series ",
+                         "R4 H1 caller-count negative control"))
+
+
+def test_r4_h1_the_banner_polls_the_read_only_route_and_only_when_it_is_advertised():
+    """THE PREDICATE, asserted as the code applies it.
+
+    The banner polls the read-only status route, and only while this server has
+    ADVERTISED it on /mod-version (`series_status_readonly`).  Against any other
+    server it polls NOTHING AT ALL -- it does not fall back to the write, and it
+    does not try to decide locally whether the series is "played" yet.
+
+    WHY THERE IS NO LOCAL PLAYED-YET TEST.  The three terms that select the
+    cancel arm are the row's confirm count, its age from room_issued_at, and the
+    api process's live-game map.  A client can see none of them, so wins-seen, a
+    game entered, or a cached status of dc_paused are all guesses about a
+    different quantity -- and each is wrong exactly in the resume case, where
+    the relock zeroes the confirms and NULLs the room stamp.  A check that
+    cannot fail on the state it exists to catch is worse than no check (#342).
+
+    THE GATE IS TAKEN TWICE, and that is the point (#432): once at the call site
+    so the refusal can SPEAK and name the series, and once inside the read-only
+    poller, so the rule belongs to the operation and not to one caller's
+    discipline.
+
+    SERVER DEPENDENCY: the read-only route is the server lane's.  Until it is
+    deployed the banner is dark; the refusal is logged once per series id."""
+    api = _src("ApiClient.cs")
+
+    # default FALSE: an older server leaves it false by not emitting the field
+    assert ("public static bool ServerHasReadOnlySeriesStatus { get; private set; } = false;"
+            in api)
+    # the ONE writer is the mod-version handler
+    assert api.count("ServerHasReadOnlySeriesStatus = ") == 1
+    assert _member_owning(api, "ServerHasReadOnlySeriesStatus = roStatus;") == "DoCheckModVersion"
+    assert 'ExtractJsonBool(req.downloadHandler.text, "series_status_readonly")' in api
+
+    ui = _method_body(api, "public static void UpdateTeamSeriesStatePoll")
+    assert ui, "the banner poll's own text could not be delimited"
+    assert "if (!ServerHasReadOnlySeriesStatus)" in ui
+    assert "PollTeamSeriesStatusReadOnly(sid, null);" in ui
+    assert "PollTeamSeriesStateAssemblyOnly" not in ui
+    # the refusal speaks, once per series, and names why
+    assert "DC-grace banner NOT polling series" in ui
+    assert "_statusPollRefusedForSeries" in ui
+    # and it returns BEFORE the throttle, so no poll is dispatched at all
+    assert ui.index("if (!ServerHasReadOnlySeriesStatus)") < ui.index("teamSeriesStateTimer +=")
+
+    ro = _method_body(api, "public static void PollTeamSeriesStatusReadOnly")
+    assert ro, "the read-only poller's own text could not be delimited"
+    assert "if (!ServerHasReadOnlySeriesStatus) return;" in ro
+    assert "/status" in ro and "/state" not in ro
+
+    def claim(s):
+        u = _method_body(s, "public static void UpdateTeamSeriesStatePoll")
+        r = _method_body(s, "public static void PollTeamSeriesStatusReadOnly")
+        if not u or not r:
+            return False
+        return ("if (!ServerHasReadOnlySeriesStatus)" in u
+                and "if (!ServerHasReadOnlySeriesStatus) return;" in r
+                and "PollTeamSeriesStateAssemblyOnly" not in u)
+
+    # mutation 1: the call-site gate goes
+    _assert_discriminating(
+        claim, api,
+        _mutate(api, "            if (!ServerHasReadOnlySeriesStatus)\n            {",
+                "            if (false)\n            {",
+                "R4 banner gate removed"),
+        "R4 H1 banner gated on the advertisement")
+
+    # mutation 2: the choke-point gate inside the poller goes
+    _assert_discriminating(
+        claim, api,
+        _mutate(api, "            if (!ServerHasReadOnlySeriesStatus) return;\n", "",
+                "R4 read-only poller gate removed"),
+        "R4 H1 read-only poller gated at the operation")
+
+    # mutation 3: the default flips, which would poll a write against every
+    # older server before /mod-version has answered
+    def default_claim(s):
+        return ("public static bool ServerHasReadOnlySeriesStatus { get; private set; } = false;"
+                in s)
+
+    _assert_discriminating(
+        default_claim, api,
+        _mutate(api,
+                "public static bool ServerHasReadOnlySeriesStatus { get; private set; } = false;",
+                "public static bool ServerHasReadOnlySeriesStatus { get; private set; } = true;",
+                "R4 advertisement defaults to true"),
+        "R4 H1 the advertisement defaults to absent")
+
+    # NEGATIVE CONTROL: rewording the refusal leaves every claim true
+    assert claim(_mutate(api, "banner stays dark", "banner remains dark",
+                         "R4 H1 predicate negative control"))
+
+
+# ── H2: the outcome protocol's own capability, and the mixed-room refusal ────
+
+
+def outcome_quorum(seats):
+    """AllOutcomeCapable, transliterated.  `seats` is one bool per fighter seat
+    present: True when that seat advertises cr_dc3.
+
+    every(empty) must NOT apply -- an empty seat list is the state in which
+    nothing is known about the room, and arming there is arming on no evidence
+    (#430: the refusal costs a late close, the arm costs a match result)."""
+    if not seats:
+        return False
+    return all(seats)
+
+
+def test_r4_h2_a_mixed_room_arms_nothing_over_the_whole_seat_space():
+    """The quorum, exercised over every room this arm can see.
+
+    The outcome protocol changed incompatibly while the property that advertises
+    it did not, so two generations could read each other's cr_dcr values as
+    their own.  The generation before this one published `no` for a report whose
+    attempts went UNANSWERED -- a transaction that may still be running
+    server-side -- and this generation treats `no` as terminal and fires on it.
+    The generation before THAT published nothing on this property at all and ran
+    an independent elapsed-time post this build cannot observe or stand down.
+
+    cr_dc3 is what makes "every cr_dcr value this watch acts on was written by a
+    process running these rules" a property of the ROOM rather than of this
+    seat's code (#286/#301: whole-room capability with quorum, never a room-name
+    prefix and never a version string)."""
+    # exactly one room in each size arms: the one where every seat advertises
+    for n in (0, 1, 2, 3, 4):
+        rooms = list(itertools.product([False, True], repeat=n))
+        armed = [r for r in rooms if outcome_quorum(list(r))]
+        assert armed == ([] if n == 0 else [tuple([True] * n)]), (n, armed)
+
+    # the negative control for the model itself: a rule that ignored the seats
+    # would arm the mixed rooms, which is the behaviour being removed
+    assert any(not outcome_quorum(list(r))
+               for r in itertools.product([False, True], repeat=3))
+
+
+def test_r4_h2_the_outcome_protocol_has_its_own_key_and_the_watch_takes_its_quorum():
+    """The key is new, the election key is untouched, and the gate is at the one
+    place a watch can come into existence.
+
+    TWO KEYS, NOT ONE RE-KEYED CONSTANT.  cr_dc2 is the ELECTION generation and
+    did not change this round; re-keying it would drop rooms to the floor
+    election for no reason.  cr_dc3 is the OUTCOME-PROTOCOL generation and is
+    what changed.  Folding a wire generation and a capability into one constant
+    breaks compatibility in both directions (#604).
+
+    OLD BUILDS ARE NEVER HANDED A VALUE THEY MISREAD.  Publication stays
+    unconditional: an older seat reading our cr_dcr sees only send/ok/no, under
+    this build's stricter meaning for `no`, plus `unk`, which its three-token
+    parser does not admit and therefore reads as nothing published -- post
+    nothing, the same decision this build makes.  cr_dc3 itself is a key those
+    builds never read."""
+    ra = _src("RoomActors.cs")
+    body = ra[ra.index("internal static class DcReportSync"):]
+
+    assert 'internal const string CapabilityProp = "cr_dc2";' in body        # unchanged
+    assert 'internal const string OutcomeCapabilityProp = "cr_dc3";' in body  # new
+
+    # both keys ride ONE pre-join merge, so a seat is never capable of one rule
+    # and unknown on the other in the same join snapshot
+    stage = body[body.index("internal static void StageCapability(string source)"):]
+    stage = stage[:stage.index("internal static void RevokeCapability()")]
+    assert "{ CapabilityProp, CapabilityValue }," in stage
+    assert "{ OutcomeCapabilityProp, OutcomeCapabilityValue }" in stage
+    assert stage.count("SetCustomProperties") == 1
+    # and both are withdrawn together on compat-disable
+    revoke = body[body.index("internal static void RevokeCapability()"):]
+    revoke = revoke[:revoke.index("internal static bool CapableOf")]
+    assert "{ CapabilityProp, 0 }," in revoke
+    assert "{ OutcomeCapabilityProp, 0 }" in revoke
+
+    # THE GATE: inside ArmFallback, before any watch state is written
+    arm = body[body.index("internal static void ArmFallback(string seriesId"):]
+    arm = arm[:arm.index("internal static void NoteActorProps")]
+    assert "AllOutcomeCapable(fighterSeats, out missingOutcome)" in arm
+    assert arm.index("AllOutcomeCapable(") < arm.index("_watchSeries = seriesId;")
+    assert "does not advertise " in arm            # the refusal names the key
+    assert "actor " in arm                         # ...and the seat
+    assert "fallback NOT armed" in arm
+
+    # publication is NOT gated: an older peer must keep getting what it always got
+    pub = _method_body(ra, "internal static void PublishOutcome(string seriesId, string outcome)")
+    assert pub, "PublishOutcome's own text could not be delimited"
+    assert "OutcomeCapabilityProp" not in pub
+
+    # the call site hands the census list, not a fresh guess at the roster
+    plug = _src("Plugin.cs")
+    assert "observedRoom, survivors);" in plug
+
+    def claim(s):
+        if "internal static class DcReportSync" not in s:
+            return False
+        b = s[s.index("internal static class DcReportSync"):]
+        if 'internal const string OutcomeCapabilityProp = "cr_dc3";' not in b:
+            return False
+        if "internal static void ArmFallback(string seriesId" not in b:
+            return False
+        a = b[b.index("internal static void ArmFallback(string seriesId"):]
+        a = a[:a.index("internal static void NoteActorProps")]
+        return ("AllOutcomeCapable(fighterSeats, out missingOutcome)" in a
+                and a.index("AllOutcomeCapable(") < a.index("_watchSeries = seriesId;"))
+
+    # the mutation: the quorum stops being consulted, which is the round-3 tree
+    _assert_discriminating(
+        claim, ra,
+        _mutate(ra,
+                "                int missingOutcome;\n"
+                "                if (!AllOutcomeCapable(fighterSeats, out missingOutcome))",
+                "                int missingOutcome = -1;\n"
+                "                if (false)",
+                "R4 mixed-room arm restored"),
+        "R4 H2 the watch takes the outcome quorum")
+
+    # NEGATIVE CONTROL: rewording the refusal line leaves the gate in place
+    assert claim(_mutate(ra, "so this room is running", "so this room runs",
+                         "R4 H2 quorum negative control"))
+
+
+# ── H3: the client half of the deferral, and what an older server does ───────
+
+
+def dc_report_query(fallback):
+    """The report-dc query string this client builds, transliterated.  Returns
+    the parameter names in order."""
+    names = ["reporter_steam_id", "dc_player_steam_id",
+             "t1_points_total", "t2_points_total", "photon_room_id"]
+    if fallback:
+        names.append("is_fallback")
+    names.append("hmac_sig")
+    return names
+
+
+def test_r4_h3_a_fallback_report_carries_is_fallback_and_a_prompt_report_does_not():
+    """The client half of the two-lane close.
+
+    A server carrying the deferral rule does not settle on a zero-total fallback:
+    it records that a survivor believes the series abandoned, answers
+    {"deferred": true}, and leaves the row active so a real-totals prompt report
+    arriving at ANY later time still reaches its normal branches including the
+    rated lead-forfeit.  The round-3 note claimed "client coupling: none
+    required" while the reviewed URL sent no such flag -- which would have left
+    every fallback on the immediate-settlement path with a complete server half
+    deployed (#635: a field on one side of a wire contract and not the other
+    ships the feature inert).
+
+    UNSIGNED, like photon_room_id, which already rides outside the frozen DC
+    canonical; extending the canonical would fail every current client's
+    signature.
+
+    DIRECTION (#283): setting it can only move the server toward the more
+    conservative outcome, and the server's predicate requires zero totals anyway.
+
+    AGAINST AN OLDER SERVER (#266): an unknown query parameter is IGNORED, the
+    request is answered 200, and the report settles immediately exactly as it
+    does today.  The flag buys nothing there and costs nothing, and nothing in
+    the client reads that 200 as proof the parameter was understood -- the
+    `deferred` field is what says so."""
+    assert dc_report_query(True) == ["reporter_steam_id", "dc_player_steam_id",
+                                     "t1_points_total", "t2_points_total",
+                                     "photon_room_id", "is_fallback", "hmac_sig"]
+    assert "is_fallback" not in dc_report_query(False)
+
+    api = _src("ApiClient.cs")
+    body = _method_body(api, "public static void ReportTeamSeriesDc")
+    assert body, "the report composer's own text could not be delimited"
+    assert '(fallback ? "&is_fallback=true" : "") +' in body
+    # exactly one emission, inside THIS method -- an occurrence count scoped to
+    # the function span, never file-wide (#432)
+    assert body.count('"&is_fallback=true"') == 1
+    # and the signature stays last, so the unsigned hint rides outside it
+    assert body.index('"&is_fallback=true"') < body.index("hmac_sig=")
+
+    def claim(s):
+        b = _method_body(s, "public static void ReportTeamSeriesDc")
+        return (bool(b) and '(fallback ? "&is_fallback=true" : "") +' in b
+                and b.count('"&is_fallback=true"') == 1)
+
+    _assert_discriminating(
+        claim, api,
+        _mutate(api, '                         (fallback ? "&is_fallback=true" : "") +\n', "",
+                "R4 is_fallback dropped"),
+        "R4 H3 the fallback names itself")
+
+    # the OTHER mutation this needs: the flag sent unconditionally, which would
+    # ask the server to defer a real-totals prompt report as well
+    _assert_discriminating(
+        claim, api,
+        _mutate(api, '(fallback ? "&is_fallback=true" : "") +', '"&is_fallback=true" +',
+                "R4 is_fallback sent on every report"),
+        "R4 H3 only a fallback names itself")
+
+    # NEGATIVE CONTROL
+    assert claim(_mutate(api, "// DIRECTION (#283). Setting it can only move",
+                         "// DIRECTION (#283): setting it can only move",
+                         "R4 H3 is_fallback negative control"))
+
+
+def test_r4_h3_the_deferred_answer_is_named_in_both_directions():
+    """A 200 alone does not distinguish a server that deferred this fallback
+    from one that dropped the unknown parameter and settled on it (#266).  The
+    `deferred` field is the positive signal the new rule emits (#438), and BOTH
+    branches log, because "deferred" and "settled by a server that never saw the
+    flag" are different facts a bundle has to be able to tell apart (#342).
+
+    SERVER DEPENDENCY: `deferred` is the server lane's field.  Until that lane
+    is deployed this logs the SETTLED line on every fallback, which is the
+    truthful description of what the deployed endpoint does."""
+    api = _src("ApiClient.cs")
+    send = _method_body(api, "private static IEnumerator SendTeamSeriesDcReport")
+    assert send, "the dispatch half's own text could not be delimited"
+    assert 'ExtractJsonBool(resp, "deferred")' in send
+    assert "fallback DEFERRED by the server" in send
+    assert "fallback SETTLED by the server" in send
+    # the deferred read happens on the FALLBACK path and before its return
+    assert send.index("if (fallback)") < send.index('ExtractJsonBool(resp, "deferred")')
+    # the prompt path is untouched: it still publishes the three-way outcome
+    assert "DcReportSync.OutcomeUnknown" in send
+
+    def claim(s):
+        b = _method_body(s, "private static IEnumerator SendTeamSeriesDcReport")
+        return (bool(b) and 'ExtractJsonBool(resp, "deferred")' in b
+                and "fallback DEFERRED by the server" in b
+                and "fallback SETTLED by the server" in b)
+
+    _assert_discriminating(
+        claim, api,
+        _mutate(api, 'try { deferred = ExtractJsonBool(resp, "deferred"); } catch { deferred = false; }',
+                "deferred = false;",
+                "R4 deferred status never read"),
+        "R4 H3 the deferred answer is read and named")
+
+    # NEGATIVE CONTROL
+    assert claim(_mutate(api, "the server's own sweep closes it if none does",
+                         "the server's own sweep closes it when none does",
+                         "R4 H3 deferred negative control"))
+
+
+# ── H5 / M1 / L1: comments that asserted what the tree does not keep ─────────
+
+
+def test_r4_h5_the_election_note_states_the_departure_rule_and_the_open_residual():
+    """A comment asserting a guarantee is a claim about the whole state space
+    (#302/#351), and these two were claims the tree stopped keeping rounds ago.
+
+    (a) "plus that seat leaving the room having dispatched nothing" named
+        DEPARTURE as a terminal signal that FIRES the fallback.  The tree stands
+        the watch DOWN on a departure, and has since the round that wrote the
+        rule: the elected seat's departure is itself a disconnect in this same
+        series, the election runs again for it in the very next statements, and
+        a real-totals report about it is composed in a process this watch holds
+        no property from.
+
+    (b) "so no ordering of the two can select the rated completion" was
+        withdrawn by the round before this one and left standing here.  A
+        zero-total fallback that takes the row lock first writes dc_incomplete
+        and a real-totals report behind it is answered {"ignored": true}.
+
+    What replaces (b) is the narrow claim plus the SERVER-LANE residual named as
+    a residual: the client sends is_fallback, and against a server without the
+    deferral rule the parameter is ignored and the displacement stands."""
+    plug = _src("Plugin.cs")
+
+    # the withdrawn claims are gone
+    assert "so no ordering of the two can select the rated" not in plug
+    assert "seat leaving the room having dispatched nothing" not in plug
+    # the rule the tree actually keeps is stated
+    assert "DEPARTURE IS NOT A TRIGGER" in plug
+    assert "stands the watch DOWN" in plug or "STANDS THE WATCH DOWN" in plug
+    # the residual is named as a residual, with its server dependency and #266
+    assert "is_fallback=true" in plug
+    assert "(#266)" in plug
+    assert "THAT IS THE WHOLE CLAIM" in plug
+    # the lying-client enumeration no longer lists departure as the trigger
+    assert "Leaving the room is" in plug
+
+    def claim(s):
+        return ("so no ordering of the two can select the rated" not in s
+                and "seat leaving the room having dispatched nothing" not in s
+                and "DEPARTURE IS NOT A TRIGGER" in s)
+
+    _assert_discriminating(
+        claim, plug,
+        _mutate(plug, "                //      DEPARTURE IS NOT A TRIGGER",
+                "                //      so no ordering of the two can select the rated\n"
+                "                //      completion. DEPARTURE IS NOT A TRIGGER",
+                "R4 withdrawn ordering claim restored"),
+        "R4 H5 the election note keeps only claims the tree keeps")
+
+    # NEGATIVE CONTROL: an unrelated wording change leaves it true
+    assert claim(_mutate(plug, "elapsed-time guess about another seat's transaction",
+                         "elapsed-time guess at another seat's transaction",
+                         "R4 H5 comment negative control"))
+
+
+def test_r4_m1_the_capability_note_documents_the_four_idle_states():
+    """The staging gate admits four idle client states; this note named two.
+
+    Narrowing the gate to the pair it named is not hypothetical: it is what
+    stopped the sibling capability staging at all once staging moved behind the
+    compatibility verdict, because the pair excluded every state the verdict
+    lands in.  The capability was then inert for the session with nothing in the
+    log saying so, which was the fifth HIGH of an earlier round (#342)."""
+    vf = _src("VanillaFixes.cs")
+    doc = vf[vf.index("/// <summary>Identical state rules to PoisonSync.StageCapability"):]
+    doc = doc[:doc.index("internal static void StageCapability(string source)")]
+
+    assert "merge only while Disconnected/PeerCreated" not in doc
+    for st in ("Disconnected", "PeerCreated", "ConnectedToMasterServer", "JoinedLobby"):
+        assert st in doc, st
+    assert "FOUR states" in doc or "four states" in doc
+    assert "InIdleClientState" in doc
+    # and the implementation really is that helper.  Sliced from the NOTE, not
+    # from the file's FIRST StageCapability: VanillaFixes carries more than one
+    # capability class, and a window that opens on the wrong one reads a
+    # neighbour's statements as this fix's (#342, the same defect _method_body
+    # exists to refuse).
+    impl = vf[vf.index("/// <summary>Identical state rules to PoisonSync.StageCapability"):]
+    impl = impl[:impl.index("internal static void RevokeCapability")]
+    assert "if (!InIdleClientState())" in impl
+
+    def claim(s):
+        if "/// <summary>Identical state rules to PoisonSync.StageCapability" not in s:
+            return False
+        d = s[s.index("/// <summary>Identical state rules to PoisonSync.StageCapability"):]
+        d = d[:d.index("internal static void StageCapability(string source)")]
+        return ("merge only while Disconnected/PeerCreated" not in d
+                and all(x in d for x in ("ConnectedToMasterServer", "JoinedLobby")))
+
+    _assert_discriminating(
+        claim, vf,
+        _mutate(vf, "        /// refuse in-room, merge only from an IDLE client state, one-shot, retried",
+                "        /// refuse in-room, merge only while Disconnected/PeerCreated, one-shot, retried",
+                "R4 two-state capability note restored"),
+        "R4 M1 the capability note names the gate it has")
+
+    # NEGATIVE CONTROL
+    assert claim(_mutate(vf, "which is what <c>InIdleClientState()</c> is",
+                         "which is what <c>InIdleClientState()</c> means",
+                         "R4 M1 note negative control"))
+
+
+def test_r4_l1_the_assembly_loop_comment_names_the_deployed_deadline():
+    """The note said the server cancels after 15 s; production defines 180.
+
+    The number matters beyond being wrong.  At 15 s the loop looks like the
+    thing that OUTLIVES the deadline, which would make its own duration the
+    reason it is safe.  At 180 s the opposite is true and the real reason is
+    visible: 3 s of delay plus a 22 s loop is entirely inside the deadline.  And
+    the loop's duration bounds only the loop -- the ROW's age is measured from
+    room_issued_at on the server and can already be hours old on the first read
+    after a resume relock.
+
+    The assertion below is DERIVED from the loop's own terms rather than
+    written down twice, so raising either term reddens this instead of passing
+    (#342)."""
+    plug = _src("Plugin.cs")
+    doc = plug[plug.index("/// <summary>Poll /team/series/{id}/state every 2s"):]
+    doc = doc[:doc.index("private static System.Collections.IEnumerator PollAssemblyStateLoop")]
+
+    assert "cancels the series after 15s" not in doc
+    assert "180 SECONDS" in doc
+    assert "_ASSEMBLY_DEADLINE_SECONDS" in doc
+    assert "0cc7f75" in doc                       # which server the number is from
+
+    documented = float(re.search(r"(\d+) SECONDS", doc).group(1))
+    loop = _method_body(plug,
+                        "private static System.Collections.IEnumerator PollAssemblyStateLoop")
+    assert loop, "the assembly loop's own text could not be delimited"
+    deadline = float(re.search(r"Time\.realtimeSinceStartup \+ (\d+)f", loop).group(1))
+    start = float(re.search(r"WaitForSeconds\((\d+)f\)", loop).group(1))
+    assert start + deadline < documented, (start, deadline, documented)
+
+    def claim(s):
+        if "/// <summary>Poll /team/series/{id}/state every 2s" not in s:
+            return False
+        d = s[s.index("/// <summary>Poll /team/series/{id}/state every 2s"):]
+        d = d[:d.index("private static System.Collections.IEnumerator PollAssemblyStateLoop")]
+        m = re.search(r"(\d+) SECONDS", d)
+        if not m or "cancels the series after 15s" in d:
+            return False
+        lp = _method_body(s, "private static System.Collections.IEnumerator PollAssemblyStateLoop")
+        if not lp:
+            return False
+        dl = float(re.search(r"Time\.realtimeSinceStartup \+ (\d+)f", lp).group(1))
+        st = float(re.search(r"WaitForSeconds\((\d+)f\)", lp).group(1))
+        return st + dl < float(m.group(1))
+
+    _assert_discriminating(
+        claim, plug,
+        _mutate(plug, "more than 180 SECONDS", "more than 15 SECONDS",
+                "R4 stale deadline restored"),
+        "R4 L1 the loop comment names the deployed deadline")
+
+    # NEGATIVE CONTROL
+    assert claim(_mutate(plug, "which is exactly why this caller",
+                         "which is precisely why this caller",
+                         "R4 L1 deadline negative control"))

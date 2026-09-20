@@ -41,6 +41,27 @@ namespace CompetitiveRounds
         // their own callers rather than locking the menu (r3/r4 findings).
         public static bool ForceUpdateRequired { get; private set; } = false;
 
+        /// <summary>True only when THIS server said, on /api/v1/mod-version, that it
+        /// serves the read-only per-series status route
+        /// (<c>GET /api/v1/team/series/{id}/status</c>). Default FALSE, and every
+        /// older server leaves it false by simply not emitting the field.
+        ///
+        /// <para>WHY AN ADVERTISEMENT AND NOT A PROBE. What this gates is the refusal
+        /// to call a GET that WRITES (see UpdateTeamSeriesStatePoll). The acceptance
+        /// signal therefore has to be something the new behaviour positively EMITS,
+        /// not the absence of an error (#438): an absent field, a server that never
+        /// answered, a parse that failed and a 404 all land on "not advertised",
+        /// which is the branch that touches nothing. Inferring it from a 404 on the
+        /// new route would mean sending a request per poll to a server that does not
+        /// have it, and reading a transport failure as a capability answer.</para>
+        ///
+        /// <para>#266 does not reach this field: an old server ignoring an unknown
+        /// QUERY parameter answers 200 with un-filtered data, but an old server
+        /// cannot emit a RESPONSE field it does not have. The unknown-parameter
+        /// direction is handled where it applies — the report-dc `is_fallback`
+        /// input, in ReportTeamSeriesDc.</para></summary>
+        public static bool ServerHasReadOnlySeriesStatus { get; private set; } = false;
+
         // Recent ranked series (for leaderboard sidebar)
         public static List<RecentSeriesEntry> CachedRecentSeries { get; private set; }
         public class RecentSeriesEntry
@@ -1878,6 +1899,22 @@ namespace CompetitiveRounds
                         Plugin.Log.LogWarning($"[VERSION] Mod is BELOW server minimum (v{Plugin.ModVersion} < v{minVer}) — update required");
                     }
                 }
+                // The one SERVER capability this client reads. It is not a version
+                // compare: a box can be behind or ahead of the advertised mod
+                // version for reasons that have nothing to do with which routes it
+                // serves, and the two backend boxes are deployed separately, so the
+                // route's presence is the only thing worth asking about (#604 — a
+                // wire version and a capability are two constants, never one).
+                // Absent field -> false -> the banner polls nothing at all.
+                bool roStatus = false;
+                try { roStatus = ExtractJsonBool(req.downloadHandler.text, "series_status_readonly"); }
+                catch { roStatus = false; }
+                ServerHasReadOnlySeriesStatus = roStatus;
+                Plugin.Log.LogInfo("[VERSION] series_status_readonly=" + (roStatus ? "yes" : "no")
+                    + (roStatus
+                        ? " — the team tab reads series status from the read-only route"
+                        : " — this server serves no read-only series status, so the team tab's "
+                          + "DC-grace banner polls NOTHING (the only other route is a lifecycle write)"));
                 // Auto-fire update on launch if behind. The Update method is no-op
                 // when running the Thunderstore build (it surfaces a notification only).
                 // NOT on the broadcast seat: that binary is installed by the build
@@ -13901,7 +13938,8 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Tracks the most recent series-state poll response so the
-        /// dispatcher coroutine can react. Set by PollTeamSeriesState.</summary>
+        /// dispatcher coroutine can react. Set by the shared response parse
+        /// (ApplySeriesStateResponse), whichever of the two routes fetched it.</summary>
         public static string LastSeriesStateStatus = null;
         public static string LastSeriesStateReason = null;
         public static int LastSeriesStateConfirmations = 0;
@@ -13910,28 +13948,79 @@ namespace CompetitiveRounds
         public static int LastSeriesT1Wins = 0;
         public static int LastSeriesT2Wins = 0;
         // Codex r2 f8: WHICH series the LastSeriesState* fields describe. Set
-        // ONLY in PollTeamSeriesState's success callback (to the id that
-        // response was for) and reset by the ActiveTeamSeriesId setter, so a
-        // consumer can require ForId == current before trusting the cache.
+        // ONLY in ApplySeriesStateResponse (to the id that response was for)
+        // and reset by the ActiveTeamSeriesId setter, so a consumer can require
+        // ForId == current before trusting the cache.
         public static string LastSeriesStateForId = null;
-        // Throttled background poll of the team-series state — 2s while we
+        // Throttled background poll of the team-series status — 2s while we
         // have an active or paused series, off otherwise.
         private static float teamSeriesStateTimer = 0f;
         private const float TEAM_SERIES_STATE_INTERVAL = 2f;
+        // One line per series id: the refusal below speaks ONCE instead of at
+        // the tab's frame rate, and it speaks at all rather than falling
+        // through in silence — an unpolled banner and a banner whose poll was
+        // refused are different facts (#342).
+        private static string _statusPollRefusedForSeries = null;
+
+        /// <summary>The team tab's DC-grace banner refresh.
+        ///
+        /// <para>THIS PATH MAY NOT REACH THE MUTATING ROUTE, IN ANY SERVER STATE.
+        /// <c>GET /team/series/{id}/state</c> is a lifecycle WRITE — see the block
+        /// above SendTeamSpawnConfirm for the full arm. It sets
+        /// <c>status='canceled'</c> with <c>invalidation_reason='assembly_timeout'</c>,
+        /// reconciles the series' bets and COMMITS, whenever the row reads
+        /// <c>status='active'</c> with fewer than four spawn-confirms, more than 180 s
+        /// past <c>room_issued_at</c>, and no positive live-game evidence in the api
+        /// process. Each of those three is reachable by a healthy PLAYED 2v2: a lost
+        /// spawn-confirm POST leaves a live game at 3/4 indefinitely; the bug-245
+        /// resume relock writes <c>spawn_confirmations=0</c> and
+        /// <c>room_issued_at=NULL</c>, after which the endpoint's COALESCE falls back
+        /// to <c>created_at</c> and the age is already hours on the first read; and
+        /// the live-game veto reads an in-process map that every api restart empties.
+        /// This method runs from the MENU, against whatever series id is cached, for
+        /// as long as the team tab is open — precisely a caller outside the assembly
+        /// window that write exists for.</para>
+        ///
+        /// <para>THE PREDICATE, stated as the code applies it: the banner polls the
+        /// READ-ONLY status route and nothing else, and it polls that only while
+        /// <see cref="ServerHasReadOnlySeriesStatus"/> is true — i.e. only while THIS
+        /// server has advertised the route. Against any server that has not, this
+        /// method polls NOTHING AT ALL and says so once per series.</para>
+        ///
+        /// <para>AND IT DOES NOT TRY TO DECIDE "IS THIS SERIES PLAYED YET" FROM HERE.
+        /// The three terms that actually select the cancel arm are the row's confirm
+        /// count, its age from <c>room_issued_at</c>, and the api process's live-game
+        /// map. A client can see none of them, so any local test — wins seen, a game
+        /// entered, a cached status of <c>dc_paused</c> — is a guess about a different
+        /// quantity, and a guess that is WRONG exactly in the resume case the relock
+        /// creates (#342: a check that cannot fail on the state it is meant to catch
+        /// is worse than no check). The unhandled case fails toward touching nothing
+        /// (#276). What the refusal costs is one countdown in one banner; what it
+        /// buys is that no UI poll can void a played series and refund its bets
+        /// (#430).</para></summary>
         public static void UpdateTeamSeriesStatePoll(bool force)
         {
             string sid = ActiveTeamSeriesId;
             if (string.IsNullOrEmpty(sid)) return;
+            if (!ServerHasReadOnlySeriesStatus)
+            {
+                if (_statusPollRefusedForSeries != sid)
+                {
+                    _statusPollRefusedForSeries = sid;
+                    Plugin.Log.LogInfo("[2v2] DC-grace banner NOT polling series " + sid
+                        + " — this server does not advertise series_status_readonly, and the only "
+                        + "other per-series route (GET .../state) is a lifecycle write that can "
+                        + "cancel a played series and reconcile its bets. The banner stays dark "
+                        + "until a server carrying the read-only status route answers this seat");
+                }
+                return;
+            }
             teamSeriesStateTimer += Time.deltaTime;
             if (!force && teamSeriesStateTimer < TEAM_SERIES_STATE_INTERVAL) return;
             teamSeriesStateTimer = 0f;
-            PollTeamSeriesState(sid, (status, reason, conf) =>
-            {
-                // PollTeamSeriesState already populates LastSeriesStateStatus etc.
-                // We just need to extract the DC fields, which it doesn't currently
-                // parse — the response JSON has them, but the in-helper parse uses
-                // a fixed callback signature. Refresh in a separate parse below.
-            });
+            // The parse fills LastSeriesStateStatus / LastSeriesDcGraceSeconds /
+            // LastSeriesT*Wins, which is everything the banner reads; no callback.
+            PollTeamSeriesStatusReadOnly(sid, null);
         }
 
         /// <summary>POST /team/series/continuation. Called by the reporter (lowest Steam
@@ -14120,12 +14209,41 @@ namespace CompetitiveRounds
                 dcRoom = "";
                 try { dcRoom = PhotonNetwork.InRoom ? (PhotonNetwork.CurrentRoom?.Name ?? "") : ""; } catch { }
             }
+            // is_fallback: TRUE on exactly the reports this client composes as a
+            // fallback, and absent otherwise. Unsigned, like photon_room_id, which
+            // already rides outside the frozen DC canonical — extending the canonical
+            // is a coordinated change that would fail every current client's
+            // signature.
+            //
+            // WHAT IT ASKS THE SERVER FOR. A server carrying the fallback-deferral
+            // rule does not settle on a zero-total fallback: it records that a
+            // survivor believes the series is abandoned and answers
+            // {"deferred": true}, leaving the row active so a real-totals prompt
+            // report arriving at any later time still reaches its normal branches,
+            // including the rated lead-forfeit. That is the half the client cannot
+            // close — two disconnects on different seats are not orderable from
+            // inside one client — and setting the flag is the client's whole part in
+            // closing it.
+            //
+            // AGAINST AN OLDER SERVER (#266). An unknown query parameter is IGNORED,
+            // the request is answered 200, and the report settles immediately exactly
+            // as it does today: the flag buys nothing and costs nothing there, the
+            // displacement residual stands unchanged, and no behaviour depends on the
+            // parameter having been understood. Nothing here reads the 200 as proof
+            // it was — that is what the `deferred` field below is for.
+            //
+            // DIRECTION (#283). Setting it can only move the server toward the more
+            // conservative outcome (defer instead of settle); omitting it is today's
+            // position. A client that set it falsely on a real-totals prompt report
+            // would be asking for its OWN team's forfeit to be deferred, and the
+            // server's predicate requires zero totals anyway.
             string url = $"{baseUrl}/api/v1/team/series/{seriesId}/report-dc" +
                          $"?reporter_steam_id={UnityWebRequest.EscapeURL(reporterSteamId)}" +
                          $"&dc_player_steam_id={UnityWebRequest.EscapeURL(dcPlayerSteamId)}" +
                          $"&t1_points_total={t1PointsTotal}" +
                          $"&t2_points_total={t2PointsTotal}" +
                          $"&photon_room_id={UnityWebRequest.EscapeURL(dcRoom)}" +
+                         (fallback ? "&is_fallback=true" : "") +
                          $"&hmac_sig={UnityWebRequest.EscapeURL(sig)}";
             // The URL is complete BEFORE the request exists. Every field in it is a
             // fact of the disconnect — the reporter, the leaver, the points as they
@@ -14157,7 +14275,33 @@ namespace CompetitiveRounds
                 if (ok) Plugin.Log.LogInfo($"[2v2-DC] report accepted: {resp}");
                 else Plugin.Log.LogWarning($"[2v2-DC] report failed after every retry: {resp}"
                     + $" (every attempt answered={answered})");
-                if (fallback) return;
+                if (fallback)
+                {
+                    // WHICH SERVER ANSWERED, said positively rather than assumed. A
+                    // 200 alone does not distinguish a server that deferred this
+                    // fallback from one that ignored the is_fallback parameter and
+                    // settled the series on it (#266 — an unknown query parameter is
+                    // dropped silently and the response is a healthy 200). The
+                    // `deferred` field is the positive signal the new rule emits
+                    // (#438), and BOTH directions are logged, because "deferred" and
+                    // "settled by a server that never saw the flag" are different
+                    // facts and a bundle has to be able to tell them apart (#342).
+                    if (ok)
+                    {
+                        bool deferred = false;
+                        try { deferred = ExtractJsonBool(resp, "deferred"); } catch { deferred = false; }
+                        if (deferred)
+                            Plugin.Log.LogInfo("[2v2-DC] fallback DEFERRED by the server — the row is "
+                                + "still open and a real-totals report arriving later still settles it "
+                                + "normally; the server's own sweep closes it if none does");
+                        else
+                            Plugin.Log.LogInfo("[2v2-DC] fallback SETTLED by the server (no deferred "
+                                + "flag in the answer) — this server does not carry the deferral rule, "
+                                + "or it declined to defer this report. The zero-total form still bounds "
+                                + "the row to dc_incomplete, and the displacement residual stands");
+                    }
+                    return;
+                }
                 // THREE outcomes, not two, because failure is two different facts.
                 //
                 //  ok        ANY server answer, including `{"ignored": true}`: the
@@ -14208,13 +14352,24 @@ namespace CompetitiveRounds
         //    empties, which its own comment describes as "for minutes after every
         //    deploy EVERY group looks idle".
         //
-        // The one shipped caller, Plugin.PollAssemblyStateLoop, can never reach the
-        // arm — it starts 3s after a cr_ff join, runs ~22s and exits the moment the
-        // seat is out of the room — so the probe removed below would have been the
-        // deadline arm's first reachable caller, and it would have voided a
-        // partly-played series as never assembled: not dc_incomplete, so never in
-        // the admin panel, bets settled on the wrong reason, and a real report
-        // afterwards answered with {"ignored": true}.
+        // THE PREVIOUS ROUND SAID "the one shipped caller" HERE AND WAS WRONG. It
+        // named Plugin.PollAssemblyStateLoop, which genuinely cannot reach the arm —
+        // it starts 3s after a cr_ff join, runs ~22s and exits the moment the seat is
+        // out of the room, so its whole life is inside the 180s deadline. But the
+        // team tab had a SECOND caller, UpdateTeamSeriesStatePoll, running from the
+        // menu against whatever series id was cached for as long as the tab was open;
+        // it was not found because the round's own check counted this URL literal,
+        // which is one occurrence whether it has one caller or five. A flag names a
+        // LINE, the defect is a CLASS (#432): the operation to sweep is "a caller of
+        // a GET that writes", and the check that closes it counts CALLERS.
+        //
+        // Both of those callers would have voided a partly-played series as never
+        // assembled: not dc_incomplete, so never in the admin panel, bets settled on
+        // the wrong reason, and a real report afterwards answered with
+        // {"ignored": true}. The tab's caller is gone as of this round — the banner
+        // reads PollTeamSeriesStatusReadOnly, and polls nothing at all against a
+        // server that does not serve it. This route keeps exactly one caller, and
+        // its method name now says so.
         // NOTHING REPLACES IT, because nothing needed it. The question it was asked
         // ("is this series still open?") is answered by the report endpoint itself,
         // atomically, under the FOR NO KEY UPDATE reread it already takes: a status
@@ -14240,54 +14395,96 @@ namespace CompetitiveRounds
             }));
         }
 
-        /// <summary>GET /team/series/{id}/state. Polled during the first 20s
-        /// after ready_join to detect server-side assembly cancel.</summary>
-        public static void PollTeamSeriesState(string seriesId, Action<string, string, int> onResponse)
+        /// <summary>GET /team/series/{id}/state — THE MUTATING ROUTE. Its first arm
+        /// cancels the series and reconciles its bets; the name carries that so a
+        /// call site cannot be written without reading it.
+        ///
+        /// <para>EXACTLY ONE CALLER IS PERMITTED: Plugin.PollAssemblyStateLoop, which
+        /// is the assembly window the cancel arm was written for — it starts 3 s
+        /// after a cr_ff join, lives ~22 s, and exits the moment this seat is out of
+        /// the room or has no pending 2v2 slot, so its whole life is inside the
+        /// server's 180 s deadline and it cannot reach the arm. Every other consumer
+        /// of series status uses PollTeamSeriesStatusReadOnly. The previous round
+        /// removed a second caller from the DC fallback path; a second one survived
+        /// in the team tab and is removed this round (see
+        /// UpdateTeamSeriesStatePoll). Do not add a third.</para></summary>
+        public static void PollTeamSeriesStateAssemblyOnly(string seriesId, Action<string, string, int> onResponse)
         {
             if (string.IsNullOrEmpty(seriesId)) return;
             string url = $"{baseUrl}/api/v1/team/series/{seriesId}/state";
             Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
             {
                 if (!ok || string.IsNullOrEmpty(resp)) return;
-                string status = ExtractJsonString(resp, "status") ?? "";
-                string reason = ExtractJsonString(resp, "reason") ?? "";
-                int conf = ExtractJsonInt(resp, "confirmations");
-                LastSeriesStateStatus = status;
-                LastSeriesStateReason = reason;
-                LastSeriesStateConfirmations = conf;
-                LastSeriesDcGraceSeconds = ExtractJsonInt(resp, "dc_grace_seconds_remaining");
-                LastSeriesDcTeamRemaining = ExtractJsonInt(resp, "dc_team_remaining");
-                LastSeriesT1Wins = ExtractJsonInt(resp, "t1_series_wins");
-                LastSeriesT2Wins = ExtractJsonInt(resp, "t2_series_wins");
-                // Codex r2 f8: stamp WHICH series this answer described — the
-                // ONLY writer of this field. A late callback for a previous
-                // series overwrites the cache above, but ForId then names that
-                // previous series, so the assembly loop's ForId==current check
-                // rejects it.
-                LastSeriesStateForId = seriesId;
-                // Aug 8 (Sid): the frozen team-colour stamp rides this poll
-                // (empty = vanilla / pre-migration). Publish only while the
-                // response still describes the ACTIVE series — a late callback
-                // for a previous series must not repaint the new one's stamp.
-                if (seriesId == ActiveTeamSeriesId)
-                {
-                    SeriesTeam1ColorName = ExtractJsonString(resp, "t1_color_name") ?? "";
-                    SeriesTeam1ColorHex = ExtractJsonString(resp, "t1_color_hex") ?? "";
-                    SeriesTeam2ColorName = ExtractJsonString(resp, "t2_color_name") ?? "";
-                    SeriesTeam2ColorHex = ExtractJsonString(resp, "t2_color_hex") ?? "";
-                    // Codex r2 f8-adjacent/f6: carry the decided bool with the
-                    // colours, and re-publish the room stamp from the poll —
-                    // idempotent (PublishSeriesStamp skips identical values
-                    // and no-ops on undecided-and-empty), and this is the one
-                    // fetch every fighter seat runs, so it reaches rooms the
-                    // continuation response (reporter-only) cannot.
-                    SeriesColorDecided = ExtractJsonBool(resp, "color_decided");
-                    TeamColorIdentity.PublishSeriesStamp(seriesId,
-                        SeriesTeam1ColorName, SeriesTeam1ColorHex,
-                        SeriesTeam2ColorName, SeriesTeam2ColorHex, SeriesColorDecided);
-                }
-                onResponse?.Invoke(status, reason, conf);
+                ApplySeriesStateResponse(seriesId, resp, onResponse);
             }));
+        }
+
+        /// <summary>GET /team/series/{id}/status — the READ-ONLY twin the server lane
+        /// adds this round. Same response shape as /state, no write on any arm, so a
+        /// UI may poll it for as long as it likes.
+        ///
+        /// <para>Gated HERE as well as at the call site, so the gate is a property of
+        /// the operation and not of one caller's discipline (#432). Against a server
+        /// that has not advertised the route this method sends nothing: it does not
+        /// fall back to /state, because falling back to a write is the whole defect
+        /// this pair exists to remove.</para></summary>
+        public static void PollTeamSeriesStatusReadOnly(string seriesId, Action<string, string, int> onResponse)
+        {
+            if (string.IsNullOrEmpty(seriesId)) return;
+            if (!ServerHasReadOnlySeriesStatus) return;
+            string url = $"{baseUrl}/api/v1/team/series/{seriesId}/status";
+            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
+            {
+                if (!ok || string.IsNullOrEmpty(resp)) return;
+                ApplySeriesStateResponse(seriesId, resp, onResponse);
+            }));
+        }
+
+        /// <summary>The shared response parse for the two routes above. Extracted so
+        /// the read-only route cannot drift into a second, subtly different reader of
+        /// the same payload — the two halves of one contract written apart is how a
+        /// field ends up on one side only (#635).</summary>
+        private static void ApplySeriesStateResponse(string seriesId, string resp,
+                                                     Action<string, string, int> onResponse)
+        {
+            string status = ExtractJsonString(resp, "status") ?? "";
+            string reason = ExtractJsonString(resp, "reason") ?? "";
+            int conf = ExtractJsonInt(resp, "confirmations");
+            LastSeriesStateStatus = status;
+            LastSeriesStateReason = reason;
+            LastSeriesStateConfirmations = conf;
+            LastSeriesDcGraceSeconds = ExtractJsonInt(resp, "dc_grace_seconds_remaining");
+            LastSeriesDcTeamRemaining = ExtractJsonInt(resp, "dc_team_remaining");
+            LastSeriesT1Wins = ExtractJsonInt(resp, "t1_series_wins");
+            LastSeriesT2Wins = ExtractJsonInt(resp, "t2_series_wins");
+            // Codex r2 f8: stamp WHICH series this answer described — the
+            // ONLY writer of this field. A late callback for a previous
+            // series overwrites the cache above, but ForId then names that
+            // previous series, so the assembly loop's ForId==current check
+            // rejects it.
+            LastSeriesStateForId = seriesId;
+            // Aug 8 (Sid): the frozen team-colour stamp rides this poll
+            // (empty = vanilla / pre-migration). Publish only while the
+            // response still describes the ACTIVE series — a late callback
+            // for a previous series must not repaint the new one's stamp.
+            if (seriesId == ActiveTeamSeriesId)
+            {
+                SeriesTeam1ColorName = ExtractJsonString(resp, "t1_color_name") ?? "";
+                SeriesTeam1ColorHex = ExtractJsonString(resp, "t1_color_hex") ?? "";
+                SeriesTeam2ColorName = ExtractJsonString(resp, "t2_color_name") ?? "";
+                SeriesTeam2ColorHex = ExtractJsonString(resp, "t2_color_hex") ?? "";
+                // Codex r2 f8-adjacent/f6: carry the decided bool with the
+                // colours, and re-publish the room stamp from the poll —
+                // idempotent (PublishSeriesStamp skips identical values
+                // and no-ops on undecided-and-empty), and this is the one
+                // fetch every fighter seat runs, so it reaches rooms the
+                // continuation response (reporter-only) cannot.
+                SeriesColorDecided = ExtractJsonBool(resp, "color_decided");
+                TeamColorIdentity.PublishSeriesStamp(seriesId,
+                    SeriesTeam1ColorName, SeriesTeam1ColorHex,
+                    SeriesTeam2ColorName, SeriesTeam2ColorHex, SeriesColorDecided);
+            }
+            onResponse?.Invoke(status, reason, conf);
         }
 
         /// <summary>Submit a 2v2 match. Reporter is the lowest Steam ID across

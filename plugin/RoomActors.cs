@@ -710,6 +710,16 @@ namespace CompetitiveRounds
     /// was no <c>cr_dc1</c>: the number is the election generation, and the
     /// generation before this one advertised nothing at all.</para>
     ///
+    /// <para>TWO KEYS, TWO RULES, DELIBERATELY NOT ONE. <c>cr_dc2</c> is the
+    /// ELECTION generation; <c>cr_dc3</c> is the OUTCOME-PROTOCOL generation, and
+    /// they are separate because they gate different things and a seat can agree
+    /// about one while disagreeing about the other. Folding them into one constant
+    /// is the shape that broke compatibility in both directions once already
+    /// (#604): the election rule did not change this round and re-keying it would
+    /// drop rooms to the floor election for no reason, while the outcome rule DID
+    /// change and leaving it on the old key is what let one generation read
+    /// another's values. See <c>OutcomeCapabilityProp</c>.</para>
+    ///
     /// <para>FAIL-CLOSED on every arm — a disabled mod, a staging failure, a
     /// survivor without the property, an empty survivor list (every(∅) must not
     /// apply) — and what "closed" costs here is only the floor election, i.e.
@@ -718,6 +728,41 @@ namespace CompetitiveRounds
     {
         internal const string CapabilityProp = "cr_dc2";
         internal const int CapabilityValue = 1;
+
+        /// <summary>The OUTCOME protocol's own whole-room capability: "this seat
+        /// runs the round-3 <c>cr_dcr</c> rules". It gates the FALLBACK WATCH and
+        /// nothing else.
+        ///
+        /// <para>WHY THE OUTCOME PROTOCOL NEEDED ITS OWN KEY. The values carried on
+        /// <c>cr_dcr</c> changed meaning incompatibly without the property that
+        /// advertises them changing, so two generations could read each other's
+        /// values as their own. The generation before this one published
+        /// <c>no</c> for a report whose attempts went UNANSWERED — a transaction
+        /// that may still be running server-side — and this generation treats
+        /// <c>no</c> as terminal and fires on it. A watcher on this build reading
+        /// that seat's <c>no</c> would post a zero-total report beside a live
+        /// transaction, which is the ordering defect the whole protocol exists to
+        /// remove. The generation before THAT published nothing at all on this
+        /// property and ran an independent +45 s timer, which this build cannot
+        /// observe or stand down.</para>
+        ///
+        /// <para>WHAT THE KEY BUYS, EXACTLY: the watch arms only where every
+        /// fighter seat present advertises <c>cr_dc3</c>, so every <c>cr_dcr</c>
+        /// value this seat ever ACTS on was written by a process running these
+        /// rules. In any mixed room this seat arms nothing and posts nothing, and
+        /// says which seat lacked the key.</para>
+        ///
+        /// <para>AND WHAT IT DOES NOT CHANGE: publishing. A seat on an older build
+        /// reading OUR <c>cr_dcr</c> sees only values it already had — <c>send</c>,
+        /// <c>ok</c>, <c>no</c> — under this build's STRICTER meaning for <c>no</c>
+        /// (answered and refused, never a timeout), plus <c>unk</c>, which its
+        /// three-token parser does not admit and which therefore reads as "nothing
+        /// published": post nothing, the same decision this build makes. An older
+        /// build never reads <c>cr_dc3</c> at all, because the key did not exist in
+        /// it. So publication stays unconditional and no older generation is ever
+        /// handed a value it misreads.</para></summary>
+        internal const string OutcomeCapabilityProp = "cr_dc3";
+        internal const int OutcomeCapabilityValue = 1;
 
         private static bool _staged, _stageFailedPermanently, _deferLogged;
 
@@ -773,12 +818,18 @@ namespace CompetitiveRounds
                     return;   // connecting/joining: wait for a clean moment
                 var local = PhotonNetwork.LocalPlayer;
                 if (local == null) return;
+                // BOTH keys in ONE merge, so a seat is never visible as capable of
+                // one rule and unknown on the other: the two are written by the same
+                // process under the same verdict, and a peer that can see one must be
+                // able to see the other in the same join snapshot.
                 local.SetCustomProperties(new ExitGames.Client.Photon.Hashtable
                 {
-                    { CapabilityProp, CapabilityValue }
+                    { CapabilityProp, CapabilityValue },
+                    { OutcomeCapabilityProp, OutcomeCapabilityValue }
                 });
                 _staged = true;
                 Plugin.Log.LogInfo("[2v2-DC] staged " + CapabilityProp + "=" + CapabilityValue
+                    + " " + OutcomeCapabilityProp + "=" + OutcomeCapabilityValue
                     + " pre-join (" + source + ", state=" + st + ")");
             }
             catch (Exception ex)
@@ -802,48 +853,82 @@ namespace CompetitiveRounds
                 if (local == null) return;
                 local.SetCustomProperties(new ExitGames.Client.Photon.Hashtable
                 {
-                    { CapabilityProp, 0 }
+                    { CapabilityProp, 0 },
+                    { OutcomeCapabilityProp, 0 }
                 });
-                Plugin.Log.LogWarning("[2v2-DC] revoked " + CapabilityProp
-                    + " — mod disabled, floor election everywhere");
+                Plugin.Log.LogWarning("[2v2-DC] revoked " + CapabilityProp + " and "
+                    + OutcomeCapabilityProp
+                    + " — mod disabled, floor election everywhere and no fallback watch");
             }
             catch (Exception ex) { Plugin.Log.LogWarning("[2v2-DC] revoke failed: " + ex.Message); }
         }
 
-        /// <summary>One actor's advertisement, read from the replicated property
-        /// every time. Anything that is not the exact integer value — absent,
-        /// null props, a revoked 0, a type we did not write — is NOT capable.</summary>
-        internal static bool Capable(PhotonPlayer actor)
+        /// <summary>One actor's advertisement of ONE of this class's keys, read from
+        /// the replicated property every time. Anything that is not the exact integer
+        /// value — absent, null props, a revoked 0, a type we did not write — is NOT
+        /// capable. Parameterised by key on purpose: both capabilities are read by
+        /// the same rule, so a change to what "capable" means cannot apply to one and
+        /// miss the other (#432).</summary>
+        internal static bool CapableOf(PhotonPlayer actor, string prop, int value)
         {
             try
             {
-                if (actor == null) return false;
+                if (actor == null || string.IsNullOrEmpty(prop)) return false;
                 var props = actor.CustomProperties;
                 if (props == null) return false;
                 object v;
-                if (!props.TryGetValue(CapabilityProp, out v)) return false;
-                return (v is int) && (int)v == CapabilityValue;
+                if (!props.TryGetValue(prop, out v)) return false;
+                return (v is int) && (int)v == value;
             }
             catch { return false; }
         }
 
-        /// <summary>True only when EVERY survivor advertises the capability.
-        /// <paramref name="missingActor"/> names the first that does not, for the
-        /// log line — the same shape the other three protocols report.</summary>
-        internal static bool AllCapable(List<PhotonPlayer> survivors, out int missingActor)
+        /// <summary>The ELECTION capability (<c>cr_dc2</c>) for one actor.</summary>
+        internal static bool Capable(PhotonPlayer actor)
+        {
+            return CapableOf(actor, CapabilityProp, CapabilityValue);
+        }
+
+        /// <summary>The OUTCOME-PROTOCOL capability (<c>cr_dc3</c>) for one actor.</summary>
+        internal static bool OutcomeCapable(PhotonPlayer actor)
+        {
+            return CapableOf(actor, OutcomeCapabilityProp, OutcomeCapabilityValue);
+        }
+
+        /// <summary>True only when EVERY seat in <paramref name="seats"/> advertises
+        /// the named key. <paramref name="missingActor"/> names the first that does
+        /// not, for the log line — the same shape the other three protocols report.
+        /// An empty or null list is NOT capable: every(∅) must not apply.</summary>
+        internal static bool AllCapableOf(List<PhotonPlayer> seats, string prop, int value,
+                                          out int missingActor)
         {
             missingActor = -1;
-            if (survivors == null || survivors.Count == 0) return false;
+            if (seats == null || seats.Count == 0) return false;
             bool all = true;
-            for (int i = 0; i < survivors.Count; i++)
+            for (int i = 0; i < seats.Count; i++)
             {
-                var a = survivors[i];
+                var a = seats[i];
                 if (a == null) { all = false; continue; }
-                if (Capable(a)) continue;
+                if (CapableOf(a, prop, value)) continue;
                 all = false;
                 if (missingActor < 0) missingActor = a.ActorNumber;
             }
             return all;
+        }
+
+        /// <summary>True only when EVERY survivor advertises the ELECTION
+        /// capability.</summary>
+        internal static bool AllCapable(List<PhotonPlayer> survivors, out int missingActor)
+        {
+            return AllCapableOf(survivors, CapabilityProp, CapabilityValue, out missingActor);
+        }
+
+        /// <summary>True only when EVERY seat listed advertises the OUTCOME-PROTOCOL
+        /// capability — the quorum the fallback watch arms on.</summary>
+        internal static bool AllOutcomeCapable(List<PhotonPlayer> seats, out int missingActor)
+        {
+            return AllCapableOf(seats, OutcomeCapabilityProp, OutcomeCapabilityValue,
+                                out missingActor);
         }
 
         // ── the elected seat's prompt-report outcome, and the fallback it gates ──
@@ -1021,10 +1106,20 @@ namespace CompetitiveRounds
         }
 
         /// <summary>The non-elected non-DC survivor arms the watch and posts
-        /// NOTHING. Every later move comes from <see cref="Evaluate"/>.</summary>
+        /// NOTHING. Every later move comes from <see cref="Evaluate"/>.
+        ///
+        /// <para>THE QUORUM IS TAKEN HERE, at the one place a watch can come into
+        /// existence, rather than at the call site: a gate that lives in the caller
+        /// is a property of that caller's discipline, and the next caller inherits
+        /// nothing (#432). <paramref name="fighterSeats"/> is the fighter seats
+        /// present when the disconnect was observed — the same census list the
+        /// election ran on. A departed seat is deliberately not in it: it can publish
+        /// nothing and post nothing, so requiring a key of it would refuse the watch
+        /// over a seat that cannot affect the outcome, and a guard is judged by what
+        /// its refusal costs (#430).</para></summary>
         internal static void ArmFallback(string seriesId, PhotonPlayer elected,
                                          string reporterSteamId, string dcSteamId,
-                                         string observedRoom)
+                                         string observedRoom, List<PhotonPlayer> fighterSeats)
         {
             try
             {
@@ -1033,6 +1128,37 @@ namespace CompetitiveRounds
                 {
                     Plugin.Log.LogWarning("[2v2-DC] fallback NOT armed — the elected seat or the "
                         + "report's own fields could not be resolved; this seat posts nothing");
+                    return;
+                }
+                // THE MIXED-ROOM REFUSAL. Arm only where every fighter seat present
+                // advertises the OUTCOME-protocol key, so every cr_dcr value this
+                // watch can ever act on was written by a process running these rules.
+                // A seat without it is either publishing the previous generation's
+                // values — where `no` also meant "an attempt went unanswered", a
+                // transaction that may still be running — or publishing nothing on
+                // this property at all while running a schedule of its own. Neither
+                // is observable from here, so the room is not one this watch can be
+                // right about.
+                //
+                // The refusal SPEAKS, once, and names the seat (#342): a watch that
+                // was refused and a watch that was never reached are different facts,
+                // and this line is the only thing that tells them apart in a bundle.
+                // What it costs is the same cost already paid in four other states —
+                // a series that closes on the elected seat's own report, or on the
+                // server's lease expiry and the admin path, instead of one that
+                // closes wrongly (#276, #430).
+                int missingOutcome;
+                if (!AllOutcomeCapable(fighterSeats, out missingOutcome))
+                {
+                    Plugin.Log.LogInfo("[2v2-DC] fallback NOT armed — "
+                        + (missingOutcome >= 0
+                            ? "actor " + missingOutcome.ToString(CultureInfo.InvariantCulture)
+                            : "a fighter seat")
+                        + " does not advertise " + OutcomeCapabilityProp + ", so this room is running "
+                        + "more than one outcome protocol and a " + OutcomeProp + " value from it "
+                        + "would not mean what this build reads it as. This seat posts NOTHING for "
+                        + "this series and publishes " + OutcomeProp + " as usual, which older builds "
+                        + "read exactly as they always did");
                     return;
                 }
                 _watchSeries = seriesId;

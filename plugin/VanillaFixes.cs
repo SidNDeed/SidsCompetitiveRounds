@@ -3119,8 +3119,25 @@ namespace CompetitiveRounds
         private static bool _deferLogged;
 
         /// <summary>Identical state rules to PoisonSync.StageCapability (#287):
-        /// refuse in-room, merge only while Disconnected/PeerCreated, one-shot,
-        /// retried from the persistent tick.</summary>
+        /// refuse in-room, merge only from an IDLE client state, one-shot, retried
+        /// from the persistent tick.
+        ///
+        /// <para>The idle set is FOUR states, not two, and this note named two of
+        /// them for as long as the gate had four. What #287 actually requires is
+        /// "never merge MID-JOIN" — a merge landing after LoadBalancingClient has
+        /// snapshotted enterRoomParams but before room entry is silently undelivered.
+        /// <c>Disconnected</c> and <c>PeerCreated</c> were the whole idle set only
+        /// while these capabilities staged at Awake; every one of them now stages
+        /// AFTER the compatibility verdict, by which time ROUNDS may already be
+        /// sitting on the master server or in the lobby. <c>ConnectedToMasterServer</c>
+        /// and <c>JoinedLobby</c> are equally safe — no join op is in flight and the
+        /// local merge rides the next one's snapshot — and all four capabilities
+        /// admit the same four states, which is what <c>InIdleClientState()</c> is.
+        /// Narrowing this gate back to the pair the old wording named is what stopped
+        /// PoisonSync staging at all once its staging moved behind the verdict: the
+        /// pair excluded every state the verdict actually lands in, and the
+        /// capability was inert for the session with nothing in the log saying so
+        /// (#342, and the fifth HIGH of the round before this one).</para></summary>
         internal static void StageCapability(string source)
         {
             try
