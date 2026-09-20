@@ -647,13 +647,38 @@ WATCHER_CS = Path(__file__).resolve().parents[2] / "plugin" / "GameStateWatcher.
 
 def test_the_client_still_builds_report_ids_the_way_this_file_assumes():
     """If the client's format changes, the derivation below is wrong and these
-    tests must fail rather than keep asserting against a stale shape."""
+    tests must fail rather than keep asserting against a stale shape.
+
+    UPDATED for the FFA half. This used to require the literal
+    `{matchStartTime:HHmmss}_r{FfaMode.GameNumber}` -- a local clock and a
+    per-seat counter, which is the shape that let two electors file one game
+    under two keys. The FFA key is now built by FfaReportRules.ReportRoomId
+    from the room name and a game number frozen at game over, so the literal
+    is gone and cannot come back (test_ffa_report_identity asserts its
+    absence). What this file actually depends on is unchanged and is what is
+    asserted here: the id the client sends is the issued room name with a
+    trailing `_r<n>` the derivation below strips, and a suffix run can carry
+    more than one underscore-separated part.
+    """
     src = WATCHER_CS.read_text(encoding="utf-8", errors="replace")
     assert '_r{reportRoundTotal}' in src, (
         "the 1v1 report id no longer ends in the _r<n> suffix this derivation strips"
     )
-    assert '{matchStartTime:HHmmss}_r{FfaMode.GameNumber}' in src, (
-        "the FFA report id no longer has the _<HHmmss>_r<n> shape this derivation strips"
+    assert 'FfaReportRules.ReportRoomId(' in src, (
+        "the FFA report id is no longer built by the shared rule, so this "
+        "file cannot know its shape"
+    )
+    rules = (Path(__file__).resolve().parents[2] / "plugin" / "FfaReportRules.cs"
+             ).read_text(encoding="utf-8", errors="replace")
+    suffix = " ".join(rules[rules.index("ReportRoomId(string roomName"):][:700].split())
+    assert '+ "_r" + frozenGame' in suffix, (
+        "the FFA report id no longer ends in the _r<n> suffix this derivation "
+        "strips: " + suffix[:300]
+    )
+    assert '{matchStartTime:HHmmss}' not in src, (
+        "a local clock is back in a report id; the derivation below strips a "
+        "FIXED number of trailing parts and would hand the lookup a prefix "
+        "that was never issued"
     )
 
 
