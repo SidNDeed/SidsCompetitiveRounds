@@ -3,6 +3,13 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 
+// The binder orders used to be a private enum here. Item 20 moved the member
+// set, the cycler and the comparator into BinderSortRules so a plain compiler
+// (tools/client-rules-harness) can RUN them; the alias keeps every switch site
+// in this file reading as it always has, and keeps ONE definition of the set
+// the cycle length is derived from.
+using Sort = CompetitiveRounds.BinderSortRules.Mode;
+
 namespace CompetitiveRounds
 {
     /// <summary>Player Cards (Sept 10 batch, WP-E): the Collection tab (Open
@@ -84,9 +91,27 @@ namespace CompetitiveRounds
         /// <summary>Binder orders (2026-09-13): the header button cycles them.
         /// Position is the leaderboard position printed on the card
         /// (board_rank); a card of a player who was off the board that day
-        /// sorts last under it.</summary>
-        private enum Sort { Name, Rarity, Edition, Date, Position }
+        /// sorts last under it. Rating position (item 20) asks the different
+        /// question — where that player stands on the same board TODAY — and
+        /// is offered only while the collection answer carries standings.
+        ///
+        /// The members themselves are BinderSortRules.Mode (aliased to `Sort`
+        /// at the top of this file): Unity-free, so the cycler and the
+        /// comparator are EXECUTED by tools/client-rules-harness rather than
+        /// described by a source test.</summary>
         private static Sort binderSort = Sort.Name;
+        /// <summary>A sort read out of the config file that has not been
+        /// applied yet.
+        ///
+        /// The binder's FIRST paint of a session always happens before the
+        /// collection fetch has answered — OnTabEntered only STARTS the fetch
+        /// and RefreshBinder then paints the col == null branch — so resolving
+        /// a stored "RatingPosition" there would coerce it to Name on every
+        /// launch. It is held instead, and BinderSortRules.Resolve decides on
+        /// each paint whether to apply it, drop it for this session, or keep
+        /// waiting. None of the three writes the config back: the config is
+        /// written by CycleSort, an explicit click, and by nothing else.</summary>
+        private static Sort? pendingBinderSort;
         private static Tile[] binderTiles;
         private static GameObject[] binderRows;
         private static int binderPage;
@@ -1630,9 +1655,33 @@ namespace CompetitiveRounds
         private static readonly List<ApiClient.PcPrint> sorted = new List<ApiClient.PcPrint>();
         private static readonly Dictionary<string, int> faceCounts = new Dictionary<string, int>();
 
+        /// <summary>What this session knows about the subjects' standings.
+        /// Three values, because "no answer has been read yet" and "an answer
+        /// was read and carried none" must not decide the same way (#430) —
+        /// the cycler may treat them alike, the restore may not.</summary>
+        private static BinderSortRules.Standings CurrentStandings()
+        {
+            var col = ApiClient.CachedPcCollection;
+            if (col == null) return BinderSortRules.Standings.Unknown;
+            return col.subject_standings
+                ? BinderSortRules.Standings.Present
+                : BinderSortRules.Standings.Absent;
+        }
+
+        /// <summary>The header button. The next mode comes from
+        /// BinderSortRules, which derives the cycle length from the enum — the
+        /// "% 5" that stood here was right for exactly as long as there were
+        /// five sorts — and steps over a mode the current answer cannot serve.
+        ///
+        /// This is the ONLY writer of the stored sort: an explicit click. No
+        /// paint path, no fallback and no availability test writes it, so a
+        /// session that cannot offer the rating sort costs the player that
+        /// session's ordering and never the preference itself.</summary>
         private static void CycleSort()
         {
-            binderSort = (Sort)(((int)binderSort + 1) % 5);
+            binderSort = BinderSortRules.Next(binderSort, CurrentStandings());
+            pendingBinderSort = null;   // an explicit choice supersedes a restore still waiting
+            if (Plugin.BinderSort != null) Plugin.BinderSort.Value = BinderSortRules.NameOf(binderSort);
             binderPage = 0;
             NativeUI.MarkDirty();
         }
@@ -1645,51 +1694,80 @@ namespace CompetitiveRounds
                 case Sort.Edition: return I18n.Tr("Edition");
                 case Sort.Date: return I18n.Tr("Date obtained");
                 case Sort.Position: return I18n.Tr("Position");
+                case Sort.RatingPosition: return I18n.Tr("Rating position");
                 default: return I18n.Tr("Name");
             }
         }
 
-        private static int EditionNo(ApiClient.PcPrint p) { int e; return int.TryParse(p.edition_id ?? "", out e) ? e : int.MaxValue; }
-        private static int BoardKey(ApiClient.PcPrint p) { return p.board_rank > 0 ? p.board_rank : int.MaxValue; }
+        /// <summary>Plugin.Awake hands over the stored sort once. Parsing is
+        /// BinderSortRules' job (a member NAME, never an ordinal; an
+        /// unrecognised one falls back to Name) and applying it is deferred —
+        /// see pendingBinderSort.</summary>
+        internal static void RestoreBinderSort(string stored)
+        {
+            pendingBinderSort = BinderSortRules.Parse(stored, Sort.Name);
+        }
 
-        /// <summary>The binder order: the chosen key first, then the name order
-        /// as the tiebreaker under every mode (and the whole order under Name),
+        private static int EditionNo(ApiClient.PcPrint p) { int e; return int.TryParse(p.edition_id ?? "", out e) ? e : int.MaxValue; }
+
+        /// <summary>One print reduced to the keys the order reads. Everything
+        /// locale- or Unity-dependent is resolved HERE — SafeName goes through
+        /// I18n, RarityOrder is already a number — so BinderSortRules stays
+        /// free of both and can be run under a plain compiler.</summary>
+        private static BinderSortRules.Subject SortKey(ApiClient.PcPrint p)
+        {
+            return new BinderSortRules.Subject
+            {
+                PrintId = p.print_id,
+                CardId = p.card_id,
+                EditionId = p.edition_id,
+                MintedAt = p.minted_at,
+                Name = SafeName(p),
+                RarityOrder = RarityOrder(p.rarity),
+                Foil = p.foil,
+                Signed = p.signed,
+                EditionNo = EditionNo(p),
+                PoolRank = p.pool_rank,
+                MintBoardRank = p.board_rank,       // the number on the card face
+                SubjectId = p.subject_player_id,
+                Rank = p.subject_board_rank,        // where that player stands today
+                Inactive = p.subject_inactive,
+                Rated = p.subject_rated,
+                Rating = p.subject_rating,
+            };
+        }
+
+        /// <summary>The binder order. The rule itself is BinderSortRules.Compare,
+        /// which the harness runs: the chosen key first, then the name order as
+        /// the tiebreaker under every mode (and the whole order under Name),
         /// down to the print id so the order is total.</summary>
         private static int CompareForBinder(ApiClient.PcPrint a, ApiClient.PcPrint b)
         {
-            int c;
-            switch (binderSort)
-            {
-                case Sort.Rarity:
-                    c = RarityOrder(a.rarity).CompareTo(RarityOrder(b.rarity)); if (c != 0) return c;
-                    c = (b.foil ? 1 : 0).CompareTo(a.foil ? 1 : 0); if (c != 0) return c;
-                    c = (b.signed ? 1 : 0).CompareTo(a.signed ? 1 : 0); if (c != 0) return c;
-                    break;
-                case Sort.Edition:
-                    c = EditionNo(a).CompareTo(EditionNo(b)); if (c != 0) return c;
-                    c = string.CompareOrdinal(a.edition_id ?? "", b.edition_id ?? ""); if (c != 0) return c;
-                    c = RarityOrder(a.rarity).CompareTo(RarityOrder(b.rarity)); if (c != 0) return c;
-                    break;
-                case Sort.Date:
-                    c = string.CompareOrdinal(b.minted_at ?? "", a.minted_at ?? ""); if (c != 0) return c;   // newest first
-                    break;
-                case Sort.Position:
-                    c = BoardKey(a).CompareTo(BoardKey(b)); if (c != 0) return c;
-                    c = a.pool_rank.CompareTo(b.pool_rank); if (c != 0) return c;
-                    break;
-            }
-            c = string.Compare(SafeName(a), SafeName(b), StringComparison.OrdinalIgnoreCase); if (c != 0) return c;
-            c = string.CompareOrdinal(a.card_id ?? "", b.card_id ?? ""); if (c != 0) return c;
-            c = RarityOrder(a.rarity).CompareTo(RarityOrder(b.rarity)); if (c != 0) return c;
-            c = (b.foil ? 1 : 0).CompareTo(a.foil ? 1 : 0); if (c != 0) return c;
-            c = (b.signed ? 1 : 0).CompareTo(a.signed ? 1 : 0); if (c != 0) return c;
-            c = string.CompareOrdinal(a.minted_at ?? "", b.minted_at ?? "");
-            return c != 0 ? c : string.CompareOrdinal(a.print_id, b.print_id);
+            return BinderSortRules.Compare(SortKey(a), SortKey(b), binderSort);
         }
 
         private static void RefreshBinder(ApiClient.PcMe me)
         {
             var col = ApiClient.CachedPcCollection;
+            // The deferred restore (item 20), BEFORE the sort, off the same
+            // `col` this paint reads. Unknown keeps it waiting; only an answer
+            // that was actually read decides, and neither outcome touches the
+            // stored value.
+            if (pendingBinderSort.HasValue)
+            {
+                switch (BinderSortRules.Resolve(pendingBinderSort.Value, CurrentStandings()))
+                {
+                    case BinderSortRules.Restore.Apply:
+                        binderSort = pendingBinderSort.Value;
+                        pendingBinderSort = null;
+                        binderPage = 0;
+                        break;
+                    case BinderSortRules.Restore.DropForSession:
+                        pendingBinderSort = null;
+                        break;
+                    // Keep: the fetch has not answered yet; try again next paint.
+                }
+            }
             sorted.Clear(); faceCounts.Clear();
             if (col != null)
             {
@@ -2165,8 +2243,17 @@ namespace CompetitiveRounds
                 // a synthetic 375x525 face in the cache for every print — the
                 // exact sprite size a fetched face has, so the action row is
                 // verified under the same layout pressure the live binder has.
-                var col = new ApiClient.PcCollection { owner_steam_id = "dev", owner_name = "Sid", is_public = true };
+                var col = new ApiClient.PcCollection { owner_steam_id = "dev", owner_name = "Sid", is_public = true, subject_standings = true };
                 string[] rar2 = { "legendary", "epic", "rare", "uncommon", "common", "common", "rare", "uncommon", "common", "common" };
+                // Item 20's witness set, per SUBJECT: the front group, both
+                // sides of the 100/101 boundary, a rank-5 subject who has gone
+                // quiet (highest rating of the ten, and still at the back), and
+                // two unrated subjects behind every rated one. subject_rank 0
+                // is "off the board today".
+                int[] subjRank = { 1, 2, 100, 101, 5, 0, 0, 0, 0 };
+                bool[] subjQuiet = { false, false, false, false, true, false, false, false, false };
+                bool[] subjRated = { true, true, true, true, true, true, true, false, false };
+                float[] subjRating = { 1900f, 1860f, 1500f, 1820f, 2400f, 1700f, 1300f, 0f, 0f };
                 for (int i = 0; i < 10; i++)
                 {
                     int subj = i == 9 ? 8 : i;   // the last two are the same card
@@ -2177,6 +2264,8 @@ namespace CompetitiveRounds
                         pool_rank = i + 1, rating = 1900 - i * 40, peak_rating = 1950 - i * 40, board_rank = i < 5 ? i + 1 : 0,
                         series_wins = 40 - i * 3, series_losses = 10 + i, top_card = "Bombs Away", title = i == 1 ? "Champion" : "", rank_name = "Advanced I",
                         source = "bought", slot = i % 5, dup_at_pull = -1,
+                        subject_board_rank = subjRank[subj], subject_inactive = subjQuiet[subj],
+                        subject_rated = subjRated[subj], subject_rating = subjRating[subj],
                         face_rev = mode == "binder-faces" ? "dev" : null,
                     });
                 }

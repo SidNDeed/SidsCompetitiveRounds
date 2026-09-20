@@ -143,6 +143,20 @@ namespace CompetitiveRounds
 - A <b>Signed</b> card carries the player's autograph across the picture and a seal.
 - The bottom edge has the edition, the minted date, and your copy's print number. Click a binder tile to see the card full size.");
 
+        /// <summary>Item 20, and deliberately its OWN block rather than three
+        /// more lines inside CardsFace.
+        ///
+        /// A translation key IS the English source string, so a bullet added
+        /// inside that 1,786-character literal would retire its four shipped
+        /// translations and hand the whole "Reading a card" page back to
+        /// English in es/ru/uk/sv. Composing at the article — the same thing
+        /// the "cards" article already does with CardsIntro + CardsPacks —
+        /// adds one key and removes none.</summary>
+        private static string CardsBinderSort => I18n.Tr(@"<color=#FFD94D><b>SORTING THE BINDER</b></color>
+
+- <b>Rating position</b> orders the binder by where each player stands on the leaderboard today - top 100 first. Players outside it, or not seen in 90 days, go to the back, ordered by rating.
+- The number printed on a card is the rank it was minted with, which can differ.");
+
         private static string CardsPictures => I18n.Tr(@"<color=#FFD94D><b>YOUR PICTURE ON OTHER PEOPLE'S CARDS</b></color>
 
 - The card of you shows your <b>in-game character</b>: the body, face items, colour and effect you play with, drawn by your own PC when you visit the Collection or Settings tab after a change, and sent once. Nobody else's PC renders you.
@@ -252,7 +266,7 @@ namespace CompetitiveRounds
             new Category { Title = () => I18n.Tr("Player Cards"), Color = CAT_CARDS, Articles = new[]
             {
                 new Article { Key = "cards",          Title = () => I18n.Tr("Player Cards"),            Body = () => CardsIntro + "\n\n" + CardsPacks },
-                new Article { Key = "cards-face",     Title = () => I18n.Tr("Reading a card"),          Body = () => CardsFace },
+                new Article { Key = "cards-face",     Title = () => I18n.Tr("Reading a card"),          Body = () => CardsFace + "\n\n" + CardsBinderSort },
                 new Article { Key = "cards-pictures", Title = () => I18n.Tr("Card pictures & settings"), Body = () => CardsPictures },
             }},
         });

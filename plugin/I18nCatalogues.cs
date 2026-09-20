@@ -2972,6 +2972,14 @@ namespace CompetitiveRounds
             ["Room rules: friendly fire OFF"] = "Reglas de sala: fuego amigo DESACTIVADO",
             ["Room rules: friendly fire OFF, same cards for everyone"] = "Reglas de sala: fuego amigo DESACTIVADO, mismas cartas para todos",
             ["Room rules: same cards for everyone"] = "Reglas de sala: mismas cartas para todos",
+
+            // Added 2026-09-20: item 20, the binder's rating-position sort.
+            // The wiki block is its own key, composed into the "Reading a card"
+            // article beside CardsFace -- adding it INSIDE that literal would have
+            // retired this locale's translation of the whole page. Sorted among
+            // themselves; entries above are untouched.
+            ["<color=#FFD94D><b>SORTING THE BINDER</b></color>\n\n- <b>Rating position</b> orders the binder by where each player stands on the leaderboard today - top 100 first. Players outside it, or not seen in 90 days, go to the back, ordered by rating.\n- The number printed on a card is the rank it was minted with, which can differ."] = "<color=#FFD94D><b>ORDENAR EL ÁLBUM</b></color>\n\n- <b>Posición por rating</b> ordena el álbum por la posición que cada jugador ocupa hoy en la clasificación: los 100 primeros van delante. Quienes quedan fuera, o llevan 90 días sin aparecer, van al final, ordenados por rating.\n- El número impreso en una carta es el puesto que tenía al acuñarse, y puede ser distinto.",
+            ["Rating position"] = "Posición por rating",
         };
 
         private static readonly Dictionary<string, string> RU = new Dictionary<string, string>
@@ -5910,6 +5918,14 @@ namespace CompetitiveRounds
             ["Room rules: friendly fire OFF"] = "Правила комнаты: огонь по своим ВЫКЛ",
             ["Room rules: friendly fire OFF, same cards for everyone"] = "Правила комнаты: огонь по своим ВЫКЛ, одинаковые карты у всех",
             ["Room rules: same cards for everyone"] = "Правила комнаты: одинаковые карты у всех",
+
+            // Added 2026-09-20: item 20, the binder's rating-position sort.
+            // The wiki block is its own key, composed into the "Reading a card"
+            // article beside CardsFace -- adding it INSIDE that literal would have
+            // retired this locale's translation of the whole page. Sorted among
+            // themselves; entries above are untouched.
+            ["<color=#FFD94D><b>SORTING THE BINDER</b></color>\n\n- <b>Rating position</b> orders the binder by where each player stands on the leaderboard today - top 100 first. Players outside it, or not seen in 90 days, go to the back, ordered by rating.\n- The number printed on a card is the rank it was minted with, which can differ."] = "<color=#FFD94D><b>СОРТИРОВКА АЛЬБОМА</b></color>\n\n- <b>Позиция в топе</b> сортирует альбом по тому, какое место игрок занимает в таблице лидеров сегодня: первые 100 идут вперёд. Те, кто вне топа или не появлялся 90 дней, уходят в конец и сортируются по рейтингу.\n- Число, напечатанное на карте, — это место на момент её выпуска, и оно может отличаться.",
+            ["Rating position"] = "Позиция в топе",
         };
 
         private static readonly Dictionary<string, string> UK = new Dictionary<string, string>
@@ -8774,6 +8790,14 @@ namespace CompetitiveRounds
             ["Room rules: friendly fire OFF"] = "Правила кімнати: вогонь по своїх ВИМК",
             ["Room rules: friendly fire OFF, same cards for everyone"] = "Правила кімнати: вогонь по своїх ВИМК, однакові карти у всіх",
             ["Room rules: same cards for everyone"] = "Правила кімнати: однакові карти у всіх",
+
+            // Added 2026-09-20: item 20, the binder's rating-position sort.
+            // The wiki block is its own key, composed into the "Reading a card"
+            // article beside CardsFace -- adding it INSIDE that literal would have
+            // retired this locale's translation of the whole page. Sorted among
+            // themselves; entries above are untouched.
+            ["<color=#FFD94D><b>SORTING THE BINDER</b></color>\n\n- <b>Rating position</b> orders the binder by where each player stands on the leaderboard today - top 100 first. Players outside it, or not seen in 90 days, go to the back, ordered by rating.\n- The number printed on a card is the rank it was minted with, which can differ."] = "<color=#FFD94D><b>СОРТУВАННЯ АЛЬБОМУ</b></color>\n\n- <b>Позиція в топі</b> сортує альбом за тим, яке місце гравець посідає в таблиці лідерів сьогодні: перші 100 ідуть уперед. Ті, хто поза топом або не з’являвся 90 днів, ідуть у кінець і сортуються за рейтингом.\n- Число, надруковане на картці, — це місце на момент її випуску, і воно може відрізнятися.",
+            ["Rating position"] = "Позиція в топі",
         };
 
         private static readonly Dictionary<string, string> SV = new Dictionary<string, string>
@@ -11638,6 +11662,14 @@ namespace CompetitiveRounds
             ["Room rules: friendly fire OFF"] = "Rumsregler: friendly fire AV",
             ["Room rules: friendly fire OFF, same cards for everyone"] = "Rumsregler: friendly fire AV, samma kort för alla",
             ["Room rules: same cards for everyone"] = "Rumsregler: samma kort för alla",
+
+            // Added 2026-09-20: item 20, the binder's rating-position sort.
+            // The wiki block is its own key, composed into the "Reading a card"
+            // article beside CardsFace -- adding it INSIDE that literal would have
+            // retired this locale's translation of the whole page. Sorted among
+            // themselves; entries above are untouched.
+            ["<color=#FFD94D><b>SORTING THE BINDER</b></color>\n\n- <b>Rating position</b> orders the binder by where each player stands on the leaderboard today - top 100 first. Players outside it, or not seen in 90 days, go to the back, ordered by rating.\n- The number printed on a card is the rank it was minted with, which can differ."] = "<color=#FFD94D><b>SORTERA PÄRMEN</b></color>\n\n- <b>Ratingposition</b> sorterar pärmen efter var varje spelare står på topplistan i dag - de 100 främsta först. De som hamnar utanför, eller inte synts på 90 dagar, hamnar sist och sorteras efter rating.\n- Numret som är tryckt på ett kort är placeringen det präglades med, och den kan skilja sig.",
+            ["Rating position"] = "Ratingposition",
         };
     }
 }

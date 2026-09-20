@@ -170,6 +170,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<string> BroadcastTestGstatsSentinel; // broadcast seat only — any new value runs the cr_gstats W1-sentinel self-test once
         internal static ConfigEntry<string> BroadcastTestPlayerCards;   // broadcast seat only — any new value seeds synthetic Player Card tiles (Sept 10)
         internal static ConfigEntry<int> PortraitPreset;                 // Player Cards (v22 section 6): -1 = follow the selected character, 0..PortraitRender.PresetSlotCount()-1 = the saved face slot (#370 — NOT 0-9; playerFaces has ten entries but only eight are authorable). Anything outside that range resolves to -1, and is rewritten to -1 once the real slot count has been discovered — it is NOT clamped to the top slot (that silently re-rendered someone else's face onto the card).
+        internal static ConfigEntry<string> BinderSort;                  // Player Cards (item 20): the binder order, stored as the BinderSortRules.Mode member NAME (never the ordinal, which changes meaning when a mode is inserted). Written by the header button alone; an unrecognised name falls back to Name.
         internal static ConfigEntry<bool> BroadcastTestSilence;          // broadcast seat only, offline/sandbox — apply 3s of silence to a bot for indicator verification
         internal static ConfigEntry<string> BroadcastTestQuickChatWheel; // broadcast seat only — pin the quick-chat wheel open for layout screenshots
         internal static ConfigEntry<string> BroadcastTestDance;         // broadcast seat only — "wheel" | "preview:<sku>" | "play:<idx>" dance verification
@@ -1088,6 +1089,17 @@ namespace CompetitiveRounds
                 "Broadcast", "TestPlayerCards", "",
                 "Broadcast seat only: set to any value that differs from the previous one to fill the Collection tab's reveal strip with five synthetic Player Cards (layout screenshots on a seat whose server has no Player Cards yet). No server call, nothing persisted."
             );
+            // Item 20. The EXISTING "Player Cards" section (with the space) —
+            // binding under a second, near-identical heading would give every
+            // player two Player Cards blocks in CompetitiveRounds.cfg. The
+            // value is the enum member name; applying it is deferred until a
+            // collection answer has been read (PlayerCardsUI.pendingBinderSort),
+            // and nothing but the header button ever writes it back.
+            BinderSort = Config.Bind(
+                "Player Cards", "BinderSort", "Name",
+                "How your binder is ordered: Name, Rarity, Edition, Date, Position (the rank printed on the card) or RatingPosition (where the player stands on the leaderboard today). Set by the Sort button on the binder page; an unrecognised value reads as Name."
+            );
+            PlayerCardsUI.RestoreBinderSort(BinderSort.Value);
             PortraitPreset = Config.Bind(
                 "Player Cards", "PortraitPreset", -1,
                 "Which character your card picture shows: -1 follows the character you have selected, or pin one of your saved character slots by its index counting from 0 (the button counts them from 1). Only slots the character creator lets you fill can be pinned; any other value falls back to following your selected character, and is reset to -1 once the game has told us how many slots there really are. Changing it re-renders the picture next time the Collection tab or Settings is open."

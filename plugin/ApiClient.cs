@@ -3803,6 +3803,18 @@ namespace CompetitiveRounds
             // rather than announcing every card new.
             public int dup_at_pull = -1;
             public float rating, peak_rating;
+            // ── item 20: the SUBJECT as of the collection read ──────────────
+            // Everything above is the MINT-TIME snapshot frozen onto the card
+            // face. These four are where that player stands TODAY, and they
+            // ride only the /pc/collection answer (a pack open and /pc/card
+            // carry none). Absence is unranked, not an error: an api that
+            // predates the server half leaves all four at their defaults, the
+            // collection's own subject_standings reads false, and the binder
+            // keeps the five sorts it has always had.
+            public int subject_board_rank;    // 0 = not on the card's board today
+            public float subject_rating;      // only meaningful while subject_rated
+            public bool subject_rated;        // a rating row exists and the subject has not deleted their data
+            public bool subject_inactive;     // the leaderboard's own activity window says so
         }
         public class PcUnopened { public string pack_id, source, mode, kind, reference_id, created_at; }
         public class PcMe
@@ -3830,6 +3842,12 @@ namespace CompetitiveRounds
             public string locale = "en";   // the locale the server keyed the faces under (v22 §2.2)
             public bool is_public;
             public int count;
+            // item 20: this answer computed the subjects' standings, so the
+            // four subject_* fields on each print mean something. FALSE on an
+            // api that predates them, and false is the whole feature-presence
+            // question -- a per-print 0 only ever means "this subject has no
+            // position", never "this api never said".
+            public bool subject_standings;
             public List<PcPrint> prints = new List<PcPrint>();
         }
 
@@ -4405,6 +4423,14 @@ namespace CompetitiveRounds
                 discard_shards = PcIntOr(PcTopLevel(obj, "discard_shards"), -1),
                 face_rev = PcStr(PcTopLevel(obj, "face_rev")),
                 dup_at_pull = PcIntOr(PcTopLevel(obj, "dup_at_pull"), -1),
+                // item 20. PcTopLevel matches the WHOLE quoted key at depth 1,
+                // so "subject_rating" and the frozen "rating" above cannot read
+                // each other. PcHas is the present-and-not-null test: a subject
+                // with no rating row must not be read as a subject rated 0.
+                subject_board_rank = PcInt(PcTopLevel(obj, "subject_board_rank")),
+                subject_rating = PcFloat(PcTopLevel(obj, "subject_rating")),
+                subject_rated = PcHas(obj, "subject_rating"),
+                subject_inactive = PcBool(PcTopLevel(obj, "subject_inactive")),
             };
             return string.IsNullOrEmpty(p.print_id) ? null : p;
         }
@@ -4575,6 +4601,10 @@ namespace CompetitiveRounds
                 locale = PcStr(PcTopLevel(json, "locale")) ?? "en",
                 is_public = PcBool(PcTopLevel(json, "public")),
                 count = PcInt(PcTopLevel(json, "count")),
+                // item 20: absent -> false -> the binder does not offer the
+                // rating-position sort. The unhandled case fails toward the
+                // five sorts that have always worked (#276).
+                subject_standings = PcBool(PcTopLevel(json, "subject_standings")),
                 prints = ParsePcPrints(prints, PcStr(PcTopLevel(json, "locale")) ?? "en"),
             };
             return c;
