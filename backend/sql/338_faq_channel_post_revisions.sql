@@ -52,12 +52,16 @@
 -- — but it is stated rather than assumed away (#276).
 --
 -- MIGRATION NUMBER
--- 338 is item 11's reservation in ai-collab/LEDGER.md §5b, which is the only
--- register of numbers for this release: 339 belongs to the Discord-collection
--- item, 340/341 to this item's i18n keys/seed pair, 342 to the ladder flip.
--- Recorded here the way 233_ffa_early_leave_grace.sql:31-32 records the 231
--- race, because parallel branches otherwise each take "the next number" from
--- their own base (#553).
+-- 338 is item 11's reservation for the v1.41.0 batch: 339 belongs to the
+-- Discord-collection item, 340/341 to this item's i18n keys/seed pair, 342 to
+-- the ladder flip. Recorded here the way 233_ffa_early_leave_grace.sql:31-32
+-- records the 231 race, because parallel branches otherwise each take "the
+-- next number" from their own base (#553). The batch's own register of numbers
+-- is a scratch file that does not exist outside the seat that wrote it, so
+-- this comment is the tracked copy of the part that concerns 338 — a header
+-- citing that file would send every other checkout somewhere empty, which is
+-- the defect test_no_shipped_file_points_into_the_gitignored_scratch exists
+-- for, and which that sweep did not catch here until round 7 widened it.
 --
 -- RUN ORDER
 --   1. this file          — the api's pending SELECT names the new columns

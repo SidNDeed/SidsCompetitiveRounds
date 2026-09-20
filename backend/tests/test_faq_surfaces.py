@@ -29,18 +29,21 @@ The Postgres tests are skipped unless FAQ_TEST_PG_DSN points at a database, the
 same convention test_a1_predicate_sql.py uses so the ordinary suite stays
 hermetic:
 
-    FAQ_TEST_PG_DSN="postgresql://postgres@127.0.0.1:5432/faqtest" \
+    FAQ_TEST_PG_DSN="postgresql://postgres@127.0.0.1:55432/faqtest" \
         python -m pytest backend/tests/test_faq_surfaces.py -q
 
-The port is 5432 because that is the port this seat's PostgreSQL 16.9 actually
-serves: its postgresql.conf leaves `port` commented out, so the built-in
-default applies. An earlier version of this line said 55432, which nothing has
-ever answered on — and a documented DSN that refuses to connect is worse than
-no line at all, because the runs then happen against some other string and the
-evidence stops naming the server that produced it.
-test_the_harness_names_the_server_it_ran_on pins the connection instead of the
-prose: it reports what actually answered, and reds if that is not the server
-the DSN asked for.
+55432 is this seat's standing port for that PostgreSQL 16.9 instance and the
+port the other two DSN-gated test files document. It is NOT a property of the
+data directory: that cluster's postgresql.conf leaves `port` commented out, so
+the port is whatever the server was LAUNCHED with, and one round's runs went
+against the same instance started on the built-in 5432. A documented DSN that
+refuses to connect is worse than no line at all, because the runs then happen
+against some other string and the evidence stops naming the server that
+produced it. test_the_harness_names_the_server_it_ran_on pins the connection
+instead of the prose: it reports what actually answered, reds if that is not
+the server the DSN asked for, and reds if the line above does not reach that
+same server. It does NOT compare port literals — the port is a correlate of
+the server, not the server (#732).
 """
 import io
 import json
@@ -232,6 +235,20 @@ _SHIPPED_TREES = (
 )
 _SCRATCH_REF = re.compile(r"ai-collab/[A-Za-z0-9_./-]+")
 
+# Files this item owns outright, where EVERY scratch reference is one this work
+# wrote. Scoping the sweep by the PATH's spelling alone missed the one that
+# mattered — 338's header cited a batch-wide register whose filename says
+# neither "item11" nor "v1410" — because the spelling is a correlate of "this
+# work created it" and not the thing itself (#732). Ownership is the other
+# half, and between them they still leave other lanes' comments alone.
+_ITEM11_OWN_FILES = (
+    "backend/sql/338_faq_channel_post_revisions.sql",
+    "backend/sql/340_i18n_keys_item11.sql",
+    "backend/sql/341_seed_machine_translations_item11.sql",
+    "backend/tests/test_faq_surfaces.py",
+    "docs/faq-refresh-client-contract.md",
+)
+
 
 def _shipped_files():
     for top, exts in _SHIPPED_TREES:
@@ -263,20 +280,34 @@ def test_no_shipped_file_points_into_the_gitignored_scratch():
     flag names a line, the defect is a class (#432).
 
     WHAT THE SWEEP IS SCOPED TO, and why it is not the whole class. Every
-    scratch path THIS work created — anything under ai-collab/ naming item 11
-    or the v1.41.0 batch — must be gone from backend/, docs/, plugin/ and
-    tools/. It is not scoped to a list of files: main.py and discord_bot.py
-    are shared, and a rule that named the files rather than the paths would go
-    quiet the moment the reference moved. It is not the whole directory
-    either, because dozens of comments written by OTHER lanes point into
-    ai-collab/ in those same two files and in plugin/; that is the same defect
-    and it is recorded as an open item rather than swept from here, since
-    rewriting another lane's comments is not this branch's to do."""
+    scratch path THIS work created must be gone from backend/, docs/, plugin/
+    and tools/, and "this work created it" is asked two ways because one way
+    was not enough:
+
+      by PATH — anything under ai-collab/ naming item 11 or the v1.41.0
+        batch, anywhere in the shipped tree, which is what reaches the shared
+        files (main.py, discord_bot.py) that this item only edits in part;
+      by FILE — any ai-collab/ path at all in one of this item's OWN files
+        (_ITEM11_OWN_FILES), because there every reference is ours.
+
+    The second rule is here because the first one silently passed 338's header,
+    which cited the batch's register of migration numbers — a filename saying
+    neither "item11" nor "v1410", so a scratch path this branch itself added
+    sat in a shipped migration through three review rounds. A spelling is a
+    correlate of authorship, not authorship (#732), and a guard bound to a
+    correlate does not go noisy, it goes quiet.
+
+    It is still not the whole directory, because dozens of comments written by
+    OTHER lanes point into ai-collab/ from the shared files and from plugin/;
+    that is the same defect, recorded as an open item rather than swept from
+    here, since rewriting another lane's comments is not this branch's to
+    do."""
     scratch = []
     for path in _shipped_files():
         rel = os.path.relpath(path, REPO).replace("\\", "/")
+        mine = rel in _ITEM11_OWN_FILES
         for hit in set(_SCRATCH_REF.findall(_read(path))):
-            if "item11" in hit.lower() or "v1410" in hit.lower():
+            if mine or "item11" in hit.lower() or "v1410" in hit.lower():
                 scratch.append("%s -> %s" % (rel, hit))
     assert not scratch, (
         "shipped files point into the gitignored scratch directory, so the "
@@ -2105,19 +2136,28 @@ def test_a_live_lease_is_not_voided_by_a_missing_token():
 def test_the_harness_names_the_server_it_ran_on():
     """Evidence that does not name its server is not reproducible evidence.
 
-    The DSN in this file's own docstring said 55432 for several rounds, and
-    nothing has ever listened on that port; the runs that produced the
-    migration results therefore used a string typed somewhere else, and no
-    artifact recorded which server answered. The name guard above only asks
-    that the DATABASE be a scratch one, which a different server on a
-    different port satisfies just as well.
+    For several rounds nothing recorded which server answered, and the name
+    guard above only asks that the DATABASE be a scratch one — which a tunnel,
+    a pooler or a second instance satisfies just as well.
 
     So the connection is asserted against the DSN it was asked for, rather
-    than described: a tunnel, a pooler or a second instance that answers on
-    another port reds here instead of quietly producing results attributed to
-    the documented one. The version and directory are printed so the log of a
-    run says what produced it (#438 — acceptance is a positive signal, and an
-    unnamed server is not one)."""
+    than described: a server that answers on another port reds here instead of
+    quietly producing results attributed to the documented one. The version and
+    directory are printed so the log of a run says what produced it (#438 —
+    acceptance is a positive signal, and an unnamed server is not one).
+
+    The second half asks the same question of the INSTRUCTION at the top of
+    this file, and asks it by connecting. It used to compare the documented
+    port to the port that answered, which is a correlate and not the property
+    (#732): the data directory's postgresql.conf leaves `port` commented out,
+    so the port is chosen when the server is launched, and pinning the
+    documented literal to one round's launch turned this test red the next
+    time the same instance came up on this seat's standing 55432. What has to
+    hold is that following the documented line lands on the server these
+    results came from, so that is what is asked — the documented endpoint is
+    dialled and its cluster identity compared. A line that refuses to connect,
+    or that reaches a different cluster, reds; a relaunch on a different port
+    reds only until the line is corrected to match."""
     m = re.search(r":(\d+)/", DSN)
     assert m, (
         "FAQ_TEST_PG_DSN names no port, so a run cannot say which server "
@@ -2132,17 +2172,43 @@ def test_the_harness_names_the_server_it_ran_on():
     assert ("/" + dbname) in DSN, (
         "connected to database %r, which the DSN does not name: %r"
         % (dbname, DSN))
-    # ...and the line at the top of this file that tells the next person how
-    # to run these must name that same port. That line is the only instruction
+    # ...and the line at the top of this file that tells the next person how to
+    # run these must reach that same server. That line is the only instruction
     # anybody has; when it drifts, runs move to a string typed somewhere else
     # and the evidence stops being reproducible from the repo — which is the
-    # defect this test exists for, so it is checked rather than described.
-    doc_ports = re.findall(r"FAQ_TEST_PG_DSN=\"[^\"]*:(\d+)/", __doc__ or "")
-    assert doc_ports, "this file no longer shows how to run its Postgres tests"
-    assert set(doc_ports) == {port}, (
-        "the DSN this file documents names port(s) %s, but these tests ran "
-        "against %s — following the documented line would not reproduce this "
-        "run" % (sorted(set(doc_ports)), port))
+    # defect this test exists for, so it is checked rather than described, and
+    # checked by DIALLING the endpoint rather than by comparing its port to the
+    # one that answered (#732 — the port is a correlate; the server is the
+    # property, and this data directory's port is a launch argument).
+    ident = _psql("SELECT system_identifier FROM pg_control_system();"
+                  ).stdout.strip()
+    doc = re.search(r"FAQ_TEST_PG_DSN=\"([^\"]+)\"", __doc__ or "")
+    assert doc, "this file no longer shows how to run its Postgres tests"
+    doc_dsn = doc.group(1)
+    assert re.search(r"/[^/?]*test[^/?]*(\?|$)", doc_dsn), (
+        "the DSN this file documents does not name a *test* database, so "
+        "following it would point the destructive migration checks somewhere "
+        "this file refuses to run: %r" % doc_dsn)
+    doc_ep = re.match(r"([A-Za-z0-9+]+)://([^/]+)/", doc_dsn)
+    assert doc_ep, (
+        "the DSN this file documents is not a URL an endpoint can be read "
+        "out of: %r" % doc_dsn)
+    # The documented ENDPOINT, carrying the database this run actually used —
+    # so a scratch database that exists only on somebody else's seat cannot
+    # red this, while an endpoint that is dead or is a different cluster does.
+    probe = subprocess.run(
+        [PSQL, "-v", "ON_ERROR_STOP=1", "-q", "-X", "-t", "-A",
+         "-d", "%s://%s/%s" % (doc_ep.group(1), doc_ep.group(2), dbname),
+         "-c", "SELECT system_identifier FROM pg_control_system();"],
+        capture_output=True, text=True)
+    assert probe.returncode == 0, (
+        "the DSN this file documents does not reach a server at all (%r), so "
+        "following the only instruction in the repo would not reproduce this "
+        "run: %s" % (doc_dsn, (probe.stderr or probe.stdout).strip()))
+    assert probe.stdout.strip() == ident, (
+        "the DSN this file documents reaches cluster %s and these tests ran "
+        "against cluster %s — the documented line would reproduce this run "
+        "somewhere else" % (probe.stdout.strip(), ident))
 
     datadir = _psql("SELECT current_setting('data_directory');",
                     expect_ok=False).stdout.strip() or "(not readable)"
