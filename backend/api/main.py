@@ -3579,6 +3579,122 @@ async def team_queue_cleanup_loop():
             print(f"[TEAM-QUEUE-CLEANUP] Error: {e}")
 
 
+# ── 1v2 abandoned-series horizon (bug 391) ───────────────────────────────
+# Sid ruled on 2026-09-20 that a ranked series idle for 14 days is closed
+# rather than left live. A 1v2 sitting is UNRANKED (`is_ranked` defaults FALSE
+# and nothing flips it — backend/sql/120_1v2_schema.sql), so there is no rating
+# to move and the settlement is a VOID: `invalidated_at` +
+# `invalidation_reason`, never `completed_at` and never `winner_side`. Nothing
+# is credited to whoever happened to be ahead on games.
+OVT_ABANDONED_HORIZON_DAYS = 14
+# One tick settles at most this many rows; the next tick continues. A full
+# batch SAYS SO in the log, because a silent truncation makes "nothing left"
+# and "two hundred done, four thousand waiting" the same line (#304 / #441).
+OVT_HORIZON_SWEEP_LIMIT = 200
+
+
+async def _ovt_horizon_candidates(db, days: int, limit: int):
+    """1v2 series rows that have been `active` with no activity for `days` days.
+
+    Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
+    (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
+    ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
+    (main.py:41252) and `created_at` defaults to NOW(). `ovt_matches.started_at`
+    is the one client-supplied stamp on that row and is deliberately NOT read
+    here: a client-attested value may only move the server toward the
+    conservative outcome, and a future-dated one would hold its own series open
+    forever (#283).
+
+    Queue polls are not activity either. `ovt_queue.last_polled` is a client
+    saying it is still there; a client that never stops polling would pin a row
+    `active` with no bound, which is exactly the blocking-by-default shape this
+    sweep exists to remove (#276 / #430).
+
+    This is a candidate READ, not the decision. Every row it returns is
+    re-checked under its own row lock before anything is written (#208), so a
+    report that lands between this SELECT and the write settles the row itself
+    and the sweep declines it.
+    """
+    rows = await db.execute(text("""
+        SELECT s.id AS id,
+               GREATEST(s.created_at,
+                        COALESCE((SELECT MAX(GREATEST(m.ended_at, m.created_at))
+                                    FROM ovt_matches m
+                                   WHERE m.series_id = s.id),
+                                 s.created_at)) AS last_activity_at
+          FROM ovt_series s
+         WHERE s.status = 'active'
+           AND s.created_at < NOW() - make_interval(days => CAST(:days AS int))
+           AND NOT EXISTS (
+                 SELECT 1 FROM ovt_matches m
+                  WHERE m.series_id = s.id
+                    AND GREATEST(m.ended_at, m.created_at)
+                        >= NOW() - make_interval(days => CAST(:days AS int)))
+         ORDER BY s.created_at
+         LIMIT CAST(:lim AS int)
+    """), {"days": int(days), "lim": int(limit)})
+    return rows.mappings().all()
+
+
+async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
+    """Void ONE past-horizon 1v2 series under its own row lock. True if written.
+
+    The caller owns the transaction boundary: this function locks, re-checks
+    and writes; the caller commits on True and rolls back on False.
+
+    There is no arm here that DECLINES a past-horizon row on grounds it cannot
+    evaluate. It consults neither the presence map nor the service-account
+    fence, because the only alternative to voiding is a row that stays `active`
+    with no writer left that can ever change it, and a blocking-by-default
+    state needs a positive cleanup that always runs (#276 / #430). The write is
+    delta-free — no gold, no XP, no rating, no `winner_side` — so there is no
+    credit for that fence to protect and nothing a wrong call could pay out.
+    """
+    locked = (await db.execute(text(
+        # FOR NO KEY UPDATE, not FOR UPDATE (#202 / #207): `ovt_matches.series_id`
+        # is an FK to this row, so every report's INSERT takes FOR KEY SHARE on
+        # it, and KEY SHARE conflicts with exactly one mode — FOR UPDATE. NO KEY
+        # UPDATE is the weakest mode that still self-conflicts, so two sweeps and
+        # a sweep racing the report sink's own lock (main.py:41162) serialize,
+        # while a live game report never waits on the janitor.
+        "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
+        " FOR NO KEY UPDATE"
+    ), {"sid": str(series_id)})).mappings().first()
+    # #208: the predicate is re-checked INSIDE the transaction, against the row
+    # version this lock waited for — never against the candidate list, which was
+    # read before any lock was held.
+    if locked is None or locked["status"] != "active":
+        return False
+    still_idle = (await db.execute(text("""
+        SELECT 1 FROM ovt_series s
+         WHERE s.id = CAST(:sid AS uuid)
+           AND s.created_at < NOW() - make_interval(days => CAST(:days AS int))
+           AND NOT EXISTS (
+                 SELECT 1 FROM ovt_matches m
+                  WHERE m.series_id = s.id
+                    AND GREATEST(m.ended_at, m.created_at)
+                        >= NOW() - make_interval(days => CAST(:days AS int)))
+    """), {"sid": str(series_id), "days": int(days)})).first()
+    if still_idle is None:
+        return False
+    # 'canceled', one L. Every other ovt path uses that spelling and the
+    # continuation's prior-series lookup filters on it (main.py:41069); the
+    # janitor's original 'cancelled' made its own rows invisible to that lookup
+    # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
+    # spelling would reopen that hole, so the VOID is carried by
+    # `invalidation_reason`, not by a new status word.
+    upd = await db.execute(text("""
+        UPDATE ovt_series
+           SET status = 'canceled',
+               invalidated_at = NOW(),
+               invalidation_reason = 'abandoned_horizon_void'
+         WHERE id = CAST(:sid AS uuid)
+           AND status = 'active'
+        RETURNING id
+    """), {"sid": str(series_id)})
+    return upd.first() is not None
+
+
 async def queue_cleanup_loop():
     """Delete stale queue entries every 60 seconds.
     Logs enough detail to diagnose matchmaking reports like lopi+NotNic where
@@ -3813,6 +3929,45 @@ async def queue_cleanup_loop():
                 await db.commit()
         except Exception as e:
             print(f"[QUEUE-CLEANUP] ovt sweep error: {e}")
+        # ── 1v2 abandoned-series horizon backstop (bug 391) ──────────────
+        # Its OWN session and try/except (#228), and deliberately NOT inside
+        # the ovt block above. That block calls _assert_no_service_subject(),
+        # which RAISES on a candidate whose trio includes the broadcast
+        # account, and the raise aborts the rest of that tick's ovt work; this
+        # backstop exists for exactly the rows the classified arms never
+        # settle, so it must not share their failure.
+        #
+        # The classified arms settle what they can NAME: a zero-game lock dead
+        # for 30 minutes, and a mid-series row with games and nothing reported
+        # for 24 hours — the latter fenced off any trio containing a service
+        # account. This arm names nothing. It closes a row that has been
+        # `active` for the whole 14-day horizon with no game and no report,
+        # whatever the reason, so that "the classified arms declined it" can no
+        # longer mean "it is live forever".
+        try:
+            async with async_session() as db:
+                horizon_cands = await _ovt_horizon_candidates(
+                    db, OVT_ABANDONED_HORIZON_DAYS, OVT_HORIZON_SWEEP_LIMIT)
+                for hc in horizon_cands:
+                    if await _ovt_settle_horizon_row(
+                            db, hc["id"], OVT_ABANDONED_HORIZON_DAYS):
+                        await db.commit()
+                        print(f"[OVT-HORIZON] Abandoned series voided: series "
+                              f"{hc['id']} last_activity={hc['last_activity_at']} "
+                              f"reason=abandoned_horizon_void")
+                    else:
+                        # Settled or re-activated under the lock: the row is
+                        # someone else's now. Say so per row, or a sweep that
+                        # settles nothing is indistinguishable from a sweep
+                        # that found nothing (#304).
+                        await db.rollback()
+                        print(f"[OVT-HORIZON] Candidate declined under lock: "
+                              f"series {hc['id']}")
+                if len(horizon_cands) >= OVT_HORIZON_SWEEP_LIMIT:
+                    print(f"[OVT-HORIZON] batch full at {OVT_HORIZON_SWEEP_LIMIT} "
+                          f"candidates; more may remain, next tick continues")
+        except Exception as e:
+            print(f"[QUEUE-CLEANUP] ovt horizon sweep error: {e}")
         try:
             async with async_session() as db:
                 # ── FFA janitor (same nobody-is-polling contract as the ovt
