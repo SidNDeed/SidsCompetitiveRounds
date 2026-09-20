@@ -1213,7 +1213,7 @@
           ],
           "main",
           "team_series_report_dc",
-          "6cd18f23beca780e939e5d3a67b29beda769425d"
+          "4676da2247216e2e91cd70562bc39390f90d82a9"
         ],
         [
           "/api/v1/team/series/{series_id}/spawn-confirm",
@@ -2164,7 +2164,7 @@
           ],
           "main",
           "get_mod_version",
-          "9c8cacc9ad75ff42f99b8ef2865a18c00a35eaf4"
+          "34cbdadc0aef1e3d6f81312d98bebf61baec1507"
         ],
         [
           "/api/v1/mod/check/{steam_id}",
@@ -2686,7 +2686,7 @@
           ],
           "main",
           "team_lobby_start",
-          "37b9fe60e3f6ad35e4d86a772b17dcdb33ac1451"
+          "0fb6931edc48672d573eceec8987647e618de00c"
         ],
         [
           "/api/v1/team/lobby/state",
@@ -2749,7 +2749,7 @@
           ],
           "main",
           "team_queue_poll",
-          "8ee2c8dc2ef3659280dfb036e7d00f2effcbb8c7"
+          "5a03505f795e9ee4c25ed0d8448143375167d4a0"
         ],
         [
           "/api/v1/team/queue/preferred-team",
@@ -3317,7 +3317,7 @@
       [
         "main",
         "lifespan",
-        "16447dee1bb3a017f05924a3c94dbcbd2abd3d00"
+        "d589673cb19dee764f8f061cd622ab9648d222d7"
       ]
     ]
   },

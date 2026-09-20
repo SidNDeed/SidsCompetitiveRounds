@@ -513,6 +513,53 @@ def test_the_sweep_is_vetoed_by_live_game_evidence():
     _drive(body)
 
 
+# ── Holding the sweep at a chosen statement ──────────────────────────────
+
+
+class _GateOnStatement:
+    """A session wrapper that pauses the sweep at one chosen statement.
+
+    The sweep's discovery SELECT and its locked re-read are two round trips
+    with nothing awaitable of OURS in between, and after the lock the liveness
+    re-check is a plain synchronous call. Landing a competing commit, or a
+    client ping, in one of those gaps is otherwise a race. This holds the sweep
+    at the door of (or just past) a named statement so the gap is a place the
+    test can stand.
+
+    It is the TEST's wrapper, around the session the test itself hands in:
+    production code gets no seam it would have to carry, and the sweep runs
+    unmodified (#342 -- a harness that needed the code to grow a hook would be
+    proving something about the hook).
+    """
+
+    def __init__(self, inner, needle, gate, when="before"):
+        self._inner, self._needle, self._gate, self._when = inner, needle, gate, when
+        self.fired = False
+
+    async def execute(self, statement, *args, **kwargs):
+        hit = not self.fired and self._needle in str(statement)
+        if hit:
+            self.fired = True
+            if self._when == "before":
+                await self._gate.wait()
+        result = await self._inner.execute(statement, *args, **kwargs)
+        if hit and self._when == "after":
+            await self._gate.wait()
+        return result
+
+    def __getattr__(self, name):          # commit, rollback, begin_nested, ...
+        return getattr(self._inner, name)
+
+
+async def _gated_sweep(Session, gate, needle, when):
+    async with Session() as inner:
+        return await main._team_dc_fallback_sweep_once(
+            _GateOnStatement(inner, needle, gate, when))
+
+
+LOCK_STATEMENT = "FOR NO KEY UPDATE SKIP LOCKED"
+
+
 # ── The in-transaction re-check ──────────────────────────────────────────
 
 
@@ -521,34 +568,240 @@ def test_the_sweep_does_not_clobber_a_series_completed_after_discovery():
         engine, Session, ids = await _fresh_series()
         sid = ids["sid"]
         try:
+            with _harness_globals() as rated:
+                assert (await _fallback(Session, sid))["status"] == "deferred"
+                await _age_marker(Session, sid, main._DC_FALLBACK_DEFER_SECONDS * 2)
+
+                # Hold the sweep at the door of its locked re-read. Its
+                # UNLOCKED discovery SELECT has already run and has already
+                # seen 'active'.
+                gate = asyncio.Event()
+                task = asyncio.create_task(
+                    _gated_sweep(Session, gate, LOCK_STATEMENT, "before"))
+                await asyncio.sleep(0.5)
+                assert not task.done(), "the sweep never reached its locked read"
+
+                # Now a real-totals report takes the row, completes the series
+                # WITH ratings, and COMMITS -- so the row is free by the time
+                # the sweep locks it. Nothing about the lock saves the series
+                # here; only re-reading the predicate inside the transaction
+                # does.
+                out = await _real_totals(Session, sid)
+                assert out["status"] == "completed", out
+                assert [c["winner"] for c in rated.calls] == [2]
+
+                gate.set()
+                assert await task == 0
+                end = await _row(Session, sid)
+                assert end["status"] == "completed", dict(end)
+                assert end["invalidation_reason"] == "dc_leadforfeit"
+                assert len(rated.calls) == 1
+        finally:
+            await engine.dispose()
+    _drive(body)
+
+
+# ── The lock is never a queue ────────────────────────────────────────────
+
+
+def test_the_sweep_skips_a_held_row_instead_of_queueing_behind_it():
+    async def body():
+        engine, Session, ids = await _fresh_series()
+        sid = ids["sid"]
+        try:
             with _harness_globals():
                 assert (await _fallback(Session, sid))["status"] == "deferred"
                 await _age_marker(Session, sid, main._DC_FALLBACK_DEFER_SECONDS * 2)
 
-                # A real-totals report takes the row and completes the series,
-                # but has not committed yet. The sweep's UNLOCKED discovery
-                # SELECT therefore still sees 'active' and queues the row; its
-                # locked re-read is where it has to find out otherwise.
+                # Somebody holds the row: an admin resolution, or the family
+                # pick four players just triggered by pressing Start. There is
+                # no lock_timeout on the engine and none set in the sweep, so
+                # an unqualified lock here is an unbounded wait that starves
+                # every other due row in the batch.
                 blocker = Session()
                 await blocker.execute(
                     text("SELECT id FROM team_series WHERE id = :sid"
                          "  FOR NO KEY UPDATE"), {"sid": sid})
-                await blocker.execute(
-                    text("UPDATE team_series SET status = 'completed',"
-                         "  winner_team = 2, invalidation_reason = 'dc_leadforfeit'"
-                         " WHERE id = :sid"), {"sid": sid})
 
                 task = asyncio.create_task(_sweep(Session))
-                await asyncio.sleep(1.0)
-                assert not task.done(), "the sweep did not wait for the lock"
-                await blocker.commit()
+                await asyncio.sleep(2.0)
+                finished_while_held = task.done()
+                # Release before asserting, so a regression reddens instead of
+                # hanging the suite on a lock that is never granted.
+                await blocker.rollback()
                 await blocker.close()
                 settled = await task
 
+                assert finished_while_held, (
+                    "the sweep queued behind the holder instead of skipping it")
                 assert settled == 0
-                end = await _row(Session, sid)
-                assert end["status"] == "completed", dict(end)
-                assert end["invalidation_reason"] == "dc_leadforfeit"
+                assert (await _row(Session, sid))["status"] == "active"
+
+                # NEGATIVE CONTROL: the row really was due. Skipping is a
+                # deferral to the next tick, not a drop -- without this half the
+                # assertion above would also pass on a sweep that settles
+                # nothing at all.
+                assert await _sweep(Session) == 1
+                assert (await _row(Session, sid))["status"] == "dc_incomplete"
+        finally:
+            await engine.dispose()
+    _drive(body)
+
+
+# ── Liveness is re-read after the lock is held ───────────────────────────
+
+
+def test_the_sweep_re_reads_liveness_after_taking_the_lock():
+    async def body():
+        engine, Session, ids = await _fresh_series()
+        sid = ids["sid"]
+        try:
+            with _harness_globals():
+                assert (await _fallback(Session, sid))["status"] == "deferred"
+                await _age_marker(Session, sid, main._DC_FALLBACK_DEFER_SECONDS * 2)
+
+                # Hold the sweep JUST PAST its locked read: the pre-lock veto
+                # has already been evaluated and found no evidence.
+                gate = asyncio.Event()
+                task = asyncio.create_task(
+                    _gated_sweep(Session, gate, LOCK_STATEMENT, "after"))
+                await asyncio.sleep(0.5)
+                assert not task.done(), "the sweep never reached its locked read"
+
+                # While it holds the lock, the four resume and the first
+                # in-match ping of the new room lands. The row's COLUMNS are
+                # unchanged -- status, marker and dueness all still say settle
+                # -- so the in-transaction re-check cannot see this. Only
+                # re-reading the veto can.
+                main._in_match_touch(str(sid))
+                gate.set()
+                assert await task == 0
+                assert (await _row(Session, sid))["status"] == "active"
+
+                # NEGATIVE CONTROL: the identical interleave with no ping
+                # settles. Without it, a sweep that had simply stopped working
+                # would pass the half above.
+                main._in_match_seen.clear()
+                gate2 = asyncio.Event()
+                task2 = asyncio.create_task(
+                    _gated_sweep(Session, gate2, LOCK_STATEMENT, "after"))
+                await asyncio.sleep(0.5)
+                gate2.set()
+                assert await task2 == 1
+                assert (await _row(Session, sid))["status"] == "dc_incomplete"
+        finally:
+            await engine.dispose()
+    _drive(body)
+
+
+# ── The second refusal: the room a held report could still name ──────────
+
+
+def test_the_sweep_declines_while_the_stored_room_is_still_young():
+    async def body():
+        engine, Session, ids = await _fresh_series()
+        sid = ids["sid"]
+        try:
+            with _harness_globals():
+                assert (await _fallback(Session, sid))["status"] == "deferred"
+                await _age_marker(Session, sid, main._DC_FALLBACK_DEFER_SECONDS * 2)
+
+                # The series still stores the room its abandoned sitting was
+                # played in, issued moments ago. A report held through an
+                # assembly would still name that room and the report handler's
+                # room fence would still accept it, so the marker's age is not
+                # the whole question.
+                async with Session() as s:
+                    await s.execute(
+                        text("UPDATE team_series"
+                             "   SET photon_room_id = 'sct-aaaaaaaaaaaa',"
+                             "       room_issued_at = clock_timestamp()"
+                             " WHERE id = :sid"), {"sid": sid})
+                    await s.commit()
+                assert await _sweep(Session) == 0
+                assert (await _row(Session, sid))["status"] == "active"
+
+                # NEGATIVE CONTROL: age the room past the quiet window and the
+                # same row settles, so the refusal above is the room term and
+                # not a sweep that stopped working.
+                async with Session() as s:
+                    await s.execute(
+                        text("UPDATE team_series SET room_issued_at ="
+                             "  room_issued_at - make_interval(secs => :n)"
+                             " WHERE id = :sid"),
+                        {"sid": sid,
+                         "n": float(main._DC_FALLBACK_ROOM_QUIET_SECONDS + 30)})
+                    await s.commit()
+                assert await _sweep(Session) == 1
+                assert (await _row(Session, sid))["status"] == "dc_incomplete"
+        finally:
+            await engine.dispose()
+    _drive(body)
+
+
+# ── A revived series does not get settled again ──────────────────────────
+
+
+def test_an_adopted_series_carries_no_marker_into_the_next_tick():
+    """The hosted-lobby Start funnel, which the first cut of this change missed.
+
+    _team_lock_family_pick admits a 'dc_incomplete' row as resumable, so four
+    players pressing Start again adopt the settled series back to 'active'. The
+    row's DC fields are cleared inline by that handler; the marker is cleared by
+    the shared helper, which is what this drives -- the call SITE is bound by
+    test_sept16_dc_fallback_shape.py, which counts the revival operation across
+    the whole file.
+    """
+    async def body():
+        engine, Session, ids = await _fresh_series()
+        sid = ids["sid"]
+
+        async def adopt(clear_marker: bool):
+            """What both adoption funnels do to the row."""
+            async with Session() as s:
+                await s.execute(
+                    text("""UPDATE team_series
+                               SET status = 'active',
+                                   dc_team_remaining = NULL,
+                                   dc_player_id = NULL,
+                                   photon_room_id = NULL,
+                                   room_issued_at = NULL,
+                                   invalidation_reason = CASE
+                                       WHEN invalidation_reason = 'dc_manual_pending'
+                                       THEN NULL ELSE invalidation_reason END
+                             WHERE id = :sid"""), {"sid": sid})
+                if clear_marker:
+                    await main._team_clear_dc_fallback_marker(s, sid)
+                await s.commit()
+
+        try:
+            with _harness_globals():
+                assert (await _fallback(Session, sid))["status"] == "deferred"
+                await _age_marker(Session, sid, main._DC_FALLBACK_DEFER_SECONDS * 2)
+                assert await _sweep(Session) == 1
+                assert (await _row(Session, sid))["status"] == "dc_incomplete"
+
+                # NEGATIVE CONTROL FIRST, because it is the bug: adopt WITHOUT
+                # clearing the marker and the next tick settles the sitting the
+                # four just resumed, attributed to the previous disconnect.
+                await adopt(clear_marker=False)
+                assert (await _row(Session, sid))["status"] == "active"
+                assert await _sweep(Session) == 1
+                back = await _row(Session, sid)
+                assert back["status"] == "dc_incomplete"
+                assert back["invalidation_reason"] == "dc_manual_pending"
+
+                # And with the clear, which is what both funnels call: the row
+                # is revived and STAYS revived, tick after tick.
+                await adopt(clear_marker=True)
+                after = await _row(Session, sid)
+                assert after["status"] == "active"
+                assert after["dc_fallback_at"] is None
+                assert after["dc_fallback_player_id"] is None
+                assert after["invalidation_reason"] is None
+                assert await _sweep(Session) == 0
+                assert await _sweep(Session) == 0
+                assert (await _row(Session, sid))["status"] == "active"
         finally:
             await engine.dispose()
     _drive(body)

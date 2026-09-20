@@ -57,10 +57,16 @@
 -- status IN ('active','dc_paused'), so the moment a real-totals report
 -- completes or settles the series the marker can never be acted on again, and
 -- it is left in place because "a fallback was filed for this series" is worth
--- having in the admin panel. The ONE place it is cleared is the sticky-resume
--- relock, which flips a dc_incomplete series back to 'active' and clears the
--- other DC fields -- a marker surviving THAT would be old by definition and
--- would have the sweep settle the resumed series on its next tick.
+-- having in the admin panel. It IS cleared by the funnels that REVIVE a series
+-- -- the ones that flip it back to 'active' and clear the other DC fields --
+-- because a marker surviving that is older than the bound by definition and
+-- would have the sweep settle the resumed series on its next tick. There are
+-- two such funnels, not one: the queue/sticky relock and the hosted-lobby
+-- Start adoption, which _team_lock_family_pick also admits a 'dc_incomplete'
+-- row into. An earlier draft of this header said "the ONE place", counted the
+-- first and shipped the second unhandled; both now call the single helper
+-- _team_clear_dc_fallback_marker, and the structural suite counts the revival
+-- operation across the whole of main.py rather than inside one function.
 --
 -- EXPIRES BY DEFAULT. Nothing has to run for the deferral to end. If the api is
 -- restarted mid-window the marker waits on disk for the next tick, and the
