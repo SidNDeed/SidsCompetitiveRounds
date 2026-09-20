@@ -1631,20 +1631,31 @@ class FfaMatchResponse(BaseModel):
     gold_gained: int = 0        # reporter's own
     message: str = "FFA match recorded"
     # ── The lobby's authoritative progress (RJ-3 round 4) ─────────────────
-    # Every answer this endpoint gives carries these, acceptances and refusals
-    # alike (a refusal carries them in its error body — see main.py's
-    # FfaReportRefusal). They exist because the game number a report names is
-    # the client's own counter: one terminally refused report leaves that
-    # counter ahead of the server for the rest of the sitting, and every later
-    # game is then refused too. The client resynchronises from these instead
-    # (docs/../ai-collab/rejoin/RJ-CLIENT-RESYNC-CONTRACT.md).
+    # Every answer given once the lobby row has been LOCKED carries these,
+    # acceptances and refusals alike (a refusal carries them in its error body
+    # — see main.py's FfaReportRefusal). Two classes of answer are raised
+    # before there is a lobby row to read and therefore carry none: the
+    # integrity 400s (malformed roster, missing room id, bad signature) and the
+    # 404s (unknown player, lobby not found). A consumer reads them when they
+    # are present rather than assuming they always are.
+    #
+    # They exist because the game number a report names comes from the seats'
+    # own physical game counter, published by the host and frozen once per
+    # game: one terminally refused report leaves that number ahead of the
+    # server for the rest of the sitting, and every later game is then refused
+    # too. A client resynchronises from these instead — the consumer is
+    # specified by RJ-CLIENT-RESYNC-CONTRACT.md in the rejoin lane's review
+    # bundle, which is not a file in this repository, and no shipped client
+    # reads these fields yet.
     #   games_played  — settled games of this sitting, INCLUDING this one when
     #                   this answer settled it.
     #   expected_game — the number the lobby's NEXT report has to name; always
     #                   games_played + 1.
-    #   settled_game  — set only when the number the report named is already
-    #                   settled: which number that is. The client drops such an
-    #                   outbox entry as terminal instead of retrying it.
+    #   settled_game  — set only when the report NAMED a number and the lobby
+    #                   already holds a row for that same number: which number
+    #                   that is. A consumer drops such an outbox entry as
+    #                   terminal instead of retrying it, which is why an answer
+    #                   to a report that named no number never carries it.
     # Additive: a client that reads none of them behaves exactly as before.
     games_played: int = 0
     expected_game: int = 0

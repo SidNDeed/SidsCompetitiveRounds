@@ -85,13 +85,15 @@ contradicts it is the same defect class as a comment asserting a guarantee the
 code does not supply, so the numbers here are the ones in the list, counted off
 it: 22 unmarked and still live (rounds 1 and 2), 1 unmarked and RETIRED because
 round 4 deleted the code it mutated (prior-tail-only, annotated in place), 16
-marked (r3), 15 marked (r4), 10 marked (r5), and one more that is a committed
-test rather than a hand-run control (backfill-neutered, at the end). Rounds 4
-and 5's are the ones with a NEGATIVE control — an inert edit at the same site
-that must leave the same test GREEN — so each test is shown to redden for the
-mutation and not for any edit at all (#391); the runner, the red line of every
-mutant and the negative-control result for each are in
-ai-collab/r4-mutation-controls.log and ai-collab/r5-mutation-controls.log.
+marked (r3), 15 marked (r4), 10 marked (r5), 7 marked (r6), and one more that
+is a committed test rather than a hand-run control (backfill-neutered, at the
+end). Rounds 4, 5 and 6's are the ones with a NEGATIVE control — an inert
+edit at the same site that must leave the same test GREEN — so each test is
+shown to redden for the mutation and not for any edit at all (#391); the
+runner, the red line of every mutant and the negative-control result for each
+are COMMITTED under backend/tests/evidence/, beside the executed PostgreSQL
+runs. Round 5 named two paths under a gitignored scratch directory instead,
+which is a reference nobody reading this repository can follow.
 All KILLED:
 
   replay-echo-call-short (r5)  the endpoint: drop `_progress` from the
@@ -206,6 +208,21 @@ All KILLED:
   postcheck-nulls-only     327: drop the post-check's derivable-tail assertion,
                            which is the control ON the backfill-neutered test
 
+  refund-clamps-the-delta (r6)  _return_stake_exactly: the exact subtraction
+                           back to GREATEST(0, gold_spent - :amt)
+  refund-class-swept (r6)  main.py: put the clamped form back at ONE of the
+                           five refund sites
+  variant-scan-unbounded (r6)  _quarantine_on_file: drop the variant scan's
+                           `status = 'pending'` and its LIMIT
+  settlement-takes-for-update (r6)  _FFA_LOBBY_LOCK_SQL back to FOR UPDATE
+  settled-game-without-a-named-number (r6)  _ffa_with_settled: ignore `named`
+                           and take the row's number unconditionally
+  insert-failure-answers-bare (r6)  the endpoint: the non-duplicate integrity
+                           arm back to a bare HTTPException(500, ...)
+  binding-sweep-posonly (r6)  _binding_failures: fold posonlyargs back into
+                           `positional` before the keywords are tested, and
+                           make one production def positional-only
+
 ...and one more that is a COMMITTED TEST rather than a hand-run control:
   backfill-neutered        327's room_tail backfill: WHERE FALSE. See
                            test_pg_migration_327_post_check_fails_when_the_
@@ -310,7 +327,10 @@ def test_the_number_a_report_settles_is_the_lobbys_own_next_slot():
     # cannot hold one without the other and a test can drive both together
     # (test_pg_two_reports_for_one_lobby_cannot_settle_the_same_number).
     slot = inspect.getsource(main._ffa_lock_lobby_slot)
-    assert "FOR UPDATE" in main._FFA_LOBBY_LOCK_SQL
+    # FOR NO KEY UPDATE since round 6 (#202/#203/#207) - see
+    # test_the_lobby_lock_is_the_weakest_mode_that_still_conflicts_with_itself
+    # for why the weaker mode still serialises two settlements.
+    assert "FOR NO KEY UPDATE" in main._FFA_LOBBY_LOCK_SQL
     lock = slot.index("_FFA_LOBBY_LOCK_SQL")
     derive = slot.index('int(lobby["games_played"] or 0) + 1')
     assert lock < derive
@@ -388,7 +408,24 @@ def test_every_surface_that_names_a_game_reads_the_column_not_the_room_string():
              if "_ffa_room_game_no(" in ln
              and not ln.lstrip().startswith(("def ", "#", "`", "-"))
              and "`tail` is" not in ln]
-    assert calls == ['    _room_tail = _ffa_room_game_no(report.photon_room_id)']
+    # TWO calls since round 6, and the split between them is the point. The
+    # NUMBER A REPORT NAMES is derived once, in _ffa_named_game_number, and
+    # both the endpoint and the room-keyed replay read it from there — round 5
+    # bounded the tail inline in the endpoint and never asked the question at
+    # all in the replay, which is how an answer came to name a game the report
+    # had not (see _ffa_with_settled). The endpoint keeps the RAW tail beside
+    # it because _ffa_game_number_refusal's message distinguishes a missing
+    # tail from an out-of-domain one, and `None` cannot say which it was.
+    assert calls == ['    tail = _ffa_room_game_no(room_id)',
+                     '    _room_tail = _ffa_room_game_no(report.photon_room_id)']
+    assert calls[0] in inspect.getsource(main._ffa_named_game_number)
+    # The raw tail's ONLY use in the endpoint is that refusal rule.
+    endpoint = _endpoint_src()
+    assert endpoint.count("_room_tail") == 2
+    assert "_ffa_game_number_refusal(_room_tail, _expected_game)" in endpoint
+    for user in (endpoint, inspect.getsource(main._ffa_replay_echo)):
+        assert "_ffa_named_game_number(" in user
+    assert "_ffa_room_game_no(" not in inspect.getsource(main._ffa_replay_echo)
 
 
 def test_the_lookup_asks_about_the_number_the_report_named():
@@ -407,9 +444,11 @@ def test_the_lookup_asks_about_the_number_the_report_named():
     equality in _ffa_game_number_refusal."""
     src = _endpoint_src()
     named = src[src.index("_named_game = "):src.index("if _prior_game is not None:")]
-    assert "_room_tail" in named
-    assert "FFA_GAME_NUMBER_MAX" in named        # out-of-domain tails name nothing
+    assert "_ffa_named_game_number(report.photon_room_id)" in named
     assert "_expected_game" not in named         # the slot is NOT a candidate
+    # out-of-domain tails name nothing - the bound moved into the helper
+    # with the derivation, so it is asserted where it now lives.
+    assert "FFA_GAME_NUMBER_MAX" in inspect.getsource(main._ffa_named_game_number)
     assert '"g": _named_game' in src
     assert "game_number = CAST(:g AS SMALLINT)" in main._FFA_PRIOR_GAME_SQL
     assert "ANY(" not in main._FFA_PRIOR_GAME_SQL
@@ -766,11 +805,15 @@ def test_a_skewed_game_refunds_its_wagers_instead_of_paying_frozen_prices():
     assert "if not _target_skew:" in bets
     settle = bets.index("_settle_ffa_bets_for_game(db, lobby_uuid, game_no")
     assert bets.index("if not _target_skew:") < settle
-    # The refund is idempotent and moves gold as a DELTA (#326), so a retry,
-    # the straggler pass and the closure reconcile can all cross it.
+    # The refund is idempotent and moves gold as an EXACT delta (#326), so a
+    # retry, the straggler pass and the closure reconcile can all cross it.
+    # Round 5 pinned the clamped form here — `GREATEST(0, gold_spent - :amt)`
+    # beside a ledger row for the whole stake — which is the defect, not the
+    # guarantee: it records 10 returned while moving 5.
     ref = inspect.getsource(main._refund_ffa_game_bets_strict)
     assert "settled_at IS NULL RETURNING id" in ref
-    assert "gold_spent = GREATEST(0, COALESCE(gold_spent,0) - :amt)" in ref
+    assert "_return_stake_exactly(" in ref
+    assert "GREATEST" not in ref
     # ...and because the refund stamps settled_at, every later pass skips it:
     # both the straggler query and the closure reconcile select on IS NULL.
     assert "settled_at IS NULL AND game_number < :g" in src
@@ -1289,8 +1332,14 @@ def test_a_room_whose_row_is_not_visible_yet_is_retried_not_spent():
     # come from the same derivation every other answer's does or the pair can
     # come back inconsistent. See
     # test_every_progress_the_endpoint_builds_comes_from_a_locked_slot.
-    assert "_race_progress = _ffa_progress(" in blk
-    assert "await _ffa_lock_lobby_slot(db, lobby_uuid)" in blk
+    # Round 6 moved the re-read to _ffa_progress_relocked and takes it for
+    # BOTH arms of the handler, so the arm that is not the replay cannot be
+    # the one that answers bare. The helper is still the locked derivation.
+    assert "_race_progress = await _ffa_progress_relocked(" in src[
+        src.index("except IntegrityError as ie:"):src.index("uq_ffa_match_room")]
+    assert "_race_progress" in blk
+    assert "await _ffa_lock_lobby_slot(db, lobby_uuid)" in inspect.getsource(
+        main._ffa_progress_relocked)
     assert "SELECT games_played FROM ffa_lobbies" not in blk
 
 
@@ -1375,7 +1424,15 @@ def test_the_capture_note_no_longer_calls_every_conflict_a_retry():
     assert '"variant"' in doc
     # ...and it no longer says the quota bounds variants "exactly as it bounds
     # any other capture" without saying what makes a REDELIVERY of one free.
-    assert "EVERY kept outcome is idempotent" in doc
+    # Round 5 answered that with "EVERY kept outcome is idempotent", which the
+    # bounded scan makes untrue: a variant an admin has reviewed is no longer
+    # recognised. The note has to state WHICH row holds the payload and for
+    # how long redelivery is free, or it is a guarantee over a case it does
+    # not cover (#351).
+    assert "EVERY kept outcome is idempotent" not in doc
+    assert "EVERY kept outcome means this exact payload IS in the table" in doc
+    assert "free while that\n    row is still PENDING" in doc
+    assert "whatever its\n    review status" in doc
 
 
 def test_the_refusal_note_states_the_retry_budget_as_a_bound():
@@ -1406,7 +1463,15 @@ def test_the_migration_header_says_the_tail_has_to_agree():
     # Provenance documentation covers the writer rows and states what the
     # trigger's sequence arm actually computes.
     assert "writer = the inserting statement supplied it" in sql
-    assert "one above the lobby''s highest number for the trigger" in sql
+    # The trigger's sequence arm has TWO results and the column comment has to
+    # name both. Round 5 pinned only the first half ("one above the lobby's
+    # highest number for the trigger"), which is the arm's description for
+    # every lobby except the one the fallback exists for — so the assertion
+    # stayed green over a comment that stopped short exactly where the
+    # behaviour gets interesting.
+    assert ("for the trigger one above the lobby''s highest number, or the "
+            "lobby''s lowest free number when that one would leave the "
+            "1..999 domain") in sql
     # The sequence arm is described as what it computes. Round 2 called it "the
     # next free number", which it was not; round 4 added a free-number FALLBACK
     # for the one input MAX+1 cannot serve, and says which is which.
@@ -1457,6 +1522,7 @@ def test_the_control_tally_matches_the_list_it_sits_next_to():
         "r3": sum(1 for ln in entries if "(r3)" in ln),
         "r4": sum(1 for ln in entries if "(r4)" in ln),
         "r5": sum(1 for ln in entries if "(r5)" in ln),
+        "r6": sum(1 for ln in entries if "(r6)" in ln),
         "retired": sum(1 for ln in entries if "(retired)" in ln),
     }
     counted["plain"] = len(entries) - sum(counted.values())
@@ -1467,17 +1533,27 @@ def test_the_control_tally_matches_the_list_it_sits_next_to():
 
     claimed = re.search(
         r"counted off\s*\n?it: (\d+) unmarked and still live .*?(\d+) unmarked and RETIRED"
-        r".*?(\d+)\s*\n?marked \(r3\), (\d+) marked \(r4\), (\d+) marked \(r5\)",
+        r".*?(\d+)\s*\n?marked \(r3\), (\d+) marked \(r4\), (\d+) marked \(r5\),"
+        r" (\d+) marked \(r6\)",
         doc, re.S)
     assert claimed, "the docstring no longer states a tally in a readable form"
     want = tuple(int(g) for g in claimed.groups())
     have = (counted["plain"], counted["retired"],
-            counted["r3"], counted["r4"], counted["r5"])
+            counted["r3"], counted["r4"], counted["r5"], counted["r6"])
     assert want == have, (
         f"the docstring's tally and its own list disagree: claimed {want}, "
         f"listed {have}")
     # ...and the list is not empty, or the whole check passes on nothing.
-    assert counted["r4"] >= 10 and counted["r5"] >= 5 and counted["plain"] >= 10
+    assert counted["r4"] >= 10 and counted["r5"] >= 5 and counted["r6"] >= 5
+    assert counted["plain"] >= 10
+    # The evidence sentence names a path that EXISTS in this repository. Round
+    # 5 pointed at two files under the gitignored ai-collab scratch, so the
+    # inventory's own provenance line was unfollowable from a clone (#302: a
+    # claim that cannot be traced is a finding).
+    assert "ai-collab/" not in doc.split("All KILLED:")[0].split("counted off")[1]
+    evidence = pathlib.Path(__file__).resolve().parent / "evidence"
+    assert evidence.is_dir(), f"{evidence} is named by the inventory and absent"
+    assert any(evidence.iterdir()), f"{evidence} is empty"
 
 
 def test_every_round_four_control_names_a_test_that_exists():
@@ -2511,6 +2587,31 @@ def test_the_neutered_control_is_exactly_one_predicate_away():
 #     executed and the body it answers with is read off a real response.
 
 
+
+def _non_docstring_strings(src: str) -> list:
+    """Every string literal in `src` that is NOT a docstring.
+
+    The statements, separated from the prose about them. A file-wide grep for
+    an SQL form cannot tell the two apart, so a docstring that names the shape
+    it replaced would either defeat the check or force the explanation out of
+    the code -- and a check that a comment can redden is one a comment can also
+    keep green (#441). Docstrings are the first statement of a module, class or
+    function, which is exactly what this excludes."""
+    tree = ast.parse(src)
+    docs = set()
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if not isinstance(node, (ast.Module, ast.ClassDef,
+                                 ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if (body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            docs.add(id(body[0].value))
+    return [n.value for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+            and id(n) not in docs]
+
 def _own_functions(tree):
     """name -> the single top-level-or-nested def, for names defined once.
 
@@ -2542,7 +2643,16 @@ def _binding_failures(src: str):
             continue                      # f(*seq) — the count is runtime
         if any(k.arg is None for k in node.keywords):
             continue                      # f(**d) — the names are runtime
-        positional = [p.arg for p in args.posonlyargs + args.args]
+        # A POSITIONAL-ONLY parameter cannot be bound by keyword, so the two
+        # groups are kept apart. Round 5 folded posonlyargs into one
+        # `positional` list and then tested keywords against it, which made
+        # `f(a, b, /)` called as `f(a=1, b=2)` read as fully bound — the call
+        # raises TypeError at runtime and the sweep said nothing. One `/` in a
+        # def is all that takes, which is why it is tested below by mutating a
+        # real signature rather than only a synthetic one.
+        posonly = [p.arg for p in args.posonlyargs]
+        byname = [p.arg for p in args.args]
+        positional = posonly + byname
         required = positional[:len(positional) - len(args.defaults)]
         kwonly = [p.arg for p in args.kwonlyargs]
         kwonly_required = [p.arg for p, d in zip(args.kwonlyargs, args.kw_defaults)
@@ -2552,11 +2662,14 @@ def _binding_failures(src: str):
             out.append((node.lineno, node.func.id,
                         f"{len(node.args)} positional into {len(positional)}"))
             continue
-        bound = set(positional[:len(node.args)]) | set(given_kw)
+        nameable = set(byname) | set(kwonly)
+        # Only a keyword the def can actually accept binds anything.
+        bound = set(positional[:len(node.args)]) | (set(given_kw) & nameable)
         missing = [a for a in required if a not in bound]
         missing += [a for a in kwonly_required if a not in bound]
-        unknown = [g for g in given_kw if g not in positional and g not in kwonly]
-        duplicated = [a for a in positional[:len(node.args)] if a in given_kw]
+        unknown = [g for g in given_kw if g not in nameable]
+        duplicated = [a for a in positional[:len(node.args)]
+                      if a in given_kw and a in nameable]
         if missing or unknown or duplicated:
             out.append((node.lineno, node.func.id,
                         f"missing={missing} unknown={unknown} duplicated={duplicated}"))
@@ -2602,6 +2715,20 @@ def test_the_binding_sweep_can_actually_fail():
     # An unknown keyword and a doubly-supplied parameter are both caught.
     assert len(_binding_failures("def f(a):\n    pass\n\ndef g():\n    f(1, z=2)\n")) == 1
     assert len(_binding_failures("def f(a, b):\n    pass\n\ndef g():\n    f(1, a=2)\n")) == 1
+    # A POSITIONAL-ONLY parameter named by keyword is a TypeError, and round 5
+    # read it as bound. Both halves: the call that raises is caught...
+    posonly = _binding_failures(
+        "def f(a, b, /):\n    pass\n\ndef g():\n    f(a=1, b=2)\n")
+    assert len(posonly) == 1 and "unknown=['a', 'b']" in posonly[0][2], posonly
+    # ...and a legal call against the same signature is still silent, so the
+    # rule is "a keyword may not name a posonly parameter" and not "any `/` is
+    # a failure".
+    assert _binding_failures("def f(a, b, /):\n    pass\n\ndef g():\n    f(1, 2)\n") == []
+    assert _binding_failures(
+        "def f(a, /, b):\n    pass\n\ndef g():\n    f(1, b=2)\n") == []
+    # A posonly parameter left unsupplied is still missing, not unknown.
+    assert "missing=['b']" in _binding_failures(
+        "def f(a, b, /):\n    pass\n\ndef g():\n    f(1)\n")[0][2]
 
 
 def _awaited_endpoint_calls(src: str) -> list:
@@ -2620,11 +2747,19 @@ def _awaited_endpoint_calls(src: str) -> list:
         tree = ast.parse(src)
     except SyntaxError:
         return []
+    # THE RECEIVER IS PART OF THE QUESTION. Round 5 matched any attribute call
+    # named submit_ffa_match, so `await dummy.submit_ffa_match(...)` — a stub,
+    # a fake, a module-shaped stand-in — satisfied it while the production
+    # endpoint stayed unexecuted, which is the round-4 defect wearing a
+    # different hat. It has to be `main`, which is how every other test in this
+    # file reaches production.
     return [node.lineno for node in ast.walk(tree)
             if isinstance(node, ast.Await)
             and isinstance(node.value, ast.Call)
             and isinstance(node.value.func, ast.Attribute)
-            and node.value.func.attr == "submit_ffa_match"]
+            and node.value.func.attr == "submit_ffa_match"
+            and isinstance(node.value.func.value, ast.Name)
+            and node.value.func.value.id == "main"]
 
 
 def test_this_file_actually_executes_the_report_endpoint():
@@ -2645,6 +2780,13 @@ def test_this_file_actually_executes_the_report_endpoint():
         'MENTION = "await main.submit_ffa_match(report, req, db)"\n') == []
     assert len(_awaited_endpoint_calls(
         "async def t(db):\n    return await main.submit_ffa_match(r, q, db)\n")) == 1
+    # ...and neither is a call on something that merely has the same attribute
+    # name. Round 5's detector ignored the receiver, so a stub satisfied it
+    # while production went unexecuted (#342/#431 again, one level up).
+    assert _awaited_endpoint_calls(
+        "async def t(db):\n    return await dummy.submit_ffa_match(r, q, db)\n") == []
+    assert _awaited_endpoint_calls(
+        "async def t(db):\n    return await self.main.submit_ffa_match(r, q, db)\n") == []
 
 
 # ── the strict refund: its bound, and the guard it must not inherit ───────
@@ -2669,11 +2811,17 @@ class _RefundDb:
     what was added. Enough to EXECUTE the loop and count its passes, which is
     the thing the bound is about."""
 
-    def __init__(self, batches):
+    def __init__(self, batches, covers=True):
         self.batches = list(batches)
         self.reads = 0
         self.claimed = 0
+        self.gold_moves = 0
         self.added = []
+        # Whether the conditional gold UPDATE finds a row. It is the whole
+        # question _return_stake_exactly asks: a row means the balance covered
+        # the exact stake, no row means it did not. `0` is a real balance, so
+        # the covered answer has to be a falsy value that is not None.
+        self.covers = covers
 
     async def execute(self, stmt, params=None):
         sql = str(stmt)
@@ -2684,6 +2832,9 @@ class _RefundDb:
         if "UPDATE ffa_bets" in sql:
             self.claimed += 1
             return _RefundBatchResult(scalar=uuid.uuid4())
+        if "UPDATE players" in sql:
+            self.gold_moves += 1
+            return _RefundBatchResult(scalar=0 if self.covers else None)
         return _RefundBatchResult(scalar=None)
 
     def add(self, obj):
@@ -3171,9 +3322,298 @@ def test_every_progress_the_endpoint_builds_comes_from_a_locked_slot():
     # No bare read of the counter anywhere in the endpoint: the one derivation
     # is the locked helper's.
     assert "SELECT games_played FROM ffa_lobbies" not in src
-    assert src.count("_ffa_lock_lobby_slot(") == 2
-    # The race branch in particular, between the rollback and the echo.
-    race = src[src.index("if \"uq_ffa_match_room\" not in str("):]
+    # Round 6 moved the post-rollback re-read into _ffa_progress_relocked, so
+    # the endpoint takes the lock once and every answer given after a rollback
+    # goes through the helper — which is itself the locked derivation, not a
+    # second one.
+    assert src.count("_ffa_lock_lobby_slot(") == 1
+    assert src.count("_ffa_progress_relocked(") == 2
+    relock = inspect.getsource(main._ffa_progress_relocked)
+    assert "_ffa_lock_lobby_slot(db, lobby_uuid)" in relock
+    assert "SELECT games_played" not in relock
+    # The integrity handler takes it ONCE, above its own branch, so the arm
+    # that is not the replay cannot be the one that skips it.
+    race = src[src.index("except IntegrityError as ie:"):]
     race = race[:race.index("_ffa_replay_echo(")]
-    assert "_ffa_lock_lobby_slot(db, lobby_uuid)" in race
-    assert "_race_progress = _ffa_progress(" in race
+    assert "_race_progress = await _ffa_progress_relocked(" in race
+    assert (race.index("_race_progress = await _ffa_progress_relocked(")
+            < race.index('"uq_ffa_match_room" not in str('))
+
+
+# ── round 6: the exact stake, the bounded scan, the weaker lock ───────────
+
+def test_a_refund_moves_the_exact_stake_and_never_a_clamped_one():
+    """Control: refund-clamps-the-delta (r6).
+
+    Round 5 wrote `gold_spent = GREATEST(0, COALESCE(gold_spent,0) - :amt)`
+    beside a `GoldTransaction` for the WHOLE stake. With gold_spent = 5 and a
+    10-gold wager the ledger records 10 returned and the balance moves 5, so
+    the ledger's sum and `gold_earned - gold_spent` stop agreeing and the
+    player is short with nothing in the record saying so (#326: a money
+    mutation is a DB delta, and a delta is the amount or it is wrong).
+
+    Executed in BOTH directions against the loop that uses it, because a
+    refusal that never fires and a clamp that never refuses look identical
+    from outside (#391)."""
+    ref = inspect.getsource(main._return_stake_exactly)
+    # The predicate is IN the statement - a read-then-write pair would let a
+    # concurrent debit land between them.
+    assert "COALESCE(gold_spent, 0) >= CAST(:amt AS integer)" in ref
+    assert "RETURNING gold_spent" in ref
+    # The clamp survives in the PROSE, which is where it belongs: the
+    # docstring has to be able to name the form it replaced. Measured on
+    # the statements, never on the file's text (#441).
+    assert "GREATEST" not in "".join(_non_docstring_strings(ref))
+    # ...and the ledger row is written by the same helper, so no caller can
+    # keep one half of the record.
+    assert "GoldTransaction(" in ref
+
+    # Covered: the stake goes back, the ledger row is added, nothing raises.
+    db = _RefundDb([_bet_batch(3), []], covers=True)
+    moved = run(main._refund_ffa_game_bets_strict(db, uuid.uuid4(), 3, "t"))
+    assert moved == 3
+    assert db.gold_moves == 3 and len(db.added) == 3
+
+    # NOT covered: nothing is added, and the refusal propagates to the caller
+    # rather than being rounded down into a partial payment.
+    db = _RefundDb([_bet_batch(3), []], covers=False)
+    with pytest.raises(RuntimeError) as ex:
+        run(main._refund_ffa_game_bets_strict(db, uuid.uuid4(), 3, "t"))
+    assert "does not cover the stake" in str(ex.value)
+    assert db.added == [], "a ledger row was written for gold that never moved"
+
+
+def test_no_refund_in_the_file_still_clamps_its_delta():
+    """The defect is a CLASS, not the line the report named (#432/#330).
+
+    Five sites wrote the same clamped subtraction beside a full-stake ledger
+    row - the series refund, the team-bet reconcile, both FFA bet refunds and
+    the lobby-bet refund. Grepping the OPERATION is what found the other four,
+    and asserting on the operation is what keeps a sixth from being added."""
+    src = pathlib.Path(main.__file__).read_text(encoding="utf-8")
+    # On the STATEMENTS, not the text: the one surviving mention is the
+    # helper docstring naming the form it replaced, and a check that a
+    # comment can redden is a check a comment can also keep green (#441).
+    statements = "\n".join(_non_docstring_strings(src))
+    assert "GREATEST(0, COALESCE(gold_spent" not in statements
+    assert "GREATEST(0, COALESCE(gold_spent, 0)" not in statements
+    # ...and the negative control for that reading: the clamp IS still in
+    # the file, so the assertion above is not passing on an empty view.
+    assert "GREATEST(0, COALESCE(gold_spent,0) - :amt)" in src
+    # ...and every refund path reaches the one helper.
+    for fn in (main._refund_series_bets, main._refund_ffa_game_bets_strict,
+               main._refund_ffa_lobby_bets, main._lobby_bet_pay_refund):
+        assert "_return_stake_exactly(" in inspect.getsource(fn), fn.__name__
+    # The claw-back sites (gold_earned coming back down on an admin reversal)
+    # are a DIFFERENT question and are deliberately untouched here: refusing a
+    # reversal leaves a paid award standing, which is the opposite polarity
+    # (#412). Named so the next round knows they were seen, not missed.
+    assert "GREATEST(0, COALESCE(gold_earned,0) - :amt)" in src
+
+
+def test_the_variant_scan_is_bounded_by_the_quota_it_claims():
+    """Control: variant-scan-unbounded (r6).
+
+    The note said "the scan is bounded by the same quota it protects" and the
+    statement had neither a status filter nor a LIMIT: it read every NULL-room
+    row the group had ever produced, reviewed and discarded history included,
+    under the advisory lock the caller holds. A comment asserting a bound the
+    SQL does not have is the highest-risk kind (#351)."""
+    src = inspect.getsource(main._quarantine_on_file)
+    scan = src[src.index("photon_room_id IS NULL"):]
+    assert "status = 'pending'" in scan
+    assert "LIMIT 50" in scan
+    # The LIMIT and the quota are the SAME number. Both are literals in their
+    # own statements (the janitor's boot self-test refuses SQL assembled at
+    # runtime), so nothing but this assertion stops them drifting apart.
+    quota = re.search(r"int\(_pending\) >= (\d+)",
+                      inspect.getsource(main._quarantine_report))
+    assert quota, "the pending quota is no longer a readable literal"
+    limit = re.search(r"LIMIT (\d+)", scan)
+    assert limit and limit.group(1) == quota.group(1), (
+        "the variant scan and the quota name different numbers")
+    # ...and the note now says what the bound COSTS rather than claiming it
+    # free: a reviewed variant is no longer recognised.
+    doc = main._quarantine_on_file.__doc__
+    assert "THE VARIANT SCAN READS THE SAME SET THE QUOTA COUNTS" in doc
+    assert "already REVIEWED is not recognised any more" in doc
+
+
+def test_the_lobby_lock_is_the_weakest_mode_that_still_conflicts_with_itself():
+    """Control: settlement-takes-for-update (r6).
+
+    `ffa_bets.lobby_id` and `ffa_matches.lobby_id` both reference this row, so
+    every wager and every settled match takes FOR KEY SHARE on it - and FOR
+    KEY SHARE conflicts with exactly one mode, FOR UPDATE (#202/#203/#207).
+    The settlement holds the lobby through the INSERT, the rating/XP/gold pass
+    and, on a config skew, an unbounded strict refund, so the stronger mode
+    enrolled every concurrent bet insert in that wait for no benefit: nothing
+    in the settlement changes a KEY column of ffa_lobbies.
+
+    What the weaker mode still conflicts with is what the exclusion is made
+    of, and `test_pg_two_reports_for_one_lobby_cannot_settle_the_same_number`
+    is the executed half - it stays RED when the lock is removed and GREEN
+    under FOR NO KEY UPDATE."""
+    assert "FOR NO KEY UPDATE" in main._FFA_LOBBY_LOCK_SQL
+    assert "FOR UPDATE" not in main._FFA_LOBBY_LOCK_SQL.replace(
+        "FOR NO KEY UPDATE", "")
+    # B13: placement and the delete path keep the mode they already had, so
+    # this round weakened one lock and strengthened none.
+    src = pathlib.Path(main.__file__).read_text(encoding="utf-8")
+    place = src[src.index('@app.post("/api/v1/ffa/bets"'):]
+    place = place[:place.index("@app.", 10)]
+    assert "FROM ffa_lobbies WHERE id = :lid FOR NO KEY UPDATE" in place
+    assert src.count(
+        "SELECT 1 FROM ffa_lobbies WHERE id = :lid FOR NO KEY UPDATE") == 1
+    # ...and the prose that named the old mode was corrected with it: a
+    # comment naming a mechanism the change removed is where the next false
+    # claim lives (#432/#459).
+    lock_note = src[src.index("# FOR NO KEY UPDATE, not FOR UPDATE (#202/#203/#207)"):
+                    src.index("_FFA_LOBBY_LOCK_SQL =")]
+    assert "never changes a KEY column" in lock_note
+    endpoint = _endpoint_src()
+    assert "under the FOR UPDATE" not in endpoint
+    assert "under the lobby lock" in endpoint
+
+
+def test_an_answer_names_a_settled_game_only_when_the_report_named_it():
+    """Control: settled-game-without-a-named-number (r6).
+
+    `settled_game` means "the number THIS report named is already settled",
+    and a consumer drops the outbox entry as terminal on it. Round 5 took the
+    number off the recorded row without asking what the report named, so the
+    room-keyed replay of a report whose room id has no usable `_rN` tail -
+    reachable in the migration window, where 327 numbers a tail-less
+    historical row from the lobby's own sequence - was answered "game N is
+    settled" about a number it had never mentioned."""
+    progress = main._ffa_progress(4)
+    prior = {"game_number": 3}
+    # Named, and the same number: the field is there.
+    assert main._ffa_with_settled(progress, prior, 3)["settled_game"] == 3
+    # Named nothing: no claim about any number.
+    assert "settled_game" not in main._ffa_with_settled(progress, prior, None)
+    # Named a DIFFERENT number from the row's: still no claim, because the
+    # answer would be about a game the report did not send.
+    assert "settled_game" not in main._ffa_with_settled(progress, prior, 2)
+    # The progress itself survives every one of those.
+    for named in (3, None, 2):
+        out = main._ffa_with_settled(progress, prior, named)
+        assert out["games_played"] == 4 and out["expected_game"] == 5
+    # The number a report names has ONE derivation, used by both the replay
+    # path and the endpoint - a second reading is how the two disagreed.
+    assert main._ffa_named_game_number("rm_211531_r7") == 7
+    assert main._ffa_named_game_number("rm_no_tail") is None
+    assert main._ffa_named_game_number("rm_r0") is None
+    assert main._ffa_named_game_number("rm_r1000") is None
+    assert "_ffa_named_game_number(" in inspect.getsource(main._ffa_replay_echo)
+    assert _endpoint_src().count("_ffa_named_game_number(") == 1
+
+
+def test_every_reachable_insert_failure_answers_with_the_lobbys_progress():
+    """Control: insert-failure-answers-bare (r6).
+
+    Two answers below the lobby lock used to carry nothing. A non-duplicate
+    integrity error raised `HTTPException(500, ...)`, and a DBAPI-level
+    failure of the INSERT - migration 327's trigger refusing a lobby holding
+    every number in 1..999 - was not caught at all. Both roll the settlement
+    back, so neither can move a result; both left the reporter without the
+    number to resume from, which is the whole of B3."""
+    src = _endpoint_src()
+    # Whitespace-normalised, because a CALL is what this is about and a call
+    # wrapped across two lines is the same call. The first draft matched the
+    # raw text and its own negative control reddened it: an inert reflow of
+    # the very line under test turned the check red, which means it was
+    # measuring a line shape and not the answer (#391 — the negative control
+    # earning its place, and #441).
+    flat = " ".join(src.split())
+    assert 'raise HTTPException(500, "FFA match insert failed")' not in flat
+    assert 'FfaReportRefusal(500, "FFA match insert failed", _race_progress)' in flat
+    # The DBAPI arm exists, is AFTER the integrity arm (IntegrityError is a
+    # subclass of DBAPIError, so the narrower clause has to come first or it
+    # is dead), and answers a retryable status carrying the progress.
+    assert "except DBAPIError as _insert_ex:" in src
+    assert (src.index("except IntegrityError as ie:")
+            < src.index("except DBAPIError as _insert_ex:"))
+    dbapi = " ".join(src[src.index("except DBAPIError as _insert_ex:"):].split())
+    assert "_ffa_progress_relocked(" in dbapi
+    assert 'FfaReportRefusal(503, "Could not record this game - retry"' in dbapi
+    # The service-account guard moved BELOW the progress, so its 403 is no
+    # longer the one post-lock answer outside the rule.
+    lock = src.index("_progress = _ffa_progress(_expected_game - 1)")
+    # The roster guard higher up the endpoint is a different call; this is
+    # the LOBBY-MEMBER one, and it has to sit after the progress exists.
+    member_guard = src.index("_assert_no_service_subject(\n", lock)
+    assert member_guard > lock
+    guard = src[lock:member_guard + 900]
+    assert "FfaReportRefusal(_svc.status_code, str(_svc.detail), _progress)" in guard
+
+
+def test_pg_an_exhausted_number_space_reaches_the_arm_that_answers_it():
+    """The reachability half of the test above (#286/#405: prove the path is
+    entered before trusting the logic).
+
+    The handler is worth nothing unless a plpgsql RAISE from the migration's
+    trigger really reaches SQLAlchemy as DBAPIError and NOT as IntegrityError:
+    the narrower clause runs first, and a refusal landing there would be
+    answered 500 "FFA match insert failed" instead of the retryable refusal
+    that names the lobby's progress. Executed against the real trigger."""
+    from sqlalchemy.exc import DBAPIError, IntegrityError
+    require_pg()
+    sql = MIGRATION.read_text(encoding="utf-8")
+    FULL = "00000000-0000-0000-0000-0000000000f9"
+
+    async def go():
+        conn = await _raw_pg()
+        try:
+            await conn.execute(MIGRATION_FIXTURE)
+            await conn.execute(sql)
+            await conn.execute(
+                "INSERT INTO ffa_matches (id, lobby_id, photon_room_id,"
+                " ended_at, game_number)"
+                " SELECT gen_random_uuid(), $1, 'f9_r' || n, NOW(),"
+                "        n::SMALLINT FROM generate_series(1, 999) AS n", FULL)
+        finally:
+            await conn.close()
+        engine = create_async_engine(require_pg())
+        sm = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with sm() as db:
+                try:
+                    await db.execute(text(
+                        "INSERT INTO ffa_matches (id, lobby_id, photon_room_id,"
+                        " ended_at) VALUES (gen_random_uuid(),"
+                        " CAST(:l AS uuid), 'f9_no_tail', NOW())"), {"l": FULL})
+                    return ("accepted",), ""
+                except Exception as ex:
+                    await db.rollback()
+                    return type(ex).__mro__, str(ex)
+        finally:
+            await engine.dispose()
+
+    mro, why = run(go())
+    assert mro != ("accepted",), "the exhausted lobby accepted an unnumbered insert"
+    assert DBAPIError in mro, mro
+    # ...and NOT the narrower class, which the handler above answers 500.
+    assert IntegrityError not in mro, mro
+    assert "holds every number in 1..999" in why, why
+
+
+def test_every_round_six_control_names_a_test_that_exists():
+    """The same pairing for round 6. Every control in the inventory marked
+    (r6) names one of these, and a rename that left the log pointing at
+    nothing reddens here."""
+    mod = sys.modules[__name__]
+    for name in ("test_a_refund_moves_the_exact_stake_and_never_a_clamped_one",
+                 "test_no_refund_in_the_file_still_clamps_its_delta",
+                 "test_the_variant_scan_is_bounded_by_the_quota_it_claims",
+                 "test_the_lobby_lock_is_the_weakest_mode_that_still_conflicts_with_itself",
+                 "test_pg_two_reports_for_one_lobby_cannot_settle_the_same_number",
+                 "test_an_answer_names_a_settled_game_only_when_the_report_named_it",
+                 "test_every_reachable_insert_failure_answers_with_the_lobbys_progress",
+                 "test_pg_an_exhausted_number_space_reaches_the_arm_that_answers_it",
+                 "test_the_binding_sweep_can_actually_fail",
+                 "test_every_call_in_main_binds_to_the_function_it_names",
+                 "test_this_file_actually_executes_the_report_endpoint",
+                 "test_the_capture_note_no_longer_calls_every_conflict_a_retry",
+                 "test_the_migration_header_says_the_tail_has_to_agree"):
+        assert callable(getattr(mod, name, None)), name

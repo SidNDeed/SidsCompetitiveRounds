@@ -94,7 +94,7 @@ ALTER TABLE ffa_matches ADD COLUMN IF NOT EXISTS score_target_played SMALLINT;
 COMMENT ON COLUMN ffa_matches.game_number IS
     'Which game of the sitting this row records (1..999, NOT NULL). Live rows take the lobby''s own games_played + 1, which the report room id''s _rN tail has to equal; historical rows were backfilled by migration 327. Not unique: a second row for one game is a recorded contradiction, not a key violation.';
 COMMENT ON COLUMN ffa_matches.game_number_source IS
-    'How this row got its number. writer = the inserting statement supplied it (the api, which supplies the lobby''s games_played + 1). room_tail = the report room id''s _rN tail, taken by migration 327''s backfill or by the insert trigger when the writer supplied none. sequence = neither was available: the lobby''s ended_at order for the backfill, one above the lobby''s highest number for the trigger.';
+    'How this row got its number. writer = the inserting statement supplied it (the api, which supplies the lobby''s games_played + 1). room_tail = the report room id''s _rN tail, taken by migration 327''s backfill or by the insert trigger when the writer supplied none. sequence = neither was available: the lobby''s ended_at order for the backfill, and for the trigger one above the lobby''s highest number, or the lobby''s lowest free number when that one would leave the 1..999 domain.';
 COMMENT ON COLUMN ffa_matches.score_target_frozen IS
     'The lobby''s frozen first-to-N at the time this game settled (NULL before migration 327).';
 COMMENT ON COLUMN ffa_matches.score_target_played IS
@@ -167,9 +167,28 @@ BEGIN
                 AND m.game_number = n::SMALLINT);
     END IF;
     IF tail IS NULL THEN
+        -- The one input with no answer. A BEFORE INSERT trigger has exactly
+        -- two ways to decline -- raise, or invent a number -- and inventing
+        -- one here means handing back a number the lobby is already using,
+        -- which is a silent second settlement of a recorded game. So it
+        -- raises, and the raise is the conservative outcome: nothing is
+        -- committed, so no match, rating, gold or wager moves.
+        --
+        -- WHAT EACH API REVISION DOES WITH IT, rather than a claim that
+        -- nobody ever sees it. The current api catches a DBAPI-level failure
+        -- of this INSERT and answers 503 carrying the lobby's own progress,
+        -- which the client's outbox retries rather than spends
+        -- (submit_ffa_match's `except DBAPIError`). The pre-327 api has no
+        -- such handler and answers an unhandled HTTP 500 -- also retryable,
+        -- also committing nothing, and reachable only inside the deploy
+        -- window this migration opens by running first. Neither revision can
+        -- produce the input: FFA_MAX_GAMES_PER_LOBBY is 40, so a lobby cannot
+        -- reach 999 rows through the endpoint at all.
         RAISE EXCEPTION
             'ffa_matches: lobby % holds every number in 1..999, so an '
-            'unnumbered insert has no number left', NEW.lobby_id;
+            'unnumbered insert has no number left', NEW.lobby_id
+        USING HINT = 'The api answers this as a retryable refusal carrying the '
+                     'lobby progress; nothing was committed.';
     END IF;
     NEW.game_number := tail::SMALLINT;
     NEW.game_number_source := 'sequence';

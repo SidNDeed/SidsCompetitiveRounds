@@ -1,0 +1,31 @@
+Both full suites, run SEQUENTIALLY on this seat, 2026-09-20
+===========================================================
+
+Never concurrently: the two modes share one local PostgreSQL instance, and a
+concurrent pair would have them fighting over the same scratch databases and
+reporting each other's failures.
+
+  opt-out  FFA_TEST_PG_OPTOUT=1   the live checks become skips, and the guard
+                                  tests below prove that only an AFFIRMATIVE
+                                  opt-out can do it -- a missing DSN alone
+                                  cannot, which is what stops the PostgreSQL
+                                  half vanishing from a green run.
+  live DSN FFA_TEST_PG_DSN=...    the same suite with the live checks RUN. The
+                                  19-test difference in the counts below is
+                                  exactly that half.
+
+------------------------------------------------------------------------------
+== opt-out ==
+1727 passed, 34 skipped, 1 xfailed, 2 warnings in 685.50s (0:11:25)
+
+== live DSN ==
+1746 passed, 15 skipped, 1 xfailed, 2 warnings in 700.28s (0:11:40)
+
+== the difference, named ==
+opt-out skips 34, DSN skips 15: the 19 the DSN run executes are the
+PostgreSQL-gated checks listed in r6-postgresql-controls.txt.
+
+== failures in either run ==
+ai-collab/r6-suite-optout2.log:0
+ai-collab/r6-suite-dsn.log:0
+(0 and 0)
