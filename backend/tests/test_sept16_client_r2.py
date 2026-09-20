@@ -674,12 +674,21 @@ def test_h1_the_form_holds_under_every_ordering_the_endpoint_distinguishes():
     api = _src("ApiClient.cs")
 
     def claim(s):
-        return "if (fallback) { t1PointsTotal = 0; t2PointsTotal = 0; }" in s
+        # STRUCTURAL, not a line literal.  The round-4 lens pass gave this
+        # normalisation a warning beside it, which a one-line anchor could not
+        # survive -- and a predicate that has to be rewritten every time the
+        # statement is reformatted measures the formatting, not the rule.
+        if "if (fallback)" not in s:
+            return False
+        blk = s[s.index("if (fallback)"):]
+        blk = blk[:blk.index("\n            }") + 14] if "\n            }" in blk else ""
+        return ("t1PointsTotal = 0;" in blk and "t2PointsTotal = 0;" in blk)
 
     _assert_discriminating(
         claim, api,
-        _mutate(api, "if (fallback) { t1PointsTotal = 0; t2PointsTotal = 0; }",
-                "// the caller is trusted to zero them", "H1 fallback form"),
+        _mutate(api, "                t1PointsTotal = 0;\n                t2PointsTotal = 0;",
+                "                // the caller is trusted to zero them",
+                "H1 fallback form"),
         "H1 fallback form")
 
 
@@ -2703,17 +2712,22 @@ def test_r4_h2_the_outcome_protocol_has_its_own_key_and_the_watch_takes_its_quor
     place a watch can come into existence.
 
     TWO KEYS, NOT ONE RE-KEYED CONSTANT.  cr_dc2 is the ELECTION generation and
-    did not change this round; re-keying it would drop rooms to the floor
-    election for no reason.  cr_dc3 is the OUTCOME-PROTOCOL generation and is
+    did not change this round; cr_dc3 is the OUTCOME-PROTOCOL generation and is
     what changed.  Folding a wire generation and a capability into one constant
     breaks compatibility in both directions (#604).
 
-    OLD BUILDS ARE NEVER HANDED A VALUE THEY MISREAD.  Publication stays
-    unconditional: an older seat reading our cr_dcr sees only send/ok/no, under
-    this build's stricter meaning for `no`, plus `unk`, which its three-token
-    parser does not admit and therefore reads as nothing published -- post
-    nothing, the same decision this build makes.  cr_dc3 itself is a key those
-    builds never read."""
+    WHAT THIS TEST DOES NOT SAY, corrected after the lens pass ratified a claim
+    it had not earned.  The docstring here used to justify the split with "re-
+    keying cr_dc2 would drop rooms to the floor election for no reason" and to
+    certify that old builds tolerate an unknown cr_dcr token.  Neither key nor
+    cr_dcr is on ANY released tree, so both sentences were statements about
+    builds that do not exist, and a harness repeating a source comment ratifies
+    it rather than testing it (#342).  What is asserted below is only what the
+    text can carry: the two constants exist, they ride one merge and one revoke,
+    the gate sits inside ArmFallback before any watch state, and publication is
+    ungated.  The REACHABILITY of the refusal -- it is dominated by the election
+    quorum on the only path that reaches it -- is asserted separately, in
+    test_r4lens_f3_*, together with the corrected comments."""
     ra = _src("RoomActors.cs")
     body = ra[ra.index("internal static class DcReportSync"):]
 
@@ -2811,8 +2825,15 @@ def test_r4_h3_a_fallback_report_carries_is_fallback_and_a_prompt_report_does_no
     canonical; extending the canonical would fail every current client's
     signature.
 
-    DIRECTION (#283): setting it can only move the server toward the more
-    conservative outcome, and the server's predicate requires zero totals anyway.
+    DIRECTION (#283): setting it moves the server away from settling and toward
+    deferral, and the deferral branch sits before the lead-forfeit block, so it
+    reaches no rating, gold or team_matches write.  It is NOT free, and the
+    round-4 lens pass corrected this docstring along with the comment it
+    mirrored: the server checks only the FLAG, so a real-totals report sent with
+    it would be deferred rather than settled and lose the rated lead-forfeit it
+    earned.  The zero form is held in exactly one place across both lanes --
+    ReportTeamSeriesDc's own normalisation -- and test_r4lens_f1_* is what pins
+    that.
 
     AGAINST AN OLDER SERVER (#266): an unknown query parameter is IGNORED, the
     request is answered 200, and the report settles immediately exactly as it
@@ -2854,8 +2875,8 @@ def test_r4_h3_a_fallback_report_carries_is_fallback_and_a_prompt_report_does_no
         "R4 H3 only a fallback names itself")
 
     # NEGATIVE CONTROL
-    assert claim(_mutate(api, "// DIRECTION (#283). Setting it can only move",
-                         "// DIRECTION (#283): setting it can only move",
+    assert claim(_mutate(api, "// DIRECTION (#283). Setting it moves the server away",
+                         "// DIRECTION (#283): setting it moves the server away",
                          "R4 H3 is_fallback negative control"))
 
 
@@ -3059,3 +3080,360 @@ def test_r4_l1_the_assembly_loop_comment_names_the_deployed_deadline():
     assert claim(_mutate(plug, "which is exactly why this caller",
                          "which is precisely why this caller",
                          "R4 L1 deadline negative control"))
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# ROUND 4 LENS PASS -- four findings against the round-4 tree itself
+# ══════════════════════════════════════════════════════════════════════════
+#
+# All four are claim defects plus one enforcement gap, and all four have the
+# shape #351 names: the highest-risk claim is the one the previous round's own
+# fix authored.  Three of them were reporting a PASS neither lane had earned --
+# two halves of one contract written in the same round, each citing the other
+# (#341/#635).
+
+
+def _flat_comment(text):
+    """Comment text with its line wrapping removed.
+
+    A predicate over a SENTENCE must not depend on where that sentence happened
+    to wrap: a reflow of the comment would turn the check red for nothing, and
+    writing the predicate to match one wrap point is how a check ends up
+    measuring the formatter instead of the claim (#342)."""
+    return re.sub(r"\s+", " ", re.sub(r"\n\s*(?:///|//)\s?", "\n", text)).strip()
+
+
+def test_r4lens_f1_the_zero_form_is_enforced_only_here_and_the_comment_says_so():
+    """F1.  The is_fallback note claimed a server-side predicate that does not
+    exist.
+
+    The server lane's deferral branch reads is_fallback and nothing else -- its
+    own note states the placement before the lead-forfeit block is structural
+    and does NOT rest on a fallback carrying zero points, "a property of today's
+    client and not a check this endpoint could fail on".  The client's DIRECTION
+    paragraph nonetheless closed with "the server's predicate requires zero
+    totals anyway", which would license a later caller to drop the client-side
+    normalisation as redundant.  Nothing anywhere would then hold the two
+    consistent: a real-totals report flagged as a fallback is DEFERRED instead
+    of settled, and the rated lead-forfeit it earned is lost to the sweep.
+
+    Three properties are asserted: the false sentence is gone, the normalisation
+    is still there and is named as the only enforcement in EITHER lane, and it
+    emits a positive signal when it has to act (#438) so a bundle can tell a
+    caller that passed real totals from one that passed zeros."""
+    api = _src("ApiClient.cs")
+
+    def window(s):
+        if "public static void ReportTeamSeriesDc(" not in s:
+            return ""
+        b = s[s.index("public static void ReportTeamSeriesDc("):]
+        if "StartCoroutine(SendTeamSeriesDcReport(" not in b:
+            return ""
+        return b[:b.index("StartCoroutine(SendTeamSeriesDcReport(")]
+
+    def claim(s):
+        body = window(s)
+        if not body:
+            return False
+        if "server's predicate requires zero totals" in body:
+            return False                       # the retracted claim is back
+        if "ENFORCED HERE AND NOWHERE ELSE" not in body:
+            return False                       # ...and its replacement is gone
+        if "t1PointsTotal = 0;" not in body or "t2PointsTotal = 0;" not in body:
+            return False                       # the normalisation itself
+        if "non-zero " not in body or "forcing " not in body:
+            return False                       # the positive signal beside it
+        # the guard on the warning must test BOTH totals, not one
+        return "if (t1PointsTotal != 0 || t2PointsTotal != 0)" in body
+
+    # MUTATION: the false server-side claim comes back
+    _assert_discriminating(
+        claim, api,
+        _mutate(api,
+                "// with any server-side check and must not be deleted as one.",
+                "// with the server's predicate requires zero totals anyway.",
+                "R4-lens F1 server-predicate claim restored"),
+        "R4-lens F1 the zero form is enforced only here")
+
+    # MUTATION 2: the normalisation is dropped as redundant -- the exact move
+    # the false comment licensed
+    assert not claim(_mutate(
+        api,
+        "                t1PointsTotal = 0;\n                t2PointsTotal = 0;\n",
+        "                // (the server checks this)\n",
+        "R4-lens F1 normalisation dropped"))
+
+    # NEGATIVE CONTROL: rewording the warning's prose leaves the claim true
+    assert claim(_mutate(api, "a game it did not watch", "a game it never watched",
+                         "R4-lens F1 negative control"))
+
+
+def readonly_reads_before_the_latch(rtt_seconds, in_flight_rule):
+    """How many lifecycle-mode reads reach the wire before the first answer
+    latches the capability off.
+
+    The dispatcher is a 2 s menu tick; the latch is applied inside a response
+    callback.  With no in-flight rule every tick inside the round trip sends.
+    With one, a tick whose predecessor has not answered sends nothing, so the
+    count is exactly one whatever the latency.
+
+    Transport bound: GetRequest sets request.timeout = 20, so an unanswered read
+    cannot outlive 20 s -- the un-guarded count is bounded, not unbounded, and
+    the bound is eleven.  That distinction is why this is a model and not a
+    rhetorical point: the lens finding stated there was no timeout, and there
+    is one."""
+    rtt = min(rtt_seconds, 20.0)
+    if in_flight_rule:
+        return 1
+    return 1 + int(rtt // 2.0)
+
+
+def test_r4lens_f2_at_most_one_lifecycle_read_is_outstanding():
+    """F2.  Gate 2 documented a bound of one that nothing enforced.
+
+    "the capability is latched OFF for the session and no further read goes out
+    -- it stops the second request, never the first" is a claim about how many
+    reads reach the wire before the first ANSWER, and the code had no in-flight
+    flag: UpdateTeamSeriesStatePoll dispatched a fresh coroutine every 2 s.  The
+    guard's refusal cost was reasoned about on a bound of ONE write (#430), and
+    on a 6 s answer the real count was four.
+
+    What the bound protects: a server advertises series_status_readonly at
+    launch (read once, never re-read) while the box answering the GET does not
+    honour lifecycle=false -- the standby half of a two-step deploy, a rollback,
+    a rebuild during which the edge falls back.  Each un-honoured read can run
+    the cancel arm on a played active series and reconcile its bets."""
+    # the model: un-guarded, the count grows with latency and tops out at the
+    # transport timeout; guarded, it is one everywhere
+    for rtt in (0.5, 2.0, 6.0, 19.0, 45.0):
+        assert readonly_reads_before_the_latch(rtt, True) == 1, rtt
+    # NEGATIVE CONTROL for the model itself: without the rule it is not one
+    assert readonly_reads_before_the_latch(6.0, False) == 4
+    assert readonly_reads_before_the_latch(45.0, False) == 11
+
+    api = _src("ApiClient.cs")
+
+    def claim(s):
+        ro = _method_body(s, "public static void PollTeamSeriesStatusReadOnly")
+        if not ro or "StartCoroutine(" not in ro:
+            return False
+        # the flag is READ before anything is dispatched...
+        if "if (_statusReadInFlight) return;" not in ro:
+            return False
+        if ro.index("if (_statusReadInFlight) return;") > ro.index("StartCoroutine("):
+            return False
+        # ...set before the dispatch...
+        if "_statusReadInFlight = true;" not in ro:
+            return False
+        if ro.index("_statusReadInFlight = true;") > ro.index("StartCoroutine("):
+            return False
+        # ...cleared inside the response callback BEFORE any early return...
+        if "_statusReadInFlight = false;" not in ro:
+            return False
+        after = ro[ro.index("StartCoroutine("):]
+        if "if (!ok ||" not in after:
+            return False
+        if after.index("_statusReadInFlight = false;") > after.index("if (!ok ||"):
+            return False
+        # ...and released when the dispatch itself throws, or one transient
+        # failure latches this route dark for the session
+        return "catch (Exception ex)" in ro and ro.count("_statusReadInFlight = false;") == 2
+
+    # MUTATION: the in-flight gate is removed -- the round-4 tree
+    _assert_discriminating(
+        claim, api,
+        _mutate(api, "            if (_statusReadInFlight) return;            // GATE 3",
+                "            // no in-flight rule                          // GATE 3",
+                "R4-lens F2 in-flight gate removed"),
+        "R4-lens F2 one lifecycle read outstanding")
+
+    # MUTATION 2: the flag is cleared only after the early return, so a failed
+    # read latches the route dark for the session
+    assert not claim(_mutate(
+        api,
+        "                    _statusReadInFlight = false;\n                    if (!ok ||",
+        "                    if (!ok ||",
+        "R4-lens F2 clear moved after the early return"))
+
+    # NEGATIVE CONTROL: rewording the dispatch-failure log leaves the claim true
+    assert claim(_mutate(api, "series status read could not be dispatched",
+                         "series status read was not dispatched",
+                         "R4-lens F2 negative control"))
+
+    # the documented bound names the mechanism rather than asserting it, and the
+    # transport term the model uses is the one the source actually sets
+    assert "GATE 3" in api
+    assert "request.timeout = 20;" in api
+
+
+def test_r4lens_f3_the_outcome_quorum_is_dominated_by_the_election_quorum():
+    """F3.  The mixed-room refusal cannot fire, and the comment justifying two
+    keys rested on a premise no tree supports.
+
+    cr_dc2, cr_dc3 and cr_dcr are on NO released tree.  Both capability keys are
+    written in one SetCustomProperties merge and withdrawn in one, so a seat
+    carries both or neither.  ArmFallback has exactly one caller, the census arm
+    in Plugin.OnPlayerLeftRoom, which has already taken the cr_dc2 quorum over
+    the SAME seat list it then hands on -- so AllOutcomeCapable can only return
+    False where AllCapable already did, i.e. never on the path that reaches it.
+
+    The old comment said re-keying cr_dc2 "would drop rooms to the floor
+    election for no reason", which is true only of a key that shipped.  The
+    guard is KEPT -- the gate belongs to the operation, not to one caller's
+    discipline (#432) -- but the text must now say what it can and cannot catch,
+    because a reviewer reading it as "mixed-version 2v2 is handled" stops
+    looking, and the branch's log line can never appear in a bundle."""
+    ra = _src("RoomActors.cs")
+    plug = _src("Plugin.cs")
+
+    # STRUCTURE: ArmFallback has exactly one caller, and it is the census arm
+    sites = _call_sites("ArmFallback")
+    assert sites == {("Plugin.cs", "OnPlayerLeftRoom")}, sites
+
+    # ...and that caller hands on the same list the election quorum ran over
+    assert "observedRoom, survivors);" in plug
+    assert "DcReportSync.AllCapable(survivors, out missingCap)" in plug
+    assert (plug.index("DcReportSync.AllCapable(survivors")
+            < plug.index("DcReportSync.ArmFallback(seriesId, elected"))
+    # and the call sits under the census arm's own gate
+    assert "bool unique = teamsKnown && survivors.Count == 3 && roomWide;" in plug
+
+    # BOTH keys ride one merge and one revoke, so a seat carries both or neither
+    body = ra[ra.index("internal static class DcReportSync"):]
+    stage = body[body.index("internal static void StageCapability(string source)"):]
+    stage = stage[:stage.index("internal static void RevokeCapability()")]
+    assert stage.count("SetCustomProperties") == 1
+    assert "{ CapabilityProp, CapabilityValue }," in stage
+    assert "{ OutcomeCapabilityProp, OutcomeCapabilityValue }" in stage
+
+    def claim(s):
+        if "internal static class DcReportSync" not in s:
+            return False
+        head = _flat_comment(s[:s.index("internal static class DcReportSync")])
+        # the retracted premise is quoted as retracted, never asserted
+        if "is on no released tree" not in head:
+            return False
+        if "DOMINATED by the election quorum" not in head:
+            return False
+        if "cr_dc4" not in head:        # cr_dc3 is spent; the next election key is 4
+            return False
+        b = s[s.index("internal static class DcReportSync"):]
+        if "internal static void ArmFallback(string seriesId" not in b:
+            return False
+        a = b[b.index("internal static void ArmFallback(string seriesId"):]
+        a = a[:a.index("internal static void NoteActorProps")]
+        # the guard is still taken, before any watch state is written
+        if "AllOutcomeCapable(fighterSeats, out missingOutcome)" not in a:
+            return False
+        if a.index("AllOutcomeCapable(") > a.index("_watchSeries = seriesId;"):
+            return False
+        # ...and the comment states the reachability truth rather than implying
+        # that a mixed-version room was exercised
+        af = _flat_comment(a)
+        return ("cannot fire on a room a player can assemble" in af
+                and "exactly one caller" in af
+                and "proves nothing either way" in af)
+
+    # MUTATION: the reachability sentence is turned back into the reading it
+    # replaces -- "this guard covers mixed rooms" -- which is what a reviewer
+    # took from the branch before
+    _assert_discriminating(
+        claim, ra,
+        _mutate(ra,
+                "So this refusal cannot fire on a room",
+                "So this refusal is what protects a room",
+                "R4-lens F3 reachability sentence restored to the old reading"),
+        "R4-lens F3 the outcome quorum is dominated")
+
+    # MUTATION 2: the head-note premise is restored to the retracted form.  The
+    # anchor is the HEAD paragraph's own line, not the bare sentence -- the
+    # sentence also occurs in the cr_dcr note further down, and a mutation that
+    # lands on the wrong occurrence is a control that cannot fail (#342).
+    assert not claim(_mutate(
+        ra,
+        "<para>AND NO GENERATION OF IT HAS SHIPPED. <c>cr_dc2</c> is on no released",
+        "<para>AND IT SHIPPED LONG AGO. <c>cr_dc2</c> is on every released",
+        "R4-lens F3 shipped-key premise restored"))
+
+    # MUTATION 3: the guard is deleted.  The claim must still fail: the fix is
+    # "keep the gate AND state its reach", not one or the other
+    assert not claim(_mutate(
+        ra,
+        "                if (!AllOutcomeCapable(fighterSeats, out missingOutcome))",
+        "                if (false)",
+        "R4-lens F3 guard deleted"))
+
+    # NEGATIVE CONTROL: rewording the kept-anyway rationale leaves it true
+    assert claim(_mutate(ra, "and not as belt-and-braces", "and not as belt and braces",
+                         "R4-lens F3 negative control"))
+
+
+def test_r4lens_f4_no_comment_certifies_a_deployed_cr_dcr_parser():
+    """F4.  Two summaries asserted, in the present tense, how "an older build"
+    parses cr_dcr -- a property of an unreleased intermediate tree stated as a
+    fact about builds in the field.
+
+    No shipped build parses cr_dcr at all.  The compatibility direction those
+    paragraphs certified is real only as BRANCH HISTORY, and the danger is the
+    next round: a change to the cr_dcr value set that consults them reads a
+    verified statement about deployed parsers and leaves publication
+    unconditional without re-deriving it -- by which time cr_dcr may have
+    shipped, and the real deployed parser's behaviour on an unknown token was
+    never checked, only asserted (#302, #351).
+
+    Publication STAYS unconditional; only its justification changes, and the
+    text now carries the condition under which it must be re-derived."""
+    ra = _src("RoomActors.cs")
+
+    def claim(s):
+        if "internal static class DcReportSync" not in s:
+            return False
+        b = s[s.index("internal static class DcReportSync"):]
+        # neither summary may assert a deployed parser...
+        if "three-token parser does not admit" in b:
+            return False
+        if "A build that predates this value reads it" in b:
+            return False
+        # ...both must say it as branch history, and name the re-derive trigger
+        if "parsed by NO released build" not in b:
+            return False
+        if "an earlier commit on THIS" not in b:
+            return False
+        if "must re-derive whether publication may stay" not in b:
+            return False
+        # publication itself is still ungated
+        pub = _method_body(s, "internal static void PublishOutcome(string seriesId, string outcome)")
+        if not pub:
+            return False
+        return "OutcomeCapabilityProp" not in pub
+
+    # MUTATION: the deployed-parser assertion comes back
+    _assert_discriminating(
+        claim, ra,
+        _mutate(ra, "<c>cr_dcr</c> is parsed by NO released build",
+                "<c>cr_dcr</c> is parsed by every older build",
+                "R4-lens F4 deployed-parser claim restored"),
+        "R4-lens F4 no comment certifies a deployed parser")
+
+    # MUTATION 2: the re-derive condition is dropped -- the sentence the next
+    # round would have needed
+    assert not claim(_mutate(ra, "must re-derive whether publication may stay",
+                             "may assume publication stays",
+                             "R4-lens F4 re-derive condition dropped"))
+
+    # MUTATION 3: publication becomes gated -- the thing that must NOT change
+    assert not claim(_mutate(
+        ra,
+        "                string tag = Tag(seriesId);",
+        "                string tag = Tag(seriesId);\n"
+        "                if (OutcomeCapabilityProp == null) return;",
+        "R4-lens F4 publication gated"))
+
+    # the refusal's own log line must not claim older builds read cr_dcr either
+    assert "read exactly as they always did" not in ra
+    assert "released build parses at all" in ra
+
+    # NEGATIVE CONTROL: rewording the branch-history sentence leaves it true
+    assert claim(_mutate(ra, "not about a deployed parser",
+                         "and not about a deployed parser",
+                         "R4-lens F4 negative control"))

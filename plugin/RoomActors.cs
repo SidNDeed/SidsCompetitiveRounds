@@ -705,20 +705,46 @@ namespace CompetitiveRounds
     /// floor election they already agree on.</para>
     ///
     /// <para>KEY NAMING: <c>cr_dc2</c> means "this seat elects from the four-seat
-    /// census". A later rule change takes <c>cr_dc3</c>, so a mixed room drops to
+    /// census". The next ELECTION rule change takes <c>cr_dc4</c> — <c>cr_dc3</c>
+    /// is already spent on the outcome protocol below — so a mixed room drops to
     /// the floor election everywhere rather than running two rules at once. There
     /// was no <c>cr_dc1</c>: the number is the election generation, and the
     /// generation before this one advertised nothing at all.</para>
     ///
-    /// <para>TWO KEYS, TWO RULES, DELIBERATELY NOT ONE. <c>cr_dc2</c> is the
-    /// ELECTION generation; <c>cr_dc3</c> is the OUTCOME-PROTOCOL generation, and
-    /// they are separate because they gate different things and a seat can agree
-    /// about one while disagreeing about the other. Folding them into one constant
-    /// is the shape that broke compatibility in both directions once already
-    /// (#604): the election rule did not change this round and re-keying it would
-    /// drop rooms to the floor election for no reason, while the outcome rule DID
-    /// change and leaving it on the old key is what let one generation read
-    /// another's values. See <c>OutcomeCapabilityProp</c>.</para>
+    /// <para>AND NO GENERATION OF IT HAS SHIPPED. <c>cr_dc2</c> is on no released
+    /// tree — not <c>main</c>, not <c>origin/main</c>, not the production pin — so
+    /// every build a player can be running today advertises NOTHING on this key.
+    /// That is what makes the census arm's own refusal the one that decides a real
+    /// mixed room: this build beside any shipped build sees a survivor without
+    /// <c>cr_dc2</c>, refuses the census arm, and every seat runs the floor
+    /// election. It is written down because the paragraph below used to reason from
+    /// the opposite premise (#302).</para>
+    ///
+    /// <para>TWO KEYS, TWO RULES, AND WHAT THE SECOND ONE DOES AND DOES NOT BUY
+    /// TODAY. <c>cr_dc2</c> is the ELECTION generation; <c>cr_dc3</c> is the
+    /// OUTCOME-PROTOCOL generation. They are separate because they gate different
+    /// things, and folding a wire generation and a capability into one constant is
+    /// the shape that broke compatibility in both directions once already (#604).
+    /// The previous wording justified the split by saying that re-keying
+    /// <c>cr_dc2</c> "would drop rooms to the floor election for no reason" — true
+    /// only of a key that has shipped, and this one has not.</para>
+    ///
+    /// <para>SO, EXACTLY. On this tree both keys are written in ONE
+    /// <c>SetCustomProperties</c> merge and withdrawn in one, by the only builds
+    /// that have either, so a seat carries BOTH or NEITHER. The outcome quorum is
+    /// therefore DOMINATED by the election quorum on the one path that reaches it:
+    /// <c>ArmFallback</c> is called only from the census arm, which has already
+    /// required <c>cr_dc2</c> of the same seat list, so the outcome quorum cannot
+    /// refuse a room the election gate did not already refuse. It is kept because
+    /// the gate then belongs to the OPERATION rather than to one caller's
+    /// discipline (#432), and because that domination rests on today's single merge
+    /// and on nothing stronger — split the two writes, add a caller that arms
+    /// outside the census arm, or ship one key ahead of the other, and the outcome
+    /// quorum becomes the only thing between two generations' <c>cr_dcr</c> values.
+    /// What it is NOT is evidence that a mixed-version 2v2 has been exercised: its
+    /// refusal branch is unreachable from any room a player can assemble today, so
+    /// the absence of its log line proves nothing (#342). See
+    /// <c>OutcomeCapabilityProp</c>.</para>
     ///
     /// <para>FAIL-CLOSED on every arm — a disabled mod, a staging failure, a
     /// survivor without the property, an empty survivor list (every(∅) must not
@@ -752,15 +778,29 @@ namespace CompetitiveRounds
         /// rules. In any mixed room this seat arms nothing and posts nothing, and
         /// says which seat lacked the key.</para>
         ///
-        /// <para>AND WHAT IT DOES NOT CHANGE: publishing. A seat on an older build
-        /// reading OUR <c>cr_dcr</c> sees only values it already had — <c>send</c>,
-        /// <c>ok</c>, <c>no</c> — under this build's STRICTER meaning for <c>no</c>
-        /// (answered and refused, never a timeout), plus <c>unk</c>, which its
-        /// three-token parser does not admit and which therefore reads as "nothing
-        /// published": post nothing, the same decision this build makes. An older
-        /// build never reads <c>cr_dc3</c> at all, because the key did not exist in
-        /// it. So publication stays unconditional and no older generation is ever
-        /// handed a value it misreads.</para></summary>
+        /// <para>AND WHAT IT DOES NOT BUY TODAY: reachability. Neither key is on a
+        /// released tree, both are written in one pre-join merge, and the only
+        /// caller of <c>ArmFallback</c> has already taken the <c>cr_dc2</c> quorum
+        /// over the same seat list — so on this tree the outcome quorum cannot
+        /// refuse a room the election quorum did not already refuse. The class note
+        /// above states that in full; it is repeated here so this summary is not
+        /// read as a certificate that mixed-version rooms were exercised
+        /// (#342).</para>
+        ///
+        /// <para>AND WHAT IT DOES NOT CHANGE: publishing, which stays unconditional.
+        /// The reason is simpler than the one this paragraph used to give, and the
+        /// old one asserted behaviour of builds in the field that no tree supports.
+        /// <c>cr_dcr</c> is parsed by NO released build — the property is on neither
+        /// <c>main</c>, nor <c>origin/main</c>, nor the production pin — so against
+        /// every build a player can be running today the value published here is one
+        /// nobody reads. The only readers of <c>cr_dcr</c> are commits on this
+        /// branch, and among those the three-token generation (before <c>unk</c>
+        /// existed) reads an unknown token as "nothing published" and posts nothing,
+        /// which is the same decision this build makes. Both statements are about
+        /// THIS branch's history, not about a deployed parser, because there is no
+        /// deployed parser. Once a build carrying <c>cr_dcr</c> does ship, a later
+        /// change to this value set must re-derive whether publication may stay
+        /// unconditional instead of reading it off here (#302, #351).</para></summary>
         internal const string OutcomeCapabilityProp = "cr_dc3";
         internal const int OutcomeCapabilityValue = 1;
 
@@ -1031,9 +1071,12 @@ namespace CompetitiveRounds
         internal const string OutcomeAnswered = "ok";
         internal const string OutcomeFailed = "no";
         /// <summary>An attempt went unanswered; a handler may still be running.
-        /// A build that predates this value reads it as none of the three it knows
-        /// and falls through to "post nothing", which is the same decision this
-        /// build makes — the mixed-version direction is the safe one.</summary>
+        /// The generation that predates this value — an earlier commit on THIS
+        /// branch, not a build in the field: <c>cr_dcr</c> is on no released tree —
+        /// reads it as none of the three tokens it knows and falls through to "post
+        /// nothing", the same decision this build makes. Said as branch history
+        /// rather than as a property of a deployed parser, which is what the
+        /// previous wording asserted and no tree supports (#302).</summary>
         internal const string OutcomeUnknown = "unk";
 
         private static string _watchSeries;
@@ -1140,9 +1183,28 @@ namespace CompetitiveRounds
                 // is observable from here, so the room is not one this watch can be
                 // right about.
                 //
-                // The refusal SPEAKS, once, and names the seat (#342): a watch that
-                // was refused and a watch that was never reached are different facts,
-                // and this line is the only thing that tells them apart in a bundle.
+                // WHAT IT CAN AND CANNOT CATCH TODAY, because this branch is easy to
+                // read as proof that a mixed-version 2v2 is handled, and it is not.
+                // On this tree cr_dc2 and cr_dc3 are written in ONE merge and
+                // withdrawn in one, and NEITHER is on a released tree — so a seat
+                // carries both or neither. This method has exactly one caller, the
+                // census arm in Plugin.OnPlayerLeftRoom, which has already required
+                // cr_dc2 of the SAME seat list. So this refusal cannot fire on a room
+                // a player can assemble: the state it names, a peer advertising one
+                // key without the other, exists only across commits on this branch.
+                // The REAL mixed room — this build beside a shipped one — is decided
+                // upstream by the census arm's own refusal, and nothing here
+                // contributes to that outcome. Its absence from a bundle is expected
+                // and proves nothing either way (#342).
+                //
+                // It is kept anyway, and not as belt-and-braces: the gate belongs to
+                // the OPERATION rather than to one caller's discipline (#432), so a
+                // second caller, a split of the staging merge, or one key shipping
+                // ahead of the other cannot silently arm this watch on another
+                // generation's values.
+                //
+                // The refusal SPEAKS, once, and names the seat: a watch that was
+                // refused and a watch that was never reached are different facts.
                 // What it costs is the same cost already paid in four other states —
                 // a series that closes on the elected seat's own report, or on the
                 // server's lease expiry and the admin path, instead of one that
@@ -1157,8 +1219,8 @@ namespace CompetitiveRounds
                         + " does not advertise " + OutcomeCapabilityProp + ", so this room is running "
                         + "more than one outcome protocol and a " + OutcomeProp + " value from it "
                         + "would not mean what this build reads it as. This seat posts NOTHING for "
-                        + "this series and publishes " + OutcomeProp + " as usual, which older builds "
-                        + "read exactly as they always did");
+                        + "this series and publishes " + OutcomeProp + " as usual — a property no "
+                        + "released build parses at all, so publishing it can mislead nobody");
                     return;
                 }
                 _watchSeries = seriesId;

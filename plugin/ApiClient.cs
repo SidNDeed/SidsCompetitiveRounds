@@ -14171,10 +14171,33 @@ namespace CompetitiveRounds
             int t1PointsTotal, int t2PointsTotal,
             string observedRoom = null, bool fallback = false)
         {
-            // The form is enforced HERE, not asked of the caller: a fallback that
-            // carried real totals could select the rated completion, which is the
-            // one property the watch behind it is built on.
-            if (fallback) { t1PointsTotal = 0; t2PointsTotal = 0; }
+            // THE ZERO FORM IS ENFORCED HERE AND NOWHERE ELSE, in either lane.
+            // Against a server that predates the deferral, a fallback carrying real
+            // totals could select the rated completion — the one property the watch
+            // behind it is built on. Against a server that carries the deferral, the
+            // same report would be DEFERRED rather than settled, losing a rated
+            // lead-forfeit it had earned. Neither server checks the totals: the
+            // deferral branch reads is_fallback alone, and that lane's own note says
+            // so — the placement before the lead-forfeit block is structural and does
+            // not rest on a fallback happening to carry zero points, which is a
+            // property of this client and not a predicate that endpoint could fail
+            // on (#342). So this line is the whole guarantee. It is not redundant
+            // with any server-side check and must not be deleted as one.
+            //
+            // It also SPEAKS when it has to act (#438). Normalising in silence would
+            // leave a caller that passes real totals with fallback:true looking
+            // exactly like one that passed zeros, and that caller is the defect this
+            // line exists to absorb.
+            if (fallback)
+            {
+                if (t1PointsTotal != 0 || t2PointsTotal != 0)
+                    Plugin.Log.LogWarning("[2v2-DC] a fallback report was composed with non-zero "
+                        + "point totals (t1=" + t1PointsTotal + " t2=" + t2PointsTotal + ") — forcing "
+                        + "the zero form. A fallback states only that the series looks abandoned; the "
+                        + "caller that supplied these totals is reporting a game it did not watch");
+                t1PointsTotal = 0;
+                t2PointsTotal = 0;
+            }
             // EVERY EXIT OF THE PROMPT PATH ANNOUNCES ITSELF. The seat behind this
             // one decides from `cr_dcr` and from nothing else, so a prompt report
             // that returns here in silence leaves that seat waiting on a
@@ -14244,11 +14267,24 @@ namespace CompetitiveRounds
             // parameter having been understood. Nothing here reads the 200 as proof
             // it was — that is what the `deferred` field below is for.
             //
-            // DIRECTION (#283). Setting it can only move the server toward the more
-            // conservative outcome (defer instead of settle); omitting it is today's
-            // position. A client that set it falsely on a real-totals prompt report
-            // would be asking for its OWN team's forfeit to be deferred, and the
-            // server's predicate requires zero totals anyway.
+            // DIRECTION (#283). Setting it moves the server away from settling and
+            // toward deferral, and the deferral branch sits before the lead-forfeit
+            // block and reaches no rating, gold or team_matches write — so a set flag
+            // cannot produce a WRONG rated result; omitting it is today's position.
+            //
+            // IT IS NOT FREE, and the earlier wording here claimed a server-side
+            // check that does not exist. The server's branch reads is_fallback and
+            // nothing else; that lane's own note states the placement is structural
+            // and does not rest on a fallback carrying zero points, "which is a
+            // property of today's client and not a check this endpoint could fail on"
+            // (#342). A real-totals prompt report sent with this flag is therefore
+            // DEFERRED rather than settled, and the rated lead-forfeit it would have
+            // applied is lost to the sweep instead. The flag and the zero form are
+            // kept consistent in exactly ONE place across both lanes — the
+            // normalisation at the top of this method — and nothing downstream
+            // re-checks it. Both halves of this contract were written in one round,
+            // so neither may be asserted from the other (#341/#635), and a claim that
+            // cannot be traced to code is a finding (#302).
             string url = $"{baseUrl}/api/v1/team/series/{seriesId}/report-dc" +
                          $"?reporter_steam_id={UnityWebRequest.EscapeURL(reporterSteamId)}" +
                          $"&dc_player_steam_id={UnityWebRequest.EscapeURL(dcPlayerSteamId)}" +
@@ -14458,27 +14494,59 @@ namespace CompetitiveRounds
         /// for "absent" and for "false" alike and absent is the dangerous one (#604).
         /// An answer without the echo means this server ignored the parameter, so the
         /// capability is latched OFF for the session and no further read goes out —
-        /// it stops the second request, never the first.</para></summary>
+        /// it stops the second request, never the first.</para>
+        ///
+        /// <para>GATE 3, WHICH IS WHAT MAKES GATE 2's BOUND TRUE. "It stops the
+        /// second request" is a claim about how many reads can reach the wire before
+        /// the first answer arrives, and nothing used to enforce it. The caller is a
+        /// menu tick dispatching every TEAM_SERIES_STATE_INTERVAL (2 s), the latch
+        /// lives in a response callback, and a request may be outstanding for up to
+        /// the transport's own 20 s timeout — so the count was round-trip latency
+        /// divided by the tick interval, which on a slow answer is ten, not one. The
+        /// guard's cost was reasoned about on a bound of ONE write (#430), so the
+        /// bound is enforced rather than assumed: at most one read of this route is
+        /// outstanding at a time. The flag is cleared in the callback, which
+        /// GetRequest invokes on EVERY exit — consent refusal, transport refusal,
+        /// version gate, success and failure alike — and again if the dispatch
+        /// itself throws. A flag that somehow stuck would leave this route polling
+        /// nothing, which is the same cost the latch imposes and the same direction
+        /// the rest of this method fails in (#276).</para></summary>
+        private static bool _statusReadInFlight;
+
         public static void PollTeamSeriesStatusReadOnly(string seriesId, Action<string, string, int> onResponse)
         {
             if (string.IsNullOrEmpty(seriesId)) return;
             if (!ServerHasReadOnlySeriesStatus) return;
+            if (_statusReadInFlight) return;            // GATE 3 — see the note above
             string url = $"{baseUrl}/api/v1/team/series/{seriesId}/state?lifecycle=false";
-            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
+            _statusReadInFlight = true;
+            try
             {
-                if (!ok || string.IsNullOrEmpty(resp)) return;
-                bool echoed = resp.IndexOf("\"lifecycle\"", StringComparison.Ordinal) >= 0;
-                if (!echoed || ExtractJsonBool(resp, "lifecycle"))
+                Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
                 {
-                    ServerHasReadOnlySeriesStatus = false;
-                    Plugin.Log.LogWarning("[2v2] series status read-only mode is NOT in effect on this "
-                        + "server — the answer carries no lifecycle=false echo, so the lifecycle query "
-                        + "parameter was dropped and this endpoint's mutating arms ran. Latching the "
-                        + "capability off for the session: the DC-grace banner goes dark rather than "
-                        + "polling a write again");
-                }
-                ApplySeriesStateResponse(seriesId, resp, onResponse);
-            }));
+                    _statusReadInFlight = false;
+                    if (!ok || string.IsNullOrEmpty(resp)) return;
+                    bool echoed = resp.IndexOf("\"lifecycle\"", StringComparison.Ordinal) >= 0;
+                    if (!echoed || ExtractJsonBool(resp, "lifecycle"))
+                    {
+                        ServerHasReadOnlySeriesStatus = false;
+                        Plugin.Log.LogWarning("[2v2] series status read-only mode is NOT in effect on this "
+                            + "server — the answer carries no lifecycle=false echo, so the lifecycle query "
+                            + "parameter was dropped and this endpoint's mutating arms ran. Latching the "
+                            + "capability off for the session: the DC-grace banner goes dark rather than "
+                            + "polling a write again");
+                    }
+                    ApplySeriesStateResponse(seriesId, resp, onResponse);
+                }));
+            }
+            catch (Exception ex)
+            {
+                // The dispatch itself failed, so no callback will ever run and
+                // nothing would clear the flag: release it here or this route
+                // stops polling for the session on one transient failure.
+                _statusReadInFlight = false;
+                Plugin.Log.LogWarning("[2v2] series status read could not be dispatched: " + ex.Message);
+            }
         }
 
         /// <summary>The shared response parse for the two routes above. Extracted so
