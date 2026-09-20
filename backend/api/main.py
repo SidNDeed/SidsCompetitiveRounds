@@ -3586,11 +3586,37 @@ async def team_queue_cleanup_loop():
 # to move and the settlement is a VOID: `invalidated_at` +
 # `invalidation_reason`, never `completed_at` and never `winner_side`. Nothing
 # is credited to whoever happened to be ahead on games.
+#
+# Sid's ruling for a RANKED series idle this long is the OPPOSITE settlement —
+# the leader takes the rating — so a ranked row must never reach this void.
+# Every 1v2 insert on this tree hardcodes `is_ranked` FALSE, but
+# 120_1v2_schema.sql reserves the column ("FALSE at launch (unscored)"), so the
+# candidate read FILTERS on it instead of trusting that: the day the flag
+# becomes a variable, this arm declines those rows and NAMES them in the log
+# rather than silently applying the unranked rule to a ranked sitting.
+#
+# What the void does NOT do: it does not make the sitting continuable again.
+# `ovt_series_continuation`'s prior-series lookup accepts 'canceled', but its
+# next statement anchors on COALESCE(completed_at, created_at) against
+# _CONTINUATION_WINDOW_MINUTES, and this settlement deliberately writes no
+# completed_at — so a row whose created_at is 14 days old by construction is
+# outside that window before and after the void alike. The acceptance of
+# canceled priors is there for a lock canceled MINUTES after creation
+# (assembly_timeout), not for this arm's rows.
 OVT_ABANDONED_HORIZON_DAYS = 14
 # One tick settles at most this many rows; the next tick continues. A full
 # batch SAYS SO in the log, because a silent truncation makes "nothing left"
 # and "two hundred done, four thousand waiting" the same line (#304 / #441).
 OVT_HORIZON_SWEEP_LIMIT = 200
+# The whole arm's wall-clock budget inside one 60-second tick. This is the only
+# arm in queue_cleanup_loop that takes a named row lock, and a lock wait raises
+# nothing: an unbounded one would stop every arm BEHIND it in the same tick
+# (the FFA janitor, the lease expiry) with no log line at all. The row lock
+# declines instead of waiting (SKIP LOCKED below); this budget bounds the rest
+# — a table-level wait behind a migration's DDL, or a batch that runs long — so
+# the arm's failure direction is "gives up and says so", never "holds the
+# loop" (#276 / #430).
+OVT_HORIZON_TICK_BUDGET_S = 20
 
 
 async def _ovt_horizon_candidates(db, days: int, limit: int):
@@ -3610,6 +3636,12 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     `active` with no bound, which is exactly the blocking-by-default shape this
     sweep exists to remove (#276 / #430).
 
+    RANKED rows are excluded here rather than declined later. Sid's 14-day
+    ruling for a ranked series is that the leader takes the rating — a
+    different write from this one — and an unbuilt settlement must not be
+    approximated by the one that happens to exist. The tick counts what this
+    filter leaves behind and names it in the log, so the omission is loud.
+
     This is a candidate READ, not the decision. Every row it returns is
     re-checked under its own row lock before anything is written (#208), so a
     report that lands between this SELECT and the write settles the row itself
@@ -3624,6 +3656,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
                                  s.created_at)) AS last_activity_at
           FROM ovt_series s
          WHERE s.status = 'active'
+           AND s.is_ranked = FALSE
            AND s.created_at < NOW() - make_interval(days => CAST(:days AS int))
            AND NOT EXISTS (
                  SELECT 1 FROM ovt_matches m
@@ -3649,6 +3682,19 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     state needs a positive cleanup that always runs (#276 / #430). The write is
     delta-free — no gold, no XP, no rating, no `winner_side` — so there is no
     credit for that fence to protect and nothing a wrong call could pay out.
+
+    `invalidated_at` is not an inert marker, though, and the delta-free claim
+    rests on a SECOND property rather than on the column being unread: the
+    Player Cards reconciler voids every still-unopened earned pack whose series
+    carries a non-NULL `invalidated_at` (`_PC_VOID_SWEEP_SQL["ovt"]`) and the
+    open route refuses on the same column (`_PC_SERIES_STANDING_SQL["ovt"]`).
+    The rows this arm writes can carry no such pack, because BOTH ovt grant
+    paths are completion-gated — the inline grant sits in the statement group
+    that writes `status='completed'`, and `_PC_RECONCILE_SQL["ovt"]` scans
+    `status = 'completed' AND invalidated_at IS NULL`. If pack granting ever
+    moves to per-game or mid-series, that property is gone and this write
+    starts voiding real packs; `test_the_ovt_earned_pack_paths_are_completion_gated`
+    is the pin that reds when it does.
     """
     locked = (await db.execute(text(
         # FOR NO KEY UPDATE, not FOR UPDATE (#202 / #207): `ovt_matches.series_id`
@@ -3656,20 +3702,38 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         # it, and KEY SHARE conflicts with exactly one mode — FOR UPDATE. NO KEY
         # UPDATE is the weakest mode that still self-conflicts, so two sweeps
         # serialize, and so does a sweep against the report sink's own lock on
-        # this row (main.py:41164) — deliberately, that is what #208 re-checks
-        # after. What NO KEY UPDATE keeps out of the wait is the FK check: a
-        # report's INSERT INTO ovt_matches never waits on the janitor.
+        # this row — and SKIP LOCKED means that meeting is a DECLINE, not a
+        # wait. What NO KEY UPDATE keeps out of the way entirely is the FK
+        # check: a report's INSERT INTO ovt_matches never waits on the janitor.
+        #
+        # SKIP LOCKED, like every sibling sweep in this loop (`FOR UPDATE OF q
+        # SKIP LOCKED` in the ovt husk arm, the same in the 1v1 and team arms,
+        # `FOR NO KEY UPDATE OF p2 SKIP LOCKED` in the pair writer). A janitor
+        # arm that WAITS on a row lock waits with no bound — no lock_timeout is
+        # configured on this engine — and it raises nothing while it does, so
+        # the arms behind it in the same tick simply never run (#276 / #430).
+        # The row is 14 days old; losing it for one 60-second tick costs
+        # nothing, and the next tick re-reads it.
         "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
-        " FOR NO KEY UPDATE"
+        " FOR NO KEY UPDATE SKIP LOCKED"
     ), {"sid": str(series_id)})).mappings().first()
     # #208: the predicate is re-checked INSIDE the transaction, against the row
-    # version this lock waited for — never against the candidate list, which was
-    # read before any lock was held.
-    if locked is None or locked["status"] != "active":
+    # version this lock saw — never against the candidate list, which was read
+    # before any lock was held. Each refusal says which one it is: one boolean
+    # must not stand for both "somebody else holds it" and "it is no longer
+    # ours to settle" (#430).
+    if locked is None:
+        print(f"[OVT-HORIZON] Candidate held by another writer or gone; "
+              f"left for the next tick: series {series_id}")
+        return False
+    if locked["status"] != "active":
+        print(f"[OVT-HORIZON] Candidate already settled under the lock: "
+              f"series {series_id} status={locked['status']}")
         return False
     still_idle = (await db.execute(text("""
         SELECT 1 FROM ovt_series s
          WHERE s.id = CAST(:sid AS uuid)
+           AND s.is_ranked = FALSE
            AND s.created_at < NOW() - make_interval(days => CAST(:days AS int))
            AND NOT EXISTS (
                  SELECT 1 FROM ovt_matches m
@@ -3678,6 +3742,8 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
                         >= NOW() - make_interval(days => CAST(:days AS int)))
     """), {"sid": str(series_id), "days": int(days)})).first()
     if still_idle is None:
+        print(f"[OVT-HORIZON] Candidate no longer past the horizon under the "
+              f"lock: series {series_id}")
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it (main.py:41071); the
@@ -3694,7 +3760,119 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
            AND status = 'active'
         RETURNING id
     """), {"sid": str(series_id)})
-    return upd.first() is not None
+    if upd.first() is None:
+        print(f"[OVT-HORIZON] Candidate changed between the lock and the "
+              f"write; not settled: series {series_id}")
+        return False
+    return True
+
+
+async def _ovt_horizon_ranked_backlog(db, days: int) -> int:
+    """How many RANKED 1v2 series are past the horizon and still `active`.
+
+    Zero on this tree — every 1v2 insert hardcodes `is_ranked` FALSE — and
+    that is the point: the day it stops being zero, the arm says so instead of
+    leaving the rows to a settlement nobody wrote (#342, a check that cannot
+    fail is worse than no check; the count is the one that CAN).
+    """
+    n = (await db.execute(text("""
+        SELECT COUNT(*) FROM ovt_series s
+         WHERE s.status = 'active'
+           AND s.is_ranked = TRUE
+           AND s.created_at < NOW() - make_interval(days => CAST(:days AS int))
+    """), {"days": int(days)})).scalar()
+    return int(n or 0)
+
+
+# Printed once per api process, by the arm itself, the first time it runs: a
+# deploy needs a POSITIVE signal that THIS arm shipped, and the janitor
+# self-test's "all janitor queries plan clean" prints on any build, including
+# one with no horizon arm at all (#438 / #443, and #306 — a probe whose only
+# purpose is to be probed).
+_ovt_horizon_armed_logged = False
+# The last ranked backlog this process reported, so a standing non-zero count
+# is named when it CHANGES rather than every 60 seconds forever.
+_ovt_horizon_ranked_last_seen = -1
+
+
+async def _ovt_horizon_sweep_tick(session_factory) -> int:
+    """One tick of the 1v2 horizon arm. Returns the number of rows settled.
+
+    This is the arm's whole body: `queue_cleanup_loop` calls it through
+    `_ovt_horizon_sweep_tick_bounded` and nothing else, so "the arm exists" and
+    "the arm runs" stay the same claim (#286).
+    """
+    global _ovt_horizon_armed_logged, _ovt_horizon_ranked_last_seen
+    if not _ovt_horizon_armed_logged:
+        _ovt_horizon_armed_logged = True
+        print(f"[OVT-HORIZON] armed: horizon={OVT_ABANDONED_HORIZON_DAYS}d "
+              f"cap={OVT_HORIZON_SWEEP_LIMIT} "
+              f"budget={OVT_HORIZON_TICK_BUDGET_S}s reason="
+              f"abandoned_horizon_void")
+    settled = 0
+    async with session_factory() as db:
+        cands = await _ovt_horizon_candidates(
+            db, OVT_ABANDONED_HORIZON_DAYS, OVT_HORIZON_SWEEP_LIMIT)
+        for hc in cands:
+            # Settled or declined, the row's own line is printed by the
+            # settler — which is the only place that knows WHICH refusal it
+            # was. Here we print the one outcome it cannot name: the write.
+            if await _ovt_settle_horizon_row(
+                    db, hc["id"], OVT_ABANDONED_HORIZON_DAYS):
+                await db.commit()
+                settled += 1
+                print(f"[OVT-HORIZON] Abandoned series voided: series "
+                      f"{hc['id']} last_activity={hc['last_activity_at']} "
+                      f"reason=abandoned_horizon_void")
+            else:
+                await db.rollback()
+        if len(cands) >= OVT_HORIZON_SWEEP_LIMIT:
+            print(f"[OVT-HORIZON] batch full at {OVT_HORIZON_SWEEP_LIMIT} "
+                  f"candidates; more may remain, next tick continues")
+        ranked = await _ovt_horizon_ranked_backlog(
+            db, OVT_ABANDONED_HORIZON_DAYS)
+        await db.rollback()
+        if ranked != _ovt_horizon_ranked_last_seen:
+            _ovt_horizon_ranked_last_seen = ranked
+            if ranked:
+                print(f"[OVT-HORIZON] {ranked} RANKED 1v2 series past the "
+                      f"horizon left ACTIVE: the ranked settlement (the leader "
+                      f"takes the rating) is not built, and this arm voids "
+                      f"unranked sittings only")
+    return settled
+
+
+async def _ovt_horizon_sweep_tick_bounded(session_factory) -> int:
+    """Run one tick, and give the loop back inside OVT_HORIZON_TICK_BUDGET_S.
+
+    The budget is not decoration. The arms behind this one in the same tick —
+    the FFA janitor, the lease expiry — run only if this one returns, a wait
+    on a table lock raises nothing while it holds, and no lock_timeout or
+    statement_timeout is configured on this engine (`database.py`). On expiry
+    the tick task is CANCELLED and not awaited: waiting for a wedged
+    connection to finish unwinding would reintroduce the same unbounded wait
+    one level up. The orphan holds at most its own pooled connection, the
+    janitor keeps ticking, and the next tick re-reads the same rows — the
+    sweep is idempotent by construction.
+    """
+    task = asyncio.create_task(_ovt_horizon_sweep_tick(session_factory))
+    done, _pending = await asyncio.wait({task},
+                                        timeout=OVT_HORIZON_TICK_BUDGET_S)
+    if task not in done:
+        task.cancel()
+        # Nothing awaits this task again, so its result would be reported as
+        # "never retrieved" on GC. Swallow it there instead.
+        task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        print(f"[OVT-HORIZON] tick abandoned after "
+              f"{OVT_HORIZON_TICK_BUDGET_S}s (row lock declines, so this is a "
+              f"table-level wait or a long batch); the rest of this janitor "
+              f"tick runs, next tick retries")
+        return 0
+    try:
+        return task.result()
+    except Exception as e:
+        print(f"[QUEUE-CLEANUP] ovt horizon sweep error: {e}")
+        return 0
 
 
 async def queue_cleanup_loop():
@@ -3946,30 +4124,11 @@ async def queue_cleanup_loop():
         # `active` for the whole 14-day horizon with no game and no report,
         # whatever the reason, so that "the classified arms declined it" can no
         # longer mean "it is live forever".
-        try:
-            async with async_session() as db:
-                horizon_cands = await _ovt_horizon_candidates(
-                    db, OVT_ABANDONED_HORIZON_DAYS, OVT_HORIZON_SWEEP_LIMIT)
-                for hc in horizon_cands:
-                    if await _ovt_settle_horizon_row(
-                            db, hc["id"], OVT_ABANDONED_HORIZON_DAYS):
-                        await db.commit()
-                        print(f"[OVT-HORIZON] Abandoned series voided: series "
-                              f"{hc['id']} last_activity={hc['last_activity_at']} "
-                              f"reason=abandoned_horizon_void")
-                    else:
-                        # Settled or re-activated under the lock: the row is
-                        # someone else's now. Say so per row, or a sweep that
-                        # settles nothing is indistinguishable from a sweep
-                        # that found nothing (#304).
-                        await db.rollback()
-                        print(f"[OVT-HORIZON] Candidate declined under lock: "
-                              f"series {hc['id']}")
-                if len(horizon_cands) >= OVT_HORIZON_SWEEP_LIMIT:
-                    print(f"[OVT-HORIZON] batch full at {OVT_HORIZON_SWEEP_LIMIT} "
-                          f"candidates; more may remain, next tick continues")
-        except Exception as e:
-            print(f"[QUEUE-CLEANUP] ovt horizon sweep error: {e}")
+        #
+        # The arm's body, its own session, its own try/except and its own time
+        # budget all live in _ovt_horizon_sweep_tick_bounded — one call here,
+        # so the loop cannot drift from what the tests drive.
+        await _ovt_horizon_sweep_tick_bounded(async_session)
         try:
             async with async_session() as db:
                 # ── FFA janitor (same nobody-is-polling contract as the ovt

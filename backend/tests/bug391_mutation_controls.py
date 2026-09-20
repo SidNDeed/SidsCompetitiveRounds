@@ -32,6 +32,8 @@ MAIN_PY = BACKEND / "api" / "main.py"
 TESTS = "tests/test_ovt_abandoned_horizon.py"
 
 ALL_GREEN = "__ALL_GREEN__"
+# The only database this runner and the suite it drives may touch.
+EXPECTED_DB = "scr_bug391"
 
 # Each entry: (label, what defect it models, [(old, new), ...], [tests that must red])
 MUTATIONS = [
@@ -76,41 +78,45 @@ MUTATIONS = [
         "M3-no-predicate-recheck-in-the-transaction",
         "the candidate list is trusted: no status re-check under the lock, "
         "no status guard on the write",
-        [('    if locked is None or locked["status"] != "active":',
-          "    if locked is None:"),
+        [('''    if locked["status"] != "active":
+        print(f"[OVT-HORIZON] Candidate already settled under the lock: "
+              f"series {series_id} status={locked['status']}")
+        return False
+''', ""),
          ("""         WHERE id = CAST(:sid AS uuid)
            AND status = 'active'
         RETURNING id""",
           """         WHERE id = CAST(:sid AS uuid)
         RETURNING id""")],
-        ["test_a_report_completing_the_series_under_the_lock_wins",
+        ["test_a_report_completing_the_series_before_the_lock_wins",
          "test_the_predicate_is_re_checked_inside_the_transaction"],
     ),
     (
         "M3b-status-is-not-part-of-the-predicate",
         "M3 plus a candidate read that no longer filters on status",
-        [('    if locked is None or locked["status"] != "active":',
-          "    if locked is None:"),
+        [('''    if locked["status"] != "active":
+        print(f"[OVT-HORIZON] Candidate already settled under the lock: "
+              f"series {series_id} status={locked['status']}")
+        return False
+''', ""),
          ("""         WHERE id = CAST(:sid AS uuid)
            AND status = 'active'
         RETURNING id""",
           """         WHERE id = CAST(:sid AS uuid)
         RETURNING id"""),
          ("""         WHERE s.status = 'active'
-           AND s.created_at < NOW()""",
+           AND s.is_ranked = FALSE""",
           """         WHERE s.status IS NOT NULL
-           AND s.created_at < NOW()""")],
+           AND s.is_ranked = FALSE""")],
         ["test_sweeping_the_same_row_twice_is_a_no_op",
-         "test_a_report_completing_the_series_under_the_lock_wins"],
+         "test_a_report_completing_the_series_before_the_lock_wins"],
     ),
     (
         "M4-lock-mode-for-update",
         "the janitor takes FOR UPDATE, which conflicts with the FK check a "
         "game report takes on the same row",
-        [('        "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"\n'
-          '        " FOR NO KEY UPDATE"',
-          '        "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"\n'
-          '        " FOR UPDATE"')],
+        [('        " FOR NO KEY UPDATE SKIP LOCKED"',
+          '        " FOR UPDATE SKIP LOCKED"')],
         ["test_the_settlement_lock_does_not_block_a_game_reports_fk_insert",
          "test_the_row_lock_is_for_no_key_update"],
     ),
@@ -136,6 +142,61 @@ MUTATIONS = [
           "GREATEST(m.ended_at, m.created_at, m.started_at)")],
         ["test_a_future_dated_client_stamp_cannot_hold_a_series_open",
          "test_idleness_is_measured_from_server_clock_columns_only"],
+    ),
+    (
+        "M7-the-row-lock-waits-instead-of-declining",
+        "the settler waits on a row another transaction holds, so every "
+        "janitor arm behind it in that tick stops running",
+        [('        " FOR NO KEY UPDATE SKIP LOCKED"',
+          '        " FOR NO KEY UPDATE"')],
+        ["test_a_row_another_transaction_holds_is_declined_not_waited_for",
+         "test_the_row_lock_declines_a_held_row_instead_of_waiting_for_it"],
+    ),
+    (
+        "M8-the-tick-has-no-time-budget",
+        "the arm waits out a table-level lock, holding the janitor loop",
+        [("""    done, _pending = await asyncio.wait({task},
+                                        timeout=OVT_HORIZON_TICK_BUDGET_S)""",
+          "    done, _pending = await asyncio.wait({task})")],
+        ["test_the_tick_gives_the_janitor_loop_back_when_the_table_is_locked",
+         "test_the_tick_gives_the_loop_back_inside_a_bounded_budget"],
+    ),
+    (
+        "M9-the-sweep-stops-distinguishing-ranked",
+        "a ranked 1v2 series is voided by the unranked rule instead of being "
+        "left for the settlement Sid ruled (the leader takes the rating)",
+        [("           AND s.is_ranked = FALSE\n", "")],
+        ["test_a_ranked_series_past_the_horizon_is_left_active_and_counted",
+         "test_a_ranked_series_is_refused_by_both_halves_of_the_predicate"],
+    ),
+    (
+        "M10-the-arm-stops-announcing-itself",
+        "the deploy loses its positive signal and falls back on a "
+        "self-test banner that prints on any build",
+        [("""    if not _ovt_horizon_armed_logged:
+        _ovt_horizon_armed_logged = True
+        print(f"[OVT-HORIZON] armed: horizon={OVT_ABANDONED_HORIZON_DAYS}d "
+              f"cap={OVT_HORIZON_SWEEP_LIMIT} "
+              f"budget={OVT_HORIZON_TICK_BUDGET_S}s reason="
+              f"abandoned_horizon_void")
+""", "")],
+        ["test_the_arm_announces_itself_once_per_process"],
+    ),
+    (
+        "M11-the-continuation-window-swallows-the-horizon",
+        "the window is 30 days, so a voided row WOULD re-enter the "
+        "continuation path — the claim the notes may not make while it is 60m",
+        [("_CONTINUATION_WINDOW_MINUTES = 60  #",
+          "_CONTINUATION_WINDOW_MINUTES = 60 * 24 * 30  #")],
+        ["test_the_void_cannot_put_a_row_back_inside_the_continuation_window"],
+    ),
+    (
+        "M12-earned-packs-stop-being-completion-gated",
+        "the Player Cards reconciler grants for a series that is not "
+        "completed, so this arm's invalidated_at starts voiding real packs",
+        [("""         WHERE os.status = 'completed' AND os.invalidated_at IS NULL AND os.winner_side IN (1, 2)""",
+          """         WHERE os.invalidated_at IS NULL AND os.winner_side IN (1, 2)""")],
+        ["test_the_ovt_earned_pack_paths_are_completion_gated"],
     ),
     (
         "NC-unrelated-constant-in-the-same-file",
@@ -168,7 +229,10 @@ def clean_slate() -> str:
     as well is what stops one dead case reaching across into the NEXT
     mutation's run. A cross-run leak of exactly that shape is what once put a
     false REDDENED on this runner's negative control. Bounded by construction:
-    this database exists for this file alone.
+    Bounded by the NAME check below, not by the belief that the DSN is the
+    right one: this terminates every backend on whatever database it is
+    pointed at, and the sibling lanes keep their own throwaway databases on
+    the same local instance (#342).
     """
     import asyncio
     from sqlalchemy import text
@@ -180,6 +244,14 @@ def clean_slate() -> str:
             os.environ["BUG391_TEST_PG_DSN"], poolclass=NullPool)
         try:
             async with engine.connect() as conn:
+                dbname = (await conn.execute(
+                    text("SELECT current_database()"))).scalar()
+                if dbname != EXPECTED_DB:
+                    raise RuntimeError(
+                        f"BUG391_TEST_PG_DSN points at database {dbname!r}; "
+                        f"this runner terminates every backend on it and the "
+                        f"suite drops its tables, so it runs against "
+                        f"{EXPECTED_DB!r} and nothing else.")
                 n = (await conn.execute(text(
                     "SELECT count(*) FROM pg_stat_activity"
                     " WHERE datname = current_database()"

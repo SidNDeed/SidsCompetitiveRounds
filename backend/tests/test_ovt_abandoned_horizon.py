@@ -19,8 +19,13 @@ BUG391_TEST_PG_DSN at the dedicated throwaway database:
 An unset DSN SKIPS the live half. A skipped live half is not an acceptance —
 it is an unrun test, and the lane's log has to show the executed run.
 
-The file creates and drops its own tables and every steam id it uses is outside
-the real SteamID64 space, so a misconfigured DSN cannot touch real rows.
+The database NAME is checked, not assumed. This file DROPs three tables and
+terminates every other backend on whatever database the DSN names, and both of
+those happen before the first row is written — so "every steam id is outside
+the real SteamID64 space" protects the rows this file INSERTS and nothing
+else. The DSN's database must literally be EXPECTED_DB or the fixture refuses
+to touch it: sibling lanes keep their own throwaway databases on the same
+local instance, and an exported DSN outlives the shell that set it.
 
 No pytest-asyncio: the rest of this suite drives coroutines through a plain
 asyncio.run helper and one opt-in file is not a reason to add a dependency the
@@ -33,6 +38,7 @@ import inspect
 import os
 import re
 import textwrap
+import time
 import uuid
 from pathlib import Path
 
@@ -191,7 +197,10 @@ def test_the_sweep_sql_is_reachable_from_the_janitor_roots():
     assert inv["dynamic"] == []
     sqls = [" ".join(s["sql"].split()) for s in inv["statements"]]
     horizon = [q for q in sqls if "ovt_series" in q and "make_interval(days" in q]
-    assert len(horizon) == 2, horizon
+    # The candidate read, the under-lock re-check, and the ranked backlog
+    # count — all three reach the loop, or the arm's loud gap is silent.
+    assert len(horizon) == 3, horizon
+    assert len([q for q in horizon if q.startswith("SELECT COUNT(*)")]) == 1, horizon
     locks = [q for q in sqls
              if q.startswith("SELECT status FROM ovt_series")
              and "FOR NO KEY UPDATE" in q]
@@ -201,15 +210,128 @@ def test_the_sweep_sql_is_reachable_from_the_janitor_roots():
     assert "UPDATE ovt_series" in voids[0]
 
 
-def test_the_janitor_loop_calls_both_halves_of_the_sweep():
+def _fn_named(name: str):
     tree = ast.parse(MAIN_PY.read_text(encoding="utf-8"))
-    loop = next(n for n in ast.walk(tree)
-                if isinstance(n, ast.AsyncFunctionDef)
-                and n.name == "queue_cleanup_loop")
-    names = {n.id for n in ast.walk(loop) if isinstance(n, ast.Name)}
-    assert "_ovt_horizon_candidates" in names
-    assert "_ovt_settle_horizon_row" in names
-    assert "OVT_ABANDONED_HORIZON_DAYS" in names
+    return next(n for n in ast.walk(tree)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and n.name == name)
+
+
+def _names_in(fn) -> set:
+    return {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
+
+
+def test_the_janitor_loop_runs_the_arm_and_only_through_the_bounded_form():
+    """The loop calls the bounded tick and nothing else of this arm."""
+    loop = _names_in(_fn_named("queue_cleanup_loop"))
+    assert "_ovt_horizon_sweep_tick_bounded" in loop
+    # The unbounded body must never be reachable from the loop directly: that
+    # is the call that can hold every arm behind it.
+    assert "_ovt_horizon_sweep_tick" not in loop
+    tick = _names_in(_fn_named("_ovt_horizon_sweep_tick"))
+    assert {"_ovt_horizon_candidates", "_ovt_settle_horizon_row",
+            "_ovt_horizon_ranked_backlog", "OVT_ABANDONED_HORIZON_DAYS",
+            "OVT_HORIZON_SWEEP_LIMIT"} <= tick, tick
+
+
+def test_the_tick_gives_the_loop_back_inside_a_bounded_budget():
+    """#276/#430: this arm's unhandled case must expire, not hold the loop.
+
+    A row lock wait raises nothing and there is no lock_timeout on the engine
+    (backend/api/database.py sets no connect_args), so an arm that waits stops
+    every arm behind it in the same tick with no log line at all.
+    """
+    bounded = _code(main._ovt_horizon_sweep_tick_bounded)
+    assert "timeout=OVT_HORIZON_TICK_BUDGET_S" in bounded
+    assert ".cancel()" in bounded
+    # Bounded well inside the 60-second tick interval, or the budget is not a
+    # budget.
+    assert 0 < main.OVT_HORIZON_TICK_BUDGET_S < 60
+
+
+def test_the_row_lock_declines_a_held_row_instead_of_waiting_for_it():
+    """SKIP LOCKED, like every sibling sweep in the same loop.
+
+    The rows are fourteen days old: losing one for a 60-second tick costs
+    nothing, and waiting for it costs the arms behind this one.
+    """
+    lock = _only(_sql_literals(main._ovt_settle_horizon_row),
+                 "FOR NO KEY UPDATE")
+    assert "SKIP LOCKED" in lock, lock
+
+
+def test_a_ranked_series_is_refused_by_both_halves_of_the_predicate():
+    """Sid's 14-day ruling for a RANKED series is the opposite settlement —
+    the leader takes the rating. This arm must not apply the unranked rule to
+    one, and the exclusion has to survive the candidate read AND the re-check.
+    """
+    cand = _only(_sql_literals(main._ovt_horizon_candidates), "FROM ovt_series s")
+    recheck = _only(_sql_literals(main._ovt_settle_horizon_row),
+                    "SELECT 1 FROM ovt_series")
+    for q in (cand, recheck):
+        assert "s.is_ranked = FALSE" in q, q
+    # And the rows it declines are COUNTED, so the gap is loud rather than
+    # silent (#342 — the check that can fail).
+    backlog = _only(_sql_literals(main._ovt_horizon_ranked_backlog), "COUNT(*)")
+    assert "s.is_ranked = TRUE" in backlog
+    assert "s.status = 'active'" in backlog
+
+
+def test_the_void_cannot_put_a_row_back_inside_the_continuation_window():
+    """#302: no note may claim this sweep restores a sitting's continuation.
+
+    The prior-series lookup does accept 'canceled', so a voided row enters its
+    scope — and is refused two statements later. The settlement writes no
+    completed_at, so the continuation's anchor is COALESCE(completed_at,
+    created_at) = created_at, and created_at is past the horizon on every row
+    this arm touches BY CONSTRUCTION. The acceptance of canceled priors is
+    there for a lock canceled minutes after creation (assembly_timeout).
+    """
+    src = MAIN_PY.read_text(encoding="utf-8")
+    assert "ORDER BY COALESCE(completed_at, created_at) DESC LIMIT 1" in src
+    assert 'anchor = prior["completed_at"] or prior["created_at"]' in src
+    assert "completed_at" not in _settle_update_sql()
+    horizon_minutes = main.OVT_ABANDONED_HORIZON_DAYS * 24 * 60
+    assert main._CONTINUATION_WINDOW_MINUTES < horizon_minutes, (
+        main._CONTINUATION_WINDOW_MINUTES, horizon_minutes)
+
+
+def test_the_ovt_earned_pack_paths_are_completion_gated():
+    """What makes this write delta-free, pinned.
+
+    `invalidated_at` is read by the Player Cards reconciler
+    (`_PC_VOID_SWEEP_SQL["ovt"]` voids still-unopened earned packs on it) and
+    by the open route (`_PC_SERIES_STANDING_SQL["ovt"]`). The void is harmless
+    only because an `active` row can carry no earned pack: both ovt grant
+    paths require a COMPLETED series. Move granting to per-game and this test
+    reds before the sweep starts voiding real packs.
+    """
+    scan = " ".join(main._PC_RECONCILE_SQL["ovt"].split())
+    assert "os.status = 'completed'" in scan, scan
+    assert "os.invalidated_at IS NULL" in scan, scan
+
+    tree = ast.parse(MAIN_PY.read_text(encoding="utf-8"))
+    parent_fn = {}
+
+    def walk(node, fn):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            fn = node
+        for child in ast.iter_child_nodes(node):
+            parent_fn[child] = fn
+            walk(child, fn)
+
+    walk(tree, None)
+    sites = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call)
+                and getattr(node.func, "id", None) == "_pc_grant_earned_packs"
+                and any(k.arg == "mode" and isinstance(k.value, ast.Constant)
+                        and k.value.value == "ovt" for k in node.keywords)):
+            sites.append(parent_fn[node])
+    # A pin that measured an empty set would pass forever (#342).
+    assert sites, "no ovt earned-pack grant call found — the pin lost its subject"
+    for fn in sites:
+        assert "UPDATE ovt_series SET status='completed'" in ast.unparse(fn), fn.name
 
 
 def test_the_horizon_is_the_fourteen_days_sid_ruled_for_ranked():
@@ -221,6 +343,29 @@ def test_the_horizon_is_the_fourteen_days_sid_ruled_for_ranked():
 DSN = os.environ.get("BUG391_TEST_PG_DSN")
 live = pytest.mark.skipif(
     not DSN, reason="BUG391_TEST_PG_DSN unset; live-PostgreSQL acceptance half")
+
+# The only database this file may touch. Everything below DROPs tables on it
+# and terminates every other backend connected to it.
+EXPECTED_DB = "scr_bug391"
+
+
+async def _assert_dedicated_db(conn) -> str:
+    """Refuse any database but the dedicated one (#342).
+
+    The docstring that used to carry this rule was a claim about the DSN's
+    VALUE that nothing read. The local instance also carries the 389 and 392
+    lanes' throwaway databases, `players` is the root identity table in all of
+    them, and the DROP runs before the first insert — so the guard has to be a
+    statement, not a sentence.
+    """
+    name = (await conn.execute(text("SELECT current_database()"))).scalar()
+    if name != EXPECTED_DB:
+        raise RuntimeError(
+            f"BUG391_TEST_PG_DSN points at database {name!r}. This file drops "
+            f"ovt_matches, ovt_series and players and terminates every other "
+            f"backend on it, so it runs against {EXPECTED_DB!r} and nothing "
+            f"else.")
+    return name
 
 # Outside the real SteamID64 space on purpose.
 SIDS = ("90000000000003911", "90000000000003912", "90000000000003913")
@@ -290,9 +435,12 @@ async def _reset(engine):
     # The DROP below would then sit behind it and the next run would red for a
     # reason that has nothing to do with the code under test. That is exactly
     # how this file's own negative control first reddened, so the fix belongs
-    # here and not in a retry. This database exists for this file alone, so
-    # terminating every other backend on it is bounded by construction.
+    # here and not in a retry. Terminating every other backend is bounded by
+    # the name check below, not by the belief that the DSN is the right one.
     async with engine.connect() as conn:
+        # Before the terminate, not after it: the refusal has to come first or
+        # it is documentation.
+        await _assert_dedicated_db(conn)
         await conn.execute(text(
             "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
             " WHERE datname = current_database() AND pid <> pg_backend_pid()"))
@@ -309,17 +457,19 @@ async def _reset(engine):
 
 
 async def _make_series(conn, *, age_days: float, status: str = "active",
-                       solo_wins: int = 0, duo_wins: int = 0) -> str:
+                       solo_wins: int = 0, duo_wins: int = 0,
+                       is_ranked: bool = False) -> str:
     ids = (await conn.execute(
         text("SELECT id FROM players ORDER BY steam_id"))).scalars().all()
     sid = str(uuid.uuid4())
     await conn.execute(text("""
         INSERT INTO ovt_series (id, solo_id, duo_a_id, duo_b_id,
-                                solo_series_wins, duo_series_wins, status, created_at)
-        VALUES (CAST(:id AS uuid), :a, :b, :c, :sw, :dw, :st,
+                                solo_series_wins, duo_series_wins, status,
+                                is_ranked, created_at)
+        VALUES (CAST(:id AS uuid), :a, :b, :c, :sw, :dw, :st, :rk,
                 NOW() - make_interval(secs => CAST(:age AS double precision)))
     """), {"id": sid, "a": ids[0], "b": ids[1], "c": ids[2],
-           "sw": solo_wins, "dw": duo_wins, "st": status,
+           "sw": solo_wins, "dw": duo_wins, "st": status, "rk": is_ranked,
            "age": age_days * 86400.0})
     return sid
 
@@ -514,9 +664,15 @@ def test_sweeping_the_same_row_twice_is_a_no_op():
 
 
 @live
-def test_a_report_completing_the_series_under_the_lock_wins():
-    """The candidate was read before any lock was held; the settlement must
-    lose to the report that commits while it waits (#208)."""
+def test_a_report_completing_the_series_before_the_lock_wins():
+    """The candidate was read before any lock was held (#208).
+
+    The interleaving that matters is the one the sweep cannot see: the
+    candidate list is built, a report completes the series and COMMITS, and
+    only then does the settler take the row lock. It must read the row version
+    the lock gives it — not the candidate's — and decline. Deterministic on
+    purpose: no sleep decides the outcome.
+    """
     async def go():
         engine = _engine()
         try:
@@ -528,21 +684,15 @@ def test_a_report_completing_the_series_under_the_lock_wins():
 
             reporter = Session()
             sweeper = Session()
-            task = None
             try:
-                await reporter.execute(
-                    text("SELECT status FROM ovt_series WHERE id = CAST(:i AS uuid)"
-                         " FOR NO KEY UPDATE"), {"i": sid})
-
                 cands = await main._ovt_horizon_candidates(
                     sweeper, main.OVT_ABANDONED_HORIZON_DAYS,
                     main.OVT_HORIZON_SWEEP_LIMIT)
                 assert [str(c["id"]) for c in cands] == [sid]
 
-                task = asyncio.create_task(main._ovt_settle_horizon_row(
-                    sweeper, sid, main.OVT_ABANDONED_HORIZON_DAYS))
-                await asyncio.sleep(0.4)
-
+                await reporter.execute(
+                    text("SELECT status FROM ovt_series WHERE id = CAST(:i AS uuid)"
+                         " FOR NO KEY UPDATE"), {"i": sid})
                 await reporter.execute(text("""
                     UPDATE ovt_series
                        SET status = 'completed', winner_side = 1,
@@ -551,8 +701,10 @@ def test_a_report_completing_the_series_under_the_lock_wins():
                 """), {"i": sid})
                 await reporter.commit()
 
-                wrote = await asyncio.wait_for(task, timeout=20)
-                task = None
+                wrote = await asyncio.wait_for(
+                    main._ovt_settle_horizon_row(
+                        sweeper, sid, main.OVT_ABANDONED_HORIZON_DAYS),
+                    timeout=20)
                 if wrote:
                     await sweeper.commit()
                 else:
@@ -560,8 +712,6 @@ def test_a_report_completing_the_series_under_the_lock_wins():
             finally:
                 # An assertion that fires mid-interleaving must not leave a
                 # session holding a row lock — see _reset's comment.
-                if task is not None:
-                    task.cancel()
                 await _shut(reporter)
                 await _shut(sweeper)
 
@@ -612,4 +762,211 @@ def test_the_settlement_lock_does_not_block_a_game_reports_fk_insert():
                 await _shut(sweeper)
         finally:
             await engine.dispose()
+    _run(go())
+
+
+@live
+def test_a_row_another_transaction_holds_is_declined_not_waited_for():
+    """SKIP LOCKED: the janitor arm never waits on a row lock.
+
+    A report transaction holds the same series row and is slow (a pinned pool
+    connection, a client socket that died without the server noticing). With
+    an unbounded wait, THIS call would not return — and the FFA janitor and
+    the lease expiry behind it in the same tick would not run, with no log
+    line to say why.
+    """
+    async def go():
+        engine = _engine()
+        try:
+            await _reset(engine)
+            Session = async_sessionmaker(engine, expire_on_commit=False)
+            async with engine.begin() as conn:
+                sid = await _make_series(conn, age_days=20)
+                await _add_game(conn, sid, ended_days_ago=20)
+
+            holder = Session()
+            sweeper = Session()
+            try:
+                await holder.execute(
+                    text("SELECT status FROM ovt_series WHERE id = CAST(:i AS uuid)"
+                         " FOR NO KEY UPDATE"), {"i": sid})
+                t0 = time.monotonic()
+                try:
+                    wrote = await asyncio.wait_for(
+                        main._ovt_settle_horizon_row(
+                            sweeper, sid, main.OVT_ABANDONED_HORIZON_DAYS),
+                        timeout=10)
+                except asyncio.TimeoutError:
+                    pytest.fail(
+                        "the settler waited on a row another transaction held; "
+                        "a janitor arm that waits holds every arm behind it")
+                elapsed = time.monotonic() - t0
+                await sweeper.rollback()
+                # Declined, not written, and it did not sit there to find out.
+                assert wrote is False
+                assert elapsed < 5, elapsed
+                # The holder still holds it, so read the row on its own
+                # connection: FOR NO KEY UPDATE does not block a plain read.
+                async with engine.connect() as conn:
+                    st = (await conn.execute(
+                        text("SELECT status, invalidated_at FROM ovt_series"
+                             " WHERE id = CAST(:i AS uuid)"),
+                        {"i": sid})).mappings().first()
+                assert st["status"] == "active"
+                assert st["invalidated_at"] is None
+            finally:
+                await _shut(holder)
+                await _shut(sweeper)
+        finally:
+            await engine.dispose()
+    _run(go())
+
+
+@live
+def test_the_tick_gives_the_janitor_loop_back_when_the_table_is_locked():
+    """#276/#430, one level up: SKIP LOCKED bounds the ROW wait, and the
+    tick's own budget bounds everything else.
+
+    A migration holding ACCESS EXCLUSIVE on ovt_series blocks even the
+    candidate read, which takes only ACCESS SHARE. Nothing on this engine sets
+    lock_timeout or statement_timeout, so without the budget this arm holds
+    the janitor tick for as long as the DDL runs.
+    """
+    async def go():
+        engine = _engine()
+        prev_budget = main.OVT_HORIZON_TICK_BUDGET_S
+        main.OVT_HORIZON_TICK_BUDGET_S = 2
+        try:
+            await _reset(engine)
+            Session = async_sessionmaker(engine, expire_on_commit=False)
+            async with engine.begin() as conn:
+                sid = await _make_series(conn, age_days=20)
+                await _add_game(conn, sid, ended_days_ago=20)
+
+            blocker = Session()
+            try:
+                await blocker.execute(
+                    text("LOCK TABLE ovt_series IN ACCESS EXCLUSIVE MODE"))
+                t0 = time.monotonic()
+                try:
+                    settled = await asyncio.wait_for(
+                        main._ovt_horizon_sweep_tick_bounded(Session),
+                        timeout=15)
+                except asyncio.TimeoutError:
+                    pytest.fail(
+                        "the horizon tick never gave the loop back: it was "
+                        "still waiting on the table lock after 15s, so every "
+                        "arm behind it in that tick was skipped")
+                elapsed = time.monotonic() - t0
+                assert settled == 0
+                assert elapsed < 10, elapsed
+            finally:
+                # Releasing the DDL lock lets the cancelled tick's connection
+                # unwind; _reset in the next case clears whatever it leaves.
+                await _shut(blocker)
+        finally:
+            main.OVT_HORIZON_TICK_BUDGET_S = prev_budget
+            await engine.dispose()
+    _run(go())
+
+
+@live
+def test_a_ranked_series_past_the_horizon_is_left_active_and_counted(capsys):
+    """Sid's ruling for a ranked series idle 14 days is that the LEADER takes
+    the rating — the opposite settlement. Until that is built, a ranked 1v2
+    row is left alone and NAMED, never voided by the unranked rule.
+    """
+    async def go():
+        engine = _engine()
+        main._ovt_horizon_ranked_last_seen = -1
+        try:
+            await _reset(engine)
+            Session = async_sessionmaker(engine, expire_on_commit=False)
+            async with engine.begin() as conn:
+                unranked = await _make_series(conn, age_days=20)
+                await _add_game(conn, unranked, ended_days_ago=20)
+                ranked = await _make_series(conn, age_days=20, is_ranked=True)
+                await _add_game(conn, ranked, ended_days_ago=20)
+            settled = await main._ovt_horizon_sweep_tick(Session)
+            return unranked, ranked, settled
+        finally:
+            await engine.dispose()
+
+    unranked, ranked, settled = _run(go())
+    out = capsys.readouterr().out
+    assert settled == 1, out
+
+    async def read_rows():
+        engine = _engine()
+        try:
+            return await _row(engine, unranked), await _row(engine, ranked)
+        finally:
+            await engine.dispose()
+
+    u, r = _run(read_rows())
+    assert u["status"] == "canceled" and u["invalidation_reason"] == VOID_REASON
+    assert r["status"] == "active", r
+    assert r["invalidated_at"] is None and r["invalidation_reason"] is None
+    named = [ln for ln in out.splitlines()
+             if "RANKED 1v2 series past the horizon" in ln]
+    assert len(named) == 1, out
+    assert named[0].startswith("[OVT-HORIZON] 1 RANKED"), named[0]
+
+
+@live
+def test_the_arm_announces_itself_once_per_process(capsys):
+    """The deploy's positive signal (#438/#443, #306).
+
+    '[JANITOR-SELFTEST] all janitor queries plan clean' prints on any build
+    whose janitor statements EXPLAIN — including a build with no horizon arm
+    at all — so it cannot be the acceptance line for THIS arm. This one is
+    printed by the arm itself, on its first tick, and by nothing else.
+    """
+    async def go():
+        engine = _engine()
+        try:
+            await _reset(engine)
+            Session = async_sessionmaker(engine, expire_on_commit=False)
+            main._ovt_horizon_armed_logged = False
+            await main._ovt_horizon_sweep_tick(Session)
+            await main._ovt_horizon_sweep_tick(Session)
+        finally:
+            await engine.dispose()
+    _run(go())
+    out = capsys.readouterr().out
+    armed = [ln for ln in out.splitlines() if "[OVT-HORIZON] armed" in ln]
+    assert len(armed) == 1, out
+    assert f"horizon={main.OVT_ABANDONED_HORIZON_DAYS}d" in armed[0]
+    assert f"cap={main.OVT_HORIZON_SWEEP_LIMIT}" in armed[0]
+    assert VOID_REASON in armed[0]
+
+
+@live
+def test_the_live_half_refuses_any_database_but_the_dedicated_one():
+    """The negative control for the fixture's own guard.
+
+    This file DROPs three tables — `players` among them — and terminates every
+    backend on the database the DSN names, both before it writes a single row.
+    Point it at a different database on the same instance and it must refuse.
+    Nothing here writes: the wrong-database connection only asks its own name.
+    """
+    other = "postgres" if not DSN.rstrip("/").endswith("/postgres") else "template1"
+    wrong_dsn = DSN.rsplit("/", 1)[0] + "/" + other
+
+    async def go():
+        engine = create_async_engine(wrong_dsn, poolclass=NullPool)
+        try:
+            async with engine.connect() as conn:
+                with pytest.raises(RuntimeError) as exc:
+                    await _assert_dedicated_db(conn)
+            assert other in str(exc.value)
+            assert EXPECTED_DB in str(exc.value)
+        finally:
+            await engine.dispose()
+        ok = _engine()
+        try:
+            async with ok.connect() as conn:
+                assert await _assert_dedicated_db(conn) == EXPECTED_DB
+        finally:
+            await ok.dispose()
     _run(go())
