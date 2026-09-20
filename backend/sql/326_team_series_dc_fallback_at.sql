@@ -1,0 +1,94 @@
+-- 326_team_series_dc_fallback_at.sql
+--
+-- 2v2 disconnect fallback: the DEFERRAL MARKER (2026-09-20, 886bed8 round 4).
+--
+-- WHAT THESE COLUMNS ARE FOR. A mid-series disconnect is reported to
+-- /api/v1/team/series/{id}/report-dc by the surviving seat the room elected.
+-- When that seat's own report cannot be produced -- every attempt of it went
+-- unanswered, or the seat published a terminal refusal -- another survivor
+-- posts a FALLBACK: a report carrying no point totals, filed by a seat that
+-- knows only that the series looks abandoned.
+--
+-- Until now both kinds settled the row the moment they arrived. The first one
+-- to take the series lock wrote status='dc_incomplete', and the handler ignores
+-- an already-settled row, so a real-totals report that arrived second was
+-- discarded along with the rating and gold its branch would have applied.
+-- Which of the two arrives first is a race between two client transactions and
+-- is not orderable from inside either client.
+--
+-- The marker removes the race instead of guessing at it. A fallback report no
+-- longer writes a terminal status at all; it stamps dc_fallback_at and returns
+-- "deferred". A real-totals report arriving at ANY later moment still finds the
+-- row 'active' and reaches its normal branches, including the rated
+-- lead-forfeit. Only a scheduled sweep settles a marked row, and only once the
+-- marker is older than the deferral bound with no live game in evidence.
+--
+--   dc_fallback_at         -- when a survivor first said "this series looks
+--                             abandoned", stamped with clock_timestamp() AFTER
+--                             the row lock was taken. NULL = no fallback has
+--                             been filed, which is every row in the table today
+--                             and the overwhelming majority afterwards.
+--   dc_fallback_player_id  -- who that filing named as the disconnected player.
+--                             The settling path records dc_player_id and
+--                             dc_team_remaining; a deferred filing has nowhere
+--                             to put them yet, and writing the live columns
+--                             early would make an ACTIVE series read to every
+--                             client as one with a recorded disconnect. Parked
+--                             here instead, and copied across by the sweep at
+--                             the moment it settles.
+--
+-- WHY clock_timestamp() AND NOT NOW(). NOW() is the transaction's START time
+-- and is frozen before any lock wait. The report handler takes
+-- FOR NO KEY UPDATE on this row and may wait behind another report; a marker
+-- stamped with NOW() would be backdated by the whole wait, so a wait
+-- approaching the bound would hand the sweep a marker already expired on
+-- arrival and let it settle the series while a real-totals report was still in
+-- flight. clock_timestamp() is read at statement time, after the wait. The same
+-- correction already applies to the relock stamp this endpoint reads
+-- (learning #277).
+--
+-- SET ONCE, NOT REFRESHED. The writer is
+-- COALESCE(dc_fallback_at, clock_timestamp()), so repeated fallbacks -- from a
+-- retrying client, or from a second survivor -- keep the FIRST stamp. A marker
+-- a retry could push forward would let a client hold a dead series open
+-- indefinitely by re-posting; the bound has to run from the first filing.
+--
+-- WHAT MAKES A MARKER INERT. Not a clear: the sweep's predicate requires
+-- status IN ('active','dc_paused'), so the moment a real-totals report
+-- completes or settles the series the marker can never be acted on again, and
+-- it is left in place because "a fallback was filed for this series" is worth
+-- having in the admin panel. The ONE place it is cleared is the sticky-resume
+-- relock, which flips a dc_incomplete series back to 'active' and clears the
+-- other DC fields -- a marker surviving THAT would be old by definition and
+-- would have the sweep settle the resumed series on its next tick.
+--
+-- EXPIRES BY DEFAULT. Nothing has to run for the deferral to end. If the api is
+-- restarted mid-window the marker waits on disk for the next tick, and the
+-- sweep's live-game veto refuses to act on restart-blinded evidence
+-- (learnings #276, #430).
+--
+-- APPLY THIS BEFORE THE API. Both columns are nullable with no default, so
+-- every existing row reads as "no fallback filed" and no current writer touches
+-- them. In the other order the api's boot-time janitor self-test EXPLAINs a
+-- sweep naming a column that does not exist and fails loudly every boot, and
+-- the sweep itself logs an error every tick.
+
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+
+ALTER TABLE team_series ADD COLUMN IF NOT EXISTS dc_fallback_at TIMESTAMPTZ;
+ALTER TABLE team_series ADD COLUMN IF NOT EXISTS dc_fallback_player_id UUID;
+
+COMMENT ON COLUMN team_series.dc_fallback_at IS
+    'First moment a survivor filed a zero-total disconnect fallback for this series, stamped with clock_timestamp() after the row lock. NULL = none filed. A fallback defers instead of settling; the scheduled sweep settles the row only once this stamp is older than the deferral bound and no live game is in evidence.';
+COMMENT ON COLUMN team_series.dc_fallback_player_id IS
+    'Player the deferred fallback named as disconnected. Parked here rather than in dc_player_id so an active series does not read as one with a recorded disconnect; the sweep copies it across when it settles.';
+
+-- The sweep asks exactly one question: which live series carry a marker. The
+-- marked rows are a handful against a table that is otherwise entirely
+-- unmarked, so a full index here would be almost all dead entries.
+CREATE INDEX IF NOT EXISTS idx_team_series_dc_fallback_at
+    ON team_series (dc_fallback_at)
+    WHERE dc_fallback_at IS NOT NULL;
+
+COMMIT;
