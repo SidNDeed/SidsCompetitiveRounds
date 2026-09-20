@@ -15,6 +15,8 @@ import importlib.util
 import pathlib
 import re
 
+import pytest
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 CLIENT = ROOT / "plugin" / "PlayerCardsUI.cs"
 API = ROOT / "plugin" / "ApiClient.cs"
@@ -415,7 +417,11 @@ def test_the_info_library_states_what_the_cards_settings_actually_do():
     nxt = src.find("new Category {", start + 1)
     cat = src[start:nxt if nxt >= 0 else len(src)]
     assert re.search(r'Key = "cards",\s+Title = \(\) => I18n\.Tr\("Player Cards"\),\s+Body = \(\) => CardsIntro \+ "\\n\\n" \+ CardsPacks', cat)
-    assert re.search(r'Key = "cards-face",\s+Title = \(\) => I18n\.Tr\("Reading a card"\),\s+Body = \(\) => CardsFace', cat)
+    # Since item 20 the page is COMPOSED: the binder-sort block is its own key
+    # beside CardsFace rather than three more lines inside it, so the page's
+    # four shipped translations survive the addition. See
+    # test_the_reading_a_card_page_keeps_its_translated_body below.
+    assert re.search(r'Key = "cards-face",\s+Title = \(\) => I18n\.Tr\("Reading a card"\),\s+Body = \(\) => CardsFace \+ "\\n\\n" \+ CardsBinderSort', cat)
     assert re.search(r'Key = "cards-pictures",\s+Title = \(\) => I18n\.Tr\("Card pictures & settings"\),\s+Body = \(\) => CardsPictures', cat)
     # frozen vs live
     assert "rating, record, rank tier, top card and title as they were that day" in src
@@ -477,3 +483,134 @@ def test_the_renderer_fences_its_pixel_inputs_and_keeps_a_refused_request_armed(
     tick = ui[ui.index("internal static void MaybeTick("):]
     tick = tick[:tick.index("\n        }\n")]
     assert tick.index("if (!onSettings) settingsVisited = false;") < tick.index("if (Time.unscaledTime < tickAt) return;")
+
+
+# ── item 20: the wiki page's translations are an asset, not a comment ────────
+
+CATALOGUES = ROOT / "plugin" / "I18nCatalogues.cs"
+
+
+def _verbatim_literal(src, marker):
+    """The @"..." literal that follows `marker`, with "" unescaped.
+
+    Read with universal newlines, which is what the catalogue keys are: the
+    working tree is CRLF, so a verbatim literal carries carriage returns at
+    runtime and I18n normalizes them away before the dictionary lookup (see
+    I18n.NormalizeLf and the comment above it).
+    """
+    i = src.index(marker)
+    j = src.index('@"', i) + 2
+    out, k = [], j
+    while k < len(src):
+        c = src[k]
+        if c == '"':
+            if k + 1 < len(src) and src[k + 1] == '"':
+                out.append('"')
+                k += 2
+                continue
+            break
+        out.append(c)
+        k += 1
+    return "".join(out)
+
+
+def _unescape_cs(s):
+    out, i = [], 0
+    while i < len(s):
+        if s[i] == "\\":
+            out.append({"n": "\n", "r": "\r", "t": "\t", '"': '"', "\\": "\\"}
+                       .get(s[i + 1], s[i + 1]))
+            i += 2
+        else:
+            out.append(s[i])
+            i += 1
+    return "".join(out)
+
+
+# One catalogue entry: ["<escaped key>"] = "<escaped value>".
+_ENTRY = r'\s*\["((?:[^"\\]|\\.)*)"\]\s*=\s*"((?:[^"\\]|\\.)*)"'
+
+
+def _catalogue_rows(cat_src):
+    """(line, key, value) for every catalogue entry, keys unescaped."""
+    rows = []
+    for n, line in enumerate(cat_src.split("\n"), 1):
+        m = re.match(_ENTRY, line)
+        if m:
+            rows.append((n, _unescape_cs(m.group(1)), _unescape_cs(m.group(2))))
+    return rows
+
+
+def _assert_page_keeps_its_translations(info, cat):
+    """The gate itself, over the two sources, so the control below can feed it
+    a mutated COPY and require it to raise."""
+    face = _verbatim_literal(info, "private static string CardsFace")
+    rows = _catalogue_rows(cat)
+
+    live = [n for n, key, _ in rows if key == face]
+    assert len(live) == 4, (
+        "the 'Reading a card' body is keyed in %d catalogues, not 4 -- an edit "
+        "to the CardsFace literal has stranded its translations. Lines still "
+        "matching: %s" % (len(live), live))
+    # every one of them is actually translated, not a copy of the English
+    for n, key, value in rows:
+        if key == face:
+            assert value != face, "line %d left the page as the English source" % n
+
+    # the composed block is its own key, in four locales, and is NOT part of
+    # the page's key -- which is the whole mechanism this test protects
+    binder = _verbatim_literal(info, "private static string CardsBinderSort")
+    assert binder not in face and face not in binder
+    assert len([n for n, key, _ in rows if key == binder]) == 4, (
+        "the binder-sort block is not drafted in all four locales")
+
+
+def test_the_reading_a_card_page_keeps_its_translated_body():
+    """The "Reading a card" body must still be the string four locales are
+    keyed on.
+
+    A translation key IS the English source string, so ONE editorial tweak
+    inside this 1,786-character literal retires four long-form translations at
+    once and hands the whole page back to English -- and there is proof it has
+    happened here before: four keys for an older wording of this same page sit
+    stranded in the catalogues beside the live ones, matching no current
+    source. That is why the match is BY VALUE and not by line number.
+
+    Item 20's own addition is the shape that does not do this: its block is a
+    separate key composed into the article, so adding a bullet THERE leaves
+    all four of these alone. Adding one inside CardsFace reds this test and
+    names the locales it would have cost.
+    """
+    _assert_page_keeps_its_translations(
+        INFO.read_text(encoding="utf-8"),
+        CATALOGUES.read_text(encoding="utf-8"))
+
+
+def test_a_bullet_inside_the_page_body_reds_it_and_the_same_bullet_elsewhere_does_not():
+    """The control pair, both halves run against COPIES (#391).
+
+    Without the first half the gate could be passing because its needle
+    drifted rather than because the page is intact. Without the second it
+    would not show that item 20's composed block is the shape that costs
+    nothing -- which is the reason the block exists.
+    """
+    info = INFO.read_text(encoding="utf-8")
+    cat = CATALOGUES.read_text(encoding="utf-8")
+    bullet = "\r\n- A line added by a later editor."
+
+    face_decl = "private static string CardsFace"
+    face = _verbatim_literal(info, face_decl)
+    inside_page = info.replace(face + '");', face + bullet + '");', 1)
+    assert inside_page != info, "the mutation did not apply"
+    with pytest.raises(AssertionError):
+        _assert_page_keeps_its_translations(inside_page, cat)
+
+    binder = _verbatim_literal(info, "private static string CardsBinderSort")
+    inside_block = info.replace(binder + '");', binder + bullet + '");', 1)
+    assert inside_block != info, "the control mutation did not apply"
+    # the page's four keys are untouched, so the gate's page half still passes;
+    # only the new block's own four drafts are now stale, which is what the
+    # one-key churn of composing a block costs.
+    face_after = _verbatim_literal(inside_block, face_decl)
+    assert face_after == face, (
+        "adding a bullet to the binder-sort block changed the PAGE's key")
