@@ -493,7 +493,7 @@
           ],
           "main",
           "submit_ffa_match",
-          "97a9b09f020274d420aa45f1ecf8f1b343e9da88"
+          "3f17e6395488c9b64615660ae697dae57685f702"
         ],
         [
           "/api/v1/h2h/{steam_id}/{opponent_steam_id}",
@@ -1732,7 +1732,7 @@
           ],
           "main",
           "ffa_queue_leave",
-          "ef21debce550491cf9023182ce6b28821a220b0b"
+          "6d6140262f06a417ede18b3b81d87dbfe20f37ff"
         ],
         [
           "/api/v1/ffa/queue/list",
@@ -1768,7 +1768,7 @@
           ],
           "main",
           "ffa_recent",
-          "3ba77fad3bbf46236b330931b26e3aab16e4c878"
+          "2dd1e00e03ba721617c85b85dbee24797473ffe3"
         ],
         [
           "/api/v1/health",
@@ -2164,7 +2164,7 @@
           ],
           "main",
           "get_mod_version",
-          "9c8cacc9ad75ff42f99b8ef2865a18c00a35eaf4"
+          "3731f9c4c3b514e2bb48c2028608b685a0c72baa"
         ],
         [
           "/api/v1/mod/check/{steam_id}",
@@ -2317,7 +2317,7 @@
           ],
           "main",
           "ovt_queue_leave",
-          "f49e6542dc0e264112bd7794f801bd94177dff94"
+          "741c9aaab37083888623212bab17f34a00c26948"
         ],
         [
           "/api/v1/ovt/queue/list",
