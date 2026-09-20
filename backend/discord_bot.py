@@ -6557,7 +6557,13 @@ async def cmd_game(ctx, code: str):
             medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(pl, f"#{pl}")
             head = f"{medal} {display_name}"
             if p.get("left_early"):
-                head += "  *(left)*"
+                # Bug #392: the departure is reported either way; only the
+                # WORD changes. `*(left)*` reads as a choice, and a seat whose
+                # own leave attested a transport failure did not choose. The
+                # key is absent on a pre-#392 payload, so an older api answers
+                # into exactly today's rendering.
+                head += ("  *(disconnected)*" if p.get("left_early_involuntary")
+                         else "  *(left)*")
         else:
             head = f"{'🏆 ' if won else ''}{display_name}"
         if mode == "2v2":
@@ -7099,7 +7105,10 @@ async def log_ffa_match_result(guild, m):
         # Match-time stamps from the row, so later games can't rewrite them.
         rb, ra = p.get("rating_before"), p.get("rating_after")
         ba_s = f" {rb:.0f}→{ra:.0f}" if (rb is not None and ra is not None) else ""
-        left = " *(left)*" if p.get("left_early") else ""
+        # Bug #392: same two-word split as the /game embed above — the mark
+        # stays, the word tells a transport failure from a choice.
+        left = ((" *(disconnected)*" if p.get("left_early_involuntary") else " *(left)*")
+                if p.get("left_early") else "")
         medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(p.get("placement", 0), f"#{p.get('placement', '?')}")
         nm = discord.utils.escape_markdown(str(p.get("display_name") or p.get("steam_id")))
         # Bug 215 (Sid): points AND unconverted half points, in the game's own
