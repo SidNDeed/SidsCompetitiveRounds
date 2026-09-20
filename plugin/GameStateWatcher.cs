@@ -3572,6 +3572,23 @@ namespace CompetitiveRounds
                 }
 
                 Plugin.Log.LogInfo("[POLL] Left room");
+                // Bug 392 item C: this seat's own receive-gap and opponent
+                // heartbeat-gap counters, at EVERY room exit.
+                //
+                // They reach the server only inside the 1v1 match report
+                // (local_recv_gap_max_ms / opp_hb_gap_count on PlayerMatchData
+                // — the only schema that has fields for them), so on an FFA,
+                // 2v2 or 1v2 exit, and on any exit where no report is sent,
+                // this line is the ONLY record that the seat measured
+                // anything. It is written rather than sent because there is no
+                // field to send it to: the FFA report carries no telemetry of
+                // this kind, and putting the numbers into a field that means
+                // something else would be worse than not sending them. The
+                // server-lane dependency is named in the batch notes.
+                Plugin.Log.LogInfo(
+                    $"[LAG-DIAG] room exit recvGapCount={localRecvGapCount} " +
+                    $"recvGapMaxMs={localRecvGapMaxMs} oppHbGapCount={oppHbGapCount} " +
+                    $"oppRecvGapCount={oppRecvGapCount}");
                 // Bug 199 adjacent: retract this fighter's spectate attestation
                 // so the room stops being advertised the moment it dies, rather
                 // than lingering for the 150s attest-freshness window and
