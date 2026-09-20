@@ -722,9 +722,16 @@ def test_h1_the_fallback_never_probes_the_series_state_endpoint():
     assert "/state" not in fire
     assert fire.count("ApiClient.") == 1
 
-    # the ONE surviving client caller of that endpoint is the assembly loop, and
-    # it is bounded away from the deadline arm by its own exits
-    assert api.count('/api/v1/team/series/{seriesId}/state') == 1
+    # THIS LINE USED TO COUNT THE URL LITERAL, AND THAT IS WHY IT PASSED ON A
+    # TREE WITH TWO LIVE CALLERS.  A route has one literal whether one method
+    # calls it or five (#432).  Round 4 replaces the measurement in two places:
+    # here, the count is of the route's WRITING mode -- the bare path, without
+    # lifecycle=false, which is what actually cancels -- and the caller count
+    # itself lives in test_r4_h1_the_mutating_state_route_has_exactly_one_caller.
+    writing_mode = [ln for ln in api.split("\n")
+                    if "/api/v1/team/series/{seriesId}/state" in ln
+                    and "?lifecycle=false" not in ln]
+    assert len(writing_mode) == 1, writing_mode
     loop = _method_body(_src("Plugin.cs"),
                         "private static System.Collections.IEnumerator PollAssemblyStateLoop")
     assert loop, "the assembly loop's own text could not be delimited"
@@ -2419,40 +2426,62 @@ _MUTATING_GET_OWNERS = {
     "/api/v1/team/queue/poll/{steamId}": "UpdateTeamQueuePoll",
     "/api/v1/ovt/queue/poll/{sid}": "UpdateOvtQueuePoll",
     "/api/v1/ffa/queue/poll/{sid}": "UpdateFfaQueuePoll",
-    "/api/v1/team/series/{seriesId}/state": "PollTeamSeriesStateAssemblyOnly",
 }
+
+# The sixth route is built TWICE on purpose, because the server lane makes its
+# write conditional rather than moving the read elsewhere: the same path in two
+# MODES, separated by one query parameter.
+_STATE_ROUTE = "/api/v1/team/series/{seriesId}/state"
+_READONLY_SUFFIX = "?lifecycle=false"
 
 
 def test_r4_h1_every_mutating_get_is_built_in_exactly_one_method():
     """The sweep, as an OPERATION over the whole class rather than one route.
 
-    Each of the six routes above is constructed in exactly ONE client method, so
-    each has a single choke point where its rule can be stated and enforced.  A
-    second construction site anywhere reddens this."""
+    Each queue route above is constructed in exactly ONE client method, so each
+    has a single choke point where its rule can be stated.  The series-state
+    route is the one with two modes: the WRITING mode is the bare path, the
+    read-only mode is the same path plus lifecycle=false.  What must be true is
+    not "one construction" but "exactly one construction in the WRITING mode" --
+    a distinction that matters because the parameter is what separates a read
+    from a cancel, and an omitted parameter is the dangerous direction."""
     api = _src("ApiClient.cs")
     for route, owner in sorted(_MUTATING_GET_OWNERS.items()):
         assert api.count(route) == 1, (route, api.count(route))
         assert _member_owning(api, route) == owner, (route, _member_owning(api, route))
 
-    # and no OTHER file builds one of them
+    # the two modes of the sixth, counted as modes
+    lines = [ln for ln in api.split("\n") if _STATE_ROUTE in ln]
+    assert len(lines) == 2, lines
+    writing = [ln for ln in lines if _READONLY_SUFFIX not in ln]
+    reading = [ln for ln in lines if _READONLY_SUFFIX in ln]
+    assert len(writing) == 1 and len(reading) == 1, (writing, reading)
+    assert _member_owning(api, writing[0].strip()) == "PollTeamSeriesStateAssemblyOnly"
+    assert _member_owning(api, reading[0].strip()) == "PollTeamSeriesStatusReadOnly"
+
+    # and no OTHER file builds any of them
     for name, src in _all_sources().items():
         if name == "ApiClient.cs":
             continue
-        for route in _MUTATING_GET_OWNERS:
+        for route in list(_MUTATING_GET_OWNERS) + [_STATE_ROUTE]:
             assert route not in src, (name, route)
 
     def claim(s):
-        return all(s.count(r) == 1 and _member_owning(s, r) == o
-                   for r, o in _MUTATING_GET_OWNERS.items())
+        if not all(s.count(r) == 1 and _member_owning(s, r) == o
+                   for r, o in _MUTATING_GET_OWNERS.items()):
+            return False
+        ls = [ln for ln in s.split("\n") if _STATE_ROUTE in ln]
+        return len(ls) == 2 and len([ln for ln in ls if _READONLY_SUFFIX not in ln]) == 1
 
-    # the mutation: a second construction site for the dangerous one
+    # the mutation: the read-only mode loses its parameter, so the banner's own
+    # construction becomes a second WRITING one
     _assert_discriminating(
         claim, api,
         _mutate(api,
-                'string url = $"{baseUrl}/api/v1/team/series/{seriesId}/status";',
+                'string url = $"{baseUrl}/api/v1/team/series/{seriesId}/state?lifecycle=false";',
                 'string url = $"{baseUrl}/api/v1/team/series/{seriesId}/state";',
-                "R4 second state-route construction"),
-        "R4 H1 one construction site per mutating GET")
+                "R4 second writing-mode construction"),
+        "R4 H1 one construction site in the writing mode")
 
     # NEGATIVE CONTROL: an unrelated edit in the same method leaves it true
     assert claim(_mutate(api, "[VERSION] series_status_readonly=",
@@ -2535,16 +2564,26 @@ def test_r4_h1_the_banner_polls_the_read_only_route_and_only_when_it_is_advertis
     poller, so the rule belongs to the operation and not to one caller's
     discipline.
 
-    SERVER DEPENDENCY: the read-only route is the server lane's.  Until it is
+    THE SECOND GATE IS NOT INTERCHANGEABLE WITH THE FIRST.  lifecycle is a QUERY
+    parameter, so a server that does not know it drops it, answers 200 and runs
+    the mutating arms anyway (#266).  The echoed `lifecycle` field in the answer
+    does tell the two servers apart -- but only once the request has been sent,
+    which on the wrong server IS the write.  So the advertisement protects the
+    first request and the echo latches the capability off before a second.
+
+    SERVER DEPENDENCY: both the `lifecycle` parameter and the
+    `series_status_readonly` advertisement are the server lane's.  Until both are
     deployed the banner is dark; the refusal is logged once per series id."""
     api = _src("ApiClient.cs")
 
     # default FALSE: an older server leaves it false by not emitting the field
     assert ("public static bool ServerHasReadOnlySeriesStatus { get; private set; } = false;"
             in api)
-    # the ONE writer is the mod-version handler
-    assert api.count("ServerHasReadOnlySeriesStatus = ") == 1
+    # two writers, and only two: the advertisement sets it, the echo latches it off
+    assert api.count("ServerHasReadOnlySeriesStatus = ") == 2
     assert _member_owning(api, "ServerHasReadOnlySeriesStatus = roStatus;") == "DoCheckModVersion"
+    assert (_member_owning(api, "ServerHasReadOnlySeriesStatus = false;")
+            == "PollTeamSeriesStatusReadOnly")
     assert 'ExtractJsonBool(req.downloadHandler.text, "series_status_readonly")' in api
 
     ui = _method_body(api, "public static void UpdateTeamSeriesStatePoll")
@@ -2561,7 +2600,16 @@ def test_r4_h1_the_banner_polls_the_read_only_route_and_only_when_it_is_advertis
     ro = _method_body(api, "public static void PollTeamSeriesStatusReadOnly")
     assert ro, "the read-only poller's own text could not be delimited"
     assert "if (!ServerHasReadOnlySeriesStatus) return;" in ro
-    assert "/status" in ro and "/state" not in ro
+    assert "/state?lifecycle=false" in ro
+    # GATE 2: presence is tracked separately from value, because a bool
+    # extractor answers False for "absent" and for "false" alike and absent is
+    # the dangerous one (#604)
+    assert 'resp.IndexOf("\\"lifecycle\\"", StringComparison.Ordinal) >= 0' in ro
+    assert 'if (!echoed || ExtractJsonBool(resp, "lifecycle"))' in ro
+    assert "ServerHasReadOnlySeriesStatus = false;" in ro
+    # the latch is set BEFORE the response is applied, so no later path can send
+    # another read on the strength of this one
+    assert ro.index("ServerHasReadOnlySeriesStatus = false;") < ro.index("ApplySeriesStateResponse")
 
     def claim(s):
         u = _method_body(s, "public static void UpdateTeamSeriesStatePoll")
@@ -2570,6 +2618,8 @@ def test_r4_h1_the_banner_polls_the_read_only_route_and_only_when_it_is_advertis
             return False
         return ("if (!ServerHasReadOnlySeriesStatus)" in u
                 and "if (!ServerHasReadOnlySeriesStatus) return;" in r
+                and "/state?lifecycle=false" in r
+                and 'if (!echoed || ExtractJsonBool(resp, "lifecycle"))' in r
                 and "PollTeamSeriesStateAssemblyOnly" not in u)
 
     # mutation 1: the call-site gate goes

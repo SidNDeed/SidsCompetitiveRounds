@@ -41,25 +41,32 @@ namespace CompetitiveRounds
         // their own callers rather than locking the menu (r3/r4 findings).
         public static bool ForceUpdateRequired { get; private set; } = false;
 
-        /// <summary>True only when THIS server said, on /api/v1/mod-version, that it
-        /// serves the read-only per-series status route
-        /// (<c>GET /api/v1/team/series/{id}/status</c>). Default FALSE, and every
-        /// older server leaves it false by simply not emitting the field.
+        /// <summary>True only when THIS server said, on /api/v1/mod-version, that
+        /// <c>GET /api/v1/team/series/{id}/state</c> honours <c>?lifecycle=false</c>
+        /// — i.e. that it has a mode in which that endpoint performs no lifecycle
+        /// write. Default FALSE, and every older server leaves it false by simply not
+        /// emitting the field.
         ///
-        /// <para>WHY AN ADVERTISEMENT AND NOT A PROBE. What this gates is the refusal
-        /// to call a GET that WRITES (see UpdateTeamSeriesStatePoll). The acceptance
-        /// signal therefore has to be something the new behaviour positively EMITS,
-        /// not the absence of an error (#438): an absent field, a server that never
-        /// answered, a parse that failed and a 404 all land on "not advertised",
-        /// which is the branch that touches nothing. Inferring it from a 404 on the
-        /// new route would mean sending a request per poll to a server that does not
-        /// have it, and reading a transport failure as a capability answer.</para>
+        /// <para>WHY AN ADVERTISEMENT AND NOT THE PARAMETER'S OWN ECHO. What this
+        /// gates is the refusal to send a GET that WRITES (see
+        /// UpdateTeamSeriesStatePoll). `lifecycle` is a QUERY parameter, and a server
+        /// that does not know it DROPS it, answers 200, and runs the mutating arms
+        /// anyway (#266). The echoed `lifecycle` field in the answer is a true
+        /// discriminator, but it is only readable AFTER the request — and on the
+        /// wrong server that request is the write. Only an out-of-band signal can
+        /// protect the FIRST one, and it has to be something the new behaviour
+        /// positively EMITS rather than the absence of an error (#438): an absent
+        /// field, a server that never answered and a parse that failed all land on
+        /// "not advertised", the branch that touches nothing (#276).</para>
         ///
-        /// <para>#266 does not reach this field: an old server ignoring an unknown
-        /// QUERY parameter answers 200 with un-filtered data, but an old server
-        /// cannot emit a RESPONSE field it does not have. The unknown-parameter
-        /// direction is handled where it applies — the report-dc `is_fallback`
-        /// input, in ReportTeamSeriesDc.</para></summary>
+        /// <para>The echo is still used — as gate 2 in PollTeamSeriesStatusReadOnly,
+        /// where it latches this capability off so a server that ignored the
+        /// parameter is never polled a second time.</para>
+        ///
+        /// <para>An old server cannot emit a RESPONSE field it does not have, so the
+        /// unknown-parameter direction does not reach this flag itself. It reaches
+        /// the two parameters this client sends: `lifecycle` here, and `is_fallback`
+        /// in ReportTeamSeriesDc.</para></summary>
         public static bool ServerHasReadOnlySeriesStatus { get; private set; } = false;
 
         // Recent ranked series (for leaderboard sidebar)
@@ -1912,9 +1919,11 @@ namespace CompetitiveRounds
                 ServerHasReadOnlySeriesStatus = roStatus;
                 Plugin.Log.LogInfo("[VERSION] series_status_readonly=" + (roStatus ? "yes" : "no")
                     + (roStatus
-                        ? " — the team tab reads series status from the read-only route"
-                        : " — this server serves no read-only series status, so the team tab's "
-                          + "DC-grace banner polls NOTHING (the only other route is a lifecycle write)"));
+                        ? " — the team tab reads series status with lifecycle=false, which this "
+                          + "server honours"
+                        : " — this server advertises no read-only series-status mode, so the team "
+                          + "tab's DC-grace banner polls NOTHING (the only per-series route it "
+                          + "could use performs a lifecycle write by default)"));
                 // Auto-fire update on launch if behind. The Update method is no-op
                 // when running the Thunderstore build (it surfaces a notification only).
                 // NOT on the broadcast seat: that binary is installed by the build
@@ -13982,10 +13991,12 @@ namespace CompetitiveRounds
         /// window that write exists for.</para>
         ///
         /// <para>THE PREDICATE, stated as the code applies it: the banner polls the
-        /// READ-ONLY status route and nothing else, and it polls that only while
-        /// <see cref="ServerHasReadOnlySeriesStatus"/> is true — i.e. only while THIS
-        /// server has advertised the route. Against any server that has not, this
-        /// method polls NOTHING AT ALL and says so once per series.</para>
+        /// READ-ONLY mode (`?lifecycle=false`) and nothing else, and it polls that
+        /// only while <see cref="ServerHasReadOnlySeriesStatus"/> is true — i.e. only
+        /// while THIS server has advertised that it honours the parameter. Against
+        /// any server that has not, this method polls NOTHING AT ALL and says so once
+        /// per series. It never sends the parameter hopefully: a server that does not
+        /// know it drops it and writes anyway (#266).</para>
         ///
         /// <para>AND IT DOES NOT TRY TO DECIDE "IS THIS SERIES PLAYED YET" FROM HERE.
         /// The three terms that actually select the cancel arm are the row's confirm
@@ -14009,9 +14020,10 @@ namespace CompetitiveRounds
                     _statusPollRefusedForSeries = sid;
                     Plugin.Log.LogInfo("[2v2] DC-grace banner NOT polling series " + sid
                         + " — this server does not advertise series_status_readonly, and the only "
-                        + "other per-series route (GET .../state) is a lifecycle write that can "
-                        + "cancel a played series and reconcile its bets. The banner stays dark "
-                        + "until a server carrying the read-only status route answers this seat");
+                        + "per-series route it could use (GET .../state) performs a lifecycle write "
+                        + "by default that can cancel a played series and reconcile its bets. The "
+                        + "banner stays dark until a server that honours lifecycle=false answers "
+                        + "this seat");
                 }
                 return;
             }
@@ -14367,9 +14379,10 @@ namespace CompetitiveRounds
         // assembled: not dc_incomplete, so never in the admin panel, bets settled on
         // the wrong reason, and a real report afterwards answered with
         // {"ignored": true}. The tab's caller is gone as of this round — the banner
-        // reads PollTeamSeriesStatusReadOnly, and polls nothing at all against a
-        // server that does not serve it. This route keeps exactly one caller, and
-        // its method name now says so.
+        // goes through PollTeamSeriesStatusReadOnly, which sends `lifecycle=false`
+        // and only against a server that advertised it honours that, and polls
+        // nothing at all otherwise. This route keeps exactly one caller in its
+        // default, WRITING mode, and that method's name now says so.
         // NOTHING REPLACES IT, because nothing needed it. The question it was asked
         // ("is this series still open?") is answered by the report endpoint itself,
         // atomically, under the FOR NO KEY UPDATE reread it already takes: a status
@@ -14395,19 +14408,22 @@ namespace CompetitiveRounds
             }));
         }
 
-        /// <summary>GET /team/series/{id}/state — THE MUTATING ROUTE. Its first arm
-        /// cancels the series and reconciles its bets; the name carries that so a
-        /// call site cannot be written without reading it.
+        /// <summary>GET /team/series/{id}/state in its LIFECYCLE mode — with no
+        /// `lifecycle` parameter, which is the default and the MUTATING one. Its
+        /// first arm cancels the series and reconciles its bets; the name carries
+        /// that so a call site cannot be written without reading it.
         ///
         /// <para>EXACTLY ONE CALLER IS PERMITTED: Plugin.PollAssemblyStateLoop, which
         /// is the assembly window the cancel arm was written for — it starts 3 s
         /// after a cr_ff join, lives ~22 s, and exits the moment this seat is out of
         /// the room or has no pending 2v2 slot, so its whole life is inside the
-        /// server's 180 s deadline and it cannot reach the arm. Every other consumer
-        /// of series status uses PollTeamSeriesStatusReadOnly. The previous round
-        /// removed a second caller from the DC fallback path; a second one survived
-        /// in the team tab and is removed this round (see
-        /// UpdateTeamSeriesStatePoll). Do not add a third.</para></summary>
+        /// server's 180 s deadline and it cannot reach the arm. It is also the one
+        /// caller that MUST keep the lifecycle behaviour: it is the only thing that
+        /// frees four clients from an assembly that failed. Every other consumer of
+        /// series status uses PollTeamSeriesStatusReadOnly, which sends
+        /// `lifecycle=false`. The previous round removed a second caller from the DC
+        /// fallback path; a second one survived in the team tab and is removed this
+        /// round (see UpdateTeamSeriesStatePoll). Do not add a third.</para></summary>
         public static void PollTeamSeriesStateAssemblyOnly(string seriesId, Action<string, string, int> onResponse)
         {
             if (string.IsNullOrEmpty(seriesId)) return;
@@ -14419,23 +14435,48 @@ namespace CompetitiveRounds
             }));
         }
 
-        /// <summary>GET /team/series/{id}/status — the READ-ONLY twin the server lane
-        /// adds this round. Same response shape as /state, no write on any arm, so a
-        /// UI may poll it for as long as it likes.
+        /// <summary>The READ-ONLY mode of the same route: `?lifecycle=false`, which
+        /// the server lane adds this round. With it, both mutating arms of
+        /// team_series_state are skipped — no UPDATE, no commit — and the row's real
+        /// current status is returned, with the answer echoing a `lifecycle` field.
         ///
-        /// <para>Gated HERE as well as at the call site, so the gate is a property of
-        /// the operation and not of one caller's discipline (#432). Against a server
-        /// that has not advertised the route this method sends nothing: it does not
-        /// fall back to /state, because falling back to a write is the whole defect
-        /// this pair exists to remove.</para></summary>
+        /// <para>TWO GATES, AND THEY DO DIFFERENT JOBS. `lifecycle` is a QUERY
+        /// parameter, so a server that does not know it DROPS it, answers 200, and
+        /// runs the mutating arms anyway (#266). The echoed field is the only thing
+        /// in the answer that tells the two servers apart — and it can only be read
+        /// once the request has already been sent, which on the wrong server is the
+        /// write itself. So:</para>
+        ///
+        /// <para>GATE 1, before anything is sent: the advertisement
+        /// (<see cref="ServerHasReadOnlySeriesStatus"/>). It is the only thing that
+        /// can protect the FIRST request, and it is checked here as well as at the
+        /// call site so the rule belongs to the operation rather than to one caller's
+        /// discipline (#432).</para>
+        ///
+        /// <para>GATE 2, on the answer: the echo must be PRESENT and false. Presence
+        /// is tracked separately from value, because a bool extractor returns false
+        /// for "absent" and for "false" alike and absent is the dangerous one (#604).
+        /// An answer without the echo means this server ignored the parameter, so the
+        /// capability is latched OFF for the session and no further read goes out —
+        /// it stops the second request, never the first.</para></summary>
         public static void PollTeamSeriesStatusReadOnly(string seriesId, Action<string, string, int> onResponse)
         {
             if (string.IsNullOrEmpty(seriesId)) return;
             if (!ServerHasReadOnlySeriesStatus) return;
-            string url = $"{baseUrl}/api/v1/team/series/{seriesId}/status";
+            string url = $"{baseUrl}/api/v1/team/series/{seriesId}/state?lifecycle=false";
             Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
             {
                 if (!ok || string.IsNullOrEmpty(resp)) return;
+                bool echoed = resp.IndexOf("\"lifecycle\"", StringComparison.Ordinal) >= 0;
+                if (!echoed || ExtractJsonBool(resp, "lifecycle"))
+                {
+                    ServerHasReadOnlySeriesStatus = false;
+                    Plugin.Log.LogWarning("[2v2] series status read-only mode is NOT in effect on this "
+                        + "server — the answer carries no lifecycle=false echo, so the lifecycle query "
+                        + "parameter was dropped and this endpoint's mutating arms ran. Latching the "
+                        + "capability off for the session: the DC-grace banner goes dark rather than "
+                        + "polling a write again");
+                }
                 ApplySeriesStateResponse(seriesId, resp, onResponse);
             }));
         }
