@@ -78,30 +78,21 @@ namespace CompetitiveRounds
         /// in.</summary>
         public float Z;
 
-        /// <summary>data.playerVel.position. Vanilla's GetClosestPlayer measures
-        /// the NearestAny selection against THIS and not against transform.position
-        /// (PlayerManager.cs:71). The two differ: playerVel is the rigidbody the
-        /// movement code drives. Keeping both means each vanilla path is
-        /// reproduced against the position vanilla actually used, rather than
-        /// against one position chosen for convenience.</summary>
-        public float AnyX;
-        public float AnyY;
-
         /// <summary>data.dead. Which branches consult it differs by mode and is
         /// part of the fidelity - see Choose.</summary>
         public bool Dead;
 
         /// <summary>At least one field above could not be read from this roster
-        /// entry - a destroyed Player, a missing CharacterData, a missing
-        /// rigidbody, or a property access that threw.
+        /// entry - a destroyed Player, a missing CharacterData, or a property
+        /// access that threw.
         ///
         /// It is a FLAG rather than an omission on purpose. The roster handed to
         /// Choose must keep its length and its order, because the NearestEnemyTeam
         /// branch indexes it positionally; dropping the entry would renumber every
         /// later one. Choose refuses the whole resolution when any entry carries
-        /// this, so the unread Team, X, Y, Z, AnyX, AnyY and Dead of such an entry
-        /// are never consulted - which is what stops a default team of zero from
-        /// deciding who the enemy subset contains.</summary>
+        /// this, so the unread Team, X, Y, Z and Dead of such an entry are never
+        /// consulted - which is what stops a default team of zero from deciding
+        /// who the enemy subset contains.</summary>
         public bool Unreadable;
     }
 
@@ -122,11 +113,17 @@ namespace CompetitiveRounds
         /// against each candidate's transform.position.</summary>
         NearestEnemyFfa,
 
-        /// <summary>PlayerManager.GetClosestPlayer (PlayerManager.cs:63-78) -
-        /// PlayerInRangeTrigger.cs:65. Measured from the TRIGGER's position against
-        /// each candidate's data.playerVel.position, and vanilla excludes nobody
-        /// here: it skips only the dead. The repair must not quietly narrow that.
-        /// No FFA substitution exists for this one.</summary>
+        /// <summary>PlayerManager.GetClosestPlayer (PlayerManager.cs:63-78),
+        /// reached from PlayerInRangeTrigger.cs:65 - it excludes nobody but the
+        /// dead.
+        ///
+        /// This value names the RING's rule, not a rule this seam reproduces.
+        /// Every effect that reaches the seam resolves its own victim through
+        /// GetOtherPlayer, so on an Any ring the ring's answer and the effect's
+        /// answer come from different functions and can be different players - a
+        /// TEAMMATE, or the holder. Choose defers on this value; the note at the
+        /// head of Choose says why neither answering with the ring's player nor
+        /// substituting the effect's rule is defensible here.</summary>
         NearestAny
     }
 
@@ -184,6 +181,44 @@ namespace CompetitiveRounds
 
         /// <summary>Return false. Nothing is written and nothing is applied.</summary>
         SkipOriginal
+    }
+
+    /// <summary>Whether this seat is in a position to repair the victim, and when
+    /// it is not, WHICH of the reasons applies.
+    ///
+    /// A BOOLEAN HERE MEANS FIVE DIFFERENT THINGS AT ONCE (#430). The gate answers
+    /// no when the mod is switched off, when this seat's own prefixes did not
+    /// attach, when there is no room to take a census of, when a fighter in the
+    /// room does not advertise the repair, and when the census itself could not be
+    /// read. "The room does not all carry the repair" is a true statement about
+    /// exactly one of those; printed for the other four it points the reader at
+    /// the peers' builds while the cause is local, or at a room that does not
+    /// exist. One value per cause, one reason line each, so this gate never has to
+    /// say both "the room said no" and "we declined locally".</summary>
+    internal enum ProximityGateState
+    {
+        /// <summary>Every seat in the room that simulates these effects advertises
+        /// the repair - or there are no peers at all (offline play).</summary>
+        Capable,
+
+        /// <summary>The mod is switched off on this seat.</summary>
+        ModDisabled,
+
+        /// <summary>This seat's own Harmony prefixes are not all attached, so it
+        /// cannot perform the repair - and does not advertise it (#83).</summary>
+        PatchesNotAttached,
+
+        /// <summary>Not in a Photon room, so there is no roster to take a census
+        /// of. The main menu and every pre-join state land here.</summary>
+        NotInARoom,
+
+        /// <summary>The census ran and found a fighter that does not advertise the
+        /// capability. This is the one state that IS about the peers.</summary>
+        RoomNotAllCapable,
+
+        /// <summary>The census could not be taken - a Photon or roster read threw.
+        /// An unreadable input, not an answer.</summary>
+        CensusUnreadable
     }
 
     internal static class ProximityVictim
@@ -266,12 +301,14 @@ namespace CompetitiveRounds
         /// <summary>The capability gate, as a pure predicate so the inert case is
         /// testable.
         ///
-        /// roomCapable: EVERY seat in the room that can simulate this effect
-        /// advertises a build carrying this repair. This changes who takes damage in
-        /// a shared simulation, so it is whole-room or nothing - never a room-name
+        /// state: what this seat's census concluded. Capable means EVERY seat in
+        /// the room that can simulate this effect advertises a build carrying this
+        /// repair, or that there are no peers at all. This changes who takes damage
+        /// in a shared simulation, so it is whole-room or nothing - never a room-name
         /// prefix (#286: the prefix set misses most rated play) and never
         /// mod_version (#301: a locally built DLL reports the last shipped version,
-        /// so it lies on exactly the seat that tests it).
+        /// so it lies on exactly the seat that tests it). Every other state refuses,
+        /// and each of them names its own cause - see ProximityGateState.
         ///
         /// targetsOther: the effect resolves a player OTHER than its holder. The
         /// own-player branch caches data.player (DealDamageToPlayer.cs:35), which is
@@ -282,9 +319,39 @@ namespace CompetitiveRounds
         ///
         /// Both false-directions fall through to vanilla unchanged, which preserves
         /// today's behaviour rather than inventing a third one (#276/#430).</summary>
-        internal static bool ShouldRepair(bool roomCapable, bool targetsOther)
+        internal static bool ShouldRepair(ProximityGateState state, bool targetsOther)
         {
-            return roomCapable && targetsOther;
+            return state == ProximityGateState.Capable && targetsOther;
+        }
+
+        /// <summary>The reason line for a call this repair left to vanilla.
+        ///
+        /// The polarity is checked first because it is the permanent answer: an
+        /// own-player effect is never repaired whatever the room does, and saying
+        /// anything about the room for it would be a statement the reader cannot
+        /// act on. Otherwise the gate's own state names the cause.</summary>
+        internal static string InactiveReason(ProximityGateState state, bool targetsOther)
+        {
+            if (!targetsOther) return "the effect targets its own player";
+            return GateReason(state);
+        }
+
+        /// <summary>One line per gate state. They must stay DISTINCT: the line is
+        /// also the budget key (see SignalKey), so two states sharing a line means
+        /// the second cause is never printed at all, and the reader is told the
+        /// first one instead.</summary>
+        internal static string GateReason(ProximityGateState state)
+        {
+            switch (state)
+            {
+                case ProximityGateState.Capable: return "the repair is active";
+                case ProximityGateState.ModDisabled: return "the mod is disabled on this seat";
+                case ProximityGateState.PatchesNotAttached: return "this seat's repair patches are not attached";
+                case ProximityGateState.NotInARoom: return "this seat is not in a room";
+                case ProximityGateState.RoomNotAllCapable: return "the room does not all carry the repair";
+                case ProximityGateState.CensusUnreadable: return "the room census could not be read";
+                default: return "the gate state is not one this build names";
+            }
         }
 
         /// <summary>One resolution, one action, for all three prefixes.
@@ -307,6 +374,34 @@ namespace CompetitiveRounds
             if (outcome == ProximityResolution.Defer) return ProximityPrefixAction.RunVanillaUntouched;
             if (outcome != ProximityResolution.Victim || !victimKnown) return ProximityPrefixAction.SkipOriginal;
             return ProximityPrefixAction.WriteVictimAndRun;
+        }
+
+        /// <summary>What a prefix hands back to Harmony for a given action. One
+        /// function, so the three prefixes cannot drift apart on it - and so the
+        /// ordering claim below is composed from the SAME function the shipped
+        /// prefixes return through, rather than from a restatement of it.</summary>
+        internal static bool PrefixReturn(ProximityPrefixAction action)
+        {
+            return action != ProximityPrefixAction.SkipOriginal;
+        }
+
+        /// <summary>HarmonyX's own composition of prefix returns, as this repair
+        /// depends on it: every prefix on a method is called regardless of what a
+        /// sibling returned, and the returns are ANDed into __runOriginal (#352,
+        /// verified from the shipped 0Harmony.dll - WritePrefixes emits every
+        /// prefix call unconditionally).
+        ///
+        /// This is a MODEL of the host, not a call the shipped prefixes make:
+        /// Harmony performs the conjunction itself. It lives here because the
+        /// ordering claim on StunPlayer.Go - which carries a second, unrelated
+        /// prefix, PerfPatches.StunPlayerGoNullGuard, with no priority declared on
+        /// either - has to be MEASURED. Composing this function in both orders is a
+        /// test that can fail; comparing `a && b` with `b && a` is a test that
+        /// cannot (#441/#431). Make it return `prefixReturn` alone - last prefix
+        /// wins - and the two orders disagree, which is what P3 asserts.</summary>
+        internal static bool RunOriginalAfter(bool runSoFar, bool prefixReturn)
+        {
+            return runSoFar && prefixReturn;
         }
 
         /// <summary>Planar squared distance, for the SELECTION only. All three
@@ -389,14 +484,52 @@ namespace CompetitiveRounds
         {
             if (candidates == null || candidates.Count == 0) return None;
 
-            // A ROSTER WITH AN UNREADABLE ENTRY IS NOT THE ROSTER VANILLA READ.
-            // Vanilla's own loops read players[i].data.dead, the team subset's
-            // transform.position and, on the Any path, data.playerVel.position
-            // (PlayerManager.cs:69-71, :113-115); an entry whose fields could not
-            // be obtained would have thrown there, and cannot be stood in for by
-            // defaults. A defaulted Team is the sharpest case: team zero puts the
-            // entry into whichever subset the enemy-team branch walks, so ONE
-            // unread entry changes which candidates that branch even considers.
+            // THE RING'S RULE MUST BE THE EFFECT'S RULE, OR THERE IS NOTHING HERE
+            // TO REPRODUCE. Every effect that reaches this seam resolves its own
+            // victim through PlayerManager.GetOtherPlayer - DealDamageToPlayer.cs
+            // :33-38, StunPlayer.cs:19-25, TeleportToOpponent.cs:19-22 - and the
+            // ring decides only WHEN Go() is called. On a TargetType.OtherPlayer
+            // ring the two are the same function, so re-running it IS the repair,
+            // and the ring's predicate is a re-check of the test it just passed on
+            // that same candidate.
+            //
+            // On a TargetType.Any ring they are different functions.
+            // GetClosestPlayer excludes nobody but the dead (PlayerManager.cs
+            // :63-78), so the ring's player can be a TEAMMATE - or the holder -
+            // for an effect whose own rule resolves an opponent. Writing that into
+            // vanilla's field would hand vanilla a victim vanilla's own rule could
+            // not have produced, which is the one thing this seam may not do;
+            // substituting the effect's rule instead would write a player the
+            // ring's predicate was never evaluated against. Neither is defensible,
+            // so an Any ring DEFERS: vanilla resolves its own victim and keeps its
+            // own once-only cache, exactly as an unpatched build does. No shipped
+            // content reaches this - all three PlayerInRangeTrigger instances in
+            // the game are targetType 1 (BUG389-GATE0-OFFLINE.md) - and it is
+            // recorded as a deviation rather than left to be inferred (#327).
+            if (selection == ProximitySelection.NearestAny) return Defer;
+
+            // A ROSTER WITH AN UNREADABLE ENTRY IS NOT THE ROSTER VANILLA READ. A
+            // defaulted Team is the sharpest case: team zero puts the entry into
+            // whichever subset the enemy-team branch walks, so ONE unread entry
+            // changes which candidates that branch even considers.
+            //
+            // The two surviving branches do NOT agree on what vanilla would have
+            // done with such an entry, and this is deliberately the stricter of
+            // the two - a BOUND rather than a per-branch mechanism (#310):
+            //   - NearestEnemyTeam reproduces stock GetClosestPlayerInTeam, which
+            //     reads players[i].data.dead and playersInTeam[i].transform
+            //     .position with no null guard (PlayerManager.cs:113-115). An entry
+            //     whose Player or CharacterData could not be read would have THROWN
+            //     out of Update there, so there is no vanilla answer to reproduce.
+            //   - NearestEnemyFfa reproduces this mod's own FfaTargeting
+            //     .NearestOpponent, which SKIPS such an entry and answers with the
+            //     nearest of the rest (FfaMode.cs:3812). In FFA vanilla-as-patched
+            //     would have produced a victim here and this seam defers instead,
+            //     so on that branch the repair is STRICTER than the code it
+            //     reproduces. The cost is one tick of vanilla with its stale cached
+            //     target - today's shipped behaviour and no new symptom - and the
+            //     alternative is answering from a roster this seam cannot show is
+            //     the one the trigger walked. Recorded as a deviation (#327).
             // Deferring costs a vanilla tick and one log line; guessing costs
             // another player the health that left them.
             for (int i = 0; i < candidates.Count; i++)
@@ -481,42 +614,34 @@ namespace CompetitiveRounds
             }
             else
             {
-                // PlayerManager.GetClosestPlayer (PlayerManager.cs:63-78): skip the
-                // dead and nobody else, measured against the rigidbody position.
-                // No self-exclusion of any kind, positional or by identity - adding
-                // one here would narrow a set vanilla leaves open.
-                for (int i = 0; i < candidates.Count; i++)
-                {
-                    ProximityCandidate c = candidates[i];
-                    if (c.Dead) continue;
-
-                    float d2a = DistanceSquared(selectX, selectY, c.AnyX, c.AnyY);
-                    if (d2a >= bestDistanceSquared) continue;
-                    bestDistanceSquared = d2a;
-                    bestIndex = i;
-                }
+                // A selection this seam does not model cannot be reproduced, and an
+                // unmodelled rule is vanilla's to run (#276/#430). NearestAny is
+                // handled above; this catches a value added later and never wired
+                // into a branch, which would otherwise fall through with nothing
+                // selected and read as "the trigger admitted nobody".
+                return Defer;
             }
 
             if (bestIndex < 0) return None;
 
             ProximityCandidate chosen = candidates[bestIndex];
 
-            // THE HOLDER IS NEVER AN ANSWER, and the check is here rather than in
-            // the selection because only the NearestAny branch can produce it:
-            // that branch is vanilla's own open set, and the trigger sits on the
-            // holder's subtree, so the holder is very nearly always the nearest
-            // candidate to it. Every caller is an effect that acts on someone
-            // other than its holder (ShouldRepair), and writing the holder into
-            // such an effect's victim field inverts it - DealDamageToPlayer then
-            // drains the holder with data.player as the damaging player, which is
-            // self-damage, and LifeSteal does not fire on it (#354).
+            // THE HOLDER IS NEVER AN ANSWER. Every caller is an effect that acts
+            // on someone other than its holder (ShouldRepair), and writing the
+            // holder into such an effect's victim field inverts it -
+            // DealDamageToPlayer then drains the holder with data.player as the
+            // damaging player, which is self-damage, and LifeSteal does not fire
+            // on it (#354).
             //
-            // Defer, not None: vanilla's own rule for these effects resolves an
-            // opponent (DealDamageToPlayer.cs:33-38), so falling through produces
-            // the right polarity, while refusing would drop a tick vanilla applies.
-            // The stale-cache defect remains on that path, which is today's
-            // behaviour and no new symptom - recorded as a deviation rather than
-            // papered over (#327).
+            // AN INVARIANT BACKSTOP, NOT A REACHABLE PATH, and claimed as nothing
+            // more. Both surviving branches already exclude the holder by TEAM -
+            // the team branch walks GetOtherTeam(holderTeam) and the FFA branch
+            // skips c.Team == holderTeam - and the one selection that could return
+            // the holder, vanilla's open GetClosestPlayer set, defers at the head
+            // of this function. No test asserts this line, because a check that
+            // cannot fail is not evidence (#342/#431). Defer rather than None so
+            // that if a later branch ever does reach it, vanilla resolves the
+            // opponent its own rule would have.
             if (chosen.Id == holderId) return Defer;
 
             // Vanilla's predicate (PlayerInRangeTrigger.cs:67), evaluated from the

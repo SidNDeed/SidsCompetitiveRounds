@@ -95,7 +95,7 @@ namespace CompetitiveRounds
         /// advertising an authority we cannot deliver is worse than not advertising
         /// at all.
         ///
-        /// Why the gate has to be HERE and not only in RoomCarriesFix(). PatchesLive
+        /// Why the gate has to be HERE and not only in GateState(). PatchesLive
         /// read at the census only suppresses THIS seat's own repair. The key is
         /// what every OTHER seat reads. A seat whose patches failed would keep
         /// advertising, its peers' census would find the key on every fighter and
@@ -210,19 +210,33 @@ namespace CompetitiveRounds
         /// actor that cannot be identified is counted and must advertise like any
         /// other; if it does not, the room stays on vanilla. That is fail-closed
         /// for the REPAIR, which is today's shipped behaviour and no new symptom
-        /// (#276/#430).</summary>
-        internal static bool RoomCarriesFix()
+        /// (#276/#430).
+        ///
+        /// WHY THIS ANSWERS WITH A STATE AND NOT A BOOLEAN (#430). Five different
+        /// facts refuse the repair here and only one of them is about the peers:
+        /// the mod is switched off, this seat's own prefixes did not attach, there
+        /// is no room, the census found a fighter without the key, or the census
+        /// could not be read at all. A caller handed `false` can only guess which,
+        /// and the line it printed - "the room does not all carry the repair" -
+        /// pointed a reader at the other seats' builds for a patch that failed to
+        /// attach locally, and printed the same sentence in the main menu, where
+        /// there is no room to carry anything. Each cause now leaves here under its
+        /// own name and gets its own line (ProximityVictim.GateReason). The failure
+        /// DIRECTION is unchanged: anything that is not Capable refuses.</summary>
+        internal static ProximityGateState GateState()
         {
             try
             {
-                if (Plugin.modDisabled) return false;
-                if (!PatchesLive) return false;
-                if (PhotonNetwork.OfflineMode) return true;
-                if (!PhotonNetwork.InRoom) return false;
+                if (Plugin.modDisabled) return ProximityGateState.ModDisabled;
+                if (!PatchesLive) return ProximityGateState.PatchesNotAttached;
+                if (PhotonNetwork.OfflineMode) return ProximityGateState.Capable;
+                if (!PhotonNetwork.InRoom) return ProximityGateState.NotInARoom;
 
-                return _cap.Evaluate(Time.frameCount, RoomActors.RosterGeneration, CensusDelegate);
+                return _cap.Evaluate(Time.frameCount, RoomActors.RosterGeneration, CensusDelegate)
+                    ? ProximityGateState.Capable
+                    : ProximityGateState.RoomNotAllCapable;
             }
-            catch { return false; }
+            catch { return ProximityGateState.CensusUnreadable; }
         }
     }
 
@@ -252,6 +266,34 @@ namespace CompetitiveRounds
         internal static ProximityResolution ResolveFromTrigger(PlayerInRangeTrigger trigger, string site, out Player victim)
         {
             victim = null;
+
+            // NO OWNING TRIGGER - AND THEREFORE NO REPAIR. The effect is driven by
+            // something other than a PlayerInRangeTrigger, so this seam has no
+            // predicate to reproduce and leaves vanilla exactly as it is.
+            //
+            // An earlier draft called PlayerManager.GetOtherPlayer here and argued
+            // in a comment that this was deliberately NOT FfaTargeting
+            // .NearestOpponent, "which defaults needVision to false and applies no
+            // range bound at all". In FFA that distinction does not exist: this
+            // mod's own PlayerManager_GetOtherPlayer_Ffa_Patch prefixes
+            // GetOtherPlayer to exactly FfaTargeting.NearestOpponent whenever
+            // FfaMode.EngineActive() (FfaMode.cs:3754-3763), with needVision
+            // omitted and no range term in the helper (FfaMode.cs:3805-3826). So on
+            // this path, in the very mode the bug was reported in, the draft
+            // selected with neither a range bound nor a vision test and then wrote
+            // that answer into vanilla's field - which can drain a player standing
+            // behind a wall on the far side of the map. That is the reported
+            // symptom, reproduced by the repair.
+            //
+            // Falling through is also the RIGHT scope. The only other vanilla
+            // caller of DealDamageToPlayer.Go is A_DemonicPact, driven by an
+            // AttackTrigger (measured in BUG389-GATE0-OFFLINE.md: exactly three
+            // persistent calls in the whole game name a DealDamageToPlayer, one
+            // from the Lifestealer ring and two from that AttackTrigger).
+            // AttackTrigger has its own selection rule that this seam does not
+            // model, so the honest answer for it is vanilla's, unchanged. Whether
+            // that card carries the same victim-cache defect is a separate question
+            // and is flagged rather than guessed.
             if (trigger == null) { NoteOutcome(site, "defer", "no owning trigger"); return ProximityResolution.Defer; }
             PlayerManager pm = PlayerManager.instance;
             if (pm == null || pm.players == null || pm.players.Count == 0)
@@ -269,7 +311,7 @@ namespace CompetitiveRounds
                 var c = new ProximityCandidate();
                 c.Id = i;
                 // EVERY FIELD SET HERE IS ONE THE VANILLA RULE READS
-                // (PlayerManager.cs:69-71 and :113-115), so a field that cannot
+                // (PlayerManager.cs:113-115, FfaMode.cs:3812-3816), so one that cannot
                 // be read leaves this seam unable to show that its candidate set
                 // is the set vanilla built. The entry keeps its SLOT and its
                 // order - the team branch indexes the roster positionally, so
@@ -279,25 +321,21 @@ namespace CompetitiveRounds
                 bool readable = false;
                 try
                 {
-                    // The NearestAny selection is vanilla's GetClosestPlayer,
-                    // which measures data.playerVel.position and NOT
-                    // transform.position (PlayerManager.cs:71). Marshal both, so
-                    // each vanilla path is reproduced against the position
-                    // vanilla itself read. A null playerVel is UNREADABLE rather
-                    // than a reason to substitute the transform: vanilla
-                    // dereferences it and would have thrown, and standing a
-                    // different position in its place would rank candidates
-                    // vanilla's own loop never measured.
-                    if (p != null && p.data != null && p.data.playerVel != null)
+                    // EXACTLY the fields the two surviving rules read, and no
+                    // more. The rigidbody position (data.playerVel) left with the
+                    // NearestAny branch: nothing reads it now, and requiring it
+                    // would mark an entry unreadable - deferring the WHOLE
+                    // resolution - over a field neither GetClosestPlayerInTeam nor
+                    // FfaTargeting.NearestOpponent consults. A marshaller stricter
+                    // than every branch it feeds declines calls for a reason that
+                    // is not there (#412).
+                    if (p != null && p.data != null)
                     {
                         Vector3 pos = p.transform.position;
-                        Vector2 velPos = p.data.playerVel.position;
                         c.Team = p.TeamID;
                         c.X = pos.x;
                         c.Y = pos.y;
                         c.Z = pos.z;
-                        c.AnyX = velPos.x;
-                        c.AnyY = velPos.y;
                         c.Dead = p.data.dead;
                         readable = true;
                     }
@@ -398,15 +436,20 @@ namespace CompetitiveRounds
 
             if (chosen == ProximityVictim.Defer)
             {
-                // Which unreadable input produced the deferral, in the order the
-                // seam consults them: the roster is read before anything is
-                // selected, the vision query only for the candidate selected,
-                // and a deferral with neither means the trigger's own rule
-                // resolved the holder for an effect that acts on someone else.
+                // WHICH deferral, in the order the seam decides them: the ring's
+                // rule is compared with the effect's before anything is read, the
+                // roster is read before anything is selected, and the vision query
+                // is asked only for the candidate that was selected. The last arm
+                // is the holder backstop inside Choose, which the two surviving
+                // branches make unreachable; it is named anyway, so that a
+                // deferral can never be reported as a cause the seam did not
+                // reach.
                 NoteOutcome(site, "defer",
-                    rosterUnreadable ? "a roster entry could not be read"
+                    selection == ProximitySelection.NearestAny
+                        ? "the ring matches anyone and this effect acts on an opponent"
+                    : rosterUnreadable ? "a roster entry could not be read"
                     : visionUnreadable ? "the vision query could not be answered"
-                    : "the trigger's own rule resolves the holder");
+                    : "the seam could not show its answer is someone other than the holder");
                 return ProximityResolution.Defer;
             }
             if (chosen < 0 || chosen >= players.Count) return ProximityResolution.Refuse;
@@ -431,17 +474,26 @@ namespace CompetitiveRounds
             try
             {
                 if (instance == null) return ProximityPrefixAction.RunVanillaUntouched;
-                if (!ProximityVictim.ShouldRepair(ProximityVictimGate.RoomCarriesFix(), targetsOther))
+
+                // The census is not consulted for an own-player effect: that branch
+                // has no cross-player lookup and no defect, so the room's answer
+                // cannot change the outcome and asking would walk the PlayerList on
+                // every tick. ShouldRepair still makes the whole decision - both
+                // terms go into it, in one place (#432).
+                ProximityGateState gate = targetsOther
+                    ? ProximityVictimGate.GateState()
+                    : ProximityGateState.Capable;
+                if (!ProximityVictim.ShouldRepair(gate, targetsOther))
                 {
                     // NOT a refusal and not a deferral: the repair has nothing to
                     // do here. It still gets a line, because a feature that is
                     // INACTIVE and a feature that is active and declining must
-                    // not produce the same silence (#438/#443). Bounded to one
-                    // line per reason per session, so behaviour and log volume
-                    // both stay what an unpatched seat produces.
-                    NoteOutcome(site, "inactive", targetsOther
-                        ? "the room does not all carry the repair"
-                        : "the effect targets its own player");
+                    // not produce the same silence (#438/#443) - and the line names
+                    // WHICH cause applied, because four of the five are local to
+                    // this seat and only one is about the room. Bounded to one line
+                    // per reason per session, so behaviour and log volume both stay
+                    // what an unpatched seat produces.
+                    NoteOutcome(site, "inactive", ProximityVictim.InactiveReason(gate, targetsOther));
                     return ProximityPrefixAction.RunVanillaUntouched;
                 }
 
@@ -465,31 +517,15 @@ namespace CompetitiveRounds
             }
         }
 
-        /// <summary>NO OWNING TRIGGER - and therefore no repair. The effect is
-        /// driven by something other than a PlayerInRangeTrigger, so this seam has
-        /// no predicate to reproduce and leaves vanilla exactly as it is.
+        /// <summary>The one bounded sink every outcome in this resolver reports
+        /// through. Site, outcome AND reason are all part of the budget key, so
+        /// each distinct reason is stated once per session and a per-tick effect
+        /// can never repeat itself (ProximityVictim.SignalKey / MaxOutcomeSignals).
         ///
-        /// An earlier draft called PlayerManager.GetOtherPlayer here and argued in
-        /// a comment that this was deliberately NOT FfaTargeting.NearestOpponent,
-        /// "which defaults needVision to false and applies no range bound at all".
-        /// In FFA that distinction does not exist: this mod's own
-        /// PlayerManager_GetOtherPlayer_Ffa_Patch prefixes GetOtherPlayer to
-        /// exactly FfaTargeting.NearestOpponent whenever FfaMode.EngineActive()
-        /// (FfaMode.cs:3754-3763), with needVision omitted and no range term in the
-        /// helper (FfaMode.cs:3805-3826). So on this path, in the very mode the bug
-        /// was reported in, the draft selected with neither a range bound nor a
-        /// vision test and then wrote that answer into vanilla's field - which can
-        /// drain a player standing behind a wall on the far side of the map. That
-        /// is the reported symptom, reproduced by the repair.
-        ///
-        /// Falling through is also the RIGHT scope. The only other vanilla caller
-        /// of DealDamageToPlayer.Go is A_DemonicPact, driven by an AttackTrigger
-        /// (measured in BUG389-GATE0-OFFLINE.md: exactly three persistent calls in
-        /// the whole game name a DealDamageToPlayer, one from the Lifestealer ring
-        /// and two from that AttackTrigger). AttackTrigger has its own selection
-        /// rule that this seam does not model, so the honest answer for it is
-        /// vanilla's, unchanged. Whether that card carries the same victim-cache
-        /// defect is a separate question and is flagged rather than guessed.</summary>
+        /// It builds a key and a line and decides nothing. The behaviour each line
+        /// describes lives at the branch that emits it - the no-owning-trigger
+        /// fall-through is at the head of ResolveFromTrigger, with the reasoning
+        /// that kept it there.</summary>
         internal static void NoteOutcome(string site, string outcome, string why)
         {
             VanillaFixSupport.DiagLimited(
@@ -513,22 +549,17 @@ namespace CompetitiveRounds
             // vanilla's minus one unreadable term, microseconds later, in the
             // same frame, over the same transforms. The selection fidelity is
             // what carries that claim; see the seam's note on Choose.
-            switch (ProximityVictimResolver.DecidePrefix(
+            ProximityPrefixAction action = ProximityVictimResolver.DecidePrefix(
                 "DealDamageToPlayer", __instance,
                 __instance != null && __instance.targetPlayer == DealDamageToPlayer.TargetPlayer.Other,
-                out fresh))
-            {
-                case ProximityPrefixAction.WriteVictimAndRun:
-                    // Hand the answer to vanilla. Writing on EVERY call is not
-                    // reinstating the cache: nothing ever reads a value this
-                    // prefix did not just write on this call.
-                    __instance.target = fresh;
-                    return true;
-                case ProximityPrefixAction.SkipOriginal:
-                    return false;
-                default:
-                    return true;
-            }
+                out fresh);
+            // Hand the answer to vanilla. Writing on EVERY call is not reinstating
+            // the cache: nothing ever reads a value this prefix did not just write
+            // on this same call. The write stays on the accepting branch, and the
+            // return comes from the seam, so all three prefixes answer Harmony
+            // through one tested function (#432).
+            if (action == ProximityPrefixAction.WriteVictimAndRun) __instance.target = fresh;
+            return ProximityVictim.PrefixReturn(action);
         }
 
         [HarmonyCleanup]
@@ -567,13 +598,15 @@ namespace CompetitiveRounds
     /// WritePrefixes emits every prefix call unconditionally). A conjunction is
     /// order-independent, so either prefix refusing suppresses the original
     /// whichever ran first, and neither can turn the other's refusal into an
-    /// application. Both halves of that are exercised by the harness case
-    /// P1/P2, over both orders.
+    /// application.
     ///
     /// What it could still reach is a SIDE EFFECT one prefix leaves for the other
     /// to read. This one writes __instance.target, and only on the accepting
     /// path; the null guard reads the ancestor Player and writes nothing. So
-    /// today there is no shared state to order. That is a statement about
+    /// today there is no shared state to order. The run half is exercised by
+    /// harness case P3, which composes the seam's model of that conjunction
+    /// (ProximityVictim.RunOriginalAfter) in BOTH orders over the real decision
+    /// function; the write half by P1/P2. That is a statement about
     /// today's two bodies rather than a property of the arrangement, and it is
     /// recorded as a residual: nothing in the tree stops a later edit from making
     /// either prefix read the field the other writes. The consequence to watch
@@ -586,19 +619,12 @@ namespace CompetitiveRounds
         private static bool BeforeGo(StunPlayer __instance)
         {
             Player fresh;
-            switch (ProximityVictimResolver.DecidePrefix(
+            ProximityPrefixAction action = ProximityVictimResolver.DecidePrefix(
                 "StunPlayer", __instance,
                 __instance != null && __instance.targetPlayer == StunPlayer.TargetPlayer.OtherPlayer,
-                out fresh))
-            {
-                case ProximityPrefixAction.WriteVictimAndRun:
-                    __instance.target = fresh;
-                    return true;
-                case ProximityPrefixAction.SkipOriginal:
-                    return false;
-                default:
-                    return true;
-            }
+                out fresh);
+            if (action == ProximityPrefixAction.WriteVictimAndRun) __instance.target = fresh;
+            return ProximityVictim.PrefixReturn(action);
         }
 
         [HarmonyCleanup]
@@ -636,17 +662,10 @@ namespace CompetitiveRounds
         private static bool BeforeGo(TeleportToOpponent __instance)
         {
             Player fresh;
-            switch (ProximityVictimResolver.DecidePrefix(
-                "TeleportToOpponent", __instance, true, out fresh))
-            {
-                case ProximityPrefixAction.WriteVictimAndRun:
-                    __instance.target = fresh;
-                    return true;
-                case ProximityPrefixAction.SkipOriginal:
-                    return false;
-                default:
-                    return true;
-            }
+            ProximityPrefixAction action = ProximityVictimResolver.DecidePrefix(
+                "TeleportToOpponent", __instance, true, out fresh);
+            if (action == ProximityPrefixAction.WriteVictimAndRun) __instance.target = fresh;
+            return ProximityVictim.PrefixReturn(action);
         }
 
         [HarmonyCleanup]
