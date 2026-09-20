@@ -581,15 +581,18 @@ def test_the_qualifier_is_read_only_by_renderers():
     assert len(sources) >= 10, f"only {len(sources)} sources discovered: {sorted(sources)}"
 
     found = _qualifier_sites(sources)
-    per_file: dict[str, int] = {}
-    for path, _lineno, _text in found["lines"]:
-        per_file[path] = per_file.get(path, 0) + 1
-    assert per_file == {"api/main.py": 4, "discord_bot.py": 2}, (
-        "the recorded sites are: in the api, one SELECT projection and one "
-        "render dict for the match-by-code route, the INSERT column list that "
-        "writes it, and one render dict for the history route; in the bot, the "
-        "two display ternaries. Found:\n  "
-        + "\n  ".join(f"{p}:{n}: {t}" for p, n, t in found["lines"]))
+
+    # ORDER: the SHAPE rules are asserted first and the census last, and that
+    # is deliberate. The census counts LINES, so it survives untouched a
+    # rewrite that changes an existing site IN PLACE — a projection turned
+    # into a ternary is still one line in one file. With the census first,
+    # every mutation that ADDS a site stopped there, and the three assertions
+    # that carry the actual rule were never the thing that reddened: they were
+    # reachable, but no executed control had ever driven them on real sources,
+    # and the in-place rewrite is precisely the shape they exist to catch. The
+    # rule is that nothing may DECIDE on a client-attested cause (#283), so
+    # the rule is checked first and the census is the last word — the tripwire
+    # for a site that is genuinely new.
 
     # No `if` STATEMENT anywhere: that is the shape where something DECIDES on
     # a client-attested cause rather than printing a word for it.
@@ -604,13 +607,23 @@ def test_the_qualifier_is_read_only_by_renderers():
         + ", ".join(f"{p}:{n}" for p, n in api_branches))
 
     bot_branches = [t for t in found["ternaries"] if t[0] == "discord_bot.py"]
-    assert len(bot_branches) == 2, (
-        "the bot's recorded branches are the /game embed head and the series-log "
-        "line. Found: " + ", ".join(f"{p}:{n}" for p, n, _ in bot_branches))
     for path, lineno, text_only in bot_branches:
         assert text_only, (
             f"{path}:{lineno} branches on the qualifier into something other "
             "than displayed text — the label has started deciding")
+    assert len(bot_branches) == 2, (
+        "the bot's recorded branches are the /game embed head and the series-log "
+        "line. Found: " + ", ".join(f"{p}:{n}" for p, n, _ in bot_branches))
+
+    per_file: dict[str, int] = {}
+    for path, _lineno, _text in found["lines"]:
+        per_file[path] = per_file.get(path, 0) + 1
+    assert per_file == {"api/main.py": 4, "discord_bot.py": 2}, (
+        "the recorded sites are: in the api, one SELECT projection and one "
+        "render dict for the match-by-code route, the INSERT column list that "
+        "writes it, and one render dict for the history route; in the bot, the "
+        "two display ternaries. Found:\n  "
+        + "\n  ".join(f"{p}:{n}: {t}" for p, n, t in found["lines"]))
 
 
 def test_the_site_counter_can_fail():
@@ -740,10 +753,25 @@ def test_the_traceability_detector_can_fail():
 
 _MIGRATION_FILES = sorted((MAIN_PATH.parents[1] / "sql").glob("*_ffa_departure_cause.sql"))
 _THREE_DIGIT = re.compile(r"(?<!#)\b(3\d\d)\b")
+# A 3xx used AS A REFERENCE TO THIS MIGRATION, in the two forms it can take in
+# a file that is not the lane's own: the filename form, and prose that names
+# the migration by its ROLE and then gives a number.
+_MIGRATION_FILENAME_REF = re.compile(r"\b(\d{3})_ffa_departure_cause\b")
+_ROLE_WORDS = re.compile(r"departure[-_ ]cause migration", re.I)
+# The tokens that make a file this lane's OWN, matched against its PATH and
+# never against its text. A shared production module that merely mentions the
+# lane — `main.py` names the client branch `claude/bug392-client` in a comment
+# — is not a lane file, and promoting it on a text match would put the strict
+# bare-3xx rule over a module carrying a hundred and sixty unrelated 3xx
+# numbers (bug ids, other lanes' migrations, timeouts). That check would be
+# noise on its first run and would be switched off, which is the same as not
+# having it (#342). Files this lane owns carry the lane in their name.
+_LANE_PATH_TOKENS = ("ffa_departure_cause", "bug392")
 
 
 def _stale_migration_numbers(src: str, current: str) -> list[tuple[int, str]]:
-    """Every bare 3xx number in `src` that is not the migration's own.
+    """STRICT rule, for this lane's OWN files: every bare 3xx number that is
+    not the migration's own.
 
     `#` -prefixed numbers are learning references and are skipped: `#340` is a
     lesson, `324` is a file on disk. The two live in the same prose, which is
@@ -757,43 +785,131 @@ def _stale_migration_numbers(src: str, current: str) -> list[tuple[int, str]]:
     return out
 
 
+def _migration_references(src: str, current: str) -> list[tuple[int, str]]:
+    """WIDE rule, for every other backend source: a 3xx that is being used as a
+    reference to THIS migration and is not its current number.
+
+    The strict rule cannot be applied outside the lane — `main.py` alone
+    carries over a hundred lines with a bare 3xx on them (bug numbers, other
+    lanes' migrations, timeouts), so a bare-number scan there would be noise
+    and would be switched off, which is the same as not having it. Two forms
+    are unambiguous instead:
+
+      * the filename form, `326_ffa_departure_cause`, anywhere at all;
+      * a line that names the migration by ROLE — "the departure-cause
+        migration" — and carries a bare 3xx on the same line.
+
+    The boundary is stated rather than hidden: a line that says only
+    "migration 326", with no role words and no stem, names SOME migration and
+    this rule does not claim it means this one. Inside the lane's own files
+    that case is still caught, by the strict rule above.
+    """
+    out: list[tuple[int, str]] = []
+    for lineno, line in enumerate(src.splitlines(), 1):
+        for hit in _MIGRATION_FILENAME_REF.findall(line):
+            if hit != current:
+                out.append((lineno, hit))
+        if _ROLE_WORDS.search(line):
+            for hit in _THREE_DIGIT.findall(line):
+                if hit != current:
+                    out.append((lineno, hit))
+    return out
+
+
+def _backend_sources() -> dict[str, Path]:
+    """Every backend source a migration reference can live in: the whole api
+    package, the bot, every migration and every test and fixture.
+
+    DISCOVERED, not listed. The check this replaces walked a three-entry list
+    written by hand, while its sibling tripwire in this same file was rebuilt
+    in the same commit from a listed set to a discovered one for exactly this
+    reason (#342/#432): a list is green about the files someone remembered.
+    """
+    backend = MAIN_PATH.parents[1]
+    paths = sorted((backend / "api").rglob("*.py"))
+    paths += [backend / "discord_bot.py"]
+    for sub in ("sql", "tests"):
+        paths += sorted((backend / sub).rglob("*.py"))
+        paths += sorted((backend / sub).rglob("*.sql"))
+    out: dict[str, Path] = {}
+    for path in paths:
+        if "__pycache__" in path.parts:
+            continue
+        assert path.is_file(), f"{path.name} is missing — this scan would prove nothing"
+        out[path.relative_to(backend).as_posix()] = path
+    return out
+
+
 def test_no_stale_migration_number_survives_in_this_lane_s_files():
     """The renumber from 326 to 324 left the pg harness's docstring saying it
     runs 326 — so a failure triage would have gone and read a file belonging to
     a different lane. The number is DERIVED from the file on disk, so a second
     renumber cannot strand this check the way it stranded the docstring.
+
+    Two rules over one discovered file set, because the lane's own files and
+    everything else can carry different burdens of proof. In a file whose PATH
+    names the lane, ANY bare 3xx that is not the current number is stale. In
+    every other backend source, only a reference that is unambiguously to THIS
+    migration counts — the filename form, or role words plus a number.
     """
     assert len(_MIGRATION_FILES) == 1, (
         f"expected exactly one departure-cause migration, found {_MIGRATION_FILES}")
     current = _MIGRATION_FILES[0].name.split("_", 1)[0]
     assert current.isdigit() and len(current) == 3, _MIGRATION_FILES[0].name
 
-    backend = MAIN_PATH.parents[1]
-    scanned = {
-        "sql/" + _MIGRATION_FILES[0].name: _MIGRATION_FILES[0],
-        "tests/test_ffa_departure_cause_pg.py": backend / "tests" / "test_ffa_departure_cause_pg.py",
-        "tests/fixtures/bug392_schema.sql": backend / "tests" / "fixtures" / "bug392_schema.sql",
-    }
-    # This file is deliberately NOT scanned: it is the scanner's own home and
-    # carries a planted stale number in the control below, which would make
-    # the check flag itself forever.
-    stale = {}
-    for label, path in scanned.items():
-        assert path.is_file(), f"{label} is missing — this scan would prove nothing"
-        hits = _stale_migration_numbers(path.read_text(encoding="utf-8"), current)
+    sources = _backend_sources()
+    # The discovery first: a scan over a truncated file set is green for the
+    # wrong reason (#342, #304).
+    assert "api/main.py" in sources and "discord_bot.py" in sources, sorted(sources)
+    assert "sql/" + _MIGRATION_FILES[0].name in sources, sorted(sources)
+    assert len(sources) >= 20, f"only {len(sources)} sources discovered"
+
+    # This file is the scanner's own home and carries planted stale numbers in
+    # the control below, so scanning it would make the check flag itself
+    # forever. The exclusion is asserted to be exactly this one file rather
+    # than left as a silent `continue`.
+    own = Path(__file__).resolve().relative_to(MAIN_PATH.parents[1]).as_posix()
+    assert own in sources, own
+    lane, wide, lane_seen = {}, {}, []
+    for label, path in sources.items():
+        if label == own:
+            continue
+        text = path.read_text(encoding="utf-8")
+        is_lane = any(tok in label for tok in _LANE_PATH_TOKENS)
+        if is_lane:
+            lane_seen.append(label)
+        hits = (_stale_migration_numbers(text, current) if is_lane
+                else _migration_references(text, current))
         if hits:
-            stale[label] = hits
-    assert stale == {}, (
-        f"these files name a 3xx migration that is not {current}: {stale}. A bare "
-        "3xx number in this lane's files means this migration; a learning "
-        "reference is written with a leading '#'.")
+            (lane if is_lane else wide)[label] = hits
+    # The strict rule must have had something to be strict about: a
+    # classifier that promotes nothing makes the whole scan the wide rule
+    # while the docstring above claims otherwise (#342).
+    assert len(lane_seen) >= 3, (
+        f"only {lane_seen} classified as this lane's own files — the migration, "
+        "the pg harness and the fixture schema all carry the lane in their name")
+    assert (lane, wide) == ({}, {}), (
+        f"these files name a 3xx migration that is not {current} — lane files "
+        f"{lane}, other backend sources {wide}. A bare 3xx number in this "
+        "lane's files means this migration; a learning reference is written "
+        "with a leading '#'; elsewhere, name the migration by its role.")
 
 
 def test_the_migration_number_detector_can_fail():
-    """The negative control: a stale number is seen, a learning ref is not."""
+    """The negative control for BOTH rules: every shape either detector must
+    catch is planted, and the two shapes that must NOT be flagged are too."""
+    # strict, lane files
     assert _stale_migration_numbers("Run 326 the way psql -f would", "324") == [(1, "326")]
     assert _stale_migration_numbers("honouring the file's own BEGIN (#340)", "324") == []
     assert _stale_migration_numbers("applies 324 statement by statement", "324") == []
+    # wide, every other backend source
+    assert _migration_references("-- see sql/326_ffa_departure_cause.sql", "324") == [(1, "326")]
+    assert _migration_references("# the departure-cause migration, 326", "324") == [(1, "326")]
+    assert _migration_references("# predates the departure-cause migration", "324") == []
+    assert _migration_references("# see sql/324_ffa_departure_cause.sql", "324") == []
+    # the wide rule deliberately does NOT claim a bare number means this
+    # migration, and must not start flagging every other lane's file
+    assert _migration_references("# region maps (migration 307, Sept 10)", "324") == []
 
 
 # ── (9) the residual's precondition, pinned (r1 row L6) ──────────────────
