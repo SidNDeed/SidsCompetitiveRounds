@@ -3654,9 +3654,11 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         # FOR NO KEY UPDATE, not FOR UPDATE (#202 / #207): `ovt_matches.series_id`
         # is an FK to this row, so every report's INSERT takes FOR KEY SHARE on
         # it, and KEY SHARE conflicts with exactly one mode — FOR UPDATE. NO KEY
-        # UPDATE is the weakest mode that still self-conflicts, so two sweeps and
-        # a sweep racing the report sink's own lock (main.py:41162) serialize,
-        # while a live game report never waits on the janitor.
+        # UPDATE is the weakest mode that still self-conflicts, so two sweeps
+        # serialize, and so does a sweep against the report sink's own lock on
+        # this row (main.py:41162) — deliberately, that is what #208 re-checks
+        # after. What NO KEY UPDATE keeps out of the wait is the FK check: a
+        # report's INSERT INTO ovt_matches never waits on the janitor.
         "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
         " FOR NO KEY UPDATE"
     ), {"sid": str(series_id)})).mappings().first()
