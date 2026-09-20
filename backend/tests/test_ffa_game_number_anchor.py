@@ -43,6 +43,21 @@ document (ai-collab/rejoin/RJ-CLIENT-RESYNC-CONTRACT.md), not code in this
 lane; the three tests under "what a client can resync FROM" are the server half
 and are what make the document checkable.
 
+THE FOURTH RULE (round 5): the two numbers an answer carries are two
+INSTRUCTIONS, and `settled_game` may never equal `expected_game` — an answer
+saying "this number is finished" and "name this number next" in one body makes
+a client name it for the rest of the sitting. A lobby holds a row at its own
+next slot whenever its counter is behind its rows, which migration 327
+preserves on purpose, so _ffa_lock_lobby_slot brings the counter up to the rows
+under the same FOR UPDATE.
+
+AND THE THING ROUND 5 EXISTS FOR: round 4 closed every one of its claims with
+tests that never ran the endpoint, so a tree whose submit_ffa_match raised
+TypeError on its third statement reported 1708 passed. Nothing textual can tell
+a live path from an unreachable one. The last section of this file awaits the
+endpoint itself, and the binding sweep beside it asks the same question of the
+whole module in every mode, database or not (#286/#405, #313/#340/#465).
+
 The live tests RUN the production SQL and the production migration against a
 real PostgreSQL — `_FFA_PACE_ANCHOR_SQL` carries `CAST(:g AS SMALLINT)` and an
 `IS DISTINCT FROM`, `_FFA_PRIOR_GAME_SQL` carries `CAST(:g AS SMALLINT)` for
@@ -70,13 +85,40 @@ contradicts it is the same defect class as a comment asserting a guarantee the
 code does not supply, so the numbers here are the ones in the list, counted off
 it: 22 unmarked and still live (rounds 1 and 2), 1 unmarked and RETIRED because
 round 4 deleted the code it mutated (prior-tail-only, annotated in place), 16
-marked (r3), 15 marked (r4), and one more that is a committed test rather than
-a hand-run control (backfill-neutered, at the end). Round 4's are the ones
-with a NEGATIVE control — an inert edit at the same site that must leave the
-same test GREEN — so each test is shown to redden for the mutation and not for
-any edit at all (#391); the runner, the red line of every mutant and the
-negative-control result for each are in ai-collab/r4-mutation-controls.log.
+marked (r3), 15 marked (r4), 10 marked (r5), and one more that is a committed
+test rather than a hand-run control (backfill-neutered, at the end). Rounds 4
+and 5's are the ones with a NEGATIVE control — an inert edit at the same site
+that must leave the same test GREEN — so each test is shown to redden for the
+mutation and not for any edit at all (#391); the runner, the red line of every
+mutant and the negative-control result for each are in
+ai-collab/r4-mutation-controls.log and ai-collab/r5-mutation-controls.log.
 All KILLED:
+
+  replay-echo-call-short (r5)  the endpoint: drop `_progress` from the
+                           replay-echo call, i.e. exactly the round-4 tree.
+                           Run against the binding sweep AND the executed
+                           endpoint test, which is the pair the round-4 suite
+                           had neither half of.
+  endpoint-never-called (r5)  this file: remove the one line that awaits
+                           main.submit_ffa_match
+  lobby-counter-not-caught-up (r5)  _ffa_lock_lobby_slot: drop the catch-up,
+                           so expected_game can name a number the lobby holds
+  refund-bound-off-by-one (r5)  _refund_ffa_game_bets_strict: range(
+                           FFA_REFUND_MAX_BATCHES) again, i.e. round 4's
+  strict-refund-asserts-service (r5)  put _assert_no_service_subject back into
+                           the strict refund
+  skew-refusal-bare-http (r5)  the skew-refund handler back to
+                           `except HTTPException: raise`
+  left-early-compared-raw (r5)  _ffa_report_contradiction: compare the raw
+                           left_early flag again
+  decision-from-one-reading (r5)  _ffa_report_contradiction: the leave decision
+                           from the incoming report's form alone
+  absent-columns-claimed-safe (r5)  _ffa_recorded_game_outcome's docstring back
+                           to promising that missing columns degrade
+  race-progress-from-a-bare-read (r5)  the unique-violation fallback: derive
+                           its progress from a bare SELECT of games_played
+                           again, so the echo's settled_game can sit at or
+                           past its own expected_game
 
   prior-lookup-takes-the-earliest-of-a-set (r4)  _FFA_PRIOR_GAME_SQL: back to
                            a SET bind under ORDER BY ended_at
@@ -177,6 +219,7 @@ passing — it was measuring its own replacement string. Rebuilt to remove the
 line, and the assertion it now reddens is an EXECUTED insert against a
 disabled trigger.
 """
+import ast
 import asyncio
 import inspect
 import json
@@ -544,9 +587,11 @@ def test_the_comparisons_gate_is_the_signature_not_the_tie_break():
     moved achievement gold, in a lobby with the flag off, as agreement."""
     src = _endpoint_src()
     assert "report, kills_break_ties)" not in src
-    assert "len(report.players), kills_break_ties)" not in src
+    assert "len(report.players), kills_break_ties" not in src
     assert "report, kills_in_canonical)" in src
-    assert "len(report.players), kills_in_canonical)" in src
+    # The replay-echo call carries the lobby's progress after the gate since
+    # round 5, so what follows the flag is a comma and not the closing paren.
+    assert "len(report.players), kills_in_canonical," in src
     # ...and the achievement those kills feed is gated on the same fact, not on
     # the tie-break flag, which is what makes them paid either way.
     grant = src.index('_grant_achievement_inline(db, _ach_pid, "ffa_kills_50")')
@@ -753,7 +798,12 @@ def test_the_skew_refund_is_part_of_the_settlement_and_not_a_best_effort_pass():
     assert "except Exception" not in strict and "except Exception" in soft
     assert "begin_nested" not in strict and "begin_nested" in soft
     assert "raise RuntimeError(" in strict
-    assert "for _ in range(FFA_REFUND_MAX_BATCHES)" in strict
+    # `+ 1` since round 5: the bound is a number of WAGERS, and only an empty
+    # read returns, so a run that refunds the full 50 x 200 still needs a
+    # confirming read before the refusal may fire. The executed pair
+    # (test_a_game_whose_wagers_the_refund_moved_in_full_..., and the one past
+    # the bound) is what holds that; this only pins the shape.
+    assert "for _ in range(FFA_REFUND_MAX_BATCHES + 1)" in strict
     # The caller runs it OUTSIDE the block whose except swallows bet problems,
     # and turns a failure into a retryable answer rather than a committed row.
     src = _endpoint_src()
@@ -1234,8 +1284,14 @@ def test_a_room_whose_row_is_not_visible_yet_is_retried_not_spent():
     assert 'HTTPException(409, "Duplicate room id")' not in blk
     # ...and the progress it answers with is RE-READ, because the rollback
     # above released the lock and the in-memory lobby row is a stale snapshot.
+    # Through the LOCKED helper since round 5, not a bare SELECT of the
+    # counter: this branch names a `settled_game`, so its expected_game has to
+    # come from the same derivation every other answer's does or the pair can
+    # come back inconsistent. See
+    # test_every_progress_the_endpoint_builds_comes_from_a_locked_slot.
     assert "_race_progress = _ffa_progress(" in blk
-    assert "SELECT games_played FROM ffa_lobbies WHERE id = :lid" in blk
+    assert "await _ffa_lock_lobby_slot(db, lobby_uuid)" in blk
+    assert "SELECT games_played FROM ffa_lobbies" not in blk
 
 
 def test_a_closed_lobbys_unbound_report_is_not_answered_as_a_lifecycle_refusal():
@@ -1400,6 +1456,7 @@ def test_the_control_tally_matches_the_list_it_sits_next_to():
     counted = {
         "r3": sum(1 for ln in entries if "(r3)" in ln),
         "r4": sum(1 for ln in entries if "(r4)" in ln),
+        "r5": sum(1 for ln in entries if "(r5)" in ln),
         "retired": sum(1 for ln in entries if "(retired)" in ln),
     }
     counted["plain"] = len(entries) - sum(counted.values())
@@ -1410,17 +1467,17 @@ def test_the_control_tally_matches_the_list_it_sits_next_to():
 
     claimed = re.search(
         r"counted off\s*\n?it: (\d+) unmarked and still live .*?(\d+) unmarked and RETIRED"
-        r".*?(\d+)\s*\n?marked \(r3\), (\d+) marked \(r4\)",
+        r".*?(\d+)\s*\n?marked \(r3\), (\d+) marked \(r4\), (\d+) marked \(r5\)",
         doc, re.S)
     assert claimed, "the docstring no longer states a tally in a readable form"
-    want_plain, want_retired, want_r3, want_r4 = (int(g) for g in claimed.groups())
-    assert (want_plain, want_retired, want_r3, want_r4) == (
-        counted["plain"], counted["retired"], counted["r3"], counted["r4"]), (
-        "the docstring's tally and its own list disagree: claimed "
-        f"{(want_plain, want_retired, want_r3, want_r4)}, listed "
-        f"{(counted['plain'], counted['retired'], counted['r3'], counted['r4'])}")
+    want = tuple(int(g) for g in claimed.groups())
+    have = (counted["plain"], counted["retired"],
+            counted["r3"], counted["r4"], counted["r5"])
+    assert want == have, (
+        f"the docstring's tally and its own list disagree: claimed {want}, "
+        f"listed {have}")
     # ...and the list is not empty, or the whole check passes on nothing.
-    assert counted["r4"] >= 10 and counted["plain"] >= 10
+    assert counted["r4"] >= 10 and counted["r5"] >= 5 and counted["plain"] >= 10
 
 
 def test_every_round_four_control_names_a_test_that_exists():
@@ -1443,6 +1500,30 @@ def test_every_round_four_control_names_a_test_that_exists():
                  "test_the_lobby_state_advertises_the_sittings_settled_count",
                  "test_pg_the_trigger_never_hands_back_a_number_the_lobby_is_using",
                  "test_no_terminal_refusal_on_the_ffa_report_path_is_answered_over_nothing"):
+        assert callable(getattr(mod, name, None)), name
+
+
+def test_every_round_five_control_names_a_test_that_exists():
+    """The same pairing for round 5. Two of them name a PAIR — a static test
+    and an executed one — because the round-4 defect was invisible to the
+    static half alone."""
+    mod = sys.modules[__name__]
+    for name in ("test_every_call_in_main_binds_to_the_function_it_names",
+                 "test_the_binding_sweep_can_actually_fail",
+                 "test_this_file_actually_executes_the_report_endpoint",
+                 "test_pg_the_report_endpoint_runs_and_its_echo_carries_the_lobbys_progress",
+                 "test_pg_an_answer_never_tells_a_client_to_name_a_number_it_just_settled",
+                 "test_pg_the_catch_up_only_ever_moves_the_counter_forward",
+                 "test_pg_a_settlement_commits_the_catch_up_and_lands_on_the_free_number",
+                 "test_a_game_whose_wagers_the_refund_moved_in_full_is_not_called_an_overflow",
+                 "test_one_wager_past_the_bound_still_refuses",
+                 "test_the_strict_refund_does_not_inherit_a_guard_it_cannot_afford",
+                 "test_a_refusal_raised_out_of_the_skew_refund_still_carries_the_progress",
+                 "test_raw_left_early_is_not_a_contradiction_when_the_decision_agrees",
+                 "test_the_signature_form_alone_is_not_a_disagreement_about_the_game",
+                 "test_the_recorded_outcome_note_does_not_promise_a_missing_column_degrades",
+                 "test_pg_a_recorded_outcome_without_the_columns_raises_rather_than_defaulting",
+                 "test_every_progress_the_endpoint_builds_comes_from_a_locked_slot"):
         assert callable(getattr(mod, name, None)), name
 
 # ── what a client can resync FROM ─────────────────────────────────────────
@@ -1629,9 +1710,19 @@ CREATE TABLE players (
     id UUID PRIMARY KEY,
     steam_id TEXT NOT NULL UNIQUE
 );
+-- games_played is INTEGER, as 154_ffa_schema.sql declares it: the catch-up in
+-- _ffa_lock_lobby_slot casts its bind to INTEGER, and a test table that
+-- narrowed the column would be exercising a different write. The other four
+-- columns are the ones submit_ffa_match reads off the locked row before it
+-- answers. (No colon-prefixed name in this comment -- SQLAlchemy's text()
+-- scans comments for binds too, and one here makes every CREATE TABLE in
+-- this string demand a parameter.)
 CREATE TABLE ffa_lobbies (
     id UUID PRIMARY KEY,
-    games_played SMALLINT NOT NULL DEFAULT 0,
+    status VARCHAR(16) NOT NULL DEFAULT 'active',
+    player_count SMALLINT NOT NULL DEFAULT 3,
+    member_ids UUID[] NOT NULL DEFAULT '{}',
+    games_played INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE TABLE ffa_matches (
@@ -1655,6 +1746,11 @@ CREATE TABLE ffa_match_players (
     kills INTEGER NOT NULL DEFAULT 0,
     left_early BOOLEAN NOT NULL DEFAULT FALSE,
     absent BOOLEAN NOT NULL DEFAULT FALSE,
+    -- What _ffa_match_echo reads back as the reporter's own answer.
+    placement SMALLINT NOT NULL DEFAULT 0,
+    rating_change DOUBLE PRECISION NOT NULL DEFAULT 0,
+    xp_gained INTEGER NOT NULL DEFAULT 0,
+    gold_gained INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (match_id, player_id)
 );
 """
@@ -1936,9 +2032,20 @@ def test_pg_the_recorded_vector_reads_back_for_the_comparison():
     # account.
     same = _report(ROW_A, S3, leave={S2: (True, False, 99)})
     assert main._ffa_report_contradiction(S3, vec, same, True) is None
-    # The same tallies with S2 reported as never having left: a different
-    # account of who played, and the settlement it asks for is a different one.
-    assert main._ffa_report_contradiction(S3, vec, _report(ROW_A, S3), True) is not None
+    # The same tallies with S2 reported as never having left. Round 4 called
+    # this a contradiction on the strength of the raw flag; it is not one, and
+    # the sentence that justified it here ("the settlement it asks for is a
+    # different one") was the claim round 5 refuted. S2's stored absent is
+    # False either way, so the seat is rated, paid and counted identically —
+    # the only difference is the stored flag and the history line drawn from
+    # it. See test_raw_left_early_is_not_a_contradiction_when_the_decision_
+    # agrees for the cost of the refusal this used to produce.
+    assert main._ffa_report_contradiction(S3, vec, _report(ROW_A, S3), True) is None
+    # What a leave difference that DOES change the settlement still is: S2
+    # scoreless and graced out of the game by one report, rated by the row.
+    graced_vec = {S2: (0, 0, 0, True, False), S1: vec[S1], S3: vec[S3]}
+    graced = _report(dict(ROW_A, **{S2: (0, 0, 0)}), S3, leave={S2: (True, False, 1)})
+    assert main._ffa_report_contradiction(S3, graced_vec, graced, True) is not None
 
 
 # ── migration 327, EXECUTED ───────────────────────────────────────────────
@@ -2380,3 +2487,693 @@ def test_the_neutered_control_is_exactly_one_predicate_away():
     assert len(diff) == 1
     assert re.match(r"^ WHERE game_number IS NULL$", diff[0][0])
     assert len(sql.splitlines()) == len(neutered.splitlines())
+
+
+# ── round 5: the request path, EXECUTED ───────────────────────────────────
+# Round 4 closed every one of its own claims with tests that never ran the
+# endpoint. `grep -rn "submit_ffa_match(" backend/tests` found no caller, and
+# no test issued a request to /api/v1/ffa/matches; the three tests §1 of the
+# client contract names as the server-side pin all assert on
+# inspect.getsource(...) substrings. So a tree whose endpoint raised
+# TypeError on its third statement — round 4 gave _ffa_replay_echo a seventh
+# required parameter and updated one of its two call sites — reported 1708
+# passed / 0 failed, and every one of the fifteen mutation controls inherited
+# the same blindness: a textual mutation cannot tell a live path from an
+# unreachable one (#286/#405 verify reachability before logic; #313/#340/#465
+# not reviewed until it has RUN).
+#
+# Two things close that, at two different costs:
+#   * the binding sweep below, which runs in EVERY mode including opt-out and
+#     needs no database. It is the defect's CLASS — a helper gains a
+#     parameter, one call site is updated — and not the one line;
+#   * the live tests at the end of this section, which build a lobby and a
+#     recorded game and AWAIT submit_ffa_match, so the request path is
+#     executed and the body it answers with is read off a real response.
+
+
+def _own_functions(tree):
+    """name -> the single top-level-or-nested def, for names defined once.
+
+    A name defined twice is skipped rather than guessed at: the sweep is
+    about call sites whose target is unambiguous."""
+    seen = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            seen.setdefault(node.name, []).append(node)
+    return {k: v[0] for k, v in seen.items() if len(v) == 1}
+
+
+def _binding_failures(src: str):
+    """Every call in `src` to a function `src` itself defines that could not
+    bind, as (lineno, name, reason)."""
+    tree = ast.parse(src)
+    defs = _own_functions(tree)
+    out = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+            continue
+        target = defs.get(node.func.id)
+        if target is None:
+            continue
+        args = target.args
+        if args.vararg is not None or args.kwarg is not None:
+            continue                      # the def accepts anything
+        if any(isinstance(a, ast.Starred) for a in node.args):
+            continue                      # f(*seq) — the count is runtime
+        if any(k.arg is None for k in node.keywords):
+            continue                      # f(**d) — the names are runtime
+        positional = [p.arg for p in args.posonlyargs + args.args]
+        required = positional[:len(positional) - len(args.defaults)]
+        kwonly = [p.arg for p in args.kwonlyargs]
+        kwonly_required = [p.arg for p, d in zip(args.kwonlyargs, args.kw_defaults)
+                           if d is None]
+        given_kw = [k.arg for k in node.keywords]
+        if len(node.args) > len(positional):
+            out.append((node.lineno, node.func.id,
+                        f"{len(node.args)} positional into {len(positional)}"))
+            continue
+        bound = set(positional[:len(node.args)]) | set(given_kw)
+        missing = [a for a in required if a not in bound]
+        missing += [a for a in kwonly_required if a not in bound]
+        unknown = [g for g in given_kw if g not in positional and g not in kwonly]
+        duplicated = [a for a in positional[:len(node.args)] if a in given_kw]
+        if missing or unknown or duplicated:
+            out.append((node.lineno, node.func.id,
+                        f"missing={missing} unknown={unknown} duplicated={duplicated}"))
+    return out
+
+
+def test_every_call_in_main_binds_to_the_function_it_names():
+    """Control: replay-echo-call-short (r5), and the whole class it belongs to.
+
+    The round-4 tree shipped `_ffa_replay_echo(db, report, lobby_uuid,
+    id_by_steam, len(report.players), kills_in_canonical)` against a def
+    carrying seven required parameters, as the third statement of
+    submit_ffa_match's body — so every POST /api/v1/ffa/matches raised
+    TypeError before it could do anything, and the suite was green. This is
+    that fact asked of the whole module rather than of one line, it costs one
+    parse, and it runs in the opt-out mode too, where nothing else can see it.
+
+    It is deliberately conservative: a def taking *args/**kwargs, a call
+    unpacking *seq or **d, and a name this module defines twice are all
+    skipped, because for those the count is not decidable here. What is left
+    is the shape that actually happened."""
+    src = pathlib.Path(main.__file__).read_text(encoding="utf-8")
+    failures = _binding_failures(src)
+    assert failures == [], "\n".join(
+        f"main.py:{ln}: {name}() {why}" for ln, name, why in failures)
+
+
+def test_the_binding_sweep_can_actually_fail():
+    """A check that cannot fail is worse than no check (#342/#431). The sweep
+    is shown to catch the exact round-4 defect — a call one argument short of
+    its def — and to stay quiet on the forms it deliberately skips."""
+    caught = _binding_failures(
+        "async def f(a, b, c):\n    return a\n\nasync def g():\n    return await f(1, 2)\n")
+    assert len(caught) == 1 and caught[0][1] == "f", caught
+    assert "missing=['c']" in caught[0][2], caught
+    # ...and the skips are real skips, not accidental passes.
+    assert _binding_failures("def f(a, b, c):\n    pass\n\ndef g(s):\n    f(*s)\n") == []
+    assert _binding_failures("def f(a, **kw):\n    pass\n\ndef g():\n    f(1, z=2)\n") == []
+    assert _binding_failures("def f(a, b=1):\n    pass\n\ndef g():\n    f(1)\n") == []
+    # A name this module defines twice is not guessed at.
+    assert _binding_failures(
+        "def f(a):\n    pass\n\ndef f(a, b):\n    pass\n\ndef g():\n    f(1)\n") == []
+    # An unknown keyword and a doubly-supplied parameter are both caught.
+    assert len(_binding_failures("def f(a):\n    pass\n\ndef g():\n    f(1, z=2)\n")) == 1
+    assert len(_binding_failures("def f(a, b):\n    pass\n\ndef g():\n    f(1, a=2)\n")) == 1
+
+
+def _awaited_endpoint_calls(src: str) -> list:
+    """The lines of `src` holding an AWAITED call of main.submit_ffa_match,
+    taken off the AST rather than out of the text.
+
+    A SUBSTRING scan cannot ask this question about the file it lives in: the
+    line carrying the pattern contains the pattern, so the scan matches its
+    own predicate and the assertion built on it can never fail (#342/#431 — a
+    check that cannot fail is worse than no check). That is exactly what the
+    first draft of the test below did, and the control is what found it:
+    `endpoint-never-called` came back GREEN against a copy of this file whose
+    only await of the endpoint had been replaced by `return None`. A string
+    literal is not an Await node, so this reading tells the two apart."""
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return []
+    return [node.lineno for node in ast.walk(tree)
+            if isinstance(node, ast.Await)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Attribute)
+            and node.value.func.attr == "submit_ffa_match"]
+
+
+def test_this_file_actually_executes_the_report_endpoint():
+    """Control: endpoint-never-called (r5).
+
+    The round-4 suite asserted on the endpoint's SOURCE and never ran it. This
+    pins that at least one test in this module awaits the endpoint itself, so
+    the file cannot quietly go back to reading text about a path nobody
+    enters. It asserts on this module's own source, which is the only place
+    the fact lives."""
+    own = pathlib.Path(__file__).read_text(encoding="utf-8")
+    assert _awaited_endpoint_calls(own), (
+        "no test in this file awaits main.submit_ffa_match; the endpoint's "
+        "own request path would be unexercised")
+    # ...and the detector CAN fail, which is the half the first draft lacked:
+    # a file that only mentions the call in a string is not a caller of it.
+    assert _awaited_endpoint_calls(
+        'MENTION = "await main.submit_ffa_match(report, req, db)"\n') == []
+    assert len(_awaited_endpoint_calls(
+        "async def t(db):\n    return await main.submit_ffa_match(r, q, db)\n")) == 1
+
+
+# ── the strict refund: its bound, and the guard it must not inherit ───────
+
+class _RefundBatchResult:
+    def __init__(self, rows=None, scalar=None):
+        self._rows, self._scalar = rows or [], scalar
+
+    def mappings(self):
+        return self
+
+    def all(self):
+        return self._rows
+
+    def scalar(self):
+        return self._scalar
+
+
+class _RefundDb:
+    """The narrowest stand-in the strict refund actually uses: it answers the
+    batch SELECT from a queue of batches, claims every UPDATE, and records
+    what was added. Enough to EXECUTE the loop and count its passes, which is
+    the thing the bound is about."""
+
+    def __init__(self, batches):
+        self.batches = list(batches)
+        self.reads = 0
+        self.claimed = 0
+        self.added = []
+
+    async def execute(self, stmt, params=None):
+        sql = str(stmt)
+        if sql.lstrip().startswith("SELECT id, player_id, amount"):
+            self.reads += 1
+            rows = self.batches.pop(0) if self.batches else []
+            return _RefundBatchResult(rows=rows)
+        if "UPDATE ffa_bets" in sql:
+            self.claimed += 1
+            return _RefundBatchResult(scalar=uuid.uuid4())
+        return _RefundBatchResult(scalar=None)
+
+    def add(self, obj):
+        self.added.append(obj)
+
+    async def flush(self):
+        return None
+
+
+def _bet_batch(n):
+    return [{"id": uuid.uuid4(), "player_id": uuid.uuid4(), "amount": 10}
+            for _ in range(n)]
+
+
+def test_a_game_whose_wagers_the_refund_moved_in_full_is_not_called_an_overflow():
+    """Control: refund-bound-off-by-one (r5).
+
+    `for _ in range(FFA_REFUND_MAX_BATCHES)` returns only on a read that comes
+    back EMPTY, so the 50th pass could refund its 200 rows and then fall
+    straight through to `raise RuntimeError(... after 50 passes of 200)`. The
+    clean capacity was 9 800 wagers while the constant's comment, the
+    docstring and the error all said 10 000 — and the caller turns the raise
+    into a 503, rolls the settlement back, and repeats it on every retry: a
+    game whose wagers were in fact fully refundable would have been
+    permanently unsettleable, reported as an overflow that did not happen.
+
+    Executed, not read: the loop runs against exactly the bound."""
+    full = main.FFA_REFUND_MAX_BATCHES
+    db = _RefundDb([_bet_batch(200) for _ in range(full)])
+    moved = run(main._refund_ffa_game_bets_strict(db, uuid.uuid4(), 3, "t"))
+    assert moved == full * 200
+    assert db.reads == full + 1, "the confirming empty read never happened"
+
+
+def test_one_wager_past_the_bound_still_refuses():
+    """The other side of the same edge: the bound has to still be a bound, or
+    the fix is just a larger silent truncation (#391 — the negative control
+    for the test above)."""
+    full = main.FFA_REFUND_MAX_BATCHES
+    db = _RefundDb([_bet_batch(200) for _ in range(full + 1)])
+    with pytest.raises(RuntimeError) as ex:
+        run(main._refund_ffa_game_bets_strict(db, uuid.uuid4(), 3, "t"))
+    assert f"{full} passes of 200" in str(ex.value)
+    assert f"{full * 200} refunded" in str(ex.value)
+
+
+def test_the_strict_refund_does_not_inherit_a_guard_it_cannot_afford():
+    """Control: strict-refund-asserts-service (r5).
+
+    #412 in the other direction. _refund_ffa_lobby_bets asserts no service
+    account is among the subjects and swallows the 403 in its own savepoint —
+    a skipped batch, which that caller can afford. The strict helper has no
+    savepoint and its failure is the report's answer, so the same assertion
+    reached the reporter as a bare HTTPException(403): no progress fields, no
+    captured payload, terminal by the client's rule, and identical on every
+    retry — the game never rated, never paid, no evidence kept. It is also the
+    wrong question for this operation: a refund RETURNS a stake, which is the
+    one movement that takes a service account back out of the economy, and
+    refusing it strands the stake and freezes the lobby.
+
+    The route keeps its own guard, which is what the service-policy gate
+    measures: submit_ffa_match asserts on the reported roster before any of
+    this runs."""
+    src = inspect.getsource(main._refund_ffa_game_bets_strict)
+    assert "_assert_no_service_subject" not in _code_lines(src)
+    # The fail-soft sweep still has it — the two polarities are the point, and
+    # a sweep that lost it would be a different defect.
+    assert "_assert_no_service_subject" in _code_lines(
+        inspect.getsource(main._refund_ffa_lobby_bets))
+    # ...and the endpoint's own guard, on the roster it is about to rate.
+    assert "_assert_no_service_subject(db, affected_steam_ids=steams)" in _endpoint_src()
+
+
+def test_a_refusal_raised_out_of_the_skew_refund_still_carries_the_progress():
+    """Control: skew-refusal-bare-http (r5).
+
+    Below the lobby lock every answer this endpoint gives carries the lobby's
+    progress. The skew refund's handler used to re-raise an HTTPException
+    unchanged, which serialises as `detail` alone — so the one answer whose
+    whole purpose is to tell a client where the lobby is would have told it
+    nothing. The status is kept exactly as raised (it is what says terminal or
+    retryable); only the body gains the fields."""
+    src = _endpoint_src()
+    block = src[src.index("await _refund_ffa_game_bets_strict("):]
+    block = block[:block.index("await _ffa_advance_lobby_slot")]
+    assert "except HTTPException:\n            raise" not in block
+    assert "except FfaReportRefusal:" in block
+    assert "raise FfaReportRefusal(_skew_http.status_code" in block
+    # Still exactly one generic arm, and it still answers 503 with progress.
+    assert block.count("raise FfaReportRefusal(") == 2
+    assert "_progress)" in block
+
+
+# ── the comparison: what it may and may not call a contradiction ──────────
+
+def test_raw_left_early_is_not_a_contradiction_when_the_decision_agrees():
+    """Control: left-early-compared-raw (r5).
+
+    _ffa_report_contradiction's docstring says WHAT IS COMPARED IS WHAT THE
+    SETTLEMENT ACTS ON, and round 4 then compared raw `left_early` as well as
+    the effective decision. With the decision equal, left_early moves no
+    rating, gold, XP, placement or beaten count — only the stored flag and
+    whether game_points_at_leave is kept beside it. It is unsigned, outside
+    the frozen canonical, and two honest clients of a seat that drops on the
+    winning point really do differ on it; the cost of calling that a
+    contradiction is a terminal 409 to an honest reporter, a spent quarantine
+    row and an operator review item over one identical settlement (#430)."""
+    # Above the grace threshold, so neither reading marks the seat unrated:
+    # the two reports reach the SAME effective decision and differ only in the
+    # raw claim.
+    gp = main.FFA_LEAVE_GRACE_POINTS + 3
+    rec = _vec(ROW_A, leave={S2: (True, False)})
+    same_decision = _report(ROW_A, S3, leave={S2: (False, False, None)})
+    assert main._ffa_report_contradiction(S3, rec, same_decision, True) is None
+    # ...and the other way round, because the detector is symmetric.
+    rec_plain = _vec(ROW_A)
+    claimed = _report(ROW_A, S3, leave={S2: (True, False, gp)})
+    assert main._ffa_report_contradiction(S3, rec_plain, claimed, True) is None
+    # The claim is still the INPUT to the decision, so a left_early difference
+    # that changes who PLAYED is caught where it means something.
+    zeroed = dict(ROW_A, **{S2: (0, 0, 0)})
+    graced = _report(zeroed, S3, leave={S2: (True, False, 1)})
+    why = main._ffa_report_contradiction(S3, _vec(zeroed), graced, True)
+    assert why is not None and "did-not-play" in why
+
+
+def test_the_signature_form_alone_is_not_a_disagreement_about_the_game():
+    """Control: decision-from-one-reading (r5).
+
+    The effective decision is recomputed here from the INCOMING report while
+    the stored flag was decided from the first one, and _ffa_leave_decision's
+    refutation guard is weaker for an unsigned (v1) report: kills prove
+    presence only when signed, so the unsigned reading refutes fewer claims
+    and marks a SUPERSET of seats unrated. Two members of one lobby can be on
+    different mod versions wherever the lobby is not kills-capable, so the
+    same claims arrive in both forms — and the round-4 comparison could reach
+    two different verdicts on one game from signature form alone.
+
+    Both readings are computed and a flag agreeing with EITHER is agreement.
+    That can only turn a refusal into an echo, and an echo writes nothing."""
+    # A seat claiming absent with zero rounds/points but NON-ZERO kills: the
+    # signed reading refutes the claim (it played), the unsigned one cannot.
+    kills_only = dict(ROW_A, **{S2: (0, 0, 7)})
+    claim = {S2: (True, True, None)}
+    signed = _report(kills_only, S3, leave=claim)
+    assert main._ffa_leave_decision(signed, True)[0] == set()
+    assert main._ffa_leave_decision(signed, False)[0] == {S2}
+    # The row was written by a v2 report: absent = False, the refuted reading.
+    recorded_signed = _vec(kills_only, leave={S2: (True, False)})
+    # The SAME claims delivered as a v1 report are still the same game.
+    assert main._ffa_report_contradiction(S3, recorded_signed, signed, False) is None
+    # ...and a row written by a v1 report is agreed with by a v2 delivery.
+    recorded_plain = _vec(kills_only, leave={S2: (True, True)})
+    assert main._ffa_report_contradiction(S3, recorded_plain, signed, True) is None
+    # The leniency is bounded: a decision NEITHER reading can reach is still a
+    # contradiction.
+    played = dict(ROW_A, **{S2: (4, 9, 7)})
+    present = _report(played, S3)
+    assert main._ffa_report_contradiction(
+        S3, _vec(played, leave={S2: (False, True)}), present, True) is not None
+
+
+def test_the_recorded_outcome_note_does_not_promise_a_missing_column_degrades():
+    """Control: absent-columns-claimed-safe (r5).
+
+    _ffa_recorded_game_outcome's docstring asserted that columns ABSENT (a
+    database the migration has not reached) or NULL both mean "no skew
+    recorded, the pre-327 behaviour and the right default". The NULL half is
+    true. The absent half is not: SELECT of a column that does not exist
+    raises UndefinedColumn and never yields NULL, and both callers swallow the
+    exception — so the documented safe default is in fact "resolve nothing, on
+    every report, for the whole window", with a log line that says catch-up
+    next report about a next report that fails identically (#351/#277)."""
+    doc = inspect.getdoc(main._ffa_recorded_game_outcome)
+    assert "A NULL in either column" in doc
+    assert "UndefinedColumn" in doc
+    assert "is not that case" in doc.lower()
+    # The claim that was false is gone in the form that made it false.
+    assert "Columns absent" not in doc
+    assert not re.search(r"absent .{0,40}mean[s]? .{0,20}no skew recorded", doc)
+
+
+# ── the endpoint, AWAITED against a live PostgreSQL ───────────────────────
+# What the binding sweep above proves statically, these prove by running: a
+# report arrives, submit_ffa_match executes, and the body it answers with is
+# read off the response object rather than off the function's source text.
+#
+# They take the ECHO path deliberately. It runs through the first third of the
+# endpoint — the session check, the signature, the roster resolution, the
+# lobby's FOR UPDATE, the progress derivation and the replay comparison — and
+# answers from the four tables this file's schema already builds, without
+# needing the settlement's glicko/bets/cards/achievements surfaces. That is
+# the stretch where round 4's TypeError sat, and it is where the progress
+# fields are decided.
+
+
+class _NoHeaders:
+    @staticmethod
+    def get(_name, _default=None):
+        return None
+
+
+class _FakeRequest:
+    """Only what _check_steam_session reads. The session check itself is
+    replaced below: this file is about the report path, and an unarmed
+    soft-fail would make the test depend on which auth env vars happen to be
+    set on the machine running it (#438)."""
+    headers = _NoHeaders()
+    client = None
+    url = "http://test/api/v1/ffa/matches"
+
+
+def _endpoint_report(vec, winner, room, *, lobby=None, leave=None, reporter=None):
+    """A real schemas.FfaMatchReport, which is what the endpoint is annotated
+    with and what FastAPI would have validated."""
+    leave = leave or {}
+    return schemas.FfaMatchReport(
+        lobby_id=str(lobby or LOBBY),
+        photon_room_id=room,
+        winner_steam_id=winner,
+        reported_by_steam_id=reporter or winner,
+        is_ranked=True,
+        players=[schemas.FfaPlayerEntry(
+            steam_id=s, rounds_won=r, points_total=p, kills=k,
+            left_early=leave.get(s, PRESENT)[0],
+            absent=leave.get(s, PRESENT)[1],
+            game_points_at_leave=leave.get(s, PRESENT)[2])
+            for s, (r, p, k) in vec.items()])
+
+
+async def _endpoint_fixture(games_played, recorded_number, recorded_room,
+                            vec=None, awarded=(2, 1.5, 40, 7)):
+    """A lobby, its three members and ONE recorded game, shaped so the echo
+    path can answer. `awarded` is what the reporter's stored row holds, so the
+    echo's own numbers can be told apart from defaults."""
+    vec = vec or ROW_A
+    engine = create_async_engine(require_pg())
+    sm = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as conn:
+        for stmt in [s for s in SCHEMA.split(";") if s.strip()]:
+            await conn.execute(text(stmt))
+    pids = {}
+    match_id = uuid.uuid4()
+    async with sm() as db:
+        for s in (S1, S2, S3):
+            pids[s] = uuid.uuid4()
+            await db.execute(text("INSERT INTO players (id, steam_id) VALUES (:i, :s)"),
+                             {"i": pids[s], "s": s})
+        await db.execute(text(
+            "INSERT INTO ffa_lobbies (id, status, player_count, member_ids,"
+            "                         games_played, created_at)"
+            " VALUES (:i, 'active', 3, CAST(:m AS uuid[]), CAST(:g AS INTEGER),"
+            "         CAST(:t AS TIMESTAMPTZ))"),
+            {"i": LOBBY, "m": [str(pids[s]) for s in (S1, S2, S3)],
+             "g": int(games_played), "t": T0})
+        await db.execute(text(
+            "INSERT INTO ffa_matches (id, lobby_id, photon_room_id, player_count,"
+            "                         winner_id, ended_at, game_number)"
+            " VALUES (:i, :l, :r, 3, :w, CAST(:t AS TIMESTAMPTZ),"
+            "         CAST(:g AS SMALLINT))"),
+            {"i": match_id, "l": LOBBY, "r": recorded_room, "w": pids[S3],
+             "t": T0, "g": int(recorded_number)})
+        place, delta, xp, gold = awarded
+        for s, (r, p, k) in vec.items():
+            await db.execute(text(
+                "INSERT INTO ffa_match_players (match_id, player_id, rounds_won,"
+                "        points_total, kills, placement, rating_change, xp_gained,"
+                "        gold_gained)"
+                " VALUES (:m, :p, :r, :pt, :k, :pl, :rc, :xp, :gd)"),
+                {"m": match_id, "p": pids[s], "r": r, "pt": p, "k": k,
+                 "pl": place if s == S3 else 3,
+                 "rc": delta if s == S3 else -1.0,
+                 "xp": xp if s == S3 else 0, "gd": gold if s == S3 else 0})
+        await db.commit()
+    return engine, sm, pids, match_id
+
+
+async def _call_endpoint(sm, report):
+    """Await the production endpoint with a real session, exactly as the route
+    would. The signature check is neutralised by clearing MATCH_HMAC_SECRET,
+    which is the module's own documented "no secret configured" path, and the
+    session check is replaced: neither is what these tests are about, and both
+    would otherwise make the result depend on this machine's env."""
+    saved_secret = main.MATCH_HMAC_SECRET
+    saved_session = main._check_steam_session
+
+    async def _no_session_check(request, steam_id, db):
+        return None
+
+    main.MATCH_HMAC_SECRET = ""
+    main._check_steam_session = _no_session_check
+    try:
+        async with sm() as db:
+            return await main.submit_ffa_match(report, _FakeRequest(), db)
+    finally:
+        main.MATCH_HMAC_SECRET = saved_secret
+        main._check_steam_session = saved_session
+
+
+def test_pg_the_report_endpoint_runs_and_its_echo_carries_the_lobbys_progress():
+    """Control: replay-echo-call-short (r5) — the RUNTIME half.
+
+    This is the test round 4 did not have. It awaits submit_ffa_match itself,
+    so a call inside it that cannot bind is a TypeError here and not a green
+    suite over a dead endpoint. The answer's progress fields are read off the
+    response object, which is the same place the client reads them."""
+    require_pg()
+
+    async def go():
+        engine, sm, pids, match_id = await _endpoint_fixture(
+            games_played=1, recorded_number=1, recorded_room="rm_211531_r1")
+        try:
+            return await _call_endpoint(sm, _endpoint_report(
+                ROW_A, S3, "rm_211531_r1")), match_id
+        finally:
+            await engine.dispose()
+
+    answer, match_id = run(go())
+    assert isinstance(answer, schemas.FfaMatchResponse)
+    assert answer.match_id == match_id
+    assert answer.message == "Already recorded"
+    # The stored figures, not defaults — so the echo really read the row.
+    assert (answer.placement, answer.xp_gained, answer.gold_gained) == (2, 40, 7)
+    # ...and the three fields the client resyncs from.
+    assert answer.games_played == 1
+    assert answer.expected_game == 2
+    assert answer.settled_game == 1
+
+
+def test_pg_an_answer_never_tells_a_client_to_name_a_number_it_just_settled():
+    """Control: lobby-counter-not-caught-up (r5).
+
+    `settled_game` and `expected_game` are two instructions, and round 4 could
+    emit them EQUAL. A lobby holds a row at its own next slot whenever its
+    counter is behind its rows — migration 327 numbers every historical row
+    from its room tail and does not touch games_played, so a sitting whose
+    game 1 was refused by an older api while its game 2 settled carries a row
+    at 2 with games_played = 1. Every report naming 2 was then answered "2 is
+    settled" and "name 2 next", the client adopted 2, played on, named 2
+    again, and the sitting settled nothing more for as long as the seats kept
+    playing. _ffa_lock_lobby_slot brings the counter up to the rows under the
+    same FOR UPDATE, so the pair is consistent and the sitting resumes."""
+    require_pg()
+
+    async def go():
+        engine, sm, _pids, _mid = await _endpoint_fixture(
+            games_played=1, recorded_number=2, recorded_room="rm_211531_r2")
+        try:
+            answer = await _call_endpoint(sm, _endpoint_report(
+                ROW_A, S3, "rm_211531_r2"))
+            async with sm() as db:
+                gp = (await db.execute(text(
+                    "SELECT games_played FROM ffa_lobbies WHERE id = :l"),
+                    {"l": LOBBY})).scalar()
+            return answer, int(gp)
+        finally:
+            await engine.dispose()
+
+    answer, gp = run(go())
+    assert answer.settled_game == 2
+    # The number the client is told to name next is one it can actually settle.
+    assert answer.expected_game == 3
+    assert answer.settled_game < answer.expected_game
+    assert answer.games_played == 2
+    # The catch-up is a DERIVATION, not a repair job: it is recomputed from the
+    # rows under the lock on every report, and it becomes durable only in a
+    # transaction that commits. An echo commits nothing, so the stored counter
+    # is still 1 here — and that costs nothing, because the next report
+    # recomputes the same 2 before settling 3 on top of it. What must not
+    # depend on the write is the ANSWER, and it does not.
+    assert gp == 1
+
+
+def test_pg_the_catch_up_only_ever_moves_the_counter_forward():
+    """The negative half (#391): a lobby whose counter is AHEAD of its rows —
+    which is every ordinary lobby, since a settlement increments the counter
+    and the row it wrote carries the number it just consumed — is not rewound,
+    and nothing is written to it at all."""
+    require_pg()
+
+    async def go():
+        engine, sm, _pids, _mid = await _endpoint_fixture(
+            games_played=4, recorded_number=1, recorded_room="rm_211531_r1")
+        try:
+            async with sm() as db:
+                _row, expected = await main._ffa_lock_lobby_slot(db, LOBBY)
+                await db.commit()
+            async with sm() as db:
+                gp = (await db.execute(text(
+                    "SELECT games_played FROM ffa_lobbies WHERE id = :l"),
+                    {"l": LOBBY})).scalar()
+            return expected, int(gp)
+        finally:
+            await engine.dispose()
+
+    expected, gp = run(go())
+    assert (expected, gp) == (5, 4)
+
+
+def test_pg_a_settlement_commits_the_catch_up_and_lands_on_the_free_number():
+    """The half the echo path cannot show: in a transaction that COMMITS, the
+    catch-up persists and the increment beside it lands the sitting on the
+    number after the one just settled. Without the catch-up the settlement
+    would store 3 (the caught-up slot) while the counter went 1 -> 2, so the
+    gap would reopen at the same width on every game, for ever."""
+    require_pg()
+
+    async def go():
+        engine, sm, _pids, _mid = await _endpoint_fixture(
+            games_played=1, recorded_number=2, recorded_room="rm_211531_r2")
+        try:
+            async with sm() as db:
+                _row, expected = await main._ffa_lock_lobby_slot(db, LOBBY)
+                # What the settlement does with the slot it took.
+                await main._ffa_advance_lobby_slot(db, LOBBY)
+                await db.commit()
+            async with sm() as db:
+                gp = (await db.execute(text(
+                    "SELECT games_played FROM ffa_lobbies WHERE id = :l"),
+                    {"l": LOBBY})).scalar()
+                _row2, next_expected = await main._ffa_lock_lobby_slot(db, LOBBY)
+            return expected, int(gp), next_expected
+        finally:
+            await engine.dispose()
+
+    expected, gp, next_expected = run(go())
+    assert expected == 3          # the free number, not the held 2
+    assert gp == 3                # 2 (caught up) + 1 (consumed)
+    assert next_expected == 4     # and the gap does not reopen
+
+
+def test_pg_a_recorded_outcome_without_the_columns_raises_rather_than_defaulting():
+    """Control: absent-columns-claimed-safe (r5) — the RUNTIME half.
+
+    The docstring used to promise that a database without score_target_frozen
+    / score_target_played degrades to the pre-327 "no skew recorded" answer.
+    It does not: the SELECT raises. Asserted against a real table with the
+    columns dropped, so the claim cannot come back as prose."""
+    require_pg()
+
+    async def go():
+        engine, sm, _pids, _mid = await _endpoint_fixture(
+            games_played=1, recorded_number=1, recorded_room="rm_211531_r1")
+        try:
+            async with sm() as db:
+                with_columns = await main._ffa_recorded_game_outcome(db, LOBBY, 1)
+            async with engine.begin() as conn:
+                await conn.execute(text(
+                    "ALTER TABLE ffa_matches DROP COLUMN score_target_frozen"))
+                await conn.execute(text(
+                    "ALTER TABLE ffa_matches DROP COLUMN score_target_played"))
+            raised = None
+            try:
+                async with sm() as db:
+                    await main._ffa_recorded_game_outcome(db, LOBBY, 1)
+            except Exception as ex:          # noqa: BLE001 - the point is the class
+                raised = ex
+            return with_columns, raised
+        finally:
+            await engine.dispose()
+
+    with_columns, raised = run(go())
+    # Both columns NULL is the genuine pre-327 row, and it DOES mean "settle".
+    assert with_columns[0] == "settle" and with_columns[1] is not None
+    # A table without them is a different fact, and it is not silent.
+    assert raised is not None
+    assert "score_target_frozen" in str(raised) or "UndefinedColumn" in type(raised).__name__
+
+
+def test_every_progress_the_endpoint_builds_comes_from_a_locked_slot():
+    """Control: race-progress-from-a-bare-read (r5).
+
+    The invariant `settled_game < expected_game` is a property of the PAIR, so
+    it holds only where both numbers come from the same derivation. The
+    unique-violation fallback answers with `settled_game` taken from the row
+    the insert collided with, and round 4 paired it with a bare
+    `SELECT games_played FROM ffa_lobbies` — which is the counter before any
+    catch-up, i.e. exactly the state that produces an expected_game the client
+    cannot settle. It re-reads through _ffa_lock_lobby_slot instead.
+
+    Found by re-reading the comment this round's own fix had just written
+    ("every answer that carries both"), which is where the next false claim
+    usually is."""
+    src = _endpoint_src()
+    # No bare read of the counter anywhere in the endpoint: the one derivation
+    # is the locked helper's.
+    assert "SELECT games_played FROM ffa_lobbies" not in src
+    assert src.count("_ffa_lock_lobby_slot(") == 2
+    # The race branch in particular, between the rollback and the echo.
+    race = src[src.index("if \"uq_ffa_match_room\" not in str("):]
+    race = race[:race.index("_ffa_replay_echo(")]
+    assert "_ffa_lock_lobby_slot(db, lobby_uuid)" in race
+    assert "_race_progress = _ffa_progress(" in race
