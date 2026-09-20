@@ -4,6 +4,7 @@ using System.Reflection;
 using HarmonyLib;
 using Photon.Pun;
 using UnityEngine;
+using PhotonPlayer = Photon.Realtime.Player;
 
 namespace CompetitiveRounds
 {
@@ -132,11 +133,15 @@ namespace CompetitiveRounds
             catch { }
         }
 
-        // Per-room capability cache. Recomputed when the room or the fighter count
-        // changes - a roster change is exactly when a previously whole-room-capable
-        // room can stop being one.
-        private static string _capRoom = "";
-        private static int _capCount = -1;
+        // Capability cache, keyed on the FRAME rather than on the room and a
+        // count. A count is not a sufficient key: an actor's properties replicate
+        // after it appears in PlayerList, so a census taken at the instant a seat
+        // joins can read "no key" and then never re-read it, because the count it
+        // was keyed on never changes again. Re-deriving once per frame removes the
+        // staleness question rather than arguing about its window; the census is a
+        // dictionary probe per actor over at most a handful of actors, and Go()
+        // runs a few times per frame at most.
+        private static int _capFrame = -1;
         private static bool _capValue;
 
         /// <summary>True when EVERY fighter in the room advertises a build carrying
@@ -148,9 +153,30 @@ namespace CompetitiveRounds
         /// keeps vanilla on every seat, which is exactly today's shipped behaviour -
         /// no new symptom - and the room stays self-consistent.
         ///
-        /// Spectators are excluded by construction: RoomActors.ActiveFighters() is
-        /// the census of players who fight, and a spectator advertises no capability
-        /// and must not disable the repair room-wide.</summary>
+        /// THE DENOMINATOR IS EVERY ACTOR THAT CAN SIMULATE THE EFFECT, which is
+        /// NOT RoomActors.ActiveFighters(). That helper is the rating-bearing
+        /// roster, and it is deliberately fail-CLOSED: once FreezeFighterRoster has
+        /// run - and it does run, from GameStateWatcher.cs:1564, :4965 and :6351 -
+        /// it drops any actor that is off the frozen steam-id roster, whose u_id
+        /// cannot be read, or that was ever cached as rejected. Dropping an actor
+        /// from a ROSTER is the safe direction. Dropping it from a CAPABILITY
+        /// CENSUS is the unsafe one, and reusing a fail-soft helper under the
+        /// opposite polarity is its own defect class (#412): the census would
+        /// answer "every fighter advertises" without having looked at that actor,
+        /// while the actor still owns a Player in PlayerManager.instance.players,
+        /// still runs this effect object locally, and - since nothing kicks a
+        /// fighter - keeps playing. The repair would then re-resolve the victim on
+        /// four seats while the fifth drained its stale cached one: the same drain
+        /// tick debiting a different player's health on different screens, which is
+        /// the exact state StageInto's note says this gate exists to prevent.
+        ///
+        /// So the census walks PhotonNetwork.PlayerList itself and excludes only a
+        /// CONFIRMED spectator - the one actor class that is not simulating a
+        /// fighter's effects, and which advertises no capability of its own. An
+        /// actor that cannot be identified is counted and must advertise like any
+        /// other; if it does not, the room stays on vanilla. That is fail-closed
+        /// for the REPAIR, which is today's shipped behaviour and no new symptom
+        /// (#276/#430).</summary>
         internal static bool RoomCarriesFix()
         {
             try
@@ -160,18 +186,21 @@ namespace CompetitiveRounds
                 if (PhotonNetwork.OfflineMode) return true;
                 if (!PhotonNetwork.InRoom) return false;
 
-                string room = PhotonNetwork.CurrentRoom != null ? (PhotonNetwork.CurrentRoom.Name ?? "") : "";
-                var fighters = RoomActors.ActiveFighters();
-                int count = fighters == null ? 0 : fighters.Length;
+                int frame = Time.frameCount;
+                if (frame == _capFrame) return _capValue;
 
-                if (room == _capRoom && count == _capCount) return _capValue;
-
-                bool ok = count > 0;
+                PhotonPlayer[] actors = PhotonNetwork.PlayerList;
+                bool ok = actors != null && actors.Length > 0;
                 if (ok)
                 {
-                    foreach (var p in fighters)
+                    foreach (var p in actors)
                     {
+                        // An unreadable actor is not a reason to stop looking at
+                        // it: it may still be simulating. Treat it as a seat that
+                        // does not advertise.
                         if (p == null) { ok = false; break; }
+                        if (RoomActors.IsSpectator(p)) continue;
+
                         var props = p.CustomProperties;
                         object v;
                         if (props == null || !props.TryGetValue(CapabilityProp, out v) || !(v is int) || ((int)v) != CapabilityValue)
@@ -182,13 +211,31 @@ namespace CompetitiveRounds
                     }
                 }
 
-                _capRoom = room;
-                _capCount = count;
+                _capFrame = frame;
                 _capValue = ok;
                 return ok;
             }
             catch { return false; }
         }
+    }
+
+    /// <summary>What the resolver concluded. Three outcomes, because two would
+    /// force a genuinely different case into one of the others: Refuse means the
+    /// trigger's own rule admitted nobody and nothing should be applied, while
+    /// Defer means this seam has no standing to answer and an unpatched build's
+    /// behaviour is the correct one. Folding Defer into Refuse would drop ticks
+    /// vanilla applies; folding it into Victim would require inventing a victim.</summary>
+    internal enum ProximityResolution
+    {
+        /// <summary>A victim was resolved and is handed back.</summary>
+        Victim,
+
+        /// <summary>The trigger's own rule admits nobody - a contradiction on a
+        /// trigger-driven call, so the effect applies nothing and says so.</summary>
+        Refuse,
+
+        /// <summary>Not this seam's question: run vanilla untouched.</summary>
+        Defer
     }
 
     internal static class ProximityVictimResolver
@@ -215,11 +262,12 @@ namespace CompetitiveRounds
 
         /// <summary>Re-execute the trigger's own selection and predicate through the
         /// pure seam. Returns null when the trigger's own rule admits nobody.</summary>
-        internal static Player ResolveFromTrigger(PlayerInRangeTrigger trigger)
+        internal static ProximityResolution ResolveFromTrigger(PlayerInRangeTrigger trigger, out Player victim)
         {
-            if (trigger == null) return null;
+            victim = null;
+            if (trigger == null) return ProximityResolution.Defer;
             PlayerManager pm = PlayerManager.instance;
-            if (pm == null || pm.players == null || pm.players.Count == 0) return null;
+            if (pm == null || pm.players == null || pm.players.Count == 0) return ProximityResolution.Defer;
 
             var players = pm.players;
             var candidates = new List<ProximityCandidate>(players.Count);
@@ -255,23 +303,39 @@ namespace CompetitiveRounds
             Vector3 triggerPos = trigger.transform.position;
             Player holder = trigger.ownPlayer;
 
-            ProximitySelection selection = trigger.targetType == PlayerInRangeTrigger.TargetType.OtherPlayer
-                ? ProximitySelection.NearestEnemy
-                : ProximitySelection.NearestAny;
+            // THE HOLDER IS REQUIRED ON EVERY PATH, not only on the enemy ones.
+            // The seam may never answer with the holder (every caller is an effect
+            // that acts on someone else), and the only way to honour that is to
+            // know which candidate the holder is. Without it, vanilla's own rule
+            // is the honest answer.
+            if (holder == null) return ProximityResolution.Defer;
+            int holderId = ProximityVictim.None;
+            for (int i = 0; i < players.Count; i++)
+                if (ReferenceEquals(players[i], holder)) { holderId = i; break; }
+            if (holderId == ProximityVictim.None) return ProximityResolution.Defer;
+            int holderTeam = holder.TeamID;
+
+            // WHICH vanilla selector the trigger actually evaluated. GetOtherPlayer
+            // is prefixed to FfaTargeting.NearestOpponent while the FFA engine is
+            // active and runs stock GetClosestPlayerInTeam otherwise
+            // (FfaMode.cs:3752-3763), and the two disagree - so reading the mode is
+            // part of reproducing the selection, not a detail. If the mode cannot
+            // be read there is no selector to reproduce and vanilla keeps the call.
+            bool ffa;
+            try { ffa = FfaMode.EngineActive(); }
+            catch { return ProximityResolution.Defer; }
+
+            ProximitySelection selection;
+            if (trigger.targetType == PlayerInRangeTrigger.TargetType.OtherPlayer)
+                selection = ffa ? ProximitySelection.NearestEnemyFfa : ProximitySelection.NearestEnemyTeam;
+            else
+                selection = ProximitySelection.NearestAny;
 
             // OtherPlayer measures its lookup from the HOLDER (vanilla :61 passes
             // ownPlayer to GetOtherPlayer); Any measures from the TRIGGER (:65).
-            Vector3 selectPos = triggerPos;
-            int holderId = ProximityVictim.None;
-            int holderTeam = int.MinValue;
-            if (selection == ProximitySelection.NearestEnemy)
-            {
-                if (holder == null) return null;
-                selectPos = holder.transform.position;
-                holderTeam = holder.TeamID;
-                for (int i = 0; i < players.Count; i++)
-                    if (ReferenceEquals(players[i], holder)) { holderId = i; break; }
-            }
+            Vector3 selectPos = selection == ProximitySelection.NearestAny
+                ? triggerPos
+                : holder.transform.position;
 
             float effectiveRange = trigger.range * trigger.transform.root.localScale.x;
             Vector2 seeFrom = new Vector2(triggerPos.x, triggerPos.y);
@@ -296,8 +360,12 @@ namespace CompetitiveRounds
                     catch { return false; }
                 });
 
-            if (chosen < 0 || chosen >= players.Count) return null;
-            return players[chosen];
+            if (chosen == ProximityVictim.Defer) return ProximityResolution.Defer;
+            if (chosen < 0 || chosen >= players.Count) return ProximityResolution.Refuse;
+            Player resolved = players[chosen];
+            if (resolved == null) return ProximityResolution.Refuse;
+            victim = resolved;
+            return ProximityResolution.Victim;
         }
 
         /// <summary>NO OWNING TRIGGER - and therefore no repair. The effect is
@@ -351,13 +419,21 @@ namespace CompetitiveRounds
                 // No owning trigger, no predicate to reproduce: vanilla, untouched.
                 if (trigger == null) return true;
 
-                Player fresh = ProximityVictimResolver.ResolveFromTrigger(trigger);
-                if (fresh == null)
+                Player fresh;
+                ProximityResolution outcome = ProximityVictimResolver.ResolveFromTrigger(trigger, out fresh);
+
+                // Nothing to reproduce, or nothing this seam may answer: vanilla
+                // resolves its own victim, exactly as an unpatched build would.
+                if (outcome == ProximityResolution.Defer) return true;
+
+                if (outcome != ProximityResolution.Victim || fresh == null)
                 {
-                    // A contradiction, not a routine outcome: our predicate is a
-                    // strict relaxation of the one the trigger evaluated
-                    // microseconds ago, in the same frame, over the same
-                    // transforms.
+                    // A contradiction, not a routine outcome - and it is that only
+                    // because the seam reproduces the SAME selector the trigger
+                    // evaluated, then applies a predicate that is vanilla's minus
+                    // one unreadable term, microseconds later, in the same frame,
+                    // over the same transforms. The selection fidelity is what
+                    // carries this claim; see the seam's note on Choose.
                     ProximityVictimResolver.NoteRefusal("DealDamageToPlayer", "trigger-driven call admits nobody");
                     return false;
                 }
@@ -430,8 +506,10 @@ namespace CompetitiveRounds
                 // No owning trigger, no predicate to reproduce: vanilla, untouched.
                 if (trigger == null) return true;
 
-                Player fresh = ProximityVictimResolver.ResolveFromTrigger(trigger);
-                if (fresh == null)
+                Player fresh;
+                ProximityResolution outcome = ProximityVictimResolver.ResolveFromTrigger(trigger, out fresh);
+                if (outcome == ProximityResolution.Defer) return true;
+                if (outcome != ProximityResolution.Victim || fresh == null)
                 {
                     ProximityVictimResolver.NoteRefusal("StunPlayer", "trigger-driven call admits nobody");
                     return false;
@@ -493,8 +571,10 @@ namespace CompetitiveRounds
                 // No owning trigger, no predicate to reproduce: vanilla, untouched.
                 if (trigger == null) return true;
 
-                Player fresh = ProximityVictimResolver.ResolveFromTrigger(trigger);
-                if (fresh == null)
+                Player fresh;
+                ProximityResolution outcome = ProximityVictimResolver.ResolveFromTrigger(trigger, out fresh);
+                if (outcome == ProximityResolution.Defer) return true;
+                if (outcome != ProximityResolution.Victim || fresh == null)
                 {
                     ProximityVictimResolver.NoteRefusal("TeleportToOpponent", "trigger-driven call admits nobody");
                     return false;

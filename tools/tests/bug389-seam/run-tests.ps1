@@ -1,4 +1,4 @@
-# Bug 389 - run the victim-choice seam clean, then under five mutations. Each
+# Bug 389 - run the victim-choice seam clean, then under six mutations. Each
 # mutation names a test that MUST redden and a control that MUST stay green
 # (#391): a suite that reddens at any change measures nothing, and one with no
 # control cannot tell "the mutation was detected" from "the build broke".
@@ -160,10 +160,27 @@ Say ''
 # data.playerVel.position, not transform.position. F5 is the control - it uses
 # candidates whose two positions coincide, so it cannot see this mutation.
 $mutSel = New-Mutant 'selpos' @(
-    @('            bool selectByVelocity = !enemy;', '            bool selectByVelocity = false;')
+    @('                    float d2a = DistanceSquared(selectX, selectY, c.AnyX, c.AnyY);',
+      '                    float d2a = DistanceSquared(selectX, selectY, c.X, c.Y);')
 )
 $runSel = Invoke-Suite 'mut-selpos' $mutSel
 if (-not (Assert-Mutation 'selection-position mutation' $runSel 'F9' 'F5')) { $overall = 1 }
+Say ''
+
+# ---------- 7. "tidy up" the mis-indexed liveness gate ----------
+# Outside FFA the trigger runs stock GetClosestPlayerInTeam, which reads its
+# liveness test from the GLOBAL roster at the enemy subset's ordinal
+# (PlayerManager.cs:113 vs :115). The seam reproduces that. This mutation
+# replaces it with the per-candidate check a tidier loop would use - the exact
+# change that makes the seam select enemies the trigger never looked at.
+# F11 is the control: the same board with nobody dead, where both gates agree,
+# so it cannot see the mutation and F10 is left measuring the indexing itself.
+$mutMis = New-Mutant 'misindex' @(
+    @('                    bool gateAlive = teamIndex < candidates.Count && !candidates[teamIndex].Dead;',
+      '                    bool gateAlive = !c.Dead;')
+)
+$runMis = Invoke-Suite 'mut-misindex' $mutMis
+if (-not (Assert-Mutation 'mis-index mutation' $runMis 'F10' 'F11')) { $overall = 1 }
 Say ''
 
 if ($overall -eq 0) { Say 'BUG 389 SEAM SUITE: ALL CHECKS PASSED' }
