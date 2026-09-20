@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    EXECUTES plugin/RosterCensus.cs under a plain compiler, with no Unity, no
+    Photon and no BepInEx. The file is kept free of those on purpose: a rule
+    whose only gate is a source-shape test is asserted ABOUT and never RUN
+    (#391), and the roster census is nothing but a rule about what a line must
+    say.
+
+    This harness does two things, and the second is the one that matters:
+
+      1. runs RosterCensus.SelfTest() against the REAL implementation, which
+         must pass every case and must run more than zero of them;
+
+      2. runs the same assertions against WRONG implementations and requires
+         each of them to RED, and against behaviour-preserving ones and
+         requires those to stay GREEN. A suite that reds on both is measuring
+         the source file rather than the behaviour, and a suite that reds on
+         neither is decoration.
+
+    net10.0 because that is the runtime installed on this build seat
+    (Microsoft.NETCore.App 10.0.11 alone); RollForward keeps the next SDK
+    rotation from turning this into a green-looking nothing.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RollForward>LatestMajor</RollForward>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>roster-census-harness</AssemblyName>
+    <RootNamespace>CompetitiveRounds.Harness</RootNamespace>
+    <!-- Only the files named below. A default glob would drag in the whole
+         plugin tree, which does not compile without Unity. -->
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Main.cs" />
+    <Compile Include="../../plugin/RosterCensus.cs" />
+  </ItemGroup>
+
+</Project>
