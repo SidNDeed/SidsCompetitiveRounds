@@ -21,6 +21,7 @@ run FAILS if the file did not come back byte-identical.
 import hashlib
 import io
 import os
+import re
 import subprocess
 import sys
 import time
@@ -154,18 +155,110 @@ def apply_all(src: str, edits) -> str:
     return src
 
 
-def run_suite() -> tuple:
+SUMMARY = re.compile(
+    r"(\d+) (passed|failed|errors|error|skipped|xfailed|xpassed|deselected)")
+
+
+def clean_slate() -> str:
+    """Terminate every other backend on the dedicated test database.
+
+    The suite's per-case fixture does this too, but it cannot help when the
+    statement that blocks is the fixture's own DDL: the case then dies inside
+    the reset and every later case in that process dies with it. Doing it here
+    as well is what stops one dead case reaching across into the NEXT
+    mutation's run. A cross-run leak of exactly that shape is what once put a
+    false REDDENED on this runner's negative control. Bounded by construction:
+    this database exists for this file alone.
+    """
+    import asyncio
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from sqlalchemy.pool import NullPool
+
+    async def go() -> int:
+        engine = create_async_engine(
+            os.environ["BUG391_TEST_PG_DSN"], poolclass=NullPool)
+        try:
+            async with engine.connect() as conn:
+                n = (await conn.execute(text(
+                    "SELECT count(*) FROM pg_stat_activity"
+                    " WHERE datname = current_database()"
+                    "   AND pid <> pg_backend_pid()"))).scalar()
+                await conn.execute(text(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
+                    " WHERE datname = current_database()"
+                    "   AND pid <> pg_backend_pid()"))
+                await conn.commit()
+                return int(n or 0)
+        finally:
+            await engine.dispose()
+
+    try:
+        n = asyncio.run(go())
+    except Exception as exc:                      # noqa: BLE001 - reported, not raised
+        return f"clean-slate probe FAILED: {exc!r}"
+    return f"cleared {n} leftover backend(s)" if n else ""
+
+
+def run_suite() -> dict:
+    """Run the suite once and report what actually executed.
+
+    A run that did not execute every test is not evidence about the mutation.
+    Module-level and fixture errors used to be parsed into the same set as
+    test failures, so a run in which NOTHING executed was scored as "the
+    mutant survived" — the filter was discarding the very line it measured
+    (#441). They are separate outcomes now, and the caller retries them
+    instead of scoring them.
+    """
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", TESTS, "-q", "--no-header",
          "-p", "no:cacheprovider"],
         cwd=str(BACKEND), capture_output=True, text=True)
-    failed = set()
+    failed, errored, collect_errors = set(), set(), []
     for line in proc.stdout.splitlines():
         if line.startswith("FAILED ") or line.startswith("ERROR "):
             part = line.split(" ", 1)[1].split(" ")[0]
-            failed.add(part.rsplit("::", 1)[-1])
-    tail = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
-    return failed, tail
+            if "::" in part:
+                target = failed if line.startswith("FAILED ") else errored
+                target.add(part.rsplit("::", 1)[-1])
+            else:
+                # "ERROR tests/foo.py - ..." names the MODULE, so no test in
+                # it ran. It is never a test name and never a kill signal.
+                collect_errors.append(part)
+    lines = proc.stdout.strip().splitlines()
+    tail = lines[-1] if lines else ""
+    counts: dict = {}
+    for n, word in SUMMARY.findall(tail):
+        word = "error" if word == "errors" else word
+        counts[word] = counts.get(word, 0) + int(n)
+    return {
+        "failed": failed,
+        "errored": errored,
+        "collect_errors": collect_errors,
+        "counts": counts,
+        "ran": counts.get("passed", 0) + counts.get("failed", 0),
+        "tail": tail,
+        "rc": proc.returncode,
+    }
+
+
+def not_a_verdict(res: dict, expected_total) -> str:
+    """Empty when the run may be scored; else the reason it may not be."""
+    if res["collect_errors"]:
+        return f"module-level error, no test in it ran: {res['collect_errors']}"
+    if res["errored"]:
+        return f"fixture error in {sorted(res['errored'])}"
+    if res["counts"].get("error"):
+        return f"{res['counts']['error']} error(s) reported"
+    if res["counts"].get("skipped"):
+        return (f"{res['counts']['skipped']} test(s) SKIPPED — the live half "
+                f"did not run, so most mutations had nothing to kill")
+    if not res["ran"]:
+        return f"no test accounted for at all (tail: {res['tail']!r})"
+    if expected_total is not None and res["ran"] != expected_total:
+        return (f"{res['ran']} test(s) accounted for, expected "
+                f"{expected_total} — the suite did not run whole")
+    return ""
 
 
 def main() -> int:
@@ -182,17 +275,46 @@ def main() -> int:
 
     rows = []
     try:
-        base_failed, base_tail = run_suite()
-        print(f"[baseline] {base_tail}")
-        if base_failed:
-            print(f"baseline is not green: {sorted(base_failed)}")
+        slate = clean_slate()
+        if slate:
+            print(f"[slate] {slate}")
+        base = run_suite()
+        print(f"[baseline] {base['tail']}")
+        why = not_a_verdict(base, None)
+        if why or base["failed"]:
+            print(f"baseline is not a green verdict: "
+                  f"{why or sorted(base['failed'])}")
             return 2
+        expected_total = base["ran"]
+        print(f"[baseline] every run below must account for "
+              f"{expected_total} tests or it is not a verdict")
         for label, defect, edits, expect in MUTATIONS:
             t0 = time.time()
             MAIN_PY.write_text(apply_all(original, edits), encoding="utf-8",
                                newline="")
-            failed, tail = run_suite()
+            res, why = None, ""
+            for attempt in (1, 2):
+                slate = clean_slate()
+                if slate:
+                    print(f"           [slate] {slate}")
+                res = run_suite()
+                why = not_a_verdict(res, expected_total)
+                if not why:
+                    break
+                print(f"           [no verdict, attempt {attempt}] {why}")
+                print(f"           [no verdict, attempt {attempt}] "
+                      f"{res['tail']}")
             MAIN_PY.write_text(original, encoding="utf-8", newline="")
+            if why:
+                # Never ALIVE and never KILL: the run did not measure the
+                # mutation, so it carries no information about it either way.
+                rows.append((label, None, f"NO VERDICT: {why}", defect))
+                print(f"[NOVER] {label} ({time.time() - t0:.0f}s) — "
+                      f"NO VERDICT: {why}")
+                print(f"           models: {defect}")
+                print(f"           {res['tail']}")
+                continue
+            failed = res["failed"]
             if expect == [ALL_GREEN]:
                 ok = not failed
                 detail = "all green" if ok else f"REDDENED: {sorted(failed)}"
@@ -205,7 +327,7 @@ def main() -> int:
             print(f"[{'KILL ' if ok else 'ALIVE'}] {label} "
                   f"({time.time() - t0:.0f}s) — {detail}")
             print(f"           models: {defect}")
-            print(f"           {tail}")
+            print(f"           {res['tail']}")
     finally:
         MAIN_PY.write_text(original, encoding="utf-8", newline="")
 
@@ -214,11 +336,25 @@ def main() -> int:
     print(f"restored sha256 {after} ({'MATCH' if after == digest else 'MISMATCH'})")
     backup.unlink(missing_ok=True)
 
-    bad = [r for r in rows if not r[1]]
-    print(f"\n{len(rows) - len(bad)}/{len(rows)} controls behaved as required")
+    good = [r for r in rows if r[1] is True]
+    nover = [r for r in rows if r[1] is None]
+    bad = [r for r in rows if r[1] is False]
+    print(f"\n{len(good)}/{len(rows)} controls behaved as required")
+    if bad:
+        print(f"{len(bad)} control(s) did NOT behave: "
+              f"{[r[0] for r in bad]}")
+    if nover:
+        # Distinct from a misbehaving control on purpose. These runs measured
+        # nothing, so the set is incomplete rather than failing, and the only
+        # honest report is to say so (#342: a check that cannot fail is worse
+        # than no check — one that silently did not run is the same defect).
+        print(f"{len(nover)} control(s) produced NO VERDICT after a retry on a "
+              f"clean slate: {[r[0] for r in nover]}")
     if after != digest:
         print("main.py DID NOT come back byte-identical — restore by hand")
         return 3
+    if nover:
+        return 4
     return 1 if bad else 0
 
 
