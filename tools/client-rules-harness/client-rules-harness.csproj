@@ -30,6 +30,14 @@
                         excluded the actor it was deciding about — is exactly
                         the kind of circularity a source-shape test cannot see.
 
+      BinderSortRules.cs    the binder's order: which sorts the header button
+                        offers, which of them the config may restore before
+                        the collection answer has landed, and the comparison
+                        itself. The "% 5" cycler it replaced was correct for
+                        exactly as long as there were five sorts, and a
+                        comparator is the shape a source test can only ever
+                        describe — so both are driven from here.
+
     net10.0 because that is the runtime installed on the build seat, matching
     the h2h harness; RollForward keeps the next SDK rotation from turning this
     into a green-looking nothing.
@@ -55,6 +63,7 @@
     <Compile Include="../../plugin/TopStripBand.cs" />
     <Compile Include="../../plugin/FfaReportRules.cs" />
     <Compile Include="../../plugin/RosterCensusRules.cs" />
+    <Compile Include="../../plugin/BinderSortRules.cs" />
   </ItemGroup>
 
 </Project>

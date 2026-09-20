@@ -117,6 +117,82 @@ def test_the_roster_census_suite_ran_every_case_and_none_failed(harness_run):
     assert run >= 12, "the RosterCensusRules suite shrank to %d cases" % run
 
 
+def test_the_binder_sort_suite_ran_every_case_and_none_failed(harness_run):
+    suites = _suites(harness_run)
+    assert "bindersort" in suites, "the BinderSortRules suite did not report"
+    run, fail, verdict = suites["bindersort"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[bindersort\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+    # A floor near the real count, not far below it: the suite ran 41 cases on
+    # the commit that added it, and a floor 25 below that is a gate that cannot
+    # fail (#342). Raise it when cases are added.
+    assert run >= 38, "the BinderSortRules suite shrank to %d cases" % run
+
+
+@pytest.mark.parametrize("name", [
+    # the ordering rule itself
+    "a ranked subject precedes an off-board subject",
+    "off the board, the order flips (group key, not rating)",
+    "rank 100 is in the front group",
+    "rank 101 is NOT in the front group",
+    "rank 5 AND inactive sorts to the back",
+    "clearing inactive on the same fixture makes it front",
+    "the back group orders by current rating, descending",
+    "the frozen mint numbers order the SAME pair the other way",
+    "an unrated subject sorts behind a rated one on 0",
+    "two copies of one subject sit together, not split by a third",
+    "copies order by the shared tail, and swapping rarity flips them",
+    "a print compares equal to itself",
+    # the cycler, and the "% 5" literal's grave
+    "Next skips RatingPosition when the answer carried no standings",
+    "Next skips RatingPosition before any answer has been read",
+    "the same call returns RatingPosition once standings are present",
+    "the cycle visits every member and returns to Name",
+    "a hardcoded modulus cannot reach the sixth mode (control)",
+    # the deferred restore
+    "a pending RatingPosition SURVIVES the pre-fetch paint",
+    "it applies once standings are present",
+    "it is dropped for the session when the answer carried none",
+    "folding Unknown into Absent would change the first outcome (control)",
+    "Restore has exactly Keep/Apply/DropForSession and no write outcome",
+    # the stored value
+    "a stored member name round-trips",
+    "a numeric string is not a member name",
+    "the stored value is a name, never an ordinal",
+])
+def test_the_binder_sort_guarantees_each_have_a_case(harness_run, name):
+    line = _named_case(harness_run, name, "bindersort")
+    assert line.startswith("[bindersort] PASS"), line
+    assert " | got=" in line and not line.rstrip().endswith("| got="), (
+        "the case printed no measurement: " + line)
+
+
+def test_the_binder_order_is_total_under_every_mode_the_button_offers(harness_run):
+    """The tail that makes the order total is reached from every branch, so a
+    mode added later cannot quietly forget it.
+
+    The modes are COUNTED here rather than named: the cycle case prints how
+    many members the button visits, so a sixth mode added without a totality
+    case makes the two numbers disagree. Naming them would have to be edited
+    by the same change that forgets the case.
+    """
+    total = [l for l in harness_run.stdout.splitlines()
+             if l.startswith("[bindersort] ") and " | case=the order is total under " in l]
+    assert total, "no totality cases were printed"
+    for line in total:
+        assert line.startswith("[bindersort] PASS"), line
+    cycle = _named_case(harness_run, "the cycle visits every member and returns to Name",
+                        "bindersort")
+    m = re.search(r"visited=(\d+) of (\d+)", cycle)
+    assert m, cycle
+    modes = int(m.group(2)) + 1   # the cycle prints every member BUT Name
+    assert len(total) == modes, (
+        "%d modes are on the cycler but only %d have a totality case"
+        % (modes, len(total)))
+
+
 def test_a_widening_census_can_actually_discover_a_latched_fighter(harness_run):
     """The HIGH this suite exists for, asserted on the printed MEASUREMENT.
 
@@ -440,6 +516,7 @@ def test_the_harness_compiles_only_the_rule_files():
     included = re.findall(r'<Compile Include="([^"]+)"', csproj)
     assert "Main.cs" in included
     for rule_file in ("plugin/LogScrub.cs", "plugin/TopStripBand.cs",
-                      "plugin/FfaReportRules.cs"):
+                      "plugin/FfaReportRules.cs", "plugin/RosterCensusRules.cs",
+                      "plugin/BinderSortRules.cs"):
         assert any(p.endswith(rule_file) for p in included), (
             "%s is not compiled into the harness" % rule_file)
