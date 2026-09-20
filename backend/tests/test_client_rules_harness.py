@@ -141,8 +141,6 @@ def test_a_widening_census_can_actually_discover_a_latched_fighter(harness_run):
     assert m, got
     assert m.group(2) == "3", (
         "the latched seat was not the one released: " + got)
-    assert "76561198000000003" in m.group(1), (
-        "the census never contained the latched seat's id: " + got)
 
     control = _named_case(harness_run,
                           "a census that pre-excludes the latched actor cannot release it",
@@ -154,7 +152,26 @@ def test_a_widening_census_can_actually_discover_a_latched_fighter(harness_run):
     assert cm.group(2) == "", (
         "a census that cannot see the latched seat still released it -- the "
         "case above then measures nothing: " + cgot)
-    assert "76561198000000003" not in cm.group(1), cgot
+
+    # The id the raw census contributes is DERIVED from the pair, never spelled
+    # out here. Both cases latch the same seat; the only difference is which
+    # census they are handed, so the id the good census has and the control
+    # census lacks IS the latched seat's, whatever the fixtures call it. A
+    # literal here went stale the moment the fixture ids moved out of the real
+    # SteamID64 range, and a stale literal in an `in` test reds for a reason
+    # that has nothing to do with the rule under test.
+    good_ids = [i for i in m.group(1).split(",") if i]
+    control_ids = [i for i in cm.group(1).split(",") if i]
+    assert set(control_ids) < set(good_ids), (
+        "the two cases are not the same room plus one: raw=" + got +
+        " pre-filtered=" + cgot)
+    extra = sorted(set(good_ids) - set(control_ids))
+    assert len(extra) == 1, (
+        "the widening admitted %d ids, so 'the latched seat' is not "
+        "identified by this pair: %s" % (len(extra), extra))
+    assert len(extra[0]) == 17 and extra[0].isdigit(), (
+        "the id the raw census contributed is not a Steam ID, so the census "
+        "is not carrying identities: " + repr(extra[0]))
 
 
 @pytest.mark.parametrize("name", [
