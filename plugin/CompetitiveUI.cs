@@ -6435,6 +6435,19 @@ namespace CompetitiveRounds
         /// not just on the TTL. Null means "stashed before a channel was
         /// resolvable", which only matches another null.</summary>
         private static string chatDraftStashChannel;
+        /// <summary>Which ACCOUNT wrote the stashed draft, captured when it is
+        /// stashed. Null means "stashed before an identity was resolvable", and
+        /// only matches another null.
+        ///
+        /// <para>DropChatOnAccountChange is still the primary guarantee and this
+        /// does not replace it. It is the arm for the case that hook cannot cover:
+        /// the hook fires on a RESOLVED transition, and a transition that is never
+        /// observed — a resolution failure, a restart inside the TTL, an ordering
+        /// the transition detector does not see — leaves a stash whose channel
+        /// still matches, which is the whole test the reader used to apply. Storing
+        /// what the reader needs where the reader is means one missed hook is not
+        /// also a missed guarantee (r2 LOW).</para></summary>
+        private static string chatDraftStashIdentity;
         // NO IDENTITY FENCE LIVES HERE ANY MORE (r5 method change). Two generation
         // counters used to guard this — one stamped on the stash, one on the open
         // editor — each compared against ApiClient.IdentityEpoch at the moment the
@@ -6468,11 +6481,36 @@ namespace CompetitiveRounds
         // that makes Time.time crawl (#221).
         private const float CHAT_DRAFT_STASH_TTL = 180f;
 
-        /// <summary>Destroy any held chat draft. Called from the consent-revoke
-        /// path itself so the hard-discard does not depend on the chat loop
-        /// running a frame later — a revoke arriving while the draw path is
-        /// throwing would otherwise never reach the guard that drops it.</summary>
-        internal static void DropChatDraftOnRevoke() { DropStash(); }
+        /// <summary>Destroy every held draft on consent revocation — the stash
+        /// AND the line currently in the open box. Called from the consent-revoke
+        /// path itself so the hard-discard does not depend on the chat loop running
+        /// a frame later: a revoke arriving while the draw path is throwing would
+        /// otherwise never reach the guard that drops it.
+        ///
+        /// <para>IT USED TO DROP ONLY THE STASH (r2 MEDIUM), which left exactly the
+        /// case this function exists for. A revoke while the draw path faults clears
+        /// the stash and leaves <c>chatInputText</c> holding the composed line; the
+        /// frame the draw path recovers, that text is still there, and a later
+        /// consent grant resumes typing it. The guarantee is "nothing composed under
+        /// the old consent survives it", and half of "composed" lives in the live
+        /// field.</para>
+        ///
+        /// <para>The shared teardown is reached through CloseChatInput rather than
+        /// repeated here, so a future field added to one is not missing from the
+        /// other. By the time it is called the stash is gone and the live text is
+        /// empty, so none of its branches can re-stash anything.</para></summary>
+        internal static void DropChatDraftOnRevoke()
+        {
+            bool hadText = !string.IsNullOrEmpty(chatDraftStash)
+                        || !string.IsNullOrEmpty(chatInputText);
+            DropStash();
+            chatInputText = "";
+            chatResumeNoticeUntil = -999f;
+            chatCaretToEndUntil = -999f;
+            if (chatInputOpen) CloseChatInput(discardDraft: true);
+            if (hadText)
+                Plugin.Log.LogInfo("[CHAT] data consent revoked — the held draft and the open line were discarded");
+        }
 
         /// <summary>The resolved account CHANGED — not merely resolved for the
         /// first time. Everything the previous account composed is destroyed
@@ -6508,6 +6546,7 @@ namespace CompetitiveRounds
         {
             chatDraftStash = null;
             chatDraftStashChannel = null;
+            chatDraftStashIdentity = null;
             chatDraftStashAt = -999f;
         }
 
@@ -6525,10 +6564,31 @@ namespace CompetitiveRounds
             string d = chatDraftStash;
             if (string.IsNullOrEmpty(d)) { DropStash(); return ""; }
             if (Time.unscaledTime - chatDraftStashAt > CHAT_DRAFT_STASH_TTL) { DropStash(); return ""; }
-            // DIFFERENT ACCOUNT -> destroy it. Unlike the channel case below this
-            // is never "hold it, they might come back": the identity edge means the
+            // DIFFERENT ACCOUNT -> destroy it. Unlike the channel case below this is
+            // never "hold it, they might come back": the identity edge means the
             // person who wrote the line is gone, and handing their text to whoever
             // signed in next is the one outcome this whole mechanism must not have.
+            //
+            // This paragraph described a rule that WAS NOT HERE (r2 LOW): the check
+            // below it was the channel comparison, and nothing in this function read
+            // an identity at all, because the guarantee had been moved wholesale to
+            // DropChatOnAccountChange. That hook is still the primary mechanism; this
+            // is the arm for a transition it never observes. A resolvable identity
+            // that differs from the one the text was written under destroys the
+            // stash. An UNRESOLVED identity now is not evidence of a change and is
+            // deliberately not treated as one — that is the first-resolution case
+            // the hook already refuses to fire on.
+            string writer = chatDraftStashIdentity;
+            string reader = null;
+            try { reader = MatchTracker.LocalSteamId; } catch { }
+            if (!string.IsNullOrEmpty(reader) && reader != "unknown"
+                && !string.IsNullOrEmpty(writer)
+                && !string.Equals(writer, reader, StringComparison.Ordinal))
+            {
+                Plugin.Log.LogInfo("[CHAT] a held draft belonged to a different account — discarded unread");
+                DropStash();
+                return "";
+            }
             string now = null;
             try { now = ChatClient.SendChannel; } catch { }
             if (!string.Equals(chatDraftStashChannel ?? "", now ?? "", StringComparison.Ordinal))
@@ -6578,7 +6638,14 @@ namespace CompetitiveRounds
                 chatDraftStash = chatInputText;
                 chatDraftStashAt = Time.unscaledTime;
                 chatDraftStashChannel = null;
+                chatDraftStashIdentity = null;
                 try { chatDraftStashChannel = ChatClient.SendChannel; } catch { }
+                try
+                {
+                    string who = MatchTracker.LocalSteamId;
+                    if (!string.IsNullOrEmpty(who) && who != "unknown") chatDraftStashIdentity = who;
+                }
+                catch { }
             }
             chatInputOpen = false;
             chatJustOpened = false;
@@ -7153,9 +7220,12 @@ namespace CompetitiveRounds
                 // exact path "leaving a game deletes what you were typing"
                 // travels. It is no different in kind from the modal and
                 // watchdog closes that already stash; the only thing that ever
-                // made it different was that assumption about intent (#351 —
-                // the guarantee a comment asserts is written from the one state
-                // its author had in mind).
+                // made it different was that assumption about intent (LEARNING
+                // #351 — the guarantee a comment asserts is written from the one
+                // state its author had in mind; NOT bug report #351, which is a
+                // separate, unclaimed report about chat rendering breaking after a
+                // menu-thickness change. The two share a number and nothing else,
+                // and this hunk addresses bug report #382 alone).
                 //
                 // A deliberate discard is still one keystroke away: Esc, then
                 // do not press T again — the stash ages out on its own TTL and

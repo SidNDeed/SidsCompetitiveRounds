@@ -7229,6 +7229,12 @@ namespace CompetitiveRounds
             int oppHbGapCount = 0,
             int oppFreezeCount = 0, int oppFreezeFocusedCount = 0,
             int oppRecvGapCount = 0,
+            // Counting-semantic epochs for the freeze columns either side of
+            // this row (GameStateWatcher.FREEZE_COUNT_EPOCH). 0 = the producer
+            // never tagged its output, i.e. pre-epoch, which is UNKNOWN and not
+            // comparable with a tagged value. Additive: a server that does not
+            // declare these ignores them.
+            int localFreezeEpoch = 0, int oppFreezeEpoch = 0,
             // July 22 item 3 — latency timelines (own 3s samples; opp via
             // gstats field 12) + opp average for the history "Ping:" tag.
             string localPingTimeline = null, string oppPingTimeline = null,
@@ -7351,6 +7357,8 @@ namespace CompetitiveRounds
             sb.Append($"\"local_recv_gap_count\":{localRecvGapCount},");
             sb.Append($"\"local_recv_gap_max_ms\":{localRecvGapMaxMs},");
             sb.Append($"\"opp_hb_gap_count\":{oppHbGapCount},");
+            sb.Append($"\"local_freeze_epoch\":{localFreezeEpoch},");
+            sb.Append($"\"opp_freeze_epoch\":{oppFreezeEpoch},");
             sb.Append($"\"opp_freeze_count\":{oppFreezeCount},");
             sb.Append($"\"opp_freeze_focused_count\":{oppFreezeFocusedCount},");
             sb.Append($"\"opp_recv_gap_count\":{oppRecvGapCount},");
@@ -13976,10 +13984,29 @@ namespace CompetitiveRounds
         }
 
         /// <summary>POST /team/series/{id}/report-dc. Called from
-        /// Cr2v2DiagCallbacks.OnPlayerLeftRoom when the lowest-Steam-ID remaining
-        /// client detects a mid-series DC. Server applies the 2v2 DC rule (any
-        /// match abandoned with >=2 total points → non-DC team wins) and starts
-        /// the 5-min sticky-team requeue grace window.</summary>
+        /// Cr2v2DiagCallbacks.OnPlayerLeftRoom by the ONE elected survivor on the
+        /// non-DC team.
+        ///
+        /// <para>THE DEPLOYED RULE, read off main.py's team_series_report_dc rather
+        /// than remembered (r2 LOW). The whole SERIES completes to the non-DC team
+        /// — with Glicko and gold, no XP — only when BOTH halves hold: that team
+        /// had already won at least one game of the series, AND the abandoned game
+        /// carries >= 2 total points. The previous wording here said "any match
+        /// abandoned with >=2 total points", which drops the existing-win half and
+        /// describes a rule the endpoint has never had.</para>
+        ///
+        /// <para>Otherwise the series flips to status='dc_incomplete' with
+        /// invalidation_reason='dc_manual_pending' for the admin panel. There is no
+        /// 5-minute grace window on this path: that belongs to the legacy dc_paused
+        /// flow, which only the state poll's expiry sweep still reads. The window
+        /// that does exist is bug 245's resume — the same four re-queueing within
+        /// roughly thirty minutes are re-locked onto THIS series with its scores
+        /// kept and the pending flag cleared.</para>
+        ///
+        /// <para>The point totals below ride the query string OUTSIDE the DC
+        /// signature and gate half of the forfeit condition, so the caller sends
+        /// them only when it can prove from replicated state that it is the sole
+        /// reporter; see the election in Plugin.OnPlayerLeftRoom.</para></summary>
         public static void ReportTeamSeriesDc(
             string seriesId, string reporterSteamId, string dcPlayerSteamId,
             int t1PointsTotal, int t2PointsTotal)
@@ -22800,12 +22827,35 @@ namespace CompetitiveRounds
         /// same refusal differently or one of them stops explaining it at all (r3
         /// finding). Here a key can only be added to both at once.</para>
         ///
-        /// <para>`Contains` rather than equality because the caller may hand over a
-        /// whole formatted error line ("HTTP 409: {"detail":"mode_not_ready"}"), which
-        /// is what the grant path's failure text actually looks like.</para></summary>
+        /// <para>THREE READINGS, IN PRECEDENCE ORDER (r2 LOW). The caller may hand
+        /// over a bare token (the listing's <c>disabled_reason</c>), or a whole
+        /// formatted error line ("HTTP 409: {"detail":"mode_not_ready"}"), which is
+        /// what the grant path's failure text actually looks like. Those are read in
+        /// the order of how much they PROVE:
+        ///   1. the whole string IS a known key — the listing's own field;
+        ///   2. the body's <c>detail</c> field is a known key — the one place the
+        ///      server states its answer, and the only reading that is positional
+        ///      rather than incidental;
+        ///   3. only then the ordered <c>Contains</c> chain below.
+        /// Reading (3) alone is what made the answer depend on code order: a body
+        /// carrying two mapped keys — an error line that quotes a room state while
+        /// refusing for another cause — returned whichever check happened to sit
+        /// higher, and nothing enforced that no key is a substring of another. The
+        /// chain is kept because it is the only thing that can read a malformed body
+        /// or a future server that stops sending <c>detail</c>, and its ordering
+        /// caveat below still applies TO IT.</para></summary>
         private static string SpectateReason(string reason, bool full)
         {
             string r = reason ?? "";
+            string exact = SpectateReasonExact(r.Trim(), full);
+            if (exact != null) return exact;
+            string detail = null;
+            try { detail = ExtractJsonString(r, "detail"); } catch { }
+            if (!string.IsNullOrEmpty(detail))
+            {
+                exact = SpectateReasonExact(detail.Trim(), full);
+                if (exact != null) return exact;
+            }
             if (r.Contains("spectator_full"))
                 return I18n.Tr(full ? "All spectator seats are taken." : "Seats full");
             if (r.Contains("spectating_disabled"))
@@ -22833,6 +22883,37 @@ namespace CompetitiveRounds
             if (r.Contains("session_required"))
                 return I18n.Tr(full ? "Steam session expired — try again in a moment." : "Session expired");
             return I18n.Tr(full ? "Could not spectate this game." : "Unavailable");
+        }
+
+        /// <summary>The same table, matched WHOLE. Null when the candidate is not
+        /// one of the eight keys — which is the point: an exact match cannot be
+        /// shadowed by a longer key, cannot depend on the order of the chain, and
+        /// cannot be produced by a key appearing incidentally inside a sentence.
+        /// Every string here is the byte-for-byte server key; adding one to the
+        /// chain above without adding it here silently demotes it to the ordered
+        /// reading.</summary>
+        private static string SpectateReasonExact(string key, bool full)
+        {
+            switch (key)
+            {
+                case "spectator_full":
+                    return I18n.Tr(full ? "All spectator seats are taken." : "Seats full");
+                case "spectating_disabled":
+                    return I18n.Tr(full ? "A player in this game has spectating disabled." : "Player opted out");
+                case "game_not_live":
+                    return I18n.Tr(full ? "That game is no longer live." : "Game ended");
+                case "already_in_game":
+                    return I18n.Tr(full ? "Leave your current game first." : "You're in a game");
+                case "room_not_ready":
+                    return I18n.Tr(full ? "That game is not ready to watch yet." : "Not ready yet");
+                case "mode_not_ready":
+                    return I18n.Tr(full ? "That mode is not accepting spectators right now." : "Mode closed");
+                case "spectator_upgrade_required":
+                    return I18n.Tr(full ? "Update the mod to watch this game." : "Update required");
+                case "session_required":
+                    return I18n.Tr(full ? "Steam session expired — try again in a moment." : "Session expired");
+            }
+            return null;
         }
 
         public static List<SpectateGameInfo> CachedSpectateGames = new List<SpectateGameInfo>();
@@ -23085,11 +23166,40 @@ namespace CompetitiveRounds
             return RequestSpectateGrantCore(gameId, broadcastTicket: true);
         }
 
+        /// <summary>EVERY refusal below this line says something (#375, r2 MEDIUM).
+        /// A locally declined WATCH used to be a bare `return 0;` on two arms —
+        /// unresolved identity and a grant already on the wire — so the player
+        /// clicked and nothing at all happened, which reads as a broken button
+        /// rather than as a refusal. A guard is judged by what its refusal COSTS
+        /// (#430), and an unexplained one costs the player the ability to tell
+        /// "not yet" from "never". Toasts are suppressed for broadcast-ticket
+        /// dispatches, which nobody clicked; the log line is unconditional so a
+        /// bundle carries the reason either way.</summary>
         private static int RequestSpectateGrantCore(string gameId, bool broadcastTicket)
         {
             string sid = MatchTracker.LocalSteamId;
-            if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) return 0;
-            if (spectateGrantInFlight) return 0;
+            if (Plugin.Instance == null)
+            {
+                // No UI host to toast to; this is the only arm that cannot speak.
+                Plugin.Log.LogWarning("[SPECTATE] WATCH declined before dispatch: no plugin host");
+                return 0;
+            }
+            if (string.IsNullOrEmpty(sid) || sid == "unknown")
+            {
+                Plugin.Log.LogInfo("[SPECTATE] WATCH declined before dispatch: local identity unresolved");
+                if (!broadcastTicket)
+                    CompetitiveUI.ShowNotification(I18n.Tr("Sign-in still pending - try again in a moment."),
+                                                   Color.yellow, 4f);
+                return 0;
+            }
+            if (spectateGrantInFlight)
+            {
+                Plugin.Log.LogInfo("[SPECTATE] WATCH declined before dispatch: a grant is already in flight");
+                if (!broadcastTicket)
+                    CompetitiveUI.ShowNotification(I18n.Tr("Still finishing your last spectate request - try again in a moment."),
+                                                   Color.yellow, 4f);
+                return 0;
+            }
             // r2 find 4: NO grant is admitted while a broadcast-issued grant
             // request is still unresolved on the wire — even a public WATCH
             // on this seat. A newer grant reaching the server before the

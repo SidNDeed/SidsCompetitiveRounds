@@ -125,3 +125,20 @@ For the reported regression, compare the last 30–50 matches by reporter mod
 version, mode and day. Report median, p10 and p90 reporter-side FPS, match
 duration, freeze timeline, ping and any three-second periodic dips. A profiler
 capture is still required to assign exact milliseconds to each subsystem.
+
+**Correction, 2026-09-19 — the freeze columns are not comparable across that
+window, and mod version does not separate them.** Every `local_freeze_*` value
+produced before the September 16 client batch was counted twice per stall: the
+detector tripped from `Math.Max(unscaledDeltaTime, wallGap)` with both sources
+sampled every tick, so one stall was credited on the resume tick and again on
+the next. Those figures are inflated roughly 2x, in the same columns and the
+same range as correct ones, so a mixed window looks like a real difference
+between two players rather than like two definitions. Partition on
+`local_freeze_epoch` / `opp_freeze_epoch` (1 = the doubled definition, 2 = the
+monotonic single-trip one, absent/0 = a client older than the tag, which is
+UNKNOWN and belongs in neither bucket). Do not partition on
+`reporter_mod_version`: a locally built DLL reports the last shipped version,
+so the label cannot identify which counter produced a row (learning #301).
+Separately, the 0.2 s freeze-log trip sits ABOVE the band this audit is about —
+in-combat stalls clustered at 50–199 ms — so an empty freeze log is not
+evidence that nothing stuttered; read the `[FREEZE-BAND]` aggregates instead.

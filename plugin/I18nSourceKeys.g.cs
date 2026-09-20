@@ -2198,6 +2198,7 @@ namespace CompetitiveRounds
             "Steam sign-in is required to view session reports",
             "Steam sign-in still pending - try again in a moment.",
             "Steel Gradient",
+            "Still finishing your last spectate request - try again in a moment.",
             "Still joining - one moment...",
             "Still leaving the 1v2 queue — try again in a moment.",
             "Still leaving the 2v2 queue — try again in a moment.",

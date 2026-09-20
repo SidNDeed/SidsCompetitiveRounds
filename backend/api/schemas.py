@@ -146,6 +146,25 @@ class MatchReport(BaseModel):
     local_freeze_count: int | None = Field(None, ge=0, le=30000)
     local_freeze_focused_count: int | None = Field(None, ge=0, le=30000)
     local_freeze_total_sec: float | None = Field(None, ge=0, le=86400)
+    # SERVER-CONTRACT NOTE ONLY — no field is declared here by this client pass,
+    # and nothing below changes behaviour. Since the Sept 16 client batch the
+    # reporter also sends two integers on this body:
+    #     local_freeze_epoch, opp_freeze_epoch
+    # They are the COUNTING SEMANTIC of the three local_freeze_* / two
+    # opp_freeze_* columns above, not a version: 1 = the pre-batch definition,
+    # which credited one stall TWICE (Math.Max(unscaledDeltaTime, wallGap), both
+    # sampled per tick) and is therefore inflated ~2x; 2 = the monotonic
+    # single-trip definition; ABSENT or 0 = a client older than the tag, which is
+    # UNKNOWN and must not be laundered into either era. The peer's value rides
+    # cr_gstats field 24 and reaches opp_freeze_epoch the same way opp_freeze_*
+    # already does. reporter_mod_version cannot substitute: a locally built DLL
+    # reports the last shipped version (learning #301).
+    # Pydantic v2 ignores undeclared fields (no model here sets
+    # extra="forbid" — checked against the deployed main.py at cc92498), so the
+    # additions are inert until a server pass declares them, stores them, and
+    # makes the advisory freeze classifier and the admin evidence view refuse to
+    # compare rows whose epochs differ. That pass is OUT OF SCOPE for the client
+    # batch that added the fields.
     local_ping_avg: int | None = Field(None, ge=0, le=30000)
     local_ping_max: int | None = Field(None, ge=0, le=30000)
     local_recv_gap_count: int | None = Field(None, ge=0, le=30000)

@@ -374,6 +374,12 @@ namespace CompetitiveRounds
         /// <summary>One-shot: an out-of-range saved preset has been written back
         /// as -1, so it is not re-logged or re-written on every read.</summary>
         private static bool _presetMigrated;
+        /// <summary>Rate limit for the re-sweep of a count that is not yet
+        /// credible. The sweep walks every loaded CharacterCreatorPortrait, so it
+        /// is not free to run on every call — but it is not permitted to run
+        /// ONCE either (see PresetSlotCount).</summary>
+        private static float _presetSweptAt = -999f;
+        private static int _presetProvisional;
 
         /// <summary>How many preset slots a player can actually AUTHOR (bug #370).
         ///
@@ -400,7 +406,22 @@ namespace CompetitiveRounds
         /// built yet.</para></summary>
         internal static int PresetSlotCount()
         {
+            // ONLY A CREDIBLE COUNT IS FROZEN (r2 LOW). r5 removed the magnitude
+            // floor and cached whatever discovery returned, which made the two
+            // "self-heals on the next visit" guarantees below false for the case
+            // they were written for: a row caught mid-build reports two to seven,
+            // that number becomes process-lifetime state, PresetCountIsCredible()
+            // is false forever, and Tick()'s publish arm answers "waiting for the
+            // character creator" for the rest of the session while a perfectly
+            // valid saved preset never renders. r5's objection to the floor was
+            // COST, not correctness — re-sweeping every portrait object on every
+            // call — so the answer is a rate limit rather than a freeze: a
+            // provisional count answers immediately, and discovery re-runs at most
+            // twice a second until it produces one that can be trusted.
             if (_presetSlots > 0) return _presetSlots;
+            if (_presetProvisional > 0 && Time.realtimeSinceStartup - _presetSweptAt < 0.5f)
+                return _presetProvisional;
+            _presetSweptAt = Time.realtimeSinceStartup;
             int slots = 0;
             try
             {
@@ -453,6 +474,17 @@ namespace CompetitiveRounds
             catch { }
             if (faces == null) return Mathf.Min(slots, PresetSlotsFallback);
             if (slots > faces.Length) slots = faces.Length;
+            if (slots < PresetSlotsFallback)
+            {
+                // Below the count this build ships knowing about. Answer with it,
+                // but as a PROVISIONAL value: a half-built row and a genuinely
+                // smaller future creator are indistinguishable from here, and only
+                // one of them stops changing. The rate limit above bounds the cost
+                // of asking again; PresetCountIsCredible() stays false either way,
+                // so neither irreversible consumer acts on it.
+                _presetProvisional = slots;
+                return slots;
+            }
             // NO MAGNITUDE FLOOR HERE (r5 method change). r4 returned the shipped
             // count for any discovery below it, on the reasoning that a small row is
             // a half-built row. Two things were wrong with that. A genuinely complete
@@ -470,6 +502,7 @@ namespace CompetitiveRounds
             // completeness — may an irreversible action run off this number — moved
             // to PresetCountIsCredible, where both destructive consumers now ask.
             _presetSlots = slots;
+            _presetProvisional = 0;
             Plugin.Log.LogInfo($"[PC] preset slots discovered: {slots}");
             return slots;
         }
@@ -716,7 +749,17 @@ namespace CompetitiveRounds
         /// uploaded the capture taken under the old value. Pairs of ad-hoc
         /// checks are exactly how the next one gets forgotten, so there is one
         /// key and one comparison. (The picture setting was a term until
-        /// 2026-09-13; there is no such setting any more.)</summary>
+        /// 2026-09-13; there is no such setting any more.)
+        ///
+        /// <para>-1 (Follow) IS a value of this key, deliberately, and the claim
+        /// made for #370 is narrower than it was once written (r2 LOW). What holds
+        /// is that -1 never crosses the wire, never reaches a filename and never
+        /// enters the server-visible descriptor: BuildDescriptor resolves it to the
+        /// selected character's face ids, and neither schemas.py nor main.py has a
+        /// preset field at all. What does NOT hold is "-1 never enters a cache
+        /// key" — this is a process-local staleness key, and Follow must be able
+        /// to invalidate it when the player changes the selected character, so
+        /// excluding -1 would be a defect rather than hygiene.</para></summary>
         private static string StateKey()
         {
             return (MatchTracker.LocalSteamId ?? "")

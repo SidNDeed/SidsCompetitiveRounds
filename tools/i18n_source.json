@@ -2192,6 +2192,7 @@
   "Steam sign-in is required to view session reports",
   "Steam sign-in still pending - try again in a moment.",
   "Steel Gradient",
+  "Still finishing your last spectate request - try again in a moment.",
   "Still joining - one moment...",
   "Still leaving the 1v2 queue — try again in a moment.",
   "Still leaving the 2v2 queue — try again in a moment.",
@@ -5127,7 +5128,7 @@
   },
   "A player in this game has spectating disabled.": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "A player's mod is too old for these settings - they need to update, or turn the setting off.": {
@@ -5507,7 +5508,7 @@
   },
   "All spectator seats are taken.": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "All-time: {0} games ({1}W-{2}L), series {3}-{4}": {
@@ -8692,7 +8693,7 @@
   },
   "Game ended": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "Game over - {0} wins": {
@@ -9767,7 +9768,7 @@
   },
   "Leave your current game first.": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "Leave your custom 1v2 lobby first.": {
@@ -10312,7 +10313,7 @@
   },
   "Mode closed": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "Mode: <color=#88CCFF>vanilla music</color>": {
@@ -10927,7 +10928,7 @@
   },
   "Not ready yet": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "Nothing playing": {
@@ -11647,7 +11648,7 @@
   },
   "Player opted out": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "Player removed from the lobby.": {
@@ -13012,7 +13013,7 @@
   },
   "Seats full": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "Secure connection unavailable - signed-in features are disabled this session.": {
@@ -13192,7 +13193,7 @@
   },
   "Session expired": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "Session games": {
@@ -13827,7 +13828,7 @@
   },
   "Steam session expired — try again in a moment.": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "Steam session not accepted — queue polling stopped; the server will clear your seat shortly. Try again in a moment.": {
@@ -13849,6 +13850,11 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "Still finishing your last spectate request - try again in a moment.": {
+   "surface": "ApiClient",
+   "location": "RequestSpectateGrantCore",
+   "kind": "Tr"
   },
   "Still joining - one moment...": {
    "surface": "ApiClient",
@@ -14277,17 +14283,17 @@
   },
   "That game is no longer live.": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "That game is not ready to watch yet.": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "That mode is not accepting spectators right now.": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "That pack is not available any more": {
@@ -15207,7 +15213,7 @@
   },
   "Update required": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "Update the mod first": {
@@ -15222,7 +15228,7 @@
   },
   "Update the mod to watch this game.": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "Updates": {
@@ -15892,7 +15898,7 @@
   },
   "You're in a game": {
    "surface": "ApiClient",
-   "location": "SpectateReason",
+   "location": "SpectateReason, SpectateReasonExact",
    "kind": "Tr"
   },
   "You're in a live {0} game — finish or leave it first.": {

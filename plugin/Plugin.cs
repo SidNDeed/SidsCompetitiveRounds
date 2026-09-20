@@ -2894,6 +2894,9 @@ namespace CompetitiveRounds
             // patch covers the ordering the polling cannot).
             try { GrowNormalize.StageCapability("tick"); GrowNormalize.SyncRankedIntent("tick"); }
             catch { }
+            // Same one-shot pre-join stage for the saw-targeting capability
+            // (bug #380's gated half). Self-guarded, so this is free once staged.
+            try { SawTargetSync.StageCapability("tick"); } catch { }
             // Quick-chat sends through the vanilla chat RPC since Sept 1 and
             // needs no receive hook (event code 48 is retired, never shipped).
             // Dance emotes (Aug 31 item 5) ride event code 49; Tick runs the
@@ -2963,6 +2966,7 @@ namespace CompetitiveRounds
                         // this client will never publish.
                         try { PoisonSync.RevokeCapability(); } catch { }
                         try { GrowNormalize.RevokeCapability(); } catch { }
+                        try { SawTargetSync.RevokeCapability(); } catch { }
                         // r3 find 4: same shape for the base-game locale
                         // injector. It has been inert (activation is gated on
                         // the compat clear below), but Shutdown is idempotent
@@ -3972,6 +3976,31 @@ namespace CompetitiveRounds
             catch { return -1; }
         }
 
+        /// <summary>The Steam id a seat advertises (`u_id`, `unity_id` is NOT
+        /// consulted here), or -1 when it advertises nothing a reporter election
+        /// can compare. Replicated, so every seat reads the same value for the
+        /// same actor — which is the whole reason the election uses it rather
+        /// than anything locally derived.
+        ///
+        /// <para>A `photon_`-prefixed value is Photon's own placeholder for an
+        /// actor with no Steam identity, never a Steam id, and it must not
+        /// order against real ones.</para></summary>
+        private static long SteamIdOf(Photon.Realtime.Player pl)
+        {
+            try
+            {
+                if (pl == null || pl.CustomProperties == null) return -1;
+                object v;
+                if (!pl.CustomProperties.TryGetValue("u_id", out v) || v == null) return -1;
+                string s = v.ToString();
+                if (string.IsNullOrEmpty(s) || s.StartsWith("photon_")) return -1;
+                long n;
+                if (!long.TryParse(s, out n) || n <= 0) return -1;
+                return n;
+            }
+            catch { return -1; }
+        }
+
         public void OnPlayerLeftRoom(Photon.Realtime.Player p)
         {
             // Roster changed: same-frame reads must not see the cached view
@@ -4030,10 +4059,22 @@ namespace CompetitiveRounds
             try { Plugin.Log.LogInfo($"[2v2-DIAG] PlayerLeft: nick='{p?.NickName}' actor={p?.ActorNumber} {Diag2v2.DescribeRoom()}"); }
             catch { }
 
-            // 2v2 DC reporting: when a player drops mid-series, the lowest-Steam-ID
-            // remaining client reports the DC to the server. Server awards the
-            // current match to the non-DC team (if total points >= 2) and starts
-            // the 5-min sticky-team requeue grace window.
+            // 2v2 DC reporting: when a player drops mid-series, ONE elected
+            // survivor on the non-DC team reports the DC to the server.
+            //
+            // THE DEPLOYED CONTRACT, restated from main.py's own
+            // team_series_report_dc rather than from memory (r2 LOW). Two
+            // outcomes: the whole SERIES completes to the non-DC team with full
+            // Glicko and gold (no XP) only when that team had ALREADY won at
+            // least one game AND the abandoned game holds >= 2 total points;
+            // otherwise the series flips to status='dc_incomplete' with
+            // invalidation_reason='dc_manual_pending' for manual resolution in
+            // the admin panel. There is no 5-minute grace window on this path —
+            // that is the legacy dc_paused flow, which only the state poll's
+            // expiry sweep still reads. What DOES exist is the bug-245 resume:
+            // if the same four re-queue within roughly thirty minutes the
+            // matcher re-locks them onto THIS series with its scores kept and
+            // clears the pending flag.
             //
             // STRICTLY 2v2: the widened IsActive() also fires this callback in
             // ovt_ rooms, where ActiveTeamSeriesId can be a STALE id from an
@@ -4083,20 +4124,70 @@ namespace CompetitiveRounds
                 if (string.IsNullOrEmpty(dcSteamId) && !string.IsNullOrEmpty(p.UserId)) dcSteamId = p.UserId;
                 if (string.IsNullOrEmpty(dcSteamId) || dcSteamId.StartsWith("photon_")) return;
 
-                // Reporter election: lowest steam_id among the survivors ON THE TEAM
-                // THAT DID NOT LOSE A PLAYER.
+                // Reporter election: ONE reporter, decided from state every seat
+                // reads identically, or no rated-completion form at all.
                 //
-                // Bugs #384/#385. The server accepts a DC report only from a member of
-                // the non-DC team (team/series/{id}/report-dc: "reporter must be a
-                // member of the non-DC team"). This election used to pick the lowest id
-                // in the ROOM — a different rule, and the two only agreed by luck. When
-                // the lowest id belonged to the DC'd player's own teammate the server
-                // refused with a 400, and because exactly ONE client is elected, nobody
-                // else tried: the series was never closed, every survivor kept a live
-                // 2v2 hold, and all further 2v2 joins were refused until the lease TTL
-                // ran out ~15 minutes later. The information needed to avoid it was
-                // already here — the leaver banner one block above prints "your
-                // teammate" off the same t_id prop.
+                // Bugs #384/#385 and the r2 HIGH above them. The server accepts a DC
+                // report only from a member of the non-DC team
+                // (team/series/{id}/report-dc: "reporter must be a member of the
+                // non-DC team"). The original election picked the lowest id in the
+                // ROOM — a different rule that agreed with the server's only by
+                // luck, so the series was never closed, every survivor kept a live
+                // 2v2 hold, and further 2v2 joins were refused until the lease TTL
+                // ran out. The first repair OR'd the old room-wide elector with a
+                // team-aware one to guarantee at least one report; that guarantee is
+                // kept, but the OR could elect TWO seats, and two reports are NOT
+                // equivalent:
+                //
+                //   `t1_points_total` / `t2_points_total` ride the query string,
+                //   OUTSIDE the DC signature, as ONE seat's snapshot of a game that
+                //   never produced a team_matches row. The deployed endpoint gates
+                //   its lead-forfeit branch on `total_points >= 2` and settles on the
+                //   FIRST accepted report (`WHERE status IN ('active','dc_paused')`).
+                //   So two HONEST survivors whose snapshots straddle two points
+                //   decide a rated series completion — ratings and gold — versus
+                //   `dc_incomplete`, by which request took the row lock first. No
+                //   dishonest client is required.
+                //
+                // Two arms, in this order:
+                //
+                //  (1) UNIQUENESS PROVABLE. Every input below is a replicated custom
+                //      property, so every seat computes the same answer from the same
+                //      bytes: a four-seat census (three survivors plus the leaver),
+                //      every seat advertising a parseable and DISTINCT `u_id`, and the
+                //      four `t_id` values forming an exact 2/2 split with the leaver's
+                //      team known. Then the non-DC team has two survivors, the lower
+                //      `u_id` of the two is the reporter, and it is the reporter on
+                //      every seat. That seat — and only that seat — posts the real
+                //      point totals.
+                //
+                //  (2) UNPROVABLE. Anything missing (a seat without `u_id`, duplicate
+                //      ids, a `t_id` outside {0,1}, a census that is not 2/2, a
+                //      roster mid-change) falls back to the OLD floor election
+                //      unchanged, because zero reporters is still the one outcome
+                //      worse than the bug (#276) — but the report is posted with
+                //      ZERO point totals. `total_points` is then 0, the lead-forfeit
+                //      branch cannot be reached, and the endpoint can only record
+                //      `dc_incomplete` / `dc_manual_pending` for the admin panel. The
+                //      series is still closed and every survivor's 2v2 hold is still
+                //      released; what is given up is the automatic forfeit, which is
+                //      the direction a client-attested cause is allowed to move the
+                //      server in (#283).
+                //
+                // WHAT A LYING CLIENT GAINS, enumerated (#283):
+                //   * Faking `t_id` to look non-DC: nothing. The server resolves team
+                //     membership from the series row, not from the report, and refuses
+                //     a DC-team member with a 400.
+                //   * Faking a low `u_id` to win arm (1): it must still be an actual
+                //     non-DC member for the server to accept it, and such a seat was
+                //     entitled to report anyway.
+                //   * Faking `t_id` INCONSISTENTLY so the 2/2 split fails: that is a
+                //     move from arm (1) to arm (2), i.e. from a possible rated
+                //     completion to `dc_incomplete`. Strictly conservative.
+                //   * Submitting inflated points while legitimately elected: unchanged
+                //     by this election and not closable from the client. The server
+                //     needs a per-game fact of its own; see the server-contract note
+                //     in the r2 notes.
                 string myId = MatchTracker.LocalSteamId;
                 if (string.IsNullOrEmpty(myId)) return;
                 long myVal; if (!long.TryParse(myId, out myVal)) return;
@@ -4105,67 +4196,112 @@ namespace CompetitiveRounds
                 int myTeam = TeamIdOf(PhotonNetwork.LocalPlayer);
                 bool teamsKnown = dcTeam >= 0 && myTeam >= 0;
 
-                // TWO independent reasons to report, OR'd. This shape is chosen so the
-                // election can never do WORSE than the room-wide one it replaces.
-                //
-                //   lowestOverall  — the old rule, unchanged. True on AT LEAST one
-                //                    surviving seat whatever anyone advertises, which
-                //                    is the property that matters; see the bound below
-                //                    for when it is true on more than one.
-                //   lowestOnMyTeam — the new rule: I look like a member of the team
-                //                    that did not lose a player, and I am the lowest
-                //                    id among the seats that also look that way.
-                //
-                // An earlier version STOOD DOWN when it looked like the DC'd player's
-                // teammate. That could reach zero reporters, which is the one outcome
-                // worse than the bug being fixed: `t_id` is advertised per seat, and a
-                // leaver whose advertised team does not match its real one flips the
-                // real non-DC survivors into standing down while the one seat still
-                // willing to report is the one the server refuses (r2 HIGH). Keeping
-                // the old elector as a floor means the server always receives at least
-                // one report, and the team rule can only ADD a report from a seat it
-                // will accept. Duplicates are cheap — the series is closed by whichever
-                // lands first and the rest no-op.
-                //
-                // THE BOUND, stated honestly. At least one reporter, always: that is
-                // the property worth having and it holds unconditionally. At most two
-                // only while every survivor advertises a parseable `u_id` — a seat
-                // that does not is invisible to the census, so its peers cannot defer
-                // to it, and with two such seats every survivor can believe it is the
-                // lowest and all of them report. That is the direction this election
-                // deliberately errs in, and the duplicate reports no-op; it is stated
-                // here because the previous wording claimed "exactly one" as if it
-                // were unconditional (r4 finding).
-                bool lowestOverall = true;
-                bool lowestOnMyTeam = teamsKnown && myTeam != dcTeam;
-                foreach (var pp in RoomActors.ActiveFighters())   // census: reporter election over fighters only
+                // CENSUS BASIS: the raw PlayerList filtered by the replicated
+                // spectator prop, NOT RoomActors.ActiveFighters(). That filter
+                // consults the frozen roster, which is LOCAL state — two seats
+                // freezing at different moments classify a prop-less actor
+                // differently, and an election two seats compute differently is
+                // exactly the duplicate this arm exists to rule out. Same basis,
+                // same reasoning, as GrowNormalize.Quorum and PoisonSync.ScanRoster.
+                // Photon has already removed the leaver from PlayerList by the time
+                // this callback runs, so `survivors` never contains `p`.
+                var survivors = new List<Photon.Realtime.Player>();
+                try
                 {
-                    if (pp == null || pp.ActorNumber == p.ActorNumber) continue;  // skip the leaver
-                    if (pp.IsLocal) continue;
-                    string ppSid = null;
-                    if (pp.CustomProperties != null && pp.CustomProperties.ContainsKey("u_id"))
-                        ppSid = pp.CustomProperties["u_id"]?.ToString();
-                    if (string.IsNullOrEmpty(ppSid) || ppSid.StartsWith("photon_")) continue;
-                    long ppVal;
-                    if (!long.TryParse(ppSid, out ppVal) || ppVal >= myVal) continue;
-                    lowestOverall = false;
-                    // Defer the TEAM claim only to a peer that also looks eligible.
-                    // Deferring to one the server would refuse is how this produced no
-                    // report at all in the first place.
-                    if (lowestOnMyTeam && TeamIdOf(pp) == myTeam) lowestOnMyTeam = false;
-                    if (!lowestOverall && !lowestOnMyTeam) break;
+                    var all = PhotonNetwork.PlayerList;
+                    if (all != null)
+                        for (int i = 0; i < all.Length; i++)
+                        {
+                            var a = all[i];
+                            if (a == null || a.ActorNumber == p.ActorNumber) continue;
+                            if (RoomActors.IsSpectator(a)) continue;
+                            survivors.Add(a);
+                        }
                 }
-                if (!lowestOverall && !lowestOnMyTeam) return;
-                if (!lowestOverall)
-                    Plugin.Log.LogInfo("[2v2-DC] reporting as the non-disconnected team's lowest id "
-                        + "(another seat holds the room-wide election)");
+                catch { survivors.Clear(); }
 
-                // Pull current point totals from the in-game state. Per the DC rule,
-                // a match with combined points >= 2 awards the match to the non-DC team.
-                int t1Points = GameStateWatcher.LastP1Points;
-                int t2Points = GameStateWatcher.LastP2Points;
+                // Arm (1)'s preconditions, all from replicated bytes.
+                bool unique = teamsKnown && survivors.Count == 3;
+                long lowestNonDc = long.MaxValue;
+                int nonDcCount = 0, dcTeamCount = 1;   // the leaver is on the DC team
+                var seenIds = new HashSet<long>();
+                bool sawSelf = false;
+                if (unique)
+                {
+                    long dcId = SteamIdOf(p);
+                    if (dcId < 0) unique = false; else seenIds.Add(dcId);
+                }
+                if (unique)
+                {
+                    for (int i = 0; i < survivors.Count; i++)
+                    {
+                        var s = survivors[i];
+                        long sid = SteamIdOf(s);
+                        int st = TeamIdOf(s);
+                        if (sid < 0 || st < 0 || !seenIds.Add(sid)) { unique = false; break; }
+                        if (s.IsLocal) { sawSelf = true; if (sid != myVal) { unique = false; break; } }
+                        if (st == dcTeam) dcTeamCount++;
+                        else { nonDcCount++; if (sid < lowestNonDc) lowestNonDc = sid; }
+                    }
+                }
+                // A 2v2 sitting is 2/2. Anything else means at least one seat is
+                // advertising a team it is not on, and the split is the cheapest
+                // replicated cross-check that catches it.
+                if (unique && (!sawSelf || dcTeamCount != 2 || nonDcCount != 2)) unique = false;
+
+                bool conservativeOnly = !unique;
+                if (unique)
+                {
+                    if (myTeam == dcTeam) return;                 // the other team elects
+                    if (myVal != lowestNonDc) return;             // elected seat is not this one
+                    Plugin.Log.LogInfo("[2v2-DC] elected from the replicated census "
+                        + "(2/2 teams, four distinct ids) — exactly one reporter");
+                }
+                else
+                {
+                    // FLOOR ELECTION, unchanged from the version this replaces: at
+                    // least one report, always. `lowestOverall` is true on at least
+                    // one surviving seat whatever anyone advertises; `lowestOnMyTeam`
+                    // can only ADD a report from a seat the server will accept.
+                    bool lowestOverall = true;
+                    bool lowestOnMyTeam = teamsKnown && myTeam != dcTeam;
+                    bool otherEligible = false;
+                    for (int i = 0; i < survivors.Count; i++)
+                    {
+                        var pp = survivors[i];
+                        if (pp == null || pp.IsLocal) continue;
+                        long ppVal = SteamIdOf(pp);
+                        if (ppVal < 0) continue;
+                        if (teamsKnown && TeamIdOf(pp) >= 0 && TeamIdOf(pp) != dcTeam) otherEligible = true;
+                        if (ppVal >= myVal) continue;
+                        lowestOverall = false;
+                        // Defer the TEAM claim only to a peer that also looks eligible.
+                        // Deferring to one the server would refuse is how this produced
+                        // no report at all in the first place.
+                        if (lowestOnMyTeam && TeamIdOf(pp) == myTeam) lowestOnMyTeam = false;
+                    }
+                    // L3: a seat that looks like the LEAVER's own teammate sends a
+                    // request the deployed endpoint rejects by construction. Standing
+                    // down is only safe while some other survivor looks eligible —
+                    // otherwise a leaver advertising the wrong team would flip the real
+                    // non-DC survivors into silence, which is the r2 HIGH this floor
+                    // exists to prevent. Both conditions, or it reports.
+                    if (teamsKnown && myTeam == dcTeam && otherEligible) return;
+                    if (!lowestOverall && !lowestOnMyTeam) return;
+                    if (!lowestOverall)
+                        Plugin.Log.LogInfo("[2v2-DC] reporting as the non-disconnected team's lowest id "
+                            + "(another seat holds the room-wide election)");
+                }
+
+                // Point totals. Only a provably unique elector carries the real ones;
+                // see arm (2) above for why the fallback sends zeros rather than its
+                // own snapshot.
+                int t1Points = conservativeOnly ? 0 : GameStateWatcher.LastP1Points;
+                int t2Points = conservativeOnly ? 0 : GameStateWatcher.LastP2Points;
                 ApiClient.ReportTeamSeriesDc(seriesId, myId, dcSteamId, t1Points, t2Points);
-                Plugin.Log.LogInfo($"[2v2-DC] reporter={myId} dc={dcSteamId} series={seriesId} pts={t1Points}/{t2Points}");
+                Plugin.Log.LogInfo($"[2v2-DC] reporter={myId} dc={dcSteamId} series={seriesId} "
+                    + $"pts={t1Points}/{t2Points} unique={!conservativeOnly}"
+                    + (conservativeOnly ? " (zeros: uniqueness unprovable, dc_incomplete only)" : ""));
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[2v2-DC] report error: {ex.Message}"); }
         }
@@ -9297,8 +9433,13 @@ namespace CompetitiveRounds
                                     // + applied color so any hue that still looks wrong on screen
                                     // is attributable to a specific object from one log line.
                                     //
-                                    // BOUNDED since report #359, where this wrote 216 lines in one
-                                    // session. The hunt it was built for is over, and a per-part,
+                                    // BOUNDED since report #359. The captured bundle holds 216
+                                    // [MAPCOLOR-ART] lines, but the bundle MIRRORS every write into
+                                    // two captured sections, so that is 108 emissions counted twice
+                                    // — the same double-count this batch corrected in the freeze
+                                    // counters, in the same report. The cap is not sized against 216;
+                                    // it is sized so one map's worth of parts is attributable and no
+                                    // more. The hunt it was built for is over, and a per-part,
                                     // per-map-load line with no ceiling is a standing cost in every
                                     // player's bundle. The budget is per PROCESS — nothing calls
                                     // ResetDiag on this key — so it covers roughly one map's worth

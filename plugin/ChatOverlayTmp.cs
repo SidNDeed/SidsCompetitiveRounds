@@ -250,26 +250,62 @@ namespace CompetitiveRounds
                 if (singleLineH <= 0f) singleLineH = FontSize * 1.3f;   // API missing: estimate, never 0
             }
             float maxH = singleLineH * MaxWrapLines + 2f;
-            var fit = new Fit { Disp = line, H = Height(probe, line) };
-            if (fit.H > maxH)
+            // MEASUREMENT FAILURE IS NOT "IT FITS" (#357, r2 MEDIUM). Height() used
+            // to floor a failed measurement to one line, so a wholesale failure gave
+            // every line a one-line height that could never exceed maxH: the cut
+            // never ran, the "[see F5]" marker never appeared, and a long message was
+            // drawn into a one-line rect against a Truncate label — which is exactly
+            // the reported symptom, with the code reporting success. The unmeasurable
+            // case now engages truncation conservatively and says so.
+            float measured = HeightOrFail(probe, line);
+            bool unmeasurable = measured < 0f;
+            var fit = new Fit { Disp = line, H = unmeasurable ? maxH : measured };
+            if (unmeasurable || fit.H > maxH)
             {
                 int minCut = line.LastIndexOf('>') + 1;
                 if (minCut < 1) minCut = 1;
                 if (minCut < line.Length - 1)
                 {
                     int lo = Math.Min(minCut + 1, line.Length), hi = line.Length, best = SafeCut(line, lo);
-                    while (lo <= hi)
+                    if (unmeasurable)
                     {
-                        int mid = (lo + hi) / 2;
-                        int cut = SafeCut(line, mid);   // review LOW: never split a surrogate pair
-                        if (Height(probe, line.Substring(0, cut).TrimEnd() + suffix) <= maxH) { best = cut; lo = mid + 1; }
-                        else hi = mid - 1;
+                        // No oracle to binary-search against, so a CHARACTER budget
+                        // takes its place: the width divided by a deliberately narrow
+                        // per-character estimate, times the wrap allowance. It is an
+                        // estimate and is not pretending otherwise — it exists to make
+                        // the marker appear and the rect claim its full allowance,
+                        // which is the conservative direction. Never cuts before
+                        // minCut, so the markup head always survives.
+                        int perLine = Math.Max(8, (int)(PanelW / (FontSize * 0.5f)));
+                        int budget = perLine * MaxWrapLines;
+                        best = SafeCut(line, Math.Max(Math.Min(minCut + 1, line.Length),
+                                                      Math.Min(budget, line.Length)));
+                        WarnMeasurementUnavailable();
+                    }
+                    else
+                    {
+                        while (lo <= hi)
+                        {
+                            int mid = (lo + hi) / 2;
+                            int cut = SafeCut(line, mid);   // review LOW: never split a surrogate pair
+                            float h = HeightOrFail(probe, line.Substring(0, cut).TrimEnd() + suffix);
+                            // A probe that could not be measured is NOT a fit.
+                            if (h >= 0f && h <= maxH) { best = cut; lo = mid + 1; }
+                            else hi = mid - 1;
+                        }
                     }
                     fit.Disp = line.Substring(0, best).TrimEnd() + suffix;
-                    fit.H = Height(probe, fit.Disp);
+                    float fh = HeightOrFail(probe, fit.Disp);
+                    fit.H = fh >= 0f ? fh : maxH;
                 }
-                // Markup-final line (nothing trimmable): keep the full height
-                // rather than append a false indicator to an uncut line.
+                else
+                {
+                    // Markup-final line (nothing trimmable): keep the full
+                    // allowance rather than append a false indicator to an uncut
+                    // line. When the height came from no measurement at all, say
+                    // so — the line is drawn against an estimate either way.
+                    if (unmeasurable) WarnMeasurementUnavailable();
+                }
             }
             if (fit.H <= 0f) fit.H = singleLineH;
             // 333 step 2: substitute AFTER the cut, so minCut (LastIndexOf('>')) never
@@ -316,10 +352,45 @@ namespace CompetitiveRounds
             return run;
         }
 
+        /// <summary>The measured height, or a NEGATIVE value when the measurement
+        /// API gave no answer. Separated from <see cref="Height"/> so a caller that
+        /// is DECIDING something cannot silently receive an estimate: the render
+        /// path wants a usable number and the fit path wants the truth.</summary>
+        private static float HeightOrFail(object tmp, string text)
+        {
+            try
+            {
+                float h = UIFactory.MeasureTextHeight(tmp, text, PanelW);
+                return h > 0f ? h : -1f;
+            }
+            catch { return -1f; }
+        }
+
+        /// <summary>A height that is always usable for a rect. Failure floors to one
+        /// line, which is right for DRAWING and wrong for deciding — see
+        /// <see cref="HeightOrFail"/>.</summary>
         private static float Height(object tmp, string text)
         {
-            float h = UIFactory.MeasureTextHeight(tmp, text, PanelW);
+            float h = HeightOrFail(tmp, text);
             return h > 0f ? h : singleLineH;
+        }
+
+        private static bool _warnedNoMeasure;
+
+        /// <summary>Once per session. The condition is process-wide (the measure API
+        /// is there or it is not), so one line names it and the rest of the bundle
+        /// stays readable.</summary>
+        private static void WarnMeasurementUnavailable()
+        {
+            if (_warnedNoMeasure) return;
+            _warnedNoMeasure = true;
+            try
+            {
+                Plugin.Log.LogWarning("[CHAT-OVERLAY] text measurement is unavailable — "
+                    + "chat lines are being truncated on a character estimate with the "
+                    + "indicator forced, rather than drawn uncut into a one-line rect (#357)");
+            }
+            catch { }
         }
     }
 
