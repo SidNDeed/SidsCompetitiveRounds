@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import re
 from pathlib import Path
 
 import pytest
@@ -327,8 +328,13 @@ def test_the_capability_field_is_spelled_the_way_the_client_reads_it():
     the first build of this lane got wrong.
 
     The server advertised `involuntary_leave_cause`; the client asks for
-    `ffa_involuntary_cause` (plugin/TransportExit.cs, `CapabilityField`, read
-    into ExtractJsonBool at the startup version check). Both lanes were green
+    `ffa_involuntary_cause` — client lane, branch `claude/bug392-client`,
+    `plugin/TransportExit.cs:95`, `CapabilityField`, read into ExtractJsonBool
+    at the startup version check (`plugin/ApiClient.cs:1864` on that same
+    branch). The qualification matters: this tree's own `plugin/` folder is
+    the PRODUCTION client and has no `TransportExit.cs`, so an unqualified
+    path here would point a reader at a file that does not exist where they
+    would look for it. Both lanes were green
     — each asserted its OWN key — and the gate could never open, so every
     column, writer and renderer this bug added was live and completely inert.
     The only thing that can catch that is a test that states the literal the
@@ -455,13 +461,98 @@ def test_the_writer_detector_can_fail():
     assert not (isinstance(binds[0], ast.Name) and binds[0].id == "_pcause")
 
 
-# ── (6) the label stays a label (lens find 5) ────────────────────────────
+# ── (6) the label stays a label (lens find 5; r1 rows B5 / L5 / LOW-1) ───
 
 _LEI = "left_early_involuntary"
 
 
+def _counted_sources() -> dict[str, str]:
+    """Every source the qualifier may appear in: the whole api package, plus
+    the bot.
+
+    The first form of this tripwire read `main.py` and nothing else. Both of
+    the production renderer branches live in `discord_bot.py`, so the guard
+    was blind to the two branches that actually exist and to any third one
+    added beside them: it watched one file while claiming a property of the
+    system, which is a check that cannot fail in the direction it is quoted
+    for (#342). A flag names a line, the defect is a class (#432) — so the
+    class here is "every source that can name this column", and the set is
+    DISCOVERED rather than listed, so a new api module that starts naming it
+    is counted the moment it exists rather than the moment someone remembers
+    to add it here.
+    """
+    backend = MAIN_PATH.parents[1]
+    paths = sorted((backend / "api").rglob("*.py")) + [backend / "discord_bot.py"]
+    sources: dict[str, str] = {}
+    for path in paths:
+        assert path.is_file(), f"counted source {path.name} is missing"
+        sources[path.relative_to(backend).as_posix()] = path.read_text(encoding="utf-8")
+    return sources
+
+
+def _mentions_qualifier(node: ast.AST) -> bool:
+    """The column named anywhere inside `node` — as a dict key or SQL string,
+    as an attribute, or as a bare name."""
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Constant) and isinstance(sub.value, str) and _LEI in sub.value:
+            return True
+        if isinstance(sub, ast.Attribute) and sub.attr == _LEI:
+            return True
+        if isinstance(sub, ast.Name) and sub.id == _LEI:
+            return True
+    return False
+
+
+def _is_rendered_text(node: ast.AST) -> bool:
+    """True when this branch ARM can only ever become displayed text: a string
+    literal, an f-string, or a concatenation of those. An arm that is anything
+    else is a value the program goes on to USE."""
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, str)
+    if isinstance(node, ast.JoinedStr):
+        return True
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _is_rendered_text(node.left) and _is_rendered_text(node.right)
+    return False
+
+
+def _qualifier_sites(sources: dict[str, str]) -> dict:
+    """Classify every mention of the qualifier in `sources`.
+
+    `lines`     — the census: one row per source line that names the column.
+    `decisions` — `if` STATEMENTS whose test reads it, i.e. control flow
+                  branching on a client-attested cause.
+    `ternaries` — conditional EXPRESSIONS whose test reads it, each carrying
+                  whether BOTH arms can only be displayed text.
+
+    The real test and its negative control both go through this one function,
+    so a control that passes proves the detector the test uses can see the
+    thing it is supposed to see — not that a second, hand-written copy of the
+    filter can.
+    """
+    census: list[tuple[str, int, str]] = []
+    decisions: list[tuple[str, int]] = []
+    ternaries: list[tuple[str, int, bool]] = []
+    for path, src in sorted(sources.items()):
+        for lineno, line in enumerate(src.splitlines(), 1):
+            if _LEI in line:
+                census.append((path, lineno, line.strip()))
+        try:
+            tree = ast.parse(src)
+        except SyntaxError as exc:                       # pragma: no cover
+            raise AssertionError(f"{path} does not parse: {exc}") from exc
+        for node in ast.walk(tree):
+            if isinstance(node, ast.If) and _mentions_qualifier(node.test):
+                decisions.append((path, node.lineno))
+            elif isinstance(node, ast.IfExp) and _mentions_qualifier(node.test):
+                ternaries.append((path, node.lineno,
+                                  _is_rendered_text(node.body)
+                                  and _is_rendered_text(node.orelse)))
+    return {"lines": census, "decisions": decisions, "ternaries": ternaries}
+
+
 def test_the_qualifier_is_read_only_by_renderers():
-    """The enumeration this fix rests on, made into a tripwire.
+    """The enumeration this fix rests on, made into a repository-wide tripwire.
 
     A false cause gains a player nothing on the integrity axis today: the
     column has ONE writer and its readers are projections and renders, so
@@ -471,25 +562,339 @@ def test_the_qualifier_is_read_only_by_renderers():
     keys a penalty, a leave-rate or a readmission decision off this column,
     the enumeration stops being true and the cost stops being reputational.
 
-    So the sites are counted. A fifth one in main.py reddens this test and
-    forces that judgement to be made deliberately rather than inherited.
+    So the sites are counted across every source that can name the column:
+    six, four in the api and two in the bot. A seventh anywhere, an `if`
+    statement anywhere, an api-side branch of any shape, or a bot branch
+    whose arms are not both display text, reddens this test and forces that
+    judgement to be made deliberately rather than inherited.
+
+    The two bot sites are branches ON PURPOSE and are the only ones allowed to
+    be: they choose between two rendered words for a departure that is
+    reported either way. What distinguishes them from the shape this test
+    exists to catch is that both arms are literal text — nothing downstream
+    can tell which arm ran except a reader.
     """
-    lines = [(i + 1, ln.strip()) for i, ln in enumerate(MAIN_SRC.splitlines())
-             if _LEI in ln]
-    assert len(lines) == 4, (
-        "the recorded sites are: one SELECT projection and one render dict for "
-        "the match-by-code route, the INSERT column list that writes it, and one "
-        "render dict for the history route. Found:\n  "
-        + "\n  ".join(f"main.py:{n}: {t}" for n, t in lines))
-    # None of them is a branch: the column is projected and serialised, never
-    # tested. `if` here would mean something DECIDES on a client-attested cause.
-    for n, t in lines:
-        assert not t.startswith("if ") and " if " not in t, (
-            f"main.py:{n} branches on {_LEI}: {t}")
+    sources = _counted_sources()
+    # The discovery itself first: a census over an empty or truncated file set
+    # is green for the wrong reason (#342, #304).
+    assert "api/main.py" in sources and "discord_bot.py" in sources, sorted(sources)
+    assert len(sources) >= 10, f"only {len(sources)} sources discovered: {sorted(sources)}"
+
+    found = _qualifier_sites(sources)
+    per_file: dict[str, int] = {}
+    for path, _lineno, _text in found["lines"]:
+        per_file[path] = per_file.get(path, 0) + 1
+    assert per_file == {"api/main.py": 4, "discord_bot.py": 2}, (
+        "the recorded sites are: in the api, one SELECT projection and one "
+        "render dict for the match-by-code route, the INSERT column list that "
+        "writes it, and one render dict for the history route; in the bot, the "
+        "two display ternaries. Found:\n  "
+        + "\n  ".join(f"{p}:{n}: {t}" for p, n, t in found["lines"]))
+
+    # No `if` STATEMENT anywhere: that is the shape where something DECIDES on
+    # a client-attested cause rather than printing a word for it.
+    assert found["decisions"] == [], (
+        "control flow branches on the qualifier at "
+        + ", ".join(f"{p}:{n}" for p, n in found["decisions"]))
+
+    # The api tests it in no shape at all: it projects and serialises it.
+    api_branches = [(p, n) for p, n, _ in found["ternaries"] if p.startswith("api/")]
+    assert api_branches == [], (
+        "the api branches on the qualifier at "
+        + ", ".join(f"{p}:{n}" for p, n in api_branches))
+
+    bot_branches = [t for t in found["ternaries"] if t[0] == "discord_bot.py"]
+    assert len(bot_branches) == 2, (
+        "the bot's recorded branches are the /game embed head and the series-log "
+        "line. Found: " + ", ".join(f"{p}:{n}" for p, n, _ in bot_branches))
+    for path, lineno, text_only in bot_branches:
+        assert text_only, (
+            f"{path}:{lineno} branches on the qualifier into something other "
+            "than displayed text — the label has started deciding")
 
 
 def test_the_site_counter_can_fail():
-    """The negative control: the counter sees a branch when there is one."""
-    probe = 'if row["left_early_involuntary"]:\n'
-    hits = [ln.strip() for ln in probe.splitlines() if _LEI in ln]
-    assert len(hits) == 1 and hits[0].startswith("if ")
+    """The negative control, driven through the SAME classifier the test above
+    uses, on synthetic sources that plant each shape it must catch.
+
+    The control this replaces re-implemented the filter inline over a one-line
+    probe, so it proved that a hand-written copy of the scan could see an `if`
+    — not that the shipped scan could see a renderer branch added outside the
+    file it happened to read.
+    """
+    synthetic = {
+        # four api mentions, none of them a branch: the shape that must pass
+        "api/main.py": (
+            'q = "SELECT fmp.left_early_involuntary FROM t"\n'
+            'a = {"left_early_involuntary": bool(r["left_early_involuntary"])}\n'
+            'i = "INSERT INTO t (left_early_involuntary) VALUES (:lei)"\n'
+        ),
+        # a THIRD bot ternary beside the two recorded ones
+        "discord_bot.py": (
+            'a = " *(disconnected)*" if p.get("left_early_involuntary") else " *(left)*"\n'
+            'b = " *(disconnected)*" if p.get("left_early_involuntary") else " *(left)*"\n'
+            'c = " *(disconnected)*" if p.get("left_early_involuntary") else " *(left)*"\n'
+        ),
+        # a renderer branch in an api module that is NOT main.py — the site the
+        # main.py-only counter could never have seen
+        "api/reports.py": (
+            'def render(row):\n'
+            '    return "gone" if row["left_early_involuntary"] else "left"\n'
+        ),
+        # and control flow deciding on the cause, in a third file again
+        "api/penalties.py": (
+            'def apply(row):\n'
+            '    if row["left_early_involuntary"]:\n'
+            '        return refund(row)\n'
+            '    return None\n'
+        ),
+    }
+    found = _qualifier_sites(synthetic)
+
+    per_file: dict[str, int] = {}
+    for path, _lineno, _text in found["lines"]:
+        per_file[path] = per_file.get(path, 0) + 1
+    assert per_file == {"api/main.py": 3, "api/penalties.py": 1,
+                        "api/reports.py": 1, "discord_bot.py": 3}, per_file
+
+    assert found["decisions"] == [("api/penalties.py", 2)], found["decisions"]
+    assert len([t for t in found["ternaries"] if t[0] == "discord_bot.py"]) == 3
+    assert [(p, n) for p, n, _ in found["ternaries"] if p.startswith("api/")] \
+        == [("api/reports.py", 2)]
+
+    # and an arm that is not displayed text is reported as such
+    valued = _qualifier_sites(
+        {"discord_bot.py": 'v = penalty(p) if p.get("left_early_involuntary") else 0\n'})
+    assert valued["ternaries"] and valued["ternaries"][0][2] is False
+
+
+# ── (7) the wire name's traceability (r1 row LOW-3) ──────────────────────
+
+REPO = MAIN_PATH.parents[2]
+SELF_SRC = Path(__file__).read_text(encoding="utf-8")
+_CLIENT_LANE_BRANCH = "claude/bug392-client"
+
+
+def _unqualified_client_source_mentions(src: str, window: int = 12) -> list[int]:
+    """Line numbers where the client's constant file is named WITHOUT the lane
+    it is authoritative on being named within `window` lines either side."""
+    lines = src.splitlines()
+    out = []
+    for i, line in enumerate(lines):
+        if "TransportExit.cs" not in line:
+            continue
+        near = "\n".join(lines[max(0, i - window):i + window + 1])
+        if _CLIENT_LANE_BRANCH not in near:
+            out.append(i + 1)
+    return out
+
+
+def test_the_wire_name_note_points_at_the_tree_that_owns_the_constant():
+    """A comment that names a file the reader cannot find is not traceable.
+
+    `CapabilityField` is authoritative on ONE tree — the client lane, branch
+    `claude/bug392-client`. This branch's own `plugin/` folder is the
+    production client and has no `TransportExit.cs` at all, so an unqualified
+    `plugin/TransportExit.cs` resolved against this checkout finds nothing,
+    and the next person to touch the wire name re-derives it from whatever the
+    shipped client does. That is the route back to the defect this lane
+    already had once: a spelling chosen on one side and read on neither.
+
+    The second assertion is the merge tripwire. When the lanes meet, that file
+    APPEARS on this tree and this test reddens — which is the moment the
+    hardcoded literal pin (against `claude/bug392-client`'s
+    `plugin/TransportExit.cs:95`) is supposed to become a cross-file read of
+    the constant, the transitional alias is supposed to go, and this note is
+    supposed to lose its "not in this tree" half. The owed action is therefore
+    enforced rather than remembered.
+    """
+    assert _unqualified_client_source_mentions(MAIN_SRC) == [], (
+        "main.py names TransportExit.cs without naming the lane it lives on, at "
+        f"lines {_unqualified_client_source_mentions(MAIN_SRC)}")
+    assert _unqualified_client_source_mentions(SELF_SRC) == [], (
+        "this file names TransportExit.cs without naming the lane it lives on, at "
+        f"lines {_unqualified_client_source_mentions(SELF_SRC)}")
+
+    client_constant = REPO / "plugin" / "TransportExit.cs"
+    assert not client_constant.exists(), (
+        "plugin/TransportExit.cs now exists on this tree — the two lanes have "
+        "met. Replace the hardcoded literal in "
+        "test_the_capability_field_is_spelled_the_way_the_client_reads_it with a "
+        "cross-file read of CapabilityField from that file, drop the "
+        "transitional alias, and delete the 'not in this tree' half of the note "
+        "at the capability constants in main.py.")
+
+
+def test_the_traceability_detector_can_fail():
+    """The negative control: an unqualified mention is reported."""
+    # This comment names the lane `claude/bug392-client`, which is what
+    # qualifies the probe strings below for the file-level scan above — they
+    # have to contain the bare file name to exercise the detector at all.
+    bad = "# transcribed from plugin/TransportExit.cs, `CapabilityField`\n"
+    assert _unqualified_client_source_mentions(bad) == [1]
+    good = f"# on branch {_CLIENT_LANE_BRANCH}:\n# plugin/TransportExit.cs:95\n"
+    assert _unqualified_client_source_mentions(good) == []
+
+
+# ── (8) the migration is named by the number it actually has (row LOW-4) ─
+
+_MIGRATION_FILES = sorted((MAIN_PATH.parents[1] / "sql").glob("*_ffa_departure_cause.sql"))
+_THREE_DIGIT = re.compile(r"(?<!#)\b(3\d\d)\b")
+
+
+def _stale_migration_numbers(src: str, current: str) -> list[tuple[int, str]]:
+    """Every bare 3xx number in `src` that is not the migration's own.
+
+    `#` -prefixed numbers are learning references and are skipped: `#340` is a
+    lesson, `324` is a file on disk. The two live in the same prose, which is
+    why the distinction is made here rather than by eye.
+    """
+    out = []
+    for lineno, line in enumerate(src.splitlines(), 1):
+        for hit in _THREE_DIGIT.findall(line):
+            if hit != current:
+                out.append((lineno, hit))
+    return out
+
+
+def test_no_stale_migration_number_survives_in_this_lane_s_files():
+    """The renumber from 326 to 324 left the pg harness's docstring saying it
+    runs 326 — so a failure triage would have gone and read a file belonging to
+    a different lane. The number is DERIVED from the file on disk, so a second
+    renumber cannot strand this check the way it stranded the docstring.
+    """
+    assert len(_MIGRATION_FILES) == 1, (
+        f"expected exactly one departure-cause migration, found {_MIGRATION_FILES}")
+    current = _MIGRATION_FILES[0].name.split("_", 1)[0]
+    assert current.isdigit() and len(current) == 3, _MIGRATION_FILES[0].name
+
+    backend = MAIN_PATH.parents[1]
+    scanned = {
+        "sql/" + _MIGRATION_FILES[0].name: _MIGRATION_FILES[0],
+        "tests/test_ffa_departure_cause_pg.py": backend / "tests" / "test_ffa_departure_cause_pg.py",
+        "tests/fixtures/bug392_schema.sql": backend / "tests" / "fixtures" / "bug392_schema.sql",
+    }
+    # This file is deliberately NOT scanned: it is the scanner's own home and
+    # carries a planted stale number in the control below, which would make
+    # the check flag itself forever.
+    stale = {}
+    for label, path in scanned.items():
+        assert path.is_file(), f"{label} is missing — this scan would prove nothing"
+        hits = _stale_migration_numbers(path.read_text(encoding="utf-8"), current)
+        if hits:
+            stale[label] = hits
+    assert stale == {}, (
+        f"these files name a 3xx migration that is not {current}: {stale}. A bare "
+        "3xx number in this lane's files means this migration; a learning "
+        "reference is written with a leading '#'.")
+
+
+def test_the_migration_number_detector_can_fail():
+    """The negative control: a stale number is seen, a learning ref is not."""
+    assert _stale_migration_numbers("Run 326 the way psql -f would", "324") == [(1, "326")]
+    assert _stale_migration_numbers("honouring the file's own BEGIN (#340)", "324") == []
+    assert _stale_migration_numbers("applies 324 statement by statement", "324") == []
+
+
+# ── (9) the residual's precondition, pinned (r1 row L6) ──────────────────
+
+def _sql_literals_in(fn_name: str, *must_contain: str) -> list[str]:
+    return [n.value for n in ast.walk(_function(fn_name))
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+            and all(m in n.value for m in must_contain)]
+
+
+_TIME_OR_GAME_BOUND = ("started_at", "ended_at", "game_number", "game_no",
+                       "NOW()", "CURRENT_TIMESTAMP", "clock_timestamp")
+
+
+def _cause_object_spans(statement: str) -> list[str]:
+    """The `departure_causes = CASE … END` span of a writer, whitespace
+    normalised — the only part of a writer that decides what a stored cause
+    carries."""
+    flat = " ".join(statement.split())
+    return [m.group(0) for m in
+            re.finditer(r"departure_causes = CASE .*?END", flat)]
+
+
+def test_the_cause_carries_no_time_and_the_read_applies_no_game_bound():
+    """The scope residual, pinned as the two facts it rests on.
+
+    The cause is recorded per LOBBY — per sitting — while the label it
+    produces is stamped per MATCH ROW, and this read applies no time and no
+    game bound. It cannot: a match on this tree carries only its lobby, and
+    the stored cause is a bare string with no attestation time, so there is
+    nothing on either side to bound against. Accepted as a residual rather
+    than closed, because closing it needs a per-match game number that another
+    lane adds and this tree does not have.
+
+    This test is the residual's tripwire, not its fix. It reddens when EITHER
+    fact stops being true — when the read gains a time or game predicate, or
+    when the stored value gains a timestamp — and at that moment the residual
+    has to be closed properly and struck from the notes instead of being
+    inherited by whoever reads them next.
+
+    Integrity bar, unchanged either way: a cause taken from the wrong game of
+    the same sitting mislabels the same seat's own row with one public word.
+    It cannot move a placement, a rating, gold or XP, and it cannot reach
+    another player's row at all — the set is keyed by player id and the label
+    is gated on that row's own `left_early`.
+    """
+    reads = _sql_literals_in("submit_ffa_match", "jsonb_each_text")
+    assert len(reads) == 1, f"expected one departure-cause read, found {len(reads)}"
+    flat_read = " ".join(reads[0].split())
+    present = [t for t in _TIME_OR_GAME_BOUND if t in flat_read]
+    assert present == [], (
+        f"the cause read now names {present} — it has gained a bound, so the "
+        "lobby/match scope residual recorded for this lane is closed and must "
+        "be struck from the notes rather than left standing.")
+
+    writers = _sql_literals_in("ffa_queue_leave", "UPDATE ffa_lobbies", "departure_causes")
+    assert len(writers) == 3, f"expected the three departure writers, found {len(writers)}"
+    for writer in writers:
+        spans = _cause_object_spans(writer)
+        assert len(spans) == 1, f"expected one departure_causes assignment, found {len(spans)}"
+        span = spans[0]
+        assert re.search(r"jsonb_build_object\((?:CAST\(:pidt AS text\)|p\.id::text), "
+                         r"CAST\(:cause AS text\)\)", span), (
+            f"the stored cause is no longer the bare narrowed string: {span}")
+        carried = [t for t in _TIME_OR_GAME_BOUND if t in span]
+        assert carried == [], (
+            f"the stored cause now carries {carried} — the map's value shape has "
+            "changed, so the read can be bounded and the residual must be closed.")
+
+
+def test_the_residual_detector_can_fail():
+    """The negative control: a bound and a timestamped value are both seen."""
+    bounded = " ".join("""
+        SELECT key, value FROM jsonb_each_text(x) WHERE m.game_number = :g
+    """.split())
+    assert [t for t in _TIME_OR_GAME_BOUND if t in bounded] == ["game_number"]
+    stamped = _cause_object_spans(
+        "SET departure_causes = CASE WHEN 1=1 THEN d ELSE "
+        "jsonb_build_object(CAST(:pidt AS text), NOW()::text) END")
+    assert len(stamped) == 1 and "NOW()" in stamped[0]
+    assert not re.search(r"jsonb_build_object\(CAST\(:pidt AS text\), "
+                         r"CAST\(:cause AS text\)\)", stamped[0])
+
+
+# ── (10) the alias is transitional, and says so (r1 row B13 / LOW-5) ─────
+
+def test_the_alias_states_the_condition_that_removes_it():
+    """A second wire key for one boolean is a deviation from the contract this
+    lane is supposed to leave behind, and a deviation with no removal
+    condition is how a transitional thing becomes permanent.
+
+    The condition is stated at the constant itself, not only in the notes,
+    because the notes are not on the deploy path and the constant is.
+    """
+    src = MAIN_SRC.splitlines()
+    idx = next(i for i, ln in enumerate(src)
+               if ln.startswith("_INVOLUNTARY_CAUSE_CAPABILITY_ALIAS"))
+    note = "\n".join(src[max(0, idx - 14):idx])
+    assert "transitional" in note.lower(), note
+    # The whole phrase, not the word "merged": the paragraph above already
+    # contains "unmerged", so a substring check on it would be a check that
+    # cannot fail (#342).
+    assert "Drop the alias once both lanes are merged and the client literal is read off" in note, note
+    assert main._INVOLUNTARY_CAUSE_CAPABILITY_ALIAS != main._INVOLUNTARY_CAUSE_CAPABILITY_FIELD

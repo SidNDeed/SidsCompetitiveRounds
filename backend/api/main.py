@@ -951,8 +951,24 @@ _INVOLUNTARY_EXIT_CAUSES = frozenset({"in_room_timeout"})
 # consumes.
 #
 # So the canonical name is now the one the only consumer actually reads,
-# transcribed byte-for-byte from the client's own constant
-# (plugin/TransportExit.cs, `CapabilityField`) rather than chosen here.
+# transcribed byte-for-byte from the client's own constant rather than chosen
+# here. That constant is AUTHORITATIVE in exactly one place — the client lane,
+# branch `claude/bug392-client`, `plugin/TransportExit.cs:95`,
+# `internal const string CapabilityField = "ffa_involuntary_cause"` — and that
+# tree is not this one. This branch's own `plugin/` folder is the PRODUCTION
+# client and carries no `TransportExit.cs` at all, so a bare
+# `plugin/TransportExit.cs` resolved against this checkout finds nothing and
+# would send the next reader to re-derive the name from whatever the shipped
+# client happens to do, which is how the first build of this lane picked a
+# spelling no consumer reads. The server-side pin of the literal is
+# `backend/tests/test_ffa_leave_cause.py`,
+# `test_the_capability_field_is_spelled_the_way_the_client_reads_it`; a rename
+# on either side has to get past that assertion. Once both lanes sit on one
+# tree the pin becomes a cross-file read of the constant itself — the owed
+# action recorded in this lane's notes — and this note loses its "not in this
+# tree" half. That hand-over is not left to memory:
+# test_the_wire_name_note_points_at_the_tree_that_owns_the_constant reddens as
+# soon as `claude/bug392-client`'s `plugin/TransportExit.cs` appears here.
 _INVOLUNTARY_CAUSE_CAPABILITY_FIELD = "ffa_involuntary_cause"
 # The first spelling, kept as a transitional ALIAS carrying the identical
 # value. Two keys for one boolean is not a contract we want to keep, but while
@@ -46830,16 +46846,24 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # game index, only its lobby. (`ffa_matches` does carry `started_at` and
     # `ended_at`, so it is the CAUSE side that lacks the timestamp — a time
     # bound would mean changing the map's value shape, not adding a predicate
-    # here.) So in a multi-game
-    # sitting the label reads "the seat attested an involuntary departure from
-    # this sitting", not "...from this game". Two consequences, both display
+    # here.) So in a multi-game sitting the label reads "the seat attested an
+    # involuntary departure from this sitting", not "...from this game".
+    # Two consequences, both display
     # and both accepted here rather than left implied: a report for an earlier
     # game submitted late — the handler tolerates a late report by design —
     # takes a cause attested after that game ended, and a frozen-roster row
     # carried into a later game inherits the same cause. Bounding it needs a
     # per-match game number, which another lane is adding; when that column
-    # exists this read gains one predicate. Recorded in the notes as a
-    # residual so the next reader does not have to re-derive it.
+    # exists this read gains one predicate. Recorded in the notes as an
+    # ACCEPTED residual — display-only, and it cannot move a placement, a
+    # rating, gold or XP, nor reach another player's row, because the set is
+    # keyed by player id and the label is gated on that row's own left_early —
+    # so the next reader does not have to re-derive it. It is pinned as well
+    # as written down: tests/test_ffa_leave_cause.py's
+    # test_the_cause_carries_no_time_and_the_read_applies_no_game_bound
+    # reddens the moment this read gains a bound or the stored cause gains a
+    # timestamp, which is the moment the residual has to be closed properly
+    # instead of inherited.
     #
     # `jsonb_each_text` over a scalar subquery, NOT a LATERAL join: asyncpg
     # does not support LATERAL (CLAUDE.md hard rule), and text pairs keep the

@@ -143,11 +143,20 @@ def _statements(sql: str) -> list[str]:
 
 
 async def _apply_migration_raw() -> list:
-    """Run 326 the way `psql -f` would: statement by statement, honouring the
+    """Run the departure-cause migration — 324, the file `MIGRATION_SQL`
+    points at — the way `psql -f` would: statement by statement, honouring the
     file's OWN BEGIN/COMMIT (#340 — psql does not wrap a file in a
     transaction, which is why the file carries its own). Returns every row the
     file's SELECTs produced, so the dry-run half is proved to ANSWER rather
     than merely not to error.
+
+    This docstring named a DIFFERENT migration until round 2: the renumber
+    (§3.4 of the notes) moved the file and left the prose behind, so a triage
+    of a failure here would have gone and read the file a different lane owns
+    under the old number. Named by role first and number second for that
+    reason, and the number is no longer prose at all — it is asserted against
+    the file on disk by
+    `test_no_stale_migration_number_survives_in_this_lane_s_files`.
     """
     conn = await asyncpg.connect(RAW_DSN)
     try:

@@ -1,7 +1,8 @@
 -- Minimal FFA schema for the bug #392 DSN-gated tests.
 --
--- Transcribed from the PRIMARY's own catalogue (`ssh ccdeploy@<primary>
--- 'sql-readonly:\d ffa_lobbies'` / `\d ffa_match_players`, read 2026-09-20),
+-- Transcribed from the primary backend's own catalogue, read 2026-09-20
+-- through the deploy account's read-only SQL verb (a table description of
+-- ffa_lobbies and of ffa_match_players),
 -- restricted to the tables and columns migration 324 and the changed
 -- statements actually touch. Column TYPES and NOT NULL/DEFAULT are copied
 -- exactly, because the whole point of running against a real PostgreSQL is
