@@ -14029,17 +14029,34 @@ namespace CompetitiveRounds
         /// caller, because `total_points >= 2` is half of the endpoint's
         /// lead-forfeit condition: a zero-total report cannot take that branch, so
         /// the only write it can reach is the one recording
-        /// `status='dc_incomplete'`. That is what stops arrival order deciding the
-        /// outcome — the prompt report is the only one of the two that can complete
-        /// a series with ratings and gold. WHO may send one, and on what terminal
-        /// signal, is DcReportSync's rule, not this method's.</para>
+        /// `status='dc_incomplete'`. WHO may send one, and on what terminal signal,
+        /// is DcReportSync's rule, not this method's.</para>
+        ///
+        /// <para>WHAT THE ZERO FORM DOES AND DOES NOT BUY, stated exactly, because
+        /// the previous wording here overclaimed it. It buys this: a fallback can
+        /// never BE the report that rates a series — under every ordering, the only
+        /// row state it can reach is `dc_incomplete`. It does NOT buy immunity from
+        /// arrival order in general: a fallback that reaches the lock FIRST writes
+        /// `dc_incomplete`, and a real-totals report arriving behind it is answered
+        /// `{"ignored": true}`, so a rated lead-forfeit can still be LOST to a
+        /// fallback that ran beside it. That is why the form is only half the rule
+        /// and DcReportSync's terminal-signal table is the other half: the form
+        /// bounds the damage, the signal table is what keeps the two apart. The one
+        /// case the client half cannot close — a SECOND disconnect in the same
+        /// series, whose own prompt report is a different seat's transaction the
+        /// watch never armed on — is named in DcReportSync's note and closed by the
+        /// server-lane rule recorded with this round, not by this comment.</para>
         ///
         /// <para>OUTCOME PUBLICATION. A prompt report announces its own progress on
         /// the `cr_dcr` player property — `send` before the request exists, then
-        /// `ok` on any server answer or `no` when every attempt failed — because
-        /// the seat behind it decides what to do from that and from nothing else.
-        /// A fallback publishes nothing: nobody is watching it, and a second writer
-        /// on that property would make the value ambiguous.</para>
+        /// `ok` on any server answer, `no` when every attempt was refused or nothing
+        /// ever left this process, and `unk` when an attempt went unanswered and a
+        /// handler may still be running — because the seat behind it decides what to
+        /// do from that and from nothing else. Every exit of this method that
+        /// abandons a prompt report announces `no` on the way out, so "said nothing
+        /// at all" stops being a state the watcher has to guess about. A fallback
+        /// publishes nothing: nobody is watching it, and a second writer on that
+        /// property would make the value ambiguous.</para>
         ///
         /// <para><paramref name="observedRoom"/> is the room the disconnect was
         /// SEEN in, passed in rather than read here: a fallback send happens after
@@ -14057,9 +14074,38 @@ namespace CompetitiveRounds
             // carried real totals could select the rated completion, which is the
             // one property the watch behind it is built on.
             if (fallback) { t1PointsTotal = 0; t2PointsTotal = 0; }
-            // §2c identity fence: the broadcast service account never reports.
-            if (BroadcastMode.FenceBlocksFighterPath("report-2v2-dc")) return;
-            if (string.IsNullOrEmpty(seriesId) || string.IsNullOrEmpty(reporterSteamId) || string.IsNullOrEmpty(dcPlayerSteamId)) return;
+            // EVERY EXIT OF THE PROMPT PATH ANNOUNCES ITSELF. The seat behind this
+            // one decides from `cr_dcr` and from nothing else, so a prompt report
+            // that returns here in silence leaves that seat waiting on a
+            // transaction that will never exist — a state the protocol note used to
+            // leave unenumerated. Both refusals below are LOCAL declines: nothing
+            // was composed, nothing was sent, no handler exists anywhere, which is
+            // exactly the `no` case (#430 — the value names what the server did, and
+            // "we never tried" belongs with "the server refused", not with "we do
+            // not know"). The series tag is the announcement's whole meaning, so a
+            // missing series id is the one exit that cannot speak.
+            if (BroadcastMode.FenceBlocksFighterPath("report-2v2-dc"))
+            {
+                if (!fallback && !string.IsNullOrEmpty(seriesId))
+                {
+                    Plugin.Log.LogInfo("[2v2-DC] prompt report declined by the identity fence — "
+                        + "publishing " + DcReportSync.OutcomeProp + "=" + DcReportSync.OutcomeFailed
+                        + " so the watching seat is not left waiting on a report that will never be sent");
+                    try { DcReportSync.PublishOutcome(seriesId, DcReportSync.OutcomeFailed); } catch { }
+                }
+                return;
+            }
+            if (string.IsNullOrEmpty(seriesId) || string.IsNullOrEmpty(reporterSteamId) || string.IsNullOrEmpty(dcPlayerSteamId))
+            {
+                if (!fallback && !string.IsNullOrEmpty(seriesId))
+                {
+                    Plugin.Log.LogWarning("[2v2-DC] prompt report abandoned — a required field was empty; "
+                        + "publishing " + DcReportSync.OutcomeProp + "=" + DcReportSync.OutcomeFailed
+                        + " so the watching seat is not left waiting");
+                    try { DcReportSync.PublishOutcome(seriesId, DcReportSync.OutcomeFailed); } catch { }
+                }
+                return;
+            }
             string sig = ComputeHmacHex($"{reporterSteamId}:{seriesId}:{dcPlayerSteamId}:dc");
             // Bug 245 companion: name the room this DC was OBSERVED in (raw,
             // unsuffixed). The server ignores a report whose room no longer
@@ -14106,56 +14152,76 @@ namespace CompetitiveRounds
         /// watches for a terminal outcome instead.</summary>
         private static IEnumerator SendTeamSeriesDcReport(string url, string seriesId, bool fallback)
         {
-            yield return Plugin.Instance.StartCoroutine(PostRequestWithRetry(url, "", (ok, resp) =>
+            yield return Plugin.Instance.StartCoroutine(PostRequestWithRetryAnswered(url, "", (ok, resp, answered) =>
             {
                 if (ok) Plugin.Log.LogInfo($"[2v2-DC] report accepted: {resp}");
-                else Plugin.Log.LogWarning($"[2v2-DC] report failed after every retry: {resp}");
+                else Plugin.Log.LogWarning($"[2v2-DC] report failed after every retry: {resp}"
+                    + $" (every attempt answered={answered})");
                 if (fallback) return;
-                // ANY server answer is terminal for the seat behind us, including
-                // `{"ignored": true}`: the series is already settled, or the room
-                // fence refused this report — and a fallback carrying the same
-                // observed room would be refused identically. `no` is the other
-                // terminal answer: every attempt failed, nothing landed, and a
-                // report from the other seat is the only thing that can close the
-                // series.
+                // THREE outcomes, not two, because failure is two different facts.
+                //
+                //  ok        ANY server answer, including `{"ignored": true}`: the
+                //            series is already settled, or the room fence refused
+                //            this report — and a fallback carrying the same observed
+                //            room would be refused identically.
+                //  no        every attempt FAILED and every one of them was
+                //            answered, or nothing ever left this process. Nothing
+                //            landed and nothing is still running: the other seat is
+                //            the only thing that can close the series.
+                //  unk       at least one attempt was sent and got no answer. Our
+                //            `request.timeout` abandoned the connection; the handler
+                //            on the other end did not stop, and it can still commit.
+                //            NOT terminal — announcing `no` here is what let a
+                //            fallback be posted beside a transaction that was still
+                //            running, and arrival order then chose between the rated
+                //            completion and dc_incomplete.
                 try
                 {
                     DcReportSync.PublishOutcome(
                         seriesId,
                         ok ? DcReportSync.OutcomeAnswered
-                           : DcReportSync.OutcomeFailed);
+                           : answered ? DcReportSync.OutcomeFailed
+                                      : DcReportSync.OutcomeUnknown);
                 }
                 catch { }
             }));
         }
 
-        /// <summary>GET /team/series/{id}/state, once, reporting the status and
-        /// whether the read succeeded at all. The DC fallback watch asks this
-        /// before posting anything, so "the read failed" and "the series is still
-        /// open" must be different answers: the first is an UNKNOWN server state
-        /// and nothing is posted on it.
-        ///
-        /// <para>Deliberately separate from <see cref="PollTeamSeriesState"/>: that
-        /// one drops every failure on the floor (no callback at all) and writes a
-        /// dozen cached fields for the assembly loop, which a post-disconnect probe
-        /// has no business republishing. Same endpoint, and the endpoint's own
-        /// assembly-cancel arm still applies — it needs fewer than four
-        /// spawn-confirms, past the deadline, with no live game, which is a series
-        /// that was never assembled rather than one a disconnect interrupted; a
-        /// cancel there is also a terminal state that releases the holds, and no
-        /// rating or economy effect exists on that path.</para></summary>
-        public static void ReadTeamSeriesStatusOnce(string seriesId, Action<bool, string> onDone)
-        {
-            if (string.IsNullOrEmpty(seriesId) || onDone == null) return;
-            string url = $"{baseUrl}/api/v1/team/series/{seriesId}/state";
-            Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
-            {
-                if (!ok || string.IsNullOrEmpty(resp)) { onDone(false, ""); return; }
-                string status = ExtractJsonString(resp, "status") ?? "";
-                if (status.Length == 0) { onDone(false, ""); return; }
-                onDone(true, status);
-            }));
-        }
+        // GET /team/series/{id}/state IS A WRITE. There is no read-only probe of a
+        // series' status on the deployed server, and the previous round added one
+        // on the assumption that a GET could not change anything. It can: the
+        // endpoint's FIRST arm (backend/api/main.py at 0cc7f75) UPDATEs
+        // status='canceled', invalidation_reason='assembly_timeout', runs
+        // _reconcile_team_series_bets and COMMITS, whenever the row reads
+        // status='active' with fewer than four spawn-confirms, more than
+        // _ASSEMBLY_DEADLINE_SECONDS (180) past room_issued_at, and no positive
+        // live-game evidence.
+        //
+        // None of those three is the rare state the arm was written for:
+        //  * fewer than four confirms is a NORMAL state of a healthy live series —
+        //    the server's own comments say so twice, naming a lost spawn-confirm
+        //    POST leaving a live game at 3/4 "forever"; and the bug-245 resume
+        //    relock writes spawn_confirmations=0 AND room_issued_at=NULL, after
+        //    which the endpoint's COALESCE falls back to created_at and the age is
+        //    already hours on the first read;
+        //  * the live-game veto reads an IN-PROCESS dict that every api restart
+        //    empties, which its own comment describes as "for minutes after every
+        //    deploy EVERY group looks idle".
+        //
+        // The one shipped caller, Plugin.PollAssemblyStateLoop, can never reach the
+        // arm — it starts 3s after a cr_ff join, runs ~22s and exits the moment the
+        // seat is out of the room — so the probe removed below would have been the
+        // deadline arm's first reachable caller, and it would have voided a
+        // partly-played series as never assembled: not dc_incomplete, so never in
+        // the admin panel, bets settled on the wrong reason, and a real report
+        // afterwards answered with {"ignored": true}.
+        // NOTHING REPLACES IT, because nothing needed it. The question it was asked
+        // ("is this series still open?") is answered by the report endpoint itself,
+        // atomically, under the FOR NO KEY UPDATE reread it already takes: a status
+        // outside (active, dc_paused) returns {"ignored": true} and writes nothing.
+        // A separate read before the post was strictly worse even without the
+        // cancel — two round trips deciding on state that can change between them.
+        // Do not reintroduce a client-side status probe against this endpoint.
 
         /// <summary>POST /team/series/{id}/spawn-confirm. Called from the auto-spawn
         /// coroutine when CreatePlayer override successfully creates the local
@@ -21144,8 +21210,35 @@ namespace CompetitiveRounds
         /// <summary>POST with automatic retry on failure (DNS hiccups, timeouts).</summary>
         private static IEnumerator PostRequestWithRetry(string url, string json, Action<bool, string> callback, int maxRetries = 3, float retryDelay = 2f)
         {
-            if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
-            if (SensitiveTransportBlocked(url, json, callback)) yield break;
+            return PostRequestWithRetryAnswered(
+                url, json, (ok, resp, answered) => callback(ok, resp), maxRetries, retryDelay);
+        }
+
+        /// <summary>The retried POST, with ONE extra fact for the callers that need
+        /// it: whether every attempt it made was ANSWERED.
+        ///
+        /// <para><c>request.timeout</c> is a CLIENT-side deadline. It abandons our
+        /// end of the connection; it does not reach the server, and it does not
+        /// cancel the handler, which goes on running and can commit long after we
+        /// have given up. So <c>ok == false</c> is two different facts wearing one
+        /// boolean (#430): "the server answered and refused", after which nothing of
+        /// ours is still running anywhere — and "we never heard back", after which a
+        /// transaction we cannot see may still be in flight and may still write. A
+        /// caller that ANNOUNCES its own failure to another seat has to tell those
+        /// apart, because the second one is not a terminal outcome of anything.</para>
+        ///
+        /// <para><paramref name="callback"/>'s third argument is false as soon as ONE
+        /// attempt is sent and receives no HTTP status (<c>responseCode</c> 0 —
+        /// timeout, DNS, reset). It stays true when nothing left this process at all
+        /// (a local decline), which is equally definite in the direction the callers
+        /// care about. It is accumulated ACROSS attempts on purpose: attempt 1 timing
+        /// out and attempt 3 receiving a 400 leaves attempt 1's handler running, so
+        /// the last attempt's status alone answers the wrong question.</para></summary>
+        private static IEnumerator PostRequestWithRetryAnswered(string url, string json, Action<bool, string, bool> callback, int maxRetries = 3, float retryDelay = 2f)
+        {
+            bool allAnswered = true;
+            if (ConsentBlocksRequest(url)) { callback(false, "no-consent", true); yield break; }
+            if (SensitiveTransportBlocked(url, json, (ok, resp) => callback(ok, resp, true))) yield break;
             for (int attempt = 1; attempt <= maxRetries; attempt++)
             {
                 NoteAttempt();
@@ -21164,25 +21257,31 @@ namespace CompetitiveRounds
 
                     yield return request.SendWebRequest();
 
-                    if (HandleVersionGate(request)) { callback(false, "outdated"); yield break; }
+                    // A version gate IS an answer: a response arrived and was read.
+                    if (HandleVersionGate(request)) { callback(false, "outdated", allAnswered); yield break; }
                     HandleSessionReject(request, _sentTok);
 
                     bool success = request.result == UnityWebRequest.Result.Success;
                     NoteResult(success, request.responseCode);
                     if (success)
                     {
-                        callback(true, request.downloadHandler.text);
+                        callback(true, request.downloadHandler.text, allAnswered);
                         yield break;
                     }
 
-                    Plugin.Log.LogWarning($"[HTTP] POST attempt {attempt}/{maxRetries} failed: {request.error}");
+                    // MEASURED, not inferred from the error text: UnityWebRequest
+                    // reports 0 here exactly when no HTTP status was received.
+                    if (request.responseCode <= 0) allAnswered = false;
+
+                    Plugin.Log.LogWarning($"[HTTP] POST attempt {attempt}/{maxRetries} failed: {request.error}"
+                        + $" (status={request.responseCode})");
 
                     if (attempt < maxRetries)
                         // Network recovery must keep moving while ROUNDS pauses
                         // or slows game time on result/menu screens.
                         yield return new WaitForSecondsRealtime(retryDelay);
                     else
-                        callback(false, FormatRequestError(request));
+                        callback(false, FormatRequestError(request), allAnswered);
                 }
             }
         }

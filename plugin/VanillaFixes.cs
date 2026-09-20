@@ -800,18 +800,32 @@ namespace CompetitiveRounds
                     return;
                 }
                 for (int i = 0; i < _order.Count; i++) players[i] = _order[i];
-                // The positive half, bounded per room. Every term is MEASURED:
-                // same-list is a reference comparison against the object the window
-                // opened over, same-count and same-members are the guard above, and
-                // postfix-stand-down is the companion postfix's own count inside
-                // this window. Without this line a bundle can show that the quorum
-                // was evaluated ([SAW-TARGET] apply) and still say nothing about
-                // whether a frame was ever masked or put back (#438).
+                // The positive half, bounded per room. Without this line a bundle can
+                // show that the quorum was evaluated ([SAW-TARGET] apply) and still
+                // say nothing about whether a frame was ever masked or put back
+                // (#438).
+                //
+                // EVERY TERM IS PRINTED FROM THE VARIABLE THAT DECIDED IT. Three of
+                // them used to be string literals reading "true", on the reasoning
+                // that the guard above had already proved them — which is a claim
+                // about this line's POSITION, not about anything it measures, and it
+                // made a witness line that could not come back false (#342, #302).
+                // The guard does still make all three true today, so the values are
+                // not expected to vary; that is not the point. The point is that if
+                // a later edit relaxes or reorders that guard — dropping the
+                // ReferenceEquals identity term is the one its own comment warns
+                // about — this line prints `same-list=false` and the capture shows
+                // the restore writing into a list the window never masked, instead
+                // of printing a reassuring constant over the top of it.
                 if (_maskedLines < 3)
                 {
                     _maskedLines++;
-                    Plugin.Log.LogInfo("[SAW-TARGET] masked/restored same-list=true same-count=true "
-                        + "same-members=true postfix-stand-down="
+                    bool sameMembers = sameSet;
+                    Plugin.Log.LogInfo("[SAW-TARGET] masked/restored same-list="
+                        + (sameList ? "true" : "false")
+                        + " same-count=" + (sameCount ? "true" : "false")
+                        + " same-members=" + (sameMembers ? "true" : "false")
+                        + " postfix-stand-down="
                         + _postfixStandDowns.ToString(CultureInfo.InvariantCulture)
                         + " (roster=" + _order.Count.ToString(CultureInfo.InvariantCulture)
                         + ", " + _maskedLines.ToString(CultureInfo.InvariantCulture)
@@ -3153,12 +3167,17 @@ namespace CompetitiveRounds
 
                 // #287's actual invariant is "never merge MID-JOIN" (a merge
                 // landing after LoadBalancingClient snapshots enterRoomParams
-                // but before room entry is silently undelivered). PoisonSync
-                // stages at Awake where Disconnected/PeerCreated suffices;
-                // cr_grow2 stages AFTER the compat verdict (see above), by
-                // which time ROUNDS may already sit idle on the master server
-                // — an equally safe state (no join in flight; the local merge
-                // rides the next join op's snapshot). Idle states only:
+                // but before room entry is silently undelivered). Every
+                // capability here stages AFTER the compat verdict, by which
+                // time ROUNDS may already sit idle on the master server or in
+                // the lobby — equally safe states (no join in flight; the
+                // local merge rides the next join op's snapshot), and all four
+                // capabilities now admit the same set. The narrower
+                // Disconnected/PeerCreated pair this note used to attribute to
+                // PoisonSync was correct only while PoisonSync staged at Awake
+                // alone; once its staging moved behind the verdict too, the
+                // pair excluded every state the verdict actually lands in and
+                // the capability stopped staging at all. Idle states only:
                 var st = PhotonNetwork.NetworkClientState;
                 if (!InIdleClientState())
                     return;   // connecting/joining: wait for a clean moment, do not merge now

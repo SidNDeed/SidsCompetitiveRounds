@@ -213,6 +213,7 @@ namespace CompetitiveRounds
         private static bool _staged;
         private static bool _stageFailedPermanently;
         private static bool _deferLogged;
+        private static int _stateWaitLines;
 
         /// <summary>Stage the capability property BEFORE ever joining a room, so it
         /// rides the join operation itself. Called from Plugin.Awake (after Harmony
@@ -223,12 +224,17 @@ namespace CompetitiveRounds
         ///  * REFUSE while in a room. An in-room write is a network op that arrives
         ///    on peers at some later time — exactly the eventual-consistency hole
         ///    this design exists to avoid.
-        ///  * Retry ONLY while Disconnected/PeerCreated. `!InRoom` is ALSO true
-        ///    mid-join, and a merge landing after LoadBalancingClient snapshots
+        ///  * Retry only from an IDLE client state. `!InRoom` is ALSO true mid-join,
+        ///    and a merge landing after LoadBalancingClient snapshots
         ///    enterRoomParamsCache but before room entry would be present locally
         ///    and NEVER delivered to peers — a silently false-capable client, which
-        ///    is the worst state this protocol can be in. Disconnected/PeerCreated
-        ///    provably precede any connect.</summary>
+        ///    is the worst state this protocol can be in. The idle set is
+        ///    Disconnected, PeerCreated, ConnectedToMasterServer and JoinedLobby:
+        ///    the first two provably precede any connect, and in the other two no
+        ///    join is in flight, so a local merge rides the next join op's own
+        ///    snapshot. The first two ALONE were correct only while this staged at
+        ///    Awake; see the gate itself for why the post-verdict tick made them a
+        ///    trap.</summary>
         internal static void StageCapability(string source)
         {
             try
@@ -272,9 +278,38 @@ namespace CompetitiveRounds
                     return;
                 }
 
+                // Disconnected/PeerCreated alone was the right set while this staged
+                // at Awake and nowhere else. It became a trap the moment the gate
+                // above moved staging to the first POST-VERDICT tick: the verdict
+                // lands about three seconds in, by which time ROUNDS is normally
+                // sitting on the master server or in the lobby. Those two states are
+                // equally safe — no join is in flight, and the local merge rides the
+                // next join op's snapshot — but the old pair excluded them, so every
+                // tick from then on returned here, _deferLogged had already been
+                // spent on the deferral line, and the capability never staged for the
+                // whole session with nothing in the log saying so. The three siblings
+                // that were always tick-staged (GrowNormalize, SawTargetSync,
+                // DcReportSync) admit all four; this one now matches them (#432 — the
+                // flag named a line, the defect was the operation).
                 ClientState st = PhotonNetwork.NetworkClientState;
-                if (st != ClientState.Disconnected && st != ClientState.PeerCreated)
-                    return;   // mid-connect: wait for a clean moment, do not merge now
+                if (st != ClientState.Disconnected && st != ClientState.PeerCreated
+                    && st != ClientState.ConnectedToMasterServer && st != ClientState.JoinedLobby)
+                {
+                    // Bounded, and deliberately NOT sharing _deferLogged: a silent
+                    // return is exactly how the failure above stayed invisible. This
+                    // line is the only thing that tells "still waiting for a clean
+                    // moment" apart from "staged" in a bundle.
+                    if (_stateWaitLines < 3)
+                    {
+                        _stateWaitLines++;
+                        Plugin.Log.LogInfo("[POISON-CAP] holding " + CapabilityProp + " (" + source
+                            + ") — client state is " + st + ", which may be mid-join; a later tick "
+                            + "stages it from an idle state ("
+                            + _stateWaitLines.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                            + "/3)");
+                    }
+                    return;
+                }
 
                 var local = PhotonNetwork.LocalPlayer;
                 if (local == null) return;

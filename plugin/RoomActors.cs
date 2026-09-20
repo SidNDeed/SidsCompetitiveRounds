@@ -875,33 +875,64 @@ namespace CompetitiveRounds
         //                  dc_incomplete, or ignored because the series was
         //                  already settled or the room fence refused it).
         //                  TERMINAL: the fallback stands down permanently.
-        //   <series>:no    every attempt failed, or the server refused. TERMINAL
-        //                  the other way: nothing landed, the fallback fires.
+        //   <series>:no    every attempt was ANSWERED and refused, or nothing ever
+        //                  left that seat's process at all. Nothing landed and
+        //                  nothing is still running. TERMINAL the other way: the
+        //                  fallback fires.
+        //   <series>:unk   at least one attempt was sent and got NO answer. NOT
+        //                  terminal, and this is the distinction the first version
+        //                  of this table got wrong: `request.timeout` is a
+        //                  client-side deadline that abandons our end of the
+        //                  connection. It never reaches the server and it does not
+        //                  cancel the handler, which goes on running and can commit
+        //                  minutes later. A seat that announced `no` on a timeout
+        //                  was announcing a terminal outcome of a transaction that
+        //                  was still live, and the fallback posted beside it.
         //
-        // and one more terminal signal the property cannot carry: the elected seat
-        // LEAVING THE ROOM having published nothing at all for this series. It
-        // never dispatched, so nothing is in flight. That one is terminal only in
-        // combination with the SERVER's own answer — the watcher reads
-        // GET /team/series/{id}/state first and posts only while the series is
-        // still open (ApiClient.ReadTeamSeriesStatusOnce).
+        // EVERY OTHER STATE IS SILENCE, AND SILENCE IS NOT A SIGNAL. The elected
+        // seat present and saying nothing, and the elected seat LEAVING having said
+        // nothing, both leave this seat posting nothing at all. The second of those
+        // used to fire, on the reasoning that a seat which never dispatched has
+        // nothing in flight. The reasoning is sound and the conclusion is still
+        // wrong, because it prices only the transaction this watch was armed on:
+        // the elected seat's DEPARTURE IS ITSELF A DISCONNECT. Photon delivers it to
+        // every remaining seat, the election runs again for it against the SAME
+        // series, and some seat posts a REAL-TOTALS prompt report about it — from a
+        // process this watch has no property from and no view into. Firing here puts
+        // a zero-total report next to a real one and hands the outcome back to
+        // arrival order, which is the defect the whole census arm exists to close.
         //
-        // WHERE NO TERMINAL OUTCOME IS KNOWN, THIS SEAT POSTS NOTHING. The elected
-        // seat leaving with `send` outstanding is precisely that state: a request
-        // may still be in flight and no client-side observation can settle it.
-        // Posting there would reopen the race; not posting leaves the series to the
-        // elected seat's own request, or failing that to the server's lease expiry
-        // and the admin path. That is the direction the unhandled case must fail
-        // (#276), and what the refusal costs is a series that closes late rather
-        // than one that closes wrongly (#430).
+        // WHERE NO TERMINAL OUTCOME IS KNOWN, THIS SEAT POSTS NOTHING. That is the
+        // direction the unhandled case must fail (#276), and what the refusal costs
+        // is a series that closes late — the elected seat's own request, or the
+        // server's lease expiry and the admin path — rather than one that closes
+        // wrongly (#430). The cost is paid in four states now, not one, and each of
+        // them says so in the log rather than falling through in silence.
         //
         // AND THE FORM. When it does fire, the fallback posts ZERO point totals.
         // The deployed endpoint reaches its lead-forfeit branch only when
-        // `total_points >= 2` (backend/api/main.py at 0cc7f75), so a zero-total
-        // report cannot select the rated completion under ANY ordering: the single
-        // UPDATE it can reach writes `status='dc_incomplete'`. The prompt report is
-        // the only report in this arm that can complete a series with ratings and
-        // gold, which is what makes "which of the two arrived first" stop being a
-        // question about the outcome.
+        // `total_points >= 2` (backend/api/main.py at 0cc7f75), so the only row
+        // state a fallback can ever reach is `status='dc_incomplete'`: it can never
+        // BE the report that rates a series. It bounds the damage; it does not by
+        // itself make ordering irrelevant, and the earlier wording here that said it
+        // did was overclaiming. A fallback that takes the row lock FIRST writes
+        // `dc_incomplete`, and a real-totals report behind it is answered
+        // `{"ignored": true}` — a rated lead-forfeit lost. The form and the signal
+        // table are two halves of one rule: the table is what keeps a fallback and a
+        // prompt report from ever being in flight together, the form is what bounds
+        // the outcome if some path this seat cannot see ever puts them there.
+        //
+        // WHAT THE CLIENT HALF STILL CANNOT CLOSE, named rather than papered over: a
+        // SECOND disconnect in the same series opens a prompt-report path this watch
+        // was never armed on and holds no property for. The rules above remove every
+        // schedule this seat can observe — it will not fire while its own elected
+        // seat's transaction may be live, and it will not fire on that seat's
+        // departure — but two disconnects arriving close together on DIFFERENT seats
+        // are not orderable from inside any one client. Closing that needs the
+        // server to refuse to settle on a zero-total report while a real one may
+        // still arrive; the rule is written out as a server-lane note with this
+        // round (endpoint, lock, predicate, what the check rejects) and is NOT
+        // claimed here as though it were already deployed.
         //
         // The zeros withdrawn in the previous round are a different rule and stay
         // withdrawn: those were posted by EVERY seat whenever the census failed on
@@ -914,12 +945,17 @@ namespace CompetitiveRounds
         internal const string OutcomeSent = "send";
         internal const string OutcomeAnswered = "ok";
         internal const string OutcomeFailed = "no";
+        /// <summary>An attempt went unanswered; a handler may still be running.
+        /// A build that predates this value reads it as none of the three it knows
+        /// and falls through to "post nothing", which is the same decision this
+        /// build makes — the mixed-version direction is the safe one.</summary>
+        internal const string OutcomeUnknown = "unk";
 
         private static string _watchSeries;
         private static int _watchActor = -1;
         private static string _watchReporter, _watchDc, _watchRoom;
         private static string _watchOutcome = "";
-        private static bool _watchGone, _watchSettled, _watchHeldLogged;
+        private static bool _watchGone, _watchSettled, _watchHeldLogged, _watchWaitLogged;
 
         /// <summary>The series tag that scopes an outcome value. A `cr_dcr`
         /// written for the PREVIOUS series must never read as an answer about
@@ -978,7 +1014,8 @@ namespace CompetitiveRounds
                 if (i <= 0 || i + 1 >= s.Length) return "";
                 if (!string.Equals(s.Substring(0, i), tag, StringComparison.Ordinal)) return "";
                 string o = s.Substring(i + 1);
-                return (o == OutcomeSent || o == OutcomeAnswered || o == OutcomeFailed) ? o : "";
+                return (o == OutcomeSent || o == OutcomeAnswered
+                        || o == OutcomeFailed || o == OutcomeUnknown) ? o : "";
             }
             catch { return ""; }
         }
@@ -1007,11 +1044,14 @@ namespace CompetitiveRounds
                 _watchGone = false;
                 _watchSettled = false;
                 _watchHeldLogged = false;
+                _watchWaitLogged = false;
                 Plugin.Log.LogInfo("[2v2-DC] fallback armed on actor "
-                    + _watchActor.ToString(CultureInfo.InvariantCulture) + " — no timer: it fires only on a "
-                    + "TERMINAL outcome of that seat's report (" + OutcomeProp + "="
-                    + OutcomeFailed + ", or that seat leaving having dispatched nothing), and then only "
-                    + "in the zero-total form, which the deployed endpoint can only record as dc_incomplete");
+                    + _watchActor.ToString(CultureInfo.InvariantCulture) + " — no timer: it fires on ONE "
+                    + "signal only, " + OutcomeProp + "=" + OutcomeFailed + " (every attempt of that "
+                    + "seat's report answered and refused, or nothing ever left its process), and then "
+                    + "only in the zero-total form, which the deployed endpoint can only record as "
+                    + "dc_incomplete. " + OutcomeProp + "=" + OutcomeUnknown + ", that seat leaving, and "
+                    + "that seat staying silent all post NOTHING");
                 Evaluate("armed");
             }
             catch (Exception ex) { Plugin.Log.LogWarning("[2v2-DC] arming the fallback failed: " + ex.Message); }
@@ -1053,7 +1093,8 @@ namespace CompetitiveRounds
         {
             _watchSeries = null; _watchActor = -1;
             _watchReporter = null; _watchDc = null; _watchRoom = null;
-            _watchOutcome = ""; _watchGone = false; _watchSettled = false; _watchHeldLogged = false;
+            _watchOutcome = ""; _watchGone = false; _watchSettled = false;
+            _watchHeldLogged = false; _watchWaitLogged = false;
         }
 
         private static void Evaluate(string why)
@@ -1067,65 +1108,91 @@ namespace CompetitiveRounds
                     + "refused both seats' reports alike, and a second one changes nothing");
                 return;
             }
+            if (_watchGone)
+            {
+                // CHECKED BEFORE OutcomeFailed, not after, and the ordering is the
+                // rule rather than a detail. A seat that published `no` and then
+                // left is observed in ONE callback — NoteActorLeft latches the last
+                // thing it said and reports the departure together — and that
+                // departure is itself a disconnect in this same series: the election
+                // runs again for it in the very next statements of
+                // Plugin.OnPlayerLeftRoom, and a REAL-TOTALS prompt report about it
+                // is composed in a process this seat holds no property from. Firing
+                // on the stale `no` would put a zero-total post beside that one and
+                // hand the outcome back to arrival order. Whatever the seat had
+                // said, its absence is now the more recent fact.
+                _watchSettled = true;
+                Plugin.Log.LogInfo("[2v2-DC] fallback STOOD DOWN (" + why + ") — the elected seat "
+                    + "left with " + OutcomeProp + "="
+                    + (_watchOutcome.Length == 0 ? "<nothing published>" : _watchOutcome)
+                    + ". Its departure is a new disconnect in this same series and the election runs "
+                    + "again for it, so a real-totals report is the thing that closes the series now; "
+                    + "a zero-total post beside it would decide the outcome by arrival order");
+                return;
+            }
             if (_watchOutcome == OutcomeFailed)
             {
                 _watchSettled = true;
-                Fire("the elected seat's report failed on every attempt (" + OutcomeProp + "="
-                     + OutcomeFailed + ")");
+                Fire("the elected seat's report failed on every attempt with every attempt ANSWERED ("
+                     + OutcomeProp + "=" + OutcomeFailed + "), and that seat is still in the room, so "
+                     + "its departure has not opened a second report path for this series");
                 return;
             }
-            if (_watchGone && _watchOutcome.Length == 0)
+            if (_watchOutcome == OutcomeUnknown)
             {
-                _watchSettled = true;
-                Fire("the elected seat left the room having dispatched nothing for this series");
-                return;
-            }
-            if (_watchGone && _watchOutcome == OutcomeSent)
-            {
-                // NOT terminal, and deliberately not made terminal by waiting: a
-                // request may still be in flight in that seat's process.
+                // The seat SAID it does not know. An attempt of its report went
+                // unanswered, so a handler may still be running on the server and
+                // may still write. Not terminal, and never made terminal by waiting.
                 if (_watchHeldLogged) return;
                 _watchHeldLogged = true;
-                Plugin.Log.LogInfo("[2v2-DC] fallback WITHHELD — the elected seat left with "
-                    + OutcomeProp + "=" + OutcomeSent + " outstanding. No terminal outcome is known, "
-                    + "so this seat posts nothing: a report may still be in flight, and a fallback "
-                    + "beside it would decide the series by arrival order again");
+                Plugin.Log.LogInfo("[2v2-DC] fallback WITHHELD (" + why + ") — the elected seat "
+                    + "published " + OutcomeProp + "=" + OutcomeUnknown + ": an attempt of its report "
+                    + "went UNANSWERED, so a handler may still be running server-side and may still "
+                    + "commit. Its client-side timeout abandoned the connection, it did not cancel "
+                    + "the transaction. This seat posts nothing");
                 return;
             }
+            // The elected seat is still here and has said nothing, or has said only
+            // `send`. Enumerated on purpose: a silent fall-through here was a state
+            // no bundle could tell apart from a watch that had never been armed.
+            if (_watchWaitLogged) return;
+            _watchWaitLogged = true;
+            Plugin.Log.LogInfo("[2v2-DC] fallback WAITING (" + why + ") — the elected seat is still "
+                + "in the room with " + OutcomeProp + "="
+                + (_watchOutcome.Length == 0 ? "<nothing published>" : _watchOutcome)
+                + ". No terminal outcome is known, so this seat posts nothing and keeps watching. If "
+                + "that seat never speaks, the series closes on the server's lease expiry and the "
+                + "admin path rather than on a report this seat guessed at");
         }
 
+        /// <summary>Post the fallback. NO PRE-CHECK.
+        ///
+        /// <para>The previous round asked GET /team/series/{id}/state first, to post
+        /// only while the series was still open. That endpoint is not a read: its
+        /// first arm cancels a series outright, and every condition it cancels on is
+        /// reachable by a healthy, partly-played 2v2 — see the block that replaced
+        /// the probe in ApiClient. The pre-check meant to make this safe was the
+        /// most destructive thing in the path.</para>
+        ///
+        /// <para>Nothing replaces it, because the report endpoint already answers
+        /// the same question ATOMICALLY and under the row lock: it re-reads the row
+        /// FOR NO KEY UPDATE and returns `{"ignored": true}` without writing unless
+        /// the status is still active/dc_paused. A separate read could only have
+        /// been right about a moment that had already passed by the time the post
+        /// went out.</para></summary>
         private static void Fire(string reason)
         {
             string series = _watchSeries, reporter = _watchReporter, dc = _watchDc, room = _watchRoom;
-            Plugin.Log.LogInfo("[2v2-DC] fallback triggered — " + reason
-                + "; asking the server whether the series is still open before posting anything");
+            Plugin.Log.LogInfo("[2v2-DC] fallback POSTING — " + reason
+                + ". ZERO point totals, which is the only form the deployed endpoint can record as "
+                + "dc_incomplete and can never turn into a rated completion. No status pre-check: the "
+                + "report endpoint re-reads the row FOR NO KEY UPDATE and ignores a settled series "
+                + "itself, and the state endpoint that looks like a read CANCELS series");
             try
             {
-                ApiClient.ReadTeamSeriesStatusOnce(series, (ok, status) =>
-                {
-                    try
-                    {
-                        if (!ok)
-                        {
-                            Plugin.Log.LogWarning("[2v2-DC] fallback withheld — the series state could "
-                                + "not be read; nothing is posted on an UNKNOWN server state");
-                            return;
-                        }
-                        if (status != "active" && status != "dc_paused")
-                        {
-                            Plugin.Log.LogInfo("[2v2-DC] fallback stood down — the server already reports "
-                                + "the series as '" + status + "'; there is nothing left to close");
-                            return;
-                        }
-                        Plugin.Log.LogInfo("[2v2-DC] fallback posting — the server still reports the series "
-                            + "as '" + status + "'. ZERO point totals, which is the only form the deployed "
-                            + "endpoint can record as dc_incomplete and can never turn into a rated completion");
-                        ApiClient.ReportTeamSeriesDc(series, reporter, dc, 0, 0, room, true);
-                    }
-                    catch (Exception ex) { Plugin.Log.LogWarning("[2v2-DC] fallback dispatch failed: " + ex.Message); }
-                });
+                ApiClient.ReportTeamSeriesDc(series, reporter, dc, 0, 0, room, true);
             }
-            catch (Exception ex) { Plugin.Log.LogWarning("[2v2-DC] fallback state read failed: " + ex.Message); }
+            catch (Exception ex) { Plugin.Log.LogWarning("[2v2-DC] fallback dispatch failed: " + ex.Message); }
         }
     }
 }

@@ -117,7 +117,7 @@ def retry_budget_seconds():
     derived from it.
     """
     api = _src("ApiClient.cs")
-    body = _method_body(api, "private static IEnumerator PostRequestWithRetry")
+    body = _method_body(api, "private static IEnumerator PostRequestWithRetryAnswered")
     assert body, "the retry helper's own text could not be delimited"
     attempts = int(re.search(r"int maxRetries = (\d+)", body).group(1))
     backoff = float(re.search(r"float retryDelay = ([\d.]+)f", body).group(1))
@@ -247,30 +247,54 @@ def _watch(posts):
 
 # ── the fallback's own rule, transliterated from DcReportSync.Evaluate ───────
 
-def fallback(outcome, gone, server_status):
+def fallback(outcome, gone):
     """What the WATCHING seat does.
 
     `outcome` is the last cr_dcr value it latched for this series: "" (the
-    elected seat has said nothing), "send", "ok" or "no".  `gone` is whether
-    that seat has left the room.  `server_status` is what
-    GET /team/series/{id}/state answered, or None when the read FAILED.
+    elected seat has said nothing), "send", "ok", "no" or "unk".  `gone` is
+    whether that seat has left the room.
 
     Returns "nothing", "stand-down", or "post" -- and "post" always means the
     zero-total form.
+
+    There is NO server_status parameter any more, and its removal is this
+    round's first fix.  The previous model asked GET /team/series/{id}/state
+    before posting, on the assumption that a GET cannot change anything.  That
+    endpoint CANCELS series: its first arm writes status='canceled',
+    invalidation_reason='assembly_timeout' and reconciles bets whenever the row
+    reads 'active' with fewer than four spawn-confirms, past the 180 s deadline,
+    with no in-process live-game evidence -- all three of which a healthy,
+    partly-played 2v2 reaches (a lost spawn-confirm POST, or the bug-245 relock
+    that writes spawn_confirmations=0 and room_issued_at=NULL; and the live-game
+    dict is empty for minutes after every api restart).  The pre-check meant to
+    make the post safe was the most destructive call on the path.
+
+    ONE signal posts now.  `unk` and a departed seat are both NOT terminal --
+    see the tests below for what each of them used to cost.
     """
     if outcome == "ok":
         return "stand-down"                       # terminal: the server answered
-    if outcome == "no" or (gone and outcome == ""):
-        # terminal the other way: nothing landed, or nothing was ever dispatched.
-        # Ask the server before writing anything.
-        if server_status is None:
-            return "nothing"                      # UNKNOWN state: never post on it
-        if server_status not in ("active", "dc_paused"):
-            return "stand-down"
+    if gone:
+        # BEFORE the "no" arm, and the ordering is the rule rather than a
+        # detail.  A seat that published "no" and then left is observed in ONE
+        # callback, and that departure is itself a disconnect in this same
+        # series: the election runs again for it and a REAL-TOTALS prompt report
+        # is composed in a process this watch holds no property from.  Whatever
+        # the seat had said, its absence is the more recent fact.
+        return "stand-down"
+    if outcome == "no":
+        # TERMINAL the other way, and the only trigger there is.  Every attempt
+        # of that seat's report was answered and refused, or nothing ever left
+        # its process: nothing landed and nothing is still running.  No
+        # pre-check -- the report endpoint re-reads the row FOR NO KEY UPDATE
+        # and answers {"ignored": true} on a settled series without writing.
         return "post"
-    # everything else -- still in the room, or gone with a request in flight --
-    # is NOT terminal, and where no terminal outcome is known this seat posts
-    # nothing at all.
+    if outcome == "unk":
+        # An attempt went UNANSWERED, so a handler may still be running and may
+        # still commit.  The client's own timeout abandoned the connection; it
+        # did not cancel the transaction.
+        return "nothing"
+    # still in the room, silent or with a request in flight: not terminal.
     return "nothing"
 
 
@@ -343,107 +367,308 @@ def test_h1_no_elapsed_time_arms_the_fallback():
 
     def claim(s):
         b = _method_body(s, "private static IEnumerator SendTeamSeriesDcReport")
-        return bool(b) and "WaitForSeconds" not in b and "PostRequestWithRetry(url" in b
+        return bool(b) and "WaitForSeconds" not in b and "PostRequestWithRetryAnswered(url" in b
 
     _assert_discriminating(
         claim, api,
         _mutate(api,
-                "            yield return Plugin.Instance.StartCoroutine(PostRequestWithRetry(url",
+                "            yield return Plugin.Instance.StartCoroutine(PostRequestWithRetryAnswered(url",
                 "            yield return new WaitForSecondsRealtime(45f);\n"
-                "            yield return Plugin.Instance.StartCoroutine(PostRequestWithRetry(url",
+                "            yield return Plugin.Instance.StartCoroutine(PostRequestWithRetryAnswered(url",
                 "H1 elapsed-time net"),
         "H1 no elapsed-time arming")
 
 
 def test_h1_the_fallback_fires_only_on_a_terminal_outcome():
-    """Every state the watching seat can be in, and what it does there.  The one
-    that carries the whole method change is (gone, "send"): the elected seat left
-    with a request possibly in flight, no terminal outcome is known, and this
-    seat posts NOTHING."""
-    # terminal: the server answered the prompt report
+    """Every state the watching seat can be in, and what it does there.
+
+    EXACTLY ONE cell posts.  `no` is the only signal that means both "nothing
+    landed" and "nothing is still running"; every other cell leaves a
+    transaction this seat cannot see, so it posts nothing at all."""
     for gone in (False, True):
-        assert fallback("ok", gone, "active") == "stand-down"
-        assert fallback("ok", gone, None) == "stand-down"
-    # terminal: every attempt failed
-    assert fallback("no", False, "active") == "post"
-    assert fallback("no", True, "dc_paused") == "post"
-    # terminal: it left having dispatched nothing at all
-    assert fallback("", True, "active") == "post"
-    # NOT terminal, in either of its two shapes
-    assert fallback("", False, "active") == "nothing"      # still here, silent so far
-    assert fallback("send", False, "active") == "nothing"  # still here, in flight
-    assert fallback("send", True, "active") == "nothing"   # gone, in flight: UNKNOWN
-    # a terminal trigger still defers to the server's own answer
-    assert fallback("no", False, "completed") == "stand-down"
-    assert fallback("no", False, "dc_incomplete") == "stand-down"
-    assert fallback("no", False, None) == "nothing"        # unreadable: post nothing
+        # terminal: the server answered the prompt report
+        assert fallback("ok", gone) == "stand-down"
+        # NOT terminal: an attempt went unanswered and a handler may still run.
+        # Present, that is "nothing"; gone, the departure arm answers first and
+        # calls it "stand-down" -- different words, and neither one posts, which
+        # is the only distinction that reaches the server.
+        assert fallback("unk", gone) != "post"
+    assert fallback("unk", False) == "nothing"
+    # the ONE trigger
+    assert fallback("no", False) == "post"
+    # still here and not terminal, in both shapes
+    assert fallback("", False) == "nothing"          # silent so far
+    assert fallback("send", False) == "nothing"      # in flight
+    # gone: never a trigger, WHATEVER it had said -- including a latched "no",
+    # because NoteActorLeft reports the last value and the departure together
+    # and the departure is itself a new disconnect in this same series
+    for said in ("", "send", "no"):
+        assert fallback(said, True) == "stand-down"
+    # exactly one cell of the whole table posts
+    posts = [(o, g) for o in ("", "send", "ok", "no", "unk") for g in (False, True)
+             if fallback(o, g) == "post"]
+    assert posts == [("no", False)], posts
 
     # and the source runs the same table
     ra = _src("RoomActors.cs")
     body = ra[ra.index("private static void Evaluate(string why)"):]
-    body = body[:body.index("private static void Fire(")]
+    body = body[:body.index("/// <summary>Post the fallback. NO PRE-CHECK.")]
     assert "_watchOutcome == OutcomeAnswered" in body
     assert "_watchOutcome == OutcomeFailed" in body
-    assert '_watchGone && _watchOutcome.Length == 0' in body
-    assert "_watchGone && _watchOutcome == OutcomeSent" in body
+    assert "_watchOutcome == OutcomeUnknown" in body
+    # the two arms that used to fire and no longer exist in any form
+    assert "_watchGone && _watchOutcome.Length == 0" not in body
+    assert "_watchGone && _watchOutcome == OutcomeSent" not in body
+    # Fire() is reachable from the OutcomeFailed arm and from nowhere else...
+    assert body.count("Fire(") == 1
+    assert body.index("_watchOutcome == OutcomeFailed") < body.index("Fire(")
+    # ...and the departure arm is checked BEFORE it, so a latched "no" observed
+    # together with the departure stands down instead of firing
+    assert body.index("if (_watchGone)") < body.index("_watchOutcome == OutcomeFailed")
 
     def claim(s):
         if "private static void Evaluate(string why)" not in s:
             return False
         b = s[s.index("private static void Evaluate(string why)"):]
-        b = b[:b.index("private static void Fire(")] if "private static void Fire(" in b else b
-        return ("_watchGone && _watchOutcome == OutcomeSent" in b
-                and "_watchOutcome == OutcomeFailed" in b)
+        cut = "/// <summary>Post the fallback. NO PRE-CHECK."
+        b = b[:b.index(cut)] if cut in b else b
+        return b.count("Fire(") == 1 and "_watchOutcome == OutcomeUnknown" in b
+
+    # the mutation that reopens the closed defect: make the departure fire again
+    _assert_discriminating(
+        claim, ra,
+        _mutate(ra, "                _watchSettled = true;\n"
+                    '                Plugin.Log.LogInfo("[2v2-DC] fallback STOOD DOWN (" + why + ") — the elected seat "',
+                    "                _watchSettled = true;\n"
+                    '                Fire("the elected seat left");\n'
+                    '                Plugin.Log.LogInfo("[2v2-DC] fallback STOOD DOWN (" + why + ") — the elected seat "',
+                    "H1 terminal table"),
+        "H1 terminal-outcome table")
+
+    # NEGATIVE CONTROL: a mutation that does NOT touch the table must leave the
+    # claim true, or the claim is just detecting that the file changed (#391).
+    assert claim(_mutate(ra, "[2v2-DC] fallback WAITING (", "[2v2-DC] fallback HOLDING (",
+                         "H1 table negative control"))
+
+
+def test_h1_an_unanswered_attempt_is_not_a_terminal_outcome():
+    """`request.timeout` is a CLIENT-side deadline.  It abandons our end of the
+    connection; it never reaches the server and it does not cancel the handler,
+    which runs to completion and commits.
+
+    So publishing `no` on a client-observed timeout announced a terminal outcome
+    of a transaction that was still live, and the watching seat posted its
+    zero-total fallback beside it.  If the fallback took the row lock first it
+    wrote dc_incomplete, and the real report behind it was answered
+    {"ignored": true} -- a rated lead-forfeit lost.  The failure boolean had to
+    be split before the table above could mean anything (#430: one boolean must
+    not mean both "the server said no" and "we never heard back")."""
+    api = _src("ApiClient.cs")
+
+    # the retry helper MEASURES it rather than inferring it from the error text,
+    # and accumulates it across attempts: attempt 1 timing out and attempt 3
+    # receiving a 400 still leaves attempt 1's handler running.
+    body = _method_body(api, "private static IEnumerator PostRequestWithRetryAnswered")
+    assert body, "the retry helper's own text could not be delimited"
+    assert "if (request.responseCode <= 0) allAnswered = false;" in body
+    assert body.count("bool allAnswered = true;") == 1
+    # accumulated, not recomputed per attempt: the reset would have to be inside
+    # the loop, and there is no second assignment anywhere in the method.
+    assert body.count("allAnswered =") == 2     # the declaration and the one clear
+
+    # ...and the dispatch turns it into the third property value
+    dispatch = _method_body(api, "private static IEnumerator SendTeamSeriesDcReport")
+    assert dispatch, "the dispatch method's own text could not be delimited"
+    assert "answered ? DcReportSync.OutcomeFailed" in dispatch
+    assert ": DcReportSync.OutcomeUnknown" in dispatch
+
+    # the model: only the answered failure is terminal
+    assert fallback("no", False) == "post"
+    assert fallback("unk", False) == "nothing"
+
+    def claim(s):
+        b = _method_body(s, "private static IEnumerator PostRequestWithRetryAnswered")
+        d = _method_body(s, "private static IEnumerator SendTeamSeriesDcReport")
+        return (bool(b) and bool(d)
+                and "if (request.responseCode <= 0) allAnswered = false;" in b
+                and "DcReportSync.OutcomeUnknown" in d)
+
+    # the mutation that restores the defect: call every failure terminal again
+    _assert_discriminating(
+        claim, api,
+        _mutate(api, "                           : answered ? DcReportSync.OutcomeFailed\n"
+                     "                                      : DcReportSync.OutcomeUnknown);",
+                "                           : DcReportSync.OutcomeFailed);",
+                "H1 unanswered attempt"),
+        "H1 unanswered is not terminal")
+
+    # NEGATIVE CONTROL
+    assert claim(_mutate(api, "(every attempt answered=", "(all answered=",
+                         "H1 unanswered negative control"))
+
+
+def test_h1_the_elected_seats_departure_is_itself_a_disconnect():
+    """The arm that fired on "it left having dispatched nothing" was reasoning
+    about ONE transaction: the one this watch was armed on.  The departure it
+    fires on opens a SECOND one.
+
+    A (team 2) disconnects; C is elected; D arms the watch on C.  C crashes
+    before publishing anything.  Photon delivers OnPlayerLeftRoom(C) to B and D.
+    DcReportSync.NoteActorLeft runs FIRST in that callback -- before the DC
+    classification below it -- so on the old rule D fired a zero-total fallback,
+    while the very same callback elected a reporter for C's departure who posts
+    REAL totals against the SAME series.  Arrival order then chose between
+    dc_incomplete and the rated completion, which is the defect statement the
+    census arm exists to close."""
+    plug = _src("Plugin.cs")
+    left = plug[plug.index("public void OnPlayerLeftRoom(Photon.Realtime.Player p)"):]
+    left = left[:left.index('Plugin.Log.LogWarning($"[2v2-DC] report error')]
+    # the ordering the failure scenario rests on, asserted rather than assumed
+    assert "DcReportSync.NoteActorLeft(p)" in left
+    assert left.index("DcReportSync.NoteActorLeft(p)") < left.index("ApiClient.ReportTeamSeriesDc(")
+    # ...and the elected seat's departure does reach the same prompt path
+    assert "ApiClient.ReportTeamSeriesDc(seriesId, myId, dcSteamId, t1Points, t2Points," in left
+
+    # so the watch stands down there instead of firing
+    assert fallback("", True) == "stand-down"
+    assert fallback("send", True) == "stand-down"
+
+    ra = _src("RoomActors.cs")
+
+    def claim(s):
+        if "private static void Evaluate(string why)" not in s:
+            return False
+        b = s[s.index("private static void Evaluate(string why)"):]
+        cut = "/// <summary>Post the fallback. NO PRE-CHECK."
+        b = b[:b.index(cut)] if cut in b else b
+        if "if (_watchGone)" not in b:
+            return False
+        # the arm's OWN span, not everything after it: the OutcomeFailed arm
+        # below it legitimately calls Fire, and a slice that swallowed it would
+        # be a claim that cannot hold rather than a claim that cannot fail.
+        gone_arm = b[b.index("if (_watchGone)"):]
+        end = "if (_watchOutcome == OutcomeFailed)"
+        gone_arm = gone_arm[:gone_arm.index(end)] if end in gone_arm else gone_arm
+        return "Fire(" not in gone_arm
 
     _assert_discriminating(
         claim, ra,
-        _mutate(ra, "            if (_watchGone && _watchOutcome == OutcomeSent)",
-                "            if (false)", "H1 terminal table"),
-        "H1 terminal-outcome table")
+        _mutate(ra, '                Plugin.Log.LogInfo("[2v2-DC] fallback STOOD DOWN (" + why + ") — the elected seat "',
+                '                Fire("the elected seat left having dispatched nothing");\n'
+                '                Plugin.Log.LogInfo("[2v2-DC] fallback STOOD DOWN (" + why + ") — the elected seat "',
+                "H1 departure arm"),
+        "H1 departure is a new disconnect")
+
+    # NEGATIVE CONTROL
+    assert claim(_mutate(ra, "a zero-total post beside it would decide the outcome by arrival order",
+                         "a zero-total post beside it would decide the series by arrival order",
+                         "H1 departure negative control"))
 
 
-def test_h1_no_ordering_of_prompt_and_fallback_can_select_the_rated_completion():
-    """The proof the round is judged on, over the DEPLOYED endpoint.
+def test_h1_a_fallback_can_never_be_the_report_that_rates_a_series():
+    """The claim this round actually establishes, stated at the width it holds.
 
-    Two things make it hold, and the harness separates them.  First, the two
-    requests never coexist: a fallback is emitted only from a state in which the
-    prompt transaction is terminal, so the set of schedules containing both an
-    in-flight prompt report and a fallback is EMPTY.  Second -- belt and braces,
-    because the first rests on a client-side observation -- the fallback's FORM
-    carries zero totals, and the endpoint's lead-forfeit branch needs >= 2, so
-    even if the two were somehow interleaved the fallback could never be the
-    report that completes a series with ratings and gold."""
-    coexist = []
-    for outcome in ("", "send", "ok", "no"):
-        for gone in (False, True):
-            for server_status in ("active", "dc_paused", "completed",
-                                  "dc_incomplete", "canceled", None):
-                act = fallback(outcome, gone, server_status)
-                # a prompt request is still live exactly while the elected seat
-                # has dispatched and not announced a terminal answer
-                prompt_in_flight = (outcome == "send")
-                if act == "post" and prompt_in_flight:
-                    coexist.append((outcome, gone, server_status))
-    assert coexist == [], coexist
+    THE BROADER CLAIM IS FALSE AND THE PREVIOUS VERSION OF THIS TEST ASSERTED
+    IT.  "No ordering can select rated completion versus dc_incomplete" is not
+    true of the pair and cannot be made true from inside one client.  The old
+    body computed `after_fallback = endpoint("active", wins, 0)`, asserted it was
+    "dc_incomplete", and then asserted the prompt report behind it stayed
+    "dc_incomplete" for prompt_points up to 5 -- which IS an ordering selecting
+    dc_incomplete over the rated completion, written down as though it were the
+    proof of the opposite.
 
-    # ...and the form, against the endpoint itself.  Over every series state and
-    # every series-lead the endpoint distinguishes, in BOTH arrival orders.
+    What is true, and is proved here:
+      * a fallback can never BE the report that rates a series.  Its form is
+        zero totals and the endpoint's lead-forfeit branch needs >= 2, so the
+        only row state it can reach is dc_incomplete, under every ordering.
+      * a fallback arriving BEHIND a settled series changes nothing: the
+        FOR NO KEY UPDATE reread answers {"ignored": true} without writing.
+
+    What is NOT proved here, and is not claimed anywhere in the tree: that the
+    two can never be in flight together.  The client-side table removes every
+    schedule a seat can observe; a SECOND disconnect in the same series is a
+    different seat's transaction and is closed by the server-lane rule recorded
+    with this round, not by this test.  The test that used to carry the broader
+    claim is directly below, reduced to what it can support."""
+    for other_team_wins in (0, 1, 2):
+        for prompt_points in (0, 1, 2, 5):
+            # a fallback is never the rating report, whatever the lead
+            assert endpoint("active", other_team_wins, 0) == "dc_incomplete"
+            assert endpoint("dc_paused", other_team_wins, 0) == "dc_incomplete"
+            # behind a settled series it writes nothing at all
+            after_prompt = endpoint("active", other_team_wins, prompt_points)
+            assert endpoint(after_prompt, other_team_wins, 0) == after_prompt
+
+    # the negative control: a fallback carrying the prompt seat's real totals
+    # DOES select the rated completion, which is what the zero form removes
+    assert endpoint("active", 1, 3) == "completed"
+
+
+def test_h1_the_displacement_the_client_half_cannot_close_is_recorded_not_hidden():
+    """The residual, asserted as a residual.
+
+    A zero-total fallback that takes the row lock FIRST writes dc_incomplete,
+    and a real-totals report arriving behind it is answered {"ignored": true}.
+    That is a rated lead-forfeit lost to a fallback -- displacement, in the
+    direction the acceptance bar asked be proved impossible, and it is NOT
+    impossible.  It is unreachable from any schedule one client can observe, and
+    reachable in principle from a concurrent second disconnect.
+
+    Direction check (#283): both seats that can emit the fallback are on the
+    WINNING team, so the party that loses by the displacement is the party that
+    caused it.  Nobody gains by withholding anything.  That is why the residual
+    is survivable while the server rule is not yet written -- not why it is
+    acceptable to leave unstated."""
+    # the displacement is REAL against the deployed endpoint
+    displaced = endpoint(endpoint("active", 1, 0), 1, 3)
+    assert displaced == "dc_incomplete"
+    # ...and the same pair in the other order does rate the series
+    assert endpoint(endpoint("active", 1, 3), 1, 0) == "completed"
+    # so arrival order does decide, and only the client-side table keeps the two
+    # apart.  Exactly one cell of that table posts, and it is the cell in which
+    # the elected seat's transaction is over.
+    posts = [(o, g) for o in ("", "send", "ok", "no", "unk") for g in (False, True)
+             if fallback(o, g) == "post"]
+    assert posts == [("no", False)], posts
+
+    # and the tree says so in both halves rather than claiming the closure
+    ra = _src("RoomActors.cs")
+    api = _src("ApiClient.cs")
+    note = ra[ra.index("WHAT THE CLIENT HALF STILL CANNOT CLOSE"):]
+    note = note[:note.index("internal const string OutcomeProp")]
+    assert "SECOND disconnect" in note
+    assert "server-lane note" in note
+    assert "is NOT" in note and "claimed here" in note
+    # the ApiClient paragraph that used to overclaim now states both halves
+    doc = api[api.index("WHAT THE ZERO FORM DOES AND DOES NOT BUY"):]
+    doc = doc[:doc.index("OUTCOME PUBLICATION")]
+    assert "does NOT buy immunity from" in doc
+    assert '{"ignored": true}' in doc
+
+    def claim(s):
+        if "WHAT THE CLIENT HALF STILL CANNOT CLOSE" not in s:
+            return False
+        n = s[s.index("WHAT THE CLIENT HALF STILL CANNOT CLOSE"):]
+        n = n[:n.index("internal const string OutcomeProp")]
+        return "SECOND disconnect" in n and "server-lane note" in n
+
+    _assert_discriminating(
+        claim, ra,
+        _mutate(ra, "        // WHAT THE CLIENT HALF STILL CANNOT CLOSE",
+                "        // EVERY ORDERING IS CLOSED CLIENT-SIDE", "H1 residual"),
+        "H1 residual is recorded")
+
+
+def test_h1_the_form_holds_under_every_ordering_the_endpoint_distinguishes():
+    """The FORM half, over every series state and every lead, both orders."""
     for other_team_wins in (0, 1, 2):
         for prompt_points in (0, 1, 2, 5):
             # prompt first, then a fallback that the endpoint sees second
             after_prompt = endpoint("active", other_team_wins, prompt_points)
             after_both = endpoint(after_prompt, other_team_wins, 0)
             assert after_both == after_prompt, (other_team_wins, prompt_points)
-            # fallback first, then the prompt report
-            after_fallback = endpoint("active", other_team_wins, 0)
-            assert after_fallback == "dc_incomplete"
-            assert endpoint(after_fallback, other_team_wins, prompt_points) == "dc_incomplete"
             # in NEITHER order is the fallback the report that rates the series
             assert endpoint("active", other_team_wins, 0) != "completed"
-
-    # the negative control: a fallback carrying the prompt seat's real totals
-    # DOES select the rated completion, which is what the zero form removes
-    assert endpoint("active", 1, 3) == "completed"
 
     # and the client forces the form rather than trusting its caller
     api = _src("ApiClient.cs")
@@ -458,40 +683,77 @@ def test_h1_no_ordering_of_prompt_and_fallback_can_select_the_rated_completion()
         "H1 fallback form")
 
 
-def test_h1_the_fallback_asks_the_server_before_it_writes_anything():
-    """report-dc is not a probe: for an OPEN series it WRITES.  The read is
-    GET /team/series/{id}/state, and a read that fails is an UNKNOWN server
-    state on which nothing is posted -- which is why it cannot reuse
-    PollTeamSeriesState, whose callback never fires on a failure at all."""
+def test_h1_the_fallback_never_probes_the_series_state_endpoint():
+    """GET /team/series/{id}/state IS A WRITE, and the previous round put it on
+    the fallback path as a safety pre-check.
+
+    Its first arm UPDATEs status='canceled', invalidation_reason=
+    'assembly_timeout', runs _reconcile_team_series_bets and COMMITS whenever
+    the row reads 'active' with fewer than four spawn-confirms, more than
+    _ASSEMBLY_DEADLINE_SECONDS past room_issued_at, and no positive live-game
+    evidence.  Each of those is ordinary for a healthy, partly-played 2v2:
+
+      * <4 confirms -- production's own comments name a lost spawn-confirm POST
+        leaving a LIVE series at 3/4 "forever", and the bug-245 relock writes
+        spawn_confirmations=0 AND room_issued_at=NULL, after which the age falls
+        back to created_at and is past the deadline on the first read;
+      * the live-game veto reads an in-process dict that every api restart
+        empties -- "for minutes after every deploy EVERY group looks idle".
+
+    The only shipped caller (PollAssemblyStateLoop) runs ~22 s from 3 s after a
+    join and exits the moment the seat leaves the room, so it can never reach
+    the arm.  The pre-check would have been its first reachable caller, on a
+    series that had been PLAYED: voided as never-assembled, never reaching
+    dc_incomplete, so never in the admin panel, bets settled on the wrong
+    reason, and the real report afterwards answered {"ignored": true}.
+
+    Nothing replaces it: the report endpoint answers the same question under the
+    FOR NO KEY UPDATE reread it already takes."""
     ra = _src("RoomActors.cs")
     api = _src("ApiClient.cs")
-    fire = ra[ra.index("private static void Fire(string reason)"):]
-    assert "ApiClient.ReadTeamSeriesStatusOnce(series" in fire
-    assert 'if (!ok)' in fire
-    assert 'status != "active" && status != "dc_paused"' in fire
-    # the post is the LAST thing, after both refusals
-    assert fire.index("if (!ok)") < fire.index("ApiClient.ReportTeamSeriesDc(")
-    assert fire.index('status != "active"') < fire.index("ApiClient.ReportTeamSeriesDc(")
 
-    read = _method_body(api, "public static void ReadTeamSeriesStatusOnce")
-    assert read, "the read helper's own text could not be delimited"
-    assert "onDone(false, \"\")" in read          # a failure is REPORTED, not dropped
+    # the probe is gone from the tree, helper and call site alike
+    assert "ReadTeamSeriesStatusOnce" not in api
+    assert "ReadTeamSeriesStatusOnce" not in ra
+
+    # Fire posts, directly, and nothing else reaches the network from it
+    fire = ra[ra.index("private static void Fire(string reason)"):]
+    assert "ApiClient.ReportTeamSeriesDc(series, reporter, dc, 0, 0, room, true);" in fire
+    assert "/state" not in fire
+    assert fire.count("ApiClient.") == 1
+
+    # the ONE surviving client caller of that endpoint is the assembly loop, and
+    # it is bounded away from the deadline arm by its own exits
+    assert api.count('/api/v1/team/series/{seriesId}/state') == 1
+    loop = _method_body(_src("Plugin.cs"),
+                        "private static System.Collections.IEnumerator PollAssemblyStateLoop")
+    assert loop, "the assembly loop's own text could not be delimited"
+    assert "if (Plugin.Pending2v2Slot < 0) yield break;" in loop
+    assert "if (!PhotonNetwork.InRoom) yield break;" in loop
+    deadline = float(re.search(r"Time\.realtimeSinceStartup \+ (\d+)f", loop).group(1))
+    start = float(re.search(r"WaitForSeconds\((\d+)f\)", loop).group(1))
+    # DERIVED, not written down: the loop's whole life is inside the 180 s
+    # deadline, so raising either term here reddens this rather than passing.
+    assert start + deadline < 180.0, (start, deadline)
 
     def claim(s):
         if "private static void Fire(string reason)" not in s:
             return False
         f = s[s.index("private static void Fire(string reason)"):]
-        if ("ApiClient.ReadTeamSeriesStatusOnce(series" not in f
-                or "if (!ok)" not in f
-                or "ApiClient.ReportTeamSeriesDc(" not in f):
-            return False
-        return f.index("if (!ok)") < f.index("ApiClient.ReportTeamSeriesDc(")
+        return "ReadTeamSeriesStatusOnce" not in f and "/state" not in f
 
+    # the mutation that reopens it: put the probe back on the fallback path
     _assert_discriminating(
         claim, ra,
-        _mutate(ra, "                        if (!ok)", "                        if (false)",
-                "H1 unknown state"),
-        "H1 fallback server read")
+        _mutate(ra, "                ApiClient.ReportTeamSeriesDc(series, reporter, dc, 0, 0, room, true);",
+                "                ApiClient.ReadTeamSeriesStatusOnce(series, (ok, status) => {\n"
+                "                    ApiClient.ReportTeamSeriesDc(series, reporter, dc, 0, 0, room, true); });",
+                "H1 destructive pre-check"),
+        "H1 no state-endpoint probe")
+
+    # NEGATIVE CONTROL: an unrelated edit in the same method leaves it true
+    assert claim(_mutate(ra, "[2v2-DC] fallback POSTING — ", "[2v2-DC] fallback SENDING — ",
+                         "H1 probe negative control"))
 
 
 def test_h1_a_peer_on_the_older_election_drops_the_room_to_the_floor_rule():
@@ -1561,7 +1823,7 @@ def test_the_dc_report_is_retried_and_carries_the_room_it_was_observed_in():
     src = _src("ApiClient.cs")
     body = _method_body(src, "private static IEnumerator SendTeamSeriesDcReport")
     assert body, "the dispatch method's own text could not be delimited"
-    assert "PostRequestWithRetry(url" in body
+    assert "PostRequestWithRetryAnswered(url" in body
     # the lock mode is the DEPLOYED one, read off production 0cc7f75 rather than
     # remembered: the row re-read takes FOR NO KEY UPDATE; FOR UPDATE is what the
     # completion helper beneath it takes, and the doc used to name the wrong one.
@@ -1571,12 +1833,12 @@ def test_the_dc_report_is_retried_and_carries_the_room_it_was_observed_in():
 
     def claim(s):
         b = _method_body(s, "private static IEnumerator SendTeamSeriesDcReport")
-        return bool(b) and "PostRequestWithRetry(url" in b
+        return bool(b) and "PostRequestWithRetryAnswered(url" in b
 
     _assert_discriminating(
         claim, src,
-        _mutate(src, "PostRequestWithRetry(url, \"\", (ok, resp) =>\n            {\n                if (ok) Plugin.Log.LogInfo($\"[2v2-DC] report accepted",
-                "PostRequest(url, \"\", (ok, resp) =>\n            {\n                if (ok) Plugin.Log.LogInfo($\"[2v2-DC] report accepted",
+        _mutate(src, "PostRequestWithRetryAnswered(url, \"\", (ok, resp, answered) =>",
+                "PostRequestAnswered(url, \"\", (ok, resp, answered) =>",
                 "DC retry"),
         "DC report retry")
 
@@ -1713,6 +1975,159 @@ def test_every_capability_stage_waits_for_the_compatibility_verdict():
             "compat gate in " + fname)
 
 
+def test_every_capability_stage_admits_the_states_the_verdict_lands_in():
+    """The verdict gate above and the NETWORK-STATE gate below it have to agree,
+    and in PoisonSync they did not.
+
+    Moving the stage behind the compatibility verdict moves it about three
+    seconds into the process -- by which time ROUNDS is normally sitting on the
+    master server or in the lobby, not Disconnected or PeerCreated.  PoisonSync
+    kept the narrower pair that was correct when it staged at Awake, so from the
+    first post-verdict tick onwards every call returned at the state gate, the
+    deferral line had already been spent, and cr_pois2 never staged for the whole
+    session with nothing in the log saying so.  The advertisement is the whole
+    protocol: without it every peer reads this seat as poison-incapable, the
+    sticky incapability latches room-wide and the authoritative-poison path ships
+    100% inert behind a healthy-looking bundle (#438).
+
+    A guard is judged by what its refusal costs (#430), and the cost here was the
+    feature.  The idle set is the same four states in all four protocols: the
+    first two provably precede any connect, and in the other two no join is in
+    flight, so a local merge rides the next join op's own snapshot.
+
+    The repo's own comment in VanillaFixes asserted the contradiction in as many
+    words -- "PoisonSync stages at Awake where Disconnected/PeerCreated suffices"
+    -- while the tree had already moved that stage behind the verdict (#302, and
+    #432: the flag named cr_grow2's line, the defect was the operation)."""
+    idle = ("Disconnected", "PeerCreated", "ConnectedToMasterServer", "JoinedLobby")
+    protocols = [
+        ("VanillaFixes.cs", "GrowNormalize"),
+        ("VanillaFixes.cs", "SawTargetSync"),
+        ("RoomActors.cs", "DcReportSync"),
+        ("PoisonSync.cs", "PoisonSync"),
+    ]
+    for fname, cls in protocols:
+        src = _src(fname)
+        cut = src[src.index("class " + cls):] if ("class " + cls) in src else src
+        stage = cut[cut.index("internal static void StageCapability(string source)"):]
+        stage = stage[:stage.index("internal static void RevokeCapability()")]
+        # the gate may be inlined or named; a named one is resolved to its body
+        gate = stage
+        if "InIdleClientState()" in stage:
+            gate = _method_body(src, "private static bool InIdleClientState")
+            assert gate, cls
+        for st in idle:
+            assert st in gate, (cls, st)
+
+    # ...and PoisonSync's refusal is no longer silent: the state it refuses from
+    # is printed, and it does not share the deferral flag that is already spent
+    ps = _src("PoisonSync.cs")
+    stage = ps[ps.index("internal static void StageCapability(string source)"):]
+    stage = stage[:stage.index("internal static void RevokeCapability()")]
+    assert "[POISON-CAP] holding" in stage
+    assert "_stateWaitLines" in stage
+    assert "_deferLogged" in stage
+    # the two counters are separate flags, which is the point of the line: the
+    # deferral flag is already SPENT by the time this gate is reached, so a gate
+    # sharing it would refuse in silence.  Over the CODE with comment lines
+    # removed -- the comment above the gate names _deferLogged to explain exactly
+    # that, and deleting the explanation to satisfy a text search would delete
+    # the record of the fix.
+    hold = stage[stage.index("ClientState st = PhotonNetwork.NetworkClientState;"):]
+    hold_code = "\n".join(l for l in hold.splitlines() if not l.strip().startswith("//"))
+    assert "_deferLogged" not in hold_code
+
+    def claim(s):
+        anchors = ("internal static void StageCapability(string source)",
+                   "internal static void RevokeCapability()",
+                   "ClientState st = PhotonNetwork.NetworkClientState;")
+        if not all(a in s for a in anchors):
+            return False
+        b = s[s.index(anchors[0]):s.index(anchors[1])]
+        if anchors[2] not in b:
+            return False
+        g = b[b.index(anchors[2]):]
+        return all(st in g for st in idle) and "[POISON-CAP] holding" in g
+
+    # the mutation that restores the defect: the narrow pair, silently
+    _assert_discriminating(
+        claim, ps,
+        _mutate(ps,
+                "                if (st != ClientState.Disconnected && st != ClientState.PeerCreated\n"
+                "                    && st != ClientState.ConnectedToMasterServer && st != ClientState.JoinedLobby)",
+                "                if (st != ClientState.Disconnected && st != ClientState.PeerCreated)",
+                "POISON-CAP idle set"),
+        "PoisonSync idle-state set")
+
+    # NEGATIVE CONTROL: an edit elsewhere in the same method leaves it true
+    assert claim(_mutate(ps, "[POISON-CAP] staged ", "[POISON-CAP] merged ",
+                         "POISON-CAP negative control"))
+
+
+def test_the_saw_target_witness_line_prints_measured_terms():
+    """The WITNESS line the next round's evidence rests on printed three of its
+    four terms as the string literal "true", under a comment asserting that
+    "Every term is MEASURED".
+
+    Only postfix-stand-down was.  The other three were constants whose truth
+    rested on the line's POSITION after the sameSet guard, not on anything the
+    line reads -- a claim in a comment with no code under it (#302) and a check
+    that cannot fail (#342).  If a later edit relaxes or reorders that guard --
+    dropping the ReferenceEquals identity term is the one its own comment warns
+    about -- the line would still print "same-list=true" on every masked frame
+    while the restore wrote into a list the window never masked, and no capture
+    could tell the working case from the broken one.
+
+    The previous round's deviation note applied exactly this reasoning to the
+    fourth term ("a count can come back 0, an asserted true cannot") and stopped
+    one term short."""
+    vf = _src("VanillaFixes.cs")
+    body = _method_body(vf, "internal static void RestoreOrder")
+    if not body:
+        body = vf[vf.index("[SAW-TARGET] masked/restored") - 4000:]
+        body = body[:body.index("[HarmonyFinalizer]")]
+    # no term is a literal any more
+    assert '"[SAW-TARGET] masked/restored same-list=true' not in vf
+    assert "same-count=true" not in vf
+    assert "same-members=true" not in vf
+    # every term is printed from the variable that decided it
+    for term, var in (("same-list=", "sameList"), ("same-count=", "sameCount"),
+                      ("same-members=", "sameMembers")):
+        assert term in body, term
+        seg = body[body.index(term):body.index(term) + 120]
+        assert var in seg, (term, var)
+        assert '? "true" : "false"' in seg, term
+
+    def claim(s):
+        head, tail = "[SAW-TARGET] masked/restored same-list=", "/3 this room)"
+        if head not in s or tail not in s:
+            return False
+        line = s[s.index(head):]
+        line = line[:line.index(tail)]
+        # all three, inside the witness line's OWN span
+        return all('(%s ? "true" : "false")' % v in line
+                   for v in ("sameList", "sameCount", "sameMembers"))
+
+    # The mutation anchor carries the WITNESS line's own head.  The bare ternary
+    # is not unique in this file -- the !sameSet diagnostic a few lines above
+    # prints the same expression, and a first-occurrence replace lands there
+    # instead, mutating a line this test does not measure and leaving the claim
+    # green (#432: a flag names a LINE; anchor on the one you mean).
+    _assert_discriminating(
+        claim, vf,
+        _mutate(vf,
+                'Plugin.Log.LogInfo("[SAW-TARGET] masked/restored same-list="\n'
+                '                        + (sameList ? "true" : "false")',
+                'Plugin.Log.LogInfo("[SAW-TARGET] masked/restored same-list="\n'
+                '                        + "true"',
+                "SAW-TARGET witness literal"),
+        "SAW-TARGET witness terms measured")
+
+    # NEGATIVE CONTROL
+    assert claim(_mutate(vf, "postfix-stand-down=", "postfix-standdown=",
+                         "SAW-TARGET witness negative control"))
+
+
 def test_the_dc_outcome_property_is_scoped_to_the_series_it_describes():
     """cr_dcr is retained on the actor and a sitting can run several series, so
     an outcome published for the PREVIOUS series must not read as a terminal
@@ -1724,7 +2139,8 @@ def test_the_dc_outcome_property_is_scoped_to_the_series_it_describes():
     assert "Tag(seriesId)" in body
     assert "s.Substring(0, i), tag" in body
     # and an unrecognised token is NOT terminal
-    assert "OutcomeSent || o == OutcomeAnswered || o == OutcomeFailed" in body
+    assert "OutcomeSent || o == OutcomeAnswered" in body
+    assert "o == OutcomeFailed || o == OutcomeUnknown" in body
 
     # the model of the same rule, including the three ways it must answer ""
     def outcome_of(prop, series):
@@ -1732,7 +2148,7 @@ def test_the_dc_outcome_property_is_scoped_to_the_series_it_describes():
         if not prop or ":" not in prop:
             return ""
         head, _, rest = prop.partition(":")
-        if head != tag or rest not in ("send", "ok", "no"):
+        if head != tag or rest not in ("send", "ok", "no", "unk"):
             return ""
         return rest
 
@@ -1741,7 +2157,7 @@ def test_the_dc_outcome_property_is_scoped_to_the_series_it_describes():
     assert outcome_of("abcdef12:maybe", "abcdef12-1111") == ""   # unrecognised
     assert outcome_of("", "abcdef12-1111") == ""
     # and the watch treats "" as NOT terminal while the seat is still present
-    assert fallback(outcome_of("99999999:no", "abcdef12"), False, "active") == "nothing"
+    assert fallback(outcome_of("99999999:no", "abcdef12"), False) == "nothing"
 
     def claim(s):
         b = _method_body(s, "internal static string OutcomeOf(PhotonPlayer actor, string seriesId)")
@@ -1789,7 +2205,12 @@ def test_the_masking_witness_line_is_measured_and_bounded():
     restore = vf[vf.index("private static void RestoreOrder()"):]
     restore = restore[:restore.index("[HarmonyFinalizer]")]
     assert "ReferenceEquals(players, _maskedList)" in restore
-    assert "[SAW-TARGET] masked/restored same-list=true same-count=true" in restore
+    # MEASURED, not asserted: this used to read "same-list=true same-count=true"
+    # as string literals, under a comment claiming every term was measured.  See
+    # test_the_saw_target_witness_line_prints_measured_terms for why that made
+    # the witness line incapable of ever reporting the failure it witnesses.
+    assert "[SAW-TARGET] masked/restored same-list=" in restore
+    assert "same-list=true same-count=true" not in restore
     assert "postfix-stand-down=" in restore
     assert "_maskedLines < 3" in restore                     # bounded, per room
     # identity is part of the restore GUARD, not only of the line
