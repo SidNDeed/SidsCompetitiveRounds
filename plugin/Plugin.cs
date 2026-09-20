@@ -4694,6 +4694,15 @@ namespace CompetitiveRounds
         public void OnJoinRandomFailed(short returnCode, string message) { }
         public void OnLeftRoom()
         {
+            // Bug 392 item B: a silence notice belongs to the room it was
+            // raised in. On a clean leave the sample loop stops without ever
+            // seeing a recovered sample, so the notice would sit in the MENU
+            // until its hold horizon expired — a warning about a match this
+            // seat is no longer in. The horizon bounds that to seconds; this
+            // makes it none. The cause store is NOT cleared here: the exit
+            // hooks read it immediately after a disconnect-driven leave, and
+            // the join edge plus the validity window are what bound it.
+            try { TransportExit.ClearSilence(); } catch { }
             // Release B §1: the head-to-head line dies with the room — first
             // statement (same reason as OnDisconnected). Idempotent.
             try { H2HSummary.Invalidate(); } catch { }

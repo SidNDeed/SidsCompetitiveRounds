@@ -5366,7 +5366,12 @@ namespace CompetitiveRounds
             // users is still ranked — that's an intended feature.
             matchIsRanked = Plugin.RankedEnabled.Value && opponentIsRanked && OpponentHasMod();
 
-            string matchType = matchIsRanked ? "RANKED" : "CASUAL";
+            // Bug 392 item D, sibling sweep: same expression, same false
+            // claim. matchIsRanked is forced true for any mod-issued room, so
+            // an FFA, 2v2 or 1v2 sitting opened its log with "=== RANKED Match
+            // Started ===". The label names the room's mode now; the ranked
+            // decision above is untouched.
+            string matchType = RoomModeLabels.ModeLabel(photonRoomId, matchIsRanked);
             Plugin.Log.LogInfo($"[POLL] === {matchType} Match Started ===");
             Plugin.Log.LogInfo($"[POLL] Me: {localDisplayName} ({localSteamId}) team {localTeamId}");
             Plugin.Log.LogInfo($"[POLL] Opp: {opponentDisplayName} ({opponentSteamId}) oppRanked={opponentIsRanked}");
@@ -5405,7 +5410,10 @@ namespace CompetitiveRounds
 
             bool localWon = (winnerTeam == localTeamId);
 
-            string matchType = matchIsRanked ? "RANKED" : "CASUAL";
+            // Bug 392 item D, sibling sweep: the third site built from the
+            // same expression (the other two are the room-exit cancel line and
+            // the match-start line).
+            string matchType = RoomModeLabels.ModeLabel(photonRoomId, matchIsRanked);
             Plugin.Log.LogInfo($"[POLL] === {matchType} Match Over === Winner: team {winnerTeam}");
             // Bug #91 item 2 (cosmetic): in a 1v2 room the old line named only
             // whichever single opponent the 1v1 poll latched onto ("YOU WON vs

@@ -1829,8 +1829,8 @@ namespace CompetitiveRounds
         /// to a box that does not know it would lose the in-room veto that
         /// keeps a live lobby from being dissolved for the other seats. The
         /// advert therefore has to be emitted by the same code that recognises
-        /// the tag; the leave is a write and lands on the primary, and backend
-        /// deploys go primary first (deploy-reference.md).</summary>
+        /// the tag, and the ordering constraints that follow from that are
+        /// written down in the batch notes rather than asserted here.</summary>
         public static bool ServerAcceptsInvoluntaryFfaCause { get; private set; }
 
         public static void CheckModVersion()

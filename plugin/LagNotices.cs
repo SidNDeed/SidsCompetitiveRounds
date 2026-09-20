@@ -361,9 +361,11 @@ namespace CompetitiveRounds
         /// on a plain-1v1 fighter seat, behind the [Network] LagNotices opt-in
         /// (default off). This line is a warning that the match connection is
         /// failing RIGHT NOW: it is decided from this seat's own socket
-        /// receive gap (GameStateWatcher.SampleConnectionQuality, which runs
-        /// in every room type including FFA — the seat that reported this bug
-        /// was in an FFA lobby), and it is NOT behind the opt-in, because a
+        /// receive gap in GameStateWatcher.SampleConnectionQuality, which runs
+        /// on the tracked-match frame tick — TickFrame returns early for a
+        /// spectator and when nothing is being tracked, and the FFA game-start
+        /// path sets isTracking, which is why the reported FFA sitting was
+        /// producing these samples. It is NOT behind the opt-in, because a
         /// warning nobody has switched on is a feature that ships inert
         /// (#438/#443). The setting still governs the four quality states
         /// exactly as it did.</summary>
