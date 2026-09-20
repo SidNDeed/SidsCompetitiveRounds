@@ -3299,7 +3299,7 @@ async def lifespan(app: FastAPI):
             # work; the replica is a read surface and nothing more.
             print("[REPLICA] BOOTING AS READ REPLICA: write schedulers disabled "
                   "(queue_cleanup, team_queue_cleanup, tournament_tick, "
-                  "min_version_autoraise, janitor self-test)")
+                  "min_version_autoraise, auto_log_retention, janitor self-test)")
             # The floor still has to track the primary — see the docstring.
             tasks.append(asyncio.create_task(
                 _supervised("min_version_follow", min_version_follow_loop)))
@@ -3343,6 +3343,23 @@ async def lifespan(app: FastAPI):
             # stack imported; the health word says which of those it is.
             if not IS_REPLICA and _pcs is not None:
                 tasks.append(asyncio.create_task(_pc_steam_sweep_loop()))
+            # Automatic post-match log retention (v1.41.0 Item 3). PRIMARY
+            # ONLY: every pass DELETEs, and a delete raises in recovery. This
+            # is the ONLY thing that enforces the fourteen-day rule -- the
+            # opportunistic prune inside the upload route collects nothing once
+            # uploads stop, which is precisely when a corpus needs collecting.
+            #
+            # WHAT TO GREP FOR, because a sweep failing every hour and a sweep
+            # with nothing to do are equally quiet otherwise:
+            # `[AUTO-LOG] retention sweep armed` once at boot, one
+            # `[AUTO-LOG] retention sweep:` line per pass including the empty
+            # ones, and `[AUTO-LOG] retention sweep FAILED` with a consecutive
+            # count when a pass dies. Those are the lines that exist because
+            # the loop catches its own per-pass errors; _supervised is the
+            # backstop for what escapes the loop entirely, and its restart line
+            # is NOT this sweep's failure signal.
+            tasks.append(asyncio.create_task(
+                _supervised("auto_log_retention", _auto_logs.auto_log_retention_loop)))
         # The Steam-render probe (v3 §9) runs on BOTH roles: each box
         # composites a stored Steam picture through its own face path and
         # reports the word on /health; the standby serves faces too.
@@ -4524,6 +4541,17 @@ app.add_middleware(
 from tournaments import router as tournaments_router
 app.include_router(tournaments_router)
 
+# Opt-in automatic post-match log upload (v1.41.0 Item 3). LIVE, not inert:
+# the client half is in the v1.41.0 client lane build 46f54d4 on Sid's desktop
+# and the opt-in setting is switched on there, so POST /api/v1/logs/auto
+# receives real traffic. The module's own docstring says what a working call
+# looks like and what it prints. The module object is bound as well as the
+# routers because lifespan starts its retention sweep.
+import auto_logs as _auto_logs
+from auto_logs import router as auto_logs_router, internal_router as auto_logs_internal_router
+app.include_router(auto_logs_router)
+app.include_router(auto_logs_internal_router)
+
 
 # ── Version gate ───────────────────────────────────────────────
 # Clients send X-Mod-Version on every request. If the version is below
@@ -4947,6 +4975,14 @@ _RL_SENSITIVE_PREFIXES = (
     # would throttle every player read. The trailing slash keeps it from
     # matching any sibling path.
     "/api/v1/h2h/",
+    # Automatic post-match log upload: a single accepted request can carry up
+    # to 14 MiB and writes a disk artifact, so it belongs in the tighter
+    # bucket rather than the 150/10s one it inherited. THE TRAILING SLASH IS
+    # LOAD-BEARING for the same reason as /bug-reports/ above. It does not
+    # cover /api/v1/internal/logs (a different prefix), whose callers carry
+    # X-Internal-Key and bypass the limiter anyway. A real client uploads once
+    # per match, so 20/10s is nowhere near binding.
+    "/api/v1/logs/",
     "/api/v1/ffa/matches", # quarantine-capture write path (Codex v1.36 find 6)
     "/api/v1/ffa/bets",
     # Lobby-phase wagers (migration 207). startswith also covers
@@ -35132,7 +35168,13 @@ async def submit_bug_report(req: BugReportRequest, request: Request, db: AsyncSe
     if not admin_exempt:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
         recent = await db.execute(
-            text("SELECT COUNT(*) FROM bug_reports WHERE steam_id = :sid AND created_at >= :cutoff"),
+            # kind = 'report' is what keeps the two budgets apart: automatic
+            # post-match uploads (kind='auto', migration 336) live in their
+            # own 12-per-24h bucket in auto_logs.py and must not consume a
+            # player's ten reports a day. Without this predicate a player who
+            # turned the setting on would silently lose the ability to file.
+            text("SELECT COUNT(*) FROM bug_reports "
+                 "WHERE steam_id = :sid AND kind = 'report' AND created_at >= :cutoff"),
             {"sid": req.steam_id, "cutoff": cutoff},
         )
         if (recent.scalar() or 0) >= BUG_REPORT_PER_STEAM_PER_DAY:
@@ -35167,7 +35209,30 @@ async def submit_bug_report(req: BugReportRequest, request: Request, db: AsyncSe
             report.log_filename = log_filename
             report.log_bytes = log_bytes_stored
         except Exception as ex:
-            print(f"[BUG-REPORT] log persistence failed for {report.id}: {ex}")
+            # A LOG WAS ATTACHED AND IT IS GONE, and the row has to say so.
+            #
+            # Falling through leaves log_filename NULL, which is the SAME
+            # state as a report filed with no log at all. An admin opening the
+            # row a week later sees "no attachment" and has no way to know one
+            # was sent, so a player who attached their log and describes a
+            # crash looks like a player who did not bother. The api log line
+            # below is the only record, and it is thirty thousand lines away
+            # by the time anybody looks.
+            #
+            # log_bytes = 0 is that marker, and it needs no schema change:
+            # log_filename stays NULL because there is genuinely nothing to
+            # download (`has_log` is derived from it and stays false), while 0
+            # is unreachable for a stored blob -- this arm only runs when a
+            # non-empty log_blob was sent, and gzip of anything is never zero
+            # bytes. So NULL means "none attached" and 0 means "attached and
+            # lost", which is the distinction that was missing.
+            #
+            # The response already carries `log_persisted: false`, so the
+            # client half was told. This is the half nobody was told: the row.
+            report.log_bytes = 0
+            print(f"[BUG-REPORT] log persistence FAILED for {report.id}: "
+                  f"{ex}; the row is committed with log_bytes=0 to record "
+                  f"that a log was attached and could not be stored")
 
     # Seed the activity log with a "created" event so the timeline is complete.
     db.add(BugReportEvent(
@@ -35198,6 +35263,22 @@ async def list_bug_reports(
     hmac_signature: str | None = Query(None),
     status: str | None = Query(None, max_length=16),
     severity: str | None = Query(None, max_length=16),
+    # WHAT PUT THE ROW HERE, as a filter and not only as a field.
+    #
+    # One opted-in seat can write up to twelve automatic uploads a day --
+    # more in a day than the bug form produces in a month -- and they are
+    # written 'open'/'low'/'other', which is exactly what an untriaged player
+    # report looks like. So neither `status` nor `severity` separates them,
+    # and page one of a DESC-by-created_at list is fifty machine rows with a
+    # player's two-day-old ticket sitting on page three.
+    #
+    # Carrying `kind` on the summary row was not enough by itself: it lets an
+    # admin SEE which row is which once the page has been fetched, and that
+    # field's default in schemas.py exists precisely so an OLDER admin client
+    # ignores the key. This parameter is what makes the two separable by
+    # QUERY. Omitted, the list is unchanged and shows both -- an admin should
+    # be able to see automatic uploads, just not have to wade through them.
+    kind: str | None = Query(None, max_length=16),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
@@ -35216,11 +35297,28 @@ async def list_bug_reports(
     if severity:
         filters.append("severity = :severity")
         params["severity"] = severity.lower()
+    if kind:
+        filters.append("kind = :kind")
+        params["kind"] = kind.lower()
     where = " WHERE " + " AND ".join(filters) if filters else ""
+    # `kind` is SELECTed and carried out: an automatic post-match upload
+    # (migration 336) and a player-filed ticket are otherwise the same row in
+    # this list, and the triage actions beside them -- status, comment -- mean
+    # completely different things for the two. The list is deliberately not
+    # filtered to kind='report' BY DEFAULT -- an admin should be able to see
+    # automatic uploads, just not mistake one for a ticket somebody is waiting
+    # on, and not have to page past them to find one. `?kind=report` is the
+    # filter that does the second half; the default answers as it always did.
+    #
+    # AN OLD API BOX IGNORES AN UNKNOWN QUERY PARAMETER AND ANSWERS 200 (#266).
+    # A new admin client asking for `kind=report` against a box that has not
+    # been deployed yet gets the UNFILTERED list back, looking filtered. That
+    # is the standby-drift signature exactly, and it is why this endpoint has
+    # to be live on both boxes before the filter is trusted.
     rows = await db.execute(
         text(f"""SELECT id, bug_number, created_at, steam_id, display_name, mod_version,
                         severity, category, status, description,
-                        log_filename, log_bytes
+                        log_filename, log_bytes, kind
                    FROM bug_reports{where}
                   ORDER BY created_at DESC
                   LIMIT :limit OFFSET :offset"""),
@@ -35241,6 +35339,7 @@ async def list_bug_reports(
                 description=r["description"],
                 has_log=r["log_filename"] is not None,
                 log_bytes=r["log_bytes"],
+                kind=r["kind"] or "report",
             ).model_dump()
             for r in rows.mappings().all()
         ],
@@ -35264,11 +35363,23 @@ async def recent_bug_report_events(
     while the bot was restarting/deploying — which is exactly when comment
     sweeps happen — so DMs looked 'inconsistent'. Ack-based delivery makes
     them at-least-once."""
+    # kind = 'report' on BOTH arms, for the same reason recent_bug_reports
+    # filters it -- and this one matters more. An automatic post-match log
+    # upload (kind='auto', migration 336) is not a ticket the player filed:
+    # it creates no initial event, so it never appears here on its own. But
+    # the moment an admin comments on one or changes its status, THAT writes
+    # a bug_report_events row, and this feed hands it to the bot with the
+    # linked player's discord_id attached -- which DMs them that staff acted
+    # on 'your report' for something they never filed and cannot see.
+    # Filtering the feed is the fix rather than filtering in the bot: the
+    # reporter_discord_id join below is what makes the row deliverable, and
+    # it should not be built for a row that is not a player's ticket.
     if unnotified:
-        where = "bre.notified_at IS NULL AND bre.created_at >= NOW() - INTERVAL '7 days'"
+        where = ("br.kind = 'report' AND bre.notified_at IS NULL "
+                 "AND bre.created_at >= NOW() - INTERVAL '7 days'")
         params = {}
     else:
-        where = "bre.created_at >= :cutoff"
+        where = "br.kind = 'report' AND bre.created_at >= :cutoff"
         params = {"cutoff": datetime.now(timezone.utc) - timedelta(seconds=seconds)}
     rows = (await db.execute(
         text(f"""SELECT bre.id              AS event_id,
@@ -35375,10 +35486,18 @@ async def recent_bug_reports(
     unposted=true (v1.29): ack-based variant — reports not yet posted to the
     feed channel (up to 7 days back), so a bot restart can't drop one."""
     if unposted:
-        where = "channel_posted_at IS NULL AND created_at >= NOW() - INTERVAL '7 days'"
+        # kind = 'report' on BOTH arms. This is the feed the bot turns into
+        # #bug-reports posts, and an automatic log upload is not something to
+        # announce -- it is not a report, nobody wrote it, and a player with
+        # the setting on would spam the channel after every match. The gate
+        # lives here rather than in the bot because the bot is a separate
+        # deployable and a server-side feed should not hand out rows whose
+        # only correct handling is to drop them.
+        where = ("kind = 'report' AND channel_posted_at IS NULL "
+                 "AND created_at >= NOW() - INTERVAL '7 days'")
         params = {}
     else:
-        where = "created_at >= :cutoff"
+        where = "kind = 'report' AND created_at >= :cutoff"
         params = {"cutoff": datetime.now(timezone.utc) - timedelta(seconds=seconds)}
     rows = (await db.execute(
         text(f"""SELECT id, bug_number, created_at, steam_id, display_name, mod_version,
@@ -35425,10 +35544,14 @@ async def get_bug_report(
         rid = UUID(report_id)
     except (ValueError, TypeError):
         raise HTTPException(400, "Invalid report_id")
+    # `kind` rides out here too (migration 336). The detail pane is where an
+    # admin decides to comment or change a status, and both of those reach the
+    # reporter for a kind='report' row and nobody for a kind='auto' one. The
+    # pane cannot make that distinction from a field it is not sent.
     row = (await db.execute(
         text("""SELECT id, bug_number, player_id, steam_id, display_name, mod_version, game_version,
                        severity, category, description, repro_steps, log_filename, log_bytes,
-                       status, triage_notes, created_at, updated_at
+                       status, triage_notes, created_at, updated_at, kind
                   FROM bug_reports WHERE id = :rid"""),
         {"rid": rid},
     )).mappings().first()
@@ -35746,6 +35869,30 @@ async def user_comment_on_bug_report(
         select(BugReport).where(BugReport.bug_number == bug_number)
     )).scalar_one_or_none()
     if not report:
+        raise HTTPException(404, "Bug report not found")
+    # AUTOMATIC UPLOADS ARE NOT TICKETS, and this is the door that would let
+    # one become one. An automatic post-match log upload (kind='auto',
+    # migration 336) carries the uploader's steam_id, so the ownership test
+    # below PASSES for it: the player's own Discord id matches, and a comment
+    # relayed from a DM lands on a row the player never filed, cannot see, and
+    # did not ask anyone to read. That comment then writes a bug_report_events
+    # row, which is the feed the bot answers from.
+    #
+    # Refused as a 404 rather than a 403: a number that names no ticket of
+    # theirs is, from the reporter surface's point of view, not a ticket.
+    #
+    # The column is read in raw SQL because models.BugReport deliberately does
+    # not map `kind` (see the class). The statement is exactly
+    # `SELECT kind FROM bug_reports WHERE id = :rid`: it filters on the id and
+    # on nothing else, and the kind is judged underneath it, in Python. That
+    # split is deliberate -- it is what lets a row that is missing and a row
+    # whose kind is not 'report' arrive at the same refusal without the query
+    # having to carry the decision as well. A NULL kind, which is what a row
+    # predating any backfill has, refuses along with them.
+    row_kind = (await db.execute(
+        text("SELECT kind FROM bug_reports WHERE id = :rid"), {"rid": report.id},
+    )).scalar_one_or_none()
+    if row_kind is None or row_kind != "report":
         raise HTTPException(404, "Bug report not found")
     # Ownership: the report's reporter (matched by steam_id) must have THIS
     # Discord account linked. No link or a mismatch → not their ticket.

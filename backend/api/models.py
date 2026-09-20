@@ -714,6 +714,27 @@ class BugReport(Base):
     log_bytes = Column(Integer, nullable=True)
     status = Column(String(16), nullable=False, default="open")
     triage_notes = Column(Text, nullable=True)
+    # DELIBERATELY UNMAPPED: `kind` (migration 336, 'report' | 'auto').
+    # Not mapped because an ORM assignment to an undeclared column is a SILENT
+    # no-op, invisible at the call site (#346), and auto_logs.py -- the only
+    # writer of a non-default value -- uses raw SQL.
+    #
+    # MIGRATION 336 MUST BE APPLIED BEFORE THIS CODE REACHES A BOX. Leaving the
+    # column unmapped does NOT make the reverse order safe. Being absent from
+    # the ORM keeps `kind` out of submit_bug_report's INSERT, but raw-SQL sites
+    # READ it and they decide the ordering:
+    #   * the 10-per-24h rate-limit COUNT inside submit_bug_report itself,
+    #     `WHERE steam_id = :sid AND kind = 'report' AND created_at >= :cutoff`
+    #   * recent_bug_report_events, both arms
+    #   * recent_bug_reports, both arms
+    #   * list_bug_reports and get_bug_report, which SELECT it
+    #   * user_comment_on_bug_report, which reads it to refuse an auto row
+    # On a box running this code without 336, that first one raises
+    # UndefinedColumn before any INSERT is attempted, so NO player can file a
+    # bug report at all. Migration 336's own header states the requirement the
+    # same way; this comment agrees with it.
+    # channel_posted_at (migration 102) is also unmapped and is read and
+    # written by raw SQL in main.py; no reason was ever recorded for that one.
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))
 

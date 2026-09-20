@@ -1,10 +1,26 @@
 """Re-pin the fingerprints in route_manifest_net_seat.json from the GATE's own code path.
 
-Both families: the route rows AND the `entry_points` section (middleware,
-exception handlers, the lifespan). The section was outside this tool until now,
-so the only way to move an entry-point sha was to paste one in by hand -- the
-exact thing the route half refuses to do, on a set whose whole point is that a
-request path outside the routing table is still a reviewed surface.
+All THREE families: the route rows, the `entry_points` section (middleware,
+exception handlers, the lifespan) and `route_order`. The entry-point section
+was outside this tool until it was brought in, so the only way to move an
+entry-point sha was to paste one in by hand -- the exact thing the route half
+refuses to do, on a set whose whole point is that a request path outside the
+routing table is still a reviewed surface.
+
+`route_order` was the last one left outside, and it was outside SILENTLY: the
+tool reported "rows rewritten" and exited 0 while the gate stayed red, because
+registration order is the one family this tool never touched. Adding a route
+moves it by construction, so every route added since that section landed has
+had to be hand-pasted -- the thing the other two halves refuse. It is re-pinned
+here from `gate._route_registration_order()`, the same function
+`test_the_manifest_records_the_order_requests_are_matched_in` compares against,
+so tool and gate cannot disagree by construction (#596).
+
+Re-pinning order is NOT the same as approving it. Starlette matches in
+registration order and first match wins, so a route that changed POSITION may
+have changed which handler answers a request. The tool prints every insertion,
+removal and move so that question is put in front of whoever runs it; what it
+refuses to do is let the answer be typed in by hand.
 
 Learning #596: a previous re-pin tool computed a fingerprint a second way, the
 manifest carried a value the gate never produces, and the gate failed closed on
@@ -99,10 +115,27 @@ def main():
             print("   ", k)
         return 1
 
-    moved, written = [], 0
+    moved, written, seeded = [], 0, []
     for group in doc["groups"]:
         for r in group["routes"]:
             if len(r) <= 4:
+                # A four-element row carries no fingerprint. For the
+                # sentinel-exercised route that is correct and permanent --
+                # it is checked by being RUN with all 50 sentinels, not by its
+                # source. For a statically-nonconsumer row it means a route
+                # was just added to the manifest and its sha has not been
+                # taken yet, so take it HERE rather than letting someone paste
+                # one in: the classification and the reason are the human's
+                # call, the sha never is (#596). Reported separately from
+                # `moved`, because a first fingerprint is not a drift.
+                if group.get("classification") != "statically-nonconsumer":
+                    continue
+                k = (r[0], tuple(r[1]), r[2], r[3])
+                if k not in live:
+                    continue
+                r.append(live[k])
+                seeded.append(r[2] + "." + r[3])
+                written += 1
                 continue
             k = (r[0], tuple(r[1]), r[2], r[3])
             if baseline.get(k) != live[k]:
@@ -138,6 +171,23 @@ def main():
                 row[2] = now
                 written += 1
 
+    # ── registration order: the third family ────────────────────────────
+    # Read from the gate's own `_route_registration_order`, never rebuilt
+    # here. Starlette matches in this order and first match wins, so the
+    # DIFFERENCE is printed rather than quietly absorbed: a route that only
+    # moved position is the case where the manifest looks unchanged and the
+    # handler that answers a request is not the one that used to.
+    live_order = gate._route_registration_order()
+    recorded_order = doc.get("route_order") or []
+    order_added = [s for s in live_order if s not in recorded_order]
+    order_gone = [s for s in recorded_order if s not in live_order]
+    kept_live = [s for s in live_order if s in recorded_order]
+    kept_recorded = [s for s in recorded_order if s in live_order]
+    order_reshuffled = kept_live != kept_recorded
+    if live_order != recorded_order:
+        doc["route_order"] = live_order
+        written += 1
+
     print("manifest rows      : %d" % sum(len(g["routes"]) for g in doc["groups"]))
     print("fingerprinted      : %d" % len(rows(doc)))
     print("rows rewritten now : %d" % written)
@@ -147,6 +197,24 @@ def main():
     print("ENTRY POINTS moved vs %-4s: %d" % (baseline_name, len(ep_moved)))
     for name, old, new in sorted(ep_moved):
         print("   %-42s %s -> %s" % (name, (old or "none")[:8], new[:8]))
+    if seeded:
+        print("FIRST fingerprint taken for %d newly-manifested route(s):" % len(seeded))
+        for name in sorted(seeded):
+            print("   * %s" % name)
+    print("ROUTE ORDER        : %d recorded -> %d live (+%d/-%d)%s"
+          % (len(recorded_order), len(live_order), len(order_added),
+             len(order_gone), ", RESHUFFLED" if order_reshuffled else ""))
+    for s in order_added:
+        print("   + %s" % s)
+    for s in order_gone:
+        print("   - %s" % s)
+    if order_reshuffled:
+        # Said loudly and separately from the +/- list: an insertion is
+        # expected when a batch adds a route, a RESHUFFLE of routes that were
+        # already there is the case where first-match-wins may now pick a
+        # different handler for the same request.
+        print("   !! routes that already existed changed position; confirm the "
+              "route that answers each path is still the one that used to")
 
     if "--write" in sys.argv:
         out = json.dumps(doc, indent=2) + "\n"

@@ -957,6 +957,15 @@ class AchievementListResponse(BaseModel):
 
 # ── Bug reports (v1.26.7) ─────────────────────────────────────
 
+# The log-bundle ceiling, in CHARACTERS, pre-gzip. Named because there are
+# THREE different clamps on BugReportRequest below -- 64 for the short
+# identity fields, 8000 for the free-text ones and this one for the log --
+# and a plan citing the wrong one of them is what this constant exists to
+# stop. backend/api/auto_logs.py imports it so the automatic upload and the
+# bug form cannot end up with two different ideas of how much log fits.
+BUG_REPORT_LOG_MAX_CHARS = 12_000_000
+
+
 class BugReportRequest(BaseModel):
     """In-game bug report submission. log_text is optional plain-text — server
     gzips it before persisting to disk.
@@ -1001,10 +1010,10 @@ class BugReportRequest(BaseModel):
     @classmethod
     def _clamp_log(cls, v):
         # Keep the TAIL of the log — the most recent events are what matter for a
-        # bug report. 12MB pre-gzip ceiling (matches the prior intent) but as a
-        # truncation, not a 422-triggering hard cap.
-        if isinstance(v, str) and len(v) > 12_000_000:
-            return v[-12_000_000:]
+        # bug report. BUG_REPORT_LOG_MAX_CHARS pre-gzip, applied as a truncation
+        # and not as a 422-triggering hard cap.
+        if isinstance(v, str) and len(v) > BUG_REPORT_LOG_MAX_CHARS:
+            return v[-BUG_REPORT_LOG_MAX_CHARS:]
         return v
 
 
@@ -1022,6 +1031,20 @@ class BugReportSummary(BaseModel):
     description: str
     has_log: bool
     log_bytes: int | None
+    # WHAT PUT THE ROW HERE: 'report' = a player filed it from the F5 bug form,
+    # 'auto' = the automatic post-match log upload wrote it (migration 336).
+    # Carried so admin triage can tell the two apart. Without it they are
+    # indistinguishable in the list, while every triage affordance the pane
+    # offers -- a status change, a comment -- reads as acting on a ticket a
+    # player filed and is waiting on an answer to.
+    #
+    # Appended last and defaulted so an older admin client ignores the extra
+    # key. The default does NOT make this model survive a missing column, and
+    # an earlier version of this comment claimed it did: list_bug_reports
+    # SELECTs `kind` by name, so on a box without migration 336 the query
+    # raises before any response model is built. Migration 336 before the api
+    # is mandatory (#477); the default is about OLD CLIENTS, not old schemas.
+    kind: str = "report"
 
 
 class BugReportEventEntry(BaseModel):
