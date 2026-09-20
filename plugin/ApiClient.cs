@@ -14004,12 +14004,33 @@ namespace CompetitiveRounds
         /// kept and the pending flag cleared.</para>
         ///
         /// <para>The point totals below ride the query string OUTSIDE the DC
-        /// signature and gate half of the forfeit condition, so the caller sends
-        /// them only when it can prove from replicated state that it is the sole
-        /// reporter; see the election in Plugin.OnPlayerLeftRoom.</para></summary>
+        /// signature and gate half of the forfeit condition. The election in
+        /// Plugin.OnPlayerLeftRoom decides WHO sends and WHEN; this method only
+        /// carries what that seat observed.</para>
+        ///
+        /// <para>DELIVERY. A single un-retried request used to be the whole
+        /// mechanism, on a path whose failure leaves the series open and every
+        /// survivor holding a 2v2 lease until its TTL expires — and the disruption
+        /// that produced the disconnect is exactly the one that drops it. It now
+        /// goes through PostRequestWithRetry, and a second seat may send the same
+        /// report later still (<paramref name="delaySeconds"/>). Both are safe
+        /// against the DEPLOYED endpoint, which is not merely tolerant of a repeat
+        /// but explicitly ignores one: it re-reads the row under FOR UPDATE and
+        /// returns `{"ignored": true}` unless the status is still active/dc_paused,
+        /// and the completion helper beneath it no-ops on an already-completed
+        /// series. A duplicate therefore cannot double-apply ratings or gold.</para>
+        ///
+        /// <para><paramref name="observedRoom"/> is the room the disconnect was
+        /// SEEN in, passed in rather than read here: a delayed send can leave the
+        /// room first, and this method reading `PhotonNetwork.CurrentRoom` at that
+        /// point would send an empty hint — which the endpoint treats as an old
+        /// client and lets through the bug-245 resume fence. Null keeps the old
+        /// read-it-here behaviour for any caller that has no observation to
+        /// name.</para></summary>
         public static void ReportTeamSeriesDc(
             string seriesId, string reporterSteamId, string dcPlayerSteamId,
-            int t1PointsTotal, int t2PointsTotal)
+            int t1PointsTotal, int t2PointsTotal,
+            string observedRoom = null, float delaySeconds = 0f)
         {
             // §2c identity fence: the broadcast service account never reports.
             if (BroadcastMode.FenceBlocksFighterPath("report-2v2-dc")) return;
@@ -14022,8 +14043,12 @@ namespace CompetitiveRounds
             // must not lead-forfeit the resumed sitting mid-play. Unsigned
             // hint by design (the DC canonical is frozen); empty when the
             // room is already gone, which keeps legacy behavior.
-            string dcRoom = "";
-            try { dcRoom = PhotonNetwork.InRoom ? (PhotonNetwork.CurrentRoom?.Name ?? "") : ""; } catch { }
+            string dcRoom = observedRoom;
+            if (dcRoom == null)
+            {
+                dcRoom = "";
+                try { dcRoom = PhotonNetwork.InRoom ? (PhotonNetwork.CurrentRoom?.Name ?? "") : ""; } catch { }
+            }
             string url = $"{baseUrl}/api/v1/team/series/{seriesId}/report-dc" +
                          $"?reporter_steam_id={UnityWebRequest.EscapeURL(reporterSteamId)}" +
                          $"&dc_player_steam_id={UnityWebRequest.EscapeURL(dcPlayerSteamId)}" +
@@ -14031,10 +14056,29 @@ namespace CompetitiveRounds
                          $"&t2_points_total={t2PointsTotal}" +
                          $"&photon_room_id={UnityWebRequest.EscapeURL(dcRoom)}" +
                          $"&hmac_sig={UnityWebRequest.EscapeURL(sig)}";
-            Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
+            // The URL is complete BEFORE any wait. Every field in it is a fact of
+            // the disconnect — the reporter, the leaver, the points as they stood,
+            // the room it happened in — and none of them may be re-read from a
+            // client state that has moved on by the time the request goes out.
+            Plugin.Instance.StartCoroutine(SendTeamSeriesDcReport(url, delaySeconds));
+        }
+
+        /// <summary>Dispatch half of <see cref="ReportTeamSeriesDc"/>: an optional
+        /// wait, then the retried POST. Realtime wait — ROUNDS slows or pauses game
+        /// time on the result and menu screens, which is precisely where a seat
+        /// sits after a team-mate disconnects.</summary>
+        private static IEnumerator SendTeamSeriesDcReport(string url, float delaySeconds)
+        {
+            if (delaySeconds > 0f)
+            {
+                yield return new WaitForSecondsRealtime(delaySeconds);
+                Plugin.Log.LogInfo("[2v2-DC] safety-net window elapsed — sending this seat's report; "
+                    + "the endpoint ignores it if the elected seat's already closed the series");
+            }
+            yield return Plugin.Instance.StartCoroutine(PostRequestWithRetry(url, "", (ok, resp) =>
             {
                 if (ok) Plugin.Log.LogInfo($"[2v2-DC] report accepted: {resp}");
-                else Plugin.Log.LogWarning($"[2v2-DC] report failed: {resp}");
+                else Plugin.Log.LogWarning($"[2v2-DC] report failed after every retry: {resp}");
             }));
         }
 

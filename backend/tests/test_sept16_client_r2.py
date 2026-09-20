@@ -27,6 +27,7 @@ Run: python -m pytest backend/tests/test_sept16_client_r2.py -q
 """
 import itertools
 import pathlib
+import re
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 PLUGIN = ROOT / "plugin"
@@ -50,6 +51,49 @@ def _assert_discriminating(predicate, real, mutated, label):
     assert not predicate("// nothing here\n"), label + ": the claim holds on a stub"
 
 
+# A member declaration at class-member indentation: what a single method's text
+# must not contain, because containing one means the window is not one method's.
+_MEMBER_DECL = re.compile(
+    r"^ {8}(?:internal|private|public|protected)\s+[A-Za-z_<]", re.M)
+
+
+def _method_body(src, signature):
+    """The text of ONE C# method, or "" when that cannot be established.
+
+    The first cut of this file took a body as "everything from the signature to
+    the first line that is exactly eight spaces and a closing brace".  That
+    window is the method's own only while the method is written across lines.
+    For a ONE-LINE member -- `internal static void X() { Y(); }`, which is
+    exactly how DropChatDraftOnRevoke looked BEFORE the fix M5 is about -- there
+    is no such line inside it, so the window ran on into the NEXT member and the
+    predicate read a neighbour's statements as the fix's.  test_m5 therefore
+    passed on the unfixed tree: a check that cannot fail is worse than no check
+    (#342).  The control beside it never caught that, because the synthetic
+    mutation is the one source where the anchor does sit in the right method --
+    which is why the control below this file's M5 test is the PRE-FIX SHAPE and
+    not another synthetic edit (#391).
+
+    Two rules close it.  A one-line member returns that line and nothing else.
+    A multi-line one still ends at its eight-space brace, but the window is
+    REJECTED (returns "") when another member declaration appears inside it,
+    which is exactly the footprint of a window that ran past its own method.
+    """
+    if signature not in src:
+        return ""
+    rest = src[src.index(signature):]
+    line_end = rest.find("\n")
+    first_line = rest if line_end < 0 else rest[:line_end]
+    if "{" in first_line and first_line.count("{") == first_line.count("}"):
+        return first_line                      # a complete one-line member
+    end = rest.find("\n        }")
+    if end < 0:
+        return ""
+    body = rest[:end + 10]
+    if _MEMBER_DECL.search(body[len(signature):]):
+        return ""                              # ran past this method: not evidence
+    return body
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # H1 / L3 -- the 2v2 DC reporter election
 # ══════════════════════════════════════════════════════════════════════════
@@ -62,13 +106,25 @@ def _assert_discriminating(predicate, real, mutated, label):
 # one reporter whenever it claims the right to send real totals.
 
 
-def elect(seats, leaver):
+SAFETY_NET_SEC = 45          # Plugin.cs DC_SAFETY_NET_SEC
+RETRY_BUDGET_SEC = 34        # PostRequestWithRetry: 3 x 10s timeout + 2 x 2s backoff
+
+
+def elect(seats, leaver, capable=None):
     """Transliteration of Plugin.OnPlayerLeftRoom's election.
 
     `seats` is the list of SURVIVORS as every seat sees them (Photon has
-    already removed the leaver), each a dict {uid, team, local}. `leaver` is
-    {uid, team}.  Returns the list of (uid, t1p, t2p) each seat would post,
-    computed independently per seat exactly as the client does.
+    already removed the leaver), each a dict {uid, team, local}.  `leaver` is
+    {uid, team}.  `capable` is the set of uids advertising cr_dc2 -- None means
+    the whole room advertises it, which is the case the census arm needs.
+
+    Returns one entry per seat that POSTS, as (uid, totals, delay_seconds).
+    `totals` is always "REAL": the arm-(2) zeros were withdrawn this round, and
+    a test asserting a seat can produce "ZERO" would now be asserting the defect
+    (a seat on the LEAVER's team could force every other seat's report to zero
+    by withholding one property, turning a forfeit the other team had earned
+    into dc_incomplete).  `delay_seconds` is 0 for the prompt report and
+    SAFETY_NET_SEC for the seat that only reports if the prompt one never lands.
     """
     posts = []
     for me in seats:
@@ -78,8 +134,11 @@ def elect(seats, leaver):
         dc_team = leaver["team"]
         teams_known = dc_team is not None and my_team is not None
 
-        # arm (1) preconditions
-        unique = teams_known and len(seats) == 3
+        # arm (1) preconditions, including the room-wide one: every survivor
+        # advertising cr_dc2, i.e. every seat that could report is evaluating
+        # THIS rule rather than the previous OR'd election.
+        room_wide = all(capable is None or s["uid"] in capable for s in seats)
+        unique = teams_known and len(seats) == 3 and room_wide
         seen, lowest_non_dc, non_dc, dc_count, saw_self = set(), None, 0, 1, False
         if unique:
             if leaver["uid"] is None:
@@ -106,13 +165,12 @@ def elect(seats, leaver):
 
         if unique:
             if my_team == dc_team:
-                continue
-            if my_val != lowest_non_dc:
-                continue
-            posts.append((my_val, "REAL"))
+                continue                  # the other team elects; the server refuses us
+            posts.append((my_val, "REAL",
+                          0 if my_val == lowest_non_dc else SAFETY_NET_SEC))
             continue
 
-        # arm (2): the floor election, with zero totals
+        # arm (2): the floor election, unchanged, with this seat's own snapshot
         lowest_overall = True
         lowest_on_my_team = teams_known and my_team != dc_team
         other_eligible = False
@@ -133,38 +191,112 @@ def elect(seats, leaver):
             continue
         if not lowest_overall and not lowest_on_my_team:
             continue
-        posts.append((my_val, "ZERO"))
+        posts.append((my_val, "REAL", 0))
     return posts
+
+
+def _prompt(posts):
+    return [p for p in posts if p[2] == 0]
+
+
+def _net(posts):
+    return [p for p in posts if p[2] > 0]
 
 
 def _seats(ids_teams):
     return [{"uid": u, "team": t, "local": i} for i, (u, t) in enumerate(ids_teams)]
 
 
-def test_h1_healthy_2v2_elects_exactly_one_reporter_with_real_totals():
+def test_h1_healthy_2v2_elects_exactly_one_prompt_reporter_plus_a_safety_net():
     # leaver on team 0; survivors: its teammate (team 0) and both of team 1.
     seats = _seats([(10, 0), (20, 1), (30, 1)])
     posts = elect(seats, {"uid": 40, "team": 0})
-    assert posts == [(20, "REAL")], posts
+    assert _prompt(posts) == [(20, "REAL", 0)], posts
+    assert _net(posts) == [(30, "REAL", SAFETY_NET_SEC)], posts
+    # the leaver's own team-mate is silent either way: the server refuses it
+    assert 10 not in [u for u, _t, _d in posts]
 
 
-def test_h1_every_healthy_permutation_yields_one_reporter():
+def test_h1_every_healthy_permutation_yields_one_prompt_report():
     for ids in itertools.permutations([11, 22, 33, 44]):
         leaver_id, a, b, c = ids
         for dc_team in (0, 1):
             other = 1 - dc_team
             seats = _seats([(a, dc_team), (b, other), (c, other)])
             posts = elect(seats, {"uid": leaver_id, "team": dc_team})
-            assert len(posts) == 1, (ids, dc_team, posts)
-            uid, totals = posts[0]
-            assert totals == "REAL"
+            prompt = _prompt(posts)
+            assert len(prompt) == 1, (ids, dc_team, posts)
+            uid, totals, delay = prompt[0]
+            assert totals == "REAL" and delay == 0
             assert uid == min(b, c)
+            # and exactly one seat behind it, never a second prompt report
+            assert [u for u, _t, _d in _net(posts)] == [max(b, c)], posts
 
 
-def test_h1_degenerate_seats_never_post_real_totals_and_never_post_zero_times():
-    """Every way the census can be incomplete.  The bar is two-sided: at least
-    one report (#276 -- zero reporters is worse than the bug) and never a
-    report carrying real totals (#283 -- the conservative direction)."""
+def test_h1_the_safety_net_cannot_overtake_the_prompt_report():
+    """The net exists because a single un-retried request used to be the whole
+    mechanism, and the disruption that produced the disconnect is the one that
+    drops it.  It must wait out the prompt seat's ENTIRE budget, or the two race
+    and the arrival order decides a rated completion again -- the defect the
+    census arm exists to remove."""
+    assert SAFETY_NET_SEC > RETRY_BUDGET_SEC
+    src = _src("Plugin.cs")
+
+    def claim(s):
+        return "const float DC_SAFETY_NET_SEC = 45f;" in s and "delaySec = DC_SAFETY_NET_SEC;" in s
+
+    _assert_discriminating(
+        claim, src,
+        _mutate(src, "const float DC_SAFETY_NET_SEC = 45f;",
+                "const float DC_SAFETY_NET_SEC = 1f;", "H1 net delay"),
+        "H1 safety-net delay")
+
+
+def test_h1_a_peer_on_the_older_election_drops_the_room_to_the_floor_rule():
+    """The census proves ONE reporter only among seats evaluating the census.  A
+    seat that does not advertise cr_dc2 is running the previous OR'd election
+    and will post regardless, so the rule is not room-wide and this seat must
+    not act as though it were."""
+    seats = _seats([(10, 0), (20, 1), (30, 1)])
+    leaver = {"uid": 40, "team": 0}
+    every = elect(seats, leaver, capable={10, 20, 30})
+    assert len(_prompt(every)) == 1 and len(_net(every)) == 1
+
+    # one survivor on the old build: every seat falls to the floor election,
+    # which is the rule that seat is already running.
+    mixed = elect(seats, leaver, capable={20, 30})
+    assert all(d == 0 for _u, _t, d in mixed), mixed
+    assert _prompt(mixed), "the floor election still reports (#276)"
+    assert all(t == "REAL" for _u, t, _d in mixed), mixed
+
+
+def test_h1_the_leavers_own_team_cannot_downgrade_the_report():
+    """#283 from the abandoned team's side.  Withholding a property, or
+    advertising a team it is not on, is a leaver-side seat's only lever over the
+    election.  It may move WHICH seats report; it must not change WHAT they
+    report, because the alternative hands the party with the motive a one-property
+    escape from a rated forfeit."""
+    leaver = {"uid": 40, "team": 0}
+    sabotage = [
+        _seats([(10, 0), (20, 1), (30, 1)]),            # honest, for comparison
+        _seats([(None, 0), (20, 1), (30, 1)]),          # no u_id
+        _seats([(10, None), (20, 1), (30, 1)]),         # t_id outside {0,1}
+        _seats([(10, 1), (20, 1), (30, 1)]),            # claims the other team
+        _seats([(20, 0), (20, 1), (30, 1)]),            # duplicate id
+    ]
+    for seats in sabotage:
+        for cap in (None, {20, 30}):                    # also with cr_dc2 withheld
+            posts = elect(seats, leaver, capable=cap)
+            assert posts, ("zero reporters", seats, cap)
+            assert all(t == "REAL" for _u, t, _d in posts), (seats, cap, posts)
+            # and someone reports without waiting, in every one of them
+            assert _prompt(posts), (seats, cap, posts)
+
+
+def test_h1_degenerate_seats_always_report_and_never_wait_for_a_seat_that_will_not():
+    """Every way the census can be incomplete.  The bar: at least one PROMPT
+    report in every one of them (#276 -- zero reporters is worse than the bug),
+    and no seat sitting on a safety net when no census elected anyone."""
     cases = [
         # a survivor with no advertised u_id
         (_seats([(10, 0), (None, 1), (30, 1)]), {"uid": 40, "team": 0}),
@@ -184,7 +316,8 @@ def test_h1_degenerate_seats_never_post_real_totals_and_never_post_zero_times():
     for seats, leaver in cases:
         posts = elect(seats, leaver)
         assert posts, ("zero reporters", seats, leaver)
-        assert all(t == "ZERO" for _uid, t in posts), ("real totals", seats, leaver, posts)
+        assert _prompt(posts), ("nobody reports promptly", seats, leaver, posts)
+        assert not _net(posts), ("a net without an election", seats, leaver, posts)
 
 
 def test_h1_mutation_dropping_the_split_check_reopens_the_race():
@@ -209,25 +342,49 @@ def test_h1_mutation_dropping_the_split_check_reopens_the_race():
     # the mutant elects team 0's lone survivor AND nothing cross-checks it
     mutant = elect_without_split(seats, leaver)
     assert mutant == [(10, "REAL")], mutant
-    # the real election refuses: the split is 1 non-DC vs 3, so it drops to zeros
-    assert all(t == "ZERO" for _u, t in elect(seats, leaver))
+    # the real election refuses the census (the split is 1 non-DC vs 3) and runs
+    # the floor rule, which is what every peer in that room is running too.
+    real = elect(seats, leaver)
+    assert real and all(d == 0 for _u, _t, d in real), real
 
 
 def test_h1_source_matches_the_model():
     src = _src("Plugin.cs")
 
     def claim(s):
-        return ("conservativeOnly" in s
-                and "int t1Points = conservativeOnly ? 0 : GameStateWatcher.LastP1Points;" in s
+        return ("bool roomWide = DcReportSync.AllCapable(survivors, out missingCap);" in s
+                and "bool unique = teamsKnown && survivors.Count == 3 && roomWide;" in s
                 and "dcTeamCount != 2 || nonDcCount != 2" in s
                 and "PhotonNetwork.PlayerList" in s)
 
     _assert_discriminating(
         claim, src,
         _mutate(src,
+                "bool unique = teamsKnown && survivors.Count == 3 && roomWide;",
+                "bool unique = teamsKnown && survivors.Count == 3;", "H1 quorum"),
+        "H1 room-wide quorum")
+
+
+def test_h1_the_totals_are_this_seats_snapshot_in_both_arms():
+    """The withdrawn zeros, asserted as an absence: no conditional may stand
+    between the reported totals and what this seat observed.  A seat on the
+    leaver's team could force the zero branch for the WHOLE room by withholding
+    one property, which converts a forfeit the other team earned into
+    dc_incomplete -- a client-attested cause moving the server AWAY from the
+    conservative outcome (#283)."""
+    src = _src("Plugin.cs")
+
+    def claim(s):
+        return ("int t1Points = GameStateWatcher.LastP1Points;" in s
+                and "int t2Points = GameStateWatcher.LastP2Points;" in s
+                and "conservativeOnly" not in s)
+
+    _assert_discriminating(
+        claim, src,
+        _mutate(src, "int t1Points = GameStateWatcher.LastP1Points;",
                 "int t1Points = conservativeOnly ? 0 : GameStateWatcher.LastP1Points;",
-                "int t1Points = GameStateWatcher.LastP1Points;", "H1 totals"),
-        "H1 conservative totals")
+                "H1 honest totals"),
+        "H1 honest totals")
 
 
 def test_l3_dc_team_seat_stands_down_when_another_is_eligible():
@@ -243,7 +400,7 @@ def test_l3_dc_team_seat_stands_down_when_another_is_eligible():
         "L3 DC-team stand-down")
     # and the model: with the split intact the DC-team survivor never posts
     seats = _seats([(10, 0), (20, 1), (30, 1)])
-    assert 10 not in [u for u, _t in elect(seats, {"uid": 40, "team": 0})]
+    assert 10 not in [u for u, _t, _d in elect(seats, {"uid": 40, "team": 0})]
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -458,15 +615,12 @@ def test_m3_no_silent_return_remains_before_the_grant_dispatch():
 
 def test_m5_consent_revocation_clears_the_live_line_too():
     src = _src("CompetitiveUI.cs")
-    body = src[src.index("internal static void DropChatDraftOnRevoke()"):]
-    body = body[:body.index("\n        }") + 10]
+    body = _method_body(src, "internal static void DropChatDraftOnRevoke()")
+    assert body, "the revoke method's own text could not be delimited"
 
     def claim(s):
-        if "internal static void DropChatDraftOnRevoke()" not in s:
-            return False
-        b = s[s.index("internal static void DropChatDraftOnRevoke()"):]
-        b = b[:b.index("\n        }") + 10]
-        return "DropStash();" in b and 'chatInputText = "";' in b
+        b = _method_body(s, "internal static void DropChatDraftOnRevoke()")
+        return bool(b) and "DropStash();" in b and 'chatInputText = "";' in b
 
     _assert_discriminating(
         claim, src,
@@ -475,16 +629,45 @@ def test_m5_consent_revocation_clears_the_live_line_too():
         "M5 revoke clears live input")
     assert "chatResumeNoticeUntil = -999f;" in body
 
+    # THE CONTROL THAT MATTERS, and the one this test did not have: the exact
+    # PRE-FIX shape, a one-line stash-only method with the account-change hook
+    # (which does clear the live line) right underneath it.  The predicate used
+    # to answer True here -- the window ran past the one-liner and read the
+    # neighbour's statements -- so the regression M5 exists to catch could land
+    # with the suite green.  Reverting the fix must go RED, on the real shape of
+    # the revert and not only on a synthetic edit.
+    pre_fix = (
+        "        internal static void DropChatDraftOnRevoke() { DropStash(); }\n"
+        "\n"
+        "        /// <summary>The resolved account CHANGED.</summary>\n"
+        "        internal static void DropChatOnAccountChange()\n"
+        "        {\n"
+        "            DropStash();\n"
+        '            chatInputText = "";\n'
+        "            chatResumeNoticeUntil = -999f;\n"
+        "        }\n")
+    assert not claim(pre_fix), "the claim holds on the pre-fix tree: it is not evidence"
+
+    def claim_before_this_round(s):
+        """The predicate as it was written, kept as the negative control for the
+        HARNESS fix itself: it must answer True on the pre-fix shape, or the
+        defect being fixed here was not real (#391)."""
+        if "internal static void DropChatDraftOnRevoke()" not in s:
+            return False
+        b = s[s.index("internal static void DropChatDraftOnRevoke()"):]
+        b = b[:b.index("\n        }") + 10]
+        return "DropStash();" in b and 'chatInputText = "";' in b
+
+    assert claim_before_this_round(pre_fix), "the harness defect does not reproduce"
+    assert claim(src), "the repaired predicate must still hold on the tree"
+
 
 def test_l2_the_stash_reader_applies_the_identity_rule_its_comment_states():
     src = _src("CompetitiveUI.cs")
 
     def claim(s):
-        if "private static string TakeStashedDraft()" not in s:
-            return False
-        b = s[s.index("private static string TakeStashedDraft()"):]
-        b = b[:b.index("\n        }") + 10]
-        return "chatDraftStashIdentity" in b and "MatchTracker.LocalSteamId" in b
+        b = _method_body(s, "private static string TakeStashedDraft()")
+        return bool(b) and "chatDraftStashIdentity" in b and "MatchTracker.LocalSteamId" in b
 
     _assert_discriminating(
         claim, src,
@@ -671,7 +854,8 @@ def test_m7_the_quorum_fails_closed_on_every_arm():
     assert "if (list == null || list.Length == 0) return false;" in body   # every(empty)
     assert "if (fighterCount == 0) return false;" in body
     assert "if (Plugin.modDisabled || !PatchesLive) return false;" in body
-    assert "if (RoomActors.IsSpectator(actor)) continue;" in body
+    # the replicated read, never the first-sight cache: see the class sweep test
+    assert "if (RoomActors.IsSpectatorReplicated(actor)) continue;" in body
     # the basis is the replicated list, never the locally frozen roster
     assert "PhotonNetwork.PlayerList" in body
     assert "RoomActors.ActiveFighters" not in body
@@ -691,8 +875,109 @@ def test_m7_the_restore_runs_even_when_the_original_throws():
     body = src[src.index("internal static class SawLiveTargetPatch"):]
     body = body[:body.index("\n    }\n") + 6]
     assert "[HarmonyFinalizer]" in body
-    assert "PlayerManager.instance.players = _saved;" in body
+    assert "RestoreOrder();" in body
     assert "return __exception;" in body        # observes, never contains
+
+
+def test_m7_the_window_changes_order_and_never_membership():
+    """The roster field stays changed for the WHOLE of Saw.Update -- the inline
+    damage call and everything ROUNDS reaches from it included -- so what that
+    window holds is the property that matters.  A live-only list would put the
+    game in a state it never otherwise has (a lookup by id returning null, a
+    short count) for code this patch has not modelled.  A reorder of the game's
+    own list cannot: same object, same members, same count."""
+    src = _src("VanillaFixes.cs")
+    body = src[src.index("internal static class SawLiveTargetPatch"):]
+    body = body[:body.index("\n    }\n") + 6]
+
+    # no substitution of the roster field anywhere in the patch
+    assert "PlayerManager.instance.players =" not in body
+    assert "players[w++] = q;" in body          # written in place, by index
+
+    def claim(s):
+        if "internal static class SawLiveTargetPatch" not in s:
+            return False
+        b = s[s.index("internal static class SawLiveTargetPatch"):]
+        b = b[:b.index("\n    }\n") + 6]
+        return "PlayerManager.instance.players =" not in b and "players[w++] = q;" in b
+
+    _assert_discriminating(
+        claim, src,
+        _mutate(src, "                _masked = true;",
+                "                PlayerManager.instance.players = _order;\n                _masked = true;",
+                "M7 in place"),
+        "M7 reorder in place")
+
+
+def test_m7_a_membership_change_inside_the_window_is_not_overwritten():
+    """Restoring an order is safe; restoring a stale MEMBERSHIP is not.  If the
+    frame's own bookkeeping rewrote the roster while the window was open, the
+    list is its business and the patch leaves it alone -- and says so, because a
+    silent refusal here would be indistinguishable from a restore that worked."""
+    src = _src("VanillaFixes.cs")
+    body = src[src.index("private static void RestoreOrder()"):]
+    body = body[:body.index("\n        [HarmonyFinalizer]")]
+    assert "players.Count == _order.Count" in body
+    assert "players.Contains(_order[i])" in body
+    assert "DiagLimited(" in body
+
+    def claim(s):
+        if "private static void RestoreOrder()" not in s:
+            return False
+        b = s[s.index("private static void RestoreOrder()"):]
+        b = b[:b.index("\n        [HarmonyFinalizer]")]
+        return "players.Count == _order.Count" in b and "players.Contains(_order[i])" in b
+
+    _assert_discriminating(
+        claim, src,
+        _mutate(src, "bool sameSet = players != null && players.Count == _order.Count;",
+                "bool sameSet = players != null;", "M7 membership"),
+        "M7 membership guard")
+
+
+def test_m7_the_ungated_postfix_stands_down_inside_the_window():
+    """Harmony runs every postfix before any finalizer, so the corpse-particle
+    postfix executes inside the fall-through patch's window, over the order that
+    patch arranged.  Without the stand-down its verdict is a function of the
+    OTHER patch's quorum -- benign today, because the chosen target is alive, and
+    exactly the kind of coupling that stops being benign silently."""
+    src = _src("VanillaFixes.cs")
+
+    def claim(s):
+        if "internal static class SawDeadTargetPatch" not in s:
+            return False
+        b = s[s.index("internal static class SawDeadTargetPatch"):]
+        b = b[:b.index("\n    }\n") + 6]
+        # the stand-down is BEFORE the selector re-run, or it is not a stand-down
+        return ("if (SawLiveTargetPatch.WindowOpen) return;" in b
+                and b.index("if (SawLiveTargetPatch.WindowOpen) return;")
+                    < b.index("Player vanillaTarget = Select("))
+
+    _assert_discriminating(
+        claim, src,
+        _mutate(src, "                if (SawLiveTargetPatch.WindowOpen) return;",
+                "                // postfix runs inside the window", "M7 stand-down"),
+        "M7 postfix stand-down")
+
+
+def test_m7_the_verdict_line_is_per_room_and_not_per_process():
+    """SawTargetSync.ResetForRoomChange existed with NO caller, so the [SAW-TARGET]
+    verdict -- the only positive signal that the whole-room gate was evaluated --
+    was de-duplicated for the life of the PROCESS.  A player's second room of a
+    session logged nothing, and a bundle cannot then tell "the gate applied in that
+    room" from "the patch never attached"."""
+    plug = _src("Plugin.cs")
+    vf = _src("VanillaFixes.cs")
+    assert "internal static void ResetForRoomChange()" in vf
+    assert plug.count("SawTargetSync.ResetForRoomChange();") >= 2   # join AND leave edges
+
+    def claim(s):
+        return "SawTargetSync.ResetForRoomChange();" in s
+
+    _assert_discriminating(
+        claim, plug,
+        plug.replace("SawTargetSync.ResetForRoomChange();", "// no caller"),
+        "M7 per-room verdict")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -753,8 +1038,8 @@ def test_l1_the_source_reads_detail_before_the_ordered_chain():
 
 def test_l1_every_ordered_key_has_an_exact_arm():
     src = _src("ApiClient.cs")
-    exact = src[src.index("private static string SpectateReasonExact"):]
-    exact = exact[:exact.index("\n        }") + 10]
+    exact = _method_body(src, "private static string SpectateReasonExact")
+    assert exact, "the exact-arm method's own text could not be delimited"
     for k in KEYS:
         assert 'case "%s":' % k in exact, k
 
@@ -893,3 +1178,142 @@ def test_l10_the_changed_files_carry_role_terminology_not_a_maintainer_name():
         claim, doc,
         _mutate(doc, "a product decision", "Sid's call", "L10"),
         "L10 role terminology")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Round-2 lens findings -- the class sweeps and the delivery half
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_every_cross_seat_roster_filter_reads_the_replicated_property():
+    """#432: the flag named the census, the defect is the class.  Three rules
+    have to agree across seats -- the DC census, the saw quorum, the grow quorum
+    -- and all three filtered spectators through RoomActors.IsSpectator, which
+    caches its answer at THIS seat's first sight of an actor and never re-reads
+    the property.  Two seats that first look at different moments can hold
+    different rosters for the whole room, which is two rules, not one.
+
+    PoisonSync is deliberately NOT swept: its roster GRANTS authority, and there
+    the cache is doing real work by holding "joined as a spectator" fixed.  The
+    rule this test encodes is the distinction, not "never use the cache"."""
+    plug = _src("Plugin.cs")
+    vf = _src("VanillaFixes.cs")
+
+    # the census
+    census = plug[plug.index("var survivors = new List<Photon.Realtime.Player>();"):]
+    census = census[:census.index("catch { survivors.Clear(); }")]
+    assert "RoomActors.IsSpectatorReplicated(a)" in census
+    assert "RoomActors.IsSpectator(a)" not in census
+
+    # both quorums
+    assert vf.count("RoomActors.IsSpectatorReplicated(actor)") == 2
+    assert "RoomActors.IsSpectator(actor)" not in vf
+
+    # and the helper itself reads the property every call -- no cache to fall back on
+    ra = _src("RoomActors.cs")
+    body = _method_body(ra, "internal static bool IsSpectatorReplicated(PhotonPlayer actor)")
+    assert body and "props.ContainsKey(SPEC_PROP)" in body
+    assert "_roleByActor" not in body
+
+    def claim(s):
+        return ("RoomActors.IsSpectatorReplicated(actor)" in s
+                and "RoomActors.IsSpectator(actor)" not in s)
+
+    _assert_discriminating(
+        claim, vf,
+        _mutate(vf, "if (RoomActors.IsSpectatorReplicated(actor)) continue;",
+                "if (RoomActors.IsSpectator(actor)) continue;", "sweep"),
+        "cross-seat roster basis")
+
+
+def test_the_dc_report_is_retried_and_carries_the_room_it_was_observed_in():
+    """A single un-retried request was the whole mechanism, on the path whose
+    failure leaves the series open and every survivor holding a 2v2 lease.  The
+    retry is safe against the DEPLOYED endpoint, which re-reads the row under
+    FOR UPDATE and answers {"ignored": true} unless the status is still
+    active/dc_paused -- so a repeat cannot double-apply ratings or gold."""
+    src = _src("ApiClient.cs")
+    body = _method_body(src, "private static IEnumerator SendTeamSeriesDcReport")
+    assert body, "the dispatch method's own text could not be delimited"
+    assert "PostRequestWithRetry(url" in body
+    assert "WaitForSecondsRealtime(delaySeconds)" in body
+
+    def claim(s):
+        b = _method_body(s, "private static IEnumerator SendTeamSeriesDcReport")
+        return bool(b) and "PostRequestWithRetry(url" in b
+
+    _assert_discriminating(
+        claim, src,
+        _mutate(src, "PostRequestWithRetry(url, \"\", (ok, resp) =>\n            {\n                if (ok) Plugin.Log.LogInfo($\"[2v2-DC] report accepted",
+                "PostRequest(url, \"\", (ok, resp) =>\n            {\n                if (ok) Plugin.Log.LogInfo($\"[2v2-DC] report accepted",
+                "DC retry"),
+        "DC report retry")
+
+    # the room is the observation's, not the dispatch's: a delayed send can have
+    # left the room, and an empty hint reads to the endpoint as an old client and
+    # passes straight through the bug-245 resume fence.
+    def room_claim(s):
+        return ("string dcRoom = observedRoom;" in s
+                and "string observedRoom = null, float delaySeconds = 0f)" in s)
+
+    _assert_discriminating(
+        room_claim, src,
+        _mutate(src, "string dcRoom = observedRoom;", "string dcRoom = null;", "DC room"),
+        "DC observed room")
+
+    plug = _src("Plugin.cs")
+    assert "ApiClient.ReportTeamSeriesDc(seriesId, myId, dcSteamId, t1Points, t2Points,\n                                             observedRoom, delaySec);" in plug
+
+
+def test_the_dc_election_capability_follows_the_pre_join_protocol():
+    """cr_dc2 says "this seat elects from the census".  Staged pre-join only: an
+    in-room write is present locally at once and may reach peers after they have
+    already evaluated a census, which is a seat advertising a rule it is not
+    running at the moment that matters."""
+    ra = _src("RoomActors.cs")
+    body = ra[ra.index("internal static class DcReportSync"):]
+
+    assert 'internal const string CapabilityProp = "cr_dc2";' in body
+    assert "if (PhotonNetwork.InRoom)" in body            # refuses an in-room write
+    assert "if (Plugin.modDisabled) { _stageFailedPermanently = true; return; }" in body
+    assert "if (survivors == null || survivors.Count == 0) return false;" in body   # every(empty)
+
+    plug = _src("Plugin.cs")
+    vf = _src("VanillaFixes.cs")
+    assert 'DcReportSync.StageCapability("tick");' in plug
+    assert 'DcReportSync.StageCapability("pre-join");' in vf
+    assert "DcReportSync.RevokeCapability();" in plug     # withdrawn on compat-disable
+
+    def claim(s):
+        if "internal static class DcReportSync" not in s:
+            return False
+        b = s[s.index("internal static class DcReportSync"):]
+        return "if (PhotonNetwork.InRoom)" in b and "_stageFailedPermanently" in b
+
+    _assert_discriminating(
+        claim, ra,
+        _mutate(ra, "                if (PhotonNetwork.InRoom)\n                {\n                    Plugin.Log.LogError(\"[2v2-DC] refusing to stage \" + CapabilityProp",
+                "                if (false)\n                {\n                    Plugin.Log.LogError(\"[2v2-DC] refusing to stage \" + CapabilityProp",
+                "cr_dc2 staging"),
+        "cr_dc2 pre-join protocol")
+
+
+def test_the_freeze_log_budget_is_spent_per_match_not_per_process():
+    """FREEZE_LOG_CAP was described as a per-match budget in the comment beside
+    it and was implemented as a per-PROCESS one: _freezeLogged had no reset.  A
+    player's first match could spend all 60 lines, and the bundle from the match
+    they actually complained about then reads exactly like a match with no stalls
+    in it -- the same shape as the [SAW-TARGET] line that only spoke once."""
+    src = _src("GameStateWatcher.cs")
+    assert src.count("_freezeLogged = 0;   // the >0.2s cap is per MATCH") == 2
+
+    def claim(s):
+        return s.count("_freezeLogged = 0;   // the >0.2s cap is per MATCH") == 2
+
+    _assert_discriminating(
+        claim, src,
+        _mutate(src, "_freezeLogged = 0;   // the >0.2s cap is per MATCH, like the two below it\n",
+                "", "freeze cap"),
+        "freeze log budget per match")
+
+    # the band's own caps were already per match; all three now share the unit
+    assert src.count("_bandSummaries = 0; _bandSummarisedCount = 0;") == 2

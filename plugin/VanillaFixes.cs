@@ -259,11 +259,15 @@ namespace CompetitiveRounds
     /// skipped exactly as vanilla skips it.</para>
     ///
     /// <para>THIS postfix stays UNGATED and keeps its own job: particle playback is
-    /// local presentation. The two compose without overlapping — when the quorum
-    /// holds, vanilla's own target branch no longer lands on a corpse while a live
-    /// target is in range, so this postfix finds nothing to correct; when a corpse is
-    /// alone in range, the fall-through deliberately does not engage and this postfix
-    /// is the whole fix.</para>
+    /// local presentation. The two compose without overlapping, and the composition
+    /// is enforced rather than argued: Harmony runs postfixes before finalizers, so
+    /// this one executes INSIDE the fall-through patch's reordering window, and it
+    /// returns immediately while that window is open
+    /// (<c>SawLiveTargetPatch.WindowOpen</c>). Nothing is lost by returning — the
+    /// window only opens when a living player was in range and was therefore chosen,
+    /// which is the case this postfix has nothing to say about. When a corpse is
+    /// alone in range the fall-through deliberately does not engage, the window
+    /// stays shut, and this postfix is the whole fix.</para>
     ///
     /// <para>Among LIVE candidates the vanilla "last in list wins" order is preserved
     /// rather than switched to nearest-first: that is a mechanics change with no defect
@@ -307,6 +311,15 @@ namespace CompetitiveRounds
             {
                 if (__instance == null || PlayerManager.instance == null
                     || PlayerManager.instance.players == null || __instance.parts == null) return;
+
+                // Harmony runs every postfix BEFORE any finalizer, so this one runs
+                // inside the fall-through patch's window, over the roster that patch
+                // ordered. Stand down there rather than re-deriving a target from it:
+                // the window only opens when a living player was in range and was
+                // therefore chosen, so there is no corpse in the slot to correct, and
+                // this postfix's verdict must not become a function of the other
+                // patch's quorum.
+                if (SawLiveTargetPatch.WindowOpen) return;
 
                 bool faithful;
                 Player vanillaTarget = Select(__instance, out faithful);
@@ -359,11 +372,22 @@ namespace CompetitiveRounds
     /// targeting on EVERY seat rather than running two rules at once.</para>
     ///
     /// <para>BASIS: the raw <c>PhotonNetwork.PlayerList</c> filtered by the
-    /// replicated spectator prop — NOT <c>RoomActors.ActiveFighters</c>, whose
-    /// frozen-roster filter is LOCAL state, so two seats freezing at different
-    /// moments classify a prop-less actor differently and split the rule in
-    /// steady state. That question was settled for <c>GrowNormalize.Quorum</c>
-    /// and <c>PoisonSync.ScanRoster</c> and is not re-opened here.</para>
+    /// replicated spectator prop, read from the property on every call
+    /// (<c>RoomActors.IsSpectatorReplicated</c>).
+    ///
+    /// NOT <c>RoomActors.ActiveFighters</c>, whose frozen-roster filter is LOCAL
+    /// state, so two seats freezing at different moments classify a prop-less
+    /// actor differently and split the rule in steady state. That question was
+    /// settled for <c>GrowNormalize.Quorum</c> and <c>PoisonSync.ScanRoster</c>
+    /// and is not re-opened here.
+    ///
+    /// And NOT <c>RoomActors.IsSpectator</c>, which this round stopped using:
+    /// that helper answers from a cache written at FIRST SIGHT of an actor and
+    /// never re-read, so it is also per-seat state — the very property the
+    /// paragraph above rejects, one layer down. The role cannot change inside a
+    /// room (staged pre-join, never cleared mid-room), so re-reading it costs
+    /// nothing and removes the one way two seats could hold different
+    /// rosters.</para>
     ///
     /// <para>FAIL-CLOSED on every arm: a disabled mod, a patch that never
     /// attached, an empty roster (every(∅) must not apply), or one fighter
@@ -463,7 +487,7 @@ namespace CompetitiveRounds
             {
                 var actor = list[i];
                 if (actor == null) continue;
-                if (RoomActors.IsSpectator(actor)) continue;
+                if (RoomActors.IsSpectatorReplicated(actor)) continue;
                 fighterCount++;
                 object v = null;
                 var props = actor.CustomProperties;
@@ -544,15 +568,39 @@ namespace CompetitiveRounds
     /// non-owner in range and assigns without a break, so the LAST in-list match wins
     /// and <c>data.dead</c> is never consulted. <c>HealthHandler.TakeDamage</c> discards
     /// the damage for a corpse, so a live enemy the corpse outranks receives nothing.
-    /// This patch hides dead entries from that one loop — a prefix swaps the list for
-    /// a live-only copy, a FINALIZER restores it — so vanilla's own selector, its own
-    /// ordering and its own arithmetic run unchanged over a smaller candidate set.</para>
+    /// This patch REORDERS that one list in place — every corpse moved ahead of every
+    /// living player, relative order inside each group untouched — so vanilla's own
+    /// selector, its own ordering rule and its own arithmetic run unchanged and land
+    /// on a living player whenever one is in range. A FINALIZER puts the game's order
+    /// back.</para>
+    ///
+    /// <para>WHY A REORDER, AND NOT THE LIVE-ONLY LIST THIS PATCH FIRST USED. A
+    /// prefix cannot hand the selector a private list; it can only change what the
+    /// GAME's roster field holds, and that field stays changed for the WHOLE of
+    /// <c>Saw.Update</c> — the inline damage call included, and everything ROUNDS
+    /// reaches from it, up to and including death and round-end bookkeeping. A
+    /// live-only list makes that window a state the game never otherwise has: a
+    /// roster with players missing, where a lookup by id comes back null and a count
+    /// is short. A reorder changes no membership, no count, and not even the list
+    /// object's identity, so nothing can observe it except code that reads ORDER —
+    /// and order is exactly the input vanilla's "last match wins" rule consults.</para>
+    ///
+    /// <para>WHAT ELSE RUNS INSIDE THE WINDOW, stated rather than assumed: every
+    /// postfix on the same method, because Harmony runs all postfixes before any
+    /// finalizer. The one that exists is this file's own corpse-particle postfix, and
+    /// it stands down while the window is open (<see cref="WindowOpen"/>) instead of
+    /// re-running its selector over a roster this patch arranged — when the
+    /// fall-through engages, a living target was in range and was chosen, so there is
+    /// by construction no corpse in the slot for it to correct.</para>
     ///
     /// <para>A FINALIZER, NOT A POSTFIX, for the restore: a postfix does not run when
-    /// the original throws, and leaving <c>PlayerManager.instance.players</c> pointing
-    /// at a live-only list after an unrelated exception would delete every corpse from
-    /// the game's own roster for the rest of the round. The finalizer runs either way
-    /// and returns the exception untouched.</para>
+    /// the original throws, and leaving the roster in this patch's order after an
+    /// unrelated exception would hand the rest of the round an ordering the game did
+    /// not choose. The finalizer runs either way and returns the exception untouched.
+    /// It restores only while the membership is unchanged — if the frame's own
+    /// bookkeeping added or removed a player inside the window, the list is now ITS
+    /// business, and re-imposing a stale order on it would be the same class of
+    /// mistake this whole paragraph exists to avoid.</para>
     ///
     /// <para>WHY THE RNG OBJECTION NO LONGER APPLIES (it is what withdrew attempt 1).
     /// Vanilla's target branch ends in <c>GameFeel((normalized + Random.onUnitSphere)
@@ -561,7 +609,7 @@ namespace CompetitiveRounds
     /// draw and put the stream out of phase with every other seat, which later surfaces
     /// as different gun spread. This one engages ONLY when a live target is also in
     /// range, so vanilla enters the target branch in both worlds and takes exactly the
-    /// same single draw; when a corpse is alone in range nothing is swapped and the
+    /// same single draw; when a corpse is alone in range nothing is reordered and the
     /// corpse is still selected, drawing exactly as vanilla draws. The stream is
     /// therefore in phase with an unpatched seat in every case.</para>
     ///
@@ -571,29 +619,42 @@ namespace CompetitiveRounds
     /// over-damages ends the round for everyone. <see cref="SawTargetSync"/> applies
     /// this only when EVERY fighter advertises cr_saw1. Effects that fire from a real
     /// hit (procs, lifesteal) then fire on every seat identically, because every seat
-    /// ran the same filtered loop.</para>
+    /// ran the same loop over the same roster in the same order.</para>
     ///
     /// <para>DEFERS LIKE THE POSTFIX DOES. A null entry or a null <c>data</c> is
     /// something vanilla would dereference and this replica would have to invent
-    /// behaviour for, so the swap is abandoned and the frame runs stock.</para></summary>
+    /// behaviour for, so the reorder is abandoned and the frame runs stock.</para></summary>
     [HarmonyPatch(typeof(Saw), "Update")]
     internal static class SawLiveTargetPatch
     {
-        /// <summary>Non-null only between this patch's own prefix and its own
-        /// finalizer, which is a window no other code runs in: Unity is single
-        /// threaded, <c>Saw.Update</c> is not re-entrant, and the postfix that
-        /// stops corpse particles is the only other thing patched onto it.</summary>
-        private static List<Player> _saved;
+        /// <summary>The game's OWN order, held between this patch's prefix and its
+        /// finalizer so the finalizer can put it back. Re-used rather than allocated
+        /// per frame: a corpse lying next to a live target produces this case on
+        /// EVERY frame of a round, and it never outlives the window.</summary>
+        private static readonly List<Player> _order = new List<Player>();
 
-        /// <summary>Re-used rather than allocated per frame: a corpse lying next to a
-        /// live target produces this case on EVERY frame of a round, and the list never
-        /// outlives the window above.</summary>
-        private static readonly List<Player> _live = new List<Player>();
+        /// <summary>True while <c>PlayerManager.instance.players</c> holds this
+        /// patch's order instead of the game's. Unity is single threaded and
+        /// <c>Saw.Update</c> is not re-entrant, so at most one window is open — but
+        /// the window is NOT empty: the original method's whole call tree runs in it,
+        /// and so does every postfix on the method (Harmony orders postfixes before
+        /// finalizers). What it guarantees is only this: the roster is the same list
+        /// object, with the same members and the same count, in a different
+        /// order.</summary>
+        private static bool _masked;
+
+        /// <summary>For the corpse-particle postfix, which shares this method and
+        /// therefore runs inside the window. See the class doc.</summary>
+        internal static bool WindowOpen { get { return _masked; } }
 
         [HarmonyPrefix]
         private static void BeforeUpdate(Saw __instance)
         {
-            _saved = null;
+            // The finalizer always runs, so a window is never left open across
+            // frames; this is the belt-and-braces a future early return must not be
+            // able to defeat.
+            _masked = false;
+            _order.Clear();
             try
             {
                 if (__instance == null || PlayerManager.instance == null) return;
@@ -619,37 +680,74 @@ namespace CompetitiveRounds
                 if (!corpseInRange || !liveInRange) return;
                 if (!SawTargetSync.ShouldApply()) return;
 
-                _live.Clear();
-                for (int i = 0; i < players.Count; i++)
+                // Snapshot the game's order, then partition the SAME list in place:
+                // corpses first, the living after them, each group keeping its
+                // relative order. Vanilla takes the LAST match, so a living player in
+                // range now outranks every corpse in range, while the order it would
+                // have chosen from among the living is exactly the one it had.
+                _order.Clear();
+                for (int i = 0; i < players.Count; i++) _order.Add(players[i]);
+                int w = 0;
+                for (int i = 0; i < _order.Count; i++)
                 {
-                    Player p = players[i];
-                    if (p != null && p.data != null && p.data.dead) continue;
-                    _live.Add(p);
+                    Player q = _order[i];
+                    if (q != null && q.data != null && q.data.dead) players[w++] = q;
                 }
-                _saved = players;
-                PlayerManager.instance.players = _live;
+                for (int i = 0; i < _order.Count; i++)
+                {
+                    Player q = _order[i];
+                    if (!(q != null && q.data != null && q.data.dead)) players[w++] = q;
+                }
+                _masked = true;
             }
             catch (Exception ex)
             {
-                // Restore before reporting: the catch can only be reached with the swap
-                // not yet made, but a future edit must not be able to make that false.
-                try { if (_saved != null) PlayerManager.instance.players = _saved; }
-                catch { }
-                _saved = null;
+                // Restore before reporting. The catch is only reachable before the
+                // partition today, but a future edit must not be able to make that
+                // false, and a half-written roster is the one state worth the paranoia.
+                RestoreOrder();
                 VanillaFixSupport.LogError("SawLiveTarget", ex);
             }
+        }
+
+        /// <summary>Put the game's own order back — and only while the list still
+        /// holds the same players. A membership change inside the window means the
+        /// frame's own bookkeeping rewrote the roster, and overwriting THAT with a
+        /// stale snapshot is worse than leaving a permuted order behind: the order is
+        /// cosmetic to everything but vanilla's saw loop, the membership is not.</summary>
+        private static void RestoreOrder()
+        {
+            if (!_masked) { _order.Clear(); return; }
+            _masked = false;
+            try
+            {
+                var pm = PlayerManager.instance;
+                var players = pm != null ? pm.players : null;
+                bool sameSet = players != null && players.Count == _order.Count;
+                if (sameSet)
+                    for (int i = 0; i < _order.Count; i++)
+                        if (!players.Contains(_order[i])) { sameSet = false; break; }
+                if (!sameSet)
+                {
+                    VanillaFixSupport.DiagLimited(
+                        "SawLiveTarget",
+                        "the roster changed while a saw frame was masked ("
+                        + (players == null ? "null" : players.Count.ToString(CultureInfo.InvariantCulture))
+                        + " now, " + _order.Count.ToString(CultureInfo.InvariantCulture)
+                        + " at entry) — leaving the game's own list exactly as it is",
+                        5);
+                    return;
+                }
+                for (int i = 0; i < _order.Count; i++) players[i] = _order[i];
+            }
+            catch (Exception ex) { VanillaFixSupport.LogError("SawLiveTarget", ex); }
+            finally { _order.Clear(); }
         }
 
         [HarmonyFinalizer]
         private static Exception AfterUpdate(Exception __exception)
         {
-            try
-            {
-                if (_saved != null && PlayerManager.instance != null)
-                    PlayerManager.instance.players = _saved;
-            }
-            catch { }
-            _saved = null;
+            RestoreOrder();
             return __exception;   // observe only; containment is not this patch's job
         }
 
@@ -3085,7 +3183,13 @@ namespace CompetitiveRounds
             {
                 var actor = list[i];
                 if (actor == null) continue;
-                if (RoomActors.IsSpectator(actor)) continue;
+                // Sibling of the saw quorum's own filter, swept with it (#432): a
+                // quorum every seat has to compute the same way cannot be built on
+                // RoomActors.IsSpectator, whose answer is cached at this seat's
+                // first sight of the actor. Both directions of a misread cost the
+                // same nothing here — an actor counted as a fighter does not carry
+                // cr_grow2, so the quorum simply fails and the room plays vanilla.
+                if (RoomActors.IsSpectatorReplicated(actor)) continue;
                 fighterCount++;
                 var props = actor.CustomProperties;
                 object v = null;
@@ -3313,6 +3417,11 @@ namespace CompetitiveRounds
                 // at all and the seat reads incapable for that whole room, which
                 // drops the WHOLE room to vanilla targeting.
                 SawTargetSync.StageCapability("pre-join");
+                // And the 2v2 DC election generation, for the same ordering reason:
+                // a survivor whose cr_dc2 is not in the join snapshot reads as a seat
+                // running the older election, which drops the WHOLE room to the floor
+                // rule for that sitting.
+                DcReportSync.StageCapability("pre-join");
             }
             catch (Exception ex) { VanillaFixSupport.LogError("GrowPreJoinSync", ex); }
         }

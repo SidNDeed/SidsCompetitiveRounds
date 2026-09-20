@@ -301,6 +301,48 @@ namespace CompetitiveRounds
             catch { return false; }
         }
 
+        /// <summary>The same question as <see cref="IsSpectator"/>, answered from
+        /// the REPLICATED property on every call instead of from a first-sight
+        /// cache.
+        ///
+        /// <para>WHY BOTH EXIST. <see cref="IsSpectator"/> writes its answer into
+        /// <c>_roleByActor</c> the first time any caller ON THIS SEAT touches an
+        /// actor and never re-reads the property afterwards, so what it returns
+        /// is a function of when this seat happened to look — per-seat local
+        /// state. Every caller that only needs a local classification can keep
+        /// it. A caller whose answer has to AGREE with another seat's cannot: two
+        /// seats that first touch an actor at different moments can cache
+        /// different answers and then hold them for the whole room, and a
+        /// cross-seat rule computed from two different rosters is two rules.</para>
+        ///
+        /// <para>READING IT EVERY TIME IS SOUND because the role is immutable
+        /// inside a room: it is staged pre-join, and
+        /// <c>SpectatorSession.ClearStagedProperties</c> refuses to clear it
+        /// while in one (design §3.2 — converting a live spectator actor into a
+        /// fighter is exactly what that rule forbids). So this answer and the
+        /// cached one can only differ for an actor whose property payload is not
+        /// readable yet, and there this one SELF-HEALS on the next call, where
+        /// the cache keeps its wrong answer for the rest of the room (#276).</para>
+        ///
+        /// <para>WHICH ONE A CALLER WANTS. Use this where the answer must AGREE
+        /// with another seat's and a wrong answer only ever REFUSES something —
+        /// capability quorums, the DC census. Keep <see cref="IsSpectator"/>
+        /// where the answer GRANTS a role or an authority (PoisonSync's
+        /// authority roster, the master-client rule): there the cache is doing
+        /// real work, because it holds "joined as a spectator" fixed even if the
+        /// property were to vanish mid-room, which design §3.2 forbids but this
+        /// read could not tell from a legitimate fighter.</para></summary>
+        internal static bool IsSpectatorReplicated(PhotonPlayer actor)
+        {
+            try
+            {
+                if (actor == null) return false;
+                var props = actor.CustomProperties;
+                return props != null && props.ContainsKey(SPEC_PROP);
+            }
+            catch { return false; }
+        }
+
         /// <summary>The local client's own role. Cheap and allocation-free —
         /// safe to call from per-frame paths.</summary>
         internal static bool LocalIsSpectator
@@ -628,6 +670,140 @@ namespace CompetitiveRounds
                 return m != null && IsSpectator(m);
             }
             catch { return false; }
+        }
+    }
+
+    /// <summary>The whole-room capability behind the 2v2 disconnect reporter
+    /// election. Same protocol as <c>PoisonSync</c>, <c>GrowNormalize</c> and
+    /// <c>SawTargetSync</c>, for the same reason all three have one: the rule
+    /// decides what OTHER seats' reports mean, so it may only run where every
+    /// seat that could report is running it too.
+    ///
+    /// <para>WHAT THE ELECTION NEEDS IT FOR. The four-seat census in
+    /// <c>Plugin.OnPlayerLeftRoom</c> proves that exactly one seat elects itself
+    /// — on the seats evaluating that census. A seat on an older build evaluates
+    /// the previous OR'd election instead and posts its own report regardless, so
+    /// in a MIXED room "exactly one reporter" would be a property of this seat's
+    /// code and not of the room, and the duplicate the census exists to rule out
+    /// would still arrive from the peer. <c>cr_dc2</c> is how a seat says "I
+    /// elect from the census"; the census arm is entered only when every survivor
+    /// says it, and otherwise every seat in the room — old and new — runs the
+    /// floor election they already agree on.</para>
+    ///
+    /// <para>KEY NAMING: <c>cr_dc2</c> means "this seat elects from the four-seat
+    /// census". A later rule change takes <c>cr_dc3</c>, so a mixed room drops to
+    /// the floor election everywhere rather than running two rules at once. There
+    /// was no <c>cr_dc1</c>: the number is the election generation, and the
+    /// generation before this one advertised nothing at all.</para>
+    ///
+    /// <para>FAIL-CLOSED on every arm — a disabled mod, a staging failure, a
+    /// survivor without the property, an empty survivor list (every(∅) must not
+    /// apply) — and what "closed" costs here is only the floor election, i.e.
+    /// the behaviour that shipped (#430).</para></summary>
+    internal static class DcReportSync
+    {
+        internal const string CapabilityProp = "cr_dc2";
+        internal const int CapabilityValue = 1;
+
+        private static bool _staged, _stageFailedPermanently;
+
+        /// <summary>Stage PRE-JOIN only. An in-room write is present locally
+        /// immediately and may reach peers after they have already evaluated a
+        /// census — a silently false-capable seat, which is the one state this
+        /// protocol must not be in. Idle client states provably precede the join
+        /// op's parameter snapshot (#287, same reasoning as PoisonSync).</summary>
+        internal static void StageCapability(string source)
+        {
+            try
+            {
+                if (_staged || _stageFailedPermanently) return;
+                if (Plugin.modDisabled) { _stageFailedPermanently = true; return; }
+                if (PhotonNetwork.InRoom)
+                {
+                    Plugin.Log.LogError("[2v2-DC] refusing to stage " + CapabilityProp
+                        + " while in a room (" + source + ") — an in-room write is the racy "
+                        + "path this protocol forbids");
+                    return;
+                }
+                var st = PhotonNetwork.NetworkClientState;
+                if (st != Photon.Realtime.ClientState.Disconnected
+                    && st != Photon.Realtime.ClientState.PeerCreated
+                    && st != Photon.Realtime.ClientState.ConnectedToMasterServer
+                    && st != Photon.Realtime.ClientState.JoinedLobby)
+                    return;   // connecting/joining: wait for a clean moment
+                var local = PhotonNetwork.LocalPlayer;
+                if (local == null) return;
+                local.SetCustomProperties(new ExitGames.Client.Photon.Hashtable
+                {
+                    { CapabilityProp, CapabilityValue }
+                });
+                _staged = true;
+                Plugin.Log.LogInfo("[2v2-DC] staged " + CapabilityProp + "=" + CapabilityValue
+                    + " pre-join (" + source + ", state=" + st + ")");
+            }
+            catch (Exception ex)
+            {
+                _stageFailedPermanently = true;
+                Plugin.Log.LogWarning("[2v2-DC] staging " + CapabilityProp + " failed; this seat "
+                    + "elects with the floor rule for the session: " + ex.Message);
+            }
+        }
+
+        /// <summary>Withdraw on compat-disable: peers must not count us as
+        /// running a rule this process will not run.</summary>
+        internal static void RevokeCapability()
+        {
+            try
+            {
+                if (!_staged) return;
+                _staged = false;
+                _stageFailedPermanently = true;   // never re-stage this session
+                var local = PhotonNetwork.LocalPlayer;
+                if (local == null) return;
+                local.SetCustomProperties(new ExitGames.Client.Photon.Hashtable
+                {
+                    { CapabilityProp, 0 }
+                });
+                Plugin.Log.LogWarning("[2v2-DC] revoked " + CapabilityProp
+                    + " — mod disabled, floor election everywhere");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("[2v2-DC] revoke failed: " + ex.Message); }
+        }
+
+        /// <summary>One actor's advertisement, read from the replicated property
+        /// every time. Anything that is not the exact integer value — absent,
+        /// null props, a revoked 0, a type we did not write — is NOT capable.</summary>
+        internal static bool Capable(PhotonPlayer actor)
+        {
+            try
+            {
+                if (actor == null) return false;
+                var props = actor.CustomProperties;
+                if (props == null) return false;
+                object v;
+                if (!props.TryGetValue(CapabilityProp, out v)) return false;
+                return (v is int) && (int)v == CapabilityValue;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>True only when EVERY survivor advertises the capability.
+        /// <paramref name="missingActor"/> names the first that does not, for the
+        /// log line — the same shape the other three protocols report.</summary>
+        internal static bool AllCapable(List<PhotonPlayer> survivors, out int missingActor)
+        {
+            missingActor = -1;
+            if (survivors == null || survivors.Count == 0) return false;
+            bool all = true;
+            for (int i = 0; i < survivors.Count; i++)
+            {
+                var a = survivors[i];
+                if (a == null) { all = false; continue; }
+                if (Capable(a)) continue;
+                all = false;
+                if (missingActor < 0) missingActor = a.ActorNumber;
+            }
+            return all;
         }
     }
 }

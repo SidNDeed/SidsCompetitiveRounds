@@ -2897,6 +2897,11 @@ namespace CompetitiveRounds
             // Same one-shot pre-join stage for the saw-targeting capability
             // (bug #380's gated half). Self-guarded, so this is free once staged.
             try { SawTargetSync.StageCapability("tick"); } catch { }
+            // ...and for the 2v2 DC election generation (cr_dc2). A survivor that
+            // does not advertise it drops its room to the floor election, so the
+            // stage has to happen for every seat that can play 2v2, not only the
+            // ones that reach a vanilla-fix path.
+            try { DcReportSync.StageCapability("tick"); } catch { }
             // Quick-chat sends through the vanilla chat RPC since Sept 1 and
             // needs no receive hook (event code 48 is retired, never shipped).
             // Dance emotes (Aug 31 item 5) ride event code 49; Tick runs the
@@ -2967,6 +2972,10 @@ namespace CompetitiveRounds
                         try { PoisonSync.RevokeCapability(); } catch { }
                         try { GrowNormalize.RevokeCapability(); } catch { }
                         try { SawTargetSync.RevokeCapability(); } catch { }
+                        // Same for the DC-election capability: a disabled mod runs no
+                        // election at all, and a peer counting us as a census seat
+                        // would hold a room-wide claim that is false on this seat.
+                        try { DcReportSync.RevokeCapability(); } catch { }
                         // r3 find 4: same shape for the base-game locale
                         // injector. It has been inert (activation is gated on
                         // the compat clear below), but Shutdown is idempotent
@@ -4124,8 +4133,9 @@ namespace CompetitiveRounds
                 if (string.IsNullOrEmpty(dcSteamId) && !string.IsNullOrEmpty(p.UserId)) dcSteamId = p.UserId;
                 if (string.IsNullOrEmpty(dcSteamId) || dcSteamId.StartsWith("photon_")) return;
 
-                // Reporter election: ONE reporter, decided from state every seat
-                // reads identically, or no rated-completion form at all.
+                // Reporter election: exactly ONE PROMPT report wherever the rule can
+                // be proven ROOM-WIDE, delayed redundancy behind it, and this seat's
+                // honest point snapshot in every case.
                 //
                 // Bugs #384/#385 and the r2 HIGH above them. The server accepts a DC
                 // report only from a member of the non-DC team
@@ -4151,41 +4161,71 @@ namespace CompetitiveRounds
                 //
                 // Two arms, in this order:
                 //
-                //  (1) UNIQUENESS PROVABLE. Every input below is a replicated custom
-                //      property, so every seat computes the same answer from the same
-                //      bytes: a four-seat census (three survivors plus the leaver),
-                //      every seat advertising a parseable and DISTINCT `u_id`, and the
-                //      four `t_id` values forming an exact 2/2 split with the leaver's
-                //      team known. Then the non-DC team has two survivors, the lower
-                //      `u_id` of the two is the reporter, and it is the reporter on
-                //      every seat. That seat — and only that seat — posts the real
-                //      point totals.
+                //  (1) CENSUS, and only where the rule is ROOM-WIDE. A four-seat
+                //      census (three survivors plus the leaver); every seat
+                //      advertising a parseable and DISTINCT `u_id`; the four `t_id`
+                //      values forming an exact 2/2 split with the leaver's team
+                //      known; AND every survivor advertising `cr_dc2`, i.e. every
+                //      seat that could report is evaluating THIS rule
+                //      (RoomActors.DcReportSync). Then the lower `u_id` of the
+                //      non-DC team's two survivors is the reporter, it is the same
+                //      seat on every seat, and it posts at once. Its team-mate does
+                //      NOT post a second report: it arms a SAFETY NET, one delayed
+                //      post after the prompt seat's entire retry budget has run out,
+                //      so ONE seat's request failing — dropped by the same disruption
+                //      that produced the disconnect, or never sent because that seat
+                //      quit with it — no longer leaves the series open, while the
+                //      arrival race stays closed in the normal case. What it does not
+                //      cover is a refusal that would apply to both seats (a room the
+                //      series no longer names, a series already gone): that is the
+                //      endpoint's answer, not a delivery failure.
                 //
-                //  (2) UNPROVABLE. Anything missing (a seat without `u_id`, duplicate
-                //      ids, a `t_id` outside {0,1}, a census that is not 2/2, a
-                //      roster mid-change) falls back to the OLD floor election
-                //      unchanged, because zero reporters is still the one outcome
-                //      worse than the bug (#276) — but the report is posted with
-                //      ZERO point totals. `total_points` is then 0, the lead-forfeit
-                //      branch cannot be reached, and the endpoint can only record
-                //      `dc_incomplete` / `dc_manual_pending` for the admin panel. The
-                //      series is still closed and every survivor's 2v2 hold is still
-                //      released; what is given up is the automatic forfeit, which is
-                //      the direction a client-attested cause is allowed to move the
-                //      server in (#283).
+                //  (2) EVERYTHING ELSE — a seat without `u_id`, duplicate ids, a
+                //      `t_id` outside {0,1}, a census that is not 2/2, a roster
+                //      mid-change, or one peer on a build that does not advertise
+                //      `cr_dc2`. The floor election runs unchanged, which is also
+                //      what those peers are running: at least one report, always,
+                //      because zero reporters is the one outcome worse than the bug
+                //      (#276). Its residual is the straddle described above,
+                //      unchanged from the build already in the room. An election is
+                //      a property of the ROOM, and no client-side rule can be
+                //      room-wide while a peer evaluates a different one — which is
+                //      why arm (1) asks the room first instead of assuming it.
                 //
-                // WHAT A LYING CLIENT GAINS, enumerated (#283):
+                // THE REPORT ALWAYS CARRIES THIS SEAT'S HONEST SNAPSHOT. An earlier
+                // cut of this election sent ZEROS from arm (2), on the reasoning that
+                // `total_points = 0` cannot reach the lead-forfeit branch and is
+                // therefore conservative. It is conservative for the SERVER and not
+                // for the abandoned team: it converts a forfeit they have already
+                // earned into `dc_incomplete`. Worse, it was reachable by the one
+                // party with a motive — the leaver's own surviving team-mate omitting
+                // `u_id`, or advertising a `t_id` outside {0,1}, fails the census on
+                // EVERY seat and zeroes the totals for the whole room. And it bought
+                // nothing against a liar, because every census input is
+                // self-advertised: a client willing to lie satisfies arm (1) and
+                // sends whatever totals it likes.
+                //
+                // WHAT A LYING CLIENT GAINS under THIS rule, enumerated (#283):
                 //   * Faking `t_id` to look non-DC: nothing. The server resolves team
                 //     membership from the series row, not from the report, and refuses
                 //     a DC-team member with a 400.
                 //   * Faking a low `u_id` to win arm (1): it must still be an actual
                 //     non-DC member for the server to accept it, and such a seat was
                 //     entitled to report anyway.
-                //   * Faking `t_id` INCONSISTENTLY so the 2/2 split fails: that is a
-                //     move from arm (1) to arm (2), i.e. from a possible rated
-                //     completion to `dc_incomplete`. Strictly conservative.
+                //   * Breaking the census on purpose (an inconsistent `t_id`, a
+                //     withheld `u_id`, a withheld `cr_dc2`): arm (2), which is the
+                //     election the room was already running. It no longer changes
+                //     WHAT is reported, only which seats report it — that is the
+                //     whole reason the zeros are gone.
+                //   * Going silent after winning arm (1): its team-mate's safety net
+                //     closes the series when the budget runs out. Both seats are on
+                //     the non-DC team, so neither has a motive to suppress a report
+                //     that forfeits in their favour, but the series no longer depends
+                //     on one seat's request surviving the same disruption that
+                //     produced the disconnect.
                 //   * Submitting inflated points while legitimately elected: unchanged
-                //     by this election and not closable from the client. The server
+                //     by this election and NOT closable from the client — the totals
+                //     are client-attested and ride outside the signature. The server
                 //     needs a per-game fact of its own; see the server-contract note
                 //     in the r2 notes.
                 string myId = MatchTracker.LocalSteamId;
@@ -4197,12 +4237,32 @@ namespace CompetitiveRounds
                 bool teamsKnown = dcTeam >= 0 && myTeam >= 0;
 
                 // CENSUS BASIS: the raw PlayerList filtered by the replicated
-                // spectator prop, NOT RoomActors.ActiveFighters(). That filter
-                // consults the frozen roster, which is LOCAL state — two seats
-                // freezing at different moments classify a prop-less actor
-                // differently, and an election two seats compute differently is
-                // exactly the duplicate this arm exists to rule out. Same basis,
-                // same reasoning, as GrowNormalize.Quorum and PoisonSync.ScanRoster.
+                // spectator prop, read from the property on every call.
+                //
+                // NOT RoomActors.ActiveFighters(): that filter consults the frozen
+                // roster, which is LOCAL state — two seats freezing at different
+                // moments classify a prop-less actor differently, and an election two
+                // seats compute differently is exactly the duplicate this arm exists
+                // to rule out.
+                //
+                // NOT RoomActors.IsSpectator() either, which is the correction this
+                // round makes: that helper caches its answer by ActorNumber at FIRST
+                // SIGHT and never re-reads the property, so it too is per-seat state
+                // whose answer depends on when this seat happened to look. The role
+                // itself is immutable inside a room (staged pre-join, never cleared
+                // mid-room), so the uncached read is the one that actually delivers
+                // the "same bytes on every seat" this arm needs, and it self-heals
+                // for an actor whose payload was not readable yet instead of fixing
+                // the wrong answer in place for the rest of the room.
+                //
+                // Either misclassification costs the same thing and no more: the
+                // survivor count stops being 3, arm (1) is refused, and the room runs
+                // the floor election. Even the pair of them at once — one fighter read
+                // as a spectator while one spectator is read as a fighter, which keeps
+                // the count at 3 — lands in the same place, because a spectator clears
+                // `t_id` when it stages its role and an actor with no team fails the
+                // 2/2 split below.
+                //
                 // Photon has already removed the leaver from PlayerList by the time
                 // this callback runs, so `survivors` never contains `p`.
                 var survivors = new List<Photon.Realtime.Player>();
@@ -4214,14 +4274,20 @@ namespace CompetitiveRounds
                         {
                             var a = all[i];
                             if (a == null || a.ActorNumber == p.ActorNumber) continue;
-                            if (RoomActors.IsSpectator(a)) continue;
+                            if (RoomActors.IsSpectatorReplicated(a)) continue;
                             survivors.Add(a);
                         }
                 }
                 catch { survivors.Clear(); }
 
-                // Arm (1)'s preconditions, all from replicated bytes.
-                bool unique = teamsKnown && survivors.Count == 3;
+                // Arm (1)'s preconditions. Every one is read from a replicated
+                // property, and the last one asks whether the OTHER seats are even
+                // running this rule: without it, "exactly one reporter" would be a
+                // property of this process rather than of the room, and a peer on the
+                // previous build would post its own report beside ours anyway.
+                int missingCap = -1;
+                bool roomWide = DcReportSync.AllCapable(survivors, out missingCap);
+                bool unique = teamsKnown && survivors.Count == 3 && roomWide;
                 long lowestNonDc = long.MaxValue;
                 int nonDcCount = 0, dcTeamCount = 1;   // the leaver is on the DC team
                 var seenIds = new HashSet<long>();
@@ -4249,16 +4315,38 @@ namespace CompetitiveRounds
                 // replicated cross-check that catches it.
                 if (unique && (!sawSelf || dcTeamCount != 2 || nonDcCount != 2)) unique = false;
 
-                bool conservativeOnly = !unique;
+                // How long this seat waits before posting. 0 = now. The safety net
+                // waits out the prompt seat's ENTIRE budget (PostRequestWithRetry:
+                // 3 attempts x 10s timeout + 2 x 2s backoff ~= 34s), so the two can
+                // only ever race when the prompt one has already failed — and the
+                // 2v2 hold it protects runs for minutes, not seconds.
+                const float DC_SAFETY_NET_SEC = 45f;
+                float delaySec = 0f;
+
                 if (unique)
                 {
                     if (myTeam == dcTeam) return;                 // the other team elects
-                    if (myVal != lowestNonDc) return;             // elected seat is not this one
-                    Plugin.Log.LogInfo("[2v2-DC] elected from the replicated census "
-                        + "(2/2 teams, four distinct ids) — exactly one reporter");
+                    if (myVal == lowestNonDc)
+                        Plugin.Log.LogInfo("[2v2-DC] elected from the replicated census "
+                            + "(2/2 teams, four distinct ids, every survivor advertising "
+                            + DcReportSync.CapabilityProp + ") — the one prompt reporter");
+                    else
+                    {
+                        // The other non-DC survivor. Not a second report: a report the
+                        // server will only ever act on if the elected one did not
+                        // arrive, because by then the series is no longer active.
+                        delaySec = DC_SAFETY_NET_SEC;
+                        Plugin.Log.LogInfo("[2v2-DC] not the elected seat — arming the safety net at +"
+                            + $"{(int)DC_SAFETY_NET_SEC}s in case the elected report never lands");
+                    }
                 }
                 else
                 {
+                    if (teamsKnown && survivors.Count == 3 && !roomWide)
+                        Plugin.Log.LogInfo("[2v2-DC] census arm refused: "
+                            + (missingCap >= 0 ? $"actor {missingCap}" : "a survivor")
+                            + $" does not advertise {DcReportSync.CapabilityProp} — floor election, "
+                            + "which is the rule that seat is running");
                     // FLOOR ELECTION, unchanged from the version this replaces: at
                     // least one report, always. `lowestOverall` is true on at least
                     // one surviving seat whatever anyone advertises; `lowestOnMyTeam`
@@ -4293,15 +4381,22 @@ namespace CompetitiveRounds
                             + "(another seat holds the room-wide election)");
                 }
 
-                // Point totals. Only a provably unique elector carries the real ones;
-                // see arm (2) above for why the fallback sends zeros rather than its
-                // own snapshot.
-                int t1Points = conservativeOnly ? 0 : GameStateWatcher.LastP1Points;
-                int t2Points = conservativeOnly ? 0 : GameStateWatcher.LastP2Points;
-                ApiClient.ReportTeamSeriesDc(seriesId, myId, dcSteamId, t1Points, t2Points);
+                // Point totals: this seat's honest snapshot in BOTH arms. See the
+                // paragraph above for why the arm-(2) zeros are gone.
+                int t1Points = GameStateWatcher.LastP1Points;
+                int t2Points = GameStateWatcher.LastP2Points;
+                // The room is a fact of the OBSERVATION, not of the dispatch. A
+                // delayed post can leave the room before it sends, and reading the
+                // room at send time would hand the server an empty hint — losing the
+                // bug-245 fence that stops a report about an abandoned room
+                // lead-forfeiting the sitting that resumed it.
+                string observedRoom = "";
+                try { observedRoom = PhotonNetwork.InRoom ? (PhotonNetwork.CurrentRoom?.Name ?? "") : ""; } catch { }
+                ApiClient.ReportTeamSeriesDc(seriesId, myId, dcSteamId, t1Points, t2Points,
+                                             observedRoom, delaySec);
                 Plugin.Log.LogInfo($"[2v2-DC] reporter={myId} dc={dcSteamId} series={seriesId} "
-                    + $"pts={t1Points}/{t2Points} unique={!conservativeOnly}"
-                    + (conservativeOnly ? " (zeros: uniqueness unprovable, dc_incomplete only)" : ""));
+                    + $"pts={t1Points}/{t2Points} census={unique} room={observedRoom}"
+                    + (delaySec > 0f ? $" (safety net, +{(int)delaySec}s)" : " (prompt)"));
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[2v2-DC] report error: {ex.Message}"); }
         }
@@ -4387,6 +4482,7 @@ namespace CompetitiveRounds
             // room. Idempotent.
             try { H2HSummary.Invalidate(); } catch { }
             try { GameStateWatcher.ClearSessionUuid(); } catch { }   // Sept 6 item c: the id dies with the room
+            try { SawTargetSync.ResetForRoomChange(); } catch { }    // and so does its verdict line (see OnJoinedRoom)
             try { RoomRules.ResetLatched(); } catch { }              // room rules die with the room (§5.2)
             try { VanillaCardSequence.OnRoomLeft(); } catch { }      // and the vanilla-mode card sequence with them (§6)
             // lag-332 W1 (impl-review r5 MEDIUM 7): a disconnect that produces no
@@ -4425,6 +4521,14 @@ namespace CompetitiveRounds
             // Bug 235 diagnostics bind to the reliable Photon room edge so a
             // fast leave+rejoin cannot merge two sittings' counters/budgets.
             try { NetworkReplicaDiagnostics.OnRoomJoined(); } catch { }
+            // The saw-targeting verdict line is per ROOM, and until this call
+            // existed it was per PROCESS: SawTargetSync.ResetForRoomChange had no
+            // caller at all, so its de-duplication key survived every room and the
+            // second sitting of a session logged nothing. A bundle then cannot tell
+            // "the quorum was evaluated and applied in that room" from "the patch
+            // never attached", which is the one question the line is there to
+            // answer (#342 — a diagnostic that cannot speak proves nothing).
+            try { SawTargetSync.ResetForRoomChange(); } catch { }
             // Sept 6 item c: the reliable join edge mints the session id too (the
             // poll can miss a leave+join inside one tick); no game precedes either.
             try { GameStateWatcher.MintSessionUuid(); } catch { }
@@ -5015,6 +5119,7 @@ namespace CompetitiveRounds
             // statement (same reason as OnDisconnected). Idempotent.
             try { H2HSummary.Invalidate(); } catch { }
             try { GameStateWatcher.ClearSessionUuid(); } catch { }   // Sept 6 item c: the id dies with the room
+            try { SawTargetSync.ResetForRoomChange(); } catch { }    // and so does its verdict line (see OnJoinedRoom)
             try { RoomRules.ResetLatched(); } catch { }              // room rules die with the room (§5.2)
             try { VanillaCardSequence.OnRoomLeft(); } catch { }      // and the vanilla-mode card sequence with them (§6)
             // A teardown window is bound to the room it was opened in. Without

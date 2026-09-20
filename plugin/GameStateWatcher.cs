@@ -254,6 +254,16 @@ namespace CompetitiveRounds
         //     when the band actually moved since the last one.
         // Worst case is 22 added lines per match, against the 60 the >0.2s log may
         // already spend.
+        //
+        // PER MATCH IS THE UNIT, and until this round it was not: `_freezeLogged`
+        // was initialised once and never reset, so FREEZE_LOG_CAP was a
+        // PER-PROCESS budget. A player's first match of a session could spend all
+        // 60 lines and every later match in that session reported no freeze line
+        // at all — the bundle from the match someone actually complained about
+        // then reads exactly like a match with no stalls in it. The reset below
+        // sits beside the counters' own reset, so all three caps (event lines,
+        // band exemplars, band summaries) are spent and refilled per match, which
+        // is the unit every sentence above already claimed.
         private const float FREEZE_COUNT_SEC = 0.5f;
         private const float FREEZE_LOG_SEC = 0.2f;
         private const float FREEZE_BAND_SEC = 0.05f;
@@ -6447,6 +6457,7 @@ namespace CompetitiveRounds
             oppFpsTimeline.Clear(); oppPingTimeline.Clear(); lastOppGstatsSeq = -1; lastOppSeqAdvanceTime = -1f; oppSeqBaselineTaken = false; oppSeqTransitionSeen = false; oppSeqActor = 0; oppRttCurrent = 0;
             localFreezeCount = 0; localFreezeFocusedCount = 0; localFreezeTotalSec = 0f;
             FlushFreezeBandSummary(true);
+            _freezeLogged = 0;   // the >0.2s cap is per MATCH, like the two below it
             _bandCount = 0; _bandMaxMs = 0; _bandLogged = 0; _bandTotalSec = 0f;
             _bandSummaries = 0; _bandSummarisedCount = 0; _bandSummaryAt = -999f;
             pingSamples.Clear(); localRecvGapCount = 0; localRecvGapMaxMs = 0; _recvGapOpen = false;
@@ -8153,6 +8164,7 @@ namespace CompetitiveRounds
             oppFpsTimeline.Clear(); oppPingTimeline.Clear(); lastOppGstatsSeq = -1; lastOppSeqAdvanceTime = -1f; oppSeqBaselineTaken = false; oppSeqTransitionSeen = false; oppSeqActor = 0; oppRttCurrent = 0;
             localFreezeCount = 0; localFreezeFocusedCount = 0; localFreezeTotalSec = 0f;
             FlushFreezeBandSummary(true);
+            _freezeLogged = 0;   // the >0.2s cap is per MATCH, like the two below it
             _bandCount = 0; _bandMaxMs = 0; _bandLogged = 0; _bandTotalSec = 0f;
             _bandSummaries = 0; _bandSummarisedCount = 0; _bandSummaryAt = -999f;
             pingSamples.Clear(); localRecvGapCount = 0; localRecvGapMaxMs = 0; _recvGapOpen = false;
