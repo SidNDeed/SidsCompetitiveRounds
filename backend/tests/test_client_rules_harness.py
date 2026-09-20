@@ -103,7 +103,7 @@ def test_the_ffa_report_suite_ran_every_case_and_none_failed(harness_run):
     printed = len(re.findall(r"^\[ffareport\] (PASS|FAIL) ", harness_run.stdout, re.M))
     assert printed == run, (
         "the suite declared run=%d but printed %d case lines" % (run, printed))
-    assert run >= 18, "the FfaReportRules suite shrank to %d cases" % run
+    assert run >= 21, "the FfaReportRules suite shrank to %d cases" % run
 
 
 def test_the_roster_census_suite_ran_every_case_and_none_failed(harness_run):
@@ -114,7 +114,7 @@ def test_the_roster_census_suite_ran_every_case_and_none_failed(harness_run):
     printed = len(re.findall(r"^\[rostercensus\] (PASS|FAIL) ", harness_run.stdout, re.M))
     assert printed == run, (
         "the suite declared run=%d but printed %d case lines" % (run, printed))
-    assert run >= 10, "the RosterCensusRules suite shrank to %d cases" % run
+    assert run >= 12, "the RosterCensusRules suite shrank to %d cases" % run
 
 
 def test_a_widening_census_can_actually_discover_a_latched_fighter(harness_run):
@@ -183,12 +183,81 @@ def test_a_widening_census_can_actually_discover_a_latched_fighter(harness_run):
     "an absent roster member is not evicted by the census",
     "the census is order-independent",
     "degenerate inputs are empty, not exceptions",
+    "a second freeze does not re-open the assembly window",
+    "a re-taken window would admit the actor case 10 refuses",
 ])
 def test_the_roster_census_guarantees_each_have_a_case(harness_run, name):
     line = _named_case(harness_run, name, "rostercensus")
     assert line.startswith("[rostercensus] PASS"), line
     assert " | got=" in line and not line.rstrip().endswith("| got="), (
         "the case printed no measurement: " + line)
+
+
+def test_a_second_freeze_cannot_re_open_the_assembly_window(harness_run):
+    """The widening's discriminator is "was this actor in the room when the
+    roster was taken", so WHICH INSTANT that names is part of the rule. A later
+    freeze re-taking the window moves the instant forward and every actor that
+    joined in between becomes admissible -- the late entrant the freeze exists
+    to refuse.
+
+    Asserted as a PAIR on the printed measurements: the refusing case must show
+    the window WITHOUT the late actor and a census of two, and its control --
+    the same room with a window that WAS re-taken -- must show the same actor
+    admitted. Without the control, the first case would pass equally well if D
+    were being excluded for some reason of its own.
+    """
+    refused = _named_case(harness_run,
+                          "a second freeze does not re-open the assembly window",
+                          "rostercensus")
+    admitted = _named_case(harness_run,
+                           "a re-taken window would admit the actor case 10 refuses",
+                           "rostercensus")
+    assert refused.startswith("[rostercensus] PASS"), refused
+    assert admitted.startswith("[rostercensus] PASS"), admitted
+
+    m = re.search(r"window=\{([^}]*)\} census=\{([^}]*)\}", refused)
+    assert m, refused
+    window = [x for x in m.group(1).split(",") if x]
+    kept = [x for x in m.group(2).split(",") if x]
+    assert window == ["1", "2"], (
+        "the window moved: the second freeze re-took it as " + repr(window))
+    assert len(kept) == 2, (
+        "the widening admitted %d ids from a window of two seats: %s"
+        % (len(kept), kept))
+
+    m2 = re.search(r"census=\{([^}]*)\}", admitted)
+    assert m2, admitted
+    widened = [x for x in m2.group(1).split(",") if x]
+    assert len(widened) == len(kept) + 1, (
+        "the control did not admit exactly one more seat than the case it "
+        "controls: %s vs %s" % (widened, kept))
+    extra = [x for x in widened if x not in kept]
+    assert len(extra) == 1 and len(extra[0]) == 17 and extra[0].isdigit(), (
+        "the seat the two cases differ by is not an identity: " + repr(extra))
+
+
+def test_a_later_freeze_cannot_move_a_key_already_taken(harness_run):
+    """First write wins. A second freeze is by definition later than the
+    game-over edge -- a hook that fired twice, or a freeze that drifted back
+    into the reporting path -- and by then the host may have rolled the
+    property into the next game. Taking the later value gives two electors of
+    one physical game two keys, which is a second settlement."""
+    line = _named_case(harness_run, "a later freeze cannot move a key already taken",
+                       "ffareport")
+    assert line.startswith("[ffareport] PASS"), line
+    got = line.split(" | got=", 1)[1].strip()
+    assert got.endswith("_r7"), (
+        "the second freeze moved the key: " + got)
+    assert "_r8" not in got, ("the rolled-over number reached the key: " + got)
+    # the negative control, so "_r7" is not simply the only number this rule
+    # can produce
+    control = _named_case(harness_run,
+                          "a seat that froze after the rollover files a different game",
+                          "ffareport")
+    assert control.startswith("[ffareport] PASS"), control
+    assert "_r8" in control, (
+        "a snapshot taken after the rollover produced no distinguishable key: "
+        + control)
 
 
 def _named_case(proc, name, suite="topstrip"):
@@ -260,6 +329,9 @@ def test_the_report_key_still_satisfies_the_server_contract(harness_run):
     "one parseable id outranks the ordinal fallback",
     "a settled refusal is recognised, a neighbour is not",
     "409 and 403 are terminal, 503 is not",
+    "a later freeze cannot move a key already taken",
+    "a seat that froze after the rollover files a different game",
+    "a cleared snapshot files nothing",
 ])
 def test_the_ffa_report_guarantees_each_have_a_case(harness_run, name):
     line = _named_case(harness_run, name, "ffareport")

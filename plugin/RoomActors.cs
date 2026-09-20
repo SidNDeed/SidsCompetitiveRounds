@@ -125,6 +125,13 @@ namespace CompetitiveRounds
         /// direction.</summary>
         private static readonly HashSet<int> _assemblyActors = new HashSet<int>();
 
+        /// <summary>Whether this room's assembly window has been taken. NOT
+        /// "is the set non-empty": a window taken in a room the census could
+        /// not read is an EMPTY window that has still been taken, and the
+        /// difference decides whether a later freeze may re-take it. Cleared
+        /// exactly where the set is.</summary>
+        private static bool _assemblyCaptured = false;
+
         private static readonly PhotonPlayer[] _emptyActors = new PhotonPlayer[0];
 
         // ── cache lifecycle ──────────────────────────────────────────────
@@ -143,8 +150,10 @@ namespace CompetitiveRounds
                 // Actor numbers belong to ONE room incarnation, so this goes
                 // with the latches and not with the roster. Keeping it would
                 // let an actor number from the previous room admit a stranger
-                // to this one's widening.
+                // to this one's widening. The flag clears WITH the set: a new
+                // room's first freeze must be able to take a new window.
                 _assemblyActors.Clear();
+                _assemblyCaptured = false;
                 _cacheRoom = room;
                 // Deliberately NOT clearing _fighterSteamIds here: the roster
                 // is frozen by the match-assembly path, which owns its own
@@ -161,6 +170,7 @@ namespace CompetitiveRounds
             _rosterLatchDeclined.Clear();
             _hasUidByActor.Clear();
             _assemblyActors.Clear();
+            _assemblyCaptured = false;
             _cacheRoom = "";
             _fighterSteamIds.Clear();
             _fighterCacheFrame = -1;
@@ -319,12 +329,16 @@ namespace CompetitiveRounds
         internal static void FreezeFighterRoster(IEnumerable<string> steamIds)
         {
             _fighterSteamIds.Clear();
-            // The assembly window closes with the snapshot that opened it: the
-            // actors in the room AT THIS INSTANT are the ones the roster was
-            // taken from, whether or not their identity could be read. Taken
-            // on every freeze, because a replace-freeze is a new snapshot and
-            // an assembly set that outlived it would describe a roster that no
-            // longer exists.
+            // The assembly window opens with the room and closes with the
+            // FIRST snapshot taken in it: the actors present at that instant
+            // are the ones the roster was taken from, whether or not their
+            // identity could be read. A later freeze does not re-open it —
+            // see CaptureAssemblyActors for why that direction is the unsafe
+            // one. The CAPTURE is therefore idempotent after the first; the
+            // roster write on the line above is not, and this method still
+            // REPLACES the roster every time it is called. Only the per-game
+            // widening reads the window, so a second freeze in a 1v1/2v2 room
+            // keeping the first window changes nothing there.
             CaptureAssemblyActors();
             if (steamIds == null) { ReleaseLatchesTheRosterNowCovers(); return; }
             foreach (var s in steamIds)
@@ -334,12 +348,27 @@ namespace CompetitiveRounds
 
         /// <summary>Record every actor the room holds right now. Identity is
         /// deliberately NOT required: an actor whose u_id has not arrived is
-        /// exactly the seat this set exists to remember.</summary>
+        /// exactly the seat this set exists to remember.
+        ///
+        /// ONCE PER ROOM, and the decision is
+        /// <see cref="RosterCensusRules.ShouldCaptureAssembly"/>'s so that the
+        /// harness RUNS it rather than this file asserting it. The window is a
+        /// property of the ROOM's assembly, not of whichever call froze last,
+        /// and the widening's entire discriminator is "was this actor here
+        /// when the roster was taken". A second freeze re-taking the window
+        /// would move that instant FORWARD, and every actor that joined in
+        /// between would become admissible at the next game boundary — the
+        /// late entrant the freeze exists to refuse. Re-taking is the
+        /// fail-OPEN direction and is refused; keeping the first window is
+        /// fail-closed and its cost is the stated residual (a seat that joins
+        /// after the assembly is never admitted by the widening).</summary>
         private static void CaptureAssemblyActors()
         {
             try
             {
                 EnsureCacheRoom();
+                if (!RosterCensusRules.ShouldCaptureAssembly(_assemblyCaptured)) return;
+                _assemblyCaptured = true;
                 _assemblyActors.Clear();
                 var room = PhotonNetwork.CurrentRoom;
                 var players = room != null ? room.Players : null;
@@ -364,10 +393,29 @@ namespace CompetitiveRounds
         /// match start is the whole truth for that room's lifetime, and
         /// widening it there would admit entrants the freeze exists to refuse.
         ///
-        /// Growth is bounded by the room: the union only ever accumulates
-        /// Steam IDs that ActiveFighters() returned — i.e. seats already
-        /// admitted by this room's own rules — and OnJoinedNewRoom() clears it,
-        /// so nothing crosses a room boundary.</summary>
+        /// WHAT BOUNDS THE GROWTH — stated as it now is, not as it was. This
+        /// used to read "the union only ever accumulates Steam IDs that
+        /// ActiveFighters() returned — i.e. seats already admitted by this
+        /// room's own rules". That described a census this method's only
+        /// production feeder stopped using in the same commit that wrote the
+        /// feeder: RefreezeFighterRosterForGameFromRoom feeds from
+        /// <see cref="RawActorCensus"/>, which by design applies NEITHER the
+        /// latch test NOR the roster test — being unfiltered is the whole
+        /// point of it. Nothing upstream of here filters anything.
+        ///
+        /// The narrowing that bounds this set is
+        /// <see cref="RosterCensusRules.UnionCensus"/>'s, and it lives there:
+        /// spectators and impostors out, unreadable identities out, and once
+        /// the roster is frozen only actors already ON the roster or present
+        /// in the room when the roster was taken. It is NOT redundant
+        /// belt-and-braces — delete it and this method admits every actor the
+        /// room holds, including one that joined after the freeze, which is
+        /// the single thing the freeze exists to refuse (rostercensus case 2,
+        /// control r8).
+        ///
+        /// A room boundary bounds the other axis: OnJoinedNewRoom clears the
+        /// roster and EnsureCacheRoom clears the assembly window, so nothing
+        /// accumulated here crosses into the next room.</summary>
         internal static void UnionFighterRoster(IEnumerable<string> steamIds)
         {
             if (steamIds == null) return;

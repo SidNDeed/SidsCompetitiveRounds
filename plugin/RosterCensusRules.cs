@@ -52,12 +52,49 @@ namespace CompetitiveRounds
     /// entrant" means. Photon never reuses an ActorNumber inside a room, so
     /// the assembly set cannot alias a later joiner onto an earlier seat.
     ///
-    /// RESIDUAL, stated rather than left to be discovered: a seat that joins
-    /// the Photon room AFTER the first freeze is never admitted, even if the
-    /// lobby believes it belongs. That is the freeze's own definition of a
-    /// late entrant. If FFA ever needs mid-sitting admission, the input for it
-    /// is the server-authoritative lobby roster — not this census, which is
-    /// assembled entirely from client-published properties.
+    /// ── WHAT THE DISCRIMINATOR DOES NOT ASK, AND WHY THAT IS THE WHOLE
+    /// RESIDUAL ────────────────────────────────────────────────────────────
+    /// It does not ask WHY an actor was off the roster. Presence at the
+    /// assembly instant is the entire test, so every reason lands in the same
+    /// bucket. That is sound and not a shortcut, because it is the same
+    /// authority the FREEZE itself has: the roster is built from
+    /// RawActorCensus, so an actor in the room at that instant with a readable
+    /// u_id is ON the roster whatever the lobby thinks of it. The widening
+    /// therefore admits exactly what the freeze would have admitted had the
+    /// u_id arrived a moment earlier — it removes a TIMING artifact and adds
+    /// no authority. Enumerated, because "the benign case" is not the only
+    /// case and a comment that names only it is the class this file exists to
+    /// stop being:
+    ///
+    ///   * spectator at the instant — refused by IsSpectator, in both rules;
+    ///   * impostor — refused by IsImpostor, in both rules;
+    ///   * u_id unreadable at the instant, readable later — ADMITTED. This is
+    ///     the intended case AND the one an actor that never belonged to the
+    ///     lobby is indistinguishable from, because nothing the client holds
+    ///     can tell them apart;
+    ///   * latched as unauthorized — not consulted at all. The latch is
+    ///     downstream of the two above, so it adds no evidence; consulting it
+    ///     is the circularity the r2 HIGH was.
+    ///
+    /// RESIDUALS, stated rather than left to be discovered:
+    ///
+    ///  1. A seat that joins the Photon room AFTER the assembly window is
+    ///     never admitted, even if the lobby believes it belongs. That is the
+    ///     freeze's own definition of a late entrant, and the window is taken
+    ///     ONCE per room (RoomActors.CaptureAssemblyActors) so a later freeze
+    ///     cannot move it forward.
+    ///  2. An actor that was in the room at the assembly instant WITHOUT being
+    ///     a lobby member — it had the room name and joined in time — is
+    ///     admitted on the game after its u_id arrives, exactly as it would
+    ///     have been by the freeze itself. LOBBY MEMBERSHIP IS NOT A FACT THIS
+    ///     CENSUS HAS. The server holds it: the FFA report endpoint refuses a
+    ///     report whose player set is not exactly the lobby's frozen roster,
+    ///     terminally, and the client's own key/eligibility rules cannot
+    ///     recover that game. So the cost of this residual is a refused
+    ///     report, not a settled wrong one — the fail-closed direction — and
+    ///     the input that would close it is the server-authoritative lobby
+    ///     roster, not this census, which is assembled entirely from
+    ///     client-published properties.
     /// </summary>
     internal static class RosterCensusRules
     {
@@ -98,7 +135,14 @@ namespace CompetitiveRounds
         ///
         /// Order is by ActorNumber, and duplicates are collapsed: two actors
         /// can only carry one u_id if one of them is an impostor, and an
-        /// impostor is excluded above.</summary>
+        /// impostor is excluded above.
+        ///
+        /// THE FROZEN-ROSTER NARROWING IS NOT BELT-AND-BRACES. onRoster and
+        /// wasAtAssembly are the only thing standing between a frozen roster
+        /// and every actor holding the room name; deleting them as redundant
+        /// (the roster and latch tests upstream were REMOVED on purpose —
+        /// RawActorCensus applies neither) re-opens the late-entrant hole in
+        /// full. Case 2 of the self-test is that deletion's alarm.</summary>
         internal static List<string> UnionCensus(IList<Actor> raw,
                                                  ICollection<string> roster,
                                                  ICollection<int> assembly,
@@ -155,6 +199,26 @@ namespace CompetitiveRounds
                 release.Add(a.ActorNumber);
             }
             return release;
+        }
+
+        /// <summary>Whether a freeze may take the assembly window, given
+        /// whether this room has already had one taken.
+        ///
+        /// A rule rather than an `if` at the call site, for the same reason
+        /// the other two are: the widening's discriminator is "was this actor
+        /// in the room when the roster was taken", so WHICH INSTANT that names
+        /// is part of the rule, not plumbing around it. Re-taking the window
+        /// at a later freeze moves the instant forward and makes every actor
+        /// that joined in between admissible at the next game boundary — the
+        /// fail-OPEN direction, and precisely the late entrant the freeze
+        /// exists to refuse. First window wins; the cost is residual 1 above.
+        ///
+        /// It takes the FLAG and not the set: a window taken in a room whose
+        /// census read nothing is an EMPTY window that has still been taken,
+        /// and "empty" must not invite a re-take.</summary>
+        internal static bool ShouldCaptureAssembly(bool alreadyCaptured)
+        {
+            return !alreadyCaptured;
         }
 
         // ── self-test (EXECUTED by tools/client-rules-harness) ──────────────
@@ -362,6 +426,54 @@ namespace CompetitiveRounds
                 Check(r, "degenerate inputs are empty, not exceptions",
                       census.Count == 0 && released.Count == 0 && released2.Count == 0,
                       "census=" + census.Count + " released=" + released.Count);
+            }
+
+            // 10. THE ASSEMBLY WINDOW IS TAKEN ONCE PER ROOM, driven exactly as
+            //     RoomActors.CaptureAssemblyActors drives it. The first freeze
+            //     asks and takes {1,2}; D then obtains the room name and joins;
+            //     a second freeze (a replace-freeze from a room-scoped path, or
+            //     a re-entry) asks again with the flag set, is refused, and the
+            //     window still describes the assembly — so the widening refuses
+            //     D. Without this rule the second freeze would move the instant
+            //     forward and D would be admitted at the next game boundary,
+            //     which is the late entrant the freeze exists to refuse.
+            {
+                var D = new Actor(9, "76561190000000009", false, false);
+                var window = new HashSet<int>();
+                bool captured = false;
+
+                if (ShouldCaptureAssembly(captured))          // first freeze: A and B are the room
+                {
+                    captured = true;
+                    window.Clear(); window.Add(1); window.Add(2);
+                }
+                if (ShouldCaptureAssembly(captured))          // D has joined by now
+                {
+                    captured = true;
+                    window.Clear(); window.Add(1); window.Add(2); window.Add(D.ActorNumber);
+                }
+
+                var raw = new List<Actor> { A, B, D };
+                var roster = Roster(A.SteamId, B.SteamId);
+                var census = UnionCensus(raw, roster, window, true);
+                Check(r, "a second freeze does not re-open the assembly window",
+                      !window.Contains(D.ActorNumber) && !census.Contains(D.SteamId),
+                      "window=" + JoinInts(window) + " census=" + Join(census));
+            }
+
+            // 10b. NEGATIVE CONTROL for case 10. Hand the widening a window
+            //      that WAS re-taken after D joined and D is admitted — so
+            //      case 10 measures the refusal to re-take, and not something
+            //      about D that would have excluded it anyway.
+            {
+                var D = new Actor(9, "76561190000000009", false, false);
+                var retaken = new HashSet<int> { 1, 2, 9 };
+                var raw = new List<Actor> { A, B, D };
+                var roster = Roster(A.SteamId, B.SteamId);
+                var census = UnionCensus(raw, roster, retaken, true);
+                Check(r, "a re-taken window would admit the actor case 10 refuses",
+                      census.Contains(D.SteamId),
+                      "census=" + Join(census));
             }
 
             return r;
