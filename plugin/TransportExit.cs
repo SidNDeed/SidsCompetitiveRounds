@@ -66,6 +66,13 @@ namespace CompetitiveRounds
         /// <summary>The wire bound the tag above is measured against.</summary>
         internal const int MaxCauseTagLength = 16;
 
+        /// <summary>The field in the /api/v1/mod-version response by which the
+        /// server advertises that it recognises the involuntary tag. Absent =
+        /// not advertised = this client sends exactly what it sends today.
+        /// Named here, next to the tag it gates, so the client's half of the
+        /// contract is one place.</summary>
+        internal const string CapabilityField = "ffa_involuntary_cause";
+
         /// <summary>The Photon DisconnectCause values that are NOT this
         /// player's choice, enumerated from the DisconnectCause enum in the
         /// PhotonRealtime build ROUNDS ships (19 members; the whole enum is

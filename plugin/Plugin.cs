@@ -1333,6 +1333,13 @@ namespace CompetitiveRounds
                 {
                     // Same #150 lifecycle as 1v2: a failed join must dissolve the
                     // FFA lobby server-side or the husk re-feeds this dead room.
+                    // Bug 392 sweep: stays UNTAGGED. The room was never
+                    // entered, so there is no in-room exit to attest, and an
+                    // in-room tag here would veto the dissolution this call
+                    // exists to cause. The cause store is dropped for the same
+                    // reason — a failed join is a plausible neighbour of a
+                    // transport failure, and it must not inherit one.
+                    try { TransportExit.ClearCause(); } catch { }
                     try { ApiClient.FfaLeaveQueue(); } catch { }
                     CompetitiveUI.ShowNotificationCritical("Couldn't join the FFA match — your lobby was dissolved. Please requeue.", new Color(1f, 0.4f, 0.4f), 8f);
                 }

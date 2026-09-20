@@ -1817,6 +1817,22 @@ namespace CompetitiveRounds
             CheckModVersion();
         }
 
+        /// <summary>Bug 392 item A step 2: whether the server has said it
+        /// recognises the in-room INVOLUNTARY leave cause.
+        ///
+        /// FALSE until a mod-version response says otherwise, and false again
+        /// the moment a response stops saying it — so an older box, a rolled
+        /// back box, a startup check that never landed and a client that has
+        /// not reached the API yet all behave exactly as this client behaves
+        /// today. The capability is what makes the ordering safe: `cause` is
+        /// compared by exact string equality on the server, so a new tag sent
+        /// to a box that does not know it would lose the in-room veto that
+        /// keeps a live lobby from being dissolved for the other seats. The
+        /// advert therefore has to be emitted by the same code that recognises
+        /// the tag; the leave is a write and lands on the primary, and backend
+        /// deploys go primary first (deploy-reference.md).</summary>
+        public static bool ServerAcceptsInvoluntaryFfaCause { get; private set; }
+
         public static void CheckModVersion()
         {
             Plugin.Instance.StartCoroutine(DoCheckModVersion());
@@ -1830,6 +1846,14 @@ namespace CompetitiveRounds
             {
                 string ver = ExtractJsonString(req.downloadHandler.text, "version");
                 string minVer = ExtractJsonString(req.downloadHandler.text, "min_version");
+                // Read on EVERY successful response, not only the first: an
+                // absent field extracts as false (the same shape the FFA lobby
+                // config uses for sudden_death), so a box that stops
+                // advertising takes the capability away again.
+                bool involuntaryCause = ExtractJsonBool(req.downloadHandler.text, TransportExit.CapabilityField);
+                if (involuntaryCause != ServerAcceptsInvoluntaryFfaCause)
+                    Plugin.Log.LogInfo($"[VERSION] server involuntary-cause capability: {involuntaryCause}");
+                ServerAcceptsInvoluntaryFfaCause = involuntaryCause;
                 if (!string.IsNullOrEmpty(ver))
                 {
                     LatestModVersion = ver;
@@ -15421,7 +15445,28 @@ namespace CompetitiveRounds
             UpdateFfaQueuePoll(force: true);
         }
 
-        /// <summary>cause (round-9 gate): "in_room_exit" when fired by the
+        /// <summary>The cause tag an in-room FFA exit should send (bug 392
+        /// item A step 2). "in_room_exit" — today's tag — unless this seat
+        /// recorded a fresh involuntary DisconnectCause AND the server
+        /// advertised that it recognises the involuntary tag. Both possible
+        /// results are IN-ROOM tags, so this can only ever change which
+        /// in-room value is sent; it can never turn an in-room exit into one
+        /// the server reads as failed assembly.
+        ///
+        /// Call it at the exit site, not earlier: the value is a function of
+        /// the cause store's freshness at the moment of the leave.</summary>
+        public static string FfaInRoomExitCause()
+        {
+            try
+            {
+                return TransportExit.InRoomLeaveTag(
+                    ServerAcceptsInvoluntaryFfaCause, TransportExit.NowSeconds());
+            }
+            catch { return TransportExit.InRoomExitTag; }
+        }
+
+        /// <summary>cause (round-9 gate): an IN-ROOM tag — "in_room_exit", or
+        /// the involuntary "in_room_timeout" (bug 392) — when fired by the
         /// room-exit hook (the leaver was demonstrably IN the ffa_ room, so
         /// the server must never classify it as failed assembly); anything
         /// else / empty = pre-room (menu leave, decline, watchdog).</summary>
@@ -15433,10 +15478,33 @@ namespace CompetitiveRounds
             // in flight (the room-exit hook fires AFTER a teardown's own
             // leave and used to be discarded whole); an untagged call
             // inherits it so every retry path re-sends the attestation.
-            if (cause == "in_room_exit") _ffaLeaveCause = cause;
+            // Bug 392: the upgrade keys on the CLASS of tag, not on one
+            // literal — the involuntary tag is an in-room attestation too, and
+            // a bare equality here would have carried it on the first call and
+            // silently dropped it on every retry (#432).
+            if (TransportExit.IsInRoomTag(cause)) _ffaLeaveCause = cause;
             if (FfaQueueStatus == "leaving") return;
             if (string.IsNullOrEmpty(cause)) cause = _ffaLeaveCause;
             else _ffaLeaveCause = cause;
+            // Bug 392: an involuntary attestation is only sent while this seat
+            // can still justify it. The durable cause is inherited by every
+            // untagged caller — the Leave button, the reconciliation paths, a
+            // retry — and those callers know nothing about the transport. If
+            // the cause store no longer holds a fresh involuntary cause, the
+            // tag DOWNGRADES to today's in-room value: the exit is still
+            // attested as in-room (the veto that protects the other seats is
+            // kept), only the claim about WHY is dropped. A client-attested
+            // cause may move the server toward the conservative outcome and
+            // never away from it (#283).
+            if (string.Equals(cause, TransportExit.InRoomInvoluntaryTag, StringComparison.Ordinal))
+            {
+                string stillFresh;
+                if (!TransportExit.TryGetFreshInvoluntary(TransportExit.NowSeconds(), out stillFresh))
+                {
+                    cause = TransportExit.InRoomExitTag;
+                    _ffaLeaveCause = cause;
+                }
+            }
             // Capture the expected target BEFORE any clears (impl review find
             // 2: the old order captured after clearing ActiveFfaLobbyId, so a
             // locked-lobby leave carried no expected id and no recovery

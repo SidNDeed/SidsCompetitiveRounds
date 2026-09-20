@@ -3304,6 +3304,12 @@ namespace CompetitiveRounds
                             $"[FFA-LOBBY] joined competitive room '{photonRoomId}' while in an open lobby — leaving the lobby");
                         // Pre-room cause: this is an open-lobby SEAT being
                         // abandoned, not an exit from the ffa_ room itself.
+                        // Bug 392 sweep: deliberately NOT upgraded to the
+                        // involuntary tag. Reaching this line required a
+                        // successful join of a DIFFERENT room, so it is not a
+                        // transport failure; and an in-room tag here would
+                        // veto the dissolution that frees an open lobby whose
+                        // seat has gone.
                         try { ApiClient.FfaLeaveQueue("seat_abandon"); } catch { }
                         CompetitiveUI.ShowNotification(
                             "Left your FFA lobby - you joined a competitive game",
@@ -3606,11 +3612,18 @@ namespace CompetitiveRounds
                     // FfaLeaveQueue closes/dissolves it server-side and clears
                     // ActiveFfaLobbyId + the pending slot. Idempotent when
                     // several members leave at sitting end.
-                    // in_room_exit only when a game ACTUALLY STARTED here
+                    // An in-room tag only when a game ACTUALLY STARTED here
                     // (round-10 find 4): occupancy of a never-filled room is
                     // not assembly, and tagging it would refuse the
                     // dissolution that frees the other seats.
-                    try { ApiClient.FfaLeaveQueue(FfaMode.GameStartedInRoom ? "in_room_exit" : ""); } catch { }
+                    // Bug 392 item A step 2: WHICH in-room tag is decided by
+                    // FfaInRoomExitCause — the involuntary one when this seat
+                    // recorded a transport failure and the server advertised
+                    // that it recognises it, today's tag otherwise. The
+                    // never-started branch is untouched: it still sends the
+                    // empty tag, so a room that never assembled still
+                    // dissolves for the other seats.
+                    try { ApiClient.FfaLeaveQueue(FfaMode.GameStartedInRoom ? ApiClient.FfaInRoomExitCause() : ""); } catch { }
                     try { Plugin.ClearPendingFfaSlot(); } catch { }
                     try { FfaMode.OnRoomLeft(); } catch { }
                 }
@@ -3732,9 +3745,16 @@ namespace CompetitiveRounds
                         // server-side (cancels the series, resets the other two
                         // rows to searching) and clears the local lock state —
                         // otherwise the husk re-feeds this dead room forever.
-                        // Cause deliberately NOT in_room_exit (round-9): the
+                        // Cause deliberately NOT an in-room tag (round-9): the
                         // room never assembled — dissolution is the correct
                         // outcome, and the in-room fence must not veto it.
+                        // Bug 392 sweep: this is the site where an involuntary
+                        // upgrade would do the most damage, because the
+                        // opponent-never-arrived watchdog fires on exactly the
+                        // kind of failure that also produces a transport
+                        // cause. It stays assembly_bail, and the cause store
+                        // is dropped here so no later leave inherits it.
+                        try { TransportExit.ClearCause(); } catch { }
                         if (isOvtRoom) { try { ApiClient.OvtLeaveQueue("assembly_bail"); } catch { } }
                         if (isFfaRoom) { try { ApiClient.FfaLeaveQueue("assembly_bail"); } catch { } }
                         // 2v2: the fenced queue leave is what tells the server this
