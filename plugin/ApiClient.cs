@@ -12651,6 +12651,15 @@ namespace CompetitiveRounds
                         var prejoin = new ExitGames.Client.Photon.Hashtable();
                         prejoin["p_id"] = slot;
                         prejoin["t_id"] = slot / 2;
+                        // Bug 389: this build re-resolves the victim of a proximity
+                        // effect on every call instead of keeping the first one. It
+                        // changes who takes damage in a shared simulation, so it runs
+                        // only when EVERY fighter advertises it - never on a room-name
+                        // prefix (#286) and never on mod_version (#301).
+                        // StageInto writes the key ONLY if our own patches attached
+                        // (#83): the advert is what peers act on, so a seat that
+                        // cannot perform the repair must not claim it.
+                        ProximityVictimGate.StageInto(prejoin);
                         // Publish our Steam ID under "u_id" so peers can resolve
                         // actor → Steam ID at match-end time. Vanilla
                         // PlayerAssigner.CreatePlayer normally calls AssignUserID
@@ -14113,6 +14122,15 @@ namespace CompetitiveRounds
                             var prejoin = new ExitGames.Client.Photon.Hashtable();
                             prejoin["p_id"] = slot;
                             prejoin["t_id"] = slot == 0 ? 0 : 1;
+                            // Bug 389: this build re-resolves the victim of a proximity
+                            // effect on every call instead of keeping the first one. It
+                            // changes who takes damage in a shared simulation, so it runs
+                            // only when EVERY fighter advertises it - never on a room-name
+                            // prefix (#286) and never on mod_version (#301).
+                            // StageInto writes the key ONLY if our own patches attached
+                            // (#83): the advert is what peers act on, so a seat that
+                            // cannot perform the repair must not claim it.
+                            ProximityVictimGate.StageInto(prejoin);
                             prejoin["u_id"] = sid;
                             if (PhotonNetwork.LocalPlayer != null)
                                 PhotonNetwork.LocalPlayer.SetCustomProperties(prejoin);
@@ -15837,6 +15855,15 @@ namespace CompetitiveRounds
                             // pre-join so it rides the Player record and can
                             // never race a peer's map load (#79 pattern).
                             prejoin[FfaMapScale.ScaleCapabilityProp] = 1;
+                            // Bug 389: this build re-resolves the victim of a proximity
+                            // effect on every call instead of keeping the first one. It
+                            // changes who takes damage in a shared simulation, so it runs
+                            // only when EVERY fighter advertises it - never on a room-name
+                            // prefix (#286) and never on mod_version (#301).
+                            // StageInto writes the key ONLY if our own patches attached
+                            // (#83): the advert is what peers act on, so a seat that
+                            // cannot perform the repair must not claim it.
+                            ProximityVictimGate.StageInto(prejoin);
                             // Config/same-card feature level (v1.36): the
                             // same-card engine runs only when EVERY room member
                             // advertises this (#273 all-players rule).
