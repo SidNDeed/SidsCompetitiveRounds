@@ -129,6 +129,72 @@ ACCEPTED_DLL_ACCOUNT_IDS = {
 }
 
 
+def _account_ids_in(blob):
+    """Every SteamID64-shaped run in a byte blob, in both encodings.
+
+    Separate from its callers so the binary scan and its positive control use
+    the SAME probe — a control that exercises a different expression proves
+    nothing about the one that measured (#342/#431)."""
+    found = set()
+    found.update(m.decode("utf-8") for m in re.findall(rb"7656119[0-9]{10}", blob))
+    for m in re.findall(rb"(?:7\x006\x005\x006\x001\x001\x009\x00(?:[0-9]\x00){10})", blob):
+        found.add(m.decode("utf-16le"))
+    return found
+
+
+# Source files that can put a literal into the binary. The generated key file
+# is included deliberately: a caption or a label carrying an id would reach the
+# DLL through it exactly like hand-written source.
+SCANNED_SOURCE = ("plugin", "tools")
+
+
+def test_no_source_file_carries_an_account_id_nobody_accepted():
+    """THE UNCONDITIONAL HALF, and the reason it exists.
+
+    The binary scan below skips where there is no Release build — a fresh
+    worktree, a CI runner, a pre-commit sweep — and that skip is why a real
+    test account's id sat in the FFA election fixtures and shipped with every
+    release for several versions before a round happened to build first. A
+    privacy gate under an absolute rule that reports green on the seat where it
+    has nothing to measure is a check that cannot fail (#342/#441).
+
+    So the question is asked of the SOURCE too, where it needs no build output
+    and cannot skip. The two halves are not redundant: source cannot see what a
+    generator or a tool embeds, and the binary cannot say which file a hit came
+    from. Together they leave no seat where the question goes unasked.
+    """
+    root = PLUGIN.parent
+    offenders = {}
+    for folder in SCANNED_SOURCE:
+        for path in sorted((root / folder).rglob("*")):
+            if not path.is_file() or path.suffix.lower() not in (".cs", ".py", ".json", ".md"):
+                continue
+            if "bin" in path.parts or "obj" in path.parts:
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            for hit in set(re.findall(r"7656119\d{10}", text)):
+                if hit not in ACCEPTED_DLL_ACCOUNT_IDS:
+                    offenders.setdefault(hit, []).append(
+                        str(path.relative_to(root)).replace("\\", "/"))
+    assert not offenders, (
+        "account id(s) in source that nothing accounts for: %s" % offenders)
+
+
+def test_the_source_scan_can_actually_see_an_account_id():
+    """NEGATIVE CONTROL for the test above: the same expression, over a buffer
+    that does carry one. A scan whose regex or whose file walk quietly stopped
+    matching would pass the test above for ever."""
+    salted = "public const string X = \"76561197960287930\";"
+    assert re.findall(r"7656119\d{10}", salted) == ["76561197960287930"]
+    # and the walk really reaches the files the fixtures live in
+    root = PLUGIN.parent
+    seen = [p for p in (root / "plugin").rglob("*.cs")
+            if "bin" not in p.parts and "obj" not in p.parts]
+    assert len(seen) > 20, "the source walk reaches almost nothing: %d files" % len(seen)
+    assert any(p.name == "FfaReportRules.cs" for p in seen), (
+        "the walk misses the rule files whose fixtures ship in the DLL")
+
+
 def test_the_dll_carries_only_the_account_ids_this_project_has_accepted():
     """The binary half, as a real check. It used to be a promise in a docstring
     over a body that read one .cs file — and this project's rule is explicit
@@ -138,15 +204,23 @@ def test_the_dll_carries_only_the_account_ids_this_project_has_accepted():
 
     Scanned as BYTES at any offset in both encodings. A text read of a binary
     decodes UTF-16 from byte zero and hides every wide string sitting at an odd
-    offset, which is how an ungated build once read clean (#157)."""
+    offset, which is how an ungated build once read clean (#157).
+
+    This one still skips without a build — there is nothing to measure — but it
+    is no longer the only thing asking: the source half above runs everywhere,
+    including on the seat where this skips."""
     dll = PLUGIN_CS.parent / "bin" / "Release" / "netstandard2.1" / "CompetitiveRounds.dll"
     if not dll.exists():
-        pytest.skip("no Release DLL on this seat")
+        pytest.skip("no Release DLL on this seat — the source-side gate above "
+                    "runs unconditionally and covers this tree's own files")
     blob = dll.read_bytes()
-    found = set()
-    found.update(m.decode("utf-8") for m in re.findall(rb"7656119[0-9]{10}", blob))
-    for m in re.findall(rb"(?:7\x006\x005\x006\x001\x001\x009\x00(?:[0-9]\x00){10})", blob):
-        found.add(m.decode("utf-16le"))
+    found = _account_ids_in(blob)
+    # POSITIVE CONTROL, inside the measuring test: a scan that found NOTHING in
+    # a 7 MB binary known to carry the rule files' fixtures is a broken probe
+    # reporting a clean result, not a clean binary.
+    assert found, (
+        "the account-id scan found no id at all in the built DLL — the probe "
+        "is broken, not the binary clean")
     unexpected = found - ACCEPTED_DLL_ACCOUNT_IDS
     assert not unexpected, (
         f"account id(s) in the built DLL that nothing accounts for: {sorted(unexpected)}"
