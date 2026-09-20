@@ -446,14 +446,64 @@ namespace CompetitiveRounds
         /// terminal gap, and flushing there would inject one into the room
         /// window every game.
         ///
-        /// The flush uses the SAME bin thresholds as a measured gap, so a
-        /// clean exit whose last interval was 40 ms still reports every bin at
-        /// zero — a flush that manufactured a terminal bin on every exit would
-        /// be worse than the blindness it fixes.</summary>
+        /// The flush uses the SAME bin thresholds as a measured gap. That on
+        /// its own does NOT keep a clean exit at zero, which is what an
+        /// earlier version of this comment claimed: identical thresholds only
+        /// mean a short interval bins low, and nothing about them stops a LONG
+        /// interval being open at the room edge for a perfectly healthy reason
+        /// (#302/#351). The gate below is what makes the clean-exit case
+        /// true, and the C1 control only covers the accounting helper, not
+        /// this method's decision to call it.</summary>
         private static void FlushOpenArrivalGaps(string reason)
         {
             try
             {
+                // An open interval is a MEASUREMENT only while the stream it
+                // belongs to was still expected to deliver. Every other
+                // baseline decision in this file already says so:
+                // SetBattleActive clears all baselines on each falling combat
+                // edge because pick/map/death intervals are expected
+                // serialization silences, OnGameEnded clears them at the score
+                // edge, OnAcceptedDeath clears them on a death. The flush was
+                // the one place that ignored all of it and binned whatever
+                // interval happened to be open when the room ended.
+                //
+                // A clearing edge does not stop traffic, so that gap is
+                // reachable: orphan bullet tails keep arriving between the
+                // score edge and the next game's start — this file counts them
+                // and rebases for them — so a single straggler after
+                // OnGameEnded re-arms a baseline. The players then read the
+                // end-of-sitting scoreboard for several seconds and the room
+                // edge bins that reading time as a terminal outage: gap300,
+                // gap750 and gap1500 all incremented and maxArrivalGapMs in
+                // the thousands, on a sitting where nothing went wrong. The
+                // next lag diagnosis reads that as an outage and starts
+                // looking for a cause that does not exist — the same false
+                // mechanism in the log that item D removes, one method over.
+                //
+                // So: flush only while a game is OPEN and has not reached its
+                // score edge. The reported 47-second outage is exactly that
+                // case (the seat was dropped mid-game; no score edge ran), and
+                // a silence measured after a completed game is the expected
+                // one. Direction of the unhandled case (#276): a room whose
+                // state cannot be read as live is NOT flushed, so this gate
+                // can only withhold a bin, never manufacture one.
+                bool streamExpected = NetGapAccounting.RoomExitGapIsMeasurable(_gameActive, _gameEnded);
+                if (!streamExpected)
+                {
+                    // Said out loud rather than returning quietly: a gate that
+                    // can only remove evidence has to report when it fired, or
+                    // a reader cannot tell a suppressed flush from a room that
+                    // had nothing open, and the suppression becomes its own
+                    // invisible mechanism (#342).
+                    Plugin.Log?.LogInfo(
+                        "[NET-ROOM] open-gap flush skipped reason=" + reason +
+                        " gameActive=" + (_gameActive ? "1" : "0") +
+                        " gameEnded=" + (_gameEnded ? "1" : "0") +
+                        " (silence after the score edge is expected, not measured)");
+                    return;
+                }
+
                 long now = Stopwatch.GetTimestamp();
                 int actors = 0;
                 int worstOpenMs = 0;

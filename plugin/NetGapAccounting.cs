@@ -105,6 +105,28 @@ namespace CompetitiveRounds
             return measured;
         }
 
+        /// <summary>Whether an interval still open when a room ends is a
+        /// MEASUREMENT, given the room's game state at that edge.
+        ///
+        /// The accounting above cannot answer this: handed an open gap it
+        /// bins it, which is correct and is why the negative control for the
+        /// flush passes whatever the caller decides. The decision is
+        /// therefore the thing worth testing, and it lives here — free of
+        /// engine types — rather than only as a branch inside the diagnostics
+        /// class the harness cannot compile.
+        ///
+        /// TRUE only while a game is OPEN and has not reached its score edge.
+        /// After the score edge a silence is expected: the players are reading
+        /// the scoreboard, and a late orphan batch can re-arm a baseline in
+        /// that window, so an ungated flush bins the reading time as a
+        /// terminal outage. Before any game opens there is no stream whose
+        /// silence means anything. Both unhandled directions withhold a bin
+        /// rather than invent one (#276).</summary>
+        internal static bool RoomExitGapIsMeasurable(bool gameActive, bool gameEnded)
+        {
+            return gameActive && !gameEnded;
+        }
+
         private static void AddToBins(ref Bins bins, int measured)
         {
             if (measured >= Gap300Ms) bins.Gap300++;
