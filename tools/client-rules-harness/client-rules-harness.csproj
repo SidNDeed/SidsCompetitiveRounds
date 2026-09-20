@@ -22,6 +22,14 @@
                         identical on every seat in the room and must still
                         carry the suffix the server parses out of it.
 
+      RosterCensusRules.cs  which seats a per-game roster WIDENING may take in
+                        and which rejection latches the resulting roster
+                        releases. Both were unrunnable while they lived inside
+                        RoomActors against live Photon state, and the r2 HIGH
+                        they close — a widening census that had already
+                        excluded the actor it was deciding about — is exactly
+                        the kind of circularity a source-shape test cannot see.
+
     net10.0 because that is the runtime installed on the build seat, matching
     the h2h harness; RollForward keeps the next SDK rotation from turning this
     into a green-looking nothing.
@@ -46,6 +54,7 @@
     <Compile Include="../../plugin/LogScrub.cs" />
     <Compile Include="../../plugin/TopStripBand.cs" />
     <Compile Include="../../plugin/FfaReportRules.cs" />
+    <Compile Include="../../plugin/RosterCensusRules.cs" />
   </ItemGroup>
 
 </Project>

@@ -81,7 +81,7 @@ def test_the_log_scrub_suite_ran_every_case_and_none_failed(harness_run):
         "the suite declared run=%d but printed %d case lines" % (run, printed))
     # A floor, not an equality: cases get added. Below this, coverage that
     # exists today has been deleted.
-    assert run >= 18, "the LogScrub suite shrank to %d cases" % run
+    assert run >= 26, "the LogScrub suite shrank to %d cases" % run
 
 
 def test_the_top_strip_suite_ran_every_case_and_none_failed(harness_run):
@@ -103,7 +103,75 @@ def test_the_ffa_report_suite_ran_every_case_and_none_failed(harness_run):
     printed = len(re.findall(r"^\[ffareport\] (PASS|FAIL) ", harness_run.stdout, re.M))
     assert printed == run, (
         "the suite declared run=%d but printed %d case lines" % (run, printed))
-    assert run >= 15, "the FfaReportRules suite shrank to %d cases" % run
+    assert run >= 18, "the FfaReportRules suite shrank to %d cases" % run
+
+
+def test_the_roster_census_suite_ran_every_case_and_none_failed(harness_run):
+    suites = _suites(harness_run)
+    assert "rostercensus" in suites, "the RosterCensusRules suite did not report"
+    run, fail, verdict = suites["rostercensus"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[rostercensus\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+    assert run >= 10, "the RosterCensusRules suite shrank to %d cases" % run
+
+
+def test_a_widening_census_can_actually_discover_a_latched_fighter(harness_run):
+    """The HIGH this suite exists for, asserted on the printed MEASUREMENT.
+
+    A seat whose identity had not arrived when the roster was taken is latched
+    as unresolved. The release test used to be evaluated over the set the latch
+    itself filters, so the evidence that would release it was removed before it
+    could be read: the seat could never be re-admitted, and it sat out every
+    remaining game of the match.
+
+    The two cases below are one control pair. The first feeds the RAW census
+    (every actor in the room, latch not consulted) and the seat must be
+    released; the second feeds the pre-filtered census the old code used and
+    the same seat must NOT be released. A fix that widened only the roster
+    test, or one that made the release unconditional, reds exactly one of them.
+    """
+    good = _named_case(harness_run,
+                       "a widening census discovers a latched fighter and releases it",
+                       "rostercensus")
+    assert good.startswith("[rostercensus] PASS"), good
+    got = good.split(" | got=", 1)[1].strip()
+    m = re.match(r"^census=\{(.*)\} released=\{(.*)\}$", got)
+    assert m, got
+    assert m.group(2) == "3", (
+        "the latched seat was not the one released: " + got)
+    assert "76561198000000003" in m.group(1), (
+        "the census never contained the latched seat's id: " + got)
+
+    control = _named_case(harness_run,
+                          "a census that pre-excludes the latched actor cannot release it",
+                          "rostercensus")
+    assert control.startswith("[rostercensus] PASS"), control
+    cgot = control.split(" | got=", 1)[1].strip()
+    cm = re.match(r"^census=\{(.*)\} released=\{(.*)\}$", cgot)
+    assert cm, cgot
+    assert cm.group(2) == "", (
+        "a census that cannot see the latched seat still released it -- the "
+        "case above then measures nothing: " + cgot)
+    assert "76561198000000003" not in cm.group(1), cgot
+
+
+@pytest.mark.parametrize("name", [
+    "a late entrant is not admitted by the widening",
+    "an unreadable identity is neither admitted nor released",
+    "an impostor keeps its latch and adds nothing",
+    "a spectator is not a fighter in either rule",
+    "an unfrozen room takes the whole resolvable snapshot",
+    "an absent roster member is not evicted by the census",
+    "the census is order-independent",
+    "degenerate inputs are empty, not exceptions",
+])
+def test_the_roster_census_guarantees_each_have_a_case(harness_run, name):
+    line = _named_case(harness_run, name, "rostercensus")
+    assert line.startswith("[rostercensus] PASS"), line
+    assert " | got=" in line and not line.rstrip().endswith("| got="), (
+        "the case printed no measurement: " + line)
 
 
 def _named_case(proc, name, suite="topstrip"):
@@ -160,11 +228,13 @@ def test_the_report_key_still_satisfies_the_server_contract(harness_run):
 
 @pytest.mark.parametrize("name", [
     "the key is a pure function of its inputs",
-    "the published number wins when behind",
-    "absent published number falls back to local",
+    "a rollover after the freeze cannot change the key",
+    "a seat keying the rolled-over number would file a different game",
+    "an absent snapshot yields no key and no eligibility",
+    "mixed snapshots: the unsnapshotted seat cannot file and the others are distinguishable",
     "different games get different keys",
     "the key fits the column",
-    "degenerate inputs still produce a legal key",
+    "degenerate inputs are legal or absent, never invented",
     "election is total without witnesses",
     "witnesses are the electorate",
     "election is order-independent",
@@ -172,6 +242,7 @@ def test_the_report_key_still_satisfies_the_server_contract(harness_run):
     "an unparseable electorate still elects one seat",
     "one parseable id outranks the ordinal fallback",
     "a settled refusal is recognised, a neighbour is not",
+    "409 and 403 are terminal, 503 is not",
 ])
 def test_the_ffa_report_guarantees_each_have_a_case(harness_run, name):
     line = _named_case(harness_run, name, "ffareport")

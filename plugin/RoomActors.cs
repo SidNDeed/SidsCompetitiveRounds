@@ -105,6 +105,26 @@ namespace CompetitiveRounds
         private static readonly HashSet<string> _fighterSteamIds =
             new HashSet<string>(StringComparer.Ordinal);
 
+        /// <summary>The ActorNumbers that were IN THE ROOM when the roster was
+        /// taken. The roster is the set of seats that snapshot could RESOLVE;
+        /// this is the set of actors that were there to be resolved.
+        ///
+        /// It exists because the two differ, and the difference is the whole
+        /// r2 HIGH: a seat mid-load, or one whose u_id had not been delivered
+        /// yet, is in the second set and not the first — a fighter the
+        /// snapshot could not read, not a late entrant. A seat in NEITHER was
+        /// not in the room when the roster was taken, which is what the freeze
+        /// means by "late". Photon never reuses an ActorNumber inside a room,
+        /// so this cannot alias a later joiner onto an earlier seat.
+        ///
+        /// Lifetime is the ROOM's, not the roster's: it is cleared on a room
+        /// change alongside the rejection latches, because an actor number
+        /// from a previous incarnation says nothing about this one. A room
+        /// change without a re-freeze therefore leaves the widening able to
+        /// re-list roster members and nothing else, which is the fail-closed
+        /// direction.</summary>
+        private static readonly HashSet<int> _assemblyActors = new HashSet<int>();
+
         private static readonly PhotonPlayer[] _emptyActors = new PhotonPlayer[0];
 
         // ── cache lifecycle ──────────────────────────────────────────────
@@ -120,6 +140,11 @@ namespace CompetitiveRounds
                 _rejectedActors.Clear();
                 _rosterLatchDeclined.Clear();
                 _hasUidByActor.Clear();
+                // Actor numbers belong to ONE room incarnation, so this goes
+                // with the latches and not with the roster. Keeping it would
+                // let an actor number from the previous room admit a stranger
+                // to this one's widening.
+                _assemblyActors.Clear();
                 _cacheRoom = room;
                 // Deliberately NOT clearing _fighterSteamIds here: the roster
                 // is frozen by the match-assembly path, which owns its own
@@ -135,6 +160,7 @@ namespace CompetitiveRounds
             _rejectedActors.Clear();
             _rosterLatchDeclined.Clear();
             _hasUidByActor.Clear();
+            _assemblyActors.Clear();
             _cacheRoom = "";
             _fighterSteamIds.Clear();
             _fighterCacheFrame = -1;
@@ -293,10 +319,35 @@ namespace CompetitiveRounds
         internal static void FreezeFighterRoster(IEnumerable<string> steamIds)
         {
             _fighterSteamIds.Clear();
+            // The assembly window closes with the snapshot that opened it: the
+            // actors in the room AT THIS INSTANT are the ones the roster was
+            // taken from, whether or not their identity could be read. Taken
+            // on every freeze, because a replace-freeze is a new snapshot and
+            // an assembly set that outlived it would describe a roster that no
+            // longer exists.
+            CaptureAssemblyActors();
             if (steamIds == null) { ReleaseLatchesTheRosterNowCovers(); return; }
             foreach (var s in steamIds)
                 if (!string.IsNullOrEmpty(s)) _fighterSteamIds.Add(s);
             ReleaseLatchesTheRosterNowCovers();
+        }
+
+        /// <summary>Record every actor the room holds right now. Identity is
+        /// deliberately NOT required: an actor whose u_id has not arrived is
+        /// exactly the seat this set exists to remember.</summary>
+        private static void CaptureAssemblyActors()
+        {
+            try
+            {
+                EnsureCacheRoom();
+                _assemblyActors.Clear();
+                var room = PhotonNetwork.CurrentRoom;
+                var players = room != null ? room.Players : null;
+                if (players == null) return;
+                foreach (var kv in players)
+                    if (kv.Value != null) _assemblyActors.Add(kv.Value.ActorNumber);
+            }
+            catch { }
         }
 
         /// <summary>Widen the frozen roster without narrowing it (RJ-2). For a
@@ -354,30 +405,29 @@ namespace CompetitiveRounds
         ///     latch is what proves its leave was not a fighter's leave, and
         ///     its identity is no longer resolvable to test anyway.
         /// A narrowing freeze is handled by the same predicate for free: it
-        /// asks about the roster that now exists, not about the change.</summary>
+        /// asks about the roster that now exists, not about the change.
+        ///
+        /// THE CENSUS IS RAW (Codex client r2 HIGH). Both this and the widening
+        /// read <see cref="RawActorCensus"/>, which applies no roster test and
+        /// no latch test. Reading ActiveFighters() here — or feeding the
+        /// widening from it — is the circularity the r2 round named: it filters
+        /// through IsUnauthorized, which tests the latch FIRST, so the actor
+        /// whose latch is being decided is removed from the evidence before it
+        /// is weighed.</summary>
         private static void ReleaseLatchesTheRosterNowCovers()
         {
             try
             {
                 EnsureCacheRoom();
                 if (_rejectedActors.Count == 0) return;
-                var room = PhotonNetwork.CurrentRoom;
-                var players = room != null ? room.Players : null;
-                if (players == null) return;
-                List<int> release = null;
-                foreach (var kv in players)
-                {
-                    var actor = kv.Value;
-                    if (actor == null) continue;
-                    if (!_rejectedActors.Contains(actor.ActorNumber)) continue;
-                    if (IsImpostorReplicated(actor)) continue;
-                    string sid = SteamIdOf(actor);
-                    if (string.IsNullOrEmpty(sid)) continue;
-                    if (!_fighterSteamIds.Contains(sid)) continue;
-                    if (release == null) release = new List<int>();
-                    release.Add(actor.ActorNumber);
-                }
-                if (release == null) return;
+                // The RAW census, never ActiveFighters(): that view applies
+                // IsUnauthorized, which tests the latch first, so it removes
+                // the very actor this is deciding about (r2 HIGH). The
+                // predicate itself is RosterCensusRules', which the rules
+                // harness RUNS.
+                var release = RosterCensusRules.LatchesToRelease(
+                    RawActorCensus(), _rejectedActors, _fighterSteamIds);
+                if (release.Count == 0) return;
                 foreach (int actorNumber in release)
                 {
                     _rejectedActors.Remove(actorNumber);
@@ -406,6 +456,48 @@ namespace CompetitiveRounds
             if (RosterFrozen) UnionFighterRoster(presentSteamIds);
             else if (presentSteamIds != null && presentSteamIds.Count >= 2)
                 FreezeFighterRoster(presentSteamIds);
+        }
+
+        /// <summary>Every actor the room holds, reduced to the four facts the
+        /// roster rules use. NO roster test and NO latch test: this is the
+        /// evidence those two decisions are made FROM, and a census that has
+        /// already applied either of them cannot inform the other.</summary>
+        private static IList<RosterCensusRules.Actor> RawActorCensus()
+        {
+            var census = new List<RosterCensusRules.Actor>();
+            try
+            {
+                var room = PhotonNetwork.CurrentRoom;
+                var players = room != null ? room.Players : null;
+                if (players == null) return census;
+                foreach (var kv in players)
+                {
+                    var actor = kv.Value;
+                    if (actor == null) continue;
+                    census.Add(new RosterCensusRules.Actor(
+                        actor.ActorNumber, SteamIdOf(actor),
+                        IsSpectator(actor), IsImpostorReplicated(actor)));
+                }
+            }
+            catch { }
+            return census;
+        }
+
+        /// <summary>The per-game roster write, census included, so the CALL
+        /// SITE cannot hold half the rule — which is exactly how the r2 HIGH
+        /// shipped: GameStateWatcher built the census out of ActiveFighters()
+        /// and handed it in, and no amount of correctness in here could undo a
+        /// census that had already dropped the seat in question.
+        ///
+        /// Returns the census it used, so the caller's log line reports the
+        /// number this actually wrote from rather than one it recomputed.</summary>
+        internal static List<string> RefreezeFighterRosterForGameFromRoom()
+        {
+            var raw = RawActorCensus();
+            var census = RosterCensusRules.UnionCensus(
+                raw, _fighterSteamIds, _assemblyActors, RosterFrozen);
+            RefreezeFighterRosterForGame(census);
+            return census;
         }
 
         /// <summary>The frozen roster, for logging and diagnosis. Never a
@@ -622,8 +714,20 @@ namespace CompetitiveRounds
                 // roster — otherwise freezing {A,B} and then admitting a late
                 // actor C with no spectator in the room returned C as a
                 // fighter, defeating the freeze in exactly the case it exists
-                // for. Still fully inert in the shipped build: nothing calls
-                // FreezeFighterRoster, so RosterFrozen is false everywhere.
+                // for. CORRECTED (Codex client r2 LOW, this line): the
+                // "nothing calls FreezeFighterRoster, so RosterFrozen is false
+                // everywhere" that stood here has not been true for releases —
+                // GameStateWatcher freezes at match assembly, at late identity
+                // resolution, and once per FFA game. In a frozen room this
+                // path is NOT taken and the loop below does exclude actors
+                // that are off the roster, which is the freeze working.
+                //
+                // NOTE FOR ANYONE REACHING FOR THIS AS A CENSUS: the result
+                // has IsUnauthorized applied, so it already excludes every
+                // latched actor. It is the right answer to "who is playing"
+                // and the wrong input to any decision ABOUT a latch or about
+                // roster membership — see RoomActors.RawActorCensus and the
+                // r2 HIGH it closes.
                 if (!AnySpectatorPresent() && !RosterFrozen) return list;   // inert: same instance
                 var keep = new List<PhotonPlayer>(list.Length);
                 for (int i = 0; i < list.Length; i++)

@@ -22,10 +22,52 @@ namespace CompetitiveRounds
         /// string form and the status-code form cannot drift apart.</summary>
         internal const long SettledRefusalStatus = 409;
 
+        /// <summary>"Understood, and this report may not settle this game" —
+        /// the hardened FFA endpoint's answer to a key whose tail is not the
+        /// lobby's games_played + 1. The report is refused and captured for
+        /// recovery; it is not a thing to send again, because the state it was
+        /// refused on is in the lobby row and the next attempt finds it in the
+        /// same place.</summary>
+        internal const long QuarantinedRefusalStatus = 403;
+
+        /// <summary>The one refusal that IS worth another attempt: the server
+        /// could not make a decision at all. Named so that "terminal" is a
+        /// stated list rather than "anything that is not a success", which is
+        /// how a retryable code ends up terminal the day it is first
+        /// returned.</summary>
+        internal const long RetryableRefusalStatus = 503;
+
         /// <summary>A settled refusal, from the status code.</summary>
         internal static bool IsSettledRefusal(long statusCode)
         {
             return statusCode == SettledRefusalStatus;
+        }
+
+        /// <summary>A refusal this client must NOT retry and must NOT re-key.
+        ///
+        /// Both codes mean the server read the body, understood it, and
+        /// refused on state the next attempt will find in the same place —
+        /// 409 because the game is already recorded, 403 because this key's
+        /// game number is not the one the lobby is expecting. Retrying either
+        /// spends a settlement request on a decision that has been made; the
+        /// dangerous variant is re-keying, because a second key is a second
+        /// GAME to the server and that is the double-settlement this whole
+        /// path exists to prevent.
+        ///
+        /// 503 is deliberately not here: it is the server declining to decide,
+        /// which is the one refusal the transport loop's premise still fits.
+        /// </summary>
+        internal static bool IsTerminalRefusal(long statusCode)
+        {
+            return statusCode == SettledRefusalStatus
+                || statusCode == QuarantinedRefusalStatus;
+        }
+
+        /// <summary>A terminal refusal, from the formatted response text.
+        /// Matched on the CODE for the same reason IsSettledRefusal is.</summary>
+        internal static bool IsTerminalRefusal(string response)
+        {
+            return IsSettledRefusal(response) || HasStatus(response, QuarantinedRefusalStatus);
         }
 
         /// <summary>A settled refusal, from the formatted response text an
@@ -37,8 +79,13 @@ namespace CompetitiveRounds
         /// wording goes on passing silently once the wording moves (#306).</summary>
         internal static bool IsSettledRefusal(string response)
         {
+            return HasStatus(response, SettledRefusalStatus);
+        }
+
+        private static bool HasStatus(string response, long status)
+        {
             if (string.IsNullOrEmpty(response)) return false;
-            string code = SettledRefusalStatus.ToString();
+            string code = status.ToString(System.Globalization.CultureInfo.InvariantCulture);
             // The colon is part of the match: without it "HTTP 409" is a
             // PREFIX of codes that do not exist today and would be read as
             // settled if they ever did.
@@ -68,7 +115,10 @@ namespace CompetitiveRounds
         ///
         /// So: the room name, which every seat reads from Photon, and the game
         /// number the HOST published in the room's own property, which every
-        /// seat reads from the same place. No local clock takes part.
+        /// seat reads from the same place — FROZEN at the game-over edge, so
+        /// that a host that has already opened the next cycle cannot make two
+        /// electors of the same game disagree. No local clock takes part, and
+        /// no local counter can stand in.
         ///
         /// THE "_rN" SUFFIX IS A SERVER CONTRACT, not decoration. The report
         /// endpoint recovers the game number from this string with an anchored
@@ -79,21 +129,52 @@ namespace CompetitiveRounds
         /// ffa_matches.photon_room_id, VARCHAR(64) — this form is shorter than
         /// the one it replaced, so that bound only got looser.
         ///
-        /// <paramref name="publishedGame"/> is preferred whenever it is
-        /// present, INCLUDING when it is behind the local counter. A value
-        /// every seat agrees on is the entire requirement here; being the
-        /// larger number is not one. The local counter is the fallback for a
-        /// seat that cannot read the property at all — the same residual shape
-        /// as the election's own fallback, and the same reason: a key that
-        /// cannot be computed is worse than one that might not match.</summary>
-        internal static string ReportRoomId(string roomName, int publishedGame, int localGame)
+        /// THE NUMBER IS A FROZEN SNAPSHOT, NOT A LIVE READ, AND THERE IS NO
+        /// FALLBACK (Codex client r2 HIGH, this method). Two separate things
+        /// were wrong with reading `FfaMode.PublishedGameNumber()` here:
+        ///
+        ///  * cr_ffa_cyc is MUTABLE. The host writes the next game's number
+        ///    into it the moment the next pick cycle opens, so an elector
+        ///    whose game-over handling ran a little later than its peers' read
+        ///    N+1 for the game they keyed as N. Two keys, one physical game.
+        ///  * the local counter as a fallback could MINT a number. Drift
+        ///    adoption moves that counter per seat — precisely the per-seat
+        ///    value the shared key exists to escape — so the fallback
+        ///    manufactured exactly the disagreement it was there to avoid.
+        ///
+        /// So this takes ONE number: whatever FfaMode.FreezeReportGameNumber
+        /// captured at the game-over edge, before any election ran. A rollover
+        /// after that instant cannot reach the key. A seat that froze nothing
+        /// gets NULL — it is ineligible to file, and the caller must not
+        /// substitute anything, because there is nothing left to substitute
+        /// that every seat would agree on.
+        ///
+        /// WHY A WRONG NUMBER IS WORSE THAN A MISSING ONE. The hardened FFA
+        /// endpoint settles a report only when this tail equals the lobby's
+        /// games_played + 1 under the lobby lock, and refuses-and-quarantines
+        /// every other tail terminally. A key one game AHEAD of the truth is
+        /// therefore not simply rejected for ever: once the real game N
+        /// settles, expected progress becomes N+1 and the stale N+1 report
+        /// becomes acceptable as a second game. Fail closed.
+        ///
+        /// Returns null, never a "0" key, when there is no number — "_r0" is a
+        /// legal key for game zero and would be filed rather than refused.
+        /// </summary>
+        internal static string ReportRoomId(string roomName, int frozenGame)
         {
-            int game = publishedGame >= 0 ? publishedGame : localGame;
-            if (game < 0) game = 0;
+            if (frozenGame < 0) return null;
             // Invariant formatting: a culture-specific rendering would make the
             // key seat-dependent again, which is the whole defect.
             return (roomName ?? "") + "_r"
-                + game.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                + frozenGame.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>Whether this seat may file at all. Stated once, so the
+        /// eligibility rule and the key cannot disagree: a seat is eligible
+        /// exactly when ReportRoomId gave it a key.</summary>
+        internal static bool CanFile(string reportRoomId)
+        {
+            return !string.IsNullOrEmpty(reportRoomId);
         }
 
         /// <summary>Elect the seat that submits this game's report: the lowest
@@ -211,49 +292,93 @@ namespace CompetitiveRounds
                       a == "76561198040410653", "a=" + (a ?? "<null>"));
             }
 
-            // 1. THE FIX. Two seats holding different local game counters, both
-            //    reading the host's published number, file under one key.
+            // 1. THE FIX. Two seats whose LOCAL counters have drifted apart
+            //    froze the same published number at game over, so they file
+            //    under one key. The local counter is not an input at all any
+            //    more, which is what makes this true by construction.
             {
-                string a = ReportRoomId(room, 4, 4);
-                string b = ReportRoomId(room, 4, 7);
-                Check(r, "two seats agree on the key", a == b, "a=" + a + " b=" + b);
+                string a = ReportRoomId(room, 4);
+                string b = ReportRoomId(room, 4);
+                Check(r, "two seats agree on the key", a == b && a == room + "_r4",
+                      "a=" + a + " b=" + b);
             }
 
             // 2. And the key is not a function of anything else: called twice
             //    with the same inputs it is the same string. (The old key read
             //    DateTime.UtcNow, which this shape cannot do.)
             {
-                string a = ReportRoomId(room, 4, 4);
-                string b = ReportRoomId(room, 4, 4);
+                string a = ReportRoomId(room, 4);
+                string b = ReportRoomId(room, 4);
                 Check(r, "the key is a pure function of its inputs", a == b, "a=" + a + " b=" + b);
             }
 
-            // 3. The published number wins even when it is BEHIND the local
-            //    one. Agreement is the requirement; being larger is not.
+            // 3. THE ROLLOVER. This is the r2 HIGH, driven end to end: the
+            //    host publishes N+1 while a lagging elector is still handling
+            //    game N. The lagging seat froze N at the game-over edge and
+            //    the later value cannot reach its key, so both electors still
+            //    file N — one key, one game.
             {
-                string k = ReportRoomId(room, 2, 9);
-                Check(r, "the published number wins when behind", k == room + "_r2", "k=" + k);
+                const int frozenAtGameOver = 7;
+                const int publishedAfterRollover = 8;
+                string prompt = ReportRoomId(room, frozenAtGameOver);
+                string lagging = ReportRoomId(room, frozenAtGameOver);
+                Check(r, "a rollover after the freeze cannot change the key",
+                      prompt == lagging && prompt == room + "_r7"
+                      && prompt != ReportRoomId(room, publishedAfterRollover),
+                      "prompt=" + prompt + " lagging=" + lagging);
             }
 
-            // 4. No published number: the local counter is the fallback, which
-            //    is the residual mixed case and not an exception to it.
+            // 3b. NEGATIVE CONTROL for case 3. The rollover is only harmless
+            //     because the number is frozen; a seat that read the property
+            //     LATE would key N+1 and settle a second game. If this case
+            //     ever fails, the two keys have stopped being distinguishable
+            //     and case 3 proves nothing.
             {
-                string k = ReportRoomId(room, -1, 5);
-                Check(r, "absent published number falls back to local", k == room + "_r5", "k=" + k);
+                Check(r, "a seat keying the rolled-over number would file a different game",
+                      ReportRoomId(room, 7) != ReportRoomId(room, 8),
+                      ReportRoomId(room, 7) + " vs " + ReportRoomId(room, 8));
+            }
+
+            // 4. NO SNAPSHOT IS NO KEY. There is no local fallback: a seat
+            //    that froze nothing is ineligible, and CanFile says the same
+            //    thing the key does.
+            {
+                string k = ReportRoomId(room, -1);
+                Check(r, "an absent snapshot yields no key and no eligibility",
+                      k == null && !CanFile(k) && CanFile(ReportRoomId(room, 0)),
+                      "k=" + (k ?? "<null>"));
+            }
+
+            // 4b. MIXED SNAPSHOTS ACROSS THE ELECTORATE. Three seats: one
+            //     froze N, one froze N+1, one froze nothing. Exactly one
+            //     distinct key may exist among the ELIGIBLE seats that agree,
+            //     the ineligible seat files nothing, and the disagreeing seat
+            //     is a different key — which is the residual this fails closed
+            //     against and the reason the freeze happens before any await.
+            {
+                string atN = ReportRoomId(room, 5);
+                string atNPlus1 = ReportRoomId(room, 6);
+                string none = ReportRoomId(room, -1);
+                int eligible = (CanFile(atN) ? 1 : 0) + (CanFile(atNPlus1) ? 1 : 0)
+                             + (CanFile(none) ? 1 : 0);
+                Check(r, "mixed snapshots: the unsnapshotted seat cannot file and the others are distinguishable",
+                      eligible == 2 && atN != atNPlus1 && none == null,
+                      "atN=" + atN + " atN+1=" + atNPlus1 + " none=" + (none ?? "<null>")
+                      + " eligible=" + eligible);
             }
 
             // 5. Two different games in one room never share a key.
             {
                 Check(r, "different games get different keys",
-                    ReportRoomId(room, 3, 3) != ReportRoomId(room, 4, 4),
-                    ReportRoomId(room, 3, 3) + " vs " + ReportRoomId(room, 4, 4));
+                    ReportRoomId(room, 3) != ReportRoomId(room, 4),
+                    ReportRoomId(room, 3) + " vs " + ReportRoomId(room, 4));
             }
 
             // 6. THE SERVER CONTRACT. The endpoint keys bet settlement on the
             //    number it pulls out of this string with an anchored _r(\d+)$.
             //    Tested against that regex, not against the format string.
             {
-                var m = ServerGameSuffix.Match(ReportRoomId(room, 11, 3));
+                var m = ServerGameSuffix.Match(ReportRoomId(room, 11));
                 Check(r, "the server can recover the game number",
                     m.Success && m.Groups[1].Value == "11",
                     "match=" + m.Success + " value=" + (m.Success ? m.Groups[1].Value : "-"));
@@ -262,16 +387,19 @@ namespace CompetitiveRounds
             // 7. ffa_matches.photon_room_id is VARCHAR(64). A key longer than
             //    that is a 500 on every report of that room.
             {
-                string k = ReportRoomId(room, 999, 999);
+                string k = ReportRoomId(room, 999);
                 Check(r, "the key fits the column", k.Length <= 64, "len=" + k.Length + " k=" + k);
             }
 
-            // 8. Degenerate inputs cannot throw or emit a negative suffix the
-            //    server's regex would refuse.
+            // 8. Degenerate inputs: a missing room name with a real snapshot
+            //    still produces a legal suffix, and a missing snapshot is
+            //    still no key whatever the room name is.
             {
-                string k = ReportRoomId(null, -1, -1);
-                Check(r, "degenerate inputs still produce a legal key",
-                    k == "_r0" && ServerGameSuffix.IsMatch(k), "k=" + k);
+                string k = ReportRoomId(null, 0);
+                string none = ReportRoomId(null, -1);
+                Check(r, "degenerate inputs are legal or absent, never invented",
+                    k == "_r0" && ServerGameSuffix.IsMatch(k) && none == null,
+                    "k=" + k + " none=" + (none ?? "<null>"));
             }
 
             // 9. ElectReporter is TOTAL over a non-empty present set, even with
@@ -321,6 +449,23 @@ namespace CompetitiveRounds
                           && !IsSettledRefusal(400L)
                           && !IsSettledRefusal("HTTP 4090: nope");
                 Check(r, "a settled refusal is recognised, a neighbour is not", ok, "ok=" + ok);
+            }
+
+            // 14. TERMINAL vs RETRYABLE, as the hardened endpoint answers
+            //     them. 409 (already recorded) and 403 (this tail is not the
+            //     game the lobby expects, refused and captured) are both
+            //     terminal at attempt 1; 503 is the server declining to
+            //     decide and must stay retryable. A build that folded 503 in
+            //     would silently turn a transient outage into lost results.
+            {
+                bool ok = IsTerminalRefusal(409L)
+                          && IsTerminalRefusal(403L)
+                          && IsTerminalRefusal("HTTP 403: report quarantined")
+                          && !IsTerminalRefusal(RetryableRefusalStatus)
+                          && !IsTerminalRefusal("HTTP 503: try again")
+                          && !IsTerminalRefusal(500L)
+                          && !IsTerminalRefusal("HTTP 4030: nope");
+                Check(r, "409 and 403 are terminal, 503 is not", ok, "ok=" + ok);
             }
 
             return r;

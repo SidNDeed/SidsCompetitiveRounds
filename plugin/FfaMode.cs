@@ -442,6 +442,53 @@ namespace CompetitiveRounds
             catch { return -1; }
         }
 
+        /// <summary>The published game number THIS SEAT froze when the game
+        /// ended, or -1 when it had none to freeze.
+        ///
+        /// WHY A SNAPSHOT AND NOT A LIVE READ (Codex client r2 HIGH,
+        /// FfaReportRules.cs:91). The report key used to call
+        /// PublishedGameNumber() at REPORT time, and cr_ffa_cyc is a MUTABLE
+        /// room property: the host writes the next game's number into it as
+        /// soon as the next pick cycle opens. A seat whose game-over handling
+        /// ran a moment later than its peers' therefore read N+1 for the game
+        /// its peers keyed as N, and the two reports reached the server under
+        /// two different keys. Distinct keys are distinct games to the server,
+        /// so one physical game could settle twice — rating, XP, gold and
+        /// wagers, all of it twice.
+        ///
+        /// The value is read ONCE, at the game-over edge, before any election
+        /// runs and before anything can await. A rollover after that instant
+        /// cannot change the key, because nothing reads the property again.
+        ///
+        /// IT FAILS CLOSED AND THERE IS NO LOCAL FALLBACK. The local counter
+        /// is a per-seat value that drift adoption moves independently — the
+        /// exact thing the shared key exists to escape — so a seat that read
+        /// no published number cannot mint one: it is INELIGIBLE to report.
+        /// The cost of that direction is one game's result lost when no seat
+        /// in the room could read the room property; the cost of the other
+        /// direction is a second settlement of a game that already paid out.
+        /// The integrity bar decides it — a wrong number must never gain
+        /// settlement power.</summary>
+        internal static int ReportGameSnapshot { get { return _reportGameSnapshot; } }
+        private static int _reportGameSnapshot = -1;
+
+        /// <summary>Freeze the report game number. Called from the FFA
+        /// game-over edge, once per game, before anything else reads it.
+        /// Returns what it froze so the caller can log it.</summary>
+        internal static int FreezeReportGameNumber()
+        {
+            _reportGameSnapshot = PublishedGameNumber();
+            return _reportGameSnapshot;
+        }
+
+        /// <summary>Clear the snapshot at the START of a game, so game N's
+        /// number can never key game N+1. The key is composed synchronously at
+        /// game over, so nothing legitimate reads it after this point.</summary>
+        internal static void ClearReportGameNumber()
+        {
+            _reportGameSnapshot = -1;
+        }
+
         // ── Score access ──
 
         public static int RoundsFor(int teamId) { return rounds.TryGetValue(teamId, out var v) ? v : 0; }

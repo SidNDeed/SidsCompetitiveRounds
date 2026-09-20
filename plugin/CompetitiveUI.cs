@@ -1533,15 +1533,28 @@ namespace CompetitiveRounds
         // edges (toast bottom-centre, strip top-centre), so neither covers the
         // other.
         //
-        // ONE PREDICATE, BOTH MODES. The rule it names is read from
-        // FfaCardSequence.RuleOn() — the same call that gates MasterPublishSeed
-        // and LatchForGame, i.e. the test that decides whether a set is dealt
-        // identically. A second copy here would be free to drift, and the first
-        // copy (RoomRules.SameCards) had already drifted: it is the VANILLA
-        // half only, so an FFA room running its lobby's same-card rule showed
-        // nothing. RuleOn picks the flag belonging to the room's own mode
+        // ONE PREDICATE, BOTH MODES — AND IT IS StripState(), NOT RuleOn()
+        // (Codex client r2 LOW, this paragraph). What stood here said the
+        // strip reads RuleOn() and that "label and deal cannot disagree by
+        // construction". Both halves stopped being true in the round the
+        // painter moved: RuleOn() is the CONFIGURATION and stays true through
+        // every fallback LatchForGame takes, so a strip drawn from it promises
+        // shared hands for a whole game in which this seat rolls privately.
+        //
+        // The painter reads FfaCardSequence.StripState(), derived from the two
+        // fields the DEALER reads (_latchedGame, _active): Off / Pending /
+        // Active / FellBack, with a different sentence for the last two. That
+        // is a guarantee about EVERY exit from LatchForGame, which is why the
+        // exception catch in it had to start latching too — one exit that left
+        // the fields alone was enough to bring the contradiction back.
+        //
+        // RuleOn() is still the mode-choosing predicate underneath
+        // StripState() — it picks the flag belonging to the room's own mode
         // (RoomRules.SameCards for the vanilla pick modes, FfaMode.SameCardRule
-        // for an FFA lobby), so label and deal cannot disagree by construction.
+        // for an FFA lobby) — and a second copy of that choice here would be
+        // free to drift the way RoomRules.SameCards already had: it is the
+        // VANILLA half only, so an FFA room running its lobby's same-card rule
+        // showed nothing.
         //
         // The rule dies with the room, and that is also this strip's off
         // switch. Outside any room FfaMode.EngineActive() is false, so RuleOn

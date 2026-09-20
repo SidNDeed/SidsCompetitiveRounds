@@ -6431,6 +6431,10 @@ namespace CompetitiveRounds
             try { NetworkReplicaDiagnostics.OnGameStarted(); } catch { }
             try { NetworkSeatTelemetry.OnMatchStarted(); } catch { }   // lag-332 W1 (bundle-only in FFA)
             try { RoomRules.OnGameStart(); } catch { }                 // room rules: per-game counters (FFA plays the defaults)
+            // Game N's frozen report number must never key game N+1. The key
+            // is composed synchronously at game over, so nothing legitimate
+            // reads the snapshot after this point.
+            try { FfaMode.ClearReportGameNumber(); } catch { }
             // Roster freeze (r1 find 1), re-run per game because an FFA room
             // plays several. NOT the same rule as OnMatchStarted any more, and
             // the difference is the fix below — that path freezes once for a
@@ -6444,19 +6448,26 @@ namespace CompetitiveRounds
             // there IsUnauthorized reads true (fail-closed), the seat is
             // rejected and closed, and every client drops it from
             // ActiveFighters(). The union never narrows, so crossing a
-            // boundary cannot cost a fighter its place. The freeze-vs-union
-            // rule itself lives in RefreezeFighterRosterForGame.
+            // boundary cannot cost a fighter its place.
+            //
+            // THE CENSUS IS NOT BUILT HERE ANY MORE (Codex client r2 HIGH,
+            // this line). It used to be assembled from ActiveFighters(), which
+            // applies IsUnauthorized — and IsUnauthorized tests the rejection
+            // latch BEFORE membership. A latched seat was therefore removed
+            // from the census before its Steam ID could reach the union, the
+            // roster could never widen to cover it, and the release predicate
+            // could never fire: the latch was hiding the only evidence that
+            // would have released it. From the other side, once the roster is
+            // frozen ActiveFighters() is a SUBSET of it, so the widening could
+            // not add anyone under any input at all. Both halves of the rule —
+            // which seats the raw census admits, and which latches the
+            // resulting roster releases — now live in RoomActors over
+            // RosterCensusRules, where the client-rules harness RUNS them.
             try
             {
-                var ids = new List<string>();
-                foreach (var f in RoomActors.ActiveFighters())
-                {
-                    var s = RoomActors.SteamIdOf(f);
-                    if (!string.IsNullOrEmpty(s)) ids.Add(s);
-                }
-                RoomActors.RefreezeFighterRosterForGame(ids);
+                var census = RoomActors.RefreezeFighterRosterForGameFromRoom();
                 Plugin.Log.LogInfo($"[FFA] roster after game {FfaMode.GameNumber} freeze: "
-                                   + $"{RoomActors.FrozenRosterSize} (present {ids.Count})");
+                                   + $"{RoomActors.FrozenRosterSize} (census {census.Count})");
             }
             catch { }
             try
@@ -6650,6 +6661,18 @@ namespace CompetitiveRounds
             gameOverReported = true;
             isTracking = false;    // the next game re-arms via OnFfaMatchStarted
             sessionMatchCount++;
+            // FIRST, before the election, before the census, before anything
+            // that can await: freeze the game number this report will be filed
+            // under. cr_ffa_cyc is mutable and the host rolls it into the next
+            // game as soon as the next pick cycle opens, so an elector reading
+            // it LATER keyed a different game than its peers did — two keys,
+            // one physical game, two settlements (Codex client r2 HIGH,
+            // FfaReportRules.cs:91). -1 here means this seat cannot file at
+            // all; it does not mean "use the local counter".
+            int frozenGame = -1;
+            try { frozenGame = FfaMode.FreezeReportGameNumber(); } catch { }
+            Plugin.Log.LogInfo($"[FFA-REPORT] game number frozen at game over: "
+                               + (frozenGame >= 0 ? frozenGame.ToString() : "none (this seat cannot file)"));
             try { NetworkReplicaDiagnostics.OnGameEnded(); } catch { }
             try { NetworkSeatTelemetry.OnMatchEnded("ffa-game-over"); } catch { }   // lag-332 W1
 
@@ -6729,8 +6752,20 @@ namespace CompetitiveRounds
             // match-start hook) with this seat's local game counter, so the two
             // reporters the election can deliberately produce filed under two
             // different keys, nothing collided, and one game settled twice.
-            string reportRoomId = FfaReportRules.ReportRoomId(
-                photonRoomId, FfaMode.PublishedGameNumber(), FfaMode.GameNumber);
+            string reportRoomId = FfaReportRules.ReportRoomId(photonRoomId, frozenGame);
+            if (!FfaReportRules.CanFile(reportRoomId))
+            {
+                // FAIL CLOSED. No published number was readable at the
+                // game-over edge, so there is no number every seat would
+                // agree on — and the local counter is exactly the per-seat
+                // value the shared key exists to escape, so substituting it
+                // would manufacture the disagreement. One lost result costs a
+                // game; a minted number costs a second settlement of rating,
+                // XP, gold and wagers on a game that already paid out.
+                Plugin.Log.LogWarning("[FFA-REPORT] no published game number was frozen at game over — "
+                    + "this seat is not eligible to file this game");
+                return;
+            }
             try
             {
                 if (!TryReportFfaMatch(reportRoomId, duration, winnerTeam))
@@ -6760,9 +6795,20 @@ namespace CompetitiveRounds
             // merely-present electorate while its peers do not, and two seats
             // then submit. FfaReportRules.ElectReporter chooses that over
             // nobody submitting, and FfaMode.RepublishGameWitness narrows the
-            // window by re-publishing after an adoption. What makes the
-            // duplicate survivable is that both reports carry the same key,
-            // not that the sets always match.
+            // window by re-publishing after an adoption.
+            //
+            // WHAT MAKES THE DUPLICATE SURVIVABLE, precisely (the earlier
+            // wording leaned on "both reports carry one key" as though it were
+            // unconditional — Codex client r2). Two seats carry one key when
+            // both FROZE the same published game number at the game-over edge,
+            // which is the case whenever they can read the room property at
+            // all. A seat that froze nothing does not file a second key: it
+            // does not file, full stop (FfaReportRules.ReportRoomId returns
+            // null and the caller refuses). So the possible outcomes are one
+            // key from one seat, one key from two seats, or — when the seats
+            // disagree about the published number — one report and one refusal
+            // the server must answer terminally. There is no path on which
+            // this client mints a second key for the same physical game.
             var witnessSteams = new List<string>();
             string winnerSteam = null;
 
@@ -6955,19 +7001,32 @@ namespace CompetitiveRounds
             // chosen deliberately, because nobody reporting loses the sitting
             // outright.
             //
-            // WHAT THE SERVER SEES FROM TWO ELECTORS, now that both file under
-            // the same key (FfaReportRules.ReportRoomId): the first insert
-            // takes ffa_matches' UNIQUE (photon_room_id); the second loses it
-            // and the endpoint answers with the FIRST report's idempotent echo,
-            // or HTTP 409 when the stored row cannot be echoed. One match row,
-            // one rating application, one bet settlement. The 409 is terminal
-            // by FfaReportRules.IsSettledRefusal, so the losing seat's outbox
-            // drops the entry instead of retrying it forever.
+            // WHAT TWO ELECTORS FILE, and what makes the duplicate visible at
+            // all: both keys are FfaReportRules.ReportRoomId over the game
+            // number this seat FROZE at the game-over edge — not a live read
+            // of cr_ffa_cyc, which the host rolls into the next game, and not
+            // a local counter, which drift adoption moves per seat. Two
+            // electors of the same physical game therefore present the same
+            // string, and a seat that froze no number files nothing at all.
             //
-            // That paragraph was NOT true before the shared key. The two seats
-            // stamped their own clocks and their own game counters into the
-            // room id, so the ids differed, the unique index had nothing to
-            // collide with, and one game settled twice.
+            // CORRECTED (Codex client r2): what stood here asserted that the
+            // second insert "answers with the FIRST report's idempotent echo,
+            // or HTTP 409" as a fact about the deployed server. That is the
+            // REQUIRED behaviour, not a property this file can promise — the
+            // build this client shipped against keyed settlement on the
+            // client's own suffix. The required server behaviour is: settle
+            // only when the key's game tail equals the lobby's games_played+1
+            // under the lobby lock, echo an exact resubmission, refuse every
+            // other tail terminally. This client's half is what it can
+            // guarantee, and it is the same on either backend: one key per
+            // physical game, a 409 or 403 treated as terminal at attempt 1,
+            // and no re-keying of a refused report, so the losing seat's
+            // outbox drops the entry instead of retrying it for ever.
+            //
+            // None of that was even possible before the shared key. The two
+            // seats stamped their own clocks and their own game counters into
+            // the room id, so the ids differed, nothing could collide, and one
+            // game settled twice.
             string lowest = FfaReportRules.ElectReporter(presentSteams, witnessSteams, out bool witnessFallback);
             if (witnessFallback && presentSteams.Count > 0)
                 Plugin.Log.LogWarning($"[FFA-REPORT] witness-fallback: no seat carries "

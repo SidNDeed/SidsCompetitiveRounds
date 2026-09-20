@@ -244,7 +244,14 @@ namespace CompetitiveRounds
 
         /// <summary>The tri-state above, derived from the SAME two fields the
         /// dealer reads (_latchedGame, _active) rather than from the rule
-        /// flags, so a strip drawn from it cannot contradict what is dealt.
+        /// flags.
+        ///
+        /// "Cannot contradict what is dealt" holds only as long as EVERY exit
+        /// from LatchForGame writes those two fields. It did not: the catch at
+        /// the bottom set `_active = false` and left `_latchedGame` at -1, so
+        /// an exception produced private dealing under a PENDING strip (Codex
+        /// client r2 MEDIUM). The catch now latches like the named fallbacks,
+        /// which is what makes the sentence true rather than intended.
         /// internal, not private: CompetitiveUI.DrawRoomRulesBanner is the
         /// caller.</summary>
         internal static RuleDisplayState StripState()
@@ -354,8 +361,24 @@ namespace CompetitiveRounds
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogWarning("[FFA-SEQ] latch failed — private rolls this game: " + ex.Message);
+                // LATCH THE FALLBACK, do not merely disable the dealer (Codex
+                // client r2 MEDIUM, this catch). `_active = false` on its own
+                // left `_latchedGame` at -1, which StripState() reads as
+                // PENDING — so the standing strip went on saying "same cards
+                // for everyone" for a whole game in which this seat rolled
+                // privately, which is the exact contradiction the tri-state
+                // exists to make impossible.
+                //
+                // An exception is not a transient pend: no retry helps, so
+                // this takes the same verdict the NAMED fallbacks take by
+                // writing the same two fields they write — which is also why
+                // the line below is the same sentence latchFallback logs. One
+                // outcome, one wording, one state.
+                _latchPendingSince = -1f;
+                _latchedGame = game;
                 _active = false;
+                Plugin.Log.LogWarning($"[FFA-SEQ] same-card rule OFF this game (mode={ModeTag()}) — "
+                                      + "the latch threw: " + ex.Message);
             }
         }
 

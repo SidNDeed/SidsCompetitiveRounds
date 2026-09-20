@@ -76,27 +76,98 @@ def test_the_freeze_re_evaluates_on_its_early_return_too():
         "the null-roster early return skips the re-evaluation: " + body)
 
 
-def test_the_release_predicate_is_the_one_record_rejected_uses():
-    """A release that admitted more than RecordRejected declines to latch
-    would be a new hole, not a fix. The two must test the same three things.
+def test_the_release_is_evaluated_over_the_RAW_census():
+    """The HIGH. The release used to be evaluated over ActiveFighters(), which
+    is room.Players filtered by IsUnauthorized -- and IsUnauthorized tests the
+    rejection latch FIRST. So the one actor the release is deciding about was
+    removed from the evidence before the predicate could read it: a seat
+    latched while the roster was thin could never be discovered by a later
+    widening, whatever the roster did.
+
+    The census the release reads must therefore apply no roster test and no
+    latch test. That it is also CORRECT is executed, not read: see the
+    rostercensus suite in test_client_rules_harness.py, which drives frozen
+    {A,B} / raw {A,B,C} / latched C and checks C comes back released, against a
+    paired case that feeds the pre-filtered census and must release nothing.
     """
     src = _plugin("RoomActors.cs")
     release = code_of(src, "private static void ReleaseLatchesTheRosterNowCovers()")
+    assert "RosterCensusRules.LatchesToRelease(" in release, (
+        "the release no longer goes through the rule the harness executes")
+    call = release.split("RosterCensusRules.LatchesToRelease(", 1)[1]
+    first_arg = call.split(",", 1)[0].strip()
+    assert first_arg == "RawActorCensus()", (
+        "the release is evaluated over %r, not over the raw census" % first_arg)
+    for filtered in ("ActiveFighters(", "IsUnauthorized(", "IsRejected("):
+        assert filtered not in release, (
+            "the release reads %s -- that view already excludes the latched "
+            "actor it is deciding about" % filtered)
+
+
+def test_the_raw_census_filters_on_nothing_the_latch_can_move():
+    """RawActorCensus is the evidence. It must be the room's own actor list,
+    carrying the three facts the predicate needs, and nothing may be dropped
+    from it on a ground the latch or the roster controls -- otherwise the
+    circularity comes straight back one call further down."""
+    body = code_of(_plugin("RoomActors.cs"),
+                   "private static IList<RosterCensusRules.Actor> RawActorCensus()")
+    assert "room.Players" in body, (
+        "the census is no longer taken from the room's own actor list")
+    for banned in ("IsUnauthorized", "IsRejected", "_rejectedActors",
+                   "_fighterSteamIds", "ActiveFighters", "RosterFrozen"):
+        assert banned not in body, (
+            "the raw census consults %s -- it is no longer raw" % banned)
+    # It carries the facts, it does not apply them: spectators and impostors
+    # are excluded by the RULE (which the harness executes), not here.
+    for fact in ("SteamIdOf(", "IsSpectator(", "IsImpostorReplicated("):
+        assert fact in body, "the census does not carry %s" % fact
+    assert body.count("continue;") == 1, (
+        "the census drops actors on more grounds than a null entry: " + body)
+
+
+def test_the_release_predicate_is_still_record_rejecteds_own_rule():
+    """A release that admitted more than RecordRejected declines to latch
+    would be a new hole, not a fix. The predicate moved into
+    RosterCensusRules; the facts it decides on must still be the facts
+    RecordRejected decides on."""
+    src = _plugin("RoomActors.cs")
     record = code_of(src, "internal static void RecordRejected(PhotonPlayer actor)")
+    rule = code_of(_plugin("RosterCensusRules.cs"),
+                   "internal static List<int> LatchesToRelease(IList<Actor> raw,")
     for term in ("IsImpostorReplicated(", "_fighterSteamIds.Contains(", "SteamIdOf("):
-        assert term in release, "the release does not test %s" % term
         assert term in record, (
             "%s is no longer part of RecordRejected's own rule -- the two have "
             "drifted apart" % term)
-    # An unreadable identity must NOT be released: IsUnauthorized reads an
-    # unreadable identity as unauthorized once the roster is frozen, so a
-    # release there would contradict the live rule.
-    assert "string.IsNullOrEmpty(sid)" in release, (
-        "the release does not refuse an unreadable identity")
-    # And only actors still in the room are considered -- a departed actor's
-    # latch is the thing that proves its leave was not a fighter's.
-    assert "room.Players" in release or "CurrentRoom" in release, (
-        "the release does not scope itself to actors still in the room")
+    assert "a.IsImpostor" in rule, "the rule stopped refusing an impostor"
+    assert "a.IsSpectator" in rule, "the rule stopped refusing a spectator"
+    assert "string.IsNullOrEmpty(a.SteamId)" in rule, (
+        "the rule stopped refusing an unreadable identity -- once the roster is "
+        "frozen IsUnauthorized reads that as unauthorized, so a release there "
+        "would contradict the live rule")
+    assert "roster == null || !roster.Contains(a.SteamId)" in rule, (
+        "the rule stopped requiring roster membership")
+    # Only actors STILL IN THE ROOM take part: the rule iterates the census,
+    # never the latch set. A departed actor's latch is the thing that proves
+    # its leave was not a fighter's.
+    assert "foreach (var a in raw)" in rule, (
+        "the rule iterates something other than the room census")
+
+
+def test_the_per_game_roster_write_owns_its_own_census():
+    """The call site used to build the census and hand it in, which is how a
+    correct roster rule shipped with a census that had already dropped the
+    seat. The census and the write are now one call."""
+    watcher = _plugin("GameStateWatcher.cs")
+    started = code_of(watcher, "public static void OnFfaMatchStarted()")
+    assert "RoomActors.RefreezeFighterRosterForGameFromRoom()" in started, (
+        "the match-start roster write no longer takes its own census")
+    assert "ActiveFighters()" not in started, (
+        "the call site is building the census out of the filtered view again")
+    body = code_of(_plugin("RoomActors.cs"),
+                   "internal static List<string> RefreezeFighterRosterForGameFromRoom()")
+    assert "RosterCensusRules.UnionCensus(" in body, (
+        "the per-game write no longer goes through the executed census rule")
+    assert "RawActorCensus()" in body, "the per-game write does not read the raw census"
 
 
 def test_the_latch_is_still_tested_before_membership():
@@ -173,14 +244,75 @@ def test_the_witness_property_has_one_key_and_two_writers():
 
 # ── 3. the report call site asks for the shared key ───────────────────────
 
-def test_the_report_key_comes_from_the_shared_rule():
-    src = _plugin("GameStateWatcher.cs")
-    body = code_of(src, "private static void OnFfaMatchOver(int winnerTeam)") \
-        if "private static void OnFfaMatchOver(int winnerTeam)" in src else code_of(src)
+GAME_OVER = "public static void OnFfaGameOver(int winnerTeam)"
+
+
+def test_the_report_key_comes_from_a_number_frozen_before_any_election():
+    """The HIGH. Two electors could key the SAME physical game differently:
+    each read the published game number when its own report ran, and the host
+    rolls that number over at the start of the next game. A seat that ran late
+    keyed one number while its peer keyed the next, the server's anchored
+    suffix parser recovered two different games, and one physical game settled
+    twice.
+
+    The number is therefore frozen ONCE, into a per-seat snapshot, at the
+    moment the game ends -- before the election runs and before any rollover
+    can reach it -- and every elector keys from the snapshot.
+    """
+    body = code_of(_plugin("GameStateWatcher.cs"), GAME_OVER)
+    assert "FfaMode.FreezeReportGameNumber()" in body, (
+        "the game number is no longer frozen at game over")
     assert "FfaReportRules.ReportRoomId(" in body, (
         "the FFA report no longer builds its key through the shared rule")
-    assert "FfaMode.PublishedGameNumber()" in body, (
-        "the key is not derived from the number the host published")
+    key = [l for l in body.splitlines() if "FfaReportRules.ReportRoomId(" in l]
+    assert len(key) == 1, "expected one key assignment, found %d" % len(key)
+    args = key[0].split("FfaReportRules.ReportRoomId(", 1)[1].rsplit(")", 1)[0]
+    assert args.split(",")[1].strip() == "frozenGame", (
+        "the key is built from %r rather than from the frozen snapshot" % args)
+    # ORDER. A freeze that ran after the election would snapshot a number the
+    # rollover may already have moved -- the defect with one more step.
+    assert body.index("FreezeReportGameNumber()") < body.index("ReportRoomId("), (
+        "the snapshot is taken after the key is built")
+    if "ElectReporter" in body:
+        assert body.index("FreezeReportGameNumber()") < body.index("ElectReporter"), (
+            "the snapshot is taken after the election has already run")
+
+
+def test_an_unreadable_number_makes_the_seat_ineligible_and_mints_nothing():
+    """FAIL CLOSED. A local fallback is exactly the per-seat value the shared
+    key exists to escape: substituting it manufactures the disagreement the
+    freeze was added to remove, and a minted number settles a game that has
+    already paid out."""
+    rules = code_of(_plugin("FfaReportRules.cs"),
+                    "internal static string ReportRoomId(string roomName, int frozenGame)")
+    assert "if (frozenGame < 0) return null;" in rules, (
+        "an absent snapshot no longer yields a null key")
+    body = code_of(_plugin("GameStateWatcher.cs"), GAME_OVER)
+    assert "FfaReportRules.CanFile(" in body, (
+        "nothing gates the submit on the key being fileable")
+    # code_of masks comments to blanks, so measure on the collapsed text:
+    # the refusal must RETURN, and it must return before anything is posted.
+    gate = " ".join(body.split("FfaReportRules.CanFile(", 1)[1].split())
+    assert "return;" in gate, (
+        "an unfileable key does not stop the report: " + gate[:200])
+    assert gate.index("return;") < 200, (
+        "the refusal is not the first thing the guard does: " + gate[:200])
+    for minted in ("sessionMatchCount", "FfaMode.GameNumber", "matchStartTime"):
+        assert not any(minted in l for l in body.splitlines()
+                       if "ReportRoomId(" in l), (
+            "%s reaches the report key" % minted)
+
+
+def test_the_snapshot_is_the_hosts_published_number_and_is_cleared_per_match():
+    body = code_of(_plugin("FfaMode.cs"), "internal static int FreezeReportGameNumber()")
+    assert "PublishedGameNumber()" in body, (
+        "the snapshot is not taken from the number the host published")
+    assert "gameNumber" not in body, (
+        "the snapshot falls back to this seat's local counter")
+    started = code_of(_plugin("GameStateWatcher.cs"),
+                      "public static void OnFfaMatchStarted()")
+    assert "FfaMode.ClearReportGameNumber()" in started, (
+        "a stale snapshot from the previous match survives into the next one")
 
 
 def test_no_local_clock_reaches_the_report_key():
