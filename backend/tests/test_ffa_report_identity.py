@@ -271,11 +271,66 @@ def test_the_report_key_comes_from_a_number_frozen_before_any_election():
         "the key is built from %r rather than from the frozen snapshot" % args)
     # ORDER. A freeze that ran after the election would snapshot a number the
     # rollover may already have moved -- the defect with one more step.
+    assert body.count("FreezeReportGameNumber()") == 1, (
+        "the freeze happens %d times in this span; one of them is later than "
+        "the game-over edge by definition"
+        % body.count("FreezeReportGameNumber()"))
     assert body.index("FreezeReportGameNumber()") < body.index("ReportRoomId("), (
         "the snapshot is taken after the key is built")
-    if "ElectReporter" in body:
-        assert body.index("FreezeReportGameNumber()") < body.index("ElectReporter"), (
-            "the snapshot is taken after the election has already run")
+    # THE ELECTION, pinned where it actually is. This used to read
+    # `if "ElectReporter" in body:` -- and ElectReporter is NOT in this span,
+    # it is in the filing path this span calls, so that assertion never ran at
+    # all. A guard whose condition is false is an assertion that deleted
+    # itself (#342/#441), which is the class this round is closing.
+    #
+    # The real ordering is by CALL: the freeze happens here, before the call
+    # that elects and files, so no election can precede it.
+    assert "ElectReporter" not in body, (
+        "the election moved into the game-over span; this test now measures "
+        "the wrong ordering")
+    assert "TryReportFfaMatch(" in body, (
+        "the game-over edge no longer calls the filing path")
+    assert body.index("FreezeReportGameNumber()") < body.index("TryReportFfaMatch("), (
+        "the snapshot is taken after the filing path has already run")
+    filing = code_of(_plugin("GameStateWatcher.cs"),
+                     "private static bool TryReportFfaMatch(string reportRoomId, int duration, int winnerTeam)")
+    assert "ElectReporter" in filing, (
+        "the election is in neither the game-over span nor the filing path, "
+        "so nothing pins it as happening after the freeze")
+
+
+def test_the_freeze_does_not_live_in_the_path_that_files_the_report():
+    """The other half of the placement, and the one no pure function can see.
+
+    The r3 lens is right that the executed suite cannot observe WHERE the
+    number was obtained -- so this is structural on purpose, and it asks the
+    question the executed cases cannot: the freeze belongs to the game-over
+    edge, and the reporting path must only READ what that edge took. A freeze
+    that drifted into TryReportFfaMatch would snapshot a number the host may
+    already have rolled over, which is the r2 HIGH restored.
+
+    The snapshot object refuses a second freeze as well (first write wins,
+    ffareport case 3c), so this is defence in depth rather than the only
+    guard -- but a freeze in the wrong place with no earlier one to lose to
+    would still take the wrong number.
+    """
+    watcher = _plugin("GameStateWatcher.cs")
+    filing = code_of(watcher,
+                     "private static bool TryReportFfaMatch(string reportRoomId, int duration, int winnerTeam)")
+    assert "FreezeReportGameNumber" not in filing, (
+        "the freeze moved into the filing path, where the host may already "
+        "have rolled the number over")
+    assert "ReportGameSnapshot" in filing or "reportRoomId" in filing, (
+        "the filing path no longer reads the frozen key at all")
+    # And exactly one site in the whole client freezes it.
+    whole = code_of(watcher)
+    assert whole.count("FfaMode.FreezeReportGameNumber()") == 1, (
+        "the client freezes the report number in %d places"
+        % whole.count("FfaMode.FreezeReportGameNumber()"))
+    # The clear belongs to the game-START hook, so game N cannot key N+1.
+    start = code_of(watcher, "public static void OnFfaMatchStarted()")
+    assert "FfaMode.ClearReportGameNumber()" in start, (
+        "nothing re-arms the write-once snapshot at the start of a game")
 
 
 def test_an_unreadable_number_makes_the_seat_ineligible_and_mints_nothing():

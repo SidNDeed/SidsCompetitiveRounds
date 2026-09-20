@@ -22,12 +22,35 @@ namespace CompetitiveRounds
         /// string form and the status-code form cannot drift apart.</summary>
         internal const long SettledRefusalStatus = 409;
 
-        /// <summary>"Understood, and this report may not settle this game" —
-        /// the hardened FFA endpoint's answer to a key whose tail is not the
-        /// lobby's games_played + 1. The report is refused and captured for
-        /// recovery; it is not a thing to send again, because the state it was
-        /// refused on is in the lobby row and the next attempt finds it in the
-        /// same place.</summary>
+        /// <summary>"Understood, and refused on state a resend cannot change."
+        ///
+        /// WHAT THIS CODE DOES NOT MEAN. It used to be documented here as the
+        /// endpoint's answer to a key whose tail is not the lobby's
+        /// games_played + 1, refused "and captured for recovery". Neither half
+        /// survives contact with the endpoint: 403 is the answer to a signature
+        /// that does not verify, to a player set that is not exactly the
+        /// lobby's frozen roster, to a player count that disagrees with the
+        /// row, and to a slot that disagrees with the lobby's ordering, as
+        /// well as to a rejected game tail — and capture-for-recovery is a
+        /// property of SOME of those paths and not of the code. A comment that
+        /// promises a capture the server may not have made tells the next
+        /// reader a refused game is recoverable on the far side when it may
+        /// exist nowhere at all.
+        ///
+        /// So what this constant names is only what every 403 from this
+        /// endpoint has in common: the server read the body, understood it,
+        /// and refused on state that the next identical attempt finds in the
+        /// same place. That is enough to decide the client's behaviour, which
+        /// is all this file decides — see IsTerminalRefusal, and
+        /// ApiClient.ParkRefusedReport for the local copy this client keeps
+        /// precisely BECAUSE it cannot know whether the server kept one.
+        ///
+        /// The name stays QuarantinedRefusalStatus rather than being restyled.
+        /// It is asserted by name in backend/tests/test_client_r2_claims.py
+        /// and test_client_r3_claims.py, and renaming a constant to repair a
+        /// comment is how a check stops finding what it was aimed at. The name
+        /// is therefore historical, and this paragraph is what keeps it from
+        /// being read as a description.</summary>
         internal const long QuarantinedRefusalStatus = 403;
 
         /// <summary>The one refusal that IS worth another attempt: the server
@@ -177,6 +200,63 @@ namespace CompetitiveRounds
             return !string.IsNullOrEmpty(reportRoomId);
         }
 
+        /// <summary>One seat's report-number snapshot: the ONLY path from the
+        /// host's mutable room property to a report key.
+        ///
+        /// It is a rule object rather than a field on FfaMode because the r2
+        /// HIGH's remaining evidence was a pure function called twice with the
+        /// same literal, which can fail for no input. The defect lives in
+        /// WHICH INSTANT the number comes from, so the instant has to be
+        /// something a test can drive: here the harness holds the same object
+        /// production holds, moves the host's number underneath it, and reads
+        /// the key afterwards (ffareport cases 3, 3c, 3d, 3e).
+        ///
+        /// FIRST WRITE WINS. Freeze is called once per game, at the game-over
+        /// edge, before any election runs; a second call is by definition
+        /// later than that edge, so it may be a hook that fired twice or a
+        /// freeze that drifted back into the reporting path — and by then the
+        /// host may have rolled the property into the next game. Taking the
+        /// later value would hand two electors of one physical game two keys,
+        /// which is a second settlement of rating, XP, gold and wagers. So the
+        /// later value is dropped, not stored.
+        ///
+        /// A negative number is not a value. PublishedGameNumber returns -1
+        /// for "no readable number", and -1 must leave the snapshot EMPTY
+        /// rather than taken, so that a seat which could not read the property
+        /// at the edge stays ineligible instead of keying "_r-1".</summary>
+        internal sealed class GameKeySnapshot
+        {
+            private int _frozen = -1;
+
+            /// <summary>The number taken, or -1 when nothing has been.</summary>
+            internal int Frozen { get { return _frozen; } }
+
+            /// <summary>Take this game's number. Returns what is now held, so
+            /// the caller logs the value that will be keyed rather than the
+            /// one it offered.</summary>
+            internal int Freeze(int publishedNow)
+            {
+                if (_frozen >= 0) return _frozen;          // first write wins
+                if (publishedNow >= 0) _frozen = publishedNow;
+                return _frozen;
+            }
+
+            /// <summary>Drop the number at the START of a game, so game N's
+            /// number can never key game N+1.</summary>
+            internal void Clear()
+            {
+                _frozen = -1;
+            }
+
+            /// <summary>This seat's key for the game it froze, or null when it
+            /// froze nothing — in which case it is ineligible and the caller
+            /// must not substitute anything.</summary>
+            internal string Key(string roomName)
+            {
+                return ReportRoomId(roomName, _frozen);
+            }
+        }
+
         /// <summary>Elect the seat that submits this game's report: the lowest
         /// Steam ID among the seats that WITNESSED the game's start, falling
         /// back to the lowest among those merely PRESENT when no witness is
@@ -317,15 +397,76 @@ namespace CompetitiveRounds
             //    game N. The lagging seat froze N at the game-over edge and
             //    the later value cannot reach its key, so both electors still
             //    file N — one key, one game.
+            //
+            //    DRIVEN THROUGH THE SNAPSHOT, not through two calls with the
+            //    same literal. This case used to compare ReportRoomId(room, 7)
+            //    with ReportRoomId(room, 7) — a pure function called twice with
+            //    one argument, which cannot fail on the defect it names, and
+            //    whose only discriminating term duplicated case 3b (r3 lens
+            //    LOW). The mechanism the defect lives in is the SNAPSHOT, so
+            //    the snapshot is what runs here: both seats hold the object
+            //    production holds, the host's number moves underneath them, and
+            //    the keys are read afterwards.
             {
                 const int frozenAtGameOver = 7;
-                const int publishedAfterRollover = 8;
-                string prompt = ReportRoomId(room, frozenAtGameOver);
-                string lagging = ReportRoomId(room, frozenAtGameOver);
+                int published = frozenAtGameOver;         // cr_ffa_cyc during game 7
+
+                var prompt = new GameKeySnapshot();
+                var lagging = new GameKeySnapshot();
+                prompt.Freeze(published);                 // the prompt seat's game-over edge
+                lagging.Freeze(published);                // the lagging seat's edge, same instant
+                published = 8;                            // the host opens the next cycle
+                string keyLive = ReportRoomId(room, published);   // what a LATE read would key
+
                 Check(r, "a rollover after the freeze cannot change the key",
-                      prompt == lagging && prompt == room + "_r7"
-                      && prompt != ReportRoomId(room, publishedAfterRollover),
-                      "prompt=" + prompt + " lagging=" + lagging);
+                      prompt.Key(room) == lagging.Key(room)
+                      && prompt.Key(room) == room + "_r7"
+                      && prompt.Key(room) != keyLive
+                      && prompt.Frozen == frozenAtGameOver,
+                      "prompt=" + prompt.Key(room) + " lagging=" + lagging.Key(room)
+                      + " live=" + keyLive);
+            }
+
+            // 3c. THE SNAPSHOT IS WRITE-ONCE PER GAME. A second Freeze after
+            //     the host rolled over — a freeze that drifted back into the
+            //     reporting path, a hook that fired twice — cannot move a key
+            //     that has already been taken. This is the case that reds when
+            //     the first-write-wins rule is removed; the placement of the
+            //     call itself is pinned structurally in
+            //     test_ffa_report_identity.py, because no pure function can see
+            //     WHERE it was called from.
+            {
+                var s = new GameKeySnapshot();
+                s.Freeze(7);
+                s.Freeze(8);
+                Check(r, "a later freeze cannot move a key already taken",
+                      s.Key(room) == room + "_r7" && s.Frozen == 7,
+                      "key=" + s.Key(room));
+            }
+
+            // 3d. NEGATIVE CONTROL for 3/3c: a snapshot that took the ROLLED
+            //     OVER number keys a different game, so the cases above are
+            //     measuring the freeze and not a key that ignores its input.
+            {
+                var late = new GameKeySnapshot();
+                late.Freeze(8);
+                var onTime = new GameKeySnapshot();
+                onTime.Freeze(7);
+                Check(r, "a seat that froze after the rollover files a different game",
+                      late.Key(room) != onTime.Key(room) && late.Key(room) == room + "_r8",
+                      late.Key(room) + " vs " + onTime.Key(room));
+            }
+
+            // 3e. THE GAME-START CLEAR. Game N's number must not key game N+1:
+            //     a cleared snapshot is no key and no eligibility, which is the
+            //     same fail-closed answer a seat that never froze gets.
+            {
+                var s = new GameKeySnapshot();
+                s.Freeze(7);
+                s.Clear();
+                Check(r, "a cleared snapshot files nothing",
+                      s.Key(room) == null && !CanFile(s.Key(room)) && s.Frozen == -1,
+                      "key=" + (s.Key(room) ?? "<null>") + " frozen=" + s.Frozen);
             }
 
             // 3b. NEGATIVE CONTROL for case 3. The rollover is only harmless

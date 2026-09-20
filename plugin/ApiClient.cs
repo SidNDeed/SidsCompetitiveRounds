@@ -987,6 +987,86 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogWarning($"[OUTBOX] enqueue failed: {ex.Message}"); }
         }
 
+        /// <summary>Where a terminally refused report is parked: beside the
+        /// outbox, under a DIFFERENT name, because the two files mean opposite
+        /// things. The outbox is "send this again"; this is "this will never
+        /// be sent again, and here it is". Nothing reads this file back into
+        /// the send path — LoadOutbox opens OutboxPath alone.</summary>
+        private static string RefusedReportsPath
+        {
+            get { return Path.Combine(BepInEx.Paths.ConfigPath, "CompetitiveRounds.refused-reports.jsonl"); }
+        }
+
+        /// <summary>The most recent terminal refusals to keep. A parked report
+        /// is diagnostic, not a queue, so it is bounded by COUNT: the file is
+        /// rewritten with the newest entries rather than grown without limit.
+        /// The one exception is a file that cannot be READ — see the park,
+        /// which appends there rather than destroying entries it cannot
+        /// see.</summary>
+        private const int REFUSED_REPORTS_KEPT = 20;
+
+        /// <summary>Keep a local copy of a report the server refused
+        /// terminally (409/403). It is never re-sent and never re-keyed — see
+        /// the FFA terminal branch for why re-keying is the dangerous half —
+        /// so this is not a retry queue and must not become one.
+        ///
+        /// WHY IT EXISTS. A terminal refusal is the end of the road for that
+        /// game's rating, XP, gold and wager settlement on this client, and
+        /// what the SERVER did with the body is a property of that backend:
+        /// the FFA endpoint refuses with 403 on a signature that does not
+        /// verify, on a player set that is not exactly the lobby's roster, on
+        /// a player count or slot that disagrees with the row, and on a
+        /// rejected game tail — and only some of those paths capture anything.
+        /// Before this, the entire client-side record of such a game was one
+        /// log line without the body, so a game that existed nowhere on the
+        /// server existed nowhere here either. Now the seat that filed it
+        /// still has it.
+        ///
+        /// Failure direction: this is best-effort and swallows its own errors.
+        /// A disk that will not take the copy must not also cost the log line
+        /// or the caller's remaining work.</summary>
+        internal static void ParkRefusedReport(string url, string json, string response)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(json)) return;
+                // One line per refusal: when, which route, what the server
+                // said, and the body as it was sent — the body last, because
+                // it is the only field with no length bound.
+                string line = "{\"at\":\"" + DateTime.UtcNow.ToString("o", System.Globalization.CultureInfo.InvariantCulture)
+                         + "\",\"url\":\"" + Escape(url)
+                         + "\",\"refusal\":\"" + Escape(Trunc(response, 300))
+                         + "\",\"body\":" + json + "}";
+
+                var kept = new List<string>();
+                bool readable = true;
+                try
+                {
+                    if (File.Exists(RefusedReportsPath))
+                        kept.AddRange(File.ReadAllLines(RefusedReportsPath));
+                }
+                catch { readable = false; }
+                if (!readable)
+                {
+                    // Which direction does the unhandled case fail? Rewriting
+                    // a file we could not READ would destroy entries we cannot
+                    // even see, to enforce a bound that is only diagnostic.
+                    // Appending keeps both: the older refusals stay, this one
+                    // lands, and the cap is applied at the next readable write.
+                    File.AppendAllText(RefusedReportsPath, line + Environment.NewLine);
+                    Plugin.Log.LogInfo("[REFUSED] parked a terminally refused report (appended; "
+                                       + "the existing file could not be read to apply the cap)");
+                    return;
+                }
+                kept.Add(line);
+                while (kept.Count > REFUSED_REPORTS_KEPT) kept.RemoveAt(0);
+                File.WriteAllLines(RefusedReportsPath, kept.ToArray());
+                Plugin.Log.LogInfo($"[REFUSED] parked a terminally refused report "
+                                   + $"({kept.Count} kept in CompetitiveRounds.refused-reports.jsonl)");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[REFUSED] could not park the report: {ex.Message}"); }
+        }
+
         /// <summary>Macro evidence, and only it: the one queued url whose 409
         /// is a race with the elected reporter's match insert rather than a
         /// settled refusal.</summary>
@@ -20349,18 +20429,38 @@ namespace CompetitiveRounds
                     // endpoint must settle a report only when its key's game
                     // tail equals the lobby's games_played + 1 under the lobby
                     // lock, echo 200 for an exact resubmission, and refuse
-                    // every other tail terminally while capturing it for
-                    // recovery. Whether a given backend does that is a
-                    // property of that backend, not of this branch. This
-                    // client's behaviour is identical either way, which is why
-                    // it is safe to ship on both.
+                    // every other tail terminally. Whether a given backend
+                    // does that is a property of that backend, not of this
+                    // branch. This client's behaviour is identical either way,
+                    // which is why it is safe to ship on both.
+                    //
+                    // A 403 here is NOT necessarily that tail check: the same
+                    // code answers an unverifiable signature and a body whose
+                    // player set, count or slot ordering disagrees with the
+                    // lobby row. This branch treats them alike on purpose —
+                    // every one of them is a refusal on state an identical
+                    // resend finds unchanged — but nothing here may claim
+                    // WHICH check spoke, or that it kept a copy.
                     //
                     // Queueing would put a report in the outbox whose only
                     // future is to be dropped on its first retry, 30 s later,
                     // after one more request. Logged, once, because a refusal
                     // is worth seeing in a seat's log next to the game it
                     // belongs to.
+                    //
+                    // AND PARKED, because "not queued" was being read as "the
+                    // server kept it" (r3 lens MEDIUM). The endpoint's 403 has
+                    // several causes — an unverifiable signature, a player set
+                    // that is not exactly the lobby's frozen roster, a player
+                    // count or slot that disagrees with the row, a rejected
+                    // game tail — and capture is a property of some of those
+                    // paths, not of the code. Whether the far side kept this
+                    // body is therefore not knowable here, and the one thing
+                    // this branch CAN guarantee is that the seat which filed
+                    // it still has it. Parking is not a retry: nothing reads
+                    // that file into the send path.
                     Plugin.Log.LogWarning($"[FFA] report refused and not retried or re-keyed: {Trunc(resp, 160)}");
+                    ParkRefusedReport($"{baseUrl}/api/v1/ffa/matches", json, resp);
                 }
                 else
                 {
@@ -21262,6 +21362,12 @@ namespace CompetitiveRounds
                                   callback, json);
         }
 
+        /// <summary>The response text a request aborted by
+        /// <c>abortIf</c> reports. A sentinel, not a status: it is not
+        /// "HTTP &lt;code&gt;:"-shaped, so ExtractHttpStatus reads 0 and no caller
+        /// can mistake it for a server refusal.</summary>
+        internal const string RequestCancelledMarker = "cancelled-locally";
+
         /// <param name="sensitiveProbe">The body as TEXT for
         /// SensitiveTransportBlocked's two body-level token checks
         /// (`"admin_steam_id":` / `"password":`). Null means "this caller has
@@ -21270,12 +21376,13 @@ namespace CompetitiveRounds
         /// log upload passes null and is sound doing so: its body carries
         /// neither key, and every value inside it — the log text included — is
         /// JSON-escaped, so neither raw token sequence can appear.</param>
-        /// <summary>The response text a request aborted by
-        /// <c>abortIf</c> reports. A sentinel, not a status: it is not
-        /// "HTTP &lt;code&gt;:"-shaped, so ExtractHttpStatus reads 0 and no caller
-        /// can mistake it for a server refusal.</summary>
-        internal const string RequestCancelledMarker = "cancelled-locally";
-
+        /// <param name="abortIf">Polled once a frame while the request is in
+        /// flight; the first true calls <c>request.Abort()</c> and reports
+        /// <see cref="RequestCancelledMarker"/>. Null is "run to completion",
+        /// which every caller but the automatic log upload passes. It stops
+        /// this client SENDING the rest of a body — it cannot recall bytes the
+        /// server has already read, which is why the consent caption promises
+        /// the first and not the second.</param>
         private static IEnumerator PostRequestRaw(string url, byte[] bodyRaw,
                                                   Action<bool, string> callback,
                                                   string sensitiveProbe = null,

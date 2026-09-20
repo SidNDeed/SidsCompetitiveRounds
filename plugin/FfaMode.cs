@@ -469,24 +469,33 @@ namespace CompetitiveRounds
         /// direction is a second settlement of a game that already paid out.
         /// The integrity bar decides it — a wrong number must never gain
         /// settlement power.</summary>
-        internal static int ReportGameSnapshot { get { return _reportGameSnapshot; } }
-        private static int _reportGameSnapshot = -1;
+        internal static int ReportGameSnapshot { get { return _reportGame.Frozen; } }
+
+        /// <summary>The snapshot itself lives in FfaReportRules, where the
+        /// client-rules harness RUNS it: holding it as a bare int here left
+        /// "the number comes from the game-over edge and nothing can move it
+        /// afterwards" as a claim that no executed case could observe.</summary>
+        private static readonly FfaReportRules.GameKeySnapshot _reportGame =
+            new FfaReportRules.GameKeySnapshot();
 
         /// <summary>Freeze the report game number. Called from the FFA
         /// game-over edge, once per game, before anything else reads it.
-        /// Returns what it froze so the caller can log it.</summary>
+        /// Returns what is held so the caller logs the value that will be
+        /// keyed — which, if this ever fires twice in one game, is the FIRST
+        /// one (see GameKeySnapshot: the later call is by definition past the
+        /// edge, and the host may have rolled the property by then).</summary>
         internal static int FreezeReportGameNumber()
         {
-            _reportGameSnapshot = PublishedGameNumber();
-            return _reportGameSnapshot;
+            return _reportGame.Freeze(PublishedGameNumber());
         }
 
         /// <summary>Clear the snapshot at the START of a game, so game N's
         /// number can never key game N+1. The key is composed synchronously at
-        /// game over, so nothing legitimate reads it after this point.</summary>
+        /// game over, so nothing legitimate reads it after this point. This is
+        /// also what re-arms the write-once freeze for the next game.</summary>
         internal static void ClearReportGameNumber()
         {
-            _reportGameSnapshot = -1;
+            _reportGame.Clear();
         }
 
         // ── Score access ──
