@@ -1630,6 +1630,25 @@ class FfaMatchResponse(BaseModel):
     xp_gained: int = 0          # reporter's own
     gold_gained: int = 0        # reporter's own
     message: str = "FFA match recorded"
+    # ── The lobby's authoritative progress (RJ-3 round 4) ─────────────────
+    # Every answer this endpoint gives carries these, acceptances and refusals
+    # alike (a refusal carries them in its error body — see main.py's
+    # FfaReportRefusal). They exist because the game number a report names is
+    # the client's own counter: one terminally refused report leaves that
+    # counter ahead of the server for the rest of the sitting, and every later
+    # game is then refused too. The client resynchronises from these instead
+    # (docs/../ai-collab/rejoin/RJ-CLIENT-RESYNC-CONTRACT.md).
+    #   games_played  — settled games of this sitting, INCLUDING this one when
+    #                   this answer settled it.
+    #   expected_game — the number the lobby's NEXT report has to name; always
+    #                   games_played + 1.
+    #   settled_game  — set only when the number the report named is already
+    #                   settled: which number that is. The client drops such an
+    #                   outbox entry as terminal instead of retrying it.
+    # Additive: a client that reads none of them behaves exactly as before.
+    games_played: int = 0
+    expected_game: int = 0
+    settled_game: int | None = None
 
 
 class FfaLeaderboardEntry(BaseModel):

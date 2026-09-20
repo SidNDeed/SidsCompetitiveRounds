@@ -98,18 +98,29 @@ COMMENT ON COLUMN ffa_matches.game_number_source IS
 COMMENT ON COLUMN ffa_matches.score_target_frozen IS
     'The lobby''s frozen first-to-N at the time this game settled (NULL before migration 327).';
 COMMENT ON COLUMN ffa_matches.score_target_played IS
-    'The first-to-N this game was actually played to. Differs from score_target_frozen only on an accepted config skew, whose wagers are refunded rather than paid (NULL before migration 327).';
+    'The first-to-N this game was actually played to. Differs from score_target_frozen only on an accepted config skew, whose wagers are refunded rather than paid -- in the settling transaction, so a row that differs here never has a paid wager (NULL before migration 327).';
 
 -- The pace anchor asks one question per report: the earliest receipt of each
 -- of this lobby's OTHER games. The duplicate lookup asks a second: does this
--- lobby already hold a row for either of two candidate numbers.
+-- lobby already hold a row for the ONE number the report named. (Round 3's
+-- lookup bound a set of two candidates and took the earliest row of either,
+-- which is not the same question and could answer with a different game.)
 CREATE INDEX IF NOT EXISTS idx_ffa_matches_lobby_game
     ON ffa_matches (lobby_id, game_number);
 
 -- ── Insert-time derivation ────────────────────────────────────────────────
--- A total function from a row to a number, so NOT NULL below is survivable by
--- any writer, including the api revision that predates this column and the one
--- that follows it. It NEVER overrides a number the writer supplied.
+-- A function from a row to a number for every lobby that has a free number
+-- inside 1..999, so NOT NULL below is survivable by any writer, including the
+-- api revision that predates this column and the one that follows it. It
+-- NEVER overrides a number the writer supplied.
+--
+-- The one input it refuses is a lobby already holding all 999 numbers, which
+-- no api revision can produce (FFA_MAX_GAMES_PER_LOBBY is 40 and the endpoint
+-- refuses a report once a lobby has settled that many). It is stated as a
+-- bound rather than claimed away: "total" was written here in round 3 while
+-- the sequence arm raised for any lobby whose HIGHEST number was 999, which
+-- is a far larger input class, and that exception leaves the pre-327 api as
+-- an HTTP 500 the client can only retry.
 CREATE OR REPLACE FUNCTION ffa_matches_derive_game_number()
 RETURNS trigger AS $fn$
 DECLARE
@@ -128,18 +139,37 @@ BEGIN
     SELECT COALESCE(MAX(game_number), 0) + 1 INTO tail
       FROM ffa_matches
      WHERE lobby_id IS NOT DISTINCT FROM NEW.lobby_id;
-    -- One above the lobby's highest number -- not "the next FREE number", which
-    -- this expression does not compute and never did. A lobby holding 1, 2 and
-    -- 999 gets 1000 here, and 1000 is REFUSED rather than clamped: an earlier
-    -- revision wrote LEAST(tail, 999), which hands back a number the lobby is
-    -- already using, and a number that silently collides is worse than an
-    -- insert that names its own problem. The real domain is bounded far lower
-    -- (FFA_MAX_GAMES_PER_LOBBY is 40 and the endpoint refuses a report once a
-    -- lobby has settled that many), so this arm is a guard, not a path.
+    -- One above the lobby's highest number. That is the number the pre-327 api
+    -- would have reached for anyway (it increments games_played per settled
+    -- report), so an unnumbered insert from it lands where the sitting was.
+    -- It is NOT "the next free number", which this expression does not compute:
+    -- a lobby holding 1, 2 and 999 gets 1000 here. 1000 is outside the column,
+    -- and an earlier revision wrote LEAST(tail, 999), which hands back a number
+    -- the lobby is already using -- a silent collision, which is worse than an
+    -- insert that names its own problem.
+    --
+    -- So the out-of-domain case falls back to the LOWEST FREE number of this
+    -- lobby instead of raising, and only a lobby with no free number at all is
+    -- refused. Round 3 raised for every lobby whose highest number was 999,
+    -- and that exception reaches the pre-327 api as an HTTP 500 rather than as
+    -- anything it can act on. The fallback cannot collide (it excludes the
+    -- numbers in use) and cannot be mistaken for an identity claim: the row
+    -- carries game_number_source = 'sequence', which says the number came from
+    -- neither the writer nor the room id. Unreachable in the real domain --
+    -- FFA_MAX_GAMES_PER_LOBBY is 40 and the endpoint refuses a report once a
+    -- lobby has settled that many -- so both arms are guards, not paths.
     IF tail > 999 THEN
+        SELECT MIN(n) INTO tail
+          FROM generate_series(1, 999) AS n
+         WHERE NOT EXISTS (
+             SELECT 1 FROM ffa_matches m
+              WHERE m.lobby_id IS NOT DISTINCT FROM NEW.lobby_id
+                AND m.game_number = n::SMALLINT);
+    END IF;
+    IF tail IS NULL THEN
         RAISE EXCEPTION
-            'ffa_matches: lobby % already numbers up to %, so an unnumbered '
-            'insert has no number left inside 1..999', NEW.lobby_id, tail - 1;
+            'ffa_matches: lobby % holds every number in 1..999, so an '
+            'unnumbered insert has no number left', NEW.lobby_id;
     END IF;
     NEW.game_number := tail::SMALLINT;
     NEW.game_number_source := 'sequence';

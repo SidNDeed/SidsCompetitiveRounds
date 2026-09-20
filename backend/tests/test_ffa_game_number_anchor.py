@@ -33,13 +33,26 @@ but not with the frozen target's economics — its wagers were priced by
 _ffa_field_odds for the frozen race length, so they are REFUNDED, and its
 Glicko weight takes the length actually played. The row records both numbers.
 
+THE THIRD RULE (RJ-4 round 4): every answer this endpoint gives names the
+LOBBY's progress — games_played, the number the next settlement takes, and the
+number of the recorded game when the answer is about one. A refusal that says
+nothing a client can realign to makes the FIRST refusal poison the rest of the
+sitting, because the client's counter advances at every game start and the
+lobby's advances only at a settlement. The client half of that is a contract
+document (ai-collab/rejoin/RJ-CLIENT-RESYNC-CONTRACT.md), not code in this
+lane; the three tests under "what a client can resync FROM" are the server half
+and are what make the document checkable.
+
 The live tests RUN the production SQL and the production migration against a
 real PostgreSQL — `_FFA_PACE_ANCHOR_SQL` carries `CAST(:g AS SMALLINT)` and an
-`IS DISTINCT FROM`, `_FFA_PRIOR_GAME_SQL` carries `ANY(CAST(:gs AS SMALLINT[]))`,
-and a bind Postgres cannot type is not a subtle bug (#275/#448/#438). Point
-FFA_TEST_PG_DSN at a throwaway cluster:
+`IS DISTINCT FROM`, `_FFA_PRIOR_GAME_SQL` carries `CAST(:g AS SMALLINT)` for
+the ONE number the report named, and a bind Postgres cannot type is not a
+subtle bug (#275/#448/#438). They also drive production's own lock/derive/
+increment functions under two live sessions, rather than rebuilding their SQL.
+Point FFA_TEST_PG_DSN at a throwaway DATABASE — the schema below drops and
+recreates players/ffa_*, so never at one another session is using:
 
-    FFA_TEST_PG_DSN="postgresql+asyncpg://postgres@127.0.0.1:55432/rjtest" \\
+    FFA_TEST_PG_DSN="postgresql+asyncpg://postgres@127.0.0.1:5432/rjtest" \\
         python -m pytest backend/tests/test_ffa_game_number_anchor.py -q
 
 Without it they FAIL, naming the DSN. A run that means to go without a
@@ -48,15 +61,65 @@ back into skips — the point is that nobody gets a green run they did not ask
 for (#438: a feature can ship inert with perfect logs).
 
 Named mutation controls, each applied to a copy-aside of the file, run RED, and
-restored from the copy (never `git checkout --`, #290). Twenty-three from round
-2, plus round 3's, which are marked (r3) and were run as a batch — all KILLED:
+restored from the copy (never `git checkout --`, #290).
+
+THE TALLY, COUNTED RATHER THAN REMEMBERED. Round 3's docstring claimed nineteen
+round-3 controls; the list below carries SIXTEEN marked (r3), and the r3 gate
+was right to say so. A count asserted from memory next to the list that
+contradicts it is the same defect class as a comment asserting a guarantee the
+code does not supply, so the numbers here are the ones in the list, counted off
+it: 22 unmarked and still live (rounds 1 and 2), 1 unmarked and RETIRED because
+round 4 deleted the code it mutated (prior-tail-only, annotated in place), 16
+marked (r3), 15 marked (r4), and one more that is a committed test rather than
+a hand-run control (backfill-neutered, at the end). Round 4's are the ones
+with a NEGATIVE control — an inert edit at the same site that must leave the
+same test GREEN — so each test is shown to redden for the mutation and not for
+any edit at all (#391); the runner, the red line of every mutant and the
+negative-control result for each are in ai-collab/r4-mutation-controls.log.
+All KILLED:
+
+  prior-lookup-takes-the-earliest-of-a-set (r4)  _FFA_PRIOR_GAME_SQL: back to
+                           a SET bind under ORDER BY ended_at
+  prior-lookup-ignores-the-named-number (r4)  _FFA_PRIOR_GAME_SQL: the equality
+                           becomes `OR TRUE`
+  skew-refund-is-fail-soft (r4)  the endpoint: call _refund_ffa_lobby_bets for
+                           this game's skew instead of the strict helper
+  skew-refund-caps-at-one-pass (r4)  _refund_ffa_game_bets_strict: one batch
+  later-pass-settles-a-recorded-skew (r4)  _ffa_recorded_game_outcome: drop the
+                           refund verdict, so a leftover is paid at the frozen
+                           price
+  leave-not-compared (r4)  _ffa_report_contradiction: the leave decision
+                           becomes empty
+  kills-gate-narrowed (r4)  the field comparison back to kills_break_ties
+  quota-before-idempotency (r4)  _quarantine_report: count the quota before the
+                           on-file read, i.e. round 3's order
+  variant-rows-are-not-deduped (r4)  _quarantine_on_file: drop the NULL-room
+                           scan
+  commit-between-the-lock-and-the-increment (r4)  the endpoint: commit between
+                           _ffa_lock_lobby_slot and _ffa_advance_lobby_slot
+  lobby-lock-no-for-update (r4)  _FFA_LOBBY_LOCK_SQL: drop FOR UPDATE. The r3
+                           version of this control reddened a test that ran its
+                           OWN copy of the statement; this one reddens a test
+                           that calls the production function.
+  refusal-carries-no-progress (r4)  the FfaReportRefusal handler: body back to
+                           {"detail": ...} alone
+  advisory-count-dropped (r4)  _ffa_poll_locked_payload: drop games_played
+  trigger-raises-on-a-full-tail (r4)  327: the free-number fallback becomes a
+                           raise, i.e. round 3's behaviour
+  terminal-refusals-unenumerated (r4)  the endpoint: one terminal 409 raised
+                           without a kept record
+
+...and the twenty-four unmarked plus sixteen (r3) below, run as batches:
 
   anchor-per-row           _FFA_PACE_ANCHOR_SQL: MIN(ended_at) -> MAX(ended_at)
   anchor-includes-self     _FFA_PACE_ANCHOR_SQL: IS DISTINCT FROM CAST(:g AS
                            SMALLINT) -> IS NOT NULL
   anchor-less-than         _FFA_PACE_ANCHOR_SQL: IS DISTINCT FROM -> <
   prior-skips-invalidated  _FFA_PRIOR_GAME_SQL: add `AND invalidated_at IS NULL`
-  prior-tail-only          the endpoint's _candidates: drop _expected_game
+  prior-tail-only (retired)  the endpoint's _candidates set is gone in round 4
+                           — the lookup keys on the ONE named number, so there
+                           is no second candidate to drop. Replaced by the two
+                           prior-lookup controls above.
   number-from-the-tail     the endpoint: _game_number = _room_tail
   number-rule-gone         _ffa_game_number_refusal: first line -> `return None`
   tail-ahead-accepted (r3) _ffa_game_number_refusal: drop the `tail > expected`
@@ -132,6 +195,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 
 import main
+import schemas
 
 MIGRATION = (pathlib.Path(__file__).resolve().parents[1]
              / "sql" / "327_ffa_game_number.sql")
@@ -148,13 +212,47 @@ ROW_A = {S1: (4, 11, 6), S2: (1, 6, 2), S3: (5, 15, 9)}      # winner S3
 ROW_B = {S1: (5, 11, 6), S2: (1, 5, 2), S3: (3, 12, 9)}      # winner S1
 
 
-def _report(vec, winner, room="rm_211531_r1"):
-    """The fields the pure helpers read off a FfaMatchReport."""
+# steam -> (left_early, absent, game_points_at_leave) for the seats that left.
+# Everyone else is present, which is the three-way default below.
+PRESENT = (False, False, None)
+
+
+def _report(vec, winner, room="rm_211531_r1", leave=None):
+    """The fields the pure helpers read off a FfaMatchReport, INCLUDING the
+    leave fields: _ffa_report_contradiction asks _ffa_leave_decision what this
+    report says about who played, because that decision is what the settlement
+    stores in ffa_match_players.absent and acts on."""
+    leave = leave or {}
     return types.SimpleNamespace(
         photon_room_id=room, winner_steam_id=winner,
+        reported_by_steam_id=winner,
         players=[types.SimpleNamespace(steam_id=s, rounds_won=r,
-                                       points_total=p, kills=k)
+                                       points_total=p, kills=k,
+                                       left_early=leave.get(s, PRESENT)[0],
+                                       absent=leave.get(s, PRESENT)[1],
+                                       game_points_at_leave=leave.get(s, PRESENT)[2])
                  for s, (r, p, k) in vec.items()])
+
+
+def _vec(rows, leave=None):
+    """One recorded game as _FFA_PRIOR_VECTOR_SQL reads it back:
+    steam -> (rounds_won, points_total, kills, left_early, absent). `leave`
+    names the seats whose two stored leave columns are not (False, False)."""
+    leave = leave or {}
+    return {s: (r, p, k) + leave.get(s, (False, False))
+            for s, (r, p, k) in rows.items()}
+
+
+def _code_lines(src: str) -> str:
+    """`src` with its whole-line comments removed.
+
+    A structural assertion about what the code DOES must not be answerable by
+    what a comment SAYS — in either direction. Round 3's span checks ran over
+    the raw text, so a sentence quoting the very call it forbade reddened the
+    test, and (the direction that matters) a comment could have supplied a
+    required literal that the code no longer contained."""
+    return "\n".join(ln for ln in src.splitlines()
+                      if not ln.strip().startswith("#"))
 
 
 def _endpoint_src():
@@ -165,12 +263,18 @@ def _endpoint_src():
 
 def test_the_number_a_report_settles_is_the_lobbys_own_next_slot():
     src = _endpoint_src()
-    # Read from the lobby row, under the FOR UPDATE taken above it.
-    assert 'int(lobby["games_played"] or 0) + 1' in src
-    assert "_game_number = _expected_game" in src
-    lock = src.index("FROM ffa_lobbies WHERE id = :lid FOR UPDATE")
-    derive = src.index("_expected_game = ")
+    # The lock and the derivation are ONE production function, so the endpoint
+    # cannot hold one without the other and a test can drive both together
+    # (test_pg_two_reports_for_one_lobby_cannot_settle_the_same_number).
+    slot = inspect.getsource(main._ffa_lock_lobby_slot)
+    assert "FOR UPDATE" in main._FFA_LOBBY_LOCK_SQL
+    lock = slot.index("_FFA_LOBBY_LOCK_SQL")
+    derive = slot.index('int(lobby["games_played"] or 0) + 1')
     assert lock < derive
+    assert "lobby, _expected_game = await _ffa_lock_lobby_slot(db, lobby_uuid)" in src
+    assert "_game_number = _expected_game" in src
+    # ...and the endpoint does not re-derive it from anything else.
+    assert 'int(lobby["games_played"] or 0) + 1' not in src
     # The room tail is read, but only as a cross-check: it never becomes the
     # stored number. (Control: number-from-the-tail.)
     assert "_room_tail = _ffa_room_game_no(" in src
@@ -182,7 +286,7 @@ def test_the_number_a_report_settles_is_the_lobbys_own_next_slot():
 
 def test_the_stored_number_is_the_one_the_anchor_and_the_bet_settle_use():
     src = _endpoint_src()
-    derive = src.index("_expected_game = ")
+    derive = src.index("_ffa_lock_lobby_slot(")
     prior = src.index("_FFA_PRIOR_GAME_SQL")
     anchor = src.index("_FFA_PACE_ANCHOR_SQL")
     insert = src.index("INSERT INTO ffa_matches")
@@ -198,9 +302,12 @@ def test_the_stored_number_is_the_one_the_anchor_and_the_bet_settle_use():
     # game N's wagers get paid against a row stored as something else.
     assert src.count("_ffa_room_game_no(") == 1
     # ...and the straggler catch-up reads the column too, not a LIKE on the
-    # room string.
+    # room string. It asks through the ONE verdict helper now, so the typed
+    # read lives there; the endpoint must still hold no second derivation.
     assert "photon_room_id LIKE :sfx" not in src
-    assert "game_number = CAST(:sg AS SMALLINT)" in src
+    assert "_ffa_recorded_game_outcome(" in src
+    assert "game_number = CAST(:g AS SMALLINT)" in \
+        inspect.getsource(main._ffa_recorded_game_outcome)
 
 
 def test_every_surface_that_names_a_game_reads_the_column_not_the_room_string():
@@ -217,7 +324,12 @@ def test_every_surface_that_names_a_game_reads_the_column_not_the_room_string():
     # The terminal bet resolution for a closing lobby.
     rec = inspect.getsource(main._reconcile_ffa_lobby_bets)
     assert "photon_room_id LIKE" not in rec
-    assert "game_number = CAST(:g AS SMALLINT)" in rec
+    # It asks the row, through the one helper that decides settle-or-refund
+    # for every after-the-fact resolver (round 4: a recorded config skew must
+    # not be PAID by a later pass at the frozen price).
+    assert "_ffa_recorded_game_outcome(db, lobby_id, int(g))" in rec
+    outcome = inspect.getsource(main._ffa_recorded_game_outcome)
+    assert "game_number = CAST(:g AS SMALLINT)" in outcome
     # The bet-history surface's settlement-cause discriminator.
     assert "fm2.game_number = fb.game_number" in whole
     assert "fm2.photon_room_id LIKE" not in whole
@@ -236,18 +348,31 @@ def test_every_surface_that_names_a_game_reads_the_column_not_the_room_string():
     assert calls == ['    _room_tail = _ffa_room_game_no(report.photon_room_id)']
 
 
-def test_the_candidate_set_covers_both_the_slot_and_the_room_tail():
-    """Control: prior-tail-only. The lookup has to ask about the slot this
-    report would consume AND the game its own room id names — the first stops
-    a report renaming its game to dodge the comparison, the second catches the
-    second client of one game, whose counter still says N while the lobby has
-    moved to N+1. The tail arm is only able to find that row because the row's
-    number IS its tail; that is the equality _ffa_game_number_refusal keeps."""
+def test_the_lookup_asks_about_the_number_the_report_named():
+    """Controls: prior-lookup-takes-the-slot, prior-lookup-takes-either.
+
+    The comparison has to be against the row that holds the number under
+    discussion, or it is not a comparison of that game. Round 3 asked about a
+    SET — the named number plus the lobby's next slot — and took the earliest
+    row that came back, so a lobby holding a row at its next slot as well could
+    have a report compared against a different game entirely (and, if that
+    other game agreed, answered 200).
+
+    Dropping the slot arm loses nothing: a report whose tail is not the lobby's
+    next slot settles only where the lobby already HOLDS that number, which is
+    exactly the row this lookup returns, and is otherwise refused by the one
+    equality in _ffa_game_number_refusal."""
     src = _endpoint_src()
-    cand = src[src.index("_candidates = "):src.index("_prior_game = ")]
-    assert "_expected_game" in cand and "_room_tail" in cand
-    assert "FFA_GAME_NUMBER_MAX" in cand          # out-of-domain tails excluded
-    assert '"gs": _candidates' in src
+    named = src[src.index("_named_game = "):src.index("if _prior_game is not None:")]
+    assert "_room_tail" in named
+    assert "FFA_GAME_NUMBER_MAX" in named        # out-of-domain tails name nothing
+    assert "_expected_game" not in named         # the slot is NOT a candidate
+    assert '"g": _named_game' in src
+    assert "game_number = CAST(:g AS SMALLINT)" in main._FFA_PRIOR_GAME_SQL
+    assert "ANY(" not in main._FFA_PRIOR_GAME_SQL
+    # A report that names no usable number looks nothing up; the refusal below
+    # is what answers it.
+    assert "if _named_game is not None:" in src
 
 
 # ── what a misreported number gains: nothing ──────────────────────────────
@@ -385,50 +510,124 @@ def test_the_anchor_and_the_prior_lookup_treat_a_reversal_the_same_way():
 # ── the detector (controls: contradiction-blind, kills-not-compared) ──────
 
 def test_the_two_verified_rows_are_a_contradiction():
-    why = main._ffa_report_contradiction(S3, ROW_A, _report(ROW_B, S1), False)
+    why = main._ffa_report_contradiction(S3, _vec(ROW_A), _report(ROW_B, S1), False)
     assert why is not None
     assert S1 in why                      # names the winner disagreement first
 
 
 def test_a_redelivery_of_the_same_report_is_not_a_contradiction():
-    assert main._ffa_report_contradiction(S3, ROW_A, _report(ROW_A, S3), True) is None
+    assert main._ffa_report_contradiction(S3, _vec(ROW_A), _report(ROW_A, S3), True) is None
 
 
 def test_a_tally_that_differs_by_one_point_is_a_contradiction():
     near = dict(ROW_A, **{S2: (1, 7, 2)})
-    why = main._ffa_report_contradiction(S3, ROW_A, _report(near, S3), False)
+    why = main._ffa_report_contradiction(S3, _vec(ROW_A), _report(near, S3), False)
     assert why is not None and S2 in why
 
 
-def test_a_kills_only_difference_is_a_contradiction_where_kills_place_players():
-    # kills are the third placement key, so where the lobby's FROZEN
-    # kills_tiebreak flag is set a kills-only difference moves a placement, and
-    # with it a rating change, an XP award and a gold award.
+def test_a_kills_only_difference_is_a_contradiction_wherever_kills_are_signed():
+    # Control: kills-not-compared. Signed kills decide three things - placement
+    # where the lobby's FROZEN kills_tiebreak flag is set, the ffa_kills_50/100
+    # achievements and their gold in EVERY lobby, and the refutation of an
+    # absent or grace claim - so a kills-only difference between two accounts
+    # is a settlement difference wherever the signature covers them.
     near = dict(ROW_A, **{S1: (4, 11, 99)})
-    why = main._ffa_report_contradiction(S3, ROW_A, _report(near, S3), True)
+    why = main._ffa_report_contradiction(S3, _vec(ROW_A), _report(near, S3), True)
     assert why is not None and "kills" in why
 
 
+def test_the_comparisons_gate_is_the_signature_not_the_tie_break():
+    """Control: kills-gate-narrowed (round 3's own gate, restored).
+
+    kills_break_ties is kills_in_canonical AND the lobby's frozen flag, i.e.
+    STRICTLY narrower - so using it here classified a kills difference that
+    moved achievement gold, in a lobby with the flag off, as agreement."""
+    src = _endpoint_src()
+    assert "report, kills_break_ties)" not in src
+    assert "len(report.players), kills_break_ties)" not in src
+    assert "report, kills_in_canonical)" in src
+    assert "len(report.players), kills_in_canonical)" in src
+    # ...and the achievement those kills feed is gated on the same fact, not on
+    # the tie-break flag, which is what makes them paid either way.
+    grant = src.index('_grant_achievement_inline(db, _ach_pid, "ffa_kills_50")')
+    ach = src[grant - 700:grant]
+    assert "if kills_in_canonical:" in ach
+
+
 def test_a_kills_only_difference_is_not_a_contradiction_where_they_decide_nothing():
-    # Two honest clients of one game can tally kills from different local
-    # observations; a 409 for a difference that changed nothing would spend an
-    # honest report.
+    # An UNSIGNED (v1) kills field decides nothing at all: no placement, no
+    # achievement, no refutation. Two honest clients of one game can tally
+    # kills from different local observations, and a 409 for a difference that
+    # changed nothing would spend an honest report (#430).
     near = dict(ROW_A, **{S1: (4, 11, 99)})
-    assert main._ffa_report_contradiction(S3, ROW_A, _report(near, S3), False) is None
+    assert main._ffa_report_contradiction(S3, _vec(ROW_A), _report(near, S3), False) is None
+
+
+def test_a_leave_difference_is_a_contradiction():
+    """Round 3 compared the winner and the tallies and stopped there, so two
+    accounts that disagreed about who PLAYED were called agreement and the
+    second got 200. left_early is stored per player, and the effective absent
+    flag - _ffa_leave_decision's union of the carried ghosts and the
+    early-leave graces - is what excludes a seat from rating, XP, gold, the
+    payout denominator and everyone else's beaten counts."""
+    zeroed = dict(ROW_A, **{S2: (0, 0, 0)})
+    # Recorded: S2 played. Reported: S2 left this game and is graced out of it.
+    graced = _report(zeroed, S3, leave={S2: (True, False, 1)})
+    why = main._ffa_report_contradiction(S3, _vec(zeroed), graced, True)
+    assert why is not None and S2 in why
+    # Recorded: S2 was an absent carried ghost. Reported: the same. Agreement.
+    ghost = _report(zeroed, S3, leave={S2: (True, True, None)})
+    assert main._ffa_report_contradiction(
+        S3, _vec(zeroed, leave={S2: (True, True)}), ghost, True) is None
+
+
+def test_a_refuted_leave_claim_agrees_with_the_row_that_refuted_it():
+    """The DECISION is compared, not the claim. A seat with a signed non-zero
+    tally has its absent claim refuted, so the row stores absent=False; a
+    second report making the same refuted claim therefore AGREES with it, and
+    the comparison must not turn every honest redelivery into a 409."""
+    claimed = _report(ROW_A, S3, leave={S1: (True, True, None)})
+    assert main._ffa_report_contradiction(
+        S3, _vec(ROW_A, leave={S1: (True, False)}), claimed, True) is None
+
+
+def test_a_grace_that_only_differs_in_the_number_is_not_a_disagreement():
+    """game_points_at_leave is compared only through the decision it feeds: two
+    clients can read the field's running total an instant apart and still be on
+    the same side of FFA_LEAVE_GRACE_POINTS."""
+    zeroed = dict(ROW_A, **{S2: (0, 0, 0)})
+    rec = _vec(zeroed, leave={S2: (True, True)})
+    for gp in range(0, main.FFA_LEAVE_GRACE_POINTS):
+        r = _report(zeroed, S3, leave={S2: (True, False, gp)})
+        assert main._ffa_report_contradiction(S3, rec, r, True) is None, gp
 
 
 def test_a_roster_difference_is_a_contradiction_either_way():
     short = {S1: ROW_A[S1], S3: ROW_A[S3]}
-    assert main._ffa_report_contradiction(S3, ROW_A, _report(short, S3), False) is not None
-    assert main._ffa_report_contradiction(S3, short, _report(ROW_A, S3), False) is not None
+    assert main._ffa_report_contradiction(S3, _vec(ROW_A), _report(short, S3), False) is not None
+    assert main._ffa_report_contradiction(S3, _vec(short), _report(ROW_A, S3), False) is not None
 
 
 def test_the_detector_is_symmetric():
     # Whichever of the two verified rows had settled first, the other is a
     # contradiction: the detector reports a disagreement, it never ranks the
     # two accounts.
-    assert main._ffa_report_contradiction(S3, ROW_A, _report(ROW_B, S1), False) is not None
-    assert main._ffa_report_contradiction(S1, ROW_B, _report(ROW_A, S3), False) is not None
+    assert main._ffa_report_contradiction(S3, _vec(ROW_A), _report(ROW_B, S1), False) is not None
+    assert main._ffa_report_contradiction(S1, _vec(ROW_B), _report(ROW_A, S3), False) is not None
+
+
+def test_the_leave_rule_has_exactly_one_definition():
+    """#279/#432: the settlement and the comparison ask the same question, and
+    a second copy of the rule is the one that stops being updated. The endpoint
+    calls the helper and prints what it returns; it does not re-derive."""
+    src = _endpoint_src()
+    assert "ghosts, graced, _leave_log = _ffa_leave_decision(report, kills_in_canonical)" in src
+    assert "ghosts.add(" not in src and "graced.add(" not in src
+    assert "_ffa_leave_decision(" in inspect.getsource(main._ffa_report_contradiction)
+    # The helper is PURE - it returns its log lines instead of printing them,
+    # so the comparison path cannot emit a second copy of the endpoint's own
+    # evidence about a report that is about to be refused.
+    assert "print(" not in inspect.getsource(main._ffa_leave_decision)
 
 
 def test_a_same_room_second_report_is_compared_before_it_is_echoed():
@@ -515,17 +714,16 @@ def test_a_skewed_game_refunds_its_wagers_instead_of_paying_frozen_prices():
     at a price for a race that was not run, and never kept either."""
     src = _endpoint_src()
     assert "_target_skew = _played_target != int(_score_target)" in src
-    bets = src[src.index("game_no = _game_number"):src.index("UPDATE ffa_lobbies SET games_played")]
+    bets = src[src.index("game_no = _game_number"):src.index("await _ffa_advance_lobby_slot")]
     assert "if _target_skew:" in bets
-    assert '_refund_ffa_lobby_bets(db, lobby_uuid, "score_target_skew"' in bets
-    assert "game_number=game_no" in bets
+    assert '_refund_ffa_game_bets_strict(db, lobby_uuid, game_no,' in bets
     # ...and this game's own settle is the branch that does NOT run.
     assert "if not _target_skew:" in bets
     settle = bets.index("_settle_ffa_bets_for_game(db, lobby_uuid, game_no")
     assert bets.index("if not _target_skew:") < settle
     # The refund is idempotent and moves gold as a DELTA (#326), so a retry,
     # the straggler pass and the closure reconcile can all cross it.
-    ref = inspect.getsource(main._refund_ffa_lobby_bets)
+    ref = inspect.getsource(main._refund_ffa_game_bets_strict)
     assert "settled_at IS NULL RETURNING id" in ref
     assert "gold_spent = GREATEST(0, COALESCE(gold_spent,0) - :amt)" in ref
     # ...and because the refund stamps settled_at, every later pass skips it:
@@ -533,6 +731,60 @@ def test_a_skewed_game_refunds_its_wagers_instead_of_paying_frozen_prices():
     assert "settled_at IS NULL AND game_number < :g" in src
     assert "settled_at IS NULL ORDER BY game_number" in \
         inspect.getsource(main._reconcile_ffa_lobby_bets)
+
+
+def test_the_skew_refund_is_part_of_the_settlement_and_not_a_best_effort_pass():
+    """Controls: skew-refund-is-fail-soft, skew-refund-caps-at-one-pass.
+
+    Round 3 called the SWEEP helper here, from inside the block whose except
+    swallows everything. That helper also ends its pass at 200 rows. Either way
+    a wager on a skewed game could still be unsettled at commit, and the next
+    pass over it - the straggler loop, the closure reconcile, the janitor -
+    settled it against the recorded winner at the FROZEN price, which is the
+    one outcome the branch exists to prevent (#412).
+
+    Three properties, and the file's own fail-soft refund has to keep NOT
+    having them, or this test is measuring nothing."""
+    strict = inspect.getsource(main._refund_ffa_game_bets_strict)
+    soft = inspect.getsource(main._refund_ffa_lobby_bets)
+    # 1. It does not swallow. 2. It opens no savepoint of its own, so a failure
+    # takes the caller's transaction with it. 3. It loops to exhaustion and
+    # RAISES at its bound rather than returning short.
+    assert "except Exception" not in strict and "except Exception" in soft
+    assert "begin_nested" not in strict and "begin_nested" in soft
+    assert "raise RuntimeError(" in strict
+    assert "for _ in range(FFA_REFUND_MAX_BATCHES)" in strict
+    # The caller runs it OUTSIDE the block whose except swallows bet problems,
+    # and turns a failure into a retryable answer rather than a committed row.
+    src = _endpoint_src()
+    swallow = src.index("[FFA-BETS] settle failed (report unaffected")
+    assert src.index("_refund_ffa_game_bets_strict(") > swallow
+    assert src.index("_refund_ffa_game_bets_strict(") < src.index("await _ffa_advance_lobby_slot")
+    blk = src[swallow:src.index("await _ffa_advance_lobby_slot")]
+    assert "FfaReportRefusal(" in blk and "503" in blk
+
+
+def test_a_later_pass_refunds_a_recorded_skew_instead_of_settling_it():
+    """The other half of the same guarantee, and the one a leftover needs. Every
+    after-the-fact resolver asks ONE helper what a recorded game's wagers must
+    do, and that helper reads the row's two target columns - so a wager that
+    somehow outlives the settlement's own refund is returned, never paid at the
+    price the bettor did not agree to."""
+    outcome = inspect.getsource(main._ffa_recorded_game_outcome)
+    assert "score_target_frozen" in outcome and "score_target_played" in outcome
+    assert 'return "refund", None' in outcome
+    # Both resolvers go through it, and neither settles without asking.
+    rec = inspect.getsource(main._reconcile_ffa_lobby_bets)
+    assert "_ffa_recorded_game_outcome(" in rec
+    assert 'verdict == "settle"' in rec
+    assert 'verdict == "refund"' in rec
+    src = _endpoint_src()
+    strag = src[src.index("stragglers = "):src.index("[FFA-BETS] settle failed")]
+    assert "_ffa_recorded_game_outcome(" in strag
+    assert "SELECT winner_id FROM ffa_matches" not in strag
+    # NULL columns (every pre-327 row) mean "no skew recorded", which is the
+    # pre-327 behaviour - a guessed skew would refund a game that was paid.
+    assert "frozen is not None and played is not None" in outcome
 
 
 def test_a_skewed_game_is_rated_with_the_weight_of_the_target_it_was_played_to():
@@ -562,12 +814,19 @@ def test_the_match_row_records_both_targets():
     assert "ADD COLUMN IF NOT EXISTS score_target_played SMALLINT" in sql
 
 
-def test_the_played_target_is_never_a_number_the_report_chose():
-    """Both admissible values are SERVER-held — the lobby's frozen target and
-    the module default — so `_played_target` can only ever be one of two
-    numbers the report did not pick, whatever it tallies."""
+def test_the_played_target_is_one_of_two_server_held_numbers():
+    """The narrower claim, which is the true one. `_played_target` IS the
+    report's own max tally, so the report selects which of the two branches
+    runs; what it cannot do is name a third length, because the shape rule
+    above admits exactly the lobby's frozen target and the module default and
+    refuses everything else. Round 3 wrote "never a number the report chose",
+    which reads as the stronger claim and is not what the code does."""
     src = _endpoint_src()
     assert "_played_target = int(max_rounds)" in src
+    note = src[src.index("The target the game was actually played to"):
+               src.index("_played_target = int(max_rounds)")]
+    assert "never a number the report chose" not in note
+    assert "SELECTS between two server-held numbers" in note
     # max_rounds has been through the shape rule by then, which admits exactly
     # those two values and refuses everything else.
     assert src.index("_shape_error = ") < src.index("_played_target = ")
@@ -615,7 +874,7 @@ def test_the_closed_lobby_capture_gate_reads_the_same_win_invariant():
     `max_rounds == _score_target` here would refuse to KEEP exactly the
     config-skew report the shape rule now settles (#279/#432)."""
     src = _endpoint_src()
-    block = src[src.index("_roster_bound = "):src.index('detail="Lobby is not active")')]
+    block = src[src.index("_roster_bound = "):src.index('detail="Lobby is not active"')]
     assert "_ffa_score_shape_error" in block
     assert "max_rounds == _score_target" not in block
 
@@ -649,22 +908,31 @@ def test_the_two_rules_that_could_not_fire_are_gone():
 # ── a refusal that says "recorded" must have recorded ─────────────────────
 
 class _FakeResult:
-    def __init__(self, value=None):
+    def __init__(self, value=None, rows=None):
         self._value = value
+        self._rows = list(rows or [])
 
     def scalar(self):
         return self._value
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return self._rows
 
 
 class _FakeDb:
     """Enough AsyncSession for _quarantine_report: a scripted reply per
     statement, and a record of what it was asked."""
 
-    def __init__(self, pending=0, insert_id=None, boom=False, stored=None):
+    def __init__(self, pending=0, insert_id=None, boom=False, stored=None,
+                 variants=()):
         self.pending = pending
         self.insert_id = uuid.uuid4() if insert_id == "new" else insert_id
         self.boom = boom
         self.stored = stored           # what (mode, room) already holds
+        self.variants = list(variants)  # the group's NULL-room rows
         self.committed = False
         self.statements = []
         self.inserts = 0
@@ -683,6 +951,8 @@ class _FakeDb:
         if "SELECT COUNT(*)" in sql:
             return _FakeResult(self.pending)
         if "SELECT payload FROM match_report_quarantine" in sql:
+            if "photon_room_id IS NULL" in sql:
+                return _FakeResult(rows=self.variants)
             return _FakeResult(self.stored)
         if "INSERT INTO match_report_quarantine" in sql:
             if self.boom:
@@ -705,12 +975,58 @@ def _capture(db, payload=None):
 
 def test_the_capture_says_which_of_the_five_things_happened():
     assert _capture(_FakeDb(insert_id="new")) == "recorded"
-    # ON CONFLICT fired AND the stored payload is this same report: the
-    # retry-idempotency, not a drop.
+    # The room's row already holds THIS report: the retry-idempotency, not a
+    # drop.
     assert _capture(_FakeDb(insert_id=None,
                             stored=json.dumps(PAYLOAD))) == "already"
     assert _capture(_FakeDb(pending=50)) == "quota"
     assert _capture(_FakeDb(boom=True)) == "failed"
+
+
+def test_a_delivery_that_adds_no_row_is_not_charged_for_one():
+    """Control: quota-before-idempotency (round 3's order).
+
+    The pending bound exists to stop a flood of NEW rows. Counting it FIRST
+    meant that at saturation an honest outbox retry of a payload the table
+    already held was answered 503 instead of its idempotent terminal answer -
+    so the bound spent the very report it exists to preserve. The read is now
+    first, and neither kept answer touches the count."""
+    full = _FakeDb(pending=50, stored=json.dumps(PAYLOAD))
+    assert _capture(full) == "already"
+    assert full.inserts == 0
+    # A REPEAT of a variant is the same kind of delivery: its payload is on
+    # file, so it adds nothing and costs nothing, even at saturation.
+    repeat = _FakeDb(pending=50, stored=json.dumps(OTHER),
+                     variants=[json.dumps(PAYLOAD)])
+    assert _capture(repeat) == "variant"
+    assert repeat.inserts == 0
+    # ...and the order is what does it: the on-file read runs before the count.
+    src = inspect.getsource(main._quarantine_report)
+    assert src.index("_quarantine_on_file(") < src.index("SELECT COUNT(*)")
+
+
+def test_a_variant_is_kept_once_however_often_it_is_delivered():
+    """Control: variant-rows-are-not-deduped.
+
+    A variant row carries photon_room_id NULL so it cannot take the
+    (mode, room) key that makes an honest retry idempotent - which left it with
+    no idempotency at all: round 3 inserted a fresh row for every redelivery,
+    so one differing payload delivered four times (three immediate retries plus
+    an outbox attempt) cost four rows of a 50-row bound. The group's NULL-room
+    rows are compared as values too."""
+    first = _FakeDb(insert_id=None, stored=json.dumps(OTHER))
+    assert _capture(first) == "variant"
+    assert first.inserts == 1
+    again = _FakeDb(insert_id=None, stored=json.dumps(OTHER),
+                    variants=[json.dumps(PAYLOAD)])
+    assert _capture(again) == "variant"
+    assert again.inserts == 0
+    # A DIFFERENT second account is still kept - the dedupe is on the payload,
+    # not on "there is already a variant".
+    third = _FakeDb(insert_id=None, stored=json.dumps(OTHER),
+                    variants=[json.dumps({"a": 2})])
+    assert _capture(third) == "variant"
+    assert third.inserts == 1
 
 
 def test_a_distinct_account_of_a_captured_room_is_compared_and_kept():
@@ -726,9 +1042,11 @@ def test_a_distinct_account_of_a_captured_room_is_compared_and_kept():
     # It was COMPARED (the stored payload was read back)...
     assert any("SELECT payload FROM match_report_quarantine" in s
                for s in db.statements)
-    # ...and RECORDED: a second insert, carrying a NULL room so the partial
-    # unique index that makes an honest retry idempotent still does.
-    assert db.inserts == 2
+    # ...and RECORDED: one insert, carrying a NULL room so the partial unique
+    # index that makes an honest retry idempotent still does. (Round 3 tried
+    # the keyed insert first and wrote this row after the conflict came back,
+    # i.e. two statements; the read above already knows the key is taken.)
+    assert db.inserts == 1
     variant = [s for s in db.statements
                if "INSERT INTO match_report_quarantine" in s][-1]
     assert ":rep, :pids, CAST(:pl AS JSONB))" in variant
@@ -783,7 +1101,8 @@ def _refuse(capture_result, status=409):
         asyncio.run(main._ffa_record_and_refuse(
             None, report=rep, lobby_uuid=uuid.uuid4(),
             id_by_steam={S1: uuid.uuid4()}, reason="ffa_game_contradiction",
-            why="w", detail="This game is already recorded", status=status))
+            why="w", detail="This game is already recorded",
+            progress=main._ffa_progress(3), status=status))
     finally:
         main._quarantine_report = real
 
@@ -833,15 +1152,23 @@ def test_the_rj3_branches_never_answer_409_without_asking_the_capture():
         assert "_ffa_record_and_refuse" in window, reason
     # ...and no branch of the endpoint writes a match or player row while
     # refusing.
-    branch = src[src.index("_candidates = "):src.index("INSERT INTO ffa_matches")]
+    branch = src[src.index("_named_game = "):src.index("INSERT INTO ffa_matches")]
     for forbidden in ("UPDATE ffa_matches", "UPDATE players", "invalidated_at =",
                       "DELETE FROM"):
         assert forbidden not in branch, forbidden
 
 
 def _terminal_raises(src):
-    """Every `raise HTTPException(<terminal>, ...)` literal in a source blob."""
-    return re.findall(r"raise HTTPException\((4\d\d), ([^\n]*)", src)
+    """Every terminal refusal literal in a source blob, in EITHER raise form.
+
+    The FFA report path raises FfaReportRefusal wherever it can name the
+    lobby's progress and plain HTTPException where it cannot (above the lobby
+    read). A regex that only saw one of them would stop seeing half the class
+    the moment a site moved between the two - a check that cannot fail (#342).
+    The message literal is the key; what follows it is the progress argument."""
+    return re.findall(
+        r"raise (?:HTTPException|FfaReportRefusal)\((4\d\d), (f?\"[^\"]*\")",
+        src)
 
 
 def test_no_terminal_refusal_on_the_ffa_report_path_is_answered_over_nothing():
@@ -860,27 +1187,32 @@ def test_no_terminal_refusal_on_the_ffa_report_path_is_answered_over_nothing():
     src = _endpoint_src() + inspect.getsource(main._ffa_replay_echo)
     # Refusals that may not be captured, with the reason each one may not.
     integrity = {
-        '"Invalid FFA match signature")': "HMAC",
-        '"Invalid lobby_id format")': "unparseable id",
-        '"Need at least two distinct players")': "malformed roster",
-        '"Winner is not among the players")': "malformed roster",
-        '"Reporter is not a participant")': "malformed roster",
-        '"photon_room_id is required")': "malformed room id",
-        '"One or more players not registered")': "unknown player",
-        '"Lobby not found")': "no row to bind to",
+        '"Invalid FFA match signature"': "HMAC",
+        '"Invalid lobby_id format"': "unparseable id",
+        '"Need at least two distinct players"': "malformed roster",
+        '"Winner is not among the players"': "malformed roster",
+        '"Reporter is not a participant"': "malformed roster",
+        '"photon_room_id is required"': "malformed room id",
+        '"One or more players not registered"': "unknown player",
+        '"Lobby not found"': "no row to bind to",
     }
     unbound = {
-        '"Report must cover exactly the lobby roster")': "roster binding",
-        '"Report player count does not match the lobby")': "roster binding",
+        '"Report must cover exactly the lobby roster"': "roster binding",
+        '"Report player count does not match the lobby"': "roster binding",
     }
+    seen = 0
     for status, rest in _terminal_raises(src):
         key = rest.strip()
+        seen += 1
         if key in integrity or key in unbound:
             continue
         if key.startswith('f"Slot mismatch'):
             continue
         raise AssertionError(
             f"terminal HTTP {status} answered without a kept record: {key}")
+    # The enumeration has to have MATCHED something, or a rename of the raise
+    # form turns this whole test into a check that cannot fail (#342/#441).
+    assert seen >= len(integrity) + len(unbound)
     # ...and the captures that DO stand behind a terminal answer all run
     # through the one helper that checks whether the capture happened.
     for reason in ('"ffa_room_other_lobby"', '"ffa_replay_roster_mismatch"',
@@ -898,8 +1230,12 @@ def test_a_room_whose_row_is_not_visible_yet_is_retried_not_spent():
     committed, so the lookup cannot see it. That is a race, not a verdict."""
     src = _endpoint_src()
     blk = src[src.index("uq_ffa_match_room"):src.index("Pairwise Glicko")]
-    assert "HTTPException(503" in blk
+    assert "FfaReportRefusal(503" in blk
     assert 'HTTPException(409, "Duplicate room id")' not in blk
+    # ...and the progress it answers with is RE-READ, because the rollback
+    # above released the lock and the in-memory lobby row is a stale snapshot.
+    assert "_race_progress = _ffa_progress(" in blk
+    assert "SELECT games_played FROM ffa_lobbies WHERE id = :lid" in blk
 
 
 def test_a_closed_lobbys_unbound_report_is_not_answered_as_a_lifecycle_refusal():
@@ -910,7 +1246,7 @@ def test_a_closed_lobbys_unbound_report_is_not_answered_as_a_lifecycle_refusal()
     blk = src[src.index('if lobby["status"] != "active":'):
               src.index("# Roster validation")]
     assert "_roster_bound" in blk
-    assert 'raise HTTPException(403, "Report must cover exactly the lobby roster")' in blk
+    assert 'raise FfaReportRefusal(403, "Report must cover exactly the lobby roster"' in blk
     assert blk.count("_ffa_record_and_refuse") == 2
     assert "score_shape_mismatch" in blk
     assert 'reason=f"lobby_{lobby[\'status\']}"' in blk
@@ -976,8 +1312,24 @@ def test_the_echo_names_the_two_helpers_that_actually_run_before_it():
 def test_the_capture_note_no_longer_calls_every_conflict_a_retry():
     doc = inspect.getsource(main._quarantine_report)
     assert "the same report under the same room id is the same report" not in doc
-    assert "byte-identical" in doc or "says something DIFFERENT" in doc
+    # A conflict on the key is TWO cases and the note names both: the retry,
+    # compared as values rather than as text, and the second account.
+    assert "compared as VALUES" in doc
+    assert "a DIFFERENT account of the" in doc
     assert '"variant"' in doc
+    # ...and it no longer says the quota bounds variants "exactly as it bounds
+    # any other capture" without saying what makes a REDELIVERY of one free.
+    assert "EVERY kept outcome is idempotent" in doc
+
+
+def test_the_refusal_note_states_the_retry_budget_as_a_bound():
+    """Round 3 wrote that a 503 makes the report survive "until an operator
+    clears the backlog". It survives as long as the client keeps retrying, and
+    that ladder is finite - so the sentence promised something no server-side
+    change can deliver."""
+    doc = inspect.getsource(main._ffa_record_and_refuse)
+    assert "until an operator clears the backlog" not in doc
+    assert "FINITE ladder" in doc
 
 
 def test_the_shutout_note_no_longer_infers_the_target_from_the_tally():
@@ -999,7 +1351,12 @@ def test_the_migration_header_says_the_tail_has_to_agree():
     # trigger's sequence arm actually computes.
     assert "writer = the inserting statement supplied it" in sql
     assert "one above the lobby''s highest number for the trigger" in sql
-    assert "next free number" not in sql
+    # The sequence arm is described as what it computes. Round 2 called it "the
+    # next free number", which it was not; round 4 added a free-number FALLBACK
+    # for the one input MAX+1 cannot serve, and says which is which.
+    fn = sql[sql.index("CREATE OR REPLACE FUNCTION"):sql.index("DROP TRIGGER")]
+    assert 'NOT "the next free number", which this expression does not compute' in fn
+    assert "falls back to the LOWEST FREE number" in fn
 
 
 def test_the_migration_makes_the_column_total_and_bounded():
@@ -1009,6 +1366,178 @@ def test_the_migration_makes_the_column_total_and_bounded():
     # Provenance for every backfilled row: which rule gave it its number.
     assert "game_number_source" in sql
 
+
+def test_the_trigger_claims_only_the_totality_it_has():
+    """Round 3's header called the derivation "a total function from a row to a
+    number" while its sequence arm raised for any lobby whose HIGHEST number
+    was 999 - and that exception reaches the pre-327 api as an HTTP 500. The
+    arm now falls back to the lobby's lowest free number, so the only refused
+    input is a lobby holding all 999, and the header says so as a bound."""
+    sql = MIGRATION.read_text(encoding="utf-8")
+    head = sql[sql.index("Insert-time derivation"):sql.index("CREATE OR REPLACE FUNCTION")]
+    assert "A total function from a row to a number" not in head
+    assert "every lobby that has a free number" in head
+    fn = sql[sql.index("CREATE OR REPLACE FUNCTION"):sql.index("DROP TRIGGER")]
+    assert "generate_series(1, 999)" in fn
+    assert "holds every number in 1..999" in fn
+
+
+# ── the control inventory, checked against itself ─────────────────────────
+
+def test_the_control_tally_matches_the_list_it_sits_next_to():
+    """Control: tally-from-memory (the round-3 LOW at line 50).
+
+    Round 3's docstring said nineteen round-3 controls and listed sixteen. A
+    number asserted beside the list that contradicts it is the same defect
+    class as a comment asserting a guarantee the code does not supply, and it
+    stays wrong silently because nothing counts. This counts.
+
+    It reads the SAME docstring the inventory lives in, so the two cannot
+    drift: adding a control without updating the tally reddens here."""
+    doc = sys.modules[__name__].__doc__
+    entries = [ln for ln in doc.splitlines()
+               if re.match(r"^  [a-z0-9-]+( \((?:r3|r4|retired)\))? +\S", ln)]
+    counted = {
+        "r3": sum(1 for ln in entries if "(r3)" in ln),
+        "r4": sum(1 for ln in entries if "(r4)" in ln),
+        "retired": sum(1 for ln in entries if "(retired)" in ln),
+    }
+    counted["plain"] = len(entries) - sum(counted.values())
+    # The committed-test one is listed in the same shape but is called out
+    # separately in the prose, so it is not a hand-run control.
+    assert any("backfill-neutered" in ln for ln in entries)
+    counted["plain"] -= 1
+
+    claimed = re.search(
+        r"counted off\s*\n?it: (\d+) unmarked and still live .*?(\d+) unmarked and RETIRED"
+        r".*?(\d+)\s*\n?marked \(r3\), (\d+) marked \(r4\)",
+        doc, re.S)
+    assert claimed, "the docstring no longer states a tally in a readable form"
+    want_plain, want_retired, want_r3, want_r4 = (int(g) for g in claimed.groups())
+    assert (want_plain, want_retired, want_r3, want_r4) == (
+        counted["plain"], counted["retired"], counted["r3"], counted["r4"]), (
+        "the docstring's tally and its own list disagree: claimed "
+        f"{(want_plain, want_retired, want_r3, want_r4)}, listed "
+        f"{(counted['plain'], counted['retired'], counted['r3'], counted['r4'])}")
+    # ...and the list is not empty, or the whole check passes on nothing.
+    assert counted["r4"] >= 10 and counted["plain"] >= 10
+
+
+def test_every_round_four_control_names_a_test_that_exists():
+    """A control whose test was renamed is a control nobody can re-run, and the
+    inventory is the only place the pairing is written down. Every round-4
+    control ran against a named node; those names are in the log, and the ones
+    the docstring's prose points at have to still be in this module."""
+    mod = sys.modules[__name__]
+    for name in ("test_pg_the_prior_lookup_reads_the_row_that_holds_the_named_number",
+                 "test_pg_a_tail_behind_the_slot_finds_its_own_game_not_the_next_one",
+                 "test_the_skew_refund_is_part_of_the_settlement_and_not_a_best_effort_pass",
+                 "test_a_later_pass_refunds_a_recorded_skew_instead_of_settling_it",
+                 "test_a_leave_difference_is_a_contradiction",
+                 "test_the_comparisons_gate_is_the_signature_not_the_tie_break",
+                 "test_a_delivery_that_adds_no_row_is_not_charged_for_one",
+                 "test_a_variant_is_kept_once_however_often_it_is_delivered",
+                 "test_the_lock_the_derivation_and_the_increment_are_one_transaction",
+                 "test_pg_two_reports_for_one_lobby_cannot_settle_the_same_number",
+                 "test_every_report_answer_carries_the_lobbys_progress",
+                 "test_the_lobby_state_advertises_the_sittings_settled_count",
+                 "test_pg_the_trigger_never_hands_back_a_number_the_lobby_is_using",
+                 "test_no_terminal_refusal_on_the_ffa_report_path_is_answered_over_nothing"):
+        assert callable(getattr(mod, name, None)), name
+
+# ── what a client can resync FROM ─────────────────────────────────────────
+# RJ-CLIENT-RESYNC-CONTRACT.md is the client lane's side of these fields. The
+# tests below are the server side of the same contract: they are what makes
+# the document checkable rather than descriptive.
+
+def test_the_lobby_state_advertises_the_sittings_settled_count():
+    """Control: advisory-count-has-no-semantic-test (the round-3 LOW).
+
+    `games_played` was added to the ready-join payload with nothing asserting
+    it is EMITTED, what it is measured against, or that it names the same
+    quantity the report path refuses on. A field with no test is a field that
+    can be renamed, moved under a nested object or dropped, and nothing here
+    would notice — which is exactly the state an unchanged client consumer
+    cannot be built against (#438: acceptance is a positive signal)."""
+    src = inspect.getsource(main._ffa_poll_locked_payload)
+    # It is a TOP-LEVEL key of the ready-join payload, which is what the
+    # client's substring JSON reader can reach.
+    body = src[src.index('return {'):]
+    assert '"games_played": int(lobby["games_played"] or 0),' in body
+    assert '"status": "ready_join"' in body
+    # ...and it is the LOBBY's count, not a member count or a queue length.
+    assert "lobby[" in body[body.index('"games_played"'):
+                            body.index('"games_played"') + 60]
+    # The one quantity: what the payload advertises and what the report path
+    # derives its slot from are the same column, read the same way.
+    lock = inspect.getsource(main._ffa_lock_lobby_slot)
+    assert 'int(lobby["games_played"] or 0) + 1' in lock
+    # And the number a client that reads it should name is the NEXT one.
+    assert main._ffa_progress(4)["expected_game"] == 5
+    assert main._ffa_progress(0)["expected_game"] == 1
+
+
+def test_every_report_answer_carries_the_lobbys_progress():
+    """The resync fields, on all three answer shapes.
+
+    One refusal used to poison the rest of a same-room sitting: the client's
+    counter advanced at every game start, the server's did not, and no answer
+    carried anything a client could realign to — so the first refusal made
+    every later report of that sitting one further ahead, and all of them were
+    refused (RJ-R3 HIGH, plugin/FfaMode.cs:1077). The server half is that
+    EVERY answer names the lobby's authoritative progress."""
+    # 1. The shape. Two keys always, and the third only when the answer is
+    #    about a game the lobby has already settled.
+    assert main._ffa_progress(2) == {"games_played": 2, "expected_game": 3}
+    assert main._ffa_progress(2, settled_game=1) == {
+        "games_played": 2, "expected_game": 3, "settled_game": 1}
+    # The counter is authoritative, not a delta: a client adopts it whole.
+    assert main._ffa_progress(0) == {"games_played": 0, "expected_game": 1}
+
+    # 2. The refusals. FfaReportRefusal carries the progress to the handler,
+    #    and `detail` stays a plain string so an existing client's error text
+    #    is unchanged.
+    ex = main.FfaReportRefusal(409, "This game is already recorded",
+                               main._ffa_progress(2, settled_game=2))
+    assert isinstance(ex, main.HTTPException)
+    assert ex.status_code == 409 and ex.detail == "This game is already recorded"
+    assert ex.progress == {"games_played": 2, "expected_game": 3,
+                           "settled_game": 2}
+    handler = main.app.exception_handlers[main.FfaReportRefusal]
+    body = json.loads(bytes(asyncio.run(handler(None, ex)).body))
+    assert body == {"detail": "This game is already recorded",
+                    "games_played": 2, "expected_game": 3, "settled_game": 2}
+    # Top-level integer keys: ApiClient.ExtractJsonInt is a substring reader,
+    # so a nested object would not be reachable by the unchanged client.
+    assert all(not isinstance(v, (dict, list)) for v in body.values())
+
+    # 3. The success answer. The schema carries the same three names, so a
+    #    client reads one vocabulary whatever the outcome.
+    fields = schemas.FfaMatchResponse.model_fields
+    assert {"games_played", "expected_game", "settled_game"} <= set(fields)
+    src = _code_lines(_endpoint_src())
+    assert "**_ffa_progress(_game_number)" in src
+    # ...and the success answer's progress is the COMMITTED state: it is built
+    # from the number this transaction settled, after the advance.
+    assert src.index("await _ffa_advance_lobby_slot(") < \
+        src.index("**_ffa_progress(_game_number)")
+
+
+def test_a_refusal_the_client_can_act_on_names_the_settled_game():
+    """The difference between "retry later" and "this one is done".
+
+    An outbox entry whose game the lobby has already settled must be DROPPED,
+    not retried to the end of a finite ladder — and the only way a client can
+    tell is the answer. Every refusal about an already-recorded game carries
+    settled_game; the ones about a game that is not settled do not."""
+    src = _code_lines(_endpoint_src())
+    # The already-recorded answers name the game they are about.
+    assert "_ffa_with_settled(" in src
+    withs = inspect.getsource(main._ffa_with_settled)
+    assert '"settled_game"' in withs
+    # A 503 (capture failed, room race, refund failed) is retryable and says
+    # nothing about a settled game, because none is settled.
+    assert main._ffa_progress(2).get("settled_game") is None
 
 # ── live PostgreSQL ───────────────────────────────────────────────────────
 # No silent skip. Unset DSN FAILS with the reason; FFA_TEST_PG_OPTOUT=1 is the
@@ -1114,6 +1643,8 @@ CREATE TABLE ffa_matches (
     ended_at TIMESTAMPTZ NOT NULL,
     invalidated_at TIMESTAMPTZ,
     game_number SMALLINT,
+    score_target_frozen SMALLINT,
+    score_target_played SMALLINT,
     CONSTRAINT uq_ffa_match_room UNIQUE (photon_room_id)
 );
 CREATE TABLE ffa_match_players (
@@ -1122,6 +1653,8 @@ CREATE TABLE ffa_match_players (
     rounds_won SMALLINT NOT NULL DEFAULT 0,
     points_total SMALLINT NOT NULL DEFAULT 0,
     kills INTEGER NOT NULL DEFAULT 0,
+    left_early BOOLEAN NOT NULL DEFAULT FALSE,
+    absent BOOLEAN NOT NULL DEFAULT FALSE,
     PRIMARY KEY (match_id, player_id)
 );
 """
@@ -1173,10 +1706,12 @@ async def _anchor(sm, g):
                                  {"lid": LOBBY, "g": g})).scalar()
 
 
-async def _prior(sm, gs):
+async def _prior(sm, g):
+    """The production lookup, asked the way production asks it: about the ONE
+    number the report named."""
     async with sm() as db:
         return (await db.execute(text(main._FFA_PRIOR_GAME_SQL),
-                                 {"lid": LOBBY, "gs": list(gs)})).mappings().first()
+                                 {"lid": LOBBY, "g": int(g)})).mappings().first()
 
 
 def test_pg_a_second_row_for_one_game_is_not_the_next_games_anchor():
@@ -1245,28 +1780,94 @@ def test_pg_rows_with_no_derivable_number_still_count_as_earlier_games():
     assert as_nine > as_two              # game 2's own receipt anchors game 9
 
 
-def test_pg_the_prior_lookup_asks_about_every_candidate_number():
-    """The array bind is typed (`ANY(CAST(:gs AS SMALLINT[]))`) — an untyped
-    list is the #275/#448 shape and aborts the transaction."""
+def test_pg_the_prior_lookup_reads_the_row_that_holds_the_named_number():
+    """Control: prior-lookup-takes-the-earliest-of-a-set (round 3's shape).
+
+    The lookup used to bind a SET — the lobby's expected slot and the report's
+    own `_rN` tail — under `game_number = ANY(...) ORDER BY ended_at LIMIT 1`.
+    A set plus "earliest" is not "the row that holds the number the report
+    named": with rows at BOTH numbers it returned whichever settled first, so a
+    report naming the tail was compared against, and could be declared a
+    duplicate of, a DIFFERENT game. The bind is now the single named number and
+    the row is the one holding it; the typed cast (`CAST(:g AS SMALLINT)`)
+    stays, because an untyped bind is the #275/#448 shape.
+
+    Every gap state a live sitting can be in, enumerated against real rows."""
+    require_pg()
+
+    async def go():
+        # Rows at BOTH numbers a round-3 report would have offered: the lobby's
+        # expected slot 2 (settled LATER) and the tail 1 (settled first).
+        engine, sm, _ = await _setup([
+            ("rm_g1_r1", 1, 686, False),
+            ("rm_g2_r2", 2, 1300, False),
+            ("rm_dup_r3", 3, 2000, False),
+            ("rm_dup2_r3", 3, 2100, False),
+        ])
+        try:
+            return {
+                "both_named_2": await _prior(sm, 2),
+                "both_named_1": await _prior(sm, 1),
+                "duplicate_pair": await _prior(sm, 3),
+                "gap": await _prior(sm, 4),
+                "above_domain": await _prior(sm, 999),
+            }
+        finally:
+            await engine.dispose()
+    got = run(go())
+    # 1. Two numbers held, the report names 2: the row holding 2 comes back,
+    #    though the row holding 1 is EARLIER. (Round 3 returned rm_g1_r1 here,
+    #    and the caller then compared game 2's report against game 1's row.)
+    assert got["both_named_2"] is not None
+    assert got["both_named_2"]["photon_room_id"] == "rm_g2_r2"
+    assert int(got["both_named_2"]["game_number"]) == 2
+    # 2. The same table, the report names 1: the row holding 1.
+    assert got["both_named_1"]["photon_room_id"] == "rm_g1_r1"
+    # 3. Two rows hold ONE number (the verified-pair case that made the set
+    #    ambiguous in the first place). ORDER BY ended_at makes the choice
+    #    deterministic: the account that settled first. Both are live — neither
+    #    was reversed — so this is a stable choice, not a claim about validity.
+    assert got["duplicate_pair"]["photon_room_id"] == "rm_dup_r3"
+    # 4. and 5. No row holds the named number: nothing comes back, and the
+    #    refusal rule alone decides — which is the honest state for a number
+    #    the lobby has not reached, and for one outside the sitting entirely.
+    assert got["gap"] is None
+    assert got["above_domain"] is None
+
+
+def test_pg_a_tail_behind_the_slot_finds_its_own_game_not_the_next_one():
+    """The finding's own failure scenario, end to end on real rows.
+
+    A same-room sitting where the client's counter fell behind: the lobby is on
+    slot 3 and the report names 2. The lookup has to hand the endpoint the row
+    holding 2 — that is the game being re-reported, and comparing against it is
+    what makes an honest redelivery a 409-with-evidence instead of a settlement
+    of somebody else's game. The refusal rule and the lookup have to agree
+    about WHICH number is in question."""
     require_pg()
 
     async def go():
         engine, sm, _ = await _setup([
-            ("rm_live_r1", 1, 686, False),
-            ("rm_late_r1", 1, 743, False),
-        ])
+            ("rm_g1_r1", 1, 600, False),
+            ("rm_g2_r2", 2, 1300, False),
+        ], games_played=2)
         try:
-            return (await _prior(sm, [1]), await _prior(sm, [1, 2]),
-                    await _prior(sm, [2, 3]))
+            async with sm() as db:
+                _row, expected = await main._ffa_lock_lobby_slot(db, LOBBY)
+                await db.rollback()
+            return expected, await _prior(sm, 2), await _prior(sm, expected)
         finally:
             await engine.dispose()
-    one, one_and_two, neither = run(go())
-    # ORDER BY ended_at: the row that settled first, deterministically. Both of
-    # the verified pair are live — both settled, neither was reversed — so this
-    # is a stable choice, not a claim that the later one is not live.
-    assert one is not None and one["photon_room_id"] == "rm_live_r1"
-    assert one_and_two is not None and one_and_two["photon_room_id"] == "rm_live_r1"
-    assert neither is None
+    expected, named, at_slot = run(go())
+    assert expected == 3
+    # The named number is behind the slot, and the row it names is the one that
+    # comes back — not game 1's, and not nothing.
+    assert named is not None and int(named["game_number"]) == 2
+    assert named["photon_room_id"] == "rm_g2_r2"
+    # The slot itself is empty, which is what makes it the next settlement.
+    assert at_slot is None
+    # ...and the rule refuses the report, with the row above as its evidence.
+    assert main._ffa_game_number_refusal(2, expected) is not None
 
 
 def test_pg_a_reused_invalidated_number_cannot_widen_the_window():
@@ -1283,7 +1884,7 @@ def test_pg_a_reused_invalidated_number_cannot_widen_the_window():
             ("rm_b_r2", 2, 1300, True),          # reversed by an admin
         ])
         try:
-            found = await _prior(sm, [2, 3])
+            found = await _prior(sm, 2)
             widened = await _anchor(sm, 2)       # if that report DID settle
             honest = await _anchor(sm, 3)
             return found, widened, honest
@@ -1313,20 +1914,31 @@ def test_pg_the_recorded_vector_reads_back_for_the_comparison():
                 for s, (r, p, k) in ROW_A.items():
                     await db.execute(text(
                         "INSERT INTO ffa_match_players (match_id, player_id,"
-                        " rounds_won, points_total, kills)"
-                        " VALUES (:m, :p, :r, :t, :k)"),
-                        {"m": mid, "p": pids[s], "r": r, "t": p, "k": k})
+                        " rounds_won, points_total, kills, left_early, absent)"
+                        " VALUES (:m, :p, :r, :t, :k, :le, :ab)"),
+                        {"m": mid, "p": pids[s], "r": r, "t": p, "k": k,
+                         "le": s == S2, "ab": False})
                 await db.commit()
                 rows = (await db.execute(text(main._FFA_PRIOR_VECTOR_SQL),
                                          {"m": mid})).mappings().all()
             return {r["steam_id"]: (int(r["rounds_won"]), int(r["points_total"]),
-                                    int(r["kills"])) for r in rows}
+                                    int(r["kills"]), bool(r["left_early"]),
+                                    bool(r["absent"])) for r in rows}
         finally:
             await engine.dispose()
     vec = run(go())
-    assert vec == ROW_A
+    # The five stored fields the comparison reads, off real columns — the two
+    # new ones are what round 3 left out, so two accounts that disagreed about
+    # who PLAYED were called agreement and the second settled (#430).
+    assert vec == _vec(ROW_A, leave={S2: (True, False)})
     assert main._ffa_report_contradiction(S3, vec, _report(ROW_B, S1), True) is not None
-    assert main._ffa_report_contradiction(S3, vec, _report(ROW_A, S3), True) is None
+    # The same tallies, and S2's early leave reported as it is recorded: same
+    # account.
+    same = _report(ROW_A, S3, leave={S2: (True, False, 99)})
+    assert main._ffa_report_contradiction(S3, vec, same, True) is None
+    # The same tallies with S2 reported as never having left: a different
+    # account of who played, and the settlement it asks for is a different one.
+    assert main._ffa_report_contradiction(S3, vec, _report(ROW_A, S3), True) is not None
 
 
 # ── migration 327, EXECUTED ───────────────────────────────────────────────
@@ -1380,72 +1992,90 @@ async def _unwedge(conn):
 
 # ── two sessions, one lobby ───────────────────────────────────────────────
 
-def _production_sql(pattern: str) -> str:
-    """One of submit_ffa_match's OWN statement literals, with its named bind
-    rewritten for asyncpg's positional form.
+def test_the_lock_the_derivation_and_the_increment_are_one_transaction():
+    """Control: commit-between-the-lock-and-the-increment.
 
-    The point of lifting it rather than retyping it (#391): the test below then
-    executes the real lock, so deleting `FOR UPDATE` from the endpoint reddens
-    it. A test carrying its own copy of the SQL measures its own copy."""
-    m = re.search(pattern, _endpoint_src())
-    assert m, f"the endpoint no longer carries a statement matching {pattern}"
-    return m.group(1).replace(":lid", "$1")
+    The live test below proves the LOCK holds. What it cannot see is the
+    endpoint deciding to commit in the middle — at which point the row unlocks
+    with games_played unchanged, the waiting report reads the same number, and
+    two settlements take one slot with the lock still nominally in place. So
+    the transaction SCOPE is asserted here, structurally, on the production
+    source: between taking the lock and consuming the slot there is no commit,
+    and the advance is the last thing before the one that ends it."""
+    src = _code_lines(_endpoint_src())
+    lock = src.index("await _ffa_lock_lobby_slot(")
+    advance = src.index("await _ffa_advance_lobby_slot(")
+    commit = src.index("await db.commit()", advance)
+    assert lock < advance < commit
+    # Nothing commits in between. Measured on the CODE, with the comments
+    # stripped — a prose mention of `await db.commit()` is not a commit, and a
+    # check that a comment can redden is a check that a comment can also keep
+    # green (#441). `db.commit()` inside the quarantine helper is a different
+    # session-level call in a DIFFERENT function; this span is the endpoint's.
+    assert "await db.commit()" not in src[lock:advance]
+    # ...and the advance is not itself inside a savepoint that a later failure
+    # could roll back while the settlement stands.
+    assert "begin_nested" not in src[advance:commit]
+    # Exactly one advance per settlement, in the whole endpoint (#330/#279).
+    assert src.count("_ffa_advance_lobby_slot(") == 1
+    # ...and the increment is nowhere else in the file either: one rule, one
+    # place, so the slot cannot be consumed by a second writer's copy.
+    whole = _code_lines(pathlib.Path(main.__file__).read_text(encoding="utf-8"))
+    assert whole.count("games_played = games_played + 1") == 1
 
 
 def test_pg_two_reports_for_one_lobby_cannot_settle_the_same_number():
-    """The concurrency bar, on two real connections against real rows.
+    """The concurrency bar, on two real connections, through PRODUCTION's own
+    functions.
 
-    Report A takes the lobby row FOR UPDATE and derives `games_played + 1`.
-    Report B, arriving while A is still open, must WAIT on that row — and when
-    it is let through it must RE-READ, not reuse the value it would have seen
-    (#208: the second half of a split operation working from a snapshot is how
-    a settled row gets acted on twice). The three things asserted are that B
-    blocked, that B's derived number moved, and that B cannot settle A's number
-    even if it tries: the endpoint's own already-recorded lookup finds A's row
-    for it, which is the comparison path, not a second settlement.
+    Report A calls `_ffa_lock_lobby_slot` and derives its slot. Report B,
+    arriving while A is still open, must WAIT on that row — and when it is let
+    through it must RE-READ, not reuse the value it would have seen (#208: the
+    second half of a split operation working from a snapshot is how a settled
+    row gets acted on twice).
 
-    Control (hand-run): delete `FOR UPDATE` from the endpoint's lobby read and
-    B returns immediately with games_played = 0, deriving 1 exactly as A did."""
+    Round 3's version lifted the endpoint's SQL STRINGS out with a regex and
+    ran them itself, on its own connections, in its own transaction — so it
+    proved PostgreSQL's row locking and nothing about production's ordering.
+    Moving the derivation above the lock, or splitting the transaction in two,
+    left it green. It now calls `main._ffa_lock_lobby_slot` and
+    `main._ffa_advance_lobby_slot` directly, so the derivation, the lock and
+    the increment under test are the ones the endpoint runs.
+
+    Control (hand-run): drop `FOR UPDATE` from `_FFA_LOBBY_LOCK_SQL` and B
+    returns immediately with games_played = 0, deriving 1 exactly as A did."""
     require_pg()
-    lock_sql = _production_sql(r'"(SELECT \* FROM ffa_lobbies WHERE id = :lid[^"]*)"')
-    incr_sql = _production_sql(
-        r'"(UPDATE ffa_lobbies SET games_played = games_played \+ 1[^"]*)"')
 
     async def go():
         engine, sm, pids = await _setup([], games_played=0)
-        a = await _raw_pg()
-        b = await _raw_pg()
+        # Two SEPARATE sessions: two connections, two transactions.
+        a, b = sm(), sm()
         try:
-            await b.execute("SET lock_timeout = '10s'")
-            tx_a = a.transaction()
-            await tx_a.start()
-            row_a = await a.fetchrow(lock_sql, LOBBY)
-            expected_a = int(row_a["games_played"]) + 1
+            await b.execute(text("SET lock_timeout = '10s'"))
+            row_a, expected_a = await main._ffa_lock_lobby_slot(a, LOBBY)
 
-            tx_b = b.transaction()
-            await tx_b.start()
-            waiting = asyncio.create_task(b.fetchrow(lock_sql, LOBBY))
+            waiting = asyncio.create_task(main._ffa_lock_lobby_slot(b, LOBBY))
             await asyncio.sleep(0.5)
             blocked = not waiting.done()
 
-            # A settles its game and advances the sitting, in its own
-            # transaction, exactly as the endpoint does.
-            await a.execute(
+            # A settles its game and consumes the slot, in the SAME
+            # transaction as its lock, exactly as the endpoint does.
+            await a.execute(text(
                 "INSERT INTO ffa_matches (id, lobby_id, photon_room_id,"
                 " winner_id, ended_at, game_number) VALUES"
-                " ($1, $2, $3, $4, NOW(), $5)",
-                uuid.uuid4(), LOBBY, f"rm_211531_r{expected_a}", pids[S3],
-                expected_a)
-            await a.execute(incr_sql, LOBBY)
-            await tx_a.commit()
+                " (:i, :l, :r, :w, NOW(), CAST(:g AS SMALLINT))"),
+                {"i": uuid.uuid4(), "l": LOBBY,
+                 "r": f"rm_211531_r{expected_a}", "w": pids[S3],
+                 "g": expected_a})
+            await main._ffa_advance_lobby_slot(a, LOBBY)
+            await a.commit()
 
-            row_b = await asyncio.wait_for(waiting, 10)
-            expected_b = int(row_b["games_played"]) + 1
-            await tx_b.rollback()
+            _row_b, expected_b = await asyncio.wait_for(waiting, 10)
+            await b.rollback()
             # What B's own already-recorded lookup sees when its report still
             # carries A's number as its tail — production's statement, with
-            # production's typed binds.
-            found = await _prior(sm, [expected_b, expected_a])
+            # production's typed bind.
+            found = await _prior(sm, expected_a)
             return blocked, expected_a, expected_b, found
         finally:
             await a.close()
@@ -1464,6 +2094,37 @@ def test_pg_two_reports_for_one_lobby_cannot_settle_the_same_number():
     # The tail B would have carried for that same game is now behind its own
     # slot, and the rule refuses it outright when no row is there to compare.
     assert main._ffa_game_number_refusal(expected_a, expected_b) is not None
+
+
+def test_pg_a_refusal_carries_the_lobbys_progress_off_the_locked_row():
+    """The resync half of the same lock, as a live read.
+
+    Every refusal the report path raises answers with the lobby's authoritative
+    progress, and that progress comes off the row this transaction locked — so
+    what a refused client adopts is the committed counter, not a prediction of
+    it. RJ-CLIENT-RESYNC-CONTRACT.md is what consumes these three fields."""
+    require_pg()
+
+    async def go():
+        engine, sm, _ = await _setup([("rm_g1_r1", 1, 600, False),
+                                      ("rm_g2_r2", 2, 1300, False)],
+                                     games_played=2)
+        try:
+            async with sm() as db:
+                _row, expected = await main._ffa_lock_lobby_slot(db, LOBBY)
+                await db.rollback()
+            return expected
+        finally:
+            await engine.dispose()
+    expected = run(go())
+    progress = main._ffa_progress(expected - 1)
+    assert progress == {"games_played": 2, "expected_game": 3}
+    # A refusal about a number the lobby already holds says so, and names the
+    # settled game, which is what lets the client drop that outbox entry as
+    # terminal rather than retry it forever.
+    settled = main._ffa_progress(expected - 1, settled_game=2)
+    assert settled["settled_game"] == 2
+    assert settled["games_played"] == 2 and settled["expected_game"] == 3
 
 
 def test_pg_migration_327_numbers_every_row_and_rerunning_changes_nothing():
@@ -1581,13 +2242,22 @@ def test_pg_migration_327_post_check_fails_when_the_backfill_is_neutered():
     assert "derivable _rN tail" in why, why
 
 
-def test_pg_the_insert_trigger_refuses_rather_than_reusing_an_occupied_999():
-    """Control: trigger-clamps-999.
+def test_pg_the_trigger_never_hands_back_a_number_the_lobby_is_using():
+    """Controls: trigger-clamps-999, trigger-raises-on-a-full-tail.
 
-    `LEAST(MAX(game_number) + 1, 999)` is total against the CHECK and wrong:
-    it hands back a number the lobby is already using, so a writer that
-    supplied none would silently share a slot with a settled game. One above
-    the highest, and a named refusal when that leaves the domain."""
+    `LEAST(MAX(game_number) + 1, 999)` is total against the CHECK and wrong: it
+    hands back a number the lobby is already using, so a writer that supplied
+    none would silently share a slot with a settled game.
+
+    Round 3 replaced the clamp with a RAISE — correct about the collision and
+    wrong about the cost (#430). MAX+1 leaves the domain for any lobby holding
+    999, whatever else is free, and that lobby's next unnumbered insert then
+    reaches the pre-327 api as an HTTP 500: a settled game destroyed over a
+    number the lobby had 998 of. The arm now falls back to the lobby's LOWEST
+    FREE number, and only a lobby with no free number at all is refused.
+
+    Both arms, executed: the fallback lands on a free number, and the refusal
+    still fires when there is genuinely nothing left."""
     require_pg()
     sql = MIGRATION.read_text(encoding="utf-8")
     # The clamp is gone from the STATEMENTS; it survives only in the note that
@@ -1597,32 +2267,61 @@ def test_pg_the_insert_trigger_refuses_rather_than_reusing_an_occupied_999():
     assert "LEAST(" not in code
     assert "NEW.game_number := tail::SMALLINT;" in code
 
+    C3 = "00000000-0000-0000-0000-0000000000c3"
+    C4 = "00000000-0000-0000-0000-0000000000c4"
+
     async def go():
         conn = await _raw_pg()
         try:
             await conn.execute(MIGRATION_FIXTURE)
             await conn.execute(sql)
+            # Lobby c3 holds 999 and nothing else. MAX + 1 is 1000.
             await conn.execute(
                 "INSERT INTO ffa_matches (id, lobby_id, photon_room_id,"
                 " ended_at, game_number) VALUES (gen_random_uuid(),"
-                " '00000000-0000-0000-0000-0000000000c3', 'c3_r999', NOW(), 999)")
+                " $1, 'c3_r999', NOW(), 999)", C3)
+            await conn.execute(
+                "INSERT INTO ffa_matches (id, lobby_id, photon_room_id,"
+                " ended_at) VALUES (gen_random_uuid(), $1, 'c3_no_tail', NOW())",
+                C3)
+            fell_back = await conn.fetchrow(
+                "SELECT game_number, game_number_source FROM ffa_matches"
+                " WHERE photon_room_id = 'c3_no_tail'")
+            # ...and it is FREE, not a reuse: c3 now holds two distinct numbers.
+            distinct = await conn.fetchval(
+                "SELECT COUNT(DISTINCT game_number) FROM ffa_matches"
+                " WHERE lobby_id = $1", C3)
+            # Lobby c4 holds every number in 1..999: there is nothing to give.
+            await conn.execute(
+                "INSERT INTO ffa_matches (id, lobby_id, photon_room_id,"
+                " ended_at, game_number)"
+                " SELECT gen_random_uuid(), $1, 'c4_r' || n, NOW(),"
+                "        n::SMALLINT FROM generate_series(1, 999) AS n", C4)
             try:
                 await conn.execute(
                     "INSERT INTO ffa_matches (id, lobby_id, photon_room_id,"
-                    " ended_at) VALUES (gen_random_uuid(),"
-                    " '00000000-0000-0000-0000-0000000000c3', 'c3_no_tail', NOW())")
+                    " ended_at) VALUES (gen_random_uuid(), $1,"
+                    " 'c4_no_tail', NOW())", C4)
                 why = "accepted"
             except Exception as ex:
                 why = str(ex)
                 await _unwedge(conn)
             landed = await conn.fetchval(
-                "SELECT COUNT(*) FROM ffa_matches WHERE photon_room_id = 'c3_no_tail'")
-            return why, landed
+                "SELECT COUNT(*) FROM ffa_matches WHERE photon_room_id = 'c4_no_tail'")
+            return fell_back, distinct, why, landed
         finally:
             await conn.close()
 
-    why, landed = run(go())
-    assert "no number left inside 1..999" in why, why
+    fell_back, distinct, why, landed = run(go())
+    # The fallback: the lobby's lowest free number, flagged as neither the
+    # writer's nor the room id's.
+    assert int(fell_back["game_number"]) == 1
+    assert fell_back["game_number_source"] == "sequence"
+    assert distinct == 2                    # 999 and 1, not 999 twice
+    # The refusal, for the one input that has no answer — and it names the
+    # lobby rather than failing on the CHECK, so an operator reading it knows
+    # which sitting is full.
+    assert "holds every number in 1..999" in why, why
     assert landed == 0                      # refused, not clamped onto 999
 
 

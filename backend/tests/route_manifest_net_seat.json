@@ -3312,7 +3312,13 @@
         "849e9fbbdcee26f3f7307359f1134e1415b7ba5d"
       ]
     ],
-    "exception_handlers": [],
+    "exception_handlers": [
+      [
+        "main",
+        "_ffa_report_refusal_handler",
+        "85009c59afe0e0e45cb84d9fb06fd76fd81f28a5"
+      ]
+    ],
     "background_entry_points": [
       [
         "main",

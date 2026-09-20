@@ -492,13 +492,23 @@ def _middleware_entry_points():
 def _exception_handler_entry_points():
     """First-party exception handlers.
 
-    This app registers NONE today -- all three handlers on the app are
-    FastAPI's own -- so this returns an empty list, and the assertion that
-    keeps it honest is not "non-empty" (which would be a check that cannot
-    pass) but the one in the test below: the RAW handler set must be non-empty,
-    proving the recovery still sees handlers at all. The day a first-party
-    handler is registered it enters the manifest, and its absence there fails
-    the exhaustiveness assertion."""
+    The day predicted below arrived: RJ-4 registered
+    `main._ffa_report_refusal_handler` for `FfaReportRefusal`, and the
+    exhaustiveness assertion below caught it exactly as it was written to --
+    two red tests on a manifest nobody had edited, which is what a gate that
+    fails closed is for. It is a REQUEST-PATH surface: every FFA report
+    refusal is serialised by it, so its body shape is reviewed here and
+    fingerprinted like a route.
+
+    The assertion this replaces was "the section is empty". That was correct
+    while it was true and is now the wrong shape, because it would have to be
+    re-written for every handler ever added. What is asserted instead is the
+    property that made the old one safe: the RAW handler set must be non-empty,
+    proving the recovery still sees handlers at all, and the recovered
+    first-party set must equal the manifest -- which the generic loop already
+    checks for every section. A handler appearing or leaving therefore stays a
+    review item, answerable only by editing the manifest's identity list by
+    hand (repin_route_manifest.py refuses to do it)."""
     keys = []
     for handler in (getattr(main.app, "exception_handlers", None) or {}).values():
         key = _binding_key(handler)
@@ -1098,16 +1108,21 @@ def test_the_manifest_covers_every_non_route_entry_point():
         sorted(live["background_entry_points"])
     )
 
-    # This app registers no first-party exception handlers, so asserting that
-    # SECTION is non-empty would be a check that cannot pass. What must be
-    # non-empty is the raw recovery -- proof the mechanism still sees handlers
-    # at all, so that a first-party one added later is picked up rather than
-    # silently skipped.
+    # The raw recovery must be non-empty -- proof the mechanism still sees
+    # handlers at all, so that a first-party one added later is picked up
+    # rather than silently skipped. (FastAPI's own three are always there; the
+    # recovery keeps only the first-party ones, which is why this is asserted
+    # on the RAW set and not on the section.)
     raw_handlers = getattr(main.app, "exception_handlers", None) or {}
     assert raw_handlers, "the exception-handler recovery sees nothing at all"
-    assert live["exception_handlers"] == [], (
-        "a first-party exception handler was registered -- it belongs in the "
-        "manifest, and this assertion is the thing that says so"
+    # ...and the first-party set is what the manifest says it is. The generic
+    # loop below asserts that for every section; this names the one handler
+    # this app registers, so DELETING it from both the app and the manifest --
+    # which the loop would call agreement -- still reddens here.
+    assert live["exception_handlers"] == [("main", "_ffa_report_refusal_handler")], (
+        "the first-party exception-handler set changed. A handler is a "
+        "request-path surface: adding, removing or renaming one is a review "
+        "item, not a re-pin (repin_route_manifest.py refuses to do it)."
     )
 
     for section, entries in live.items():
