@@ -16,37 +16,50 @@ namespace CompetitiveRounds
     /// DealDamageToPlayer caches its victim on the first call
     /// (DealDamageToPlayer.cs:24,33-40) so the drain keeps landing on whoever was
     /// nearest the FIRST time the card ever fired. The cache is read straight off
-    /// the decompile and is not in doubt. The WIRING is: the persistent-call list
-    /// lives in a prefab inside an asset bundle, which the decompile cannot show,
-    /// so the link between the ring and the damage component is currently a
-    /// reading, not a measurement, and it has not been observed on the seat that
-    /// reports the bug (#405 — verify reachability before logic; #286 — do not
-    /// reason about a path without checking it is the one that runs).
+    /// the decompile and is not in doubt. The WIRING was the open question: the
+    /// persistent-call list lives in a serialized prefab, so the link between the
+    /// ring and the damage component was a reading, not a measurement, on the seat
+    /// that reports the bug (#405 — verify reachability before logic; #286 — do
+    /// not reason about a path without checking it is the one that runs).
     ///
-    /// This class measures it. It is a Postfix on PlayerInRangeTrigger.Start that
-    /// reads the event's persistent-call list and prints it once per distinct
-    /// wiring. It CHANGES NO BEHAVIOUR: it writes nothing, gates nothing, returns
-    /// nothing to vanilla, and every statement in it is inside a catch-all so a
-    /// diagnostic can never alter vanilla control flow.
+    /// This class measures it in a running game. It is a Postfix on
+    /// PlayerInRangeTrigger.Start that reads the event's persistent-call list and
+    /// prints it once per distinct wiring. It CHANGES NO BEHAVIOUR: it writes
+    /// nothing, gates nothing, returns nothing to vanilla, and every statement in
+    /// it is inside a catch-all so a diagnostic can never alter vanilla control
+    /// flow.
     ///
     /// It is deliberately UNGATED by mode or room (the same choice
     /// RadarVisualLifetimePatch documents): a log line cannot desynchronise a
     /// simulation, and gating a probe on the feature it is meant to characterise
     /// would inherit that feature's dead zone (#272). It IS bounded — see
-    /// Gate0WiringFormat.MaxWirings.
+    /// Gate0WiringFormat.MaxWirings, and the overflow is announced rather than
+    /// silent.
     ///
     /// ACCEPTANCE: in a real match where LIFESTEALER is picked, LogOutput.log
-    /// carries a SCR_GATE0_389=1 line whose path names A_Lifestealer and whose
-    /// call list names DealDamageToPlayer and Go. If it does not, section 2 of the
-    /// diagnosis is refuted and the diagnosis is redone. A_ChillingPresence is the
-    /// sibling ring logged at the same time, so one witness run characterises both.
+    /// carries a line matching
+    /// `SCR_GATE0_389=1.*A_Lifestealer.*DealDamageToPlayer\.Go`. The bare token on
+    /// its own is NOT the acceptance — it matches the sibling A_ChillingPresence
+    /// ring too. See Gate0WiringFormat.FormatWiring.
+    ///
+    /// WHAT THE IN-GAME RUN ADDS. The wiring question itself was settled offline
+    /// from the shipped assets (ai-collab/bugs/BUG389-GATE0-OFFLINE.md, CONFIRMED
+    /// by two independent passes: trigger 10029 on A_Lifestealer, 7 persistent
+    /// calls, [6] to DealDamageToPlayer.Go). What that read cannot show is
+    /// REACHABILITY — that this component starts, and this event carries that list,
+    /// on the seat that plays the match. That is what this probe measures, and it
+    /// is why it exists after the offline answer rather than instead of it.
     ///
     /// ATTACHMENT: a diagnostic patch can silently fail to attach and produce zero
-    /// data for release cycles (#83). Two defences: the target is resolved
-    /// explicitly and a miss THROWS, which the per-class patch loop in Plugin.cs
-    /// reports as "[HARMONY] Failed to patch Gate0TriggerWiringProbe"; and a
-    /// successful resolve prints SCR_GATE0_389_ATTACH=1, a positive signal that
-    /// separates "attached but never reached" from "never attached".
+    /// data for release cycles (#83). Two INDEPENDENT defences: the target is
+    /// resolved explicitly and a miss THROWS, which the per-class patch loop in
+    /// Plugin.cs reports as "[HARMONY] Failed to patch Gate0TriggerWiringProbe";
+    /// and SCR_GATE0_389_ATTACH=1 is emitted from [HarmonyCleanup] on a null
+    /// exception — i.e. only once Harmony has finished installing the wrapper.
+    /// Emitting it from TargetMethod() instead would time it at target RESOLUTION,
+    /// before the wrapper is generated, so a failure in that later step would print
+    /// the attach line and install nothing: the second defence would be a restating
+    /// of the first rather than independent of it.
     /// </summary>
     [HarmonyPatch]
     internal static class Gate0TriggerWiringProbe
@@ -56,6 +69,13 @@ namespace CompetitiveRounds
         /// budget is the whole answer and a per-room reset would only re-print what
         /// was already printed.</summary>
         internal const string DiagKey = "Gate0Wiring389";
+
+        /// <summary>A SEPARATE budget key for the overflow line, with a maximum of
+        /// one. It must not share DiagKey: by the time the cap overflows, DiagKey's
+        /// own budget is exhausted by construction, so an overflow line billed to it
+        /// could never be printed — the announcement would be swallowed by the very
+        /// exhaustion it exists to announce.</summary>
+        internal const string OverflowDiagKey = "Gate0Wiring389Overflow";
 
         private static readonly Gate0WiringBudget Budget = new Gate0WiringBudget();
 
@@ -71,14 +91,29 @@ namespace CompetitiveRounds
                 throw new MissingMethodException("PlayerInRangeTrigger", "Start");
             }
 
+            // Deliberately silent here. Resolving the target is not attaching to it;
+            // the attach signal belongs in Cleanup below.
+            return target;
+        }
+
+        /// <summary>The positive attach signal, on the same shape as the shipped
+        /// VanillaFixSupport.Cleanup patches. Harmony calls this once at class level
+        /// with a null `original` after the patch job has run; a null `exception`
+        /// there means the wrapper was generated and installed.</summary>
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
             try
             {
-                Plugin.Log.LogInfo("[VANILLA-DIAG] " + Gate0WiringFormat.AttachToken
-                    + " target=PlayerInRangeTrigger.Start bound=" + Gate0WiringFormat.MaxWirings);
+                if (exception == null)
+                {
+                    Plugin.Log.LogInfo("[VANILLA-DIAG] " + Gate0WiringFormat.AttachToken
+                        + " target=PlayerInRangeTrigger.Start bound=" + Gate0WiringFormat.MaxWirings);
+                }
             }
             catch { }
-
-            return target;
+            return exception;
         }
 
         /// <summary>Ancestor names from the trigger up to the root, bounded. The
@@ -116,16 +151,16 @@ namespace CompetitiveRounds
                 string path = AncestorPath(__instance.transform);
 
                 UnityEvent evt = __instance.triggerEvent;
-                // -1 is "the event field itself was null", which is a different
-                // observation from an event with an empty list. Do not collapse.
-                int count = -1;
+                // Three distinct observations, never collapsed: the event field was
+                // null; the count could not be read; the count is a number.
+                int count = Gate0WiringFormat.CountEventNull;
                 var targetTypes = new List<string>();
                 var methodNames = new List<string>();
 
                 if (evt != null)
                 {
                     try { count = evt.GetPersistentEventCount(); }
-                    catch { count = -1; }
+                    catch { count = Gate0WiringFormat.CountReadFailed; }
 
                     int listed = count;
                     if (listed > Gate0WiringFormat.MaxCallsPerEvent) listed = Gate0WiringFormat.MaxCallsPerEvent;
@@ -148,8 +183,24 @@ namespace CompetitiveRounds
                     }
                 }
 
-                // The bound, applied before the message is built.
-                if (!Budget.TryAdmit(Gate0WiringFormat.Signature(path, targetTypes, methodNames))) return;
+                // The bound, applied before the message is built. The count is part
+                // of the signature, so a degraded reading of a ring cannot suppress
+                // the healthy reading that the next round's re-instantiation brings.
+                if (!Budget.TryAdmit(Gate0WiringFormat.Signature(path, count, targetTypes, methodNames)))
+                {
+                    // Announce the cap exactly once. An absent wiring line otherwise
+                    // means both "the ring never started" and "the budget ran out
+                    // first", and the witness procedure gives the first one a
+                    // definite meaning (#342).
+                    if (Budget.TryClaimOverflowReport())
+                    {
+                        VanillaFixSupport.DiagLimited(
+                            OverflowDiagKey,
+                            Gate0WiringFormat.FormatOverflow(Budget.Admitted),
+                            1);
+                    }
+                    return;
+                }
 
                 VanillaFixSupport.DiagLimited(
                     DiagKey,
