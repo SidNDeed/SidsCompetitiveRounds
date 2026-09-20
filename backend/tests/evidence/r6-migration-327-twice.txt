@@ -19,7 +19,14 @@ What the run proves, in order:
     window produces, is numbered by the trigger from its room tail rather than
     refused.
 
-Script: ai-collab/r6-mig327-twice.sh (gitignored scratch).
+Instrument: backend/tests/evidence/migration-327-twice.sh, against the table in
+backend/tests/evidence/migration-327-fixture.sql. Round 6 ran this script from a
+gitignored scratch directory and named it there, which is a reference nobody
+reading this repository can follow (the round-7 finding on this file); round 7
+committed it, changed only in that its psql path, host, port and database now
+come from the environment instead of one machine's paths. The fixture is
+byte-identical to the one this run used and the row dump below is its output.
+The `<scratchpad>` in the line below is where that fixture then lived.
 
 ------------------------------------------------------------------------------
 NOTICE:  database "rj327r6" does not exist, skipping

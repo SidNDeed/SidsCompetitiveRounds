@@ -23,9 +23,15 @@ reporting each other's failures.
 
 == the difference, named ==
 opt-out skips 34, DSN skips 15: the 19 the DSN run executes are the
-PostgreSQL-gated checks listed in r6-postgresql-controls.txt.
+PostgreSQL-gated checks listed in r6-postgresql-controls.txt. That file selects
+THIRTY-FIVE tests, which is those 19 plus 16 that need no server -- the 13
+opt-out guard cases and 3 source checks it runs in the same selection on
+purpose, since they are what stops the other 19 turning into silent skips.
+19 + 16 = 35, stated here because the two numbers sat in two files.
 
 == failures in either run ==
-ai-collab/r6-suite-optout2.log:0
-ai-collab/r6-suite-dsn.log:0
-(0 and 0)
+Neither summary line above carries a `failed` term. pytest prints one whenever
+a run has any, so its absence from a line quoted verbatim IS the zero, and it
+is re-derivable from this file alone. Round 6 instead wrote the two counts as
+greps over logs under a gitignored directory, which is a number nobody reading
+this repository could check (the round-7 finding on this file).

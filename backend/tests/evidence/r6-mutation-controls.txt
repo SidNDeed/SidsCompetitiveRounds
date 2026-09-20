@@ -7,10 +7,17 @@ restored; an INERT edit is applied at the SAME site and the same test must
 PASS. A test that reddens for any edit at all measures a line's shape rather
 than the behaviour, which is what the negative control exists to catch (#391).
 
-Runner: ai-collab/r6-mutation-runner.py (gitignored scratch; the run it
-produced is this file). Files are restored from byte-exact in-memory copies,
-never with `git checkout --` or `git restore` (#290/#401), and the md5 of every
-touched file is compared before and after.
+Runner: backend/tests/evidence/mutation-runner.py. Round 6 ran it from a
+gitignored scratch directory and named it there, which is a reference nobody
+reading this repository can follow (the round-7 finding on this file); round 7
+committed it, with its repository root derived from its own location and its
+DSN taken from the environment, and carrying round 7's controls after these
+seven. All seven below are re-run there on the round-7 tree, so this file is
+the round-6 record and r7-mutation-controls.txt is the current one.
+
+Files are restored from byte-exact in-memory copies, never with
+`git checkout --` or `git restore` (#290/#401), and the md5 of every touched
+file is compared before and after.
 
 Control -> test:
   refund-clamps-the-delta              test_a_refund_moves_the_exact_stake_and_never_a_clamped_one

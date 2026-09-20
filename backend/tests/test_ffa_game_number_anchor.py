@@ -85,15 +85,18 @@ contradicts it is the same defect class as a comment asserting a guarantee the
 code does not supply, so the numbers here are the ones in the list, counted off
 it: 22 unmarked and still live (rounds 1 and 2), 1 unmarked and RETIRED because
 round 4 deleted the code it mutated (prior-tail-only, annotated in place), 16
-marked (r3), 15 marked (r4), 10 marked (r5), 7 marked (r6), and one more that
-is a committed test rather than a hand-run control (backfill-neutered, at the
-end). Rounds 4, 5 and 6's are the ones with a NEGATIVE control — an inert
-edit at the same site that must leave the same test GREEN — so each test is
-shown to redden for the mutation and not for any edit at all (#391); the
-runner, the red line of every mutant and the negative-control result for each
-are COMMITTED under backend/tests/evidence/, beside the executed PostgreSQL
-runs. Round 5 named two paths under a gitignored scratch directory instead,
-which is a reference nobody reading this repository can follow.
+marked (r3), 15 marked (r4), 10 marked (r5), 7 marked (r6), 7 marked (r7), and
+one more that is a committed test rather than a hand-run control
+(backfill-neutered, at the end). Rounds 4 through 7's are the ones with a
+NEGATIVE control — an inert edit at the same site that must leave the same
+test GREEN — so each test is shown to redden for the mutation and not for any
+edit at all (#391); the runner, the red line of every mutant and the
+negative-control result for each are COMMITTED under backend/tests/evidence/,
+beside the executed PostgreSQL runs. Round 5 named two paths under a gitignored
+scratch directory instead, which is a reference nobody reading this repository
+can follow — and round 6, having moved the artifacts into the repository, still
+sourced the suites' failure counts from one, which is what r7's
+evidence-cites-a-gitignored-path control now makes impossible.
 All KILLED:
 
   replay-echo-call-short (r5)  the endpoint: drop `_progress` from the
@@ -222,6 +225,27 @@ All KILLED:
   binding-sweep-posonly (r6)  _binding_failures: fold posonlyargs back into
                            `positional` before the keywords are tested, and
                            make one production def positional-only
+
+  refund-statement-never-executed (r7)  _return_stake_exactly: read the
+                           RETURNING as a VALUE (`if not moved`) rather than
+                           as a row, which only a live server can tell apart
+  refund-refusal-kills-the-queue (r7)  _flush_lobby_bet_refunds: the refusal
+                           arm back to `break`, i.e. round 6's shape
+  refund-refusal-kills-the-sweep (r7)  _prune_stale_series: the mode-2 call
+                           back to a bare _refund_series_bets
+  wager-lock-dropped-as-redundant (r7)  place_ffa_bet: drop its own FOR NO KEY
+                           UPDATE on the lobby row, on the deleted reading
+                           that the settlement lock no longer excludes wagers
+  relock-leaves-a-poisoned-transaction (r7)  _ffa_progress_relocked: drop the
+                           rollback from its handler
+  evidence-cites-a-gitignored-path (r7)  backend/tests/evidence: state a
+                           committed count as a grep over an ai-collab/ path
+  refusal-skips-without-ending-the-transaction (r7)  _refund_or_skip: drop the
+                           rollback, so the sweep takes the next series still
+                           holding this one's locks. Its test lives in
+                           test_report_disconnect_durability.py, which owns the
+                           prune sweep's shape -- the one control in this set
+                           that names a file other than this one.
 
 ...and one more that is a COMMITTED TEST rather than a hand-run control:
   backfill-neutered        327's room_tail backfill: WHERE FALSE. See
@@ -1523,6 +1547,7 @@ def test_the_control_tally_matches_the_list_it_sits_next_to():
         "r4": sum(1 for ln in entries if "(r4)" in ln),
         "r5": sum(1 for ln in entries if "(r5)" in ln),
         "r6": sum(1 for ln in entries if "(r6)" in ln),
+        "r7": sum(1 for ln in entries if "(r7)" in ln),
         "retired": sum(1 for ln in entries if "(retired)" in ln),
     }
     counted["plain"] = len(entries) - sum(counted.values())
@@ -1534,17 +1559,19 @@ def test_the_control_tally_matches_the_list_it_sits_next_to():
     claimed = re.search(
         r"counted off\s*\n?it: (\d+) unmarked and still live .*?(\d+) unmarked and RETIRED"
         r".*?(\d+)\s*\n?marked \(r3\), (\d+) marked \(r4\), (\d+) marked \(r5\),"
-        r" (\d+) marked \(r6\)",
+        r" (\d+) marked \(r6\), (\d+) marked \(r7\)",
         doc, re.S)
     assert claimed, "the docstring no longer states a tally in a readable form"
     want = tuple(int(g) for g in claimed.groups())
     have = (counted["plain"], counted["retired"],
-            counted["r3"], counted["r4"], counted["r5"], counted["r6"])
+            counted["r3"], counted["r4"], counted["r5"], counted["r6"],
+            counted["r7"])
     assert want == have, (
         f"the docstring's tally and its own list disagree: claimed {want}, "
         f"listed {have}")
     # ...and the list is not empty, or the whole check passes on nothing.
     assert counted["r4"] >= 10 and counted["r5"] >= 5 and counted["r6"] >= 5
+    assert counted["r7"] >= 5
     assert counted["plain"] >= 10
     # The evidence sentence names a path that EXISTS in this repository. Round
     # 5 pointed at two files under the gitignored ai-collab scratch, so the
@@ -1776,11 +1803,22 @@ def test_the_live_checks_cannot_be_skipped_by_a_missing_dsn_alone():
         globals()["DSN"], globals()["OPTOUT"] = saved_dsn, saved_opt
 
 
+# CASCADE on the players drop, and it is load-bearing rather than defensive.
+# MONEY_SCHEMA below builds a SECOND set of tables in the same scratch database
+# -- gold_transactions, lobby_bets, bets, ranked_series -- and every one of
+# them carries a foreign key to players. A plain DROP therefore succeeds on a
+# virgin database and raises DependentObjectsStillExistError on every run
+# after the first, which makes the live half of this file pass once per scratch
+# database and never again. That is not a hypothetical: it is what 14 of these
+# tests did on the second run, and it is why r7-postgresql-controls.txt runs
+# the whole selection TWICE against one database and quotes both summaries.
+# Dropping the constraints is harmless in both directions, because each schema
+# block drops and recreates its own tables before using them.
 SCHEMA = """
 DROP TABLE IF EXISTS ffa_match_players;
 DROP TABLE IF EXISTS ffa_matches;
 DROP TABLE IF EXISTS ffa_lobbies;
-DROP TABLE IF EXISTS players;
+DROP TABLE IF EXISTS players CASCADE;
 
 CREATE TABLE players (
     id UUID PRIMARY KEY,
@@ -3442,18 +3480,20 @@ def test_the_variant_scan_is_bounded_by_the_quota_it_claims():
 def test_the_lobby_lock_is_the_weakest_mode_that_still_conflicts_with_itself():
     """Control: settlement-takes-for-update (r6).
 
-    `ffa_bets.lobby_id` and `ffa_matches.lobby_id` both reference this row, so
-    every wager and every settled match takes FOR KEY SHARE on it - and FOR
-    KEY SHARE conflicts with exactly one mode, FOR UPDATE (#202/#203/#207).
-    The settlement holds the lobby through the INSERT, the rating/XP/gold pass
-    and, on a config skew, an unbounded strict refund, so the stronger mode
-    enrolled every concurrent bet insert in that wait for no benefit: nothing
-    in the settlement changes a KEY column of ffa_lobbies.
+    Take the WEAKEST mode that still conflicts with everything this
+    transaction has to exclude (#202/#203/#207). Nothing in the settlement
+    changes a KEY column of ffa_lobbies, so FOR UPDATE was strictly more than
+    it needed; what FOR NO KEY UPDATE still conflicts with - another of
+    itself, the games_played UPDATE, every FOR UPDATE taker - is what the
+    exclusion is actually made of, and
+    `test_pg_two_reports_for_one_lobby_cannot_settle_the_same_number` is the
+    executed half: RED when the lock is removed, GREEN under the weaker mode.
 
-    What the weaker mode still conflicts with is what the exclusion is made
-    of, and `test_pg_two_reports_for_one_lobby_cannot_settle_the_same_number`
-    is the executed half - it stays RED when the lock is removed and GREEN
-    under FOR NO KEY UPDATE."""
+    The BENEFIT half of round 6's justification - that the stronger mode had
+    made concurrent wagers wait for nothing - was false and is gone. It is
+    `test_a_wager_cannot_be_inserted_while_its_game_settles` (r7) that pins
+    the corrected reading and the explicit lock the false claim would have
+    licensed removing. This test keeps the mode; that one keeps the reason."""
     assert "FOR NO KEY UPDATE" in main._FFA_LOBBY_LOCK_SQL
     assert "FOR UPDATE" not in main._FFA_LOBBY_LOCK_SQL.replace(
         "FOR NO KEY UPDATE", "")
@@ -3617,3 +3657,463 @@ def test_every_round_six_control_names_a_test_that_exists():
                  "test_the_capture_note_no_longer_calls_every_conflict_a_retry",
                  "test_the_migration_header_says_the_tail_has_to_agree"):
         assert callable(getattr(mod, name, None)), name
+
+
+# ── round 7: what a refusal costs, executed rather than asserted ───────────
+
+# The money tables, declared as their own migrations declare them. Separate
+# from SCHEMA above because these tests are about gold and wagers rather than
+# about game numbers, and a test table that quietly widened a column would be
+# exercising a different write than production runs (the SCHEMA header's rule,
+# applied to a second set of tables).
+#
+# `players.gold_spent` is INTEGER NOT NULL DEFAULT 0 (020_economy.sql).
+# `gold_transactions.id` is BIGSERIAL because the ORM model declares
+# BigInteger autoincrement and SQLAlchemy asks for the generated value back.
+# `lobby_bets.id` is UUID (207_lobby_bets.sql), which is what the flush's
+# skip-list binds as `uuid[]`.
+MONEY_SCHEMA = """
+DROP TABLE IF EXISTS gold_transactions;
+DROP TABLE IF EXISTS lobby_bets;
+DROP TABLE IF EXISTS bets;
+DROP TABLE IF EXISTS tournament_matches;
+DROP TABLE IF EXISTS matches;
+DROP TABLE IF EXISTS ranked_series;
+DROP TABLE IF EXISTS players CASCADE;
+
+CREATE TABLE players (
+    id UUID PRIMARY KEY,
+    steam_id TEXT NOT NULL UNIQUE,
+    gold_earned INTEGER NOT NULL DEFAULT 0,
+    gold_spent INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE gold_transactions (
+    id BIGSERIAL PRIMARY KEY,
+    player_id UUID NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+    amount INTEGER NOT NULL,
+    reason VARCHAR(64) NOT NULL,
+    reference_id TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE lobby_bets (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    mode VARCHAR(8) NOT NULL,
+    lobby_id UUID NOT NULL,
+    player_id UUID NOT NULL REFERENCES players(id) ON DELETE CASCADE,
+    amount INTEGER NOT NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'open',
+    resolve_reason VARCHAR(48),
+    bound_bet_id UUID,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    resolved_at TIMESTAMPTZ
+);
+CREATE TABLE ranked_series (
+    id UUID PRIMARY KEY,
+    player1_id UUID REFERENCES players(id),
+    player2_id UUID REFERENCES players(id),
+    status VARCHAR(16) NOT NULL DEFAULT 'active',
+    is_tournament BOOLEAN NOT NULL DEFAULT FALSE,
+    p1_series_wins SMALLINT NOT NULL DEFAULT 0,
+    p2_series_wins SMALLINT NOT NULL DEFAULT 0,
+    invalidated_at TIMESTAMPTZ,
+    invalidation_reason VARCHAR(64),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE matches (
+    id UUID PRIMARY KEY,
+    series_id UUID REFERENCES ranked_series(id),
+    ended_at TIMESTAMPTZ
+);
+CREATE TABLE bets (
+    id BIGSERIAL PRIMARY KEY,
+    series_id UUID REFERENCES ranked_series(id),
+    player_id UUID NOT NULL REFERENCES players(id),
+    amount INTEGER NOT NULL,
+    payout INTEGER,
+    settlement_kind VARCHAR(16),
+    settled_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE tournament_matches (
+    id BIGSERIAL PRIMARY KEY,
+    series_id UUID REFERENCES ranked_series(id),
+    status VARCHAR(20) NOT NULL DEFAULT 'pending'
+);
+"""
+
+
+async def _money_setup(players):
+    """A scratch money schema plus `players`, each with the gold_spent it is
+    given. Returns (engine, sessionmaker, {steam_id: uuid})."""
+    engine = create_async_engine(require_pg())
+    sm = async_sessionmaker(engine, expire_on_commit=False)
+    async with engine.begin() as conn:
+        for stmt in [s for s in MONEY_SCHEMA.split(";") if s.strip()]:
+            await conn.execute(text(stmt))
+    pids = {}
+    async with sm() as db:
+        for steam, spent in players.items():
+            pids[steam] = uuid.uuid4()
+            await db.execute(text(
+                "INSERT INTO players (id, steam_id, gold_spent)"
+                " VALUES (:i, :s, CAST(:g AS integer))"),
+                {"i": pids[steam], "s": steam, "g": int(spent)})
+        await db.commit()
+    return engine, sm, pids
+
+
+async def _gold(sm, pid):
+    """(gold_spent, [ledger amounts]) for one player, read back committed."""
+    async with sm() as db:
+        spent = (await db.execute(text(
+            "SELECT gold_spent FROM players WHERE id = :i"), {"i": pid})).scalar()
+        ledger = (await db.execute(text(
+            "SELECT amount FROM gold_transactions WHERE player_id = :i"
+            " ORDER BY id"), {"i": pid})).scalars().all()
+    return spent, list(ledger)
+
+
+def test_pg_the_exact_refund_statement_runs_against_a_real_server():
+    """Control: refund-statement-never-executed (r7).
+
+    Round 6 closed the clamped-delta finding and pinned it with a source
+    substring plus a mock whose answer was a CONSTRUCTOR FLAG: `_RefundDb`
+    returns a row or None according to `covers=`, so the predicate
+    `COALESCE(gold_spent, 0) >= CAST(:amt AS integer)` and the
+    RETURNING-row-versus-None reading were never run by a database at all.
+    The recorded RED for that control came from the substring assertion, which
+    fires before the behavioural half is reached - so the statement could have
+    been wrong in either direction and the suite stayed green (#313/#340/#465:
+    not reviewed until it has RUN).
+
+    This runs it. Four questions, all about the statement rather than about
+    the loop that calls it:
+
+      1. a covered refund moves the balance by EXACTLY the stake and writes
+         exactly one ledger row for the same number;
+      2. a refund that takes the balance to exactly 0 SUCCEEDS - `0` is a real
+         balance and a falsy one, and reading the returned VALUE rather than
+         its presence is the bug this shape exists to make impossible;
+      3. an uncovered refund raises and writes NOTHING - no partial move, no
+         ledger row;
+      4. `:pid` takes both shapes its callers arrive with, a `uuid.UUID` off
+         an ORM row and a `str` off a mappings row, which is the claim the
+         docstring makes about why that one bind is deliberately untyped."""
+    require_pg()
+
+    async def go():
+        engine, sm, pids = await _money_setup({S1: 25, S2: 10, S3: 4})
+        try:
+            out = {}
+            # 1: exact move, exact ledger row. player_id as a UUID object.
+            async with sm() as db:
+                await main._return_stake_exactly(db, pids[S1], 10,
+                                                 reason="ffa_bet_refund",
+                                                 reference_id="ref-1")
+                await db.commit()
+            out["exact"] = await _gold(sm, pids[S1])
+
+            # 2: down to exactly 0, and player_id as a STRING this time.
+            async with sm() as db:
+                await main._return_stake_exactly(db, str(pids[S2]), 10,
+                                                 reason="ffa_bet_refund",
+                                                 reference_id="ref-2")
+                await db.commit()
+            out["to_zero"] = await _gold(sm, pids[S2])
+
+            # 3: the balance does not cover the stake the wager records.
+            async with sm() as db:
+                try:
+                    await main._return_stake_exactly(db, pids[S3], 10,
+                                                     reason="ffa_bet_refund",
+                                                     reference_id="ref-3")
+                    out["refused"] = None
+                except main.StakeRefundRefused as ex:
+                    out["refused"] = str(ex)
+                await db.rollback()
+            out["short"] = await _gold(sm, pids[S3])
+            return out
+        finally:
+            await engine.dispose()
+
+    got = run(go())
+    assert got["exact"] == (15, [10]), got["exact"]
+    assert got["to_zero"] == (0, [10]), got["to_zero"]
+    assert got["refused"] is not None, (
+        "a 10-gold refund against a 4-gold balance was not refused")
+    assert "does not cover the stake" in got["refused"]
+    assert got["short"] == (4, []), (
+        "a refused refund moved gold or wrote a ledger row")
+
+
+def test_pg_one_unpayable_wager_does_not_block_the_rest_of_the_queue():
+    """Control: refund-refusal-kills-the-queue (r7).
+
+    `_flush_lobby_bet_refunds` selects `ORDER BY created_at, id LIMIT 1` with
+    no exclusion of a row it has already failed on, so a single wager whose
+    owner's gold_spent cannot cover it sits at the head of the order forever.
+    Round 6's refusal turned that into a `break` after zero refunds: every
+    OTHER player's queued lobby-bet refund went unpaid, silently, one log line
+    per tick, for as long as that one row existed - while the function's own
+    docstring said a failure degrades to "skip it, the janitor retries".
+
+    Executed against a real server because the fix IS a SQL predicate: the
+    skip-list is `NOT (id = ANY(CAST(:skip AS uuid[])))` with a Python list
+    bound into it, including the EMPTY list on the first pass, and a bind that
+    does not round-trip would either select nothing or raise (#448/#391).
+
+    Both directions, because a queue that pays everyone and a queue that
+    refuses nobody look identical from outside: the same three wagers with the
+    head-of-queue owner made solvent must pay all three."""
+    require_pg()
+
+    async def go(head_can_pay):
+        engine, sm, pids = await _money_setup({
+            S1: 50 if head_can_pay else 0, S2: 50, S3: 50})
+        try:
+            lobby = uuid.uuid4()
+            async with sm() as db:
+                for i, steam in enumerate((S1, S2, S3)):
+                    await db.execute(text(
+                        "INSERT INTO lobby_bets (id, mode, lobby_id, player_id,"
+                        "        amount, status, resolved_at, created_at)"
+                        " VALUES (gen_random_uuid(), 'ffa', CAST(:l AS uuid),"
+                        "         :p, 10, 'refund_pending', NOW(),"
+                        "         NOW() - MAKE_INTERVAL(secs => CAST(:o AS int)))"),
+                        {"l": str(lobby), "p": pids[steam], "o": 300 - i * 60})
+                await db.commit()
+            async with sm() as db:
+                paid = await main._flush_lobby_bet_refunds(db)
+            states = {}
+            async with sm() as db:
+                for steam in (S1, S2, S3):
+                    states[steam] = (await db.execute(text(
+                        "SELECT status FROM lobby_bets WHERE player_id = :p"),
+                        {"p": pids[steam]})).scalar()
+            gold = {}
+            for steam in (S1, S2, S3):
+                gold[steam] = await _gold(sm, pids[steam])
+            return paid, states, gold
+        finally:
+            await engine.dispose()
+
+    # The head of the queue cannot be paid. Everybody else still is.
+    paid, states, gold = run(go(head_can_pay=False))
+    assert paid == 2, f"the queue stopped at the row it could not pay: {paid}"
+    assert states[S1] == "refund_pending", states[S1]
+    assert states[S2] == "refunded" and states[S3] == "refunded", states
+    assert gold[S1] == (0, []), gold[S1]
+    assert gold[S2] == (40, [10]) and gold[S3] == (40, [10]), gold
+
+    # Negative direction: nothing is being skipped for its own sake.
+    paid, states, gold = run(go(head_can_pay=True))
+    assert paid == 3, paid
+    assert set(states.values()) == {"refunded"}, states
+    assert gold[S1] == (40, [10]), gold[S1]
+
+
+def test_pg_one_unpayable_series_does_not_stop_the_stale_series_sweep():
+    """Control: refund-refusal-kills-the-sweep (r7).
+
+    `_refund_series_bets` can now raise, and round 6 left all three of its
+    call sites in `_prune_stale_series` unguarded. One bettor whose gold_spent
+    is below their stake therefore aborted the WHOLE pass out of the function:
+    the remaining mode-2 rows and the entire mode-1 abandon loop never ran,
+    and because the selects are ordered and unfiltered the next tick rebuilt
+    the same set in the same order and stopped at the same series. The sweep
+    was dead, for every other pair, for as long as that one row existed - the
+    opposite of the per-item degradation #204 asks for and the comment above
+    the loops claimed.
+
+    Mode 2 is the arm exercised here because its select carries `ORDER BY
+    rs.id`, so the unpayable series is deterministically FIRST and the test
+    cannot pass by luck of ordering. Both directions: with the same bettor
+    made solvent, both series are refunded."""
+    require_pg()
+
+    async def go(first_can_pay):
+        engine, sm, pids = await _money_setup({
+            S1: 50 if first_can_pay else 0, S2: 50, S3: 50})
+        try:
+            # Sorted by id, so the 0000... series is reached first.
+            bad = uuid.UUID("00000000-0000-4000-8000-000000000001")
+            good = uuid.UUID("ffffffff-0000-4000-8000-000000000002")
+            async with sm() as db:
+                for sid, bettor in ((bad, S1), (good, S2)):
+                    await db.execute(text(
+                        "INSERT INTO ranked_series (id, player1_id, player2_id,"
+                        "        status, is_tournament, created_at)"
+                        " VALUES (:i, :a, :b, 'active', FALSE,"
+                        "         NOW() - MAKE_INTERVAL(mins => 300))"),
+                        {"i": sid, "a": pids[S3], "b": pids[S2]})
+                    await db.execute(text(
+                        "INSERT INTO matches (id, series_id, ended_at)"
+                        " VALUES (gen_random_uuid(), :s,"
+                        "         NOW() - MAKE_INTERVAL(mins => 120))"),
+                        {"s": sid})
+                    await db.execute(text(
+                        "INSERT INTO bets (series_id, player_id, amount)"
+                        " VALUES (:s, :p, 10)"), {"s": sid, "p": pids[bettor]})
+                await db.commit()
+            async with sm() as db:
+                changed = await main._prune_stale_series(db)
+            async with sm() as db:
+                rows = (await db.execute(text(
+                    "SELECT series_id, settlement_kind FROM bets"))).all()
+            settled = {str(r[0]): r[1] for r in rows}
+            gold = {}
+            for steam in (S1, S2):
+                gold[steam] = await _gold(sm, pids[steam])
+            return changed, settled[str(bad)], settled[str(good)], gold
+        finally:
+            await engine.dispose()
+
+    changed, bad_kind, good_kind, gold = run(go(first_can_pay=False))
+    assert changed == 1, f"the sweep stopped at the series it could not pay: {changed}"
+    assert bad_kind is None, "an unpayable series was marked settled anyway"
+    assert good_kind == "refunded", good_kind
+    assert gold[S1] == (0, []), gold[S1]
+    assert gold[S2] == (40, [10]), gold[S2]
+
+    changed, bad_kind, good_kind, gold = run(go(first_can_pay=True))
+    assert changed == 2, changed
+    assert bad_kind == "refunded" and good_kind == "refunded"
+    assert gold[S1] == (40, [10]), gold[S1]
+
+
+def test_a_wager_cannot_be_inserted_while_its_game_settles():
+    """Control: wager-lock-dropped-as-redundant (r7).
+
+    The justification round 6 wrote for weakening the settlement lock said the
+    stronger mode had made "every concurrent bet insert on that lobby wait
+    behind all of it for no benefit". That is false, and the false half is the
+    dangerous one: the FK's FOR KEY SHARE is NOT what excludes a wager during
+    settlement, because both ffa_bets writers take an explicit lock on the
+    ffa_lobbies row FIRST - `place_ffa_bet` (the POST /api/v1/ffa/bets handler,
+    which this file and main.py's older comments call ffa_bet_place, a name no
+    identifier carries) its own FOR NO KEY UPDATE (which conflicts with FOR NO
+    KEY UPDATE exactly as it conflicted with FOR UPDATE), and the lobby-bet
+    bind under the Start's FOR UPDATE. Nothing was freed.
+
+    A reader who believed the deleted claim would drop `place_ffa_bet`'s lock
+    as redundant, and a wager could then be inserted for the game currently
+    settling - after `_refund_ffa_game_bets_strict` has taken its claim SELECT,
+    leaving that stake on a config-skewed game neither paid nor returned. So
+    this pins the lock, and pins that the comment no longer says the thing
+    that would license removing it (#432/#459: the highest-risk comment names
+    a mechanism a fix already killed)."""
+    src = pathlib.Path(main.__file__).read_text(encoding="utf-8")
+    place = src[src.index('@app.post("/api/v1/ffa/bets"'):]
+    place = place[:place.index("@app.", 10)]
+    assert "FROM ffa_lobbies WHERE id = :lid FOR NO KEY UPDATE" in place, (
+        "place_ffa_bet no longer takes its own lock on the lobby row")
+    lock_note = src[src.index("# FOR NO KEY UPDATE, not FOR UPDATE (#202/#203/#207)"):
+                    src.index("_FFA_LOBBY_LOCK_SQL =")]
+    # Measured on the FLATTENED comment, never on its lines. Round 6's one
+    # negative control that fired proved the point: an assertion over source
+    # as it is wrapped measures where the author broke the line, so reflowing
+    # a paragraph reddens a test about its meaning. Strip the comment markers
+    # and collapse the whitespace, and the sentence is the sentence.
+    flat = " ".join(ln.lstrip().lstrip("#").strip() for ln in lock_note.splitlines())
+    flat = " ".join(flat.split())
+    # The false benefit claim is gone...
+    assert "for no benefit" not in flat
+    assert "waited behind all of it" not in flat
+    # ...and what replaced it says out loud that no writer is freed, and that
+    # the other lock is load-bearing. A deletion that left the paragraph
+    # silent would let the next reader re-derive the same wrong conclusion.
+    assert "no writer is freed by this change" in flat
+    assert "IS LOAD-BEARING AND IS NOT REDUNDANT" in flat
+    assert "test_a_wager_cannot_be_inserted_while_its_game_settles" in flat
+
+
+def test_the_relock_leaves_a_transaction_the_next_read_can_run_in():
+    """Control: relock-leaves-a-poisoned-transaction (r7).
+
+    `_ffa_progress_relocked`'s docstring said "IT CANNOT ITSELF BE THE THING
+    THAT FAILS THE ANSWER" while its handler only swallowed the exception.
+    Under asyncpg one failed statement poisons the whole transaction (#235),
+    so on the replay arm a failed re-lock left the session aborted and the
+    very next statement - `_ffa_replay_echo`'s SELECT - raised into an
+    unhandled 500 carrying none of the progress the function exists to carry.
+    The guarantee was written from the arm where the catch is enough.
+
+    The rollback is what makes the sentence true, so the rollback is what is
+    pinned: inside the handler, before the fallback is returned, and itself
+    contained because a connection that is gone cannot be rolled back either -
+    which is the one residue the docstring now states rather than hides."""
+    relock = inspect.getsource(main._ffa_progress_relocked)
+    body = relock[relock.index("except Exception as _relock_ex:"):]
+    assert "await db.rollback()" in body[:body.index("return dict(fallback")], (
+        "the relock returns its fallback without clearing the failed statement")
+    assert "#235" in relock, "the docstring no longer names why the rollback is there"
+    # An absolute the code cannot keep is the defect class here, so the
+    # absolute form must not come back.
+    assert "IT CANNOT ITSELF BE THE THING THAT FAILS" not in relock
+    assert "IT MUST NOT ITSELF BE THE THING THAT FAILS" in relock
+    # The residue is stated, not implied.
+    assert "connection that is gone" in relock
+
+
+def test_the_committed_evidence_re_derives_its_own_numbers():
+    """Control: evidence-cites-a-gitignored-path (r7).
+
+    Round 6 committed four evidence files to answer round 4's "the artifacts
+    are named under a gitignored scratch directory" - and then stated the
+    load-bearing number of one of them, the failure count of each full suite,
+    as `ai-collab/<file>.log:0`. That is a grep count over a path that is not
+    in the repository, so a reader on a fresh clone cannot confirm the zero at
+    all: the finding was closed for the PostgreSQL subset and only narrated
+    for the suites (#302 - a claim that cannot be traced to something in the
+    repository is a finding, not a record).
+
+    The rule this pins is the general one rather than that one line: NOTHING
+    under evidence/ may point outside the repository, for a number or for the
+    instrument that produced one. Round 6 pointed at its runner and its
+    migration script that way too - less load-bearing than a count, and just
+    as unfollowable - so the close is to COMMIT the instruments beside the
+    output rather than to narrow the rule to counts. An evidence file quotes
+    the run it is evidence of, and names something a clone can open."""
+    evidence = pathlib.Path(__file__).resolve().parent / "evidence"
+    assert evidence.is_dir(), f"{evidence} is named by the inventory and absent"
+    files = sorted(p for p in evidence.iterdir() if p.is_file())
+    assert len(files) >= 4, [p.name for p in files]
+    reports = [p for p in files if p.suffix == ".txt"]
+    assert len(reports) >= 4, [p.name for p in reports]
+    for path in files:
+        body = path.read_text(encoding="utf-8", errors="replace")
+        assert "ai-collab/" not in body, (
+            f"{path.name} points at a gitignored path; evidence has to carry "
+            f"the output it is evidence of and name instruments a clone has")
+    for path in reports:
+        # ...and each report actually carries run output rather than prose.
+        body = path.read_text(encoding="utf-8", errors="replace")
+        assert re.search(r"\d+ passed|second run|rows identical|RED:", body), (
+            f"{path.name} states no executed result")
+    # The instruments are here too, or the reports cannot be re-derived.
+    names = {p.name for p in files}
+    assert any(n.endswith("mutation-runner.py") for n in names), sorted(names)
+
+
+def test_every_round_seven_control_names_a_test_that_exists():
+    """The same pairing for round 7."""
+    mod = sys.modules[__name__]
+    for name in ("test_pg_the_exact_refund_statement_runs_against_a_real_server",
+                 "test_pg_one_unpayable_wager_does_not_block_the_rest_of_the_queue",
+                 "test_pg_one_unpayable_series_does_not_stop_the_stale_series_sweep",
+                 "test_a_wager_cannot_be_inserted_while_its_game_settles",
+                 "test_the_relock_leaves_a_transaction_the_next_read_can_run_in",
+                 "test_the_committed_evidence_re_derives_its_own_numbers"):
+        assert callable(getattr(mod, name, None)), name
+    # One round-7 control names a test in ANOTHER file, because the property
+    # it guards belongs to the prune sweep's shape rather than to this file's
+    # subject. Checked by reading that file rather than importing it: a
+    # control whose test has been renamed away is a control that runs nothing,
+    # and the pairing has to cover the case that is easiest to lose.
+    neighbour = (pathlib.Path(__file__).resolve().parent
+                 / "test_report_disconnect_durability.py")
+    assert neighbour.is_file(), neighbour
+    assert ("def test_the_prune_batch_commits_per_series_so_it_cannot_hold_the_chain("
+            in neighbour.read_text(encoding="utf-8")), (
+        "the refusal-skips-without-ending-the-transaction control names a "
+        "test that is no longer in test_report_disconnect_durability.py")

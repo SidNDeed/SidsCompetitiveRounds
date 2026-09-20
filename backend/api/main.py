@@ -29479,6 +29479,19 @@ async def _set_active_cosmetic(db: AsyncSession, steam_id: str, kind: str, prefi
 
 # ── Routes: Betting + Live series ────────────────────────────
 
+class StakeRefundRefused(RuntimeError):
+    """One refund could not return the EXACT stake, so it returned nothing.
+
+    A subclass of RuntimeError, so every caller that already contains a
+    RuntimeError keeps containing it unchanged; a NAMED class because the two
+    BATCH sweeps have to tell this apart from a database-level failure. The
+    two say opposite things about the NEXT item: this refusal is about one
+    wager and every other row in the batch is unaffected, while a DBAPIError
+    or a lost connection is about the transaction and there is no next row to
+    try. A sweep that treats them alike either abandons a batch it could have
+    finished or spins against a connection that is gone."""
+
+
 async def _return_stake_exactly(db: AsyncSession, player_id, amount,
                                 *, reason: str, reference_id: str) -> None:
     """Return one refunded stake by the EXACT amount, or refuse and move nothing.
@@ -29499,32 +29512,67 @@ async def _return_stake_exactly(db: AsyncSession, player_id, amount,
     here.
 
     A balance that cannot cover the exact delta is a corrupt state, so this
-    RAISES rather than paying part of it. What a refusal costs is the CALLER's
-    to contain (#412), and the shape that lets every caller contain it is the
-    same in all five: the stake is CLAIMED by a conditional
-    `UPDATE ... RETURNING` in THIS transaction, and a raise here takes that
-    claim down with it. The wager goes back to unsettled and the next pass
-    finds it -- the janitor's next tick, the client's retry of a report that
-    changed nothing, or an operator repeating a reversal.
+    RAISES `StakeRefundRefused` rather than paying part of it. Every caller
+    CLAIMS the stake with a conditional `UPDATE ... RETURNING` in THIS
+    transaction, so the raise takes the claim down with it and the wager goes
+    back to unsettled for the next pass to find.
 
-    Both sweeps and request handlers reach it (the admin series and team
-    reversals, the admin void, the tournament and abandoned refunds, and the
-    lobby-bet cancel endpoint); a request handler surfaces the refusal as a
-    500 over a claim that rolled back, which is the conservative direction.
-    Callers that savepoint around their own batch lose that batch and no more.
+    WHAT A REFUSAL COSTS IS THE THING TO JUDGE IT BY (#430), and it is not the
+    same at the four kinds of call site. Each is named from a resolved caller
+    rather than covered by one sentence, because the first draft of this list
+    was written from the shape it expected and got two of them wrong:
+
+      * AN UNGUARDED REQUEST HANDLER -- `admin_reverse_series` through
+        `_refund_series_bets`, and `cancel_lobby_bet` through
+        `_lobby_bet_pay_refund` -- surfaces it as a 500 over a transaction
+        that rolled back. Nothing moved, the operator or the bettor retries,
+        and that is the conservative direction.
+      * THE CONFIG-SKEW SETTLEMENT does better and deliberately: it catches
+        the refusal and re-raises it as a 503 `FfaReportRefusal` carrying the
+        lobby's progress, so the client's outbox RETRIES a report that
+        changed nothing instead of spending it on a 4xx. The settlement does
+        not commit either way.
+      * A SAVEPOINTED BATCH (`_refund_lobby_bets`, `_refund_ffa_lobby_bets`,
+        `_reconcile_team_series_bets`, and so the team reversal that calls the
+        last of them) loses its own batch and nothing outside it; the caller's
+        disband, leave or reversal still commits and the janitor retries.
+      * A BATCH SWEEP over rows belonging to DIFFERENT players
+        (`_flush_lobby_bet_refunds`, `_prune_stale_series`) must SKIP the
+        refused item and keep going. This is why the refusal has its own
+        class: those two select their work ordered and unfiltered, so a single
+        uncoverable row at the head of the order is a permanent block on every
+        other player's refund if the sweep stops at it. Both now record the
+        item, log it and take the next one, which is the per-item degradation
+        #204 asks for -- and neither treats a DBAPI failure that way, because
+        there is no next row to take when the transaction itself is gone.
+
+    The per-bettor loop inside `_refund_series_bets` is not a fifth shape: its
+    claim covers every bettor of one series in one statement, so a refusal
+    there is that series, atomically, and it is the caller above it that
+    decides what the series costs.
 
     The ledger row is added AFTER the balance has moved, so neither half of
     the record can be committed without the other, whichever path called.
 
     It writes the ledger row itself, so no caller can keep one half of the
-    record without the other."""
+    record without the other.
+
+    `:amt` is CAST and `:pid` deliberately is NOT, which is the one place this
+    file departs from "type every bind" (#448) and it departs for a reason the
+    live control proves rather than asserts. Compared against `id`, the
+    parameter is typed by that column, and the driver then accepts both shapes
+    callers arrive with -- a `UUID` off an ORM row and a `str` off a mappings
+    row. Wrapping it as `CAST(:pid AS uuid)` retypes the parameter itself to
+    text, and every `UUID`-passing caller becomes a driver type error at the
+    moment a refund is due. Whichever way it is written, the column is never
+    the thing cast: casting `id` is what turns this into a sequential scan."""
     moved = (await db.execute(text(
         "UPDATE players SET gold_spent = COALESCE(gold_spent, 0) - CAST(:amt AS integer)"
         " WHERE id = :pid AND COALESCE(gold_spent, 0) >= CAST(:amt AS integer)"
         " RETURNING gold_spent"
     ), {"amt": int(amount), "pid": player_id})).scalar()
     if moved is None:
-        raise RuntimeError(
+        raise StakeRefundRefused(
             f"refund of {int(amount)} gold to player {player_id} ({reason}) was "
             f"refused: the balance does not cover the stake the wager records, "
             f"so no gold and no ledger row were written")
@@ -29684,9 +29732,43 @@ async def _prune_stale_series(db: AsyncSession) -> int:
     # selection predicate before writing (mode 1 gained that in r13 — until then
     # it decided from the unlocked snapshot and overwrote whatever had arrived),
     # _refund_series_bets claims the rows it pays, and a mode-1 abandon takes the
-    # series out of the 'active' predicate this job selects on. A failure
-    # mid-batch now leaves the items before it committed and the rest for the
-    # next call, which is the degradation #204 asks for.
+    # series out of the 'active' predicate this job selects on.
+    #
+    # Committing per item is only half of what #204 asks for, though: the other
+    # half is that one item's failure must not END the pass. A refund can now
+    # REFUSE (StakeRefundRefused — one bettor's gold_spent does not cover the
+    # stake their wager records), and an unguarded call let that refusal
+    # propagate out of this function entirely, so the remaining mode-2 rows and
+    # the WHOLE mode-1 abandon loop never ran. The three selects above are
+    # ordered and unfiltered, so the next tick rebuilds the same sets in the
+    # same order and stops at the same series: the sweep is dead, for every
+    # OTHER pair, for as long as that one bettor's row exists. `_refund_or_skip`
+    # is where that is contained — it is the only failure kind this sweep can
+    # take a next item after, so it is the only one it catches.
+    async def _refund_or_skip(_sid, _reason: str):
+        """This series' refund, contained at the ITEM boundary.
+
+        The count on success, or None when this series could not be paid and
+        the sweep should move to the next one. On None the transaction has
+        been rolled back, so the caller must NOT commit: the series keeps
+        every row it had, including — for mode 1 — the 'active' status whose
+        abandonment shares that transaction. Nothing half-done, nothing
+        marked, nothing to un-mark; the next tick simply tries again.
+
+        Only the refusal. A DBAPI-level failure is about the transaction and
+        not about this series, there is no next item to take, and it
+        propagates as it did before."""
+        try:
+            return await _refund_series_bets(db, _sid, _reason)
+        except StakeRefundRefused as _refusal:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            print(f"[SERIES] stale-series sweep could not refund {_sid} and "
+                  f"left it exactly as it was; the sweep continues: {_refusal}")
+            return None
+
     for sid, player1_id, player2_id in stale_rows_c:
         await _assert_no_service_subject(
             db, affected_player_ids=[player1_id, player2_id])
@@ -29704,7 +29786,9 @@ async def _prune_stale_series(db: AsyncSession) -> int:
         if _still_c is None:
             await db.commit()
             continue
-        n = await _refund_series_bets(db, sid, "refund_tournament_forfeit")
+        n = await _refund_or_skip(sid, "refund_tournament_forfeit")
+        if n is None:
+            continue
         await db.commit()
         if n:
             changed += 1
@@ -29746,7 +29830,9 @@ async def _prune_stale_series(db: AsyncSession) -> int:
         if _still_b is None:
             await db.commit()
             continue
-        n = await _refund_series_bets(db, sid, "refund_abandoned")
+        n = await _refund_or_skip(sid, "refund_abandoned")
+        if n is None:
+            continue
         await db.commit()
         if n:
             changed += 1
@@ -29783,7 +29869,12 @@ async def _prune_stale_series(db: AsyncSession) -> int:
         if _still_a is None:
             await db.commit()
             continue
-        n = await _refund_series_bets(db, sid, "refund_abandoned")
+        n = await _refund_or_skip(sid, "refund_abandoned")
+        if n is None:
+            # The abandon shares this series' transaction with its refund, so
+            # a refused refund leaves the row 'active' rather than abandoning
+            # a series whose stakes are still out. Conservative, and retried.
+            continue
         await db.execute(text(
             "UPDATE ranked_series SET status = 'abandoned', "
             "  invalidated_at = NOW(), invalidation_reason = :reason "
@@ -47127,18 +47218,40 @@ async def _ffa_poll_locked_payload(db: AsyncSession, lobby_id, steam_id: str) ->
 # and `test_the_lock_the_derivation_and_the_increment_are_one_transaction`
 # pins that the endpoint keeps them in one.
 #
-# FOR NO KEY UPDATE, not FOR UPDATE (#202/#203/#207), for the same reason
-# ffa_bet_place already gives: ffa_bets.lobby_id and ffa_matches.lobby_id both
-# reference this row, so every wager and every settled match takes FOR KEY
-# SHARE on it, and FOR KEY SHARE conflicts with exactly one mode -- FOR UPDATE.
-# The settlement holds this lock through the INSERT, the rating/XP/gold pass
-# and, on a config skew, an unbounded strict refund, and under the stronger
-# mode every concurrent bet insert on that lobby waited behind all of it for
-# no benefit: the settlement never changes a KEY column of ffa_lobbies (the
-# only one is `id`). What the weaker mode still conflicts with is what the
-# mutual exclusion is actually made of -- another FOR NO KEY UPDATE, the
-# `games_played` UPDATE below, and every FOR UPDATE taker on this table -- so
-# two settlements of one lobby serialise exactly as before.
+# FOR NO KEY UPDATE, not FOR UPDATE (#202/#203/#207): take the WEAKEST mode
+# that still conflicts with everything this transaction has to exclude, and
+# nothing broader. The settlement never changes a KEY column of ffa_lobbies
+# (the only one is `id`), so FOR UPDATE was strictly more than it needed. What
+# the weaker mode still conflicts with is what the mutual exclusion is
+# actually made of -- another FOR NO KEY UPDATE, the `games_played` UPDATE
+# below, and every FOR UPDATE taker on this table -- so two settlements of one
+# lobby serialise exactly as before.
+#
+# WHAT IT DOES NOT DO IS FREE A CONCURRENT WAGER, and an earlier draft of this
+# comment claimed it did. ffa_bets.lobby_id and ffa_matches.lobby_id do both
+# reference this row, so every INSERT into either takes FOR KEY SHARE on it,
+# and FOR KEY SHARE conflicts with exactly one mode -- FOR UPDATE. But the FK's
+# lock is not what excludes those writers today: BOTH ffa_bets inserters take
+# an explicit lock on this same row first. `place_ffa_bet` -- the
+# `POST /api/v1/ffa/bets` handler, which the older comments in this file call
+# ffa_bet_place, a name no identifier here actually carries -- takes FOR NO KEY
+# UPDATE (which conflicts with FOR NO KEY UPDATE just as it conflicted with FOR
+# UPDATE), and the lobby-bet bind (`_bind_one_lobby_bet`, under
+# `_bind_lobby_bets`) runs inside ffa_lobby_start, below the group lock --
+# _lock_queue_group_for_player takes `SELECT 1 FROM ffa_lobbies WHERE id =
+# :sid FOR UPDATE` on the caller's lobby, and the Start binds that lobby.
+# (That second one was checked rather than assumed: the queue-leave path's
+# FOR UPDATE on this table is a different endpoint and does not cover the
+# bind.) So no writer is freed by this change, and the benefit of the weaker
+# mode here is the standing one: a lock no wider than the write it protects,
+# and no hazard added if an FK-only ffa_bets writer is ever introduced.
+#
+# THE EXPLICIT LOCK IN place_ffa_bet IS LOAD-BEARING AND IS NOT REDUNDANT WITH
+# THIS ONE. It is what stops a wager being inserted for the game currently
+# settling -- specifically after _refund_ffa_game_bets_strict has taken its
+# claim SELECT, which would leave that stake on a config-skewed game neither
+# paid nor returned. `test_a_wager_cannot_be_inserted_while_its_game_settles`
+# pins it, because a reader who believed the deleted claim above would drop it.
 _FFA_LOBBY_LOCK_SQL = "SELECT * FROM ffa_lobbies WHERE id = :lid FOR NO KEY UPDATE"
 _FFA_LOBBY_ADVANCE_SQL = "UPDATE ffa_lobbies SET games_played = games_played + 1 WHERE id = :lid"
 # The highest number this lobby actually HOLDS a row for, and the statement
@@ -47334,19 +47447,36 @@ async def _ffa_progress_relocked(db: AsyncSession, lobby_uuid, fallback: dict) -
     which would let `settled_game` name a number `expected_game` had not
     passed).
 
-    IT CANNOT ITSELF BE THE THING THAT FAILS THE ANSWER. It is called on paths
-    that are already refusing, and a re-read that raised there would replace a
-    refusal carrying the progress with a bare 500 carrying nothing -- the exact
-    outcome. So a failure falls back to the caller's pre-rollback copy, which
-    is the committed state as of the lock and can only be STALE-LOW: it names a
-    number at or below the sitting's real position, and a report naming a
-    settled number is answered terminally with the right number next time. The
-    same fallback covers a lobby row that is gone by now, where
-    _ffa_lock_lobby_slot has no row to derive from and 'games_played = 0'
-    would be an invention rather than a reading."""
+    IT MUST NOT ITSELF BE THE THING THAT FAILS THE ANSWER. It is called on
+    paths that are already refusing, and a re-read that raised there would
+    replace a refusal carrying the progress with a bare 500 carrying nothing
+    -- the exact outcome. So a failure falls back to the caller's pre-rollback
+    copy, which is the committed state as of the lock and can only be
+    STALE-LOW: it names a number at or below the sitting's real position, and a
+    report naming a settled number is answered terminally with the right number
+    next time. The same fallback covers a lobby row that is gone by now, where
+    _ffa_lock_lobby_slot has no row to derive from and 'games_played = 0' would
+    be an invention rather than a reading.
+
+    SWALLOWING THE EXCEPTION IS NOT BY ITSELF ENOUGH TO KEEP THAT PROMISE, and
+    an earlier draft of this docstring stated it as an absolute while the code
+    could still break it. Under asyncpg one failed statement poisons the whole
+    transaction (#235), so a catch that returns the fallback and leaves the
+    transaction aborted only moves the failure one statement along: on the
+    replay arm the very next statement is _ffa_replay_echo's SELECT, which
+    would then raise and answer the bare 500 this function exists to remove.
+    The rollback below is what makes the sentence true -- it puts the session
+    back in a state the caller's remaining reads can run in. The one residue
+    left is a connection that is gone, where the rollback cannot succeed
+    either; nothing in this process can answer over that, and it is a stated
+    residue rather than a silent one."""
     try:
         _lobby, _expected = await _ffa_lock_lobby_slot(db, lobby_uuid)
     except Exception as _relock_ex:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
         print(f"[FFA-REPORT] could not re-read lobby {lobby_uuid} progress after "
               f"a rollback; answering with the locked snapshot: {_relock_ex}")
         return dict(fallback or {})
@@ -50300,15 +50430,35 @@ async def _flush_lobby_bet_refunds(db: AsyncSession, mode: str | None = None,
     players row, and holding N of them while working on the next is exactly
     the hold-and-wait shape that deadlocks against a live settle crediting a
     bettor outside our lock set (#204). A transaction that holds at most one
-    row of a class can never be the middle of a wait chain, and a failure
-    degrades to "skip it, the janitor retries" instead of losing the batch.
+    row of a class can never be the middle of a wait chain.
+
+    THE TWO WAYS A PASS CAN FAIL ARE NOT THE SAME FAILURE, and the queue this
+    walks belongs to many different players, so getting that wrong is one
+    player's broken row deciding whether anybody else is paid:
+
+      * `StakeRefundRefused` is about ONE wager -- that player's gold_spent
+        does not cover the stake this row records. The row is rolled back to
+        refund_pending, recorded in `refused`, EXCLUDED from this pass's
+        remaining selects, and the sweep takes the next wager. Without that
+        exclusion the select's `ORDER BY created_at, id` hands back the same
+        head-of-queue row every time, so stopping at it would have blocked
+        every other player's refund for as long as the row existed -- one log
+        line per tick and no refunds at all. The skip is per PASS, never
+        persisted: the next tick retries the row once (one cheap rolled-back
+        transaction) and skips it again, so an operator correction to the
+        balance is picked up without anything having to be un-marked.
+      * Anything else is about the TRANSACTION -- a lost connection, a
+        statement timeout, a deadlock abort. There is no next row to take, so
+        the pass stops and the janitor retries the whole queue.
 
     Called post-commit by each Start (scoped to that lobby) and by the janitor
     (unscoped, with an age floor). Never raises."""
     if mode is not None and mode not in _LOBBY_BET_PARENT:
         return 0
     n = 0
+    refused: list[str] = []
     for _ in range(max(1, int(limit))):
+        row = None
         try:
             row = (await db.execute(text("""
                 SELECT id, lobby_id FROM lobby_bets
@@ -50318,11 +50468,13 @@ async def _flush_lobby_bet_refunds(db: AsyncSession, mode: str | None = None,
                    AND (CAST(:age AS int) IS NULL
                         OR COALESCE(resolved_at, created_at)
                            < NOW() - MAKE_INTERVAL(secs => CAST(:age AS int)))
+                   AND NOT (id = ANY(CAST(:skip AS uuid[])))
                  ORDER BY created_at, id
                  LIMIT 1
                  FOR NO KEY UPDATE SKIP LOCKED
             """), {"m": mode, "l": str(lobby_id) if lobby_id is not None else None,
-                   "age": int(older_than_seconds) if older_than_seconds is not None else None
+                   "age": int(older_than_seconds) if older_than_seconds is not None else None,
+                   "skip": refused,
                    })).mappings().first()
             if row is None:
                 await db.commit()
@@ -50331,6 +50483,24 @@ async def _flush_lobby_bet_refunds(db: AsyncSession, mode: str | None = None,
             await db.commit()
             if paid:
                 n += 1
+        except StakeRefundRefused as ex:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            if row is None:
+                # Unreachable by construction -- only the pay call raises this
+                # class and it runs below the select -- and written as a stop
+                # rather than an assumption, because the alternative to a row
+                # id is an unbounded loop over the same select.
+                print(f"[LOBBY-BETS] refund flush refused with no row in hand "
+                      f"({mode}/{lobby_id}): {ex}")
+                break
+            refused.append(str(row["id"]))
+            print(f"[LOBBY-BETS] wager {row['id']} cannot be paid and was left "
+                  f"refund_pending ({mode}/{lobby_id}); the rest of the queue "
+                  f"continues: {ex}")
+            continue
         except Exception as ex:
             try:
                 await db.rollback()
@@ -50338,6 +50508,9 @@ async def _flush_lobby_bet_refunds(db: AsyncSession, mode: str | None = None,
                 pass
             print(f"[LOBBY-BETS] refund flush stopped early ({mode}/{lobby_id}): {ex}")
             break
+    if refused:
+        print(f"[LOBBY-BETS] {len(refused)} wager(s) refused payment this pass "
+              f"and stay refund_pending: {', '.join(refused)}")
     if n:
         print(f"[LOBBY-BETS] refunded {n} lobby wager(s)")
     return n
