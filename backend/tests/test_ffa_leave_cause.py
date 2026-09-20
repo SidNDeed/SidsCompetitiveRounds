@@ -322,13 +322,63 @@ def test_both_renderers_emit_the_qualifier(renderer):
 
 # ── (4) the capability ───────────────────────────────────────────────────
 
+def test_the_capability_field_is_spelled_the_way_the_client_reads_it():
+    """The wire NAME, pinned byte-for-byte. This is the whole of the contract
+    the first build of this lane got wrong.
+
+    The server advertised `involuntary_leave_cause`; the client asks for
+    `ffa_involuntary_cause` (plugin/TransportExit.cs, `CapabilityField`, read
+    into ExtractJsonBool at the startup version check). Both lanes were green
+    — each asserted its OWN key — and the gate could never open, so every
+    column, writer and renderer this bug added was live and completely inert.
+    The only thing that can catch that is a test that states the literal the
+    OTHER side reads, which is what this line is. Changing either side's
+    spelling without changing the other must redden here.
+
+    A hardcoded literal is normally the shape of a check that cannot fail
+    (#342). For a WIRE name it is the opposite: the literal IS the contract,
+    it is not derived from anything, and an assertion against the constant
+    that feeds the route is the only thing standing between a one-character
+    rename and a silent re-run of #438/#443.
+    """
+    assert main._INVOLUNTARY_CAUSE_CAPABILITY_FIELD == "ffa_involuntary_cause"
+    assert main._INVOLUNTARY_CAUSE_CAPABILITY_ALIAS == "involuntary_leave_cause"
+
+
 def test_mod_version_advertises_the_capability():
     """The client reads this route at startup; it is the ordering gate."""
     payload = asyncio.run(main.get_mod_version())
-    assert payload["involuntary_leave_cause"] is True
+    assert payload[main._INVOLUNTARY_CAUSE_CAPABILITY_FIELD] is True
     # The control: the fields the existing client already parses are still there.
     assert payload["version"] == main.LATEST_MOD_VERSION
     assert payload["min_version"] == main.MIN_MOD_VERSION_EFFECTIVE
+
+
+def test_the_route_takes_its_field_name_from_the_pinned_constant(monkeypatch):
+    """The other half of the pin, and the mutation that reddens it.
+
+    The test above pins the constant; this one proves the ROUTE is bound to
+    that constant rather than to a literal typed again in the handler — if it
+    were, the pin would guard a name nothing on the wire uses. Renaming the
+    constant must rename the wire field, and must leave the old name absent.
+    """
+    monkeypatch.setattr(main, "_INVOLUNTARY_CAUSE_CAPABILITY_FIELD", "zz_probe_field")
+    payload = asyncio.run(main.get_mod_version())
+    assert "zz_probe_field" in payload
+    assert "ffa_involuntary_cause" not in payload
+
+
+def test_the_alias_can_never_carry_a_different_value(monkeypatch):
+    """Two keys for one boolean is a transitional state, not a second source
+    of truth. They are bound from one expression, so they cannot drift — in
+    either direction, which is why the false case is asserted too."""
+    for vocab, expected in ((main._INVOLUNTARY_EXIT_CAUSES, True),
+                            (frozenset(), False)):
+        monkeypatch.setattr(main, "_INVOLUNTARY_EXIT_CAUSES", vocab)
+        payload = asyncio.run(main.get_mod_version())
+        canonical = payload[main._INVOLUNTARY_CAUSE_CAPABILITY_FIELD]
+        alias = payload[main._INVOLUNTARY_CAUSE_CAPABILITY_ALIAS]
+        assert canonical is expected and alias is expected
 
 
 def test_the_capability_can_go_false(monkeypatch):
@@ -338,16 +388,108 @@ def test_the_capability_can_go_false(monkeypatch):
     the vocabulary and the advertisement must follow — which is only possible
     because the value is derived from the same set the handlers read.
     """
+    field = main._INVOLUNTARY_CAUSE_CAPABILITY_FIELD
     monkeypatch.setattr(main, "_INVOLUNTARY_EXIT_CAUSES", frozenset())
-    assert asyncio.run(main.get_mod_version())["involuntary_leave_cause"] is False
+    assert asyncio.run(main.get_mod_version())[field] is False
 
     # And a vocabulary where the involuntary tag is NOT in-room — the shape
     # that would un-veto dissolution — must also refuse to advertise.
     monkeypatch.setattr(main, "_INVOLUNTARY_EXIT_CAUSES", frozenset({"not_in_room"}))
-    assert asyncio.run(main.get_mod_version())["involuntary_leave_cause"] is False
+    assert asyncio.run(main.get_mod_version())[field] is False
 
 
 def test_mod_version_stays_outside_the_version_gate():
     """The capability is useless if the client cannot read it before it has
     proved its version — the route must stay on the bypass list."""
     assert "/api/v1/mod-version" in main._VERSION_GATE_BYPASS
+
+
+# ── (5) what may be STORED (lens find 7) ─────────────────────────────────
+
+@pytest.mark.parametrize("cause", sorted(main._IN_ROOM_EXIT_CAUSES))
+def test_the_vocabulary_is_storable(cause):
+    """Both in-room tags, not just the involuntary one. A recorded
+    `in_room_exit` occupies the slot first-attestation-wins protects, so a
+    seat that has attested a chosen exit cannot follow it with a transport
+    claim — narrowing storage to the involuntary tag would have handed that
+    slot to the later claim (#283)."""
+    assert main._persistable_exit_cause(cause) == cause
+
+
+@pytest.mark.parametrize("cause", ["", None, "fresh_cancel", "whatever_16ch",
+                                   "in_room_exit ", "IN_ROOM_EXIT", "{}"])
+def test_everything_outside_the_vocabulary_stores_nothing(cause):
+    """The route's `max_length=16` was the only filter, which made the column
+    a client-writable free-text map keyed by player id while the migration
+    described its values as the wire vocabulary. Anything unrecognised now
+    stores nothing, which reads downstream as "no cause recorded" — today's
+    behaviour for every client, and the direction that costs only the label."""
+    assert main._persistable_exit_cause(cause) == ""
+
+
+def test_every_cause_writer_binds_the_narrowed_value():
+    """The class check (#432): not "the helper exists" but "no writer can
+    bind anything else". Counted within the FUNCTION span, and the count is
+    asserted — a fourth writer added later without the narrowing reddens
+    here rather than quietly storing raw client text.
+    """
+    fn = _function("ffa_queue_leave")
+    binds = [(d.lineno, v) for d in ast.walk(fn) if isinstance(d, ast.Dict)
+             for k, v in zip(d.keys, d.values)
+             if isinstance(k, ast.Constant) and k.value == "cause"]
+    assert len(binds) == 3, f"expected the three departure writers, found {len(binds)}"
+    for lineno, value in binds:
+        assert isinstance(value, ast.Name) and value.id == "_pcause", (
+            f"the cause bind at main.py:{lineno} does not use the narrowed value")
+
+
+def test_the_writer_detector_can_fail():
+    """The negative control for the test above: the walk finds a `cause` bind
+    that is NOT the narrowed name, so a green result means agreement and not
+    an empty search (#342)."""
+    tree = ast.parse("def f():\n    g({'lid': 1, 'cause': cause or ''})\n")
+    binds = [v for d in ast.walk(tree) if isinstance(d, ast.Dict)
+             for k, v in zip(d.keys, d.values)
+             if isinstance(k, ast.Constant) and k.value == "cause"]
+    assert len(binds) == 1
+    assert not (isinstance(binds[0], ast.Name) and binds[0].id == "_pcause")
+
+
+# ── (6) the label stays a label (lens find 5) ────────────────────────────
+
+_LEI = "left_early_involuntary"
+
+
+def test_the_qualifier_is_read_only_by_renderers():
+    """The enumeration this fix rests on, made into a tripwire.
+
+    A false cause gains a player nothing on the integrity axis today: the
+    column has ONE writer and its readers are projections and renders, so
+    nothing cancels a lobby, refunds a wager, completes a series, changes a
+    placement, a rating, XP or gold because of it. That is a property of the
+    current call sites, not a guarantee of the design — the moment anything
+    keys a penalty, a leave-rate or a readmission decision off this column,
+    the enumeration stops being true and the cost stops being reputational.
+
+    So the sites are counted. A fifth one in main.py reddens this test and
+    forces that judgement to be made deliberately rather than inherited.
+    """
+    lines = [(i + 1, ln.strip()) for i, ln in enumerate(MAIN_SRC.splitlines())
+             if _LEI in ln]
+    assert len(lines) == 4, (
+        "the recorded sites are: one SELECT projection and one render dict for "
+        "the match-by-code route, the INSERT column list that writes it, and one "
+        "render dict for the history route. Found:\n  "
+        + "\n  ".join(f"main.py:{n}: {t}" for n, t in lines))
+    # None of them is a branch: the column is projected and serialised, never
+    # tested. `if` here would mean something DECIDES on a client-attested cause.
+    for n, t in lines:
+        assert not t.startswith("if ") and " if " not in t, (
+            f"main.py:{n} branches on {_LEI}: {t}")
+
+
+def test_the_site_counter_can_fail():
+    """The negative control: the counter sees a branch when there is one."""
+    probe = 'if row["left_early_involuntary"]:\n'
+    hits = [ln.strip() for ln in probe.splitlines() if _LEI in ln]
+    assert len(hits) == 1 and hits[0].startswith("if ")

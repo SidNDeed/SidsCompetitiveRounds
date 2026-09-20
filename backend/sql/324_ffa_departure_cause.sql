@@ -1,4 +1,4 @@
--- 326_ffa_departure_cause.sql
+-- 324_ffa_departure_cause.sql
 --
 -- Bug #392, item A step 1 (2) and (3): persist the departure cause, and give
 -- the match row somewhere to carry the reconciled label.

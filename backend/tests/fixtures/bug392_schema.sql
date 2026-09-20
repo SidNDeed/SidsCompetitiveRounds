@@ -2,7 +2,7 @@
 --
 -- Transcribed from the PRIMARY's own catalogue (`ssh ccdeploy@<primary>
 -- 'sql-readonly:\d ffa_lobbies'` / `\d ffa_match_players`, read 2026-09-20),
--- restricted to the tables and columns migration 326 and the changed
+-- restricted to the tables and columns migration 324 and the changed
 -- statements actually touch. Column TYPES and NOT NULL/DEFAULT are copied
 -- exactly, because the whole point of running against a real PostgreSQL is
 -- that the types are the ones production has: a uuid[] that were text[], or a
@@ -10,7 +10,7 @@
 -- about a different schema.
 --
 -- Not a substitute for the migration series. Nothing here is shipped; it
--- exists only so the tests can build the tables that migration 326 alters.
+-- exists only so the tests can build the tables that migration 324 alters.
 
 DROP TABLE IF EXISTS ffa_match_players;
 DROP TABLE IF EXISTS ffa_matches;

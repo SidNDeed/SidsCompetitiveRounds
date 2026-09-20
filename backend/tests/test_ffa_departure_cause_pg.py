@@ -22,7 +22,7 @@ describes, so the recorded run sets it.
 
 This file creates and drops no database. It rebuilds four tables from
 fixtures/bug392_schema.sql inside the database the DSN names, applies
-migration 326 to them, and touches nothing else.
+migration 324 to them, and touches nothing else.
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ import os
 import re
 import uuid
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
@@ -58,9 +59,36 @@ if not DSN:
 
 RAW_DSN = DSN.replace("postgresql+asyncpg://", "postgresql://")
 
+# ── What this file is allowed to point at (lens find 3) ──────────────────
+# fixtures/bug392_schema.sql opens with four unconditional DROP TABLE IF
+# EXISTS statements. The module docstring's safety claim is about the
+# DATABASE object — this file creates and drops none — and says nothing about
+# the tables inside whatever database the DSN happens to name. Nothing
+# constrained that name, so the recorded command re-run against a populated
+# database (a local dev copy, a restored dump staged for a migration dry run)
+# would have dropped `players` and the three FFA tables, rebuilt them as
+# fixtures, and reported a green run. No confirmation step, no error.
+#
+# Two independent conditions, both required, because either alone can be
+# satisfied by accident: the database must be NAMED as a throwaway for these
+# tests, and it must not already hold player rows. The name check alone would
+# not protect a scratch database someone had loaded a dump into; the emptiness
+# check alone would not protect a real database that happened to be empty at
+# the moment of the run.
+_ALLOWED_DB_NAMES = frozenset({"scr_bug392"})
+_DB_NAME = urlparse(RAW_DSN).path.lstrip("/")
+
+if _DB_NAME not in _ALLOWED_DB_NAMES:
+    raise AssertionError(
+        f"BUG392_TEST_PG_DSN names database {_DB_NAME!r}. This file DROPS and "
+        f"rebuilds players, ffa_lobbies, ffa_matches and ffa_match_players in "
+        f"whatever database it is pointed at, so it refuses any name outside "
+        f"{sorted(_ALLOWED_DB_NAMES)}. Create the throwaway database and point "
+        f"the DSN at that — never at a database holding data you want to keep.")
+
 BACKEND = Path(__file__).parents[1]
 SCHEMA_SQL = (BACKEND / "tests" / "fixtures" / "bug392_schema.sql").read_text(encoding="utf-8")
-MIGRATION_SQL = (BACKEND / "sql" / "326_ffa_departure_cause.sql").read_text(encoding="utf-8")
+MIGRATION_SQL = (BACKEND / "sql" / "324_ffa_departure_cause.sql").read_text(encoding="utf-8")
 MAIN_TREE = ast.parse((BACKEND / "api" / "main.py").read_text(encoding="utf-8"))
 
 
@@ -134,9 +162,33 @@ async def _apply_migration_raw() -> list:
         await conn.close()
 
 
+async def _assert_target_is_disposable(conn) -> None:
+    """The second half of the lens find 3 guard, and the half the DSN string
+    cannot answer: is there anything in here worth keeping?
+
+    Asked on the connection, immediately before the DROPs, and asked about the
+    table whose loss would hurt most. A `players` table that exists and holds
+    rows means this is not a fixture database whatever it is called, so the
+    run refuses instead of rebuilding it. An ABSENT table is the expected
+    state for a fresh throwaway and passes; a present-but-empty one is what
+    the second and later runs of this file see, and passes too.
+    """
+    rows = await conn.fetchval("""
+        SELECT CASE WHEN to_regclass('public.players') IS NULL THEN -1
+                    ELSE (SELECT COUNT(*) FROM players) END
+    """)
+    if rows and rows > 0:
+        raise AssertionError(
+            f"the target database holds {rows} row(s) in `players`. This file "
+            f"drops and rebuilds that table as a 3-column fixture, so it will "
+            f"not run against a database with data in it. Point "
+            f"BUG392_TEST_PG_DSN at an empty throwaway database.")
+
+
 async def _rebuild() -> None:
     conn = await asyncpg.connect(RAW_DSN)
     try:
+        await _assert_target_is_disposable(conn)
         for stmt in _statements(SCHEMA_SQL):
             await conn.execute(stmt)
     finally:
@@ -265,6 +317,112 @@ def test_rowless_writer_persists_the_cause_and_still_appends():
         row = await _lobby(conn, lobby)
         assert leaver in row["departed_ids"]
         assert _as_map(row["departure_causes"])[str(leaver)] == "in_room_timeout"
+    run(body)
+
+
+# ── (2b) the tagged retry that arrives after the mark (lens find 2) ──────
+#
+# The client's durable-cause machinery re-sends an attestation on a LATER
+# request, because the room-exit hook fires AFTER a teardown's own untagged
+# leave. That first leave takes the row path, appends the player to
+# departed_ids and deletes the queue row; the tagged retry therefore finds no
+# row and lands here, on a player who is already departed. The first build's
+# predicate admitted only an unmarked player, so every attestation that
+# survived a teardown was discarded with no error and no log line.
+
+async def _already_departed_without_a_cause(conn, lobby, leaver):
+    """The state the teardown's untagged leave leaves behind."""
+    await conn.execute(text(LIVE_WRITER), {"lid": lobby, "pid": leaver,
+                                           "pidt": str(leaver), "cause": ""})
+    row = await _lobby(conn, lobby)
+    assert leaver in row["departed_ids"], "precondition: the departure is marked"
+    assert _as_map(row["departure_causes"]) == {}, "precondition: no cause yet"
+
+
+def test_a_tagged_retry_after_an_untagged_teardown_records_the_cause():
+    """The defect this section exists for, end to end on real PostgreSQL."""
+    async def body(conn):
+        lobby, players = await _seed(conn)
+        leaver = players[1]
+        steam = (await conn.execute(text("SELECT steam_id FROM players WHERE id = :i"),
+                                    {"i": leaver})).scalar()
+        await _already_departed_without_a_cause(conn, lobby, leaver)
+
+        marked = (await conn.execute(text(ROWLESS_WRITER), {
+            "sid": steam, "lid": str(lobby), "cause": "in_room_timeout"})).scalars().all()
+        assert marked == [lobby], "the tagged retry reached no row"
+        row = await _lobby(conn, lobby)
+        assert _as_map(row["departure_causes"])[str(leaver)] == "in_room_timeout"
+        # And the departure itself is unchanged — appended once, not twice.
+        assert list(row["departed_ids"]).count(leaver) == 1
+    run(body)
+
+
+def test_the_old_one_way_predicate_would_have_dropped_that_retry():
+    """The MUTATION control (#391), executed rather than argued.
+
+    The shipped statement is mutated back to the predicate it replaced — the
+    single `NOT (departed_ids @> ...)` clause — and run against the identical
+    state. It must record nothing. Without this, the test above would pass on
+    any statement that happened to write, including one that writes for the
+    wrong reason; with it, the pair pins the fix to the predicate change.
+    """
+    async def body(conn):
+        lobby, players = await _seed(conn)
+        leaver = players[1]
+        steam = (await conn.execute(text("SELECT steam_id FROM players WHERE id = :i"),
+                                    {"i": leaver})).scalar()
+        await _already_departed_without_a_cause(conn, lobby, leaver)
+
+        start = ROWLESS_WRITER.index("AND (NOT (l.departed_ids")
+        end = ROWLESS_WRITER.index("RETURNING l.id")
+        mutated = (ROWLESS_WRITER[:start]
+                   + "AND NOT (l.departed_ids @> ARRAY[p.id])\n                     "
+                   + ROWLESS_WRITER[end:])
+        assert "jsonb_exists" not in mutated, "the mutation did not remove the new clause"
+
+        marked = (await conn.execute(text(mutated), {
+            "sid": steam, "lid": str(lobby), "cause": "in_room_timeout"})).scalars().all()
+        assert marked == [], "the old predicate unexpectedly matched"
+        assert _as_map((await _lobby(conn, lobby))["departure_causes"]) == {}
+    run(body)
+
+
+def test_the_retry_cannot_overwrite_a_cause_already_recorded():
+    """First attestation still wins — and now the slot it wins is the CAUSE,
+    not membership of departed_ids.
+
+    The negative control for the widened predicate: widening it must not have
+    turned the map into last-write-wins.
+    """
+    async def body(conn):
+        lobby, players = await _seed(conn)
+        leaver = players[1]
+        steam = (await conn.execute(text("SELECT steam_id FROM players WHERE id = :i"),
+                                    {"i": leaver})).scalar()
+        await conn.execute(text(LIVE_WRITER), {"lid": lobby, "pid": leaver,
+                                               "pidt": str(leaver), "cause": "in_room_exit"})
+        marked = (await conn.execute(text(ROWLESS_WRITER), {
+            "sid": steam, "lid": str(lobby), "cause": "in_room_timeout"})).scalars().all()
+        assert marked == [], "a recorded cause was reachable for rewriting"
+        assert _as_map((await _lobby(conn, lobby))["departure_causes"])[str(leaver)] == "in_room_exit"
+    run(body)
+
+
+def test_an_untagged_retry_after_the_mark_is_still_a_no_op():
+    """The other half of the widening: only a TAGGED retry gets the second
+    way in. An untagged one matches nothing, exactly as before, so the log
+    line and the row are both unchanged."""
+    async def body(conn):
+        lobby, players = await _seed(conn)
+        leaver = players[1]
+        steam = (await conn.execute(text("SELECT steam_id FROM players WHERE id = :i"),
+                                    {"i": leaver})).scalar()
+        await _already_departed_without_a_cause(conn, lobby, leaver)
+        marked = (await conn.execute(text(ROWLESS_WRITER), {
+            "sid": steam, "lid": str(lobby), "cause": ""})).scalars().all()
+        assert marked == []
+        assert _as_map((await _lobby(conn, lobby))["departure_causes"]) == {}
     run(body)
 
 
