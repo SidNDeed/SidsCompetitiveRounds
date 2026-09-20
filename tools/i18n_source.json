@@ -1385,6 +1385,7 @@
   "Match canceled — searching again...",
   "Match could not start — only {0} of {1} players connected. Leave to the menu to requeue.",
   "Match dissolved — searching again...",
+  "Match interrupted - the connection to the match server was lost",
   "Match recorded",
   "Matchmaking hiccup — putting you back in the Quick Match queue...",
   "Matchmaking keeps failing - returning to menu. Please try again in a minute.",
@@ -1492,6 +1493,7 @@
   "No active tournament",
   "No articles match your search.",
   "No blocked senders.",
+  "No data from the match server for {0}s - you may be dropped",
   "No games recorded for this session yet.",
   "No games this session",
   "No games together yet",
@@ -9592,6 +9594,11 @@
    "location": "ReadyUp",
    "kind": "Tr"
   },
+  "Match interrupted - the connection to the match server was lost": {
+   "surface": "GameStateWatcher",
+   "location": "PollRoomState",
+   "kind": "ShowNotification"
+  },
   "Match recorded": {
    "surface": "ApiClient",
    "location": "OutboxPass",
@@ -10126,6 +10133,11 @@
    "surface": "MailUI",
    "location": "RefreshSettingsRow",
    "kind": "CreateText"
+  },
+  "No data from the match server for {0}s - you may be dropped": {
+   "surface": "LagNotices",
+   "location": "TransportSilenceLine",
+   "kind": "TrF"
   },
   "No games recorded for this session yet.": {
    "surface": "PostSessionReport",

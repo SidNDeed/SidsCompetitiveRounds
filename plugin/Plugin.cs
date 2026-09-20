@@ -4037,6 +4037,21 @@ namespace CompetitiveRounds
         }
         public void OnDisconnected(Photon.Realtime.DisconnectCause cause)
         {
+            // Bug 392 items A(2)+B: this is the ONLY place the DisconnectCause
+            // exists on this client, and it was logged and dropped — so no
+            // exit hook could tell a transport failure from a player who chose
+            // to leave, and the player was told nothing about why the game
+            // ended. Record it before anything below can return early. The
+            // store keeps ONLY involuntary causes, only for a short validity
+            // window, and any other cause clears it. The pre-disconnect notice
+            // has done its job by the time we are here — the room-exit toast
+            // is what explains this — so it comes down in the same statement.
+            try
+            {
+                TransportExit.NoteDisconnect(cause.ToString(), TransportExit.NowSeconds());
+                TransportExit.ClearSilence();
+            }
+            catch { }
             // Release B §1: the head-to-head line dies with the room — first
             // statement, so an in-flight response can never bind to the next
             // room. Idempotent.
@@ -4075,6 +4090,14 @@ namespace CompetitiveRounds
         }
         public void OnJoinedRoom()
         {
+            // Bug 392: a new room starts with no inherited transport state.
+            // The cause store has its own validity window, but a window is a
+            // soft bound and a room edge is a hard one — without this, a
+            // disconnect recorded seconds before a fast rejoin could tag the
+            // NEXT room's exit as involuntary (#430: a cached flag on a lossy
+            // edge inherited by the next room). Same for a silence notice left
+            // on screen from the previous room.
+            try { TransportExit.ResetAll(); } catch { }
             // Bug 235 diagnostics bind to the reliable Photon room edge so a
             // fast leave+rejoin cannot merge two sittings' counters/budgets.
             try { NetworkReplicaDiagnostics.OnRoomJoined(); } catch { }

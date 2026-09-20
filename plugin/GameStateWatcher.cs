@@ -1956,8 +1956,31 @@ namespace CompetitiveRounds
                             Plugin.Log.LogInfo($"[LAG-DIAG] recv gap open silent={silent}ms n={localRecvGapCount}");
                         }
                         if (silent > localRecvGapMaxMs) localRecvGapMaxMs = silent;
+                        // Bug 392 item B: this seat already knew. Tell the
+                        // player while there is still something to say, rather
+                        // than only after Photon has given up — the reported
+                        // complaint is precisely that the game ended with no
+                        // apparent reason. peer.DisconnectTimeout is READ and
+                        // logged rather than assumed: "well inside the
+                        // timeout" is then a reading from the seat that fired,
+                        // not a claim this comment makes (#302). One line per
+                        // episode — NoteSilence returns the rising edge only.
+                        if (TransportExit.NoteSilence(silent, TransportExit.NowSeconds()))
+                        {
+                            int dcTimeout = 0;
+                            try { dcTimeout = peer.DisconnectTimeout; } catch { }
+                            Plugin.Log.LogWarning(
+                                $"[LAG-DIAG] transport silence notice silent={silent}ms " +
+                                $"threshold={TransportExit.SilenceNoticeMs}ms peerDisconnectTimeout={dcTimeout}ms");
+                        }
                     }
-                    else _recvGapOpen = false;
+                    else
+                    {
+                        _recvGapOpen = false;
+                        // Cleared on the same edge that clears _recvGapOpen: a
+                        // hiccup that recovers takes its notice with it.
+                        TransportExit.ClearSilence();
+                    }
                 }
                 if (lastOppGstatsSeq >= 0 && lastOppSeqAdvanceTime > 0f)
                 {
@@ -3522,7 +3545,23 @@ namespace CompetitiveRounds
                             Plugin.Log.LogInfo($"[POLL] === {matchType} Canceled === Opp DC'd while ahead at {localRounds}-{oppRounds} (no win awarded)");
                         else
                             Plugin.Log.LogInfo($"[POLL] === {matchType} Canceled === Disconnect at {localRounds}-{oppRounds} (not counted)");
-                        CompetitiveUI.ShowNotification("Match canceled (disconnect)", new Color(1f, 0.7f, 0.3f));
+                        // Bug 392 item B: when the exit followed an involuntary
+                        // DisconnectCause on THIS seat, name the transport. The
+                        // old text says the match was canceled and nothing
+                        // about why, which is what the report described as "no
+                        // apparent reason". Unknown / voluntary / stale cause
+                        // keeps today's wording exactly — the text can only get
+                        // MORE specific when the seat actually has the cause.
+                        string dcCause;
+                        bool involuntaryExit = TransportExit.TryGetFreshInvoluntary(
+                            TransportExit.NowSeconds(), out dcCause);
+                        if (involuntaryExit)
+                            Plugin.Log.LogInfo($"[POLL] exit followed an involuntary disconnect cause={dcCause}");
+                        CompetitiveUI.ShowNotification(
+                            involuntaryExit
+                                ? "Match interrupted - the connection to the match server was lost"
+                                : "Match canceled (disconnect)",
+                            new Color(1f, 0.7f, 0.3f));
                     }
                 }
 

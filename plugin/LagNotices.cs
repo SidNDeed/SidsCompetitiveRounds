@@ -354,6 +354,31 @@ namespace CompetitiveRounds
             return null;
         }
 
+        /// <summary>Bug 392 item B: the transport-silence line, or null.
+        ///
+        /// NOT one of the four states above and deliberately not evaluated
+        /// with them. Those are a quality read built from closed 1 s windows
+        /// on a plain-1v1 fighter seat, behind the [Network] LagNotices opt-in
+        /// (default off). This line is a warning that the match connection is
+        /// failing RIGHT NOW: it is decided from this seat's own socket
+        /// receive gap (GameStateWatcher.SampleConnectionQuality, which runs
+        /// in every room type including FFA — the seat that reported this bug
+        /// was in an FFA lobby), and it is NOT behind the opt-in, because a
+        /// warning nobody has switched on is a feature that ships inert
+        /// (#438/#443). The setting still governs the four quality states
+        /// exactly as it did.</summary>
+        internal static string TransportSilenceLine()
+        {
+            try
+            {
+                int silentMs;
+                if (!TransportExit.SilenceNoticeActive(TransportExit.NowSeconds(), out silentMs)) return null;
+                return I18n.TrF("No data from the match server for {0}s - you may be dropped",
+                                TransportExit.SilenceSeconds(silentMs));
+            }
+            catch { return null; }
+        }
+
         // ── production wrapper ───────────────────────────────────────────
 
         private static readonly Slot[] _slots = NewSlots();
