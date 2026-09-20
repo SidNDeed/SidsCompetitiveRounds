@@ -3481,12 +3481,54 @@ namespace CompetitiveRounds
                 // Accumulate session time for this opponent
                 AccumulateSessionTime();
 
-                if (isTracking && !gameOverReported)
+                if (isTracking && !gameOverReported && RoomModeLabels.SuppressOneVOneOutcome(photonRoomId))
+                {
+                    // Bug 392 item D: an FFA sitting keeps its score in the FFA
+                    // engine, not in the 1v1 tracker's round counters, so every
+                    // outcome the cascade below could derive here is derived
+                    // from zeros. That is how a game at three rounds each came
+                    // out of this path as "=== RANKED Canceled === Disconnect
+                    // at 0-0 (not counted)" — wrong on the mode, wrong on the
+                    // score, and wrong about counting: the FFA reporter counted
+                    // that game and the seat was rated into it.
+                    //
+                    // The line below states only what this seat can support: no
+                    // 1v1 outcome was derived, and the FFA engine's own tally
+                    // for this seat at the moment of the exit.
+                    int ffaGame = 0, ffaRounds = 0, ffaPoints = 0;
+                    try
+                    {
+                        ffaGame = FfaMode.GameNumber;
+                        ffaRounds = FfaMode.RoundsFor(localTeamId);
+                        ffaPoints = FfaMode.PointsTotalFor(localTeamId);
+                    }
+                    catch { }
+                    Plugin.Log.LogInfo(
+                        $"[POLL] === FFA Room Exit === no 1v1 outcome derived; " +
+                        $"FFA engine tally for this seat: game={ffaGame} rounds={ffaRounds} points={ffaPoints}");
+                    // The toast is raised ONLY when this seat has a recorded
+                    // transport cause. Today this path shows "Match canceled
+                    // (disconnect)" on EVERY tracked FFA room exit, including
+                    // the clean end of a sitting, which is its own false claim;
+                    // the FFA engine does its own messaging for those.
+                    string ffaCause;
+                    if (TransportExit.TryGetFreshInvoluntary(TransportExit.NowSeconds(), out ffaCause))
+                    {
+                        Plugin.Log.LogInfo($"[POLL] FFA exit followed an involuntary disconnect cause={ffaCause}");
+                        CompetitiveUI.ShowNotification(
+                            "Match interrupted - the connection to the match server was lost",
+                            new Color(1f, 0.7f, 0.3f));
+                    }
+                }
+                else if (isTracking && !gameOverReported)
                 {
                     // Someone disconnected mid-match
                     int localRounds = localTeamId == 0 ? p1Rounds : p2Rounds;
                     int oppRounds = localTeamId == 0 ? p2Rounds : p1Rounds;
-                    string matchType = matchIsRanked ? "RANKED" : "CASUAL";
+                    // Bug 392 item D: the label names the room's ACTUAL mode.
+                    // matchIsRanked is forced true for any mod-issued room, so
+                    // on its own it labelled team_ and ovt_ exits "RANKED" too.
+                    string matchType = RoomModeLabels.ModeLabel(photonRoomId, matchIsRanked);
 
                     // If this client is the leaver while the opponent already
                     // has a reportable DC-win lead, preserve its exact local
