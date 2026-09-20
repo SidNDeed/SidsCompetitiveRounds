@@ -94,6 +94,22 @@ namespace CompetitiveRounds
         /// handed and cannot fail (#342).</summary>
         internal const string CapabilityField = "ffa_involuntary_cause";
 
+        /// <summary>The wire key by which the server echoes this attestation
+        /// back for DISPLAY: the per-player bit on /ffa/recent and
+        /// /matches/by-code saying that seat's early departure was a transport
+        /// failure rather than a choice.
+        ///
+        /// It lives beside the capability field, and not next to the parser
+        /// that reads it, for one reason: it is the other half of the same
+        /// cross-lane contract, and every literal in that contract is now
+        /// pinned against the server's own source by the harness (X5/X6). The
+        /// display half is where this bug is actually visible to the player
+        /// who reported it, so a silent disagreement here costs the same as
+        /// one on the capability - the renderer would read a key nobody emits,
+        /// get false for every row, and keep printing the mark the report was
+        /// about.</summary>
+        internal const string InvoluntaryMarkField = "left_early_involuntary";
+
         /// <summary>The Photon DisconnectCause values that are NOT this
         /// player's choice, enumerated from the DisconnectCause enum in the
         /// PhotonRealtime build ROUNDS ships (19 members; the whole enum is

@@ -14784,6 +14784,13 @@ namespace CompetitiveRounds
             // result; never re-derive positional labels here.
             public string end_stats;
             public bool left_early;
+            /* Bug 392: WHY the seat left early, for the mark the report was
+             * about. TRUE only when the server recorded the departure as a
+             * transport failure rather than a choice. A missing key (a box
+             * that has not deployed the server half) parses false, which is
+             * "left" — today's wording, and the direction that says less
+             * rather than claiming a failure the server never recorded. */
+            public bool left_early_involuntary;
             // Bug 254: the server's authoritative frozen-roster-ghost bit
             // (ffa_match_players.absent, #227/#239). TRUE means this player
             // was carried on the report for roster continuity but was NOT in
@@ -17959,6 +17966,13 @@ namespace CompetitiveRounds
                                         xp_gained = ExtractJsonInt(pObj, "xp_gained"),
                                         gold_gained = ExtractJsonInt(pObj, "gold_gained"),
                                         left_early = ExtractJsonBool(pObj, "left_early"),
+                                        // Bug 392: the key name is the shared
+                                        // constant, not a literal typed here,
+                                        // so the harness can pin it against
+                                        // the server's own source (X5/X6) the
+                                        // way the capability field is pinned.
+                                        left_early_involuntary =
+                                            ExtractJsonBool(pObj, TransportExit.InvoluntaryMarkField),
                                         absent = ExtractJsonBool(pObj, "absent"),
                                         color_name = ExtractJsonString(pObj, "color_name") ?? "",
                                         color_hex = ExtractJsonString(pObj, "color_hex") ?? "",

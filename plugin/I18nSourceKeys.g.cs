@@ -37,6 +37,7 @@ namespace CompetitiveRounds
             " (inactive)",
             " (pays {0}g)",
             " 3rd Place",
+            " <color=#888888>(disconnected)</color>",
             " <color=#888888>(left)</color>",
             " at x{0}",
             "(AoE)",
