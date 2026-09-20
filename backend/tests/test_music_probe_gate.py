@@ -113,6 +113,19 @@ ACCEPTED_DLL_ACCOUNT_IDS = {
     "76561198709950406",   # the broadcast seat's account — seat gating
     "76561190000000001",   # synthetic placeholder
     "76561190000000002",   # synthetic placeholder
+    # The rule files (LogScrub, TopStripBand, FfaReportRules, RosterCensusRules)
+    # carry SelfTest() bodies so tools/client-rules-harness can EXECUTE them
+    # instead of asserting about their source, and those bodies ship in the
+    # plugin. Their fixtures therefore reach the binary, so the ids they use
+    # are deliberately outside the real SteamID64 range (7656119[7-9]...) and
+    # are listed one by one -- a synthetic id nobody decided on still fails
+    # this gate. One of these replaced a REAL test account's id that had been
+    # sitting in the FFA election fixtures and shipping with every build.
+    "76561190000000003",   # synthetic - roster census fixtures
+    "76561190000000004",   # synthetic - report election fixtures
+    "76561190000000005",   # synthetic - report election fixtures
+    "76561190000000007",   # synthetic - report election fixtures
+    "76561190000000009",   # synthetic - roster census / election fixtures
 }
 
 

@@ -196,9 +196,9 @@ namespace CompetitiveRounds
             // but its u_id had not arrived, so the snapshot could not read it,
             // IsUnauthorized read it as unauthorized (fail-closed) and it was
             // latched. Its u_id has since arrived.
-            var A = new Actor(1, "76561198000000001", false, false);
-            var B = new Actor(2, "76561198000000002", false, false);
-            var C = new Actor(3, "76561198000000003", false, false);
+            var A = new Actor(1, "76561190000000001", false, false);
+            var B = new Actor(2, "76561190000000002", false, false);
+            var C = new Actor(3, "76561190000000003", false, false);
 
             // 1. THE FIX, end to end and in the order production runs it:
             //    frozen {A,B}, raw {A,B,C}, C latched -> the census admits C,
@@ -244,7 +244,7 @@ namespace CompetitiveRounds
             //    assembly set. The census must refuse it, and its latch must
             //    stay.
             {
-                var D = new Actor(9, "76561198000000009", false, false);
+                var D = new Actor(9, "76561190000000009", false, false);
                 var raw = new List<Actor> { A, B, D };
                 var roster = Roster(A.SteamId, B.SteamId);
                 var assembly = new HashSet<int> { 1, 2, 3 };
@@ -299,7 +299,7 @@ namespace CompetitiveRounds
             // 5. A SPECTATOR takes no part in either rule, in the assembly
             //    window or out of it.
             {
-                var spec = new Actor(5, "76561198000000005", true, false);
+                var spec = new Actor(5, "76561190000000005", true, false);
                 var raw = new List<Actor> { A, B, spec };
                 var roster = Roster(A.SteamId, B.SteamId);
                 var assembly = new HashSet<int> { 1, 2, 5 };

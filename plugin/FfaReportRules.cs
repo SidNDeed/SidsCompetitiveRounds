@@ -286,10 +286,10 @@ namespace CompetitiveRounds
                 //     build that let the ordinal pass outrank the numeric
                 //     one picks it and this case reds. An unparseable id
                 //     sorting after would have passed either way.
-                var mixed = new List<string> { "007-alpha", "76561198040410653" };
+                var mixed = new List<string> { "007-alpha", "76561190000000004" };
                 string a = ElectReporter(mixed, null, out fb);
                 Check(r, "one parseable id outranks the ordinal fallback",
-                      a == "76561198040410653", "a=" + (a ?? "<null>"));
+                      a == "76561190000000004", "a=" + (a ?? "<null>"));
             }
 
             // 1. THE FIX. Two seats whose LOCAL counters have drifted apart
@@ -405,31 +405,31 @@ namespace CompetitiveRounds
             // 9. ElectReporter is TOTAL over a non-empty present set, even with
             //    no witnesses at all.
             {
-                var present = new List<string> { "76561198040410653", "76561198720512419" };
+                var present = new List<string> { "76561190000000004", "76561190000000007" };
                 string who = ElectReporter(present, new List<string>(), out bool fb);
                 Check(r, "election is total without witnesses",
-                    who == "76561198040410653" && fb, "who=" + who + " fallback=" + fb);
+                    who == "76561190000000004" && fb, "who=" + who + " fallback=" + fb);
             }
 
             // 10. With witnesses it elects from the witnesses, not from the
             //     wider present set — the seat that never saw the game holds
             //     the lowest id here on purpose.
             {
-                var present = new List<string> { "76561198000000001", "76561198040410653" };
-                var witnesses = new List<string> { "76561198040410653" };
+                var present = new List<string> { "76561190000000001", "76561190000000004" };
+                var witnesses = new List<string> { "76561190000000004" };
                 string who = ElectReporter(present, witnesses, out bool fb);
                 Check(r, "witnesses are the electorate",
-                    who == "76561198040410653" && !fb, "who=" + who + " fallback=" + fb);
+                    who == "76561190000000004" && !fb, "who=" + who + " fallback=" + fb);
             }
 
             // 11. Every seat computes the same winner regardless of the order
             //     its own census produced.
             {
-                var one = new List<string> { "76561198000000009", "76561198000000002", "76561198000000005" };
-                var two = new List<string> { "76561198000000005", "76561198000000009", "76561198000000002" };
+                var one = new List<string> { "76561190000000009", "76561190000000002", "76561190000000005" };
+                var two = new List<string> { "76561190000000005", "76561190000000009", "76561190000000002" };
                 string a = ElectReporter(one, null, out bool _);
                 string b = ElectReporter(two, null, out bool _);
-                Check(r, "election is order-independent", a == b && a == "76561198000000002",
+                Check(r, "election is order-independent", a == b && a == "76561190000000002",
                     "a=" + a + " b=" + b);
             }
 
