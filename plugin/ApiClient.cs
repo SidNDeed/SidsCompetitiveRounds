@@ -1015,6 +1015,18 @@ namespace CompetitiveRounds
             return FfaReportRules.IsSettledRefusal(resp);
         }
 
+        /// <summary>A refusal this sender must not retry and must not re-key:
+        /// 409 (already recorded) or 403 (refused and captured because the
+        /// key's game tail is not the one the lobby expects). 503 is NOT one —
+        /// the server declining to decide is the one refusal the retry loop's
+        /// premise still fits.
+        ///
+        /// Same one definition, same reason.</summary>
+        internal static bool IsTerminalRefusalResponse(string resp)
+        {
+            return FfaReportRules.IsTerminalRefusal(resp);
+        }
+
         /// <summary>The disconnect report, whichever series it names. The
         /// series id sits in the query string, so match on the path.</summary>
         internal static bool IsDisconnectReportUrl(string url)
@@ -4660,10 +4672,16 @@ namespace CompetitiveRounds
         ///
         ///   "route"     — a 404 with no body of the route's own. The server
         ///                 does not serve the ladder route.
-        ///   "empty"     — a 404 the ROUTE answered: this account has no
-        ///                 ladder row yet, which is every account until it
-        ///                 buys an entry rung. Proved by the route's marker,
-        ///                 presumed when a 404 carries a JSON body without it.
+        ///   "empty"     — a 404 the ROUTE answered, PROVED by the route's own
+        ///                 marker: the ladder table has no row for this
+        ///                 account. CORRECTED (Codex client r2 LOW): that is
+        ///                 not the same as "has not bought an entry rung". The
+        ///                 route 404s when the general Player row is absent —
+        ///                 an account the backend has never seen at all — and
+        ///                 a player who has a Player row but no ladder
+        ///                 progress gets a 200 with an empty board instead.
+        ///                 The two render differently and the difference is
+        ///                 the point.
         ///   "parse"     — a 200 whose body carried no ladders.
         ///   "transport" — no answer at all.
         ///   anything else is the transport's own text.
@@ -4741,25 +4759,37 @@ namespace CompetitiveRounds
         /// is every player until they buy an entry rung — was told the service
         /// was unavailable.
         ///
-        /// Three outcomes, and the order below is the discrimination:
+        /// TWO outcomes, and the discrimination is the MARKER and nothing
+        /// else:
         ///
-        ///   "empty"  — EXACT when the 404 body carries LadderNoAccountMarker.
-        ///              That marker is the route's own, so its presence proves
-        ///              the request reached the route.
-        ///   "route"  — a 404 with no body at all, or a body that is not JSON
-        ///              (an HTML error page from a proxy, a bare status). The
-        ///              route always answers JSON, so neither shape can be it.
-        ///   "empty"  — PRESUMED for any other 404 carrying a JSON body. This
-        ///              is the case a server without the marker lands in, and
-        ///              it is a judgement, not a deduction: an unrouted path
-        ///              also answers JSON ({"detail":"Not Found"}), and telling
-        ///              the two apart by that wording is exactly the check that
-        ///              goes on passing after a rewording. The direction is
-        ///              chosen: an empty board shown to a player on a server
-        ///              without the route is a quiet, true-looking tab, while
-        ///              "the service is unavailable" shown to a new account is
-        ///              alarming and false. It becomes EXACT the moment the
-        ///              server carrying the marker is deployed.
+        ///   "empty"  — the 404 body carries LadderNoAccountMarker. That
+        ///              marker is a field the ladder route alone returns and
+        ///              exists for no other purpose, so its presence PROVES
+        ///              the request reached the route and the route said "no
+        ///              row for this account".
+        ///   "route"  — every other 404. No body, a bare status, an HTML error
+        ///              page, or a JSON body without the marker.
+        ///
+        /// WHAT THIS REPLACED, and why the replacement is not a UX
+        /// regression (Codex client r2 MEDIUM, this method). A JSON-bodied
+        /// 404 without the marker used to be PRESUMED "empty", on the reading
+        /// that the route always answers JSON. FastAPI's own unrouted answer
+        /// is `{"detail":"Not Found"}` — also JSON, also brace-bearing — so
+        /// the presumption classified "this server has no ladder route" as
+        /// "your ladder is empty, go buy a title", and a brace anywhere in an
+        /// HTML error page did the same. A classification that cannot fail on
+        /// the case it exists for is not a classification (#342); the probe
+        /// has to be something the route alone emits (#306).
+        ///
+        /// Both directions are now correct rather than one being traded for
+        /// the other: on a server WITHOUT the route the answer really is "this
+        /// server does not serve ladders", and on a server WITH it a new
+        /// account gets the marker and reads "no ladder yet". The only
+        /// combination that could mislead — a deployed route that stopped
+        /// emitting its own marker — is a server defect this client cannot
+        /// paper over, and it fails toward "unavailable", which is the
+        /// conservative direction for a tab whose other reading invites a
+        /// purchase.
         ///
         /// Anything that is not a 404 keeps its own response text, and a
         /// response with no status at all is "transport".</summary>
@@ -4768,10 +4798,9 @@ namespace CompetitiveRounds
             if (string.IsNullOrEmpty(response)) return "transport";
             if (response.IndexOf("HTTP 404", StringComparison.Ordinal) < 0)
                 return response;
-            if (response.IndexOf(LadderNoAccountMarker, StringComparison.Ordinal) >= 0)
-                return "empty";
-            int brace = response.IndexOf('{');
-            return brace >= 0 ? "empty" : "route";
+            return response.IndexOf(LadderNoAccountMarker, StringComparison.Ordinal) >= 0
+                ? "empty"
+                : "route";
         }
 
         /// <summary>The machine-readable reason of a failed Player Cards call:
@@ -20298,32 +20327,47 @@ namespace CompetitiveRounds
                             myPlace == 1 ? I18n.TrF("FFA VICTORY! +{0}xp", xp) : I18n.TrF("FFA: placed #{0} (+{1}xp)", myPlace, xp),
                             myPlace == 1 ? Color.green : new Color(0.6f, 0.8f, 1f), 6f);
                 }
-                else if (IsSettledConflictResponse(resp))
+                else if (IsTerminalRefusalResponse(resp))
                 {
-                    // TERMINAL, and deliberately not queued. The server
-                    // settles a game once. Which of the two answers a second
-                    // report gets is NOT a comparison of the two scoreboards:
-                    // the echo branch above is returned when the resubmission
-                    // matches on room id, lobby and roster, and this 409 is
-                    // what a second report of an already-settled game gets
-                    // otherwise. Two reports that share a key and contradict
-                    // each other on placements are not reconciled anywhere —
-                    // the first one settles the game and the second is refused
-                    // — and the disagreement is recorded server-side
-                    // for recovery, so re-sending ours adds no information and
-                    // cannot displace what is stored. Queueing it would put a
-                    // report in the outbox whose only future is to be dropped
-                    // on its first retry, 30 s later, after one more request.
-                    // Logged, once, because a disagreement is worth seeing in
-                    // a seat's log next to the game it belongs to.
-                    Plugin.Log.LogWarning($"[FFA] report refused — this game is already recorded; not queued: {Trunc(resp, 160)}");
+                    // TERMINAL AT ATTEMPT 1, and deliberately not queued.
+                    //
+                    // WHAT THIS CLIENT GUARANTEES, which is the only half it
+                    // can: a report refused with 409 or 403 is never re-sent
+                    // and never RE-KEYED. The second is the load-bearing one —
+                    // a second key is a second GAME to the server, so a client
+                    // that "tried a different number" would convert one
+                    // refusal into a second settlement of rating, XP, gold and
+                    // wagers. 503 is not in this branch; that one is the
+                    // server declining to decide and the retry loop keeps it.
+                    //
+                    // WHAT THE SERVER DOES, stated as the required behaviour
+                    // rather than as something this line can promise (an
+                    // earlier revision asserted score-vector comparison and
+                    // quarantine as facts about the deployed backend, and
+                    // neither was true of the build this client shipped
+                    // against — Codex client r2 LOW, this comment): the FFA
+                    // endpoint must settle a report only when its key's game
+                    // tail equals the lobby's games_played + 1 under the lobby
+                    // lock, echo 200 for an exact resubmission, and refuse
+                    // every other tail terminally while capturing it for
+                    // recovery. Whether a given backend does that is a
+                    // property of that backend, not of this branch. This
+                    // client's behaviour is identical either way, which is why
+                    // it is safe to ship on both.
+                    //
+                    // Queueing would put a report in the outbox whose only
+                    // future is to be dropped on its first retry, 30 s later,
+                    // after one more request. Logged, once, because a refusal
+                    // is worth seeing in a seat's log next to the game it
+                    // belongs to.
+                    Plugin.Log.LogWarning($"[FFA] report refused and not retried or re-keyed: {Trunc(resp, 160)}");
                 }
                 else
                 {
                     Plugin.Log.LogWarning($"[FFA] report failed: {resp}");
                     EnqueueFailedReport($"{baseUrl}/api/v1/ffa/matches", json);
                 }
-            }, maxRetries: 3, retryDelay: 2f, stopOnConflict: true));
+            }, maxRetries: 3, retryDelay: 2f, stopOnTerminalRefusal: true));
         }
 
         // ── Player Blocks (permanent, from leaderboard) ──────────
@@ -21226,9 +21270,16 @@ namespace CompetitiveRounds
         /// log upload passes null and is sound doing so: its body carries
         /// neither key, and every value inside it — the log text included — is
         /// JSON-escaped, so neither raw token sequence can appear.</param>
+        /// <summary>The response text a request aborted by
+        /// <c>abortIf</c> reports. A sentinel, not a status: it is not
+        /// "HTTP &lt;code&gt;:"-shaped, so ExtractHttpStatus reads 0 and no caller
+        /// can mistake it for a server refusal.</summary>
+        internal const string RequestCancelledMarker = "cancelled-locally";
+
         private static IEnumerator PostRequestRaw(string url, byte[] bodyRaw,
                                                   Action<bool, string> callback,
-                                                  string sensitiveProbe = null)
+                                                  string sensitiveProbe = null,
+                                                  Func<bool> abortIf = null)
         {
             if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
             if (SensitiveTransportBlocked(url, sensitiveProbe, callback)) yield break;
@@ -21245,7 +21296,36 @@ namespace CompetitiveRounds
                 string _sentTok = SteamAuth.SessionToken;
                 request.timeout = 20;
 
-                yield return request.SendWebRequest();
+                if (abortIf == null)
+                {
+                    yield return request.SendWebRequest();
+                }
+                else
+                {
+                    // A CANCELLABLE send. `yield return op` is one suspension
+                    // with no frame in between, so a caller whose permission
+                    // to send can be WITHDRAWN mid-transfer (the automatic log
+                    // upload, when the player turns the setting off) has
+                    // nowhere to interrupt it. Polling the operation gives one
+                    // check per frame, and Abort() ends the transfer rather
+                    // than letting it finish and discarding the answer.
+                    var op = request.SendWebRequest();
+                    bool aborted = false;
+                    while (!op.isDone)
+                    {
+                        bool stop = false;
+                        try { stop = abortIf(); } catch { }
+                        if (stop) { aborted = true; break; }
+                        yield return null;
+                    }
+                    if (aborted)
+                    {
+                        try { request.Abort(); } catch { }
+                        NoteResult(false, 0);
+                        callback(false, RequestCancelledMarker);
+                        yield break;
+                    }
+                }
 
                 if (HandleVersionGate(request)) { callback(false, "outdated"); yield break; }
                 HandleSessionReject(request, _sentTok);
@@ -21348,16 +21428,20 @@ namespace CompetitiveRounds
 
         /// <summary>POST with automatic retry on failure (DNS hiccups, timeouts).
         ///
-        /// <paramref name="stopOnConflict"/> ends the loop on a 409 instead of
-        /// re-sending. The loop's premise is that the failure was the
-        /// TRANSPORT's — a hiccup two seconds apart is a different roll of the
-        /// dice — and a 409 breaks that premise: the server read the body,
-        /// understood it, and refused on state that the next attempt will find
-        /// in the same place. Off by default, so every existing caller retries
-        /// exactly as it did; the match-report callers opt in, because for
-        /// them each extra attempt is another settlement request for a game
-        /// the server has already settled.</summary>
-        private static IEnumerator PostRequestWithRetry(string url, string json, Action<bool, string> callback, int maxRetries = 3, float retryDelay = 2f, bool stopOnConflict = false)
+        /// <paramref name="stopOnTerminalRefusal"/> ends the loop on a refusal
+        /// the server has already decided, instead of re-sending. The loop's
+        /// premise is that the failure was the TRANSPORT's — a hiccup two
+        /// seconds apart is a different roll of the dice — and such a refusal
+        /// breaks that premise: the server read the body, understood it, and
+        /// refused on state that the next attempt will find in the same place.
+        /// WHICH codes those are is FfaReportRules.IsTerminalRefusal's to say
+        /// (409 already recorded, 403 refused-and-captured), and 503 is
+        /// deliberately outside it — the server declining to decide is the one
+        /// refusal the loop's premise still fits. Off by default, so every
+        /// existing caller retries exactly as it did; the match-report callers
+        /// opt in, because for them each extra attempt is another settlement
+        /// request for a game the server has already decided about.</summary>
+        private static IEnumerator PostRequestWithRetry(string url, string json, Action<bool, string> callback, int maxRetries = 3, float retryDelay = 2f, bool stopOnTerminalRefusal = false)
         {
             if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
             if (SensitiveTransportBlocked(url, json, callback)) yield break;
@@ -21392,9 +21476,9 @@ namespace CompetitiveRounds
 
                     Plugin.Log.LogWarning($"[HTTP] POST attempt {attempt}/{maxRetries} failed: {request.error}");
 
-                    if (stopOnConflict && FfaReportRules.IsSettledRefusal(request.responseCode))
+                    if (stopOnTerminalRefusal && FfaReportRules.IsTerminalRefusal(request.responseCode))
                     {
-                        Plugin.Log.LogWarning("[HTTP] 409 is settled — not retrying");
+                        Plugin.Log.LogWarning($"[HTTP] {request.responseCode} is a decided refusal — not retrying");
                         callback(false, FormatRequestError(request));
                         yield break;
                     }
@@ -22077,8 +22161,17 @@ namespace CompetitiveRounds
         /// <summary>Post an ALREADY-ENCODED automatic-log body. MAIN THREAD
         /// ONLY (it starts a coroutine), but the only work it does that scales
         /// with the log is handing the finished byte[] to the upload handler —
-        /// no read, no scan, no escape, no encode.</summary>
-        internal static void SubmitAutoLogBody(byte[] body, Action<bool, long, string> done)
+        /// no read, no scan, no escape, no encode.
+        ///
+        /// <paramref name="abortIf"/> is polled once a frame until the request
+        /// finishes, and a true answer ABORTS the transfer rather than letting
+        /// it complete. The caller passes its own "is this still allowed"
+        /// predicate: the consent says nothing is sent while the setting is
+        /// off, and a request already on the wire when the player turns it off
+        /// is the one case where that sentence used to be untrue (Codex client
+        /// r2 MEDIUM).</summary>
+        internal static void SubmitAutoLogBody(byte[] body, Action<bool, long, string> done,
+                                               Func<bool> abortIf = null)
         {
             if (Plugin.Instance == null) { done?.Invoke(false, 0, "not ready"); return; }
             if (body == null || body.Length == 0) { done?.Invoke(false, 0, "log empty"); return; }
@@ -22096,7 +22189,8 @@ namespace CompetitiveRounds
                     // the report outbox pattern-matches for permanence.
                     long code = ok ? 200 : ExtractHttpStatus(response);
                     done?.Invoke(ok, code, response);
-                }
+                },
+                abortIf: abortIf
             ));
         }
 

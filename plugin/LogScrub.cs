@@ -18,35 +18,47 @@ namespace CompetitiveRounds
     /// Two things are removed, and they are separate passes because they fail
     /// in different directions:
     ///
-    ///  * PATHS. Every `X:\Users\&lt;segment&gt;` prefix, in each of the four
-    ///    separator spellings a log can carry, plus the real profile
-    ///    directory when it is somewhere else entirely. The whole PREFIX goes;
-    ///    the remainder of the path is kept, because `&lt;userprofile&gt;\AppData\
-    ///    LocalLow\...` still tells a reader which file produced a line while
-    ///    naming nobody. The pattern is written against `Users\&lt;anything&gt;`
-    ///    rather than against this machine's own directory so that a second
-    ///    account's path in the same log is scrubbed too.
-    ///  * THE ACCOUNT NAME on its own, with no path around it.
+    ///  * PATHS. Every path through a `Users` directory, and the real profile
+    ///    directory when it is somewhere else entirely. The whole PREFIX goes,
+    ///    up to and including the account segment; the remainder of the path
+    ///    is kept, because `&lt;userprofile&gt;\AppData\LocalLow\...` still tells a
+    ///    reader which file produced a line while naming nobody. The pattern
+    ///    is written against `Users&lt;sep&gt;&lt;anything&gt;` rather than against this
+    ///    machine's own directory so that a second account's path in the same
+    ///    log is scrubbed too.
+    ///  * THE ACCOUNT NAME on its own, in running text, with nothing path- or
+    ///    address-shaped around it.
     ///
     /// WHAT "LOCAL PATHS" DOES NOT MEAN (Codex r1 MEDIUM, this class's three
     /// findings). The old wording invited the reading "any local path is
     /// removed", and that was never what the passes do. Stated as a bound
     /// rather than a promise, so it can be checked:
     ///
-    ///    REMOVED — a path whose prefix is `&lt;drive&gt;:&lt;sep&gt;Users&lt;sep&gt;&lt;segment&gt;`
-    ///    with the SAME separator spelling throughout, in any of the four
-    ///    spellings; and this process's own profile directory, wherever it
-    ///    lives, in those same four spellings.
+    ///    REMOVED — any `&lt;sep&gt;Users&lt;sep&gt;&lt;segment&gt;` run, with or without a
+    ///    drive letter in front of it, in ANY MIX of the four separator
+    ///    spellings a log carries (plain backslash; the doubled backslash of
+    ///    anything JSON- or C-escaped; forward slash; and the `%5C` of a
+    ///    file:// URL); and this process's own profile directory, wherever it
+    ///    lives, in any mix of those same spellings. MIXED separators are
+    ///    covered because a log really does carry them — one component writes
+    ///    `C:\Users\x`, another rewrites half of it — and the combination used
+    ///    to survive both passes while the consent said otherwise (Codex
+    ///    client r2 MEDIUM).
     ///
-    ///    NOT REMOVED — a path with MIXED separators; a UNC share
-    ///    (`\\host\share\...`); a POSIX path; any other local directory that
-    ///    is neither under Users nor the profile; Steam IDs; display or
-    ///    player names; room and series IDs; IP addresses; e-mail addresses;
-    ///    the machine's name; tokens.
+    ///    NOT REMOVED — a local directory that is neither under a Users folder
+    ///    nor the profile (a game on D:\Games, a UNC share that does not go
+    ///    through Users, a POSIX home); the account name where it sits inside
+    ///    a path or an address this process did not recognise, because it is
+    ///    not "on its own" there; Steam IDs; display or player names; room and
+    ///    series IDs; IP addresses; e-mail addresses; the machine's name;
+    ///    tokens.
     ///
     /// The Settings caption says the same thing in a player's words, and the
     /// two are edited together: a consent that claims more than this list is
-    /// the defect, not a wording preference.
+    /// the defect, not a wording preference. A consent that claims LESS than
+    /// the code does is the same defect from the other side, and that is the
+    /// half the bare-name boundary below closes — it used to fire inside
+    /// `/name/`, `\name\` and `name@example`, none of which is "on its own".
     ///
     /// THE SHORT-NAME POLICY, stated rather than left as a silent skip. The
     /// bare-name pass needs a name long enough that "the same letters, alone"
@@ -80,6 +92,20 @@ namespace CompetitiveRounds
         /// account name that happens to be an ordinary word must not rewrite
         /// every one of them.
         ///
+        /// THE SEPARATORS AND '@' ARE INSIDE IT TOO (Codex client r2 MEDIUM,
+        /// this constant). They were outside, so `/name/`, `\name\`,
+        /// `%5Cname%5C` and `name@example.com` all satisfied the boundary and
+        /// were rewritten — while the class contract and the consent both said
+        /// the pass fires only where the name stands on its own, and the
+        /// consent added "nothing else is removed". Two ways out of that, and
+        /// this is the one that keeps the promise instead of widening it: the
+        /// path shapes worth removing are removed by the PATH passes, which
+        /// take the whole identifying prefix rather than one segment, and an
+        /// e-mail local part is listed as not-removed and now genuinely is.
+        /// What this gives up is the account name inside a path the path
+        /// passes do not recognise — a UNC share or POSIX home that does not
+        /// go through Users — which the NOT REMOVED list names.
+        ///
         /// Shared with the residue counter deliberately, and it is the one
         /// thing they do share. The counter's PATH check is independently
         /// written (a plain `Users&lt;sep&gt;` scan, not the scrub's regexes) so a
@@ -88,8 +114,8 @@ namespace CompetitiveRounds
         /// policy drift (#279). What keeps the counter honest here is the
         /// self-test's before/after control: every positive case asserts the
         /// residue count was non-zero BEFORE the scrub ran.</summary>
-        internal const string NameBoundaryBefore = "(?<![A-Za-z0-9_.\\-])";
-        internal const string NameBoundaryAfter = "(?![A-Za-z0-9_.\\-])";
+        internal const string NameBoundaryBefore = "(?<![A-Za-z0-9_.\\-\\\\/%@])";
+        internal const string NameBoundaryAfter = "(?![A-Za-z0-9_.\\-\\\\/%@])";
 
         /// <summary>One separator, four spellings a real log carries: a plain
         /// backslash; the doubled backslash of anything that was JSON- or
@@ -99,24 +125,59 @@ namespace CompetitiveRounds
         /// of the single-backslash pattern taking half of it.</summary>
         private static readonly string[] SepForms = { "\\\\", "\\", "/", "%5C" };
 
+        /// <summary>ONE separator, any spelling, matched independently at each
+        /// position. This is what makes a MIXED-separator path removable: the
+        /// old patterns fixed one spelling for the whole run, so `C:\Users/x`
+        /// matched none of the four and survived every pass.</summary>
+        private static readonly string SepAny = BuildSepAny();
+
+        private static string BuildSepAny()
+        {
+            var sb = new StringBuilder("(?:");
+            for (int i = 0; i < SepForms.Length; i++)
+            {
+                if (i > 0) sb.Append('|');
+                sb.Append(Regex.Escape(SepForms[i]));   // longest first: see SepForms
+            }
+            return sb.Append(')').ToString();
+        }
+
         /// <summary>A path segment ends at any separator spelling, at
         /// whitespace, or at a delimiter a log line wraps a path in. '%'
         /// terminates a segment because the percent-encoded separator begins
         /// with it.</summary>
         private const string SegmentClass = "[^\\\\/%\\s\"'\\]\\)\\},;]+";
 
-        private static readonly Regex[] UsersDirPatterns = BuildUsersDirPatterns();
+        /// <summary>`[drive:]&lt;sep&gt;Users&lt;sep&gt;&lt;segment&gt;`, every separator
+        /// independent. The drive is OPTIONAL so the same pattern covers a UNC
+        /// share that goes through Users (`\\host\Users\x`) and a forward-slash
+        /// Users root, both of which carry exactly the identifying segment the
+        /// drive-anchored form was written for.</summary>
+        private static readonly Regex UsersDirPattern =
+            new Regex("(?:[A-Za-z]:)?" + SepAny + "Users" + SepAny + SegmentClass,
+                      RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
-        private static Regex[] BuildUsersDirPatterns()
+        /// <summary>The profile directory as a pattern rather than as four
+        /// literal spellings: each separator inside it accepts any spelling,
+        /// so a profile that arrives half-rewritten is still removed.</summary>
+        private static Regex ProfilePattern(string profile)
         {
-            var list = new List<Regex>(SepForms.Length);
-            foreach (string sep in SepForms)
+            if (string.IsNullOrEmpty(profile)) return null;
+            string plain = profile.TrimEnd('\\', '/');
+            if (plain.Length == 0) return null;
+            string[] parts = plain.Split('\\', '/');
+            var sb = new StringBuilder();
+            for (int i = 0; i < parts.Length; i++)
             {
-                string s = Regex.Escape(sep);
-                list.Add(new Regex("[A-Za-z]:" + s + "Users" + s + SegmentClass,
-                                   RegexOptions.IgnoreCase | RegexOptions.CultureInvariant));
+                if (i > 0) sb.Append(SepAny);
+                sb.Append(Regex.Escape(parts[i]));
             }
-            return list.ToArray();
+            try
+            {
+                return new Regex(sb.ToString(),
+                                 RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            }
+            catch { return null; }
         }
 
         /// <summary>Scrub with this process's own account name and profile
@@ -142,19 +203,20 @@ namespace CompetitiveRounds
                 int n = 0;
                 string s = text;
 
-                // 1. The profile directory as this process reports it, in all
-                //    four separator spellings. Runs FIRST and is the only pass
-                //    that can reach a profile outside \Users (a redirected or
-                //    domain profile, e.g. D:\Profiles\name).
-                if (!string.IsNullOrEmpty(userProfile))
-                    foreach (string form in SpellingsOf(userProfile))
-                        s = ReplaceCounted(s, form, PathPlaceholder, ref n);
+                // 1. The profile directory as this process reports it, with
+                //    every separator inside it matched in ANY spelling. Runs
+                //    FIRST and is the only pass that can reach a profile
+                //    outside \Users (a redirected or domain profile, e.g.
+                //    D:\Profiles\name).
+                var profileRx = ProfilePattern(userProfile);
+                if (profileRx != null)
+                    s = profileRx.Replace(s, m => { n++; return PathPlaceholder; });
 
-                // 2. Any X:\Users\<segment> prefix, whoever it belongs to.
-                //    Counted from the evaluator, so the number is of matches
-                //    actually replaced rather than a separately computed guess.
-                foreach (Regex rx in UsersDirPatterns)
-                    s = rx.Replace(s, m => { n++; return PathPlaceholder; });
+                // 2. Any [drive:]<sep>Users<sep><segment> run, whoever it
+                //    belongs to, each separator independent. Counted from the
+                //    evaluator, so the number is of matches actually replaced
+                //    rather than a separately computed guess.
+                s = UsersDirPattern.Replace(s, m => { n++; return PathPlaceholder; });
 
                 // 3. The bare account name, at a TRUE word boundary.
                 //
@@ -170,11 +232,20 @@ namespace CompetitiveRounds
                 //
                 //    NameBoundary adds '_', '.' and '-' to the class, so the
                 //    pass fires only where the name stands genuinely alone —
-                //    which is exactly what the consent caption claims. The
-                //    account name inside a PATH is not this pass's job: passes
-                //    1 and 2 already removed the whole prefix it sat in, and a
-                //    UNC or otherwise-uncovered path still has separators on
-                //    both sides of the segment, which are not in the class.
+                //    which is exactly what the consent caption claims.
+                //
+                //    AND THE SEPARATORS AND '@' (Codex client r2 MEDIUM,
+                //    LogScrub.cs:174). The previous revision argued that
+                //    leaving them OUT was deliberate, so the pass would catch
+                //    a path the path passes did not recognise. It did — and
+                //    that made `/name/`, `\name\` and `name@example.com` into
+                //    removals the class contract and the consent both denied
+                //    ("on its own", "nothing else is removed"). The claim and
+                //    the code have to agree; this narrows the code, because
+                //    the paths worth removing are removed properly by passes 1
+                //    and 2 (which take the whole identifying prefix, not one
+                //    segment) and an e-mail local part was already on the
+                //    NOT-REMOVED list.
                 //
                 //    Bounded on both sides, so "name2" and "xname" keep their
                 //    spelling. Skipped under three characters — see THE
@@ -196,34 +267,10 @@ namespace CompetitiveRounds
             }
         }
 
-        /// <summary>The same directory written four ways. A caller's profile
-        /// string arrives in one spelling; a log can carry any of them.</summary>
-        private static IEnumerable<string> SpellingsOf(string path)
-        {
-            string plain = path.TrimEnd('\\', '/');
-            if (plain.Length == 0) yield break;
-            yield return plain.Replace("\\", "\\\\");   // doubled, longest first
-            yield return plain;                          // as given
-            yield return plain.Replace("\\", "/");       // forward slash
-            yield return plain.Replace("\\", "%5C");     // percent-encoded
-        }
-
-        private static string ReplaceCounted(string s, string needle, string with, ref int count)
-        {
-            if (string.IsNullOrEmpty(needle)) return s;
-            var sb = new StringBuilder(s.Length);
-            int i = 0;
-            while (true)
-            {
-                int at = s.IndexOf(needle, i, StringComparison.OrdinalIgnoreCase);
-                if (at < 0) { sb.Append(s, i, s.Length - i); break; }
-                sb.Append(s, i, at - i);
-                sb.Append(with);
-                count++;
-                i = at + needle.Length;
-            }
-            return sb.ToString();
-        }
+        // SpellingsOf / ReplaceCounted are GONE, not merely unused: they
+        // enumerated the profile in four HOMOGENEOUS spellings and replaced
+        // each as a literal, which is the shape that let a mixed-separator
+        // profile through. ProfilePattern replaces both.
 
         // ── Self-test ────────────────────────────────────────────────────
         //
@@ -296,6 +343,18 @@ namespace CompetitiveRounds
             return b.ToString();
         }
 
+        /// <summary>The same, with a DIFFERENT separator spelling at each
+        /// position — the shape that survived every pass before the r2 fix.
+        /// The spellings are taken in rotation from <paramref name="seps"/> so
+        /// the case is a genuine mix rather than one odd separator.</summary>
+        private static string JoinUsersMixed(string drive, string[] seps, params string[] segments)
+        {
+            int i = 0;
+            var b = new StringBuilder(drive).Append(':').Append(seps[i++ % seps.Length]).Append(UsersWord);
+            foreach (string seg in segments) b.Append(seps[i++ % seps.Length]).Append(seg);
+            return b.ToString();
+        }
+
         internal static SelfTestResult SelfTest()
         {
             var r = new SelfTestResult();
@@ -316,6 +375,23 @@ namespace CompetitiveRounds
                 new[] { "another account at " + JoinUsers("C", Bsl, "someoneelse", "Desktop", "a.txt"), "Desktop", "" },
                 new[] { "testuser2 is a different identifier", "testuser2", "neg" },
                 new[] { "no identity here at all", "identity", "neg" },
+                // MIXED SEPARATORS (Codex client r2 MEDIUM). One component
+                // writes the path, another rewrites half of it, and the result
+                // matched none of the four homogeneous patterns while the
+                // consent claimed every Users path was removed. Two rotations,
+                // so a fix that only handled "backslash then slash" is not
+                // enough.
+                new[] { "mixed " + JoinUsersMixed("C", new[] { Bsl, "/" }, user, "AppData", "x.log"), "AppData", "" },
+                new[] { "mixed2 " + JoinUsersMixed("C", new[] { "/", Bsl + Bsl, "%5C" }, user, "AppData", "y.log"), "AppData", "" },
+                // The PROFILE directory with mixed separators, which pass 1
+                // owns. `profile` below is built with plain backslashes, so
+                // this case only passes once that pass matches spellings
+                // independently.
+                new[] { "profile at " + JoinUsersMixed("C", new[] { "/", Bsl }, user) + Bsl + "Documents", "Documents", "" },
+                // A Users path with NO DRIVE LETTER — a UNC share or a
+                // forward-slash root. It carries the same identifying segment
+                // the drive-anchored form was written for.
+                new[] { "share at " + Bsl + Bsl + "host" + Bsl + UsersWord + Bsl + user + Bsl + "x.log", "x.log", "" },
                 // The boundary cases. An account name that is also an ordinary
                 // word used to rewrite every identifier that contained it, and
                 // all of these must come back untouched (Codex r1 MEDIUM,
@@ -335,6 +411,17 @@ namespace CompetitiveRounds
                 new[] { "testuser.log rotated", "testuser.log", "neg" },            // trailing '.'
                 new[] { "queued cr_testuser now", "cr_testuser", "neg" },           // leading '_'
                 new[] { "selected map-testuser now", "map-testuser", "neg" },       // leading '-'
+                // THE r2 BOUNDARY CASES. Each of these used to be rewritten
+                // while the class contract said "on its own" and the consent
+                // said "nothing else is removed". They are NOT paths this
+                // process recognises (no Users segment, no profile prefix), so
+                // nothing else removes them either — which is what makes them
+                // controls for the boundary and not for the path passes.
+                new[] { "posix home /testuser/logs/a.txt", "/testuser/", "neg" },
+                new[] { "share " + Bsl + Bsl + "host" + Bsl + "share" + Bsl + "testuser" + Bsl + "a.txt",
+                        Bsl + "testuser" + Bsl, "neg" },
+                new[] { "mail from testuser@example.com bounced", "testuser@example.com", "neg" },
+                new[] { "encoded %5Ctestuser%5Clog", "%5Ctestuser%5C", "neg" },
             };
 
             foreach (var c in cases)

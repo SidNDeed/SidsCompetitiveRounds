@@ -216,8 +216,14 @@ def _auto_log_body_keys() -> set:
 # second. Neither can be satisfied by editing only one side.
 DISCLOSED = {
     "steam_id": "your Steam ID",
-    "display_name": "name",
-    "opponent_steam_id": "the other players' Steam IDs",
+    # NOT the bare word "name": "room name" contains it, so deleting the
+    # personal-name disclosure entirely left this row green (r2 LOW). The
+    # phrase here is the one that only the personal-name sentence can satisfy.
+    "display_name": "your Steam ID and name",
+    # SINGULAR. BuildAutoLogBody emits at most one optional opponent id, so a
+    # caption promising "the other players' Steam IDs" disclosed a field that
+    # does not exist while under-describing the one that does.
+    "opponent_steam_id": "your opponent's Steam ID",
     "room_name": "the room name",
     "series_id": "the series ID",
     "mode": "the game mode",
@@ -256,6 +262,118 @@ def test_the_consent_states_the_scrub_it_actually_gets():
     words = {2: "two", 3: "three", 4: "four"}
     assert words[floor] + " characters" in caption, (
         "the bare-name floor is %d but the caption does not say so" % floor)
+
+
+def test_the_consent_promises_one_opponent_id_because_one_is_what_is_sent():
+    """The body carries `opponent_steam_id` at most once, and only when the
+    game had one. A plural promise is a disclosure of a field that is not
+    there -- and it reads as "everyone in the room", which for FFA is the one
+    place a reader would most want it to be true."""
+    caption = _settings_toggle_literal("SAutoLog")
+    for plural in ("opponents' Steam IDs", "the other players' Steam IDs",
+                   "opponent Steam IDs", "Steam IDs of everyone"):
+        assert plural not in caption, (
+            "the caption promises plural opponent IDs: %r" % plural)
+    block = cs_block(API_CLIENT, "BuildAutoLogBody(string steamId, string displayName,")
+    assert block.count('opponent_steam_id') == 1, (
+        "the body emits the opponent id %d times; the caption describes one"
+        % block.count('opponent_steam_id'))
+    # ...and it is optional, which the caption says with "when the game had one".
+    assert "when the game had one" in caption, (
+        "the caption no longer says the opponent id is conditional")
+
+
+def test_the_path_claim_covers_every_separator_the_scrub_actually_handles():
+    """The caption says "however the slashes are written". That is a claim
+    about the PASSES, not about one of them: a Windows log carries `C:\\Users\\`,
+    a Unity log carries `C:/Users/`, an escaped JSON payload carries `C:\\\\Users\\\\`
+    and a URL-encoded one carries `%5CUsers%5C`. Before this round the pattern
+    was a single hard-coded backslash form and the other three survived.
+    """
+    caption = _settings_toggle_literal("SAutoLog")
+    assert "however the slashes are written" in caption, (
+        "the caption no longer claims separator-independence")
+    src = LOG_SCRUB.read_text(encoding="utf-8")
+    forms = initialiser(LOG_SCRUB, "internal static class LogScrub", "SepForms")
+    for sep in ("\\\\\\\\", "/", "%5C"):
+        assert sep in forms, "the separator set does not carry %r: %s" % (sep, forms)
+    body = code_of(LOG_SCRUB)
+    assert "SepAny" in body, "the passes no longer share one separator alternation"
+    # Both path passes read it -- a pass that kept a literal separator is the
+    # half the claim would be false about.
+    users = initialiser(LOG_SCRUB, "internal static class LogScrub", "UsersDirPattern")
+    assert "SepAny" in users, "the Users pass hard-codes its separator: " + users
+    profile = code_of(LOG_SCRUB, "private static Regex ProfilePattern(string profile)")
+    assert "SepAny" in profile, "the profile pass hard-codes its separator: " + profile
+
+
+def test_the_caption_does_not_promise_the_narrow_pass_removes_more():
+    """The bare-name pass is deliberately NARROW: it removes the account name
+    only where it stands alone. `/name/`, `\\name\\` and `name@example` used to
+    satisfy the boundaries, which contradicted the caption in the safe
+    direction for privacy and the unsafe one for truth -- a reader cannot tell
+    which claims to trust once one is wrong.
+
+    The caption now names the two cases that survive, and the boundary
+    excludes exactly the characters that make them survive.
+    """
+    caption = _settings_toggle_literal("SAutoLog")
+    assert "e-mail address" in caption, (
+        "the caption no longer says an address is left alone")
+    assert "path we did not recognise" in caption, (
+        "the caption no longer says an unrecognised path is left alone")
+    before = initialiser(LOG_SCRUB, "internal static class LogScrub", "NameBoundaryBefore")
+    after = initialiser(LOG_SCRUB, "internal static class LogScrub", "NameBoundaryAfter")
+    for name, expr in (("before", before), ("after", after)):
+        for ch, why in (("/", "a forward-slash path segment"),
+                        ("@", "an e-mail local part"),
+                        ("%", "a percent-encoded separator")):
+            assert ch in expr, (
+                "the %s boundary admits %s: %s" % (name, why, expr))
+
+
+def test_turning_the_setting_off_stops_a_transfer_already_running():
+    """"Nothing is sent while this is off" was false for the one upload in
+    flight when it was switched off: the flag was read at dispatch and never
+    again, so a bundle already on the wire finished and was accepted.
+
+    Three pieces, one assertion each: the uploader hands the request a live
+    predicate, the request layer polls it and ABORTS, and the completion path
+    tells a cancellation apart from a failure so a cancelled upload leaves no
+    debounce and no content hash behind (which would suppress the retry the
+    player is entitled to after turning it back on).
+    """
+    caption = _settings_toggle_literal("SAutoLog")
+    assert "turning it off stops an upload that is already running" in caption, (
+        "the caption no longer claims cancellation")
+
+    upload = AUTO_LOG.read_text(encoding="utf-8")
+    assert "abortIf: () => !Enabled" in upload, (
+        "the uploader does not hand the request a live enable predicate")
+
+    raw = code_of(API_CLIENT.read_text(encoding="utf-8"),
+                  "private static IEnumerator PostRequestRaw(string url, byte[] bodyRaw,")
+    assert "abortIf" in raw and "request.Abort()" in raw, (
+        "the request layer never aborts: " + raw[:300])
+    assert "RequestCancelledMarker" in raw, (
+        "an aborted request is not distinguishable from a failed one")
+
+    marker = initialiser(API_CLIENT, "public static class ApiClient",
+                         "RequestCancelledMarker")
+    assert marker.strip('"'), "the cancellation marker is empty"
+    body = code_of(AUTO_LOG.read_text(encoding="utf-8"))
+    assert "ApiClient.RequestCancelledMarker" in body, (
+        "the upload callback does not recognise a cancellation")
+    # The cancellation branch must return BEFORE the debounce/hash writes.
+    # code_of masks comments to blanks, so collapse first and then measure.
+    tail = " ".join(body.split("ApiClient.RequestCancelledMarker", 1)[1].split())
+    assert "return;" in tail, "the cancellation branch does not return"
+    assert tail.index("return;") < 400, (
+        "a cancelled upload still falls through to the debounce: " + tail[:300])
+    for after in ("_lastUploadAt", "_lastHash"):
+        assert after not in tail[:tail.index("return;")], (
+            "a cancelled upload writes %s before it returns, which suppresses "
+            "the retry the player is entitled to" % after)
 
 
 def test_the_bare_name_pass_does_not_eat_identifiers():

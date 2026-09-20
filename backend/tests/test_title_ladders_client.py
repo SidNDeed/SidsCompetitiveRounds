@@ -29,7 +29,7 @@ import re
 
 import pytest
 
-from _cs_structure import code_of
+from _cs_structure import code_of, strip_comments_only
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
@@ -47,24 +47,104 @@ def _server(name):
 
 # ── 1. the 404 is classified three ways ───────────────────────────────────
 
-def test_the_failure_classifier_has_three_outcomes():
-    body = code_of(_plugin("ApiClient.cs"),
-                   "internal static string TitleLadderFailure(string response)")
-    for outcome in ('"transport"', '"empty"', '"route"'):
-        assert outcome in body, "TitleLadderFailure can never answer %s" % outcome
-    # "empty" twice: the exact case (the marker) and the presumed case (a JSON
-    # body without it). One occurrence means one of them was folded away.
-    assert body.count('"empty"') == 2, (
-        "the exact and presumed no-account cases are no longer distinct: " + body)
+SIG = "internal static string TitleLadderFailure(string response)"
 
 
-def test_the_marker_is_tested_before_the_body_shape():
-    """The marker PROVES the route answered. The body-shape test is a
-    judgement about a 404 that carries no marker. Reversing them would decide
-    by the weaker signal first and never consult the stronger one."""
+def _marker_literal():
+    src = _plugin("ApiClient.cs")
+    m = re.search(r'LadderNoAccountMarker\s*=\s*"([^"]+)"', src)
+    assert m, "the marker constant moved"
+    return m.group(1)
+
+
+def _classify(response):
+    """TitleLadderFailure, driven from its OWN source.
+
+    Not a second copy of the rule: each branch below is located in the
+    production method and the OUTCOME IT RETURNS is read out of it, so
+    exchanging the two 404 answers, dropping a branch or reversing a test
+    changes what this function returns. Written this way because ApiClient.cs
+    is a Unity type and cannot be executed here -- and because a test that
+    merely checks the three literals are PRESENT passes with them swapped,
+    which is the finding this closes.
+    """
+    body = code_of(_plugin("ApiClient.cs"), SIG)
+    code = " ".join(body.split())
+    m = re.search(r'if \(string\.IsNullOrEmpty\(response\)\) return "(\w+)";', code)
+    assert m, "the empty-response branch is gone: " + code
+    if not response:
+        return m.group(1)
+    m404 = re.search(r'if \(response\.IndexOf\("HTTP 404".*?\) < 0\) return (\w+);', code)
+    assert m404, "the not-a-404 branch is gone: " + code
+    if "HTTP 404" not in response:
+        assert m404.group(1) == "response", (
+            "a non-404 failure is being relabelled rather than passed through")
+        return response
+    mk = re.search(
+        r'return response\.IndexOf\(LadderNoAccountMarker.*?(>=|<) 0 \? "(\w+)" : "(\w+)";',
+        code)
+    assert mk, "the marker branch is gone or no longer decides the 404: " + code
+    # The comparator is read, not assumed, so that inverting it moves the
+    # MAPPING rather than making this helper fail to parse its own source.
+    present, absent = (mk.group(2), mk.group(3)) if mk.group(1) == ">="         else (mk.group(3), mk.group(2))
+    return present if _marker_literal() in response else absent
+
+
+@pytest.mark.parametrize("response,expected", [
+    (None, "transport"),
+    ("", "transport"),
+    ('HTTP 404: {"detail":{"error":"@MARKER@"}}', "empty"),
+    ('HTTP 404: {"detail":"Not Found"}', "route"),
+    ("HTTP 404: Not Found", "route"),
+])
+def test_the_classifier_maps_each_answer_to_the_right_outcome(response, expected):
+    """The MAPPING, not the vocabulary.
+
+    The two 404 rows are the pair the tab's behaviour hangs on. A 404 carrying
+    the route's own marker means "this account has no ladder yet", and the tab
+    offers the entry rung. A 404 WITHOUT it means the request never reached the
+    ladder route, and the tab must say the service is unavailable -- offering
+    to sell an entry rung there is an offer against a server that cannot
+    honour it.
+
+    The fourth row is the one the previous round got wrong: an ordinary
+    FastAPI 404 body is JSON, so a classifier that decided on the presence of
+    `{` read "unavailable service" as "no account yet".
+    """
+    if response:
+        response = response.replace("@MARKER@", _marker_literal())
+    assert _classify(response) == expected
+
+
+def test_the_classifier_does_not_decide_on_the_body_being_json():
+    """The marker is the only thing that distinguishes the ladder route's own
+    404, because it exists for no other purpose (#306). Any test on the body's
+    SHAPE answers the same way for every FastAPI 404 in the stack."""
+    body = code_of(_plugin("ApiClient.cs"), SIG)
+    for shape in ("IndexOf('{')", 'IndexOf("{"', 'StartsWith("{"', 'Contains("{"'):
+        assert shape not in body, (
+            "the classifier is deciding by the body being JSON again: " + body)
+    assert "LadderNoAccountMarker" in body, "the marker is no longer consulted"
+
+
+def test_the_fetch_caller_classifies_through_the_helper():
+    """The helper is worth nothing if the one failure path does not use it. A
+    caller that assigned the raw response, or its own literal, leaves every
+    assertion above green."""
     body = code_of(_plugin("ApiClient.cs"),
-                   "internal static string TitleLadderFailure(string response)")
-    assert body.index("LadderNoAccountMarker") < body.index("IndexOf('{')"), body
+                   "public static void FetchTitleLadders(string steamId, bool force = false)")
+    assigns = [l.strip() for l in body.splitlines() if "TitleLaddersError =" in l]
+    assert assigns, "FetchTitleLadders no longer sets the error code"
+    failure = [l for l in assigns if "TitleLadderFailure(" in l]
+    assert len(failure) == 1, (
+        "the failure branch does not go through TitleLadderFailure: %r" % assigns)
+    # Every OTHER assignment in the method is a success-path write: the clear
+    # at the top of a good answer, and the one literal for a 200 that carried
+    # no ladders array. A third literal here would be a second classifier
+    # nobody is testing.
+    others = sorted(l for l in assigns if "TitleLadderFailure(" not in l)
+    assert others == ['TitleLaddersError = "parse";', "TitleLaddersError = null;"], (
+        "an unclassified error code is assigned beside the helper: %r" % others)
 
 
 def test_the_marker_is_one_constant_on_both_sides():
@@ -133,8 +213,21 @@ def test_every_composed_name_goes_through_the_translation_helper():
     `.name` / `next_names` reading that lands inside an I18n.TrF argument list
     has to be wrapped."""
     src = code_of(_plugin("TitleLaddersUI.cs"))
+    # A server name does not have to arrive as `x.name`. The equip path holds
+    # it in a local first -- `string wanted = r.name;` -- precisely so the
+    # "putting on" line and the success line name the same thing, and a local
+    # is invisible to a scan that only knows the field. That alias is what the
+    # previous round missed: reverting `LadderName(wanted)` to a bare `wanted`
+    # stayed green while the success line went out untranslated.
+    aliases = set(re.findall(r"\bstring\s+(\w+)\s*=\s*\w+\.name\s*;", src))
+    assert aliases, (
+        "no local alias of a server name was found -- either the equip path "
+        "changed shape or this scan has stopped seeing it")
     bad = []
     for call in re.findall(r"I18n\.TrF\((.*?)\);", src, re.S):
+        for alias in aliases:
+            if re.search(r"(?<!LadderName\()\b" + alias + r"\b", call):
+                bad.append(call.strip()[:90])
         for raw in re.findall(r"(?<!LadderName\()\b(\w+)\.name\b", call):
             bad.append(call.strip()[:90])
         if "next_names" in call and "LadderName(" not in call:
@@ -251,24 +344,71 @@ def test_every_ladder_name_is_translated_in_every_locale(lang):
 
 # ── 3. the parser self-check is off the release path ──────────────────────
 
-def test_the_parser_self_check_is_behind_a_lever():
-    body = code_of(_plugin("TitleLaddersUI.cs"), "internal static void OnTabEntered()")
-    assert "SelfCheckOnce()" in body, "the self-check was deleted rather than gated"
-    assert "SelfCheckLever()" in body, (
-        "opening the Titles tab still runs the parser self-check unconditionally")
-    call = body[body.index("SelfCheckOnce()") - 60:body.index("SelfCheckOnce()")]
-    assert "if (" in call and "SelfCheckLever()" in call, (
-        "the lever is read but does not gate the call: " + call)
+SELF_CHECK_NAMES = ("SelfCheckOnce", "SelfCheckLever", "selfChecked",
+                    "selfCheckLever", "selfCheckLeverBound",
+                    "TitleLadderParserSelfCheck")
 
 
-def test_the_lever_defaults_to_off_and_fails_closed():
-    body = code_of(_plugin("TitleLaddersUI.cs"), "private static bool SelfCheckLever()")
-    assert '"Debug", "TitleLadderParserSelfCheck"' in body, body
-    # The default sits immediately after the key, and it must be false.
-    after = body[body.index('"TitleLadderParserSelfCheck"'):][:120]
-    assert re.search(r'"TitleLadderParserSelfCheck",\s*\n?\s*false', after), after
-    assert "catch { return false; }" in body, (
-        "an unreadable lever must not enable the check")
-    # Bound once: retrying the bind on every tab entry puts the failure back
-    # on the path a player touches.
-    assert "selfCheckLeverBound" in body, body
+def test_the_parser_self_check_is_not_in_the_shipped_type_at_all():
+    """Round two gated it behind a default-off Debug lever. That still ships
+    the fixture, the parser driver and the config entry in every player's DLL,
+    and a lever is one config edit away from running a developer harness on a
+    player's machine. The disposition here is deletion: the parser is
+    exercised by tests that run on a build machine, which is where a fixture
+    belongs.
+
+    Names AND the fixture's own sku, because removing the methods while
+    leaving the canned body behind would keep the payload in the binary. The
+    same sku is scanned for in the built DLL -- see ai-collab/CLIENT-R3-NOTES.md.
+    """
+    src = _plugin("TitleLaddersUI.cs")
+    code = code_of(src)
+    for name in SELF_CHECK_NAMES:
+        assert name not in code, (
+            "%s is back in the shipped type -- the self-check fixture ships "
+            "again" % name)
+    # Comments stripped, literals kept: the sku appears in the note recording
+    # the removal (and in the DLL scan that pins it), and a check that reds on
+    # its own explanation is a check whose next fix is to delete the
+    # explanation.
+    literals = strip_comments_only(src)
+    for literal in ("title_ladder_rat_4_queen", "active_line"):
+        assert literal not in literals, (
+            "the self-check's canned response is still in the source: %s" % literal)
+    entered = code_of(src, "internal static void OnTabEntered()")
+    for name in SELF_CHECK_NAMES:
+        assert name not in entered, (
+            "opening the Titles tab still reaches %s" % name)
+
+
+def test_every_parsed_field_is_read_from_its_own_object_slice():
+    """The adversarial property the deleted fixture existed to probe, pinned
+    by a test that runs on every build machine instead of on a developer's.
+
+    The server's answer nests a rung inside a line, and BOTH carry `name` and
+    `tier`. A reader that searches the whole body -- or the enclosing line --
+    answers every rung with the LINE's name and the LINE's tier, and the board
+    renders eight identical rows that all look plausible. So each parser may
+    read only the slice it was handed.
+    """
+    src = _plugin("ApiClient.cs")
+    rung = code_of(src, "internal static TitleLadderRung ParseTitleLadderRung(string obj)")
+    subjects = set(re.findall(r"PcTopLevel\((\w+),", rung))
+    assert subjects == {"obj"}, (
+        "the rung parser reads fields out of %r -- anything but its own slice "
+        "lets the enclosing line answer for the rung" % sorted(subjects))
+
+    outer = code_of(src, "internal static TitleLadders ParseTitleLadders(string json)")
+    # Inside the per-line loop, nothing may be read from the whole body.
+    loop = outer[outer.index("foreach (var obj in SliceTopLevelObjects(arr))"):]
+    assert "PcTopLevel(json," not in loop, (
+        "a line's field is being read from the whole response: " + loop[:200])
+    # And the rung parser is fed a slice of that line's own rungs array.
+    call = [l.strip() for l in outer.splitlines() if "ParseTitleLadderRung(" in l]
+    assert call == ["var r = ParseTitleLadderRung(ro);"], (
+        "the rung parser is called with something other than a rung slice: %r"
+        % call)
+    assert "foreach (var ro in SliceTopLevelObjects(rungs))" in outer, (
+        "the rungs array is no longer sliced before it is parsed")
+
+

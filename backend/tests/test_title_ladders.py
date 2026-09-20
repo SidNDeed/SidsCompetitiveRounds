@@ -70,16 +70,21 @@ def _read(path):
         return fh.read()
 
 
-# Whether any production path calls the ladder credit hook. Evaluated at
-# collection because the marker below needs it at collection.
+# Whether any production path calls the ladder credit hook.
 #
-# It gates an XFAIL, never a skip. A skip reads as "not applicable here" and
-# is what let the hook-coverage assertion sit green for releases while the
-# thing it checks did not exist -- a check that cannot fail (#306/#342/#431).
-# An xfail says the opposite: this SHOULD pass, it does not, and here is why.
-# strict=True closes the other end: the moment the hook lands and the
-# assertions start passing, an XPASS is reported as a FAILURE, so nobody can
-# wire the hook and leave a stale "expected to fail" behind it.
+# It GATES NOTHING. It used to be the condition on the xfail below, which is a
+# marker that deletes itself at the only moment it matters: the day the hook is
+# wired the condition goes false, the marker disappears, the assertions run as
+# an ordinary test and -- if the wiring happens to be complete -- simply PASS.
+# Nothing then reports that the reason text beside them still says the hook does
+# not exist. The marker is unconditional and strict instead, so that day is an
+# XPASS, i.e. a FAILURE, and the stale prose has to be removed to clear it.
+#
+# What is kept here is the STATE, reported by its own test below, so a reader
+# does not have to infer it from an xfail. A skip was the original shape and is
+# the one a coverage check must never take: it reads as "not applicable here"
+# and sat green for releases while the thing it checks did not exist
+# (#306/#342/#431).
 HOOK_IS_WIRED = HOOK in _read(MAIN_PY)
 
 
@@ -546,8 +551,47 @@ def test_every_completion_symbol_exists():
     assert not missing, f"completion sites not found by symbol: {missing}"
 
 
+def test_the_hook_coverage_marker_cannot_erase_itself():
+    """Read off the MARKER OBJECT, not off the source text.
+
+    Two ways the coverage check below can stop being a check, and one
+    assertion each. `strict=False` turns the day the wiring lands into a
+    silent xpass. A CONDITION turns it into no marker at all on that same day,
+    which is worse: the assertions then run as an ordinary test, pass if the
+    wiring is complete, and the reason string -- which says in so many words
+    that the hook does not exist -- is never printed by anything again.
+
+    Both are one keyword away from each other and neither changes a single
+    identifier in this file, which is why this is read off the mark rather
+    than grepped.
+    """
+    marks = [m for m in test_hook_coverage_is_per_mode.pytestmark
+             if m.name == "xfail"]
+    assert len(marks) == 1, "expected exactly one xfail marker, found %d" % len(marks)
+    mark = marks[0]
+    assert mark.kwargs.get("strict") is True, (
+        "the coverage xfail is not strict: the day the hook lands it xpasses "
+        "silently and the stale reason stays")
+    assert not mark.args and "condition" not in mark.kwargs, (
+        "the coverage xfail is CONDITIONAL again -- it deletes itself on the "
+        "one day it has something to say")
+    assert HOOK in mark.kwargs.get("reason", ""), (
+        "the reason no longer names the hook it is waiting for")
+
+
+def test_the_hook_wiring_state_is_reported_not_inferred():
+    """The state the marker above used to encode. Reported, so that a reader
+    of a green run knows which of the two worlds they are in."""
+    assert isinstance(HOOK_IS_WIRED, bool)
+    if HOOK_IS_WIRED:
+        pytest.fail(
+            "%s now appears in main.py -- the ladder credit hook has been "
+            "wired by the server pass. Remove the xfail marker on "
+            "test_hook_coverage_is_per_mode (it is strict, so it is already "
+            "failing) and delete this reminder." % HOOK)
+
+
 @pytest.mark.xfail(
-    not HOOK_IS_WIRED,
     strict=True,
     reason=(
         f"{HOOK} is not called from any production path in main.py, so the "
@@ -555,7 +599,12 @@ def test_every_completion_symbol_exists():
         f"pass owned by the integrator and is deliberately not written here. "
         f"This is an expected failure, not a skip: the assertion runs, it "
         f"reds, and strict=True turns the day it starts passing into a "
-        f"FAILURE so the marker cannot outlive the wiring."
+        f"FAILURE -- which is the ONLY thing that forces this marker to be "
+        f"removed. It is deliberately UNCONDITIONAL: a condition of the form "
+        f"`not HOOK_IS_WIRED` erases the marker on exactly the day the wiring "
+        f"lands, so the stale reason above would never be reported by "
+        f"anything and the suite would go quietly green with prose in it "
+        f"saying the opposite."
     ),
 )
 def test_hook_coverage_is_per_mode():
@@ -870,9 +919,10 @@ def hook_calls_in(source):
     cannot produce an entry, because this walks the parse tree.
 
     Module-level precisely so it can be tested. The coverage test that uses it
-    skips until the hook is wired, and a scanner whose first real run is the
-    day it has to be right is not a check (#313) -- so the tests below drive it
-    against synthetic sources now.
+    is an EXPECTED FAILURE until the hook is wired -- it RUNS, and it reds; it
+    has not skipped since round two -- and a scanner whose first real run is
+    the day it has to be right is not a check (#313), so the tests below drive
+    it against synthetic sources now.
     """
     src = textwrap.dedent(source)
     try:

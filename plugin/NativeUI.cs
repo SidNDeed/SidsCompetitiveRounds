@@ -14148,6 +14148,26 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
              * because a consent that names only the obvious half is not
              * consent for the other half. If a field is ever added to that
              * body, it is added here in the same edit or it is not sent.
+             * `opponent_steam_id` is SINGULAR and optional, so the caption
+             * says so — the earlier draft promised "the other players' Steam
+             * IDs", plural, which no body this sender builds has ever carried
+             * (Codex client r2 LOW).
+             *
+             * IT ALSO NAMES WHAT THE SCRUB ACTUALLY DOES, in both directions
+             * (Codex client r2, two MEDIUMs). "Every path through a Users
+             * folder" is now true of MIXED separator spellings as well, which
+             * is what LogScrub's r2 change made so; and "nothing else is
+             * removed" is now true of `/name/` and `name@example`, which the
+             * bare-name pass used to rewrite. The sentence and the code were
+             * moved toward each other in the same pass rather than one being
+             * reworded to survive the other.
+             *
+             * AND "NOTHING IS SENT WHILE THIS IS OFF" IS NOW TRUE OF A
+             * REQUEST ALREADY ON THE WIRE. Turning the setting off aborts it
+             * (AutoLogUpload passes `abortIf: () => !Enabled` into
+             * SubmitAutoLogBody); it used to stop only the NEXT dispatch,
+             * which made the sentence false in exactly the moment a player
+             * changing their mind cares about.
              *
              * The caption also used to be CLIPPED rather than wrapped: the
              * label was a fixed 700x18 box with TMP's Truncate default, so
@@ -14167,7 +14187,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                         Plugin.AutoLogUploadEnabled.Value = !Plugin.AutoLogUploadEnabled.Value;
                     dirty = true;
                 },
-                "After a game you played in, this sends the same logs the bug-report form sends, so a problem can be looked at without you filing a report. Also sent: your Steam ID and name, the other players' Steam IDs, the room name, the game mode, the series ID, and the mod and game version. Removed first: every path through a Windows Users folder, this PC's own profile folder, and this PC's Windows account name on its own when it is three characters or longer (a shorter name is removed only inside a path). Nothing else is removed. At most one upload every five minutes, and never while this is off.",
+                "After a game you played in, this sends the same logs the bug-report form sends, so a problem can be looked at without you filing a report. Also sent: your Steam ID and name, your opponent's Steam ID when the game had one, the room name, the game mode, the series ID, and the mod and game version. Removed first: every path through a Users folder, however the slashes are written, and this PC's own profile folder; and this PC's Windows account name where it stands on its own in a line, when it is three characters or longer. Nothing else is removed - the same name inside a path we did not recognise, or in an e-mail address, stays. At most one upload every five minutes. Nothing is sent while this is off, and turning it off stops an upload that is already running.",
                 descH: 100f,
                 descWrap: true);
             autoLogToggleTxt = UIFactory.GetButtonText(autoLogToggleBtn);

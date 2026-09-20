@@ -252,6 +252,35 @@ def test_a_refused_discard_run_is_bounded_by_a_wait_budget():
     assert float(value.rstrip("fF")) > 0
 
 
+def test_the_budget_bounds_the_wait_from_ABOVE():
+    """The tests around this one read the comparison's OPERANDS and never its
+    DIRECTION, so `<=` could become `>=` and both stayed green (Codex client r2
+    MEDIUM, test_pc_discard_one_request.py:241).
+
+    The direction is the whole rule. `discardWaited + wait <= DiscardWaitBudget`
+    means "there is room left, so retry"; reversed it means "we have already
+    spent at least the budget, so retry", which is FALSE on the first refusal
+    of every run -- so no copy ever gets the one retry it is promised and every
+    rate-limited run ends at its first pause. The defect is silent: the budget
+    is still there, still named, still compared, and every other assertion in
+    this file still passes.
+
+    Control: swap `<=` for `>=` at the guard -> red.
+    """
+    conditions = guard_chain(PLAYER_CARDS, DISCARD_NEXT, "StartCoroutine(DiscardAfter")
+    terms = [t for c in conditions for t in and_terms(c)]
+    budgeted = [t for t in terms
+                if "discardWaited" in t and "DiscardWaitBudget" in t]
+    assert budgeted, f"the retry is not compared against a budget: {terms}"
+    # Accepted in either writing, but only with the budget as the UPPER bound.
+    upper = re.compile(
+        r"(discardWaited\s*\+\s*wait\s*<=?\s*DiscardWaitBudget"
+        r"|DiscardWaitBudget\s*>=?\s*discardWaited\s*\+\s*wait)")
+    assert any(upper.search(t) for t in budgeted), (
+        "the spent-wait total is not bounded ABOVE by the budget -- reversing "
+        f"this comparison disables every FIRST retry, not the last: {budgeted}")
+
+
 def test_the_wait_budget_is_compared_against_a_value_that_moves():
     """The assertion above passes on an expression that can never be false.
 
@@ -298,10 +327,26 @@ def test_the_retry_latch_is_keyed_by_the_copy():
     copies queued behind it with none of the retry the rule promised them.
     """
     code = mask_code(cs_block(PLAYER_CARDS, DISCARD_NEXT))
-    assert "discardRetriedIds.Contains(pid)" in code, (
-        "the retry is not gated on THIS copy having had one")
     assert "discardRetriedIds.Add(pid)" in code, (
         "taking the retry does not record which copy took it")
+
+    # POLARITY, not merely presence (Codex client r2 MEDIUM,
+    # test_pc_discard_one_request.py:292). Looking for the two identifiers
+    # left `!` free to disappear: without it the guard reads "this copy has
+    # ALREADY been retried, so retry it", which is false for every copy on its
+    # first refusal -- so the retry the rule promises is never taken at all,
+    # while both identifiers are still right there to be found.
+    #
+    # Control: delete the `!` at the retry guard -> red.
+    conditions = guard_chain(PLAYER_CARDS, DISCARD_NEXT, "StartCoroutine(DiscardAfter")
+    terms = [t for c in conditions for t in and_terms(c)]
+    keyed = [t for t in terms if "discardRetriedIds.Contains(pid)" in t]
+    assert keyed, (
+        f"the retry is not gated on THIS copy having had one: {terms}")
+    assert any(re.search(r"!\s*discardRetriedIds\.Contains\(\s*pid\s*\)", t)
+               for t in keyed), (
+        "the retry guard admits a copy that has ALREADY been retried and "
+        f"refuses one that has not -- the negation is gone: {keyed}")
 
 
 def test_the_resumption_does_not_return_the_copys_retry():

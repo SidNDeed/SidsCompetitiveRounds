@@ -2090,7 +2090,18 @@ namespace CompetitiveRounds
             // DELIBERATELY does not clear the per-copy latch. Resuming IS the
             // retry; clearing it here was what turned "one retry per copy"
             // into "one retry in flight" and let a single copy loop until the
-            // run budget ran out. The latch is cleared only by FinishDiscard.
+            // run budget ran out.
+            //
+            // CORRECTED (Codex client r2 LOW): "cleared only by FinishDiscard"
+            // was not the whole list, and the omissions are exactly the two a
+            // reader needs in order to decide whether a stale latch can
+            // survive. THREE sites clear it, and every one of them ends a RUN:
+            // FinishDiscard (the run finished or gave up), the new-run
+            // initialisation in the discard entry point (a fresh run starts
+            // with no copy already retried), and the identity change (another
+            // account's run must not inherit this one's retries). What no site
+            // does is clear it MID-RUN — that is the property this comment is
+            // actually here for.
             DiscardNext(id);
         }
 

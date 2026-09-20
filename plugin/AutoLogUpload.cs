@@ -9,9 +9,21 @@ namespace CompetitiveRounds
 {
     /// <summary>
     /// Opt-in automatic post-match log upload: when the player has turned the
-    /// Settings toggle on, the same log bundle the bug form builds is sent once
-    /// per qualifying room exit, so a report of "it broke last night" has a log
-    /// behind it without asking anyone to remember to file one.
+    /// Settings toggle on, the same log bundle the bug form builds is sent
+    /// after a qualifying room exit, so a report of "it broke last night" has a
+    /// log behind it without asking anyone to remember to file one.
+    ///
+    /// AT MOST ONE REQUEST PER QUALIFYING EXIT, and usually none. "Once per
+    /// qualifying room exit" read as a floor as well as a ceiling, and it is
+    /// only the ceiling (Codex client r2). An exit sends nothing when the
+    /// toggle is off, when data reporting is not consented, when no game ran,
+    /// when there is no Steam session, inside the 300 s debounce, while a
+    /// previous bundle is still being built or a previous upload is still in
+    /// flight, when the finished bundle is byte-identical to the one already
+    /// accepted, or once a 404 has latched uploads off for the session. Every
+    /// one of those prints its own reason through NoteSkip, because "no
+    /// [AUTO-LOG] line" must never be the same observation as "the hook never
+    /// ran" (#438).
     ///
     /// DEFAULT OFF and a NEW config key. Config.Bind writes a default exactly
     /// once and never revisits it (#190), so this ships off for every install
@@ -352,10 +364,27 @@ namespace CompetitiveRounds
                     (ok, code, resp) =>
                     {
                         _inFlight = false;
-                        // Every arm consumes the debounce, including refusals:
-                        // a refused upload still cost a request, and re-asking
-                        // thirty seconds later is how a bucket gets spent on
-                        // nothing.
+                        if (!ok && resp == ApiClient.RequestCancelledMarker)
+                        {
+                            // The player turned the setting off while this was
+                            // on the wire, and the transfer was ABORTED rather
+                            // than completed-and-discarded. That is what makes
+                            // the consent's "nothing is sent while this is off"
+                            // true of a dispatched request and not only of a
+                            // future one (Codex client r2 MEDIUM).
+                            //
+                            // Neither the debounce nor the dedup hash is
+                            // written: nothing was accepted, so a later
+                            // re-enable must not be made to wait five minutes
+                            // for an upload that never happened, and the
+                            // unsent bundle must not be remembered as sent.
+                            Plugin.Log.LogInfo("[AUTO-LOG] upload cancelled — the setting was turned off mid-transfer");
+                            return;
+                        }
+                        // Every other arm consumes the debounce, including
+                        // refusals: a refused upload still cost a request, and
+                        // re-asking thirty seconds later is how a bucket gets
+                        // spent on nothing.
                         _lastUploadAt = Time.realtimeSinceStartup;
                         if (ok)
                         {
@@ -384,7 +413,12 @@ namespace CompetitiveRounds
                         }
                         Plugin.Log.LogWarning($"[AUTO-LOG] upload failed ({(code > 0 ? "HTTP " + code : "no response")}) — "
                             + "not retried; the next match tries again");
-                    });
+                    },
+                    // Polled once a frame for as long as the request is open.
+                    // This is the whole of "never while this is off": the
+                    // gates above stop a NEW dispatch, and this one stops a
+                    // dispatched transfer the moment permission is withdrawn.
+                    abortIf: () => !Enabled);
             }
             catch (Exception ex)
             {

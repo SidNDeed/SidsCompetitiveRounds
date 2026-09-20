@@ -27,17 +27,26 @@ namespace CompetitiveRounds
     ///     the caption names the entry rung and its price. It is never drawn
     ///     as "0 of 10 to Rat Leader", which would promise progress the
     ///     account cannot make.
-    ///   * An account the route does not know at all gets a 404, which is
-    ///     every account until it buys an entry rung. That is a whole-screen
-    ///     message, not a board: EmptyText's "empty" branch. Saying "every
-    ///     player reads back games=0" skipped this case entirely, and it is
-    ///     the one a new player actually meets.
+    ///   * An account the route does not know AT ALL — no Player row on this
+    ///     backend — gets a 404 carrying the route's own marker. That is a
+    ///     whole-screen message, not a board: EmptyText's "empty" branch.
+    ///     Saying "every player reads back games=0" skipped this case
+    ///     entirely.
     ///
-    /// UNAVAILABLE IS NOT ZERO. A server without the route answers 404. The
-    /// board is then hidden entirely and one line says so. A board of zeroes
-    /// would read as a truthful statement about the account (#438: acceptance
-    /// is a POSITIVE signal the feature emits, and "all zeroes" is what both
-    /// success and total absence look like).</summary>
+    /// CORRECTED (Codex client r2 LOW): the second bullet used to say this
+    /// 404 is "every account until it buys an entry rung". It is not. Buying
+    /// an entry rung is not what creates the row this route looks for; an
+    /// account the backend knows, with no ladder progress, gets the 200 of
+    /// the FIRST bullet. What the 404 means is that the backend has no Player
+    /// row for this Steam ID at all.
+    ///
+    /// UNAVAILABLE IS NOT ZERO. A server without the route answers 404 too,
+    /// WITHOUT the marker, and that is what tells the two apart — see
+    /// ApiClient.TitleLadderFailure. The board is then hidden entirely and one
+    /// line says so. A board of zeroes would read as a truthful statement
+    /// about the account (#438: acceptance is a POSITIVE signal the feature
+    /// emits, and "all zeroes" is what both success and total absence look
+    /// like).</summary>
     internal static class TitleLaddersUI
     {
         private static readonly Color C_PANEL = new Color(0.10f, 0.11f, 0.14f, 0.92f);
@@ -244,12 +253,10 @@ namespace CompetitiveRounds
         /// applied inside CreateButton, so nothing here re-claims it (#158).</summary>
         internal static void OnTabEntered()
         {
-            // Behind a Debug config lever, off by default — the same shape
-            // AutoLogUpload gives the log-scrub self-test, and for the same
-            // reason: every player opening this tab was building synthetic
-            // JSON and running assertions over it, which is test work on a
-            // release path. See SelfCheckOnce.
-            if (SelfCheckLever()) SelfCheckOnce();
+            // Nothing test-shaped runs here any more. Opening this tab used to
+            // build synthetic JSON and run assertions over it — first
+            // unconditionally, then behind a default-off Debug lever, and now
+            // not at all (see the note where that code was).
             var id = LocalId;
             if (id == null) return;
             ApiClient.FetchTitleLadders(id);
@@ -285,9 +292,15 @@ namespace CompetitiveRounds
             equipInFlight = true; equipAt = Time.realtimeSinceStartup;
             SetMsg(I18n.TrF("Putting on {0}...", LadderName(r.name)), C_LABEL);
             // RAW on purpose: this is the value echoed back into the
-            // success message below, and it is the same name the server
-            // was asked for. Translating it here would translate it
+            // success message below. Translating it here would translate it
             // twice, since the echo is composed like every other site.
+            //
+            // CORRECTED (Codex client r2 LOW): it is NOT "the same name the
+            // server was asked for". SetActiveTitle sends `item_id` and its
+            // authentication fields and no name at all — this string never
+            // leaves the client. It is the label THIS screen already had for
+            // the rung the player clicked, held so the success line can name
+            // the same thing the "putting on" line named.
             string wanted = r.name;
             ApiClient.SetActiveTitle(id, r.item_id, (ok, resp) =>
             {
@@ -390,12 +403,15 @@ namespace CompetitiveRounds
                 // a claim about the ACCOUNT, and it would be false.
                 return I18n.Tr("Ladders unavailable: this server does not serve the ladder route yet.");
             if (e == "empty")
-                // A 404 the ROUTE itself answered: this account has no ladder
-                // row yet, which is every account until it buys an entry rung.
-                // It used to render as the "route" line above, telling a new
-                // player the service was broken. ApiClient.TitleLadderFailure
-                // says which 404s reach here and which of them are presumed
-                // rather than proved.
+                // A 404 the ROUTE itself answered, PROVED by the route's own
+                // marker: the backend has no Player row for this account. It
+                // used to render as the "route" line above, telling a new
+                // player the service was broken.
+                //
+                // CORRECTED (Codex client r2 LOW): "every account until it
+                // buys an entry rung" was the wrong account model — see the
+                // class header. ApiClient.TitleLadderFailure now classifies on
+                // the marker alone, so nothing reaching here is presumed.
                 return I18n.Tr("No ladder yet - buy a title line in the Shop to start one.");
             if (e == "parse") return I18n.Tr("Ladders unavailable: the server's answer could not be read.");
             return I18n.Tr("Ladders unavailable: the server could not be reached.");
@@ -527,130 +543,28 @@ namespace CompetitiveRounds
             UIFactory.SetColor(card.txtCaption, C_LABEL);
         }
 
-        // ── parser self-check (acceptance §3) ────────────────────────────
-
-        private static bool selfChecked;
-        private static BepInEx.Configuration.ConfigEntry<bool> selfCheckLever;
-        private static bool selfCheckLeverBound;
-
-        /// <summary>Whether the parser self-check below may run at all. False
-        /// on every seat that has not deliberately turned it on.
-        ///
-        /// Bound once, lazily, and never re-bound on failure: a config file
-        /// that cannot be read is not going to start working because the tab
-        /// was opened again, and retrying would put the failure on a path a
-        /// player touches. Fails CLOSED — an unbindable lever means the check
-        /// does not run, which is the release behaviour anyway.</summary>
-        private static bool SelfCheckLever()
-        {
-            if (!selfCheckLeverBound)
-            {
-                selfCheckLeverBound = true;
-                try
-                {
-                    var cf = Plugin.ConfigFileForLevers;
-                    if (cf != null)
-                        selfCheckLever = cf.Bind(
-                            "Debug", "TitleLadderParserSelfCheck",
-                            false,
-                            "Development only: the first time the Titles tab opens, run the "
-                            + "ladder parser over a canned response whose rungs repeat the "
-                            + "line's own keys, and log one [LADDER] line saying which fields "
-                            + "came back with the rung's value. Nothing is sent, shown or "
-                            + "persisted.");
-                }
-                catch (Exception ex)
-                { Plugin.Log?.LogWarning("[LADDER] self-check bind failed: " + ex.Message); }
-            }
-            try { return selfCheckLever != null && selfCheckLever.Value; }
-            catch { return false; }
-        }
-
-        /// <summary>One shot, first time the tab opens ON A SEAT THAT ASKED
-        /// FOR IT: run a fixture whose `rungs[]` REPEAT the keys `name`,
-        /// `tier`, `sku` and `threshold` through the real parser and log
-        /// whether each field came back with the rung's value or the line's.
-        ///
-        /// This exists because there is no C# test runner on this project, and
-        /// the failure it guards is silent by construction: a flat
-        /// `ExtractJson*` reader returns the FIRST occurrence in the whole
-        /// body, so it would answer "Rat" for a line's name and "Rat" for
-        /// every rung's name and every assertion about the shape would still
-        /// pass (#608). The check is a POSITIVE signal the feature emits into
-        /// the log (#438), and the log line is what the in-game pass reads.
-        ///
-        /// BEHIND A LEVER, off by default (SelfCheckLever). Unconditional, it
-        /// meant every player who opened this tab built a synthetic JSON
-        /// document and ran assertions over it — test work on a release path,
-        /// down to the allocations. The lever is the same arrangement
-        /// AutoLogUpload gives the log-scrub self-test; the parser cannot go
-        /// into tools/client-rules-harness with the scrub because it lives on
-        /// ApiClient's JSON helper family, which the harness has no way to
-        /// compile. That is the reason this shape survives at all.</summary>
-        private static void SelfCheckOnce()
-        {
-            if (selfChecked) return;
-            selfChecked = true;
-            try
-            {
-                // Deliberately adversarial ordering: the LINE's name/tier come
-                // first, and the rungs repeat both. A reader that searches the
-                // whole text answers every rung with the line's values.
-                const string fixture =
-                    "{\"steam_id\":\"7656\",\"active_line\":\"rat\",\"ladders\":[{" +
-                    "\"line\":\"rat\",\"name\":\"Rat\",\"games\":30,\"tier\":3,\"max_tier\":5," +
-                    "\"next_tier\":4,\"next_threshold\":75,\"next_names\":[\"Rat King\",\"Rat Queen\"]," +
-                    "\"games_to_next\":45,\"rungs\":[" +
-                    "{\"tier\":1,\"sku\":\"title_ladder_rat_1\",\"item_id\":11,\"name\":\"Rat\"," +
-                    "\"description\":\"d1\",\"rarity\":\"rare\",\"preview_color\":\"#9AA0A6\"," +
-                    "\"threshold\":0,\"price\":1000,\"owned\":true,\"active\":false}," +
-                    "{\"tier\":4,\"sku\":\"title_ladder_rat_4_queen\",\"item_id\":14,\"name\":\"Rat Queen\"," +
-                    "\"description\":\"d2\",\"rarity\":\"epic\",\"preview_color\":\"#E0B33A\"," +
-                    "\"threshold\":75,\"price\":0,\"owned\":false,\"active\":true}]}]}";
-
-                var d = ApiClient.ParseTitleLadders(fixture);
-                var bad = new List<string>();
-                if (d == null || d.lines.Count != 1) { Plugin.Log.LogWarning("[LADDER] parser self-check FAILED: no line parsed"); return; }
-                var ln = d.lines[0];
-                int checks = 0;
-                Action<string, bool> want = (field, okv) => { checks++; if (!okv) bad.Add(field); };
-                want("line.name", ln.name == "Rat");
-                want("line.games", ln.games == 30);
-                want("line.tier", ln.tier == 3);
-                want("line.max_tier", ln.max_tier == 5);
-                want("line.has_next", ln.has_next);
-                want("line.next_threshold", ln.next_threshold == 75);
-                want("line.games_to_next", ln.games_to_next == 45);
-                want("line.next_names", ln.next_names.Length == 2 && ln.next_names[1] == "Rat Queen");
-                want("rungs.count", ln.rungs.Count == 2);
-                if (ln.rungs.Count == 2)
-                {
-                    var r0 = ln.rungs[0]; var r1 = ln.rungs[1];
-                    want("rung0.sku", r0.sku == "title_ladder_rat_1");
-                    want("rung0.name", r0.name == "Rat");
-                    want("rung0.owned", r0.owned);
-                    want("rung0.price", r0.price == 1000);
-                    want("rung1.tier", r1.tier == 4);
-                    want("rung1.sku", r1.sku == "title_ladder_rat_4_queen");
-                    want("rung1.name", r1.name == "Rat Queen");
-                    want("rung1.item_id", r1.item_id == 14L);
-                    want("rung1.threshold", r1.threshold == 75);
-                    want("rung1.preview_color", r1.preview_color == "#E0B33A");
-                    want("rung1.rarity", r1.rarity == "epic");
-                    want("rung1.description", r1.description == "d2");
-                    want("rung1.active", r1.active);
-                    want("rung1.owned-false", !r1.owned);
-                }
-                // A rung missing its sku must be DROPPED, not rendered blank.
-                var missing = ApiClient.ParseTitleLadderRung("{\"tier\":2,\"name\":\"Rat Leader\"}");
-                want("rung-without-sku-dropped", missing == null);
-
-                if (bad.Count == 0)
-                    Plugin.Log.LogInfo($"[LADDER] parser self-check: {checks}/{checks} fields OK (rungs repeat name/tier/sku/threshold)");
-                else
-                    Plugin.Log.LogWarning($"[LADDER] parser self-check FAILED on {bad.Count}/{checks}: {string.Join(", ", bad.ToArray())}");
-            }
-            catch (Exception ex) { Plugin.Log.LogWarning($"[LADDER] parser self-check threw: {ex.Message}"); }
-        }
+        // ── parser self-check: REMOVED FROM THE SHIPPED PATH ─────────────
+        //
+        // A one-shot fixture used to run here the first time the Titles tab
+        // opened, behind a default-off Debug lever. Round two put the lever
+        // on it; round three removes the fixture altogether (Codex client
+        // r1 LOW / r2 PARTIAL, TitleLaddersUI.cs:239).
+        //
+        // The lever was not the finding. A check that only a developer who
+        // knows it exists can turn on runs in no build anybody ships and in
+        // no gate anybody reads, so it was decoration inside a release
+        // artifact — synthetic JSON and assertion text in the literal heap
+        // of every player's DLL, which is also the heap the privacy scan
+        // reads. Its absence is now checkable at the ARTIFACT: the release
+        // DLL must carry no `title_ladder_rat_4_queen`, and that scan can
+        // fail, which the lever's default could not.
+        //
+        // WHAT IT WAS GUARDING, kept as a statement so the next author does
+        // not re-derive it the hard way: a flat whole-body JSON reader
+        // answers the LINE's `name`, `tier`, `sku` and `threshold` for every
+        // RUNG that repeats those keys (#608), and every shape assertion
+        // still passes. ApiClient.ParseTitleLadderRung must therefore read
+        // each field from the rung OBJECT it was handed and never from the
+        // enclosing text; test_title_ladders_client.py holds that contract.
     }
 }

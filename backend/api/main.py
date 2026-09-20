@@ -4600,12 +4600,25 @@ import mail_discord
 app.include_router(mail_discord.router)
 
 # Opt-in automatic post-match log upload (v1.41.0 Item 3). The CLIENT half
-# landed in the same release and DOES call POST /api/v1/logs/auto -- once per
-# qualifying room exit, and only while the player has turned the Settings
-# toggle on, which ships off. This comment used to read "INERT: no client calls
-# it", which was true when the route was written and stopped being true in the
-# same batch. The module's own docstring says what a working call looks like
-# and what it prints.
+# landed in the same release and DOES call POST /api/v1/logs/auto. This comment
+# used to read "INERT: no client calls it", which was true when the route was
+# written and stopped being true in the same batch.
+#
+# HOW OFTEN, stated as a CEILING rather than as "once per qualifying room exit"
+# (Codex client r2: that phrasing reads as a floor too, and the client drops
+# many more exits than it sends). The ceiling is AT MOST one request per
+# qualifying exit. An exit sends nothing at all when the Settings toggle is off
+# (it ships off), when data reporting is not consented, when no game ran in the
+# room, when there is no Steam session, when the 300 s debounce since the last
+# attempt has not elapsed, when a previous bundle is still being built or a
+# previous upload is still in flight, when the finished bundle is byte-identical
+# to the one already accepted, or when a 404 from this route has latched uploads
+# off for the rest of that process session. Each of those prints its own reason
+# in the client log. Sizing this route's buckets from "one per exit" therefore
+# over-provisions rather than under-provisions.
+#
+# The module's own docstring says what a working call looks like and what it
+# prints.
 from auto_logs import router as auto_logs_router, internal_router as auto_logs_internal_router
 app.include_router(auto_logs_router)
 app.include_router(auto_logs_internal_router)
