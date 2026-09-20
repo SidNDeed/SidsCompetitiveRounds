@@ -273,8 +273,33 @@ def _engine():
     return create_async_engine(DSN, poolclass=NullPool)
 
 
+async def _shut(session):
+    """Roll a session back and close it, whatever state it is in."""
+    for step in (session.rollback, session.close):
+        try:
+            await step()
+        except Exception:
+            pass
+
+
 async def _reset(engine):
+    # Take the clean slate rather than hoping for it. A test that fails
+    # mid-transaction leaves a backend holding locks on these tables, and
+    # PostgreSQL does not notice its client is gone until it next writes to
+    # that socket — minutes, on a default keepalive, and across process exit.
+    # The DROP below would then sit behind it and the next run would red for a
+    # reason that has nothing to do with the code under test. That is exactly
+    # how this file's own negative control first reddened, so the fix belongs
+    # here and not in a retry. This database exists for this file alone, so
+    # terminating every other backend on it is bounded by construction.
+    async with engine.connect() as conn:
+        await conn.execute(text(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
+            " WHERE datname = current_database() AND pid <> pg_backend_pid()"))
+        await conn.commit()
     async with engine.begin() as conn:
+        # A blocked DDL must fail loudly, not hang the suite.
+        await conn.execute(text("SET LOCAL lock_timeout = '15s'"))
         for stmt in filter(None, (s.strip() for s in SCHEMA.split(";"))):
             await conn.execute(text(stmt))
         for sid in SIDS:
@@ -502,35 +527,43 @@ def test_a_report_completing_the_series_under_the_lock_wins():
                 await _add_game(conn, sid, ended_days_ago=20)
 
             reporter = Session()
-            await reporter.execute(
-                text("SELECT status FROM ovt_series WHERE id = CAST(:i AS uuid)"
-                     " FOR NO KEY UPDATE"), {"i": sid})
-
             sweeper = Session()
-            cands = await main._ovt_horizon_candidates(
-                sweeper, main.OVT_ABANDONED_HORIZON_DAYS,
-                main.OVT_HORIZON_SWEEP_LIMIT)
-            assert [str(c["id"]) for c in cands] == [sid]
+            task = None
+            try:
+                await reporter.execute(
+                    text("SELECT status FROM ovt_series WHERE id = CAST(:i AS uuid)"
+                         " FOR NO KEY UPDATE"), {"i": sid})
 
-            task = asyncio.create_task(main._ovt_settle_horizon_row(
-                sweeper, sid, main.OVT_ABANDONED_HORIZON_DAYS))
-            await asyncio.sleep(0.4)
+                cands = await main._ovt_horizon_candidates(
+                    sweeper, main.OVT_ABANDONED_HORIZON_DAYS,
+                    main.OVT_HORIZON_SWEEP_LIMIT)
+                assert [str(c["id"]) for c in cands] == [sid]
 
-            await reporter.execute(text("""
-                UPDATE ovt_series
-                   SET status = 'completed', winner_side = 1,
-                       solo_series_wins = 2, completed_at = NOW()
-                 WHERE id = CAST(:i AS uuid)
-            """), {"i": sid})
-            await reporter.commit()
-            await reporter.close()
+                task = asyncio.create_task(main._ovt_settle_horizon_row(
+                    sweeper, sid, main.OVT_ABANDONED_HORIZON_DAYS))
+                await asyncio.sleep(0.4)
 
-            wrote = await asyncio.wait_for(task, timeout=20)
-            if wrote:
-                await sweeper.commit()
-            else:
-                await sweeper.rollback()
-            await sweeper.close()
+                await reporter.execute(text("""
+                    UPDATE ovt_series
+                       SET status = 'completed', winner_side = 1,
+                           solo_series_wins = 2, completed_at = NOW()
+                     WHERE id = CAST(:i AS uuid)
+                """), {"i": sid})
+                await reporter.commit()
+
+                wrote = await asyncio.wait_for(task, timeout=20)
+                task = None
+                if wrote:
+                    await sweeper.commit()
+                else:
+                    await sweeper.rollback()
+            finally:
+                # An assertion that fires mid-interleaving must not leave a
+                # session holding a row lock — see _reset's comment.
+                if task is not None:
+                    task.cancel()
+                await _shut(reporter)
+                await _shut(sweeper)
 
             assert wrote is False
             row = await _row(engine, sid)
@@ -559,20 +592,24 @@ def test_the_settlement_lock_does_not_block_a_game_reports_fk_insert():
                 await _add_game(conn, sid, ended_days_ago=20)
 
             sweeper = Session()
-            wrote = await main._ovt_settle_horizon_row(
-                sweeper, sid, main.OVT_ABANDONED_HORIZON_DAYS)
-            assert wrote is True   # lock + write held, NOT yet committed
+            try:
+                wrote = await main._ovt_settle_horizon_row(
+                    sweeper, sid, main.OVT_ABANDONED_HORIZON_DAYS)
+                assert wrote is True   # lock + write held, NOT yet committed
 
-            async with engine.connect() as conn:
-                await conn.execute(text("SET lock_timeout = '3s'"))
-                await conn.execute(text("""
-                    INSERT INTO ovt_matches (id, series_id, winner_side, ended_at, created_at)
-                    VALUES (CAST(:id AS uuid), CAST(:sid AS uuid), 2, NOW(), NOW())
-                """), {"id": str(uuid.uuid4()), "sid": sid})
-                await conn.commit()
-
-            await sweeper.rollback()
-            await sweeper.close()
+                async with engine.connect() as conn:
+                    await conn.execute(text("SET lock_timeout = '3s'"))
+                    await conn.execute(text("""
+                        INSERT INTO ovt_matches (id, series_id, winner_side, ended_at, created_at)
+                        VALUES (CAST(:id AS uuid), CAST(:sid AS uuid), 2, NOW(), NOW())
+                    """), {"id": str(uuid.uuid4()), "sid": sid})
+                    await conn.commit()
+            finally:
+                # Under the FOR UPDATE mutation the INSERT above times out, and
+                # without this the sweeper's session keeps the row locked for
+                # every later test in the run AND for the next process — see
+                # _reset's comment.
+                await _shut(sweeper)
         finally:
             await engine.dispose()
     _run(go())
