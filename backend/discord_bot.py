@@ -8963,13 +8963,36 @@ async def poll_channel_posts():
     the duplicate it exists to prevent (#276: pick which direction the
     unhandled case fails).
 
-    AMBIGUITY IS A PROPERTY OF THE BATCH, NOT OF ONE ROW. Two rows whose sent
-    text is byte-identical are indistinguishable from outside, so the pair is
-    refused BEFORE any scan: whichever of them ran first would otherwise take
-    a surviving message on an exactly-one match that is only exactly-one
-    because it was evaluated one row at a time. Refusing both leaves two
-    correct old messages up; binding one leaves a correct message edited with
-    the other row's text.
+    AMBIGUITY IS DECIDED BY THE SERVER, AND THIS LOOP ONLY OBEYS IT. Two rows
+    in one channel whose recorded text is byte-identical are indistinguishable
+    from outside, so neither may bind: whichever ran first would otherwise take
+    a message on an exactly-one match that is only exactly-one because it was
+    evaluated one row at a time. REFUSING LEAVES THE CHANNEL EXACTLY AS IT
+    IS — one surviving message or two, whichever it happens to hold — where
+    binding one edits a message as likely to belong to the other row. (Round
+    three said "both old messages" here, which describes the two-message case
+    as though it were the only one; the one-message case is the harder half
+    and the one a per-row scan cannot tell apart.) The
+    api computes that over the WHOLE channel and returns `ambiguous` per row —
+    this loop computed it over one response, which made the answer depend on
+    where the 20-row LIMIT fell and on what a concurrent poller had taken, and
+    made two unrelated channels carrying the same text block each other.
+
+    THE CLAIM IS THE UNIT OF EXCLUSIVE RENDERING. The hand-out returns a
+    `claim_token`; every ack this loop makes presents it. An ack from a caller
+    that does not hold the claim writes nothing and comes back
+    "not_claimant" — never "acked" — so a tick that lost its lease learns that
+    instead of believing it finished. A "stale" answer KEEPS the claim, which
+    is what lets this loop render forward under the same token while no other
+    poller can be handed the row.
+
+    RELEASING: this loop hands a row back when it DECIDES not to render it
+    (nothing to adopt, the message is gone, the render cap) — a decision made
+    while the api is demonstrably answering. ANYTHING THAT IS NOT A DECISION
+    KEEPS THE CLAIM: an ack or a bind the api did not answer, a send or an edit
+    that raised, a tick that died. None of those can say what reached Discord,
+    so the row stays held until the 120 s lease expires rather than being
+    offered to a second poller that knows even less (#276).
 
     ORDER WITHIN A CORRECTION: adopt, then make the id durable (bind_only),
     then edit, then ack the revision THAT WAS RENDERED. The edit is what
@@ -8989,17 +9012,10 @@ async def poll_channel_posts():
     # Ids already spoken for this tick: a message another row in THIS batch
     # already owns is not a candidate for adoption. Six FAQ rows arrive
     # together, so this is where two of them could otherwise select one
-    # message.
+    # message. This is a within-tick detail, not the ownership rule — the
+    # ownership rule is the api's `ambiguous` flag, computed over the whole
+    # channel, and it is the only thing that decides whether a row may bind.
     claimed = {str(q["message_id"]) for q in data["posts"] if q.get("message_id")}
-    # Fingerprints two or more rows would have to share a message for. Exactly
-    # -one is only a meaningful test inside ONE row's scan: with two rows
-    # carrying the same sent text and one surviving message, each row's own
-    # scan sees exactly one hit, and the row that happens to run first takes
-    # it. Ownership is what is ambiguous, so the refusal has to be decided
-    # over the batch before any scan runs.
-    _fps = [q.get("adopt_fingerprint") for q in data["posts"]
-            if not q.get("message_id") and q.get("adopt_fingerprint")]
-    ambiguous = {fp for fp in _fps if _fps.count(fp) > 1}
     for p in data["posts"]:
         try:
             ch = bot.get_channel(int(p["channel_id"]))
@@ -9017,6 +9033,9 @@ async def poll_channel_posts():
             # notified_at, THEN ack. Any other post is unchanged.
             case_id, content = _modcase_parse(p["content"])
             revision = p.get("revision")
+            # The claim this row was handed to US under. Absent against a
+            # pre-338 api, where every ack degrades to the fire-once shape.
+            token = p.get("claim_token")
             # DELIVERY IS posted_at, NOT posted_revision. A row an OLD bot
             # delivered while 338 was already applied can carry posted_at with
             # posted_revision still NULL — indistinguishable from a never-posted
@@ -9038,10 +9057,15 @@ async def poll_channel_posts():
                 if mid is True:          # legacy marker from a send that
                     mid = None           # could not report its id
                 if not mid:
-                    mid = await _adopt_channel_post_message(ch, p, claimed, ambiguous)
+                    mid = await _adopt_channel_post_message(ch, p, claimed)
                 if not mid:
                     print(f"[CHANNEL-POST] no message id for {p['id']} in {p['channel_id']} — "
                           f"correction skipped, existing text left in place")
+                    # A DECISION, not a failure: nothing here will render, and
+                    # the api just answered the poll, so hand the claim back
+                    # rather than making the next tick wait out a lease for a
+                    # row this one already finished thinking about.
+                    await _release_channel_post_claim(p["id"], token)
                     continue   # an edit has no position, so skipping it cannot
                                # disorder the queue — and returning here would
                                # stall every later announcement behind it
@@ -9061,8 +9085,14 @@ async def poll_channel_posts():
                     # re-driven rather than marked delivered.
                     bound = await api_post(
                         "/internal/channel-posts/ack",
-                        params=_channel_post_ack_params(p["id"], None, mid, bind_only=True))
+                        params=_channel_post_ack_params(p["id"], None, mid,
+                                                        bind_only=True,
+                                                        claim_token=token))
                     if not bound or bound.get("status") != "acked":
+                        # Including "not_claimant": the lease expired under
+                        # this tick and somebody else may already be rendering
+                        # the row. Nothing to hand back — the claim is not
+                        # ours — and nothing to edit.
                         print(f"[CHANNEL-POST] could not persist message id {mid} for {p['id']}: "
                               f"{bound} — correction deferred, existing text left in place")
                         continue
@@ -9072,17 +9102,22 @@ async def poll_channel_posts():
                     # Somebody deleted the message. Re-sending would put the
                     # sheet back in a channel it was removed from; leave it.
                     print(f"[CHANNEL-POST] message {mid} for post {p['id']} is gone — correction skipped")
+                    await _release_channel_post_claim(p["id"], token)
                     continue
                 except discord.Forbidden:
                     print(f"[CHANNEL-POST] cannot read history in {p['channel_id']} (forbidden) — "
                           f"post {p['id']} left pending")
+                    await _release_channel_post_claim(p["id"], token)
                     continue
                 ack = None
                 # The ack names the revision that was RENDERED and the api
                 # records that one and no other, so a correction landing while
                 # this tick was editing comes back as "stale" carrying the
                 # newer text: edit forward and ack that instead of leaving the
-                # channel a revision behind until the next tick.
+                # channel a revision behind until the next tick. A stale answer
+                # KEEPS this tick's claim, which is why the loop below is
+                # allowed to go round again — no other poller can be handed the
+                # row while this one is still inside it.
                 #
                 # max_renders is the ONLY thing bounding that, deliberately in
                 # one place — a second copy of the cap would let one of them be
@@ -9092,14 +9127,24 @@ async def poll_channel_posts():
                 # it, a third correction inside one tick simply waits.
                 max_renders = 2
                 renders = 0
+                # The revision of the text that LAST went on Discord, kept
+                # separately from `revision` because a stale answer moves
+                # `revision` forward to a text this tick has not rendered yet.
+                # Naming that newer number anywhere would record a revision
+                # nobody displayed, which is the whole defect this bus exists
+                # to avoid.
+                rendered = None
                 while renders < max_renders:
                     renders += 1
+                    rendered = revision
                     await msg.edit(content=content[:2000],
                                    allowed_mentions=discord.AllowedMentions(users=True, everyone=False, roles=False))
                     _channel_post_sent[p["id"]] = msg.id
-                    print(f"[CHANNEL-POST] edited {p['id']} (rev {revision}) in {p['channel_id']}")
+                    print(f"[CHANNEL-POST] edited {p['id']} (rev {rendered}) in {p['channel_id']}")
                     ack = await api_post("/internal/channel-posts/ack",
-                                         params=_channel_post_ack_params(p["id"], revision, msg.id))
+                                         params=_channel_post_ack_params(
+                                             p["id"], rendered, msg.id,
+                                             claim_token=token))
                     if not ack or ack.get("status") != "stale":
                         break
                     if not ack.get("content") or not ack.get("revision"):
@@ -9110,8 +9155,19 @@ async def poll_channel_posts():
                 if ack and ack.get("status") == "stale":
                     print(f"[CHANNEL-POST] {p['id']} is still behind after this tick's renders — "
                           f"left pending, the id is stored and the next tick edits it")
+                    # THE CAP IS A DECISION TO STOP, so it hands the claim back
+                    # explicitly, naming the revision that WAS RENDERED — never
+                    # the newer one the stale answer carried. Without this the
+                    # row would sit under a claim nobody is using for the rest
+                    # of the lease. Nothing is re-sent by the hand-off: the row
+                    # carries posted_at and its message id, so the next poll
+                    # takes the correction path, not the send path.
+                    await _release_channel_post_claim(p["id"], token, rendered)
                     continue
                 if not ack or ack.get("status") != "acked":
+                    # "not_claimant" arrives here too, and it is NOT success:
+                    # this tick wrote nothing, so the row stays exactly as it
+                    # was for whoever does hold the claim.
                     print(f"[CHANNEL-POST] ack failed for {p['id']}: {ack} — row stays pending, edit remembered")
                     return
                 _channel_post_sent.pop(p["id"], None)
@@ -9146,27 +9202,41 @@ async def poll_channel_posts():
             ack = await api_post("/internal/channel-posts/ack",
                                  params=_channel_post_ack_params(
                                      p["id"], revision,
-                                     remembered if isinstance(remembered, int) else None))
+                                     remembered if isinstance(remembered, int) else None,
+                                     claim_token=token))
             if (ack and ack.get("status") == "stale"
                     and msg is not None and isinstance(remembered, int)):
                 # The row was corrected between this send and its ack. The api
                 # recorded the revision that WAS sent — so nothing reads as
                 # delivered that is not — and handed back the newer text. The
-                # message exists and its id is known, so correct it now; a
+                # claim is still ours (a stale answer releases nothing), so the
+                # message exists, its id is known, and this tick corrects it; a
                 # failure here just leaves a pending row with posted_at set,
                 # which the correction path picks up next tick without sending.
                 _, newer = _modcase_parse(ack.get("content") or "")
                 if newer and ack.get("revision"):
+                    newer_rev = ack["revision"]
                     await msg.edit(content=newer[:2000],
                                    allowed_mentions=discord.AllowedMentions(users=True, everyone=False, roles=False))
-                    print(f"[CHANNEL-POST] {p['id']} was corrected mid-send — edited to rev {ack['revision']}")
+                    print(f"[CHANNEL-POST] {p['id']} was corrected mid-send — edited to rev {newer_rev}")
                     ack = await api_post("/internal/channel-posts/ack",
                                          params=_channel_post_ack_params(
-                                             p["id"], ack["revision"], remembered))
+                                             p["id"], newer_rev, remembered,
+                                             claim_token=token))
             if ack and ack.get("status") == "stale":
                 print(f"[CHANNEL-POST] {p['id']} delivered but still behind — correction next tick")
+                # Same decision as the correction path's cap: this tick has
+                # stopped rendering, so the claim goes back rather than sitting
+                # idle for the rest of the lease. The row is delivered and
+                # carries its id, so the next poll edits — it cannot re-send.
+                # A PURE hand-back: the delivery ack above already recorded the
+                # revision that went out, and naming one here could only repeat
+                # it or name one nobody rendered.
+                await _release_channel_post_claim(p["id"], token)
                 continue
             if not ack or ack.get("status") != "acked":
+                # "not_claimant" lands here as a failure, which is what it is:
+                # nothing was recorded by THIS tick.
                 print(f"[CHANNEL-POST] ack failed for {p['id']}: {ack} — row stays pending, send remembered")
                 return
             _channel_post_sent.pop(p["id"], None)
@@ -9178,21 +9248,29 @@ async def poll_channel_posts():
             return  # keep strict ordering; retry from this post next tick
 
 
-def _channel_post_ack_params(post_id, revision, message_id, bind_only=False):
+def _channel_post_ack_params(post_id, revision, message_id, bind_only=False,
+                             claim_token=None, release=False):
     """Query params for the channel-post ack, with the optional halves
     dropped rather than sent as None — aiohttp refuses a None param value,
     and the endpoint treats an absent field as "leave it alone". Against a
-    pre-338 api `revision` arrives None here and the ack degrades to exactly
-    the call this loop used to make.
+    pre-338 api `revision` and `claim_token` both arrive None here and the ack
+    degrades to exactly the call this loop used to make.
 
     An omitted `revision` is not a shorthand for "whatever is current": the
     endpoint will not advance a row past a revision nobody claims to have
-    rendered, so a caller that cannot name one gets its delivery recorded and
-    the row stays pending for a caller that can.
+    rendered, so a caller that cannot name one gets its delivery recorded at
+    what the hand-out gave it, and nothing else.
+
+    claim_token is the row's claim, handed over by the poll that took it. The
+    endpoint requires it of anything that names a revision or binds an id and
+    refuses the call by name without it, so dropping it here is not a degraded
+    ack — it is a refused one.
 
     bind_only asks the endpoint for the id write ALONE — no posted_at, no
     posted_revision — which is how a correction makes its message id durable
-    without claiming to have rendered anything yet."""
+    without claiming to have rendered anything yet. release asks it to drop the
+    claim: with a revision, "record this and let go" at the render cap; without
+    one, a pure hand-back that writes nothing at all."""
     params = {"post_id": post_id}
     if revision is not None:
         params["revision"] = int(revision)
@@ -9200,10 +9278,39 @@ def _channel_post_ack_params(post_id, revision, message_id, bind_only=False):
         params["message_id"] = str(message_id)
     if bind_only:
         params["bind_only"] = "true"
+    if release:
+        params["release"] = "true"
+    if claim_token is not None:
+        params["claim_token"] = str(claim_token)
     return params
 
 
-async def _adopt_channel_post_message(ch, p, claimed=(), ambiguous=()):
+async def _release_channel_post_claim(post_id, claim_token, revision=None):
+    """Hand a row's claim back because this tick DECIDED to stop rendering it.
+
+    The claim is exclusive by design: while it is held, no other poller is
+    handed the row. That is what makes forward re-rendering safe, and it is
+    also why a tick that walks away — nothing to adopt, the message is gone,
+    the render cap reached — must say so rather than let the row sit idle for
+    the rest of the 120 s lease.
+
+    `revision` is the revision that WAS RENDERED, or None for a pure
+    hand-back that writes no delivery fact whatsoever. It is never the newer
+    revision a stale answer carried: this tick did not put that text on
+    Discord.
+
+    A failed release is not worth handling: the lease expires anyway, which is
+    the same cleanup a crashed tick gets. There is no token against a pre-338
+    api, and nothing to release there either."""
+    if not claim_token:
+        return
+    await api_post("/internal/channel-posts/ack",
+                   params=_channel_post_ack_params(post_id, revision, None,
+                                                   claim_token=claim_token,
+                                                   release=True))
+
+
+async def _adopt_channel_post_message(ch, p, claimed=()):
     """Recover the Discord message id of a row that was delivered before its
     id was ever recorded, or return None.
 
@@ -9225,17 +9332,24 @@ async def _adopt_channel_post_message(ch, p, claimed=(), ambiguous=()):
     confidently and edit the wrong message, the class of check that cannot
     fail (#342/#431).
 
-    AMBIGUITY REFUSES, AND OWNERSHIP IS PART OF IT. The scan does not stop at
-    the first hit; it collects every match in the window and adopts only when
-    there is exactly ONE. But exactly-one inside one row's scan does not make
-    the OWNERSHIP unambiguous: two rows whose sent text is identical — or
-    which differ only past Discord's 2,000-character ceiling, so that the same
-    text was posted for both — would each see one surviving message and the
-    one that ran first would take it. `ambiguous` is the set of fingerprints
-    the batch found on more than one unbound row, and a row in it refuses
-    before scanning: two correct old messages left alone beats one correct
-    message overwritten with the wrong row's text. `claimed` excludes ids
-    other rows in the same batch already own, for the same reason.
+    AMBIGUITY REFUSES, AND THE SERVER IS WHAT DECIDES IT. The scan does not
+    stop at the first hit; it collects every match in the window and adopts
+    only when there is exactly ONE. But exactly-one inside one row's scan does
+    not make the OWNERSHIP unambiguous: two rows whose sent text is identical —
+    or which differ only past Discord's 2,000-character ceiling, so that the
+    same text was posted for both — would each see one surviving message and
+    the one that ran first would take it. The api answers that question over
+    the WHOLE CHANNEL and sends `ambiguous` with the row; nothing is computed
+    here. An earlier version computed it across one response, which made the
+    answer depend on where the 20-row LIMIT fell and on what a concurrent
+    poller had already taken, and treated equal text in two unrelated channels
+    as a collision. REFUSING LEAVES THE CHANNEL EXACTLY AS IT IS — one
+    surviving message or two, whichever it happens to hold — which beats one
+    correct message overwritten with the wrong row's text.
+
+    `claimed` is a different and much smaller thing: ids another row in THIS
+    response already owns by a stored message_id. It is a within-tick guard,
+    not the ownership rule.
 
     Returns None on anything unexpected, and the caller then leaves the post
     alone. Bounded scan — a channel whose sheet has scrolled past the limit
@@ -9243,9 +9357,9 @@ async def _adopt_channel_post_message(ch, p, claimed=(), ambiguous=()):
     fingerprint = p.get("adopt_fingerprint") or ""
     if not fingerprint:
         return None
-    if fingerprint in set(ambiguous):
-        print(f"[CHANNEL-POST] post {p['id']} shares its recorded text with another pending "
-              f"row — ownership is ambiguous, no adoption")
+    if p.get("ambiguous"):
+        print(f"[CHANNEL-POST] post {p['id']} shares its recorded text with another "
+              f"row in {p['channel_id']} — ownership is ambiguous, no adoption")
         return None
     me = getattr(bot, "user", None)
     if me is None:

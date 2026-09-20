@@ -33071,8 +33071,15 @@ async def artist_submit_cosmetic(request: Request, payload: dict = Body(...),
         # The number in the message is the number the check enforces. The two
         # said different things: COSMETIC_MAX_B64 is 1,600,000 base64
         # characters and the text said 1 MB, so an artist with a 1.1 MB file
-        # was told to shrink something the endpoint would have accepted. Same
-        # defect as NativeUI's own "1 MB max", swept with it (#432).
+        # was told to shrink something the endpoint would have accepted.
+        #
+        # THE CLIENT TWIN IS NOT SWEPT WITH IT, AND IS NOT FIXED ANYWHERE IN
+        # THIS ARTIFACT. plugin/NativeUI.cs still refuses at 1_200_000 bytes
+        # while telling the artist "1 MB max"; that file belongs to the client
+        # lane, and the required change is written down for it in
+        # ai-collab/ITEM11-CLIENT-FAQ-CONTRACT.md. Nothing in this branch's
+        # tests goes red if it is never made — which is exactly why it is
+        # recorded rather than described as handled (#302).
         raise HTTPException(status_code=400,
                             detail="PNG missing or too large (1,600,000 base64 characters max)")
     if submission_fingerprint is not None:
@@ -34426,13 +34433,13 @@ async def internal_linked_players(
     ]}
 
 
-# How long one poller's claim on a channel-post batch lasts. Deliberately
-# LONGER than the bot's 30 s tick: the claim exists so two pollers cannot both
-# receive — and both send — one fresh row, and a lease shorter than a tick's
-# work would expire while the first poller was still inside it. The cost of the
-# longer lease is that a row whose tick died is re-driven up to four ticks
-# later, which for a queued announcement or an in-place correction is nothing;
-# the cost of the shorter one is the second copy this item exists to remove
+# How long one poller's claim on a channel-post row lasts. Deliberately LONGER
+# than the bot's 30 s tick: the claim is what makes rendering EXCLUSIVE, and a
+# lease shorter than a tick's work would expire while the holder was still
+# inside it. Lease expiry is the only way out of a claim that a crash can take,
+# so the cost of the longer lease is that a row whose tick died is re-driven up
+# to four ticks later — nothing, for a queued announcement or an in-place
+# correction. The cost of the shorter one is two renderers on one message
 # (#276 — decide which direction the unhandled case fails).
 CHANNEL_POST_CLAIM_SECONDS = 120
 
@@ -34448,20 +34455,45 @@ CHANNEL_POST_CLAIM_SECONDS = 120
 # graph (#202). SKIP LOCKED makes the second poller take the next rows instead
 # of queueing behind the first (#207).
 #
+# THE CLAIM CARRIES A TOKEN. One token is minted per poll and written on every
+# row that poll takes, so a later ack can prove it is the SAME caller that was
+# handed the row. Without it a claim says only "somebody is rendering", which
+# is not enough to keep a second poller from finishing a render the first one
+# is still inside.
+#
+# THE HAND-OUT RECORDS WHAT IT HANDED. handed_revision and handed_fingerprint
+# are the api's note of what it put on the wire — not a delivery fact, since
+# nothing here says anything reached Discord. They are what lets a caller that
+# CANNOT name a revision (a pre-338 bot) still be recorded accurately: it
+# rendered what it was handed, whatever the row says by the time its ack
+# arrives.
+#
+# AMBIGUITY IS COMPUTED HERE, OVER THE WHOLE CHANNEL. A row is ambiguous when
+# any OTHER row in the same channel — in any state, in this response or not —
+# would scan for the same text. The bot cannot compute this: it sees one
+# response, so a LIMIT boundary or a concurrent poller would change its answer,
+# and two channels that happen to carry the same text would block each other.
+# Fingerprints are scoped per (channel_id, text) by construction here.
+#
 # The adopt_fingerprint projection is a DERIVATION, not a stored value: see the
 # endpoint's docstring for why revision = 1 on a delivered row is a proof that
-# the stored content is still the text that was sent, and why no write is made
-# on the strength of it.
+# the stored content is still the text that was sent, and why no delivery fact
+# is written on the strength of it.
 _CHANNEL_POST_PENDING_SQL = (
     "WITH pick AS ("
     "  SELECT p.id FROM pending_channel_posts p"
     "   WHERE {where}"
-    "     AND (p.claimed_at IS NULL"
+    "     AND (p.claimed_token IS NULL OR p.claimed_at IS NULL"
     "          OR p.claimed_at < NOW() - make_interval(secs => :lease))"
     "   ORDER BY p.sort_order, p.id LIMIT 20"
     "   FOR NO KEY UPDATE SKIP LOCKED"
     "), taken AS ("
-    "  UPDATE pending_channel_posts p SET claimed_at = NOW()"
+    "  UPDATE pending_channel_posts p"
+    "     SET claimed_at         = NOW(),"
+    "         claimed_token      = CAST(:token AS uuid),"
+    "         handed_revision    = p.revision,"
+    "         handed_fingerprint = CASE WHEN p.content NOT LIKE '[MODCASE:%'"
+    "                                   THEN LEFT(p.content, 2000) END"
     "    FROM pick k WHERE p.id = k.id"
     "  RETURNING p.id, p.channel_id, p.content, p.revision, p.posted_revision,"
     "            p.posted_at, p.message_id, p.sort_order,"
@@ -34470,31 +34502,140 @@ _CHANNEL_POST_PENDING_SQL = (
     "                 WHEN p.posted_at IS NOT NULL AND p.revision = 1"
     "                      AND p.content NOT LIKE '[MODCASE:%'"
     "                 THEN LEFT(p.content, 2000) END AS adopt_fingerprint"
-    ") SELECT id, channel_id, content, revision, posted_revision, posted_at,"
-    "         message_id, adopt_fingerprint"
-    "    FROM taken ORDER BY sort_order, id"
+    ") SELECT t.id, t.channel_id, t.content, t.revision, t.posted_revision,"
+    "         t.posted_at, t.message_id, t.adopt_fingerprint,"
+    "         CAST(CAST(:token AS uuid) AS TEXT) AS claim_token,"
+    "         (t.adopt_fingerprint IS NOT NULL AND EXISTS ("
+    "             SELECT 1 FROM pending_channel_posts o"
+    "              WHERE o.channel_id = t.channel_id AND o.id <> t.id"
+    "                AND CASE WHEN o.adopt_fingerprint IS NOT NULL"
+    "                         THEN o.adopt_fingerprint"
+    "                         WHEN o.posted_at IS NOT NULL AND o.revision = 1"
+    "                              AND o.content NOT LIKE '[MODCASE:%'"
+    "                         THEN LEFT(o.content, 2000) END"
+    "                    = t.adopt_fingerprint)) AS ambiguous"
+    "    FROM taken t ORDER BY t.sort_order, t.id"
 )
 _CHANNEL_POST_WHERE_UNRENDERED = "p.posted_revision IS DISTINCT FROM p.revision"
 _CHANNEL_POST_WHERE_UNPOSTED = "p.posted_at IS NULL"
 
+# The ack, as ONE compare-and-set. Everything it does — authorize, record,
+# release — is decided inside this statement, so there is no window between a
+# check and the write it justifies (#208), and an unauthorized caller leaves no
+# trace at all rather than a partial one.
+#
+# `target` reads the row once and derives the two ways a caller can be
+# authorized:
+#   holds_claim    it presented the token this row's claim carries, and the
+#                  claim has not expired. Required of anything that names a
+#                  revision or binds an id.
+#   legacy_caller  it presented no token, named no revision and is not binding
+#                  — exactly and only the call shape a pre-338 bot can make.
+#                  That caller cannot hold a claim, so it is authorized by its
+#                  shape and gets what the hand-out recorded it was handed.
+# `written` runs only for an authorized caller (the WHERE), so a non-claimant
+# writes NOTHING and the outer SELECT reports authorized = false. Round three
+# answered such a caller by re-reading the row, which another poller had
+# already advanced, and reported success — the database then suppressed every
+# repair, because the row looked finished to everyone.
+#
+# A RELEASE THAT NAMES NO REVISION IS A PURE HAND-BACK: it clears the claim and
+# writes nothing else, not even posted_at. That is what the bot sends when it
+# DECIDES not to render a row this tick (nothing to adopt, message deleted), and
+# a hand-back must never be able to mark an undelivered row delivered.
+#
+# THE CLAIM IS RELEASED ONLY WHEN THE ROW IS DONE WITH. `:rev = revision` means
+# the row is fully current (posted_revision is bounded by revision at every
+# writer, so naming the current revision implies the write was accepted), the
+# explicit `:release` is the two-render cap saying "record what I rendered and
+# let go", and a legacy caller can do no more by construction. A STALE answer
+# releases nothing: the same holder renders forward under the same token.
+# bind_only releases nothing either — that row is mid-render.
+_CHANNEL_POST_ACK_SQL = (
+    "WITH target AS ("
+    "  SELECT p.id, p.revision, p.posted_revision, p.content,"
+    "         p.handed_revision, p.handed_fingerprint,"
+    "         (CAST(:token AS uuid) IS NOT NULL"
+    "          AND p.claimed_token = CAST(:token AS uuid)"
+    "          AND p.claimed_at > NOW() - make_interval(secs => :lease))"
+    "             AS holds_claim,"
+    "         (CAST(:token AS uuid) IS NULL"
+    "          AND CAST(:rev AS INTEGER) IS NULL"
+    "          AND NOT CAST(:bind AS BOOLEAN)) AS legacy_caller"
+    "    FROM pending_channel_posts p WHERE p.id = :pid"
+    "), written AS ("
+    "  UPDATE pending_channel_posts p SET"
+    "     posted_at = CASE"
+    "         WHEN CAST(:bind AS BOOLEAN)"
+    "              OR (CAST(:release AS BOOLEAN) AND CAST(:rev AS INTEGER) IS NULL)"
+    "         THEN p.posted_at ELSE COALESCE(p.posted_at, NOW()) END,"
+    "     message_id = COALESCE(CAST(:mid AS TEXT), p.message_id),"
+    "     posted_revision = CASE"
+    "         WHEN CAST(:bind AS BOOLEAN) THEN p.posted_revision"
+    "         WHEN t.legacy_caller THEN"
+    "              CASE WHEN t.handed_revision IS NOT NULL"
+    "                    AND t.handed_revision <= p.revision"
+    "                    AND t.handed_revision >= COALESCE(p.posted_revision, 0)"
+    "                   THEN t.handed_revision ELSE p.posted_revision END"
+    "         WHEN CAST(:rev AS INTEGER) IS NOT NULL"
+    "              AND CAST(:rev AS INTEGER) <= p.revision"
+    "              AND CAST(:rev AS INTEGER) >= COALESCE(p.posted_revision, 0)"
+    "         THEN CAST(:rev AS INTEGER)"
+    "         ELSE p.posted_revision END,"
+    "     adopt_fingerprint = CASE"
+    "         WHEN t.legacy_caller AND p.adopt_fingerprint IS NULL"
+    "         THEN t.handed_fingerprint ELSE p.adopt_fingerprint END,"
+    "     claimed_token = CASE"
+    "         WHEN NOT CAST(:bind AS BOOLEAN)"
+    "              AND (CAST(:release AS BOOLEAN) OR t.legacy_caller"
+    "                   OR CAST(:rev AS INTEGER) = p.revision)"
+    "         THEN NULL ELSE p.claimed_token END,"
+    "     claimed_at = CASE"
+    "         WHEN NOT CAST(:bind AS BOOLEAN)"
+    "              AND (CAST(:release AS BOOLEAN) OR t.legacy_caller"
+    "                   OR CAST(:rev AS INTEGER) = p.revision)"
+    "         THEN NULL ELSE p.claimed_at END"
+    "   FROM target t"
+    "  WHERE p.id = t.id AND (t.holds_claim OR t.legacy_caller)"
+    "  RETURNING p.id, p.revision, p.posted_revision, p.content"
+    ") SELECT t.id AS id,"
+    "         COALESCE(w.revision, t.revision) AS revision,"
+    "         COALESCE(w.posted_revision, t.posted_revision) AS posted_revision,"
+    "         COALESCE(w.content, t.content) AS content,"
+    "         (w.id IS NOT NULL) AS authorized"
+    "    FROM target t LEFT JOIN written w ON w.id = t.id"
+)
+
 
 def _channel_post_ack_reply(post_id, named_revision, row):
-    """What the ack tells the caller: finished, or the row has moved on.
+    """What the ack tells the caller: refused, finished, or still behind.
 
-    A named revision that did not become the row's posted_revision means the
-    compare-and-set declined it — the text moved while the caller was
-    rendering — so the caller is handed the current revision AND the current
-    content and can edit forward in the same tick instead of leaving the
-    channel a revision behind until the next one.
+    NOT_CLAIMANT comes first and is never reported as success. The statement
+    wrote nothing for this caller, either because it does not hold the row's
+    claim or because the claim expired under it. Reading the row's columns to
+    decide the answer — which is what round three did — asks the wrong
+    question: another poller may have advanced the row to exactly the state
+    this caller wanted, and "it looks finished" is not "you finished it".
 
-    A caller that named NO revision is never told "stale": it has no way to
-    act on the answer (it cannot edit, which is why it could not name one),
-    and its delivery was recorded either way. Telling it otherwise would make
-    every pre-338 ack look like a failure in its own logs.
+    STALE means the row is still behind its own revision AFTER this write,
+    whether or not the caller's own number was the one declined: either the
+    text moved on while it was rendering, or it rendered an intermediate
+    revision. The caller holds the claim and is handed the current revision AND
+    content, so it edits forward in the same tick rather than leaving the
+    channel behind until the next one. The claim is deliberately NOT released
+    on this answer.
+
+    A caller that named NO revision is never told stale: it has no way to act
+    on the answer (it cannot edit, which is why it could not name one), and its
+    delivery was recorded either way. Telling it otherwise would make every
+    pre-338 ack look like a failure in its own logs.
 
     A named predicate rather than an inline condition, because a rule inlined
     at its only call site can only be re-implemented by a test, never
     exercised by one (#391)."""
+    if not row["authorized"]:
+        return {"status": "not_claimant", "id": post_id,
+                "revision": row["posted_revision"]}
     if named_revision is not None and row["posted_revision"] != row["revision"]:
         return {"status": "stale", "id": post_id,
                 "revision": row["revision"], "content": row["content"]}
@@ -34518,16 +34659,35 @@ async def pending_channel_posts(
     omits it and still gets the fire-once set (posted_at IS NULL), so it never
     meets a correction row at all.
 
-    THIS ENDPOINT RECORDS NO DELIVERY FACT. It hands rows out and claims them;
-    it never writes posted_revision. An earlier build did: every row carrying
-    posted_at without a rendered revision was set to revision 1 here. That is
-    a statement about what is on Discord, made by the side of the wire that
-    cannot see Discord — and when the row had been corrected to revision 2
-    since the old bot delivered it, the write recorded a revision while
-    capturing no fingerprint, which left the correction findable by neither of
-    the two handles. Only the bot can prove which text is up, by matching the
-    live message against the fingerprint, so only the bot's ack may record a
-    revision (round-3 findings at this endpoint and at ack_channel_post).
+    THIS ENDPOINT RECORDS NO DELIVERY FACT. It DOES write: it claims each row
+    it hands out (claimed_at, claimed_token) and records what it served
+    (handed_revision, handed_fingerprint). None of those says anything is on
+    Discord. It never writes posted_at, posted_revision or adopt_fingerprint.
+    An earlier build did: every row carrying posted_at without a rendered
+    revision was set to revision 1 here. That is a statement about what is on
+    Discord, made by the side of the wire that cannot see Discord — and when
+    the row had been corrected to revision 2 since the old bot delivered it,
+    the write recorded a revision while capturing no fingerprint, which left
+    the correction findable by neither of the two handles. Only the bot can
+    prove which text is up, so only the bot's ack may record a revision
+    (round-3 findings at this endpoint and at ack_channel_post).
+
+    WHAT IT HANDED IS RECORDED HERE, and that is what makes a pre-338 bot's
+    ack honest. That bot cannot name a revision; it can only have rendered the
+    text this endpoint just gave it. handed_revision / handed_fingerprint are
+    that text, taken at the moment it went on the wire, so a correction
+    committed between this hand-out and that ack leaves posted_revision behind
+    revision with an EXACT fingerprint for the message that is up — which the
+    upgraded bot adopts, binds and edits forward. Nothing needs a hand-supplied
+    message id for that state.
+
+    `ambiguous` IS COMPUTED HERE, NOT IN THE BOT. A row is ambiguous when any
+    other row in the SAME channel would scan for the same text, in any state
+    and whether or not it appears in this response. The bot sees one response,
+    so computing it there made the answer depend on where the LIMIT fell and on
+    what a concurrent poller happened to take, and made two independent
+    channels carrying the same text block each other forever. The bot binds
+    only rows this endpoint calls unambiguous.
 
     WHAT posted_revision DOES NOT MEAN. "posted_revision IS DISTINCT FROM
     revision" alone is NOT a delivery test, and a row can carry posted_at with
@@ -34558,19 +34718,24 @@ async def pending_channel_posts(
     a single CTE: the previous SELECT had no claim, so two pollers could both
     receive one posted_at-NULL row and both send it, with the ack — which
     happens after the send — as the only thing between them and two copies.
-    The claim EXPIRES rather than needing release (CHANNEL_POST_CLAIM_SECONDS
-    above), and the DELIVERY ack clears it, so a row that was rendered is
-    available again at once and only an abandoned one waits out a lease. The
-    bind_only ack deliberately does NOT clear it: that row is mid-render, and
-    the claim is precisely what should still be held."""
+    One token is minted per poll and returned on every row as `claim_token`;
+    every ack that names a revision or binds an id must present it back, and
+    an ack that cannot is refused by name rather than answered "acked". The
+    claim is released when the row is fully current, when the caller asks for
+    release at its render cap, or by LEASE EXPIRY — which is the only route a
+    crashed poller can take and the reason the lease exists at all. A stale
+    answer releases nothing: the holder is still rendering."""
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
     where = (_CHANNEL_POST_WHERE_UNRENDERED if revisions
              else _CHANNEL_POST_WHERE_UNPOSTED)
+    # One token per POLL, not per row: it identifies the caller, and every row
+    # this call takes is taken by the same caller.
     rows = (await db.execute(
         text(_CHANNEL_POST_PENDING_SQL.format(where=where)),
-        {"lease": CHANNEL_POST_CLAIM_SECONDS})).mappings().all()
+        {"lease": CHANNEL_POST_CLAIM_SECONDS,
+         "token": str(uuid.uuid4())})).mappings().all()
     await db.commit()
     return {"posts": [{k: (v.isoformat() if hasattr(v, "isoformat") else v)
                        for k, v in r.items()} for r in rows]}
@@ -34582,12 +34747,24 @@ async def ack_channel_post(
     revision: int | None = Query(None, ge=1),
     message_id: str | None = Query(None, max_length=32),
     bind_only: bool = Query(False),
+    release: bool = Query(False),
+    claim_token: str | None = Query(None, max_length=36),
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
     db: AsyncSession = Depends(get_db),
 ):
     """Record the revision the bot ACTUALLY RENDERED, and nothing else (#175).
 
-    COMPARE-AND-SET, NOT COALESCE. The old statement wrote
+    THE CLAIM IS THE UNIT OF EXCLUSIVE RENDERING. Anything that names a
+    revision or binds an id must present the claim_token the hand-out gave it,
+    and the claim must not have expired. An ack that cannot writes NOTHING and
+    is answered "not_claimant". Round three released the claim on the FIRST ack
+    of any kind — including the "stale" one that exists to say "keep going" —
+    so a second poller could take a row the first was still rendering, and the
+    loser's late ack was then reported as success because the ROW had reached
+    the state it asked for. That reading is gone: authorization is decided
+    inside the write, and the answer reports what THIS caller did.
+
+    COMPARE-AND-SET, NOT COALESCE. An older statement wrote
     `posted_revision = COALESCE(:rev, revision)`, so an ack that named no
     revision recorded whatever the row happened to say at ack time. A
     correction landing between a pre-338 bot's send and its ack was therefore
@@ -34595,79 +34772,72 @@ async def ack_channel_post(
     still showed revision 1, and the correction was never delivered by anyone.
     Now the ack's own number is the only one that can be written, it may not
     exceed the row's revision (nobody renders a future text), and it may not
-    move posted_revision backwards. Everything else is left exactly as found.
+    move posted_revision backwards.
 
-    WHEN THE ACK NAMES NO REVISION (a pre-338 bot, which cannot), the server
-    records only what it can PROVE. A rewrite always bumps revision, so a
-    delivered row still at revision 1 has content that is still the text that
-    was sent: posted_revision 1 and adopt_fingerprint are both provable and
-    both written, and the row is resolved. A row already past revision 1
-    cannot be reasoned about at all — the text that was sent is gone — so
-    posted_revision stays NULL and no fingerprint is invented. That row reads
-    as "delivered, revision unknown", stays pending, and the correction waits
-    for a bot that can name what it rendered rather than being recorded as
-    done by one that cannot. The moderation-case exclusion is 338's: that
-    row's stored content opens with a marker the bot strips before sending, so
-    LEFT(content, 2000) is not what was posted for it.
+    WHEN THE ACK NAMES NO REVISION (a pre-338 bot, which cannot), the row is
+    recorded at WHAT IT WAS HANDED. The hand-out wrote handed_revision and
+    handed_fingerprint when it put that text on the wire, and a bot that cannot
+    name a revision can only have rendered what it was given. So a correction
+    committed between the hand-out and the ack leaves posted_revision behind
+    revision, with adopt_fingerprint holding the exact text that is on
+    Discord — and the upgraded bot locates that message, binds its id and edits
+    forward. This replaces a derivation that only worked while revision was
+    still 1, and with it the state where a corrected row held neither handle.
+    A moderation-case row gets no fingerprint either way (338's exclusion: its
+    stored content opens with a marker the bot strips before sending).
 
     posted_at keeps its ORIGINAL stamp — it records when the message first
     appeared, not when it was last edited — and it is stamped on EVERY
     delivery ack including a stale one, because a delivery that is not
     recorded is a delivery that gets made twice.
 
-    STALE ANSWER. When the write leaves posted_revision behind the row's
-    revision — the text moved on while the bot was rendering — the response
-    says so and carries the current revision and content, so the caller edits
-    forward and acks again inside the same tick instead of leaving the channel
-    on old text for another one. An ack that named no revision is never
-    reported stale: that caller has no way to act on it, and its delivery is
-    recorded either way.
+    STALE ANSWER, AND THE CLAIM IT KEEPS. When the row is still behind its own
+    revision after the write, the response says so and carries the current
+    revision and content — and the caller KEEPS the claim, so it edits forward
+    and acks again inside the same tick while no other poller can be handed the
+    row. An ack that named no revision is never reported stale: that caller has
+    no way to act on it, and its delivery is recorded either way.
 
-    bind_only=true writes the message id and NOTHING else. It exists because
-    editing a message destroys the only other way to find it again: the
-    fingerprint describes the text that is on Discord, and the edit replaces
-    that text. So the bot persists the id it just adopted, gets a committed
-    answer, and only then edits — a restart anywhere in that sequence finds
-    the row still pending, with either a fingerprint that still matches or an
-    id that does. Advancing posted_revision here would mark the correction
-    delivered before it had been rendered, so this arm touches neither it nor
-    posted_at."""
+    RELEASE. The claim is dropped when the ack names the row's current revision
+    (it is done), or when the caller passes release=true — the render cap,
+    which says "record what I rendered and let go; the next poll continues".
+    Nothing is sent twice by that hand-off, because by then the row carries its
+    message id and the send path only runs for a row with no posted_at. A
+    crashed holder releases nothing and is cleaned up by lease expiry alone.
+
+    bind_only=true writes the message id and NOTHING else, and keeps the claim.
+    It exists because editing a message destroys the only other way to find it
+    again: the fingerprint describes the text that is on Discord, and the edit
+    replaces that text. So the bot persists the id it just adopted, gets a
+    committed answer, and only then edits — a restart anywhere in that sequence
+    finds the row still pending, with either a fingerprint that still matches
+    or an id that does. Advancing posted_revision here would mark the
+    correction delivered before it had been rendered, so this arm touches
+    neither it nor posted_at."""
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
-    if bind_only:
-        await db.execute(text(
-            "UPDATE pending_channel_posts "
-            "   SET message_id = COALESCE(CAST(:mid AS TEXT), message_id) "
-            " WHERE id = :pid"
-        ), {"pid": post_id, "mid": message_id})
-        await db.commit()
-        return {"status": "acked", "id": post_id, "revision": None, "bound": True}
-    row = (await db.execute(text(
-        "UPDATE pending_channel_posts "
-        "   SET posted_at       = COALESCE(posted_at, NOW()), "
-        "       message_id      = COALESCE(CAST(:mid AS TEXT), message_id), "
-        "       claimed_at      = NULL, "
-        "       posted_revision = CASE "
-        "           WHEN CAST(:rev AS INTEGER) IS NOT NULL "
-        "                AND CAST(:rev AS INTEGER) <= revision "
-        "                AND CAST(:rev AS INTEGER) >= COALESCE(posted_revision, 0) "
-        "           THEN CAST(:rev AS INTEGER) "
-        "           WHEN CAST(:rev AS INTEGER) IS NULL AND revision = 1 "
-        "           THEN 1 "
-        "           ELSE posted_revision END, "
-        "       adopt_fingerprint = CASE "
-        "           WHEN adopt_fingerprint IS NULL AND CAST(:mid AS TEXT) IS NULL "
-        "                AND posted_at IS NULL AND revision = 1 "
-        "                AND content NOT LIKE '[MODCASE:%' "
-        "           THEN LEFT(content, 2000) ELSE adopt_fingerprint END "
-        " WHERE id = :pid "
-        "RETURNING revision, posted_revision, content"
-    ), {"pid": post_id, "rev": revision, "mid": message_id})).mappings().first()
+    token = None
+    if claim_token:
+        # A token that is not a token cannot be confused with "named no
+        # token", which is the pre-338 shape and is authorized by its shape.
+        try:
+            token = str(UUID(claim_token))
+        except ValueError:
+            raise HTTPException(status_code=400,
+                                detail="claim_token is not a token this api issued")
+    row = (await db.execute(text(_CHANNEL_POST_ACK_SQL), {
+        "pid": post_id, "rev": revision, "mid": message_id,
+        "token": token, "bind": bool(bind_only), "release": bool(release),
+        "lease": CHANNEL_POST_CLAIM_SECONDS,
+    })).mappings().first()
     await db.commit()
     if row is None:
         raise HTTPException(status_code=404, detail="unknown channel post")
-    return _channel_post_ack_reply(post_id, revision, row)
+    reply = _channel_post_ack_reply(post_id, revision, row)
+    if bind_only and reply["status"] == "acked":
+        reply["bound"] = True
+    return reply
 
 
 @app.get("/api/v1/internal/stream-posts/pending", tags=["Internal"])

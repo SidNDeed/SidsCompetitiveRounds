@@ -282,10 +282,12 @@
         "file": "plugin/GameStateWatcher.cs",
         "pattern": "double warnAfter = isTournamentRoom \\? 90 : \\(isFfaRoom \\? 45 : \\(isOvtRoom \\? 35 : \\(isTeamRoom \\? 30 : (\\d+)\\)\\)\\);"
       },
-      "surfaces": [
+      "surfaces": [],
+      "owed_to_client_lane": [
         {
           "file": "plugin/InfoLibrary.cs",
-          "text": "a warning at 15 seconds"
+          "text": "a warning at 15 seconds",
+          "replaces": "a warning at 25 seconds"
         }
       ],
       "verdict": "verified"
@@ -401,10 +403,13 @@
         {
           "file": "backend/discord_bot.py",
           "text": "up to **16 frames**"
-        },
+        }
+      ],
+      "owed_to_client_lane": [
         {
           "file": "plugin/InfoLibrary.cs",
-          "text": "or up to 16 numbered PNG frames"
+          "text": "or up to 16 numbered PNG frames",
+          "replaces": "a PNG or animated frames"
         }
       ],
       "verdict": "verified"
@@ -649,10 +654,13 @@
         {
           "file": "backend/discord_bot.py",
           "text": "Format: **512×512 PNG**"
-        },
+        }
+      ],
+      "owed_to_client_lane": [
         {
           "file": "plugin/InfoLibrary.cs",
-          "text": "one 512x512 PNG"
+          "text": "one 512x512 PNG",
+          "replaces": "a PNG or animated frames"
         }
       ],
       "verdict": "verified"

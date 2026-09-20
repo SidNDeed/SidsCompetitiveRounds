@@ -8,10 +8,15 @@
 --     (NativeUI.ValidateAndNameCosmetic; COSMETIC_MAX_FRAMES = 16)
 --
 -- A client key IS its English source string, so each edit produces a NEW
--- key_id and leaves the old one behind. plugin/I18nCatalogues.cs was re-keyed
--- in the same pass and carries all four locales for the new sources — that is
--- the artifact a player actually renders (#583); this file and 341 are the
--- portal half, so a human translator can see and refine the same text.
+-- key_id and leaves the old one behind. THIS FILE AND 341 ARE THE PORTAL HALF
+-- ONLY. plugin/InfoLibrary.cs (the English) and plugin/I18nCatalogues.cs (the
+-- four locales) are the artifact a player actually renders (#583) and belong
+-- to the client lane; this branch carries no change to either, and the three
+-- corrections plus the catalogue entries they need are written out in
+-- ai-collab/ITEM11-CLIENT-FAQ-CONTRACT.md. The ids below are derived from the
+-- CORRECTED English, so the two halves meet at exactly the text that document
+-- specifies; backend/tests/test_faq_surfaces.py recomputes all three from the
+-- bodies in this file and matches each to the predecessor it replaces.
 --
 -- THE RE-KEY IS COMPLETED HERE, not deferred. Registering the successors and
 -- leaving the predecessors live keeps three articles' worth of text in the
@@ -254,11 +259,21 @@ ON CONFLICT (key_id) DO UPDATE
     OR i18n_keys.retired_at  IS NOT NULL;
 
 -- ── 2. Retire the three predecessor keys ─────────────────────────────────
--- tools/i18n_source.json no longer extracts their English, so nothing built
--- from this tree renders them and the portal would be offering translators
--- work on text no current client displays. (A player still running an older
--- DLL keeps rendering that DLL's own bundled strings — the portal was never
--- what fed them, so retiring the key changes nothing for that player.)
+-- Section 1's three successors are these same three articles with item 11's
+-- corrections applied, so the predecessors describe text the product no longer
+-- means to show, and the portal would be offering translators work on it.
+--
+-- THE CLIENT HALF SHIPS SEPARATELY, and this comment does not pretend
+-- otherwise. plugin/InfoLibrary.cs still carries the predecessor English in
+-- this tree, and tools/i18n_source.json — its extraction artifact — still
+-- extracts it. Both belong to the client lane, which applies the same three
+-- corrections and adds the successors' catalogue entries as its own step
+-- (ai-collab/ITEM11-CLIENT-FAQ-CONTRACT.md). Until it does, the successor keys
+-- exist with no client asking for them and the predecessors are off the
+-- translator surface. Nothing a PLAYER sees changes either way: a client of
+-- any version renders its own DLL's bundled strings, and the portal was never
+-- what fed them. What the window costs is translator work on three articles,
+-- which is the direction chosen over leaving two live keys for one article.
 -- 255_retire_orphan_keys.sql is the shape, including its refusal: a
 -- translator's finished (approved) work must never be silently retired by a
 -- hygiene pass, so this RAISEs instead.

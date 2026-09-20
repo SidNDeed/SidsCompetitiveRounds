@@ -24,16 +24,22 @@
 -- direction is "the old text stays up", never "a duplicate appears" (#276).
 --
 -- The capture below covers every row delivered before this file runs. A row an
--- OLDER bot delivers AFTERWARDS is not covered by it and is not covered by a
--- write anywhere else either: what was sent for such a row is only recoverable
--- while its revision is still 1 (any rewrite bumps revision), and that is a
--- condition the api re-derives on each poll rather than a column anybody
--- freezes. A row corrected between an old bot's send and its ack therefore
--- ends up "delivered, revision unknown, unlocatable" — pending, never
--- re-sent, and holding no id and no fingerprint, so NOTHING can find its
--- message afterwards. Upgrading the bot does not rescue it: there is nothing
--- left to match on. Its old text stays up until somebody supplies the message
--- id by hand, which is the direction this chooses over a duplicate post.
+-- OLDER bot delivers AFTERWARDS is covered by handed_revision /
+-- handed_fingerprint instead: the api records what it SERVED at the moment it
+-- served it, and a revisionless ack — the only call shape a pre-338 bot can
+-- make — persists exactly that pair. What an old bot displayed is what it was
+-- handed in that poll, so a correction committed between the hand-out and the
+-- ack leaves posted_revision behind revision WITH an exact fingerprint for the
+-- text that is on Discord, and the upgraded bot adopts that message, binds its
+-- id and edits forward. No hand-supplied message id is needed for that state.
+--
+-- The one state neither capture reaches: a row the PRE-338 api handed out (so
+-- no handed_* was recorded), an old bot delivered, and a correction rewrote
+-- before the new api was ever deployed. Its sent text is unrecoverable, it
+-- stays pending, it is never re-sent, and its old message stays up. In this
+-- release that state is unreachable — the only writer of a correction is
+-- section 2 of this file, which runs in one transaction before the api deploy
+-- — but it is stated rather than assumed away (#276).
 --
 -- MIGRATION NUMBER
 -- 338 is item 11's reservation in ai-collab/LEDGER.md §5b, which is the only
@@ -62,16 +68,41 @@ ALTER TABLE pending_channel_posts ADD COLUMN IF NOT EXISTS message_id        TEX
 ALTER TABLE pending_channel_posts ADD COLUMN IF NOT EXISTS revision          INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE pending_channel_posts ADD COLUMN IF NOT EXISTS posted_revision   INTEGER;
 ALTER TABLE pending_channel_posts ADD COLUMN IF NOT EXISTS adopt_fingerprint TEXT;
--- The poller's claim. This bus had none: the pending SELECT was a plain read,
--- so two pollers could each receive the same never-posted row and each send
--- it, with the ack — which happens AFTER the send — as the only thing between
--- them and two copies in the channel. The api now hands out and claims in one
--- statement. NULL means unclaimed; a claim EXPIRES rather than needing to be
--- released, so a poller that dies mid-batch costs one lease and not a stuck
--- row, and the DELIVERY ack clears it so the nominal path never waits on a
--- lease at all. The bind_only ack deliberately leaves it set: that row is
--- mid-render and the claim is what should still be held (#276/#430).
+-- The poller's claim, and WHO holds it. This bus had none: the pending SELECT
+-- was a plain read, so two pollers could each receive the same never-posted
+-- row and each send it, with the ack — which happens AFTER the send — as the
+-- only thing between them and two copies in the channel. The api now hands out
+-- and claims in one statement.
+--
+-- claimed_at alone was not enough, and the reason is worth the column. Round
+-- three released the claim on the FIRST ack of any kind, including the "stale"
+-- one that exists to say "keep going, you are mid-render" — so a second poller
+-- could take the row while the first was still rendering it, and two renderers
+-- then wrote two revisions to one message in an order nobody controls. The
+-- claim is now the UNIT OF EXCLUSIVE RENDERING: claimed_token identifies the
+-- holder, every ack that names a revision must present it, an ack from a
+-- non-claimant writes nothing, and a stale answer keeps the claim so the SAME
+-- poller renders forward. The claim is released when the row is fully current
+-- (acked revision = revision), when the caller asks for release at the
+-- two-render cap, or by lease expiry — the only route a crash takes, which is
+-- why it expires rather than needing a cleanup that might never run
+-- (#276/#430). bind_only never releases: that row is mid-render.
 ALTER TABLE pending_channel_posts ADD COLUMN IF NOT EXISTS claimed_at        TIMESTAMPTZ;
+ALTER TABLE pending_channel_posts ADD COLUMN IF NOT EXISTS claimed_token     UUID;
+
+-- What the last hand-out SERVED, recorded by the hand-out itself. These are
+-- not delivery facts — nothing here says anything is on Discord — they are the
+-- api's record of what it put on the wire, which is the only thing a caller
+-- that cannot name a revision could possibly have rendered. The revisionless
+-- ack (a pre-338 bot) persists this pair as posted_revision /
+-- adopt_fingerprint, so a correction committed between hand-out and ack leaves
+-- the row locatable by an EXACT fingerprint instead of by a derivation.
+-- handed_fingerprint is LEFT(content, 2000) because the bot sends
+-- content[:2000]; a moderation-case row gets NULL, because the bot strips that
+-- row's marker before sending and the stored string is therefore not what goes
+-- to Discord.
+ALTER TABLE pending_channel_posts ADD COLUMN IF NOT EXISTS handed_revision   INTEGER;
+ALTER TABLE pending_channel_posts ADD COLUMN IF NOT EXISTS handed_fingerprint TEXT;
 
 -- Everything already delivered rendered revision 1. Without this backfill
 -- every historical row would read as "revision 1 never rendered" and the bot
@@ -91,8 +122,20 @@ UPDATE pending_channel_posts
 -- that string could never match. A moderation post is fire-once and is never
 -- corrected, so it needs no fingerprint at all; leaving it NULL says that,
 -- where a wrong value would have read as a capability the row does not have.
+--
+-- handed_* is filled from the SAME capture, and the claim it makes is checked
+-- rather than assumed: the pre-338 api's pending SELECT served `content` and
+-- the pre-338 bot sent content[:2000], so for a row delivered before this file
+-- runs, LEFT(content, 2000) IS what was handed to the bot that delivered it.
+-- That holds only because nothing ever rewrote a row's content: 110 and 134
+-- INSERT, and no other migration in backend/sql touches this table's content
+-- at all (section 2 below is the first, and it runs after this statement).
+-- handed_revision is 1 because the column did not exist before this file and
+-- every delivered row is at the seed revision until section 2 moves it.
 UPDATE pending_channel_posts
-   SET adopt_fingerprint = LEFT(content, 2000)
+   SET adopt_fingerprint   = LEFT(content, 2000),
+       handed_fingerprint  = LEFT(content, 2000),
+       handed_revision     = 1
  WHERE posted_at IS NOT NULL
    AND adopt_fingerprint IS NULL
    AND content NOT LIKE '[MODCASE:%';
@@ -235,9 +278,10 @@ BEGIN
     FROM information_schema.columns
    WHERE table_name = 'pending_channel_posts'
      AND column_name IN ('message_id', 'revision', 'posted_revision',
-                         'adopt_fingerprint', 'claimed_at');
-  IF cols <> 5 THEN
-    RAISE EXCEPTION 'migration 338: expected 5 revision columns on pending_channel_posts, found % - nothing committed', cols;
+                         'adopt_fingerprint', 'claimed_at', 'claimed_token',
+                         'handed_revision', 'handed_fingerprint');
+  IF cols <> 8 THEN
+    RAISE EXCEPTION 'migration 338: expected 8 revision columns on pending_channel_posts, found % - nothing committed', cols;
   END IF;
 
   SELECT COUNT(*) INTO idx

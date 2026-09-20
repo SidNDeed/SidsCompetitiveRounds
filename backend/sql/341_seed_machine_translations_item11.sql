@@ -6,12 +6,18 @@
 -- only, sentinel proposer 'claude-mt', license_assent TRUE at the
 -- machine-translation terms revision.
 --
--- The same 12 translations ship BUNDLED in plugin/I18nCatalogues.cs, so a
--- player renders them with no approval and no server (#583); these rows exist
--- so a human translator can see and refine them through the portal, where an
--- approval overrides the bundled value via the pack overlay. Each target is
+-- The same 12 translations are owed to plugin/I18nCatalogues.cs, which is what
+-- a player actually renders — with no approval and no server (#583). That file
+-- belongs to the client lane and this branch does not change it, so until that
+-- lane ships, a player renders the PREDECESSOR article from their own DLL and
+-- these rows are the only place the corrected translations exist. They are
+-- here so a human translator can see and refine them through the portal, where
+-- an approval overrides the bundled value via the pack overlay. Each target is
 -- the PREVIOUS approved article with only the corrected sentence rewritten,
--- so the rest of a reviewed translation is not thrown away.
+-- so the rest of a reviewed translation is not thrown away. The twelve strings
+-- the client lane needs are the ones below; the step that carries them into
+-- the catalogue, and where to recover them from, is written out for that lane
+-- in ai-collab/ITEM11-CLIENT-FAQ-CONTRACT.md.
 --
 -- key_id = sha1("client" || chr(0) || source)[:16] — the NUL-separator form
 -- tools/i18n_sync_keys.py uses.

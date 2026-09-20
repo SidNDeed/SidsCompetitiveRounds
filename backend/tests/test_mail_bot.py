@@ -32,7 +32,8 @@ TREE = ast.parse(TEXT)
 # looks like a transport hiccup and silently costs every ack.
 WANT_FUNC = {"_modcase_uuid_ok", "_modcase_parse", "_modcase_custom_id", "_modcase_parse_custom_id",
              "_modcase_view", "_modcase_render", "_modcase_click", "poll_channel_posts", "on_interaction",
-             "_channel_post_ack_params", "_adopt_channel_post_message"}
+             "_channel_post_ack_params", "_adopt_channel_post_message",
+             "_release_channel_post_claim"}
 WANT_ASSIGN = {"MODCASE_MARKER", "_MODCASE_BUTTONS", "_channel_post_sent", "_TDLC_ANSWERS"}
 
 
