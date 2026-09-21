@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Reflection;
 using HarmonyLib;
 using Photon.Pun;
@@ -94,6 +94,37 @@ namespace CompetitiveRounds
             catch { }
         }
 
+        /// <summary>THE ONLY PLACE IN THIS FILE THAT READS EITHER GLOBAL. What this
+        /// seat will do, asked once, by the advertisement, by the gate and by the
+        /// withdrawal - so a peer can never be told something this seat's own gate
+        /// contradicts. The decision itself is pure and lives in the seam, where a
+        /// case can execute it and a mutant can reach it; this is the one line of
+        /// plumbing that hands it the two facts.
+        ///
+        /// A SECOND COPY IS THE DEFECT, not merely a duplication: the advert used
+        /// to be staged on the attachment count alone while the gate also required
+        /// the mod to be switched on, and the two answers disagreed on exactly the
+        /// seat that had been disabled. Harness cases W14 and W15 hold this to one
+        /// copy by requiring the mod-disabled flag to occur exactly once in this
+        /// whole file - inside this member - and by forbidding both globals inside
+        /// StageInto and GateState.</summary>
+        internal static ProximityGateState LocalCapability()
+        {
+            return ProximityVictim.LocalGateState(Plugin.modDisabled, PatchesLive);
+        }
+
+        /// <summary>True once this seat has actually staged the key into a pre-join
+        /// merge. A seat that never staged has nothing to withdraw.</summary>
+        private static bool _advertised;
+
+        /// <summary>Set by RepublishCapability when it withdraws. It is a SEPARATE
+        /// latch from the local gate on purpose: the gate answers what is true now,
+        /// and this answers what this seat has already told the room. Re-staging
+        /// after a withdrawal would advertise a capability across a room boundary
+        /// that peers in the previous room were told was gone, so the honest
+        /// direction is to stay withdrawn for the session.</summary>
+        private static bool _withdrawn;
+
         /// <summary>Once we have declined to advertise, we never advertise later in
         /// the session. Harmony patching is finished before anything can connect, so
         /// a false PatchesLive at the first staging attempt is the final answer, and
@@ -121,19 +152,82 @@ namespace CompetitiveRounds
             if (prejoin == null) return;
             try
             {
-                if (PatchesLive)
+                ProximityGateState local = LocalCapability();
+                if (local == ProximityGateState.Capable && !_withdrawn)
                 {
                     prejoin[ProximityVictim.CapabilityProp] = ProximityVictim.CapabilityValue;
+                    _advertised = true;
                     return;
                 }
 
                 if (!_stageFailedPermanently)
                 {
                     _stageFailedPermanently = true;
-                    Plugin.Log.LogError("[PROX-CAP] proximity-victim patches did NOT attach ("
-                        + _attached + "/" + RequiredAttachments + ") - not advertising "
-                        + ProximityVictim.CapabilityProp + "; this seat stays on vanilla for the session");
+                    // The reason must be true for the branch that printed it: once
+                    // withdrawn, the gate's own answer is no longer why we are
+                    // declining, and printing it would name a cause that has been
+                    // superseded.
+                    string why = _withdrawn
+                        ? "this seat withdrew the capability earlier in the session"
+                        : ProximityVictim.GateReason(local);
+                    Plugin.Log.LogError("[PROX-CAP] not advertising " + ProximityVictim.CapabilityProp
+                        + " - " + why + " (" + _attached + "/"
+                        + RequiredAttachments + " patches live); this seat stays on vanilla for the session");
                 }
+            }
+            catch { }
+        }
+
+        /// <summary>Withdraw a staged advertisement once this seat's own gate has
+        /// stopped saying Capable, so the room census re-reads it and the WHOLE
+        /// room falls back to vanilla rather than half of it repairing.
+        ///
+        /// DRIVEN, NOT HOOKED, from the always-on persistent tick - and from a
+        /// point ABOVE that tick's own modDisabled return. Below that line this
+        /// member could never run on the one seat it exists for, because the
+        /// condition that makes a withdrawal necessary is the condition the
+        /// return covers: a guard keyed on a feature's enable-condition inherits
+        /// that feature's dead zone (#272/#98). Harness case W16b is bounded to
+        /// exactly that span. It is also called directly from the compat check
+        /// that disables the mod, beside PoisonSync.RevokeCapability and
+        /// GrowNormalize.RevokeCapability - the one transition that exists today;
+        /// the tick is what makes the guarantee hold for the next one without
+        /// anybody having to remember this member (#275).
+        ///
+        /// IT CAN ONLY WITHDRAW. ProximityVictim.ShouldRevokeCapability has no
+        /// advertising direction and this member writes the value 0 and nothing
+        /// else - the capable value reaches a peer through the pre-join merge in
+        /// StageInto or not at all (#287, asserted by W15). Withdrawal is safe in
+        /// room because the census's answer is keyed on RoomActors
+        /// .RosterGeneration and Plugin.cs bumps that counter for a cr_prox1
+        /// property change, so every peer re-derives on its next tick instead of
+        /// holding a cached true.
+        ///
+        /// The write happens BEFORE the flag is cleared, so a delivery that throws
+        /// is retried by the next tick rather than dropped: a withdrawal that
+        /// silently failed would leave peers repairing against a seat that is not
+        /// (#276).</summary>
+        internal static void RepublishCapability()
+        {
+            try
+            {
+                if (!_advertised) return;
+
+                ProximityGateState local = LocalCapability();
+                if (!ProximityVictim.ShouldRevokeCapability(local, _advertised)) return;
+
+                var me = PhotonNetwork.LocalPlayer;
+                if (me == null) return;
+
+                me.SetCustomProperties(new ExitGames.Client.Photon.Hashtable
+                {
+                    { ProximityVictim.CapabilityProp, 0 }
+                });
+                _advertised = false;
+                _withdrawn = true;   // StageInto refuses for the rest of the session
+                Plugin.Log.LogWarning("[PROX-CAP] withdrew " + ProximityVictim.CapabilityProp
+                    + " - " + ProximityVictim.GateReason(local)
+                    + "; this seat and every seat in its room stay on vanilla");
             }
             catch { }
         }
@@ -239,8 +333,10 @@ namespace CompetitiveRounds
         {
             try
             {
-                if (Plugin.modDisabled) return ProximityGateState.ModDisabled;
-                if (!PatchesLive) return ProximityGateState.PatchesNotAttached;
+                // The SAME answer the advertisement is staged on - one predicate,
+                // never a second copy of the conjunction (see LocalCapability).
+                ProximityGateState local = LocalCapability();
+                if (local != ProximityGateState.Capable) return local;
                 if (PhotonNetwork.OfflineMode) return ProximityGateState.Capable;
                 if (!PhotonNetwork.InRoom) return ProximityGateState.NotInARoom;
 
@@ -321,31 +417,38 @@ namespace CompetitiveRounds
         /// this mod itself installs on that method (FfaMode.cs:3752-3764) - happens
         /// inside vanilla IL. There is nothing here to keep equivalent to it.
         ///
-        /// A throw is caught and answered with null, which the caller turns into
-        /// vanilla-unchanged. Letting it propagate would be a new failure: vanilla
-        /// only reaches this resolution when its field is EMPTY, so on the second
-        /// and every later call it cannot throw here at all, and a prefix that did
-        /// would break the ring's own Update for that frame. The fallback is
-        /// therefore to vanilla ITSELF - it runs and uses its own field - and never
-        /// to some other selector.</summary>
-        private static Player VanillaVictimFor(Component instance)
+        /// A throw is caught and answered with vanilla-unchanged. Letting it
+        /// propagate would be a new failure: vanilla only reaches this resolution
+        /// when its field is EMPTY, so on the second and every later call it cannot
+        /// throw here at all, and a prefix that did would break the ring's own
+        /// Update for that frame. The fallback is therefore to vanilla ITSELF - it
+        /// runs and uses its own field - and never to some other selector.
+        ///
+        /// FOUR WAYS TO COME BACK EMPTY, FOUR ANSWERS. They used to be one null and
+        /// one sentence, which told a reader that the game's targeting had answered
+        /// with nobody on three paths where it was never reached at all. The
+        /// `answer` parameter is what happened, never a prediction of what would
+        /// have happened (#510), and the caller prints exactly it.</summary>
+        private static Player VanillaVictimFor(Component instance, out ProximityVanillaAnswer answer)
         {
             try
             {
                 PlayerManager pm = PlayerManager.instance;
-                if (pm == null) return null;
+                if (pm == null) { answer = ProximityVanillaAnswer.NoManager; return null; }
 
                 Player holder = HolderOf(instance);
-                if (holder == null) return null;
+                if (holder == null) { answer = ProximityVanillaAnswer.NoHolder; return null; }
 
                 Player victim = pm.GetOtherPlayer(holder);
                 // Unity's own equality: this is also how a DESTROYED Player reads
                 // as absent. Vanilla would write such a reference into its field
                 // and dereference it; declining leaves the field as it found it.
-                if (victim == null) return null;
+                if (victim == null) { answer = ProximityVanillaAnswer.Nobody; return null; }
+
+                answer = ProximityVanillaAnswer.Answered;
                 return victim;
             }
-            catch { return null; }
+            catch { answer = ProximityVanillaAnswer.Threw; return null; }
         }
 
         /// <summary>THE WHOLE PREFIX DECISION, ONCE, FOR ALL THREE EFFECTS.
@@ -394,15 +497,19 @@ namespace CompetitiveRounds
                 }
 
                 bool ringDriven = OwningTrigger(instance.transform) != null;
-                fresh = ringDriven ? VanillaVictimFor(instance) : null;
-                bool vanillaAnswered = fresh != null;
+                // NotAsked when no ring drives this call: the resolution is never
+                // made, so the term may not carry a value describing one. It is the
+                // term's honest value and not a printable reason - DeclineReason
+                // answers the ring first (#351).
+                ProximityVanillaAnswer vanilla = ProximityVanillaAnswer.NotAsked;
+                fresh = ringDriven ? VanillaVictimFor(instance, out vanilla) : null;
 
-                ProximityPrefixAction action =
-                    ProximityVictim.VictimAction(gate, targetsOther, ringDriven, vanillaAnswered);
+                ProximityPrefixAction action = ProximityVictim.VictimAction(
+                    gate, targetsOther, ringDriven, vanilla == ProximityVanillaAnswer.Answered);
                 if (action != ProximityPrefixAction.WriteVictimAndRun)
                 {
                     NoteOutcome(site, "defer",
-                        ProximityVictim.DeclineReason(gate, targetsOther, ringDriven, vanillaAnswered));
+                        ProximityVictim.DeclineReason(gate, targetsOther, ringDriven, vanilla));
                     fresh = null;
                 }
                 return action;

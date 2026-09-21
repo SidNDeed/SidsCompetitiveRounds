@@ -382,6 +382,59 @@ $runGateReason = Invoke-Suite 'mut-gatereason' $mutGateReason $repo
 if (-not (Assert-Mutation 'gate-reason mutation' $runGateReason 'G4' 'G2')) { $overall = 1 }
 Say ''
 
+# ---------- 8b. let a disabled seat advertise the repair anyway ----------
+# THE ROUND-3 HIGH, PUT BACK. Drop the mod-disabled term from the one local
+# predicate and a seat whose compat check switched the mod off still answers
+# Capable to the advertiser, so it tells the room it will repair while its own
+# gate refuses. Its peers then re-resolve the victim every armed tick while this
+# seat drains the stale cached one.
+$mutLocalGate = New-Mutant 'localgate' @(, @(
+    'internal static ProximityGateState LocalGateState(bool modDisabled, bool patchesLive)',
+    '            if (modDisabled) return ProximityGateState.ModDisabled;',
+    '            if (false) return ProximityGateState.ModDisabled;'))
+$runLocalGate = Invoke-Suite 'mut-localgate' $mutLocalGate $repo
+if (-not (Assert-Mutation 'local-capability mutation' $runLocalGate 'G6' 'G2')) { $overall = 1 }
+Say ''
+
+# ---------- 8c. never withdraw a staged advertisement ----------
+# The other half of the same HIGH. Staging correctly is not enough on its own:
+# the gate can stop saying Capable AFTER the key has been staged, and a seat that
+# never withdraws leaves its peers repairing against a seat that will not.
+$mutNoRevoke = New-Mutant 'norevoke' @(, @(
+    'internal static bool ShouldRevokeCapability(ProximityGateState local, bool advertised)',
+    '            return advertised && local != ProximityGateState.Capable;',
+    '            return false;'))
+$runNoRevoke = Invoke-Suite 'mut-norevoke' $mutNoRevoke $repo
+if (-not (Assert-Mutation 'capability-withdrawal mutation' $runNoRevoke 'G7' 'G2')) { $overall = 1 }
+Say ''
+
+# ---------- 8d. repair an effect that targets its own player ----------
+# V6's OWN mutant. V6 states that all four terms are required, and until now it
+# had no mutation of its own - it only ever reddened alongside V3 or V4, so the
+# no-mutant documentation could not honestly list it either way. Dropping the
+# polarity term at the CALL SITE leaves ShouldRepair itself intact, so G1, G5 and
+# D3 - which ask that function directly - stay green and V6 is the case that
+# sees it.
+$mutOwnPlayer = New-Mutant 'ownplayer' @(, @(
+    'internal static ProximityPrefixAction VictimAction(',
+    '            if (!ShouldRepair(gate, targetsOther)) return ProximityPrefixAction.RunVanillaUntouched;',
+    '            if (!ShouldRepair(gate, true)) return ProximityPrefixAction.RunVanillaUntouched;'))
+$runOwnPlayer = Invoke-Suite 'mut-ownplayer' $mutOwnPlayer $repo
+if (-not (Assert-Mutation 'own-player-term mutation' $runOwnPlayer 'V6' 'V2')) { $overall = 1 }
+Say ''
+
+# ---------- 8e. give two outcomes of the vanilla call one reason line ----------
+# Four paths through the one call into the game's own targeting used to print
+# one sentence between them. The line is also the budget key, so two paths
+# sharing it means the second cause can never be printed in a session at all.
+$mutAnswerReason = New-Mutant 'answerreason' @(, @(
+    'internal static string VanillaAnswerReason(ProximityVanillaAnswer vanilla)',
+    '                case ProximityVanillaAnswer.NoHolder: return "this effect has no player of its own to target from";',
+    '                case ProximityVanillaAnswer.NoHolder: return "the game''s own targeting answered with nobody";'))
+$runAnswerReason = Invoke-Suite 'mut-answerreason' $mutAnswerReason $repo
+if (-not (Assert-Mutations 'vanilla-outcome-reason mutation' $runAnswerReason @('D4', 'D5') 'D2')) { $overall = 1 }
+Say ''
+
 # ---------- 9. collapse the outcome signals onto one budget ----------
 # Drop the reason from the key, so two reasons under one outcome share a budget
 # and the second is never printed. S2 is the control: the LINE still names all
@@ -508,20 +561,33 @@ Say ''
 # negative control for the round's acceptance assertion: without it "no ranking
 # here" is a statement no run has ever seen fail.
 $wireRank = New-WireRoot 'rank' 'plugin/ProximityVictimPatches.cs' `
-    'private static Player VanillaVictimFor(Component instance)' `
-    '                if (victim == null) return null;' `
-    '                if (victim == null) return null; if (Vector2.Distance(holder.transform.position, victim.transform.position) > 99f) return null;' ''
+    'private static Player VanillaVictimFor(Component instance, out ProximityVanillaAnswer answer)' `
+    '                if (victim == null) { answer = ProximityVanillaAnswer.Nobody; return null; }' `
+    '                if (victim == null || Vector2.Distance(holder.transform.position, victim.transform.position) > 99f) { answer = ProximityVanillaAnswer.Nobody; return null; }' ''
 $runWireRank = Invoke-Suite 'wire-rank' $seam $wireRank
 if (-not (Assert-Mutation 'authored-ranking wiring' $runWireRank 'N1' 'W1')) { $overall = 1 }
 Say ''
 
 # Plant a roster read of our own back into the repair.
 $wireRoster = New-WireRoot 'roster' 'plugin/ProximityVictimPatches.cs' `
-    'private static Player VanillaVictimFor(Component instance)' `
-    '                if (pm == null) return null;' `
-    '                if (pm == null || pm.players == null) return null;' ''
+    'private static Player VanillaVictimFor(Component instance, out ProximityVanillaAnswer answer)' `
+    '                if (pm == null) { answer = ProximityVanillaAnswer.NoManager; return null; }' `
+    '                if (pm == null || pm.players == null) { answer = ProximityVanillaAnswer.NoManager; return null; }' ''
 $runWireRoster = Invoke-Suite 'wire-roster' $seam $wireRoster
 if (-not (Assert-Mutation 'authored-roster wiring' $runWireRoster 'N2' 'W1')) { $overall = 1 }
+Say ''
+
+# Plant a SECOND copy of the local conjunction into the gate. The pure half of
+# the round-3 HIGH is G6's; this is the half no case can execute. A member that
+# asks the one predicate AND re-derives the conjunction beside it is exactly the
+# shape the finding described, and a required-anchor check alone would stay green
+# on it.
+$wireAdvertise = New-WireRoot 'advertise' 'plugin/ProximityVictimPatches.cs' `
+    'internal static ProximityGateState GateState()' `
+    '                ProximityGateState local = LocalCapability();' `
+    '                ProximityGateState local = Plugin.modDisabled ? ProximityGateState.ModDisabled : LocalCapability();' ''
+$runWireAdvertise = Invoke-Suite 'wire-advertise' $seam $wireAdvertise
+if (-not (Assert-Mutations 'second-copy-of-the-local-answer wiring' $runWireAdvertise @('W14b', 'W15b') 'W1')) { $overall = 1 }
 Say ''
 
 # Put the refuted key argument back. The claim that a round-2 seat and a round-3

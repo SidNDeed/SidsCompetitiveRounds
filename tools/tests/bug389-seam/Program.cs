@@ -22,8 +22,12 @@ using CompetitiveRounds;
 //   mutation ringless   : V3 must FAIL;  V2 control must PASS
 //   mutation writenull  : V4 must FAIL;  V2 control must PASS
 //   mutation suppress   : V5 must FAIL;  V2 control must PASS
+//   mutation ownplayer  : V6 must FAIL;  V2 control must PASS
 //   mutation gate       : G1 must FAIL;  G2 control must PASS
 //   mutation gatereason : G4 must FAIL;  G2 control must PASS
+//   mutation localgate  : G6 must FAIL;  G2 control must PASS
+//   mutation norevoke   : G7 must FAIL;  G2 control must PASS
+//   mutation answerreason: D4 D5 must FAIL; D2 control must PASS
 //   mutation reasonkey  : S1 must FAIL;  S2 control must PASS
 //   mutation capkey     : C1 must FAIL;  C2 control must PASS
 //   mutation fighterkeys: K1 must FAIL;  K2 control must PASS
@@ -40,11 +44,21 @@ using CompetitiveRounds;
 //   wiring   wire-roster: N2 must FAIL;  W1 control must PASS
 //   wiring   wire-keyclaim:   K3 must FAIL; W1 control must PASS
 //   wiring   wire-boundclaim: W13 must FAIL; W1 control must PASS
+//   wiring   wire-advertise:  W14b W15b must FAIL; W1 control must PASS
 //   prior-r2            : N1 N2 N3 N4 N5 N6 must all FAIL; W1 control must PASS
-// Every OTHER case here - G3, G5, C3, D1, D2, D3, S2, S3, K2, P1, P2, W4, W6,
-// W7a-c, W9a-c, W12 - is a control, a companion assertion or a claim with no
-// runtime behaviour to mutate, and has NO mutant of its own. That list is the
-// whole of it.
+// Every OTHER case here has NO mutant of its own, and this is the whole list
+// with the reason each one is on it:
+//   G3, G5, C3, D1, D2, D3, S2, S3, K2, P1, P2  - controls and companion
+//     assertions over functions another mutant already reaches.
+//   W4, W6, W7a-c, W9a-c, W12                   - wiring anchors whose finding
+//     is carried by a sibling wiring mutant.
+//   W14, W15a, W16a, W16b, W16c                 - the same, for the capability
+//     advertisement: wire-advertise is this group's mutant and reddens W14b and
+//     W15b; these five are the companions it does not move.
+// The list is derived by reading it against the run list above, not asserted -
+// which is how V6 came to sit outside BOTH lists for a round while the header
+// claimed the accounting was complete. A documented "every case has a mutant"
+// can be true of the list and false of the suite.
 //
 // run-tests.ps1 also carries ONE check that is not a case here at all: the
 // capability key's absence from the base release tag, which K3's argument
@@ -66,6 +80,9 @@ internal static class Program
         (ProximityGateState[])Enum.GetValues(typeof(ProximityGateState));
 
     private static readonly bool[] Booleans = new[] { true, false };
+
+    private static readonly ProximityVanillaAnswer[] VanillaAnswers =
+        (ProximityVanillaAnswer[])Enum.GetValues(typeof(ProximityVanillaAnswer));
 
     // ---------------------------------------------------------------------
     // Reading the shipped files the harness cannot compile.
@@ -141,6 +158,47 @@ internal static class Program
         Check(name, inSpan == 1,
             "anchor occurs " + inSpan + " time(s) inside " + signature + " in " + relative
             + " (want 1), " + (CountOf(text, anchor) - inSpan) + " elsewhere in the file: " + anchor);
+    }
+
+    /// <summary>The same member bound, for a member that must carry one anchor
+    /// and must carry NONE of another set.
+    ///
+    /// "It asks the one predicate" and "it does not read the facts behind the
+    /// predicate itself" are two halves of one property, and only the pair of them
+    /// says there is no second copy. A required-only check stays green on a member
+    /// that calls the predicate AND re-derives the conjunction beside it, which is
+    /// exactly the shape that produced the finding this closes.</summary>
+    private static void CheckMemberAnchors(string name, string relative, string signature,
+        string[] requiredOnce, string[] forbidden)
+    {
+        string text = LoadSource(relative);
+        if (text == null)
+        {
+            Check(name, false, "cannot read " + relative + " under BUG389_SOURCE_ROOT='"
+                + (SourceRoot ?? "<unset>") + "' - an unset or wrong root is a failure, not a skip");
+            return;
+        }
+        int sigs = CountOf(text, signature);
+        if (sigs != 1) { Check(name, false, "member signature found " + sigs + " time(s) (want 1) in " + relative + ": " + signature); return; }
+        int sig = text.IndexOf(signature, StringComparison.Ordinal);
+        int open = text.IndexOf('{', sig);
+        int close = open < 0 ? -1 : MemberEnd(text, sig, open);
+        if (open < 0 || close < 0) { Check(name, false, "could not bound the member span in " + relative + ": " + signature); return; }
+        string span = text.Substring(open, close - open + 1);
+
+        var problems = new List<string>();
+        foreach (string anchor in requiredOnce)
+        {
+            int n = CountOf(span, anchor);
+            if (n != 1) problems.Add("'" + anchor + "' occurs " + n + " time(s) inside (want 1)");
+        }
+        foreach (string anchor in forbidden)
+        {
+            int n = CountOf(span, anchor);
+            if (n != 0) problems.Add("'" + anchor + "' occurs " + n + " time(s) inside (want 0)");
+        }
+        Check(name, problems.Count == 0,
+            "in " + signature + " in " + relative + ": " + string.Join("; ", problems.ToArray()));
     }
 
     /// <summary>The same, for a file with no C# members: bound the region by a
@@ -314,15 +372,18 @@ internal static class Program
 
         // ---- D1: a ring-less call says so. ------------------------------------
         Check("D1 Decline_NamesTheRingWhenNoRingDrivesTheCall",
-            ProximityVictim.DeclineReason(ProximityGateState.Capable, true, false, true)
+            ProximityVictim.DeclineReason(ProximityGateState.Capable, true, false, ProximityVanillaAnswer.NotAsked)
                 == "no proximity ring drives this call",
-            "got '" + ProximityVictim.DeclineReason(ProximityGateState.Capable, true, false, true) + "'");
+            "got '" + ProximityVictim.DeclineReason(ProximityGateState.Capable, true, false, ProximityVanillaAnswer.NotAsked) + "'");
 
         // ---- D2: an empty resolution says so, and does not blame the room. ----
+        // CONTROL for the "answerreason" mutation: this path keeps its own line
+        // when two OTHER paths are made to share one, which is what makes D4/D5 a
+        // measurement of the collision and not of this sentence.
         Check("D2 Decline_NamesTheGamesTargetingWhenItAnsweredWithNobody",
-            ProximityVictim.DeclineReason(ProximityGateState.Capable, true, true, false)
+            ProximityVictim.DeclineReason(ProximityGateState.Capable, true, true, ProximityVanillaAnswer.Nobody)
                 == "the game's own targeting answered with nobody",
-            "got '" + ProximityVictim.DeclineReason(ProximityGateState.Capable, true, true, false) + "'");
+            "got '" + ProximityVictim.DeclineReason(ProximityGateState.Capable, true, true, ProximityVanillaAnswer.Nobody) + "'");
 
         // ---- D3: a reason never names a term the decision did not reach. ------
         // DeclineReason answers in the SAME order VictimAction decides, so a
@@ -335,19 +396,31 @@ internal static class Program
         foreach (var gate in GateStates)
             foreach (bool other in Booleans)
                 foreach (bool ring in Booleans)
-                    foreach (bool answered in Booleans)
+                    foreach (var answer in VanillaAnswers)
                     {
-                        string why = ProximityVictim.DeclineReason(gate, other, ring, answered);
+                        string why = ProximityVictim.DeclineReason(gate, other, ring, answer);
                         bool gateRefused = !ProximityVictim.ShouldRepair(gate, other);
                         bool blamesRing = why == "no proximity ring drives this call";
-                        bool blamesTargeting = why == "the game's own targeting answered with nobody";
+                        bool blamesTargeting = why != ProximityVictim.GateReason(gate)
+                            && why != "the effect targets its own player"
+                            && !blamesRing;
                         if (gateRefused && (blamesRing || blamesTargeting))
                         {
                             reasonsReachable = false;
                             if (unreachableReason.Length == 0)
                                 unreachableReason = gate + "/other=" + other + " -> '" + why + "'";
                         }
-                        if (!gateRefused && ring && answered && why != "the repair is active")
+                        // A ring-less call may never be told anything about a
+                        // resolution that was never made, whatever value the term
+                        // carries.
+                        if (!gateRefused && !ring && why != "no proximity ring drives this call")
+                        {
+                            reasonsReachable = false;
+                            if (unreachableReason.Length == 0)
+                                unreachableReason = "ring-less call reported '" + why + "'";
+                        }
+                        if (!gateRefused && ring && answer == ProximityVanillaAnswer.Answered
+                            && why != "the repair is active")
                         {
                             reasonsReachable = false;
                             if (unreachableReason.Length == 0)
@@ -356,6 +429,61 @@ internal static class Program
                     }
         Check("D3 Decline_NeverNamesATermTheDecisionDidNotReach", reasonsReachable,
             "a reason named a fact that was never established: " + unreachableReason);
+
+        // ---- D4: every outcome of the one vanilla call has its OWN line. ------
+        // RED under "answerreason". Four different paths through
+        // ProximityVictimResolver.VanillaVictimFor used to arrive as one null and
+        // print one sentence - "the game's own targeting answered with nobody" -
+        // which was a false statement on three of them. The line is ALSO the
+        // budget key (SignalKey keys on outcome and reason, deliberately not on
+        // the site), so two paths sharing a line means the second cause can never
+        // be printed in a session at all: the reader is told the first one
+        // instead, and the repair that stayed vanilla for a missing holder reads
+        // as a room where nobody was in range.
+        var answerOwner = new Dictionary<string, string>();
+        bool answerLinesDistinct = true;
+        string answerCollision = "";
+        foreach (var answer in VanillaAnswers)
+        {
+            string answerLine = ProximityVictim.VanillaAnswerReason(answer);
+            if (string.IsNullOrEmpty(answerLine))
+            { answerLinesDistinct = false; answerCollision = answer + " has no reason line"; break; }
+            if (answer == ProximityVanillaAnswer.Answered) continue;   // the accepting line is shared with the gate by design
+            if (answerOwner.ContainsKey(answerLine))
+            { answerLinesDistinct = false; answerCollision = answer + " shares a line with " + answerOwner[answerLine] + ": " + answerLine; break; }
+            answerOwner[answerLine] = answer.ToString();
+        }
+        // Distinct lines are distinct BUDGETS, which is the property that makes
+        // each cause printable once per session rather than at most one of them.
+        bool budgetsDistinct = ProximityVictim.SignalKey("defer", ProximityVictim.VanillaAnswerReason(ProximityVanillaAnswer.NoHolder))
+            != ProximityVictim.SignalKey("defer", ProximityVictim.VanillaAnswerReason(ProximityVanillaAnswer.Nobody));
+        Check("D4 Decline_EveryVanillaOutcomeHasItsOwnReasonAndItsOwnBudget",
+            answerLinesDistinct && budgetsDistinct && VanillaAnswers.Length == 6,
+            "outcomes=" + VanillaAnswers.Length + " (want 6) budgets distinct=" + budgetsDistinct
+            + " " + answerCollision);
+
+        // ---- D5: the line named is the line of the path that happened. --------
+        // RED under "answerreason". D4 says the lines differ from each other; this
+        // says each one is attached to its own outcome. Two paths could carry
+        // distinct-but-swapped sentences and D4 alone would stay green (#342).
+        bool eachOutcomeNamed = true;
+        string misnamed = "";
+        foreach (var answer in VanillaAnswers)
+        {
+            if (answer == ProximityVanillaAnswer.NotAsked) continue;   // the ring term answers first; D3 owns that
+            string why = ProximityVictim.DeclineReason(ProximityGateState.Capable, true, true, answer);
+            if (why != ProximityVictim.VanillaAnswerReason(answer))
+            {
+                eachOutcomeNamed = false;
+                if (misnamed.Length == 0) misnamed = answer + " -> '" + why + "'";
+            }
+        }
+        Check("D5 Decline_NamesTheOutcomeThatActuallyHappened",
+            eachOutcomeNamed
+            && ProximityVictim.VanillaAnswerReason(ProximityVanillaAnswer.NoManager) == "the game's player manager was not available"
+            && ProximityVictim.VanillaAnswerReason(ProximityVanillaAnswer.NoHolder) == "this effect has no player of its own to target from"
+            && ProximityVictim.VanillaAnswerReason(ProximityVanillaAnswer.Threw) == "the game's own targeting could not complete",
+            "a declined call named another path's outcome: " + misnamed);
 
         // =================================================================
         // G - THE CAPABILITY GATE.
@@ -423,6 +551,69 @@ internal static class Program
         Check("G5 Gate_OnlyACapableRoomAndAnOpponentEffectRepairs",
             onlyCapableRepairs && GateStates.Length == 6,
             "states=" + GateStates.Length + " (want 6) wrong answer at " + repairLeak);
+
+        // ---- G6: WHAT THIS SEAT ADVERTISES IS WHAT THIS SEAT WILL DO. ---------
+        // RED under "localgate". The advert and the local gate are one answer to
+        // one question, and this is the whole of that answer: the mod being
+        // switched off and the patches not being attached BOTH refuse, and the
+        // disabled state outranks the attachment count because it is a statement
+        // about the whole build.
+        //
+        // The defect this closes: the advert was staged on the attachment count
+        // alone while the gate also required the mod to be on, so a seat whose
+        // compat check disabled the mod kept telling the room it would repair. Its
+        // peers' census then found the key on every fighter and re-resolved the
+        // victim every armed tick while this seat drained the stale cached one -
+        // one drain tick debiting a different player's health on different
+        // screens, which decides a round, a series and a rating.
+        bool localAnswers =
+            ProximityVictim.LocalGateState(false, true) == ProximityGateState.Capable
+            && ProximityVictim.LocalGateState(true, true) == ProximityGateState.ModDisabled
+            && ProximityVictim.LocalGateState(false, false) == ProximityGateState.PatchesNotAttached
+            && ProximityVictim.LocalGateState(true, false) == ProximityGateState.ModDisabled;
+        // Only the both-true corner may advertise, over the whole product.
+        bool onlyBothTermsAdvertise = true;
+        string advertLeak = "";
+        foreach (bool disabled in Booleans)
+            foreach (bool live in Booleans)
+            {
+                bool capable = ProximityVictim.LocalGateState(disabled, live) == ProximityGateState.Capable;
+                bool wanted = !disabled && live;
+                if (capable != wanted)
+                {
+                    onlyBothTermsAdvertise = false;
+                    if (advertLeak.Length == 0)
+                        advertLeak = "disabled=" + disabled + "/live=" + live + " -> capable=" + capable;
+                }
+            }
+        Check("G6 Gate_TheAdvertisedBitIsTheConjunctionTheLocalGateEvaluates",
+            localAnswers && onlyBothTermsAdvertise,
+            "a seat that will not repair must not advertise; wrong answer at " + advertLeak);
+
+        // ---- G7: a seat that stops being capable withdraws. RED under ---------
+        // "norevoke". The polarity is the point and it runs one way only: this
+        // function has no advertising direction, because a capability that appears
+        // mid-room is the racy path the pre-join staging exists to avoid (#287),
+        // while one that disappears can only move the room toward
+        // vanilla-unchanged (#276/#430). A seat that never advertised has nothing
+        // to withdraw and must not write per tick for nothing.
+        bool revokesExactlyWhenNeeded = true;
+        string revokeLeak = "";
+        foreach (var gs in GateStates)
+            foreach (bool advertised in Booleans)
+            {
+                bool revokes = ProximityVictim.ShouldRevokeCapability(gs, advertised);
+                bool wanted = advertised && gs != ProximityGateState.Capable;
+                if (revokes != wanted)
+                {
+                    revokesExactlyWhenNeeded = false;
+                    if (revokeLeak.Length == 0)
+                        revokeLeak = gs + "/advertised=" + advertised + " -> " + revokes + " (want " + wanted + ")";
+                }
+            }
+        Check("G7 Gate_AnAdvertisedSeatThatStopsBeingCapableWithdrawsIt",
+            revokesExactlyWhenNeeded && GateStates.Length == 6,
+            "states=" + GateStates.Length + " (want 6) wrong answer at " + revokeLeak);
 
         // =================================================================
         // C - THE CAPABILITY CACHE KEY.
@@ -774,7 +965,7 @@ internal static class Program
         // Exactly one call, inside the one member whose whole job is to make it.
         CheckAnchorInMember("N4 Method_TheVictimComesFromTheGamesOwnSelector",
             "plugin/ProximityVictimPatches.cs",
-            "private static Player VanillaVictimFor(Component instance)",
+            "private static Player VanillaVictimFor(Component instance, out ProximityVanillaAnswer answer)",
             "pm.GetOtherPlayer(holder)");
 
         // ---- N5: NO PREFIX IN THAT FILE CAN SUPPRESS. RED on round-2. ---------
@@ -936,6 +1127,68 @@ internal static class Program
             && CountOf(seamText, "StunPlayer.Go is NOT covered by that bound") == 1
             && CountOf(seamText, "under ANY composition") == 0,
             "the fold bound must be scoped to a conjunction and must name the method that sits outside it");
+
+        // W14 - ONE PREDICATE, AND THE FILE PROVES IT IS ONE. RED under
+        // "wire-advertise", which plants a second copy of the conjunction into the
+        // gate. The pure half is G6's; this is the half a case cannot execute: the
+        // two globals are read in exactly one member, so no caller can hold a
+        // private opinion about what this seat will do.
+        CheckMemberAnchors("W14 Wiring_TheLocalAnswerIsComputedInExactlyOnePlace",
+            "plugin/ProximityVictimPatches.cs",
+            "internal static ProximityGateState LocalCapability()",
+            new[] { "ProximityVictim.LocalGateState(Plugin.modDisabled, PatchesLive)" },
+            new string[0]);
+        string patchesText = LoadSource("plugin/ProximityVictimPatches.cs");
+        Check("W14b Wiring_TheDisabledFlagIsReadNowhereElseInTheFile",
+            patchesText != null && CountOf(patchesText, "Plugin.modDisabled") == 1,
+            "the mod-disabled flag must be read exactly once in the file (inside LocalCapability); found "
+            + (patchesText == null ? -1 : CountOf(patchesText, "Plugin.modDisabled")));
+
+        // W15 - the advertiser and the gate BOTH ask it, and neither re-derives
+        // it. The advert used to be staged on the attachment count alone while the
+        // gate also required the mod to be on, so a disabled seat advertised a
+        // repair it would not perform and its peers repaired against it.
+        CheckMemberAnchors("W15a Wiring_TheAdvertAsksTheLocalPredicate",
+            "plugin/ProximityVictimPatches.cs",
+            "internal static void StageInto(ExitGames.Client.Photon.Hashtable prejoin)",
+            new[] { "LocalCapability()", "prejoin[ProximityVictim.CapabilityProp] = ProximityVictim.CapabilityValue;" },
+            new[] { "Plugin.modDisabled", "PatchesLive" });
+        CheckMemberAnchors("W15b Wiring_TheGateAsksTheSameLocalPredicate",
+            "plugin/ProximityVictimPatches.cs",
+            "internal static ProximityGateState GateState()",
+            new[] { "LocalCapability()" },
+            new[] { "Plugin.modDisabled", "PatchesLive" });
+
+        // W16 - the withdrawal can only withdraw. The capable value reaches a peer
+        // through the pre-join merge or not at all: a capability that APPEARS
+        // mid-room is the racy path pre-join staging exists to avoid (#287), while
+        // one that disappears moves the room toward vanilla-unchanged (#276/#430).
+        // So this member writes the value 0 and the capable value is forbidden
+        // inside it.
+        CheckMemberAnchors("W16a Wiring_TheWithdrawalNeverAdvertises",
+            "plugin/ProximityVictimPatches.cs",
+            "internal static void RepublishCapability()",
+            new[] { "ProximityVictim.ShouldRevokeCapability(local, _advertised)", "{ ProximityVictim.CapabilityProp, 0 }" },
+            new[] { "ProximityVictim.CapabilityValue", "Plugin.modDisabled", "PatchesLive" });
+
+        // W16b/c - and it is DRIVEN, from the always-on persistent tick and from
+        // the compat check that disables the mod. The tick is what makes the
+        // guarantee survive a respawned persistent host or a later toggle without
+        // anyone having to remember the member (#275); the compat site is the one
+        // transition that exists today.
+        // The span deliberately ENDS at the modDisabled return: the withdrawal
+        // exists for a seat that has been disabled, so a driver placed below that
+        // return would inherit the dead zone of the very condition it answers
+        // (#272/#98). This case is what holds it above the line.
+        CheckAnchorInSpan("W16b Wiring_TheWithdrawalIsDrivenAboveTheDisabledReturn",
+            "plugin/Plugin.cs",
+            "            TickBroadcastWindowPin();",
+            "            if (Plugin.modDisabled) return;",
+            "ProximityVictimGate.RepublishCapability();");
+        CheckAnchorInMember("W16c Wiring_TheWithdrawalRidesTheCompatDisable",
+            "plugin/Plugin.cs",
+            "private void DoInitialize()",
+            "ProximityVictimGate.RepublishCapability();");
 
         Console.WriteLine("=== passed=" + _passed + " failed=" + _failed + " ===");
         return _failed == 0 ? 0 : 1;

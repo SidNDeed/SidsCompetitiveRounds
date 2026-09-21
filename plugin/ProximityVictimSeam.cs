@@ -95,6 +95,45 @@ namespace CompetitiveRounds
         CensusUnreadable
     }
 
+    /// <summary>What the ONE call into the game's own targeting did. Not a
+    /// prediction about it and not a ranking of it (#510): the caller has already
+    /// made the call and this reports which of its outcomes happened.
+    ///
+    /// SIX VALUES BECAUSE FOUR DIFFERENT THINGS USED TO PRINT ONE SENTENCE. A
+    /// missing PlayerManager, an effect with no holder of its own, a resolution
+    /// that answered with nobody, and a resolution that could not complete all
+    /// arrived at the caller as a null and were all reported as "the game's own
+    /// targeting answered with nobody". Three of those four are false statements
+    /// about what happened, and the one line is also the budget key (see
+    /// SignalKey), so the first cause to occur was the only one a session could
+    /// ever print. One value per path, one line each.</summary>
+    internal enum ProximityVanillaAnswer
+    {
+        /// <summary>A usable player came back.</summary>
+        Answered,
+
+        /// <summary>The call was never made, because no ring drives this
+        /// invocation. Structurally unreachable as a printed reason - DeclineReason
+        /// answers the ring term first - and it exists so that the term is never
+        /// given a value describing a call that did not happen (#351).</summary>
+        NotAsked,
+
+        /// <summary>PlayerManager.instance was not available.</summary>
+        NoManager,
+
+        /// <summary>The effect's own holder rule (HolderOf) produced no player, so
+        /// there is no asker to hand the game's targeting.</summary>
+        NoHolder,
+
+        /// <summary>The resolution ran and produced no player - including a
+        /// destroyed one, which reads as absent under Unity's own equality.</summary>
+        Nobody,
+
+        /// <summary>The resolution could not complete. The seam answers with
+        /// vanilla-unchanged, never with a selector of its own.</summary>
+        Threw
+    }
+
     internal static class ProximityVictim
     {
         /// <summary>Bound on the once-per-reason outcome signals below. One line
@@ -200,6 +239,64 @@ namespace CompetitiveRounds
             return state == ProximityGateState.Capable && targetsOther;
         }
 
+        /// <summary>WHAT THIS SEAT WILL DO, ASKED ONCE. The advertisement a peer
+        /// reads and the gate this seat obeys are the same answer to the same
+        /// question, and this is that answer.
+        ///
+        /// They used to be two expressions. The advert was staged on attachment
+        /// alone while the gate refused on attachment AND the mod being switched
+        /// on, so a seat whose compat check disabled the mod kept advertising a
+        /// repair it would not perform: its peers' census found the key on every
+        /// fighter, they re-resolved the victim every armed tick, and this seat
+        /// drained the stale cached one. That is one drain tick debiting a
+        /// different player's health on different screens - the exact state a
+        /// whole-room gate exists to prevent, and it decides a round, a series and
+        /// a rating.
+        ///
+        /// Order is not arbitrary: a disabled mod is a statement about this whole
+        /// build and outranks the attachment count, which on a disabled seat is
+        /// not a fact the reader can act on.
+        ///
+        /// Pure so the conjunction itself is testable and a mutant can reach it
+        /// (#391); the two globals it describes are read in exactly one place in
+        /// the patches half, which is what stops a second copy appearing (#432).
+        /// It returns a STATE and not a bool because the caller has to name the
+        /// cause, and one boolean meaning "switched off" and "did not attach" is
+        /// the defect #430 names.</summary>
+        internal static ProximityGateState LocalGateState(bool modDisabled, bool patchesLive)
+        {
+            if (modDisabled) return ProximityGateState.ModDisabled;
+            if (!patchesLive) return ProximityGateState.PatchesNotAttached;
+            return ProximityGateState.Capable;
+        }
+
+        /// <summary>Whether a staged advertisement must now be withdrawn.
+        ///
+        /// ONE DIRECTION ONLY, AND THE POLARITY IS THE WHOLE POINT. There is no
+        /// counterpart that says "advertise now": a capability that APPEARS while
+        /// the room is running is the racy path this key's pre-join staging exists
+        /// to avoid - the value is delivered with the Player object itself and is
+        /// therefore not observable before use (#287), which is a stronger property
+        /// than any handshake and is lost the moment the key can arrive late. A
+        /// capability that DISAPPEARS mid-room is the opposite polarity: every seat
+        /// that re-reads it falls back to vanilla, which is today's shipped
+        /// behaviour and no new symptom (#276/#430).
+        ///
+        /// Nothing in this build can ask for the other direction. The mod-disabled
+        /// flag is only ever written true, and the attachment count only ever
+        /// increments, so the local answer moves from Capable to not-Capable and
+        /// never back. If a later change makes it reversible, this function is
+        /// where that has to be answered rather than assumed - and the answer is
+        /// still not an in-room advertisement.
+        ///
+        /// advertised: this seat actually staged the key. A seat that never staged
+        /// has nothing to withdraw, and writing a withdrawal it never contradicted
+        /// would be a network write per tick for nothing.</summary>
+        internal static bool ShouldRevokeCapability(ProximityGateState local, bool advertised)
+        {
+            return advertised && local != ProximityGateState.Capable;
+        }
+
         /// <summary>THE WHOLE PREFIX DECISION FOR THE VICTIM REPAIR, in one pure
         /// function, for all three effects (#432).
         ///
@@ -241,13 +338,35 @@ namespace CompetitiveRounds
         /// about the room for it would be a statement the reader cannot act on.
         /// Then the gate's own state, then the two facts about this call.</summary>
         internal static string DeclineReason(
-            ProximityGateState gate, bool targetsOther, bool ringDriven, bool vanillaAnswered)
+            ProximityGateState gate, bool targetsOther, bool ringDriven, ProximityVanillaAnswer vanilla)
         {
             if (!targetsOther) return "the effect targets its own player";
             if (gate != ProximityGateState.Capable) return GateReason(gate);
             if (!ringDriven) return "no proximity ring drives this call";
-            if (!vanillaAnswered) return "the game's own targeting answered with nobody";
-            return "the repair is active";
+            return VanillaAnswerReason(vanilla);
+        }
+
+        /// <summary>One line per outcome of the call into the game's own targeting.
+        ///
+        /// They must stay DISTINCT for the same reason the gate's lines must: the
+        /// line is also the budget key (SignalKey), so two paths sharing a line
+        /// means the second is never printed at all and the reader is told the
+        /// first one instead. And each must be TRUE for its own path and only its
+        /// own path - "the game's own targeting answered with nobody" printed for a
+        /// missing PlayerManager sends a reader to look at who was standing where,
+        /// for a call that never reached the ranking.</summary>
+        internal static string VanillaAnswerReason(ProximityVanillaAnswer vanilla)
+        {
+            switch (vanilla)
+            {
+                case ProximityVanillaAnswer.Answered: return "the repair is active";
+                case ProximityVanillaAnswer.NotAsked: return "the game's own targeting was not asked";
+                case ProximityVanillaAnswer.NoManager: return "the game's player manager was not available";
+                case ProximityVanillaAnswer.NoHolder: return "this effect has no player of its own to target from";
+                case ProximityVanillaAnswer.Nobody: return "the game's own targeting answered with nobody";
+                case ProximityVanillaAnswer.Threw: return "the game's own targeting could not complete";
+                default: return "the targeting outcome is not one this build names";
+            }
         }
 
         /// <summary>The reason line for an inactive call, from the gate alone. Kept

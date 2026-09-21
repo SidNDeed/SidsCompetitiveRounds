@@ -2640,6 +2640,22 @@ namespace CompetitiveRounds
             TickUnfocusedFpsCap();
             TickBroadcastWindowPin();
 
+            // Bug 389: the proximity-victim capability withdrawal runs here for
+            // the same reason the fps tick does - ABOVE the modDisabled return.
+            // A guard keyed on a feature's enable-condition and then placed
+            // inside a tick that returns on that same condition inherits the
+            // feature's dead zone, and this withdrawal exists for exactly the
+            // state the return covers: a seat that staged the key and has since
+            // been disabled. Below the return it could never run on the only seat
+            // that needs it (#272/#98).
+            //
+            // Safe above it on the same rule the comment above states: a disabled
+            // mod may only ever RESTORE. This call returns on its first line
+            // unless this seat actually advertised, and it can only ever write
+            // the NOT-capable value - it moves the room toward vanilla and can
+            // apply nothing (#276/#430).
+            try { ProximityVictimGate.RepublishCapability(); } catch { }
+
             if (Plugin.modDisabled) return;
 
             // Menu injection runs independently
@@ -2849,6 +2865,13 @@ namespace CompetitiveRounds
                         // this client will never publish.
                         try { PoisonSync.RevokeCapability(); } catch { }
                         try { GrowNormalize.RevokeCapability(); } catch { }
+                        // Bug 389: the same shape for the proximity-victim
+                        // capability. A pre-join stage may already have advertised
+                        // it, and a seat that advertises a repair its own gate now
+                        // refuses leaves every peer re-resolving the victim while
+                        // this seat drains the stale one - the same damage tick
+                        // debiting different players on different screens.
+                        try { ProximityVictimGate.RepublishCapability(); } catch { }
                         // r3 find 4: same shape for the base-game locale
                         // injector. It has been inert (activation is gated on
                         // the compat clear below), but Shutdown is idempotent
