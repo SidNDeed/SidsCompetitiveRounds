@@ -196,8 +196,25 @@ def _anchors_on(line: str) -> list[tuple[int, str]]:
     return out
 
 
+_FENCE = re.compile(r"^\s*(?:```|~~~)")
+
+
 def check(notes_text: str, read_source) -> list[dict]:
-    """One record per citation found. `read_source(rel) -> list[str] | None`.
+    """One record per citation found, outside fenced blocks.
+
+    `read_source(rel) -> list[str] | None`.
+
+    FENCED BLOCKS ARE NOT SCANNED. A fenced block is a VERBATIM quotation --
+    a command, a slab of source, the text of a ruling this file is answering.
+    The `path:line` strings inside one are the quoted author's, not this file's,
+    and checking them would report drift against a tree the quotation was never
+    about. Marking them by hand is not available either: the text is verbatim,
+    so an anchor cannot be added to it without making it something else.
+
+    This is a boundary, not a filter on the measurement (#441): everything
+    outside a fence is still read, and a citation this file MAKES belongs
+    outside one. The control plants the same citation inside and outside a
+    fence and requires exactly one of them to be seen.
 
     Every anchor on a notes line is offered to every citation on that line.
     Binding each anchor to its nearest citation instead was tried and is
@@ -209,7 +226,13 @@ def check(notes_text: str, read_source) -> list[dict]:
     evidence to read, not as a gate that stands alone.
     """
     results: list[dict] = []
+    fenced = False
     for lineno, line in enumerate(notes_text.splitlines(), 1):
+        if _FENCE.match(line):
+            fenced = not fenced
+            continue
+        if fenced:
+            continue
         current: str | None = None
         anchors = [needle for _pos, needle in _anchors_on(line)]
         for m in _CITE.finditer(line):
@@ -375,6 +398,13 @@ def _self_test() -> int:
         "an unnamed client source refuses rather than resolving":
             check("`client-lane/ApiClient.cs:1874`",
                   lambda rel: None)[0]["verdict"] == "CLIENT-NOT-CONFIGURED",
+        "a citation inside a fenced block is not read":
+            check("```\n`fake.py:900`\n```", lambda rel: source) == [],
+        "the SAME citation outside the fence still is":
+            [r["verdict"] for r in check("`fake.py:900`", lambda rel: source)]
+            == ["PAST-EOF"],
+        "a fence that never closes does not swallow the rest silently":
+            check("```\n`fake.py:900`", lambda rel: source) == [],
         "a quoted route path anchors":
             [n for _p, n in _anchors_on('`"/api/v1/mod-version"`')]
             == ["/api/v1/mod-version"],
