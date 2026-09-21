@@ -87,7 +87,7 @@ namespace CompetitiveRounds
         // board, the spectator seat and the broadcaster HUD all render the
         // SAME cached cell string (BroadcastStatValue hands out cachedValues,
         // it does not re-format). Nothing reads a formatted cell
-        // back — the match-history wire is produced by WireNum (:536), which
+        // back — the match-history wire is produced by WireNum (:539), which
         // never reads StatRow.fmt at all and writes "0.###" under
         // CultureInfo.InvariantCulture. The fmt-independence is WireNum's own
         // code, not a lesson; the invariant culture is #47's rule.
@@ -100,8 +100,9 @@ namespace CompetitiveRounds
             private static BepInEx.Configuration.ConfigEntry<string> _entry;
 
             /// <summary>Bound here rather than in Plugin.cs because this file
-            /// owns the format site — the same local-bind pattern LagNotices
-            /// .cs:571 uses for its own lever. Lazy, and a null ConfigFile
+            /// owns the format site — the same local-bind pattern the lag-notice
+            /// lever uses (CompetitiveUI.cs:8065, DrawLagNotices, gated on
+            /// Plugin.LagNoticesEnabled). Lazy, and a null ConfigFile
             /// (very early in startup) is retried on the next read instead of
             /// being latched as "no setting".</summary>
             private static BepInEx.Configuration.ConfigEntry<string> Entry()
@@ -1020,7 +1021,8 @@ namespace CompetitiveRounds
             stH2H.normal.textColor = new Color(0.82f, 0.82f, 0.82f);
             stName = new GUIStyle(GUI.skin.label) { fontSize = 14, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
             // wordWrap/clipping explicit, for the same reason bug 239 made them
-            // explicit on BroadcastHud's stName/stStat (:760, :767): GUI.skin.label
+            // explicit on BroadcastHud's stName/stStat (BroadcastHud.cs:769,
+        // BroadcastHud.cs:776): GUI.skin.label
             // defaults wordWrap ON, and both of this batch's changes make these
             // strings longer - the HP row can now render "87.50/100.00" instead of
             // "88/100", and the label column gained a "Scale" row. Three of the

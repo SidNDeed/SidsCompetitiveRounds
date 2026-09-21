@@ -8080,19 +8080,19 @@ class LeaderboardPaginator(discord.ui.View):
 # #153 — "matches the visible leaderboard" means matching what CALLERS PASS,
 # not the signature's defaults — applies to these paths UNEVENLY, and the
 # difference is worth knowing before copying a line:
-#   1v1  /leaderboard defaults min_matches=5 (main.py:8150) and every real
-#        caller passes 1 (ApiClient.cs:7639, the old bot board). This is
+#   1v1  /leaderboard defaults min_matches=5 (main.py:8163) and every real
+#        caller passes 1 (ApiClient.cs:7656, the old bot board). This is
 #        #153's own case: a board on the default would show a different
 #        population from the one players already see, so the 1 is REQUIRED.
 #   2v2  /team/leaderboard and /ffa/leaderboard already default their minimum
-#   FFA  to 1 (main.py:52494, :49182) and the F5 client passes only limit and
-#        sort_by (ApiClient.cs:14804, :18930), so it takes those defaults. The
+#   FFA  to 1 (main.py:52512, main.py:49200) and the F5 client passes only limit and
+#        sort_by (ApiClient.cs:14821, ApiClient.cs:18947), so it takes those defaults. The
 #        explicit min_series=1 / min_games=1 here therefore change nothing
 #        today; they are written down so the board names the population it
 #        shows, and so a later edit to either default cannot move this board
 #        away from the client's view in silence. A test pins each value to
 #        the endpoint's own current default for exactly that.
-#   1v2  /ovt/leaderboard has NO minimum parameter (main.py:43154) — there is
+#   1v2  /ovt/leaderboard has NO minimum parameter (main.py:43171) — there is
 #        nothing to pass, and `role` is the only filter it takes.
 # (An earlier version of this comment cited #153 for "render what the endpoint
 # returns", which is a different rule and not one #153 states; a later one said
@@ -8173,13 +8173,24 @@ def _lb_line_ovt(e, rank=None):
 
     Do not "fix" the divergence in main.py. The shipped client already
     matches it: RefreshFfaTab writes `{e.win_rate*100f:F0}%`
-    (NativeUI.cs:4672) and RefreshTeamTab writes the same (:27187), while
-    the 1v2 board writes `{e.win_rate:F0}%` unscaled (:5980). The 1v1 table
+    (NativeUI.cs:4672) and RefreshTeamTab writes the same (NativeUI.cs:27204), while
+    the 1v2 board writes `{e.win_rate:F0}%` unscaled (NativeUI.cs:5980). The 1v1 table
     carries no win-rate column at all — it renders `{e.wins}-{e.losses}`, so
-    there is nothing there to normalise and nothing there to copy from. So
-    normalising the server would turn a live player's 58.8%% into "1%%" on
-    the two tables that do scale. test_win_rate_unit_is_per_endpoint pins
-    both halves."""
+    there is nothing there to normalise and nothing there to copy from.
+
+    Both directions of a "normalisation" are wrong, and they are wrong in
+    opposite ways. Making /ovt/leaderboard return a FRACTION like the other
+    three leaves the two renderers that do not scale — this row and
+    NativeUI.cs:5980 — printing a live 58.8%% player as "1%%". Making the
+    three fraction endpoints return a PERCENT leaves the two renderers that
+    DO scale — NativeUI.cs:4672 and NativeUI.cs:27204 — printing that same player as
+    "5880%%". The unit belongs to the endpoint, and every consumer is
+    written against its own endpoint's unit.
+
+    test_win_rate_unit_is_per_endpoint pins the renderer half and the
+    handlers' spelling; the two value tests beside it take the NUMBER each
+    handler computes for one fixed input and assert its scale, which is what
+    a `100 *` wrapped around any of those four expressions fails."""
     if rank is None:
         rank = e["rank"]
     name = _lb_name(e["display_name"])
@@ -8241,121 +8252,54 @@ def _enabled_boards() -> list:
 
 
 # Remembered board message ids per channel: {channel id: {board key: message id}}.
-# Direct edits instead of a history scan. A restart empties this and the rescan
-# below re-adopts by embed title; a message that has gone falls back to a fresh
-# post. The old 5-message scan silently posted duplicates once a few chat
-# messages buried the board (item 8).
+#
+# This map is NOT the record of what is on the channel. THE CHANNEL IS. Every
+# tick re-reads the channel and re-derives this map from what it finds
+# (_reconcile_board_messages below), so no id here is ever acted on as though
+# it still described a message. What the map buys is the EDIT path:
+# fetch_message reaches a held id at any depth, so the ordinary tick edits one
+# message per board instead of re-posting the set.
+#
+# It replaced a 5-message history scan that silently posted duplicates once a
+# few chat messages buried the board (item 8).
 _lb_message_ids: dict = {}
 
-# Board messages this process still owes a delete, per channel:
-# {channel id: [message id]}. A delete that fails leaves a DUPLICATE board on
-# the channel, and a duplicate is exactly what a viewer reads as "the board is
-# stale" -- the older copy is the one a pin or a scrollback lands on, and
-# nothing we edit afterwards moves it. Logging that failure and moving on left
-# it there for good: the replacement is a fine anchored tail, so no later tick
-# had any reason to rescan. So a failed delete is remembered here and retried
-# on every tick until it succeeds or the message is gone.
+# How many messages ONE reconcile read will take before it stops trying to see
+# the whole channel. This is not a scan depth: the read stops as soon as the
+# channel ENDS, so a board channel holding a handful of messages costs one
+# history page and never approaches this number. It is reached only by a
+# channel holding more than this many messages, and reaching it means the read
+# did not establish what lies behind it -- on such a tick the publisher
+# deletes nothing and posts nothing fresh, and says so per board.
 #
-# Bounded on purpose. A channel that refuses deletes outright (Manage-Messages
-# revoked) would otherwise grow this list once per tick forever.
-_lb_pending_deletes: dict = {}
-LB_PENDING_DELETE_CAP = 24
-
-# How deep the re-adopt sweep reads. 50 was one busy afternoon's worth of
-# chat: a restart after that lost every board and posted a second full set
-# beside the first. This is a bound, not a fix -- a set buried deeper than
-# this is still re-posted fresh and the old one is still orphaned -- but note
-# which path depends on it. Only ADOPTION (no id in hand) reads history at
-# all; once an id is held, fetch_message reaches that message at ANY depth, so
-# the ordinary bury-and-re-anchor cycle is not limited by this number.
-LB_HISTORY_SCAN = 200
+# What that bound costs: a board whose message is buried under more than this
+# many messages AND whose id this process has lost (a restart) is neither
+# edited nor replaced, and every tick prints why. Raising this number is the
+# lever. The direction was chosen because a second full set left permanently
+# on the channel is the failure item 8 exists to prevent and nothing reports
+# it, while an absent board announces itself on every tick.
+LB_RECONCILE_CEILING = 2000
 
 
-def _remember_pending_delete(pending: list, mid: int):
-    """Queue one undeletable board message for the next tick to retry."""
-    if mid in pending:
-        return
-    pending.append(mid)
-    if len(pending) > LB_PENDING_DELETE_CAP:
-        dropped = pending.pop(0)
-        print(f"[LB] giving up on deleting mid={dropped}: more than "
-              f"{LB_PENDING_DELETE_CAP} board messages on this channel are "
-              f"refusing deletion, which is a permission problem, not a race")
-
-
-async def _delete_board_message(ch, msg, what: str, pending: list) -> bool:
+async def _delete_board_message(ch, msg, what: str) -> bool:
     """Delete one board message of ours. True when it is gone -- including
-    when it was already gone, which is not a failure and owes nothing. Any
-    other error queues a retry rather than being logged and forgotten."""
+    when it was already gone, which is not a failure.
+
+    A refusal is logged and LEFT. Nothing remembers this id: the channel is
+    the record, and the next tick's reconcile reads it again and finds this
+    message exactly as this one found it. That is also what makes leaving it
+    safe -- the decision to delete is re-derived from a fresh read every tick
+    and never replayed from memory, so this id cannot come back as a delete
+    after the channel has made it a board again."""
     try:
         await msg.delete()
         return True
     except discord.NotFound:
         return True
     except Exception as e:
-        _remember_pending_delete(pending, msg.id)
-        print(f"[LB] couldn't delete {what} mid={msg.id} ({e}) -- queued for the next tick")
+        print(f"[LB] couldn't delete {what} mid={msg.id} ({e}) -- "
+              f"the next tick reads the channel again and finds it")
         return False
-
-
-def _cancel_owed_deletes_for_live_boards(pending: list, ids: dict) -> int:
-    """Drop every owed delete whose message is now a board we publish.
-
-    The queue and the id map are two records of the same message ids, and a
-    message can move from the first into the second: a duplicate is queued
-    because its delete was refused, and a later scan adopts it as a board's
-    keeper once the message that beat it is gone. Nothing about being queued
-    stops that adoption, and nothing about being adopted used to clear the
-    queue entry -- so one id meant both "the board we publish" and "a delete
-    we still owe", and the next sweep acted on the second reading.
-
-    Which way to resolve that is not a toss-up. An id in `ids` is the message
-    a board is being published as; a queue entry is a record of a delete that
-    was refused at some earlier tick, and the reason it was queued (it was a
-    duplicate, a replaced message, a retired board) is exactly what the scan
-    has just contradicted. The queue entry is the stale half, so it goes.
-
-    This says nothing about ids that are NOT live: those stay queued and are
-    retried, which is the whole point of the queue.
-    """
-    live = set(ids.values())
-    cancelled = [mid for mid in pending if mid in live]
-    if not cancelled:
-        return 0
-    pending[:] = [mid for mid in pending if mid not in live]
-    for mid in cancelled:
-        print(f"[LB] mid={mid} is owed a delete and is now the live board message "
-              f"-- cancelling the owed delete, not the board")
-    return len(cancelled)
-
-
-async def _retry_pending_deletes(ch, pending: list, ids: dict):
-    """Re-try the deletes earlier ticks could not complete. Costs nothing on
-    the ordinary tick, where the queue is empty.
-
-    Reconciles against the live id map FIRST. The adopt path cancels an owed
-    delete the moment it makes that message a keeper, so on the ordinary
-    route this finds nothing; it is here because that is not the only route
-    into `ids`. An adopt whose history read raises part-way has already
-    queued the duplicates it got through, and returns without merging its
-    keepers -- leaving the previous tick's id in place, which may be one of
-    the ids it just queued. Checking at the point of USE is what keeps the
-    sweep off a live id however the queue and the map got out of step."""
-    if not pending:
-        return
-    _cancel_owed_deletes_for_live_boards(pending, ids)
-    still = []
-    for mid in list(pending):
-        try:
-            msg = await ch.fetch_message(mid)
-            await msg.delete()
-            print(f"[LB] swept stale board message mid={mid} that an earlier tick could not delete")
-        except discord.NotFound:
-            print(f"[LB] stale board message mid={mid} is already gone")
-        except Exception as e:
-            still.append(mid)
-            print(f"[LB] stale board message mid={mid} still not deletable ({e})")
-    pending[:] = still
 
 
 async def _render_board(board: dict):
@@ -8410,110 +8354,148 @@ async def _render_board(board: dict):
     return embeds, view
 
 
-async def _adopt_board_messages(ch, boards: list, ids: dict, pending: list) -> bool:
-    """Re-attach to boards already in the channel (this map is process memory,
-    so a restart starts empty) and delete older duplicates of the same board.
-    Newest wins: history is newest-first, so the first message carrying a
-    board's title is the keeper and any later one is a leftover from an
-    earlier re-anchor — whichever of those a viewer or a pin is looking at may
-    not be the one we edit, which is what made a board look permanently stale
-    before.
+async def _reconcile_board_messages(ch, boards: list, ids: dict) -> tuple:
+    """Read the channel FRESH and make it carry exactly one message per
+    enabled board. Returns (read_complete, anchored).
 
-    Only messages whose author is this BOT ACCOUNT are ever touched, which is
-    not the same as "posted by this process": a set left behind by an earlier
-    run, or by a second process on the same token, is adopted and swept just
-    like one of ours. That is the intent — those ARE the duplicates — but it
-    makes the guard an identity check, not a provenance one, and it is why
-    two live processes need the anchored re-check in publish_boards.
+    THE CHANNEL IS THE ONLY RECORD. Nothing outside this function decides
+    that a message should be deleted, and nothing here decides it from an id
+    held in memory: every deletion on this tick is chosen from messages this
+    read just saw. That is why a message id can only mean one thing at a
+    time. Within one read a message is either the NEWEST one carrying an
+    enabled board's title -- that board's keeper, which is what `ids` is set
+    to -- or it is not, and there is no structure left in which it could be
+    both a keeper and something owed a delete. The queue that used to hold
+    the second reading, and the cap that used to evict from it, are gone.
 
-    RETURNS WHETHER THE HISTORY READ SUCCEEDED, and the caller may not post a
-    fresh set on the strength of a scan that never happened. A read that
-    failed says nothing about what is in the channel; treating it as "found
-    nothing" is how a restart during a Discord blip ends up with two complete
-    sets, the newer of which is a perfectly anchored tail that no later tick
-    has any reason to rescan.
+    HOW FAR THE READ GOES. It reads newest-first until the CHANNEL ENDS, not
+    to a fixed depth, so in any channel of at most LB_RECONCILE_CEILING
+    messages there is nothing behind it and a previous set cannot be left
+    undiscovered -- which is the whole failure the old fixed 200-message scan
+    could not close, because a set buried deeper than the scan was re-posted
+    fresh and the old one orphaned. One page is 100 messages, so a board
+    channel costs one history call; the ceiling is reached only by a channel
+    holding more than that many messages.
 
-    It also RETIRES a board this deployment no longer publishes. Dropping a
-    key from LEADERBOARD_BOARDS otherwise left its last message on the
-    channel for good: permanently stale, and indistinguishable to a reader
-    from a board that stopped updating. The enabled set is read from the
-    environment once, at import, so it can only change across a restart --
-    and a restart empties _lb_message_ids, which forces this scan. That is
-    why retirement lives here and costs no extra history read.
+    WHICH DIRECTION THE UNHANDLED CASE FAILS. A read that raises, a read that
+    dies part-way, and a read that reaches the ceiling are all treated the
+    same: the channel picture is INCOMPLETE, so this tick DELETES NOTHING and
+    the caller posts nothing fresh. It still ADOPTS what it saw, which is
+    sound at any depth -- history is newest-first, so the first message
+    carrying a title is that title's newest message in the channel whether or
+    not the read went on to finish. And it does not drop a remembered id it
+    did not see, because it has not shown that message is gone. Only a
+    COMPLETE read may do that, and only a complete read may delete.
 
-    Retirement is REFUSED while any token in LEADERBOARD_BOARDS failed to
-    resolve. A typo ("ffaa") drops a real board from the enabled set, and the
-    cost of acting on that is a deleted message; the cost of refusing is a
-    board that keeps publishing while the log says the key is unknown. A
-    guard is judged by what its refusal costs (#430)."""
-    by_title = {b["title"]: b["key"] for b in boards}
-    live_keys = {b["key"] for b in boards}
-    retire = ({b["title"]: b["key"] for b in BOARDS if b["key"] not in live_keys}
-              if live_keys and not _lb_unknown_board_keys else {})
-    keepers, dupes, retired = {}, 0, 0
+    WHAT IS DELETED, AND WHAT IS NEVER DELETED. Only messages whose author is
+    this BOT ACCOUNT and which carry a board embed title. A message posted by
+    any other account is skipped before anything else is asked about it, on
+    every path. Of ours, two kinds go: a DUPLICATE (an older message carrying
+    an enabled board's title, whose newer keeper is on the channel now --
+    this read saw it, so the replacement is already there, and no board is
+    ever briefly absent), and a RETIRED board's message (a title in BOARDS
+    whose key this deployment no longer publishes, which is a deliberate
+    removal and has no replacement by definition).
+
+    Retirement runs when the enabled set is EMPTY too. `LEADERBOARD_BOARDS`
+    set to nothing means this deployment publishes no boards, and leaving the
+    last set of messages up said the opposite -- permanently stale, and
+    indistinguishable to a reader from boards that stopped updating. It is
+    still REFUSED while any token in LEADERBOARD_BOARDS failed to resolve: a
+    typo drops a real board from the enabled set, and the cost of acting on
+    that is a deleted message while the cost of refusing is a board that
+    keeps publishing while the log names the key (#430).
+
+    "Ours" is an IDENTITY check, not a provenance one: a set left by an
+    earlier run, or by a second process on the same token, is adopted and
+    swept exactly like one this process posted. That is the intent -- those
+    ARE the duplicates -- and it is why `anchored` is derived from the same
+    read rather than from a second one.
+
+    ANCHORED comes out of this read as well, so the tick pays no extra
+    history call for it: it is whether the channel's last len(boards)
+    messages, AFTER the deletions above, are exactly this set in BOARDS
+    order, oldest to newest. An EDIT never moves a Discord message and never
+    changes its posted date, so a board edited every 10 minutes but buried
+    under chat reads as dead -- sitting at the bottom is part of publishing
+    it, not polish. An incomplete read answers True, i.e. "do not repost":
+    the direction to fail in is editing in place, never moving a set whose
+    position was not established.
+    """
+    enabled_titles = {b["title"]: b["key"] for b in boards}
+    retire = ({b["title"]: b["key"] for b in BOARDS if b["key"] not in enabled_titles.values()}
+              if not _lb_unknown_board_keys else {})
+    keepers: dict = {}
+    stale: list = []
+    order: list = []
+    complete, seen = True, 0
     try:
-        async for msg in ch.history(limit=LB_HISTORY_SCAN):
+        async for msg in ch.history(limit=LB_RECONCILE_CEILING + 1):
+            seen += 1
+            if seen > LB_RECONCILE_CEILING:
+                complete = False
+                print(f"[LB] the channel holds more than {LB_RECONCILE_CEILING} messages -- "
+                      f"this tick deletes nothing and posts nothing fresh")
+                break
+            order.append(msg.id)
             if msg.author != bot.user or not msg.embeds:
-                continue
+                continue                      # never ours: not touched, not counted
             title = msg.embeds[0].title or ""
+            key = enabled_titles.get(title)
+            if key is not None:
+                if key in keepers:
+                    stale.append((msg, f"duplicate {key} board"))
+                else:
+                    keepers[key] = msg        # newest-first: the first one wins
+                continue
             if title in retire:
-                if await _delete_board_message(
-                        ch, msg, f"retired {retire[title]} board", pending):
-                    retired += 1
-                continue
-            key = by_title.get(title)
-            if key is None:
-                continue
-            if key not in keepers:
-                keepers[key] = msg.id
-                continue
-            if await _delete_board_message(
-                    ch, msg, f"duplicate {key} board", pending):
-                dupes += 1
+                stale.append((msg, f"retired {retire[title]} board"))
     except Exception as e:
-        print(f"[LB] rescan failed ({e}) -- nothing is posted fresh on this tick")
-        return False
-    # Only ADD what the scan found. An id we already hold for a board the scan
-    # did not see is still usable -- fetch_message reaches a message at any
-    # depth -- and dropping it would turn "buried deeper than the scan" into a
-    # duplicate instead of the re-anchor it currently resolves to.
-    ids.update(keepers)
-    # A keeper this scan just adopted may be a message an EARLIER tick queued
-    # for deletion -- a duplicate becomes the only message for its board the
-    # moment the one that beat it is deleted. It is a board now, so the owed
-    # delete is cancelled here, at the point the id changes meaning, rather
-    # than left for the next tick's sweep to act on.
-    _cancel_owed_deletes_for_live_boards(pending, ids)
+        complete = False
+        print(f"[LB] channel read failed ({e}) -- this tick deletes nothing "
+              f"and posts nothing fresh")
+
+    for key, msg in keepers.items():
+        ids[key] = msg.id
+    if complete:
+        # The read covered the whole channel, so a board it did not see has no
+        # message there and a remembered id for it is an id for something that
+        # is gone. Under an incomplete read the id is KEPT -- fetch_message
+        # reaches a message at any depth, and dropping it would turn "deeper
+        # than the read" into a fresh duplicate.
+        for b in boards:
+            if b["key"] not in keepers:
+                ids.pop(b["key"], None)
+
+    if not complete:
+        if stale:
+            print(f"[LB] {len(stale)} stale board message(s) left as they are: the channel "
+                  f"read did not reach the end of the channel")
+        return False, True
+
+    gone, dupes, retired = set(), 0, 0
+    for msg, what in stale:
+        if await _delete_board_message(ch, msg, what):
+            gone.add(msg.id)
+            if what.startswith("retired"):
+                retired += 1
+            else:
+                dupes += 1
     if dupes:
         print(f"[LB] deleted {dupes} duplicate stale board message(s)")
     if retired:
-        print(f"[LB] retired {retired} board message(s) for boards this deployment no longer publishes")
-    return True
+        print(f"[LB] retired {retired} board message(s) for boards this deployment "
+              f"no longer publishes")
 
-
-async def _boards_are_anchored(ch, boards: list, ids: dict) -> bool:
-    """True when the channel's last len(boards) messages are exactly our board
-    messages, in BOARDS order, oldest to newest. An EDIT never moves a Discord
-    message and never changes its posted date, so a board edited every 10
-    minutes but buried under chat still reads as dead ("posts aren't
-    updating") — sitting at the bottom is part of publishing it, not polish.
-
-    A history read that fails answers True: the direction we want to fail in
-    is editing in place, never deleting a set whose position we could not
-    confirm."""
     want = [ids.get(b["key"]) for b in boards]
-    if any(mid is None for mid in want):
-        return False
-    try:
-        tail = [m.id async for m in ch.history(limit=len(want))]
-    except Exception as e:
-        print(f"[LB] channel tail read failed ({e}) — editing in place this tick")
-        return True
-    tail.reverse()   # history is newest-first; channel order is oldest-first
-    return tail == want
+    if not boards or any(mid is None for mid in want):
+        return True, False
+    tail = [mid for mid in order if mid not in gone][:len(want)]
+    tail.reverse()                            # history is newest-first; channel order is oldest-first
+    return True, tail == want
 
 
-async def _repost_board_set(ch, boards: list, rendered: dict, ids: dict, pending: list):
+async def _repost_board_set(ch, boards: list, rendered: dict, ids: dict):
     """Move the whole board set to the channel bottom in BOARDS order, one
     board at a time, POSTING EACH REPLACEMENT BEFORE DELETING THE MESSAGE IT
     REPLACES. Sends append at the bottom in order while the deletes remove
@@ -8532,13 +8514,13 @@ async def _repost_board_set(ch, boards: list, rendered: dict, ids: dict, pending
 
     Both failure directions are non-destructive. A failed send leaves the old
     message in place: stale and out of order, but present, and the next tick
-    re-anchors. A failed delete leaves a duplicate above the new set -- and
-    that duplicate is QUEUED for the next tick to delete, because the
-    re-adopt sweep is not a reliable second chance for it: the sweep only
-    runs when a board's id is missing, and this path has just stored a fresh
-    id for every board. Neither direction can empty the channel. Deletes
-    still only ever touch ids this process posted or adopted, and the whole
-    path still runs at most once per tick.
+    re-anchors. A failed delete leaves a duplicate above the new set, and the
+    next tick's reconcile finds it by READING THE CHANNEL -- it is an older
+    message carrying an enabled board's title, which is exactly what that
+    read deletes, and it needs nothing remembered here to be found. Neither
+    direction can empty the channel. The deletes on this path are of a
+    message whose REPLACEMENT HAS ALREADY BEEN SENT, three lines above, and
+    the whole path still runs at most once per tick.
     """
     print(f"[LB] board set is not at the channel bottom -- reposting {len(boards)} boards in order")
     for b in boards:
@@ -8565,12 +8547,12 @@ async def _repost_board_set(ch, boards: list, rendered: dict, ids: dict, pending
         try:
             msg = await ch.fetch_message(old)
         except discord.NotFound:
-            continue                      # already gone; nothing is owed
+            continue                      # already gone; nothing left to remove
         except Exception as e:
-            _remember_pending_delete(pending, old)
-            print(f"[LB] {b['key']}: old message mid={old} not reachable ({e}) -- queued for the next tick")
+            print(f"[LB] {b['key']}: old message mid={old} not reachable ({e}) -- "
+                  f"the next tick reads the channel again and finds it")
             continue
-        await _delete_board_message(ch, msg, f"replaced {b['key']} board", pending)
+        await _delete_board_message(ch, msg, f"replaced {b['key']} board")
 
 
 async def publish_boards():
@@ -8596,7 +8578,23 @@ async def publish_boards():
     does not own the channel fell through to `bot.fetch_channel`, which
     answers for ANY guild -- so every additional guild the bot joined
     re-rendered and re-edited the same three boards, at six backend GETs and
-    seven Discord calls a time."""
+    seven Discord calls a time.
+
+    WHAT ONE TICK COSTS. Three boards, steady state, nothing stale on the
+    channel: SIX backend GETs (three board fetches and three one-row inactive
+    probes) and SEVEN logical Discord operations -- one reconcile history
+    page, then one fetch_message and one edit per board. The four-board
+    configuration is seven backend GETs (1v2 has no probe) and nine Discord
+    operations. A channel-cache miss adds one fetch_channel. A tick that has
+    to re-anchor adds three sends, three fetch_message and three deletes. A
+    cold start into a channel already carrying one stale set is one reconcile
+    page, three deletes and the steady six, i.e. about ten. There is no
+    separate tail read and no per-id retry sweep: both came out of the
+    reconcile read, which is the one place the channel is read from.
+
+    ORDER. Render first (that touches only the API), then RECONCILE THE
+    CHANNEL, and only then act on it. Nothing decides a deletion before the
+    channel has been read on this tick."""
     if LEADERBOARD_CHANNEL_ID <= 0: return
     ch = bot.get_channel(LEADERBOARD_CHANNEL_ID)
     if not ch:
@@ -8606,11 +8604,11 @@ async def publish_boards():
             return
     if not ch: return
     boards = _enabled_boards()
-    if not boards:
-        print("[LB] LEADERBOARD_BOARDS is empty — nothing to publish")
-        return
     # Render everything BEFORE touching the channel: the repost path deletes
     # messages, and it may only do that while holding a replacement for each.
+    # With no enabled board this loop does nothing and the reconcile below
+    # still runs -- that is the whole disable path, and returning before it
+    # left every old board message on the channel for good.
     rendered = {}
     for b in boards:
         try:
@@ -8621,48 +8619,32 @@ async def publish_boards():
                 rendered[b["key"]] = r
         except Exception as e:
             print(f"[LB] {b['key']}: render failed ({e}) — board left as it is")
+    ids = _lb_message_ids.setdefault(ch.id, {})
+    # The channel, read fresh, is what every decision below is made from. It
+    # also runs on the ticks that publish nothing -- an outage tick, and the
+    # empty-configuration tick -- because a duplicate or a retired board's
+    # message is not something an outage should leave standing.
+    complete, anchored = await _reconcile_board_messages(ch, boards, ids)
+    if not boards:
+        print("[LB] LEADERBOARD_BOARDS names no board — this deployment publishes none")
+        return
     if not rendered:
         print("[LB] no board rendered this tick — nothing published")
         return
-    ids = _lb_message_ids.setdefault(ch.id, {})
-    pending = _lb_pending_deletes.setdefault(ch.id, [])
-    # Owed deletes first: a duplicate left standing is what a viewer reads as
-    # a stale board, and every later step here assumes the channel holds one
-    # message per board. It is given the id map because an owed delete and a
-    # live board id are the same kind of thing, and the sweep may not act on
-    # an id the publisher is currently using.
-    await _retry_pending_deletes(ch, pending, ids)
-    scan_ok, adopted = True, False
-    if any(b["key"] not in ids for b in boards):
-        scan_ok = await _adopt_board_messages(ch, boards, ids, pending)
-        adopted = True
-    if not await _boards_are_anchored(ch, boards, ids):
-        if len(rendered) == len(boards) and scan_ok:
-            # Rescan before reposting as well: an id we hold may no longer be
-            # the newest message for its board (another process, a failed edit
-            # that posted a fresh one), and reposting without re-adopting would
-            # leave that older board message in the channel above the new set —
-            # the stale-duplicate case the sweep exists for.
-            if not adopted:
-                scan_ok = await _adopt_board_messages(ch, boards, ids, pending)
-            # ...and then ASK AGAIN whether we are anchored. The sweep may
-            # have just adopted a NEWER set than the one whose position we
-            # measured -- another process's, or one this process posted fresh
-            # after a failed edit -- and that set can already be sitting at
-            # the bottom in order. Reposting it would delete and re-send
-            # messages that are exactly where they belong; with two live
-            # processes on one token, each doing that every tick, the boards
-            # churn message ids and buttons forever and the channel shows a
-            # delete/send gap on every pass. The extra history read is paid
-            # only on the repost path.
-            if scan_ok and not await _boards_are_anchored(ch, boards, ids):
-                await _repost_board_set(ch, boards, rendered, ids, pending)
-                return
-            if scan_ok:
-                print("[LB] the set at the channel bottom is the one just adopted — editing in place")
-        elif not scan_ok:
+    # `anchored` was measured on the SAME read that adopted these ids, after
+    # its deletions, so it answers the question about the set we are actually
+    # publishing. The old shape measured position first and adopted second,
+    # which is why it had to ask twice: with two processes on one token it
+    # could adopt the other process's set and then repost a set that was
+    # already exactly where it belonged, churning message ids and buttons
+    # every ten minutes with a delete/send gap on every pass.
+    if not anchored:
+        if len(rendered) == len(boards) and complete:
+            await _repost_board_set(ch, boards, rendered, ids)
+            return
+        if not complete:
             print("[LB] set is buried but the channel could not be read — editing what we "
-                  "already hold, re-anchoring on a tick whose scan succeeds")
+                  "already hold, re-anchoring on a tick whose read succeeds")
         else:
             print("[LB] set is buried but a board did not render — editing in place, "
                   "re-anchoring on a tick where every board renders")
@@ -8679,9 +8661,10 @@ async def publish_boards():
                 print(f"[LB] {b['key']}: edited board mid={mid}")
                 continue
             except discord.NotFound:
-                # The message is GONE -- a moderator deleted it, or another
-                # process did. That is the one failure that says anything
-                # about whether a replacement is needed.
+                # The message is GONE -- a moderator or another process took
+                # it between this tick's channel read and this edit. That is
+                # the one failure that says anything about whether a
+                # replacement is needed.
                 print(f"[LB] {b['key']}: board mid={mid} is gone — posting a fresh message")
                 ids.pop(b["key"], None)
             except Exception as e:
@@ -8695,11 +8678,16 @@ async def publish_boards():
                 # force a re-anchor. Keep the id and retry.
                 print(f"[LB] {b['key']}: edit of mid={mid} failed ({e}) — keeping mid={mid}, retrying next tick")
                 continue
-        elif not scan_ok:
-            # No id for this board, and the scan that would have found one
-            # never ran. Posting now is how a restart during a Discord blip
-            # puts a second full set on the channel.
-            print(f"[LB] {b['key']}: no message id and the channel could not be read — "
+        # ONE rule for every fresh post, whichever way this board arrived
+        # here: no id at all, or an id that turned out to be gone. A fresh
+        # post may only follow a COMPLETE channel read. An incomplete read
+        # has not shown that this board has no message further back, and
+        # posting on it is how a restart during a Discord blip -- or a
+        # channel past LB_RECONCILE_CEILING -- puts a second full set on the
+        # channel, perfectly anchored, which no later tick has any reason to
+        # rescan.
+        if not complete:
+            print(f"[LB] {b['key']}: no message id and the channel read was incomplete — "
                   f"not posting, retrying next tick")
             continue
         try:

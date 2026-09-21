@@ -21,6 +21,7 @@ import datetime as _dt
 import os
 import re
 import types
+from pathlib import Path
 
 import pytest
 
@@ -43,14 +44,23 @@ TREE = ast.parse(TEXT)
 WANT_FUNC = {"rank_emoji", "get_rank_name", "_lb_name", "_lb_line",
              "_split_lb_descriptions",
              "_build_board_embeds", "_board_medal", "_lb_line_2v2", "_lb_line_ffa", "_lb_line_ovt",
-             "_enabled_boards", "_render_board", "_adopt_board_messages", "_boards_are_anchored",
-             "_repost_board_set", "_remember_pending_delete", "_delete_board_message",
-             "_retry_pending_deletes", "_cancel_owed_deletes_for_live_boards",
+             "_enabled_boards", "_render_board", "_reconcile_board_messages",
+             "_repost_board_set", "_delete_board_message",
              "publish_boards", "publish_lb_loop"}
 WANT_CLASS = {"LeaderboardPaginator"}
 WANT_ASSIGN = {"RANK_ROLES", "LB_PAGE_SIZE", "LB_TOTAL_FETCH", "BOARDS",
-               "_lb_message_ids", "_lb_unknown_board_keys", "_lb_pending_deletes",
-               "LB_PENDING_DELETE_CAP", "LB_HISTORY_SCAN", "_LB_NAME_BREAKS"}
+               "_lb_message_ids", "_lb_unknown_board_keys",
+               "LB_RECONCILE_CEILING", "_LB_NAME_BREAKS"}
+
+# The owed-delete queue is GONE. Asserted rather than assumed: the mechanism
+# produced a HIGH and two MEDIUMs inside its own fix, so it was deleted rather
+# than patched a third time, and what makes that deletion real is that no name
+# of it survives anywhere in the module. The channel is now the only record of
+# what still needs deleting.
+GONE_FROM_SOURCE = ["_lb_pending_deletes", "LB_PENDING_DELETE_CAP",
+                    "_remember_pending_delete", "_cancel_owed_deletes_for_live_boards",
+                    "_retry_pending_deletes", "_adopt_board_messages",
+                    "_boards_are_anchored", "LB_HISTORY_SCAN"]
 
 CID = 777
 
@@ -179,6 +189,12 @@ class _Channel:
         # the read failing before it yields anything.
         self.history_raises_after = None
         self.fetch_fails_once = set()
+        # A message that is on the channel when the tick READS it and gone by
+        # the time the tick fetches it to edit -- a moderator, or another
+        # process, in the gap. Discord answers that fetch with a 404, so the
+        # message is removed here and NotFound raised, which is the only
+        # failure that says a replacement is needed.
+        self.vanish_on_fetch = set()
         # A live channel refuses sends, edits and deletes: a 5xx, a rate
         # limit, a revoked Manage-Messages. Without these the repost path --
         # the only code here that REMOVES a message -- has no failing case in
@@ -209,6 +225,10 @@ class _Channel:
         if mid in self.fetch_fails_once:
             self.fetch_fails_once.discard(mid)
             raise RuntimeError("429 rate limited")
+        if mid in self.vanish_on_fetch:
+            self.vanish_on_fetch.discard(mid)
+            self.messages = [m for m in self.messages if m.id != mid]
+            raise _not_found(f"Unknown Message {mid}")
         for m in self.messages:
             if m.id == mid:
                 return m
@@ -726,6 +746,109 @@ def test_win_rate_unit_is_per_endpoint(ns):
             % (label, fn, "a percent" if label == "1v2" else "a 0-1 fraction"))
 
 
+# ── the win-rate unit, measured rather than matched ───────────────────────
+#
+# The assertions above are all SUBSTRING tests, and a substring survives being
+# wrapped: `100 * ROUND(COALESCE(c.wins, 0)::numeric / c.total, 4)` still
+# contains the needle, and the `win_rate = round(100 *` regex does not read
+# SQL at all. So the unit is taken below from the NUMBER each producer
+# computes, for the one input 20 wins in 34 games: the three fraction boards
+# must land in (0, 1] and the 1v2 board must land above 1. Nothing here can be
+# satisfied by how the expression is spelled.
+
+WR_WINS, WR_GAMES = 20, 34
+
+
+def _sql_win_rate_expr(fn, alias):
+    """The `... AS win_rate` expression out of one handler's own SQL, with the
+    row's columns replaced by numbers. Located by the alias it is given, not
+    by an offset: a handler that stops producing win_rate fails here."""
+    import re
+    src = _def_source(fn)
+    end = src.find(" AS win_rate")
+    assert end > 0, "%s no longer spells a `... AS win_rate` SQL expression" % fn
+    start = src.rfind("CASE WHEN", 0, end)
+    assert start > 0, "%s's win_rate column is no longer a CASE expression" % fn
+    expr = src[start:end]
+    assert expr.count("\n") < 6, "the matched expression spans too much to be one column"
+    expr = re.sub(r"\b%s\.wins\b" % alias, str(WR_WINS), expr)
+    expr = re.sub(r"\b%s\.total\b" % alias, str(WR_GAMES), expr)
+    assert alias + "." not in expr, (
+        "%s's win_rate expression still reads a column this model did not "
+        "substitute: %r" % (fn, expr))
+    return expr
+
+
+def _py_win_rate_value(fn):
+    """The value one handler's own `win_rate=` keyword expression computes.
+
+    Lifted by AST from the handler source and evaluated, so the NUMBER is the
+    production expression's, not a restatement of it.
+    """
+    import ast as _ast
+    tree = _ast.parse(_def_source(fn).lstrip())
+    found = [kw.value for node in _ast.walk(tree)
+             if isinstance(node, _ast.Call)
+             for kw in node.keywords if kw.arg == "win_rate"]
+    assert len(found) == 1, "%s sets win_rate %d times" % (fn, len(found))
+    return eval(compile(_ast.Expression(found[0]), "<win_rate>", "eval"),
+                {"round": round}, {"wins": WR_WINS, "games": WR_GAMES})
+
+
+@pytest.mark.skipif(not os.environ.get("A1_TEST_PG_DSN"),
+                    reason="A1_TEST_PG_DSN unset; the SQL halves need a real PostgreSQL")
+def test_the_sql_boards_win_rate_value_is_a_fraction():
+    """1v1 and 2v2 produce win_rate in SQL, so PostgreSQL evaluates the
+    handler's own expression here and the test reads the number back.
+
+    The renderers on both sides multiply by 100 (NativeUI.cs:4672, NativeUI.cs:27204).
+    Wrapping either expression as `100 * ROUND(...)` therefore ships a rate
+    100x too large, and it is that VALUE this rejects -- the substring
+    assertions above stay green through exactly that edit.
+    """
+    import asyncio as _asyncio
+    import asyncpg
+
+    dsn = os.environ["A1_TEST_PG_DSN"].replace("+asyncpg", "")
+    exprs = {"1v1": _sql_win_rate_expr("get_leaderboard", "c"),
+             "2v2": _sql_win_rate_expr("team_leaderboard", "ss")}
+
+    async def _values():
+        conn = await asyncpg.connect(dsn)
+        try:
+            return {k: float(await conn.fetchval("SELECT " + e))
+                    for k, e in exprs.items()}
+        finally:
+            await conn.close()
+
+    got = _asyncio.run(_values())
+    for label, v in got.items():
+        assert 0.0 < v <= 1.0, (
+            "%s: the leaderboard query returns win_rate=%r for %d wins in %d "
+            "games. That endpoint's consumers multiply by 100, so this is a "
+            "rate %r times too large." % (label, v, WR_WINS, WR_GAMES, round(v * 100)))
+        assert abs(v - WR_WINS / WR_GAMES) < 0.001, (label, v)
+
+
+def test_the_python_boards_win_rate_value_has_its_own_endpoints_unit():
+    """FFA produces a 0-1 fraction and 1v2 produces a percent, and the
+    difference is what both renderers are written against. Evaluated, not
+    matched: `100 * round(wins / games, 3)` fails here and passes every
+    substring assertion above."""
+    ffa = _py_win_rate_value("ffa_leaderboard")
+    ovt = _py_win_rate_value("ovt_leaderboard")
+    assert 0.0 < ffa <= 1.0, (
+        "ffa_leaderboard returns win_rate=%r for %d wins in %d games; the FFA "
+        "table multiplies by 100 (NativeUI.cs:4672), so this is %r times too "
+        "large" % (ffa, WR_WINS, WR_GAMES, round(ffa * 100)))
+    assert ovt > 1.0, (
+        "ovt_leaderboard returns win_rate=%r; the 1v2 row does NOT scale "
+        "(NativeUI.cs:5980, _lb_line_ovt), so a fraction here prints as 1%%" % ovt)
+    assert abs(ovt - 100.0 * ffa) < 0.2, (
+        "the two are meant to be the same rate in different units: %r vs %r"
+        % (ovt, ffa))
+
+
 def test_the_win_rate_unit_detector_can_fail(ns):
     """Negative control (#391) for the renderer half above.
 
@@ -987,6 +1110,138 @@ def test_the_footer_days_and_the_window_the_api_applies_are_one_number():
             "They are copies of one decision." % (service, KEY, m.group(1), bot_default))
 
 
+# ── the same number, third copy: the CLIENT prints it too ─────────────────
+
+PLUGIN_DIR = Path(__file__).resolve().parents[2] / "plugin"
+
+# `I18n.Tr("...")` / `I18n.TrF("...", ...)` -- the first argument is the
+# ENGLISH source string, which is what a player on the default locale reads
+# and what every catalogue is keyed by.
+_TR_CALL = re.compile(r'I18n\.TrF?\(\s*"((?:[^"\\]|\\.)*)"')
+_WINDOW_WORD = re.compile(r"inactiv", re.I)
+# "90d", "90 d", "90d+", "90 days". NOT "{0}d" -- a placeholder carries no
+# digits, which is the whole difference this asserts.
+_LITERAL_DAYS = re.compile(r"\b\d+\s*(?:d\b|d\+|days?\b)", re.I)
+
+# Generated or translated, and pinned by the i18n suite instead: the
+# catalogues are keyed BY these English strings, so a literal that got past
+# the sweep below would be visible there as a key with no placeholder.
+_NOT_A_SURFACE = {"I18nCatalogues.cs", "I18nSourceKeys.g.cs"}
+
+
+def _client_inactivity_strings():
+    """Every translated client string that talks about the inactive window."""
+    out = []
+    for cs in sorted(PLUGIN_DIR.glob("*.cs")):
+        if cs.name in _NOT_A_SURFACE:
+            continue
+        for m in _TR_CALL.finditer(cs.read_text(encoding="utf-8")):
+            if _WINDOW_WORD.search(m.group(1)):
+                out.append((cs.name, m.group(1)))
+    return out
+
+
+_MOD_VERSION_BODY = []
+
+
+def _api_mod_version_body():
+    """The /api/v1/mod-version handler, lifted by AST.
+
+    Scoped deliberately: api/main.py is 57k lines and `leaderboard_active_days`
+    is a plausible spelling anywhere in it, so a file-wide substring would be
+    satisfied by a comment (#441). This reads the one function that answers the
+    call every seat makes.
+    """
+    if not _MOD_VERSION_BODY:
+        src = (Path(__file__).resolve().parents[1] / "api" / "main.py").read_text(
+            encoding="utf-8")
+        tree = ast.parse(src)
+        got = None
+        for node in ast.walk(tree):
+            if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and node.name == "get_mod_version"):
+                got = ast.get_source_segment(src, node)
+                break
+        assert got, "get_mod_version is gone from api/main.py"
+        _MOD_VERSION_BODY.append((got, src))
+    return _MOD_VERSION_BODY[0]
+
+
+def test_the_day_count_the_client_prints_is_the_one_the_api_advertises():
+    """LEADERBOARD_ACTIVE_DAYS has a THIRD reader, and it is not a service.
+
+    The F5 board labels its population and its inactive toggle with the same
+    window the api filters on, and it used to do that from a compiled `90`.
+    That is the identical defect the test above prevents between the bot and
+    the api, one process further out: the number is configurable server-side,
+    so on any deployment not set to 90 the client stated a window nobody
+    applied -- and a second constant in the client would move that defect
+    rather than remove it.
+
+    So: the api ADVERTISES it, once, on the unauthenticated call every seat
+    already makes at startup; the client takes the value from that answer and
+    keeps no default of its own; and no client surface states the window as a
+    literal. The client's own default is 0, which means "not told" -- an
+    older server and a failed version check look the same from here, and both
+    print no day count at all rather than a number this side invented.
+    """
+    body, api_src = _api_mod_version_body()
+    flat_body = re.sub(r"\s+", " ", body)
+    assert '"leaderboard_active_days": LEADERBOARD_ACTIVE_DAYS' in flat_body, (
+        "the mod-version route no longer advertises the window from the api's "
+        "own constant; the client has no other way to learn it")
+    assert api_src.count('"leaderboard_active_days"') == 1, (
+        "the api names leaderboard_active_days on %d surfaces. It is "
+        "advertised ONCE, or the copies drift exactly as the compiled client "
+        "constant did." % api_src.count('"leaderboard_active_days"'))
+
+    client = (PLUGIN_DIR / "ApiClient.cs").read_text(encoding="utf-8")
+    flat_client = re.sub(r"\s+", " ", client)
+    assert ('int lbDays = ExtractJsonInt(req.downloadHandler.text, '
+            '"leaderboard_active_days");') in flat_client, (
+        "the client does not read the advertised window out of the "
+        "mod-version answer")
+    assert "if (lbDays > 0) LeaderboardActiveDays = lbDays;" in flat_client, (
+        "the client takes the advertised window unconditionally; a malformed "
+        "or absent value would turn a label that states the window into one "
+        "that states 0d")
+    assert ("public static int LeaderboardActiveDays { get; private set; } = 0;"
+            in flat_client), (
+        "the client carries a compiled default for a server setting again -- "
+        "0 is the only value that means 'the server has not told us'")
+
+    surfaces = _client_inactivity_strings()
+    assert surfaces, (
+        "no client string about the inactive window was found at all, so the "
+        "sweep below measured nothing")
+    for name, s in surfaces:
+        assert not _LITERAL_DAYS.search(s), (
+            "%s states the inactivity window as a literal: %r. The window is "
+            "a server setting; print the value the api advertised, or print "
+            "no count." % (name, s))
+    assert any("{0}d" in s or "{1}d" in s for _, s in surfaces), (
+        "no client surface prints the advertised window at all any more, so "
+        "nothing carries it to the player")
+
+
+def test_the_literal_day_count_detector_can_fail():
+    """The control for the sweep above (#391). Both halves of it: the reader
+    must find a Tr string that mentions the window, and the pattern must call
+    a literal a literal. A sweep over an empty list, or one whose pattern
+    matched nothing, passes silently and forever."""
+    planted = ('x = I18n.TrF("Show inactive players (90d+): ON"); '
+               'y = I18n.Tr("Show inactive players: ON");')
+    found = [m.group(1) for m in _TR_CALL.finditer(planted)
+             if _WINDOW_WORD.search(m.group(1))]
+    assert len(found) == 2, found
+    assert _LITERAL_DAYS.search(found[0]), (
+        "the detector does not see a literal day count in %r" % found[0])
+    assert not _LITERAL_DAYS.search(found[1])
+    assert not _LITERAL_DAYS.search("Show inactive players ({0}d+): ON"), (
+        "the detector calls the PLACEHOLDER form a literal, so the sweep "
+        "would fail on the fix as well as on the defect")
+
+
 # Keys discord_bot.py reads that compose does NOT pass into the container.
 # This is a RECORDED GAP, not an approval: each is a setting that cannot be
 # changed from .env on a standard deployment, and none of them has been
@@ -1084,20 +1339,49 @@ def test_the_missing_board_detector_can_fail(ns):
     assert sorted(titles) != sorted([T_1V1, T_2V2, T_FFA])
 
 
-def test_a_failed_repost_delete_leaves_a_duplicate_and_the_duplicate_is_retried(ns):
-    """The other failure direction, which is the price of the fix.
+def test_the_owed_delete_queue_and_its_cap_are_gone_from_the_module():
+    """The mechanism was DELETED, not patched again.
+
+    A queue of ids held beside the live-id map produced a HIGH and two
+    MEDIUMs inside its own fix: the sweep ran before the channel state
+    validated the map, its 24-entry cap could evict a genuinely owed delete,
+    and a history read that died part-way could leave one id both live and
+    owed. Every one of those is a consequence of keeping a SECOND record of
+    what is on the channel. There is now one record -- the channel -- read
+    fresh each tick, so an id cannot be in two states at once because the
+    structure that held the second state does not exist.
+
+    Asserted by absence, because "we stopped using it" and "it is gone" are
+    different claims and only the second one closes the class.
+    """
+    for name in GONE_FROM_SOURCE:
+        assert name not in TEXT, (
+            "%s is still in discord_bot.py; the owed-delete bookkeeping was "
+            "supposed to be removed, not left reachable" % name)
+
+
+def _seed_board_message(ch, title):
+    """One board message left on the channel by an EARLIER process.
+
+    The publisher's id map is process memory, so a fresh process meets a
+    channel it did not post into. This is what the reconcile read adopts.
+    """
+    return _run(ch.send(embeds=[_Embed(title=title)], view=None))
+
+
+def test_a_failed_repost_delete_leaves_a_duplicate_and_the_next_read_removes_it(ns):
+    """The other failure direction, which is the price of send-before-delete.
 
     If the replacement goes out but the old message will not delete, the
     channel carries that board twice for a tick. That is the deliberate
     trade: a stale duplicate above the set is recoverable, an absent board is
-    not recoverable until the next tick. We track the NEW id either way, so
-    the next tick edits the right message.
+    not recoverable until the next tick.
 
-    What must NOT happen is the duplicate being left there. It used to be:
-    the failure was logged and forgotten, and the re-adopt sweep that was
-    supposed to catch it only runs when a board's id is MISSING -- which this
-    path has just made certain it is not. So the id is queued and retried on
-    every tick until the delete lands or the message is gone.
+    What must NOT happen is the duplicate being left there. Nothing remembers
+    it: the next tick READS THE CHANNEL and finds an older message carrying
+    an enabled board's title, with that board's newer keeper present -- which
+    is the definition of what the reconcile deletes. No queue is involved and
+    none is needed.
     """
     _tick(ns)
     ch = ns["_ch"]
@@ -1111,176 +1395,258 @@ def test_a_failed_repost_delete_leaves_a_duplicate_and_the_duplicate_is_retried(
     assert titles.count(T_2V2) == 2, titles
     assert ns["_lb_message_ids"][CID]["2v2"] != old_2v2
     assert any("couldn't delete replaced 2v2 board" in ln for ln in ns["_log"])
-    assert ns["_lb_pending_deletes"][CID] == [old_2v2]
 
-    # The next tick retries it, with no rescan needed and nothing else moved.
+    # The next tick reads the channel, sees two 2v2 messages, and removes the
+    # older one. Nothing had to be remembered between the two ticks.
     ch.delete_fails = set()
     ns["_log"].clear()
     _tick(ns)
     titles = [t for t in ch.titles() if t is not None]
     assert titles.count(T_2V2) == 1, titles
-    assert ns["_lb_pending_deletes"][CID] == []
-    assert any(f"swept stale board message mid={old_2v2}" in ln for ln in ns["_log"])
+    assert old_2v2 in ch.deleted
+    assert any("deleted 1 duplicate stale board message" in ln for ln in ns["_log"])
 
 
-def test_the_duplicate_retry_can_fail(ns):
-    """Negative control (#391) for the sweep above: while the delete keeps
-    failing, the id must STAY queued. A queue that empties itself on failure
-    would pass the test above and fix nothing."""
+def test_the_duplicate_removal_can_fail(ns):
+    """Negative control (#391) for the branch above: while the delete keeps
+    being refused the duplicate must STAY, and the log must say so on every
+    tick. A reconcile that reported success on a refusal would pass the test
+    above and fix nothing."""
     _tick(ns)
     ch = ns["_ch"]
     old_2v2 = ns["_lb_message_ids"][CID]["2v2"]
     ch.post_from_someone_else()
     ch.delete_fails = {old_2v2}
     _tick(ns)
-    assert ns["_lb_pending_deletes"][CID] == [old_2v2]
+    assert [t for t in ch.titles() if t is not None].count(T_2V2) == 2
     ns["_log"].clear()
     _tick(ns)                                   # still refused
-    assert ns["_lb_pending_deletes"][CID] == [old_2v2]
-    assert any(f"mid={old_2v2} still not deletable" in ln for ln in ns["_log"])
     assert [t for t in ch.titles() if t is not None].count(T_2V2) == 2
+    assert old_2v2 not in ch.deleted
+    assert any(f"couldn't delete duplicate 2v2 board mid={old_2v2}" in ln
+               for ln in ns["_log"]), ns["_log"]
 
 
-def test_the_pending_delete_queue_is_bounded(ns):
-    """A channel with Manage-Messages revoked refuses every delete, once per
-    tick, forever. The queue is a retry list, not a leak."""
-    q = []
-    cap = ns["LB_PENDING_DELETE_CAP"]
-    for i in range(cap + 5):
-        ns["_remember_pending_delete"](q, 9000 + i)
-    assert len(q) == cap
-    assert 9000 not in q and (9000 + cap + 4) in q
-    ns["_remember_pending_delete"](q, 9000 + cap + 4)      # already queued
-    assert len(q) == cap
+def test_the_only_surviving_board_message_is_adopted_not_deleted(ns):
+    """The filed HIGH, driven end to end.
 
+    An older 1v1 message survives a refused delete after its replacement went
+    out. A moderator then removes the replacement, so that older message is
+    the ONLY 1v1 board on the channel. The delete refusal then clears and
+    that board's endpoint goes down, so nothing would repost whatever is
+    removed.
 
-def _seed_board_message(ch, title):
-    """One board message left on the channel by an EARLIER process.
-
-    The publisher's id map is process memory, so a fresh process meets a
-    channel it did not post into. This is what the cold-start scan adopts.
+    The old shape decided this from memory: the id was on an owed-delete
+    queue, the sweep ran before anything validated the channel, and it
+    deleted the only surviving board. The reconcile cannot reach that state.
+    It reads the channel first, and within that read the message is the
+    NEWEST one carrying the 1v1 title -- that board's keeper. A keeper is
+    what `ids` is set to; it is never also a deletion candidate, because the
+    two readings come out of the same pass over the same messages.
     """
-    return _run(ch.send(embeds=[_Embed(title=title)], view=None))
-
-
-def test_an_owed_delete_is_cancelled_when_its_message_becomes_the_live_board(ns):
-    """The owed-delete queue and the live-id map are two records of the same
-    message ids, and a scan can move an id from the first into the second.
-
-    An earlier run left two 1v1 messages. The cold-start scan keeps the newer
-    and queues the older, whose delete is refused. A moderator then deletes
-    the keeper -- so the next scan finds the QUEUED message as the only 1v1
-    board on the channel and adopts it. From that moment one id means both
-    "the board we publish" and "a delete we still owe", and the sweep at the
-    top of the next tick acts on the second reading.
-
-    The cost is not a churned message id. On a tick where that board's
-    endpoint is down, "no data this tick" leaves the board alone by design,
-    so nothing reposts what the sweep removed: the channel carries two boards
-    instead of three for the whole outage. That tick DOES log the sweep, but
-    nothing connects the two lines -- the board's own outcome line says it
-    was left as it is, and the line that removed it names a bare message id.
-    Every tick after it is indistinguishable from an ordinary outage tick.
-    """
+    _tick(ns)
     ch = ns["_ch"]
-    old_1v1 = _seed_board_message(ch, T_1V1)
-    new_1v1 = _seed_board_message(ch, T_1V1)
-    _seed_board_message(ch, T_2V2)
-    _seed_board_message(ch, T_FFA)
-    ch.delete_fails = {old_1v1.id}
-
+    old_1v1 = ns["_lb_message_ids"][CID]["1v1"]
+    ch.post_from_someone_else()                 # bury -> next tick reposts
+    ch.delete_fails = {old_1v1}
     _tick(ns)
-    ids = ns["_lb_message_ids"][CID]
-    pending = ns["_lb_pending_deletes"][CID]
-    assert ids["1v1"] == new_1v1.id
-    assert pending == [old_1v1.id], pending
+    new_1v1 = ns["_lb_message_ids"][CID]["1v1"]
+    assert new_1v1 != old_1v1
+    assert [t for t in ch.titles() if t is not None].count(T_1V1) == 2
 
-    _run(new_1v1.delete())                 # a moderator removes the keeper
-
+    _run(next(m for m in ch.messages if m.id == new_1v1).delete())   # a moderator
+    ch.delete_fails = set()                     # permission restored
+    ns["_api"].payloads[U_1V1] = None           # and 1v1's endpoint is down
     ns["_log"].clear()
     _tick(ns)
-    assert ids["1v1"] == old_1v1.id, "the surviving 1v1 message was not adopted"
-    assert old_1v1.id not in pending, (
-        "mid=%d is the live 1v1 board AND is queued for deletion; the next "
-        "tick's sweep deletes the board it is publishing" % old_1v1.id)
 
-    # Now the sweep's own preconditions: the refusal clears, 1v1 is down.
-    ch.delete_fails = set()
-    ns["_api"].payloads[U_1V1] = None
-    ns["_log"].clear()
-    _tick(ns)
-    assert not any(f"swept stale board message mid={old_1v1.id}" in ln
-                   for ln in ns["_log"]), ns["_log"]
+    assert ns["_lb_message_ids"][CID]["1v1"] == old_1v1, (
+        "the surviving 1v1 message was not adopted as the board")
+    assert old_1v1 not in ch.deleted, (
+        "mid=%d was the only 1v1 board on the channel and it was deleted" % old_1v1)
+    assert [t for t in ch.titles() if t is not None].count(T_1V1) == 1
+    assert any("1v1: no data this tick" in ln for ln in ns["_log"])
+
+    _tick(ns)                                   # the outage continues
+    assert T_1V1 in ch.titles()
+    assert old_1v1 not in ch.deleted
+
+
+def test_nothing_is_deleted_without_a_message_for_that_board_still_on_the_channel(ns):
+    """The bar property, asserted over the reconcile's own deletions rather
+    than argued.
+
+    Every message the reconcile deletes is either a DUPLICATE -- an older
+    message whose board's newer keeper is on the channel, so that board is
+    never briefly absent -- or a RETIRED board's message, which this
+    deployment does not publish at all. This drives both kinds in one tick
+    and asserts that every enabled board still has exactly one message when
+    the reconcile is done.
+    """
+    n2 = _fresh()
+    _tick(n2)
+    ch = n2["_ch"]
+    first = dict(n2["_lb_message_ids"][CID])
+    # An earlier process's full set, newer than ours, plus a retired board's
+    # message: three duplicates and one retirement in the same read.
+    for b in n2["_enabled_boards"]():
+        _seed_board_message(ch, b["title"])
+    retired = _seed_board_message(ch, "⚔️ 1v2 Leaderboard")
+
+    n3 = _bot_ns(_Api(_payloads()), _Bot(ch), boards_raw="1v1,2v2,ffa")
+    _run(n3["publish_boards"]())
+
     titles = [t for t in ch.titles() if t is not None]
-    assert titles.count(T_1V1) == 1, (
-        "the live 1v1 board was swept as an owed delete, and the outage means "
-        "nothing reposts it: %r" % titles)
+    for t in (T_1V1, T_2V2, T_FFA):
+        assert titles.count(t) == 1, (t, titles)
+    assert "⚔️ 1v2 Leaderboard" not in titles
+    assert retired.id in ch.deleted
+    assert sorted(ch.deleted) == sorted(list(first.values()) + [retired.id])
 
-    _tick(ns)                              # the outage continues
-    assert T_1V1 in [t for t in ch.titles() if t is not None]
 
+def test_a_channel_read_that_dies_part_way_deletes_nothing(ns):
+    """A history read that raises after yielding some messages has NOT shown
+    what is on the channel, so this tick deletes nothing at all -- not even
+    the duplicate it did see. The conservative direction is a duplicate that
+    survives one more tick, never a message removed on an unverified picture.
 
-def test_the_sweep_refuses_an_id_the_publisher_holds_after_a_part_way_scan(ns):
-    """Negative control's other half: the sweep's own check is not redundant.
-
-    The adopt path cancels an owed delete as it adopts, which covers the
-    ordinary route. It cannot cover this one. A history read that dies
-    PART-WAY has already queued whatever duplicates it got through, and it
-    returns without merging its keepers -- so the previous tick's id stays in
-    `ids` and may be exactly one of the ids it just queued. That state never
-    passes through the adopt-side cancel at all, and the only thing between
-    it and a deleted live board is the sweep checking at the point of use.
+    It still ADOPTS what it saw: history is newest-first, so the first
+    message carrying a title is that title's newest message whether or not
+    the read went on to finish, and adopting it removes nothing.
     """
     ch = ns["_ch"]
-    ch.post_from_someone_else()            # so the scan has a 5th thing to die on
+    ch.post_from_someone_else()
     held = _seed_board_message(ch, T_1V1)
     _seed_board_message(ch, T_2V2)
     _seed_board_message(ch, T_FFA)
-
     _tick(ns)
-    ids = ns["_lb_message_ids"][CID]
-    assert ids["1v1"] == held.id
+    assert ns["_lb_message_ids"][CID]["1v1"] == held.id
 
-    # Another process posts a newer 1v1, so the next scan calls OURS the
-    # duplicate -- while we are still publishing it.
-    newer = _seed_board_message(ch, T_1V1)
-    ch.delete_fails = {held.id}
-    ch.history_raises_after = 4            # dies after `held` has been queued
-
+    newer = _seed_board_message(ch, T_1V1)      # another process posts a 1v1
+    ch.history_raises_after = 4                 # the read dies mid-channel
     ns["_log"].clear()
     _tick(ns)
-    pending = ns["_lb_pending_deletes"][CID]
-    assert pending == [held.id], pending
-    assert ids["1v1"] == held.id, "the failed scan must not have merged keepers"
-    assert any("rescan failed" in ln for ln in ns["_log"]), ns["_log"]
 
-    # The sweep's preconditions: a readable channel and a delete that works.
-    # A moderator removes the newer message, so the one we hold is once again
-    # the only 1v1 board there is -- and 1v1 goes down, so nothing reposts
-    # whatever the sweep takes. Without this last part the scan would delete
-    # mid=held itself, as a genuine duplicate, and the sweep's contribution
-    # would not be separable from it.
+    assert ch.deleted == [], ch.deleted
+    assert any("channel read failed" in ln and "deletes nothing" in ln
+               for ln in ns["_log"]), ns["_log"]
+    assert [t for t in ch.titles() if t is not None].count(T_1V1) == 2
+
+    # ...and the first complete read resolves it: `newer` is the keeper and
+    # the one we were holding is the duplicate. Which of the two goes is
+    # decided by the CHANNEL, on that read, not by what an earlier tick
+    # happened to be holding.
     ch.history_raises_after = None
-    ch.delete_fails = set()
-    _run(newer.delete())
-    ns["_api"].payloads[U_1V1] = None
     ns["_log"].clear()
     _tick(ns)
-    assert not any(f"swept stale board message mid={held.id}" in ln
-                   for ln in ns["_log"]), ns["_log"]
-    titles = [t for t in ch.titles() if t is not None]
-    assert titles.count(T_1V1) == 1, (
-        "mid=%d is what the 1v1 board is published as and the sweep took it: "
-        "%r" % (held.id, titles))
+    assert held.id in ch.deleted, (
+        "the complete read did not remove the older 1v1 message: %r" % ch.deleted)
+    assert ns["_lb_message_ids"][CID]["1v1"] != held.id
+    assert [t for t in ch.titles() if t is not None].count(T_1V1) == 1
+
+
+def test_a_channel_deeper_than_the_ceiling_deletes_nothing_and_posts_nothing_fresh():
+    """LB_RECONCILE_CEILING is where the read gives up on seeing the whole
+    channel, and the tick then behaves exactly like a failed read.
+
+    This is the ONE case the reconcile cannot close, and it is stated rather
+    than hidden: a read that stops short has not shown that there is no
+    earlier set behind it, so nothing is deleted and no board is posted
+    fresh. A board whose id is still held is edited as usual -- fetch_message
+    reaches a message at any depth -- so the bound costs a publish only for a
+    board this process has lost the id for.
+    """
+    n2 = _fresh()
+    _tick(n2)
+    ch = n2["_ch"]
+    before = [m.id for m in ch.messages]
+    stale = _seed_board_message(ch, T_1V1)      # a duplicate the short read DOES see
+    n2["LB_RECONCILE_CEILING"] = 2              # ...and the read now stops short
+    n2["_log"].clear()
+    _tick(n2)
+    assert ch.deleted == [], "a message was deleted on a read that stopped short"
+    assert any("holds more than 2 messages" in ln for ln in n2["_log"]), n2["_log"]
+    assert [m.id for m in ch.messages] == before + [stale.id]
+
+    # A board the short read never reached is not posted fresh either.
+    n2["_lb_message_ids"].clear()
+    n2["_log"].clear()
+    _tick(n2)
+    assert ch.deleted == []
+    assert any("2v2: no message id and the channel read was incomplete" in ln
+               for ln in n2["_log"]), n2["_log"]
+    assert [m.id for m in ch.messages] == before + [stale.id]
+
+    # The control: with the ceiling back above the channel, the same tick
+    # reads to the end and resolves everything it refused to touch.
+    n2["LB_RECONCILE_CEILING"] = 2000
+    n2["_log"].clear()
+    _tick(n2)
+    assert before[0] in ch.deleted
+    assert [t for t in ch.titles() if t is not None].count(T_1V1) == 1
+
+
+def test_an_empty_configuration_retires_every_board_and_publishes_none():
+    """LEADERBOARD_BOARDS carrying no board name means this deployment
+    publishes none -- and leaving the last set of messages up says the
+    opposite. They are permanently stale from that moment, and a reader
+    cannot tell them from boards that stopped updating.
+
+    The disable path used to return before anything read the channel, so the
+    retirement that exists for a single dropped key never ran for the case
+    where every key is dropped.
+    """
+    n2 = _fresh()
+    _tick(n2)
+    ch = n2["_ch"]
+    assert ch.titles() == [T_1V1, T_2V2, T_FFA]
+    posted = [m.id for m in ch.messages]
+
+    n3 = _bot_ns(_Api(_payloads()), _Bot(ch), boards_raw=",")
+    _run(n3["publish_boards"]())
+
+    assert n3["_enabled_boards"]() == []
+    assert [t for t in ch.titles() if t is not None] == []
+    assert sorted(ch.deleted) == sorted(posted)
+    assert any("retired 3 board message" in ln for ln in n3["_log"]), n3["_log"]
+    assert any("names no board" in ln for ln in n3["_log"])
+    assert n3["_lb_message_ids"].get(CID, {}) == {}
+
+    # ...and it stays empty: the next tick finds nothing to retire and
+    # publishes nothing, without an error.
+    n3["_log"].clear()
+    _run(n3["publish_boards"]())
+    assert [t for t in ch.titles() if t is not None] == []
+    assert not any("retired" in ln for ln in n3["_log"])
+
+
+def test_an_empty_configuration_still_refuses_to_retire_on_an_unknown_key():
+    """Negative control for the retirement above, in its own failure
+    direction. `LEADERBOARD_BOARDS=ffaa` also yields an empty enabled set --
+    but by a typo, not by a decision. Acting on it costs every board its
+    message; refusing costs nothing but a log line naming the key (#430)."""
+    n2 = _fresh()
+    _tick(n2)
+    ch = n2["_ch"]
+    n3 = _bot_ns(_Api(_payloads()), _Bot(ch), boards_raw="ffaa")
+    _run(n3["publish_boards"]())
+    assert sorted(t for t in ch.titles() if t is not None) == sorted([T_1V1, T_2V2, T_FFA])
+    assert ch.deleted == []
+    assert any("no such board: ffaa" in ln for ln in n3["_log"])
+    assert not any("retired" in ln for ln in n3["_log"])
 
 
 def test_history_failure_edits_in_place_rather_than_deleting(ns):
+    """A read that fails outright, on a tick where every id is already held.
+    Nothing is deleted, nothing moves, and each board is edited where it is:
+    an unread channel is not a reason to change one."""
     _tick(ns)
     ns["_ch"].history_raises = True
     ns["_log"].clear()
     _tick(ns)
     assert ns["_ch"].deleted == []
-    assert any("channel tail read failed" in ln for ln in ns["_log"])
+    assert any("channel read failed" in ln and "deletes nothing" in ln
+               for ln in ns["_log"]), ns["_log"]
     assert sum(1 for ln in ns["_log"] if ": edited board mid=" in ln) == 3
 
 
@@ -1305,11 +1671,31 @@ def test_restart_adopts_by_title_and_sweeps_duplicates(ns):
 
 
 def test_a_board_message_of_someone_elses_is_never_touched(ns):
-    other = _run(ns["_ch"].send(embeds=[_Embed(title=T_1V1, description="not ours")], view=None))
+    """"Ours" is the BOT ACCOUNT, and the author check comes before anything
+    else is asked about a message.
+
+    Driven in both of the reconcile's deleting shapes, because a title alone
+    is not ownership: a message carrying an enabled board's title (where it
+    would otherwise be a keeper or a duplicate) and one carrying a RETIRED
+    board's title (where every copy of ours goes). Neither is touched, and
+    neither is adopted as a board this publisher edits.
+    """
+    ch = ns["_ch"]
+    other = _run(ch.send(embeds=[_Embed(title=T_1V1, description="not ours")], view=None))
     other.author = "someone-else"
+    theirs_retired = _run(ch.send(embeds=[_Embed(title="⚔️ 1v2 Leaderboard")], view=None))
+    theirs_retired.author = "someone-else"
     _tick(ns)
-    assert other.id not in ns["_ch"].deleted
-    assert other in ns["_ch"].messages
+    assert other.id not in ch.deleted and other in ch.messages
+    assert theirs_retired.id not in ch.deleted and theirs_retired in ch.messages
+    assert other.id not in ns["_lb_message_ids"][CID].values(), (
+        "a message posted by another account was adopted as our 1v1 board")
+    assert other.edits == [] and theirs_retired.edits == []
+
+    # ...and a second tick, now that the set is anchored, still leaves them.
+    ns["_log"].clear()
+    _tick(ns)
+    assert other.id not in ch.deleted and theirs_retired.id not in ch.deleted
 
 
 def test_a_transient_edit_failure_keeps_the_message_it_could_not_edit():
@@ -1346,22 +1732,52 @@ def test_a_message_that_is_really_gone_is_replaced(ns):
     keeping it forever. A NotFound is the one answer that proves a
     replacement is needed, and the board must come back.
 
-    Driven through the single state where the anchor check cannot see the
-    deletion for us -- a channel whose history read is failing, where
-    _boards_are_anchored deliberately answers True and every board is edited
-    in place. Anywhere else, a missing message breaks the tail and the
-    re-anchor path handles it.
+    Driven through the one state where the channel read cannot see the
+    deletion for us: the message is there when the tick READS the channel and
+    gone by the time the tick fetches it to edit -- a moderator, or another
+    process, in that gap. Everywhere else the read itself notices, drops the
+    id, and the board is posted fresh from the ordinary path.
     """
     _tick(ns)
     ch = ns["_ch"]
     mid = ns["_lb_message_ids"][CID]["2v2"]
-    ch.messages = [m for m in ch.messages if m.id != mid]      # a moderator deleted it
-    ch.history_raises = True
+    ch.vanish_on_fetch.add(mid)                  # present at the read, gone at the edit
+    ns["_log"].clear()
+    _tick(ns)
+    assert any(f"2v2: board mid={mid} is gone" in ln for ln in ns["_log"]), ns["_log"]
+    assert ns["_lb_message_ids"][CID]["2v2"] != mid
+    assert sorted(t for t in ch.titles() if t is not None) == sorted([T_1V1, T_2V2, T_FFA])
+
+
+def test_a_board_whose_message_the_read_cannot_see_is_not_posted_fresh(ns):
+    """The same NotFound, on a tick whose channel read was INCOMPLETE.
+
+    A fresh post follows a complete read or it does not happen. An incomplete
+    read has not shown that this board has no message further back, and
+    posting on it is how a second full set ends up on the channel: perfectly
+    anchored, so no later tick has any reason to look again.
+    """
+    _tick(ns)
+    ch = ns["_ch"]
+    mid = ns["_lb_message_ids"][CID]["2v2"]
+    ch.vanish_on_fetch.add(mid)
+    ch.history_raises = True                     # ...and the read failed this tick
     ns["_log"].clear()
     _tick(ns)
     assert any(f"2v2: board mid={mid} is gone" in ln for ln in ns["_log"])
-    assert ns["_lb_message_ids"][CID]["2v2"] != mid
-    assert sorted(t for t in ch.titles() if t is not None) == sorted([T_1V1, T_2V2, T_FFA])
+    assert any("2v2: no message id and the channel read was incomplete" in ln
+               for ln in ns["_log"]), ns["_log"]
+    assert [t for t in ch.titles() if t is not None] == [T_1V1, T_FFA]
+
+    # ...and the first tick with a working read puts it back, from the
+    # ordinary re-anchor path: the set is one board short, so it is not
+    # anchored, and the repost sends every board including the missing one.
+    ch.history_raises = False
+    ns["_log"].clear()
+    _tick(ns)
+    assert not any("channel read was incomplete" in ln for ln in ns["_log"])
+    assert sum(1 for ln in ns["_log"] if ": reposted at bottom as" in ln) == 3
+    assert ch.titles() == [T_1V1, T_2V2, T_FFA]
 
 
 # ── paginators ────────────────────────────────────────────────────────────
@@ -1497,10 +1913,11 @@ def test_an_outage_is_still_an_outage():
 def test_a_cold_start_whose_channel_read_fails_posts_no_second_set():
     """The failure this closes leaves TWO complete sets on the channel.
 
-    A restart empties the id map, so the first tick must scan. A scan that
-    FAILS does not mean "found nothing", and posting a fresh set on it puts a
-    second set below the first -- perfectly anchored, so no later tick has
-    any reason to rescan, and the old set sits there permanently stale.
+    A restart empties the id map, so the first tick has nothing but the
+    channel read. A read that FAILS does not mean "found nothing", and
+    posting a fresh set on it puts a second set below the first -- perfectly
+    anchored, so no later tick has any reason to look again, and the old set
+    sits there permanently stale.
     """
     ns = _fresh()
     _tick(ns)
@@ -1512,7 +1929,7 @@ def test_a_cold_start_whose_channel_read_fails_posts_no_second_set():
     _tick(ns)
     assert [m.id for m in ch.messages] == before, "a second set was posted"
     assert ch.deleted == []
-    assert any("rescan failed" in ln for ln in ns["_log"])
+    assert any("channel read failed" in ln for ln in ns["_log"])
     assert sum(1 for ln in ns["_log"] if "not posting, retrying next tick" in ln) == 3
 
     # It recovers on the first tick whose scan works: adopts, edits, no
@@ -1545,13 +1962,17 @@ def test_adopting_a_newer_set_that_is_already_anchored_does_not_repost_it():
     for a few minutes.
 
     The other process has just posted its own set at the bottom. This one
-    still holds ids for the set above it, so its anchor check says "not
-    anchored" and it heads for the repost; the rescan it runs first ADOPTS
-    the other set. Reposting after that deletes and re-sends three messages
-    that are already exactly where they belong -- and the other process does
-    the same thing straight back, so the boards churn message ids and buttons
-    every ten minutes with a delete/send gap on every pass. So the question
-    is asked again after adopting.
+    still holds ids for the set above it. Reposting on the strength of THOSE
+    ids deletes and re-sends three messages that are already exactly where
+    they belong -- and the other process does the same thing straight back,
+    so the boards churn message ids and buttons every ten minutes with a
+    delete/send gap on every pass.
+
+    The shape that prevents it is the order: the channel is read and adopted
+    FIRST, and the anchored answer comes out of that same read, after its
+    deletions. The position question is therefore always asked about the set
+    this tick is actually publishing. The old shape measured position from
+    the ids it walked in with and had to ask a second time after adopting.
     """
     ns = _fresh()
     _tick(ns)
@@ -1566,8 +1987,7 @@ def test_adopting_a_newer_set_that_is_already_anchored_does_not_repost_it():
     assert sorted(ch.deleted) == sorted(ours.values())     # ours were the duplicates
     assert [ns["_lb_message_ids"][CID][k] for k in ("1v1", "2v2", "ffa")] == theirs
     assert not any("reposted at bottom" in ln for ln in ns["_log"])
-    assert any("the set at the channel bottom is the one just adopted" in ln
-               for ln in ns["_log"])
+    assert not any("not at the channel bottom" in ln for ln in ns["_log"])
     assert sum(1 for ln in ns["_log"] if ": edited board mid=" in ln) == 3
     assert ch.titles() == [T_1V1, T_2V2, T_FFA]
 
@@ -1618,8 +2038,9 @@ def test_a_board_dropped_from_the_config_has_its_message_retired():
     reader from a board that stopped updating.
 
     The enabled set is read from the environment once, at import, so it can
-    only change across a restart -- and a restart empties the id map, which
-    forces the scan this retirement rides on. No extra history read.
+    only change across a restart. Retirement rides on the reconcile read
+    every tick runs anyway, so it costs no extra history call and does not
+    depend on the id map having been emptied.
     """
     n2 = _fresh()
     _tick(n2)
@@ -1651,28 +2072,39 @@ def test_retirement_is_refused_while_a_board_name_is_unknown():
 
 # ── burial depth ──────────────────────────────────────────────────────────
 
-def test_the_rescan_depth_is_pinned_and_the_id_path_does_not_depend_on_it():
-    """Which path the scan depth actually bounds.
+def test_a_cold_start_under_a_full_scan_of_chat_finds_the_set_it_left():
+    """The old fixed 200-message scan's own failure, driven.
 
-    Only ADOPTION reads history. Once an id is held, fetch_message reaches
-    that message at ANY depth, so the ordinary bury-and-re-anchor cycle is
-    not bounded by this number -- a set buried under more than a full scan's
-    worth of chat is still re-anchored, and its old messages still deleted.
-    A COLD START past that depth is the case that is not covered, and it
-    stays a recorded bound rather than a claim.
+    The publisher used to read a FIXED depth and, finding nothing, post a
+    fresh set: a restart after a busy afternoon left the old set orphaned
+    above a new one, permanently stale, with nothing that would ever look
+    again. The read now stops when the CHANNEL ends, not at a number, so
+    there is nothing behind it to miss -- at this depth or any other below
+    the ceiling.
     """
     ns = _fresh()
-    assert ns["LB_HISTORY_SCAN"] == 200
     _tick(ns)
     ch = ns["_ch"]
     ours = dict(ns["_lb_message_ids"][CID])
-    for _ in range(ns["LB_HISTORY_SCAN"] + 10):
+    for _ in range(210):                     # more than the old 200-message scan
         ch.post_from_someone_else()
+    ns["_lb_message_ids"].clear()            # ...and a restart, so only the read knows
     ns["_log"].clear()
     _tick(ns)
+
+    assert not any("posted fresh board message" in ln for ln in ns["_log"]), (
+        "a second set was posted over a set the read should have found")
     assert ch.titles()[-3:] == [T_1V1, T_2V2, T_FFA]
-    assert sorted(ch.deleted) == sorted(ours.values())
+    assert sorted(ch.deleted) == sorted(ours.values())    # re-anchored, not duplicated
+    assert [t for t in ch.titles() if t is not None] == [T_1V1, T_2V2, T_FFA]
     assert sum(1 for ln in ns["_log"] if "not at the channel bottom" in ln) == 1
+
+
+def test_the_ceiling_is_the_only_bound_left_and_it_is_pinned():
+    """The one depth that is still a bound, written down so it cannot drift
+    silently. Everything below it is read to the end of the channel."""
+    ns = _fresh()
+    assert ns["LB_RECONCILE_CEILING"] == 2000
 
 
 # ── player-authored names ─────────────────────────────────────────────────

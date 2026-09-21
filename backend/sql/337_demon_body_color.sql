@@ -36,27 +36,33 @@
 --   * colorTheme lands where the card's own look says it should on four cards
 --     named for their element: Poison bullets = PoisonGreen, Cold bullets =
 --     ColdBlue, Tank = DefensiveBlue, Explosive bullet = DestructiveRed.
---   * The negative control for that offset: the neighbouring ints at the same
---     end of the record are CONSTANT across all five cards read, and this one
---     is not. An earlier candidate offset read the same value for every card
---     and was rejected on exactly that — a reading that cannot vary is not a
---     reading.
+--   * The negative control for that offset: NOTHING in the script names the
+--     component or the offset. It searches every component the five cards
+--     share against every offset near the end of the record and requires
+--     EXACTLY ONE pair whose int is a valid themeType on all five cards and
+--     is not the same on all five — a reading that cannot vary is not a
+--     reading. A second qualifying pair, which is what a neighbouring offset
+--     that had started to vary would be, STOPS the run. The neighbours are
+--     then reported and re-asserted constant in those terms. The five
+--     path_ids above are what the run REPORTS, not what it is told: each
+--     card is located by the name its GameObject carries in the asset.
 --
--- Distance to what is already in the shop (CIELAB dE76, same metric 221 used —
--- the implementation reproduces 221's published poison numbers: Lime 24,
--- Emerald 31, Neon Lime 33, Forest 55). Nearest of the 38 body colors the
--- migrations seed (221's 37 plus Poison itself) is Amethyst #A442D6 at 17.2,
--- then Cobalt 19.8 and Sapphire 28.0. Amethyst is
--- the closest call in the set — it is a lighter, redder violet — but 17.2 is
--- past the "clearly different" line the earlier waves held to.
+-- Distance to what is already in the shop, CIELAB dE76 — the same metric 221
+-- used. `reproduce_337_theme_color.py --distances` computes it, needs no game
+-- assets, and reproduces 221's published poison numbers (Lime 24, Emerald 31,
+-- Neon Lime 33, Forest 55) as its control before printing any number here.
+-- Nearest of the 38 body colors the migrations seed (221's 37 plus Poison
+-- itself) is Amethyst #A442D6 at 17.2, then Cobalt 19.8 and Sapphire 28.0.
+-- Amethyst is the closest call in the set — it is a lighter, redder violet —
+-- but 17.2 is past the "clearly different" line the earlier waves held to.
 --
 -- No client patch is required. PlayerColorCosmetic parses preview_color
 -- directly for any non-special SKU: the hex travels as active_player_color_hex
 -- (main.py, the player_color branch of the active-cosmetic lookup, reading
 -- ShopItem.preview_color) and is parsed by PlayerColorCosmetic.ParseHex
 -- (PlayerColorCosmetic.cs:786). Only pcolor_prismatic and pcolor_chrome are
--- special-cased (IsAnimatedSku, :503), and the shop's body glyph is generated
--- from the hex too (NativeUI.GetBodyGlyphSprite, :18058) — verified this pass,
+-- special-cased (IsAnimatedSku, PlayerColorCosmetic.cs:503), and the shop's body glyph is generated
+-- from the hex too (NativeUI.cs:18115, GetBodyGlyphSprite) — verified this pass,
 -- not assumed from 221.
 --
 -- kind='player_color' is deliberately untouched by trg_gate_new_face_shop_item:
@@ -159,7 +165,7 @@ BEGIN
     -- The two columns are not symmetric either. catalog_ready = FALSE makes
     -- the item invisible AND unbuyable, because the purchase path re-checks
     -- it. A non-NULL rotation_pool always hides it from the list, but only
-    -- the literal 'achievement' refuses a PURCHASE (main.py:29297) -- any
+    -- the literal 'achievement' refuses a PURCHASE (main.py:29315) -- any
     -- other non-NULL value would leave the item buyable by sku while nothing
     -- lists it. NULL is the only value this row may carry, which is what
     -- this check asserts: stricter than either endpoint, deliberately.

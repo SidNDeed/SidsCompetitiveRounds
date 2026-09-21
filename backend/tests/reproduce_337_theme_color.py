@@ -1,12 +1,14 @@
-"""Re-derive migration 337's hex from the SHIPPED Unity assets (#579).
+"""Re-derive migration 337's hex from the SHIPPED Unity assets, and re-derive
+the shop distances that migration quotes (#579).
 
-Not a pytest: it needs the installed game, which no test environment is
-entitled to assume. It exists so the provenance comment in
+Not a pytest: the first half needs the installed game, which no test
+environment is entitled to assume. It exists so the provenance comment in
 `backend/sql/337_demon_body_color.sql` is a READING anyone can repeat rather
 than a number someone once wrote down, and so the next body colour taken from
 a card theme has a script to run instead of a procedure to re-invent.
 
     python backend/tests/reproduce_337_theme_color.py [ROUNDS_Data path]
+    python backend/tests/reproduce_337_theme_color.py --distances
 
 Why the assets and not the decompile: a decompile shows a MonoBehaviour's C#
 field DEFAULTS, not what the prefab ships (#579). Both reads below are out of
@@ -22,20 +24,36 @@ the serialized data.
   2. A card's own theme is the int 12 bytes before the end of its CardInfo
      serialized data. That offset is not asserted from the layout; it is the
      only offset within 64 bytes of the end whose value VARIES across the
-     named cards and lands where each card's look says it should. The script
-     prints its neighbours, which are constant across every card -- a reading
-     that cannot vary is not a reading, and that is the exact defect the
-     migration's own comment records rejecting.
+     named cards and lands where each card's look says it should.
 
-Nothing is trusted unless the colours whose NAMES state what they must be
-come back right: DestructiveRed #CC4646, PoisonGreen #00934C, MagicPink
-#D15088, and four cards whose theme is legible from the card itself.
+Nothing is trusted unless the controls come back right, and EVERY control
+here can fail the run:
+
+  * the colours whose NAMES state what they must be -- DestructiveRed
+    #CC4646, PoisonGreen #00934C, MagicPink #D15088;
+  * four cards whose theme is legible from the card itself, identified by the
+    NAME READ OUT OF THE ASSET rather than by a name written down beside the
+    path_id here -- a mapping this file asserted would be a fixture agreeing
+    with itself, and would keep agreeing if the path_ids moved;
+  * the neighbouring offsets, which must be CONSTANT across every card read.
+    A neighbour that also varies means -12 is no longer singled out by
+    variation, and the run STOPS. An earlier version printed a note and
+    carried on to a successful MATCHES line, which is a control that cannot
+    fail (#342/#391).
+
+`--distances` needs no game: it reads every body colour the migrations seed
+out of backend/sql, converts to CIELAB and reports dE76 from 337's hex. Its
+control is 221's own published numbers -- Lime 24, Emerald 31, Neon Lime 33,
+Forest 55 from the poison green -- reproduced by this same code before any
+337 number is printed.
 """
+import re
 import struct
 import sys
 from pathlib import Path
 
 DEFAULT_DATA = Path(r"C:/Program Files (x86)/Steam/steamapps/common/ROUNDS/ROUNDS_Data")
+SQL_DIR = Path(__file__).resolve().parents[1] / "sql"
 
 THEME_NAMES = ["DestructiveRed", "FirepowerYellow", "DefensiveBlue", "TechWhite",
                "EvilPurple", "PoisonGreen", "NatureBrown", "ColdBlue", "MagicPink"]
@@ -43,16 +61,26 @@ THEME_NAMES = ["DestructiveRed", "FirepowerYellow", "DefensiveBlue", "TechWhite"
 # Controls: themes whose name states what the colour has to be.
 COLOR_CONTROLS = {0: "#CC4646", 5: "#00934C", 8: "#D15088"}
 
-# Controls: cards whose theme is legible from the card itself. Demonic pact is
-# the subject and is deliberately NOT a control.
-CARD_CONTROLS = {10115: ("Poison bullets", 5), 10162: ("Cold bullets", 7),
-                 10134: ("Tank", 2), 10107: ("Explosive bullet", 0)}
+# Controls: cards whose theme is legible from the card itself, keyed by the
+# NAME the asset carries. The path_id for each is resolved by reading names
+# out of the file, so nothing here encodes the path_id -> name mapping.
+CARD_CONTROLS = {"Poison bullets": 5, "Cold bullets": 7, "Tank": 2,
+                 "Explosive bullet": 0}
 
-SUBJECT = (10145, "Demonic pact")
+SUBJECT_NAME = "Demonic pact"
+SUBJECT_PATH_ID = 10145         # reported, and CHECKED against the name read back
 WANT_THEME = 4                  # EvilPurple
 WANT_HEX = "#7A50D1"
 CARD_CHOICE_PATH_ID = 3810
-THEME_OFFSET_FROM_END = 12
+THEME_OFFSET_FROM_END = 12       # what the migration records; the run DERIVES it
+SEARCH_OFFSETS = (4, 8, 12, 16, 20, 24)
+NEIGHBOUR_OFFSETS = (4, 8, 16)
+
+# 221's published distances from the poison green, which this implementation
+# must reproduce before any 337 number is believed.
+POISON_HEX = "#4AD652"
+POISON_PUBLISHED = {"Lime": 24, "Emerald": 31, "Neon Lime": 33, "Forest": 55}
+DEMONIC_HEX = WANT_HEX
 
 
 def _hex(rgba):
@@ -91,20 +119,189 @@ def read_theme_table(data_dir):
     raise SystemExit("no 9-row theme table found in CardChoice")
 
 
-def read_card_themes(data_dir, path_ids):
-    """Each card's colorTheme, plus the neighbouring ints as the control."""
+def _mono_pointers(raw):
+    """(m_GameObject, m_Script) ids out of a MonoBehaviour's raw bytes.
+
+    Read from the bytes rather than through a typetree: these MonoBehaviours
+    are script-backed and UnityPy cannot deserialize them (it stops short on
+    CardInfo), which is the same reason the theme int is read by offset. The
+    header is fixed for this serialization version -- PPtr m_GameObject (int
+    file, long path), byte m_Enabled plus 3 bytes of alignment, PPtr m_Script
+    -- so the two pointers sit at 0 and 16.
+    """
+    return struct.unpack_from("<iq", raw, 0), struct.unpack_from("<iq", raw, 16)
+
+
+def read_cards(data_dir, names_wanted):
+    """Find each wanted card BY NAME and derive which component and which
+    offset carry colorTheme. Returns (script id, {name: (path_id, {off: int})}).
+
+    NOTHING here encodes a path_id, a component or an offset. A name written
+    down beside a path_id would be a fixture agreeing with itself: it would go
+    on agreeing after the ids moved, which is the drift this reproduction
+    exists to catch. Instead:
+
+      * each card is the GameObject carrying that NAME in the asset;
+      * every card prefab runs the same handful of scripts, so the component
+        is not singled out by being shared -- it is singled out together with
+        the offset, by SEARCHING every (script, offset) pair for the one whose
+        int is a valid themeType (0..8) on every card AND is not the same on
+        all of them. A reading that cannot vary is not a reading.
+      * that search must return EXACTLY ONE pair. If a second pair qualifies
+        -- a neighbouring offset that has started to vary, a second component
+        that looks the same -- the choice is no longer justified by variation
+        and the run STOPS here rather than printing a note and continuing.
+
+    The four cards whose theme is legible from the card itself are then an
+    INDEPENDENT check on what the search picked, in main().
+    """
     import UnityPy
     env = UnityPy.load(str(Path(data_dir) / "sharedassets0.assets"))
+    want = set(names_wanted)
+
+    name_of_go = {}
+    for obj in env.objects:
+        if obj.type.name != "GameObject":
+            continue
+        try:
+            name = obj.read().m_Name
+        except Exception:
+            continue
+        if name in want:
+            if name in name_of_go.values():
+                raise SystemExit("more than one GameObject is named %r; the cards "
+                                 "cannot be identified by name" % name)
+            name_of_go[obj.path_id] = name
+    missing = want - set(name_of_go.values())
+    if missing:
+        raise SystemExit("these cards were not found by name in the assets: %s"
+                         % sorted(missing))
+
+    components = {}
+    for obj in env.objects:
+        if obj.type.name != "MonoBehaviour":
+            continue
+        raw = obj.get_raw_data()
+        if len(raw) < 32:
+            continue
+        go, script = _mono_pointers(raw)
+        if go[0] != 0 or go[1] not in name_of_go:
+            continue
+        components.setdefault(name_of_go[go[1]], {})[script] = (obj.path_id, raw)
+
+    shared = sorted(set.intersection(*(set(v) for v in components.values())))
+    candidates = []
+    for script in shared:
+        for back in SEARCH_OFFSETS:
+            vals = {}
+            for name, comps in components.items():
+                pid, raw = comps[script]
+                if len(raw) < back:
+                    vals = None
+                    break
+                vals[name] = struct.unpack_from("<i", raw, len(raw) - back)[0]
+            if not vals:
+                continue
+            if all(0 <= v <= 8 for v in vals.values()) and len(set(vals.values())) > 1:
+                candidates.append((script, back))
+    if len(candidates) != 1:
+        raise SystemExit(
+            "the (component, offset) search returned %d candidates (%s), not one. "
+            "colorTheme is singled out ONLY by being the one int that is a valid "
+            "themeType on every card and is not the same on all of them, so any "
+            "other number of candidates withdraws that justification and this "
+            "reading is not trusted."
+            % (len(candidates), [(s[1], -b) for s, b in candidates]))
+    script, offset = candidates[0]
+    if offset != THEME_OFFSET_FROM_END:
+        print("NOTE: colorTheme derived at -%d; the migration records -%d"
+              % (offset, THEME_OFFSET_FROM_END))
+
     out = {}
-    for pid in path_ids:
-        raw = _raw(env, pid)
-        out[pid] = {back: struct.unpack_from("<i", raw, len(raw) - back)[0]
-                    for back in (4, 8, 12, 16)}
+    for name, comps in components.items():
+        pid, raw = comps[script]
+        out[name] = (pid, {back: struct.unpack_from("<i", raw, len(raw) - back)[0]
+                           for back in SEARCH_OFFSETS if len(raw) >= back})
+    print("colorTheme derived: component m_Script path_id %d, offset -%d "
+          "(searched %d shared components x %d offsets, exactly one qualified)"
+          % (script[1], offset, len(shared), len(SEARCH_OFFSETS)))
+    return offset, out
+
+
+# ── CIELAB, for the shop-distance half ────────────────────────────────────
+
+def _srgb_to_lab(hex_str):
+    h = hex_str.lstrip("#")
+    rgb = [int(h[i:i + 2], 16) / 255.0 for i in (0, 2, 4)]
+    lin = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in rgb]
+    r, g, b = lin
+    x = (0.4124564 * r + 0.3575761 * g + 0.1804375 * b) / 0.95047
+    y = (0.2126729 * r + 0.7151522 * g + 0.0721750 * b) / 1.00000
+    z = (0.0193339 * r + 0.1191920 * g + 0.9503041 * b) / 1.08883
+
+    def f(t):
+        return t ** (1.0 / 3.0) if t > 216.0 / 24389.0 else (841.0 / 108.0) * t + 4.0 / 29.0
+
+    fx, fy, fz = f(x), f(y), f(z)
+    return 116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)
+
+
+def de76(a, b):
+    la, lb = _srgb_to_lab(a), _srgb_to_lab(b)
+    return sum((x - y) ** 2 for x, y in zip(la, lb)) ** 0.5
+
+
+SEED_ROW = re.compile(
+    r"\(\s*'(pcolor_[a-z0-9_]+)'\s*,\s*'player_color'\s*,\s*'([^']+)'.*?'(#[0-9A-Fa-f]{6})'\s*\)",
+    re.S)
+
+
+def read_seeded_colors(exclude_sku=None):
+    """Every player_color SKU the migrations seed, read out of backend/sql."""
+    out = {}
+    for path in sorted(SQL_DIR.glob("*.sql")):
+        text = path.read_text(encoding="utf-8")
+        for sku, name, hexv in SEED_ROW.findall(text):
+            if sku == exclude_sku:
+                continue
+            out.setdefault(sku, (name, hexv.upper(), path.name))
     return out
 
 
-def main():
-    data_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_DATA
+def distances():
+    # 337's own row is excluded: the question is how close the NEW colour sits
+    # to what is already in the shop, and including it answers 0.0.
+    colors = read_seeded_colors(exclude_sku="pcolor_demonic")
+    print("read %d player_color SKUs out of %s (337's own row excluded)"
+          % (len(colors), SQL_DIR.name))
+
+    # CONTROL: this implementation must reproduce 221's published numbers.
+    by_name = {v[0]: v[1] for v in colors.values()}
+    bad = {}
+    for name, published in POISON_PUBLISHED.items():
+        if name not in by_name:
+            bad[name] = "not seeded"
+            continue
+        got = de76(POISON_HEX, by_name[name])
+        if round(got) != published:
+            bad[name] = "%.1f, published %d" % (got, published)
+    if bad:
+        raise SystemExit("221 CONTROL FAILED: %s -- this implementation does not "
+                         "reproduce the published poison distances, so its 337 "
+                         "numbers are not trusted" % bad)
+    print("221 control OK: " + ", ".join(
+        "%s=%d" % (n, round(de76(POISON_HEX, by_name[n]))) for n in POISON_PUBLISHED))
+
+    ranked = sorted(((de76(DEMONIC_HEX, hexv), name, hexv)
+                     for name, hexv, _f in colors.values()), key=lambda r: r[0])
+    print("\ndE76 from %s (migration 337), nearest first:" % DEMONIC_HEX)
+    for d, name, hexv in ranked[:6]:
+        print("  %-14s %s  %.1f" % (name, hexv, d))
+    print("\nnearest is %s at %.1f" % (ranked[0][1], ranked[0][0]))
+    return 0
+
+
+def assets(data_dir):
     if not data_dir.exists():
         raise SystemExit("ROUNDS_Data not found at %s" % data_dir)
 
@@ -122,39 +319,65 @@ def main():
     print("colour controls OK: "
           + ", ".join("%s=%s" % (THEME_NAMES[i], h) for i, h in COLOR_CONTROLS.items()))
 
-    # ── read 2: which theme the card uses ──────────────────────────────────
-    ids = [SUBJECT[0]] + list(CARD_CONTROLS)
-    themes = read_card_themes(data_dir, ids)
-    names = {SUBJECT[0]: SUBJECT[1]}
-    names.update({p: n for p, (n, _) in CARD_CONTROLS.items()})
+    # ── read 2: which theme each card uses, cards found BY NAME ────────────
+    offset, cards = read_cards(data_dir, list(CARD_CONTROLS) + [SUBJECT_NAME])
     print("\nCardInfo colorTheme, and its neighbours (the negative control):")
-    print("  %-18s %s" % ("card", "  ".join("-%-6d" % b for b in (4, 8, 12, 16))))
-    for pid in ids:
-        print("  %-18s %s" % (names[pid],
-                              "  ".join("%-7d" % themes[pid][b] for b in (4, 8, 12, 16))))
-    for back in (4, 8, 16):
-        seen = {themes[p][back] for p in ids}
+    print("  %-18s %-10s %s" % ("card", "path_id",
+                                "  ".join("-%-6d" % b for b in (4, 8, 12, 16))))
+    for name in list(CARD_CONTROLS) + [SUBJECT_NAME]:
+        pid, vals = cards[name]
+        print("  %-18s %-10d %s" % (name, pid,
+                                    "  ".join("%-7d" % vals[b] for b in (4, 8, 12, 16))))
+
+    subject_pid = cards[SUBJECT_NAME][0]
+    if subject_pid != SUBJECT_PATH_ID:
+        print("NOTE: %s is path_id %d here; the migration records %d"
+              % (SUBJECT_NAME, subject_pid, SUBJECT_PATH_ID))
+
+    # The neighbouring offsets, reported and REQUIRED to be constant. The
+    # search above already refuses to proceed when a second offset varies --
+    # that is what "exactly one candidate" means -- and this states the same
+    # property in the terms the migration comment uses, so a reader can see
+    # it rather than infer it from a count.
+    varying = {}
+    for back in NEIGHBOUR_OFFSETS:
+        seen = {cards[n][1][back] for n in cards}
         if len(seen) != 1:
-            print("  NOTE: offset -%d also varies (%s); the choice of -%d is no longer "
-                  "uniquely justified by variation alone" % (back, sorted(seen),
-                                                             THEME_OFFSET_FROM_END))
-    wrong = {names[p]: themes[p][THEME_OFFSET_FROM_END]
-             for p, (_n, exp) in CARD_CONTROLS.items()
-             if themes[p][THEME_OFFSET_FROM_END] != exp}
+            varying[back] = sorted(seen)
+    if varying:
+        raise SystemExit(
+            "NEIGHBOUR CONTROL FAILED: %s also vary across the cards read. The "
+            "choice of -%d is justified ONLY by being the one offset that "
+            "varies, so another varying offset withdraws that justification and "
+            "this reading is not trusted." % (varying, offset))
+    print("neighbour control OK: offsets %s are constant across all %d cards"
+          % (", ".join("-%d" % b for b in NEIGHBOUR_OFFSETS), len(cards)))
+
+    wrong = {n: cards[n][1][offset]
+             for n, exp in CARD_CONTROLS.items()
+             if cards[n][1][offset] != exp}
     if wrong:
         raise SystemExit("CARD CONTROLS FAILED: %s -- the offset is not colorTheme" % wrong)
     print("card controls OK: " + ", ".join(
-        "%s=%s" % (n, THEME_NAMES[e]) for _p, (n, e) in CARD_CONTROLS.items()))
+        "%s=%s" % (n, THEME_NAMES[e]) for n, e in CARD_CONTROLS.items()))
 
     # ── the two reads, joined ──────────────────────────────────────────────
-    theme = themes[SUBJECT[0]][THEME_OFFSET_FROM_END]
+    theme = cards[SUBJECT_NAME][1][offset]
     got = _hex(rows[theme][1])
-    print("\n%s: colorTheme=%d (%s) -> %s" % (SUBJECT[1], theme, THEME_NAMES[theme], got))
+    print("\n%s: colorTheme=%d (%s) -> %s" % (SUBJECT_NAME, theme, THEME_NAMES[theme], got))
     if theme != WANT_THEME or got != WANT_HEX:
         raise SystemExit("MISMATCH: migration 337 seeds %s from themeType %d"
                          % (WANT_HEX, WANT_THEME))
     print("MATCHES migration 337's preview_color %s" % WANT_HEX)
     return 0
+
+
+def main():
+    argv = [a for a in sys.argv[1:]]
+    if "--distances" in argv:
+        return distances()
+    data_dir = Path(argv[0]) if argv else DEFAULT_DATA
+    return assets(data_dir)
 
 
 if __name__ == "__main__":

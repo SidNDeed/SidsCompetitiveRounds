@@ -40,6 +40,15 @@ namespace CompetitiveRounds
         // that status too, and HandleVersionGate deliberately lets those through to
         // their own callers rather than locking the menu (r3/r4 findings).
         public static bool ForceUpdateRequired { get; private set; } = false;
+        // The inactivity window every board filters on, as the SERVER states it
+        // (/api/v1/mod-version -> leaderboard_active_days). 0 means "the server
+        // has not told us", which is what an older server and a failed version
+        // check both look like; every surface that prints a day count prints no
+        // count at all in that case rather than falling back to a number of its
+        // own. LEADERBOARD_ACTIVE_DAYS is configurable server-side, so a
+        // client-side 90 was wrong on any other setting and a second constant
+        // here would only move that defect rather than remove it.
+        public static int LeaderboardActiveDays { get; private set; } = 0;
 
         // Recent ranked series (for leaderboard sidebar)
         public static List<RecentSeriesEntry> CachedRecentSeries { get; private set; }
@@ -105,7 +114,8 @@ namespace CompetitiveRounds
             // Bug 342: seen within 3 minutes and not appear-offline. Server-decided
             // (SQL over players.last_seen), so an older server simply omits it -> false.
             public bool is_online;
-            // Item d: not seen for 90 days (server-decided). Only ever true in a
+            // Item d: not seen for LEADERBOARD_ACTIVE_DAYS days (server-decided; the
+            // window itself arrives as leaderboard_active_days). Only ever true in a
             // board fetched with include_inactive=true; absent -> false.
             public bool inactive;
         }
@@ -1850,6 +1860,13 @@ namespace CompetitiveRounds
             {
                 string ver = ExtractJsonString(req.downloadHandler.text, "version");
                 string minVer = ExtractJsonString(req.downloadHandler.text, "min_version");
+                // Absent on a server older than the one that started advertising
+                // it: ExtractJsonInt answers 0, which is the same "not told"
+                // state the printing surfaces already handle. Only a positive
+                // value is taken, so a malformed answer cannot turn a label that
+                // states the window into one that states "0d".
+                int lbDays = ExtractJsonInt(req.downloadHandler.text, "leaderboard_active_days");
+                if (lbDays > 0) LeaderboardActiveDays = lbDays;
                 if (!string.IsNullOrEmpty(ver))
                 {
                     LatestModVersion = ver;
@@ -7620,8 +7637,8 @@ namespace CompetitiveRounds
 
         // ── Data fetching ─────────────────────────────────────
 
-        // Item d (Sept 6): the server hides players not seen for 90 days
-        // (LEADERBOARD_ACTIVE_DAYS) from every board unless the fetch says
+        // Item d (Sept 6): the server hides players not seen for
+        // LEADERBOARD_ACTIVE_DAYS days from every board unless the fetch says
         // include_inactive=true, and then flags each such row `inactive`. ONE
         // helper for all four board fetches, driven by the Settings toggle.
         private static string InactiveQuery()

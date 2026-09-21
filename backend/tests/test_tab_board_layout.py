@@ -32,7 +32,7 @@ from pathlib import Path
 
 import pytest
 
-from _cs_structure import code_of
+from _cs_structure import code_of, cs_block
 
 PLUGIN = Path(__file__).resolve().parents[2] / "plugin"
 TAB_CS = PLUGIN / "TabStatsOverlay.cs"
@@ -89,6 +89,36 @@ def _constants():
     return c
 
 
+def _draw_comment():
+    """Draw()'s own comment prose, with the code taken out.
+
+    `code_of` strips comments, which is what every shape assertion below
+    wants; this is the other half, and it is what lets the numbers the
+    comment PUBLISHES be read instead of restated.
+    """
+    block = cs_block(TAB_CS, DRAW)
+    return _flat(" ".join(m.group(1) for m in
+                          re.finditer(r"^\s*//\s?(.*)$", block, re.M)))
+
+
+def _documented_floor():
+    """(rows, panel px, screen px, panel px again) as Draw()'s comment states
+    them. Both numbers, and the row count they are computed from, are read out
+    of the source text -- a bound the source publishes and no test reads drifts
+    silently (#302)."""
+    text = _draw_comment()
+    m = re.search(r"the panel is furniture \+ ([0-9]+) rows at ROW_H_MIN \+ "
+                  r"one card line -- ([0-9]+)px with the H2H row present", text)
+    assert m, ("Draw()'s comment no longer states the floor panel the way this "
+               "test reads it; it is the number the assertions below compare "
+               "against and it cannot be restated here")
+    n = re.search(r"the screen height where this starts running off the bottom "
+                  r"is ([0-9]+), not ([0-9]+)", text)
+    assert n, ("Draw()'s comment no longer states the overflow screen height "
+               "the way this test reads it")
+    return int(m.group(1)), int(m.group(2)), int(n.group(1)), int(n.group(2))
+
+
 def _row_count():
     """How many stat rows the board draws, counted in the ROWS initialiser."""
     src = TAB_CS.read_text(encoding="utf-8")
@@ -134,9 +164,17 @@ def test_the_row_count_is_read_from_the_board_not_restated():
 def test_the_constants_are_the_ones_the_source_declares():
     c = _constants()
     assert c["ROW_H_MIN"] <= c["ROW_H_MAX"], "the pitch clamp is inverted"
-    assert c["LINE_H_FLOOR"] <= min(LINE_HEIGHTS), (
-        "the runtime card line height can now fall below the band this test "
-        "asserts over; widen LINE_HEIGHTS or the fit is untested there")
+    # The band must BEGIN at the floor, not merely sit above it. `<=` here
+    # held for every floor the source could declare at or below 15 -- which is
+    # the direction that leaves the fit untested (#441). A floor dropped to
+    # 10f widens the runtime range while this band still starts at 15, and the
+    # old form passed. Equality is the only shape of this guard that can go
+    # red, in either direction.
+    assert min(LINE_HEIGHTS) == c["LINE_H_FLOOR"], (
+        f"the card line-height floor the source declares is "
+        f"{c['LINE_H_FLOOR']}, but the band this test asserts the fit over "
+        f"starts at {min(LINE_HEIGHTS)}; the fit is unmeasured between them "
+        f"-- move LINE_HEIGHTS onto the floor")
 
 
 # ── the fit ──────────────────────────────────────────────────────────────────
@@ -192,21 +230,46 @@ def test_the_budget_only_ever_shrinks_the_board(h2h):
 
 def test_the_floor_the_comment_names_is_where_the_board_actually_overflows():
     """The budget is not a promise that any screen fits: at ROW_H_MIN with a
-    single card line there is nothing left to give. The comment in Draw()
-    names that floor, so it is asserted -- a documented bound nobody measures
-    drifts silently."""
+    single card line there is nothing left to give.
+
+    Draw()'s comment PUBLISHES that floor as three numbers -- 22 rows, a 493px
+    panel, and 517 as the screen height below which the board runs off the
+    bottom. Deriving the same numbers here and never comparing them to the
+    ones in the source is what the earlier form of this test did: the comment
+    could have said any number at all and this test would have gone on
+    passing. Every one of them is read out of the comment and required to
+    equal what the constants produce.
+    """
     c, rows = _constants(), _row_count()
     line_h = int(c["LINE_H_FLOOR"])
-    panel = c["MARGIN_Y"] + c["FURNITURE"] + c["H2H_ROW"] + rows * c["ROW_H_MIN"] \
-        + line_h + c["CARDS_PAD"]
+    panel_h = (c["FURNITURE"] + c["H2H_ROW"] + rows * c["ROW_H_MIN"]
+               + line_h + c["CARDS_PAD"])
+    panel = c["MARGIN_Y"] + panel_h
+
+    doc_rows, doc_panel, doc_screen, doc_panel_again = _documented_floor()
+    assert doc_panel == doc_panel_again, (
+        f"Draw()'s comment states the floor panel twice and disagrees with "
+        f"itself: {doc_panel}px, then {doc_panel_again}px")
+    assert doc_rows == rows, (
+        f"Draw()'s comment computes the floor from {doc_rows} stat rows; the "
+        f"board draws {rows}")
+    assert panel_h == doc_panel, (
+        f"the constants put the floor panel at {panel_h}px; Draw()'s comment "
+        f"says {doc_panel}px")
+    assert panel == doc_screen, (
+        f"the constants put the overflow screen height at {panel}; Draw()'s "
+        f"comment says {doc_screen}")
+
     fits_y, fits_h = _layout(panel, line_h, True, c, rows)
     assert fits_y + fits_h <= panel, f"the derived floor {panel} does not fit"
     short_y, short_h = _layout(panel - 1, line_h, True, c, rows)
     assert short_y + short_h > panel - 1, (
         f"one pixel below the derived floor ({panel - 1}) still fits, so that "
         f"is not the floor and the comment's number is wrong")
-    assert "a scroll view" in TAB_CS.read_text(encoding="utf-8"), (
-        "the comment recording what to do below the floor is gone")
+    assert "a scroll view" in _draw_comment(), (
+        "the comment recording what to do below the floor is gone -- and it "
+        "is read out of Draw() here, not out of the file, so the phrase "
+        "appearing anywhere else in TabStatsOverlay.cs does not satisfy it")
 
 
 # ── the shape of the code the model claims to be reading ─────────────────────

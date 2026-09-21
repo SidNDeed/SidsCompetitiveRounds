@@ -401,7 +401,7 @@ namespace CompetitiveRounds
         /// the long composition is kept, which is exactly what this strip drew
         /// before the measurement existed. What a failure does NOT undo is the
         /// style change alongside it — stStat is TextClipping.Clip in this
-        /// batch whether the measurement runs or not (:767), so an over-long
+        /// batch whether the measurement runs or not (:776), so an over-long
         /// line ends at the cell edge instead of wrapping into a second row
         /// that a 17px rect clips top and bottom.</summary>
         private static float MeasureWidth(GUIStyle st, string s)

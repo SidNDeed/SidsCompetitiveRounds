@@ -3118,11 +3118,19 @@ namespace CompetitiveRounds
                 //
                 // rigPos.x stands in for the body centre because the skin is built at the rig
                 // transform. That holds for a rig this code assembled, and nothing here proves
-                // it for every rig it may be handed, which is why the fallback just below does
-                // not trust it: it asks the GEOMETRY whether the rig even lies inside the span
-                // being framed, and centres on the union when it does not. A re-rooted rig or a
-                // clone whose skin never spawned is caught there, by measurement, on the frame
-                // it happens.
+                // it for every rig it may be handed, which is why the fallback just below asks
+                // the GEOMETRY one question: does the rig transform lie INSIDE the span being
+                // framed? If it does not, nothing being framed straddles it, so it cannot be
+                // the body's centre, and the union centre is used instead.
+                //
+                // That is the whole of what the fallback detects, and it is narrower than the
+                // shapes it is reached by. A clone whose skin never spawned, and a re-root far
+                // enough to leave the span, fall outside and are caught. A re-root that keeps
+                // the transform INSIDE the span is NOT caught: the frame still centres on
+                // rigPos.x, which is then not the body centre. The only thing that shows that
+                // case is the report line below -- a bodyCx away from unionCx with no
+                // "using the union centre" line before it. Nothing here tests it and nothing
+                // here claims to.
                 //
                 // An earlier version of this comment also offered a matte-erosion measurement
                 // (a body core on rig x -0.006, bbox mid -0.004, "the same at every erosion

@@ -5744,8 +5744,21 @@ LATEST_MOD_VERSION = "1.40.3"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
-    """Returns the latest recommended mod version and the gating floor."""
-    return {"version": LATEST_MOD_VERSION, "min_version": MIN_MOD_VERSION_EFFECTIVE}
+    """Returns the latest recommended mod version, the gating floor, and the
+    inactivity window every board filters on.
+
+    `leaderboard_active_days` is advertised HERE, once, because it is a
+    server setting the CLIENT PRINTS: the F5 board labels its population and
+    its inactive toggle with a day count, and a literal in the client said
+    "90d" on a deployment configured for another number. This route is the
+    one unauthenticated call every seat already makes at startup and it is
+    exempt from the version gate, so even a client below the floor learns
+    it. A client that receives no value prints no day count rather than
+    falling back to a number of its own -- there is no second copy of this
+    setting anywhere."""
+    return {"version": LATEST_MOD_VERSION,
+            "min_version": MIN_MOD_VERSION_EFFECTIVE,
+            "leaderboard_active_days": LEADERBOARD_ACTIVE_DAYS}
 
 
 # ── Internal endpoints (used by the Discord bot) ───────────────
@@ -8151,7 +8164,12 @@ async def get_leaderboard(
     # Item d: the board hides players not seen for LEADERBOARD_ACTIVE_DAYS days
     # (players.last_seen, refreshed by the presence ping). True lists everyone
     # and flags each row `inactive`; the rank and total follow the same filter.
-    include_inactive: bool = Query(False, description="Also list players not seen for 90 days (flagged inactive)"),
+    include_inactive: bool = Query(
+        False,
+        # The window is LEADERBOARD_ACTIVE_DAYS, not a constant. This text is
+        # what the schema advertises to every reader of the API, and a literal
+        # here said 90 on a deployment filtering at 30.
+        description=f"Also list players not seen for {LEADERBOARD_ACTIVE_DAYS} days (flagged inactive)"),
     db: AsyncSession = Depends(get_db),
 ):
     """Get the ranked leaderboard sorted by Glicko-2 rating."""
@@ -52494,7 +52512,12 @@ async def team_leaderboard(
     min_series: int = Query(1, ge=0),
     sort_by: str = Query("rating"),
     # Item d -- see get_leaderboard.
-    include_inactive: bool = Query(False, description="Also list players not seen for 90 days (flagged inactive)"),
+    include_inactive: bool = Query(
+        False,
+        # The window is LEADERBOARD_ACTIVE_DAYS, not a constant. This text is
+        # what the schema advertises to every reader of the API, and a literal
+        # here said 90 on a deployment filtering at 30.
+        description=f"Also list players not seen for {LEADERBOARD_ACTIVE_DAYS} days (flagged inactive)"),
     db: AsyncSession = Depends(get_db),
 ):
     """Top players by 2v2 Glicko rating. Includes title, avg teammate elo,
