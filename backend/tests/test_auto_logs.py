@@ -1449,6 +1449,34 @@ def _markers(logdir):
                   if p.name.endswith(auto_logs._ORPHAN_MARKER_SUFFIX))
 
 
+class _OsProxy:
+    """The real `os` with named calls replaced, for the module to use in
+    place of it.
+
+    WHY A PROXY AND NOT `monkeypatch.setattr(os, "write", ...)`. Every
+    filesystem call on the blob path goes through `auto_logs.os` -- the
+    open, the writes, both fsyncs, the unlinks -- so replacing the module's
+    binding reaches exactly this module and nothing else. Patching the real
+    `os` module would reach pytest's own capture, which writes to descriptors
+    with the same call.
+
+    A name this proxy does not override is delegated, INCLUDING the ones read
+    by capability test: `getattr(os, "O_DIRECTORY", None)` finds whatever the
+    platform has, unless a test deliberately supplies one (the crash
+    simulation does, so the directory barrier the api container takes is
+    exercised on a seat whose own `os` has no directory handle to open).
+    """
+
+    def __init__(self, **over):
+        self._over = over
+
+    def __getattr__(self, name):
+        try:
+            return self._over[name]
+        except KeyError:
+            return getattr(os, name)
+
+
 def test_a_failed_blob_write_leaves_no_file_behind(logdir, verified):
     """open() succeeds, write() fails: the partial file must not survive, and
     neither must its marker.
@@ -1466,31 +1494,23 @@ def test_a_failed_blob_write_leaves_no_file_behind(logdir, verified):
     against and stopped being true when the marker and the sweep landed; the
     prose is the claim, so it moves with the mechanism.)
     """
-    import builtins
-    real_open = builtins.open
+    # THE INJECTION MOVED TO `os.write`, because `_write_blob` no longer goes
+    # through the builtin `open`: it opens a descriptor so that it can fsync
+    # the CONTENTS and then the directory ENTRY before the row naming them is
+    # inserted (R3-M2). The state this test needs is unchanged and is still
+    # produced for real -- a prefix of the blob lands on the volume and then
+    # the write raises.
+    def exploding_write(fd, data):
+        os.write(fd, bytes(data)[:8])
+        raise OSError("no space left on device")
 
-    def exploding_open(*a, **kw):
-        fh = real_open(*a, **kw)
-        if len(a) > 1 and "w" in str(a[1]):
-            class _Boom:
-                def __enter__(self_inner):
-                    return self_inner
-
-                def __exit__(self_inner, *e):
-                    fh.close()
-                    return False
-
-                def write(self_inner, _data):
-                    raise OSError("no space left on device")
-            return _Boom()
-        return fh
-
-    builtins.open = exploding_open
+    real_os = auto_logs.os
+    auto_logs.os = _OsProxy(write=exploding_write)
     try:
         with pytest.raises(HTTPException) as ei:
             _run(auto_logs.upload_auto_log(_request(), _ok_db()))
     finally:
-        builtins.open = real_open
+        auto_logs.os = real_os
 
     assert ei.value.status_code == 503, "a storage failure is retryable, not a 500"
     assert _blobs(logdir) == [], (
@@ -4402,9 +4422,17 @@ def test_the_marked_span_deadline_covers_the_insert_and_the_commit(
     become visible, so its blob goes; a cancelled COMMIT may have landed, so
     its blob and marker STAY for the sweep to resolve against the database.
     """
-    T = 0.25
+    # T HAS HEADROOM OVER THE BARRIERS THE SPAN NOW PAYS FOR. The stamp and
+    # the blob write each fsync the file and then its directory entry, and on
+    # this seat a single flush of a temporary volume is 60-200 ms; those are
+    # charged to the same deadline (R3-M2), which is the point. A quarter of
+    # a second left the barriers themselves expiring the span, so this case
+    # would have measured the flush rather than the stalled statement it is
+    # about. `test_the_durability_barrier_is_charged_to_the_marked_span` is
+    # where the barrier's own cost is the subject.
+    T = 1.5
     monkeypatch.setattr(auto_logs, "AUTO_LOG_MARKED_SPAN_DEADLINE_S", T)
-    stall = 4.0
+    stall = 5.0
 
     # ── the INSERT half ──────────────────────────────────────────────────
     started = time.monotonic()
@@ -4461,9 +4489,12 @@ def test_the_span_deadline_reds_when_an_await_inside_it_loses_the_budget(
     each twin must leave the case GREEN -- otherwise the control is reacting
     to the site being touched rather than to the bound going away (#342/#431).
     """
-    T = 0.25
+    # Same headroom as the case above, and for the same reason: the span now
+    # pays for four fsyncs, so a T below them would be expired by the
+    # barriers rather than by the site each mutant unwraps.
+    T = 1.5
     monkeypatch.setattr(auto_logs, "AUTO_LOG_MARKED_SPAN_DEADLINE_S", T)
-    stall = 2.5
+    stall = 5.0
 
     COMMIT_SITE = ("            left = _span_budget(span_deadline)\n"
                    "            await asyncio.wait_for(db.commit(), left)\n")
@@ -4592,7 +4623,11 @@ def test_cancelling_the_section_task_cannot_leave_a_blob_with_no_marker(
             own = auto_logs._MarkedBlob(
                 pathlib.Path(str(logdir)) / "bbbbbbbb-0000-4000-8000-0000000000dd.log.gz")
             task = asyncio.ensure_future(
-                auto_logs._reserve_stamp_and_write(own, b"payload", STEAM))
+                auto_logs._reserve_stamp_and_write(
+                    own, b"payload", STEAM,
+                    # The section spends the handler's one deadline at every
+                    # hop inside it, so driving it directly has to supply one.
+                    time.monotonic() + auto_logs.AUTO_LOG_MARKED_SPAN_DEADLINE_S))
             for _ in range(2000):
                 if entered.is_set():
                     break
@@ -4689,7 +4724,7 @@ def test_a_marker_with_no_blob_does_not_spend_a_removal_slot(logdir):
     # MUTANT: the collapsed answer restored -- an absent file reads as a
     # removal again. The eight leftovers take the whole budget and the four
     # real blobs survive the pass.
-    site = "        state = _unlink_existing(base / name)\n"
+    site = "        state, marker_gone = _delete_blob_then_marker(base / name)\n"
     for i, nm in enumerate(blanks):
         _mark(logdir, nm, age_s=90_000 - i)
     for i, nm in enumerate(reals):
@@ -4697,7 +4732,9 @@ def test_a_marker_with_no_blob_does_not_spend_a_removal_slot(logdir):
         _mark(logdir, nm, age_s=50_000 - i)
     mutant = _exec_mutant(
         auto_logs.prune_orphan_blobs, site,
-        '        state = "removed" if _unlink_if_present(base / name) else "failed"\n')
+        '        state, marker_gone = ("removed" if _unlink_if_present(base / name)\n'
+        '                               else "failed"), _unlink_if_present(\n'
+        '                                   base / (name + _ORPHAN_MARKER_SUFFIX))\n')
     out = _run(mutant(_db(), min_age_s=3600, limit=4))
     assert out["unlinked"] == 4 and sorted(_blobs(logdir)) == sorted(reals), (
         "the mutant did not starve the real orphans, so the live assertion "
@@ -4711,7 +4748,8 @@ def test_a_marker_with_no_blob_does_not_spend_a_removal_slot(logdir):
         _mark(logdir, nm, age_s=50_000 - i)
     twin = _exec_mutant(
         auto_logs.prune_orphan_blobs, site,
-        "        state = _unlink_existing(pathlib.Path(base) / name)\n")
+        "        state, marker_gone = _delete_blob_then_marker(\n"
+        "            pathlib.Path(base) / name)\n")
     out = _run(twin(_db(), min_age_s=3600, limit=4))
     assert out["unlinked"] == 4 and out["marker_only"] == 8 and _blobs(logdir) == [], (
         "the inert twin changed the outcome, so the mutant above is reacting "
@@ -4830,3 +4868,917 @@ def test_the_sweep_line_accounts_for_every_unreferenced_candidate(logdir, capsys
         + out["deferred"]) == out["orphans"], (
         "the inert twin changed the outcome, so the mutant above is reacting "
         "to the site being edited rather than to the counting: %r" % (out,))
+
+
+# ── ROUND 4: PERSISTENCE, NOT CALL ORDER ─────────────────────────────────────
+#
+# Round 3 proved both of this module's write orders at the SYSCALL level: the
+# marker is created before the blob's first byte, and the blob is unlinked
+# before its marker. Neither sentence survives a HOST crash on its own. A
+# filesystem promises nothing about un-synced data, and nothing about the
+# order in which two un-synced changes to one directory reach the disk -- so
+# "X happens before Y" is a statement about this process, while the guarantee
+# the sweep and the row both rest on is a statement about the disk.
+#
+# The cases below re-derive the failure table over CRASH POINTS rather than
+# over statement order, against a filesystem model that DISCARDS what was not
+# flushed and replays what was, so a barrier that is removed shows up as a
+# forbidden state rather than as an argument.
+
+
+class _Crashed(BaseException):
+    """The host stopped at this point.
+
+    A BaseException on purpose: a power loss is not something a process gets
+    to handle, so this must not be caught by an `except Exception` on the path
+    under test -- otherwise the simulation would be measuring an error path
+    instead of a crash.
+    """
+
+
+class CrashFS:
+    """A filesystem with a DURABLE state and a VOLATILE one.
+
+    THE MODEL, which is the conservative reading of what POSIX promises:
+
+    * `write()` changes only what a running process sees.
+    * `fsync(file)` promises that file's CONTENTS -- and says nothing about
+      the directory ENTRY that names them.
+    * `fsync(dir)` promises every directory change issued so far, creations
+      and removals alike.
+    * A crash discards everything not yet promised. Directory changes that
+      were issued and not flushed may reach the disk in ANY combination,
+      because there is no ordering between two un-synced entry changes -- so
+      a recovery is checked over EVERY subset of them and not only over the
+      "nothing persisted" one. That enumeration is what turns a missing
+      barrier into a demonstrable state rather than an unlikely one.
+
+    IT SUPPLIES `O_DIRECTORY`, WHICH THIS SEAT'S OWN `os` DOES NOT.
+    `_fsync_dir` decides by capability test, so on this development seat the
+    directory flush is a no-op and the file handle's own flush commits the
+    entry with it. The api container runs Linux, where that is not true; this
+    simulation is what exercises that path here, and a barrier removed from it
+    reds below even though removing it changes nothing on this seat.
+    """
+
+    O_RDONLY = 0
+    O_WRONLY = 1
+    O_CREAT = 0o100
+    O_TRUNC = 0o1000
+    O_DIRECTORY = 0o200000
+    O_BINARY = 0
+
+    #: bytes accepted per `write`, so a blob takes several calls and a crash
+    #: can land BETWEEN two of them.
+    CHUNK = 64
+
+    def __init__(self):
+        self.live = {}            # name -> bytes, what a running process sees
+        self.durable_data = {}    # name -> bytes the filesystem has promised
+        self.durable_entry = set()
+        self.pending = []         # ("create"|"unlink", name), in issue order
+        self._fds = {}
+        self._next_fd = 17
+        self.ops = []             # one label per intercepted call
+        self.crash_before = None  # 1-based index of the op that never happens
+
+    # -- the model's own API ------------------------------------------------
+    def preload(self, files):
+        """Start from a state that is already on the disk."""
+        for name, body in files.items():
+            self.live[name] = body
+            self.durable_data[name] = body
+            self.durable_entry.add(name)
+
+    def mark(self, label):
+        """A step that is not a filesystem call -- the INSERT, the commit --
+        so a crash point can land between them."""
+        self._step(label)
+
+    def recover(self, persist):
+        """The volume a process would find after a crash here, given that
+        `persist` (indices into the still-pending directory operations)
+        happened to reach the disk."""
+        names = set(self.durable_entry)
+        for i, (op, name) in enumerate(self.pending):
+            if i not in persist:
+                continue
+            if op == "create":
+                names.add(name)
+            else:
+                names.discard(name)
+        return {n: self.durable_data.get(n, b"") for n in sorted(names)}
+
+    def every_recovery(self):
+        """Every resolution of the pending set, worst case included."""
+        out = []
+        for bits in range(1 << len(self.pending)):
+            persist = {i for i in range(len(self.pending)) if bits & (1 << i)}
+            out.append((persist, self.recover(persist)))
+        return out
+
+    def _step(self, label):
+        self.ops.append(label)
+        if self.crash_before is not None and len(self.ops) == self.crash_before:
+            raise _Crashed(label)
+
+    # -- the `os` surface this module uses ----------------------------------
+    def open(self, path, flags, mode=0o666):
+        if flags & self.O_DIRECTORY:
+            self._step("open-dir")
+            fd = self._next_fd
+            self._next_fd += 1
+            self._fds[fd] = None
+            return fd
+        name = os.path.basename(str(path))
+        self._step("open %s" % name)
+        if flags & self.O_CREAT:
+            if name not in self.live:
+                self.pending.append(("create", name))
+            self.live[name] = b""
+        fd = self._next_fd
+        self._next_fd += 1
+        self._fds[fd] = name
+        return fd
+
+    def write(self, fd, data):
+        name = self._fds[fd]
+        self._step("write %s" % name)
+        chunk = bytes(data)[:self.CHUNK]
+        self.live[name] = self.live.get(name, b"") + chunk
+        return len(chunk)
+
+    def fsync(self, fd):
+        name = self._fds[fd]
+        if name is None:
+            self._step("fsync-dir")
+            for op, entry in self.pending:
+                if op == "create":
+                    self.durable_entry.add(entry)
+                else:
+                    self.durable_entry.discard(entry)
+            self.pending = []
+            return
+        self._step("fsync %s" % name)
+        self.durable_data[name] = self.live[name]
+
+    def close(self, fd):
+        self._fds.pop(fd, None)
+
+    def unlink(self, path):
+        name = os.path.basename(str(path))
+        self._step("unlink %s" % name)
+        if name not in self.live:
+            raise FileNotFoundError(name)
+        del self.live[name]
+        self.pending.append(("unlink", name))
+
+    def __getattr__(self, item):          # path, scandir, stat, everything else
+        return getattr(os, item)
+
+
+CRASH_BLOB = "eeeeeeee-0000-4000-8000-00000000cafe.log.gz"
+CRASH_MARK = CRASH_BLOB + auto_logs._ORPHAN_MARKER_SUFFIX
+CRASH_PAYLOAD = b"crash-simulation payload " * 9        # several write() calls
+
+
+def _point_at(fn, fs):
+    """Point a COMPILED COPY's own `os` at the crash filesystem.
+
+    A mutant produced by `_exec_mutant` carries a snapshot of the module's
+    globals taken when it was compiled, so patching `auto_logs.os` afterwards
+    does not reach it -- and a barrier mutation that quietly ran against the
+    real filesystem would make every control below pass for the wrong reason
+    (#342). The module's own functions are left alone: their globals ARE the
+    module's, so the patch already reaches them.
+    """
+    if fn is not None and getattr(fn, "__globals__", None) is not vars(auto_logs):
+        fn.__globals__["os"] = fs
+    return fn
+
+
+def _drive_upload(crash_before, *, stamp=None, write_blob=None, logdir=None):
+    """The upload's write order, run against a fresh `CrashFS`.
+
+    marker -> blob -> INSERT -> commit -> clear the marker, with every
+    operation a crash point of its own. The database is modelled by one flag,
+    because what is being checked is the JOINT state: what the row claims,
+    against what the volume kept.
+    """
+    fs = CrashFS()
+    fs.crash_before = crash_before
+    path = pathlib.Path(str(logdir)) / CRASH_BLOB
+    own = auto_logs._MarkedBlob(path)
+    committed = False
+    real_os = auto_logs.os
+    auto_logs.os = fs
+    _point_at(stamp, fs)
+    _point_at(write_blob, fs)
+    try:
+        try:
+            (stamp or auto_logs._stamp_marker)(path)
+            own.marked = True
+            (write_blob or auto_logs._write_blob)(path, CRASH_PAYLOAD)
+            own.written = True
+            fs.mark("INSERT")
+            fs.mark("COMMIT")
+            committed = True
+            auto_logs._clear_marker(own)
+        except _Crashed:
+            pass
+    finally:
+        auto_logs.os = real_os
+        auto_logs._MARKERS_IN_FLIGHT.discard(path.name)
+    return fs, committed
+
+
+def _drive_delete(crash_before, *, delete=None, logdir=None):
+    """The deletion order -- blob, then marker -- from a durable pair."""
+    fs = CrashFS()
+    fs.preload({CRASH_BLOB: CRASH_PAYLOAD,
+                CRASH_MARK: CRASH_BLOB.encode() + b"\n"})
+    fs.crash_before = crash_before
+    path = pathlib.Path(str(logdir)) / CRASH_BLOB
+    real_os = auto_logs.os
+    auto_logs.os = fs
+    _point_at(delete, fs)
+    try:
+        try:
+            (delete or auto_logs._delete_blob_then_marker)(path)
+        except _Crashed:
+            pass
+    finally:
+        auto_logs.os = real_os
+    return fs
+
+
+def _upload_violations(stamp=None, write_blob=None, logdir=None):
+    """Every (crash point, recovery) of the upload order that breaks one of
+    the two invariants.
+
+    INV-A  a blob on the recovered volume is named by a committed row, or
+           carries a marker. Anything else is a file nothing in this tree will
+           ever collect, on a volume shared with player-filed attachments.
+    INV-B  a committed row's blob is on the recovered volume with ALL of its
+           bytes. A row naming bytes the filesystem never promised is a
+           download that answers a read error over a file the database says
+           exists.
+    """
+    bad = []
+    probe, _ = _drive_upload(None, stamp=stamp, write_blob=write_blob,
+                             logdir=logdir)
+    for point in range(1, len(probe.ops) + 2):
+        fs, committed = _drive_upload(point, stamp=stamp, write_blob=write_blob,
+                                      logdir=logdir)
+        for _persist, image in fs.every_recovery():
+            if committed and image.get(CRASH_BLOB) != CRASH_PAYLOAD:
+                bad.append(("INV-B", point, fs.ops[-1], sorted(image)))
+            if (CRASH_BLOB in image and CRASH_MARK not in image
+                    and not committed):
+                bad.append(("INV-A", point, fs.ops[-1], sorted(image)))
+    return bad, len(probe.ops)
+
+
+def _delete_violations(delete=None, logdir=None):
+    """The deletion order's invariant: nothing this pass does may leave the
+    blob on the volume with its marker gone."""
+    bad = []
+    probe = _drive_delete(None, delete=delete, logdir=logdir)
+    for point in range(1, len(probe.ops) + 2):
+        fs = _drive_delete(point, delete=delete, logdir=logdir)
+        for _persist, image in fs.every_recovery():
+            if CRASH_BLOB in image and CRASH_MARK not in image:
+                bad.append(("INV-A", point, fs.ops[-1], sorted(image)))
+    return bad, len(probe.ops)
+
+
+def test_the_crash_simulation_finds_no_uncollectable_state_in_either_order(logdir):
+    """R3-M2 / R3-M3 / prior H2: THE TWO ORDERS, RE-DERIVED OVER CRASH POINTS.
+
+    Every point between two operations is taken as a crash, and every
+    resolution of the directory changes that had not been flushed is checked
+    -- including the worst, where a later removal persists and an earlier one
+    does not. What has to hold at each of them is small enough to state: no
+    blob that nothing names, and no committed row over bytes the filesystem
+    never promised.
+
+    The points the upload order enumerates, in the order they occur: before
+    the marker's first byte; before its contents are flushed; before its
+    directory entry is; before the blob's first byte; BETWEEN two of the
+    blob's writes; after its last byte and before the contents flush; after
+    the contents flush and before the directory flush; after the directory
+    flush and before the INSERT; between the INSERT and the commit; after the
+    commit and before the marker is cleared; and after the clear. The deletion
+    order enumerates: before the blob's unlink; after it and before the
+    directory flush; after the flush and before the marker's unlink; and after
+    both.
+    """
+    bad, steps = _upload_violations(logdir=logdir)
+    assert steps >= 14, (
+        "the upload order produced only %d operations, so the crash points "
+        "this case claims to enumerate are not the ones it drove" % steps)
+    assert bad == [], (
+        "the upload order leaves a state nothing can collect, or a row over "
+        "bytes that were never promised: %r" % (bad[:4],))
+
+    bad, steps = _delete_violations(logdir=logdir)
+    assert steps >= 4, (
+        "the deletion order produced only %d operations; the barrier between "
+        "the two unlinks is one of them" % steps)
+    assert bad == [], (
+        "the deletion order can leave a blob with no marker: %r" % (bad[:4],))
+
+
+def test_every_durability_barrier_reds_the_crash_simulation_when_it_is_removed(
+        logdir):
+    """THE CONTROL FOR THE CASE ABOVE, one mutation per barrier (#391/#342).
+
+    A simulation that passes with a barrier deleted is decoration. Each of the
+    four barriers the two orders rest on is removed in turn -- at its own
+    site, in a compiled copy, so the module itself is untouched -- and each
+    removal has to produce a forbidden state. Each is then paired with an
+    INERT TWIN at the SAME site: the same barrier, spelled differently, which
+    must leave the simulation clean.
+    """
+    real_stamp, real_write = auto_logs._stamp_marker, auto_logs._write_blob
+    real_delete = auto_logs._delete_blob_then_marker
+
+    # -- BARRIER: the blob's CONTENTS (_write_blob) -------------------------
+    site = "        os.fsync(fd)\n"
+    bad, _ = _upload_violations(
+        write_blob=_exec_mutant(real_write, site, "        pass\n"),
+        logdir=logdir)
+    assert any(kind == "INV-B" for kind, *_ in bad), (
+        "with the blob's contents never flushed the simulation still found no "
+        "committed row over unpromised bytes: %r" % (bad[:3],))
+    bad, _ = _upload_violations(
+        write_blob=_exec_mutant(real_write, site, "        os.fsync(int(fd))\n"),
+        logdir=logdir)
+    assert bad == [], (
+        "the inert twin reds, so the mutation above is reacting to the site "
+        "being edited rather than to the barrier: %r" % (bad[:3],))
+
+    # -- BARRIER: the blob's directory ENTRY --------------------------------
+    site = "    _fsync_dir(path.parent)\n"
+    bad, _ = _upload_violations(
+        write_blob=_exec_mutant(real_write, site, "    pass\n"), logdir=logdir)
+    assert any(kind == "INV-B" for kind, *_ in bad), (
+        "with the blob's directory entry never flushed, a crash after the "
+        "commit still recovered the file every time: %r" % (bad[:3],))
+    bad, _ = _upload_violations(
+        write_blob=_exec_mutant(real_write, site,
+                                "    _fsync_dir(pathlib.Path(path).parent)\n"),
+        logdir=logdir)
+    assert bad == [], (
+        "the inert twin reds at the blob's directory barrier: %r" % (bad[:3],))
+
+    # -- BARRIER: the marker's directory ENTRY, before the blob exists ------
+    site = "    _fsync_dir(blob_path.parent)\n"
+    bad, _ = _upload_violations(
+        stamp=_exec_mutant(real_stamp, site, "    pass\n"), logdir=logdir)
+    assert any(kind == "INV-A" for kind, *_ in bad), (
+        "with the marker's entry never flushed, the blob's own entry could "
+        "still not outlive it: %r" % (bad[:3],))
+    bad, _ = _upload_violations(
+        stamp=_exec_mutant(real_stamp, site,
+                           "    _fsync_dir(pathlib.Path(blob_path).parent)\n"),
+        logdir=logdir)
+    assert bad == [], (
+        "the inert twin reds at the marker's directory barrier: %r" % (bad[:3],))
+
+    # -- BARRIER: between the two unlinks -----------------------------------
+    bad, _ = _delete_violations(
+        delete=_exec_mutant(real_delete, site, "    pass\n"), logdir=logdir)
+    assert any(kind == "INV-A" for kind, *_ in bad), (
+        "with no flush between the two unlinks the simulation still could not "
+        "persist the marker's removal ahead of the blob's: %r" % (bad[:3],))
+    bad, _ = _delete_violations(
+        delete=_exec_mutant(real_delete, site,
+                            "    _fsync_dir(pathlib.Path(blob_path).parent)\n"),
+        logdir=logdir)
+    assert bad == [], (
+        "the inert twin reds at the deletion barrier: %r" % (bad[:3],))
+
+
+def test_one_site_performs_the_blob_before_marker_deletion():
+    """#432: THE FLAG NAMED A LINE AND THE DEFECT IS A CLASS.
+
+    A barrier between the two unlinks is worth nothing if a second site
+    performs the same pair without it -- and the round-3 report flagged the
+    determinate cleanup, while the orphan sweep performed the identical pair.
+    There is now ONE function that deletes a blob and then its marker, and
+    both callers go through it.
+    """
+    src = inspect.getsource(auto_logs)
+    helper = inspect.getsource(auto_logs._delete_blob_then_marker)
+
+    assert src.count("_unlink_existing(") == 2, (
+        "the three-way unlink is called at %d site(s) besides its own "
+        "definition; the barrier lives at exactly one of them"
+        % (src.count("_unlink_existing(") - 1,))
+    assert "_unlink_existing(blob_path)" in helper and "_fsync_dir(" in helper, (
+        "the one deletion site no longer removes the blob and then takes the "
+        "barrier before the marker")
+
+    callers = [name for name in ("_release_marked_blob", "prune_orphan_blobs")
+               if "_delete_blob_then_marker(" in inspect.getsource(
+                   getattr(auto_logs, name))]
+    assert callers == ["_release_marked_blob", "prune_orphan_blobs"], (
+        "a deletion path does not go through the barriered helper: %r"
+        % (callers,))
+
+    call_sites = [ln for ln in src.splitlines()
+                  if ln.strip().startswith("_fsync_dir(")]
+    assert len(call_sites) == 3, (
+        "a directory flush is performed at %d site(s); the three that own one "
+        "are the marker's stamp, the blob's write and the deletion helper: %r"
+        % (len(call_sites), call_sites))
+
+
+def test_the_durability_barrier_is_charged_to_the_marked_span(logdir, verified,
+                                                              monkeypatch, capsys):
+    """THE BARRIER IS INSIDE THE BUDGET, AND THE CASE REDS WHEN IT IS NOT.
+
+    A flush is not free, and on a contended volume it is not fast. Performed
+    outside the marked span it would make the interval in which a row naming
+    that blob can still be inserted LONGER than the T the sweep's age gate is
+    derived from -- the bound would be true of the code and false of the disk.
+
+    So both of `_write_blob`'s barriers run inside `_guarded_write`, inside
+    the reserve section, and that section is awaited under the span's own
+    remaining budget; the section's two thread hops spend the same budget, so
+    a stalled flush ends the section's wait rather than outliving it.
+
+    Here the blob's contents flush does not return inside T. The handler must
+    REFUSE 503 inside T and commit nothing. The mutant takes the ceiling off
+    the await that covers the barrier, and the request outlives T instead.
+    """
+    T, stall = 1.0, 4.0
+    monkeypatch.setattr(auto_logs, "AUTO_LOG_MARKED_SPAN_DEADLINE_S", T)
+
+    # STRUCTURAL FIRST: the two barriers on the write path are reached only
+    # through the section's own budgeted hops. A flush performed anywhere else
+    # would be outside the span whatever this case measures.
+    section = _normalise(inspect.getsource(auto_logs._reserve_stamp_and_write))
+    for hop in ("_guarded_stamp", "_guarded_write"):
+        assert ("asyncio.wait_for(asyncio.to_thread(%s" % hop) in section, (
+            "the %s hop is not awaited under a ceiling, so the barrier it "
+            "performs is not charged to the span" % hop)
+    assert section.count("_span_budget(span_deadline)") == 2, (
+        "the two hops that perform the write path's barriers do not both "
+        "spend the span's own deadline")
+    assert "_fsync_dir(" in inspect.getsource(auto_logs._write_blob), (
+        "the blob's directory barrier is no longer inside the function the "
+        "section's write hop calls")
+
+    opened = {}
+    stalled = []
+
+    def rec_open(path, flags, mode=0o666):
+        fd = os.open(str(path), flags, mode)
+        opened[fd] = str(path)
+        return fd
+
+    def slow_fsync(fd):
+        """The BLOB's flush is the one that does not return; every other
+        flush on this path costs nothing.
+
+        Neither arm performs a real `os.fsync`. What this case measures is
+        where a flush's cost is CHARGED, and a real flush of a temporary
+        volume on this seat has been measured at whole seconds under load --
+        which would put the marker's own two flushes inside T and leave the
+        case timing those instead of the one it stalls. Whether the flushes
+        actually make anything durable is the crash simulation's question,
+        not this one's.
+        """
+        if opened.get(fd, "").endswith(".log.gz"):
+            stalled.append(opened[fd])
+            time.sleep(stall)
+
+    def _attempt(db, handler=None):
+        """What the HANDLER took, not what the loop took to drain.
+
+        A stalled flush leaves a worker thread running after the handler has
+        answered, and the future behind `asyncio.to_thread` cannot be
+        cancelled once the thread has picked the work up -- so `asyncio.run`
+        sits out the rest of the stall on its way to closing the loop. Timing
+        the run would measure that teardown and report a deadline as missed on
+        a request that met it. The clock therefore starts and stops inside the
+        loop, around the handler's own await.
+        """
+        monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", asyncio.Lock())
+        auto_logs._BLOB_WRITE_STARTED[0] = 0.0
+        opened.clear()
+        seen = {}
+
+        async def call():
+            started = time.monotonic()
+            try:
+                await (handler or auto_logs.upload_auto_log)(_request(), db)
+                seen["refused"] = False
+            except HTTPException:
+                seen["refused"] = True
+            seen["took"] = time.monotonic() - started
+
+        real_os = auto_logs.os
+        auto_logs.os = _OsProxy(open=rec_open, fsync=slow_fsync)
+        try:
+            _run(call())
+        finally:
+            auto_logs.os = real_os
+        return seen["refused"], seen["took"]
+
+    # LIVE: a flush that does not return inside T ends the span.
+    db = _ok_db()
+    refused, took = _attempt(db)
+    assert stalled, (
+        "the blob's flush was never reached, so this case refused for some "
+        "other reason and says nothing about the barrier's cost")
+    assert refused and took < stall / 2.0, (
+        "a blob flush that does not return inside T did not end the span: "
+        "refused=%r after %.2fs (deadline %.2fs)" % (refused, took, T))
+    assert db.committed == 0, (
+        "the row committed over a blob whose bytes the filesystem had not "
+        "promised")
+    out = capsys.readouterr().out
+    assert "the measure-and-write for" in out and "deadline" in out, out
+
+    # MUTANT at the handler's own site: the section -- which is where both of
+    # the write path's barriers are performed -- is awaited with no ceiling,
+    # so the flush's cost is no longer charged to T and the request outlives
+    # the bound the sweep's age gate is derived from.
+    SPAN_SITE = ("        await asyncio.wait_for(asyncio.shield(section),\n"
+                 "                               _span_budget(span_deadline))\n")
+    db = _ok_db()
+    _refused, took = _attempt(db, _handler_mutant(
+        [(SPAN_SITE, "        await asyncio.shield(section)\n")]))
+    assert took >= stall / 2.0, (
+        "with the ceiling off the await that covers the barrier the handler "
+        "still answered in %.2fs, so the case above says nothing about where "
+        "the flush is charged" % (took,))
+
+    # INERT TWIN at the SAME site: the same ceiling, the same budget, spelled
+    # differently.
+    db = _ok_db()
+    refused, took = _attempt(db, _handler_mutant([(
+        SPAN_SITE,
+        "        await asyncio.wait_for(asyncio.shield(section),\n"
+        "                               _span_budget(float(span_deadline)))\n")]))
+    assert refused and took < stall / 2.0, (
+        "the inert twin changed the outcome (%.2fs), so the mutant above is "
+        "reacting to the site being edited rather than to the ceiling"
+        % (took,))
+    auto_logs._MARKERS_IN_FLIGHT.clear()
+
+
+def test_a_cancelled_sections_cleanup_does_not_block_the_event_loop(
+        logdir, verified, monkeypatch):
+    """R3-L2: THE CLEANUP WAITS IN A THREAD, NOT ON THE LOOP.
+
+    The section's cleanup takes the blob's lock, and a worker can hold that
+    lock through the write and its two flushes. Taken on the event loop, that
+    wait stops every other request this worker is serving -- and the one
+    caller that reaches it while a write may still be in flight is a CANCELLED
+    section: loop close, or the container's SIGTERM during a rebuild, which is
+    when the loop can least afford to stop.
+
+    Measured rather than reasoned about: a heartbeat coroutine runs on the
+    same loop and has to keep ticking while the cleanup waits out a write that
+    holds the lock.
+    """
+    import threading
+
+    hold = 1.0
+    inside = threading.Event()
+
+    def slow_guarded_write(own, data):
+        with own.lock:
+            inside.set()
+            time.sleep(hold)
+
+    real_section = auto_logs._reserve_stamp_and_write
+
+    def drive(mutation=None, label="live"):
+        # THE STAMP IS STUBBED, AND ONLY BECAUSE OF WHAT IT COSTS HERE. This
+        # case is about which thread waits for the blob's lock, not about the
+        # marker; and a real `_stamp_marker` fsyncs the marker and then its
+        # directory on a temporary volume, which on this seat has been
+        # measured at whole seconds under load. That would make the section
+        # spend its wait inside the stamp and this case would time a flush
+        # rather than the cleanup it is about. The crash simulation is where
+        # the stamp's own barriers are the subject.
+        monkeypatch.setattr(auto_logs, "_guarded_stamp", lambda own: None)
+        monkeypatch.setattr(auto_logs, "_guarded_write", slow_guarded_write)
+        monkeypatch.setattr(auto_logs, "_free_bytes", lambda d: 10 ** 12)
+        monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", asyncio.Lock())
+        auto_logs._BLOB_WRITE_STARTED[0] = 0.0
+        # COMPILED AFTER THE PATCHES, so the copy's globals carry this
+        # section's own lock and stubbed worker rather than the module's.
+        fn = (real_section if mutation is None
+              else _exec_mutant(real_section, *mutation))
+        inside.clear()
+        beats = [0]
+
+        async def run():
+            stop = asyncio.Event()
+
+            async def heartbeat():
+                while not stop.is_set():
+                    beats[0] += 1
+                    await asyncio.sleep(0.01)
+
+            own = auto_logs._MarkedBlob(
+                pathlib.Path(str(logdir)) /
+                "ffffffff-0000-4000-8000-00000000ab1e.log.gz")
+            beat = asyncio.ensure_future(heartbeat())
+            task = asyncio.ensure_future(fn(
+                own, b"payload", STEAM,
+                time.monotonic() + auto_logs.AUTO_LOG_MARKED_SPAN_DEADLINE_S))
+            for _ in range(400):
+                if inside.is_set() or task.done():
+                    break
+                await asyncio.sleep(0.005)
+            if not inside.is_set() and task.done():
+                # SURFACE IT. A section that refused before reaching the write
+                # would leave this case asserting about a loop that had
+                # nothing to be blocked by, which is a control that cannot
+                # fail rather than one that passed (#342).
+                task.result()
+            assert inside.is_set(), (
+                "the worker never reached the blob's lock (%s)" % (label,))
+            before = beats[0]
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            during = beats[0] - before
+            stop.set()
+            await beat
+            auto_logs._MARKERS_IN_FLIGHT.clear()
+            return during
+
+        return _run(run())
+
+    # LIVE: the cleanup waits out the write in a thread and the loop keeps
+    # answering.
+    during = drive()
+    assert during >= 10, (
+        "the event loop ticked %d times while a cancelled section's cleanup "
+        "waited out a %.1fs write; it was blocked on the worker's lock"
+        % (during, hold))
+
+    # MUTANT at the cleanup's own site: taken on the loop, which is the tree
+    # before this fix. The heartbeat stops.
+    site = "                if not await _release_marked_blob_off_loop(own):\n"
+    during = drive((site, "                if not _release_marked_blob(own):\n"),
+                   label="mutant")
+    assert during <= 2, (
+        "the loop kept ticking (%d) with the cleanup taken synchronously, so "
+        "the live assertion above proves nothing" % (during,))
+
+    # INERT TWIN at the SAME site: the same await, parenthesised.
+    during = drive(
+        (site,
+         "                if not (await _release_marked_blob_off_loop(own)):\n"),
+        label="inert twin")
+    assert during >= 10, (
+        "the inert twin blocked the loop, so the mutant above is reacting to "
+        "the site being edited rather than to where the wait happens: %d"
+        % (during,))
+
+
+def test_the_sweep_reports_cleared_only_when_the_marker_unlink_succeeded(
+        logdir, capsys):
+    """R3-L3: A DISPOSITION IS WHAT HAPPENED, NOT WHAT WAS ATTEMPTED.
+
+    Three arms discarded the unlink's answer about a marker: the one that
+    clears it over a committed row, and the two that clear it after resolving
+    the blob. A marker a permission or I/O fault leaves on the volume then
+    came back every tick under a line saying it had been cleared -- and "is
+    the leak draining" is exactly the reading an operator takes from that line
+    (#304).
+
+    Three candidates, one unlink fault, three dispositions: referenced ->
+    `uncleared`; blob removed and the marker kept -> still `removed`, with the
+    surviving marker counted; no blob and no clearable marker -> nothing
+    reclaimed OR cleared, so `unremovable`.
+    """
+    referenced = "11111111-0000-4000-8000-000000000001.log.gz"
+    removable = "11111111-0000-4000-8000-000000000002.log.gz"
+    blankonly = "11111111-0000-4000-8000-000000000003.log.gz"
+
+    def _plant():
+        for nm in (referenced, removable):
+            (logdir / nm).write_bytes(b"x" * 16)
+        for nm in (referenced, removable, blankonly):
+            _mark(logdir, nm, age_s=90_000)
+
+    def refusing_unlink(path):
+        if str(path).endswith(auto_logs._ORPHAN_MARKER_SUFFIX):
+            raise PermissionError("the volume will not give this up")
+        return os.unlink(str(path))
+
+    def _sweep(mutation=None):
+        real_os = auto_logs.os
+        auto_logs.os = _OsProxy(unlink=refusing_unlink)
+        fn = (auto_logs.prune_orphan_blobs if mutation is None else
+              _point_at(_exec_mutant(auto_logs.prune_orphan_blobs, *mutation),
+                        auto_logs.os))
+        try:
+            return _run(fn(KindRows([(referenced, "report")]), min_age_s=3600))
+        finally:
+            auto_logs.os = real_os
+
+    _plant()
+    capsys.readouterr()
+    out = _sweep()
+    printed = capsys.readouterr().out
+    assert out["cleared"] == 0 and out["uncleared"] == 1, (
+        "a marker over a committed row that would not unlink was reported as "
+        "cleared: %r" % (out,))
+    assert out["unlinked"] == 1 and out["markers_kept"] == 1, (
+        "the blob was reclaimed and its surviving marker is not reported: %r"
+        % (out,))
+    assert out["marker_only"] == 0 and out["unremovable"] == 1, (
+        "a candidate whose marker would not unlink and whose blob was never "
+        "there was reported as cleared: %r" % (out,))
+    assert (out["unlinked"] + out["marker_only"] + out["unremovable"]
+            + out["deferred"]) == out["orphans"], out
+    assert "could NOT be removed and SURVIVES" in printed, printed
+    assert "nothing was reclaimed or cleared" in printed, printed
+    assert ("cleared %s=%s" % (auto_logs._ORPHAN_MARKER, blankonly)
+            not in printed), (
+        "a marker that is still on the volume was reported as cleared:\n%s"
+        % printed)
+
+    # MUTANT: the marker-only arm stops reading the unlink result, which is
+    # the tree before this fix -- a marker that survived reads as cleared.
+    site = ('        stuck = (state == "failed") or '
+            '(state == "absent" and not marker_gone)\n')
+    _plant()
+    out = _sweep((site, '        stuck = (state == "failed")\n'))
+    assert out["marker_only"] == 1 and out["unremovable"] == 0, (
+        "the mutant did not report the surviving marker as cleared, so the "
+        "live assertion above proves nothing: %r" % (out,))
+
+    # INERT TWIN at the SAME site: the same condition, spelled out.
+    _plant()
+    out = _sweep((site, '        stuck = state == "failed" or '
+                        '(state == "absent" and marker_gone is False)\n'))
+    assert out["marker_only"] == 0 and out["unremovable"] == 1, (
+        "the inert twin changed the outcome, so the mutant above is reacting "
+        "to the site being edited rather than to the unlink result: %r"
+        % (out,))
+
+
+def _report_mutant(anchor, replacement):
+    """`main.submit_bug_report`'s body with one edit, compiled WITHOUT its
+    route decorator -- executing it would register a second copy of the route
+    on the live application. The anchor is asserted to be one site inside the
+    handler's own span first (#432/#279)."""
+    src = textwrap.dedent(inspect.getsource(main.submit_bug_report))
+    head, _, rest = src.partition("\n")
+    assert head.startswith("@app.post("), (
+        "submit_bug_report no longer starts with its route decorator, so this "
+        "harness is stripping the wrong line: %r" % (head,))
+    assert rest.count(anchor) == 1, (
+        "the mutation anchor occurs %d time(s) in submit_bug_report, not once"
+        % rest.count(anchor))
+    namespace = dict(vars(main))
+    exec(compile(rest.replace(anchor, replacement),
+                 "<mutant:submit_bug_report>", "exec"), namespace)
+    return namespace["submit_bug_report"]
+
+
+def test_a_failed_player_attachment_write_leaves_nothing_on_the_volume(
+        logdir, monkeypatch, capsys):
+    """R3-L4: THE PARTIAL FILE GOES BEFORE THE ROW COMMITS.
+
+    `submit_bug_report` opens the attachment, writes it, and records
+    `log_bytes = 0` when that fails -- with `log_filename` deliberately NULL,
+    because there is genuinely nothing to download. A write that fails AFTER
+    creating the file therefore left a prefix of the gzip stream on the volume
+    under a name no row carries.
+
+    Nothing in this tree collects that. A player-filed attachment never
+    receives an orphan-candidate marker, which is what the automatic path's
+    sweep takes as its population, and `prune_auto_logs` walks kind='auto'
+    ROWS. So the file was permanent, on the volume this route is most
+    protective of -- and the row still has to say a log was attached and lost,
+    which is the other half this arm exists for.
+    """
+    import builtins
+    real_open = builtins.open
+
+    def partial_then_fail(*a, **kw):
+        if len(a) > 1 and "w" in str(a[1]):
+            fh = real_open(*a, **kw)
+
+            class _Partial:
+                def __enter__(self_inner):
+                    return self_inner
+
+                def __exit__(self_inner, *e):
+                    fh.close()
+                    return False
+
+                def write(self_inner, data):
+                    fh.write(data[:8])
+                    fh.flush()
+                    raise OSError("no space left on device")
+
+            return _Partial()
+        return real_open(*a, **kw)
+
+    def _file(handler=None):
+        monkeypatch.setattr(main, "_is_admin", _no_admin)
+        monkeypatch.setattr(main, "_mark_mod_seen", _noop_mark)
+        monkeypatch.setattr(builtins, "open", partial_then_fail)
+        db = _ReportSession({"FROM bug_reports": [[{"count": 0}]]})
+        req = schemas.BugReportRequest(steam_id=STEAM, description="it broke",
+                                       log_text="a log worth keeping")
+        try:
+            return _run((handler or main.submit_bug_report)(
+                req, _request(), db)), db
+        finally:
+            monkeypatch.setattr(builtins, "open", real_open)
+
+    capsys.readouterr()
+    out, db = _file()
+    printed = capsys.readouterr().out
+    row = db.added[0]
+
+    assert out["log_persisted"] is False
+    assert row.log_filename is None and row.log_bytes == 0, (
+        "the row no longer records that a log was attached and lost: "
+        "filename=%r bytes=%r" % (row.log_filename, row.log_bytes))
+    assert _blobs(logdir) == [], (
+        "a partial player-filed attachment survived its own failed write. It "
+        "carries no marker, so no sweep in this tree would ever name it: %r"
+        % (_blobs(logdir),))
+    assert _markers(logdir) == [], (
+        "a player-filed attachment was given a marker: %r"
+        % (_markers(logdir),))
+    assert "the partial file was removed" in printed, printed
+
+    # MUTANT at the unlink's own site: dropped, which is the tree before this
+    # fix. The prefix stays on the volume with nothing naming it.
+    site = "                    os.unlink(str(attempted_path))\n"
+    _file(_report_mutant(site, "                    pass\n"))
+    left = _blobs(logdir)
+    assert left, (
+        "the mutant left nothing behind, so the live assertion above proves "
+        "nothing about the unlink")
+    for stale in left:
+        (logdir / stale).unlink()
+
+    # INERT TWIN at the SAME site: the same unlink, the path spelled out.
+    _file(_report_mutant(site,
+                         '                    os.unlink("%s" % '
+                         '(attempted_path,))\n'))
+    assert _blobs(logdir) == [], (
+        "the inert twin left the partial file behind, so the mutant above is "
+        "reacting to the site being edited: %r" % (_blobs(logdir),))
+
+
+def test_350_scopes_every_guard_to_the_relation_it_alters():
+    """R3-M1: THE GUARDS AND THE DDL LOOK AT ONE RELATION.
+
+    `information_schema.columns` with no `table_schema` predicate answers
+    about whichever `bug_reports.kind` the catalogue returns, which on a
+    database carrying a second accessible schema is not necessarily the column
+    this file's ALTER statements constrain: a drifted target passes because
+    the other schema is correct, and a correct target is refused because the
+    other has drifted. The rehearsal drives both directions against a database
+    carrying two such schemas; this case holds the file to the shape that
+    makes that possible.
+    """
+    sql = _sql_350()
+    lookups = [ln for ln in sql.splitlines()
+               if "information_schema.columns" in ln
+               and not ln.strip().startswith("--")]
+    assert len(lookups) == 2, (
+        "350 reads information_schema.columns at %d executable site(s); each "
+        "one has to carry its own schema predicate: %r"
+        % (len(lookups), lookups))
+    for site in lookups:
+        block = sql.split(site, 1)[1][:400]
+        assert "table_schema = current_schema()" in block, (
+            "an information_schema lookup is not scoped to current_schema(): "
+            "%r" % (site,))
+
+    assert "to_regclass('bug_reports')" in sql, (
+        "the file no longer resolves the unqualified name its own DDL uses")
+    assert "v_schema IS DISTINCT FROM current_schema()" in sql, (
+        "nothing requires the relation the DDL will alter to be the one the "
+        "guards inspect")
+    assert "conrelid = 'bug_reports'::regclass" not in sql, (
+        "a constraint lookup still re-resolves the bare name instead of using "
+        "the resolved target")
+    assert sql.count("quote_ident(current_schema())") >= 3, (
+        "the second and third blocks do not bind their own names to "
+        "current_schema()")
+    assert "CREATE TEMP TABLE m350_number_probe (LIKE bug_reports" not in sql, (
+        "the post-check's probe table is still copied from whichever "
+        "bug_reports the search_path resolves")

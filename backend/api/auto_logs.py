@@ -92,6 +92,22 @@ cases -- never 500 -- and can try again after the next match.
   cannot be made durable REFUSES the upload rather than writing the blob
   anyway.
 
+  AND EVERY ORDER THIS MODULE RELIES ON IS A PERSISTENCE ORDER, NOT A CALL
+  ORDER. An ordering that survives the PROCESS does not survive the HOST: a
+  power loss recovers whatever was flushed and discards the rest, in no
+  guaranteed order between two un-synced changes to one directory. Three
+  barriers make the two orders above true of the disk, and each one is
+  charged to the marked span's own deadline rather than paid outside it:
+
+    * ``_stamp_marker`` fsyncs the marker and then its directory entry
+      BEFORE ``open()`` is called on the blob;
+    * ``_write_blob`` fsyncs the blob's CONTENTS and then its directory
+      ENTRY before it returns -- so the row that names it is inserted and
+      committed only over bytes the filesystem has promised;
+    * ``_delete_blob_then_marker`` fsyncs the directory between the blob's
+      unlink and the marker's, so a crash cannot persist the marker's
+      removal while recovering the blob's entry.
+
   THE ONE CASE THAT CANNOT BE MADE ATOMIC is a ``commit()`` that raises. That
   is indeterminate, not failed -- PostgreSQL may have committed and the
   acknowledgement been lost on the way back -- so the blob is deliberately
@@ -700,13 +716,56 @@ def _stamp_marker(blob_path) -> None:
     directory, and one line costs nothing.
     """
     marker = _marker_path(blob_path)
-    fd = os.open(str(marker), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # O_BINARY for the same reason `_write_blob` takes it: `os.open` is TEXT
+    # mode on this development seat, which would make the content the blob's
+    # name plus CR LF rather than the name plus a newline this docstring and
+    # the notes' disk bound both claim. Absent on Linux, where it reads 0.
+    fd = os.open(str(marker),
+                 os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0),
+                 0o600)
     try:
         os.write(fd, blob_path.name.encode("utf-8") + b"\n")
         os.fsync(fd)
     finally:
         os.close(fd)
     _fsync_dir(blob_path.parent)
+
+
+def _delete_blob_then_marker(blob_path) -> tuple[str, bool]:
+    """Remove a blob and then its marker, with the FIRST removal made durable
+    before the second is issued. Answers (the blob's state, marker gone).
+
+    THE ORDER IS ONE WAY ROUND, AND SINCE THIS FUNCTION EXISTS IT IS A
+    PERSISTENCE ORDER RATHER THAN A CALL ORDER. The blob goes first, so the
+    only state an interruption can leave is a marker whose blob is absent --
+    disposition 5, cleared by the next pass at no cost. The other way round
+    leaves an unreferenced blob with nothing naming it, which is the one
+    state this whole mechanism exists to make unreachable.
+
+    ISSUING THE TWO UNLINKS IN THAT ORDER DOES NOT SURVIVE A HOST CRASH ON
+    ITS OWN. Neither removal is durable until the directory entry is
+    flushed, and a filesystem promises no order between two un-synced entry
+    changes: a power loss can persist the marker's removal while recovering
+    the blob's entry, which is exactly the forbidden state. `_fsync_dir`
+    between the two is what makes the order a property of the disk instead
+    of a property of these lines (#507 -- a crash window that is MOVED is
+    not a crash window that is CLOSED).
+
+    ONE FUNCTION, SO THERE IS ONE SITE. The determinate cleanup
+    (`_release_marked_blob`) and the orphan sweep both delete a blob and
+    then its marker; a barrier added to one and not the other is the class
+    defect rather than the line defect (#432). Both call this.
+
+    A FAILED BLOB UNLINK KEEPS THE MARKER and takes no barrier: the blob
+    survived, so the marker is what offers it to the next pass, and there is
+    no removal to persist. The caller owns the wording, because only the
+    caller knows what the file's survival means.
+    """
+    state = _unlink_existing(blob_path)
+    if state == "failed":
+        return state, False
+    _fsync_dir(blob_path.parent)
+    return state, _unlink_if_present(_marker_path(blob_path))
 
 
 class _MarkedBlob:
@@ -797,6 +856,13 @@ def _release_marked_blob(own: "_MarkedBlob") -> bool:
     would leave an unreferenced blob with nothing naming it, which is the one
     state this whole mechanism exists to make unreachable.
 
+    AND THE ORDER IS MADE PERSISTENT, not merely issued: the two unlinks go
+    through `_delete_blob_then_marker`, which flushes the directory entry
+    between them so a host crash cannot recover the blob while the marker's
+    removal has already persisted. The sweep's own deletion arm calls the
+    same function, because the barrier belongs to the OPERATION and not to
+    one of its two callers (#432).
+
     An unlink that RAISES therefore keeps the marker: the blob survived, and
     the marker is what will offer it to the sweep. The caller says so in its
     line rather than reporting a discard that did not happen.
@@ -810,10 +876,11 @@ def _release_marked_blob(own: "_MarkedBlob") -> bool:
     """
     with own.lock:
         own.discarded = True
-        blob_gone = _unlink_if_present(own.path)
+        state, marker_gone = _delete_blob_then_marker(own.path)
+        blob_gone = state != "failed"
         if blob_gone:
             own.written = False
-            if own.marked and _unlink_if_present(_marker_path(own.path)):
+            if own.marked and marker_gone:
                 own.marked = False
     _MARKERS_IN_FLIGHT.discard(own.path.name)
     return blob_gone
@@ -896,9 +963,60 @@ def _compress_blob(scrubbed: str) -> bytes:
 
 
 def _write_blob(path, data: bytes) -> None:
-    """Write the blob, off the event loop -- see the call site."""
-    with open(path, "wb") as f:
-        f.write(data)
+    """Write the blob and make it DURABLE before this call returns.
+
+    THIS IS A PERSISTENCE CALL, NOT A WRITE, and the difference is what the
+    row that follows it is allowed to claim. `write()` puts the bytes in the
+    page cache and `close()` promises nothing about them, so a host power
+    loss after the INSERT has committed could recover a row naming a blob
+    that is empty, truncated, or absent from the directory altogether -- a
+    detail view reporting a read error over a file the database says exists.
+    An ordering that survives the PROCESS is not an ordering that survives
+    the HOST (#507).
+
+    TWO BARRIERS, IN THIS ORDER, AND BOTH BEFORE THE INSERT:
+
+      * `os.fsync(fd)` commits the CONTENTS of the file;
+      * `_fsync_dir(path.parent)` commits the directory ENTRY that names
+        them. On Linux -- which is what the api container runs -- `fsync` on
+        the file's own descriptor says nothing about the entry, so without
+        this a crash can recover fully written bytes under no name at all.
+
+    WHERE THE COST IS CHARGED, because a barrier outside the budget is a
+    barrier that lengthens the span the sweep's age gate is derived from.
+    Both run inside `_guarded_write`, on the worker thread, inside the
+    reserve section -- and the handler awaits that section under
+    `_span_budget`, as it does the INSERT and the commit. So the flush is
+    spent out of the SAME `T`: a volume whose flush does not return ENDS the
+    span and refuses 503 rather than extending it.
+
+    IT DOES NOT SWALLOW. A blob that cannot be made durable raises; the
+    section's cleanup removes what it wrote and the upload is refused, which
+    is the direction `_stamp_marker` fails in for the same reason (#276).
+
+    The mode is the one the builtin `open(path, "wb")` this replaced used --
+    0o666 less the process umask -- so nothing about who can read a stored
+    blob changed with the barriers.
+    """
+    # O_BINARY IS NOT COSMETIC ON THIS DEVELOPMENT SEAT. `os.open` defaults to
+    # TEXT mode on Windows, where every 0x0A in a gzip stream would be written
+    # as 0x0D 0x0A -- a stored blob one byte longer than the row says and not
+    # a gzip file any more. The builtin `open(path, "wb")` this replaced set
+    # the flag itself; doing it by hand means saying so. The constant does not
+    # exist on Linux, where the api runs, so it reads 0 there.
+    fd = os.open(str(path),
+                 os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0),
+                 0o666)
+    try:
+        # os.write may write fewer bytes than it was given; one call is a
+        # partial file waiting for a large enough blob.
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view):]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    _fsync_dir(path.parent)
 
 
 def _guarded_stamp(own: "_MarkedBlob") -> None:
@@ -982,8 +1100,34 @@ def _span_budget(deadline: float) -> float:
     return left
 
 
+async def _release_marked_blob_off_loop(own: "_MarkedBlob") -> bool:
+    """`_release_marked_blob`, performed on a worker thread.
+
+    IT TAKES THE BLOB'S LOCK, AND A WORKER MAY BE HOLDING THAT LOCK THROUGH
+    AN 8 MiB WRITE AND TWO FSYNCS. Called on the event loop, this cleanup
+    therefore stops every other request on this worker for as long as that
+    write takes -- and the one caller that can reach it while a write is
+    still in flight is a CANCELLED section: loop close, or the container's
+    SIGTERM during a rebuild. That is the moment the loop has least business
+    being frozen, because what is queued behind it is every other seat's
+    queue join, match report and chat poll.
+
+    So the WAIT happens in a thread and the loop stays free. Every other
+    caller of `_release_marked_blob` runs after the write has returned, where
+    the lock is uncontended and a direct call blocks nobody; those are left
+    as they are rather than routed through an executor hop they do not need.
+
+    IT IS NOT MADE OPTIONAL OR GIVEN UP ON. What the lock buys is that a
+    cleanup cannot leave behind a file a worker creates after it, and a
+    cleanup that abandoned the wait would put that state back (LENS-2). The
+    wait is bounded by the write it is waiting for, which is bounded by the
+    volume's own stall ceiling and by `T`.
+    """
+    return await asyncio.to_thread(_release_marked_blob, own)
+
+
 async def _reserve_stamp_and_write(own: "_MarkedBlob", data: bytes,
-                                   steam_id: str) -> None:
+                                   steam_id: str, span_deadline: float) -> None:
     """MEASURE, STAMP, WRITE -- one section, and cancellation cannot separate
     it into parts.
 
@@ -1022,6 +1166,21 @@ async def _reserve_stamp_and_write(own: "_MarkedBlob", data: bytes,
     `_guarded_stamp`, `_guarded_write`). So the cleanup either removes a file
     that exists or stops one from being made, and "a blob with no marker"
     is unreachable rather than unlikely.
+
+    THAT CLEANUP RUNS IN A THREAD, NOT ON THE LOOP. It has to take the blob's
+    lock, and the worker may hold that lock through the write and its two
+    fsyncs; taking it on the event loop stopped every other request on this
+    worker for that whole time, in the one window -- loop close, container
+    SIGTERM -- where that is least affordable. The ordering is unchanged and
+    so is the guarantee; only the thread that waits moved
+    (`_release_marked_blob_off_loop`).
+
+    AND EVERY HOP INSIDE THIS SECTION SPENDS `span_deadline`. The stamp and
+    the write are each awaited for what is LEFT of the one deadline the
+    handler took, so the durability barriers they perform are charged to `T`
+    exactly as the INSERT and the commit are: a volume whose flush does not
+    return ENDS the span rather than extending the interval the sweep's age
+    gate is derived from.
     """
     hold_started = time.monotonic()
 
@@ -1096,7 +1255,15 @@ async def _reserve_stamp_and_write(own: "_MarkedBlob", data: bytes,
         # a crash between them.
         _MARKERS_IN_FLIGHT.add(own.path.name)
         own.marked = True
-        await asyncio.to_thread(_guarded_stamp, own)
+        # EACH HOP CARRIES WHAT IS LEFT OF THE ONE DEADLINE. The stamp is two
+        # fsyncs and the write below is up to 8 MiB plus two more, and both
+        # are inside the marked span -- so both spend `T` rather than sitting
+        # outside it. `asyncio.to_thread` cannot stop the worker, so what the
+        # ceiling ends is this coroutine's WAIT: the section stops waiting,
+        # runs its cleanup, and the cleanup's `discarded` flag is what stops
+        # the thread from creating anything afterwards.
+        await asyncio.wait_for(asyncio.to_thread(_guarded_stamp, own),
+                               _span_budget(span_deadline))
 
         # Off the event loop, like the compression in the handler: this is a
         # write of up to 8 MiB, and on a slow or contended volume it blocks
@@ -1107,7 +1274,8 @@ async def _reserve_stamp_and_write(own: "_MarkedBlob", data: bytes,
         # it; releasing between the two is the gap the lock exists to close --
         # and NOT releasing it on a cancellation is what makes that true when
         # the request goes away mid-write.
-        await asyncio.to_thread(_guarded_write, own, data)
+        await asyncio.wait_for(asyncio.to_thread(_guarded_write, own, data),
+                               _span_budget(span_deadline))
     except BaseException:
         own.failed = True
         raise
@@ -1125,18 +1293,33 @@ async def _reserve_stamp_and_write(own: "_MarkedBlob", data: bytes,
         # would hand the next upload a volume this section may still be
         # writing to, which is the bound the lock exists to hold and the same
         # class of mistake the cancelled `await` used to make (R2-M1).
-        if own.failed or own.abandoned:
-            if not _release_marked_blob(own):
-                print(f"[AUTO-LOG] the blob for {own.path.name} could not be "
-                      f"removed after a failed or abandoned write; it SURVIVES "
-                      f"and its {_ORPHAN_MARKER} marker is kept so the orphan "
-                      f"sweep collects it")
-
-        # The in-flight stamp is cleared BEFORE the release, so the next
-        # waiter can never read a stamp belonging to a pass that has already
-        # handed the lock on.
-        _BLOB_WRITE_STARTED[0] = 0.0
-        _BLOB_RESERVE_LOCK.release()
+        #
+        # AND IT WAITS IN A THREAD, NEVER ON THE EVENT LOOP. This is the one
+        # call site that can reach the cleanup while a worker still holds the
+        # blob's lock -- a cancelled section, i.e. loop close or the
+        # container's SIGTERM -- and taking that lock on the loop froze every
+        # other request on this worker for the length of the write. The
+        # ordering above is unchanged; only the thread that waits is.
+        try:
+            if own.failed or own.abandoned:
+                if not await _release_marked_blob_off_loop(own):
+                    print(f"[AUTO-LOG] the blob for {own.path.name} could not "
+                          f"be removed after a failed or abandoned write; it "
+                          f"SURVIVES and its {_ORPHAN_MARKER} marker is kept "
+                          f"so the orphan sweep collects it")
+        finally:
+            # THE LOCK IS RELEASED WHATEVER HAPPENED TO THE CLEANUP ABOVE. A
+            # second cancellation delivered while this coroutine waits in its
+            # own `finally` must not leave the volume lock held for the life
+            # of the process: the cleanup goes on in its thread, and the only
+            # thing lost is the ordering guarantee, in a window where the
+            # process is already being torn down.
+            #
+            # The in-flight stamp is cleared BEFORE the release, so the next
+            # waiter can never read a stamp belonging to a pass that has
+            # already handed the lock on.
+            _BLOB_WRITE_STARTED[0] = 0.0
+            _BLOB_RESERVE_LOCK.release()
 
         # MEASURED, whichever way this went. This span -- the wait for the
         # volume lock plus the measure-and-write under it -- is the part of
@@ -1437,7 +1620,7 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
     span_deadline = span_started + AUTO_LOG_MARKED_SPAN_DEADLINE_S
     own = _MarkedBlob(path)
     section = asyncio.ensure_future(
-        _reserve_stamp_and_write(own, data, req.steam_id))
+        _reserve_stamp_and_write(own, data, req.steam_id, span_deadline))
     section.add_done_callback(_drain_section_error)
     try:
         await asyncio.wait_for(asyncio.shield(section),
@@ -1917,8 +2100,11 @@ async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None
        a crash between the two, or an unlink that raised -- and it is the
        reason `_clear_marker` is allowed to fail.
     3. A marker whose blob the table refuses to name, once past the age gate,
-       has its BLOB removed and then its marker. That order is what keeps a
-       crash between the two unlinks harmless.
+       has its BLOB removed and then its marker, with the blob's removal made
+       DURABLE in between (`_delete_blob_then_marker`). That is what keeps a
+       host crash between the two unlinks harmless: issuing them in order is
+       not enough, because a filesystem persists two un-synced entry changes
+       in whichever order it likes.
     4. `bug_reports` naming NO blob whatsoever, while markers exist, REFUSES
        the whole pass. That reading is not "everything here is an orphan"; it
        is "this process is talking to a database that does not own this
@@ -1946,6 +2132,22 @@ async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None
     four, so the number an operator reads as the drain rate can be checked
     against the population it came out of rather than taken on trust.
 
+    A DISPOSITION IS REPORTED ONLY WHEN THE UNLINK THAT PERFORMS IT
+    SUCCEEDED. Every arm that removes a marker reads the result: a marker a
+    permission or I/O fault leaves on the volume is reported as NOT cleared
+    and named for the next tick, never as `cleared` under a line an operator
+    reads as work that was done. `unremovable` is the one term for "this
+    candidate is unchanged on the volume and the next tick retries it",
+    whichever of the two unlinks could not be taken -- one term, one meaning
+    (#430). A removed blob whose marker survived is still `removed`, because
+    the byte reclaim is what that term counts; the surviving marker is
+    reported beside it and comes back next tick as disposition 5.
+
+    THE TWO UNLINKS GO THROUGH `_delete_blob_then_marker`, which is also
+    what the determinate cleanup calls: the blob-before-marker order, and
+    the directory flush that makes that order survive a host crash, belong
+    to the OPERATION and not to one of its two callers (#432).
+
     Read-only on the database: the transaction the SELECT opens is ENDED with
     a rollback, for the same reason the early returns above are (an
     idle-in-transaction connection holds back the vacuum horizon).
@@ -1963,6 +2165,7 @@ async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None
     if not names:
         return {"candidates": 0, "markers": markers_total, "in_flight": owned,
                 "young": young, "orphans": 0, "unlinked": 0, "cleared": 0,
+                "uncleared": 0, "markers_kept": 0,
                 "marker_only": 0, "unremovable": 0, "deferred": 0,
                 "refused": False}
 
@@ -1977,7 +2180,8 @@ async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None
               f"full of orphans -- nothing removed")
         return {"candidates": len(names), "markers": markers_total,
                 "in_flight": owned, "young": young, "orphans": 0,
-                "unlinked": 0, "cleared": 0, "marker_only": 0,
+                "unlinked": 0, "cleared": 0, "uncleared": 0,
+                "markers_kept": 0, "marker_only": 0,
                 "unremovable": 0, "deferred": 0, "refused": True}
 
     # CHUNKED, and the predicate is the same one in every chunk. A name absent
@@ -1996,12 +2200,22 @@ async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None
     # marker over a blob the table names is a commit that landed; the file is
     # referenced and must never be touched.
     cleared = 0
+    uncleared = 0
     for name in (n for n in names if n in known):
         if _unlink_if_present(base / (name + _ORPHAN_MARKER_SUFFIX)):
             cleared += 1
             print(f"[AUTO-LOG] orphan sweep: cleared {_ORPHAN_MARKER}={name} -- "
                   f"a bug_reports row names it, so the commit landed and the "
                   f"blob stays")
+        else:
+            # NOT cleared, and the line says so. The blob is referenced and
+            # safe either way; what a `cleared` here would cost is an
+            # operator's reading of a marker that keeps coming back.
+            uncleared += 1
+            print(f"[AUTO-LOG] orphan sweep: {_ORPHAN_MARKER}={name} is over a "
+                  f"blob a bug_reports row names, and the marker could NOT be "
+                  f"removed; the blob stays and the next tick retries the "
+                  f"marker")
 
     # `names` is oldest-first, so `all_orphans` is too and the loop below
     # reaches the oldest unreferenced blobs first rather than whichever the
@@ -2014,6 +2228,7 @@ async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None
     unlinked = 0
     marker_only = 0
     unremovable = 0
+    markers_kept = 0
     deferred = 0
     for name in all_orphans:
         # THE BUDGET IS SPENT ON REMOVALS AND ON NOTHING ELSE. `limit` counts
@@ -2026,39 +2241,53 @@ async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None
             deferred += 1
             continue
 
-        # THE BLOB FIRST, THEN ITS MARKER. A crash between the two leaves a
-        # marker whose blob is absent, which this pass then reads as
-        # disposition 5; the other order would leave an unreferenced blob with
-        # nothing naming it, which is the state this whole mechanism exists to
-        # make unreachable.
-        state = _unlink_existing(base / name)
-        if state == "failed":
+        # THE BLOB FIRST, THEN ITS MARKER, AND THE FIRST REMOVAL MADE DURABLE
+        # BEFORE THE SECOND IS ISSUED. A crash between the two then leaves a
+        # marker whose blob is absent, which this pass reads as disposition 5;
+        # the other order -- or this order with no barrier between, which a
+        # filesystem may persist either way round -- leaves an unreferenced
+        # blob with nothing naming it, the state this mechanism exists to make
+        # unreachable. `_delete_blob_then_marker` is the one site that
+        # performs it, and the determinate cleanup calls the same function.
+        state, marker_gone = _delete_blob_then_marker(base / name)
+        stuck = (state == "failed") or (state == "absent" and not marker_gone)
+        if stuck:
             # COUNTED, for the same reason disposition 5 is counted separately.
             # A candidate that is neither removed, nor marker-only, nor
             # deferred, and appears in none of the three, is a hole in this
             # line's arithmetic -- and how much of the leak drained is exactly
-            # the reading an operator takes from it (#304). Blob AND marker are
-            # kept, so the next tick retries it.
+            # the reading an operator takes from it (#304). ONE term for one
+            # state: nothing on the volume changed for this candidate and the
+            # next tick retries it, whichever of the two unlinks refused.
             unremovable += 1
+            why = ("its blob is still on the volume and its marker is kept"
+                   if state == "failed" else
+                   "it has no blob on the volume and the marker itself would "
+                   "not unlink")
             print(f"[AUTO-LOG] orphan sweep: {_ORPHAN_MARKER}={name} could not "
-                  f"be removed; its marker is kept and the next tick retries it")
+                  f"be removed -- {why}; nothing was reclaimed or cleared and "
+                  f"the next tick retries it")
             continue
         if state == "absent":
             # DISPOSITION 5. Nothing was reclaimed, so nothing is counted as
-            # removed: the marker was the only leftover. `_unlink_if_present`
-            # cannot tell this from a real removal by design, which is why
-            # this arm asks `_unlink_existing` instead.
+            # removed: the marker was the only leftover, and it is reported
+            # cleared only because the unlink above actually took it.
+            # `_unlink_if_present` cannot tell this from a real removal by
+            # design, which is why this arm asks `_unlink_existing` instead.
             marker_only += 1
-            _unlink_if_present(base / (name + _ORPHAN_MARKER_SUFFIX))
             print(f"[AUTO-LOG] orphan sweep: cleared {_ORPHAN_MARKER}={name} -- "
                   f"marked, past the gate and NO BLOB on the volume; the marker "
                   f"was the only leftover and nothing was reclaimed")
             continue
         unlinked += 1
-        _unlink_if_present(base / (name + _ORPHAN_MARKER_SUFFIX))
+        if not marker_gone:
+            markers_kept += 1
+        after = ("its marker is cleared" if marker_gone else
+                 "its marker could NOT be removed and SURVIVES, so the next "
+                 "tick reads it as a marker with no blob")
         print(f"[AUTO-LOG] orphan sweep: removed {_ORPHAN_MARKER}={name} -- "
               f"marked, older than {int(_ORPHAN_MIN_AGE_S)}s and no "
-              f"bug_reports row names it")
+              f"bug_reports row names it; {after}")
 
     # THE LINE ACCOUNTS FOR EVERY CANDIDATE, and the four terms after
     # "unreferenced" SUM to it: removed + marker-only + unremovable +
@@ -2071,13 +2300,16 @@ async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None
           f"{owned} owned by a live upload, {young} younger than the "
           f"{int(_ORPHAN_MIN_AGE_S if min_age_s is None else min_age_s)}s gate, "
           f"{len(names)} offered to the database, {cleared} cleared over a "
-          f"committed row, {len(all_orphans)} unreferenced, {unlinked} removed, "
+          f"committed row ({uncleared} over a committed row that would not "
+          f"clear), {len(all_orphans)} unreferenced, {unlinked} removed "
+          f"({markers_kept} of them leaving a marker behind), "
           f"{marker_only} marker-only with no blob to reclaim, "
           f"{unremovable} that could not be removed, "
           f"{deferred} left for the next tick")
     return {"candidates": len(names), "markers": markers_total,
             "in_flight": owned, "young": young, "orphans": len(all_orphans),
-            "unlinked": unlinked, "cleared": cleared,
+            "unlinked": unlinked, "cleared": cleared, "uncleared": uncleared,
+            "markers_kept": markers_kept,
             "marker_only": marker_only, "unremovable": unremovable,
             "deferred": deferred, "refused": False}
 

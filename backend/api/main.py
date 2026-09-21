@@ -35199,8 +35199,10 @@ async def submit_bug_report(req: BugReportRequest, request: Request, db: AsyncSe
     await db.flush()  # need report.id for the filename
 
     if log_blob:
+        attempted_path = None
         try:
             path = _bug_report_log_path(str(report.id))
+            attempted_path = path
             data = _gzip.compress(log_blob.encode("utf-8", errors="replace"))
             with open(path, "wb") as f:
                 f.write(data)
@@ -35229,10 +35231,35 @@ async def submit_bug_report(req: BugReportRequest, request: Request, db: AsyncSe
             #
             # The response already carries `log_persisted: false`, so the
             # client half was told. This is the half nobody was told: the row.
+            #
+            # AND THE PARTIAL FILE GOES BEFORE THE ROW COMMITS. `open()` can
+            # succeed and `write()` or `flush()` fail, which leaves a prefix
+            # of the gzip stream on the volume under a name the row will NOT
+            # carry -- log_filename stays NULL. A player-filed attachment
+            # never receives an orphan-candidate marker, so the automatic
+            # path's sweep has no way to see it, and `prune_auto_logs` walks
+            # ROWS of kind='auto' and would never name it either: nothing in
+            # this tree would ever collect it, on the volume this route is
+            # most protective of. So this arm removes what it wrote, and
+            # says whether it managed to.
+            removed = "no file was created"
+            if attempted_path is not None:
+                try:
+                    os.unlink(str(attempted_path))
+                    removed = "the partial file was removed"
+                except FileNotFoundError:
+                    removed = "no file was created"
+                except OSError as rm:
+                    # NAMED, because nothing else will find it: it carries no
+                    # marker and no row. A line an operator can grep is the
+                    # only collector this state has.
+                    removed = (f"the partial file {attempted_path.name} could "
+                               f"NOT be removed ({type(rm).__name__}) and is "
+                               f"unreferenced on the volume")
             report.log_bytes = 0
             print(f"[BUG-REPORT] log persistence FAILED for {report.id}: "
-                  f"{ex}; the row is committed with log_bytes=0 to record "
-                  f"that a log was attached and could not be stored")
+                  f"{ex}; {removed}; the row is committed with log_bytes=0 to "
+                  f"record that a log was attached and could not be stored")
 
     # Seed the activity log with a "created" event so the timeline is complete.
     db.add(BugReportEvent(
