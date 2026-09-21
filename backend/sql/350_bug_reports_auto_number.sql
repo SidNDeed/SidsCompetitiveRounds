@@ -106,6 +106,13 @@ BEGIN;
 DO $m350g$
 DECLARE
     v_default text;
+    -- EXACTLY what 336 leaves, and nothing else. 336 declares
+    -- `kind VARCHAR(16) NOT NULL DEFAULT 'report'`, which PostgreSQL renders
+    -- in information_schema.columns.column_default as this string. It is
+    -- written out here so the comparison below is an equality against a value
+    -- this file names, rather than a pattern that a drifted default can
+    -- satisfy by accident.
+    c_336_default CONSTANT text := '''report''::character varying';
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM information_schema.columns
@@ -133,11 +140,23 @@ BEGIN
     -- `NULL OR false` is NULL, and a CHECK that evaluates to NULL ADMITS the
     -- row. So a missing default does not fail loudly here -- it makes the
     -- human/automatic split a thing the schema no longer enforces, quietly.
+    --
+    -- EQUALITY AGAINST 336's EXACT RENDERING, NEVER A SUBSTRING. This test
+    -- used to be `NOT LIKE '%report%'`, which is satisfied by any default
+    -- merely CONTAINING that word -- `'auto_report'::character varying`,
+    -- `'reported'::character varying`, a function call whose text mentions it.
+    -- A drifted default of that shape passed this guard, and then every
+    -- old-code bug-form INSERT during the migration-before-code window landed
+    -- a `kind` this file's CHECK does not recognise. What this file needs is
+    -- not "something reportish"; it is the one value 336 installs, because
+    -- that is the value the CHECK below and the handler are written against.
+    -- So the comparison is `IS DISTINCT FROM` -- which is also how a NULL
+    -- default (no default at all) is refused by the same line.
     SELECT column_default INTO v_default
       FROM information_schema.columns
      WHERE table_name = 'bug_reports' AND column_name = 'kind';
-    IF v_default IS NULL OR v_default NOT LIKE '%report%' THEN
-        RAISE EXCEPTION '350: bug_reports.kind has no ''report'' default (it reads %), so a writer that does not name the column leaves it NULL and the human/automatic split is not enforced. Apply 336_bug_reports_kind.sql (either copy) before this file', COALESCE(v_default, 'NULL');
+    IF v_default IS DISTINCT FROM c_336_default THEN
+        RAISE EXCEPTION '350: bug_reports.kind must carry exactly the default 336 installs, %, and it reads % instead. A default that merely mentions ''report'' is not the same fact: rows written by code that does not name the column would take a value this file''s CHECK was not written against. Apply 336_bug_reports_kind.sql (either copy), or repair the default with ALTER TABLE bug_reports ALTER COLUMN kind SET DEFAULT ''report'', before this file', c_336_default, COALESCE(v_default, 'NULL');
     END IF;
 END $m350g$;
 
