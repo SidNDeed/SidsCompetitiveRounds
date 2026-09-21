@@ -3145,14 +3145,17 @@ def test_a_marker_a_live_upload_owns_is_never_swept(logdir):
 
 
 def test_the_marker_age_gate_is_bounded_by_the_handlers_own_deadline(logdir):
-    """THE BOUND, STATED SO IT CAN BE FALSIFIED.
+    """THE ARITHMETIC HALF OF THE BOUND, AND WHERE THE BUDGET IS SPENT.
 
-    Every instant in which a marker exists and its row does not lies inside the
-    marked span, and that span is bounded by T --
-    `AUTO_LOG_MARKED_SPAN_DEADLINE_S` -- enforced by the `asyncio.wait_for`
-    around the shielded reserve section in `upload_auto_log`. The gate is
-    derived from T and from the tick, so a write stalled for the whole of T
-    cannot reach it.
+    What T bounds is the interval between a marker's creation and the last
+    instant at which a row naming its blob could still be INSERTED, and the
+    gate is derived from it. This test holds the arithmetic (`gate > T + one
+    tick`) and the three sites that spend the budget. The SPAN ITSELF is
+    measured in `test_the_marked_span_deadline_covers_the_insert_and_the_commit`
+    below, because a substring is not a measurement: an earlier version of
+    this test asserted only this arithmetic and the presence of one `wait_for`
+    call, and both stayed true while the INSERT and the commit ran under no
+    ceiling at all (#342/#431).
     """
     T = auto_logs.AUTO_LOG_MARKED_SPAN_DEADLINE_S
     assert auto_logs._ORPHAN_MIN_AGE_S > T + auto_logs.AUTO_LOG_SWEEP_EVERY_S, (
@@ -3161,13 +3164,19 @@ def test_the_marker_age_gate_is_bounded_by_the_handlers_own_deadline(logdir):
         "swept" % (auto_logs._ORPHAN_MIN_AGE_S, T, auto_logs.AUTO_LOG_SWEEP_EVERY_S))
 
     handler = _normalise(inspect.getsource(auto_logs.upload_auto_log))
-    assert handler.count("AUTO_LOG_MARKED_SPAN_DEADLINE_S)") == 1, (
-        "the deadline is enforced at %d site(s) in the handler, not one"
-        % handler.count("AUTO_LOG_MARKED_SPAN_DEADLINE_S)"))
+    assert handler.count("_span_budget(span_deadline)") == 3, (
+        "the span's one deadline is spent at %d await(s) in the handler. The "
+        "span has three -- the shielded section, the INSERT and the commit -- "
+        "and an await that does not take the budget is outside the bound"
+        % handler.count("_span_budget(span_deadline)"))
     assert "asyncio.wait_for(asyncio.shield(section)" in handler, (
         "the deadline is no longer the wait_for around the SHIELDED section. "
         "Anchored on the prefix rather than the whole call, so a respelling of "
         "the timeout argument is not read as the shield going away")
+    assert "row = (await asyncio.wait_for(db.execute(" in handler, (
+        "the INSERT is awaited outside the span's deadline")
+    assert "await asyncio.wait_for(db.commit(), left)" in handler, (
+        "the commit is awaited outside the span's deadline")
 
     # MUTATION: the gate lowered below T. A blob whose marker is younger than
     # the deadline the handler is still inside becomes collectable, which is
@@ -3347,16 +3356,19 @@ def test_a_marker_whose_blob_is_already_gone_is_cleared(logdir):
     """The state a crash between the two unlinks leaves, and it costs nothing.
 
     The blob goes before its marker, so the only thing an interrupted cleanup
-    can leave is a marker naming a file that is absent. Unlinking an absent
-    file is the outcome this pass wanted, so the marker is cleared and the pass
-    reports the removal rather than retrying it for ever.
+    can leave is a marker naming a file that is absent. The marker is cleared,
+    and the pass reports it as `marker_only` rather than as a removal: nothing
+    was reclaimed, and a counter that says otherwise is what an operator reads
+    when deciding whether a leak is draining (#304).
     """
     name = "aaaaaaaa-0000-4000-8000-0000000000cc.log.gz"
     _mark(logdir, name, age_s=10_000)          # marker, no blob
     db = Scripted({"COUNT(*) AS n FROM bug_reports": [[{"n": 7}]],
                    "SELECT log_filename FROM bug_reports": [[]]})
     out = _run(auto_logs.prune_orphan_blobs(db, min_age_s=3600))
-    assert out["unlinked"] == 1, out
+    assert out["marker_only"] == 1 and out["unlinked"] == 0, (
+        "a marker whose blob was never on the volume was counted as a blob "
+        "removed: %r" % (out,))
     assert _marker_names(logdir) == [], (
         "the marker for an absent blob survived, so this pass would re-ask the "
         "database about it on every tick for ever")
@@ -4286,3 +4298,535 @@ def test_350_preconditions_on_the_exact_336_default_not_a_substring():
     assert refusal[0].count("%") >= 2, (
         "the refusal prints fewer than two values; it has to say what it "
         "wanted and what it read: %r" % (refusal[0],))
+
+
+# ── the marked span's deadline, and the two awaits it used not to cover ──────
+
+
+def _handler_mutant(pairs):
+    """`upload_auto_log`'s body with `pairs` applied, compiled WITHOUT its
+    route decorator.
+
+    The decorator is dropped on purpose: executing `@router.post("/auto")`
+    would register a SECOND copy of the route on the module's real router, so
+    a harness meant to measure the application would have changed it. Every
+    anchor is still asserted to occur exactly once inside the function's own
+    span before anything is read from the result (#432/#279).
+    """
+    src = textwrap.dedent(inspect.getsource(auto_logs.upload_auto_log))
+    head, _, rest = src.partition("\n")
+    assert head.startswith("@router.post("), (
+        "upload_auto_log no longer starts with its route decorator, so this "
+        "harness is stripping the wrong line: %r" % (head,))
+    src = rest
+    for anchor, replacement in pairs:
+        assert src.count(anchor) == 1, (
+            "the mutation anchor occurs %d time(s) in upload_auto_log, not "
+            "once -- re-derive it before reading anything into the result "
+            "(%r)" % (src.count(anchor), anchor))
+        mutant = src.replace(anchor, replacement)
+        assert mutant != src, "the mutation changed nothing"
+        src = mutant
+    namespace = dict(vars(auto_logs))
+    exec(compile(src, "<mutant:upload_auto_log>", "exec"), namespace)
+    return namespace["upload_auto_log"]
+
+
+class _SlowInsert(Scripted):
+    """A session whose INSERT does not answer inside the span's deadline."""
+
+    def __init__(self, stall, **kw):
+        super().__init__(**kw)
+        self.stall = stall
+
+    async def execute(self, statement, params=None):
+        if "INSERT INTO bug_reports" in " ".join(str(statement).split()):
+            await asyncio.sleep(self.stall)
+        return await super().execute(statement, params)
+
+
+class _SlowCommit(Scripted):
+    """A session whose COMMIT does not answer inside the span's deadline.
+
+    The state it models is the one the bound exists for: the bytes are on the
+    volume, a marker names them, and the database has stopped answering. No
+    `statement_timeout` applies to COMMIT, so nothing else in the stack ends
+    this wait.
+    """
+
+    def __init__(self, stall, **kw):
+        super().__init__(**kw)
+        self.stall = stall
+        self.name_held_during_rollback = None
+
+    async def commit(self):
+        await asyncio.sleep(self.stall)
+        self.committed += 1
+
+    async def rollback(self):
+        self.name_held_during_rollback = set(auto_logs._MARKERS_IN_FLIGHT)
+        self.rolled_back += 1
+
+
+def _slow_insert_db(stall):
+    return _SlowInsert(stall, script={
+        COUNT_KEY: [[_bucket(0)]],
+        PLAYER_KEY: [[{"id": PID}]],
+        INSERT_KEY: [[{"bug_number": 4242}]],
+    })
+
+
+def _slow_commit_db(stall):
+    return _SlowCommit(stall, script={
+        COUNT_KEY: [[_bucket(0)]],
+        PLAYER_KEY: [[{"id": PID}]],
+        INSERT_KEY: [[{"bug_number": 4242}]],
+    })
+
+
+def test_the_marked_span_deadline_covers_the_insert_and_the_commit(
+        logdir, verified, monkeypatch, capsys):
+    """LENS-R3-1: T BOUNDS THE WHOLE SPAN, MEASURED RATHER THAN ASSERTED.
+
+    The deadline used to be one `wait_for` around the shielded section, which
+    ends when the write returns. The INSERT and the `commit()` after it ran
+    under no ceiling, so `_ORPHAN_MIN_AGE_S`'s derivation -- "a stalled write
+    cannot reach the gate" -- was a sentence about code that did not exist.
+    What kept a live upload's marker out of the sweep for that half was the
+    in-process registry, not the deadline.
+
+    Both halves are MEASURED here: a database that will not answer the INSERT,
+    and one that will not answer the COMMIT, each stalling well past T. The
+    handler has to refuse inside T in both cases, and the two dispositions
+    differ because what is knowable differs -- an uncommitted INSERT cannot
+    become visible, so its blob goes; a cancelled COMMIT may have landed, so
+    its blob and marker STAY for the sweep to resolve against the database.
+    """
+    T = 0.25
+    monkeypatch.setattr(auto_logs, "AUTO_LOG_MARKED_SPAN_DEADLINE_S", T)
+    stall = 4.0
+
+    # ── the INSERT half ──────────────────────────────────────────────────
+    started = time.monotonic()
+    with pytest.raises(HTTPException) as e:
+        _run(auto_logs.upload_auto_log(_request(), _slow_insert_db(stall)))
+    took = time.monotonic() - started
+    assert e.value.status_code == 503, e.value.status_code
+    assert took < stall / 2.0, (
+        "the handler waited %.2fs on an INSERT that never answered; the span's "
+        "deadline is %.2fs, so the INSERT is outside the bound" % (took, T))
+    assert _blobs(logdir) == [] and _markers(logdir) == [], (
+        "an INSERT that never committed left its blob behind: blobs=%r "
+        "markers=%r" % (_blobs(logdir), _markers(logdir)))
+    out = capsys.readouterr().out
+    assert "marked-span" in out and "blob discarded" in out, out
+
+    # ── the COMMIT half ──────────────────────────────────────────────────
+    db = _slow_commit_db(stall)
+    started = time.monotonic()
+    with pytest.raises(HTTPException) as e:
+        _run(auto_logs.upload_auto_log(_request(), db))
+    took = time.monotonic() - started
+    assert e.value.status_code == 503, e.value.status_code
+    assert took < stall / 2.0, (
+        "the handler waited %.2fs on a commit that never answered; the span's "
+        "deadline is %.2fs, so the commit is outside the bound" % (took, T))
+    kept = _blobs(logdir)
+    assert len(kept) == 1, (
+        "the indeterminate commit discarded its blob: %r" % (kept,))
+    assert _markers(logdir) == [kept[0] + auto_logs._ORPHAN_MARKER_SUFFIX], (
+        "the blob a commit of unknown outcome kept is not marked, so nothing "
+        "offers it to the sweep: %r" % (_markers(logdir),))
+    assert auto_logs._MARKERS_IN_FLIGHT == set(), (
+        "the finished request still owns its marker, so the sweep would skip "
+        "it for the life of the process: %r" % (auto_logs._MARKERS_IN_FLIGHT,))
+    out = capsys.readouterr().out
+    assert "INDETERMINATE" in out and "marked-span" in out, out
+
+    # THE NAME IS DROPPED BEFORE THE ROLLBACK, not after it. A rollback that
+    # never returns -- on the database that has just stopped answering -- must
+    # not hold the name, because a held name makes the marker permanent.
+    assert db.name_held_during_rollback == set(), (
+        "the request still owned its marker while its rollback was in flight: "
+        "%r" % (db.name_held_during_rollback,))
+
+
+def test_the_span_deadline_reds_when_an_await_inside_it_loses_the_budget(
+        logdir, verified, monkeypatch):
+    """THE MUTANTS AND THEIR INERT TWINS, for the bound above.
+
+    Three sites, three mutants: the commit unwrapped, the INSERT unwrapped,
+    and the budget itself stopped being the remaining span. Each has a twin at
+    the SAME site that re-spells the line without changing what it means, and
+    each twin must leave the case GREEN -- otherwise the control is reacting
+    to the site being touched rather than to the bound going away (#342/#431).
+    """
+    T = 0.25
+    monkeypatch.setattr(auto_logs, "AUTO_LOG_MARKED_SPAN_DEADLINE_S", T)
+    stall = 2.5
+
+    COMMIT_SITE = ("            left = _span_budget(span_deadline)\n"
+                   "            await asyncio.wait_for(db.commit(), left)\n")
+    INSERT_HEAD = ("            left = _span_budget(span_deadline)\n"
+                   "            row = (await asyncio.wait_for(db.execute(\n")
+    INSERT_TAIL = "            ), left)).mappings().first()\n"
+
+    def _refuses_in_time(handler, db):
+        """Whether `handler` refused, and inside the deadline."""
+        started = time.monotonic()
+        try:
+            _run(handler(_request(), db))
+            refused = False
+        except HTTPException:
+            refused = True
+        return refused and (time.monotonic() - started) < stall / 2.0
+
+    # MUTANT 1: the commit is awaited with no ceiling.
+    assert not _refuses_in_time(
+        _handler_mutant([(COMMIT_SITE, "            await db.commit()\n")]),
+        _slow_commit_db(stall)), (
+        "with the commit unwrapped the handler still refused inside the "
+        "deadline, so this control says nothing about the bound")
+
+    # INERT TWIN 1: the same call, the timeout passed by keyword.
+    assert _refuses_in_time(
+        _handler_mutant([(COMMIT_SITE,
+                          "            left = _span_budget(span_deadline)\n"
+                          "            await asyncio.wait_for(db.commit(), "
+                          "timeout=left)\n")]),
+        _slow_commit_db(stall)), (
+        "the inert twin reds, so the control above is reacting to the site "
+        "being edited rather than to the bound")
+
+    # MUTANT 2: the INSERT is awaited with no ceiling.
+    assert not _refuses_in_time(
+        _handler_mutant([
+            (INSERT_HEAD, "            row = (await (db.execute(\n"),
+            (INSERT_TAIL, "            ))).mappings().first()\n")]),
+        _slow_insert_db(stall)), (
+        "with the INSERT unwrapped the handler still refused inside the "
+        "deadline, so this control says nothing about the bound")
+
+    # INERT TWIN 2: the same wrap, the budget bound to a differently-named
+    # local.
+    assert _refuses_in_time(
+        _handler_mutant([
+            (INSERT_HEAD,
+             "            budget = _span_budget(span_deadline)\n"
+             "            row = (await asyncio.wait_for(db.execute(\n"),
+            (INSERT_TAIL, "            ), budget)).mappings().first()\n")]),
+        _slow_insert_db(stall)), (
+        "the inert twin reds, so the control above is reacting to the site "
+        "being edited rather than to the bound")
+
+    # MUTANT 3: the budget stops being what is LEFT of the span. The real
+    # function is captured FIRST -- once it is monkeypatched the module
+    # holds a function compiled from a string, and `inspect.getsource`
+    # cannot read one, so the twin below would error instead of running.
+    real_budget = auto_logs._span_budget
+    budget_site = "    left = deadline - time.monotonic()\n"
+    monkeypatch.setattr(auto_logs, "_span_budget", _exec_mutant(
+        real_budget, budget_site, "    left = 10 ** 6\n"))
+    assert not _refuses_in_time(auto_logs.upload_auto_log,
+                                _slow_commit_db(stall)), (
+        "with the budget no longer derived from the deadline the handler "
+        "still refused in time")
+
+    # INERT TWIN 3: the same arithmetic, spelled with an explicit float.
+    monkeypatch.setattr(auto_logs, "_span_budget", _exec_mutant(
+        real_budget, budget_site,
+        "    left = float(deadline) - time.monotonic()\n"))
+    assert _refuses_in_time(auto_logs.upload_auto_log,
+                            _slow_commit_db(stall)), (
+        "the inert twin reds, so the control above is reacting to the site "
+        "being edited rather than to the budget")
+
+
+def test_cancelling_the_section_task_cannot_leave_a_blob_with_no_marker(
+        logdir, verified, monkeypatch):
+    """LENS-R3-2: THE SECTION'S OWN CANCELLATION, NOT THE HANDLER'S.
+
+    The handler being cancelled is covered above: it is shielded, so the
+    section runs on. The case the failure table did not have a row for is the
+    SECTION TASK itself being cancelled -- container SIGTERM during a rebuild,
+    or `asyncio.run`'s task cancellation at loop close. `asyncio.to_thread`
+    does not stop the worker, so the section's `finally` could run its cleanup
+    while the thread had not yet reached `open()`: the blob unlink answered
+    True on a file that did not exist, the marker was removed, and the thread
+    then created the blob. That is a blob with no marker -- invisible to the
+    orphan sweep, whose population is the marker set, and invisible to the
+    row-walking prune, so permanent on a volume shared with player-filed
+    attachments.
+
+    The construction that closes it is the blob's own lock plus a `discarded`
+    flag checked inside it, so the two orders that remain are both safe. The
+    window is driven deterministically here by holding the worker before it
+    takes the lock.
+    """
+    import threading
+
+    name_of = {}
+    entered, proceed, finished = (threading.Event(), threading.Event(),
+                                  threading.Event())
+    real_guarded = auto_logs._guarded_write
+
+    def make_delayed(target):
+        def delayed(own, data):
+            name_of["blob"] = own.path.name
+            entered.set()
+            proceed.wait(10.0)
+            try:
+                target(own, data)
+            finally:
+                finished.set()
+        return delayed
+
+    def drive(guarded):
+        monkeypatch.setattr(auto_logs, "_guarded_write", make_delayed(guarded))
+        monkeypatch.setattr(auto_logs, "_free_bytes", lambda d: 10 ** 12)
+        monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", asyncio.Lock())
+        for ev in (entered, proceed, finished):
+            ev.clear()
+
+        async def run():
+            own = auto_logs._MarkedBlob(
+                pathlib.Path(str(logdir)) / "bbbbbbbb-0000-4000-8000-0000000000dd.log.gz")
+            task = asyncio.ensure_future(
+                auto_logs._reserve_stamp_and_write(own, b"payload", STEAM))
+            for _ in range(2000):
+                if entered.is_set():
+                    break
+                await asyncio.sleep(0.005)
+            assert entered.is_set(), "the section never reached its write"
+
+            # CANCEL THE SECTION ITSELF. The worker is still queued in front
+            # of the blob's lock, which is the window this test exists for.
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            proceed.set()
+            for _ in range(2000):
+                if finished.is_set():
+                    break
+                await asyncio.sleep(0.005)
+            assert finished.is_set(), "the worker thread never finished"
+
+        try:
+            _run(run())
+        finally:
+            proceed.set()
+            finished.wait(10.0)
+        return sorted(_blobs(logdir)), _markers(logdir)
+
+    # LIVE: the cleanup wins the lock, the worker creates nothing.
+    blobs, markers = drive(real_guarded)
+    assert blobs == [] and markers == [], (
+        "a cancelled section left a file behind: blobs=%r markers=%r"
+        % (blobs, markers))
+    assert auto_logs._MARKERS_IN_FLIGHT == set(), auto_logs._MARKERS_IN_FLIGHT
+
+    # MUTANT: the worker stops asking whether the blob has been discarded --
+    # exactly the tree before this fix. It writes after the cleanup, and what
+    # is left is an unreferenced blob with no marker naming it.
+    guard_site = "        if own.discarded:\n            return\n"
+    blobs, markers = drive(_exec_mutant(
+        real_guarded, guard_site, "        if False:\n            return\n"))
+    assert blobs and markers == [], (
+        "the mutant did not produce the unmarked orphan this case is about, "
+        "so the live assertion above proves nothing: blobs=%r markers=%r"
+        % (blobs, markers))
+    for stale in blobs:
+        (pathlib.Path(str(logdir)) / stale).unlink()
+
+    # INERT TWIN at the same site: the same condition, spelled differently.
+    blobs, markers = drive(_exec_mutant(
+        real_guarded, guard_site,
+        "        if own.discarded is True:\n            return\n"))
+    assert blobs == [] and markers == [], (
+        "the inert twin left a file behind, so the mutant above is reacting "
+        "to the site being edited rather than to the guard: blobs=%r "
+        "markers=%r" % (blobs, markers))
+
+
+def test_a_marker_with_no_blob_does_not_spend_a_removal_slot(logdir):
+    """LENS-R3-3: THE BUDGET BELONGS TO REMOVALS, AND A MARKER IS NOT ONE.
+
+    `_unlink_if_present` answers True for a file that was never there, by
+    design -- the caller asked for it to be gone and it is. The sweep used to
+    read that answer as a removal: it incremented `unlinked`, printed
+    "removed", and spent one of the pass's `limit` slots. A cohort of
+    marker-only leftovers -- which the design produces, a crash between the
+    stamp and `open()` -- therefore sorted oldest-first ahead of the real
+    orphans, consumed the whole budget, and the line reported N removed with N
+    left for the next tick while not one byte had been reclaimed (#304).
+
+    Here: eight marker-only leftovers, older than four real orphans, and a
+    budget of four. All four real blobs have to go on this pass.
+    """
+    blanks = ["aaaaaaaa-0000-4000-8000-%012d.log.gz" % i for i in range(8)]
+    reals = ["bbbbbbbb-0000-4000-8000-%012d.log.gz" % i for i in range(4)]
+    for i, nm in enumerate(blanks):
+        _mark(logdir, nm, age_s=90_000 - i)            # oldest: no blob at all
+    for i, nm in enumerate(reals):
+        (logdir / nm).write_bytes(b"x" * 16)
+        _mark(logdir, nm, age_s=50_000 - i)
+
+    def _db():
+        return Scripted({"COUNT(*) AS n FROM bug_reports": [[{"n": 7}]],
+                         "SELECT log_filename FROM bug_reports": [[]]})
+
+    out = _run(auto_logs.prune_orphan_blobs(_db(), min_age_s=3600, limit=4))
+    assert out["unlinked"] == 4 and out["marker_only"] == 8, (
+        "the marker-only leftovers spent the removal budget: %r" % (out,))
+    assert out["deferred"] == 0, out
+    assert sorted(_blobs(logdir)) == [], (
+        "a real orphan was deferred behind a marker that named nothing: %r"
+        % (_blobs(logdir),))
+    assert _marker_names(logdir) == [], _marker_names(logdir)
+
+    # MUTANT: the collapsed answer restored -- an absent file reads as a
+    # removal again. The eight leftovers take the whole budget and the four
+    # real blobs survive the pass.
+    site = "        state = _unlink_existing(base / name)\n"
+    for i, nm in enumerate(blanks):
+        _mark(logdir, nm, age_s=90_000 - i)
+    for i, nm in enumerate(reals):
+        (logdir / nm).write_bytes(b"x" * 16)
+        _mark(logdir, nm, age_s=50_000 - i)
+    mutant = _exec_mutant(
+        auto_logs.prune_orphan_blobs, site,
+        '        state = "removed" if _unlink_if_present(base / name) else "failed"\n')
+    out = _run(mutant(_db(), min_age_s=3600, limit=4))
+    assert out["unlinked"] == 4 and sorted(_blobs(logdir)) == sorted(reals), (
+        "the mutant did not starve the real orphans, so the live assertion "
+        "above proves nothing: %r / %r" % (out, _blobs(logdir)))
+
+    # INERT TWIN at the same site: the same call, the path built explicitly.
+    for i, nm in enumerate(blanks):
+        _mark(logdir, nm, age_s=90_000 - i)
+    for i, nm in enumerate(reals):
+        (logdir / nm).write_bytes(b"x" * 16)
+        _mark(logdir, nm, age_s=50_000 - i)
+    twin = _exec_mutant(
+        auto_logs.prune_orphan_blobs, site,
+        "        state = _unlink_existing(pathlib.Path(base) / name)\n")
+    out = _run(twin(_db(), min_age_s=3600, limit=4))
+    assert out["unlinked"] == 4 and out["marker_only"] == 8 and _blobs(logdir) == [], (
+        "the inert twin changed the outcome, so the mutant above is reacting "
+        "to the site being edited rather than to the collapsed answer: %r"
+        % (out,))
+
+
+def test_the_sweep_line_does_not_report_bytes_it_never_reclaimed(logdir, capsys):
+    """The COUNTER and the LINE agree with each other and with the volume.
+
+    The operator-facing half of the case above: a pass that clears markers and
+    reclaims nothing must not print "removed", because that line is what an
+    hourly reading of "is the leak draining" is made of.
+    """
+    name = "aaaaaaaa-0000-4000-8000-0000000000ee.log.gz"
+    _mark(logdir, name, age_s=90_000)
+    db = Scripted({"COUNT(*) AS n FROM bug_reports": [[{"n": 7}]],
+                   "SELECT log_filename FROM bug_reports": [[]]})
+    capsys.readouterr()
+    out = _run(auto_logs.prune_orphan_blobs(db, min_age_s=3600))
+    printed = capsys.readouterr().out
+    assert "removed %s=%s" % (auto_logs._ORPHAN_MARKER, name) not in printed, (
+        "a marker whose blob was never on the volume was reported as removed:"
+        "\n%s" % printed)
+    assert "NO BLOB on the volume" in printed, printed
+    assert "%d marker-only" % out["marker_only"] in printed, (
+        "the summary line does not carry the marker-only count it returns:"
+        "\n%s" % printed)
+
+
+def test_the_sweep_line_accounts_for_every_unreferenced_candidate(logdir, capsys):
+    """LENS-R3-3, SIBLING SWEEP: the four terms after "unreferenced" SUM to it.
+
+    The finding was that an absent blob was counted as a removal. Answering it
+    added a `marker_only` term -- and left a candidate the pass had ATTEMPTED
+    and could NOT remove in none of the counters at all: not removed, not
+    marker-only, not deferred. The line an operator reads as "how much of the
+    leak drained this hour" therefore still did not add up to the population it
+    came out of, which is the same reading defect one level down (#304, and
+    #430: the arm that fails must say so rather than vanish).
+
+    Here: two marker-only leftovers, one blob the volume will not give up, and
+    two ordinary orphans. `orphans` is five and the four terms must sum to it.
+    """
+    blanks = ["cccccccc-0000-4000-8000-%012d.log.gz" % i for i in range(2)]
+    stuck = "cccccccc-0000-4000-8000-0000000000ff.log.gz"
+    reals = ["dddddddd-0000-4000-8000-%012d.log.gz" % i for i in range(2)]
+    for nm in blanks:
+        _mark(logdir, nm, age_s=90_000)
+    # A DIRECTORY under the blob's name: `os.unlink` refuses it with an OSError,
+    # which is the real "the volume will not give this up" answer rather than a
+    # patched-out one. The marker beside it is an ordinary file, so the scan
+    # still offers the candidate.
+    (logdir / stuck).mkdir()
+    (logdir / stuck / "held-open").write_bytes(b"x")
+    _mark(logdir, stuck, age_s=90_000)
+    for nm in reals:
+        (logdir / nm).write_bytes(b"x" * 16)
+        _mark(logdir, nm, age_s=90_000)
+
+    def _db():
+        return Scripted({"COUNT(*) AS n FROM bug_reports": [[{"n": 7}]],
+                         "SELECT log_filename FROM bug_reports": [[]]})
+
+    capsys.readouterr()
+    out = _run(auto_logs.prune_orphan_blobs(_db(), min_age_s=3600))
+    printed = capsys.readouterr().out
+    assert out["orphans"] == 5, out
+    assert out["unlinked"] == 2 and out["marker_only"] == 2, out
+    assert out["unremovable"] == 1, (
+        "the candidate the pass could not remove is in none of the counters: "
+        "%r" % (out,))
+    assert out["deferred"] == 0, out
+    assert (out["unlinked"] + out["marker_only"] + out["unremovable"]
+            + out["deferred"]) == out["orphans"], (
+        "the four terms do not sum to the unreferenced population, so the "
+        "line cannot be checked against what it came out of: %r" % (out,))
+    assert "%d that could not be removed" % out["unremovable"] in printed, (
+        "the summary line does not carry the unremovable count it returns:"
+        "\n%s" % printed)
+    # The one it could not take keeps BOTH its blob and its marker, so the next
+    # tick retries it; the other four candidates are resolved.
+    assert _marker_names(logdir) == [stuck + auto_logs._ORPHAN_MARKER_SUFFIX], (
+        _marker_names(logdir))
+
+    # MUTANT at the counting site: the arm runs and counts nothing, which is
+    # exactly the state before this sweep. The sum assertion above reds.
+    site = "            unremovable += 1\n"
+    mutant = _exec_mutant(auto_logs.prune_orphan_blobs, site,
+                          "            unremovable += 0\n")
+    for nm in blanks:
+        _mark(logdir, nm, age_s=90_000)
+    for nm in reals:
+        (logdir / nm).write_bytes(b"x" * 16)
+        _mark(logdir, nm, age_s=90_000)
+    out = _run(mutant(_db(), min_age_s=3600))
+    assert out["unremovable"] == 0 and out["orphans"] == 5, (
+        "the mutant did not drop the count, so the live assertion above "
+        "proves nothing: %r" % (out,))
+    assert (out["unlinked"] + out["marker_only"] + out["unremovable"]
+            + out["deferred"]) != out["orphans"], (
+        "the mutant left the sum closing, so the sum is not what holds this "
+        "counter honest: %r" % (out,))
+
+    # INERT TWIN at the SAME site: the same increment, spelled out.
+    twin = _exec_mutant(auto_logs.prune_orphan_blobs, site,
+                        "            unremovable = unremovable + 1\n")
+    for nm in blanks:
+        _mark(logdir, nm, age_s=90_000)
+    for nm in reals:
+        (logdir / nm).write_bytes(b"x" * 16)
+        _mark(logdir, nm, age_s=90_000)
+    out = _run(twin(_db(), min_age_s=3600))
+    assert out["unremovable"] == 1 and (
+        out["unlinked"] + out["marker_only"] + out["unremovable"]
+        + out["deferred"]) == out["orphans"], (
+        "the inert twin changed the outcome, so the mutant above is reacting "
+        "to the site being edited rather than to the counting: %r" % (out,))

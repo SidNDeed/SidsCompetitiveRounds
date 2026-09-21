@@ -3299,7 +3299,7 @@
           ],
           "auto_logs",
           "upload_auto_log",
-          "96b09898d70610a9f74f5df11ccbebb01f1d672e"
+          "06a3eba69cc49ec8f3e53778462e2a35d27e4168"
         ],
         [
           "/api/v1/internal/logs/auto/prune",
@@ -3341,7 +3341,7 @@
       [
         "main",
         "lifespan",
-        "386186a7476dd5b04b92866197d252deff6f8bb1"
+        "6f48d1b8c28723dc8e2fe358d2f5d7e5b018dab6"
       ]
     ]
   },
