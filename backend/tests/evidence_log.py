@@ -25,6 +25,16 @@ THE THREE LAWS, AS THE CHECKER READS THEM
      contains at least one invocation. This is the one that catches the case
      the round actually produced: a section whose text says RED or GREEN while
      nothing in it was run.
+  3b. A SUMMARY is the exception, and it pays for it. A section with no
+     invocation may assert an outcome only where every assertion line in it
+     cites the section of the same log the outcome was proven in, written
+     `(§5c)` with the section mark. The cited section must exist and must
+     itself carry an invocation. So a summary is checked as what it is -- a
+     cross-reference -- and a reference that resolves nowhere, or resolves to
+     a section that ran nothing, is an offence in its own right. Without this
+     clause the check fires on every correct ladder ever written, which is how
+     a check gets ignored (#342); with it, a summary can be wrong in a way
+     nothing checked before.
 
   Commentary between an invocation and its result is fine: these logs write
   `-- ` notes, and a note is not a result. The check is about what PRODUCED a
@@ -55,12 +65,37 @@ from pathlib import Path
 INVOCATION = re.compile(r"^\$ \S")
 RESULT = re.compile(r"^\[exit (-?\d+)\]\s*$")
 SECTION = re.compile(r"^#{2,3} .*")
+# The number a section heading opens with, and the cross-reference a summary
+# line uses to point at it. Both are read from the SAME notation the logs
+# already write, so nothing had to be added to a log to make it checkable.
+SECTION_NUM = re.compile(r"^#{2,3}\s*(\d+[a-z]?)\.")
+CROSSREF = re.compile(r"\u00a7\s*(\d+[a-z]?)")
 # A line that asserts an outcome. These are the words this lane's logs use to
 # close a control, a twin or a run. A section carrying one of them is claiming
 # something happened, and something that happened has an invocation.
 ASSERTION = re.compile(
     r"^(?:CONTROL|TWIN|VERDICT|SELF-TEST|GUARD CONTROL [A-Z]|EXTRACT|VERIFY|SEAL)\b"
     r"|\b(?:RED as required|GREEN as required|DID NOT FIRE)\b")
+
+
+def ran_by_section(lines: list[str]) -> dict[str, bool]:
+    """{section number: did anything run in it}, over the whole log.
+
+    A first pass, because a summary at the END of a log cites sections above
+    it and a summary is exactly where this is needed. Sections with no number
+    in their heading are not addressable and simply never resolve.
+    """
+    ran: dict[str, bool] = {}
+    here: str | None = None
+    for line in lines:
+        if SECTION.match(line):
+            m = SECTION_NUM.match(line)
+            here = m.group(1).lower() if m else None
+            if here is not None:
+                ran.setdefault(here, False)
+        elif INVOCATION.match(line) and here is not None:
+            ran[here] = True
+    return ran
 
 
 def offences(text: str) -> list[str]:
@@ -71,17 +106,34 @@ def offences(text: str) -> list[str]:
     """
     bad: list[str] = []
     lines = text.splitlines()
+    ran = ran_by_section(lines)
     pending_invocation: tuple[int, str] | None = None
     section = (0, "<before the first section>")
     section_had_invocation = False
     section_assertions: list[tuple[int, str]] = []
 
     def close_section():
-        if section_assertions and not section_had_invocation:
-            n, t = section_assertions[0]
-            bad.append(f"{section[0]}: section {section[1]!r} asserts an outcome "
-                       f"at line {n} ({t[:60]!r}) and carries no invocation -- "
-                       "a result with no invocation above it is not evidence")
+        if not section_assertions or section_had_invocation:
+            return
+        for n, t in section_assertions:
+            ref = CROSSREF.search(t)
+            if ref is None:
+                bad.append(f"{section[0]}: section {section[1]!r} asserts an "
+                           f"outcome at line {n} ({t[:60]!r}) and carries no "
+                           "invocation -- a result with no invocation above it "
+                           "is not evidence, and it cites no section that has one")
+                return
+            cited = ref.group(1).lower()
+            if cited not in ran:
+                bad.append(f"{n}: {t[:60]!r} cites \u00a7{cited}, and this log has "
+                           "no section of that number -- a cross-reference that "
+                           "resolves nowhere traces nothing")
+                return
+            if not ran[cited]:
+                bad.append(f"{n}: {t[:60]!r} cites \u00a7{cited}, which carries no "
+                           "invocation either -- the reference resolves to a "
+                           "section that ran nothing")
+                return
 
     for n, line in enumerate(lines, 1):
         if SECTION.match(line):
@@ -129,6 +181,14 @@ def _self_test() -> int:
     orphan_invocation = "### 4. ###\n$ python tool.py\n$ python other.py\n[exit 0]\n"
     quiet_section = "### 5. notes only ###\nthis section asserts nothing at all.\n"
     trailing = "### 6. ###\n$ python tool.py\n"
+    ran_above = "### 3c. a control ###\n$ python tool.py\n[exit 1]\n"
+    prose_above = "### 3c. a note ###\nprose only, nothing run\n"
+    summary_ok = ran_above + "### 9. LADDER SUMMARY ###\nCONTROL: RED as required (\u00a73c)\n"
+    summary_bare = ran_above + "### 9. LADDER SUMMARY ###\nCONTROL: RED as required\n"
+    summary_dangling = ran_above + "### 9. LADDER SUMMARY ###\nCONTROL: RED as required (\u00a78b)\n"
+    summary_to_prose = prose_above + "### 9. LADDER SUMMARY ###\nCONTROL: RED as required (\u00a73c)\n"
+    summary_mixed = (ran_above + "### 9. LADDER SUMMARY ###\n"
+                     "CONTROL: RED as required (\u00a73c)\nTWIN: GREEN as required\n")
 
     checks = {
         # LAW 3, the shape round 3 produced, and its twin.
@@ -155,6 +215,20 @@ def _self_test() -> int:
         # the check would be ignored.
         "a section that asserts nothing needs no invocation":
             not offences(quiet_section),
+        # LAW 3b, and the twin one character away from it: the same summary
+        # line with and without the reference that makes it a cross-reference.
+        "a summary line citing a section that RAN is green":
+            not offences(summary_ok),
+        "the same line with the citation removed is caught":
+            bool(offences(summary_bare)),
+        "a citation resolving to no section of this log is caught":
+            bool(offences(summary_dangling)),
+        "a citation resolving to a section that ran NOTHING is caught":
+            bool(offences(summary_to_prose)),
+        "one uncited line among cited ones is enough to catch the section":
+            bool(offences(summary_mixed)),
+        "the dangling citation names the section it could not resolve":
+            "\u00a78b" in offences(summary_dangling)[0],
         "the offence names the line it is about":
             offences(orphan_result)[0].startswith("3:"),
         "a listing is returned, not a count":
