@@ -188,11 +188,26 @@ namespace CompetitiveRounds
         /// condition that makes a withdrawal necessary is the condition the
         /// return covers: a guard keyed on a feature's enable-condition inherits
         /// that feature's dead zone (#272/#98). Harness case W16b is bounded to
-        /// exactly that span. It is also called directly from the compat check
-        /// that disables the mod, beside PoisonSync.RevokeCapability and
-        /// GrowNormalize.RevokeCapability - the one transition that exists today;
-        /// the tick is what makes the guarantee hold for the next one without
-        /// anybody having to remember this member (#275).
+        /// exactly that span. THE TICK IS THE TRANSITION THAT EXISTS TODAY: it is
+        /// the only driver that can reach a seat which has already staged the key
+        /// and has since stopped being Capable.
+        ///
+        /// It is also called directly from the compat check that disables the mod,
+        /// beside PoisonSync.RevokeCapability and GrowNormalize.RevokeCapability -
+        /// but it is NOT the same shape as those two, and saying so was wrong.
+        /// PoisonSync stages at Awake and GrowNormalize stages from the tick, so
+        /// their latches are already set when that check fires. This key is staged
+        /// PRE-JOIN, from the queue poll, which cannot run before ApiClient
+        /// .Initialize - and the compat-fail branch returns above that call
+        /// (Plugin.cs, held by W18). So on a FIRST initialisation _advertised is
+        /// false there by construction and this member returns on its first line:
+        /// that site can only ever withdraw on a SECOND DoInitialize, after a
+        /// persistent-host respawn whose compat read differs from the first. It is
+        /// kept for exactly that case, and because a call that cannot do anything
+        /// is cheaper than a rule nobody remembers (#275). The consequence for a
+        /// reader: "[PROX-CAP] withdrew" is not a line a plain compat-disable can
+        /// produce, and an acceptance check that waits for it there will wait
+        /// forever (#438/#443).
         ///
         /// IT CAN ONLY WITHDRAW. ProximityVictim.ShouldRevokeCapability has no
         /// advertising direction and this member writes the value 0 and nothing
@@ -203,10 +218,29 @@ namespace CompetitiveRounds
         /// property change, so every peer re-derives on its next tick instead of
         /// holding a cached true.
         ///
-        /// The write happens BEFORE the flag is cleared, so a delivery that throws
-        /// is retried by the next tick rather than dropped: a withdrawal that
-        /// silently failed would leave peers repairing against a seat that is not
-        /// (#276).</summary>
+        /// THE FLAGS MOVE ONLY ON A WRITE THAT WAS ACCEPTED, and acceptance has
+        /// TWO channels rather than one. Player.SetCustomProperties RETURNS a bool
+        /// (verified against the shipped PhotonRealtime.dll, not assumed): in room
+        /// it forwards to the actor-property op, and an op the client cannot send
+        /// at that instant - mid-reconnect, or a tick where this peer is no longer
+        /// on the game server - comes back FALSE, having sent nothing and cached
+        /// nothing, and having thrown nothing. An earlier version of this member
+        /// read only the throw and cleared _advertised and latched _withdrawn
+        /// regardless, which defeated the retry the tick exists to provide:
+        /// cr_prox1 stayed 1 on every peer for the rest of the room while this
+        /// seat ran vanilla against its stale cached target, and the log asserted
+        /// a withdrawal that never left the process.
+        ///
+        /// So both channels are handled the same way - the flags are untouched and
+        /// the next tick tries again - and the success line is printed only where
+        /// the room was actually told. The same polarity the room half of this API
+        /// is already read with at GameStateWatcher.cs:4706 (#276/#430).
+        ///
+        /// The refusal is stated through the BOUNDED sink, not Plugin.Log: the
+        /// retry is per tick by design and a line per tick would bury it. Its
+        /// reason is its own sentence, so it gets its own budget and cannot be
+        /// silenced by another cause that spoke first (ProximityVictim
+        /// .WithdrawRefusedReason, held by G8).</summary>
         internal static void RepublishCapability()
         {
             try
@@ -219,10 +253,23 @@ namespace CompetitiveRounds
                 var me = PhotonNetwork.LocalPlayer;
                 if (me == null) return;
 
-                me.SetCustomProperties(new ExitGames.Client.Photon.Hashtable
+                bool sent = me.SetCustomProperties(new ExitGames.Client.Photon.Hashtable
                 {
                     { ProximityVictim.CapabilityProp, 0 }
                 });
+                if (!sent)
+                {
+                    // Nothing left this process, so nothing about what the room
+                    // has been told changed. Keep the advert standing - it is
+                    // still true that peers were told Capable - and retry.
+                    VanillaFixSupport.DiagLimited(
+                        ProximityVictim.SignalKey("withdraw", ProximityVictim.WithdrawRefusedReason),
+                        "[PROX-CAP] " + ProximityVictim.WithdrawRefusedReason + " ("
+                        + ProximityVictim.CapabilityProp
+                        + " still stands on this seat); retrying on the next tick",
+                        ProximityVictim.MaxOutcomeSignals);
+                    return;
+                }
                 _advertised = false;
                 _withdrawn = true;   // StageInto refuses for the rest of the session
                 Plugin.Log.LogWarning("[PROX-CAP] withdrew " + ProximityVictim.CapabilityProp
@@ -654,9 +701,15 @@ namespace CompetitiveRounds
     /// patch will not attach and the count will never complete, which takes the
     /// DealDamageToPlayer repair down with it. That direction is safe - no advert, so
     /// every seat stays on vanilla, which is today's behaviour - and it is loud:
-    /// StageInto logs "patches did NOT attach (2/3)" once per session. Re-pin the
-    /// census after any ROUNDS update, and if this class is gone, delete this patch
-    /// and drop RequiredAttachments to 2 rather than leaving the repair inert.</summary>
+    /// StageInto states it once per session, and the substring to grep a session
+    /// log for is " patches live); this seat stays on vanilla for the session".
+    /// That sentence is the one StageInto actually builds; harness case W19 holds
+    /// this quote and that log expression to the same text, because a comment that
+    /// quotes a deleted message sends the next maintainer looking for a line no
+    /// build can emit and the absence then reads as "nothing is wrong" (#306).
+    /// Re-pin the census after any ROUNDS update, and if this class is gone, delete
+    /// this patch and drop RequiredAttachments to 2 rather than leaving the repair
+    /// inert.</summary>
     [HarmonyPatch(typeof(TeleportToOpponent), "Go")]
     internal static class TeleportToOpponentFreshVictimPatch
     {

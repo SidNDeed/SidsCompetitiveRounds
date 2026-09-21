@@ -185,6 +185,22 @@ namespace CompetitiveRounds
         /// <summary>Root of the bounded-diagnostic budget keys.</summary>
         internal const string DiagKeyRoot = "ProximityVictim389";
 
+        /// <summary>The line for a withdrawal this client would not send.
+        ///
+        /// The property write that withdraws the key reports refusal by RETURNING
+        /// false, not by throwing, and a refused write sent nothing and cached
+        /// nothing - so the seat is still advertising a repair it will not perform
+        /// and the next tick has to try again. It gets its OWN sentence for the
+        /// same reason every other outcome does: the sentence is also the budget
+        /// key, so a cause that shares a line with another is never printed at all
+        /// once that other has spoken (G8 holds it distinct from every gate line
+        /// and every targeting-outcome line).
+        ///
+        /// It states what is true at the moment it is printed and predicts nothing
+        /// about the retry.</summary>
+        internal const string WithdrawRefusedReason =
+            "this seat's withdrawal of the repair capability was refused locally and was not sent";
+
         /// <summary>The budget key a single outcome signal is charged to.
         ///
         /// THE SITE IS DELIBERATELY NOT IN THE KEY. Outcome and reason are, and
@@ -282,10 +298,28 @@ namespace CompetitiveRounds
         /// that re-reads it falls back to vanilla, which is today's shipped
         /// behaviour and no new symptom (#276/#430).
         ///
-        /// Nothing in this build can ask for the other direction. The mod-disabled
-        /// flag is only ever written true, and the attachment count only ever
-        /// increments, so the local answer moves from Capable to not-Capable and
-        /// never back. If a later change makes it reversible, this function is
+        /// THE LOCAL ANSWER IS NOT MONOTONIC, AND THIS FUNCTION DOES NOT REST ON
+        /// ITS BEING SO. An earlier wording claimed the two globals made it move
+        /// from Capable to not-Capable and never back; that is refuted by its own
+        /// second premise, and G6 executes the refutation - LocalGateState(false,
+        /// false) is PatchesNotAttached and LocalGateState(false, true) is Capable,
+        /// so a count that only INCREMENTS moves the answer INTO Capable. What
+        /// actually holds is narrower: the mod-disabled flag has exactly one writer
+        /// and it only ever writes true, so THAT term is one-way; the attachment
+        /// count is one-way in the other direction.
+        ///
+        /// The reason there is still no advertising direction is therefore not
+        /// monotonicity. It is #287 above, plus StageInto's own latch: a seat that
+        /// declined once never stages again in that session. That combination has a
+        /// reachable corner - patches that complete AFTER the first staging attempt
+        /// leave this seat Capable, un-advertised and with nothing for this function
+        /// to withdraw - and what makes that corner safe is NOT this function. It is
+        /// the census, which walks the room's own actor list INCLUDING this seat, so
+        /// this seat's missing key refuses the repair for every seat including
+        /// itself (ProximityVictimGate.Census, held by W22). Fail-closed for the
+        /// repair, which is today's shipped behaviour.
+        ///
+        /// If a later change makes the disabled term reversible, this function is
         /// where that has to be answered rather than assumed - and the answer is
         /// still not an in-room advertisement.
         ///

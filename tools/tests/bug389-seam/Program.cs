@@ -28,6 +28,7 @@ using CompetitiveRounds;
 //   mutation localgate  : G6 must FAIL;  G2 control must PASS
 //   mutation norevoke   : G7 must FAIL;  G2 control must PASS
 //   mutation answerreason: D4 D5 must FAIL; D2 control must PASS
+//   mutation answerline : D5 must FAIL;  D4 control must PASS
 //   mutation reasonkey  : S1 must FAIL;  S2 control must PASS
 //   mutation capkey     : C1 must FAIL;  C2 control must PASS
 //   mutation fighterkeys: K1 must FAIL;  K2 control must PASS
@@ -45,16 +46,30 @@ using CompetitiveRounds;
 //   wiring   wire-keyclaim:   K3 must FAIL; W1 control must PASS
 //   wiring   wire-boundclaim: W13 must FAIL; W1 control must PASS
 //   wiring   wire-advertise:  W14b W15b must FAIL; W1 control must PASS
+//   wiring   wire-patcheslive: W14c must FAIL; W1 control must PASS
+//   wiring   wire-compatclaim: W17 must FAIL; W1 control must PASS
+//   wiring   wire-logquote:   W19 must FAIL; W1 control must PASS
+//   wiring   wire-blindwrite: W20 must FAIL; W1 control must PASS
+//   wiring   wire-monotone:   W21 must FAIL; W1 control must PASS
 //   prior-r2            : N1 N2 N3 N4 N5 N6 must all FAIL; W1 control must PASS
 // Every OTHER case here has NO mutant of its own, and this is the whole list
 // with the reason each one is on it:
 //   G3, G5, C3, D1, D2, D3, S2, S3, K2, P1, P2  - controls and companion
 //     assertions over functions another mutant already reaches.
+//   G8                                          - companion of the withdrawal
+//     group: wire-blindwrite holds the branch that emits its line, and the
+//     distinctness it asserts is the same property D4 and S1 already carry a
+//     mutant for.
 //   W4, W6, W7a-c, W9a-c, W12                   - wiring anchors whose finding
 //     is carried by a sibling wiring mutant.
 //   W14, W15a, W16a, W16b, W16c                 - the same, for the capability
 //     advertisement: wire-advertise is this group's mutant and reddens W14b and
 //     W15b; these five are the companions it does not move.
+//   W18                                         - the structural half of W17's
+//     property (the compat withdrawal sits above the earliest point from which
+//     this key can be staged); wire-compatclaim is that group's mutant.
+//   W22                                         - the structural fact W21's
+//     corrected paragraph cites; wire-monotone is that group's mutant.
 // The list is derived by reading it against the run list above, not asserted -
 // which is how V6 came to sit outside BOTH lists for a round while the header
 // claimed the accounting was complete. A documented "every case has a mutant"
@@ -98,6 +113,27 @@ internal static class Program
         string path = System.IO.Path.Combine(SourceRoot, relative.Replace('/', System.IO.Path.DirectorySeparatorChar));
         if (!System.IO.File.Exists(path)) return null;
         return System.IO.File.ReadAllText(path);
+    }
+
+    /// <summary>CountOf, restricted to lines that are not whole-line comments.
+    ///
+    /// "This global is read in exactly one place" is a statement about CODE, and
+    /// the prose around the member names the same identifier several times, so a
+    /// raw count can neither be 1 nor be made 1 without deleting the explanation.
+    /// Both files here comment by whole line, so dropping lines whose first
+    /// non-space characters are "//" is the whole rule; a needle inside a string
+    /// literal would still count, which is the safe direction for a bound.</summary>
+    private static int CountOnCodeLines(string text, string needle)
+    {
+        if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(needle)) return 0;
+        int n = 0;
+        foreach (string line in text.Split((char)10))
+        {
+            string t = line.TrimStart();
+            if (t.StartsWith("//", StringComparison.Ordinal)) continue;
+            n += CountOf(line, needle);
+        }
+        return n;
     }
 
     private static int CountOf(string text, string needle)
@@ -463,27 +499,69 @@ internal static class Program
             + " " + answerCollision);
 
         // ---- D5: the line named is the line of the path that happened. --------
-        // RED under "answerreason". D4 says the lines differ from each other; this
-        // says each one is attached to its own outcome. Two paths could carry
-        // distinct-but-swapped sentences and D4 alone would stay green (#342).
+        // RED under "answerreason" AND under "answerline". D4 says the lines differ
+        // from each other; this says each one is attached to its own outcome. Two
+        // paths could carry distinct-but-swapped sentences and D4 alone would stay
+        // green (#342).
+        //
+        // WHAT USED TO STAND HERE COULD NOT FAIL. The loop compared
+        // DeclineReason(Capable, true, true, answer) with VanillaAnswerReason(
+        // answer) - and DeclineReason DELEGATES to VanillaAnswerReason at exactly
+        // that fall-through (Seam: "return VanillaAnswerReason(vanilla);"), so the
+        // two sides were the same expression and the loop was true for every
+        // possible assignment of lines to outcomes. All the swap detection this
+        // case claimed sat in the three literals beside it, which covered three of
+        // the six outcomes. NotAsked's line was pinned NOWHERE in the suite: it
+        // could be given any distinct sentence and all 65 clean checks stayed green
+        // (#342/#441).
+        //
+        // So the expectation is now an INDEPENDENT table, written out here rather
+        // than read back from the thing under test, and it covers every outcome.
+        // The count assertion is what stops a new outcome being added to the enum
+        // and silently skipped.
+        var expectedAnswerLines = new Dictionary<ProximityVanillaAnswer, string>
+        {
+            { ProximityVanillaAnswer.Answered,  "the repair is active" },
+            { ProximityVanillaAnswer.NotAsked,  "the game's own targeting was not asked" },
+            { ProximityVanillaAnswer.NoManager, "the game's player manager was not available" },
+            { ProximityVanillaAnswer.NoHolder,  "this effect has no player of its own to target from" },
+            { ProximityVanillaAnswer.Nobody,    "the game's own targeting answered with nobody" },
+            { ProximityVanillaAnswer.Threw,     "the game's own targeting could not complete" },
+        };
         bool eachOutcomeNamed = true;
         string misnamed = "";
         foreach (var answer in VanillaAnswers)
         {
-            if (answer == ProximityVanillaAnswer.NotAsked) continue;   // the ring term answers first; D3 owns that
-            string why = ProximityVictim.DeclineReason(ProximityGateState.Capable, true, true, answer);
-            if (why != ProximityVictim.VanillaAnswerReason(answer))
+            string expected;
+            if (!expectedAnswerLines.TryGetValue(answer, out expected))
             {
                 eachOutcomeNamed = false;
-                if (misnamed.Length == 0) misnamed = answer + " -> '" + why + "'";
+                if (misnamed.Length == 0) misnamed = answer + " is an outcome this case does not name at all";
+                continue;
+            }
+            string stated = ProximityVictim.VanillaAnswerReason(answer);
+            if (stated != expected)
+            {
+                eachOutcomeNamed = false;
+                if (misnamed.Length == 0)
+                    misnamed = answer + " reads '" + stated + "' (want '" + expected + "')";
+                continue;
+            }
+            // ...and the decline path's fall-through must carry that same line.
+            // NotAsked is excluded HERE only: with a ring driving the call the ring
+            // term cannot have answered, and D3 owns that ordering.
+            if (answer == ProximityVanillaAnswer.NotAsked) continue;
+            string why = ProximityVictim.DeclineReason(ProximityGateState.Capable, true, true, answer);
+            if (why != expected)
+            {
+                eachOutcomeNamed = false;
+                if (misnamed.Length == 0) misnamed = answer + " declined as '" + why + "' (want '" + expected + "')";
             }
         }
         Check("D5 Decline_NamesTheOutcomeThatActuallyHappened",
-            eachOutcomeNamed
-            && ProximityVictim.VanillaAnswerReason(ProximityVanillaAnswer.NoManager) == "the game's player manager was not available"
-            && ProximityVictim.VanillaAnswerReason(ProximityVanillaAnswer.NoHolder) == "this effect has no player of its own to target from"
-            && ProximityVictim.VanillaAnswerReason(ProximityVanillaAnswer.Threw) == "the game's own targeting could not complete",
-            "a declined call named another path's outcome: " + misnamed);
+            eachOutcomeNamed && expectedAnswerLines.Count == VanillaAnswers.Length,
+            "named=" + expectedAnswerLines.Count + " outcomes=" + VanillaAnswers.Length
+            + " a declined call named another path's outcome: " + misnamed);
 
         // =================================================================
         // G - THE CAPABILITY GATE.
@@ -614,6 +692,39 @@ internal static class Program
         Check("G7 Gate_AnAdvertisedSeatThatStopsBeingCapableWithdrawsIt",
             revokesExactlyWhenNeeded && GateStates.Length == 6,
             "states=" + GateStates.Length + " (want 6) wrong answer at " + revokeLeak);
+
+        // ---- G8: a withdrawal the client REFUSED to send has its own line. ----
+        // No mutant of its own - wire-blindwrite is this group's, and it holds the
+        // branch that emits this line. The property is the one D4 and S1 hold for
+        // every other cause: the sentence is also the budget key, so a cause that
+        // shares a line with another is never printed once that other has spoken.
+        //
+        // Why this cause exists at all: the property write that withdraws the key
+        // reports refusal by RETURNING false, not by throwing. A refused write sent
+        // nothing and cached nothing, so the seat is still advertising a repair it
+        // will not perform and the next tick must try again - a state the reader
+        // has to be able to tell apart from "withdrew", which is a line about a
+        // write the room actually received.
+        bool withdrawLineDistinct = !string.IsNullOrEmpty(ProximityVictim.WithdrawRefusedReason);
+        string withdrawCollision = withdrawLineDistinct ? "" : "the refusal has no line at all";
+        foreach (var gs in GateStates)
+            if (ProximityVictim.GateReason(gs) == ProximityVictim.WithdrawRefusedReason)
+            {
+                withdrawLineDistinct = false;
+                if (withdrawCollision.Length == 0) withdrawCollision = "shares the line of gate state " + gs;
+            }
+        foreach (var answer in VanillaAnswers)
+            if (ProximityVictim.VanillaAnswerReason(answer) == ProximityVictim.WithdrawRefusedReason)
+            {
+                withdrawLineDistinct = false;
+                if (withdrawCollision.Length == 0) withdrawCollision = "shares the line of outcome " + answer;
+            }
+        bool withdrawKeyDistinct =
+            ProximityVictim.SignalKey("withdraw", ProximityVictim.WithdrawRefusedReason)
+                != ProximityVictim.SignalKey("withdraw", ProximityVictim.GateReason(ProximityGateState.ModDisabled));
+        Check("G8 Gate_ARefusedWithdrawalHasItsOwnReasonAndItsOwnBudget",
+            withdrawLineDistinct && withdrawKeyDistinct,
+            "the refused-withdrawal line must be its own: " + withdrawCollision);
 
         // =================================================================
         // C - THE CAPABILITY CACHE KEY.
@@ -1143,6 +1254,21 @@ internal static class Program
             patchesText != null && CountOf(patchesText, "Plugin.modDisabled") == 1,
             "the mod-disabled flag must be read exactly once in the file (inside LocalCapability); found "
             + (patchesText == null ? -1 : CountOf(patchesText, "Plugin.modDisabled")));
+        // W14c - THE SAME BOUND FOR THE OTHER GLOBAL. RED under "wire-patcheslive".
+        // The property was claimed for BOTH globals ("read in exactly one place in
+        // the patches half") and guarded file-wide for only one: W14b counted the
+        // mod-disabled flag, while PatchesLive was forbidden only inside the three
+        // members W15a, W15b and W16a name. A second read anywhere else - an
+        // early-out at the top of Census, a diagnostic branch in DecidePrefix - left
+        // all 65 clean checks green while re-creating the two-expressions shape the
+        // round-3 HIGH was about. Two code lines is the whole budget: the property's
+        // own declaration, and the single read inside LocalCapability that W14
+        // anchors.
+        Check("W14c Wiring_TheAttachmentAnswerIsReadNowhereElseInTheFile",
+            patchesText != null && CountOnCodeLines(patchesText, "PatchesLive") == 2,
+            "PatchesLive must occur on exactly two code lines - its own declaration and the read "
+            + "inside LocalCapability; found "
+            + (patchesText == null ? -1 : CountOnCodeLines(patchesText, "PatchesLive")));
 
         // W15 - the advertiser and the gate BOTH ask it, and neither re-derives
         // it. The advert used to be staged on the attachment count alone while the
@@ -1189,6 +1315,107 @@ internal static class Program
             "plugin/Plugin.cs",
             "private void DoInitialize()",
             "ProximityVictimGate.RepublishCapability();");
+
+        // W17 - THE COMPAT SITE CLAIMS ONLY WHAT IT CAN DO. RED under
+        // "wire-compatclaim". Both files used to present the compat disable as the
+        // transition that exercises the withdrawal - "A pre-join stage may already
+        // have advertised it" beside the call, "the one transition that exists
+        // today" in the member's own doc. Neither is true of a first
+        // initialisation: this key is staged PRE-JOIN from the queue poll, which
+        // cannot run before ApiClient.Initialize, and the compat-fail branch
+        // returns above that call (W18), so _advertised is false there by
+        // construction and the member returns on its first line. The two siblings
+        // beside it really are the other shape - PoisonSync stages at Awake,
+        // GrowNormalize from the tick - which is what made the claim plausible.
+        //
+        // It matters because it is an ACCEPTANCE claim: a tester told to validate
+        // the fix by disabling the mod sees the poison and grow revocations in the
+        // same frame and never sees this one, and reads the absence as a defect or,
+        // worse, reads the two that did print as covering this one. The signal this
+        // feature emits has to be producible by the route the prose names
+        // (#438/#443).
+        string pluginText = LoadSource("plugin/Plugin.cs");
+        Check("W17 Wiring_TheCompatSiteClaimsOnlyWhatItCanDo",
+            pluginText != null && patchesText != null
+            && CountOf(pluginText, "A pre-join stage may already have advertised") == 0
+            && CountOf(pluginText, "This call is a no-op on a first initialisation.") == 1
+            && CountOf(patchesText, "the one transition that exists today") == 0
+            && CountOf(patchesText, "THE TICK IS THE TRANSITION THAT EXISTS TODAY") == 1,
+            "the compat site and the member's doc must both say that site can only withdraw on a "
+            + "second initialisation, and must not claim a first-init advert");
+
+        // W18 - and the ORDERING that claim rests on. No mutant of its own: it is
+        // the structural half of W17's property and wire-compatclaim is the group's
+        // mutant. The span runs from the sibling revocation to the initialisation
+        // that is the earliest point from which this key can ever be staged, and
+        // the withdrawal has to sit inside it.
+        CheckAnchorInSpan("W18 Wiring_TheCompatWithdrawalSitsAboveTheCallThatCanStage",
+            "plugin/Plugin.cs",
+            "            try { GrowNormalize.RevokeCapability(); } catch { }",
+            "            ApiClient.Initialize(Plugin.ApiBaseUrl.Value);",
+            "ProximityVictimGate.RepublishCapability();");
+
+        // W19 - a comment may only quote a line this build can emit. RED under
+        // "wire-logquote". The TeleportToOpponent doc tells the next maintainer
+        // that an attachment shortfall is loud and gives the sentence to grep for;
+        // round 4 rewrote StageInto's message and the doc kept quoting the deleted
+        // one, so the grep would have returned nothing and the absence would have
+        // read as "the attachment count is complete" for a repair that had gone
+        // inert on every seat. Two occurrences: the doc's quote and the expression
+        // that builds it. A probe has to be bound to the thing it probes (#306).
+        Check("W19 Wiring_TheAttachmentShortfallCommentQuotesALineTheFileEmits",
+            patchesText != null
+            && CountOf(patchesText, " patches live); this seat stays on vanilla for the session") == 2
+            && CountOf(patchesText, "patches did NOT attach") == 0,
+            "the quoted shortfall sentence must appear twice - in the doc and in the log expression - "
+            + "and the deleted wording must be gone");
+
+        // W20 - THE WITHDRAWAL MOVES ITS FLAGS ONLY ON A WRITE THAT WAS ACCEPTED.
+        // RED under "wire-blindwrite". Player.SetCustomProperties RETURNS a bool:
+        // in room it forwards to the actor-property op, and an op the client cannot
+        // send at that instant comes back false having sent nothing, cached nothing
+        // and thrown nothing. The member used to read only the throw and clear
+        // _advertised and latch _withdrawn regardless, so a refused write was
+        // dropped permanently: the per-tick driver returned on its first line for
+        // the rest of the session, StageInto refused for the rest of the session,
+        // cr_prox1 stayed set on every peer, and the log said "withdrew" for a
+        // write that never left the process. Every peer then re-resolved the victim
+        // each armed tick while this seat ran vanilla against its stale cached
+        // target - the state H1 exists to prevent.
+        CheckMemberAnchors("W20 Wiring_TheWithdrawalMovesItsFlagsOnlyOnAnAcceptedWrite",
+            "plugin/ProximityVictimPatches.cs",
+            "internal static void RepublishCapability()",
+            new[] { "bool sent = me.SetCustomProperties(", "if (!sent)", "VanillaFixSupport.DiagLimited(" },
+            new[] { "ProximityVictim.CapabilityValue" });
+
+        // W21 - the withdrawal's doc states the direction that actually holds. RED
+        // under "wire-monotone". It used to argue that the two globals made the
+        // local answer move from Capable to not-Capable and never back; the second
+        // premise argues the opposite, and G6 executes the refutation - a count
+        // that only INCREMENTS moves PatchesNotAttached to Capable. The paragraph
+        // nominated itself as the place reversibility "has to be answered rather
+        // than assumed", so the one site a later reader would check stated a false
+        // fact about the state space (#351/#432).
+        Check("W21 Wiring_TheWithdrawalDocStatesTheDirectionThatActuallyHolds",
+            seamText != null
+            && CountOf(seamText, "the local answer moves from Capable to not-Capable and") == 0
+            && CountOf(seamText, "THE LOCAL ANSWER IS NOT MONOTONIC") == 1,
+            "the monotonicity claim must be gone and replaced by the narrower one that holds");
+
+        // W22 - and what the corrected paragraph now rests on instead. No mutant of
+        // its own: wire-monotone is the group's, and this is the structural fact
+        // the corrected prose cites. A seat whose patches complete AFTER its first
+        // staging attempt is Capable, un-advertised, and has nothing for the
+        // withdrawal to withdraw; what keeps that room safe is that the census
+        // walks the room's own actor list INCLUDING this seat, so this seat's
+        // missing key refuses the repair for every seat including itself. A census
+        // that special-cased the local actor out would delete that guarantee
+        // silently.
+        CheckMemberAnchors("W22 Wiring_TheCensusCountsThisSeatToo",
+            "plugin/ProximityVictimPatches.cs",
+            "private static bool Census()",
+            new[] { "PhotonNetwork.PlayerList" },
+            new[] { "RoomActors.ActiveFighters", "PhotonNetwork.LocalPlayer" });
 
         Console.WriteLine("=== passed=" + _passed + " failed=" + _failed + " ===");
         return _failed == 0 ? 0 : 1;

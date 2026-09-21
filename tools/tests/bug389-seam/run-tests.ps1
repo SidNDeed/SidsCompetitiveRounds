@@ -435,6 +435,24 @@ $runAnswerReason = Invoke-Suite 'mut-answerreason' $mutAnswerReason $repo
 if (-not (Assert-Mutations 'vanilla-outcome-reason mutation' $runAnswerReason @('D4', 'D5') 'D2')) { $overall = 1 }
 Say ''
 
+# ---------- 8f. misname ONE outcome, keeping every line distinct ----------
+# THE CASE D5 COULD NOT SEE. D5's loop used to compare DeclineReason at its
+# fall-through with VanillaAnswerReason - the same expression on both sides - so
+# it was true for every assignment of lines to outcomes, and the swap detection
+# it claimed lived entirely in three literals covering three of the six
+# outcomes. NotAsked's line was pinned nowhere: this mutation gives it a new,
+# still-distinct sentence, and before D5 was rebuilt against an independent
+# table every single check in the suite stayed green on it. D4 is the control
+# and must STAY green - the lines are still all different, which is exactly why
+# D4 cannot be the case that catches this.
+$mutAnswerLine = New-Mutant 'answerline' @(, @(
+    'internal static string VanillaAnswerReason(ProximityVanillaAnswer vanilla)',
+    '                case ProximityVanillaAnswer.NotAsked: return "the game''s own targeting was not asked";',
+    '                case ProximityVanillaAnswer.NotAsked: return "the proximity ring never armed on this tick";'))
+$runAnswerLine = Invoke-Suite 'mut-answerline' $mutAnswerLine $repo
+if (-not (Assert-Mutation 'single-outcome-misnaming mutation' $runAnswerLine 'D5' 'D4')) { $overall = 1 }
+Say ''
+
 # ---------- 9. collapse the outcome signals onto one budget ----------
 # Drop the reason from the key, so two reasons under one outcome share a budget
 # and the second is never printed. S2 is the control: the LINE still names all
@@ -588,6 +606,75 @@ $wireAdvertise = New-WireRoot 'advertise' 'plugin/ProximityVictimPatches.cs' `
     '                ProximityGateState local = Plugin.modDisabled ? ProximityGateState.ModDisabled : LocalCapability();' ''
 $runWireAdvertise = Invoke-Suite 'wire-advertise' $seam $wireAdvertise
 if (-not (Assert-Mutations 'second-copy-of-the-local-answer wiring' $runWireAdvertise @('W14b', 'W15b') 'W1')) { $overall = 1 }
+Say ''
+
+# Plant a SECOND read of the OTHER global, outside every member the suite bounds.
+# "One predicate, no second copy" was claimed for both globals and guarded
+# file-wide for only one: W14b counted the mod-disabled flag, while PatchesLive
+# was forbidden only inside StageInto, GateState and RepublishCapability. A read
+# in Census - a member none of those three name - re-creates the two-expressions
+# shape with the harness reporting the property intact. W14c is the bound that
+# was missing; this is what proves it can fail.
+$wirePatchesLive = New-WireRoot 'patcheslive' 'plugin/ProximityVictimPatches.cs' `
+    'private static bool Census()' `
+    '            PhotonPlayer[] actors = PhotonNetwork.PlayerList;' `
+    '            PhotonPlayer[] actors = PatchesLive ? PhotonNetwork.PlayerList : null;' ''
+$runWirePatchesLive = Invoke-Suite 'wire-patcheslive' $seam $wirePatchesLive
+if (-not (Assert-Mutation 'second-copy-of-the-attachment-answer wiring' $runWirePatchesLive 'W14c' 'W1')) { $overall = 1 }
+Say ''
+
+# Put the compat site's overstated claim back. "A pre-join stage may already
+# have advertised it" is false on a first initialisation: this key is staged
+# pre-join from the queue poll, which cannot run before ApiClient.Initialize,
+# and the compat-fail branch returns above that call. A tester pointed at that
+# route to validate the withdrawal waits for a line it cannot produce.
+$wireCompatClaim = New-WireRoot 'compatclaim' 'plugin/Plugin.cs' `
+    'private void DoInitialize()' `
+    '                        // staged PRE-JOIN from the queue poll, which cannot run' `
+    '                        // A pre-join stage may already have advertised it, and' ''
+$runWireCompatClaim = Invoke-Suite 'wire-compatclaim' $seam $wireCompatClaim
+if (-not (Assert-Mutation 'compat-site-claim wiring' $runWireCompatClaim 'W17' 'W1')) { $overall = 1 }
+Say ''
+
+# Move the attachment-shortfall message and leave the comment quoting the old
+# one. That is the state round 4 shipped into: the doc told the maintainer to
+# grep for "patches did NOT attach (2/3)" after round 4 had replaced it, so the
+# grep returns nothing and the absence reads as a complete attachment count for
+# a repair that has gone inert on every seat. W19 binds the quote to the
+# expression that builds it.
+$wireLogQuote = New-WireRoot 'logquote' 'plugin/ProximityVictimPatches.cs' `
+    'internal static void StageInto(ExitGames.Client.Photon.Hashtable prejoin)' `
+    '                        + RequiredAttachments + " patches live); this seat stays on vanilla for the session");' `
+    '                        + RequiredAttachments + " patches did NOT attach); this seat stays on vanilla");' ''
+$runWireLogQuote = Invoke-Suite 'wire-logquote' $seam $wireLogQuote
+if (-not (Assert-Mutation 'quoted-log-line wiring' $runWireLogQuote 'W19' 'W1')) { $overall = 1 }
+Say ''
+
+# Read the property write as if failure could only arrive as an exception.
+# Player.SetCustomProperties returns a bool and a refused op comes back false
+# having sent nothing, cached nothing and thrown nothing. Ignoring it clears
+# _advertised and latches _withdrawn on a withdrawal that never left the
+# process: the per-tick driver and StageInto then refuse for the rest of the
+# session while cr_prox1 stays set on every peer.
+$wireBlindWrite = New-WireRoot 'blindwrite' 'plugin/ProximityVictimPatches.cs' `
+    'internal static void RepublishCapability()' `
+    '                if (!sent)' `
+    '                if (false)' ''
+$runWireBlindWrite = Invoke-Suite 'wire-blindwrite' $seam $wireBlindWrite
+if (-not (Assert-Mutation 'unchecked-property-write wiring' $runWireBlindWrite 'W20' 'W1')) { $overall = 1 }
+Say ''
+
+# Put the refuted monotonicity paragraph back. "The attachment count only ever
+# increments, so the local answer moves from Capable to not-Capable and never
+# back" is refuted by its own second premise, and G6 executes the refutation.
+# The paragraph nominated itself as the place reversibility has to be answered,
+# so it is the one site a later reader would check.
+$wireMonotone = New-WireRoot 'monotone' 'plugin/ProximityVictimSeam.cs' `
+    'internal static class ProximityVictim' `
+    '        /// THE LOCAL ANSWER IS NOT MONOTONIC, AND THIS FUNCTION DOES NOT REST ON' `
+    '        /// increments, so the local answer moves from Capable to not-Capable and' ''
+$runWireMonotone = Invoke-Suite 'wire-monotone' $seam $wireMonotone
+if (-not (Assert-Mutation 'monotonicity-claim wiring' $runWireMonotone 'W21' 'W1')) { $overall = 1 }
 Say ''
 
 # Put the refuted key argument back. The claim that a round-2 seat and a round-3

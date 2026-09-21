@@ -2865,12 +2865,25 @@ namespace CompetitiveRounds
                         // this client will never publish.
                         try { PoisonSync.RevokeCapability(); } catch { }
                         try { GrowNormalize.RevokeCapability(); } catch { }
-                        // Bug 389: the same shape for the proximity-victim
-                        // capability. A pre-join stage may already have advertised
-                        // it, and a seat that advertises a repair its own gate now
-                        // refuses leaves every peer re-resolving the victim while
-                        // this seat drains the stale one - the same damage tick
-                        // debiting different players on different screens.
+                        // Bug 389: NOT the same shape as the two above.
+                        // This call is a no-op on a first initialisation.
+                        // cr_prox1 is
+                        // staged PRE-JOIN from the queue poll, which cannot run
+                        // before ApiClient.Initialize below - and this branch
+                        // returns above that call - so nothing has been advertised
+                        // yet and RepublishCapability returns on its first line.
+                        // (PoisonSync stages at Awake and GrowNormalize from the
+                        // tick, so their latches ARE set here; W18 holds this
+                        // ordering.) It can only withdraw on a SECOND DoInitialize,
+                        // after a persistent-host respawn whose compat read differs
+                        // from the first, and it is kept for that case: a seat that
+                        // advertises a repair its own gate now refuses leaves every
+                        // peer re-resolving the victim while this seat drains the
+                        // stale one - the same damage tick debiting different
+                        // players on different screens. The transition that covers
+                        // a seat already in a room is the persistent tick, not this
+                        // site; "[PROX-CAP] withdrew" is not a line a plain compat
+                        // disable produces.
                         try { ProximityVictimGate.RepublishCapability(); } catch { }
                         // r3 find 4: same shape for the base-game locale
                         // injector. It has been inert (activation is gated on
