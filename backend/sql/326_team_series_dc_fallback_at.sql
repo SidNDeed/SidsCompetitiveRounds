@@ -4,10 +4,13 @@
 --
 -- WHAT THESE COLUMNS ARE FOR. A mid-series disconnect is reported to
 -- /api/v1/team/series/{id}/report-dc by the surviving seat the room elected.
--- When that seat's own report cannot be produced -- every attempt of it went
--- unanswered, or the seat published a terminal refusal -- another survivor
--- posts a FALLBACK: a report carrying no point totals, filed by a seat that
--- knows only that the series looks abandoned.
+-- When that seat publishes a TERMINAL REFUSAL -- it will not be producing a
+-- report -- another survivor posts a FALLBACK: a report carrying no point
+-- totals, filed by a seat that knows only that the series looks abandoned.
+-- (A seat whose own attempts merely go unanswered publishes "unknown" and the
+-- survivors withhold instead, so no fallback is filed and no marker is
+-- written; such a series is closed by the rowless-husk arm of the queue
+-- cleanup loop, which cancels it and reconciles its bets.)
 --
 -- Until now both kinds settled the row the moment they arrived. The first one
 -- to take the series lock wrote status='dc_incomplete', and the handler ignores
@@ -18,10 +21,21 @@
 --
 -- The marker removes the race instead of guessing at it. A fallback report no
 -- longer writes a terminal status at all; it stamps dc_fallback_at and returns
--- "deferred". A real-totals report arriving at ANY later moment still finds the
--- row 'active' and reaches its normal branches, including the rated
--- lead-forfeit. Only a scheduled sweep settles a marked row, and only once the
--- marker is older than the deferral bound with no live game in evidence.
+-- "deferred", which leaves the row 'active' so a real-totals report reaches its
+-- normal branches, including the rated lead-forfeit, in either arrival order.
+--
+-- THE BOUND. Both lanes carry this sentence verbatim -- the API comment in the
+-- deferral branch of report-dc, and the client comment beside the report it
+-- composes:
+--
+--   A real-totals report wins while the deferred marker is younger than 420
+--   seconds, and after that only until a sweep tick finds no live-game
+--   evidence for the series and settles the row; once a row is settled, a
+--   later report is refused at the settled-row exit and is not rated.
+--
+-- The round-4 header said "at ANY later moment", which the sweep contradicts:
+-- the sweep exists to close a row nothing else ever settles, and a report that
+-- arrives after it has done so is ignored.
 --
 --   dc_fallback_at         -- when a survivor first said "this series looks
 --                             abandoned", stamped with clock_timestamp() AFTER

@@ -3629,8 +3629,32 @@ async def team_queue_cleanup_loop():
 # because the two costs are not symmetric -- waiting too long means a genuinely
 # abandoned series reaches the admin panel seven minutes late, while settling
 # too early means a PLAYED series is recorded dc_incomplete and its rating and
-# gold are never applied (#276, #430). The second refusal below is what narrows
-# the uncovered part using state this server can actually see.
+# gold are never applied (#276, #430).
+#
+# WHAT NARROWS THE UNCOVERED PART, AND WHAT DOES NOT. Round 4 answered this
+# with a "second refusal": a 214 s room-quiet term that was supposed to
+# decline a due row on state independent of the marker's age. It could not
+# decline anything. An ordinary room is stamped onto the series when it is
+# ISSUED, which is before the sitting that produced the marker, so a marker
+# past 420 s always sits on a room past 420 s and the room term was already
+# true; and a continuation series carries a real room with a NULL
+# room_issued_at, because the continuation INSERT does not stamp it, which
+# made the term true on arrival. There is a third shape -- a room issued AFTER
+# a marker was filed, which the term WOULD have refused -- and production does
+# not produce it, because issuing a room now clears the marker in the same
+# function that stamps it (the one such statement in this file); the
+# structural suite counts that operation file-wide. A check that cannot
+# refuse is worse than no check (#342, #431, #441), so it is DELETED rather
+# than patched (#310, #389). What narrows the uncovered part is the live-game
+# veto in the sweep below -- in-process evidence rather than a clock on a
+# column -- and nothing else here claims to.
+#
+# THE BOUND, in the one sentence both lanes carry verbatim:
+#
+#   A real-totals report wins while the deferred marker is younger than 420
+#   seconds, and after that only until a sweep tick finds no live-game
+#   evidence for the series and settles the row; once a row is settled, a
+#   later report is refused at the settled-row exit and is not rated.
 _DC_FALLBACK_DEFER_SECONDS = 420
 
 # The transport budget, named so the arithmetic above is something a test can
@@ -3640,38 +3664,19 @@ _DC_FALLBACK_DEFER_SECONDS = 420
 # reddens this bound instead of silently invalidating the derivation.
 _DC_CLIENT_TRANSPORT_BUDGET_SECONDS = 34
 
-# THE SECOND REFUSAL -- a refusal, not a replacement for the bound. The marker's
-# age is measured on a clock; this term is measured on the one piece of state
-# that decides whether a late report would still be ACCEPTED at all. The report
-# handler's room fence admits a report naming the series' STORED room, and an
-# unresumed series still stores the room its abandoned sitting was played in. So
-# while that room is younger than one assembly deadline plus one transport
-# budget, a held report for it is still inside the window the fence accepts, and
-# this sweep declines the row whatever the marker's age says.
-#
-# room_issued_at NULL is two states, per migration 170 which added it: no room
-# issued for this sitting, or a row that predates the column. Only the first
-# can reach this sweep -- a row arrives here only by carrying a marker, and the
-# marker's own columns postdate 170 by 156 migrations -- so for every row this
-# term is evaluated on, NULL means no room, the fence's other arm ignores every
-# room-carrying report anyway, and the term is correctly vacuous. Stated as the
-# narrower claim on purpose: the general one about the COLUMN is not true, and
-# the whole point of this pass was comments that assert more than they hold. It also cannot latch: room_issued_at only moves
-# forward when a new room is issued, and both funnels that issue one clear the
-# marker first (_team_clear_dc_fallback_marker), so 214 s after any such move
-# the row is due again with no marker left to act on.
-_DC_FALLBACK_ROOM_QUIET_SECONDS = 214
-
 
 async def _team_clear_dc_fallback_marker(db, series_id) -> None:
     """Clear the deferral marker on a series an adoption funnel just revived.
 
     THE OPERATION, NOT THE LINE (#432, #330). Every funnel that flips a
     team_series row back to 'active' and clears dc_player_id has to call this: a
-    marker that survived a resume is older than the deferral bound BY
-    DEFINITION, so the sweep would settle the freshly resumed series straight
-    back to dc_incomplete -- attributing it to the previous sitting's
-    disconnect -- on its very next tick. There are exactly two such funnels, the
+    marker that survives a resume comes due like any other: on the first
+    tick after it passes the bound, the sweep settles the FRESHLY RESUMED
+    series to dc_incomplete and attributes it to the previous sitting's
+    disconnect. It is not older than the bound by definition -- a resume
+    inside the window leaves a younger marker -- so the damage is delayed,
+    not avoided, which is why the clear belongs in the funnel and not in a
+    freshness test in the sweep. There are exactly two such funnels, the
     queue/sticky resume (_team_relock_existing_series) and the hosted-lobby
     Start adoption (team_lobby_start), and the first cut of this change cleared
     the marker in only one of them. test_sept16_dc_fallback_shape.py now counts
@@ -3710,6 +3715,11 @@ async def _team_dc_fallback_sweep_once(db) -> int:
     # else -- every value the settle acts on is re-read under the lock below,
     # so there is no column here that a later edit could quietly start carrying
     # into a write on the strength of a comment (#302).
+    #
+    # ONE time term, not two. Round 4 also required the stored room to have
+    # been quiet for 214 s. That term could not refuse a row -- see the bound
+    # above -- so it is gone from both statements rather than left here reading
+    # like a second condition somebody could rely on (#342, #441).
     due = (await db.execute(
         text("""
             SELECT ts.id
@@ -3718,13 +3728,9 @@ async def _team_dc_fallback_sweep_once(db) -> int:
                AND ts.dc_fallback_at IS NOT NULL
                AND ts.dc_fallback_at
                    < clock_timestamp() - make_interval(secs => :bound)
-               AND (ts.room_issued_at IS NULL
-                    OR ts.room_issued_at
-                       < clock_timestamp() - make_interval(secs => :quiet))
              LIMIT 20
         """),
-        {"bound": float(_DC_FALLBACK_DEFER_SECONDS),
-         "quiet": float(_DC_FALLBACK_ROOM_QUIET_SECONDS)},
+        {"bound": float(_DC_FALLBACK_DEFER_SECONDS)},
     )).mappings().all()
     for row in due:
         sid = row["id"]
@@ -3759,53 +3765,35 @@ async def _team_dc_fallback_sweep_once(db) -> int:
         # somebody else decided, so the two cases need no separate handling.
         #
         # Everything the settle uses is read HERE, under the lock: status, the
-        # marker and its dueness, the room-quiet term, the filed player id and
-        # the membership. The marker especially is re-read rather than carried,
-        # because a resume clears it (and puts the series back to 'active'), so
-        # the row can arrive at this lock with no marker at all or with a fresh
-        # one filed after that resume. clock_timestamp() inside the locked
-        # statement is read after whatever this SELECT itself did, so both time
-        # terms are measured from the moment authority is actually held.
+        # marker and its dueness, the filed player id and the membership. The
+        # marker especially is re-read rather than carried, because a resume
+        # clears it (and puts the series back to 'active'), so the row can
+        # arrive at this lock with no marker at all or with a fresh one filed
+        # after that resume. clock_timestamp() inside the locked statement is
+        # read after whatever this SELECT itself did, so the bound is measured
+        # from the moment authority is actually held.
         locked = (await db.execute(
             text("""
                 SELECT status, dc_fallback_at, dc_fallback_player_id,
                        t1a_id, t1b_id, t2a_id, t2b_id,
                        (dc_fallback_at
                         < clock_timestamp() - make_interval(secs => :bound))
-                       AS past_bound,
-                       (room_issued_at IS NULL
-                        OR room_issued_at
-                           < clock_timestamp() - make_interval(secs => :quiet))
-                       AS room_quiet
+                       AS past_bound
                   FROM team_series
                  WHERE id = :sid
                    FOR NO KEY UPDATE SKIP LOCKED
             """),
-            {"sid": sid, "bound": float(_DC_FALLBACK_DEFER_SECONDS),
-             "quiet": float(_DC_FALLBACK_ROOM_QUIET_SECONDS)},
+            {"sid": sid, "bound": float(_DC_FALLBACK_DEFER_SECONDS)},
         )).mappings().first()
         if (locked is None
                 or locked["status"] not in ("active", "dc_paused")
                 or locked["dc_fallback_at"] is None
-                or not locked["past_bound"]
-                or not locked["room_quiet"]):
+                or not locked["past_bound"]):
             # Either somebody is holding this row right now (SKIP LOCKED returns
             # nothing rather than queueing behind them) or they already decided
             # it between the two statements. Both are the designed outcome, not
             # an error, and both have the same disposition: leave it alone and
             # let the next tick read it from scratch.
-            await db.commit()
-            continue
-        # Proof-of-life veto, PASS 2, and THIS is the one the settle rests on.
-        # Pass 1 ran before the lock. A row can become live between the two --
-        # the four press Start, a room is issued, the first in-match ping lands
-        # -- and the in-transaction re-check above cannot see it, because it
-        # re-checks COLUMNS while liveness is in-process evidence. Re-read here
-        # or the sweep acts on a liveness decision as stale as the wait was
-        # long. The lock is released by the commit before continuing.
-        if _group_game_in_progress(str(sid)):
-            print("[TEAM-DC-SWEEP] deferred settle VETOED after the lock, "
-                  f"game in progress: {sid}")
             await db.commit()
             continue
         # The service-subject refusal is per ROW, not per pass. The sibling
@@ -3815,6 +3803,17 @@ async def _team_dc_fallback_sweep_once(db) -> int:
         # refusal, and it says so out loud rather than silently. It judges the
         # LOCKED row's membership -- the same four ids the settle is about to
         # attribute to -- with the lock held.
+        #
+        # IT RUNS BEFORE THE VETO, and that ordering is the point (round-4
+        # HIGH). This helper AWAITS: on a cold or hourly-expired cache
+        # _service_player_uuids issues its own SELECT, and any await hands the
+        # event loop to other requests -- including the presence ping that
+        # publishes in-match evidence for this very series. Run it after the
+        # veto and the veto is a reading of the past by however long that
+        # lookup took, while the settlement write below acts as though it were
+        # current. So every await this row needs happens HERE, and the veto
+        # below is the LAST thing read before the write with nothing awaited in
+        # between. Adding an await after the veto re-opens the same window.
         try:
             await _assert_no_service_subject(
                 db,
@@ -3823,6 +3822,29 @@ async def _team_dc_fallback_sweep_once(db) -> int:
             )
         except HTTPException:
             print(f"[TEAM-DC-SWEEP] deferred settle REFUSED, service subject: {sid}")
+            await db.commit()
+            continue
+        # Proof-of-life veto, PASS 2, and THIS is the one the settle rests on.
+        # Pass 1 ran before the lock. A row can become live between the two --
+        # the four press Start, a room is issued, the first in-match ping lands
+        # -- and the in-transaction re-check above cannot see it, because it
+        # re-checks COLUMNS while liveness is in-process evidence. Re-read here
+        # or the sweep acts on a liveness decision as stale as the wait was
+        # long. The lock is released by the commit before continuing.
+        #
+        # LAST READ BEFORE THE WRITE. Between this call and the UPDATE below
+        # there is no await, so no other task on this loop can run and no
+        # evidence can arrive unseen -- the only publisher of that evidence is
+        # presence_ping, an async handler on this same loop, not a threadpool
+        # caller. What is left between the two is a handful of lookups on the
+        # row already in hand and a membership test -- no I/O, and nothing
+        # that yields. test_sept16_dc_fallback_shape.py asserts that property
+        # over this function's own span, and the orderings file delivers a
+        # heartbeat during the service-subject lookup above and requires this
+        # veto to take it.
+        if _group_game_in_progress(str(sid)):
+            print("[TEAM-DC-SWEEP] deferred settle VETOED after the lock, "
+                  f"game in progress: {sid}")
             await db.commit()
             continue
         # The remaining team is derived from the membership on the LOCKED row's
@@ -3864,14 +3886,23 @@ async def team_dc_fallback_sweep_loop():
     A fallback report -- one filed by a survivor that is not the elected
     reporter, carrying no point totals -- no longer writes a terminal status.
     It stamps dc_fallback_at and returns "deferred", which leaves the series
-    'active' so a real-totals report arriving in ANY order still reaches its
-    normal branches including the rated lead-forfeit. This loop is what closes
-    the series when no such report ever arrives.
+    'active', so while the row is STILL active a real-totals report that
+    lands in either order relative to that fallback reaches its normal
+    branches, including the rated lead-forfeit. What ends that is this
+    loop, and the sentence below is the bound on it. This loop is what closes the series when no such report
+    ever arrives, and it is also the far end of the window:
+
+      A real-totals report wins while the deferred marker is younger than 420
+      seconds, and after that only until a sweep tick finds no live-game
+      evidence for the series and settles the row; once a row is settled, a
+      later report is refused at the settled-row exit and is not rated.
 
     It can only ever produce 'dc_incomplete' with invalidation_reason
     'dc_manual_pending' -- the admin panel's queue. It never calls
     _complete_team_series_with_ratings and moves no rating, gold or xp, so no
-    ordering of client reports can make this loop decide a result.
+    ordering of client reports can make this loop decide a RESULT; what a
+    settled row costs is the rating and gold the lead-forfeit would have
+    applied, which is why the bound is set long rather than short (#276).
     """
     import asyncio as _aio
     from database import async_session
@@ -5966,35 +5997,22 @@ LATEST_MOD_VERSION = "1.40.3"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
-    """The latest recommended mod version, the gating floor, and the one server
-    CAPABILITY a client has to ask about rather than infer.
+    """The latest recommended mod version and the gating floor.
 
-    series_status_readonly says THIS box honours ?lifecycle=false on
-    GET /api/v1/team/series/{id}/state, i.e. that the parameter makes that
-    endpoint a pure read instead of a lifecycle operation that can cancel a
-    played series. It is advertised SEPARATELY from the two version numbers on
-    purpose (#604): a box can run a build older or newer than the version it
-    advertises for reasons that have nothing to do with which routes it serves,
-    and the primary and the standby are deployed independently, so a version
-    compare is not an answer to "does the box serving me honour this
-    parameter". A server that predates this field simply omits it and the
-    client reads an absent field as false, which is the safe direction -- the
-    team tab's status banner polls nothing at all rather than polling a route
-    that would mutate (bug #266: an old server answers 200 and ignores what it
-    does not know, so a client may never infer a capability from having sent
-    the parameter).
-
-    THIS IS GATE 1 ONLY, and it is deliberately not sufficient on its own. The
-    state endpoint ECHOES `lifecycle` in its own response body, and that echo
-    is what proves the box that actually ANSWERED honoured it -- which is the
-    case this advertisement cannot cover, because the edge can route the two
-    requests to different boxes. Both halves ship together or the feature is
-    inert: without this field no client ever sends the parameter, and without
-    the echo no client may trust the answer.
+    NO CAPABILITY IS ADVERTISED HERE, and round 5 removed the one that was.
+    `series_status_readonly` used to say "this box honours ?lifecycle=false on
+    the series state endpoint". An answer from this route cannot speak for the
+    box that answers a LATER request: the edge chooses an upstream per request
+    and the primary and the standby are deployed independently, so a client
+    that read the advertisement from an updated box could still send its next
+    request to one that had not been updated (learning #422, bug #266). The
+    lifecycle parameter is gone with it; a caller that must not mutate calls
+    GET /api/v1/team/series/{id}/status, which is a route rather than an
+    argument, and reads "readonly": true out of that response -- proof about
+    the box that produced it, and about nothing else.
     """
     return {"version": LATEST_MOD_VERSION,
-            "min_version": MIN_MOD_VERSION_EFFECTIVE,
-            "series_status_readonly": True}
+            "min_version": MIN_MOD_VERSION_EFFECTIVE}
 
 
 # ── Internal endpoints (used by the Discord bot) ───────────────
@@ -37951,6 +37969,23 @@ async def team_queue_poll(steam_id: str, request: Request,
                     {"rn": room_name, "rr": chosen_region, "sid": me["series_id"],
                      "has_rules": me["rules"] is not None, "rules": _rules_json(rules)},
                 )
+                # ISSUING A ROOM CLEARS THE DEFERRAL MARKER, so a marker can
+                # never be older than the room it would be settled against.
+                # The deferred-fallback sweep no longer consults the room clock
+                # at all (the 214 s term it used could not refuse a row), and
+                # this is what makes that deletion safe: the only way a stale
+                # marker could reach a NEW sitting is a funnel that re-issues a
+                # room without clearing it, and this is the one statement in
+                # the file that stamps room_issued_at. The two funnels that
+                # revive a series call the helper on their own path, so on
+                # today's flows this is expected to find nothing to clear --
+                # "expected", not "guaranteed": the ordering between a revival
+                # and the poll that issues the room is a matter of two
+                # requests, and that is exactly the kind of reasoning this
+                # call exists to stop anyone having to do (#432, #330).
+                # test_sept16_dc_fallback_shape.py counts the room-issue
+                # OPERATION file-wide and requires this call beside it.
+                await _team_clear_dc_fallback_marker(db, me["series_id"])
                 # Re-read so the response reflects the new room name.
                 me_re = await db.execute(
                     text("SELECT room_name, room_region FROM team_queue WHERE player_id = :pid"),
@@ -38602,12 +38637,106 @@ async def team_series_spawn_confirm(
     return {"confirmations": int(new_count), "status": "active", "already_recorded": False}
 
 
-@app.get("/api/v1/team/series/{series_id}/state", tags=["Team Matches"])
-async def team_series_state(
+@app.get("/api/v1/team/series/{series_id}/status", tags=["Team Matches"])
+async def team_series_status_readonly(
     series_id: str,
-    lifecycle: bool = Query(True),
     db: AsyncSession = Depends(get_db),
 ):
+    """Read a 2v2 series' status. This route never writes.
+
+    WHY IT IS A ROUTE AND NOT A FLAG. The team tab's DC-grace banner wants to
+    know what a series' status is; the endpoint it used to ask,
+    GET .../state below, is a lifecycle operation that cancels an overdue
+    assembly and reconciles that series' bets. Round 4 gave that endpoint a
+    `lifecycle=false` parameter and had the client check the echoed flag. The
+    guarantee was then a property of an ARGUMENT, and an unknown argument is
+    the one thing a box that predates it answers 200 while ignoring (bug #266,
+    learning #422) -- so on a partly-updated deployment the first "read" the
+    banner issued could still cancel a played series and refund its stakes,
+    before any echo told the client to stop. The edge routes GETs to whichever
+    box it chooses and can route two requests from one seat to two boxes, so no
+    earlier answer -- an advertisement on /api/v1/mod-version included -- can
+    speak for the box that answers THIS one.
+
+    A separate path cannot be ignored. A box that does not carry this route
+    has no handler for it, no catch-all route and no exception handler that
+    would dress the miss up as success, so it answers 404 and the client
+    latches its banner off for that series. The capability is proven per
+    RESPONSE, by "readonly": true in the body the answering box produced, and
+    it proves nothing about any other request.
+
+    WHAT "NEVER WRITES" MEANS HERE, precisely, because a guarantee in a
+    comment is a claim about the whole state space (#351, #302): this function
+    issues one SELECT, plus whatever SELECT the service-subject assertion
+    needs; it opens no savepoint, calls no commit, and reaches no helper that
+    writes. test_sept16_dc_fallback_orderings.py records every statement this
+    route puts on the connection and requires each to be a SELECT, with the
+    mutating state GET under the same recorder as the positive control that
+    the recorder can see a write at all (#391).
+
+    The colour columns are read in the one SELECT rather than behind a
+    savepoint (#235). They arrived in migration 206 and the marker columns this
+    route ships beside arrive in 326, so any deployment that can serve this
+    route has had them for a long time; and a 500 here costs the banner, which
+    fails to OFF, where a 500 in the state GET would cost the assembly."""
+    try:
+        sid_uuid = UUID(series_id)
+    except (ValueError, TypeError):
+        raise HTTPException(400, "Invalid series_id")
+    r = (await db.execute(
+        text("""
+            SELECT status, invalidation_reason, spawn_confirmations,
+                   created_at, room_issued_at, dc_grace_until,
+                   dc_team_remaining, dc_player_id,
+                   t1_series_wins, t2_series_wins,
+                   t1_color_name, t1_color_hex, t2_color_name, t2_color_hex,
+                   t1a_id, t1b_id, t2a_id, t2b_id
+              FROM team_series
+             WHERE id = :sid
+        """),
+        {"sid": sid_uuid},
+    )).mappings().first()
+    if r is None:
+        raise HTTPException(404, "Series not found")
+    await _assert_no_service_subject(
+        db, affected_player_ids=[r["t1a_id"], r["t1b_id"],
+                                 r["t2a_id"], r["t2b_id"]])
+    _anchor = r["room_issued_at"] or r["created_at"]
+    _age = (datetime.now(timezone.utc) - _anchor).total_seconds()
+    _grace = 0
+    if r["dc_grace_until"] is not None:
+        _grace = max(0, int((r["dc_grace_until"]
+                             - datetime.now(timezone.utc)).total_seconds()))
+    return {
+        # The whole capability, stated by the box that answered. A client that
+        # does not see this key treats the answer as no answer.
+        "readonly": True,
+        "status": r["status"],
+        "reason": r["invalidation_reason"],
+        "confirmations": int(r["spawn_confirmations"] or 0),
+        "expected": 4,
+        # age_seconds and deadline_seconds are REPORTED, never acted on here:
+        # a reader can see that an assembly is overdue, and only the assembly
+        # poll's own call to the state endpoint below may do anything about it.
+        "age_seconds": int(_age),
+        "deadline_seconds": _ASSEMBLY_DEADLINE_SECONDS,
+        "dc_grace_seconds_remaining": _grace,
+        "dc_team_remaining": r["dc_team_remaining"],
+        "dc_player_id": str(r["dc_player_id"]) if r["dc_player_id"] else None,
+        "t1_series_wins": int(r["t1_series_wins"] or 0),
+        "t2_series_wins": int(r["t2_series_wins"] or 0),
+        "t1_color_name": r["t1_color_name"] or "",
+        "t1_color_hex": r["t1_color_hex"] or "",
+        "t2_color_name": r["t2_color_name"] or "",
+        "t2_color_hex": r["t2_color_hex"] or "",
+        "color_decided": any(
+            r[c] is not None for c in ("t1_color_name", "t1_color_hex",
+                                       "t2_color_name", "t2_color_hex")),
+    }
+
+
+@app.get("/api/v1/team/series/{series_id}/state", tags=["Team Matches"])
+async def team_series_state(series_id: str, db: AsyncSession = Depends(get_db)):
     """Per-series assembly + lifecycle state. Polled by clients after
     ready_join. If the room has been issued for longer than the assembly
     deadline (_ASSEMBLY_DEADLINE_SECONDS from room_issued_at) with fewer
@@ -38623,24 +38752,21 @@ async def team_series_state(
     spawn-confirm POST was lost, so a caller that merely wants to READ the
     status can cancel a played series and refund its stakes.
 
-    lifecycle=false is for those callers. It suppresses BOTH transitions and
-    makes this endpoint a pure read; the row's real current status is returned
-    either way, and age_seconds/deadline_seconds still let a reader see that an
-    assembly is overdue. Default TRUE, so every client that predates the flag
-    keeps exactly today's behaviour.
+    A CALLER THAT ONLY WANTS TO READ MUST NOT CALL THIS AT ALL. It calls
+    GET /api/v1/team/series/{series_id}/status, the route directly above,
+    which has no mutating arm of any kind. Round 4 tried to give this endpoint
+    a `lifecycle=false` parameter instead; that made the read-only guarantee a
+    property of an ARGUMENT, and an argument is exactly what a box that
+    predates it ignores while answering 200 (bug #266, learning #422) -- so a
+    request the caller believed was a read could still cancel a played series
+    on any box that had not been updated yet. A separate route cannot be
+    ignored: a box that lacks it has no handler on the path and answers 404.
+    The parameter, its response echo and the capability advertisement on
+    /api/v1/mod-version are all deleted.
 
-    WHO KEEPS THE LIFECYCLE BEHAVIOUR. The assembly poll
-    (PollAssemblyStateLoop) is the only caller that must: it is the one thing
-    that frees four clients from a failed assembly, and it runs only while a
-    seat is waiting to spawn. Every other caller -- the team UI's status read
-    among them -- wants lifecycle=false, because none of them is in a position
-    to be cancelling a series.
-
-    DEPLOY NOTE (bug #266, learning #422): a server that predates this
-    parameter answers 200 and IGNORES it, i.e. still mutates. The response
-    therefore ECHOES the flag as "lifecycle"; a caller that needs the read-only
-    guarantee must check for that field being present and false, never assume
-    it from having sent the parameter."""
+    The assembly poll (PollAssemblyStateLoop) is the only caller that wants
+    this endpoint: it is the one thing that frees four clients from a failed
+    assembly, and it runs only while a seat is waiting to spawn."""
     try:
         sid_uuid = UUID(series_id)
     except (ValueError, TypeError):
@@ -38684,12 +38810,8 @@ async def team_series_state(
     # The in_match veto covers the "game is live but a spawn-confirm POST was
     # lost" hole: a live game stuck at 3/4 confirmations must not be cancelled
     # by this poll-driven timer.
-    # The lifecycle flag comes first in this condition: this is one of the two
-    # arms a read-only caller suppresses, and it is the expensive one -- it
-    # cancels the series AND reconciles its bets.
     if (
-        lifecycle
-        and s_status == "active"
+        s_status == "active"
         and s_confirms < 4
         and age_seconds > _ASSEMBLY_DEADLINE_SECONDS
         and not _group_game_positively_live(str(sid_uuid))
@@ -38713,7 +38835,6 @@ async def team_series_state(
             "expected": 4,
             "age_seconds": int(age_seconds),
             "deadline_seconds": _ASSEMBLY_DEADLINE_SECONDS,
-            "lifecycle": lifecycle,
         }
 
     # 5-min sticky-team requeue grace window: if the deadline has passed and
@@ -38722,7 +38843,7 @@ async def team_series_state(
     dc_grace_seconds_remaining = 0
     if s_dc_grace_until is not None:
         dc_grace_seconds_remaining = max(0, int((s_dc_grace_until - datetime.now(timezone.utc)).total_seconds()))
-        if lifecycle and dc_grace_seconds_remaining == 0 and s_status == "dc_paused":
+        if dc_grace_seconds_remaining == 0 and s_status == "dc_paused":
             # Manual-control policy: a lapsed grace window no longer auto-forfeits to
             # the remaining team (a long 2v2 restart must not hand someone the series).
             # Flip to dc_incomplete so it surfaces in the admin panel for a manual call.
@@ -38743,7 +38864,6 @@ async def team_series_state(
                 "age_seconds": int(age_seconds),
                 "deadline_seconds": _ASSEMBLY_DEADLINE_SECONDS,
                 "dc_grace_seconds_remaining": 0,
-                "lifecycle": lifecycle,
             }
 
     # Aug 8 (Sid): the frozen body-colour team identity rides the state poll —
@@ -38780,10 +38900,6 @@ async def team_series_state(
         "t1_color_name": _tc[0], "t1_color_hex": _tc[1],
         "t2_color_name": _tc[2], "t2_color_hex": _tc[3],
         "color_decided": _tc_decided,
-        # Echoed on EVERY return of this endpoint, including this read-only
-        # fall-through: its absence is how a caller recognises a server that
-        # predates the parameter and ignored it (bug #266, learning #422).
-        "lifecycle": lifecycle,
     }
 
 
@@ -40024,7 +40140,21 @@ async def team_series_report_dc(
     if s is None:
         raise HTTPException(404, "Series not found")
     if s["status"] not in ("active", "dc_paused"):
-        return {"status": s["status"], "ignored": True}
+        # THE SETTLED-ROW EXIT. A report that arrives after anything terminal
+        # has been written -- by another report, by an admin, or by the
+        # deferred-fallback sweep -- is ignored here and is not rated. That is
+        # the second half of the bound stated in the deferral branch below.
+        #
+        # "deferred": False on this and on every other 200 this endpoint
+        # returns. The field is what tells a client WHICH build answered it:
+        # present and true means this box deferred the report, present and
+        # false means this box carries the deferral build and settled it, and
+        # ABSENT from a 200 means the box that answered predates the flag
+        # entirely (bug #266, learning #422). Without it on the non-deferred
+        # exits, a client seeing no flag could not tell "this build settled
+        # it" from "an old build ignored the parameter", and the seat's log
+        # line would be measuring nothing.
+        return {"status": s["status"], "ignored": True, "deferred": False}
     # Bug 245 companion: a DEFERRED DC report (clients can hold one through an
     # assembly phase and fire it minutes later) must not decide a series the
     # four have since RESUMED. Two arms, both against the LOCKED row:
@@ -40046,7 +40176,7 @@ async def team_series_report_dc(
              and not _claimed_room.startswith(_stored_room + "_"))
             or not _stored_room):
         return {"status": s["status"], "ignored": True,
-                "reason": "dc_room_mismatch"}
+                "reason": "dc_room_mismatch", "deferred": False}
     # r2 HIGH 1: an OLD client's report carries no room at all, so the fence
     # above cannot see a delayed pre-resume report. Discriminator: the
     # relock stamp. A ROOMLESS report inside the post-relock window is by
@@ -40072,7 +40202,7 @@ async def team_series_report_dc(
             _recent_relock = False
         if _recent_relock:
             return {"status": s["status"], "ignored": True,
-                    "reason": "dc_after_resume"}
+                    "reason": "dc_after_resume", "deferred": False}
     await _assert_no_service_subject(
         db,
         affected_player_ids=[s["t1a_id"], s["t1b_id"], s["t2a_id"], s["t2b_id"]],
@@ -40097,23 +40227,43 @@ async def team_series_report_dc(
 
     # ── Deferred fallback: the report that decides nothing ─────────────────
     # is_fallback marks a report filed by a survivor that is NOT the elected
-    # reporter — the elected seat published a terminal refusal, or every
-    # attempt of its report went unanswered. Such a report carries no point
-    # totals and knows nothing about the abandoned game beyond "it looks
-    # abandoned".
+    # reporter. ONE condition produces it in the client THIS release carries
+    # -- no released build publishes cr_dcr at all, so there is no older
+    # client whose conditions also have to be counted: the elected
+    # seat published a terminal refusal (cr_dcr=no), which tells the survivors
+    # that no real-totals report is coming. When the elected seat's attempts
+    # go UNANSWERED instead, it publishes cr_dcr=unk and the survivors WITHHOLD
+    # — no fallback is filed, no marker is written and the series stays
+    # 'active'. The disposition of such a series is the rowless-husk arm of
+    # team_queue_cleanup_loop: quiet for 60 minutes, no team_queue rows, no
+    # positive in-game evidence, and it is cancelled with
+    # invalidation_reason='rowless_husk' and its bets reconciled. That is a
+    # cancel, not a rating — no seat gains from an unanswered report.
     #
     # WHY IT DEFERS. A fallback and the elected seat's real-totals report can
     # be in flight at the same moment and are not orderable from inside either
     # client. When both settle on arrival, whichever takes this row's lock
     # first decides the series: a fallback landing first writes
-    # 'dc_incomplete', and the late-status guard above then discards the
+    # 'dc_incomplete', and the settled-row exit above then discards the
     # real-totals report along with the rated lead-forfeit it would have
     # applied — the same four players get a rated series or a pending admin
     # row depending on request order alone. Deferring removes the ordering
-    # from the outcome instead of guessing at it. A real-totals report
-    # arriving at ANY later moment still finds this row 'active' and reaches
-    # its normal branches; the deferral is settled only by the sweep, and only
-    # if nothing else ever arrives.
+    # from the outcome instead of guessing at it.
+    #
+    # THE BOUND, and it is a bound rather than a guarantee. Both lanes carry
+    # this sentence verbatim (client ApiClient.cs and the header of migration
+    # 326):
+    #
+    #   A real-totals report wins while the deferred marker is younger than
+    #   420 seconds, and after that only until a sweep tick finds no live-game
+    #   evidence for the series and settles the row; once a row is settled, a
+    #   later report is refused at the settled-row exit and is not rated.
+    #
+    # The round-4 comment here said "at ANY later moment", which is the one
+    # thing that is not true: the sweep exists precisely to close a row that
+    # nothing else ever settles, and a report that arrives after it has done
+    # so takes the settled-row exit above (#351 — the guarantee a comment
+    # asserts is a claim about the whole state space).
     #
     # THE INPUT IS UNSIGNED, and deliberately. The DC canonical is frozen at
     # reporter:series:dc_player:dc, so a new signed field would fail every
@@ -40160,6 +40310,12 @@ async def team_series_report_dc(
         # answered and the seat stops retrying. A caller that needs the
         # deferral must read this field; having sent the parameter proves
         # nothing about what answered.
+        #
+        # The FIELD, not the status, is the discriminator, and it now rides
+        # every 200 this endpoint returns: true here, false on each settling
+        # exit, absent only from a box that predates the flag. A client that
+        # reads a 200 with no "deferred" key at all knows it reached an old
+        # box; a client that reads false knows this build settled its report.
         return {
             "status": "deferred",
             "deferred": True,
@@ -40178,13 +40334,22 @@ async def team_series_report_dc(
 
     # ── Anti-abuse lead-forfeit (v1.28) ───────────────────────────────────
     # If the NON-DC (remaining) team has ALREADY won at least one game of this
-    # series, a DC by the other team forfeits the WHOLE series to them
-    # immediately — regardless of the abandoned game's point total. This is the
-    # rule Sid asked for: you can't leave a 2v2 to dodge a loss once the other
-    # team is up a game. Applies full Glicko/gold/xp via the shared helper so
-    # the forfeit win actually moves the board (the old dc_decided/dc_forfeit
-    # paths completed the series with NO ratings — leaving was strictly safer
-    # than losing).
+    # series AND the abandoned game had at least 2 total points, a DC by the
+    # other team forfeits the WHOLE series to them. This is the rule Sid asked
+    # for: you can't leave a 2v2 to dodge a loss once the other team is up a
+    # game. BOTH conditions are required — the branch below tests them
+    # together — and the points half is what keeps a break/restart out of it;
+    # the round-4 comment here said "regardless of the abandoned game's point
+    # total", which is the opposite of the code two lines down.
+    #
+    # It applies full Glicko and series gold via the shared helper so the
+    # forfeit win actually moves the board (the old dc_decided/dc_forfeit paths
+    # completed the series with NO ratings — leaving was strictly safer than
+    # losing). NO XP: match XP is a per-GAME payout granted inline by
+    # submit_team_match for games actually played, and
+    # _complete_team_series_with_ratings deliberately awards none — see its
+    # own docstring, which records that an earlier version of this claim was
+    # wrong in the same direction.
     other_team_existing_wins = (s["t1_series_wins"] or 0) if other_team == 1 else (s["t2_series_wins"] or 0)
     # "Clear case" (Sid's rule): auto-forfeit ONLY when the non-DC team was already
     # up a game AND real play happened in the abandoned game (>=2 points). A break/
@@ -40209,7 +40374,8 @@ async def team_series_report_dc(
         )
         await db.commit()
         return {"status": "completed", "winner_team": other_team,
-                "reason": "dc_leadforfeit", "new_ratings": new_ratings}
+                "reason": "dc_leadforfeit", "new_ratings": new_ratings,
+                "deferred": False}
 
     # Not a clear-cut forfeit (non-DC team wasn't already up a game, or too little
     # was played to count). Per the 2v2 manual-control policy — a game can break and
@@ -40233,6 +40399,7 @@ async def team_series_report_dc(
         "status": "dc_incomplete",
         "dc_team_remaining": other_team,
         "reason": "awaiting_admin_resolution",
+        "deferred": False,
     }
 
 

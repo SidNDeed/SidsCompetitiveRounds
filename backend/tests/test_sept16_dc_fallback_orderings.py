@@ -94,7 +94,13 @@ CREATE TABLE team_series (
     invalidation_reason TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     room_issued_at TIMESTAMPTZ,
-    spawn_confirmations INT NOT NULL DEFAULT 0
+    spawn_confirmations INT NOT NULL DEFAULT 0,
+    -- Migration 206's frozen team colours. PRE-326 is what this schema is,
+    -- not pre-everything: the read-only status route reads these in its one
+    -- SELECT, and a harness missing a column the route legitimately expects
+    -- would be testing the harness.
+    t1_color_name TEXT, t1_color_hex TEXT,
+    t2_color_name TEXT, t2_color_hex TEXT
 );
 
 CREATE TABLE team_matches (
@@ -155,17 +161,24 @@ def _harness_globals():
       read nor written by this file;
     * the in-match evidence map is emptied and the process is aged past the
       trust window, because _group_game_in_progress vetoes EVERYTHING while the
-      process is young and pytest's process is seconds old.
+      process is young and pytest's process is seconds old;
+    * the hourly service-account UUID cache is emptied and put back. It is
+      module state, so one scenario's fill would otherwise decide whether the
+      NEXT scenario's service-subject assertion issues SQL at all -- and one
+      scenario below has to stand inside exactly that SQL's gap.
     """
     rated = _Rated()
     old_complete = main._complete_team_series_with_ratings
     old_secret = main.MATCH_HMAC_SECRET
     old_started = main._PROCESS_STARTED_AT
     old_seen = dict(main._in_match_seen)
+    old_svc = main._service_player_uuid_cache
+    old_svc_at = main._service_uuid_cache_monotonic
     main._complete_team_series_with_ratings = rated
     main.MATCH_HMAC_SECRET = ""
     main._PROCESS_STARTED_AT = time.monotonic() - (main.IN_MATCH_TTL_SEC * 3)
     main._in_match_seen.clear()
+    main._service_player_uuid_cache = None
     try:
         assert main._in_match_evidence_trustworthy()
         yield rated
@@ -175,6 +188,8 @@ def _harness_globals():
         main._PROCESS_STARTED_AT = old_started
         main._in_match_seen.clear()
         main._in_match_seen.update(old_seen)
+        main._service_player_uuid_cache = old_svc
+        main._service_uuid_cache_monotonic = old_svc_at
 
 
 async def _fresh_series(t2_wins: int = 1):
@@ -694,10 +709,117 @@ def test_the_sweep_re_reads_liveness_after_taking_the_lock():
     _drive(body)
 
 
-# ── The second refusal: the room a held report could still name ──────────
+# ── The deleted second refusal: the sweep does not read the room clock ───
 
 
-def test_the_sweep_declines_while_the_stored_room_is_still_young():
+def test_the_sweep_settles_on_the_bound_whatever_the_room_clock_says():
+    """Round 4's 214 s room-quiet term is gone, and this is what that means.
+
+    That term was meant to be a second, independent refusal. It could not
+    refuse anything: an ordinary room is stamped when it is ISSUED, which is
+    before the sitting that produces the marker, so a marker past 420 s always
+    sat on a room past 214 s; and a continuation series carries a real room
+    with a NULL room_issued_at, which made the arm true on arrival. A check
+    that cannot fail is worse than no check (#342, #441).
+
+    The two rows below are the two shapes production actually produces. Both
+    settle on the bound alone. The third -- a room stamped AFTER the marker --
+    is the shape the round-4 test manufactured to make the term look load-
+    bearing; production cannot produce it, because issuing a room clears the
+    marker (asserted file-wide in the shape suite), and it now settles too,
+    which is the whole content of the deletion.
+    """
+    async def body():
+        engine, Session, ids = await _fresh_series()
+        sid = ids["sid"]
+        try:
+            with _harness_globals():
+                # (a) ORDINARY: room issued before the sitting, so it is at
+                # least as old as the marker.
+                assert (await _fallback(Session, sid))["status"] == "deferred"
+                async with Session() as s:
+                    await s.execute(
+                        text("UPDATE team_series"
+                             "   SET photon_room_id = 'sct-aaaaaaaaaaaa',"
+                             "       room_issued_at = clock_timestamp()"
+                             "        - make_interval(secs => 900)"
+                             " WHERE id = :sid"), {"sid": sid})
+                    await s.commit()
+                await _age_marker(Session, sid, main._DC_FALLBACK_DEFER_SECONDS * 2)
+                assert await _sweep(Session) == 1
+                assert (await _row(Session, sid))["status"] == "dc_incomplete"
+
+            # (b) CONTINUATION: a real room, no room_issued_at at all.
+            engine2, Session2, ids2 = await _fresh_series()
+            sid2 = ids2["sid"]
+            try:
+                with _harness_globals():
+                    assert (await _fallback(Session2, sid2))["status"] == "deferred"
+                    async with Session2() as s:
+                        await s.execute(
+                            text("UPDATE team_series"
+                                 "   SET photon_room_id = 'sct-bbbbbbbbbbbb',"
+                                 "       room_issued_at = NULL"
+                                 " WHERE id = :sid"), {"sid": sid2})
+                        await s.commit()
+                    await _age_marker(Session2, sid2,
+                                      main._DC_FALLBACK_DEFER_SECONDS * 2)
+                    assert await _sweep(Session2) == 1
+                    assert (await _row(Session2, sid2))["status"] == "dc_incomplete"
+            finally:
+                await engine2.dispose()
+
+            # (c) The manufactured reverse ordering: a room stamped NOW on a
+            # row whose marker is old. Under the deleted term this refused;
+            # now it settles. Production does not produce this row, and the
+            # structural suite is what holds that -- every site that stamps
+            # room_issued_at clears the marker in the same function.
+            engine3, Session3, ids3 = await _fresh_series()
+            sid3 = ids3["sid"]
+            try:
+                with _harness_globals():
+                    assert (await _fallback(Session3, sid3))["status"] == "deferred"
+                    await _age_marker(Session3, sid3,
+                                      main._DC_FALLBACK_DEFER_SECONDS * 2)
+                    async with Session3() as s:
+                        await s.execute(
+                            text("UPDATE team_series"
+                                 "   SET photon_room_id = 'sct-cccccccccccc',"
+                                 "       room_issued_at = clock_timestamp()"
+                                 " WHERE id = :sid"), {"sid": sid3})
+                        await s.commit()
+                    assert await _sweep(Session3) == 1
+                    assert (await _row(Session3, sid3))["status"] == "dc_incomplete"
+            finally:
+                await engine3.dispose()
+        finally:
+            await engine.dispose()
+    _drive(body)
+
+
+# ── The veto is the last read before the write ───────────────────────────
+
+
+SERVICE_LOOKUP_STATEMENT = "SELECT id::text FROM players"
+
+
+def test_a_heartbeat_during_the_service_subject_lookup_selects_the_veto():
+    """The round-4 HIGH, as a run rather than as a shape.
+
+    Liveness is in-process evidence and is only as current as the last moment
+    this coroutine held the event loop. Round 4 ran the awaited service-
+    subject lookup AFTER the post-lock veto; on a cold or hourly-expired cache
+    that lookup issues its own SELECT, and the await around it lets the
+    presence ping that publishes in-match evidence for this very series run to
+    completion. The veto's answer was then a reading of the past, and the
+    settlement write acted on it as if it were current.
+
+    So this scenario stands in that SELECT's gap and delivers the heartbeat
+    there. With the lookup hoisted above the veto, the veto reads the
+    heartbeat and refuses. The mutation that moves the lookup back below the
+    veto turns the first half of this test red, which is the control that it
+    is measuring the ordering and not merely that a sweep still works.
+    """
     async def body():
         engine, Session, ids = await _fresh_series()
         sid = ids["sid"]
@@ -706,34 +828,196 @@ def test_the_sweep_declines_while_the_stored_room_is_still_young():
                 assert (await _fallback(Session, sid))["status"] == "deferred"
                 await _age_marker(Session, sid, main._DC_FALLBACK_DEFER_SECONDS * 2)
 
-                # The series still stores the room its abandoned sitting was
-                # played in, issued moments ago. A report held through an
-                # assembly would still name that room and the report handler's
-                # room fence would still accept it, so the marker's age is not
-                # the whole question.
+                # Cold cache, so the service-subject assertion really does put
+                # a statement on the wire for the gate to catch.
+                main._service_player_uuid_cache = None
+                gate = asyncio.Event()
+                task = asyncio.create_task(
+                    _gated_sweep(Session, gate, SERVICE_LOOKUP_STATEMENT, "after"))
+                await asyncio.sleep(0.5)
+                assert not task.done(), (
+                    "the sweep never issued the service-subject lookup -- the "
+                    "cache was warm, or the assertion no longer runs per row")
+
+                # The four resume and the first in-match ping of the new room
+                # lands while that lookup is in flight.
+                main._in_match_touch(str(sid))
+                gate.set()
+                assert await task == 0, (
+                    "the sweep settled a row that published in-match evidence "
+                    "during its own service-subject lookup")
+                assert (await _row(Session, sid))["status"] == "active"
+
+                # NEGATIVE CONTROL: the identical interleave, same gate, same
+                # statement, no ping. It settles -- so the refusal above is the
+                # veto reading the heartbeat, not a sweep that stopped working
+                # or a gate that deadlocked it (#391).
+                main._in_match_seen.clear()
+                main._service_player_uuid_cache = None
+                gate2 = asyncio.Event()
+                task2 = asyncio.create_task(
+                    _gated_sweep(Session, gate2, SERVICE_LOOKUP_STATEMENT, "after"))
+                await asyncio.sleep(0.5)
+                assert not task2.done()
+                gate2.set()
+                assert await task2 == 1
+                assert (await _row(Session, sid))["status"] == "dc_incomplete"
+        finally:
+            await engine.dispose()
+    _drive(body)
+
+
+# ── The read-only status route writes nothing ────────────────────────────
+
+
+class _RecordStatements:
+    """Every statement the connection executes, in order.
+
+    An engine-level listener rather than a wrapper around the session: it sees
+    what actually reaches the cursor, including a SAVEPOINT or a statement
+    issued by a helper the route calls, neither of which a session wrapper
+    would catch.
+    """
+
+    def __init__(self, engine):
+        from sqlalchemy import event
+        self.seen = []
+        self._engine = engine.sync_engine
+
+        def _on(conn, cursor, statement, params, context, executemany):
+            self.seen.append(" ".join(str(statement).split()))
+        self._fn = _on
+        event.listen(self._engine, "before_cursor_execute", _on)
+
+    def close(self):
+        from sqlalchemy import event
+        event.remove(self._engine, "before_cursor_execute", self._fn)
+
+    def non_selects(self):
+        return [s for s in self.seen if not s.upper().startswith("SELECT")]
+
+
+def test_the_read_only_status_route_issues_only_selects():
+    """The route has no mutating arm -- measured, with its own positive control.
+
+    The series is put in the exact state under which the MUTATING state GET
+    cancels a series and reconciles its bets: 'active', fewer than four
+    spawn-confirms, past the assembly deadline, no live-game evidence. The
+    read-only route is called first and must leave the row alone while issuing
+    nothing but SELECTs. Then the state GET is called on the same row under the
+    same recorder: it records an UPDATE and cancels the row. That second half
+    is the control -- without it, a recorder that had silently stopped
+    listening would pass the first half (#391).
+    """
+    async def body():
+        engine, Session, ids = await _fresh_series()
+        sid = ids["sid"]
+        rec = _RecordStatements(engine)
+        try:
+            with _harness_globals():
                 async with Session() as s:
                     await s.execute(
                         text("UPDATE team_series"
-                             "   SET photon_room_id = 'sct-aaaaaaaaaaaa',"
-                             "       room_issued_at = clock_timestamp()"
-                             " WHERE id = :sid"), {"sid": sid})
-                    await s.commit()
-                assert await _sweep(Session) == 0
-                assert (await _row(Session, sid))["status"] == "active"
-
-                # NEGATIVE CONTROL: age the room past the quiet window and the
-                # same row settles, so the refusal above is the room term and
-                # not a sweep that stopped working.
-                async with Session() as s:
-                    await s.execute(
-                        text("UPDATE team_series SET room_issued_at ="
-                             "  room_issued_at - make_interval(secs => :n)"
+                             "   SET created_at = clock_timestamp()"
+                             "        - make_interval(secs => :n),"
+                             "       room_issued_at = NULL,"
+                             "       spawn_confirmations = 0"
                              " WHERE id = :sid"),
                         {"sid": sid,
-                         "n": float(main._DC_FALLBACK_ROOM_QUIET_SECONDS + 30)})
+                         "n": float(main._ASSEMBLY_DEADLINE_SECONDS * 3)})
                     await s.commit()
-                assert await _sweep(Session) == 1
-                assert (await _row(Session, sid))["status"] == "dc_incomplete"
+
+                rec.seen.clear()
+                async with Session() as s:
+                    out = await main.team_series_status_readonly(
+                        series_id=str(sid), db=s)
+                assert out["readonly"] is True
+                assert out["status"] == "active"
+                # Past the deadline and reported as such -- the route SEES the
+                # condition the state GET acts on, and does not act on it.
+                assert out["age_seconds"] > main._ASSEMBLY_DEADLINE_SECONDS
+                assert rec.non_selects() == [], rec.non_selects()
+                assert (await _row(Session, sid))["status"] == "active"
+
+                # POSITIVE CONTROL for the recorder and for the row's state.
+                calls = []
+
+                async def _fake_reconcile(db, series_uuid, reason):
+                    calls.append(reason)
+                old = main._reconcile_team_series_bets
+                main._reconcile_team_series_bets = _fake_reconcile
+                try:
+                    rec.seen.clear()
+                    async with Session() as s:
+                        state = await main.team_series_state(
+                            series_id=str(sid), db=s)
+                finally:
+                    main._reconcile_team_series_bets = old
+                assert state["status"] == "canceled", state
+                assert calls == ["assembly_timeout"], calls
+                assert any(s.upper().startswith("UPDATE") for s in rec.seen), (
+                    "the recorder saw no write on a call that demonstrably "
+                    "wrote -- it is not measuring anything")
+                assert (await _row(Session, sid))["status"] == "canceled"
+        finally:
+            rec.close()
+            await engine.dispose()
+    _drive(body)
+
+
+def test_the_status_route_is_a_different_path_from_the_mutating_one():
+    """Both routes exist, on different paths, and only one of them writes.
+
+    The capability is proven per RESPONSE by the box that answered: a box
+    without this route has no handler for the path and answers 404, which the
+    client treats as no answer. Read off the live app rather than the source,
+    so a route that failed to register cannot pass.
+    """
+    paths = {r.path: r for r in main.app.routes if hasattr(r, "path")}
+    assert "/api/v1/team/series/{series_id}/status" in paths
+    assert "/api/v1/team/series/{series_id}/state" in paths
+    ro = paths["/api/v1/team/series/{series_id}/status"]
+    assert set(ro.methods) == {"GET"}, ro.methods
+    # And the deleted flag is not a parameter of either one any more.
+    import inspect
+    for p in ("/api/v1/team/series/{series_id}/status",
+              "/api/v1/team/series/{series_id}/state"):
+        sig = inspect.signature(paths[p].endpoint)
+        assert "lifecycle" not in sig.parameters, (p, list(sig.parameters))
+
+
+def test_every_settling_answer_says_it_was_not_deferred():
+    """W23 is a measurement, not an absence (r4 client L4).
+
+    Absent from a 200, "deferred" means the box that answered predates the
+    flag. Present and false, it means this build settled the report. The
+    client cannot tell those apart unless the settling exits carry the field,
+    so they do -- including the settled-row exit a post-sweep report takes,
+    which is the second half of the bound.
+    """
+    async def body():
+        engine, Session, ids = await _fresh_series()
+        sid = ids["sid"]
+        try:
+            with _harness_globals():
+                # A settling report: the lead-forfeit branch.
+                out = await _real_totals(Session, sid)
+                assert out["status"] == "completed"
+                assert out["deferred"] is False, out
+
+                # And the settled-row exit a later report takes.
+                again = await _real_totals(Session, sid)
+                assert again["ignored"] is True
+                assert again["deferred"] is False, again
+
+            # A deferral still says true.
+            engine2, Session2, ids2 = await _fresh_series()
+            try:
+                with _harness_globals():
+                    d = await _fallback(Session2, ids2["sid"])
+                    assert d["deferred"] is True, d
+            finally:
+                await engine2.dispose()
         finally:
             await engine.dispose()
     _drive(body)

@@ -12,8 +12,11 @@ it runs everywhere:
   * the sweep re-locks and re-checks, and cannot rate anything;
   * the sweep is registered as a PRIMARY-only scheduler and as a janitor
     self-test root;
-  * every write in the state endpoint is behind the lifecycle flag, counted
-    within that function's own span rather than file-wide (#432);
+  * nothing awaits between the sweep's post-lock live-game veto and its
+    settlement write, so the veto cannot be read stale (round-4 HIGH);
+  * a caller that must not mutate has its own ROUTE rather than a flag on the
+    mutating one -- the route holds no write, and the state endpoint has no
+    lifecycle parameter left to ignore;
   * the docstrings that describe these paths say what the tree does (#302).
 """
 
@@ -215,38 +218,72 @@ def test_the_sweep_is_a_janitor_selftest_root():
     assert "team_dc_fallback_sweep_loop" in names
 
 
-# ── The state read (H1 server side) ──────────────────────────────────────
+# ── The read-only status ROUTE (H1 server side) ──────────────────────────
+#
+# Round 4 made the read-only guarantee a PARAMETER of the mutating endpoint,
+# and an unknown parameter is exactly what a box that predates it answers 200
+# while ignoring (bug #266, learning #422). Round 5 makes it a separate route,
+# because a box that lacks a route cannot answer on it.
+
+ROUTE = '@app.get("/api/v1/team/series/{series_id}/status", tags=["Team Matches"])'
+WRITE_TOKENS = ("UPDATE ", "INSERT ", "DELETE ", "db.commit(", "begin_nested(",
+                "_reconcile_team_series_bets(", "_complete_team_series_with_ratings(")
 
 
-def test_every_write_in_the_state_endpoint_is_behind_the_lifecycle_flag():
-    body = span("team_series_state")
-    joined = "\n".join(body)
-    code = code_only(body)
-    # Counted within THIS function's span: two mutating arms, two commits,
-    # each gated. A file-wide count would measure something else (#432).
+def test_the_read_only_route_is_registered():
+    assert ROUTE in SRC, "the read-only status route is not registered"
+    # And it is a distinct path from the mutating one, not a rewrite of it.
+    assert '@app.get("/api/v1/team/series/{series_id}/state", tags=["Team Matches"])' in SRC
+
+
+@pytest.mark.parametrize("token", WRITE_TOKENS)
+def test_the_read_only_route_performs_no_write(token):
+    """No write of any shape inside the route's own span (#432).
+
+    Parametrized so a failure NAMES the token that appeared rather than
+    reporting a boolean. The live half -- that the statements the route
+    actually puts on a connection are all SELECTs -- is in the orderings file,
+    with the mutating state GET under the same recorder as the control that
+    the recorder can see a write at all (#391).
+    """
+    code = code_only(span("team_series_status_readonly"))
+    hits = [ln.strip() for ln in code if token in ln]
+    assert hits == [], hits
+
+
+def test_the_read_only_route_states_the_capability_in_its_own_body():
+    code = code_only(span("team_series_status_readonly"))
+    joined = "\n".join(code)
+    # The client treats an answer without this key as no answer. It is the
+    # whole capability negotiation: proven per RESPONSE, by the box that
+    # produced it, never advertised in advance.
+    assert '"readonly": True,' in joined, joined
+
+
+def test_the_state_endpoint_has_no_lifecycle_parameter_left():
+    # code_lines_of, not code_only: the docstring NAMES the deleted parameter
+    # on purpose, and prose about a removal is not the removal (#302).
+    code = code_lines_of(node_named("team_series_state"))
+    joined = "\n".join(code)
+    # The two mutating arms and their commits are unchanged and UNGATED again:
+    # this endpoint is the assembly poll's lifecycle operation and nothing
+    # else. Counted within THIS function's span (#432).
     assert len([ln for ln in code if "UPDATE team_series" in ln]) == 2
     assert len([ln for ln in code if "await db.commit()" in ln]) == 2
-    # Drop the signature and the docstring before counting: the span starts at
-    # the def, and the flag is named in both by construction.
-    doc_end = next(i for i, ln in enumerate(code) if ln.rstrip().endswith('"""'))
-    guards = [ln.strip() for ln in code[doc_end + 1:]
-              if re.match(r"^(if )?lifecycle\b", ln.strip())]
-    assert guards == [
-        "lifecycle",                                    # the assembly-cancel arm
-        'if lifecycle and dc_grace_seconds_remaining == 0 and s_status == "dc_paused":',
-    ], guards
-    assert joined.count('"lifecycle": lifecycle') == 3   # one per return
-    assert "    lifecycle: bool = Query(True)," in body
+    assert not [ln for ln in code if re.search(r"\blifecycle\b", ln)], joined
+    assert '"lifecycle"' not in joined
+    # The signature is back to what production 0cc7f75 carries.
+    assert ("async def team_series_state(series_id: str, "
+            "db: AsyncSession = Depends(get_db)):") in joined
 
 
-def test_the_state_docstring_says_the_get_writes_and_names_who_keeps_it():
-    doc = ast.get_docstring(
-        next(n for n in TREE.body
-             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-             and n.name == "team_series_state"))
+def test_the_state_docstring_says_the_get_writes_and_sends_readers_elsewhere():
+    doc = ast.get_docstring(node_named("team_series_state"))
     assert "THIS GET WRITES" in doc
     assert "PollAssemblyStateLoop" in doc
-    assert "lifecycle=false" in doc
+    # It must name the route a read-only caller uses instead, or the deletion
+    # of the flag reads as the feature being withdrawn.
+    assert "/api/v1/team/series/{series_id}/status" in doc
 
 
 @pytest.mark.parametrize("token", ["dc_fallback_at", "dc_fallback_player_id"])
@@ -330,17 +367,13 @@ def test_the_marker_clear_lives_in_one_savepointed_helper():
         "_team_clear_dc_fallback_marker"]
 
 
-# ── The bound, and the second refusal ────────────────────────────────────
+# ── The bound ────────────────────────────────────────────────────────────
 
 
 def test_the_bound_is_derived_from_the_assembly_ceiling_not_from_transport_alone():
     import main
     budget = main._DC_CLIENT_TRANSPORT_BUDGET_SECONDS
     hold = main._ASSEMBLY_DEADLINE_SECONDS
-    # The room-quiet refusal is exactly one assembly ceiling plus one transport
-    # budget: the window inside which the report handler's room fence still
-    # accepts a report naming this series' stored room.
-    assert main._DC_FALLBACK_ROOM_QUIET_SECONDS == hold + budget
     # The bound covers the HOLD, the held report's own budget and one
     # re-election budget. The first cut was 120 s, derived from transport
     # alone; it fails this line, which is the point of having the line.
@@ -352,16 +385,81 @@ def test_the_bound_is_derived_from_the_assembly_ceiling_not_from_transport_alone
     assert "WHAT THE DERIVATION DOES NOT COVER" in head
 
 
-def test_the_room_quiet_refusal_is_applied_in_both_statements():
+def test_the_sweep_does_not_consult_the_room_clock():
+    """The 214 s "second refusal" is gone, constant and all.
+
+    It could not refuse a row. An ordinary room is stamped when it is ISSUED,
+    before the sitting that produces the marker, so a marker past 420 s always
+    sat on a room past 214 s; and a continuation series carries a real room
+    with a NULL room_issued_at, which made the term true on arrival. A check
+    that cannot fail is worse than no check (#342, #431, #441), so it is
+    deleted rather than patched (#310, #389).
+    """
+    import main
+    assert not hasattr(main, "_DC_FALLBACK_ROOM_QUIET_SECONDS")
     code = code_only(span("_team_dc_fallback_sweep_once"))
     joined = "\n".join(code)
-    # Discovery and the locked re-read both carry it: the first so the pass
-    # does not queue rows it will refuse, the second because that is the one
-    # that grants authority.
-    assert joined.count("room_issued_at IS NULL") == 2, joined.count(
-        "room_issued_at IS NULL")
-    assert joined.count('"quiet": float(_DC_FALLBACK_ROOM_QUIET_SECONDS)') == 2
-    assert 'not locked["room_quiet"]' in joined
+    assert "room_issued_at" not in joined, (
+        "the sweep is reading the room clock again")
+    assert "room_quiet" not in joined
+    assert '"quiet"' not in joined
+    # One time term remains, and it is named in both statements: the bound.
+    assert joined.count("float(_DC_FALLBACK_DEFER_SECONDS)") == 2, joined
+
+
+def test_every_room_issue_clears_the_deferral_marker():
+    """What makes the deletion above safe, asked of the FILE.
+
+    With no room term in the sweep, the property the sweep relies on is that a
+    marker is never older than the room it would be settled against. That is
+    an invariant about the room-ISSUE operation, not about the sweep: whoever
+    stamps room_issued_at must clear the marker in the same breath. Counted
+    file-wide, because the defect is a class and a span-local count could not
+    see a third funnel (#432, #330).
+    """
+    issuers = functions_performing("room_issued_at = NOW()")
+    assert issuers == ["team_queue_poll"], issuers
+    for name in issuers:
+        code = code_lines_of(node_named(name))
+        assert any("_team_clear_dc_fallback_marker(" in ln for ln in code), (
+            f"{name} stamps room_issued_at without clearing the deferral "
+            "marker; a marker filed against the previous sitting would then "
+            "settle the new one")
+    # And the only other writers of the column set it to NULL -- the two
+    # resume funnels dropping the dead room. A third value would be a new
+    # shape this reasoning has not been done for.
+    assert functions_performing("room_issued_at = NULL,") == [
+        "_team_relock_existing_series", "team_lobby_start"]
+
+
+def test_the_bound_sentence_is_one_sentence_in_every_copy():
+    """The cross-lane sentence, character for character, in both server copies.
+
+    The client lane carries the same string; the lens greps both trees for it
+    (#341, #444). A paraphrase is how two lanes start describing different
+    behaviour while each looks correct on its own.
+    """
+    sentence_words = (
+        "A real-totals report wins while the deferred marker is younger than "
+        "420 seconds, and after that only until a sweep tick finds no "
+        "live-game evidence for the series and settles the row; once a row is "
+        "settled, a later report is refused at the settled-row exit and is "
+        "not rated.")
+
+    def normalized(text):
+        return re.sub(r"\s+", " ", re.sub(r"(?m)^\s*(--|#)\s?", " ", text))
+
+    api_norm = normalized(SRC)
+    assert api_norm.count(sentence_words) == 3, (
+        "main.py must carry the bound sentence three times: the derivation "
+        "beside _DC_FALLBACK_DEFER_SECONDS, the deferral branch of report-dc, "
+        "and the sweep loop's docstring")
+    sql = (pathlib.Path(__file__).resolve().parents[1] / "sql"
+           / "326_team_series_dc_fallback_at.sql").read_text(encoding="utf-8")
+    assert sentence_words in normalized(sql)
+    # And the claim it replaced is gone from both.
+    assert "at ANY later moment still finds" not in SRC
+    assert "at ANY later moment still finds" not in sql
 
 
 # ── The lock, the veto and the attribution ───────────────────────────────
@@ -392,6 +490,68 @@ def test_the_liveness_veto_is_re_evaluated_after_the_lock_is_held():
     assert vetoes[0] < lock < vetoes[1] < settle, (vetoes, lock, settle)
 
 
+def test_nothing_awaits_between_the_post_lock_veto_and_the_settlement_write():
+    """The round-4 HIGH, as a property of the source.
+
+    Liveness is in-process evidence, so it is only as current as the last
+    moment this coroutine held the event loop. Round 4 ran the awaited
+    service-subject lookup AFTER the post-lock veto; on a cold or hourly-
+    expired cache that lookup issues its own SELECT, and any await lets the
+    presence ping that publishes in-match evidence for this very series run to
+    completion. The veto's answer was then a reading of the past and the
+    settlement write acted on it as current.
+
+    So: the veto is the LAST thing read before the write, and between them
+    there is no await of any kind. Asserted over this function's own span
+    (#432) and on the AST rather than on a line count, so a helper call that
+    happens to be written across two lines cannot slip through.
+    """
+    node = node_named("_team_dc_fallback_sweep_once")
+
+    def veto_calls(stmt):
+        return [n for n in ast.walk(stmt)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                and n.func.id == "_group_game_in_progress"]
+
+    assert len(veto_calls(node)) == 2, "the sweep no longer has two vetoes"
+    loops = [n for n in ast.walk(node) if isinstance(n, ast.For)]
+    assert len(loops) == 1, "the per-row loop is not where it was"
+    body = loops[0].body
+
+    # The post-lock veto is the LAST top-level `if` in the loop whose own test
+    # calls the veto. Its own branch is the vetoed path -- awaits in there
+    # happen instead of the write, not before it -- so the question is only
+    # about the SIBLINGS that follow it.
+    veto_idx = [i for i, st in enumerate(body)
+                if isinstance(st, ast.If) and veto_calls(st.test)]
+    assert veto_idx, "no `if` in the per-row loop tests the live-game veto"
+    after = body[veto_idx[-1] + 1:]
+    assert after, "nothing follows the post-lock veto"
+
+    first_await = None
+    for stmt in after:
+        awaits = sorted(n.lineno for n in ast.walk(stmt)
+                        if isinstance(n, ast.Await))
+        if awaits:
+            first_await = (stmt, awaits[0])
+            break
+    assert first_await is not None, "the settlement write disappeared"
+    stmt, lineno = first_await
+    text_of = "\n".join(LINES[stmt.lineno - 1:stmt.end_lineno])
+    assert "SET status = 'dc_incomplete'" in text_of, (
+        "the first thing awaited after the post-lock live-game veto is not "
+        f"the settlement write but line {lineno}: {LINES[lineno - 1].strip()!r}"
+        " -- the veto is stale by however long that await takes")
+
+    # And the service-subject lookup -- the await that used to be there -- now
+    # runs BEFORE the veto, where its cost is paid while nothing is decided.
+    service = [n.lineno for n in ast.walk(node)
+               if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+               and n.func.id == "_assert_no_service_subject"]
+    assert len(service) == 1, service
+    assert service[0] < body[veto_idx[-1]].lineno, (service, veto_idx)
+
+
 def test_every_value_the_settle_writes_is_read_from_the_locked_row():
     code = code_only(span("_team_dc_fallback_sweep_once"))
     joined = "\n".join(code)
@@ -407,19 +567,49 @@ def test_every_value_the_settle_writes_is_read_from_the_locked_row():
         code, "_assert_no_service_subject(")
 
 
-# ── Gate 1 of the read-only series status ────────────────────────────────
+# ── /mod-version advertises no capability ────────────────────────────────
 
 
-def test_mod_version_advertises_the_read_only_series_status_capability():
+def test_mod_version_advertises_no_capability():
+    """The advertisement is deleted, not merely unused.
+
+    An answer from /mod-version cannot speak for the box that answers a LATER
+    request: the edge chooses an upstream per request and the two boxes are
+    deployed independently (learning #422). Leaving the key in place while the
+    client stopped reading it would leave the next reader a mechanism to
+    revive.
+    """
     code = code_lines_of(node_named("get_mod_version"))
     joined = "\n".join(code)
-    # The client's gate 1 reads this exact key off /mod-version and treats an
-    # absent field as false, in which case the team tab's banner polls nothing
-    # at all. Without the advertisement the lifecycle flag, both suppressed
-    # arms and all three echo sites are dead code on deploy (#438, #443).
-    assert '"series_status_readonly": True' in joined, joined
+    assert "series_status_readonly" not in joined, joined
+    # The two version numbers, and nothing else.
+    assert '"version": LATEST_MOD_VERSION' in joined
+    assert '"min_version": MIN_MOD_VERSION_EFFECTIVE}' in joined
     doc = ast.get_docstring(node_named("get_mod_version"))
-    # And the docstring has to say that the advertisement is not sufficient by
-    # itself -- the echo is what proves which box answered (#266).
-    assert "GATE 1 ONLY" in doc
-    assert "ECHOES" in doc
+    # The docstring must say WHY, or the next pass re-adds it.
+    assert "NO CAPABILITY IS ADVERTISED HERE" in doc
+    assert "/status" in doc
+
+
+# ── The report endpoint's build discriminator ────────────────────────────
+
+
+def test_every_200_exit_of_report_dc_carries_the_deferred_field():
+    """W23 is a measurement only if the field rides the settling exits too.
+
+    Absent from a 200, "deferred" means the answering box predates the flag;
+    present and false, it means this build settled the report. With the field
+    only on the deferral branch, a client could not tell those two apart and
+    its log line would measure nothing (r4 client L4).
+    """
+    node = node_named("team_series_report_dc")
+    returns = [n for n in ast.walk(node) if isinstance(n, ast.Return)]
+    assert len(returns) == 6, len(returns)
+    for r in returns:
+        assert isinstance(r.value, ast.Dict), ast.dump(r.value)
+        keys = [k.value for k in r.value.keys if isinstance(k, ast.Constant)]
+        assert "deferred" in keys, (r.lineno, keys)
+    # Exactly one of them defers; the other five say so explicitly.
+    src = "\n".join(code_only(span("team_series_report_dc")))
+    assert src.count('"deferred": True') == 1
+    assert src.count('"deferred": False') == 5
