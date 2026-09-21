@@ -2287,6 +2287,15 @@ namespace CompetitiveRounds
             // Aug 12 item 2c: BEFORE the throttle, exactly like the 1v1 tab's
             // ticker — a 0.7s glitter cannot live behind a 2s gate.
             TickPodiumSparkle();
+            // THE DC-DEFERRAL BANNER'S READ, AND IT IS HERE FOR THE SAME REASON THE
+            // QUEUE PANELS ARE (#62). It used to be called from RefreshTeamTab,
+            // which runs on a dirty flip rather than per frame, so its 2 s interval
+            // was counted in repaints: the survivor's countdown moved at whatever
+            // rate other traffic happened to redraw the tab. BEFORE the throttle,
+            // like the sparkle above, because the poll carries its own unscaled 2 s
+            // deadline and a second gate here would only make the cadence this
+            // ticker's business as well as its own.
+            ApiClient.UpdateTeamSeriesStatePoll(force: false);
             if (Time.unscaledTime < teamTabRefreshAt) return;
             teamTabRefreshAt = Time.unscaledTime + 2f;
             // v1.37 host lobbies: one-shot membership rediscovery + the
@@ -26216,10 +26225,22 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 15f, C_LABEL, UIFactory.AlignTopLeft, sizeDelta: new Vector2(900, 60));
             UIFactory.SetWordWrap(txtTeamMembers, true);
 
-            // DC sticky-team grace banner: when a player drops mid-series, the
-            // server enters a 5-minute window where the same 4 can re-queue and
-            // resume the existing series with the same teams. Otherwise the
-            // remaining team takes the series win by forfeit at the deadline.
+            // DC DEFERRAL BANNER. When a 2v2 seat drops and the survivor's report
+            // is PARKED by the server rather than applied, this line tells the
+            // survivor the series is held and shows the time the read-only status
+            // route hands over. It renders nothing of its own; the render block,
+            // which owns the derivation, is in RefreshTeamTab.
+            //
+            // WHAT THIS IS NOT, because the wording here used to say both and both
+            // are dead on this branch: there is no 5-minute window in which the same
+            // four re-queue and resume — that belonged to the legacy dc_paused flow,
+            // retired in v1.30.0, and the window that does exist is bug 245's
+            // resume relock at roughly thirty minutes (SendTeamDcReport's own
+            // summary in ApiClient). And the bound passing is not a forfeit: the
+            // series completes to the other team only where that team had already
+            // won a game AND the abandoned one carries >= 2 total points, so the
+            // ordinary outcome of a parked report is status='dc_incomplete' for the
+            // admin panel, which is a win for nobody.
             txtTeamDcGrace = UIFactory.CreateText("TDC", statusBox.transform, "",
                 16f, new Color(1f, 0.7f, 0.3f), UIFactory.AlignMidLeft,
                 sizeDelta: new Vector2(900, 26));
@@ -26920,11 +26941,22 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
         /// second, and it names the fields the render came from so a reader can
         /// check the derivation rather than take it.
         ///
-        /// <para>The tab re-renders at frame rate, so it speaks on a CHANGE of what
-        /// the banner shows and not per frame. The remaining seconds are
-        /// deliberately NOT part of the change key: a countdown ticking once every
-        /// 2 s would otherwise make this line a log flood, and its value is in the
-        /// transition.</para></summary>
+        /// <para>The tab re-renders on a dirty flip rather than per frame, and an
+        /// answer that changes the banner's inputs asks for one — so this speaks on
+        /// a CHANGE of what the banner shows and not on every draw. The remaining
+        /// seconds are deliberately NOT part of the change key: a countdown ticking
+        /// once every 2 s would otherwise make this line a log flood, and its value
+        /// is in the transition.</para>
+        ///
+        /// <para>WHAT THE OFF LINE MAY SAY. Three different inputs put the banner
+        /// off with the cache naming this series and no latch: an answer that
+        /// carried dc_deferred=false, an answer of the status route that carried no
+        /// complete deferral state, and an answer of the LIFECYCLE state read, which
+        /// carries none of the three keys and stamps the cache all the same. Only
+        /// the first measured the row. The other two are the same fail-to-OFF and
+        /// this line says so, because a witness that spells "nothing answered this"
+        /// as "the route said false" hands a triage a denial nobody made (#342,
+        /// #351).</para></summary>
         private static string _dcBannerWitnessKey = null;
 
         private static void LogDcBannerWitness(string seriesId, bool shown,
@@ -26933,7 +26965,8 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             string key = (seriesId ?? "-") + "|" + (shown ? "on" : "off")
                          + "|" + (cacheIsThisSeries ? "c" : "-")
                          + (latchedDark ? "d" : "-")
-                         + (ApiClient.LastSeriesDcDeferred ? "f" : "-");
+                         + (ApiClient.LastSeriesDcDeferred ? "f" : "-")
+                         + (ApiClient.LastSeriesDcDeferredFieldsPresent ? "p" : "-");
             if (key == _dcBannerWitnessKey) return;
             _dcBannerWitnessKey = key;
             if (string.IsNullOrEmpty(seriesId)) return;
@@ -26954,8 +26987,16 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                         : !cacheIsThisSeries
                             ? "the status cache describes a different series, so nothing in "
                               + "it describes this one"
-                            : "the last answer carried dc_deferred=false, so this series "
-                              + "holds no deferral marker the sweep could still act on"));
+                            : ApiClient.LastSeriesDcDeferredFieldsPresent
+                                ? "the last answer for this series carried dc_deferred=false, "
+                                  + "so as of that answer the series held no deferral marker "
+                                  + "the sweep could still act on"
+                                : "the last answer for this series carried no deferral state "
+                                  + "at all — the three fields were absent from it, which is "
+                                  + "read as NOT deferred. The lifecycle state read carries "
+                                  + "none of them and a status answer can be missing them; "
+                                  + "either way this is about the ANSWER and says nothing "
+                                  + "about whether the row holds a marker"));
         }
 
         private static void RefreshTeamTab()
@@ -27035,10 +27076,14 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 teamLobbyCreateBtn, teamLobbyCreatePrivBtn, teamLobbyStartBtn, teamLobbyLeaveBtn, teamLobbyPrefBtn,
                 teamLobbyRulesRow, teamLobbyFfBtn, teamLobbyScBtn);
 
-            // DC banner, and THE POLL THAT FEEDS THE TEAM TAB. The poll is live
-            // and load-bearing three ways: the frozen team-colour stamp
-            // (TeamColorIdentity reads those statics), the status cache the
-            // assembly loop reads, and the banner below.
+            // DC BANNER — WHAT IT RENDERS FROM. The read that feeds it is NOT
+            // dispatched here: this method runs on a dirty flip, and a 2 s interval
+            // counted in repaints is not 2 s (#62). The poll runs from
+            // MaybeRefreshTeamTab, the tab's per-frame ticker, on an unscaled
+            // wall-clock deadline, and it is load-bearing three ways — the frozen
+            // team-colour stamp (TeamColorIdentity reads those statics), the status
+            // cache the assembly loop reads, and the banner below. What this block
+            // owns is the derivation.
             //
             // THE PREDICATE THAT USED TO BE HERE IS DELETED, NOT PATCHED. It was
             // `status == "dc_paused" && remaining > 0`, and no box could satisfy
@@ -27085,7 +27130,6 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             //  * the series must not be latched dark. A latch means no box
             //    answered this series' read AS a read, so there is no current
             //    deferral state at all and the last one must not stay on screen.
-            ApiClient.UpdateTeamSeriesStatePoll(force: false);
             var dcBanner = (txtTeamDcGrace as Component)?.gameObject;
             if (dcBanner != null)
             {

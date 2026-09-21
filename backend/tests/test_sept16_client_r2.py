@@ -29,6 +29,7 @@ import itertools
 import pathlib
 import re
 
+LF = chr(10)
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 PLUGIN = ROOT / "plugin"
 
@@ -2715,7 +2716,7 @@ def test_r5_h1_the_banner_polls_the_status_route_and_proves_it_per_response():
     assert "_statusPollRefusedForSeries" in ui
     # and it returns BEFORE the throttle, so no poll is dispatched at all
     assert (ui.index("if (_statusPollDarkSeries.Contains(sid))")
-            < ui.index("teamSeriesStateTimer +="))
+            < ui.index("if (!force && Time.unscaledTime < teamSeriesStateNextAt) return;"))
 
     ro = _method_body(api, "public static void PollTeamSeriesStatusReadOnly")
     assert ro, "the read-only poller's own text could not be delimited"
@@ -4073,7 +4074,7 @@ def _dc_banner_block(ui):
     """The DC banner's render block, and "" when its bounds cannot be
     established.  A predicate read off the whole 30 000-line file would be
     satisfied by any other method's text; the claim is about THIS block."""
-    a = "// DC banner, and THE POLL THAT FEEDS THE TEAM TAB."
+    a = "// DC BANNER — WHAT IT RENDERS FROM."
     b = "// In Queue panel"
     if a not in ui or b not in ui:
         return ""
@@ -4209,52 +4210,161 @@ def test_r6_item7_the_dead_banner_predicate_is_deleted_not_preserved():
 # trees and grep them for the SAME literals (#341, #444).
 
 
-def _server_lane_main():
-    """(text, how) for the server lane's main.py, resolved at RUN TIME.
+def _server_lane_candidates(root, env, worktree_lines):
+    """The ordered (path, how, exclusive) candidates for the server lane, as a
+    PURE function of its three inputs -- so the RULE can be tested rather than
+    only the tree this machine happens to have.
 
     NEVER A HARDCODED PATH.  A hardcoded target is a check that cannot fail
     where it matters (#342), and a workstation path written into the repository
-    is a privacy defect besides.  Three ways, and the first that actually
-    carries the route wins:
+    is a privacy defect besides.
 
-      1. $SCR_SERVER_LANE -- what the mutation-control runner points at a COPY
-         of that tree, so the "remove a field from the route" control can be
-         exercised without writing to the other lane's worktree;
-      2. <root>/REVIEW-INPUT/server-lane -- the review pin's own layout, so a
-         cold reviewer runs the same check the builder ran;
-      3. `git worktree list` -- the sibling worktree whose branch names the
-         server lane.
+    $SCR_SERVER_LANE IS EXCLUSIVE.  When something names the tree to read, a
+    tree it did not name is never read in its place.  The mutation-control
+    runner points that variable at a mutated COPY; falling through to the real
+    lane when the copy is missing or half-written would report the control
+    GREEN while reading an unmutated tree, which is the control that cannot
+    fail.  A named tree that does not carry the route FAILS, and says so.
 
-    Returns ("", ...) when none of them carries it; the caller FAILS rather
-    than skipping.  A cross-lane test that quietly skips is the check that
-    cannot fail."""
+    WITHOUT IT, THIS REPOSITORY IS ITSELF A CANDIDATE.  The two halves of this
+    contract are two branches today and ONE tree once they merge.  On merged
+    main -- or in a fresh clone, on another machine, or on CI, where no review
+    pin and no sibling worktree ever existed -- the route lives in this very
+    repository; a resolver that cannot see that goes red for a reason that has
+    nothing to do with the field list it exists to compare, and a red-on-main
+    test is deleted or turned into a skip by the next reader.  That would lose
+    the binding at exactly the moment the two halves become one artifact.
+
+    THE WORKTREE CANDIDATE IS MATCHED BY BRANCH, NOT BY SUBSTRING.  `git
+    worktree list` prints `<path> <sha> [branch]`, and a substring match for
+    the lane's name also matches every read-only review pin checked out from
+    that lane at an older sha -- a stale tree answering for the live one with
+    nothing in the output to say so."""
+    if env:
+        return [(pathlib.Path(env), "the tree $SCR_SERVER_LANE names", True)]
+    cands = [
+        (root / "REVIEW-INPUT" / "server-lane",
+         "the review pin's server-lane copy", False),
+        (root, "this repository itself -- the merged tree", False),
+    ]
+    for ln in worktree_lines:
+        m = re.search(r"\[([^\]]+)\]\s*$", ln.strip())
+        if not m or m.group(1).strip() != "claude/sept16-dc-server":
+            continue
+        cands.append((pathlib.Path(ln.split()[0]),
+                      "the server lane's worktree", False))
+    return cands
+
+
+def _stable_text(read, attempts=3, complete=None):
+    """The text of a file nothing is writing to, or None.
+
+    THIS CHECK READS ANOTHER LANE'S WORKING TREE, and that lane's builder edits
+    it while this one runs.  A read that lands mid-write returns a file whose
+    route is half a dict -- which is indistinguishable, at the assertion, from
+    the two lanes genuinely disagreeing about a field name.  It happened: a
+    controls run reported this test RED with `dc_deferred_bound_seconds`
+    missing while the file re-read minutes later carried it and the contract
+    named it throughout.
+
+    A difference is evidence only when the thing read was COMPLETE (#304), so
+    two conditions must hold before a text is used, both cheap: two consecutive
+    reads are identical, and `complete` -- when one is given -- says the part
+    this check actually uses is whole.  Neither proves anything about behaviour
+    (#340); they are about the READ.  Parsing the whole 40 000-line file was
+    the first cut and cost about fifteen seconds per process, which is the
+    controls runner's whole budget; the completeness claim belongs to the text
+    this check reads, not to the file around it.
+
+    `read` and `complete` are callables so the rule can be exercised without a
+    concurrent writer: hand it a reader that answers differently each time, or
+    a completeness predicate that refuses, and it must refuse both."""
+    prev = None
+    for _ in range(attempts):
+        cur = read()
+        if cur is None:
+            return None
+        if cur == prev:
+            if complete is not None and not complete(cur):
+                return None
+            return cur
+        prev = cur
+    return None
+
+
+def _route_dict_is_complete(text):
+    """True when the status route's own return dict is BALANCED in `text`.
+
+    A text with no such route is not judged here: a candidate tree that does
+    not carry the route is SKIPPED by the resolver, and answering False for it
+    would turn every unrelated tree into a failure."""
+    a = '@app.get("/api/v1/team/series/{series_id}/status"'
+    if a not in text:
+        return True
+    i = text.index(a)
+    j = text.find("@app.get(", i + len(a))
+    region = text[i:j if j > 0 else len(text)]
+    if "return {" not in region:
+        return False
+    depth = 0
+    for ch in region[region.rindex("return {"):]:
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return True
+    return False
+
+
+def _server_lane_main():
+    """(text, how) for the server lane's main.py, resolved at RUN TIME through
+    _server_lane_candidates.
+
+    Returns ("", reason) when no candidate carries the route; the caller FAILS
+    rather than skipping.  A cross-lane test that quietly skips is the check
+    that cannot fail."""
     import os
     import subprocess
     route = '@app.get("/api/v1/team/series/{series_id}/status"'
-    cands = []
-    env = os.environ.get("SCR_SERVER_LANE")
-    if env:
-        cands.append((pathlib.Path(env), "the tree $SCR_SERVER_LANE names"))
-    cands.append((ROOT / "REVIEW-INPUT" / "server-lane", "the review pin's server-lane copy"))
+    lines = []
     try:
         proc = subprocess.run(["git", "-C", str(ROOT), "worktree", "list"],
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        for ln in proc.stdout.decode("utf-8", "replace").splitlines():
-            if "sept16-dc-server" in ln:
-                cands.append((pathlib.Path(ln.split()[0]), "the server lane's worktree"))
+        lines = proc.stdout.decode("utf-8", "replace").splitlines()
     except Exception:
-        pass
-    for root, how in cands:
+        lines = []
+    for cand, how, exclusive in _server_lane_candidates(
+            ROOT, os.environ.get("SCR_SERVER_LANE"), lines):
         for rel in ("backend/api/main.py", "main.py"):
-            p = root / rel
-            try:
-                if not p.exists():
-                    continue
-                text = p.read_text(encoding="utf-8", errors="replace")
-            except OSError:
+            p = cand / rel
+
+            def _read(path=p):
+                try:
+                    if not path.exists():
+                        return None
+                    return path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    return None
+
+            text = _stable_text(_read, complete=_route_dict_is_complete)
+            if text is None:
+                if p.exists():
+                    # It is there and it would not read twice alike, or would
+                    # not parse: something is writing it.  That is NOT a
+                    # disagreement between the lanes and must not be reported
+                    # as one -- the caller fails with the reason, and the
+                    # answer is to re-read, never to weaken the assertion.
+                    return "", ("a candidate main.py could not be read in a stable, "
+                                "complete state -- the other lane's tree is being "
+                                "written; re-read before treating any difference as "
+                                "a disagreement")
                 continue
             if route in text:
                 return text, how
+        if exclusive:
+            return "", ("the tree $SCR_SERVER_LANE names carries no status route, "
+                        "and a named tree is never silently replaced by another")
     return "", "no candidate tree carried the status route"
 
 
@@ -4614,3 +4724,453 @@ def test_r6_an_id_change_clears_the_banners_three_inputs():
     assert claim(_mutate(api, "The banner's three inputs are part of that scope",
                          "The banner's three inputs belong to that scope",
                          "R6 id-change negative control"))
+
+
+# ── ROUND 6, THE COLD LENS: the cadence, the repaint, and three claims ───────
+# Every case below closes one lens finding on the round-6 tree.
+
+
+def _no_frame_time_code(body):
+    """True when no LINE OF CODE in `body` reads Time.deltaTime.  The name may
+    appear in the comment that explains why the accumulator went -- a claim
+    about an operation is checked against the operation, not against the file's
+    vocabulary (#432)."""
+    return all(ln.strip().startswith("//")
+               for ln in body.split(chr(10)) if "Time.deltaTime" in ln)
+
+
+def _witness_body(ui):
+    return _method_body(ui, "private static void LogDcBannerWitness")
+
+
+def _team_ticker_body(ui):
+    return _method_body(ui, "public static void MaybeRefreshTeamTab")
+
+
+def test_r6lens_h2_the_banner_read_runs_on_a_wall_clock_from_a_per_frame_path():
+    """THE CADENCE WAS MEASURED IN REPAINTS, NOT IN SECONDS.
+
+    The banner's only data source was polled on a `Time.deltaTime` accumulator
+    whose one caller sat inside RefreshTeamTab -- a path that runs when
+    something flips the dirty bit, never per frame (#62, which is why the queue
+    panels were pulled out of that same method).  So the documented 2 s
+    interval was counted in repaint-frames: the wall-clock cadence moved with
+    the frame rate and with however much unrelated traffic happened to repaint
+    the tab, and a survivor inside a 420 s deferral window could wait tens of
+    seconds for the first read and then watch the handed-over seconds jump by
+    as much.  Round 6 made this banner the only consumer of a live countdown
+    and certified the 2 s cadence in three comments, which is what makes it a
+    defect of this round rather than inherited plumbing.
+
+    THE FIX IS THE DOCUMENTED PATTERN, not a second timer: the per-frame
+    ticker calls the poll, and the poll gates on an unscaled wall-clock
+    deadline."""
+    api = _src("ApiClient.cs")
+    ui = _src("NativeUI.cs")
+
+    poll = _method_body(api, "public static void UpdateTeamSeriesStatePoll")
+    assert poll, "the poll's own text could not be delimited"
+    # the gate is a deadline on the unscaled wall clock
+    assert "if (!force && Time.unscaledTime < teamSeriesStateNextAt) return;" in poll
+    assert "teamSeriesStateNextAt = Time.unscaledTime + TEAM_SERIES_STATE_INTERVAL;" in poll
+    # and the accumulator is gone: frame time survives in this method only as
+    # the prose explaining why it went, never as a line of code, and the field
+    # itself is gone from the whole file
+    assert _no_frame_time_code(poll)
+    assert "teamSeriesStateTimer" not in api
+
+    # THE CALLER.  One call site in this file, and it is the per-frame ticker.
+    assert ui.count("ApiClient.UpdateTeamSeriesStatePoll(") == 1
+    ticker = _team_ticker_body(ui)
+    assert ticker, "the team tab's ticker could not be delimited"
+    assert "ApiClient.UpdateTeamSeriesStatePoll(force: false);" in ticker
+    # BEFORE the ticker's own 2 s throttle: the poll owns its cadence, and a
+    # second gate in front of it would put that cadence back in a caller's hands
+    assert (ticker.index("ApiClient.UpdateTeamSeriesStatePoll(force: false);")
+            < ticker.index("if (Time.unscaledTime < teamTabRefreshAt) return;"))
+    # and the render block no longer dispatches anything
+    block = _dc_banner_block(ui)
+    assert block, "the DC banner block's own bounds could not be established"
+    assert "UpdateTeamSeriesStatePoll" not in block
+
+    def claim(s_ui):
+        t = _team_ticker_body(s_ui)
+        b = _dc_banner_block(s_ui)
+        if not t or not b:
+            return False
+        return ("ApiClient.UpdateTeamSeriesStatePoll(force: false);" in t
+                and t.index("ApiClient.UpdateTeamSeriesStatePoll(force: false);")
+                < t.index("if (Time.unscaledTime < teamTabRefreshAt) return;")
+                and "UpdateTeamSeriesStatePoll" not in b
+                and s_ui.count("ApiClient.UpdateTeamSeriesStatePoll(") == 1)
+
+    # MUTATION 1: the poll goes back into the repaint path
+    _assert_discriminating(
+        claim, ui,
+        _mutate(ui,
+                "            ApiClient.UpdateTeamSeriesStatePoll(force: false);\n",
+                "",
+                "R6lens the poll leaves the per-frame ticker")
+        .replace("            var dcBanner = (txtTeamDcGrace as Component)?.gameObject;",
+                 "            ApiClient.UpdateTeamSeriesStatePoll(force: false);\n"
+                 "            var dcBanner = (txtTeamDcGrace as Component)?.gameObject;"),
+        "R6lens the poll runs from the per-frame ticker")
+
+    # MUTATION 2: it runs behind the ticker's own 2 s throttle, so the cadence
+    # belongs to the caller again
+    _assert_discriminating(
+        claim, ui,
+        _mutate(ui,
+                "            ApiClient.UpdateTeamSeriesStatePoll(force: false);\n"
+                "            if (Time.unscaledTime < teamTabRefreshAt) return;",
+                "            if (Time.unscaledTime < teamTabRefreshAt) return;\n"
+                "            ApiClient.UpdateTeamSeriesStatePoll(force: false);",
+                "R6lens the poll moves behind the throttle"),
+        "R6lens the poll is called before the ticker's throttle")
+
+    def gate(s_api):
+        p = _method_body(s_api, "public static void UpdateTeamSeriesStatePoll")
+        if not p:
+            return False
+        return ("if (!force && Time.unscaledTime < teamSeriesStateNextAt) return;" in p
+                and _no_frame_time_code(p)
+                and "teamSeriesStateTimer" not in s_api)
+
+    # MUTATION 3: the accumulator returns, so the interval is frame time again
+    _assert_discriminating(
+        gate, api,
+        _mutate(api,
+                "            if (!force && Time.unscaledTime < teamSeriesStateNextAt) return;\n"
+                "            teamSeriesStateNextAt = Time.unscaledTime + TEAM_SERIES_STATE_INTERVAL;",
+                "            teamSeriesStateTimer += Time.deltaTime;\n"
+                "            if (!force && teamSeriesStateTimer < TEAM_SERIES_STATE_INTERVAL) return;\n"
+                "            teamSeriesStateTimer = 0f;",
+                "R6lens the frame-time accumulator returns"),
+        "R6lens the poll gates on the unscaled wall clock")
+
+    # NEGATIVE CONTROL: rewording the prose beside the gate keeps every claim
+    assert gate(_mutate(api, "WALL-CLOCK CADENCE, AND THE CALLER IS A PER-FRAME TICKER",
+                        "WALL-CLOCK CADENCE, AND ITS CALLER IS A PER-FRAME TICKER",
+                        "R6lens cadence negative control"))
+
+
+def test_r6lens_h2_an_answer_that_changes_the_banner_asks_for_the_repaint():
+    """THE OTHER HALF OF THE CADENCE.
+
+    A wall-clock poll alone still draws at whatever rate the tab's other
+    fetches happen to repaint it, because this tab re-renders on a dirty flip
+    (#62).  The answer that changes what the banner reads asks for that
+    repaint, which is the shape every other fetch on this tab already uses --
+    the ticker polls, the answer marks dirty.  An answer that changes nothing
+    asks for nothing, so the countdown does not become a repaint loop."""
+    api = _src("ApiClient.cs")
+    parse = _method_body(api, "private static void ApplySeriesStateResponse")
+    assert parse, "the shared parse could not be delimited"
+
+    assert "string bannerBefore = BannerRenderKey();" in parse
+    assert "if (BannerRenderKey() != bannerBefore) NativeUI.MarkDirty();" in parse
+    # the key is taken BEFORE the fields are written and compared after
+    assert parse.index("string bannerBefore = BannerRenderKey();") < parse.index(
+        "if (BannerRenderKey() != bannerBefore) NativeUI.MarkDirty();")
+
+    key = _method_body(api, "private static string BannerRenderKey()")
+    assert key, "the render key could not be delimited"
+    for field in ("LastSeriesStateForId", "LastSeriesDcDeferred",
+                  "LastSeriesDcDeferredSecondsRemaining",
+                  "LastSeriesDcDeferredBoundSeconds",
+                  "LastSeriesDcDeferredFieldsPresent",
+                  "LastSeriesT1Wins", "LastSeriesT2Wins"):
+        assert field in key, field
+
+    def claim(s):
+        p = _method_body(s, "private static void ApplySeriesStateResponse")
+        k = _method_body(s, "private static string BannerRenderKey()")
+        if not p or not k:
+            return False
+        return ("string bannerBefore = BannerRenderKey();" in p
+                and "if (BannerRenderKey() != bannerBefore) NativeUI.MarkDirty();" in p
+                and "LastSeriesDcDeferredSecondsRemaining" in k
+                and "LastSeriesStateForId" in k)
+
+    # MUTATION 1: the repaint request goes, so the banner redraws only when
+    # something unrelated flips the dirty bit
+    _assert_discriminating(
+        claim, api,
+        _mutate(api,
+                "            if (BannerRenderKey() != bannerBefore) NativeUI.MarkDirty();",
+                "            // no repaint",
+                "R6lens the repaint request is removed"),
+        "R6lens an answer that changes the banner asks for a repaint")
+
+    # MUTATION 2: the countdown leaves the key, so a changing number never
+    # reaches the screen
+    _assert_discriminating(
+        claim, api,
+        _mutate(api,
+                '                   + "|" + LastSeriesDcDeferredSecondsRemaining',
+                '                   + "|"',
+                "R6lens the countdown leaves the render key"),
+        "R6lens the render key carries the countdown")
+
+
+def test_r6lens_m3_m5_the_banner_off_line_separates_absent_from_false():
+    """A WITNESS MUST NOT STATE A FACT ITS INPUT DID NOT CARRY (#342, #351).
+
+    The OFF line's last branch is reached for THREE different inputs: an answer
+    that really carried dc_deferred=false; a status answer that carried no
+    complete deferral state; and an answer to the LIFECYCLE state read, which
+    carries none of the three keys, zeroes them through the shared parse and
+    stamps the cache with this series all the same.  Only the first measured
+    the row.  The line said "the last answer carried dc_deferred=false, so this
+    series holds no deferral marker" for all three -- a positive denial derived
+    from a body that never contained the key, in a bundle whose reader is
+    asking exactly that question.
+
+    The parse records WHICH it was, and the line says which it holds."""
+    api = _src("ApiClient.cs")
+    ui = _src("NativeUI.cs")
+
+    # the parse records presence separately from value, in both branches
+    parse = _method_body(api, "private static void ApplySeriesStateResponse")
+    assert parse, "the shared parse could not be delimited"
+    assert "LastSeriesDcDeferredFieldsPresent = true;" in parse
+    assert "LastSeriesDcDeferredFieldsPresent = false;" in parse
+    assert parse.index("LastSeriesDcDeferredFieldsPresent = true;") < parse.index(
+        "LastSeriesDcDeferredFieldsPresent = false;")
+    # and the state GET reaches that same parse, which is why the flag is needed
+    state = _method_body(api, "public static void PollTeamSeriesStateAssemblyOnly")
+    assert state and "ApplySeriesStateResponse(seriesId, resp, onResponse);" in state
+
+    w = _witness_body(ui)
+    assert w, "the banner witness could not be delimited"
+    assert "ApiClient.LastSeriesDcDeferredFieldsPresent" in w
+    # the change key carries it, so the transition between the two is visible
+    assert '+ (ApiClient.LastSeriesDcDeferredFieldsPresent ? "p" : "-");' in w
+    # BOTH sentences exist, and the measured one is qualified by the answer
+    assert "so as of that answer the series held no deferral marker" in w
+    assert "carried no deferral state" in w
+    assert "says nothing " in w and "about whether the row holds a marker" in w
+    # the unconditional claim is gone from the file
+    assert "the last answer carried dc_deferred=false, so this series " not in ui
+
+    def claim(s_ui):
+        b = _witness_body(s_ui)
+        if not b:
+            return False
+        return ("ApiClient.LastSeriesDcDeferredFieldsPresent" in b
+                and ": ApiClient.LastSeriesDcDeferredFieldsPresent" in b
+                and '+ (ApiClient.LastSeriesDcDeferredFieldsPresent ? "p" : "-");' in b
+                and "so as of that answer the series held no deferral marker" in b
+                and "carried no deferral state" in b
+                and "the last answer carried dc_deferred=false, so this series " not in s_ui)
+
+    # MUTATION 1: the branch collapses back to one sentence for all three inputs
+    _assert_discriminating(
+        claim, ui,
+        _mutate(ui,
+                "                            : ApiClient.LastSeriesDcDeferredFieldsPresent\n",
+                "                            : true\n",
+                "R6lens the OFF line stops measuring what it holds"),
+        "R6lens the OFF line splits on what the answer carried")
+
+    # MUTATION 2: the key drops the flag, so the transition from an absent
+    # field to a measured false never prints
+    _assert_discriminating(
+        claim, ui,
+        _mutate(ui,
+                '                         + (ApiClient.LastSeriesDcDeferredFieldsPresent ? "p" : "-");',
+                '                         ;',
+                "R6lens the witness key drops the presence flag"),
+        "R6lens the witness key carries the presence flag")
+
+    def parsed(s_api):
+        p = _method_body(s_api, "private static void ApplySeriesStateResponse")
+        if not p:
+            return False
+        return ("LastSeriesDcDeferredFieldsPresent = true;" in p
+                and "LastSeriesDcDeferredFieldsPresent = false;" in p)
+
+    # MUTATION 3: an answer with no deferral state records presence anyway, so
+    # the line's "false" case becomes the lie it used to be
+    _assert_discriminating(
+        parsed, api,
+        _mutate(api,
+                "                LastSeriesDcDeferredFieldsPresent = false;",
+                "                LastSeriesDcDeferredFieldsPresent = true;",
+                "R6lens absence is recorded as presence"),
+        "R6lens the parse records absence as absence")
+
+
+def _dc_banner_construction(ui):
+    """The banner ELEMENT's construction site -- the comment that introduces it
+    and the lines that build it.  The round-6 stale-comment case scoped itself
+    to the RENDER block, which is a different span; the comment a maintainer
+    reads first is this one."""
+    a = "// DC DEFERRAL BANNER."
+    b = "(txtTeamDcGrace as Component)?.gameObject?.SetActive(false);"
+    if a not in ui or b not in ui:
+        return ""
+    start = ui.index(a)
+    end = ui.index(b, start)
+    return ui[start:end]
+
+
+def test_r6lens_m4_the_banner_construction_site_names_no_dead_mechanism():
+    """THE COMMENT THAT INTRODUCES THE ELEMENT THIS ROUND REVIVED.
+
+    It asserted two mechanisms this same branch documents as dead: a "5-minute
+    window where the same 4 can re-queue and resume", and "the remaining team
+    takes the series win by forfeit at the deadline".  The file says the
+    opposite in both halves -- there is no 5-minute grace on this path (it
+    belonged to the legacy dc_paused flow, retired in v1.30.0) and the window
+    that exists is bug 245's resume at roughly thirty minutes; and the
+    lead-forfeit completion needs an existing series win AND >= 2 total points,
+    so a parked report's ordinary outcome is dc_incomplete, which is a win for
+    nobody.
+
+    This is the #432 / #459 class -- a comment naming a mechanism a numbered
+    learning already killed -- and it sat three lines above the element the
+    round made live, outside the span the round's own stale-comment case
+    checked."""
+    ui = _src("NativeUI.cs")
+    block = _dc_banner_construction(ui)
+    assert block, "the banner's construction site could not be delimited"
+
+    # the two dead claims are gone from the WHOLE file, not only from here
+    assert "5-minute window where the same 4 can re-queue" not in ui
+    assert "takes the series win by forfeit at the deadline" not in ui
+    # and this site states the live mechanisms instead
+    assert "bug 245" in block
+    assert "thirty minutes" in block
+    assert "dc_incomplete" in block
+    assert "v1.30.0" in block
+    # every line of the span that names the dead flow is prose, never code
+    for line in block.split("\n"):
+        if "dc_paused" in line:
+            assert line.strip().startswith("//"), line
+
+    def claim(s_ui):
+        b = _dc_banner_construction(s_ui)
+        if not b:
+            return False
+        return ("5-minute window where the same 4 can re-queue" not in s_ui
+                and "takes the series win by forfeit at the deadline" not in s_ui
+                and "bug 245" in b and "thirty minutes" in b
+                and "dc_incomplete" in b)
+
+    # MUTATION 1: the dead grace window comes back
+    _assert_discriminating(
+        claim, ui,
+        _mutate(ui,
+                "            // are dead on this branch: there is no 5-minute window in which the same",
+                "            // server enters a 5-minute window where the same 4 can re-queue and",
+                "R6lens the dead grace window returns"),
+        "R6lens the construction site names no 5-minute window")
+
+    # MUTATION 2: the forfeit-at-deadline rule comes back
+    _assert_discriminating(
+        claim, ui,
+        _mutate(ui,
+                "            // series completes to the other team only where that team had already",
+                "            // remaining team takes the series win by forfeit at the deadline, and",
+                "R6lens the forfeit rule returns"),
+        "R6lens the construction site names no forfeit deadline")
+
+
+def test_r6lens_m1_l6_the_cross_lane_resolver_finds_a_merged_tree():
+    """THE CHECK MUST NOT GO RED FOR THE WRONG REASON, AND MUST NOT GUESS.
+
+    (M1) The resolver knew three places, and none of them was the repository
+    itself.  On main after the two branches merge -- or in a fresh clone, on
+    another machine, on CI -- the route is in THIS tree and no candidate could
+    see it, so the cross-lane case would fail with "the server lane's main.py
+    could not be located" on the one tree where both halves finally live
+    together.  A red-on-main test is deleted or skipped by the next reader,
+    which is how the field-list binding would be lost at the moment it starts
+    guarding one artifact.
+
+    (L6) And the worktree candidate was a SUBSTRING match against each `git
+    worktree list` line, which on this machine also matches read-only review
+    pins checked out from that lane at older shas.  Matching the bracketed
+    BRANCH is exact.  A tree named by $SCR_SERVER_LANE is now exclusive, so a
+    mutation control pointed at a copy can never be answered by a different,
+    unmutated tree."""
+    # drive-less on purpose: see the note above about the bundle sweep
+    here = pathlib.Path("/lane/root")
+    lines = [
+        "/pins/scr-codex-sept16-dc-server-1dc473e  1dc473e (detached HEAD)",
+        "/lane/scr-wt-sept16-dc-server             deab5c5 [claude/sept16-dc-server]",
+        "/lane/scr-wt-sept16-client-r2             baf43e0 [claude/sept16-client-r2]",
+    ]
+
+    # M1: without an env override, the repository itself is a candidate
+    cands = _server_lane_candidates(here, None, lines)
+    assert here in [c for c, _, _ in cands], [str(c) for c, _, _ in cands]
+
+    # L6: the detached pin is NOT a candidate; the branch's worktree is
+    paths = [c for c, _, _ in cands]
+    assert pathlib.Path("/lane/scr-wt-sept16-dc-server") in paths, paths
+    assert not any("1dc473e" in str(p) for p in paths), paths
+    assert not any("client-r2" in str(p) for p in paths), paths
+
+    # L6: a named tree is exclusive and is never replaced by another
+    named = _server_lane_candidates(here, "/lane/copy", lines)
+    assert len(named) == 1 and named[0][2] is True
+    assert named[0][0] == pathlib.Path("/lane/copy")
+
+    # ...and the resolver still resolves on the tree this run is against
+    text, how = _server_lane_main()
+    assert text, how
+    assert '@app.get("/api/v1/team/series/{series_id}/status"' in text
+
+
+def test_r6lens_l6_a_tree_being_written_is_not_read_as_a_disagreement():
+    """A RED HERE MUST MEAN THE LANES DISAGREE, NOT THAT ONE WAS MID-SAVE.
+
+    This was observed rather than imagined: a controls run read the other
+    lane's `main.py` while its builder was saving it, and the route's key set
+    came back without `dc_deferred_bound_seconds` -- a field the contract names
+    throughout and which the same file carried on the next read.  A check whose
+    RED can mean "I read a half-written file" sends a round looking for a
+    defect that is not there, and the natural remedy for a test that cries wolf
+    is to stop believing it.
+
+    The rule is exercised through a reader callable, so it is tested without a
+    concurrent writer."""
+    seq = iter(["a = 1", "a = 2", "a = 3"])
+    assert _stable_text(lambda: next(seq)) is None, "a changing file was accepted"
+    assert _stable_text(lambda: "a = 1") == "a = 1", "a stable file was refused"
+    assert _stable_text(lambda: None) is None, "a missing file was accepted"
+    # the completeness hook is HONOURED, not decorative
+    assert _stable_text(lambda: "a = 1", complete=lambda t: False) is None
+
+    # a file that settles part-way through the attempts is accepted, because
+    # the writer finished: the rule refuses instability, not slowness
+    settling = iter(["a = 1", "a = 2", "a = 2"])
+    assert _stable_text(lambda: next(settling), attempts=3) == "a = 2"
+
+    # and the completeness predicate is about the DICT this check reads
+    head = 'x = 1' + LF + '@app.get("/api/v1/team/series/{series_id}/status")' + LF
+    whole = head + '    return {' + LF + '        "readonly": True,' + LF + '    }' + LF
+    cut = head + '    return {' + LF + '        "readonly": True,' + LF
+    assert _route_dict_is_complete(whole) is True
+    assert _route_dict_is_complete(cut) is False
+    # a tree that carries no such route is not judged here: the resolver skips
+    # it, and failing it would make every unrelated tree an error
+    assert _route_dict_is_complete("nothing of ours here") is True
+
+    # THE RULE IS WIRED, not merely defined.  A defined-and-unused guard is a
+    # check that cannot fail (#342), and nothing else here would notice: the
+    # live resolver answers the same either way on a tree nobody is writing.
+    #
+    # THE FIRST CUT OF THIS ASSERTION READ THE WHOLE FILE, and the line below
+    # would have satisfied it by containing the text it searched for -- which
+    # its own control caught: R6L-12 unwired the resolver and the case stayed
+    # green.  The claim is about the RESOLVER's body, so it reads that body.
+    import inspect
+    resolver = inspect.getsource(_server_lane_main)
+    assert "_stable_text(_read, complete=_route_dict_is_complete)" in resolver
+
+    # and the live resolver still resolves through all of it
+    text, how = _server_lane_main()
+    assert text, how

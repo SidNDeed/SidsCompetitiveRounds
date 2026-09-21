@@ -13949,14 +13949,24 @@ namespace CompetitiveRounds
         public static bool LastSeriesDcDeferred = false;
         public static int LastSeriesDcDeferredSecondsRemaining = 0;
         public static int LastSeriesDcDeferredBoundSeconds = 0;
+        /// <summary>Whether the answer that last wrote the three fields above
+        /// CARRIED them. Absent and false are different facts and only one of them
+        /// is about the row (#342, #604): the lifecycle state read carries none of
+        /// the three and a status answer can be missing them, and both land in the
+        /// same else-branch below, which zeroes the cache. The banner is off either
+        /// way — that is the direction an unknown costs least in (#276) — but its
+        /// witness must not spell "nothing answered this" as "the route said
+        /// false". This flag is what lets that line say which one it holds.</summary>
+        public static bool LastSeriesDcDeferredFieldsPresent = false;
         // Codex r2 f8: WHICH series the LastSeriesState* fields describe. Set
         // ONLY in ApplySeriesStateResponse (to the id that response was for)
         // and reset by the ActiveTeamSeriesId setter, so a consumer can require
         // ForId == current before trusting the cache.
         public static string LastSeriesStateForId = null;
-        // Throttled background poll of the team-series status — 2s while we
-        // have an active or paused series, off otherwise.
-        private static float teamSeriesStateTimer = 0f;
+        // The next UNSCALED WALL-CLOCK time the team-series status read may be
+        // dispatched at — not an accumulator of frame time. Why it is a deadline
+        // and not a sum is in UpdateTeamSeriesStatePoll's own gate.
+        private static float teamSeriesStateNextAt = 0f;
         private const float TEAM_SERIES_STATE_INTERVAL = 2f;
         // One line per series id: the refusal below speaks ONCE instead of at
         // the tab's frame rate, and it speaks at all rather than falling
@@ -14127,9 +14137,22 @@ namespace CompetitiveRounds
                 }
                 return;
             }
-            teamSeriesStateTimer += Time.deltaTime;
-            if (!force && teamSeriesStateTimer < TEAM_SERIES_STATE_INTERVAL) return;
-            teamSeriesStateTimer = 0f;
+            // WALL-CLOCK CADENCE, AND THE CALLER IS A PER-FRAME TICKER (#62).
+            // This gate used to add Time.deltaTime, and its only caller sat inside
+            // RefreshTeamTab — a repaint path that runs when something flips the
+            // dirty bit, not every frame. The interval was therefore measured in
+            // REPAINTS: the wall-clock cadence moved with the frame rate and with
+            // however much unrelated traffic happened to be repainting the tab, so
+            // a survivor inside a deferral window could wait tens of seconds for the
+            // first read and watch the handed-over seconds jump by as much. The
+            // caller is now NativeUI.MaybeRefreshTeamTab, which runs every frame
+            // while tab 8 is open, and the gate below is an unscaled wall-clock
+            // deadline — so the read is dispatched every TEAM_SERIES_STATE_INTERVAL
+            // of the survivor's own clock, at any frame rate, and while the game
+            // clock is stopped. `force` still bypasses it for a caller that needs a
+            // read now.
+            if (!force && Time.unscaledTime < teamSeriesStateNextAt) return;
+            teamSeriesStateNextAt = Time.unscaledTime + TEAM_SERIES_STATE_INTERVAL;
             // The parse fills LastSeriesDcDeferred /
             // LastSeriesDcDeferredSecondsRemaining /
             // LastSeriesDcDeferredBoundSeconds — which, with the series wins, is
@@ -14776,12 +14799,18 @@ namespace CompetitiveRounds
         /// (the catch below): nothing was asked of any box, so there is no answer to
         /// judge.</para>
         ///
-        /// <para>GATE 3, THE IN-FLIGHT BOUND. The caller is a menu tick dispatching
-        /// every TEAM_SERIES_STATE_INTERVAL (2 s), the latch lives in a response
-        /// callback, and a request may be outstanding for up to the transport's own
-        /// 20 s timeout — so without a rule the number of reads reaching the wire
-        /// before the first answer is round-trip latency over the tick interval,
-        /// about ten. It is bounded rather than assumed: at most one read of this
+        /// <para>GATE 3, THE IN-FLIGHT BOUND. The caller is the team tab's
+        /// per-frame ticker (NativeUI.MaybeRefreshTeamTab); it calls this poll on
+        /// every frame the tab is open and the poll's own unscaled wall-clock
+        /// deadline lets a read through every TEAM_SERIES_STATE_INTERVAL (2 s). The
+        /// latch lives in a response callback and a request may be outstanding for
+        /// up to the transport's own 20 s timeout — so without a rule the number of
+        /// reads reaching the wire before the first answer is round-trip latency
+        /// over that interval, about ten. THAT ARITHMETIC IS THE WALL CLOCK'S, and
+        /// it is stated here only because the cadence is now wall time: while the
+        /// gate accumulated frame time inside a repaint path the real count was
+        /// smaller, for a reason that moved with the frame rate, and a bound that
+        /// holds by accident is not a bound (#342). It is bounded rather than assumed: at most one read of this
         /// route is outstanding at a time. The flag is cleared in the callback,
         /// which GetRequest invokes on EVERY exit — consent refusal, transport
         /// refusal, version gate, success and failure alike — and again if the
@@ -14931,6 +14960,20 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>Everything the DC banner renders from, in one string, so an
+        /// answer that changed it can ask for the repaint that draws it. It is not
+        /// a claim about what is on screen — the banner reports itself — only about
+        /// the inputs.</summary>
+        private static string BannerRenderKey()
+        {
+            return (LastSeriesStateForId ?? "-")
+                   + "|" + (LastSeriesDcDeferred ? "1" : "0")
+                   + "|" + LastSeriesDcDeferredSecondsRemaining
+                   + "|" + LastSeriesDcDeferredBoundSeconds
+                   + "|" + (LastSeriesDcDeferredFieldsPresent ? "p" : "-")
+                   + "|" + LastSeriesT1Wins + "|" + LastSeriesT2Wins;
+        }
+
         /// <summary>The shared response parse for the two routes above. Extracted so
         /// the read-only route cannot drift into a second, subtly different reader of
         /// the same payload — the two halves of one contract written apart is how a
@@ -14938,6 +14981,10 @@ namespace CompetitiveRounds
         private static void ApplySeriesStateResponse(string seriesId, string resp,
                                                      Action<string, string, int> onResponse)
         {
+            // The banner's inputs BEFORE this answer, so the repaint below is asked
+            // for on a change and not on every answer (#62: the tab redraws on a
+            // dirty flip, so an answer nothing flips for is an answer nobody sees).
+            string bannerBefore = BannerRenderKey();
             string status = ExtractJsonString(resp, "status") ?? "";
             string reason = ExtractJsonString(resp, "reason") ?? "";
             int conf = ExtractJsonInt(resp, "confirmations");
@@ -14958,14 +15005,18 @@ namespace CompetitiveRounds
             // that a box which somehow is fails to OFF rather than to a guess.
             //
             // THE STATE GET GOES THROUGH HERE TOO, and it carries none of the
-            // three, so its answer zeroes them. That is the same fail-to-OFF and
-            // it is priced rather than assumed: that route has ONE caller,
+            // three, so its answer zeroes them AND records that they were ABSENT
+            // rather than false. That is the same fail-to-OFF, and what it costs is
+            // now said rather than assumed: that route has ONE caller,
             // Plugin.PollAssemblyStateLoop, which runs in-room for about twenty
             // seconds after a join while this banner is a MENU element, and the
-            // menu's own 2 s read restores the state on the next tick. The cost of
-            // the overlap is at most one tick of a banner nobody is looking at;
-            // the alternative is a second reader of one payload, which is how a
-            // field ends up handled on one side only (#635).
+            // tab's own read — dispatched by its per-frame ticker on an unscaled
+            // 2 s deadline — restores the state when it answers. Until it does the
+            // banner is off, and its witness says the ANSWER carried no deferral
+            // state, which is a different sentence from "this series holds no
+            // marker": a body without the keys measured nothing about the row
+            // (#342). The alternative is a second reader of one payload, which is
+            // how a field ends up handled on one side only (#635).
             if (HasDeferralFields(resp))
             {
                 bool deferredNow = false;
@@ -14979,12 +15030,14 @@ namespace CompetitiveRounds
                     Math.Max(0, ExtractJsonInt(resp, "dc_deferred_seconds_remaining"));
                 LastSeriesDcDeferredBoundSeconds =
                     Math.Max(0, ExtractJsonInt(resp, "dc_deferred_bound_seconds"));
+                LastSeriesDcDeferredFieldsPresent = true;
             }
             else
             {
                 LastSeriesDcDeferred = false;
                 LastSeriesDcDeferredSecondsRemaining = 0;
                 LastSeriesDcDeferredBoundSeconds = 0;
+                LastSeriesDcDeferredFieldsPresent = false;
             }
             LastSeriesT1Wins = ExtractJsonInt(resp, "t1_series_wins");
             LastSeriesT2Wins = ExtractJsonInt(resp, "t2_series_wins");
@@ -15015,6 +15068,14 @@ namespace CompetitiveRounds
                     SeriesTeam1ColorName, SeriesTeam1ColorHex,
                     SeriesTeam2ColorName, SeriesTeam2ColorHex, SeriesColorDecided);
             }
+            // THE REPAINT, WHICH IS THE OTHER HALF OF THE BANNER'S CADENCE (#62).
+            // The team tab re-renders only when something flips the dirty bit, so a
+            // wall-clock poll alone would still draw at whatever rate the tab's
+            // other fetches happened to repaint it. An answer that CHANGES what the
+            // banner reads asks for that repaint here — the shape every other fetch
+            // on this tab already uses (#62: the ticker polls, the answer marks
+            // dirty). An answer that changes nothing asks for nothing.
+            if (BannerRenderKey() != bannerBefore) NativeUI.MarkDirty();
             onResponse?.Invoke(status, reason, conf);
         }
 
