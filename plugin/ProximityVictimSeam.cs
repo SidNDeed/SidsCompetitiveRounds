@@ -309,25 +309,40 @@ namespace CompetitiveRounds
         /// count is one-way in the other direction.
         ///
         /// The reason there is still no advertising direction is therefore not
-        /// monotonicity, and it is not a latch in StageInto either. An earlier
-        /// wording named one - a seat that declined once never staging again in
-        /// that session - and the flag it named does not do that. It is read only
-        /// on the branch that has ALREADY declined, where it bounds a repeated log
-        /// line; StageInto's advertising branch asks the local gate and the
-        /// withdrawal latch and nothing else. So a seat whose patches complete
-        /// after a declined attempt DOES stage the key on its next pre-join merge,
-        /// and that is the design rather than a leak: what makes an advertisement
-        /// safe is #287 above - the value travels with the Player object and is
-        /// never observable before use - and a later one travels the same way.
-        /// W23 holds that branch clear of the flag.
+        /// monotonicity, and it is not a latch in StageInto either: an earlier
+        /// wording named a latch on that shortfall flag, and the flag does not do
+        /// that. It is read only on the branch that has ALREADY declined, where
+        /// it bounds a repeated log line; StageInto's advertising branch asks the
+        /// local gate and the withdrawal latch and nothing else. The retracted
+        /// sentence is not reproduced here either - a shipped file carries no
+        /// copy of a claim a round removed, or the next grep for it finds one
+        /// (#306/#434). W24 holds both shipped files AND both harness files to
+        /// that, because a deletion certified by a search that stops short of the
+        /// document still making the claim is not a bound on the claim.
         ///
-        /// The corner that remains is the window BEFORE that next pre-join merge:
-        /// this seat is Capable, has not advertised, and has nothing for this
-        /// function to withdraw. What makes that corner safe is NOT this function.
-        /// It is the census, which walks the room's own actor list INCLUDING this
-        /// seat, so this seat's missing key refuses the repair for every seat
-        /// including itself (ProximityVictimGate.Census, held by W22).
-        /// Fail-closed for the repair, which is today's shipped behaviour.
+        /// WHAT HOLDS INSTEAD IS REACHABILITY, and it is the narrower fact this
+        /// function's polarity actually rests on. Every term of that advertising
+        /// guard is settled before the first staging attempt can run, so a local
+        /// answer that has once declined cannot move back into Capable: the
+        /// attachment count is written only by the three [HarmonyCleanup]
+        /// callbacks, inside Plugin.Awake's single patch loop, which finishes
+        /// before DoInitialize reaches ApiClient.Initialize - and every pre-join
+        /// merge that can stage this key is downstream of that call; and every
+        /// write to either of the other two terms writes true. W25 pins
+        /// those premises. #287 above is why the FIRST advertisement is safe;
+        /// reachability is why there is never a later one to reason about. An
+        /// earlier wording of this paragraph said the opposite - that a seat
+        /// whose patches complete after a declined attempt goes on to advertise -
+        /// and rested the no-advertising-direction argument on #287 alone, which
+        /// is the reasoning that would license an in-room direction later.
+        ///
+        /// The corner that remains is a seat that is Capable and has simply not
+        /// reached a pre-join merge yet: it has advertised nothing, and has
+        /// nothing for this function to withdraw. What makes that corner safe is
+        /// NOT this function. It is the census, which walks the room's own actor
+        /// list INCLUDING this seat, so this seat's missing key refuses the repair
+        /// for every seat including itself (ProximityVictimGate.Census, held by
+        /// W22). Fail-closed for the repair, which is today's shipped behaviour.
         ///
         /// If a later change makes the disabled term reversible, this function is
         /// where that has to be answered rather than assumed - and the answer is

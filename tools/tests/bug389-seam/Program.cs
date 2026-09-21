@@ -49,10 +49,18 @@ using CompetitiveRounds;
 //   wiring   wire-patcheslive: W14c must FAIL; W1 control must PASS
 //   wiring   wire-compatclaim: W17 must FAIL; W1 control must PASS
 //   wiring   wire-compatharness: W17 must FAIL; W1 control must PASS
-//   wiring   wire-logquote:   W19 must FAIL; W1 control must PASS  (and W23 control must PASS)
+//   wiring   wire-logquote:   W19 must FAIL; W1 control must PASS  (and the
+//     W23, W24 and W25 inert twins must all stay green)
 //   wiring   wire-blindwrite: W20 must FAIL; W1 control must PASS
 //   wiring   wire-monotone:   W21 must FAIL; W1 control must PASS
 //   wiring   wire-stagelatch: W23 must FAIL; W1 control must PASS
+//   wiring   wire-stagewithdraw: W23 must FAIL; W1 control must PASS (and the
+//     W25 inert twin must stay green - that mutant's write is one-way, so the
+//     premise W25 pins is untouched and only W23's own assertion moves)
+//   wiring   wire-latchprose: W24 must FAIL; W1 control must PASS (and the W23
+//     inert twin must stay green - it plants prose and no code)
+//   wiring   wire-reach   :   W25 must FAIL; W1 control must PASS (and the W23
+//     inert twin must stay green)
 //   wiring   wire-pathswap:   D6 must FAIL;  D4 and D5 controls must PASS
 //   wiring   wire-paththrew:  D6 must FAIL;  D4 and D5 controls must PASS
 //   prior-r2            : N1 N2 N3 N4 N5 N6 must all FAIL; W1 control must PASS
@@ -74,6 +82,11 @@ using CompetitiveRounds;
 //     this key can be staged); wire-compatclaim is that group's mutant.
 //   W22                                         - the structural fact W21's
 //     corrected paragraph cites; wire-monotone is that group's mutant.
+//   W25b, W25c                                  - the two structural premises
+//     W25's paragraph rests on (the patch loop sits inside Awake's Harmony
+//     bootstrap; the staging prerequisite sits in the deferred init). wire-reach
+//     is this group's mutant and it reddens W25; these two are the companions it
+//     does not move.
 // The list is derived by reading it against the run list above, not asserted -
 // which is how V6 came to sit outside BOTH lists for a round while the header
 // claimed the accounting was complete. A documented "every case has a mutant"
@@ -1559,42 +1572,57 @@ internal static class Program
 
         // W22 - and what the corrected paragraph now rests on instead. No mutant of
         // its own: wire-monotone is the group's, and this is the structural fact
-        // the corrected prose cites. A seat whose patches complete AFTER its first
-        // staging attempt is Capable, un-advertised, and has nothing for the
+        // the corrected prose cites. A seat can be Capable and simply not have
+        // reached a pre-join merge yet - un-advertised, with nothing for the
         // withdrawal to withdraw; what keeps that room safe is that the census
         // walks the room's own actor list INCLUDING this seat, so this seat's
         // missing key refuses the repair for every seat including itself. A census
         // that special-cased the local actor out would delete that guarantee
         // silently.
+        //
+        // An earlier wording of this comment reached that corner by the other
+        // route - a seat whose patches complete after its first staging attempt -
+        // which is a state this build cannot reach (W25). The census fact is
+        // unchanged; only the route named for it was wrong.
         CheckMemberAnchors("W22 Wiring_TheCensusCountsThisSeatToo",
             "plugin/ProximityVictimPatches.cs",
             "private static bool Census()",
             new[] { "PhotonNetwork.PlayerList" },
             new[] { "RoomActors.ActiveFighters", "PhotonNetwork.LocalPlayer" });
 
-        // W23 - THE ADVERTISEMENT IS NOT LATCHED BY THE SHORTFALL FLAG. RED under
-        // "wire-stagelatch"; green under "wire-logquote", which edits another line
-        // of the same member and is this case's inert twin.
+        // W23 - THE ADVERTISEMENT IS NOT LATCHED: NOT BY THE SHORTFALL FLAG, AND
+        // NOT BY A SECOND WRITE TO THE WITHDRAWAL LATCH. RED under
+        // "wire-stagelatch" and under "wire-stagewithdraw"; green under
+        // "wire-logquote", which edits another line of the same member and is this
+        // case's inert twin.
         //
         // Two files used to say _stageFailedPermanently latched the ADVERTISEMENT
-        // - "once we have declined to advertise, we never advertise later in the
-        // session" in the field's own doc, and "plus StageInto's own latch: a seat
-        // that declined once never stages again in that session" carried into the
-        // withdrawal's argument for having no advertising direction. The flag does
-        // no such thing. It is read only on the branch that has already declined,
-        // where it bounds a second LogError, and the advertising branch asks the
-        // local gate and the withdrawal latch and nothing else. A seat whose third
-        // patch attaches after a declined attempt is Capable and its next pre-join
-        // merge stages the key - which is correct, and the opposite of what both
-        // comments told a reader to expect.
+        // - the field's own doc had us never advertising later in the session once
+        // we had declined, and the withdrawal's argument for having no advertising
+        // direction carried the same latch as a premise. The flag does no such
+        // thing. It is read only on the branch that has already declined, where it
+        // bounds a second LogError, and the advertising branch asks the local gate
+        // and the withdrawal latch and nothing else.
         //
-        // It matters beyond the prose. The withdrawal's doc used that latch as a
-        // PREMISE for why no advertising direction is needed, so a later reader
-        // re-deriving that argument would have been reasoning from a mechanism
-        // that does not exist (#351/#434). What holds instead is #287: the value
-        // travels with the Player object, so a later advertisement is no more
-        // observable before use than the first. This case keeps the branch clear
-        // of the flag, which is the sentence both files now make.
+        // THE CONCLUSION THOSE COMMENTS DREW WAS TRUE; ONLY THE MECHANISM WAS
+        // WRONG. A decline IS final - because every term of the advertising guard
+        // is settled before the first staging attempt can run, which is W25 and
+        // not this case. The intermediate wording went the other way and had both
+        // shipped files telling a reader that a seat whose third patch attaches
+        // late goes on to advertise on a later merge. That state is not reachable
+        // on this build; the wording also contradicted the line StageInto actually
+        // emits (W19), and it would have licensed exactly the in-room advertising
+        // direction the seam forbids (#351/#434).
+        //
+        // THE FLAG IS NOT THE ONLY WAY TO LATCH THIS BRANCH, which is why this
+        // case grew a fourth assertion. Checking the guard's two terms, the flag's
+        // two code lines and their order leaves a latch installed through the
+        // OTHER one-way flag entirely green: an assignment to _withdrawn on the
+        // declining branch would make the shortfall flag gate a capability after
+        // all - the exact drift the paragraphs above say cannot happen - with
+        // every other assertion here unmoved. The member must therefore assign no
+        // _withdrawn at all; its one writer is RepublishCapability. A flag names a
+        // line, the defect is a class (#432).
         string stageProblem;
         string stageBody = MemberBody("plugin/ProximityVictimPatches.cs",
             "internal static void StageInto(ExitGames.Client.Photon.Hashtable prejoin)",
@@ -1618,10 +1646,181 @@ internal static class Program
             if (writeAt < 0 || flagAt < 0 || writeAt > flagAt)
                 stageProblems.Add("the key must be staged BEFORE this member reads the flag at all "
                     + "(staged at " + writeAt + ", first flag read at " + flagAt + ")");
+            int withdrawWrites = CountOnCodeLines(stageBody, "_withdrawn = ");
+            if (withdrawWrites != 0)
+                stageProblems.Add("this member must ASSIGN no _withdrawn - its one writer is "
+                    + "RepublishCapability, and a latch installed through that flag instead would "
+                    + "leave every other assertion here green; found " + withdrawWrites);
         }
         Check("W23 Wiring_TheAdvertisementIsNotLatchedByTheShortfallFlag",
             stageProblems.Count == 0,
             string.Join("; ", stageProblems.ToArray()));
+
+        // W24 - THE RETRACTED LATCH LANGUAGE IS ABSENT FROM EVERY FILE THAT
+        // CERTIFIES ITS DELETION. RED under "wire-latchprose".
+        //
+        // Seven earlier deletions each carry an absence bound: W13, W17, W19 and
+        // W21 all count the removed text and require zero. The eighth - the latch
+        // language above - had only a line in the notes and a STRUCTURAL case
+        // (W23) that reads code and never reads a comment, so the sentence could
+        // walk back into either file with all checks green and the next reader
+        // would re-derive the withdrawal's polarity from a mechanism the code does
+        // not implement. That is the same gap the compat claim had, closed one
+        // deletion earlier by widening W17, and not applied to this one.
+        //
+        // THE SURFACE IS ALL FOUR FILES, not just the two shipped ones. Last time,
+        // the document still making the deleted claim was this harness's own
+        // comment; the mutant driver is the same kind of document and is included
+        // for the same reason. A ninth deletion rides here too: the intermediate
+        // late-staging wording, which was a claim about an unreachable state.
+        //
+        // EVERY NEEDLE IS BUILT FROM HALVES, because this case searches the file
+        // it is written in - a needle spelled whole here would be found here and
+        // could never count zero, a check that cannot fail (#342). The comments
+        // around it name these sentences only in paraphrase or across a line
+        // break, which is the same discipline.
+        string runnerText = LoadSource("tools/tests/bug389-seam/run-tests.ps1");
+        string latchDoc = "once we have declined to advertise, we never "
+            + "advertise later in the session";
+        string latchSeam = "a seat that declined once never "
+            + "stages again in that session";
+        string latchSeamAlt = "a seat that declined once never "
+            + "staging again in that session";
+        string lateStage = "pre-join merge " + "stages the key";
+        string lateStageSeam = "DOES stage the key on its " + "next pre-join merge";
+        string[] latchNeedles = new[] { latchDoc, latchSeam, latchSeamAlt, lateStage, lateStageSeam };
+        string[] latchNames = new[] { "latch-in-the-field-doc", "latch-in-the-seam",
+            "latch-in-the-seam-respelled", "late-staging-claim", "late-staging-claim-in-the-seam" };
+        string[] latchFiles = new[] { "plugin/ProximityVictimPatches.cs", "plugin/ProximityVictimSeam.cs",
+            "tools/tests/bug389-seam/Program.cs", "tools/tests/bug389-seam/run-tests.ps1" };
+        string[] latchTexts = new[] { patchesText, seamText, progText, runnerText };
+        var latchProblems = new List<string>();
+        for (int f = 0; f < latchTexts.Length; f++)
+        {
+            if (latchTexts[f] == null)
+            {
+                latchProblems.Add("cannot read " + latchFiles[f] + " - an unread file in this surface is a "
+                    + "failure, not a skip: it is exactly how the last deletion stayed certified");
+                continue;
+            }
+            for (int n = 0; n < latchNeedles.Length; n++)
+            {
+                int hits = CountOf(latchTexts[f], latchNeedles[n]);
+                if (hits != 0)
+                    latchProblems.Add(latchFiles[f] + " still carries the " + latchNames[n]
+                        + " (" + hits + " hit(s), want 0)");
+            }
+        }
+        // ...and the replacement is actually stated, so this case cannot pass by
+        // both the claim and its correction being absent.
+        if (patchesText != null && CountOf(patchesText, "SETTLED BEFORE THE FIRST STAGING ATTEMPT") != 1)
+            latchProblems.Add("the patches file must state the replacement exactly once - that the guard's "
+                + "terms are fixed before the first attempt, which is why a decline is final");
+        if (seamText != null && CountOf(seamText, "settled before the first staging attempt") != 1)
+            latchProblems.Add("the seam must state the same replacement exactly once, in the paragraph "
+                + "that used to carry the latch as its premise");
+        Check("W24 Wiring_TheRetractedLatchLanguageIsAbsentFromEveryFileThatCertifiesIt",
+            latchProblems.Count == 0,
+            string.Join("; ", latchProblems.ToArray()));
+
+        // W25 - THE TERMS OF THE ADVERTISING GUARD ARE SETTLED BEFORE THE FIRST
+        // STAGING ATTEMPT. RED under "wire-reach"; green under "wire-logquote",
+        // which edits the same file on a line this case makes no claim about.
+        //
+        // This is what makes the corrected paragraphs checkable rather than merely
+        // plausible. Both shipped files now say a decline is final because the
+        // guard's inputs cannot move afterwards, and StageInto says so out loud in
+        // a line W19 pins and the TeleportToOpponent doc tells a maintainer to grep
+        // a session log for. A sentence about the whole session is a claim about
+        // the whole state space and needs a pin, not a re-reading (#351/#434). The
+        // premises, each one a count here:
+        //   - the attachment count has one writer and no direct assignment, so it
+        //     can only ever rise;
+        //   - that writer is called from exactly three sites, and there are
+        //     exactly three Harmony cleanup callbacks for them to be;
+        //   - the assembly has exactly one patch site, inside Awake's Harmony
+        //     bootstrap block (W25b);
+        //   - ApiClient.Initialize - which the three pre-join merges that can
+        //     stage this key are all downstream of - is inside the deferred
+        //     initialisation, not inside Awake (W25c);
+        //   - every write to either boolean term writes true, so neither can move
+        //     back - the ONE-WAY direction is the premise, and it is deliberately
+        //     not "exactly one writer": a second write that also writes true would
+        //     leave the reachability argument intact. Whether StageInto itself may
+        //     write one is a different question, and W23 owns it.
+        //
+        // WHAT THIS CASE DOES NOT PROVE, said plainly so the next reader does not
+        // take more from it than it gives: that Awake runs before the first tick
+        // that can reach DoInitialize. That is Unity's lifecycle contract, not a
+        // fact about this text, and both shipped paragraphs record it as a premise
+        // rather than claiming a test for it.
+        string apiText = LoadSource("plugin/ApiClient.cs");
+        var reachProblems = new List<string>();
+        if (patchesText == null) reachProblems.Add("cannot read plugin/ProximityVictimPatches.cs");
+        else
+        {
+            int bump = CountOnCodeLines(patchesText, "_attached++");
+            if (bump != 1)
+                reachProblems.Add("the attachment count must have exactly one writer; found " + bump);
+            int assign = CountOnCodeLines(patchesText, "_attached = ");
+            if (assign != 0)
+                reachProblems.Add("nothing may assign the attachment count directly - a direct write is "
+                    + "how it would stop being one-way; found " + assign);
+            int callers = CountOnCodeLines(patchesText, "ProximityVictimGate.MarkAttached(");
+            if (callers != 3)
+                reachProblems.Add("MarkAttached must be called from exactly three sites; found " + callers);
+            int cleanups = CountOnCodeLines(patchesText, "[HarmonyCleanup]");
+            if (cleanups != 3)
+                reachProblems.Add("and those sites must be Harmony cleanup callbacks, which run inside the "
+                    + "patch loop; found " + cleanups + " cleanup attribute(s)");
+            int wWrites = CountOnCodeLines(patchesText, "_withdrawn = ");
+            int wTrue = CountOnCodeLines(patchesText, "_withdrawn = true;");
+            if (wWrites < 1 || wWrites != wTrue)
+                reachProblems.Add("every write to the withdrawal latch must write true - ONE-WAY is the "
+                    + "premise here, not the number of writers, and W23 owns the separate question of "
+                    + "whether StageInto makes one; found " + wWrites + " write(s), " + wTrue + " true");
+        }
+        if (pluginText == null) reachProblems.Add("cannot read plugin/Plugin.cs");
+        else
+        {
+            int patchSites = CountOnCodeLines(pluginText, "CreateClassProcessor(type).Patch();");
+            if (patchSites != 1)
+                reachProblems.Add("the assembly must have exactly one Harmony patch site, or the attachment "
+                    + "count can still move after this one has run; found " + patchSites);
+            int mWrites = CountOnCodeLines(pluginText, "Plugin.modDisabled = ");
+            int mTrue = CountOnCodeLines(pluginText, "Plugin.modDisabled = true;");
+            if (mWrites < 1 || mWrites != mTrue)
+                reachProblems.Add("every write to the disabled flag must write true, for the same reason; "
+                    + "found " + mWrites + " write(s), " + mTrue + " true");
+        }
+        if (apiText == null) reachProblems.Add("cannot read plugin/ApiClient.cs");
+        else
+        {
+            int stageSites = CountOnCodeLines(apiText, "ProximityVictimGate.StageInto(prejoin);");
+            if (stageSites != 3)
+                reachProblems.Add("the three pre-join merges are the only places this key is staged, and all "
+                    + "three are downstream of ApiClient.Initialize; found " + stageSites);
+        }
+        Check("W25 Wiring_TheGuardsTermsAreSettledBeforeTheFirstStagingAttempt",
+            reachProblems.Count == 0,
+            string.Join("; ", reachProblems.ToArray()));
+
+        // W25b - the one patch site is inside Awake's Harmony bootstrap block, the
+        // span that ends with the sibling capability being staged "before anything
+        // can connect". No mutant of its own: wire-reach is the group's.
+        CheckAnchorInSpan("W25b Wiring_ThePatchLoopIsInsideAwakesHarmonyBootstrap",
+            "plugin/Plugin.cs",
+            "                HarmonyInstance = new Harmony(ModId);",
+            "            try { PoisonSync.StageCapability(\"Awake\"); PoisonSync.Hook(); } catch { }",
+            "HarmonyInstance.CreateClassProcessor(type).Patch();");
+
+        // W25c - and the prerequisite for every staging call is in the DEFERRED
+        // initialisation, which the tick reaches after startup, not in Awake. W18
+        // asserts what sits above this call; this asserts where the call lives.
+        CheckAnchorInMember("W25c Wiring_TheStagingPrerequisiteIsInsideTheDeferredInit",
+            "plugin/Plugin.cs",
+            "private void DoInitialize()",
+            "ApiClient.Initialize(Plugin.ApiBaseUrl.Value);");
 
         Console.WriteLine("=== passed=" + _passed + " failed=" + _failed + " ===");
         return _failed == 0 ? 0 : 1;

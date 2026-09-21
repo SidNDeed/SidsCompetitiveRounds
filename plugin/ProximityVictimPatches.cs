@@ -139,15 +139,36 @@ namespace CompetitiveRounds
         /// read only on the branch that has ALREADY decided not to advertise. So
         /// what it bounds is a second LogError, never a capability.
         ///
-        /// A seat whose third patch attaches after a declined attempt is
-        /// therefore Capable, and - having never advertised, it can never have
-        /// withdrawn - its NEXT pre-join merge stages the key. That is the design
-        /// and not a leak: the key reaches a peer only with the Player object
-        /// itself and is therefore never observable before use (#287), a later
-        /// advertisement travels exactly the same way, and a seat that is
-        /// genuinely capable is the seat the room wants carrying it. W23 holds
-        /// the branch clear of this flag so this paragraph and the code cannot
-        /// drift apart again (#351/#434).
+        /// A DECLINE IS STILL FINAL. THE REACHABILITY IS WHAT MAKES IT SO, NOT
+        /// THIS FLAG - which is the whole correction, because the flag was only
+        /// ever the wrong reason for a true statement. Every term of the
+        /// advertising guard is SETTLED BEFORE THE FIRST STAGING ATTEMPT can
+        /// run, so a local answer that is not Capable at one attempt cannot be
+        /// Capable at a later one:
+        ///   - the attachment count has one writer, MarkAttached, whose only
+        ///     callers are the three [HarmonyCleanup] callbacks in this file,
+        ///     and those run inside the single CreateClassProcessor(type).Patch()
+        ///     loop in Plugin.Awake - the only patch site in the assembly;
+        ///   - that loop has finished before DoInitialize reaches
+        ///     ApiClient.Initialize, and all three pre-join merges that can call
+        ///     StageInto are downstream of that call;
+        ///   - every write to the mod-disabled flag writes true - W14b holds this
+        ///     file to a single READ of that flag, so its name is deliberately not
+        ///     repeated in this paragraph;
+        ///   - every write to _withdrawn writes true, and StageInto makes none of
+        ///     them (W23).
+        /// So the shortfall message's closing clause - that this seat is on
+        /// vanilla for the rest of the session - is true when it prints, and the
+        /// TeleportToOpponent doc below may keep telling a maintainer to grep a
+        /// session log for it. W25 pins each premise above; W23 holds the
+        /// advertising branch clear of this flag AND of any second latch; W24
+        /// keeps the retracted wording out of every file that certifies the
+        /// deletion (#351/#434).
+        ///
+        /// One step in that chain is not greppable, and is recorded here as a
+        /// premise rather than asserted as a test: Awake runs before the first
+        /// tick that can call DoInitialize. That is Unity's lifecycle contract,
+        /// which this mod's polling architecture already rests on everywhere.
         ///
         /// What the flag does buy is the one thing its name is about: the
         /// shortfall message states itself once per session rather than on every

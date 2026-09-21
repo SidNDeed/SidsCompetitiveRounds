@@ -62,7 +62,13 @@ $wireFiles = @(
     'plugin/PerfPatches.cs',
     'plugin/ApiClient.cs',
     'plugin/CompetitiveRounds.csproj',
-    'tools/tests/bug389-seam/Program.cs'
+    'tools/tests/bug389-seam/Program.cs',
+    # W24 searches this file too. A deletion is not bounded by a search that
+    # stops short of a document still making the claim, and the driver's own
+    # comments are such a document - the previous deletion survived a round
+    # inside one. It has to be in every mutant root or the case reports
+    # "cannot read" instead of a count.
+    'tools/tests/bug389-seam/run-tests.ps1'
 )
 
 function Say([string]$text) { [Console]::WriteLine($text) }
@@ -743,23 +749,90 @@ if (-not (Assert-Mutation 'quoted-log-line wiring' $runWireLogQuote 'W19' 'W1'))
 # branch is latched" and "W23 reddens whenever anything in StageInto moves" look
 # the same from the log.
 if (-not (Assert-Mutation 'quoted-log-line wiring, W23 inert twin' $runWireLogQuote 'W19' 'W23')) { $overall = 1 }
+# The same service for the two cases added this round. Both read this file;
+# neither makes a claim about the line this mutant moves, so both must stay
+# green, or "W24/W25 redden for their own reason" and "they redden whenever the
+# patches file moves" would read identically from the log.
+if (-not (Assert-Mutation 'quoted-log-line wiring, W24 inert twin' $runWireLogQuote 'W19' 'W24')) { $overall = 1 }
+if (-not (Assert-Mutation 'quoted-log-line wiring, W25 inert twin' $runWireLogQuote 'W19' 'W25')) { $overall = 1 }
 Say ''
 
 # ---------- latch the ADVERTISEMENT on the shortfall flag ----------
 # Put the mechanism two comments claimed into the code that never had it. The
-# field's own doc said "once we have declined to advertise, we never advertise
-# later in the session", and the withdrawal's doc carried that latch as a
-# PREMISE for why no advertising direction is needed. What the flag actually
-# does is suppress a second LogError on the branch that has already declined; a
-# seat whose third patch attaches after a declined attempt is Capable and its
-# next pre-join merge stages the key, which is the design. This is the shape the
-# comments described, so W23 has to be able to fail on it (#351/#434).
+# field's own doc described the flag as settling the question for the rest of
+# the session, and the withdrawal's doc carried that latch as a PREMISE for why
+# no advertising direction is needed. What the flag actually does is suppress a
+# second LogError on the branch that has already declined. A decline IS final on
+# this build - but for a different reason, every term of the guard being fixed
+# before the first attempt can run (W25) - so this is the shape the comments
+# described and W23 has to be able to fail on it (#351/#434).
 $wireStageLatch = New-WireRoot 'stagelatch' 'plugin/ProximityVictimPatches.cs' `
     'internal static void StageInto(ExitGames.Client.Photon.Hashtable prejoin)' `
     '                if (local == ProximityGateState.Capable && !_withdrawn)' `
     '                if (local == ProximityGateState.Capable && !_withdrawn && !_stageFailedPermanently)' ''
 $runWireStageLatch = Invoke-Suite 'wire-stagelatch' $seam $wireStageLatch
 if (-not (Assert-Mutation 'advertisement-latched-on-the-shortfall-flag wiring' $runWireStageLatch 'W23' 'W1')) { $overall = 1 }
+Say ''
+
+# ---------- latch it through the OTHER one-way flag instead ----------
+# The same drift, installed where W23's first three assertions cannot see it.
+# The guard text does not move; the shortfall flag still occurs on exactly two
+# code lines in the member and still after the staging write; and the declining
+# branch now latches the withdrawal, so the shortfall flag gates a capability
+# after all and the paragraph both files carry is false. W23 stayed green on
+# this shape until it grew the assignment assertion - a case that bounds one
+# SPELLING of a drift is not a bound on the property (#432).
+#
+# W25 is its inert twin and must stay GREEN: this write writes true, so the
+# one-way premise the reachability argument needs is untouched. That is the
+# distinction the two cases are split along, and this row is what shows it.
+$wireStageWithdraw = New-WireRoot 'stagewithdraw' 'plugin/ProximityVictimPatches.cs' `
+    'internal static void StageInto(ExitGames.Client.Photon.Hashtable prejoin)' `
+    '                    _stageFailedPermanently = true;' `
+    '                    _stageFailedPermanently = true; _withdrawn = true;' ''
+$runWireStageWithdraw = Invoke-Suite 'wire-stagewithdraw' $seam $wireStageWithdraw
+if (-not (Assert-Mutation 'advertisement-latched-through-the-withdrawal-flag wiring' $runWireStageWithdraw 'W23' 'W1')) { $overall = 1 }
+if (-not (Assert-Mutation 'withdrawal-flag latch, W25 inert twin' $runWireStageWithdraw 'W23' 'W25')) { $overall = 1 }
+Say ''
+
+# ---------- put the retracted latch sentence back in a SHIPPED file ----------
+# The eighth deletion's absence bound. Until W24 there was none: the latch
+# language was recorded as deleted in the notes and held only by W23, which
+# reads code and never reads a comment. This plants the retracted sentence back
+# into the seam paragraph that used to carry it as a premise - the one place a
+# later reader re-derives "there is no advertising direction" from - and leaves
+# every line of code alone. Before W24 the whole suite stayed green on this.
+#
+# THIS FILE IS INSIDE W24'S SURFACE, so the sentence it plants may not be spelled
+# whole here either - the case would find it in the driver and could never count
+# zero (#342). It is assembled from two halves for exactly the reason the needles
+# in Program.cs are, and the concatenation is the point, not a style.
+$latchBackLine = '        /// that - an earlier wording had a seat that declined once never ' + 'staging again in that session. It is read only on the branch that has ALREADY declined, where'
+$wireLatchProse = New-WireRoot 'latchprose' 'plugin/ProximityVictimSeam.cs' `
+    'internal static class ProximityVictim' `
+    '        /// that. It is read only on the branch that has ALREADY declined, where' `
+    $latchBackLine ''
+$runWireLatchProse = Invoke-Suite 'wire-latchprose' $seam $wireLatchProse
+if (-not (Assert-Mutation 'retracted-latch-sentence wiring' $runWireLatchProse 'W24' 'W1')) { $overall = 1 }
+if (-not (Assert-Mutation 'retracted-latch-sentence, W23 inert twin' $runWireLatchProse 'W24' 'W23')) { $overall = 1 }
+Say ''
+
+# ---------- make the attachment count two-way ----------
+# The premise W25 exists for. The reachability argument that replaced the latch
+# says a seat which declined once cannot become Capable later, and its first
+# clause is that the attachment count can only rise. A direct assignment is how
+# that stops being true; the count would then be able to fall below the required
+# three and climb back after a staging attempt had already been declined, and
+# the shortfall message - which W19 pins and the TeleportToOpponent doc tells a
+# maintainer to grep for - would be asserting something about the session that
+# the state space no longer allows (#438/#443).
+$wireReach = New-WireRoot 'reach' 'plugin/ProximityVictimPatches.cs' `
+    'internal static void MarkAttached(string which)' `
+    '            _attached++;' `
+    '            _attached++; if (which == null) _attached = 0;' ''
+$runWireReach = Invoke-Suite 'wire-reach' $seam $wireReach
+if (-not (Assert-Mutation 'two-way-attachment-count wiring' $runWireReach 'W25' 'W1')) { $overall = 1 }
+if (-not (Assert-Mutation 'two-way attachment count, W23 inert twin' $runWireReach 'W25' 'W23')) { $overall = 1 }
 Say ''
 
 # ---------- put the deleted compat claim back in the HARNESS'S own text ----------
