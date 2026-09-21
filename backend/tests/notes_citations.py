@@ -31,6 +31,57 @@ HOW A CITATION IS CHECKED
   `--require-anchors` turns every unanchored citation into a failure. It is the
   ratchet: once a notes file is fully anchored it can be kept that way.
 
+WHERE A BARE `:N` GETS ITS PATH
+  The first version inherited a path only within ONE notes line, and its
+  comment claimed the tables in these notes were written that way. They are
+  not. A table names the module in one row and cites three more numbers in the
+  next; a paragraph names it in its first sentence and cites four lines
+  beneath. So a third of this file's citation-shaped references were not read
+  as citations at all -- not checked, not counted, not refused -- while the
+  count beside them was reported as the total the file makes. That is the
+  defect this round was opened to close, one route over (#302, #342, #441).
+
+  A bare `:N` now inherits the path most recently MENTIONED -- with or without
+  a number of its own -- earlier on its line, or on an earlier line of the same
+  BLOCK. A block is a run of lines carrying no blank line, heading or
+  horizontal rule, which is what a paragraph and a table each are; a heading is
+  a block of its own, so nothing leaks across it. Inheritance never crosses a
+  break, so a path named eight paragraphs above cannot claim a number. A bare
+  `:N` with nothing in scope is reported `NO-PATH-IN-SCOPE` rather than
+  skipped: a citation nothing can resolve is a finding about the notes, not a
+  licence to stop counting.
+
+  THE ANCHOR SCOPE IS THE SAME BLOCK, and for the same reason. Anchors were
+  offered only to citations on their own line, which is the identical defect
+  one field over (#432): a paragraph that names `_INVOLUNTARY_CAUSE_CAPABILITY_ALIAS`
+  in one sentence and cites its line in the next had an anchor the citation
+  could not reach. While the bare citations were invisible this cost nothing;
+  the moment they were read it produced six DRIFT records against numbers that
+  are correct today -- a check reporting drift on correct citations, which is
+  exactly how a check gets ignored (#342). Widening the scope does make an OK
+  slightly easier to earn: an anchor from elsewhere in the paragraph can cover
+  a citation it was not written for. That is why this verdict is reported as
+  evidence to read and not as a gate standing alone, and why the drift control
+  is executed against this file rather than asserted.
+
+  What makes a bare `:N` a citation at all is what sits to the LEFT of the
+  colon. `127.0.0.1:55432` and `postgres:16-alpine` bind the colon into a
+  larger token -- a port, an image tag -- and `` `:45435` `` and `at :45318` do
+  not. The first version used a three-digit floor as a proxy for that question;
+  it admitted nothing this rule does not and it hid two perfectly good
+  two-digit citations. Every `:N` the rule declines is still reported, as
+  `NOT-A-CITATION` with its surrounding text, so the population is conserved
+  and a reader can see what was set aside (#441).
+
+A FENCE THAT NEVER CLOSES IS A REFUSAL, NOT A QUIET PASS
+  The fenced-block skip is a toggle. One unmatched marker inverts the scanned
+  region for the whole rest of the file: every real citation disappears from
+  the record set and only the quoted material is read, with the count and the
+  verdict both agreeing with whatever was left. The scan now RAISES on an
+  unbalanced fence and names the line the last one opened at, and the caller
+  turns that into a refusal. A parse that silently yields nothing must fail
+  loudly rather than certify what it could not see (#342).
+
 THE OTHER LANE'S SOURCES
   These notes cite the client lane as well as this tree -- the constant the
   wire name is transcribed from, the capability probe, the call site that uses
@@ -83,24 +134,28 @@ BACKEND = Path(__file__).resolve().parents[1]
 REPO = BACKEND.parent
 
 # A citation: an optional path, then `:N` or `:N-M` (hyphen or en dash). A bare
-# `:N` inherits the path most recently named on the SAME notes line, which is
-# how the tables in these notes are written.
+# `:N` inherits the path most recently MENTIONED earlier on its line or on an
+# earlier line of the same block; see WHERE A BARE `:N` GETS ITS PATH above.
 #
 # `.cs` and the two client-lane directory prefixes are in the shape because the
 # notes cite the other lane; see THE OTHER LANE'S SOURCES above.
 _PATH = (r"(?:(?:backend|client-lane|plugin)/[A-Za-z0-9_./-]+"
          r"|[A-Za-z0-9_-]+\.(?:py|sql|cs))")
 _CITE = re.compile(rf"(?P<path>{_PATH})?\s*:(?P<a>\d{{1,6}})(?:\s*[-–]\s*(?P<b>\d{{1,6}}))?")
-# A citation that NAMES its file is read at any line number; a bare `:N`
-# continuation, which inherits the path most recently named on the line, is
-# read only from three digits up. The floor exists for the bare form alone,
-# where a clock time or a version string on a line that happens to have named
-# a source file earlier would otherwise be read as a citation. The first
-# version applied the floor to BOTH forms and therefore skipped five citations
-# in these notes -- a migration line and a fixture line among them -- while the
-# prose beside it claimed every citation was checked. A checker narrower than
-# the sentence describing it is the defect this whole round is about.
-_BARE_CITATION_MIN_DIGITS = 3
+# A path NAMED without a number of its own still enters scope. The commonest
+# shape in these notes is a row or a sentence that names the module and then
+# cites it by number on the lines beneath; a scanner that only remembered paths
+# carrying a citation of their own could not see one of them.
+_PATH_MENTION = re.compile(_PATH)
+# What a bare `:N` must NOT be preceded by. A colon bound into a larger token
+# belongs to that token -- a port, an image tag, a clock time -- and the thing
+# after it is not a line number.
+_BARE_BINDS_LEFT = re.compile(r"[A-Za-z0-9_./\\-]")
+# A block: a run of lines with no blank line, heading or horizontal rule in it.
+# A paragraph and a table are each one, and that is the unit a bare `:N`
+# inherits inside.
+_BLOCK_BREAK = re.compile(r"^\s*$|^\s*#{1,6}\s|^\s*(?:-{3,}|\*{3,}|_{3,})\s*$")
+
 _BACKTICKED = re.compile(r"`([^`\n]+)`")
 # `main.py` on its own means the api module in these notes.
 _ALIASES = {"main.py": "backend/api/main.py",
@@ -197,10 +252,69 @@ def _anchors_on(line: str) -> list[tuple[int, str]]:
 
 
 _FENCE = re.compile(r"^\s*(?:```|~~~)")
+_BLANK = re.compile(r"^\s*$")
+# A heading or a horizontal rule is a block of its own: it separates what is
+# above it from what is below, and a citation written INTO a heading is still
+# read rather than dropped.
+_STANDALONE = re.compile(r"^\s*#{1,6}\s|^\s*(?:-{3,}|\*{3,}|_{3,})\s*$")
+
+
+class UnbalancedFence(Exception):
+    """A fenced block was opened and never closed.
+
+    Raised rather than returned, because there is no honest record set to
+    return: from the stray marker onward the scan read the COMPLEMENT of the
+    file, and every citation after it is missing from whatever would be
+    reported. The caller turns this into a refusal with its own exit code.
+    """
+
+    def __init__(self, opened_at: int):
+        super().__init__(f"a fenced block opened at line {opened_at} is never closed")
+        self.opened_at = opened_at
+
+
+def blocks(notes_text: str) -> list[list[tuple[int, str]]]:
+    """The notes outside fenced blocks, cut into blocks of [(lineno, line)].
+
+    ONE definition of a block, used for both the path scope and the anchor
+    scope, so the two cannot drift apart (#596). Raises `UnbalancedFence` when
+    a marker is never matched -- see the note in `check`.
+    """
+    out: list[list[tuple[int, str]]] = []
+    cur: list[tuple[int, str]] = []
+    fenced = False
+    opened_at = 0
+    for lineno, line in enumerate(notes_text.splitlines(), 1):
+        if _FENCE.match(line):
+            fenced = not fenced
+            opened_at = lineno if fenced else 0
+            if cur:
+                out.append(cur)
+                cur = []
+            continue
+        if fenced:
+            continue
+        if _BLANK.match(line):
+            if cur:
+                out.append(cur)
+                cur = []
+            continue
+        if _STANDALONE.match(line):
+            if cur:
+                out.append(cur)
+            out.append([(lineno, line)])
+            cur = []
+            continue
+        cur.append((lineno, line))
+    if cur:
+        out.append(cur)
+    if fenced:
+        raise UnbalancedFence(opened_at)
+    return out
 
 
 def check(notes_text: str, read_source) -> list[dict]:
-    """One record per citation found, outside fenced blocks.
+    """One record per citation-shaped reference outside fenced blocks.
 
     `read_source(rel) -> list[str] | None`.
 
@@ -214,76 +328,102 @@ def check(notes_text: str, read_source) -> list[dict]:
     This is a boundary, not a filter on the measurement (#441): everything
     outside a fence is still read, and a citation this file MAKES belongs
     outside one. The control plants the same citation inside and outside a
-    fence and requires exactly one of them to be seen.
+    fence and requires exactly one of them to be seen. An unmatched marker
+    would invert that boundary for the rest of the file, so `blocks` raises
+    `UnbalancedFence` rather than return a set that is quietly the complement
+    of the intended one.
 
-    Every anchor on a notes line is offered to every citation on that line.
-    Binding each anchor to its nearest citation instead was tried and is
-    WORSE: the dense table rows in these notes carry five citations and five
-    anchors, proximity gets the pairing wrong, and the tool then reports drift
-    on correct numbers -- which is the failure mode that gets a check ignored
-    (#342). The weaker rule can mask a wrong number when a neighbouring
-    anchor on the same line happens to land in range; it is reported as
-    evidence to read, not as a gate that stands alone.
+    A BLOCK IS THE SCOPE OF BOTH RULES. The path a bare `:N` inherits is the
+    one most recently mentioned in its block; the anchors offered to a citation
+    are every backticked token in its block. Scoping either to a single LINE --
+    which is what the first version did, while the comment beside it claimed
+    these notes' tables were written that way -- made a third of this file's
+    citations invisible and then, once they were visible, reported drift on
+    correct numbers. Nothing is set aside silently: a `:N` the predecessor rule
+    declines is recorded `NOT-A-CITATION` with its surrounding text, and one
+    with no path in scope is recorded `NO-PATH-IN-SCOPE`.
+
+    Every anchor in the block is offered to every citation in it. Binding each
+    anchor to its nearest citation instead was tried and is WORSE: the dense
+    table rows in these notes carry five citations and five anchors, proximity
+    gets the pairing wrong, and the tool then reports drift on correct numbers
+    -- the failure mode that gets a check ignored (#342). The weaker rule can
+    mask a wrong number when another anchor in the block happens to land in
+    range; it is reported as evidence to read, not as a gate that stands alone.
     """
     results: list[dict] = []
-    fenced = False
-    for lineno, line in enumerate(notes_text.splitlines(), 1):
-        if _FENCE.match(line):
-            fenced = not fenced
-            continue
-        if fenced:
-            continue
+    for block in blocks(notes_text):
+        anchors: list[str] = []
+        for _n, line in block:
+            for _pos, needle in _anchors_on(line):
+                if needle not in anchors:
+                    anchors.append(needle)
         current: str | None = None
-        anchors = [needle for _pos, needle in _anchors_on(line)]
-        for m in _CITE.finditer(line):
-            if m.group("path"):
-                current = m.group("path")
-            elif len(m.group("a")) < _BARE_CITATION_MIN_DIGITS:
-                continue
-            if current is None:
-                continue
-            src = read_source(current)
-            if src is None:
-                # A client citation with no source named is NOT the same
-                # failure as a path that does not exist, and must not be
-                # reported as one: the first says the run could not check it,
-                # the second says the notes are wrong.
-                results.append({"notes_line": lineno, "path": current,
-                                "cited": m.group(0).strip(),
-                                "verdict": "CLIENT-NOT-CONFIGURED"
-                                if is_client_path(current) else "NO-SUCH-FILE"})
-                continue
-            a = int(m.group("a"))
-            b = int(m.group("b")) if m.group("b") else a
-            if a > len(src):
-                results.append({"notes_line": lineno, "path": current,
-                                "cited": m.group(0).strip(), "verdict": "PAST-EOF"})
-                continue
-            hit_anchor, anchor_lines = None, []
-            for anchor in anchors:
-                occurrences = [i for i, t in enumerate(src, 1) if anchor in t]
-                if not occurrences or len(occurrences) > _ANCHOR_MAX_OCCURRENCES:
+        for lineno, line in block:
+            mentions = [(m.start(), m.group(0)) for m in _PATH_MENTION.finditer(line)]
+            for m in _CITE.finditer(line):
+                colon = m.start("a") - 1
+                cited = m.group(0).strip()
+                if m.group("path"):
+                    current = m.group("path")
+                else:
+                    prev = line[colon - 1] if colon > 0 else ""
+                    if prev and _BARE_BINDS_LEFT.match(prev):
+                        results.append({"notes_line": lineno, "path": None,
+                                        "cited": cited, "verdict": "NOT-A-CITATION",
+                                        "text": line[max(0, colon - 24):colon + 8].strip()})
+                        continue
+                    named = [p for pos, p in mentions if pos < colon]
+                    if named:
+                        current = named[-1]
+                if current is None:
+                    results.append({"notes_line": lineno, "path": None,
+                                    "cited": cited, "verdict": "NO-PATH-IN-SCOPE"})
                     continue
-                anchor_lines.append((anchor, occurrences))
-                if any(a <= o <= b for o in occurrences):
-                    hit_anchor = anchor
-                    break
-            rec = {"notes_line": lineno, "path": current,
-                   "cited": m.group(0).strip(), "range": (a, b)}
-            if hit_anchor:
-                rec["verdict"] = "OK"
-                rec["anchor"] = hit_anchor
-            elif anchor_lines:
-                anchor, occurrences = anchor_lines[0]
-                rec["verdict"] = "DRIFT"
-                rec["anchor"] = anchor
-                rec["anchor_at"] = occurrences[:4]
-            elif not src[a - 1].strip():
-                rec["verdict"] = "BLANK"
-            else:
-                rec["verdict"] = "UNANCHORED"
-                rec["text"] = src[a - 1].strip()[:100]
-            results.append(rec)
+                src = read_source(current)
+                if src is None:
+                    # A client citation with no source named is NOT the same
+                    # failure as a path that does not exist, and must not be
+                    # reported as one: the first says the run could not check
+                    # it, the second says the notes are wrong.
+                    results.append({"notes_line": lineno, "path": current,
+                                    "cited": cited,
+                                    "verdict": "CLIENT-NOT-CONFIGURED"
+                                    if is_client_path(current) else "NO-SUCH-FILE"})
+                    continue
+                a = int(m.group("a"))
+                b = int(m.group("b")) if m.group("b") else a
+                if a > len(src):
+                    results.append({"notes_line": lineno, "path": current,
+                                    "cited": cited, "verdict": "PAST-EOF"})
+                    continue
+                hit_anchor, anchor_lines = None, []
+                for anchor in anchors:
+                    occurrences = [i for i, t in enumerate(src, 1) if anchor in t]
+                    if not occurrences or len(occurrences) > _ANCHOR_MAX_OCCURRENCES:
+                        continue
+                    anchor_lines.append((anchor, occurrences))
+                    if any(a <= o <= b for o in occurrences):
+                        hit_anchor = anchor
+                        break
+                rec = {"notes_line": lineno, "path": current,
+                       "cited": cited, "range": (a, b)}
+                if hit_anchor:
+                    rec["verdict"] = "OK"
+                    rec["anchor"] = hit_anchor
+                elif anchor_lines:
+                    anchor, occurrences = anchor_lines[0]
+                    rec["verdict"] = "DRIFT"
+                    rec["anchor"] = anchor
+                    rec["anchor_at"] = occurrences[:4]
+                elif not src[a - 1].strip():
+                    rec["verdict"] = "BLANK"
+                else:
+                    rec["verdict"] = "UNANCHORED"
+                    rec["text"] = src[a - 1].strip()[:100]
+                results.append(rec)
+            if mentions:
+                current = mentions[-1][1]
     return results
 
 
@@ -308,6 +448,12 @@ def emit(records: list[dict], notes_rel: str, write) -> tuple[int, int]:
             line = f"{head} — anchor `{r['anchor']}` is at {r['anchor_at']}"
         elif r["verdict"] == "UNANCHORED":
             line = f"{head} — cited line reads: {r['text']}"
+        elif r["verdict"] == "NOT-A-CITATION":
+            line = (f"{head} — reads: {r['text']} — the colon is bound into the "
+                    "token on its left, so this is not a line number")
+        elif r["verdict"] == "NO-PATH-IN-SCOPE":
+            line = (f"{head} — no path is named on this line or earlier in its "
+                    "block, so nothing can resolve it")
         else:
             line = head
         if write(line):
@@ -352,6 +498,22 @@ def _listing_control() -> dict[str, bool]:
     }
 
 
+def _raises_unbalanced(text: str) -> bool:
+    try:
+        check(text, lambda rel: None)
+    except UnbalancedFence:
+        return True
+    return False
+
+
+def _unbalanced_at(text: str) -> int:
+    try:
+        check(text, lambda rel: None)
+    except UnbalancedFence as exc:
+        return exc.opened_at
+    return 0
+
+
 def _self_test() -> int:
     """Plant one citation of every verdict and require each to be reached.
 
@@ -371,7 +533,10 @@ def _self_test() -> int:
         "common = common + 1",                           # 104
     ]
     source += ["common = common + 1"] * 20               # a token used everywhere
-    notes = "\n".join([
+    # One BLOCK per case. The anchor scope is the block, so cases sharing one
+    # would lend each other anchors and the planted BLANK would read as DRIFT
+    # -- the planting would then be testing the wrong thing without saying so.
+    notes = "\n\n".join([
         "ok      `fake.py:100` (`_persistable_exit_cause`)",
         "drift   `fake.py:103` (`_persistable_exit_cause`)",
         "blank   `fake.py:102` with no anchor",
@@ -403,8 +568,57 @@ def _self_test() -> int:
         "the SAME citation outside the fence still is":
             [r["verdict"] for r in check("`fake.py:900`", lambda rel: source)]
             == ["PAST-EOF"],
-        "a fence that never closes does not swallow the rest silently":
-            check("```\n`fake.py:900`", lambda rel: source) == [],
+        # The first version of this entry asserted `== []`: it REQUIRED the
+        # citation after the unclosed fence to be swallowed and printed `ok`
+        # when it was, under a name claiming the opposite property. A check
+        # whose name denies its own assertion certifies the arrangement it is
+        # named for (#342, #302).
+        "a fence that never closes REFUSES rather than swallowing the rest":
+            _raises_unbalanced("```\n`fake.py:900`"),
+        "a BALANCED fence at the same site still skips what it encloses":
+            check("```\n`fake.py:900`\n```", lambda rel: source) == [],
+        "the refusal names the line the stray fence opened at":
+            _unbalanced_at("text\n```\n`fake.py:900`") == 2,
+        "a bare :N inherits the path named on the LINE ABOVE":
+            [r["verdict"] for r in check(
+                "the module is `fake.py`, and\n`:100` (`_persistable_exit_cause`)",
+                lambda rel: source)] == ["OK"],
+        "a bare :N inherits across a TABLE ROW boundary":
+            [r["verdict"] for r in check(
+                "| a | `fake.py:100` (`_persistable_exit_cause`) |\n"
+                "| b | `:100` (`_persistable_exit_cause`) |",
+                lambda rel: source)] == ["OK", "OK"],
+        "inheritance does NOT cross a blank line":
+            check("the module is `fake.py`\n\n`:100`",
+                  lambda rel: source)[0]["verdict"] == "NO-PATH-IN-SCOPE",
+        "inheritance does NOT cross a heading":
+            check("the module is `fake.py`\n## next\n`:100`",
+                  lambda rel: source)[0]["verdict"] == "NO-PATH-IN-SCOPE",
+        "a port is declined, and REPORTED rather than dropped":
+            [r["verdict"] for r in check("`fake.py` listens on 127.0.0.1:55432",
+                                         lambda rel: source)] == ["NOT-A-CITATION"],
+        "an image tag is declined at the same shape":
+            [r["verdict"] for r in check("`fake.py` runs postgres:16-alpine",
+                                         lambda rel: source)] == ["NOT-A-CITATION"],
+        "a two-digit bare citation IS read now the floor is gone":
+            check("`fake.py` window at `:44`",
+                  lambda rel: source)[0]["verdict"] == "UNANCHORED",
+        "an anchor one line ABOVE its citation is reached":
+            check("the constant is `_persistable_exit_cause`, defined in `fake.py`\n"
+                  "at `:100` and nowhere else", lambda rel: source)[0]["verdict"] == "OK",
+        "an anchor one line BELOW its citation is reached too":
+            check("`fake.py:100` is the line\n"
+                  "that defines `_persistable_exit_cause`",
+                  lambda rel: source)[0]["verdict"] == "OK",
+        "an anchor does NOT reach across a blank line":
+            check("the constant is `_persistable_exit_cause`\n\n`fake.py:103`",
+                  lambda rel: source)[0]["verdict"] == "UNANCHORED",
+        "a drifted citation is still DRIFT when its anchor is a line away":
+            check("the constant is `_persistable_exit_cause`\n`fake.py:103`",
+                  lambda rel: source)[0]["verdict"] == "DRIFT",
+        "every citation-shaped reference produces exactly one record":
+            len(check("`fake.py:100` and 127.0.0.1:55432 and `:102`",
+                      lambda rel: source)) == 3,
         "a quoted route path anchors":
             [n for _p, n in _anchors_on('`"/api/v1/mod-version"`')]
             == ["/api/v1/mod-version"],
@@ -492,7 +706,14 @@ def main() -> int:
             cache[rel] = p.read_text(encoding="utf-8").splitlines() if p else None
         return cache[rel]
 
-    records = check(args.notes.read_text(encoding="utf-8"), read_source)
+    try:
+        records = check(args.notes.read_text(encoding="utf-8"), read_source)
+    except UnbalancedFence as exc:
+        print(f"REFUSING a verdict: {exc}. From that marker on, the scan read "
+              "the COMPLEMENT of this file: the citations it makes were skipped "
+              "and the quoted material was checked instead. A count taken from "
+              "an inverted scan is not evidence.")
+        return 2
     counts: dict[str, int] = {}
     for r in records:
         counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
@@ -510,9 +731,14 @@ def main() -> int:
         if "/" in name:
             print(f"client source: {name} -> {client[name].name}")
     print("citations: " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items())))
+    declined = counts.get("NOT-A-CITATION", 0)
+    print(f"population: {len(records)} citation-shaped references outside fences "
+          f"= {len(records) - declined} read as citations "
+          f"+ {declined} declined and listed above")
     print(f"listing: {printed} lines printed for {reportable} reportable records")
     bad = counts.get("DRIFT", 0) + counts.get("BLANK", 0) \
-        + counts.get("PAST-EOF", 0) + counts.get("NO-SUCH-FILE", 0)
+        + counts.get("PAST-EOF", 0) + counts.get("NO-SUCH-FILE", 0) \
+        + counts.get("NO-PATH-IN-SCOPE", 0)
     if args.require_anchors:
         bad += counts.get("UNANCHORED", 0)
     print("ANCHOR RATCHET:", "ENFORCED" if args.require_anchors
