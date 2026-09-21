@@ -43,16 +43,21 @@ namespace CompetitiveRounds
     /// <see cref="BoundaryMapSettled"/> is taken a fixed delay later, from
     /// the per-frame tick, and carries <c>sinceCallInMs</c> so a reader sees
     /// the gap that was actually measured rather than trusting a claim about
-    /// it. The per-player Move coroutine runs on the order of a second
-    /// (learning #304 pairs one CALL IN NEW MAP block with N MOVE PLAYERS
-    /// START and N END lines about a second apart), so in the ordinary case
-    /// the settled row is on the far side of the move and the revive.
+    /// it. THAT DELAY IS ALL THE ROW ASSERTS ABOUT ITSELF: it is a sample
+    /// taken about two seconds after the call-in, carrying the elapsed time
+    /// it measured. The delay was chosen against learning #304's reading that
+    /// the per-player Move coroutine runs on the order of a second, but a
+    /// sample's TIMING is a timing and never an ORDERING — the row says
+    /// nothing about how far vanilla's map coroutine had got by then, and
+    /// nothing about whether the move ran.
     ///
-    /// Deliberately NOT a guarantee that the move finished (#351): when the
-    /// transition is the thing that stalled, the settled row shows pre-move
-    /// positions, and that is the most valuable reading this instrument can
-    /// produce. The PAIR is the instrument — a settled row whose positions
-    /// still equal its call-in row's is a seat that never got moved.
+    /// Saying it any more strongly would be the false guarantee #351 is
+    /// about, and it would be false in exactly the case the instrument exists
+    /// for (#302): when the transition is the thing that stalled, the settled
+    /// row carries pre-move data, and post-move wording would file that
+    /// reading under a claim untrue of it. The PAIR is the instrument — a
+    /// settled row whose positions still equal its call-in row's is a seat
+    /// that never got moved.
     ///
     /// ── FAILURE DIRECTION (#276 / #430) ───────────────────────────────────
     /// The census is pure observation and gates nothing. A seat it cannot
@@ -88,13 +93,16 @@ namespace CompetitiveRounds
         /// <summary>Grep target. See the class remarks (#306).</summary>
         internal const string Probe = "SCR_ROSTER_PROBE=1";
 
-        /// <summary>The RPC arrived and vanilla's map coroutine has NOT run:
-        /// the state this seat inherited from the point that just ended. See
-        /// the class remarks on why the two map labels are distinct.</summary>
+        /// <summary>The sample taken in the Postfix of the call-in RPC, at
+        /// the moment that RPC is received, and carrying no elapsed field.
+        /// The label asserts WHEN the sample was taken; what the fields on
+        /// such a row then describe is the class remarks' business.</summary>
         internal const string BoundaryMapCallIn = "map-callin";
 
-        /// <summary>A fixed delay after the call-in, from the per-frame tick.
-        /// Carries the measured <c>sinceCallInMs</c>.</summary>
+        /// <summary>The sample taken about two seconds after the call-in,
+        /// from the per-frame tick, carrying the elapsed time it measured as
+        /// <c>sinceCallInMs</c>. The label asserts that delay and nothing
+        /// about where the transition had got to by then.</summary>
         internal const string BoundaryMapSettled = "map-settled";
 
         internal const string BoundaryGame = "game";
@@ -142,9 +150,77 @@ namespace CompetitiveRounds
         internal const string ReasonSessionLineCap = "session-line-cap";
         internal const string ReasonNotModRoom = "not-mod-issued-room";
         internal const string ReasonLocalSpectator = "local-seat-is-spectator";
-        internal const string ReasonRosterReadFailed = "roster-read-failed";
+
+        /// <summary>The roster read itself raised. Nothing is known about the
+        /// room's actor set: this is the instrument failing to read, not a
+        /// reading of an empty room.</summary>
+        internal const string ReasonRosterReadThrew = "roster-read-threw";
+
+        /// <summary>The roster read COMPLETED and handed back no list at all.
+        /// Distinct from a raise because the call returned — a different
+        /// question about the same subsystem, and a different next step for
+        /// the reader.</summary>
+        internal const string ReasonRosterListNull = "roster-list-null";
+
+        /// <summary>The read completed, handed back a list, and the list held
+        /// no actors. The only one of the four that is a READING of the room
+        /// rather than a failure to read it.</summary>
         internal const string ReasonRosterEmpty = "roster-read-empty";
+
+        /// <summary>The read completed and every actor it held declared the
+        /// spectator role, so the census set is empty by the filter rather
+        /// than by the room.</summary>
         internal const string ReasonAllSpectators = "every-actor-is-a-spectator";
+
+        /// <summary>A zero-seat boundary whose cause was not classified. It
+        /// exists so that the unhandled case fails toward saying something
+        /// TRUE (#276 / #430): a cause nobody classified must not borrow the
+        /// token of one that was, because <c>roster-read-empty</c> is a
+        /// positive claim that the room really held no actors.</summary>
+        internal const string ReasonRosterEmptyUnclassified = "roster-empty-unclassified";
+
+        /// <summary>The four ways a roster read reaches the census with no
+        /// seats. An enum rather than four call sites each choosing a string,
+        /// because the mapping is then one total function a harness can drive
+        /// — and a collapse of any two causes reds a named case instead of
+        /// waiting for a reader to notice (#342).</summary>
+        internal enum EmptyCause
+        {
+            ReadThrew = 0,
+            ListNull = 1,
+            NoActors = 2,
+            AllSpectators = 3,
+        }
+
+        /// <summary>Every cause its own token, and an unrecognised cause its
+        /// own token as well. Separating "the read raised" from "the read
+        /// returned nothing" ON THE LINE is the whole requirement: the two
+        /// have different next steps and used to print the same word.</summary>
+        internal static string ReasonForEmptyCause(EmptyCause cause)
+        {
+            switch (cause)
+            {
+                case EmptyCause.ReadThrew: return ReasonRosterReadThrew;
+                case EmptyCause.ListNull: return ReasonRosterListNull;
+                case EmptyCause.NoActors: return ReasonRosterEmpty;
+                case EmptyCause.AllSpectators: return ReasonAllSpectators;
+            }
+            return ReasonRosterEmptyUnclassified;
+        }
+
+        /// <summary>Every reason a zero-seat boundary can carry. The per-cause
+        /// notice throttles are built from this array, so the set of causes
+        /// and the set of throttles cannot drift apart — and the array is
+        /// filled once at type initialisation and never appended to, which is
+        /// what makes the throttle set bounded.</summary>
+        internal static readonly string[] EmptyCauseReasons =
+        {
+            ReasonRosterReadThrew,
+            ReasonRosterListNull,
+            ReasonRosterEmpty,
+            ReasonAllSpectators,
+            ReasonRosterEmptyUnclassified,
+        };
 
         // ── the boundary context ─────────────────────────────────────────
 
@@ -499,6 +575,80 @@ namespace CompetitiveRounds
             }
         }
 
+        // ── one throttle per CAUSE ───────────────────────────────────────
+
+        /// <summary>Seam for the harness: the wrong throttle sets are handed
+        /// to the same assertions as the real one.</summary>
+        internal interface ICauseNotices
+        {
+            /// <summary>True when THIS occurrence of THIS cause should print.
+            /// <paramref name="suppressed"/> counts occurrences of the SAME
+            /// cause since that cause's previous notice, and
+            /// <paramref name="final"/> marks the last notice this cause will
+            /// print. "Same cause" means same throttle: for a reason the set
+            /// was built with, that is the reason alone.</summary>
+            bool ShouldFire(string reason, int generation, out int suppressed, out bool final);
+        }
+
+        internal delegate ICauseNotices CauseNoticesFactory(int interval, int ceiling);
+
+        /// <summary>One <see cref="NoticeThrottle"/> per cause, and no shared
+        /// state between them.
+        ///
+        /// A single throttle across all causes suppresses by ARRIVAL ORDER
+        /// rather than by cause: the first zero-seat boundary of a roster
+        /// generation spends the generation's notice, and a boundary of a
+        /// DIFFERENT cause in the same generation is then silent — so the
+        /// cause a reader most needs to see is the one least likely to be on
+        /// the record, because it is whichever one happened second. Splitting
+        /// the state is the fix: each cause has its own first notice, its own
+        /// suppressed-since counter, its own interval clock and its own
+        /// ceiling, so each cause's last line is marked <c>final=true</c> on
+        /// its own terms (#430) and the end of one cause's record is not the
+        /// end of another's.
+        ///
+        /// BOUNDED BY CONSTRUCTION: the dictionary is filled once from the
+        /// reasons handed in and never grows. A reason not on that list still
+        /// announces — through ONE shared fallback throttle rather than
+        /// through silence, because the unhandled case must fail toward
+        /// saying something (#276). Two unlisted reasons would therefore share
+        /// a throttle, which is the price of a bounded set; it is not a live
+        /// path, because <see cref="EmptyCauseReasons"/> carries every reason
+        /// the emitter can produce — including the unclassified one — and
+        /// that array is where a new cause is added.</summary>
+        internal sealed class CauseNoticeThrottles : ICauseNotices
+        {
+            private readonly Dictionary<string, NoticeThrottle> _byReason;
+            private readonly NoticeThrottle _unlisted;
+
+            internal CauseNoticeThrottles(int interval, int ceiling, string[] reasons)
+            {
+                _byReason = new Dictionary<string, NoticeThrottle>(StringComparer.Ordinal);
+                if (reasons != null)
+                    for (int i = 0; i < reasons.Length; i++)
+                    {
+                        string reason = reasons[i];
+                        if (reason == null || _byReason.ContainsKey(reason)) continue;
+                        _byReason.Add(reason, new NoticeThrottle(interval, ceiling));
+                    }
+                _unlisted = new NoticeThrottle(interval, ceiling);
+            }
+
+            public bool ShouldFire(string reason, int generation, out int suppressed, out bool final)
+            {
+                NoticeThrottle throttle;
+                if (reason == null || !_byReason.TryGetValue(reason, out throttle))
+                    throttle = _unlisted;
+                return throttle.ShouldFire(generation, out suppressed, out final);
+            }
+        }
+
+        /// <summary>The real throttle set, over the real cause list.</summary>
+        internal static ICauseNotices DefaultCauseNotices(int interval, int ceiling)
+        {
+            return new CauseNoticeThrottles(interval, ceiling, EmptyCauseReasons);
+        }
+
         // ── the session budget ───────────────────────────────────────────
 
         /// <summary>Seam for the harness: the wrong budgets are handed to the
@@ -598,6 +748,13 @@ namespace CompetitiveRounds
         /// shown to fail (#342).</summary>
         internal delegate string NoticeFormatter(BoundaryContext ctx, string reason, int suppressed, bool final);
 
+        /// <summary>The empty-cause classifier under test. Same seam, same
+        /// reason: collapsing two causes onto one token is the natural
+        /// tidy-up edit ("they are both a failed read"), and without a seam
+        /// the case asserting four distinct tokens could never be shown to
+        /// fail (#342).</summary>
+        internal delegate string EmptyCauseClassifier(EmptyCause cause);
+
         internal static SelfTestResult SelfTest()
         {
             return SelfTest(FormatCensus, DefaultBudget);
@@ -616,8 +773,17 @@ namespace CompetitiveRounds
         internal static SelfTestResult SelfTest(CensusEmitter emit, BudgetFactory budget,
                                                 NoticeFormatter emptyNotice, NoticeFormatter declinedNotice)
         {
+            return SelfTest(emit, budget, emptyNotice, declinedNotice,
+                            ReasonForEmptyCause, DefaultCauseNotices);
+        }
+
+        internal static SelfTestResult SelfTest(CensusEmitter emit, BudgetFactory budget,
+                                                NoticeFormatter emptyNotice, NoticeFormatter declinedNotice,
+                                                EmptyCauseClassifier classify, CauseNoticesFactory causeNotices)
+        {
             var r = new SelfTestResult();
-            if (emit == null || budget == null || emptyNotice == null || declinedNotice == null)
+            if (emit == null || budget == null || emptyNotice == null || declinedNotice == null
+                || classify == null || causeNotices == null)
             {
                 r.Failed++;
                 r.Report.Append("FAIL | case=selftest was handed no implementation | got=null\n");
@@ -977,10 +1143,10 @@ namespace CompetitiveRounds
             //     gate and an exhausted cap.
             {
                 var ctx = BoundaryContext.For(11, BoundaryMapCallIn, -1, 2);
-                string empty = emptyNotice(ctx, ReasonRosterReadFailed, 0, false);
+                string empty = emptyNotice(ctx, ReasonRosterReadThrew, 0, false);
                 string declined = declinedNotice(ctx, ReasonNotModRoom, 4, false);
                 bool ok = Value(empty, "census") == "empty"
-                          && Value(empty, "reason") == ReasonRosterReadFailed
+                          && Value(empty, "reason") == ReasonRosterReadThrew
                           && Value(empty, "seats") == "0"
                           && Value(empty, "SCR_ROSTER_PROBE") == "1"
                           && Value(declined, "census") == "declined"
@@ -1008,6 +1174,121 @@ namespace CompetitiveRounds
                 Check(r, "the throttle fires first, on its interval and on a generation edge", ok,
                       "first=" + a1 + " next=" + a2 + "/" + a3
                       + " interval=" + a4 + "/" + sAfter + " gen=" + a5);
+            }
+
+            // 26. THE FOUR EMPTY CAUSES REACH THE LINE AS FOUR TOKENS. A read
+            //     that raised and a read that returned no list are different
+            //     facts with different next steps; printing one word for both
+            //     leaves the reader unable to separate them, which is the
+            //     whole job of the reason field. Distinctness is asserted on
+            //     the CLASSIFIER and then again on the rendered notice, so a
+            //     token that is distinct in code and collapsed by the
+            //     formatter still reds.
+            {
+                string threw = classify(EmptyCause.ReadThrew);
+                string listNull = classify(EmptyCause.ListNull);
+                string noActors = classify(EmptyCause.NoActors);
+                string allSpec = classify(EmptyCause.AllSpectators);
+                var tokens = new List<string> { threw, listNull, noActors, allSpec };
+
+                bool ok = true;
+                for (int i = 0; i < tokens.Count; i++)
+                {
+                    if (string.IsNullOrEmpty(tokens[i])) { ok = false; break; }
+                    for (int j = i + 1; j < tokens.Count; j++)
+                        if (tokens[i] == tokens[j]) { ok = false; break; }
+                    if (!ok) break;
+                }
+
+                var ctx = BoundaryContext.For(11, BoundaryMapCallIn, -1, 2);
+                if (ok)
+                    for (int i = 0; i < tokens.Count; i++)
+                        if (Value(emptyNotice(ctx, tokens[i], 0, false), "reason") != tokens[i])
+                        { ok = false; break; }
+
+                Check(r, "the four empty causes reach the line as four distinct reasons", ok,
+                      threw + " / " + listNull + " / " + noActors + " / " + allSpec);
+            }
+
+            // 27. EACH EMPTY CAUSE GETS ITS OWN FIRST NOTICE. With one
+            //     throttle across all four, the first zero-seat boundary of a
+            //     roster generation spends that generation's notice and a
+            //     boundary of a DIFFERENT cause in the same generation is
+            //     silent — so whichever cause arrived second is the one
+            //     missing from the record.
+            {
+                var t = causeNotices(1000, 99);
+                int s; bool f;
+                bool a1 = t.ShouldFire(ReasonRosterReadThrew, 11, out s, out f);   // A: its first
+                bool a2 = t.ShouldFire(ReasonRosterReadThrew, 11, out s, out f);   // A: suppressed
+                bool b1 = t.ShouldFire(ReasonRosterListNull, 11, out s, out f);    // B: its OWN first
+                bool c1 = t.ShouldFire(ReasonAllSpectators, 11, out s, out f);     // C: its OWN first
+                bool ok = a1 && !a2 && b1 && c1;
+                Check(r, "each empty cause announces its own first notice", ok,
+                      "A=" + a1 + "/" + a2 + " B=" + b1 + " C=" + c1);
+            }
+
+            // 28. EACH EMPTY CAUSE COUNTS ITS OWN SUPPRESSED TOTAL, on its own
+            //     interval clock. Occurrences of another cause in between must
+            //     move neither the count nor the moment the notice is due.
+            {
+                var t = causeNotices(2, 99);
+                int s; bool f;
+                t.ShouldFire(ReasonRosterReadThrew, 11, out s, out f);   // A fires
+                t.ShouldFire(ReasonRosterReadThrew, 11, out s, out f);   // A suppressed (1)
+                t.ShouldFire(ReasonRosterListNull, 11, out s, out f);    // B's own first
+                t.ShouldFire(ReasonRosterListNull, 11, out s, out f);    // B suppressed
+                t.ShouldFire(ReasonRosterReadThrew, 11, out s, out f);   // A suppressed (2)
+                int suppressedForA;
+                bool due = t.ShouldFire(ReasonRosterReadThrew, 11, out suppressedForA, out f);
+                bool ok = due && suppressedForA == 2;
+                Check(r, "each empty cause counts its own suppressed total", ok,
+                      "due=" + due + " suppressed=" + suppressedForA.ToString(CultureInfo.InvariantCulture));
+            }
+
+            // 29. EACH EMPTY CAUSE MARKS ITS OWN LAST NOTICE FINAL, and one
+            //     cause reaching its ceiling must not end another cause's
+            //     record. Ceiling 1 here: one notice per cause, each marked
+            //     final on its own terms (#430).
+            {
+                var t = causeNotices(1000, 1);
+                int s; bool finalA, finalB, finalLater;
+                bool a1 = t.ShouldFire(ReasonRosterReadThrew, 11, out s, out finalA);
+                bool b1 = t.ShouldFire(ReasonRosterListNull, 11, out s, out finalB);
+                bool a2 = t.ShouldFire(ReasonRosterReadThrew, 12, out s, out finalLater);
+                bool ok = a1 && finalA && b1 && finalB && !a2;
+                Check(r, "each empty cause marks its own last notice final", ok,
+                      "A=" + a1 + "/final=" + finalA + " B=" + b1 + "/final=" + finalB
+                      + " A-after-close=" + a2);
+            }
+
+            // 30. NEGATIVE CONTROL for 27 to 29. Splitting the state per cause
+            //     must not turn the throttle off: repeat occurrences of ONE
+            //     cause still share that cause's own throttle. Without this,
+            //     "every occurrence announces" would satisfy 27 to 29 and the
+            //     three of them would be measuring nothing.
+            {
+                var t = causeNotices(1000, 99);
+                int s; bool f;
+                bool a1 = t.ShouldFire(ReasonRosterReadThrew, 11, out s, out f);
+                bool a2 = t.ShouldFire(ReasonRosterReadThrew, 11, out s, out f);
+                bool a3 = t.ShouldFire(ReasonRosterReadThrew, 11, out s, out f);
+                bool ok = a1 && !a2 && !a3;
+                Check(r, "repeat occurrences of one cause still share that cause's throttle", ok,
+                      "first=" + a1 + " next=" + a2 + "/" + a3);
+            }
+
+            // 31. A CAUSE THE SET DOES NOT RECOGNISE STILL ANNOUNCES. The
+            //     unhandled case has to fail toward the record, not toward
+            //     silence (#276 / #430): a zero-seat boundary carrying a
+            //     reason nobody listed is still a zero-seat boundary, and
+            //     dropping it would make the one unclassified case the one
+            //     case with no line.
+            {
+                var t = causeNotices(1000, 99);
+                int s; bool f;
+                bool fired = t.ShouldFire("a-cause-not-on-the-list", 11, out s, out f);
+                Check(r, "an unrecognised empty cause still announces", fired, "fired=" + fired);
             }
 
             return r;

@@ -34,7 +34,22 @@ namespace CompetitiveRounds.Harness
             bool quiet = Array.IndexOf(args, "--quiet") >= 0;
 
             Console.WriteLine("=== roster-census-harness ===");
-            Console.WriteLine("baseline: RosterCensus.FormatCensus + SessionLineBudget + the notice builders");
+
+            // THE INVOCATION, PRINTED ABOVE THE RESULTS. A tally with no
+            // command above it is a number a reader cannot bind to the source
+            // that produced it: they have the count and no way to say WHICH
+            // build ran, from where, or with what arguments. The process
+            // prints it about itself, so it cannot drift from what actually
+            // ran the way a hand-written log header can.
+            Console.WriteLine("invocation:     " + Environment.CommandLine);
+            Console.WriteLine("invocation-cwd: " + Environment.CurrentDirectory);
+            Console.WriteLine("invocation-utc: "
+                              + DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture));
+            Console.WriteLine("runtime:        " + Environment.Version);
+            Console.WriteLine();
+
+            Console.WriteLine("baseline: RosterCensus.FormatCensus + SessionLineBudget + the notice builders"
+                              + " + the empty-cause classifier + the per-cause notice throttles");
 
             RosterCensus.SelfTestResult baseline;
             try { baseline = RosterCensus.SelfTest(); }
@@ -116,6 +131,21 @@ namespace CompetitiveRounds.Harness
                              Notices(ReasonlessEmpty, ReasonlessDeclined),
                              "an empty and a declined boundary each say so, with a reason", quiet);
 
+            // The zero-seat-cause findings: a reason token shared between two
+            // causes, and one cause's notice spent on behalf of another.
+            caught += Mutant(ref mutants, "collapses-the-roster-read-failure-causes",
+                             Classifier(CollapsedCauses),
+                             "the four empty causes reach the line as four distinct reasons", quiet);
+            caught += Mutant(ref mutants, "shares-one-notice-throttle-across-causes",
+                             Causes(SharedThrottle),
+                             "each empty cause announces its own first notice", quiet);
+            caught += Mutant(ref mutants, "announces-every-empty-cause-occurrence",
+                             Causes(UnthrottledCauses),
+                             "repeat occurrences of one cause still share that cause's throttle", quiet);
+            caught += Mutant(ref mutants, "drops-a-cause-it-does-not-recognise",
+                             Causes(ListedCausesOnly),
+                             "an unrecognised empty cause still announces", quiet);
+
             ok &= caught == mutants;
 
             // ── CONTROLS: each must stay green, at the baseline's count ──
@@ -130,6 +160,15 @@ namespace CompetitiveRounds.Harness
                              Budget(Equivalent), baseline.Passed, quiet);
             green += Control(ref controls, "equivalent-notices-built-by-concatenation",
                              Notices(ConcatEmpty, ConcatDeclined), baseline.Passed, quiet);
+
+            // The INERT TWINS of the two mutation sites above: the same four
+            // tokens and the same per-cause rule, reached by a different
+            // route. A red here would mean the new cases measure the shape of
+            // the implementation rather than what it does.
+            green += Control(ref controls, "equivalent-classifier-by-lookup-table",
+                             Classifier(TabulatedCauses), baseline.Passed, quiet);
+            green += Control(ref controls, "equivalent-cause-notices-by-parallel-arrays",
+                             Causes(ArrayCauses), baseline.Passed, quiet);
 
             ok &= green == controls;
 
@@ -153,6 +192,8 @@ namespace CompetitiveRounds.Harness
             internal RosterCensus.BudgetFactory Budget = Real;
             internal RosterCensus.NoticeFormatter Empty = RosterCensus.FormatEmptyRosterNotice;
             internal RosterCensus.NoticeFormatter Declined = RosterCensus.FormatDeclinedNotice;
+            internal RosterCensus.EmptyCauseClassifier Classify = RosterCensus.ReasonForEmptyCause;
+            internal RosterCensus.CauseNoticesFactory CauseNotices = RosterCensus.DefaultCauseNotices;
         }
 
         private static Variant Census(RosterCensus.CensusEmitter emit)
@@ -177,6 +218,20 @@ namespace CompetitiveRounds.Harness
             return v;
         }
 
+        private static Variant Classifier(RosterCensus.EmptyCauseClassifier classify)
+        {
+            var v = new Variant();
+            v.Classify = classify;
+            return v;
+        }
+
+        private static Variant Causes(RosterCensus.CauseNoticesFactory causeNotices)
+        {
+            var v = new Variant();
+            v.CauseNotices = causeNotices;
+            return v;
+        }
+
         // ── runners ──────────────────────────────────────────────────────
 
         /// <summary>A mutant counts as caught only when the case it is PAIRED
@@ -187,7 +242,7 @@ namespace CompetitiveRounds.Harness
         {
             total++;
             RosterCensus.SelfTestResult r;
-            try { r = RosterCensus.SelfTest(v.Emit, v.Budget, v.Empty, v.Declined); }
+            try { r = RosterCensus.SelfTest(v.Emit, v.Budget, v.Empty, v.Declined, v.Classify, v.CauseNotices); }
             catch (Exception ex)
             {
                 // A mutant that throws has not been SHOWN to red on an
@@ -208,7 +263,7 @@ namespace CompetitiveRounds.Harness
         {
             total++;
             RosterCensus.SelfTestResult r;
-            try { r = RosterCensus.SelfTest(v.Emit, v.Budget, v.Empty, v.Declined); }
+            try { r = RosterCensus.SelfTest(v.Emit, v.Budget, v.Empty, v.Declined, v.Classify, v.CauseNotices); }
             catch (Exception ex)
             {
                 Console.WriteLine("CONTROL THREW | " + name + " | " + ex.GetType().Name + ": " + ex.Message);
@@ -497,6 +552,94 @@ namespace CompetitiveRounds.Harness
             return StripField(RosterCensus.FormatDeclinedNotice(ctx, reason, suppressed, final), "reason");
         }
 
+        // ── mutant empty-cause classifiers ───────────────────────────────
+
+        /// <summary>THE PRE-FIX MAPPING. "A read that raised and a read that
+        /// returned no list are both a failed read, so one word covers both" -
+        /// and the reader who has to decide what to look at next then cannot
+        /// tell which of the two the log is describing.</summary>
+        private static string CollapsedCauses(RosterCensus.EmptyCause cause)
+        {
+            if (cause == RosterCensus.EmptyCause.ListNull) return RosterCensus.ReasonRosterReadThrew;
+            return RosterCensus.ReasonForEmptyCause(cause);
+        }
+
+        // ── mutant per-cause notice throttles ────────────────────────────
+
+        private static RosterCensus.ICauseNotices SharedThrottle(int interval, int ceiling)
+        {
+            return new SharedThrottleNotices(interval, ceiling);
+        }
+
+        private static RosterCensus.ICauseNotices UnthrottledCauses(int interval, int ceiling)
+        {
+            return new UnthrottledNotices();
+        }
+
+        private static RosterCensus.ICauseNotices ListedCausesOnly(int interval, int ceiling)
+        {
+            return new ListedOnlyNotices(interval, ceiling);
+        }
+
+        /// <summary>THE PRE-FIX THROTTLE RULE. One throttle for every cause,
+        /// so suppression follows ARRIVAL ORDER rather than cause: the first
+        /// zero-seat boundary of a roster generation spends the notice and a
+        /// boundary of a different cause in the same generation is
+        /// silent.</summary>
+        private sealed class SharedThrottleNotices : RosterCensus.ICauseNotices
+        {
+            private readonly RosterCensus.NoticeThrottle _one;
+
+            internal SharedThrottleNotices(int interval, int ceiling)
+            {
+                _one = new RosterCensus.NoticeThrottle(interval, ceiling);
+            }
+
+            public bool ShouldFire(string reason, int generation, out int suppressed, out bool final)
+            {
+                return _one.ShouldFire(generation, out suppressed, out final);
+            }
+        }
+
+        /// <summary>The over-correction: splitting the state per cause turns
+        /// into no throttle at all, so every occurrence announces and the cap
+        /// the notices exist to stay under stops meaning anything.</summary>
+        private sealed class UnthrottledNotices : RosterCensus.ICauseNotices
+        {
+            public bool ShouldFire(string reason, int generation, out int suppressed, out bool final)
+            {
+                suppressed = 0;
+                final = false;
+                return true;
+            }
+        }
+
+        /// <summary>The wrong failure direction: a reason the set does not
+        /// recognise is dropped instead of announced, so the one zero-seat
+        /// boundary nobody classified becomes the one with no line at all
+        /// (#276).</summary>
+        private sealed class ListedOnlyNotices : RosterCensus.ICauseNotices
+        {
+            private readonly Dictionary<string, RosterCensus.NoticeThrottle> _byReason;
+
+            internal ListedOnlyNotices(int interval, int ceiling)
+            {
+                _byReason = new Dictionary<string, RosterCensus.NoticeThrottle>(StringComparer.Ordinal);
+                foreach (string reason in RosterCensus.EmptyCauseReasons)
+                    if (!_byReason.ContainsKey(reason))
+                        _byReason.Add(reason, new RosterCensus.NoticeThrottle(interval, ceiling));
+            }
+
+            public bool ShouldFire(string reason, int generation, out int suppressed, out bool final)
+            {
+                suppressed = 0;
+                final = false;
+                RosterCensus.NoticeThrottle throttle;
+                if (reason == null || !_byReason.TryGetValue(reason, out throttle)) return false;
+                return throttle.ShouldFire(generation, out suppressed, out final);
+            }
+        }
+
         // ── negative controls ────────────────────────────────────────────
 
         /// <summary>Identical output, built by a different route. It must
@@ -584,6 +727,60 @@ namespace CompetitiveRounds.Harness
         private static string N(long v)
         {
             return v.ToString(CultureInfo.InvariantCulture);
+        }
+
+        // ── negative controls for the two new seams ──────────────────────
+
+        /// <summary>The same four tokens, reached by a table instead of a
+        /// switch. The INERT TWIN of the collapsing classifier above: same
+        /// site, same shape of edit, and it must stay GREEN, which is what
+        /// makes that mutant's red evidence about the MAPPING rather than
+        /// about the fact that the method was rewritten.</summary>
+        private static string TabulatedCauses(RosterCensus.EmptyCause cause)
+        {
+            string[] table =
+            {
+                RosterCensus.ReasonRosterReadThrew,
+                RosterCensus.ReasonRosterListNull,
+                RosterCensus.ReasonRosterEmpty,
+                RosterCensus.ReasonAllSpectators,
+            };
+            int i = (int)cause;
+            return i >= 0 && i < table.Length ? table[i] : RosterCensus.ReasonRosterEmptyUnclassified;
+        }
+
+        private static RosterCensus.ICauseNotices ArrayCauses(int interval, int ceiling)
+        {
+            return new ArrayCauseNotices(interval, ceiling);
+        }
+
+        /// <summary>The same per-cause rule - one throttle per cause, its own
+        /// first notice, its own counter, its own ceiling, and an unlisted
+        /// reason still announcing - keyed by a linear scan of parallel
+        /// arrays instead of a dictionary. The INERT TWIN of the three
+        /// throttle-set mutants above; it must stay green.</summary>
+        private sealed class ArrayCauseNotices : RosterCensus.ICauseNotices
+        {
+            private readonly string[] _reasons;
+            private readonly RosterCensus.NoticeThrottle[] _throttles;
+            private readonly RosterCensus.NoticeThrottle _unlisted;
+
+            internal ArrayCauseNotices(int interval, int ceiling)
+            {
+                _reasons = (string[])RosterCensus.EmptyCauseReasons.Clone();
+                _throttles = new RosterCensus.NoticeThrottle[_reasons.Length];
+                for (int i = 0; i < _reasons.Length; i++)
+                    _throttles[i] = new RosterCensus.NoticeThrottle(interval, ceiling);
+                _unlisted = new RosterCensus.NoticeThrottle(interval, ceiling);
+            }
+
+            public bool ShouldFire(string reason, int generation, out int suppressed, out bool final)
+            {
+                for (int i = 0; i < _reasons.Length; i++)
+                    if (string.Equals(_reasons[i], reason, StringComparison.Ordinal))
+                        return _throttles[i].ShouldFire(generation, out suppressed, out final);
+                return _unlisted.ShouldFire(generation, out suppressed, out final);
+            }
         }
     }
 }

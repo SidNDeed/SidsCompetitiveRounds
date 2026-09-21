@@ -8198,10 +8198,20 @@ namespace CompetitiveRounds
 
         /// <summary>One throttle per REASON. Sharing one across reasons would
         /// let a generation edge spend its notice on whichever decline
-        /// happened to come first and leave the other unmarked.</summary>
-        private static readonly RosterCensus.NoticeThrottle EmptyRosterNotices =
-            new RosterCensus.NoticeThrottle(RosterCensus.EmptyRosterNoticeInterval,
-                                            RosterCensus.EmptyRosterNoticeCeiling);
+        /// happened to come first and leave the other unmarked.
+        ///
+        /// The zero-seat notices get a SET of throttles rather than one,
+        /// because "empty" is four different causes: with one throttle the
+        /// first zero-seat boundary of a roster generation spends that
+        /// generation's notice and a boundary of a DIFFERENT cause in the same
+        /// generation goes unmarked, so whichever cause arrived second is the
+        /// one missing from the record. Each cause now keeps its own first
+        /// notice, its own suppressed-since counter, its own interval clock
+        /// and its own ceiling, so each cause's last line is marked
+        /// <c>final=true</c> on its own terms.</summary>
+        private static readonly RosterCensus.ICauseNotices EmptyRosterNotices =
+            RosterCensus.DefaultCauseNotices(RosterCensus.EmptyRosterNoticeInterval,
+                                             RosterCensus.EmptyRosterNoticeCeiling);
         private static readonly RosterCensus.NoticeThrottle NotModRoomNotices =
             new RosterCensus.NoticeThrottle(RosterCensus.DeclineNoticeInterval,
                                             RosterCensus.DeclineNoticeCeiling);
@@ -8348,7 +8358,13 @@ namespace CompetitiveRounds
                 // read that came back empty (#441, one level up from the row).
                 if (seats.Count == 0)
                 {
-                    AnnounceEmpty(ctx, emptyReason ?? RosterCensus.ReasonRosterEmpty);
+                    // The fallback is the UNCLASSIFIED token, never a cause's
+                    // own: borrowing "roster-read-empty" here would assert
+                    // that the room really held no actors, which is one of the
+                    // four readings and not a stand-in for the other three
+                    // (#276 — the unhandled case fails toward saying something
+                    // true rather than something convenient).
+                    AnnounceEmpty(ctx, emptyReason ?? RosterCensus.ReasonRosterEmptyUnclassified);
                     return true;
                 }
 
@@ -8395,7 +8411,9 @@ namespace CompetitiveRounds
             {
                 int suppressed;
                 bool final;
-                if (!EmptyRosterNotices.ShouldFire(ctx.Generation, out suppressed, out final)) return;
+                // Keyed on the CAUSE, so one cause's notice can never be spent
+                // on behalf of another.
+                if (!EmptyRosterNotices.ShouldFire(reason, ctx.Generation, out suppressed, out final)) return;
                 // A warning, not info: every other decline is a scoping
                 // decision, this one is the instrument failing to read.
                 Plugin.Log.LogWarning(RosterCensus.FormatEmptyRosterNotice(ctx, reason, suppressed, final));
@@ -8436,10 +8454,15 @@ namespace CompetitiveRounds
         /// an extra row never hides a seat, a missing row does.
         ///
         /// <paramref name="emptyReason"/> is set whenever the result is empty,
-        /// and distinguishes the four ways that happens — the read threw, the
-        /// list was null, the room really held no actors, or every actor was a
-        /// spectator. An empty result with no reason would be the filter
-        /// discarding the very measurement it was taken for.</summary>
+        /// and the four ways that happens reach the LINE as four different
+        /// tokens — the read threw, the read returned no list, the room really
+        /// held no actors, or every actor was a spectator. Each of the four
+        /// sites below names its own <see cref="RosterCensus.EmptyCause"/> and
+        /// the reason is derived from it in one place, so no two causes can
+        /// share a token by a copied line. A cause a reader cannot separate on
+        /// the line is not distinguished, and an empty result with no reason
+        /// at all would be the filter discarding the very measurement it was
+        /// taken for (#441).</summary>
         private static List<RosterCensus.SeatObservation> ReadSeats(out string emptyReason)
         {
             emptyReason = null;
@@ -8447,9 +8470,21 @@ namespace CompetitiveRounds
 
             Photon.Realtime.Player[] actors;
             try { actors = PhotonNetwork.PlayerList; }
-            catch { emptyReason = RosterCensus.ReasonRosterReadFailed; return seats; }
-            if (actors == null) { emptyReason = RosterCensus.ReasonRosterReadFailed; return seats; }
-            if (actors.Length == 0) { emptyReason = RosterCensus.ReasonRosterEmpty; return seats; }
+            catch
+            {
+                emptyReason = RosterCensus.ReasonForEmptyCause(RosterCensus.EmptyCause.ReadThrew);
+                return seats;
+            }
+            if (actors == null)
+            {
+                emptyReason = RosterCensus.ReasonForEmptyCause(RosterCensus.EmptyCause.ListNull);
+                return seats;
+            }
+            if (actors.Length == 0)
+            {
+                emptyReason = RosterCensus.ReasonForEmptyCause(RosterCensus.EmptyCause.NoActors);
+                return seats;
+            }
 
             int localActor;
             bool selfKnown = TryReadLocalActor(out localActor);
@@ -8464,7 +8499,11 @@ namespace CompetitiveRounds
                 if (spectator) continue;
                 ordered.Add(actor);
             }
-            if (ordered.Count == 0) { emptyReason = RosterCensus.ReasonAllSpectators; return seats; }
+            if (ordered.Count == 0)
+            {
+                emptyReason = RosterCensus.ReasonForEmptyCause(RosterCensus.EmptyCause.AllSpectators);
+                return seats;
+            }
 
             ordered.Sort((a, b) => a.ActorNumber.CompareTo(b.ActorNumber));
 
@@ -8620,8 +8659,12 @@ namespace CompetitiveRounds
     ///
     /// This Postfix observes the CALL-IN, not the move: vanilla's coroutine
     /// runs afterwards, and PlayerManager.MovePlayers is dispatched from
-    /// inside it. The settled sample on the far side is
-    /// RosterCensusEmitter.TickSettle — see that class's remarks.
+    /// inside it. The second sample is RosterCensusEmitter.TickSettle, taken
+    /// about two seconds later and carrying the elapsed time it measured. It
+    /// asserts that DELAY and not a position in the transition: a sample's
+    /// timing is a timing, never an ordering, and a stalled transition is
+    /// precisely the case where a post-move claim would be false (#351). See
+    /// that class's remarks.
     ///
     /// TargetMethods RESOLVES the method and throws when it cannot, rather
     /// than naming it in an attribute and hoping. Plugin's Harmony bootstrap
