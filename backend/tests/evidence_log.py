@@ -165,6 +165,17 @@ def offences(text: str) -> list[str]:
     return bad
 
 
+def _first(listing: list[str]) -> str:
+    """The first offence, or the empty string when there is none.
+
+    A total function, because the self-test's own cases index it: under a
+    mutant that reports nothing, `listing[0]` is an exception and the harness
+    dies with no case names and the wrong exit code -- losing the report
+    precisely when a mutation has worked.
+    """
+    return listing[0] if listing else ""
+
+
 def _self_test() -> int:
     """Plant each shape and require the checker to separate it from its twin.
 
@@ -228,9 +239,9 @@ def _self_test() -> int:
         "one uncited line among cited ones is enough to catch the section":
             bool(offences(summary_mixed)),
         "the dangling citation names the section it could not resolve":
-            "\u00a78b" in offences(summary_dangling)[0],
+            "\u00a78b" in _first(offences(summary_dangling)),
         "the offence names the line it is about":
-            offences(orphan_result)[0].startswith("3:"),
+            _first(offences(orphan_result)).startswith("3:"),
         "a listing is returned, not a count":
             isinstance(offences(orphan_invocation), list),
     }
