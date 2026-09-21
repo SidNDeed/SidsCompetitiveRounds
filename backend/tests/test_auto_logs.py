@@ -1432,16 +1432,39 @@ def test_the_upload_route_sits_in_the_tighter_rate_limit_bucket():
 
 
 def _blobs(logdir):
-    return sorted(p.name for p in logdir.iterdir() if p.is_file())
+    """The BLOBS in the directory, never the markers beside them.
+
+    Every blob is written with an `<id>.orphan-candidate` sidecar in place from
+    before its first byte, so a bare directory listing counts two files per
+    upload. The tests below that ask "did a blob survive" mean the blob; the
+    marker is a separate question and `_markers` asks it.
+    """
+    return sorted(p.name for p in logdir.iterdir()
+                  if p.is_file()
+                  and not p.name.endswith(auto_logs._ORPHAN_MARKER_SUFFIX))
+
+
+def _markers(logdir):
+    return sorted(p.name for p in logdir.iterdir()
+                  if p.name.endswith(auto_logs._ORPHAN_MARKER_SUFFIX))
 
 
 def test_a_failed_blob_write_leaves_no_file_behind(logdir, verified):
-    """open() succeeds, write() fails: the partial file must not survive.
+    """open() succeeds, write() fails: the partial file must not survive, and
+    neither must its marker.
 
-    Nothing can ever find it -- its id is never inserted, and prune_auto_logs
-    unlinks only files named by rows it deletes -- so this is a permanent leak
-    under an id nobody holds, which is precisely the orphan the docstring
-    promises cannot exist.
+    THIS IS THE DETERMINATE ARM, and its whole point is that the collector
+    never has to be involved. `prune_auto_logs` walks ROWS and this id is never
+    inserted, so that sweep cannot see the file; `prune_orphan_blobs` walks
+    MARKERS and would collect it one age gate later, which is a fortnight of a
+    shared volume spent on a failure this arm can resolve in a millisecond.
+    Both halves are asserted: the blob is gone, and the marker that would have
+    named it to the sweep is gone with it.
+
+    (An earlier version of this docstring said nothing could ever find the file
+    and called it a permanent leak. That was true of the tree it was written
+    against and stopped being true when the marker and the sweep landed; the
+    prose is the claim, so it moves with the mechanism.)
     """
     import builtins
     real_open = builtins.open
@@ -1472,6 +1495,10 @@ def test_a_failed_blob_write_leaves_no_file_behind(logdir, verified):
     assert ei.value.status_code == 503, "a storage failure is retryable, not a 500"
     assert _blobs(logdir) == [], (
         "a partial blob survived a failed write: %s" % _blobs(logdir))
+    assert _markers(logdir) == [], (
+        "the blob went and its marker stayed: %s. A marker with no blob is "
+        "harmless, but leaving one here means the determinate arm is relying "
+        "on the sweep to finish its cleanup" % _markers(logdir))
 
 
 def test_an_indeterminate_commit_keeps_the_blob(logdir, verified, capsys):
@@ -1484,6 +1511,15 @@ def test_an_indeterminate_commit_keeps_the_blob(logdir, verified, capsys):
 
     This is the exact inverse of the two tests above, and it is why the cleanup
     cannot simply be hoisted into one `finally`.
+
+    WHAT COLLECTS IT, because "keeping it costs disk" is only true if something
+    eventually spends that disk back. The marker stamped before the blob's
+    first byte is LEFT IN PLACE on this arm, and `prune_orphan_blobs` -- the
+    orphan sweep the retention loop runs -- resolves it: a row naming the blob
+    means the commit landed, so the marker is cleared and the file kept for
+    ever; no row naming it means the blob and its marker go, one age gate
+    later. So both halves are asserted here: the blob survives, and the marker
+    that hands it to the sweep survives with it.
     """
     db = _ok_db()
     db.fail_commit = True
@@ -1496,10 +1532,18 @@ def test_an_indeterminate_commit_keeps_the_blob(logdir, verified, capsys):
     assert len(kept) == 1, (
         "the blob was discarded on an INDETERMINATE commit -- if the row did "
         "commit, that row now points at a log that no longer exists")
+    assert _markers(logdir) == [kept[0] + auto_logs._ORPHAN_MARKER_SUFFIX], (
+        "the marker was cleared on the arm that keeps its blob. The marker is "
+        "the ONLY thing that offers this file to the sweep, so clearing it "
+        "here is what makes the kept blob permanent: %r" % (_markers(logdir),))
+    assert kept[0] not in auto_logs._MARKERS_IN_FLIGHT, (
+        "the finished request still owns the marker, so the sweep will skip "
+        "it for the life of the process")
     out = capsys.readouterr().out
     assert "INDETERMINATE" in out and kept[0] in out, (
-        "nothing collects this blob, so the id must be printed or it is "
-        "unrecoverable by construction; got: %r" % out)
+        "the id must be printed, because an operator reading this line is the "
+        "fast path to the same file the sweep reaches an age gate later; "
+        "got: %r" % out)
 
 
 
@@ -2017,6 +2061,35 @@ _KIND_UNSCOPED = {
         "UPDATE bug_reports SET updated_at = NOW() WHERE kind = 'report' AND id = :rid",
         "an id-targeted touch reached only through gated callers; scoping it "
         "would stop an automatic row's activity timestamp moving at all"),
+
+    # THE THREE ORM READERS THE MATRIX OMITTED (R2-L1). The sweep above was
+    # derived by grepping for raw `bug_reports` SQL, so three readers that
+    # reach the same table through `select(BugReport...)` were dispositioned in
+    # the notes and held to it by nothing -- a sweep of one SPELLING rather
+    # than of the OPERATION (#432/#330). Each gets its own add-a-kind-predicate
+    # mutation here, on its own statement, for the same reason the raw-SQL ones
+    # do: a later "consistency" pass that scoped them would change what an
+    # automatic row can do in admin triage while every claimed reader control
+    # stayed green.
+    #
+    # `kind` is deliberately UNMAPPED on the ORM model (models.py), so the
+    # scoped spelling a consistency pass would reach for is a `text()`
+    # predicate beside the id.
+    "admin_comment_on_bug_report": (
+        "select(BugReport.id).where(BugReport.id == rid)",
+        "select(BugReport.id).where(text(\"kind = 'report'\"), BugReport.id == rid)",
+        "the existence check an admin's comment goes through; scoping it 404s "
+        "every attempt to comment on an automatic upload in triage"),
+    "admin_change_bug_report_status": (
+        "select(BugReport).where(BugReport.id == rid)",
+        "select(BugReport).where(text(\"kind = 'report'\"), BugReport.id == rid)",
+        "the row an admin's status change loads; scoping it makes an automatic "
+        "upload impossible to triage, resolve or close"),
+    "internal_comment_on_bug_report": (
+        "select(BugReport.id).where(BugReport.id == rid)",
+        "select(BugReport.id).where(text(\"kind = 'report'\"), BugReport.id == rid)",
+        "the existence check behind the internal comment verb; scoping it "
+        "stops the ops `bug-comment:` trail landing on an automatic row"),
 }
 
 
@@ -2789,57 +2862,336 @@ def test_an_indeterminate_commit_names_a_blob_the_sweep_can_collect(logdir, veri
         % (out,))
 
 
-def test_the_orphan_sweep_collects_an_unreferenced_blob_and_only_that(logdir):
-    """Three files, one sweep: the unreferenced one goes, the referenced one
-    stays, the too-young one stays.
+def _mark(logdir, name, age_s=None):
+    """Put an orphan-candidate marker beside `name`, optionally aged.
+
+    The sweep reads the MARKER's mtime, never the blob's, so a test that means
+    "this candidate is old enough" has to age the marker.
+    """
+    marker = logdir / (name + auto_logs._ORPHAN_MARKER_SUFFIX)
+    marker.write_bytes(name.encode("utf-8") + b"\n")
+    if age_s is not None:
+        stamp = time.time() - age_s
+        os.utime(marker, (stamp, stamp))
+    return marker
+
+
+def _marker_names(logdir):
+    return sorted(p.name for p in logdir.iterdir()
+                  if p.name.endswith(auto_logs._ORPHAN_MARKER_SUFFIX))
+
+
+class KindRows:
+    """A `bug_reports` stand-in that EVALUATES the kind predicate instead of
+    answering the same rows whatever the statement says.
+
+    WHY THIS EXISTS. The control that is supposed to hold the sweep's all-kind
+    lookup honest used to assert a SQL SUBSTRING against a fake whose script
+    was keyed on a fragment of the statement. Adding `kind = 'auto'` to the
+    predicate changed the statement and not the answer, so the named mutation
+    left the test green while a real database would have stopped naming every
+    player-filed attachment (#342/#431: a check that cannot fail is worse than
+    no check).
+
+    So this fake holds `(log_filename, kind)` rows and applies whatever
+    predicate the statement actually carries: a `kind` mention filters the
+    rows, and the COUNT arm filters the same way. The mutation the control
+    names is then visible in the ANSWER.
+    """
+
+    def __init__(self, rows):
+        self.rows = list(rows)
+        self.log = []
+        self.rolled_back = 0
+
+    def _scoped(self, sql):
+        flat = " ".join(sql.split())
+        for kind in ("'auto'", '"auto"'):
+            if "kind" in flat and kind in flat:
+                return [r for r in self.rows if r[1] == "auto"]
+        return list(self.rows)
+
+    async def execute(self, statement, params=None):
+        sql = " ".join(str(statement).split())
+        self.log.append((sql, params))
+        rows = self._scoped(sql)
+        if "COUNT(*) AS n FROM bug_reports" in sql:
+            return _Res([{"n": len([r for r in rows if r[0]])}])
+        if "SELECT log_filename FROM bug_reports" in sql:
+            wanted = set((params or {}).get("names") or [])
+            return _Res([{"log_filename": r[0]} for r in rows if r[0] in wanted])
+        return _Res([])
+
+    async def rollback(self):
+        self.rolled_back += 1
+
+    def sql_for(self, key):
+        return [sql for sql, _ in self.log if key in sql]
+
+
+def _exec_mutant_pairs(fn, pairs):
+    """`fn`'s source with every (anchor, replacement) applied, compiled against
+    a COPY of the module's globals so the module itself is untouched.
+
+    Each anchor is asserted to occur exactly once inside the function's own
+    span before anything is concluded from the result (#432/#279): a mutation
+    that silently matched two sites, or none, would make the red below mean
+    something other than what the test says it means.
+    """
+    src = textwrap.dedent(inspect.getsource(fn))
+    for anchor, replacement in pairs:
+        assert src.count(anchor) == 1, (
+            "the mutation anchor occurs %d time(s) in %s, not once -- re-derive "
+            "it before reading anything into the result (%r)"
+            % (src.count(anchor), fn.__name__, anchor))
+        mutant_src = src.replace(anchor, replacement)
+        assert mutant_src != src, "the mutation changed nothing"
+        src = mutant_src
+    namespace = dict(vars(auto_logs))
+    exec(compile(src, "<mutant:%s>" % fn.__name__, "exec"), namespace)
+    return namespace[fn.__name__]
+
+
+def _exec_mutant(fn, anchor, replacement):
+    return _exec_mutant_pairs(fn, [(anchor, replacement)])
+
+
+# THE DELETED MECHANISM, as a mutation. Round 2's sweep took the attachment
+# HEAP as its population: every file under the directory was a candidate and
+# the pass was bounded at 10,000 examinations. These two edits put that
+# population back -- the marker filter stops excluding anything and the name
+# stops being derived from the marker's -- and every control below that claims
+# the population is the marker set has to RED under them.
+_HEAP_POPULATION = [
+    ("            if not e.name.endswith(_ORPHAN_MARKER_SUFFIX):\n"
+     "                continue\n",
+     "            if False:\n"
+     "                continue\n"),
+    ("            blob = e.name[:-len(_ORPHAN_MARKER_SUFFIX)]\n",
+     "            blob = e.name\n"),
+]
+
+# THE INERT TWIN: the same two sites, edited in the same shape, meaning the
+# same thing. A control that reds under this is reacting to the site being
+# touched rather than to the population changing (#342/#431).
+_INERT_TWIN = [
+    ("            if not e.name.endswith(_ORPHAN_MARKER_SUFFIX):\n"
+     "                continue\n",
+     "            if not str(e.name).endswith(_ORPHAN_MARKER_SUFFIX):\n"
+     "                continue\n"),
+    ("            blob = e.name[:-len(_ORPHAN_MARKER_SUFFIX)]\n",
+     "            blob = e.name[:len(e.name) - len(_ORPHAN_MARKER_SUFFIX)]\n"),
+]
+
+
+def test_the_orphan_sweep_collects_a_marked_unreferenced_blob_and_only_that(logdir):
+    """Four files, one sweep, four dispositions.
 
     The referenced control is a PLAYER-FILED row, not an automatic one. This
-    sweep walks FILES on a shared volume, so what protects a file is a row of
-    ANY kind naming it -- a `kind = 'auto'` predicate here would make every
-    bug-report attachment look unreferenced.
+    sweep decides the fate of FILES on a shared volume, so what protects a file
+    is a row of ANY kind naming it -- a `kind = 'auto'` predicate here would
+    read a player-filed attachment as unreferenced.
     """
-    orphan = logdir / "aaaaaaaa-0000-4000-8000-000000000001.log.gz"
-    owned = logdir / "bbbbbbbb-0000-4000-8000-000000000002.log.gz"
-    fresh = logdir / "cccccccc-0000-4000-8000-000000000003.log.gz"
-    for p in (orphan, owned, fresh):
-        p.write_bytes(b"x")
+    orphan = "aaaaaaaa-0000-4000-8000-000000000001.log.gz"
+    owned = "bbbbbbbb-0000-4000-8000-000000000002.log.gz"
+    fresh = "cccccccc-0000-4000-8000-000000000003.log.gz"
+    plain = "dddddddd-0000-4000-8000-000000000004.log.gz"
+    for n in (orphan, owned, fresh, plain):
+        (logdir / n).write_bytes(b"x")
     old = time.time() - 10_000
-    os.utime(orphan, (old, old))
-    os.utime(owned, (old, old))
+    for n in (orphan, owned, fresh, plain):
+        os.utime(logdir / n, (old, old))
+    _mark(logdir, orphan, age_s=10_000)
+    _mark(logdir, owned, age_s=10_000)
+    _mark(logdir, fresh)                       # marked, but young
 
     db = Scripted({
         "COUNT(*) AS n FROM bug_reports": [[{"n": 7}]],
-        "SELECT log_filename FROM bug_reports": [[{"log_filename": owned.name}]],
+        "SELECT log_filename FROM bug_reports": [[{"log_filename": owned}]],
     })
     out = _run(auto_logs.prune_orphan_blobs(db, min_age_s=3600))
 
     assert out["refused"] is False
     assert out["unlinked"] == 1, out
-    assert not orphan.exists(), "the unreferenced blob was not collected"
-    assert owned.exists(), (
+    assert out["cleared"] == 1, out
+    assert not (logdir / orphan).exists(), "the marked unreferenced blob was not collected"
+    assert not (logdir / (orphan + auto_logs._ORPHAN_MARKER_SUFFIX)).exists(), (
+        "the blob went and its marker stayed; the next pass would keep asking "
+        "about a file that no longer exists")
+    assert (logdir / owned).exists(), (
         "a blob a bug_reports row names was deleted -- on a volume shared with "
         "player-filed attachments that is the report's only copy")
-    assert fresh.exists(), (
-        "a blob younger than one retention tick was collected; the row for it "
-        "may still be in flight")
+    assert not (logdir / (owned + auto_logs._ORPHAN_MARKER_SUFFIX)).exists(), (
+        "the marker over a committed row was not cleared, so the sweep will "
+        "re-ask the database about it for ever")
+    assert (logdir / fresh).exists(), (
+        "a blob whose marker is younger than the gate was collected; the row "
+        "for it may still be in flight")
+    assert (logdir / plain).exists() and out["candidates"] == 2, (
+        "an UNMARKED file was examined. Nothing offers a referenced "
+        "attachment to this sweep: %r" % (out,))
 
     names = db.params_for("SELECT log_filename FROM bug_reports")[0]["names"]
-    assert fresh.name not in names, (
-        "a file too young to be a candidate was still offered to the database")
+    assert plain not in names and fresh not in names, (
+        "a file that is not a candidate was still offered to the database: %r"
+        % (names,))
 
-    # CONTROL: the same sweep with the file referenced removes nothing, so the
-    # deletion above is about the reference and not about the sweep deleting
-    # whatever it finds.
-    orphan.write_bytes(b"x")
-    os.utime(orphan, (old, old))
-    db2 = Scripted({
+
+def test_the_sweep_population_is_the_marker_set_and_not_the_attachment_heap(logdir):
+    """R2-H1, AND IT IS A METHOD CHANGE RATHER THAN A BIGGER NUMBER.
+
+    The old pass enumerated the directory and bounded what it examined. That
+    directory holds every player-filed attachment permanently and nothing in
+    this tree deletes a referenced one, so the budget was spent on files the
+    pass is REQUIRED to keep: past enough older referenced attachments, a newer
+    orphan was never offered to the database at all.
+
+    Here the heap is an order of magnitude larger than the old removal batch
+    and the orphan is the NEWEST file in the directory -- the position the old
+    ceiling excluded first. The live sweep offers exactly one name, because
+    exactly one file carries a marker.
+    """
+    heap = []
+    base = time.time() - 500_000
+    for i in range(auto_logs._ORPHAN_BATCH * 3):
+        name = "%08x-0000-4000-8000-000000000000.log.gz" % i
+        (logdir / name).write_bytes(b"x")
+        os.utime(logdir / name, (base + i, base + i))
+        heap.append(name)
+    orphan = "ffffffff-0000-4000-8000-00000000ffff.log.gz"
+    (logdir / orphan).write_bytes(b"x")
+    newest = time.time() - 10_000
+    os.utime(logdir / orphan, (newest, newest))
+    _mark(logdir, orphan, age_s=10_000)
+
+    def _db():
+        # The table names a blob, so the "this database does not own the
+        # directory" refusal does not fire, and it names none of the heap --
+        # which is the point: the heap must not be ASKED about at all.
+        return Scripted({
+            "COUNT(*) AS n FROM bug_reports": [[{"n": 7}]],
+            "SELECT log_filename FROM bug_reports": [
+                [{"log_filename": "a-blob-that-is-not-in-this-directory.log.gz"}]],
+        })
+
+    # MUTATION FIRST, so the control runs on a directory the mutant has
+    # demonstrably not touched: the population becomes the heap again.
+    mutant = _exec_mutant_pairs(auto_logs._marker_candidates, _HEAP_POPULATION)
+    names, markers_total, owned, young = mutant(
+        logdir, time.time() - 3600, set())
+    assert len(names) > auto_logs._ORPHAN_BATCH, (
+        "the heap-population mutant examined %d name(s); it is supposed to "
+        "take the whole directory, so this control proves nothing" % len(names))
+
+    # INERT TWIN at the same two sites: same shape, same meaning. The control
+    # below must stay GREEN under it, or it is reacting to the site being
+    # edited rather than to the population changing (#342/#431).
+    twin = _exec_mutant_pairs(auto_logs._marker_candidates, _INERT_TWIN)
+    t_names, t_total, t_owned, t_young = twin(logdir, time.time() - 3600, set())
+    assert t_names == [orphan] and t_total == 1, (
+        "the inert twin changed the population (%r); it is supposed to be the "
+        "same filter spelled differently" % (t_names,))
+
+    # CONTROL: the live sweep. One marker, one candidate, one removal, and the
+    # heap is neither examined nor offered to the database.
+    out = _run(auto_logs.prune_orphan_blobs(_db(), min_age_s=3600))
+    assert out["candidates"] == 1 and out["markers"] == 1, out
+    assert out["unlinked"] == 1 and not (logdir / orphan).exists(), (
+        "the newest file in the directory was the orphan and it survived a "
+        "pass with no examination ceiling: %r" % (out,))
+    assert all((logdir / n).exists() for n in heap), (
+        "an unmarked attachment was removed")
+    assert not hasattr(auto_logs, "_ORPHAN_SCAN_MAX"), (
+        "the examination ceiling is back. A cap over the attachment heap is a "
+        "starvation class, which is why it was deleted rather than raised")
+
+
+def test_a_marker_a_live_upload_owns_is_never_swept(logdir):
+    """R2-M2, closed BY CONSTRUCTION rather than by an age.
+
+    A final-path write that stalls for a whole tick used to be unlinkable
+    before its INSERT, because a blob became a candidate the moment its bytes
+    existed. The retention loop runs in the SAME process as the handler, so
+    "is a request still working on this blob" is a question this process
+    answers exactly: a name in `_MARKERS_IN_FLIGHT` is skipped whatever its
+    age. The age gate below is the second line, for a marker left by a process
+    life that has ended.
+    """
+    live = "aaaaaaaa-0000-4000-8000-00000000beef.log.gz"
+    (logdir / live).write_bytes(b"x")
+    _mark(logdir, live, age_s=10 ** 6)          # far past any gate
+
+    db = Scripted({
         "COUNT(*) AS n FROM bug_reports": [[{"n": 7}]],
-        "SELECT log_filename FROM bug_reports": [
-            [{"log_filename": orphan.name}, {"log_filename": owned.name}]],
+        "SELECT log_filename FROM bug_reports": [[]],
     })
-    out2 = _run(auto_logs.prune_orphan_blobs(db2, min_age_s=3600))
-    assert out2["unlinked"] == 0 and orphan.exists(), (
-        "the sweep removed a file the table names")
+    auto_logs._MARKERS_IN_FLIGHT.add(live)
+    try:
+        out = _run(auto_logs.prune_orphan_blobs(db, min_age_s=1))
+    finally:
+        auto_logs._MARKERS_IN_FLIGHT.discard(live)
+    assert out["in_flight"] == 1 and out["candidates"] == 0, out
+    assert (logdir / live).exists(), (
+        "a blob a live upload was still writing was taken from under it")
+    assert db.sql_for("SELECT log_filename FROM bug_reports") == [], (
+        "the sweep asked the database about a blob it already knew was owned")
+
+    # CONTROL: the same marker, same age, with nothing owning it -- collected.
+    # So the survival above is about the registry and not about the file.
+    out = _run(auto_logs.prune_orphan_blobs(
+        Scripted({"COUNT(*) AS n FROM bug_reports": [[{"n": 7}]],
+                  "SELECT log_filename FROM bug_reports": [[]]}), min_age_s=1))
+    assert out["unlinked"] == 1 and not (logdir / live).exists(), out
+
+
+def test_the_marker_age_gate_is_bounded_by_the_handlers_own_deadline(logdir):
+    """THE BOUND, STATED SO IT CAN BE FALSIFIED.
+
+    Every instant in which a marker exists and its row does not lies inside the
+    marked span, and that span is bounded by T --
+    `AUTO_LOG_MARKED_SPAN_DEADLINE_S` -- enforced by the `asyncio.wait_for`
+    around the shielded reserve section in `upload_auto_log`. The gate is
+    derived from T and from the tick, so a write stalled for the whole of T
+    cannot reach it.
+    """
+    T = auto_logs.AUTO_LOG_MARKED_SPAN_DEADLINE_S
+    assert auto_logs._ORPHAN_MIN_AGE_S > T + auto_logs.AUTO_LOG_SWEEP_EVERY_S, (
+        "the gate (%s s) is not strictly greater than T (%s s) plus one "
+        "retention tick (%s s), so a write inside its own deadline can be "
+        "swept" % (auto_logs._ORPHAN_MIN_AGE_S, T, auto_logs.AUTO_LOG_SWEEP_EVERY_S))
+
+    handler = _normalise(inspect.getsource(auto_logs.upload_auto_log))
+    assert handler.count("AUTO_LOG_MARKED_SPAN_DEADLINE_S)") == 1, (
+        "the deadline is enforced at %d site(s) in the handler, not one"
+        % handler.count("AUTO_LOG_MARKED_SPAN_DEADLINE_S)"))
+    assert "asyncio.wait_for(asyncio.shield(section)" in handler, (
+        "the deadline is no longer the wait_for around the SHIELDED section. "
+        "Anchored on the prefix rather than the whole call, so a respelling of "
+        "the timeout argument is not read as the shield going away")
+
+    # MUTATION: the gate lowered below T. A blob whose marker is younger than
+    # the deadline the handler is still inside becomes collectable, which is
+    # the state the derivation exists to make unreachable.
+    name = "aaaaaaaa-0000-4000-8000-0000000000aa.log.gz"
+    (logdir / name).write_bytes(b"x")
+    _mark(logdir, name, age_s=T / 2.0)
+
+    def _db():
+        return Scripted({"COUNT(*) AS n FROM bug_reports": [[{"n": 7}]],
+                         "SELECT log_filename FROM bug_reports": [[]]})
+
+    lowered = _run(auto_logs.prune_orphan_blobs(_db(), min_age_s=T / 4.0))
+    assert lowered["unlinked"] == 1 and not (logdir / name).exists(), (
+        "with the gate below T the mid-deadline blob was NOT collected, so "
+        "this control says nothing about the gate: %r" % (lowered,))
+
+    # CONTROL: the live gate leaves the same blob alone.
+    (logdir / name).write_bytes(b"x")
+    _mark(logdir, name, age_s=T / 2.0)
+    kept = _run(auto_logs.prune_orphan_blobs(_db()))
+    assert kept["candidates"] == 0 and (logdir / name).exists(), (
+        "the shipped gate collected a blob younger than the handler's own "
+        "deadline: %r" % (kept,))
 
 
 def test_the_orphan_sweep_refuses_a_database_that_knows_no_blobs(logdir, capsys):
@@ -2849,113 +3201,113 @@ def test_the_orphan_sweep_refuses_a_database_that_knows_no_blobs(logdir, capsys)
     scratch database -- and the honest answer to that is to delete nothing
     (#276).
     """
-    stale = logdir / "dddddddd-0000-4000-8000-000000000004.log.gz"
-    stale.write_bytes(b"x")
-    old = time.time() - 10_000
-    os.utime(stale, (old, old))
+    stale = "dddddddd-0000-4000-8000-000000000004.log.gz"
+    (logdir / stale).write_bytes(b"x")
+    _mark(logdir, stale, age_s=10_000)
 
     db = Scripted({"COUNT(*) AS n FROM bug_reports": [[{"n": 0}]]})
     out = _run(auto_logs.prune_orphan_blobs(db, min_age_s=3600))
     assert out["refused"] is True
-    assert stale.exists(), "the sweep deleted a file on a database that names none"
+    assert (logdir / stale).exists(), "the sweep deleted a file on a database that names none"
+    assert _marker_names(logdir), "the sweep cleared a marker it refused to act on"
     assert "orphan sweep REFUSED" in capsys.readouterr().out
     assert db.sql_for("SELECT log_filename FROM bug_reports") == [], (
         "the sweep went on to ask which files are known after deciding the "
         "database does not own this directory")
 
 
+def test_the_sweeps_lookup_is_executed_against_rows_of_every_kind(logdir, capsys):
+    """R2-M4: THE ALL-KIND LOOKUP, EXECUTED, NOT ASSERTED AS A SUBSTRING.
+
+    The previous control scripted a fake on a fragment of the statement, so
+    adding `kind = 'auto'` to the predicate changed the statement and not the
+    answer and the named mutation stayed green. `KindRows` applies the
+    predicate the statement actually carries, so the mutation is visible in
+    what comes back.
+
+    Both halves of the all-kind property are exercised here: the REFUSAL arm,
+    whose count must see rows of every kind, and the naming arm, where a marked
+    blob a PLAYER-FILED row names must be cleared rather than removed.
+    """
+    player = "aaaaaaaa-0000-4000-8000-0000000000a1.log.gz"
+    auto = "bbbbbbbb-0000-4000-8000-0000000000b1.log.gz"
+    gone = "cccccccc-0000-4000-8000-0000000000c1.log.gz"
+    plain = "dddddddd-0000-4000-8000-0000000000d1.log.gz"
+
+    def _plant():
+        for n in (player, auto, gone, plain):
+            (logdir / n).write_bytes(b"x")
+            old = time.time() - 10_000
+            os.utime(logdir / n, (old, old))
+        for n in (player, auto, gone):
+            _mark(logdir, n, age_s=10_000)
+
+    def _rows():
+        return KindRows([(player, "report"), (auto, "auto")])
+
+    # REFUSAL ARM, all-kind: a database whose ONLY rows naming a blob are
+    # player-filed still owns this directory, so the pass proceeds.
+    _plant()
+    db = KindRows([(player, "report")])
+    out = _run(auto_logs.prune_orphan_blobs(db, min_age_s=3600))
+    assert out["refused"] is False, (
+        "a database naming only player-filed attachments was read as one that "
+        "does not own this directory: %r" % (out,))
+    assert (logdir / player).exists(), "a player-filed attachment was removed"
+    assert (logdir / plain).exists(), "an unmarked file was removed"
+
+    # MUTATION: the lookup scoped to kind='auto'. The player-filed row stops
+    # naming its attachment, so a marked player attachment is read as
+    # unreferenced and taken.
+    _plant()
+    mutant = _exec_mutant(
+        auto_logs.prune_orphan_blobs,
+        "WHERE log_filename = ANY(CAST(:names AS text[]))",
+        "WHERE kind = 'auto' AND log_filename = ANY(CAST(:names AS text[]))")
+    out = _run(mutant(_rows(), min_age_s=3600))
+    assert not (logdir / player).exists(), (
+        "the kind='auto' mutation left the player-filed attachment in place, "
+        "so this control cannot see the defect it is named for: %r" % (out,))
+
+    # INERT TWIN at the same site: the same predicate, spelled with the cast
+    # written out. The control below must stay GREEN under it.
+    _plant()
+    twin = _exec_mutant(
+        auto_logs.prune_orphan_blobs,
+        "WHERE log_filename = ANY(CAST(:names AS text[]))",
+        "WHERE log_filename = ANY(CAST(:names AS text [ ]))")
+    out = _run(twin(_rows(), min_age_s=3600))
+    assert (logdir / player).exists() and (logdir / auto).exists(), (
+        "the inert twin changed behaviour; it is the same predicate respelled")
+    assert not (logdir / gone).exists(), out
+
+    # CONTROL: the live sweep. Both referenced blobs keep their bytes and lose
+    # their markers; only the blob no row of any kind names is removed.
+    _plant()
+    out = _run(auto_logs.prune_orphan_blobs(_rows(), min_age_s=3600))
+    assert (logdir / player).exists() and (logdir / auto).exists(), (
+        "a referenced blob was removed: %r" % (out,))
+    assert out["cleared"] == 2, out
+    assert not (logdir / gone).exists() and out["unlinked"] == 1, out
+    assert (logdir / plain).exists(), "an unmarked file was removed"
+
+
 def _aged_corpus(logdir, count, first_mtime):
-    """`count` aged blobs, one second apart, OLDEST first. Returns the names
-    in age order, so a test can say "the newest of them" and mean it whatever
-    order the filesystem lists the directory in."""
+    """`count` aged, MARKED blobs, one second apart, OLDEST first.
+
+    Returns the names in age order, so a test can say "the newest of them" and
+    mean it whatever order the filesystem lists the directory in.
+    """
     names = []
     for i in range(count):
         p = logdir / ("%08x-0000-4000-8000-00000000000%1d.log.gz" % (i, i % 10))
         p.write_bytes(b"x")
         stamp = first_mtime + i
         os.utime(p, (stamp, stamp))
+        marker = _mark(logdir, p.name)
+        os.utime(marker, (stamp, stamp))
         names.append(p.name)
     return names
-
-
-def _exec_mutant(fn, anchor, replacement):
-    """`fn`'s source with `anchor` replaced, compiled against a COPY of the
-    module's globals so the module itself is untouched.
-
-    The anchor is asserted to occur exactly once inside the function's own
-    span before anything is concluded from the result (#432/#279): a mutation
-    that silently matched two sites, or none, would make the red below mean
-    something other than what the test says it means.
-    """
-    src = textwrap.dedent(inspect.getsource(fn))
-    assert src.count(anchor) == 1, (
-        "the mutation anchor occurs %d time(s) in %s, not once -- re-derive it "
-        "before reading anything into the result (%r)"
-        % (src.count(anchor), fn.__name__, anchor))
-    mutant_src = src.replace(anchor, replacement)
-    assert mutant_src != src, "the mutation changed nothing"
-    namespace = dict(vars(auto_logs))
-    exec(compile(mutant_src, "<mutant:%s>" % fn.__name__, "exec"), namespace)
-    return namespace[fn.__name__]
-
-
-def test_the_orphan_sweep_examines_every_aged_file_not_a_directory_prefix(logdir):
-    """THE PASS HAS TO BE ABLE TO DRAIN, and a budget spent on EXAMINING
-    cannot.
-
-    `prune_auto_logs` drains because it DELETES the rows it handled, so the
-    next selection sees the next cohort. This pass keeps every file it finds
-    referenced -- that is its whole job -- so a budget spent on examination is
-    spent on the same referenced files at every tick, for ever, and a file
-    beyond it is never offered to the database at all. BUG_REPORT_LOG_DIR
-    holds player-filed attachments permanently as well as fourteen days of
-    automatic blobs, so that budget is exhausted by design rather than in a
-    corner case, and the kept blob the indeterminate-commit arm leaves behind
-    would stay on the volume for ever while the sweep reported `0
-    unreferenced` every hour.
-
-    Driven without any dependence on the order the filesystem lists names in:
-    the corpus is aged one second apart and the orphan is the NEWEST of it, so
-    the mutation below -- examining only `limit` files -- excludes it by the
-    file's own mtime.
-    """
-    size = auto_logs._ORPHAN_BATCH + 5
-    names = _aged_corpus(logdir, size, time.time() - 100_000)
-    orphan = names[-1]                      # the newest aged file
-    referenced = names[:-1]
-
-    def _db():
-        return Scripted({
-            "COUNT(*) AS n FROM bug_reports": [[{"n": 7}]],
-            "SELECT log_filename FROM bug_reports": [
-                [{"log_filename": n} for n in referenced]],
-        })
-
-    # MUTATION FIRST, so the control below runs on a directory the mutant has
-    # demonstrably not touched. `_ORPHAN_SCAN_MAX` -> `int(limit)` is exactly
-    # the pre-fix call: examination bounded by the unlink budget.
-    mutant = _exec_mutant(auto_logs.prune_orphan_blobs,
-                          "_stale_blob_names, base, cutoff, _ORPHAN_SCAN_MAX)",
-                          "_stale_blob_names, base, cutoff, int(limit))")
-    out = _run(mutant(_db(), min_age_s=3600))
-    assert out["unlinked"] == 0 and (logdir / orphan).exists(), (
-        "the mutation removed the orphan anyway, so this test proves nothing "
-        "about the examination budget: %r" % (out,))
-    assert out["candidates"] == auto_logs._ORPHAN_BATCH, (
-        "the mutant examined %d file(s), not the %d its budget allows -- the "
-        "anchor no longer bounds what it says it bounds"
-        % (out["candidates"], auto_logs._ORPHAN_BATCH))
-
-    # CONTROL: the live sweep, same directory, same database.
-    out = _run(auto_logs.prune_orphan_blobs(_db(), min_age_s=3600))
-    assert out["candidates"] == size, (
-        "the sweep examined %d of %d aged files" % (out["candidates"], size))
-    assert out["aged"] == size and out["truncated"] is False, out
-    assert out["unlinked"] == 1 and not (logdir / orphan).exists(), (
-        "the unreferenced blob survived a pass that examined the whole "
-        "corpus: %r" % (out,))
-    assert all((logdir / n).exists() for n in referenced), (
-        "a file a bug_reports row names was removed")
 
 
 def test_an_orphan_backlog_larger_than_one_batch_drains_over_ticks(logdir):
@@ -2986,27 +3338,28 @@ def test_an_orphan_backlog_larger_than_one_batch_drains_over_ticks(logdir):
     assert second["unlinked"] == 3 and second["deferred"] == 0, second
     assert not any((logdir / n).exists() for n in names), (
         "the backlog did not drain on the following tick")
+    assert _marker_names(logdir) == [], (
+        "every blob was collected and markers were left behind; the next pass "
+        "would ask the database about files that no longer exist")
 
 
-def test_a_truncated_orphan_listing_says_so(logdir):
-    """A count is evidence only if the listing behind it is complete (#304).
-    The scan ceiling exists, so the pass that hits it has to report a
-    truncated reading rather than a clean directory."""
-    names = _aged_corpus(logdir, 6, time.time() - 100_000)
-    taken, aged_total, truncated = auto_logs._stale_blob_names(
-        logdir, time.time() - 3600, 4)
-    assert aged_total == 6 and len(taken) == 4 and truncated is True, (
-        taken, aged_total, truncated)
-    assert taken == names[:4], (
-        "the ceiling cost the OLDEST candidates instead of the newest, which "
-        "is the half a collector needs: %r" % (taken,))
+def test_a_marker_whose_blob_is_already_gone_is_cleared(logdir):
+    """The state a crash between the two unlinks leaves, and it costs nothing.
 
-    # CONTROL: a ceiling above the corpus reports a complete listing, so the
-    # flag above is about the ceiling and not about the function always
-    # claiming truncation.
-    taken, aged_total, truncated = auto_logs._stale_blob_names(
-        logdir, time.time() - 3600, 50)
-    assert taken == names and aged_total == 6 and truncated is False
+    The blob goes before its marker, so the only thing an interrupted cleanup
+    can leave is a marker naming a file that is absent. Unlinking an absent
+    file is the outcome this pass wanted, so the marker is cleared and the pass
+    reports the removal rather than retrying it for ever.
+    """
+    name = "aaaaaaaa-0000-4000-8000-0000000000cc.log.gz"
+    _mark(logdir, name, age_s=10_000)          # marker, no blob
+    db = Scripted({"COUNT(*) AS n FROM bug_reports": [[{"n": 7}]],
+                   "SELECT log_filename FROM bug_reports": [[]]})
+    out = _run(auto_logs.prune_orphan_blobs(db, min_age_s=3600))
+    assert out["unlinked"] == 1, out
+    assert _marker_names(logdir) == [], (
+        "the marker for an absent blob survived, so this pass would re-ask the "
+        "database about it on every tick for ever")
 
 
 def test_the_retention_loop_runs_the_orphan_sweep():
@@ -3039,6 +3392,14 @@ def test_two_concurrent_uploads_cannot_both_spend_the_same_reserve(logdir, verif
     to reach its own measurement. With the lock, the second cannot measure
     until the first has finished writing; without it, both read the same
     number and both land.
+
+    TWO DIFFERENT ACCOUNTS, and that is the whole case. This control used to
+    send the SAME steam id twice, which is a case the per-account advisory lock
+    already excludes on a real database -- so removing the process-wide lock
+    reddened it only because the scripted session here does not implement that
+    advisory lock. The regression it claims to hold is the CROSS-ACCOUNT one:
+    two seats are two advisory-lock keys and one volume, which is precisely the
+    gap `_BLOB_RESERVE_LOCK` exists to close.
     """
     import threading
 
@@ -3063,14 +3424,20 @@ def test_two_concurrent_uploads_cannot_both_spend_the_same_reserve(logdir, verif
         return (auto_logs.AUTO_LOG_FREE_SPACE_RESERVE_BYTES
                 + room["n"] - writes_done["n"] * blob_size["n"])
 
+    def _seat(steam_id):
+        """One upload from a named account, with the id in the BODY -- which is
+        what the per-account advisory lock is keyed on."""
+        return auto_logs.upload_auto_log(
+            _request(_body(steam_id=steam_id)), _ok_db())
+
     async def drive():
-        first = asyncio.create_task(auto_logs.upload_auto_log(_request(), _ok_db()))
+        first = asyncio.create_task(_seat(STEAM))
         for _ in range(1000):
             if started.is_set():
                 break
             await asyncio.sleep(0.005)
         assert started.is_set(), "the first upload never reached its write"
-        second = asyncio.create_task(auto_logs.upload_auto_log(_request(), _ok_db()))
+        second = asyncio.create_task(_seat(OTHER))
         # Every chance for the second to reach its own measurement while the
         # first is still inside its write.
         await asyncio.sleep(0.25)
@@ -3083,7 +3450,7 @@ def test_two_concurrent_uploads_cannot_both_spend_the_same_reserve(logdir, verif
     monkeypatch.setattr(auto_logs, "_free_bytes", lambda d: 10 ** 12)
     auto_logs._write_blob = held_write
     try:
-        _run(auto_logs.upload_auto_log(_request(), _ok_db()))
+        _run(_seat(STEAM))
         release.set()
         assert blob_size["n"] > 0
         room["n"] = blob_size["n"] + 16
@@ -3107,6 +3474,9 @@ def test_two_concurrent_uploads_cannot_both_spend_the_same_reserve(logdir, verif
     assert len(_blobs(logdir)) == 1, (
         "%d blob(s) on disk; the volume had room above the reserve for one"
         % len(_blobs(logdir)))
+    assert STEAM != OTHER, (
+        "the two seats have to be two accounts, or the per-account advisory "
+        "lock is what the red below is measuring")
     assert sorted(readings) == [0, 1], (
         "the two measurements saw %r completed writes. They have to see "
         "different numbers, or the second measured a volume the first had not "
@@ -3168,12 +3538,12 @@ def test_a_volume_already_stalled_refuses_now_instead_of_queueing(logdir, verifi
     # THE ANCHORS, asserted before anything is read into the results below:
     # each of the two lines this test's mutations target is ONE site inside
     # this handler's span (#432/#279).
-    handler = _normalise(inspect.getsource(auto_logs.upload_auto_log))
-    assert handler.count("if stalled_for >= _BLOB_WRITE_STALL_S:") == 1, (
-        "the pre-check this test mutates is not a single site in the handler")
-    assert handler.count("_BLOB_WRITE_STARTED[0] = time.monotonic()") == 1, (
+    section = _normalise(inspect.getsource(auto_logs._reserve_stamp_and_write))
+    assert section.count("if stalled_for >= _BLOB_WRITE_STALL_S:") == 1, (
+        "the pre-check this test mutates is not a single site in the section")
+    assert section.count("_BLOB_WRITE_STARTED[0] = time.monotonic()") == 1, (
         "the in-flight stamp is set at %d site(s), not one"
-        % handler.count("_BLOB_WRITE_STARTED[0] = time.monotonic()"))
+        % section.count("_BLOB_WRITE_STARTED[0] = time.monotonic()"))
 
     import threading
 
@@ -3259,12 +3629,12 @@ def test_the_hold_on_the_open_transaction_is_measured_and_reported(logdir, verif
     reported past a ceiling. Without the line, "the volume was slow" and "the
     route was slow" are the same log (#438/#443).
     """
-    handler = _normalise(inspect.getsource(auto_logs.upload_auto_log))
-    assert handler.count("if held >= _BLOB_HOLD_REPORT_S:") == 1, (
-        "the report this test mutates is not a single site in the handler")
-    assert handler.count("hold_started = time.monotonic()") == 1, (
+    section = _normalise(inspect.getsource(auto_logs._reserve_stamp_and_write))
+    assert section.count("if held >= _BLOB_HOLD_REPORT_S:") == 1, (
+        "the report this test mutates is not a single site in the section")
+    assert section.count("hold_started = time.monotonic()") == 1, (
         "the span's start is stamped %d time(s); the measurement below is "
-        "anchored on one" % handler.count("hold_started = time.monotonic()"))
+        "anchored on one" % section.count("hold_started = time.monotonic()"))
 
     real_write = auto_logs._write_blob
 
@@ -3310,22 +3680,86 @@ _BRANCH_FILES = (
 )
 
 
+# EVERY 17-DIGIT STEAM IDENTIFIER, not one prefix of them (R2-L4).
+#
+# The pattern used to be `7656119\d{10}`, which covers the individual-account
+# range this project's own accounts sit in and nothing else. The claim above
+# the check was "every 17-digit Steam64 literal", and the gap between the two
+# is a check that cannot fail for whole shapes of real identifier (#342/#431):
+# a SteamID64 is a 64-bit value whose universe/type/instance bits decide its
+# leading digits, so an individual account minted outside that block, a clan or
+# group id (`7656119...` is individual; group ids begin `10358279...`), or a
+# game-server id all read as ordinary numbers to the old pattern.
+#
+# So the shape is now "any 17-digit run that is not part of a longer number",
+# which is the shape of every SteamID64 there is. The boundaries matter: an
+# 18-digit Discord snowflake, or 17 digits inside a longer literal, must not be
+# read as a Steam id and turned into a finding nobody can act on.
+_STEAM64_SHAPE = re.compile(r"(?<!\d)\d{17}(?!\d)")
+
+# The shapes the pattern is REQUIRED to catch, one case per shape, with the
+# leading block that produces each. None of these is a real account: every one
+# is a synthetic value built to exercise the pattern.
+_STEAM64_SHAPE_CASES = {
+    "individual, this project's block": "76561198000000001",
+    "individual, a different instance": "76561202000000001",
+    "clan/group": "10358279000000001",
+    "game server": "90071992500000001",
+}
+_NOT_STEAM64_CASES = {
+    "an 18-digit Discord snowflake": "123456789012345678",
+    "16 digits": "1234567890123456",
+    "17 digits inside a longer number": "x123456789012345678901",
+}
+
+
+def test_the_steam_identifier_pattern_catches_every_shape_it_claims():
+    """The allow-list below is only as wide as the pattern that feeds it.
+
+    One case per shape, plus the negative cases, because a pattern that matches
+    one prefix while the prose says "every 17-digit Steam identifier" passes
+    every test that exists at the time and stops meaning what its name says.
+    """
+    for why, value in _STEAM64_SHAPE_CASES.items():
+        assert _STEAM64_SHAPE.findall(value) == [value], (
+            "the pattern does not catch a %s identifier (%s), so an id of that "
+            "shape pasted into a fixture would not redden the check below"
+            % (why, value))
+    for why, value in _NOT_STEAM64_CASES.items():
+        assert _STEAM64_SHAPE.findall(value) == [], (
+            "the pattern reads %s (%s) as a Steam identifier, which turns the "
+            "check below into a finding nobody can act on" % (why, value))
+
+    # CONTROL, in the direction that matters: the OLD prefix-only pattern
+    # misses shapes this one catches, so the widening is a real change and not
+    # a rewritten comment.
+    old = re.compile(r"7656119\d{10}")
+    missed = [v for v in _STEAM64_SHAPE_CASES.values() if not old.findall(v)]
+    assert missed, (
+        "the old prefix pattern caught every shape listed here, so this file "
+        "is not testing the widening it claims")
+
+
 def test_this_branchs_files_name_no_real_account():
     """Every Steam-shaped literal in the files this branch adds is synthetic.
 
     STATED AS AN ALLOW-LIST, NOT A DENY-LIST, and that is the point: a test
     asserting "the maintainer's id is absent" would have to write that id down,
     in a public tree, for ever. This names only the synthetic values and
-    requires every 17-digit Steam64 literal in these files to be one of them --
-    so a real id pasted into a fixture reddens without a real id ever appearing
-    here.
+    requires every 17-digit Steam identifier literal in these files -- of ANY
+    shape, see `_STEAM64_SHAPE` -- to be one of them, so a real id pasted into
+    a fixture reddens without a real id ever appearing here.
     """
     backend = pathlib.Path(HERE).parent
     found = {}
     for rel in _BRANCH_FILES:
         path = backend / rel
         assert path.exists(), "%s is missing; this check pins a file that moved" % rel
-        for hit in re.findall(r"7656119\d{10}", path.read_text(encoding="utf-8")):
+        text_of = path.read_text(encoding="utf-8")
+        for hit in _STEAM64_SHAPE.findall(text_of):
+            if hit in _STEAM64_SHAPE_CASES.values() and rel.endswith("test_auto_logs.py"):
+                # The pattern's own shape cases live in this file by necessity.
+                continue
             found.setdefault(hit, []).append(rel)
 
     # The control: this check is worthless if the files carry no such literal
@@ -3458,3 +3892,397 @@ def test_350_preconditions_on_the_objects_336_creates_not_on_its_bytes():
         "diverging at line 217 where the post-check was rebuilt -- and a "
         "migration whose header states a guarantee the tree refutes is a "
         "finding (#302/#351)")
+
+
+# ── round 3: the method change, one control per finding ─────────────────────
+
+
+def test_the_reserve_section_is_not_separable_by_cancellation(logdir, verified,
+                                                              monkeypatch, capsys):
+    """R2-M1: MEASURE, STAMP AND WRITE RUN TO COMPLETION OR NOT AT ALL.
+
+    The section used to be an inline block the handler awaited, with the lock
+    released in the handler's own `finally`. Cancelling that await -- a client
+    disconnect, a shutdown, the deadline -- ran the `finally` and released the
+    lock while `asyncio.to_thread` went on writing, because nothing cancels a
+    thread. A second upload could then measure a volume the first had not
+    finished writing to, and the cancelled request could leave bytes behind
+    with nobody left to account for them.
+
+    Three things are asserted about a handler cancelled mid-section, and all
+    three are what the shielded task buys:
+
+    * NO CONCURRENT MEASURE -- the second seat's `_free_bytes` call does not
+      happen until the first section's write has returned;
+    * NO CONCURRENT WRITE -- the second `_write_blob` does not start inside
+      the first;
+    * NO UNMARKED ORPHAN -- at every instant between the first byte and the
+      cleanup there is a marker naming the file, and afterwards neither
+      survives.
+    """
+    import threading
+
+    order = []
+    writing = {"n": 0}
+    started = threading.Event()
+    release = threading.Event()
+    real_write = auto_logs._write_blob
+
+    def held_write(path, data):
+        order.append("write-start")
+        writing["n"] += 1
+        assert writing["n"] == 1, (
+            "two writes were inside the reserve section at once: %r" % (order,))
+        if not started.is_set():
+            started.set()
+            release.wait(10.0)
+        real_write(path, data)
+        writing["n"] -= 1
+        order.append("write-end")
+
+    def watched_free(directory):
+        order.append("measure")
+        assert writing["n"] == 0, (
+            "a second seat measured the volume while a write was still in "
+            "flight inside the section: %r" % (order,))
+        return 10 ** 12
+
+    monkeypatch.setattr(auto_logs, "_write_blob", held_write)
+    monkeypatch.setattr(auto_logs, "_free_bytes", watched_free)
+    monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", asyncio.Lock())
+
+    seen_marked = {"n": 0}
+
+    async def drive():
+        first = asyncio.create_task(auto_logs.upload_auto_log(
+            _request(_body(steam_id=STEAM)), _ok_db()))
+        for _ in range(2000):
+            if started.is_set():
+                break
+            await asyncio.sleep(0.005)
+        assert started.is_set(), "the first upload never reached its write"
+
+        # The blob's bytes are being written RIGHT NOW, and a marker already
+        # names it. That is the invariant the whole design rests on.
+        seen_marked["n"] = len(_markers(logdir))
+
+        # CANCEL IT. The section keeps the lock and its worker thread; the
+        # handler stops waiting.
+        first.cancel()
+        await asyncio.sleep(0.05)
+
+        second = asyncio.create_task(auto_logs.upload_auto_log(
+            _request(_body(steam_id=OTHER)), _ok_db()))
+        await asyncio.sleep(0.05)
+        release.set()
+        return await asyncio.gather(first, second, return_exceptions=True)
+
+    try:
+        results = _run(drive())
+    finally:
+        release.set()
+        auto_logs._write_blob = real_write
+
+    assert seen_marked["n"] == 1, (
+        "the blob was being written with no marker naming it -- an unmarked "
+        "orphan is exactly what a cancellation here used to leave")
+    assert isinstance(results[0], asyncio.CancelledError), results[0]
+    assert not isinstance(results[1], BaseException), (
+        "the second seat did not complete after the cancelled one released "
+        "the volume: %r" % (results[1],))
+
+    # The cancelled upload's own blob and marker are gone, and the second
+    # seat's blob is the only thing left.
+    assert len(_blobs(logdir)) == 1, (
+        "the cancelled upload left its blob behind: %r" % (_blobs(logdir),))
+    assert _markers(logdir) == [], (
+        "a marker survived a completed pair of uploads: %r" % (_markers(logdir),))
+    assert auto_logs._MARKERS_IN_FLIGHT == set(), (
+        "a finished request still owns a marker, so the sweep would skip it "
+        "for the life of the process: %r" % (auto_logs._MARKERS_IN_FLIGHT,))
+
+    # THE ORDERING, stated: the second seat's measure comes after the first
+    # write ended. Without the shield it comes between write-start and
+    # write-end, which is the bound being broken.
+    assert order.index("write-end") < order.index("measure", order.index("write-end")), (
+        "the second seat measured before the cancelled section finished "
+        "writing: %r" % (order,))
+
+    # CONTROL, structural: the lock is released inside the SECTION and not by
+    # the handler. A release in the handler is the mechanism this test deletes.
+    section = _normalise(inspect.getsource(auto_logs._reserve_stamp_and_write))
+    handler = _normalise(inspect.getsource(auto_logs.upload_auto_log))
+    assert section.count("_BLOB_RESERVE_LOCK.release()") == 1, section
+    assert "_BLOB_RESERVE_LOCK.release()" not in handler, (
+        "the handler releases the reserve lock again; a cancelled await would "
+        "hand the volume on while its worker is still writing")
+    assert "asyncio.shield(section)" in handler, (
+        "the handler awaits the section unshielded, so cancelling it cancels "
+        "the section's own cleanup")
+
+
+def test_an_unlink_failure_after_a_failed_insert_is_not_reported_as_discarded(
+        logdir, verified, capsys, monkeypatch):
+    """R2-L3: A CLEANUP RECORD MUST NOT BE ABLE TO BE WRONG ABOUT ITS FILE.
+
+    `_discard_blob` used to swallow an unlink failure and the arm printed
+    "blob discarded" regardless, so an INSERT failure plus an unlink failure
+    left an unreferenced file on the volume and a line saying it had been
+    cleaned up. Nobody goes looking for a file a log says is gone.
+
+    Now the blob's survival is REPORTED, and the marker is kept so the sweep
+    has it: the record names the file rather than claiming it away.
+    """
+    real_unlink = os.unlink
+
+    def refusing_unlink(path, *a, **kw):
+        if str(path).endswith(".log.gz"):
+            raise OSError("device or resource busy")
+        return real_unlink(path, *a, **kw)
+
+    db = _ok_db()
+    db.fail_on = "INSERT INTO bug_reports"
+    # RESTORED BY HAND, never `monkeypatch.undo()`: undo() rolls back every
+    # patch this test's fixtures made, including the `verified` fixture's
+    # session stub, and the control below would then be refused 401 and prove
+    # nothing (#594 -- a restore has to name what it is restoring).
+    os.unlink = refusing_unlink
+    try:
+        with pytest.raises(HTTPException) as ei:
+            _run(auto_logs.upload_auto_log(_request(), db))
+    finally:
+        os.unlink = real_unlink
+
+    assert ei.value.status_code == 503
+    survivors = _blobs(logdir)
+    assert len(survivors) == 1, (
+        "the unlink was refused, so the blob has to still be here for this "
+        "control to say anything: %r" % (survivors,))
+    out = capsys.readouterr().out
+    assert "blob discarded" not in out, (
+        "the arm reported a discard it did not perform. Printed: %r" % (out,))
+    assert "SURVIVES as %s" % survivors[0] in out, (
+        "the record does not say the blob survived, or does not name it. "
+        "Printed: %r" % (out,))
+    assert "%s=%s" % (auto_logs._ORPHAN_MARKER, survivors[0]) in out, (
+        "the surviving blob is not named for the sweep. Printed: %r" % (out,))
+    assert _markers(logdir) == [survivors[0] + auto_logs._ORPHAN_MARKER_SUFFIX], (
+        "the marker was dropped while its blob survived, which is the one "
+        "state that leaves a file nothing can collect: %r" % (_markers(logdir),))
+
+    # CONTROL: the same failed INSERT with the unlink working reports a
+    # discard and leaves neither artifact -- so the wording above is about the
+    # unlink and not about the arm always saying "SURVIVES".
+    for p in list(logdir.iterdir()):
+        p.unlink()
+    db = _ok_db()
+    db.fail_on = "INSERT INTO bug_reports"
+    with pytest.raises(HTTPException):
+        _run(auto_logs.upload_auto_log(_request(), db))
+    out = capsys.readouterr().out
+    assert "blob discarded" in out and "SURVIVES" not in out, out
+    assert _blobs(logdir) == [] and _markers(logdir) == [], (
+        "%r / %r" % (_blobs(logdir), _markers(logdir)))
+
+
+def test_a_marker_that_cannot_be_made_durable_refuses_the_upload(logdir, verified,
+                                                                 monkeypatch, capsys):
+    """THE STAMP IS NOT BEST-EFFORT.
+
+    The marker is the only thing that offers a blob to the sweep, so a volume
+    on which it cannot be made durable is a volume this route refuses rather
+    than one it writes an uncollectable blob onto. The failure direction is the
+    same as every other refusal here: 503, and the client tries after the next
+    match (#276/#430).
+
+    The negative case that matters is the one this asserts LAST: no blob, and
+    no marker, left behind.
+    """
+    real_stamp = auto_logs._stamp_marker
+
+    def exploding_stamp(blob_path):
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(auto_logs, "_stamp_marker", exploding_stamp)
+    with pytest.raises(HTTPException) as ei:
+        _run(auto_logs.upload_auto_log(_request(), _ok_db()))
+    assert ei.value.status_code == 503, "an unstampable volume is retryable"
+    assert _blobs(logdir) == [], (
+        "a blob was written after the marker could not be stamped: %r"
+        % (_blobs(logdir),))
+    assert _markers(logdir) == [] and auto_logs._MARKERS_IN_FLIGHT == set()
+    assert "blob write failed" in capsys.readouterr().out
+
+    # CONTROL: the same upload with the stamp working lands, so the refusal is
+    # about the stamp and not about the fixture. Restored BY NAME rather than
+    # with `monkeypatch.undo()`, which would also roll back the `verified`
+    # fixture's session stub and answer 401 here (#594).
+    monkeypatch.setattr(auto_logs, "_stamp_marker", real_stamp)
+    assert _run(auto_logs.upload_auto_log(_request(), _ok_db()))["log_persisted"] is True
+
+    # AND THE STAMP IS A DURABILITY CALL, not a touch: it fsyncs the marker and
+    # then its directory entry. A `write_bytes` here would leave the marker in
+    # the page cache, which is exactly the state a host incident loses.
+    src = _normalise(inspect.getsource(auto_logs._stamp_marker))
+    assert "os.fsync(fd)" in src and "_fsync_dir(blob_path.parent)" in src, (
+        "the stamp no longer makes the marker durable: %r" % (src,))
+    assert "_fsync_dir" in _normalise(inspect.getsource(auto_logs._stamp_marker))
+    dirsrc = _normalise(inspect.getsource(auto_logs._fsync_dir))
+    assert "except" not in dirsrc, (
+        "the directory flush swallows its own failure, so a volume that cannot "
+        "record the marker would be read as one that did")
+
+
+def test_the_marker_exists_before_the_blobs_first_byte(logdir, verified, monkeypatch):
+    """THE WRITE ORDER, ASSERTED RATHER THAN REASONED ABOUT.
+
+    Everything this design claims rests on one ordering: the marker is durable
+    before `open()` is called on the blob, and the blob is removed before its
+    marker is. The first makes an unmarked orphan unreachable; the second makes
+    a marker outlive every blob it names.
+    """
+    seen = []
+    real_write = auto_logs._write_blob
+    real_stamp = auto_logs._stamp_marker
+
+    def watched_stamp(blob_path):
+        seen.append(("stamp", blob_path.exists()))
+        return real_stamp(blob_path)
+
+    def watched_write(path, data):
+        seen.append(("write", (auto_logs._marker_path(path)).exists()))
+        return real_write(path, data)
+
+    monkeypatch.setattr(auto_logs, "_stamp_marker", watched_stamp)
+    monkeypatch.setattr(auto_logs, "_write_blob", watched_write)
+    assert _run(auto_logs.upload_auto_log(_request(), _ok_db()))["log_persisted"] is True
+
+    assert [s for s, _ in seen] == ["stamp", "write"], (
+        "the blob was written before its marker was stamped: %r" % (seen,))
+    assert seen[0][1] is False, "the blob already existed when the marker was stamped"
+    assert seen[1][1] is True, (
+        "the blob's first byte was written with no marker naming it, which is "
+        "the unmarked-orphan window this design exists to close")
+
+
+def test_the_indeterminate_arm_names_a_mutation_that_exists(logdir, verified):
+    """R2-L8: THE COMMENT'S NAMED MUTATION HAS TO BE ONE THIS TREE CAN RUN.
+
+    The arm's comment used to tell a reader to remove a `_discard_blob` call
+    that is not there -- an instruction that cannot be followed, and whose
+    nearest reading is to ADD a destructive cleanup to the one arm that must
+    keep its blob. The mutation it names now is deleting the
+    `_MARKERS_IN_FLIGHT.discard` beside it, which is code that exists.
+    """
+    src = inspect.getsource(auto_logs.upload_auto_log)
+    head = src.split("INDETERMINATE -- see FAILURE DIRECTION")[1]
+    comment = head.split('raise HTTPException(status_code=503')[0]
+    named = "_MARKERS_IN_FLIGHT.discard"
+    assert named in comment, (
+        "the indeterminate arm's comment names no mutation of existing code")
+    assert "_discard_blob" not in comment and "adding a discard" not in comment, (
+        "the comment still names a discard on the arm whose whole job is to "
+        "KEEP its blob")
+    body = comment.split("#")[-1] + head.split(comment)[-1]
+    assert src.count("_MARKERS_IN_FLIGHT.discard(path.name)") == 2, (
+        "the named line occurs %d time(s) in the handler; the mutation below "
+        "is anchored on the arm's own copy plus the finally"
+        % src.count("_MARKERS_IN_FLIGHT.discard(path.name)"))
+
+    # THE MUTATION, EXECUTED. Both copies of the line removed: the request
+    # finishes still owning its marker, and the sweep skips it for ever.
+    mutant = _exec_mutant(
+        auto_logs.prune_orphan_blobs,
+        "    live = set(_MARKERS_IN_FLIGHT)",
+        "    live = set(_MARKERS_IN_FLIGHT) | {'held-by-a-finished-request'}")
+    db = _ok_db()
+    db.fail_commit = True
+    with pytest.raises(HTTPException):
+        _run(auto_logs.upload_auto_log(_request(), db))
+    kept = _blobs(logdir)
+    assert len(kept) == 1
+    marker = logdir / (kept[0] + auto_logs._ORPHAN_MARKER_SUFFIX)
+    old = time.time() - 10 ** 6
+    os.utime(marker, (old, old))
+
+    sweep_db = Scripted({"COUNT(*) AS n FROM bug_reports": [[{"n": 7}]],
+                         "SELECT log_filename FROM bug_reports": [[]]})
+    auto_logs._MARKERS_IN_FLIGHT.add(kept[0])       # the state the deletion leaves
+    try:
+        out = _run(auto_logs.prune_orphan_blobs(sweep_db, min_age_s=1))
+        assert out["unlinked"] == 0 and (logdir / kept[0]).exists(), (
+            "a marker still owned by a finished request was collected, so the "
+            "line the comment names is not load-bearing: %r" % (out,))
+    finally:
+        auto_logs._MARKERS_IN_FLIGHT.discard(kept[0])
+
+    # CONTROL: with the line's effect in place -- the name dropped -- the same
+    # blob is collected on the next pass.
+    sweep_db = Scripted({"COUNT(*) AS n FROM bug_reports": [[{"n": 7}]],
+                         "SELECT log_filename FROM bug_reports": [[]]})
+    out = _run(auto_logs.prune_orphan_blobs(sweep_db, min_age_s=1))
+    assert out["unlinked"] == 1 and not (logdir / kept[0]).exists(), out
+    assert mutant is not None
+
+
+def test_the_cleanup_tests_prose_names_the_collector_that_exists():
+    """R2-L9: the prose above a control is a claim, and it traces or it is a
+    finding (#302/#351).
+
+    Two docstrings in this file used to say that nothing could ever find a
+    leaked blob. That was true of the tree they were written against; the
+    marker and `prune_orphan_blobs` landed underneath them and the sentences
+    stayed. So both are held to naming the mechanism that is actually there.
+    """
+    for name in ("test_a_failed_blob_write_leaves_no_file_behind",
+                 "test_an_indeterminate_commit_keeps_the_blob"):
+        doc = globals()[name].__doc__ or ""
+        assert "prune_orphan_blobs" in doc or "marker" in doc or "sweep" in doc, (
+            "%s explains itself without naming the collector that exists "
+            "beneath it" % name)
+        for stale in ("Nothing can ever find it",
+                      "nothing collects this blob",
+                      "unrecoverable by construction"):
+            assert stale not in doc, (
+                "%s still says %r, which the orphan sweep refutes" % (name, stale))
+
+
+def test_350_preconditions_on_the_exact_336_default_not_a_substring():
+    """R2-M3: THE GUARD ASKS FOR 336's DEFAULT, NOT FOR SOMETHING REPORTISH.
+
+    The test used to be `column_default NOT LIKE '%report%'`, which any
+    default merely CONTAINING that word satisfies. A drifted default of that
+    shape passed the guard and every old-code bug-form INSERT during the
+    migration-before-code window then landed a `kind` this file's CHECK was not
+    written against.
+
+    The executed half of this row is the rehearsal
+    (`ai-collab/autolog/autolog-hotfix-r3-migration.log`), which applies the
+    file to a database whose default is `'auto_report'::character varying` and
+    watches it refuse by name, and to one carrying 336's exact default and
+    watches it pass. This is the source half: the substring test is GONE and
+    the equality names the value.
+    """
+    sql = _sql_350()
+    executable = "\n".join(ln for ln in sql.splitlines()
+                           if not ln.lstrip().startswith("--"))
+    assert "RAISE EXCEPTION" in executable, (
+        "the comment stripper removed the statements too; this check is "
+        "searching nothing")
+    assert "NOT LIKE '%report%'" not in executable, (
+        "350 still accepts any rendered default containing 'report'")
+    assert "v_default IS DISTINCT FROM c_336_default" in executable, (
+        "350's default guard is no longer an equality against the value 336 "
+        "installs")
+    assert "c_336_default CONSTANT text := '''report''::character varying'" in executable, (
+        "the expected default is not named in the file, so the guard cannot "
+        "say WHICH value it wanted")
+
+    # The refusal has to name both halves, or an operator reading it cannot
+    # tell a drifted default from a missing one.
+    refusal = [ln for ln in executable.splitlines()
+               if "350: bug_reports.kind must carry exactly" in ln]
+    assert len(refusal) == 1, refusal
+    assert refusal[0].count("%") >= 2, (
+        "the refusal prints fewer than two values; it has to say what it "
+        "wanted and what it read: %r" % (refusal[0],))

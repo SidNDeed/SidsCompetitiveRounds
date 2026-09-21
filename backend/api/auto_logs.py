@@ -75,6 +75,23 @@ artifact: a failed write unlinks its own partial file, a failed INSERT
 unlinks the blob it just wrote. The client is told 503 in every one of these
 cases -- never 500 -- and can try again after the next match.
 
+  AND AN UNLINK THAT RAISES IS NOT A DISCARD. ``_release_marked_blob`` answers
+  whether the blob is GONE, and the INSERT arm says so either way: a file that
+  survived its own cleanup KEEPS its marker and is named for the sweep rather
+  than recorded as discarded. A cleanup record that cannot be wrong about the
+  file it describes is what makes the paragraph above a claim and not an
+  intention.
+
+  EVERY BLOB CARRIES A DURABLE MARKER FROM BEFORE ITS FIRST BYTE. A sidecar
+  file, ``<blob>.orphan-candidate``, is created and fsynced -- with its
+  directory entry, on a platform that has one to flush separately -- before
+  ``open()`` is called on the blob, and it is dropped only when the row is
+  committed, or together with the blob when one of the arms above discards it.
+  So there is no instant, and no crash between any two lines of this handler,
+  at which an unreferenced blob exists with nothing naming it. A stamp that
+  cannot be made durable REFUSES the upload rather than writing the blob
+  anyway.
+
   THE ONE CASE THAT CANNOT BE MADE ATOMIC is a ``commit()`` that raises. That
   is indeterminate, not failed -- PostgreSQL may have committed and the
   acknowledgement been lost on the way back -- so the blob is deliberately
@@ -84,14 +101,24 @@ cases -- never 500 -- and can try again after the next match.
   Cheap reversible error over expensive irreversible one (#276).
 
   THAT ARM NOW NAMES WHAT IT KEPT AND SOMETHING COLLECTS IT. The line carries
-  ``orphan-candidate=<file>``, and ``prune_orphan_blobs`` -- run by the
-  retention loop, not by a request -- removes a file that no ``bug_reports``
-  row of ANY kind names once it is a full retention tick old. If the commit
-  did land, a row names the file and the sweep passes over it for ever; if it
-  did not, the file is collected without anybody having to remember it. An
-  earlier version of this paragraph said "nothing collects such a blob ... a
-  deliberate trade": the trade was real, and it left a slow leak on a volume
-  shared with player-filed attachments, which this route may not spend.
+  ``orphan-candidate=<file>`` and the marker beside the blob is left in place,
+  so ``prune_orphan_blobs`` -- run by the retention loop, not by a request --
+  finds it. If the commit did land, a ``bug_reports`` row of ANY kind names
+  the file and the sweep CLEARS the marker, keeping the blob for ever; if it
+  did not, the blob and then its marker are removed once past the age gate.
+  Nobody has to remember it either way. An earlier version of this paragraph
+  said "nothing collects such a blob ... a deliberate trade": the trade was
+  real, and it left a slow leak on a volume shared with player-filed
+  attachments, which this route may not spend.
+
+  THE SWEEP'S POPULATION IS THE MARKER SET, NEVER THE ATTACHMENT HEAP. An
+  earlier version walked the directory and bounded what one pass examined. That
+  directory holds every player-filed attachment permanently and nothing here
+  deletes a referenced one, so the budget was spent on files the sweep is
+  required to KEEP and an orphan behind enough of them was never offered to the
+  database at all. A referenced file does not carry a marker, so the marker set
+  has no such floor, no cap over it and no starvation class; the bound that
+  remains is on how many blobs one pass may REMOVE.
 
   An earlier version of this paragraph also claimed atomicity across both
   halves unconditionally. It was false of the write arm, which raised without
@@ -158,7 +185,6 @@ not touch it; this note is here so that stays deliberate.
 import asyncio
 import gzip
 import hashlib
-import heapq
 import json
 import os
 import pathlib
@@ -311,12 +337,51 @@ _BLOB_WRITE_STALL_S = 5.0
 # upload would bury it.
 _BLOB_HOLD_REPORT_S = 5.0
 
-# The token the indeterminate-commit arm prints and the orphan sweep matches.
-# ONE literal for both halves: the handler writes a blob it cannot prove has a
-# row, and the sweep is the only thing that ever removes it, so two spellings
-# of the marker would be two chances for the recovery line to name something
-# nothing collects (#432).
+# THE HARD DEADLINE ON THE MARKED SPAN, AND IT IS THE `T` THE AGE GATE IS
+# DERIVED FROM.
+#
+# The span this bounds is measure -> stamp -> write -> INSERT -> commit: every
+# instant in which a marker exists and its row does not. It is enforced in ONE
+# place, the `asyncio.wait_for` around the shielded reserve section in
+# `upload_auto_log`, and a span that passes it answers 503 while the section
+# itself runs on to its own cleanup (it is shielded; see `_MarkedBlob`).
+#
+# WHAT IT BUYS. `_ORPHAN_MIN_AGE_S` below is `AUTO_LOG_SWEEP_EVERY_S + 2 * T`,
+# which is strictly greater than T plus one retention tick, so a write stalled
+# for the whole of T cannot outlive the gate that decides its marker is
+# collectable. That is a BOUND rather than a hope, and the suite reds when the
+# gate is lowered below T.
+#
+# It is generous on purpose: an upload that has held the volume lock, written
+# its blob and committed inside a minute is every healthy upload, and the
+# refusal a slow one gets is the same "try after the next match" every other
+# refusal on this path gives (#276/#430).
+AUTO_LOG_MARKED_SPAN_DEADLINE_S = 60.0
+
+# The token the indeterminate-commit arm prints and the orphan sweep matches,
+# and -- since the method change -- the SUFFIX of the marker FILE that makes a
+# blob collectable at all. ONE literal for all three: the handler writes a blob
+# it cannot prove has a row, the marker beside it is the only thing that ever
+# offers that blob to the sweep, and the sweep is the only thing that removes
+# it. Two spellings would be two chances for the recovery line to name
+# something nothing collects (#432).
 _ORPHAN_MARKER = "orphan-candidate"
+_ORPHAN_MARKER_SUFFIX = "." + _ORPHAN_MARKER
+
+# THE MARKERS A LIVE UPLOAD OWNS, and the reason cancellation cannot produce a
+# deleted-from-under-you blob in this process.
+#
+# The retention loop runs in the SAME process as the handler -- it is started
+# from main's `lifespan` -- so "is a request still working on this blob" is a
+# question this process can answer exactly rather than infer from an mtime. A
+# name is added before the marker file is created and removed only once the
+# request has decided (row committed, blob discarded, or marker deliberately
+# left behind), and the sweep skips every name in it WHATEVER ITS AGE.
+#
+# The age gate above is the second line, not the first: it covers the case this
+# set cannot see, which is a marker left by a PREVIOUS process life. In that
+# case the writer is gone by definition, because the process it ran in is.
+_MARKERS_IN_FLIGHT: set[str] = set()
 
 # The advisory-lock CLASS for this route's per-account serialisation. See the
 # lock site in upload_auto_log for why the route does not use the bare
@@ -365,53 +430,48 @@ _PRUNE_HELD: dict[str, float] = {}
 AUTO_LOG_SWEEP_EVERY_S = 3600.0
 AUTO_LOG_SWEEP_BOOT_DELAY_S = 120.0
 
-# ORPHAN SWEEP: how old a blob has to be before "no row names it" is read as
-# "no row will ever name it".
+# ORPHAN SWEEP: how old a MARKER has to be before "no row names its blob" is
+# read as "no row ever will".
 #
-# ONE RETENTION TICK, and the number is DERIVED from the tick rather than
-# written down beside it, so the two cannot be tuned apart. A file is a
-# candidate only once it has survived a whole period in which any request that
-# was going to commit a row for it has long since finished or died; the write
-# -to-commit span on both the automatic and the player-filed path is seconds.
+# DERIVED FROM THE TICK AND FROM THE HANDLER'S OWN DEADLINE, so the three
+# cannot be tuned apart: `AUTO_LOG_SWEEP_EVERY_S + 2 * T`. The whole span in
+# which a marker exists without its row is bounded by T
+# (`AUTO_LOG_MARKED_SPAN_DEADLINE_S`), and this gate is strictly greater than
+# T plus one retention tick, so a write stalled for the entire deadline cannot
+# reach the gate. It is a second line rather than the first: the in-process
+# `_MARKERS_IN_FLIGHT` set already excludes every marker a live request owns,
+# and what remains for the gate is a marker left behind by a process life that
+# has ended.
 #
 # The sweep exists because ONE arm of the upload deliberately keeps a blob it
 # cannot prove has a row -- the indeterminate commit. Without a collector that
 # arm is a slow leak on a volume shared with player-filed attachments, which
 # is the one thing this route is not allowed to spend.
-_ORPHAN_MIN_AGE_S = AUTO_LOG_SWEEP_EVERY_S
+_ORPHAN_MIN_AGE_S = AUTO_LOG_SWEEP_EVERY_S + 2.0 * AUTO_LOG_MARKED_SPAN_DEADLINE_S
 
-# Files UNLINKED per pass. NOT files examined, and the distinction is the
-# whole correctness of this sweep.
+# Blobs UNLINKED per pass.
 #
-# `_PRUNE_BATCH` above drains because `prune_auto_logs` DELETES the rows it
-# handled, so the next selection sees the next cohort. This pass keeps every
-# file it finds referenced -- that is its job -- so a budget spent on
-# EXAMINING would be spent on the same referenced files at every tick for
-# ever, and a file beyond it would never be offered to the database at all.
-# BUG_REPORT_LOG_DIR holds player-filed attachments permanently, so that
-# budget is spent on files this pass is required to keep, and the leak it
-# exists to close would stay open while it reported `0 unreferenced` every
-# hour.
+# THERE IS NO EXAMINATION CEILING ANY MORE, AND ITS ABSENCE IS THE METHOD
+# CHANGE. An earlier version of this sweep took the ATTACHMENT HEAP as its
+# population and bounded the examination at `50 * _ORPHAN_BATCH` files. That
+# directory holds every player-filed attachment permanently and nothing in
+# this tree deletes a referenced one, so the budget was spent on files the
+# pass is REQUIRED to keep: past that many older referenced attachments, a
+# newer orphan was never offered to the database at all. A cap over the heap
+# is a starvation class, so the heap stopped being the population and the cap
+# was deleted rather than raised (#310).
 #
-# So the bound moved to the only place a bound buys anything: the number of
-# files one pass may REMOVE. Examination is bounded separately and far higher
-# (`_ORPHAN_SCAN_MAX`), and the candidates are ordered OLDEST FIRST, so a
-# backlog of orphans larger than one batch genuinely drains -- each pass takes
-# the oldest `_ORPHAN_BATCH` of them and they are gone from the directory by
-# the next one.
+# The population is now the MARKER SET, which every pass CONSUMES -- each
+# marker is cleared over a committed row, or taken with its blob, or skipped
+# because a live request owns it. A set that shrinks by being worked cannot
+# starve, so enumerating all of it is what keeps the pass honest; the only
+# bound worth having is on the irreversible half, which is how many blobs one
+# pass may REMOVE. Candidates are ordered OLDEST FIRST, so a backlog larger
+# than one batch drains across ticks.
 _ORPHAN_BATCH = _PRUNE_BATCH
 
-# Aged files one pass may hold in memory and offer to the database. This is
-# the bound that keeps a pass finite; it is not a cursor, because the oldest
-# entries are selected by mtime rather than by directory order, so the pass
-# that hits this ceiling still makes progress on exactly the files a collector
-# should be looking at first. A pass that hits it SAYS SO in its line -- a
-# truncated listing read as a complete one is how a count stops being evidence
-# (#304).
-_ORPHAN_SCAN_MAX = 50 * _ORPHAN_BATCH
-
-# Names per `log_filename = ANY(...)` lookup. The examined set is now up to
-# `_ORPHAN_SCAN_MAX` names and a single bound array parameter that size is a
+# Names per `log_filename = ANY(...)` lookup. The marker set is small by
+# construction, but a single bound array parameter of unknown size is still a
 # statement nobody wants to see in a log; the predicate is unchanged and the
 # chunks are unioned.
 _ORPHAN_NAME_CHUNK = 500
@@ -528,20 +588,150 @@ async def _read_capped_body(request: Request, cap: int) -> bytes:
     return b"".join(chunks)
 
 
-def _discard_blob(path):
-    """Remove a blob this request wrote, for a failure that is KNOWN to have
-    left no row pointing at it.
+def _unlink_if_present(path) -> bool:
+    """Remove `path`; answer whether it is GONE.
 
-    Deliberately not used on the commit arm: see FAILURE DIRECTION. An absent
-    file is the expected outcome when the write itself failed, so a missing
-    file is not an error.
+    An absent file answers True -- the caller wanted it gone and it is. An
+    unlink that RAISES answers False, and that distinction is the whole
+    difference between "discarded" and "still on the volume": a caller that
+    cannot tell the two apart writes a record saying a blob was cleaned up
+    while the blob is still there, which is a false cleanup nobody can find
+    again. This function never prints; the caller owns the wording, because
+    only the caller knows what the file's survival means.
     """
     if path is None:
-        return
+        return True
     try:
-        os.unlink(path)
+        os.unlink(str(path))
+        return True
+    except FileNotFoundError:
+        return True
     except OSError:
-        pass
+        return False
+
+
+def _marker_path(blob_path):
+    """The marker that sits BESIDE a blob and is the only thing that offers it
+    to the orphan sweep."""
+    return blob_path.with_name(blob_path.name + _ORPHAN_MARKER_SUFFIX)
+
+
+def _fsync_dir(directory) -> None:
+    """Commit the DIRECTORY ENTRY a marker was just created in.
+
+    On Linux -- which is what the api container runs -- `fsync` on the file's
+    own descriptor commits the file's bytes and says nothing about the entry
+    naming it, so a crash can leave the marker's data durable and its name
+    absent. The entry needs its own `fsync` on a descriptor opened with
+    `O_DIRECTORY`.
+
+    On a platform with no directory handle to open (`os.O_DIRECTORY` absent --
+    Windows, where this suite runs), `FlushFileBuffers` behind `os.fsync`
+    already commits the entry with the file, so there is nothing to do here.
+    The test is for the CAPABILITY, not for a platform name, so a platform
+    that gains one is covered without an edit.
+
+    IT DOES NOT SWALLOW. A directory that will not flush is a volume on which
+    this marker cannot be made durable, and the caller's answer to that is to
+    refuse the upload -- never to write a blob and hope, and never to fall
+    back to walking the heap.
+    """
+    flag = getattr(os, "O_DIRECTORY", None)
+    if flag is None:
+        return
+    fd = os.open(str(directory), os.O_RDONLY | flag)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _stamp_marker(blob_path) -> None:
+    """Create this blob's marker, DURABLY, before the blob has any bytes.
+
+    Off the event loop, like every other filesystem call on this path: two
+    fsyncs on a contended volume are not something to do on the loop.
+
+    The content is the blob's own name plus a newline. It is not what the
+    sweep reads -- the sweep reads the marker's NAME -- but a zero-byte file
+    is indistinguishable from a failed create when an operator looks at the
+    directory, and one line costs nothing.
+    """
+    marker = _marker_path(blob_path)
+    fd = os.open(str(marker), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, blob_path.name.encode("utf-8") + b"\n")
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    _fsync_dir(blob_path.parent)
+
+
+class _MarkedBlob:
+    """One request's claim on one blob file and the marker beside it.
+
+    WHY AN OBJECT AND NOT FOUR LOCALS. The reserve section runs as its own
+    task so that cancelling the handler cannot separate measure from write
+    (see `_reserve_stamp_and_write`), and the handler and that task have to
+    agree afterwards about who cleans up. `abandoned` is the handler saying "I
+    stopped waiting"; the section reads it in its own `finally` with no await
+    between the read and its return, so exactly one of the two performs the
+    cleanup and never both:
+
+    * the handler sets `abandoned` and then asks whether the section is done.
+      Not done means the section has not yet reached its check and will see
+      the flag. Done means the section already returned, so the handler does
+      it.
+
+    `marked` and `written` are what is on disk, so a cleanup knows whether
+    there is anything to remove.
+    """
+
+    __slots__ = ("path", "marked", "written", "failed", "abandoned")
+
+    def __init__(self, path):
+        self.path = path
+        self.marked = False
+        self.written = False
+        self.failed = False
+        self.abandoned = False
+
+
+def _clear_marker(own: "_MarkedBlob") -> bool:
+    """Drop the marker and KEEP the blob -- the row is committed.
+
+    A marker that will not unlink is not an error worth failing an accepted
+    upload over: the next sweep finds it, asks the database, is told a row
+    names the blob, and clears it then. That is disposition 2 of the sweep and
+    it exists precisely so this call is allowed to fail.
+    """
+    gone = True if not own.marked else _unlink_if_present(_marker_path(own.path))
+    own.marked = not gone
+    _MARKERS_IN_FLIGHT.discard(own.path.name)
+    return gone
+
+
+def _release_marked_blob(own: "_MarkedBlob") -> bool:
+    """Remove the blob and then its marker, for a failure KNOWN to have left
+    no row naming it. Answers whether the BLOB is gone.
+
+    THE ORDER IS LOAD-BEARING AND IT IS ONE WAY ROUND. The blob goes first, so
+    the only state a crash between the two unlinks can leave is a marker whose
+    blob is absent -- which the next sweep clears at no cost. The other order
+    would leave an unreferenced blob with nothing naming it, which is the one
+    state this whole mechanism exists to make unreachable.
+
+    An unlink that RAISES therefore keeps the marker: the blob survived, and
+    the marker is what will offer it to the sweep. The caller says so in its
+    line rather than reporting a discard that did not happen.
+    """
+    blob_gone = _unlink_if_present(own.path)
+    if blob_gone:
+        own.written = False
+        if own.marked and _unlink_if_present(_marker_path(own.path)):
+            own.marked = False
+    _MARKERS_IN_FLIGHT.discard(own.path.name)
+    return blob_gone
 
 
 async def _auto_bucket(db: AsyncSession, steam_id: str):
@@ -645,6 +835,164 @@ def _free_bytes(directory) -> int:
         return shutil.disk_usage(str(directory)).free
     except Exception:
         return -1
+
+
+async def _reserve_stamp_and_write(own: "_MarkedBlob", data: bytes,
+                                   steam_id: str) -> None:
+    """MEASURE, STAMP, WRITE -- one section, and cancellation cannot separate
+    it into parts.
+
+    WHY IT IS A FUNCTION AND A TASK. This used to be an inline block awaited by
+    the handler, with the lock released in the handler's own `finally`.
+    Cancelling that await -- a client disconnect, a server shutdown, the
+    deadline below -- ran the `finally` and released the lock while
+    `asyncio.to_thread` went on writing in its worker, because nothing cancels
+    a thread. The next upload could then measure a volume the previous one had
+    not finished writing to, which is exactly the bound
+    `_BLOB_RESERVE_LOCK` exists to hold, and the cancelled request could leave
+    bytes on the volume with nobody left to account for them.
+
+    So the section is its own task and the handler awaits it through
+    `asyncio.shield`. A cancelled handler does not cancel this; the lock is
+    released HERE, in this coroutine's `finally`, after the write has actually
+    returned. If the handler stopped waiting it says so with `own.abandoned`,
+    and this coroutine performs the cleanup on its way out.
+
+    THE MARKER IS STAMPED BEFORE THE BYTES EXIST. `_stamp_marker` fsyncs the
+    marker and its directory entry, and RAISES if it cannot -- a volume that
+    cannot record the marker is a volume this route refuses rather than one it
+    writes an uncollectable blob onto. From the instant `open()` is called on
+    the blob there is a durable marker naming it, so no arm of this handler,
+    and no crash between any two lines of it, can produce a blob that the
+    sweep has no way of finding.
+    """
+    hold_started = time.monotonic()
+
+    # BEFORE THE WAIT: IS THERE ANYTHING TO WAIT FOR? The wait is served
+    # inside this request's open transaction, so it is paid in pooled
+    # connections (see `_BLOB_WRITE_STALL_S`). A measure-and-write that has
+    # already been in flight past the stall ceiling is a volume that is not
+    # answering, and every request that queues behind it spends a connection
+    # for the full ceiling to be told the same 503 it could have had at once.
+    in_flight = _BLOB_WRITE_STARTED[0]
+    stalled_for = (time.monotonic() - in_flight) if in_flight else 0.0
+    if stalled_for >= _BLOB_WRITE_STALL_S:
+        print(f"[AUTO-LOG] refused 503: the blob volume has had a write in "
+              f"flight for {stalled_for:.1f}s (ceiling {_BLOB_WRITE_STALL_S}s), "
+              f"so this upload refuses now rather than holding a database "
+              f"connection for {_BLOB_RESERVE_LOCK_WAIT_S}s to be refused then")
+        raise HTTPException(status_code=503, detail="log storage unavailable")
+    try:
+        await asyncio.wait_for(_BLOB_RESERVE_LOCK.acquire(),
+                               _BLOB_RESERVE_LOCK_WAIT_S)
+    except (asyncio.TimeoutError, TimeoutError):
+        print(f"[AUTO-LOG] refused 503: waited {_BLOB_RESERVE_LOCK_WAIT_S}s "
+              f"for the blob-volume lock and did not get it -- refusing "
+              f"rather than measuring the reserve against a reading this "
+              f"request never took")
+        raise HTTPException(status_code=503, detail="log storage unavailable")
+
+    _BLOB_WRITE_STARTED[0] = time.monotonic()
+    try:
+        # LEAVE THE LAST OF THE VOLUME TO THE PATH THAT HAS A PERSON WAITING.
+        #
+        # This corpus and the bug form's attachments share one directory, and
+        # this is the half that grows by itself: up to twelve blobs per
+        # opted-in account per day, held fourteen days. When the volume fills,
+        # THIS route handles it correctly -- it unlinks, answers 503, and the
+        # client tries after the next match. `submit_bug_report` does not: its
+        # write failure is caught, logged and fallen through, so the report
+        # commits with no attachment and the player is answered 200 by a
+        # server that just lost their log.
+        #
+        # So the automatic path stops first, while there is still room for the
+        # one that cannot retry. Refusing here rather than at ENOSPC also
+        # means no partial file is written on a volume that is already out of
+        # space.
+        free = _free_bytes(own.path.parent)
+        if free < 0:
+            # UNKNOWN IS A REFUSAL. This arm used to be the admitting one --
+            # `free >= 0 and ...` skipped the whole guard when the volume
+            # would not answer -- so the reserve stopped existing in exactly
+            # the conditions that produce an unreadable volume. Which
+            # direction the unhandled case fails in is the question (#276),
+            # and the answer here is: toward the path that has a person
+            # waiting on it.
+            print("[AUTO-LOG] refused 503: free space on the blob volume "
+                  "could not be measured, so the reserve held for "
+                  "player-filed reports cannot be shown to survive this "
+                  "write")
+            raise HTTPException(status_code=503,
+                                detail="log storage unavailable")
+        if free - len(data) < AUTO_LOG_FREE_SPACE_RESERVE_BYTES:
+            print(f"[AUTO-LOG] refused 503: {free} bytes free on the blob "
+                  f"volume, and storing {len(data)} would leave less than "
+                  f"the {AUTO_LOG_FREE_SPACE_RESERVE_BYTES}-byte reserve "
+                  f"held for player-filed reports")
+            raise HTTPException(status_code=503,
+                                detail="log storage unavailable")
+
+        # THE REGISTRY ENTRY GOES IN BEFORE THE MARKER FILE, and the marker
+        # file before the bytes. Each step is only ever ADDING something that
+        # protects the blob, so there is no instant at which a blob exists
+        # with nothing naming it -- not between two lines here, and not across
+        # a crash between them.
+        _MARKERS_IN_FLIGHT.add(own.path.name)
+        own.marked = True
+        await asyncio.to_thread(_stamp_marker, own.path)
+
+        # Off the event loop, like the compression in the handler: this is a
+        # write of up to 8 MiB, and on a slow or contended volume it blocks
+        # every other request on this worker for as long as it takes.
+        #
+        # INSIDE the reserve lock, not after it. The measurement above is only
+        # a decision about this write if this write is the one that follows
+        # it; releasing between the two is the gap the lock exists to close --
+        # and NOT releasing it on a cancellation is what makes that true when
+        # the request goes away mid-write.
+        await asyncio.to_thread(_write_blob, own.path, data)
+        own.written = True
+    except BaseException:
+        own.failed = True
+        raise
+    finally:
+        # The in-flight stamp is cleared BEFORE the release, so the next
+        # waiter can never read a stamp belonging to a pass that has already
+        # handed the lock on.
+        _BLOB_WRITE_STARTED[0] = 0.0
+        _BLOB_RESERVE_LOCK.release()
+
+        # ONE OF US CLEANS UP, AND THIS IS THE HALF THAT KNOWS IT IS STILL
+        # RUNNING. Read `abandoned` here, with no await between the read and
+        # the return, so that a handler which sets it after this point
+        # observes `done()` and cleans up itself.
+        if own.failed or own.abandoned:
+            if not _release_marked_blob(own):
+                print(f"[AUTO-LOG] the blob for {own.path.name} could not be "
+                      f"removed after a failed or abandoned write; it SURVIVES "
+                      f"and its {_ORPHAN_MARKER} marker is kept so the orphan "
+                      f"sweep collects it")
+
+        # MEASURED, whichever way this went. This span -- the wait for the
+        # volume lock plus the measure-and-write under it -- is the part of
+        # the open transaction that this route added when admission moved
+        # ahead of the write, and it is the part a contended volume extends.
+        # Reported only past the ceiling, so an ordinary upload still prints
+        # exactly one landing line.
+        held = time.monotonic() - hold_started
+        if held >= _BLOB_HOLD_REPORT_S:
+            print(f"[AUTO-LOG] slow blob volume: {held:.1f}s holding an open "
+                  f"transaction and the per-account lock for {steam_id} "
+                  f"across the volume lock and a {len(data)}-byte write "
+                  f"(report ceiling {_BLOB_HOLD_REPORT_S}s)")
+
+
+def _drain_section_error(task) -> None:
+    """Consume the exception of a section the handler stopped waiting for, so
+    an abandoned task does not surface as a "never retrieved" warning on a
+    path whose whole job is to be quiet."""
+    if not task.cancelled():
+        task.exception()
 
 
 @router.post("/auto")
@@ -886,232 +1234,209 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
         # is the whole point of moving the lock up.
         raise _bucket_full(req.steam_id, oldest, "on the locked re-check")
 
-    # The path resolution is INSIDE the try, not before it: _bug_report_log_path
-    # creates the directory, so an unusable BUG_REPORT_LOG_DIR fails there and
-    # not at open(). Outside the try that becomes a 500, and 500 vs 503 is not
-    # cosmetic here -- the client half is a background retry loop, and 503 is
-    # the code that says the same request will work later.
-    path = None
-    hold_started = time.monotonic()
+    # The path resolution has its own arm: _bug_report_log_path creates the
+    # directory, so an unusable BUG_REPORT_LOG_DIR fails here and not at
+    # open(). Uncaught that becomes a 500, and 500 vs 503 is not cosmetic here
+    # -- the client half is a background retry loop, and 503 is the code that
+    # says the same request will work later. Nothing exists yet for it to
+    # clean up.
     try:
-        # THE MEASURE-AND-WRITE PAIR, UNDER ONE PROCESS-WIDE LOCK.
-        # See `_BLOB_RESERVE_LOCK` for the bound this holds (N = 1 blob per
-        # reading) and for why the per-account advisory lock above cannot hold
-        # it: two seats have two keys, and the reserve is one volume.
-        #
-        # BEFORE THE WAIT: IS THERE ANYTHING TO WAIT FOR? The wait is served
-        # inside this request's open transaction, so it is paid in pooled
-        # connections (see `_BLOB_WRITE_STALL_S`). A measure-and-write that
-        # has already been in flight past the stall ceiling is a volume that
-        # is not answering, and every request that queues behind it spends a
-        # connection for the full ceiling to be told the same 503 it could
-        # have had at once.
-        in_flight = _BLOB_WRITE_STARTED[0]
-        stalled_for = (time.monotonic() - in_flight) if in_flight else 0.0
-        if stalled_for >= _BLOB_WRITE_STALL_S:
-            print(f"[AUTO-LOG] refused 503: the blob volume has had a write in "
-                  f"flight for {stalled_for:.1f}s (ceiling {_BLOB_WRITE_STALL_S}s), "
-                  f"so this upload refuses now rather than holding a database "
-                  f"connection for {_BLOB_RESERVE_LOCK_WAIT_S}s to be refused then")
-            raise HTTPException(status_code=503, detail="log storage unavailable")
-        try:
-            await asyncio.wait_for(_BLOB_RESERVE_LOCK.acquire(),
-                                   _BLOB_RESERVE_LOCK_WAIT_S)
-        except (asyncio.TimeoutError, TimeoutError):
-            print(f"[AUTO-LOG] refused 503: waited {_BLOB_RESERVE_LOCK_WAIT_S}s "
-                  f"for the blob-volume lock and did not get it -- refusing "
-                  f"rather than measuring the reserve against a reading this "
-                  f"request never took")
-            raise HTTPException(status_code=503, detail="log storage unavailable")
-        _BLOB_WRITE_STARTED[0] = time.monotonic()
-        try:
-            path = _bug_report_log_path(str(report_id))
+        path = _bug_report_log_path(str(report_id))
+    except Exception as ex:
+        print(f"[AUTO-LOG] refused 503: the blob directory could not be "
+              f"resolved for {report_id} ({type(ex).__name__})")
+        raise HTTPException(status_code=503, detail="log storage unavailable")
 
-            # LEAVE THE LAST OF THE VOLUME TO THE PATH THAT HAS A PERSON WAITING.
-            #
-            # This corpus and the bug form's attachments share one directory,
-            # and this is the half that grows by itself: up to twelve blobs per
-            # opted-in account per day, held fourteen days. When the volume
-            # fills, THIS route handles it correctly -- it unlinks, answers
-            # 503, and the client tries after the next match.
-            # `submit_bug_report` does not: its write failure is caught,
-            # logged and fallen through, so the report commits with no
-            # attachment and the player is answered 200 by a server that just
-            # lost their log.
-            #
-            # So the automatic path stops first, while there is still room for
-            # the one that cannot retry. Refusing here rather than at ENOSPC
-            # also means no partial file is written on a volume that is
-            # already out of space.
-            free = _free_bytes(path.parent)
-            if free < 0:
-                # UNKNOWN IS A REFUSAL. This arm used to be the admitting one
-                # -- `free >= 0 and ...` skipped the whole guard when the
-                # volume would not answer -- so the reserve stopped existing
-                # in exactly the conditions that produce an unreadable volume.
-                # Which direction the unhandled case fails in is the question
-                # (#276), and the answer here is: toward the path that has a
-                # person waiting on it.
-                print("[AUTO-LOG] refused 503: free space on the blob volume "
-                      "could not be measured, so the reserve held for "
-                      "player-filed reports cannot be shown to survive this "
-                      "write")
-                raise HTTPException(status_code=503,
-                                    detail="log storage unavailable")
-            if free - len(data) < AUTO_LOG_FREE_SPACE_RESERVE_BYTES:
-                print(f"[AUTO-LOG] refused 503: {free} bytes free on the blob "
-                      f"volume, and storing {len(data)} would leave less than "
-                      f"the {AUTO_LOG_FREE_SPACE_RESERVE_BYTES}-byte reserve "
-                      f"held for player-filed reports")
-                raise HTTPException(status_code=503,
-                                    detail="log storage unavailable")
-
-            # Off the event loop, like the compression above: this is a write
-            # of up to 8 MiB, and on a slow or contended volume it blocks
-            # every other request on this worker for as long as it takes. The
-            # path resolution stays on the loop -- it is a mkdir, and keeping
-            # it here is what binds `path` for the unlink below.
-            #
-            # INSIDE the reserve lock, not after it. The measurement above is
-            # only a decision about this write if this write is the one that
-            # follows it; releasing between the two is the gap the lock exists
-            # to close.
-            await asyncio.to_thread(_write_blob, path, data)
-        finally:
-            # The in-flight stamp is cleared BEFORE the release, so the next
-            # waiter can never read a stamp belonging to a pass that has
-            # already handed the lock on.
-            _BLOB_WRITE_STARTED[0] = 0.0
-            _BLOB_RESERVE_LOCK.release()
-            # MEASURED, whichever way this went. This span -- the wait for the
-            # volume lock plus the measure-and-write under it -- is the part
-            # of the open transaction that this route added when admission
-            # moved ahead of the write, and it is the part a contended volume
-            # extends. Reported only past the ceiling, so an ordinary upload
-            # still prints exactly one landing line.
-            held = time.monotonic() - hold_started
-            if held >= _BLOB_HOLD_REPORT_S:
-                print(f"[AUTO-LOG] slow blob volume: {held:.1f}s holding an open "
-                      f"transaction and the per-account lock for {req.steam_id} "
-                      f"across the volume lock and a {len(data)}-byte write "
-                      f"(report ceiling {_BLOB_HOLD_REPORT_S}s)")
+    # THE MARKED SPAN: measure, stamp, write, INSERT, commit.
+    #
+    # The measure-stamp-write third of it is a SEPARATE TASK awaited through
+    # `asyncio.shield`, so that cancelling this handler cannot separate the
+    # measurement from the write it decides (see `_reserve_stamp_and_write`).
+    # The whole span is bounded by T: a request that has not got its bytes
+    # onto the volume in `AUTO_LOG_MARKED_SPAN_DEADLINE_S` answers 503, which
+    # is what makes the sweep's age gate a bound rather than a hope.
+    #
+    # ON TIMEOUT OR CANCELLATION the section is NOT cancelled -- it holds the
+    # volume lock and a worker thread, and neither stops on request. It is
+    # told it has been abandoned and cleans up its own blob and marker on its
+    # way out; if it has already finished by then, this half does it instead.
+    own = _MarkedBlob(path)
+    section = asyncio.ensure_future(
+        _reserve_stamp_and_write(own, data, req.steam_id))
+    section.add_done_callback(_drain_section_error)
+    try:
+        await asyncio.wait_for(asyncio.shield(section),
+                               AUTO_LOG_MARKED_SPAN_DEADLINE_S)
     except HTTPException:
-        # The reserve refusal above is already the answer it wants to give,
-        # and nothing has been written for it to clean up. Re-raised as-is so
-        # it does not get rewritten into the generic storage failure below and
-        # lose the one line that says WHY.
+        # The reserve refusals inside the section are already the answer they
+        # want to give, and the section has cleaned up after itself. Re-raised
+        # as-is so it does not get rewritten into the generic storage failure
+        # below and lose the one line that says WHY.
+        raise
+    except (asyncio.TimeoutError, TimeoutError):
+        own.abandoned = True
+        if section.done():
+            _release_marked_blob(own)
+        print(f"[AUTO-LOG] refused 503: the measure-and-write for {report_id} "
+              f"passed its {AUTO_LOG_MARKED_SPAN_DEADLINE_S}s deadline; the "
+              f"write is left to finish and discard itself, and the client is "
+              f"told to try after the next match")
+        raise HTTPException(status_code=503, detail="log storage unavailable")
+    except asyncio.CancelledError:
+        # The request went away. Same disposition as the deadline: the section
+        # keeps the lock until its write returns and then removes what it
+        # wrote. Re-raised, because a cancelled request has no answer to give.
+        own.abandoned = True
+        if section.done():
+            _release_marked_blob(own)
         raise
     except Exception as ex:
-        # Unlink whatever landed. `open()` succeeding and `write()` failing --
-        # a full disk, a dying volume -- leaves a partial or empty file under
-        # an id that no row will ever name, and nothing in this module or the
-        # prune can find it again. `path` is None only if the directory
-        # resolution itself raised, in which case there is nothing to remove.
-        _discard_blob(path)
         print(f"[AUTO-LOG] blob write failed for {report_id}: {type(ex).__name__}")
         raise HTTPException(status_code=503, detail="log storage unavailable")
 
-    room = req.room_name or "an unnamed room"
-    description = f"auto-upload after {req.mode or 'a match'} in {room}"
+    # THE REGISTRY ENTRY IS RELEASED ON EVERY EXIT PATH, cancellation
+    # included. `_clear_marker` and `_release_marked_blob` each drop it on
+    # the arms they own, but a request cancelled between the write and the
+    # commit reaches neither -- and a name left in `_MARKERS_IN_FLIGHT`
+    # after its request is gone would make the sweep skip that marker for
+    # the life of the process, which is the one way this design could keep
+    # a blob nothing collects. Dropping the name is always safe: the marker
+    # FILE is what protects the blob, and it is still on disk.
     try:
-        row = (await db.execute(
-            # bug_number IS SUPPLIED, from a sequence of this route's own
-            # (migration 350). The column's DEFAULT is nextval() on
-            # `bug_reports_number_seq` -- the counter that names a player's
-            # ticket in #bug-reports, in admin triage and in the ops
-            # `bug-log:N` verb. Left to the default, every automatic upload
-            # would spend one of those numbers and retention would then delete
-            # the row that held it, so a player filing a report a month later
-            # is told they are #1,247 with ~900 numbers behind them naming
-            # nothing. A sequence never rewinds; that gap is permanent and
-            # reads as data loss to whoever hits it.
+        room = req.room_name or "an unnamed room"
+        description = f"auto-upload after {req.mode or 'a match'} in {room}"
+        try:
+            row = (await db.execute(
+                # bug_number IS SUPPLIED, from a sequence of this route's own
+                # (migration 350). The column's DEFAULT is nextval() on
+                # `bug_reports_number_seq` -- the counter that names a player's
+                # ticket in #bug-reports, in admin triage and in the ops
+                # `bug-log:N` verb. Left to the default, every automatic upload
+                # would spend one of those numbers and retention would then delete
+                # the row that held it, so a player filing a report a month later
+                # is told they are #1,247 with ~900 numbers behind them naming
+                # nothing. A sequence never rewinds; that gap is permanent and
+                # reads as data loss to whoever hits it.
+                #
+                # `bug_reports_auto_number_seq` descends from -1, so an automatic
+                # row's number cannot collide with a human one (the unique index
+                # is satisfied) and cannot consume one. The CHECK added by 350
+                # makes it a property of the schema rather than of this statement.
+                text("""INSERT INTO bug_reports
+                            (id, player_id, steam_id, display_name, mod_version, game_version,
+                             severity, category, kind, description, repro_steps,
+                             log_filename, log_bytes, status, bug_number)
+                        VALUES
+                            (CAST(:id AS uuid), CAST(:pid AS uuid), :sid, :name, :mv, :gv,
+                             'low', 'other', 'auto', :descr, :repro,
+                             :fname, :fbytes, 'open',
+                             nextval('bug_reports_auto_number_seq'))
+                     RETURNING bug_number"""),
+                {
+                    "id": str(report_id),
+                    "pid": str(player_row["id"]) if player_row else None,
+                    "sid": req.steam_id,
+                    "name": req.display_name,
+                    "mv": req.mod_version,
+                    "gv": req.game_version,
+                    "descr": description,
+                    "repro": _context_block(req),
+                    "fname": path.name,
+                    "fbytes": len(data),
+                },
+            )).mappings().first()
+        except Exception as ex:
+            # The INSERT raised, so there is DEFINITIVELY no row and the only thing
+            # that could ever find this blob again does not exist. Remove it, blob
+            # first and marker second. The rollback is explicit because under
+            # asyncpg a caught statement error leaves the whole transaction
+            # ABORTED, and the next statement on this session -- the opportunistic
+            # prune, or anything a later dependency runs -- would raise on that and
+            # not on its own fault.
             #
-            # `bug_reports_auto_number_seq` descends from -1, so an automatic
-            # row's number cannot collide with a human one (the unique index
-            # is satisfied) and cannot consume one. The CHECK added by 350
-            # makes it a property of the schema rather than of this statement.
-            text("""INSERT INTO bug_reports
-                        (id, player_id, steam_id, display_name, mod_version, game_version,
-                         severity, category, kind, description, repro_steps,
-                         log_filename, log_bytes, status, bug_number)
-                    VALUES
-                        (CAST(:id AS uuid), CAST(:pid AS uuid), :sid, :name, :mv, :gv,
-                         'low', 'other', 'auto', :descr, :repro,
-                         :fname, :fbytes, 'open',
-                         nextval('bug_reports_auto_number_seq'))
-                 RETURNING bug_number"""),
-            {
-                "id": str(report_id),
-                "pid": str(player_row["id"]) if player_row else None,
-                "sid": req.steam_id,
-                "name": req.display_name,
-                "mv": req.mod_version,
-                "gv": req.game_version,
-                "descr": description,
-                "repro": _context_block(req),
-                "fname": path.name,
-                "fbytes": len(data),
-            },
-        )).mappings().first()
-    except Exception as ex:
-        # The INSERT raised, so there is DEFINITIVELY no row and the only thing
-        # that could ever find this blob again does not exist. Remove it. The
-        # rollback is explicit because under asyncpg a caught statement error
-        # leaves the whole transaction ABORTED, and the next statement on this
-        # session -- the opportunistic prune, or anything a later dependency
-        # runs -- would raise on that and not on its own fault.
-        _discard_blob(path)
+            # AND THE RECORD SAYS WHICH OF THE TWO OUTCOMES HAPPENED. An unlink
+            # that raises leaves an unreferenced blob on the volume; a line saying
+            # "blob discarded" over that state is a false cleanup record, and the
+            # file it describes is one nobody goes looking for. So the marker is
+            # KEPT in that case and the line says the blob SURVIVES and names it
+            # for the sweep, which is the mechanism that collects it.
+            discarded = _release_marked_blob(own)
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            # ONE print statement, two outcomes. The branch is on the MESSAGE
+            # and not on the printing, because this module's own suite reads
+            # refusal paths structurally and a refusal whose only print sits
+            # inside a conditional reads as a silent one (#438/#443).
+            outcome = ("blob discarded" if discarded else
+                       f"the blob could NOT be removed and SURVIVES as "
+                       f"{path.name} -- {_ORPHAN_MARKER}={path.name}, kept for "
+                       f"the retention loop's orphan sweep")
+            print(f"[AUTO-LOG] insert failed for {report_id}: "
+                  f"{type(ex).__name__}; {outcome}")
+            raise HTTPException(status_code=503, detail="log storage unavailable")
+
         try:
-            await db.rollback()
-        except Exception:
-            pass
-        print(f"[AUTO-LOG] insert failed for {report_id}: "
-              f"{type(ex).__name__}; blob discarded")
-        raise HTTPException(status_code=503, detail="log storage unavailable")
+            await db.commit()
+        except Exception as ex:
+            # INDETERMINATE -- see FAILURE DIRECTION at the top. The blob STAYS,
+            # AND SO DOES ITS MARKER. This is the one arm that deliberately leaves
+            # an artifact behind: the row may have committed and the
+            # acknowledgement been lost, and deleting the file then destroys the
+            # only copy of a log a live row promises.
+            #
+            # The marker is what makes that safe rather than merely cheap. It was
+            # stamped before the bytes existed and it is left in place here, so the
+            # sweep has the file in its population either way: if the commit did
+            # land a row names the blob and the sweep CLEARS the marker, keeping
+            # the file for ever; if it did not, the file and its marker are
+            # collected once past the age gate. Nothing has to be remembered by
+            # anybody.
+            #
+            # THE MUTATION THIS ARM IS HELD BY -- and it is a mutation of code
+            # that EXISTS, not an instruction to add a cleanup this arm must
+            # never have -- is deleting the `_MARKERS_IN_FLIGHT.discard` below.
+            # That set means "a live request owns this marker" and the sweep
+            # skips every name in it, so a name held after its request has
+            # finished makes the marker permanent and the blob uncollectable for
+            # the life of the process. The suite's control removes that line and
+            # watches the sweep pass over a blob it should have taken.
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            _MARKERS_IN_FLIGHT.discard(path.name)
+            print(f"[AUTO-LOG] commit INDETERMINATE for {report_id}: "
+                  f"{type(ex).__name__}; blob KEPT as {path.name} -- a row may or "
+                  f"may not exist for it; {_ORPHAN_MARKER}={path.name}, collected "
+                  f"by the retention loop's orphan sweep if no row names it")
+            raise HTTPException(status_code=503, detail="log storage unavailable")
 
-    try:
-        await db.commit()
-    except Exception as ex:
-        # INDETERMINATE -- see FAILURE DIRECTION at the top. The blob STAYS.
-        # This is the one arm that deliberately leaves an artifact behind, and
-        # removing the `_discard_blob` call from it is the mutation that turns
-        # a lost acknowledgement into a destroyed log.
-        #
-        # AND IT IS THE ONE ARM THAT CAN STILL PRODUCE AN UNREFERENCED BLOB, so
-        # it names it. `_ORPHAN_MARKER` is the token `prune_orphan_blobs` uses
-        # for the same file, so the line an operator greps for and the line the
-        # sweep prints when it removes it are the same word. If the commit did
-        # land, a row names the file and the sweep leaves it alone for ever; if
-        # it did not, the file is collected one retention tick later and
-        # nothing has to be remembered by anybody. A kept artifact with no
-        # collector is how a shared volume fills, which is why the recovery
-        # identifier and the sweep are one change and neither works alone.
-        try:
-            await db.rollback()
-        except Exception:
-            pass
-        print(f"[AUTO-LOG] commit INDETERMINATE for {report_id}: "
-              f"{type(ex).__name__}; blob KEPT as {path.name} -- a row may or "
-              f"may not exist for it; {_ORPHAN_MARKER}={path.name}, collected "
-              f"by the retention loop's orphan sweep if no row names it")
-        raise HTTPException(status_code=503, detail="log storage unavailable")
+        # THE ROW IS COMMITTED, so the blob is referenced and the marker has done
+        # its job. Clearing it is the ONLY way a marker is dropped while its blob
+        # stays, and it is allowed to fail: the sweep's second disposition asks the
+        # database, is told a row names the blob, and clears it then.
+        _clear_marker(own)
 
-    bug_number = (row or {}).get("bug_number") or 0
-    print(f"[AUTO-LOG] #{bug_number} ({report_id}) steam={req.steam_id} "
-          f"mode={req.mode or '-'} raw_chars={len(log_blob)} stored_bytes={len(data)} "
-          f"scrub os_user={counts.get('os_user', 0)} discord_id={counts.get('discord_id', 0)}")
+        bug_number = (row or {}).get("bug_number") or 0
+        print(f"[AUTO-LOG] #{bug_number} ({report_id}) steam={req.steam_id} "
+              f"mode={req.mode or '-'} raw_chars={len(log_blob)} stored_bytes={len(data)} "
+              f"scrub os_user={counts.get('os_user', 0)} discord_id={counts.get('discord_id', 0)}")
 
-    await _maybe_prune(db)
+        await _maybe_prune(db)
 
-    return {
-        "status": "received",
-        "id": str(report_id),
-        "bug_number": bug_number,
-        "log_persisted": True,
-        "log_bytes": len(data),
-        "scrubbed": {"os_user": counts.get("os_user", 0),
-                     "discord_id": counts.get("discord_id", 0)},
-    }
+        return {
+            "status": "received",
+            "id": str(report_id),
+            "bug_number": bug_number,
+            "log_persisted": True,
+            "log_bytes": len(data),
+            "scrubbed": {"os_user": counts.get("os_user", 0),
+                         "discord_id": counts.get("discord_id", 0)},
+        }
+    finally:
+        _MARKERS_IN_FLIGHT.discard(path.name)
 
 
 def _hold(row_id: str, clock: float) -> None:
@@ -1273,140 +1598,159 @@ async def prune_auto_logs(db: AsyncSession, *, days: int = AUTO_LOG_RETENTION_DA
             "due": len(due), "held": len(_PRUNE_HELD)}
 
 
-def _stale_blob_names(base, cutoff: float, scan_max: int) -> tuple[list[str], int, bool]:
-    """The OLDEST aged files under `base`, plus how many aged files there are.
+def _marker_candidates(base, cutoff: float, live: set) -> tuple[list[str], int, int, int]:
+    """The blobs this pass may act on, OLDEST MARKER FIRST.
 
-    Returns `(names_oldest_first, aged_total, truncated)`. A file is "aged"
-    when it was last modified before `cutoff`.
+    Returns `(blob_names_oldest_first, markers_total, owned_by_a_live_upload,
+    younger_than_the_gate)`.
 
-    ORDERED BY mtime, AND THAT IS NOT COSMETIC. This used to stop at the first
-    `limit` entries `os.scandir` happened to yield and return them unordered.
-    Directory order is a property of the NAME SET rather than of the files'
-    history: it is not age-ordered, and nothing promises it rotates. So a pass
-    that filled its budget with referenced files -- which this sweep keeps, by
-    design -- had no mechanism by which a file beyond that budget would ever
-    be examined, on a directory that also holds every player-filed attachment
-    (nothing in this tree deletes a referenced one). Taking the OLDEST first
-    makes each pass examine the files a collector should look at first, and
-    makes what it leaves behind a backlog rather than a blind spot.
+    THE POPULATION IS THE MARKER SET AND NEVER THE DIRECTORY. This used to
+    enumerate every file under `base`, keep the oldest `_ORPHAN_SCAN_MAX` aged
+    ones in a heap and offer those to the database. That directory is the
+    attachment heap: it holds every player-filed bug-report attachment
+    permanently, and nothing in this tree deletes a referenced one. So the
+    examination budget was spent on files the pass is REQUIRED to keep, and
+    past that many older referenced attachments a newer orphan was never
+    offered to the database at all -- a starvation class rather than a corner
+    case. A cap over the heap cannot be fixed by raising it, so the heap
+    stopped being the population (#310).
 
-    `scan_max` bounds what one pass holds in memory, through a heap rather
-    than an early `break`, so the ceiling costs the NEWEST candidates and
-    never the oldest. `aged_total` is counted past the ceiling, so the caller
-    can say a listing was truncated instead of reporting it as complete
-    (#304).
+    A blob carries a marker only between the instant before its bytes exist
+    and the instant its row commits, so a referenced file does not appear here
+    at all and there is nothing to cap. Every marker this returns is one the
+    pass then CONSUMES -- cleared over a committed row, or taken with its
+    blob -- which is what makes a full enumeration finite in the way a heap
+    walk never was.
 
-    On the worker thread, because it is a directory walk plus one `stat` per
-    entry and the corpus is thousands of files on a contended volume.
+    TWO EXCLUSIONS, and they are different questions:
 
-    A name whose `stat` raises is SKIPPED rather than reported: the only thing
-    this pass does with a name is delete the file, and a file that will not
+    * `live` is the set of markers a request in THIS process still owns. Those
+      are skipped whatever their age, because the answer to "is somebody still
+      writing this" is one this process knows exactly rather than infers.
+    * `cutoff` excludes a marker younger than the age gate. That covers the
+      case the set cannot see -- a marker left by a process life that has
+      ended -- and it is derived from the handler's own deadline, so a stalled
+      write cannot outlive it.
+
+    On the worker thread: a directory scan plus one `stat` per marker, on a
+    volume that may be contended.
+
+    A marker whose `stat` raises is SKIPPED rather than reported: the only
+    thing this pass does with it is act on its blob, and a name that will not
     answer about its own age is not one to act on. Nothing is lost -- the next
     tick asks again.
     """
-    # A max-heap on mtime: push, then drop the newest whenever the heap is
-    # over the ceiling, which leaves the `scan_max` OLDEST entries.
-    heap: list[tuple[float, str]] = []
-    aged_total = 0
+    aged: list[tuple[float, str]] = []
+    markers_total = 0
+    owned = 0
+    young = 0
     try:
         entries = os.scandir(str(base))
     except OSError:
-        return [], 0, False
+        return [], 0, 0, 0
     with entries:
         for e in entries:
+            if not e.name.endswith(_ORPHAN_MARKER_SUFFIX):
+                continue
             try:
                 if not e.is_file():
                     continue
                 mtime = e.stat().st_mtime
             except OSError:
                 continue
+            markers_total += 1
+            blob = e.name[:-len(_ORPHAN_MARKER_SUFFIX)]
+            if blob in live:
+                owned += 1
+                continue
             if mtime >= cutoff:
+                young += 1
                 continue
-            aged_total += 1
-            if scan_max <= 0:
-                continue
-            heapq.heappush(heap, (-mtime, e.name))
-            if len(heap) > scan_max:
-                heapq.heappop(heap)
-    names = [name for _, name in sorted((-key, name) for key, name in heap)]
-    return names, aged_total, aged_total > len(names)
+            aged.append((mtime, blob))
+    aged.sort()
+    return [name for _, name in aged], markers_total, owned, young
 
 
 async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None,
                              limit: int = _ORPHAN_BATCH) -> dict:
-    """Remove blobs that no `bug_reports` row names, once they are old enough
-    that no row ever will.
+    """Resolve every orphan-candidate MARKER: clear it over a committed row,
+    or take its blob once the database refuses to name it.
 
-    WHY THIS EXISTS. `upload_auto_log` has exactly one arm that leaves a file
-    behind it cannot account for: a commit whose outcome is UNKNOWN. That arm
-    keeps the blob on purpose -- destroying a log because an acknowledgement
-    was lost is the worse error -- and it prints `<marker>=<name>`. This is the
-    other half of that decision. Without it the kept file is permanent, and the
-    volume it is permanent on is shared with player-filed attachments.
+    WHY THIS EXISTS. `upload_auto_log` has one arm that leaves a file behind
+    it cannot account for: a commit whose outcome is UNKNOWN. That arm keeps
+    the blob on purpose -- destroying a log because an acknowledgement was
+    lost is the worse error -- and it leaves the marker in place. This is the
+    other half of that decision. Without it the kept file is permanent, and
+    the volume it is permanent on is shared with player-filed attachments.
 
     NOT SCOPED TO kind='auto', AND THAT IS THE SAFETY PROPERTY, NOT AN
     OVERSIGHT. `prune_auto_logs` above walks ROWS and must never touch a bug
-    report; this walks FILES, where the only thing that protects a file is a
-    row naming it -- and a player-filed report's row names its attachment
-    exactly as an automatic row does. Scoping this query to kind='auto' would
-    make every player-filed attachment look unreferenced and delete the lot. So
-    the predicate is `log_filename = ANY(...)` over the WHOLE table, and the
-    test that reds when someone adds `kind = 'auto'` to it is named after this
-    paragraph.
+    report; this decides the fate of FILES, where the only thing that protects
+    a file is a row naming it -- and a player-filed report's row names its
+    attachment exactly as an automatic row does. Scoping this lookup to
+    kind='auto' would read a marked blob that a player-filed row names as
+    unreferenced and delete it. So the predicate is `log_filename = ANY(...)`
+    over the WHOLE table, and the control that reds when someone adds
+    `kind = 'auto'` to it executes this function against a database holding
+    rows of every kind rather than asserting on the statement's text.
 
-    THREE GUARDS, each with its own failure direction (#276):
+    FOUR DISPOSITIONS, one per state a marker can be in:
 
-    * AGE. A file is a candidate only after `_ORPHAN_MIN_AGE_S`, one whole
-      retention tick. The window between writing a blob and committing its row
-      is seconds on both paths, so this is four orders of magnitude of margin
-      against deleting a file whose row is still in flight.
-    * THE TABLE MUST KNOW ABOUT THIS CORPUS AT ALL. If `bug_reports` names no
-      blob whatsoever while the directory holds candidates, this pass REFUSES
-      and says so. That reading is not "everything here is an orphan"; it is
-      "this process is talking to a database that does not own this
-      directory" -- a restored volume, a mis-set BUG_REPORT_LOG_DIR, a
-      pointed-at scratch database -- and the honest answer to it is to delete
-      nothing.
-    * BOUNDED, ON THE REMOVALS. `limit` files may be UNLINKED per pass, so a
-      mistake is bounded by the batch. Examination is bounded separately and
-      far higher (`_ORPHAN_SCAN_MAX`), because a budget spent on examination
-      is spent on the referenced files this sweep keeps and never returns:
-      see `_ORPHAN_BATCH`. Candidates are taken OLDEST FIRST, so a backlog of
-      orphans larger than one batch drains across ticks instead of the same
-      prefix being re-read for ever.
+    1. A marker a LIVE upload owns is skipped, whatever its age. The registry
+       is in-process and the retention loop runs in that same process.
+    2. A marker whose blob the table NAMES is CLEARED and the file is left
+       alone. That is the commit that landed and whose marker clear did not --
+       a crash between the two, or an unlink that raised -- and it is the
+       reason `_clear_marker` is allowed to fail.
+    3. A marker whose blob the table refuses to name, once past the age gate,
+       has its BLOB removed and then its marker. That order is what keeps a
+       crash between the two unlinks harmless.
+    4. `bug_reports` naming NO blob whatsoever, while markers exist, REFUSES
+       the whole pass. That reading is not "everything here is an orphan"; it
+       is "this process is talking to a database that does not own this
+       directory" -- a restored volume, a mis-set BUG_REPORT_LOG_DIR, a
+       pointed-at scratch database -- and the honest answer is to delete
+       nothing (#276).
 
-    Read-only on the database: the transaction the SELECT opens is ENDED with a
-    rollback, for the same reason the early returns above are (an
+    BOUNDED ON THE REMOVALS, and nowhere else. `limit` blobs may be UNLINKED
+    per pass, so a mistake is bounded by the batch; candidates are oldest
+    first, so a backlog drains across ticks. There is no examination ceiling,
+    because the population is consumed by being worked rather than re-read.
+
+    Read-only on the database: the transaction the SELECT opens is ENDED with
+    a rollback, for the same reason the early returns above are (an
     idle-in-transaction connection holds back the vacuum horizon).
     """
     from main import BUG_REPORT_LOG_DIR
 
     base = pathlib.Path(BUG_REPORT_LOG_DIR)
     cutoff = time.time() - float(_ORPHAN_MIN_AGE_S if min_age_s is None else min_age_s)
-    names, aged_total, truncated = await asyncio.to_thread(
-        _stale_blob_names, base, cutoff, _ORPHAN_SCAN_MAX)
+    # A COPY, taken before the scan. The set is mutated by handlers between
+    # awaits, and a membership test against a moving set is a different
+    # question at the top of the loop than at the bottom.
+    live = set(_MARKERS_IN_FLIGHT)
+    names, markers_total, owned, young = await asyncio.to_thread(
+        _marker_candidates, base, cutoff, live)
     if not names:
-        return {"candidates": 0, "aged": aged_total, "orphans": 0, "unlinked": 0,
-                "deferred": 0, "truncated": truncated, "refused": False}
+        return {"candidates": 0, "markers": markers_total, "in_flight": owned,
+                "young": young, "orphans": 0, "unlinked": 0, "cleared": 0,
+                "deferred": 0, "refused": False}
 
     named_total = (await db.execute(
         text("SELECT COUNT(*) AS n FROM bug_reports WHERE log_filename IS NOT NULL")
     )).mappings().first()
     if not (named_total or {}).get("n"):
         await db.rollback()
-        print(f"[AUTO-LOG] orphan sweep REFUSED: {len(names)} aged file(s) under "
+        print(f"[AUTO-LOG] orphan sweep REFUSED: {len(names)} marked file(s) under "
               f"{base}, and bug_reports names no blob at all. That reads as a "
               f"database which does not own this directory, not as a directory "
               f"full of orphans -- nothing removed")
-        return {"candidates": len(names), "aged": aged_total, "orphans": 0,
-                "unlinked": 0, "deferred": 0, "truncated": truncated,
-                "refused": True}
+        return {"candidates": len(names), "markers": markers_total,
+                "in_flight": owned, "young": young, "orphans": 0,
+                "unlinked": 0, "cleared": 0, "deferred": 0, "refused": True}
 
-    # CHUNKED, and the predicate is the same one in every chunk. The examined
-    # set is up to `_ORPHAN_SCAN_MAX` names; asking for all of them in one
-    # bound array is a statement nobody wants in a log and nothing is gained
-    # by it. A name absent from its own chunk's answer is unreferenced --
-    # union, never intersect.
+    # CHUNKED, and the predicate is the same one in every chunk. A name absent
+    # from its own chunk's answer is unreferenced -- union, never intersect.
     known: set[str] = set()
     for start in range(0, len(names), _ORPHAN_NAME_CHUNK):
         chunk = names[start:start + _ORPHAN_NAME_CHUNK]
@@ -1417,45 +1761,56 @@ async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None
         )).mappings().all()}
     await db.rollback()
 
-    # `names` is oldest-first, so `orphans` is too and the slice below takes
-    # the oldest unreferenced files rather than whichever the filesystem
+    # DISPOSITION 2 FIRST, because it is the one that removes nothing. A
+    # marker over a blob the table names is a commit that landed; the file is
+    # referenced and must never be touched.
+    cleared = 0
+    for name in (n for n in names if n in known):
+        if _unlink_if_present(base / (name + _ORPHAN_MARKER_SUFFIX)):
+            cleared += 1
+            print(f"[AUTO-LOG] orphan sweep: cleared {_ORPHAN_MARKER}={name} -- "
+                  f"a bug_reports row names it, so the commit landed and the "
+                  f"blob stays")
+
+    # `names` is oldest-first, so `all_orphans` is too and the slice below
+    # takes the oldest unreferenced blobs rather than whichever the filesystem
     # listed first. That ordering is what makes the deferred remainder a
-    # BACKLOG -- the files taken here are gone by the next tick -- instead of
-    # a set that keeps being skipped.
+    # BACKLOG -- the files taken here are gone by the next tick -- instead of a
+    # set that keeps being skipped.
     all_orphans = [n for n in names if n not in known]
     orphans = all_orphans[:int(limit)]
     deferred = len(all_orphans) - len(orphans)
     unlinked = 0
     for name in orphans:
-        try:
-            (base / name).unlink()
-        except FileNotFoundError:
-            # Someone else got there first. Not an error -- the file is gone,
-            # which is the outcome this pass wanted.
-            unlinked += 1
-            continue
-        except OSError as ex:
+        # THE BLOB FIRST, THEN ITS MARKER. A crash between the two leaves a
+        # marker whose blob is absent, which the next pass clears at no cost;
+        # the other order would leave an unreferenced blob with nothing naming
+        # it, which is the state this whole mechanism exists to make
+        # unreachable.
+        if not _unlink_if_present(base / name):
             print(f"[AUTO-LOG] orphan sweep: {_ORPHAN_MARKER}={name} could not "
-                  f"be removed ({type(ex).__name__}); the next tick retries it")
+                  f"be removed; its marker is kept and the next tick retries it")
             continue
         unlinked += 1
+        _unlink_if_present(base / (name + _ORPHAN_MARKER_SUFFIX))
         print(f"[AUTO-LOG] orphan sweep: removed {_ORPHAN_MARKER}={name} -- "
-              f"older than {int(_ORPHAN_MIN_AGE_S)}s and no bug_reports row "
-              f"names it")
+              f"marked, older than {int(_ORPHAN_MIN_AGE_S)}s and no "
+              f"bug_reports row names it")
 
-    # The line says EXAMINED and AGED separately, and says when the two
-    # differ. "200 examined, 0 unreferenced" read as a clean directory is
-    # exactly the reading that let the old prefix-bounded pass report an hour
-    # of nothing while the leak grew (#304).
-    print(f"[AUTO-LOG] orphan sweep: {len(names)} aged file(s) examined of "
-          f"{aged_total} aged"
-          + (" (LISTING TRUNCATED at the scan ceiling; the oldest were taken)"
-             if truncated else "")
-          + f", {len(all_orphans)} unreferenced, {unlinked} removed, "
-          + f"{deferred} left for the next tick")
-    return {"candidates": len(names), "aged": aged_total,
-            "orphans": len(all_orphans), "unlinked": unlinked,
-            "deferred": deferred, "truncated": truncated, "refused": False}
+    # The line separates the four dispositions, because "0 unreferenced" over
+    # a population nobody can size is exactly the reading that let the old
+    # heap-bounded pass report an hour of nothing while the leak grew (#304).
+    print(f"[AUTO-LOG] orphan sweep: {markers_total} marker(s) on the volume, "
+          f"{owned} owned by a live upload, {young} younger than the "
+          f"{int(_ORPHAN_MIN_AGE_S if min_age_s is None else min_age_s)}s gate, "
+          f"{len(names)} offered to the database, {cleared} cleared over a "
+          f"committed row, {len(all_orphans)} unreferenced, {unlinked} removed, "
+          f"{deferred} left for the next tick")
+    return {"candidates": len(names), "markers": markers_total,
+            "in_flight": owned, "young": young, "orphans": len(all_orphans),
+            "unlinked": unlinked, "cleared": cleared, "deferred": deferred,
+            "refused": False}
+
 
 
 async def _maybe_prune(db: AsyncSession) -> None:
