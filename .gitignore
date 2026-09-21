@@ -27,6 +27,14 @@ thunderstore/SidsCompetitiveRounds_upload/plugins/music/
 # Log captures and one-off drops
 logs-snapshot/
 *.log
+# ...except the committed test evidence. Each report under this directory names
+# the stdout it was assembled from, in a `stdout:` header, and is rebuilt from
+# those bytes by assemble-evidence.py. A report naming a log the repository does
+# not carry is exactly the defect that rule exists to stop: a number nobody on a
+# fresh clone can re-derive (#302). These captures are produced by the committed
+# instruments beside them, print repository-relative paths only, and carry no
+# connection string.
+!backend/tests/evidence/*.log
 
 # Tool caches
 .vs/

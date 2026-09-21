@@ -58,7 +58,11 @@ TESTS = os.path.join(BACKEND, "tests", "test_ffa_game_number_anchor.py")
 # Shipped by the same deploy as the api (docs/deploy-reference.md maps it to
 # the primary), and outside every glob round 8's shipped-file rule read.
 DOCKERFILE_BOT = os.path.join(BACKEND, "Dockerfile.bot")
-SUITES = os.path.join(HERE, "r9-suites.txt")
+# The suites report of the round this runner is being run FOR. Two
+# controls mutate it -- the citation rule and the assembler's -- so it
+# has to exist before the runner starts, which is why the suite pair
+# runs first and the runner after it.
+SUITES = os.path.join(HERE, "r10-suites.txt")
 DSN = os.environ.get("FFA_TEST_PG_DSN")
 
 # name -> (file, anchor, mutant, inert, test)
@@ -280,10 +284,10 @@ CONTROLS = [
 
     # A refusal raised after a capture answers from the copy read before it.
     ("refusal-after-capture-reuses-stale-progress", MAIN,
-     '    fresh = await _ffa_progress_relocked(db, lobby_uuid, progress)\n',
+     '    fresh = await _ffa_progress_relocked(db, lobby_uuid)\n',
      '    fresh = dict(progress or {})\n',
      '    # (inert: a comment at the same site)\n'
-     '    fresh = await _ffa_progress_relocked(db, lobby_uuid, progress)\n',
+     '    fresh = await _ffa_progress_relocked(db, lobby_uuid)\n',
      "test_pg_a_refusal_raised_after_a_capture_reads_the_lobby_again"),
 
     # The number every refusal advertises stops being the one that settles, so
@@ -415,6 +419,126 @@ CONTROLS = [
      '              f"correction is issued in this request\'s transaction and stands "\n'
      '              f"only if that request commits")\n',
      "test_pg_a_catch_up_on_a_refusing_path_logs_a_claim_its_transaction_can_keep"),
+    # ── round 10 ─────────────────────────────────────────────────────────
+    # The r6 MEDIUM, at the site the method changed. A capture ends this
+    # request's transaction, so the counters the caller still holds predate
+    # it; when the fresh read cannot be made the answer is now a 503 carrying
+    # NO progress fields. This mutant puts the caller's copy back -- literally
+    # the restoration of the pre-capture snapshot -- by catching the refusal
+    # here, which is the only place the copy is still in scope.
+    ("capture-refusal-restores-the-snapshot", MAIN,
+     '    fresh = await _ffa_progress_relocked(db, lobby_uuid)\n',
+     '    try:\n'
+     '        fresh = await _ffa_progress_relocked(db, lobby_uuid)\n'
+     '    except FfaReportRefusal:\n'
+     '        fresh = dict(progress or {})\n',
+     '    # (inert: a comment at the same site)\n'
+     '    fresh = await _ffa_progress_relocked(db, lobby_uuid)\n',
+     "test_a_refusal_whose_lobby_cannot_be_read_carries_no_progress_at_all"),
+
+    # Both exhausted arms of the re-read, one control each, because they are
+    # two reachable states and a control on one says nothing about the other.
+    # The mutant is the invention the old docstring named and refused --
+    # answering `games_played = 0` rather than admitting there was nothing to
+    # read.
+    ("double-failure-invents-a-progress", MAIN,
+     '            print(f"[FFA-REPORT] could not re-read lobby {lobby_uuid} progress "\n'
+     '                  f"after a rollback, twice; answering 503 with no progress "\n'
+     '                  f"fields: {_relock_ex} / then {_retry_ex}")\n'
+     '            raise FfaReportRefusal(\n'
+     '                503, "Could not read this lobby\'s progress - retry this "\n'
+     '                     "report unchanged", {})\n',
+     '            print(f"[FFA-REPORT] could not re-read lobby {lobby_uuid} progress "\n'
+     '                  f"after a rollback, twice; answering 503 with no progress "\n'
+     '                  f"fields: {_relock_ex} / then {_retry_ex}")\n'
+     '            return _ffa_progress(0)\n',
+     '            # (inert: a comment at the same site)\n'
+     '            print(f"[FFA-REPORT] could not re-read lobby {lobby_uuid} progress "\n'
+     '                  f"after a rollback, twice; answering 503 with no progress "\n'
+     '                  f"fields: {_relock_ex} / then {_retry_ex}")\n'
+     '            raise FfaReportRefusal(\n'
+     '                503, "Could not read this lobby\'s progress - retry this "\n'
+     '                     "report unchanged", {})\n',
+     "test_pg_an_exhausted_progress_read_answers_503_with_no_progress_fields"),
+
+    ("vanished-lobby-invents-a-progress", MAIN,
+     '    if _lobby is None:\n'
+     '        print(f"[FFA-REPORT] lobby {lobby_uuid} has no row left to read progress "\n'
+     '              f"from; answering 503 with no progress fields")\n'
+     '        raise FfaReportRefusal(\n'
+     '            503, "This lobby\'s progress is unavailable - retry this report "\n'
+     '                 "unchanged", {})\n',
+     '    if _lobby is None:\n'
+     '        return _ffa_progress(0)\n',
+     '    if _lobby is None:\n'
+     '        # (inert: a comment at the same site)\n'
+     '        print(f"[FFA-REPORT] lobby {lobby_uuid} has no row left to read progress "\n'
+     '              f"from; answering 503 with no progress fields")\n'
+     '        raise FfaReportRefusal(\n'
+     '            503, "This lobby\'s progress is unavailable - retry this report "\n'
+     '                 "unchanged", {})\n',
+     "test_pg_an_exhausted_progress_read_answers_503_with_no_progress_fields"),
+
+    # The server is the sole allocator of the game number, so the join-time
+    # payload advertises the number it accepts NEXT rather than leaving the
+    # seat to add one to the settled count. The mutant is the shape that was
+    # there for five rounds: the settled count alone.
+    ("join-payload-omits-the-advertised-number", MAIN,
+     '        **_ffa_progress(int(lobby["games_played"] or 0)),\n',
+     '        "games_played": int(lobby["games_played"] or 0),\n',
+     '        # (inert: a comment at the same site)\n'
+     '        **_ffa_progress(int(lobby["games_played"] or 0)),\n',
+     "test_the_lobby_state_advertises_the_sittings_settled_count"),
+
+    # ...and the acceptance names the game it settled, so a client never has
+    # to infer "settled" from the absence of a refusal. The inert twin is the
+    # call REFLOWED, which is the negative control that matters here: the
+    # assertion is whitespace-flattened precisely so it measures the call and
+    # not the line's shape (#441).
+    ("acceptance-does-not-name-its-settled-game", MAIN,
+     '        **_ffa_progress(_game_number, settled_game=_game_number))\n',
+     '        **_ffa_progress(_game_number))\n',
+     '        **_ffa_progress(_game_number,\n'
+     '                        settled_game=_game_number))\n',
+     "test_every_report_answer_carries_the_lobbys_progress"),
+
+    # Two controls on the EVIDENCE, because the two rules added this round are
+    # about the evidence. The first drops one half's command line, so a
+    # results block is left with no record of what produced it; its inert twin
+    # is the same line with a space added, which is still a command line.
+    ("evidence-results-without-an-invocation", SUITES,
+     "command   env -u FFA_TEST_PG_DSN FFA_TEST_PG_OPTOUT=1 python -m pytest tests/ -q -p no:cacheprovider\n",
+     "the command for this half is not recorded\n",
+     "command   env -u FFA_TEST_PG_DSN  FFA_TEST_PG_OPTOUT=1 python -m pytest tests/ -q -p no:cacheprovider\n",
+     "test_the_committed_evidence_re_derives_its_own_numbers"),
+
+    # ...and the second puts a number into the report's prose that its run
+    # never printed, which is the round-9 finding itself. The number is one no
+    # run here can produce, so this control cannot be satisfied by coincidence.
+    ("suites-report-carries-an-underived-number", SUITES,
+     "the fence's verdict over the paths listed at the top",
+     "the fence's verdict over the 777 paths listed at the top",
+     "the fence's own verdict over the paths listed at the top",
+     "test_the_committed_evidence_is_assembled_from_its_run_stdout"),
+
+    # H1, at the site that decides what a behind seat is told. The server is
+    # the sole allocator, so an answer has to name the number it accepts NEXT
+    # and a settled number is by definition not that. The mutant makes the
+    # answer advertise the number it has just reported as settled: a seat
+    # deriving its key from the last advertisement then keys every later
+    # report at a number that is already taken, is refused for the same reason
+    # every time, and never files again. The inert twin is a comment at the
+    # same site, so what reds is the assignment and not the edit.
+    ("refusal-advertises-the-number-it-just-settled", MAIN,
+     '    if gno is not None and named is not None and int(gno) == int(named):\n'
+     '        out["settled_game"] = int(gno)\n',
+     '    if gno is not None and named is not None and int(gno) == int(named):\n'
+     '        out["settled_game"] = int(gno)\n'
+     '        out["expected_game"] = int(gno)\n',
+     '    if gno is not None and named is not None and int(gno) == int(named):\n'
+     '        # (inert: a comment at the same site)\n'
+     '        out["settled_game"] = int(gno)\n',
+     "test_pg_a_seat_that_missed_an_update_recovers_in_one_submission"),
 ]
 
 

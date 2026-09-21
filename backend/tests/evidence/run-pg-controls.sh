@@ -63,6 +63,13 @@ sanitize() {
 
 echo "------------------------------------------------------------------------------"
 echo "== RUN 1, against a database that already held the previous run's tables =="
+# ROUND 10: the invocation is printed again HERE, immediately above the run
+# it names, and not only once in the header. The evidence check requires
+# every results line to have an invocation as the nearest substantive line
+# above it, because a header shared by two runs is a command line whose
+# scope the reader has to guess -- and a third run appended later would
+# have inherited it silently.
+echo 'command   FFA_TEST_PG_DSN=... python -m pytest tests/test_ffa_game_number_anchor.py -v -p no:cacheprovider -k "<the selection printed above>"'
 FFA_TEST_PG_DSN="${DSN}" python -m pytest tests/test_ffa_game_number_anchor.py \
     -v -p no:cacheprovider -k "${SELECT_K}" 2>&1 | sanitize
 # The rc is pytest's, taken from PIPESTATUS: `$?` after a pipeline is sed's,
@@ -72,6 +79,7 @@ echo "run 1 rc=${PIPESTATUS[0]}"
 echo ""
 echo "------------------------------------------------------------------------------"
 echo "== RUN 2, the SAME selection against the SAME database, back to back =="
+echo 'command   FFA_TEST_PG_DSN=... python -m pytest tests/test_ffa_game_number_anchor.py -v -p no:cacheprovider -k "<the selection printed above>"'
 FFA_TEST_PG_DSN="${DSN}" python -m pytest tests/test_ffa_game_number_anchor.py \
     -v -p no:cacheprovider -k "${SELECT_K}" 2>&1 | sanitize
 echo "run 2 rc=${PIPESTATUS[0]}"

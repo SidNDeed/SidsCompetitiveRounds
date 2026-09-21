@@ -10,7 +10,9 @@
 #
 # COMMITTED beside the report it produces, and it takes everything from its
 # own location or from the environment, so a reader on a fresh clone can
-# re-derive the numbers in r9-suites.txt:
+# re-derive the numbers in this round's suites report. Its OWN stdout is
+# what that report is assembled from (assemble-evidence.py), so the caller
+# captures this script's output to a file and commits it beside the report:
 #
 #   FFA_TEST_PG_DSN=postgresql+asyncpg://<user>@<host>:<port>/<scratch-db> \
 #     bash backend/tests/evidence/run-both-suites.sh
@@ -37,6 +39,11 @@ set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND="$(cd "${HERE}/../.." && pwd)"
 OUT="${SUITE_OUT:-${TMPDIR:-/tmp}}"
+# The per-half pytest logs are named for the round that runs them, and the
+# round is an INPUT rather than a literal here: a tag baked into the script
+# is a thing to remember to bump, and a forgotten one makes this round's
+# report name last round's capture.
+TAG="${SUITE_TAG:-r10}"
 DSN="${FFA_TEST_PG_DSN:-}"
 
 if [ -z "${DSN}" ]; then
@@ -93,20 +100,24 @@ echo "=== opt-out started $(date -u +%H:%M:%S) ==="
 echo 'command   env -u FFA_TEST_PG_DSN FFA_TEST_PG_OPTOUT=1 python -m pytest tests/ -q -p no:cacheprovider'
 env -u FFA_TEST_PG_DSN FFA_TEST_PG_OPTOUT=1 \
     python -m pytest tests/ -q -p no:cacheprovider \
-    > "${OUT}/r9-suite-optout.log" 2>&1
+    > "${OUT}/${TAG}-suite-optout.log" 2>&1
 echo "opt-out rc=$?"
-tail -2 "${OUT}/r9-suite-optout.log"
+tail -2 "${OUT}/${TAG}-suite-optout.log"
 # The skip count in that line IS the check: an opt-out run that skipped as few
 # as the live run did is a live run, whatever the flag said.
 
 echo "=== live DSN started $(date -u +%H:%M:%S) ==="
 echo 'command   FFA_TEST_PG_DSN=postgresql+asyncpg://<user>@<host>:<port>/<db> python -m pytest tests/ -q -p no:cacheprovider'
 FFA_TEST_PG_DSN="${DSN}" python -m pytest tests/ -q -p no:cacheprovider \
-    > "${OUT}/r9-suite-dsn.log" 2>&1
+    > "${OUT}/${TAG}-suite-dsn.log" 2>&1
 echo "dsn rc=$?"
-tail -2 "${OUT}/r9-suite-dsn.log"
+tail -2 "${OUT}/${TAG}-suite-dsn.log"
 
 echo "=== tree re-fingerprinted $(date -u +%H:%M:%S) ==="
+# The invocation again, immediately above the verdict it produces:
+# the evidence check requires every results line to name the command
+# that produced it, and the closing UNCHANGED/MOVED line is a result.
+echo "command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>"
 AFTER="$(fingerprint)"
 AFTER_COUNT="$(printf '%s\n' "${AFTER}" | grep -c . || true)"
 if [ "${BEFORE}" = "${AFTER}" ]; then

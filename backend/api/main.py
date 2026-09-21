@@ -47191,7 +47191,26 @@ async def _ffa_poll_locked_payload(db: AsyncSession, lobby_id, steam_id: str) ->
         # the gap from a refusal; it does not itself make any client do that.
         # Additive either way: a client that ignores it is exactly as correct
         # as it was.
-        "games_played": int(lobby["games_played"] or 0),
+        #
+        # BOTH counters, from the ONE derivation: `_ffa_progress` is what the
+        # report endpoint's answers are built from, so the join-time copy and
+        # the report-time copy cannot be two different pieces of arithmetic.
+        # The contract makes the server the sole allocator of the game number
+        # and forbids a seat to count one for itself, and `games_played + 1` is
+        # arithmetic -- so a seat that had to do it here would be doing exactly
+        # what the rule removes. It reads the number instead.
+        #
+        # ADVISORY, and the difference from the report path's copy is stated
+        # rather than left to be discovered: this row is read WITHOUT the lobby
+        # lock and without _ffa_lock_lobby_slot's catch-up, because this is a
+        # poll and taking the settlement's lock here would put every poller
+        # behind every settlement. So it can be BEHIND -- never ahead, since
+        # games_played only advances and the catch-up only ever raises it. A
+        # seat that names a behind number is refused once and told the current
+        # one in that refusal, which is the same one-refusal cost every other
+        # stale reading has. Naming an AHEAD number is the direction that would
+        # cost a second settlement, and this read cannot produce one.
+        **_ffa_progress(int(lobby["games_played"] or 0)),
         "players": [
             {"steam_id": m["steam_id"], "display_name": m["display_name"],
              "slot": int(m["slot"]) if m["slot"] is not None else -1}
@@ -47452,58 +47471,48 @@ def _ffa_progress(games_played: int, *, settled_game: int | None = None) -> dict
     return out
 
 
-async def _ffa_progress_relocked(db: AsyncSession, lobby_uuid, fallback: dict) -> dict:
-    """The lobby's progress, re-read under its own lock after a rollback.
+async def _ffa_progress_relocked(db: AsyncSession, lobby_uuid) -> dict:
+    """The lobby's progress, re-read under its own lock after a rollback -- or
+    a 503 that carries no progress at all.
 
     A rollback releases the lobby lock, so every number read before it is a
     snapshot of a sitting that may have moved. An answer given after one has to
-    re-read or say nothing, and saying nothing is the outcome B3 exists to
-    remove -- so this re-reads through _ffa_lock_lobby_slot (the same catch-up
-    every other answer's number comes from, never a bare SELECT of the column,
-    which would let `settled_game` name a number `expected_game` had not
-    passed).
+    re-read or say nothing, and it re-reads through _ffa_lock_lobby_slot (the
+    same catch-up every other answer's number comes from, never a bare SELECT
+    of the column, which would let `settled_game` name a number `expected_game`
+    had not passed).
 
-    IT MUST NOT ITSELF BE THE THING THAT FAILS THE ANSWER. It is called on
-    paths that are already refusing, and a re-read that raised there would
-    replace a refusal carrying the progress with a bare 500 carrying nothing
-    -- the exact outcome. So a failure falls back to the caller's pre-rollback
-    copy, which is the committed state as of the lock and can only be
-    STALE-LOW: it names a number at or below the sitting's real position, and a
-    report naming a settled number is answered terminally with the right number
-    next time. The same fallback covers a lobby row that is gone by now, where
-    _ffa_lock_lobby_slot has no row to derive from and 'games_played = 0' would
-    be an invention rather than a reading.
+    IT TRIES TWICE. The likeliest reason the first attempt failed is a
+    statement that failed earlier in this transaction: under asyncpg one failed
+    statement poisons the whole transaction (#235), and that is exactly what
+    the rollback below clears. So the handler rolls back and asks again, once.
+    That rollback is also what puts the session back in a state the caller's
+    remaining reads can run in -- on the replay arm the very next statement is
+    _ffa_replay_echo's SELECT, which over an aborted transaction would raise
+    into a bare 500. The one residue is a connection that is gone, where the
+    rollback cannot succeed either; nothing in this process can answer over
+    that, and it is a stated residue rather than a silent one.
 
-    IT TRIES TWICE BEFORE IT SETTLES FOR THE SNAPSHOT. The fallback is safe,
-    not good: stale-low means the client is refused once more and the sitting
-    loses one more game before it realigns, so an exit that CAN answer the
-    lobby should not answer a snapshot instead. The rollback below is what makes
-    a second attempt worth making -- the likeliest cause of the first failure is
-    a statement that failed earlier in this transaction, and that is exactly
-    what the rollback clears. So the handler rolls back and asks again, once. A
-    second failure over a cleared session is a connection or a lock problem
-    rather than a poisoned one, and THAT is where the fallback belongs.
+    WHEN BOTH ATTEMPTS FAIL, OR THE LOBBY HAS NO ROW, IT FAILS CLOSED. It used
+    to answer from the caller's pre-rollback copy and call that safe because it
+    could only be stale-LOW. A guard is judged by what its refusal costs, and a
+    substitute reading by what ITS answer costs (#430): the pre-rollback copy
+    is a number the server may no longer accept, and an answer carrying it
+    tells a resynchronising seat to name the one number that earns it another
+    terminal refusal -- one more game of the sitting spent, on a path that had
+    nothing to say. There is no reading of the lobby to give here, so this
+    gives none: FfaReportRefusal(503, <reason>, {}), a status the client's
+    outbox retries, with no games_played, no expected_game and no settled_game
+    anywhere in the body. The contract's rule for an answer with no progress
+    fields is RETRY THE SAME BODY LATER, never re-key -- and a body carrying no
+    advertised number cannot be mistaken for one that does.
 
-    SWALLOWING THE EXCEPTION IS NOT BY ITSELF ENOUGH TO KEEP THAT PROMISE, and
-    an earlier draft of this docstring stated it as an absolute while the code
-    could still break it. Under asyncpg one failed statement poisons the whole
-    transaction (#235), so a catch that returns the fallback and leaves the
-    transaction aborted only moves the failure one statement along: on the
-    replay arm the very next statement is _ffa_replay_echo's SELECT, which
-    would then raise and answer the bare 500 this function exists to remove.
-    The rollback below is what makes the sentence true -- it puts the session
-    back in a state the caller's remaining reads can run in. The one residue
-    left is a connection that is gone, where the rollback cannot succeed
-    either; nothing in this process can answer over that, and it is a stated
-    residue rather than a silent one.
-
-    WHAT STILL ANSWERS STALE, stated rather than claimed away: a lobby row that
-    is gone by now (there is nothing to derive from, and `games_played = 0`
-    would be an invention rather than a reading), and a re-read that fails
-    TWICE across a rollback -- a lock timeout or a deadlock hitting both
-    attempts, or a connection that is gone, over which no answer is delivered at
-    all. Both answer stale-LOW, never stale-high, so the worst they cost is one
-    more refusal with the right number on it."""
+    THE CALLER'S COPY IS NOT REACHABLE FROM HERE AT ALL, which is the point
+    rather than a tidy-up: it was a parameter of this function until round 10,
+    and while it was, every exit added here had a stale answer within one line
+    of it. The identifier does not appear in this function, and
+    test_every_progress_the_endpoint_builds_comes_from_a_locked_slot asserts
+    that it occurs zero times in this span."""
     try:
         _lobby, _expected = await _ffa_lock_lobby_slot(db, lobby_uuid)
     except Exception as _relock_ex:
@@ -47513,9 +47522,8 @@ async def _ffa_progress_relocked(db: AsyncSession, lobby_uuid, fallback: dict) -
             pass
         # ...and now ASK AGAIN, on the session the rollback just cleared. The
         # first attempt's likeliest cause is a statement that failed earlier in
-        # this transaction, which the rollback has just ended; answering from
-        # the snapshot without retrying would spend one more game of the
-        # sitting for a condition that no longer holds.
+        # this transaction, which the rollback has just ended; refusing without
+        # retrying would spend an answer on a condition that no longer holds.
         try:
             _lobby, _expected = await _ffa_lock_lobby_slot(db, lobby_uuid)
         except Exception as _retry_ex:
@@ -47524,13 +47532,19 @@ async def _ffa_progress_relocked(db: AsyncSession, lobby_uuid, fallback: dict) -
             except Exception:
                 pass
             print(f"[FFA-REPORT] could not re-read lobby {lobby_uuid} progress "
-                  f"after a rollback, twice; answering with the locked "
-                  f"snapshot: {_relock_ex} / then {_retry_ex}")
-            return dict(fallback or {})
+                  f"after a rollback, twice; answering 503 with no progress "
+                  f"fields: {_relock_ex} / then {_retry_ex}")
+            raise FfaReportRefusal(
+                503, "Could not read this lobby's progress - retry this "
+                     "report unchanged", {})
         print(f"[FFA-REPORT] lobby {lobby_uuid} progress re-read succeeded on the "
               f"second attempt, once the failed statement was cleared: {_relock_ex}")
     if _lobby is None:
-        return dict(fallback or {})
+        print(f"[FFA-REPORT] lobby {lobby_uuid} has no row left to read progress "
+              f"from; answering 503 with no progress fields")
+        raise FfaReportRefusal(
+            503, "This lobby's progress is unavailable - retry this report "
+                 "unchanged", {})
     return _ffa_progress(max(0, int(_expected) - 1))
 
 
@@ -47565,15 +47579,21 @@ async def _ffa_progress_after_capture(db: AsyncSession, lobby_uuid,
     fires, the answer keeps the two counters and says nothing about a settled
     game, which is the retryable direction and the conservative one.
 
-    A re-read that FAILS falls back to the pre-rollback copy, which is
-    stale-LOW: it names a number at or below the sitting's real position, so a
-    client acting on it is refused once more and told the right number then.
-    That is `_ffa_progress_relocked`'s own contract and this function adds
-    nothing to it."""
+    A re-read that cannot be COMPLETED answers nothing at all:
+    `_ffa_progress_relocked` raises a 503 carrying no progress fields, and it
+    propagates through here and through the caller. That is the conservative
+    direction and it is cheap where it lands -- the capture is already
+    committed by the time this runs, the client's outbox retries a 503, and the
+    retry meets the same capture (the (mode, room) idempotency answers
+    `already`) and, by then, a lobby it can read. What it removes is the answer
+    this function used to give: a number the sitting may have passed, which
+    earns the next report the very refusal this endpoint exists to stop it
+    earning. That is `_ffa_progress_relocked`'s own contract and this function
+    adds nothing to it."""
     _named_settled = None
     if isinstance(progress, dict) and progress.get("settled_game") is not None:
         _named_settled = int(progress["settled_game"])
-    fresh = await _ffa_progress_relocked(db, lobby_uuid, progress)
+    fresh = await _ffa_progress_relocked(db, lobby_uuid)
     if _named_settled is not None and "settled_game" not in fresh:
         if _named_settled < int(fresh.get("expected_game", 0)):
             fresh["settled_game"] = _named_settled
@@ -48710,7 +48730,7 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         # replay arm and answered the other arm with a bare 500, which is an
         # answer below the lobby lock carrying none of the progress this
         # endpoint promises (_ffa_progress).
-        _race_progress = await _ffa_progress_relocked(db, lobby_uuid, _progress)
+        _race_progress = await _ffa_progress_relocked(db, lobby_uuid)
         # Only the room-id unique means "replay" — any OTHER integrity error
         # (FK violation etc.) is a real failure, not a duplicate (Codex design
         # find 11: a catch-all here would misreport broken inserts as success).
@@ -48760,7 +48780,7 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         # connection mid-statement, a statement timeout) takes the same answer
         # for the same reason — the transaction is rolled back either way.
         await db.rollback()
-        _fail_progress = await _ffa_progress_relocked(db, lobby_uuid, _progress)
+        _fail_progress = await _ffa_progress_relocked(db, lobby_uuid)
         print(f"[FFA-REPORT] insert refused by the database for lobby "
               f"{lobby_uuid} game {_game_number} — nothing committed: "
               f"{getattr(_insert_ex, 'orig', _insert_ex)}")
@@ -49332,7 +49352,16 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         # and the number the report named (the equality above), and the
         # increment beside it is what makes `+ 1` the next slot — so these two
         # are the committed state, not a prediction of it.
-        **_ffa_progress(_game_number))
+        #
+        # `settled_game` rides the ACCEPTANCE too, and it is the same number.
+        # The contract's rule is that every answer about a row holding the
+        # number the report named says which number that is, so that a client
+        # never has to infer "settled" from the absence of a refusal; an
+        # acceptance is the one answer for which that row was written by this
+        # request. Past `_ffa_game_number_refusal` the tail and the slot are
+        # one number, so naming it here cannot disagree with the row, and
+        # `settled_game < expected_game` holds by construction (n < n + 1).
+        **_ffa_progress(_game_number, settled_game=_game_number))
 
 
 _FFA_LB_SORTS = {

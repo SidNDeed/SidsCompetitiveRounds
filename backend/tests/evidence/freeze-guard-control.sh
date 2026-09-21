@@ -74,6 +74,14 @@ BASE="$(fingerprint)"
 R8BASE="$(r8_hash)"
 BASE_MD5="$(md5sum "${TRACKED}" | cut -d' ' -f1)"
 cp -p "${TRACKED}" "${ASIDE}"
+# The command that produced this baseline, immediately above the baseline. The
+# header at the top of this log names it too, but a header is shared by every
+# block below it, and the rule this directory enforces reads UPWARD from a
+# result and requires the command to be the nearest substantive line above it.
+# The pre-check notes above break that scan -- correctly, since they are this
+# script's own prose rather than a tool's frame. Round 10 added the rule, and
+# this baseline is the line it found.
+echo "command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>"
 note "baseline  $(printf '%s\n' "${BASE}" | grep -c .) paths fingerprinted; round-8 method holds $(printf '%s\n' "${R8FILES}" | grep -c .) captured paths"
 echo
 

@@ -86,7 +86,7 @@ code does not supply, so the numbers here are the ones in the list, counted off
 it: 22 unmarked and still live (rounds 1 and 2), 1 unmarked and RETIRED because
 round 4 deleted the code it mutated (prior-tail-only, annotated in place), 16
 marked (r3), 15 marked (r4), 10 marked (r5), 7 marked (r6), 7 marked (r7), 8
-marked (r8), 3 marked (r9), and
+marked (r8), 3 marked (r9), 8 marked (r10), and
 one more that is a committed test rather than a hand-run control
 (backfill-neutered, at the end). Rounds 4 through 8's are the ones with a
 NEGATIVE control — an inert edit at the same site that must leave the same
@@ -302,6 +302,50 @@ All KILLED:
                            N -> M` on a path whose transaction is never
                            committed, so a log asserting a repair the request
                            discards is shown to red.
+
+  capture-refusal-restores-the-snapshot (r10)  _ffa_progress_after_capture:
+                           catch the 503 the fresh read now raises and answer
+                           from the caller's pre-capture copy instead, which
+                           is the snapshot fallback put back at the one site
+                           where that copy is still in scope.
+  double-failure-invents-a-progress (r10)  _ffa_progress_relocked: on the arm
+                           where BOTH relock attempts failed, return
+                           `_ffa_progress(0)` rather than refusing -- the
+                           invention the old docstring named and declined.
+  vanished-lobby-invents-a-progress (r10)  _ffa_progress_relocked: the same
+                           invention on the other exhausted arm, a lobby with
+                           no row left to read. Two reachable states, one
+                           control each: a control on one says nothing about
+                           the other.
+  join-payload-omits-the-advertised-number (r10)  _ffa_poll_locked_payload:
+                           emit the settled count alone, so a seat with no
+                           other reading has to count `games_played + 1` for
+                           itself -- the arithmetic the sole-allocator rule
+                           removes.
+  acceptance-does-not-name-its-settled-game (r10)  submit_ffa_match: drop
+                           `settled_game` from the answer that settled the
+                           game, so an acceptance stops naming the number it
+                           took. Its inert twin is the same call REFLOWED,
+                           which is what keeps the assertion measuring a call
+                           and not a line shape (#441).
+  evidence-results-without-an-invocation (r10)  the suites report: replace one
+                           half's command line, so a results block is left
+                           with no record of what produced it. The inert twin
+                           is the same line with a space added, which is still
+                           a command line.
+  suites-report-carries-an-underived-number (r10)  the suites report: put a
+                           number into its prose that no run here can print,
+                           which is the round-9 finding itself. The assembler
+                           has to refuse it rather than transcribe it.
+  refusal-advertises-the-number-it-just-settled (r10)  _ffa_with_settled:
+                           also overwrite `expected_game` with the number the
+                           answer reports as settled, so an answer names a
+                           number that is already taken as the one to use
+                           next. A seat deriving its key from the last
+                           advertisement then keys every later report at a
+                           settled number and is refused for ever, which is the
+                           permanent exclusion the sole-allocator rule rules
+                           out.
 
 ...and one more that is a COMMITTED TEST rather than a hand-run control:
   backfill-neutered        327's room_tail backfill: WHERE FALSE. See
@@ -1261,13 +1305,32 @@ def test_an_unreadable_stored_payload_keeps_the_new_one():
     assert _capture(_FakeDb(insert_id=None, stored="{not json")) == "variant"
 
 
-def _refuse(capture_result, status=409):
-    """_ffa_record_and_refuse with the capture's answer scripted."""
+def _refuse(capture_result, status=409, reread=True):
+    """_ffa_record_and_refuse with the capture's answer scripted.
+
+    ROUND 10 scripts the post-capture re-read as well, and that is not
+    convenience. Since the re-read FAILS CLOSED, the `None` session these
+    tests pass makes EVERY answer here the 503 that says "there is no reading
+    of the lobby to give" -- so none of them would be asking the question
+    about the CAPTURE that this helper exists to ask, and four tests would
+    have gone green on an answer none of them is about (#342).
+
+    `reread=False` is the other side of the same switch: it leaves the real
+    helper in place over a session that cannot answer, which is the exhausted
+    case itself, and it is what
+    test_a_refusal_whose_lobby_cannot_be_read_carries_no_progress_at_all
+    drives."""
     async def fake_quarantine(db, **kw):
         return capture_result
 
+    async def fake_relock(db, lobby_uuid):
+        return main._ffa_progress(3)
+
     real = main._quarantine_report
+    real_relock = main._ffa_progress_relocked
     main._quarantine_report = fake_quarantine
+    if reread:
+        main._ffa_progress_relocked = fake_relock
     try:
         rep = types.SimpleNamespace(
             photon_room_id="rm_r1", reported_by_steam_id=S1,
@@ -1279,6 +1342,7 @@ def _refuse(capture_result, status=409):
             progress=main._ffa_progress(3), status=status))
     finally:
         main._quarantine_report = real
+        main._ffa_progress_relocked = real_relock
 
 
 def test_a_refusal_whose_capture_recorded_is_terminal():
@@ -1303,6 +1367,46 @@ def test_a_refusal_whose_capture_did_not_record_is_not_terminal():
             with pytest.raises(main.HTTPException) as ex:
                 _refuse(kept, status=status)
             assert ex.value.status_code == 503, (kept, status)
+
+
+def test_a_refusal_whose_lobby_cannot_be_read_carries_no_progress_at_all():
+    """Control: capture-refusal-restores-the-snapshot (r10).
+
+    The r6 MEDIUM. A capture ends this request's transaction, so the counters
+    the caller still holds predate it and every answer below the capture is
+    built from a FRESH read. Rounds 5 to 9 made the exhausted case -- both
+    relock attempts failed, or the lobby row is gone -- answer from the
+    caller's pre-rollback copy instead, and called that safe because it could
+    only be stale-LOW.
+
+    What it COSTS is the test a guard has to pass (#430). The copy is a number
+    the server may no longer accept, handed to the one seat trying to
+    resynchronise; naming it earns another terminal refusal and spends one
+    more game of the sitting. So the answer is now a 503 -- which this
+    client's outbox retries rather than spends -- carrying NO progress fields
+    at all, because there is no reading to give. `detail` is the only key in
+    the body, so nothing in that answer can be read as an advertised number,
+    and the contract's rule for it is RETRY THE SAME BODY LATER, never
+    re-key."""
+    last = None
+    for kept in ("recorded", "already", "variant"):
+        with pytest.raises(main.HTTPException) as ex:
+            _refuse(kept, reread=False)
+        last = ex.value
+        assert last.status_code == 503, (kept, last.status_code, last.detail)
+        assert last.progress == {}, (kept, last.progress)
+        assert "retry this report unchanged" in last.detail, (kept, last.detail)
+    # The status is 503 whatever TERMINAL status the caller asked for: a
+    # terminal answer whose number the client cannot trust is the one
+    # combination this must never produce.
+    with pytest.raises(main.HTTPException) as ex403:
+        _refuse("recorded", status=403, reread=False)
+    assert ex403.value.status_code == 503
+    assert ex403.value.progress == {}
+    # ...and the handler really does put nothing else in the body.
+    handler = main.app.exception_handlers[main.FfaReportRefusal]
+    body = json.loads(bytes(asyncio.run(handler(None, last)).body))
+    assert set(body) == {"detail"}, body
 
 
 def test_a_refusal_over_a_variant_capture_says_which():
@@ -1607,6 +1711,7 @@ def test_the_control_tally_matches_the_list_it_sits_next_to():
         "r7": sum(1 for ln in entries if "(r7)" in ln),
         "r8": sum(1 for ln in entries if "(r8)" in ln),
         "r9": sum(1 for ln in entries if "(r9)" in ln),
+        "r10": sum(1 for ln in entries if "(r10)" in ln),
         "retired": sum(1 for ln in entries if "(retired)" in ln),
     }
     counted["plain"] = len(entries) - sum(counted.values())
@@ -1619,20 +1724,20 @@ def test_the_control_tally_matches_the_list_it_sits_next_to():
         r"counted off\s*\n?it: (\d+) unmarked and still live .*?(\d+) unmarked and RETIRED"
         r".*?(\d+)\s*\n?marked \(r3\), (\d+) marked \(r4\), (\d+) marked \(r5\),"
         r" (\d+) marked \(r6\), (\d+) marked \(r7\), (\d+)\s*\n?marked \(r8\),"
-        r" (\d+) marked \(r9\)",
+        r" (\d+) marked \(r9\), (\d+) marked \(r10\)",
         doc, re.S)
     assert claimed, "the docstring no longer states a tally in a readable form"
     want = tuple(int(g) for g in claimed.groups())
     have = (counted["plain"], counted["retired"],
             counted["r3"], counted["r4"], counted["r5"], counted["r6"],
-            counted["r7"], counted["r8"], counted["r9"])
+            counted["r7"], counted["r8"], counted["r9"], counted["r10"])
     assert want == have, (
         f"the docstring's tally and its own list disagree: claimed {want}, "
         f"listed {have}")
     # ...and the list is not empty, or the whole check passes on nothing.
     assert counted["r4"] >= 10 and counted["r5"] >= 5 and counted["r6"] >= 5
     assert counted["r7"] >= 5 and counted["r8"] >= 5
-    assert counted["r9"] >= 3
+    assert counted["r9"] >= 3 and counted["r10"] >= 5
     assert counted["plain"] >= 10
     # The evidence sentence names a path that EXISTS in this repository. Round
     # 5 pointed at two files under the gitignored ai-collab scratch, so the
@@ -1708,11 +1813,27 @@ def test_the_lobby_state_advertises_the_sittings_settled_count():
     # It is a TOP-LEVEL key of the ready-join payload, which is what the
     # client's substring JSON reader can reach.
     body = src[src.index('return {'):]
-    assert '"games_played": int(lobby["games_played"] or 0),' in body
-    assert '"status": "ready_join"' in body
+    # ROUND 10: BOTH counters, out of the ONE derivation the report path's own
+    # answers are built from. The contract makes the server the sole allocator
+    # of the game number and forbids a seat to count one for itself --
+    # `games_played + 1` is counting, so a payload that carried only the
+    # settled count would have required exactly the arithmetic the rule
+    # removes, on the one seat with no other reading to go on.
+    # Control: join-payload-omits-the-advertised-number (r10). Flattened for
+    # the reason the acceptance assertion is: this is about a CALL, and the
+    # control's inert twin is that call reflowed (#441).
+    flat = " ".join(body.split())
+    assert '**_ffa_progress(int(lobby["games_played"] or 0)),' in flat
+    assert '"status": "ready_join"' in flat
     # ...and it is the LOBBY's count, not a member count or a queue length.
-    assert "lobby[" in body[body.index('"games_played"'):
-                            body.index('"games_played"') + 60]
+    assert 'lobby["games_played"]' in flat
+    # The spread really does put two TOP-LEVEL integers in the payload, which
+    # is what the client's substring JSON reader can reach; a nested object
+    # would be unreachable to it.
+    emitted = main._ffa_progress(4)
+    assert set(emitted) == {"games_played", "expected_game"}
+    assert emitted == {"games_played": 4, "expected_game": 5}
+    assert all(not isinstance(v, (dict, list)) for v in emitted.values())
     # The one quantity: what the payload advertises and what the report path
     # derives its slot from are the same column, read the same way.
     lock = inspect.getsource(main._ffa_lock_lobby_slot)
@@ -1720,6 +1841,70 @@ def test_the_lobby_state_advertises_the_sittings_settled_count():
     # And the number a client that reads it should name is the NEXT one.
     assert main._ffa_progress(4)["expected_game"] == 5
     assert main._ffa_progress(0)["expected_game"] == 1
+
+
+def test_the_join_time_payload_really_emits_both_counters():
+    """A structural assertion says the spread is written; this RUNS it.
+
+    A field can be declared and still ship inert -- the acceptance bar for one
+    is a positive signal the code actually emits (#438). So the production
+    function is awaited over a scripted session and the dict it returns is
+    read: both counters present, both top-level, both plain integers, and the
+    advertised one exactly one above the settled count. Nothing about the
+    lobby's real columns is under test here, so the two helpers that read them
+    are scripted and restored."""
+    class _Result:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def mappings(self):
+            return self
+
+        def first(self):
+            return self._rows[0] if self._rows else None
+
+        def all(self):
+            return list(self._rows)
+
+    class _PollDb:
+        def __init__(self, lobby):
+            self._lobby = lobby
+            self._n = 0
+
+        async def execute(self, *a, **kw):
+            self._n += 1
+            return _Result([self._lobby] if self._n == 1 else [])
+
+    async def fake_tristate(db, lobby_id, lobby):
+        return None
+
+    lobby = {"id": LOBBY, "photon_room_id": "rm", "region": "eu",
+             "player_count": 3, "games_played": 6, "is_ranked": True}
+    real_cfg = main._ffa_lobby_config
+    real_tri = main._ffa_game_in_progress_tristate
+    main._ffa_lobby_config = lambda row: {
+        "score_target": 5, "card_candidates": 4, "initial_picks": 1,
+        "card_cap": 20, "same_card_rule": "allow", "sudden_death": False}
+    main._ffa_game_in_progress_tristate = fake_tristate
+    try:
+        payload = asyncio.run(
+            main._ffa_poll_locked_payload(_PollDb(lobby), LOBBY, S1))
+    finally:
+        main._ffa_lobby_config = real_cfg
+        main._ffa_game_in_progress_tristate = real_tri
+    assert payload["status"] == "ready_join"
+    # BOTH, at the TOP level, as plain integers -- the client's JSON reader is
+    # a substring scan, so a nested object would be unreachable to it.
+    assert payload["games_played"] == 6
+    assert payload["expected_game"] == 7
+    assert isinstance(payload["games_played"], int)
+    assert isinstance(payload["expected_game"], int)
+    assert payload["expected_game"] == payload["games_played"] + 1
+    # ...and it is the same derivation the report path's own answers use, so
+    # the join-time copy and the report-time copy cannot be two different
+    # pieces of arithmetic.
+    assert {"games_played": 6, "expected_game": 7}.items() <= payload.items()
+    assert main._ffa_progress(6).items() <= payload.items()
 
 
 def test_every_report_answer_carries_the_lobbys_progress():
@@ -1761,11 +1946,29 @@ def test_every_report_answer_carries_the_lobbys_progress():
     fields = schemas.FfaMatchResponse.model_fields
     assert {"games_played", "expected_game", "settled_game"} <= set(fields)
     src = _code_lines(_endpoint_src())
-    assert "**_ffa_progress(_game_number)" in src
+    # Control: acceptance-does-not-name-its-settled-game (r10).
+    #
+    # Whitespace-flattened, because a CALL is what this is about and a call
+    # wrapped across two lines is the same call. Matching the raw text would
+    # make this measure a LINE SHAPE, and that control's inert twin -- the
+    # very reflow -- would redden it (#391/#441, the shape round 6 paid for
+    # once already).
+    flat = " ".join(src.split())
+    ok = "**_ffa_progress(_game_number, settled_game=_game_number)"
+    assert ok in flat
     # ...and the success answer's progress is the COMMITTED state: it is built
     # from the number this transaction settled, after the advance.
-    assert src.index("await _ffa_advance_lobby_slot(") < \
-        src.index("**_ffa_progress(_game_number)")
+    assert flat.index("await _ffa_advance_lobby_slot(") < flat.index(ok)
+    # ROUND 10: the acceptance ADVERTISES the number the server accepts next
+    # AND names the one it just settled. Every answer about a row holding the
+    # number the report named says which number that is, so a client never has
+    # to infer "settled" from the absence of a refusal. Past
+    # _ffa_game_number_refusal the tail and the slot are one number, so this
+    # cannot disagree with the row, and the pair's own inequality holds by
+    # construction.
+    accepted = main._ffa_progress(7, settled_game=7)
+    assert accepted == {"games_played": 7, "expected_game": 8, "settled_game": 7}
+    assert accepted["settled_game"] < accepted["expected_game"]
 
 
 def test_a_refusal_the_client_can_act_on_names_the_settled_game():
@@ -3494,9 +3697,90 @@ def test_every_progress_the_endpoint_builds_comes_from_a_locked_slot():
     # counter, and settled_game is carried only while the pair's own
     # inequality still holds.
     after = _code_lines(inspect.getsource(main._ffa_progress_after_capture))
-    assert "_ffa_progress_relocked(db, lobby_uuid, progress)" in after
+    assert "_ffa_progress_relocked(db, lobby_uuid)" in after
     assert "SELECT games_played" not in after
     assert '< int(fresh.get("expected_game", 0))' in after
+
+    # ── ROUND 10. A FAILED FRESH READ FAILS CLOSED, and the caller's copy is
+    # not reachable from the helper at all.
+    #
+    # Rounds 5 to 9 answered the two exhausted cases -- both relocks failed,
+    # or the lobby row is gone -- from the caller's pre-rollback copy, on the
+    # reading that it could only be stale-LOW and was therefore safe. What
+    # that answer COSTS is a number the server may no longer accept, handed to
+    # the one seat that is trying to resynchronise, which earns it another
+    # terminal refusal and spends one more game of the sitting (#430). So the
+    # helper now answers 503 with NO progress fields, and the identifier that
+    # made a stale answer reachable is GONE from its span rather than merely
+    # unused -- while it was in scope, every exit added there had a stale
+    # answer within one line of it.
+    assert "fallback" not in relock, (
+        "the caller's copy is reachable from _ffa_progress_relocked again")
+    assert "return dict(" not in relock, (
+        "_ffa_progress_relocked returns a dict it did not read under the lock")
+    # Both exhausted arms raise, and both raise the SAME shape: a 503 whose
+    # progress is the EMPTY dict, so the handler's `**exc.progress` adds no
+    # key at all. Derived from the parsed function rather than counted by
+    # hand: a third arm added later has to satisfy this too (#432).
+    relock_tree = ast.parse(inspect.getsource(main._ffa_progress_relocked))
+    raises = [n for n in ast.walk(relock_tree) if isinstance(n, ast.Raise)]
+    assert len(raises) == 2, [ast.unparse(r) for r in raises]
+    for node in raises:
+        call = node.exc
+        assert isinstance(call, ast.Call) and getattr(call.func, "id", None) \
+            == "FfaReportRefusal", ast.unparse(node)
+        assert isinstance(call.args[0], ast.Constant) and call.args[0].value == 503
+        assert isinstance(call.args[2], ast.Dict) and not call.args[2].keys, (
+            "an exhausted re-read still answers with progress fields: "
+            + ast.unparse(node))
+    # The ONE return is the locked reading.
+    returns = [n for n in ast.walk(relock_tree) if isinstance(n, ast.Return)]
+    assert len(returns) == 1, [ast.unparse(r) for r in returns]
+    assert ast.unparse(returns[0].value) == \
+        "_ffa_progress(max(0, int(_expected) - 1))", ast.unparse(returns[0])
+
+    # ── ...and EVERY progress the endpoint emits is one of those readings.
+    #
+    # Derived from the endpoint's own syntax tree, not from a list: every name
+    # that holds a progress dict is assigned from `_ffa_progress` over the slot
+    # read under the lobby lock, or from the relocked helper; and every answer
+    # that carries progress carries one of those names, or a `_ffa_with_settled`
+    # of one. A refusal built from anything else -- a literal, a bare column
+    # read, a copy taken before a rollback -- reds here.
+    tree = ast.parse(_endpoint_src())
+    holders = {"_progress", "_race_progress", "_fail_progress"}
+    seen = {}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id in holders):
+            value = node.value
+            value = value.value if isinstance(value, ast.Await) else value
+            seen.setdefault(node.targets[0].id, []).append(ast.unparse(value))
+    assert set(seen) == holders, sorted(seen)
+    for name, sources in seen.items():
+        for expr in sources:
+            assert expr in ("_ffa_progress(_expected_game - 1)",
+                            "_ffa_progress_relocked(db, lobby_uuid)"), (name, expr)
+    carried = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fname = getattr(node.func, "id", None)
+        if fname == "FfaReportRefusal":
+            assert len(node.args) == 3, ast.unparse(node)
+            assert getattr(node.args[2], "id", None) in holders, ast.unparse(node)
+            carried += 1
+        elif fname == "_ffa_record_and_refuse":
+            kw = {k.arg: k.value for k in node.keywords}
+            assert "progress" in kw, ast.unparse(node)
+            got = ast.unparse(kw["progress"])
+            assert (got in holders
+                    or got.startswith("_ffa_with_settled(_progress,")), got
+            carried += 1
+    # A sweep that found nothing is not a sweep that found nothing wrong
+    # (#342): the endpoint really does carry a double-figure number of these.
+    assert carried >= 12, carried
 
 
 # ── round 6: the exact stake, the bounded scan, the weaker lock ───────────
@@ -4176,15 +4460,48 @@ def test_the_relock_leaves_a_transaction_the_next_read_can_run_in():
     assert "await db.rollback()" in body[:retry], (
         "the relock retries without clearing the failed statement, so the "
         "second attempt raises for the reason the first one did")
-    assert "await db.rollback()" in body[:body.index("return dict(fallback")], (
-        "the relock returns its fallback without clearing the failed statement")
+    assert "await db.rollback()" in body[:body.index("raise FfaReportRefusal(")], (
+        "the relock refuses without clearing the failed statement, so the "
+        "caller's remaining reads run in an aborted transaction")
     assert "#235" in relock, "the docstring no longer names why the rollback is there"
-    # An absolute the code cannot keep is the defect class here, so the
-    # absolute form must not come back.
+    # An absolute the code cannot keep is the defect class here, so neither
+    # absolute form comes back. Round 10 retired the second of them along with
+    # the behaviour it described: this helper IS now the thing that refuses the
+    # answer when it has no reading to give, and a docstring still promising it
+    # could not would be the same false guarantee one round further on.
     assert "IT CANNOT ITSELF BE THE THING THAT FAILS" not in relock
-    assert "IT MUST NOT ITSELF BE THE THING THAT FAILS" in relock
+    assert "IT MUST NOT ITSELF BE THE THING THAT FAILS" not in relock
+    assert "IT FAILS CLOSED" in relock
     # The residue is stated, not implied.
     assert "connection that is gone" in relock
+
+
+
+# ── the evidence directory's own rules, loaded from where they live ────
+#
+# ROUND 10 adds the INVOCATION rule (the r6 LOW): a committed report that shows
+# a result with no record of the command that produced it is a number from a
+# selection nobody can rebuild. Until this round the evidence check asked only
+# that a report carry SOME executed result, so a later log could drop its
+# command line and stay green -- a check that cannot fail on its own class
+# (#342).
+#
+# The rule lives in backend/tests/evidence/evidence_rules.py rather than here,
+# because the re-pin wrapper applies the SAME rule to the one file a pytest run
+# cannot cover: its own output, which is written after that run by
+# construction. A rule with two implementations is a rule that drifts, and the
+# half nobody re-reads is the half that stops matching (#432).
+
+def _evidence_rules():
+    import importlib.util
+
+    path = (pathlib.Path(__file__).resolve().parent / "evidence"
+            / "evidence_rules.py")
+    assert path.is_file(), path
+    spec = importlib.util.spec_from_file_location("_scr_evidence_rules", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def test_the_committed_evidence_re_derives_its_own_numbers():
@@ -4248,6 +4565,132 @@ def test_the_committed_evidence_re_derives_its_own_numbers():
     # The instruments are here too, or the reports cannot be re-derived.
     names = {p.name for p in files}
     assert any(n.endswith("mutation-runner.py") for n in names), sorted(names)
+    assert any(n.endswith("assemble-evidence.py") for n in names), sorted(names)
+
+    # ── ROUND 10: AN INVOCATION ABOVE EVERY RESULT (the r6 LOW) ──────────
+    #
+    # The rule above asks that a report carry an executed result. It does not
+    # ask that the result name the command that produced it, so a later log
+    # could drop its invocation line and this check would stay green -- which
+    # is the check that cannot fail on its own class (#342). Two summary lines
+    # with no record of the selection are two numbers nobody can rebuild.
+    #
+    # Both directions FIRST, on a fabricated pair, so a typo in either pattern
+    # reds here from an assertion ABOUT the rule rather than from whatever the
+    # directory happens to contain today. The pair and the checks over it live
+    # beside the rule, so the wrapper that cannot run pytest asserts the same
+    # two directions rather than an approximation of them.
+    rules = _evidence_rules()
+    assert rules.selftest() == [], rules.selftest()
+    assert rules.results_without_an_invocation(rules.FABRICATED_WITH) == []
+    missing = rules.results_without_an_invocation(rules.FABRICATED_WITHOUT)
+    assert [line for _n, line in missing] == [
+        "1734 passed, 42 skipped, 1 xfailed in 566.55s"], missing
+    # ...and a report that declares no run section is not silently exempt: the
+    # newest round's reports are required to declare one, below.
+    assert rules.results_without_an_invocation("no marker here\n") == []
+
+    # SCOPE, derived from the files rather than written down, and stated
+    # rather than left implicit.
+    #
+    # The rule applies to every report the assembler built -- which is exactly
+    # the set that declares its stdout in a `stdout:` header. Earlier rounds'
+    # reports are the record of rounds already judged, on the shapes their
+    # instruments printed at the time; rewriting them now would be editing a
+    # log to satisfy a rule written after it, which is not the same artifact
+    # as a log that was true when it was written.
+    #
+    # THE SET IS TOTAL OVER WHAT EXISTS, and that is what makes it usable: a
+    # round's reports are written one at a time, and the suite pair that
+    # certifies the source necessarily runs before ANY of them exists, since
+    # a report is written FROM that pair's output. So this check covers
+    # whatever is there when it runs, and the clause below stops a round
+    # half-adopting the rule. What covers the completed set is the re-pin
+    # wrapper, which runs last over the directory as committed.
+    assembled = [p for p in reports
+                 if re.search(r"^stdout:",
+                              p.read_text(encoding="utf-8", errors="replace"),
+                              re.M)]
+    for path in assembled:
+        body = path.read_text(encoding="utf-8", errors="replace")
+        assert rules.run_section(body) is not None, (
+            f"{path.name} declares its stdout and no verbatim run section, so "
+            f"nothing it says can be traced to a run")
+        bad = rules.results_without_an_invocation(body)
+        assert not bad, (path.name, bad)
+    # ...and once a round has ONE assembled report, every other report of that
+    # same round has to be one too. A round cannot adopt the rule for the file
+    # that satisfies it and drop it for the file that would not.
+    if assembled:
+        current_round = max(
+            int(m.group(1)) for m in
+            (re.match(r"^r(\d+)-", p.name) for p in assembled) if m)
+        prefix = "r%d-" % current_round
+        for path in reports:
+            if path.name.startswith(prefix):
+                assert path in assembled, (
+                    f"{path.name} is a report of the round that adopted the "
+                    f"assembler and names no stdout of its own")
+
+
+def test_the_committed_evidence_is_assembled_from_its_run_stdout():
+    """Control: suites-report-carries-an-underived-number (r10).
+
+    The r6 HIGH. Every report here CLAIMED to be generated from the stdout of
+    the run it describes, and nothing checked the claim: round 9's suites
+    report carried a file count its own run never printed, in a sentence
+    shaped exactly like the sentences around it that WERE quoted.
+
+    `assemble-evidence.py` is the answer, and it refuses rather than
+    transcribes -- it exits non-zero, naming how many claims it could not
+    derive. This runs it twice over: its SELF-TEST, which asserts every
+    matching rule fires and every exemption stays quiet in both directions,
+    and then `--check` on each report of the newest round, which re-derives
+    every number that report's prose asserts from the committed stdout it
+    names and rebuilds its verbatim block byte for byte.
+
+    Run from the test rather than trusted from a log, because a committed log
+    says what was true when it was written and this says what is true of the
+    bytes that ship."""
+    evidence = pathlib.Path(__file__).resolve().parent / "evidence"
+    tool = evidence / "assemble-evidence.py"
+    assert tool.is_file(), tool
+    root = pathlib.Path(__file__).resolve().parent.parent.parent
+
+    def run_tool(*args):
+        return subprocess.run([sys.executable, str(tool), *args],
+                              cwd=str(root), capture_output=True, text=True,
+                              timeout=120)
+
+    selftest = run_tool("--selftest")
+    assert selftest.returncode == 0, selftest.stdout + selftest.stderr
+    assert "rule checks, all as stated" in selftest.stdout, selftest.stdout
+
+    reports = sorted(p for p in evidence.iterdir() if p.suffix == ".txt")
+    # Every report the assembler built, derived from the files: the ones that
+    # declare their stdout. Total over what exists when this runs, for the
+    # reason the invocation rule's scope states -- a report cannot exist while
+    # the run it is written from is still going.
+    assembled = [p for p in reports
+                 if re.search(r"^stdout:",
+                              p.read_text(encoding="utf-8", errors="replace"),
+                              re.M)]
+    for path in assembled:
+        done = run_tool("--check", str(path))
+        assert done.returncode == 0, (path.name, done.stdout + done.stderr)
+        assert "all derived from" in done.stdout, (path.name, done.stdout)
+
+    # Both directions on the tool itself, from here: a report whose prose
+    # carries a number its stdout does not is REFUSED, and the refusal names
+    # the count. A check that only ever sees green files is a check nobody has
+    # seen fail (#391).
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_scr_assembler", tool)
+    assembler = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(assembler)
+    assert assembler.undrivable("9 paths were hashed\n", "9 paths\n") == []
+    refused = assembler.undrivable("12 paths were hashed\n", "9 paths\n")
+    assert [c for _k, c in refused] == ["12 paths"], refused
 
 
 def test_every_round_seven_control_names_a_test_that_exists():
@@ -4616,6 +5059,121 @@ def test_pg_a_realigned_sitting_issues_each_game_its_own_number():
     assert gp == advertised + 1, gp
 
 
+def test_pg_a_seat_that_missed_an_update_recovers_in_one_submission():
+    """Control: refusal-advertises-the-number-it-just-settled (r10).
+
+    The SERVER is the sole allocator of the game number, and this is the
+    property that makes a seat which missed a room update recoverable rather
+    than excluded: every answer given under the lobby lock advertises the
+    number the server accepts NEXT, so the answer that refuses a behind seat is
+    also the answer that tells it what to use. Nothing is counted locally and
+    nothing is realigned between seats.
+
+    Run here as the sequence such a seat actually walks:
+
+      1. it holds an advertisement, and another elector settles the parked game
+         at that number while it is not looking;
+      2. it delivers the SAME body for that SAME physical game under the number
+         it still holds. That is the identical-body case: ECHOED, once, and the
+         echo carries the number the server accepts next. Nothing settles
+         twice, and the seat did not re-key anything -- the key it sent is the
+         one the server had named;
+      3. the next physical game is a DIFFERENT body, so it is a new report. A
+         seat that LATCHED the old number instead of deriving from the last
+         advertisement keys it there and is refused terminally -- and that
+         refusal names the settled number and advertises the next one;
+      4. derived from that advertisement, the same body takes the number the
+         server just named, which is a number this endpoint accepts.
+
+    So the cost of having missed the update is exactly ONE refused submission,
+    at step 3, and the seat files normally from there on. The mutation control
+    is the absence this states: an answer that advertised the number it had
+    just settled would leave a derived key exactly where it was, so every later
+    submission is refused for the same reason and the seat never files again --
+    which is the permanent exclusion the sole-allocator rule exists to rule
+    out. Step 1 and step 4 write their settlements behind the endpoint for the
+    reason _settle_directly gives; what is driven through the endpoint here is
+    every ANSWER the sequence turns on."""
+    require_pg()
+
+    async def go():
+        engine, sm, pids, _mid = await _endpoint_fixture(
+            games_played=2, recorded_number=1, recorded_room="rm_211531_r1")
+        try:
+            # The advertisement this seat holds, taken from a real answer
+            # rather than assumed: a hardcoded number here would be a test of
+            # arithmetic rather than of what the endpoint says (#342).
+            ahead = None
+            try:
+                await _call_endpoint(sm, _endpoint_report(
+                    ROW_A, S3, "rm_211531_r7", with_slots=True))
+            except main.FfaReportRefusal as ex:
+                ahead = ex
+            if ahead is None:
+                # FIVE values on every path, for the reason the sibling test
+                # records: a short return meets the caller's unpack with a
+                # ValueError about a count, and the assertion written to name
+                # the fact that failed never runs.
+                return None, None, None, None, []
+            advertised = int(ahead.progress["expected_game"])
+            # 1. another elector settles the parked game there; this seat sees
+            #    nothing of it.
+            await _settle_directly(sm, pids, ROW_A, advertised)
+            # 2. the same body, under the number this seat still holds.
+            echo = await _call_endpoint(sm, _endpoint_report(
+                ROW_A, S3, f"rm_211531_r{advertised}", with_slots=True))
+            # 3. the NEXT physical game, keyed at the latched number.
+            latched = None
+            try:
+                await _call_endpoint(sm, _endpoint_report(
+                    ROW_B, S3, f"rm_211531_r{advertised}", with_slots=True))
+            except main.FfaReportRefusal as ex:
+                latched = ex
+            if latched is None:
+                return advertised, echo, None, None, []
+            # 4. DERIVED from the refusal, never counted on: the number the
+            #    server named is the number the next delivery carries.
+            adv2 = int(latched.progress["expected_game"])
+            free = main._ffa_game_number_refusal(adv2, adv2)
+            await _settle_directly(sm, pids, ROW_B, adv2)
+            async with sm() as db:
+                numbers = [int(n) for n in (await db.execute(text(
+                    "SELECT game_number FROM ffa_matches WHERE lobby_id = :l"
+                    " ORDER BY game_number"), {"l": LOBBY})).scalars().all()]
+            return advertised, echo, latched, (adv2, free), numbers
+        finally:
+            await engine.dispose()
+
+    advertised, echo, latched, derived, numbers = run(go())
+    assert advertised is not None, (
+        "the ahead tail was not refused, so no advertisement was ever made "
+        "and nothing below this line was exercised")
+    assert advertised == 3, advertised
+    # 2. the identical body is ECHOED, and the echo advertises the next number
+    #    -- an accepted answer re-aligns the seat exactly as a refusal does.
+    assert echo is not None
+    assert echo.message == "Already recorded"
+    assert echo.settled_game == advertised
+    assert echo.expected_game == advertised + 1, echo.expected_game
+    assert echo.settled_game < echo.expected_game
+    # 3. the latched key is refused terminally, ONCE, and the refusal carries
+    #    both numbers: which one is finished, and which one to use.
+    assert latched is not None, (
+        "a different physical game at the latched number was not refused")
+    assert latched.status_code in (403, 409), latched.status_code
+    assert latched.progress.get("settled_game") == advertised, latched.progress
+    assert latched.progress["expected_game"] == advertised + 1, latched.progress
+    # 4. ...and the number it advertised is one this endpoint accepts, so the
+    #    seat that derives from it files rather than looping.
+    adv2, free = derived
+    assert adv2 == advertised + 1, adv2
+    assert free is None, free
+    # One row per physical game, at distinct numbers: the pre-seeded 1, the
+    # game recovered at 3, the next physical game at 4. The seat that missed an
+    # update lost no game and was excluded from nothing.
+    assert numbers == [1, advertised, advertised + 1], numbers
+
+
 def test_pg_a_catch_up_on_a_refusing_path_logs_a_claim_its_transaction_can_keep(capsys):
     """Control: catch-up-log-claims-a-persisted-repair (r9).
 
@@ -4874,17 +5432,97 @@ def test_pg_the_relock_retries_once_and_answers_from_the_lobby_not_the_snapshot(
                     await db.execute(text("SELECT 1"))
                 except Exception:
                     still_broken = True
-                snapshot = {"games_played": 0, "expected_game": 1}
-                answer = await main._ffa_progress_relocked(db, LOBBY, snapshot)
-            return poisoned, still_broken, snapshot, answer
+                answer = await main._ffa_progress_relocked(db, LOBBY)
+            return poisoned, still_broken, answer
         finally:
             await engine.dispose()
 
-    poisoned, still_broken, snapshot, answer = run(go())
+    poisoned, still_broken, answer = run(go())
     assert poisoned, "the statement that was supposed to fail did not"
     assert still_broken, (
         "the transaction was not left aborted, so this test never posed the "
         "question it exists to pose")
-    assert snapshot == {"games_played": 0, "expected_game": 1}
     assert answer == {"games_played": 4, "expected_game": 5}, (
-        "the re-read gave up after one attempt and answered with the snapshot")
+        "the re-read gave up after one attempt instead of asking again on the "
+        "session its own rollback had just cleared")
+
+
+def test_pg_an_exhausted_progress_read_answers_503_with_no_progress_fields():
+    """Controls: double-failure-invents-a-progress and
+    vanished-lobby-invents-a-progress (r10).
+
+    The test above proves the SECOND attempt is made. This one is about what
+    happens when there is no third: both attempts failed, or the lobby has no
+    row to derive anything from. Until round 10 both answered from the
+    caller's pre-rollback copy.
+
+    Both arms are driven for real, with nothing patched. The first passes a
+    lobby identifier the server itself refuses to read, so the retry over the
+    cleared session fails for the same reason the first attempt did -- which
+    is the exhausted case as a live server produces it, not a stubbed one. The
+    second deletes the lobby row, which is the other reachable shape of
+    "nothing to read".
+
+    What both must answer is a 503 -- a status this client's outbox retries
+    rather than spends -- with NO progress fields anywhere in the body. The
+    fields are what a resynchronising seat derives its next key from, and a
+    number this path did not read under the lock is a number that can send it
+    back into the refusal it is trying to leave (#430). `detail` names which
+    of the two happened, because a reason nobody can tell apart is a reason
+    nobody can act on."""
+    require_pg()
+
+    async def go():
+        engine, sm, _pids, _mid = await _endpoint_fixture(
+            games_played=4, recorded_number=1, recorded_room="rm_211531_r1")
+        try:
+            # ARM 1 -- both attempts fail. The identifier is one the server
+            # refuses to read at all, so the second attempt over a cleared
+            # session fails exactly as the first did.
+            async with sm() as db:
+                arm1 = None
+                try:
+                    arm1 = await main._ffa_progress_relocked(
+                        db, "not-a-lobby-identifier")
+                except Exception as ex:
+                    arm1 = ex
+            # ARM 2 -- the lobby row is gone. Its matches go first: the
+            # question is about a lobby with nothing to derive from, and a
+            # constraint failure would be a different one.
+            async with sm() as db:
+                await db.execute(text(
+                    "DELETE FROM ffa_matches WHERE lobby_id = :l"), {"l": LOBBY})
+                await db.execute(text(
+                    "DELETE FROM ffa_lobbies WHERE id = :l"), {"l": LOBBY})
+                await db.commit()
+            async with sm() as db:
+                gone = int((await db.execute(text(
+                    "SELECT COUNT(*) FROM ffa_lobbies WHERE id = :l"),
+                    {"l": LOBBY})).scalar())
+                arm2 = None
+                try:
+                    arm2 = await main._ffa_progress_relocked(db, LOBBY)
+                except Exception as ex:
+                    arm2 = ex
+            return arm1, arm2, gone
+        finally:
+            await engine.dispose()
+
+    arm1, arm2, gone = run(go())
+    assert gone == 0, (
+        "the lobby row was still there, so arm 2 never posed its question")
+    for name, ex in (("both attempts failed", arm1), ("the lobby is gone", arm2)):
+        assert isinstance(ex, main.FfaReportRefusal), (
+            f"{name}: the exhausted read answered with {ex!r} instead of "
+            f"refusing")
+        assert ex.status_code == 503, (name, ex.status_code)
+        assert ex.progress == {}, (name, ex.progress)
+        assert "retry this report unchanged" in ex.detail, (name, ex.detail)
+    # Two reasons, not one string doing both jobs.
+    assert arm1.detail != arm2.detail, arm1.detail
+    # ...and the body really carries nothing else, so neither answer can be
+    # read as advertising a number.
+    handler = main.app.exception_handlers[main.FfaReportRefusal]
+    for name, ex in (("both attempts failed", arm1), ("the lobby is gone", arm2)):
+        body = json.loads(bytes(asyncio.run(handler(None, ex)).body))
+        assert set(body) == {"detail"}, (name, body)
