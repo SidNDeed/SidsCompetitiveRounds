@@ -336,7 +336,13 @@ foreach ($case in $cases) {
         if ($void) { break }
 
         $after = ($out -join "`r`n")
-        if ($after -eq ($lines -join "`r`n")) {
+        # ORDINAL, not -eq. PowerShell's -eq on strings is case-INSENSITIVE, so
+        # an edit that changes only case reads as an edit that changed nothing -
+        # which voided the upper-case twin below, and would equally have voided
+        # a case-only MUTATION that the checker had genuinely failed to catch.
+        # The guard exists to separate "changed nothing" from "was caught"
+        # (#712) and cannot do that while it is blind to part of the change.
+        if ([string]::Equals($after, ($lines -join "`r`n"), [System.StringComparison]::Ordinal)) {
             Write-Output ("VOID | case={0,-56} | the edit changed nothing: {1}" -f $case.Name, $edit.Anchor)
             $void = $true
             break

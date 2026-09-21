@@ -193,7 +193,13 @@ foreach ($case in $cases) {
     }
 
     $after = $before.Replace($case.Find, $case.Into)
-    if ($after -eq $before) {
+    # ORDINAL, not -eq: PowerShell's -eq on strings is case-INSENSITIVE, so an
+    # edit that changes only case would read here as an edit that changed
+    # nothing. The guard exists to separate "changed nothing" from "was caught"
+    # (#712) and cannot do that while it is blind to part of the change. The
+    # sibling guard in run-evidence-log-controls.ps1 had the same defect and
+    # was swept at the same time (#432).
+    if ([string]::Equals($after, $before, [System.StringComparison]::Ordinal)) {
         Write-Output ("VOID | case={0,-46} | the edit changed nothing" -f $case.Name)
         $failures = $failures + 1
         continue
