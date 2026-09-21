@@ -86,7 +86,7 @@ code does not supply, so the numbers here are the ones in the list, counted off
 it: 22 unmarked and still live (rounds 1 and 2), 1 unmarked and RETIRED because
 round 4 deleted the code it mutated (prior-tail-only, annotated in place), 16
 marked (r3), 15 marked (r4), 10 marked (r5), 7 marked (r6), 7 marked (r7), 8
-marked (r8), and
+marked (r8), 3 marked (r9), and
 one more that is a committed test rather than a hand-run control
 (backfill-neutered, at the end). Rounds 4 through 8's are the ones with a
 NEGATIVE control — an inert edit at the same site that must leave the same
@@ -285,6 +285,23 @@ All KILLED:
                            and pairs with a live test is shown to red on a
                            control that exists in the runner and nowhere
                            else.
+  realignment-reuses-the-advertised-number (r9)  _ffa_replay_echo: drop the
+                           field comparison, so a DIFFERENT physical game
+                           delivered under an already-settled room key is
+                           echoed as that game instead of refused. The
+                           realignment section keyed exactly that delivery
+                           there, and the room key is what stops one number
+                           answering for two physical games.
+  shipped-file-outside-the-swept-set (r9)  backend/Dockerfile.bot: put a
+                           citation of the gitignored scratch into a shipped
+                           file that round 8's three hand-written globs did
+                           not read. Its point is the SET, not the line: the
+                           same mutation was green for the whole of round 8.
+  catch-up-log-claims-a-persisted-repair (r9)  _ffa_lock_lobby_slot: restore
+                           the past-tense line that announced `games_played
+                           N -> M` on a path whose transaction is never
+                           committed, so a log asserting a repair the request
+                           discards is shown to red.
 
 ...and one more that is a COMMITTED TEST rather than a hand-run control:
   backfill-neutered        327's room_tail backfill: WHERE FALSE. See
@@ -306,6 +323,7 @@ import json
 import os
 import pathlib
 import re
+import subprocess
 import sys
 import types
 import uuid
@@ -1588,6 +1606,7 @@ def test_the_control_tally_matches_the_list_it_sits_next_to():
         "r6": sum(1 for ln in entries if "(r6)" in ln),
         "r7": sum(1 for ln in entries if "(r7)" in ln),
         "r8": sum(1 for ln in entries if "(r8)" in ln),
+        "r9": sum(1 for ln in entries if "(r9)" in ln),
         "retired": sum(1 for ln in entries if "(retired)" in ln),
     }
     counted["plain"] = len(entries) - sum(counted.values())
@@ -1599,19 +1618,21 @@ def test_the_control_tally_matches_the_list_it_sits_next_to():
     claimed = re.search(
         r"counted off\s*\n?it: (\d+) unmarked and still live .*?(\d+) unmarked and RETIRED"
         r".*?(\d+)\s*\n?marked \(r3\), (\d+) marked \(r4\), (\d+) marked \(r5\),"
-        r" (\d+) marked \(r6\), (\d+) marked \(r7\), (\d+)\s*\n?marked \(r8\)",
+        r" (\d+) marked \(r6\), (\d+) marked \(r7\), (\d+)\s*\n?marked \(r8\),"
+        r" (\d+) marked \(r9\)",
         doc, re.S)
     assert claimed, "the docstring no longer states a tally in a readable form"
     want = tuple(int(g) for g in claimed.groups())
     have = (counted["plain"], counted["retired"],
             counted["r3"], counted["r4"], counted["r5"], counted["r6"],
-            counted["r7"], counted["r8"])
+            counted["r7"], counted["r8"], counted["r9"])
     assert want == have, (
         f"the docstring's tally and its own list disagree: claimed {want}, "
         f"listed {have}")
     # ...and the list is not empty, or the whole check passes on nothing.
     assert counted["r4"] >= 10 and counted["r5"] >= 5 and counted["r6"] >= 5
     assert counted["r7"] >= 5 and counted["r8"] >= 5
+    assert counted["r9"] >= 3
     assert counted["plain"] >= 10
     # The evidence sentence names a path that EXISTS in this repository. Round
     # 5 pointed at two files under the gitignored ai-collab scratch, so the
@@ -4444,8 +4465,239 @@ def test_pg_a_realigned_resubmission_is_echoed_and_never_settled_twice():
     assert rows == 1, "one physical game holds more than one row"
 
 
+async def _settle_directly(sm, pids, row, number):
+    """Write the settlement a report keyed at `number` would leave, and consume
+    the slot -- the two steps the witness above writes inline.
+
+    Behind the endpoint on purpose, and the reason is the same one that
+    docstring gives: this fixture's `ffa_matches` is the narrow one these tests
+    need, and a settlement driven through the endpoint writes columns it does
+    not carry. What a REAL settlement does with the slot is pinned separately by
+    test_pg_a_settlement_commits_the_catch_up_and_lands_on_the_free_number. What
+    the test below is about is which NUMBER the next delivery may use, and that
+    is decided before any column is written.
+
+    The winner is derived from the row rather than named, so a caller cannot
+    silently seat the wrong one: ROW_A is won by S3 and ROW_B by S1, and a
+    hardcoded winner would have made the second settlement disagree with its own
+    scoreboard."""
+    winner = max(row, key=lambda s: (row[s][0], row[s][1]))
+    order = sorted(row, key=lambda s: (-row[s][0], -row[s][1]))
+    async with sm() as db:
+        mid = uuid.uuid4()
+        await db.execute(text(
+            "INSERT INTO ffa_matches (id, lobby_id, photon_room_id,"
+            " player_count, winner_id, ended_at, game_number) VALUES"
+            " (:i, :l, :r, 3, :w, NOW(), CAST(:g AS SMALLINT))"),
+            {"i": mid, "l": LOBBY, "r": f"rm_211531_r{number}",
+             "w": pids[winner], "g": number})
+        for s, (r, p, k) in row.items():
+            await db.execute(text(
+                "INSERT INTO ffa_match_players (match_id, player_id,"
+                "  rounds_won, points_total, kills, placement,"
+                "  rating_change, xp_gained, gold_gained)"
+                " VALUES (:m, :p, :r, :pt, :k, :pl, :rc, :xp, :gd)"),
+                {"m": mid, "p": pids[s], "r": r, "pt": p, "k": k,
+                 "pl": order.index(s) + 1,
+                 "rc": 2.5 if s == winner else -1.0,
+                 "xp": 40 if s == winner else 0,
+                 "gd": 7 if s == winner else 0})
+        await main._ffa_advance_lobby_slot(db, LOBBY)
+        await db.commit()
+
+
+def test_pg_a_realigned_sitting_issues_each_game_its_own_number():
+    """Control: realignment-reuses-the-advertised-number (r9).
+
+    The witness above delivers ONE game at the advertised number and stops, so
+    it cannot see what the sitting does next -- and that is where round 8's
+    realignment section contradicted itself. It said the host sets the base so
+    the NEXT PHYSICAL GAME keys at `E`, and it also said the game that was
+    refused is recovered by one further delivery under the room's corrected
+    base, which is the same `E`. Two different physical games, one number. The
+    number is an identity, so the second of them to arrive is refused
+    terminally, captured, and lost -- and the seat then advertises `E+1` and the
+    room repeats the pattern for every remaining game of the sitting, which is
+    not the one-lost-game-per-measurement bound the section claimed.
+
+    So this test runs the sitting ON past the advertised number and states the
+    three facts the corrected rule rests on:
+
+      1. the parked game, redelivered at `E`, SETTLES -- the advertised number
+         is the one the recovered game takes;
+      2. the next physical game, keyed at `E+1`, ALSO settles -- the sitting
+         continues, two physical games hold two numbers;
+      3. a second physical game keyed at `E` is REFUSED and names `E` as
+         settled -- which is what makes the numbers an issued sequence rather
+         than a base two games can share.
+
+    Together they are the executed form of the rule: the room issues `E` to
+    exactly one delivery, the parked one when there is a parked one, and every
+    later game takes the next number up. Fact 3 is the finding itself, run."""
+    require_pg()
+
+    async def go():
+        engine, sm, pids, _mid = await _endpoint_fixture(
+            games_played=2, recorded_number=1, recorded_room="rm_211531_r1")
+        try:
+            ahead = None
+            try:
+                await _call_endpoint(sm, _endpoint_report(
+                    ROW_A, S3, "rm_211531_r7", with_slots=True))
+            except main.FfaReportRefusal as ex:
+                ahead = ex
+            if ahead is None:
+                # SIX values on every path. A five-value return here met the
+                # caller's unpack with a ValueError naming a count, so the
+                # failure reported the shape of the return instead of the
+                # fact that failed -- and the assertion written to name that
+                # fact never ran. A check whose message cannot reach the
+                # reader is the same defect one layer down from a check that
+                # cannot fail (#342).
+                return None, None, None, None, [], None
+            advertised = int(ahead.progress["expected_game"])
+            # 1. the PARKED game is recovered at the advertised number. Written
+            #    behind the endpoint, the same way the witness above writes it
+            #    and for the same reason -- what a real settlement does with
+            #    this slot is pinned by
+            #    test_pg_a_settlement_commits_the_catch_up_and_lands_on_the_free_number.
+            await _settle_directly(sm, pids, ROW_A, advertised)
+            async with sm() as db:
+                _row, after_recovery = await main._ffa_lock_lobby_slot(db, LOBBY)
+            # 2. THE FINDING, run. The NEXT physical game -- a different
+            #    scoreboard -- keyed at the SAME number, which is what round 8's
+            #    3a.3 instructed the host to set the base to.
+            collided = None
+            try:
+                await _call_endpoint(sm, _endpoint_report(
+                    ROW_B, S3, f"rm_211531_r{advertised}", with_slots=True))
+            except main.FfaReportRefusal as ex:
+                collided = ex
+            # 3. the same next physical game at the number the corrected rule
+            #    issues it instead.
+            free = main._ffa_game_number_refusal(advertised + 1, advertised + 1)
+            await _settle_directly(sm, pids, ROW_B, advertised + 1)
+            async with sm() as db:
+                numbers = [int(n) for n in (await db.execute(text(
+                    "SELECT game_number FROM ffa_matches WHERE lobby_id = :l"
+                    " ORDER BY game_number"), {"l": LOBBY})).scalars().all()]
+                gp = int((await db.execute(text(
+                    "SELECT games_played FROM ffa_lobbies WHERE id = :l"),
+                    {"l": LOBBY})).scalar())
+            return advertised, after_recovery, collided, free, numbers, gp
+        finally:
+            await engine.dispose()
+
+    advertised, after_recovery, collided, free, numbers, gp = run(go())
+    assert advertised is not None, (
+        "the ahead tail was not refused, so the sitting was never realigned "
+        "and nothing below this line was exercised")
+    assert advertised == 3, advertised
+    # 1. the recovered game consumed the advertised number, and the sitting's
+    #    next slot is the one above it -- not the same one again.
+    assert after_recovery == advertised + 1, after_recovery
+    # 2. a second physical game keyed at the advertised number is REFUSED,
+    #    terminally, and the answer names that number as settled. Round 8's
+    #    rule keyed exactly this delivery there, so this is the cost it carried:
+    #    one physical game refused and captured per measurement, for every
+    #    remaining game of the sitting.
+    assert collided is not None, (
+        "a second physical game keyed at the advertised number was not refused")
+    assert collided.status_code in (403, 409), collided.status_code
+    assert collided.progress.get("settled_game") == advertised, collided.progress
+    # 3. the next number up is one this endpoint would settle, so issuing it to
+    #    the next physical game recovers the sitting rather than stalling it.
+    assert free is None, free
+    # The lobby holds one row per physical game at distinct numbers -- the
+    # pre-seeded 1, the recovered game at 3, the next physical game at 4 -- and
+    # the counter is on the last of them. Two physical games never share a
+    # number, and none was lost to a collision.
+    assert numbers == [1, advertised, advertised + 1], numbers
+    assert gp == advertised + 1, gp
+
+
+def test_pg_a_catch_up_on_a_refusing_path_logs_a_claim_its_transaction_can_keep(capsys):
+    """Control: catch-up-log-claims-a-persisted-repair (r9).
+
+    `_ffa_lock_lobby_slot` brings a counter that is behind its own rows up to
+    them, and every refusal raised after a capture goes through it. On that path
+    the UPDATE is never committed: the capture has already rolled this request's
+    transaction back, `FfaReportRefusal` is answered by building a JSONResponse,
+    and `get_db` closes the session, which rolls back with it. Round 8's log line
+    said `games_played 1 -> 2 ... The sitting resumes at 3` -- an accomplished
+    repair, in the past tense, on a path that discards it. The numbers were
+    right and the claim was not, and an operator reading it concluded the
+    counter had been fixed while the next report of that lobby re-derived and
+    re-logged the same repair (#302, and #249 for a teardown that reports work
+    the path does not do).
+
+    THE ASSERTION ON THE WORDING IS NOT A GREP FOR A PHRASE. It sits beside the
+    row itself: the lobby's `games_played` is read back AFTER the refusal has
+    been answered and is required to be exactly where it started. That is the
+    fact the sentence now states, so the two cannot drift apart -- if a later
+    round makes this path commit, the row assertion fails first and the wording
+    is corrected because it has become wrong, rather than the wording quietly
+    outliving its subject."""
+    require_pg()
+
+    async def go():
+        engine, sm, _pids, _mid = await _endpoint_fixture(
+            games_played=1, recorded_number=2, recorded_room="rm_211531_r2")
+        try:
+            raised = None
+            try:
+                await _call_endpoint(sm, _endpoint_report(
+                    ROW_A, S3, "rm_211531_r7", with_slots=True))
+            except main.FfaReportRefusal as ex:
+                raised = ex
+            async with sm() as db:
+                gp = (await db.execute(text(
+                    "SELECT games_played FROM ffa_lobbies WHERE id = :l"),
+                    {"l": LOBBY})).scalar()
+            return raised, int(gp)
+        finally:
+            await engine.dispose()
+
+    raised, gp = run(go())
+    printed = capsys.readouterr().out
+    assert raised is not None, "an ahead tail was not refused"
+    assert raised.status_code == 409
+    # The catch-up DID happen, as a derivation: the answer carries the counter
+    # brought up to the rows, not the stored 1.
+    assert raised.progress["games_played"] == 2, raised.progress
+    assert raised.progress["expected_game"] == 3, raised.progress
+    # ...and the row is exactly where it was. The statement ran and was
+    # discarded, twice over on this path, which is what the line has to say.
+    assert gp == 1, (
+        "the catch-up persisted on a refusing path; the log line's condition "
+        "is now the wrong way round and has to be re-derived")
+
+    def claims_persistence(body):
+        return "stands only if that request commits" in body
+
+    def claims_a_completed_repair(body):
+        return "games_played 1 -> 2" in body or "was behind its own rows" in body
+
+    assert "counter is behind its own rows" in printed, printed[-800:]
+    assert claims_persistence(printed), printed[-800:]
+    assert not claims_a_completed_repair(printed), printed[-800:]
+    # Both predicates exercised in BOTH directions on the same code path, so a
+    # typo in either literal cannot make the two assertions above vacuous
+    # (#391): a check that cannot fail is worse than no check (#342).
+    assert claims_persistence(
+        "correction is issued in this request's transaction and stands only if "
+        "that request commits")
+    assert not claims_persistence("the sitting resumes at 3")
+    assert claims_a_completed_repair(
+        "[FFA] lobby X counter was behind its own rows: games_played 1 -> 2")
+    assert not claims_a_completed_repair(
+        "[FFA] lobby X counter is behind its own rows: games_played 1, "
+        "highest recorded game 2")
+
+
 def test_no_production_file_cites_the_gitignored_scratch():
-    """Control: production-cites-a-gitignored-path (r8).
+    """Control: production-cites-a-gitignored-path (r8) and
+    shipped-file-outside-the-swept-set (r9).
 
     Round 7 closed this for `backend/tests/evidence/` and left the shipped
     server outside the rule, so main.py went on sending the next reader to the
@@ -4458,17 +4710,36 @@ def test_no_production_file_cites_the_gitignored_scratch():
 
     Scoped to the shipped server deliberately. A TEST may name the review
     document it pins -- this file does -- and the evidence directory has its own
-    rule in test_the_committed_evidence_re_derives_its_own_numbers."""
+    rule in test_the_committed_evidence_re_derives_its_own_numbers.
+
+    ROUND 9 WIDENS THE SET, AND STOPS WRITING IT DOWN. Round 8 stated the rule
+    over every file we SHIP and then read three hand-written globs -- api/*.py,
+    discord_bot.py, sql/*.sql. `backend/Dockerfile.bot` is shipped by the same
+    deploy (docs/deploy-reference.md maps it to the primary) and was outside all
+    three, so the one surviving citation in the tree was the one file the check
+    could not see, and the check passed on every run while it stood. A
+    hand-written list of a set that GROWS under-covers it the moment someone
+    adds a file, and the flag names a LINE where the defect is a CLASS (#432),
+    so the set is now DERIVED from what the repository actually tracks:
+    everything under `backend/` except the test tree. Dockerfiles, requirements
+    and the compose file come in by construction, and so does anything added
+    later."""
     root = pathlib.Path(__file__).resolve().parent.parent.parent
-    files = sorted((root / "backend" / "api").glob("*.py"))
-    files.append(root / "backend" / "discord_bot.py")
-    files += sorted((root / "backend" / "sql").glob("*.sql"))
+    listed = subprocess.run(["git", "ls-files", "backend/"], cwd=str(root),
+                            capture_output=True, text=True, timeout=60)
+    assert listed.returncode == 0, f"git ls-files failed: {listed.stderr!r}"
+    files = [root / line for line in listed.stdout.splitlines()
+             if line and not line.startswith("backend/tests/")]
     # A check over an empty set passes for ever (#342), so the set is asserted
-    # before it is used, and the two files the sweep is anchored on by name.
-    assert len(files) >= 20, [f.name for f in files]
-    assert all(f.is_file() for f in files), [f.name for f in files if not f.is_file()]
-    names = {f.name for f in files}
-    assert {"main.py", "discord_bot.py"} <= names, sorted(names)
+    # before it is used -- by size, and by the four files the rule is anchored
+    # on by name, one of which is the file round 8's set did not reach.
+    assert len(files) >= 200, len(files)
+    assert all(f.is_file() for f in files), [
+        f.name for f in files if not f.is_file()]
+    rel = {f.relative_to(root).as_posix() for f in files}
+    assert {"backend/api/main.py", "backend/discord_bot.py",
+            "backend/Dockerfile.bot",
+            "backend/docker-compose.yml"} <= rel, sorted(rel)[:40]
 
     scratch = "ai-collab/"
 
@@ -4518,6 +4789,12 @@ def test_every_mutation_control_the_runner_carries_is_named_and_paired():
     module's docstring inventory NAMES it, and the test it names EXISTS.
     Adding a control without listing it, or naming a test that has since
     been renamed, reds here rather than passing quietly (#342).
+
+    Round 9 added three controls and did NOT add a fourth hand-written
+    list beside them. That is what deriving the set buys: the lists above
+    are the ones that already existed, this check covers whatever the
+    runner carries today, and a round that adds a control extends the
+    module inventory and nothing else.
     """
     import importlib.util
 

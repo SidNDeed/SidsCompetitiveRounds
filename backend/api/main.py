@@ -47339,7 +47339,21 @@ async def _ffa_lock_lobby_slot(db: AsyncSession, lobby_uuid):
     at all.
 
     Normal lobbies pay one indexed SELECT for this (idx_ffa_matches_lobby_game)
-    and never the UPDATE."""
+    and never the UPDATE.
+
+    THE CATCH-UP IS A STATEMENT, NOT AN OUTCOME, and the line it logs says so.
+    Whether it survives is decided by the request that issued it, not here: the
+    settling path commits and the correction stands, while every path that ends
+    in `FfaReportRefusal` returns a JSONResponse and never commits, so `get_db`
+    closes the session and the UPDATE is rolled back with it. Both are ordinary
+    and neither is a failure. What was NOT ordinary is a log line that read
+    `games_played 3 -> 7`, in the past tense, on a path that discards it: an
+    operator reading it concluded the counter had been repaired, and the next
+    report of that lobby re-derived and re-logged the same repair for as long
+    as the lobby kept being refused. The numbers were right and the claim was
+    not, which is the class this lane keeps finding in its own comments (#302,
+    and #249 for the same shape one layer out). The line now states what it
+    derived and names the condition its persistence hangs on."""
     lobby = (await db.execute(text(_FFA_LOBBY_LOCK_SQL),
                               {"lid": lobby_uuid})).mappings().first()
     if lobby is None:
@@ -47350,9 +47364,11 @@ async def _ffa_lock_lobby_slot(db: AsyncSession, lobby_uuid):
     if held > counted:
         await db.execute(text(_FFA_LOBBY_CATCH_UP_SQL),
                          {"lid": lobby_uuid, "gp": held})
-        print(f"[FFA] lobby {lobby_uuid} counter was behind its own rows: "
-              f"games_played {counted} -> {held} (highest recorded game). The "
-              f"sitting resumes at {held + 1}")
+        print(f"[FFA] lobby {lobby_uuid} counter is behind its own rows: "
+              f"games_played {counted}, highest recorded game {held}; this "
+              f"answer derives the sitting's next slot as {held + 1}. The "
+              f"correction is issued in this request's transaction and stands "
+              f"only if that request commits")
         # Re-read under the same lock, so the row the caller inspects (the
         # game cap reads games_played off it) and the number returned below
         # are the SAME state, not the snapshot from before the catch-up.

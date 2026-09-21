@@ -27,10 +27,13 @@ Files are restored from byte-exact copies taken here, never with
 uncommitted work). The md5 of every touched file is compared at the end and the
 run fails loudly if any file did not come back.
 
-Rounds 6, 7 and 8 are all here. Earlier rounds' are re-run rather than trusted:
-each round's edits move code around several of the previous anchors, and a
-control that is not re-run on the tree it certifies is an assertion about a
-different tree.
+EVERY round's controls are here, this round's and all the earlier ones'. The
+earlier ones are re-run rather than trusted: each round's edits move code
+around several of the previous anchors, and a control that is not re-run on
+the tree it certifies is an assertion about a different tree. The rounds are
+deliberately not listed by number in this header -- an enumeration of a set
+that grows goes stale the round after it is written, which is the same defect
+closed twice elsewhere in this round. CONTROLS below is the inventory.
 
 IT PRINTS ITS OWN INVOCATION, and that is round 8's correction to round 7's
 log. A report that shows fourteen RED lines and a tally, with no record of what
@@ -52,7 +55,10 @@ BACKEND = os.path.dirname(os.path.dirname(HERE))           # backend
 ROOT = os.path.dirname(BACKEND)                            # repository root
 MAIN = os.path.join(BACKEND, "api", "main.py")
 TESTS = os.path.join(BACKEND, "tests", "test_ffa_game_number_anchor.py")
-SUITES = os.path.join(HERE, "r8-suites.txt")
+# Shipped by the same deploy as the api (docs/deploy-reference.md maps it to
+# the primary), and outside every glob round 8's shipped-file rule read.
+DOCKERFILE_BOT = os.path.join(BACKEND, "Dockerfile.bot")
+SUITES = os.path.join(HERE, "r9-suites.txt")
 DSN = os.environ.get("FFA_TEST_PG_DSN")
 
 # name -> (file, anchor, mutant, inert, test)
@@ -363,6 +369,52 @@ CONTROLS = [
      '  evidence-result-pattern-forgets-the-repln (r8)  the result pattern in\n',
      '  evidence-result-pattern-forgets-the-repin (r8)  the result-pattern in\n',
      "test_every_mutation_control_the_runner_carries_is_named_and_paired"),
+
+    # ── round 9 ──────────────────────────────────────────────────────────
+    # The realignment section keyed the NEXT physical game and the parked one
+    # at the same advertised number. What keeps that from settling one number
+    # twice is the room-keyed echo comparing the BODY: drop the comparison and
+    # a different physical game delivered under an already-settled key is
+    # answered as that game -- settled once, and the second one silently gone.
+    ("realignment-reuses-the-advertised-number", MAIN,
+     '    why = await _ffa_prior_field_disagreement(db, prior, id_by_steam, report, kills_signed)\n'
+     '    if why is not None:\n',
+     '    why = None\n'
+     '    if why is not None:\n',
+     '    why = await _ffa_prior_field_disagreement(db, prior, id_by_steam, report, kills_signed)\n'
+     '    # (inert: a comment at the same site)\n'
+     '    if why is not None:\n',
+     "test_pg_a_realigned_sitting_issues_each_game_its_own_number"),
+
+    # The L1 rule was stated over every file we SHIP and read three
+    # hand-written globs. This mutates the one shipped file that was outside
+    # all three -- and it is the control for the SET rather than for the line,
+    # because the identical edit was green for the whole of round 8.
+    ("shipped-file-outside-the-swept-set", DOCKERFILE_BOT,
+     '# is parse-broken against current YouTube page variants, reproduced against a\n',
+     '# is parse-broken against current YouTube page variants (evidence in '
+     + "ai-" + 'collab/streaming-design-addendum-chat.md), reproduced against a\n',
+     '# is parse-broken against current YouTube page variants,  reproduced against a\n',
+     "test_no_production_file_cites_the_gitignored_scratch"),
+
+    # A log line that announces a repair on a path whose transaction is never
+    # committed. The test it reds asserts the row as well as the wording, so
+    # this control cannot be satisfied by a phrase alone.
+    ("catch-up-log-claims-a-persisted-repair", MAIN,
+     '        print(f"[FFA] lobby {lobby_uuid} counter is behind its own rows: "\n'
+     '              f"games_played {counted}, highest recorded game {held}; this "\n'
+     '              f"answer derives the sitting\'s next slot as {held + 1}. The "\n'
+     '              f"correction is issued in this request\'s transaction and stands "\n'
+     '              f"only if that request commits")\n',
+     '        print(f"[FFA] lobby {lobby_uuid} counter was behind its own rows: "\n'
+     '              f"games_played {counted} -> {held} (highest recorded game). The "\n'
+     '              f"sitting resumes at {held + 1}")\n',
+     '        print(f"[FFA] lobby {lobby_uuid} counter is behind its own rows: "\n'
+     '              f"games_played {counted}, highest recorded game {held}; this "\n'
+     '              f"answer derives the sitting\'s next slot as {held + 1}.  The "\n'
+     '              f"correction is issued in this request\'s transaction and stands "\n'
+     '              f"only if that request commits")\n',
+     "test_pg_a_catch_up_on_a_refusing_path_logs_a_claim_its_transaction_can_keep"),
 ]
 
 
