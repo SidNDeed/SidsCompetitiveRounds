@@ -24,6 +24,7 @@ import ast
 import os
 import pathlib
 import re
+import subprocess
 
 import pytest
 
@@ -335,33 +336,407 @@ def test_the_route_docstring_states_the_migration_dependency_it_created():
     assert "WHAT A REFUSAL COSTS" in doc, doc
 
 
-CROSS_LANE_ROOT = os.environ.get("SCR_CROSS_LANE_CLIENT_ROOT", "")
+# ── The cross-lane binding: one field list, read off BOTH trees ──────────
+#
+# This check was first written behind
+#   @pytest.mark.skipif(not os.environ.get("SCR_CROSS_LANE_CLIENT_ROOT"))
+# and nothing in this repository sets that name: not this directory's
+# conftest, not a pytest.ini / setup.cfg / pyproject that does not exist, not
+# a CI file. It was therefore a SKIP in every ordinary run -- it is the one
+# skip both runs of the suite of record reported -- and it executed only
+# inside the mutation harness, which set the variable itself. A test behind a
+# skip has never run, so neither has any improvement made to it (#715), and a
+# guard that is never collected reads exactly like one that passed (#664).
+#
+# What replaces it resolves a client tree AT RUN TIME and FAILS when it cannot
+# find one. That is the direction the client lane's twin already fails in, so
+# the two halves of one binding no longer fail in opposite directions (#341,
+# #444). It matters most on the MERGED artifact, where this repository is
+# itself a candidate: a field renamed in the route and left alone in the
+# client parse reddens here, on main, with nothing set.
+#
+# The candidate ORDER and the branch-name rule below are the cross-lane
+# contract's (§7.4.1c) and the other lane spells them the same way. A rule one
+# lane keeps and the other does not is how two halves of one contract drift
+# while each reads correct on its own (#341, #444).
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+# The qualifying marker for "this tree carries the client half" is the ROUTE'S
+# OWN PATH -- a contract literal both lanes must spell identically -- and
+# never a field NAME. A name-keyed marker would step past the very tree whose
+# rename this test exists to catch and measure some other checkout instead,
+# which is a check bound to something merely correlated with the property
+# (#732).
+# Quotes are ALLOWED inside the span and newlines are not: a client that
+# concatenates -- baseUrl + "/api/v1/team/series/" + id + "/status" -- builds
+# the same URL as one that interpolates, and a discriminator that admitted
+# only one spelling would answer "not the client half" about a tree that is
+# (#441: a check keyed on formatting rather than on the operation).
+_STATUS_ROUTE_CALL = re.compile(r'/api/v1/team/series/[^\r\n]{0,60}/status')
+_CLIENT_LANE_BRANCH = "claude/sept16-client-r2"
 
 
-@pytest.mark.skipif(not CROSS_LANE_ROOT,
-                    reason="set SCR_CROSS_LANE_CLIENT_ROOT to a client checkout")
-def test_every_deferral_field_the_client_reads_is_one_this_route_emits():
-    """CROSS-LANE. The field list is a single source, checked from this side.
+def _carries_the_client_half(root):
+    """(sources, carries) for one candidate tree: does its plugin call the route."""
+    try:
+        sources = sorted((pathlib.Path(root) / "plugin").glob("*.cs"))
+    except OSError:
+        return [], False
+    for p in sources:
+        try:
+            txt = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if _STATUS_ROUTE_CALL.search(txt):
+            return sources, True
+    return sources, False
 
-    The lenses grep both trees for the same literals; this makes the same
-    comparison a test, so a client that reads `dc_deferred_remaining` -- a
-    plausible name this route does not emit -- reddens here instead of
-    rendering a silent zero in front of a player. Skipped when no client
-    checkout is offered, never quietly passed: a skip says "not measured", a
-    pass would say "measured and agreed".
+
+def _worktrees_on_branch(listing, branch):
+    """The paths in a `git worktree list` listing that are ON `branch`.
+
+    A pure function over the listing TEXT, so the rule can be exercised
+    against lines this machine does not currently carry -- a rule that can
+    only be checked by whatever worktrees happen to exist is a check that
+    cannot fail on the case it exists for (#342).
+
+    `git worktree list` prints `<path> <sha> [branch]` for an attached
+    worktree and `<path> <sha> (detached HEAD)` for one checked out at a bare
+    sha, so the bracket carries both the branch name and the attached/detached
+    answer. The match is EXACT and never a substring: a substring also matches
+    a branch whose name merely BEGINS with the client lane's -- an older or
+    forked copy answering for the live one with nothing in the output to say
+    so -- and a detached pin, which on this machine calls the status route
+    while reading none of the fields, prints no bracket and is excluded by the
+    same rule a second way.
     """
-    root = pathlib.Path(CROSS_LANE_ROOT) / "plugin"
-    sources = sorted(root.glob("*.cs"))
-    assert sources, f"no client sources under the offered checkout: {root}"
-    emitted = set(status_route_response_keys())
+    out = []
+    for ln in listing.splitlines():
+        m = re.search(r"\[([^\]]+)\]\s*$", ln.strip())
+        if m and m.group(1).strip() == branch:
+            out.append(ln.split()[0])
+    return out
+
+
+def _client_lane_sources():
+    """(sources, how) for a client tree carrying the banner, resolved at run time.
+
+    NEVER a hardcoded path: a hardcoded target is a check that cannot fail
+    where it matters (#342), and a workstation path written into the
+    repository is a privacy defect besides. The order is the cross-lane
+    contract's (§7.4.1c), spelled the same on both lanes, and the first
+    candidate that actually CALLS the route wins:
+
+      1. $SCR_CROSS_LANE_CLIENT_ROOT -- what a control runner points at a COPY
+         of a client tree, so a control can be exercised without ever writing
+         to the other lane's checkout. EXCLUSIVE: when it is set nothing else
+         is tried, because a runner that names a tree is measuring THAT tree
+         and falling through on a miss would report a result about a checkout
+         the control never chose;
+      2. <root>/REVIEW-INPUT/client-lane -- the review pin's own layout. An
+         explicitly supplied copy beats an implicit one, which is why it sits
+         above the next candidate rather than below it;
+      3. THIS repository -- once both halves are merged the tree under test IS
+         the client tree, and this is the candidate that makes the check live
+         on merged main, in a fresh clone, on another machine and on CI, where
+         no review pin and no sibling worktree ever existed;
+      4. `git worktree list` -- a sibling worktree whose branch is EXACTLY the
+         client lane's, which is how this runs while the two lanes are apart.
+
+    Candidate 4 matches the branch exactly and never as a substring: the
+    listing prints `<path> <sha> [branch]`, and a substring match also matches
+    every read-only review pin checked out from that lane at an older sha -- a
+    stale tree answering for the live one with nothing in the output to say
+    so. A DETACHED worktree prints no bracket at all and is therefore never a
+    candidate, which is the same rule a second way.
+
+    Returns ([], how) when nothing qualifies, and the caller FAILS. `how`
+    names the candidate and never a path: the only absolute path any file in
+    this bundle may print is the production pin.
+    """
+    cands = []
+    env = os.environ.get("SCR_CROSS_LANE_CLIENT_ROOT")
+    if env:
+        cands.append((pathlib.Path(env),
+                      "the tree $SCR_CROSS_LANE_CLIENT_ROOT names"))
+    else:
+        cands.append((REPO_ROOT / "REVIEW-INPUT" / "client-lane",
+                      "the review pin's client-lane copy"))
+        cands.append((REPO_ROOT, "this repository itself -- the merged tree"))
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(REPO_ROOT), "worktree", "list"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            for path in _worktrees_on_branch(
+                    proc.stdout.decode("utf-8", "replace"),
+                    _CLIENT_LANE_BRANCH):
+                cands.append((pathlib.Path(path),
+                              "the client lane's worktree"))
+        except Exception:
+            pass
+    tried = []
+    for root, how in cands:
+        sources, carries = _carries_the_client_half(root)
+        if carries:
+            return sources, how
+        tried.append(how + (" (no plugin sources)" if not sources
+                            else " (does not call the route)"))
+    return [], "no candidate tree called the status route: " + "; ".join(tried)
+
+
+def _deferral_names_in(sources):
+    """Every dc_deferred* JSON key these C# sources read."""
     read = set()
     for p in sources:
-        read |= set(re.findall(r'"(dc_deferred[A-Za-z0-9_]*)"',
-                               p.read_text(encoding="utf-8", errors="replace")))
-    assert read, ("the client reads no dc_deferred* field at all -- either the "
-                  "banner derives from something else, or this is the wrong "
-                  "checkout")
+        try:
+            txt = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        read |= set(re.findall(r'"(dc_deferred[A-Za-z0-9_]*)"', txt))
+    return read
+
+
+def _stable_deferral_names(sources, attempts=3):
+    """(names, stable) -- the set read twice the same, or the last try.
+
+    While the two lanes are apart this reads a tree whose OWN builder is
+    editing it, and a read that lands mid-write returns a file that is short a
+    field -- which at the assertion below is indistinguishable from the two
+    lanes genuinely disagreeing about a name. It has happened once already, on
+    the other lane, whose controls run reported a missing field that the same
+    file carried minutes later. A difference is evidence only when the thing
+    read was COMPLETE (#304), so two consecutive identical reads are required
+    before anything is asserted on them. This says nothing about behaviour; it
+    is about the READ, and an unstable one is reported as an unstable read
+    rather than as a disagreement.
+    """
+    prev = _deferral_names_in(sources)
+    for _ in range(max(1, attempts - 1)):
+        cur = _deferral_names_in(sources)
+        if cur == prev:
+            return cur, True
+        prev = cur
+    return prev, False
+
+
+def test_every_deferral_field_the_client_reads_is_one_this_route_emits():
+    """CROSS-LANE, AND IT FAILS RATHER THAN SKIPPING.
+
+    The lenses grep both trees for the same literals; this makes that
+    comparison a test, so a client reading `dc_deferred_remaining_seconds` --
+    a plausible paraphrase this route does not emit -- reddens here instead of
+    rendering a silent zero in front of a player. Neither lane can see the
+    defect by reading its own half: the client would parse a key nobody sends,
+    the server would ship a field nobody reads, and the feature would be inert
+    with healthy logs at both ends (#438).
+
+    WHAT A FAILURE HERE MEANS, in the three shapes it takes. "not checked" --
+    no reachable tree calls this route, and the message says which candidates
+    were tried; that is a real finding, because on the merged artifact this
+    repository is itself a candidate and the case cannot arise there. "not
+    read whole" -- the tree changed under two consecutive reads, which while
+    the lanes are apart means its own builder was mid-write. "checked and
+    disagreed" -- a name lives on one lane only. All three are failures on
+    purpose: a skip and a pass are one line apart in a summary and read the
+    same way.
+    """
+    sources, how = _client_lane_sources()
+    assert sources, (
+        "THE CROSS-LANE BINDING WAS NOT CHECKED -- " + how + ". Offer a client "
+        "checkout in $SCR_CROSS_LANE_CLIENT_ROOT, or run this where both "
+        "halves live in one tree. This fails rather than skipping because a "
+        "skip is indistinguishable from a pass once it is a summary line "
+        "(#715, #664).")
+    emitted = set(status_route_response_keys())
+    read, stable = _stable_deferral_names(sources)
+    assert stable, (
+        "THE CROSS-LANE BINDING WAS NOT READ WHOLE -- two consecutive reads of "
+        + how + " disagreed, so its builder is writing it. A difference is "
+        "evidence only when the thing read was complete (#304); this is a "
+        "statement about the read, not about the two lanes.")
+    # This tree CALLS the route, so it must read the deferral state out of the
+    # answer. Calling it and parsing none of the three is the inert shape: the
+    # banner off for every deferred series, one warning line per series, and
+    # nothing anywhere that errors (#438).
+    assert read, ("this tree calls the read-only status route and reads no "
+                  "dc_deferred* field out of the answer -- " + how)
+    # Every name it reads is one this route emits. The rename in the failure
+    # this test was written for lands exactly here.
     assert read <= emitted, sorted(read - emitted)
+    # ...and all three names the contract fixes are read, not merely a subset
+    # of them. This is the other direction of the same disagreement: a field
+    # the route emits and the client quietly stops reading leaves no name
+    # mismatched anywhere, so nothing else in either tree would notice it.
+    assert set(BANNER_FIELDS) <= read, sorted(set(BANNER_FIELDS) - read)
+
+
+def test_the_cross_lane_binding_is_not_gated_on_an_unset_environment_variable():
+    """A check that cannot fail is worse than no check (#342, #431, #441).
+
+    Read off THIS file rather than off a summary line, because the summary
+    line is what hid the defect: this file's own result was "46 passed, 1
+    skipped" in both runs of the suite of record, with the database and
+    without it, and the 1 was this binding. The decorator is gone, the body
+    raises no skip, and the resolver it calls offers more than one way in --
+    so no single unset name can take the check out of the run again.
+    """
+    tree = ast.parse(pathlib.Path(__file__).resolve()
+                     .read_text(encoding="utf-8"))
+    name = "test_every_deferral_field_the_client_reads_is_one_this_route_emits"
+    fn = next((n for n in tree.body
+               if isinstance(n, ast.FunctionDef) and n.name == name), None)
+    assert fn is not None, name
+    decorated = [ast.unparse(d) for d in fn.decorator_list]
+    assert not [d for d in decorated
+                if "skip" in d or "xfail" in d], decorated
+    body = ast.unparse(fn)
+    for gate in ("pytest.skip", "pytest.xfail", "skipif", "os.environ"):
+        assert gate not in body, (gate, name)
+    # No module-level name gates it either: the old cut hung the decorator on
+    # one, so the module read green while the assertion never executed.
+    assigned = {t.id for n in tree.body if isinstance(n, ast.Assign)
+                for t in n.targets if isinstance(t, ast.Name)}
+    assert "CROSS_LANE_ROOT" not in assigned, sorted(assigned)
+    # And more than one candidate, so the check does not simply hang on the
+    # same variable under a new spelling.
+    resolver = ast.unparse(next(n for n in tree.body
+                                if isinstance(n, ast.FunctionDef)
+                                and n.name == "_client_lane_sources"))
+    assert resolver.count("cands.append") >= 3, resolver
+    # The branch is matched EXACTLY. `in` would also match every read-only
+    # review pin checked out from that lane at an older sha, and a stale tree
+    # answering for the live one leaves nothing in the output to say so.
+    # The resolver DELEGATES the branch rule; the rule itself is held
+    # behaviourally by the test below, against a synthetic listing.
+    assert "_worktrees_on_branch(" in resolver, resolver
+
+
+def test_only_a_worktree_on_the_client_lane_branch_is_a_candidate():
+    """The worktree candidate reads a BRANCH NAME, exactly.
+
+    Four lines, every one of which this repository has actually carried: the
+    live client lane, a read-only review pin checked out DETACHED from that
+    lane at an older sha, a branch whose name merely begins with the client
+    lane's, and this lane's own worktree. Only the first is a candidate.
+
+    The pin is the case that matters. It calls the status route and reads none
+    of the deferral fields, so admitting it would turn the binding red against
+    a tree nobody is merging -- a red that says "the lanes disagree" while the
+    lanes agree.
+    """
+    listing = "\n".join([
+        "/w/live    1111111 [" + _CLIENT_LANE_BRANCH + "]",
+        "/w/pin     2222222 (detached HEAD)",
+        "/w/older   3333333 [" + _CLIENT_LANE_BRANCH + "-r1]",
+        "/w/server  4444444 [claude/sept16-dc-server]",
+    ])
+    assert _worktrees_on_branch(listing, _CLIENT_LANE_BRANCH) == ["/w/live"]
+    assert _worktrees_on_branch(listing, "claude/sept16-dc-server") == ["/w/server"]
+    assert _worktrees_on_branch("", _CLIENT_LANE_BRANCH) == []
+
+
+def test_the_environment_candidate_is_exclusive(monkeypatch, tmp_path):
+    """A runner that names a tree is measuring THAT tree (contract §7.4.1c).
+
+    Falling through to another checkout on a miss would report a result about
+    a tree the control never chose -- and on a workstation carrying the other
+    lane's live worktree the fall-through would find it and go GREEN, which is
+    exactly the reading a control that points somewhere else is trying not to
+    get.
+    """
+    monkeypatch.setenv("SCR_CROSS_LANE_CLIENT_ROOT", str(tmp_path))
+    sources, how = _client_lane_sources()
+    assert sources == [], how
+    assert "SCR_CROSS_LANE_CLIENT_ROOT" in how, how
+    # With it unset the same call consults more than that one tree, so the
+    # emptiness above is the exclusivity and not simply this machine.
+    monkeypatch.delenv("SCR_CROSS_LANE_CLIENT_ROOT", raising=False)
+    _, how_unset = _client_lane_sources()
+    assert how_unset != how, (how, how_unset)
+
+
+def test_the_client_half_discriminator_answers_its_three_cases(tmp_path):
+    """The resolver's one judgement, unit-tested against synthetic trees.
+
+    The rest of the cross-lane check depends on this function answering "does
+    this tree call the route" correctly, and on a workstation it is only ever
+    asked about trees that happen to be lying around. A discriminator that is
+    never shown a negative is not known to discriminate (#391), and this is
+    the piece that decides whether the binding measures the merged artifact or
+    steps past it, so it gets the three cases in writing and they run
+    everywhere (#715).
+    """
+    # 1. No plugin directory at all -- not a client tree.
+    assert _carries_the_client_half(tmp_path / "nothing") == ([], False)
+
+    # 2. A plugin directory whose sources do NOT call the route. This is the
+    #    server lane's own tree before the merge, and it must NOT be mistaken
+    #    for the client half: the state endpoint's path is deliberately close.
+    plug = tmp_path / "pre" / "plugin"
+    plug.mkdir(parents=True)
+    (plug / "ApiClient.cs").write_text(
+        'string url = $"{baseUrl}/api/v1/team/series/{seriesId}/state";\n',
+        encoding="utf-8")
+    sources, carries = _carries_the_client_half(tmp_path / "pre")
+    assert sources and carries is False, (sources, carries)
+
+    # 3. A plugin directory that calls it -- the merged artifact's shape, and
+    #    the interpolated spelling the client actually builds the URL with.
+    plug = tmp_path / "post" / "plugin"
+    plug.mkdir(parents=True)
+    (plug / "ApiClient.cs").write_text(
+        'string url = $"{baseUrl}/api/v1/team/series/{seriesId}/status";\n',
+        encoding="utf-8")
+    sources, carries = _carries_the_client_half(tmp_path / "post")
+    assert carries is True and len(sources) == 1, (sources, carries)
+
+    # 4. And the concatenated spelling, because a client that builds the same
+    #    URL without interpolation is the same client half.
+    (plug / "ApiClient.cs").write_text(
+        'string url = baseUrl + "/api/v1/team/series/" + seriesId + "/status";\n',
+        encoding="utf-8")
+    assert _carries_the_client_half(tmp_path / "post")[1] is True
+
+
+def test_an_unstable_read_of_the_other_lane_is_reported_as_unstable(tmp_path):
+    """A file being written must not read as a field disagreement (#304).
+
+    While the two lanes are apart this binding reads a tree whose own builder
+    is editing it, and a truncated read is short a name -- the same shape, at
+    the assertion, as the two lanes disagreeing. The other lane hit exactly
+    that and reported a red for a field its own file carried minutes later.
+    The guard is two consecutive identical reads, and it is tested here rather
+    than trusted, because on a workstation it would otherwise only ever be
+    exercised by a race nobody can schedule.
+    """
+    src = tmp_path / "ApiClient.cs"
+    src.write_text('HasJsonKey(resp, "dc_deferred_seconds_remaining")\n',
+                   encoding="utf-8")
+    names, stable = _stable_deferral_names([src])
+    assert stable and names == {"dc_deferred_seconds_remaining"}, (names, stable)
+
+    # A source that answers differently on every read is what a mid-write file
+    # looks like. A plain list would hand the caller the last one it happened
+    # to see; this reports that it could not read the tree whole.
+    class Wobbling(object):
+        def __init__(self):
+            self.n = 0
+
+        def read_text(self, **kw):
+            self.n += 1
+            return '"dc_deferred_%d"' % self.n
+
+    names, stable = _stable_deferral_names([Wobbling()])
+    assert stable is False, names
+    # ...and the caller's own assertion is the one that fails on it, before
+    # any comparison with the route's keys is attempted.
+    body = ast.unparse(next(
+        n for n in ast.parse(pathlib.Path(__file__).resolve()
+                             .read_text(encoding="utf-8")).body
+        if isinstance(n, ast.FunctionDef)
+        and n.name == "test_every_deferral_field_the_client_reads_is_one_this_route_emits"))
+    assert body.index("NOT READ WHOLE") < body.index("read <= emitted"), body
 
 
 def test_the_state_endpoint_has_no_lifecycle_parameter_left():
@@ -590,18 +965,47 @@ def test_no_revival_site_claims_the_marker_has_a_known_age():
 def test_the_liveness_helper_doc_matches_its_fresh_process_branch():
     """A doc that states the opposite of its own branch (#351, #302).
 
-    The sweep's veto is built on this helper, and a reader who took the old
-    first line at face value would expect a fresh process to settle rows
-    immediately. It vetoes instead, deliberately -- the evidence map is empty
-    after a restart because nothing has been heard yet, not because nobody is
-    playing.
+    The sweep's veto is built on this helper, and a reader who took the
+    original first line at face value would expect a fresh process to settle
+    rows immediately. It vetoes instead, deliberately -- the evidence map is
+    empty after a restart because nothing has been heard yet, not because
+    nobody is playing.
+
+    AND THE CORRECTION MUST NOT BE A SECOND ABSOLUTE. The first cut of the
+    fix replaced "returns false on a fresh process" with "Returns TRUE when
+    the evidence is not yet trustworthy", stated without qualification, while
+    the function's FIRST statement returns False for a falsy group id -- on a
+    fresh process. Right about the case it was aimed at, wrong as the
+    whole-state-space sentence it was written as, which is the same shape as
+    the two revival-age absolutes deleted one row above (#351). So the doc is
+    bound to the ORDER of the branches here, not merely to the existence of
+    one of them: the falsy-id exit is the first statement, the age veto comes
+    after it, and the doc says both in that order.
     """
     doc = ast.get_docstring(node_named("_group_game_in_progress"))
-    assert "Returns TRUE when the evidence is not yet trustworthy" in doc, doc
+    node = node_named("_group_game_in_progress")
+    # The TRUE claim is scoped to a named group -- never stated flat.
+    m = re.search(r"returns TRUE while the evidence is not yet trustworthy",
+                  doc, re.I)
+    assert m, doc
+    assert re.search(r"for a NAMED group", doc[:m.start()], re.I), doc
+    # ...and the exit that makes the qualifier necessary is stated, with the
+    # direction it answers in.
+    assert re.search(r"empty group id is answered FALSE", doc), doc
+    # THE ORDER, read off the AST rather than off a line number: the first
+    # statement of the body is the falsy-id return, and the age veto is later.
+    body = node.body[1:] if (node.body and isinstance(node.body[0], ast.Expr)
+                             ) else node.body
+    first = body[0]
+    assert isinstance(first, ast.If), ast.unparse(first)
+    assert ast.unparse(first) == "if not group_id:\n    return False", \
+        ast.unparse(first)
     code = code_only(span("_group_game_in_progress"))
     i = first_index(code, "if not _in_match_evidence_trustworthy():")
     assert i >= 0, code
     assert any("return True" in ln for ln in code[i:i + 6]), code[i:i + 6]
+    j = first_index(code, "if not group_id:")
+    assert 0 <= j < i, (j, i)
 
 
 def test_no_dc_file_names_a_superseded_bound():

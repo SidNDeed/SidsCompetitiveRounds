@@ -858,13 +858,27 @@ def _in_match_evidence_trustworthy() -> bool:
 def _group_game_in_progress(group_id) -> bool:
     """True if a client reported being IN a game for this lobby/series recently.
 
-    Returns TRUE when the evidence is not yet trustworthy (fresh process), which
-    is what the code below does and the opposite of what this line said until
-    now: too soon after boot there is no way to tell "idle" from "we have not
-    listened yet", so it answers as though a game were live and every caller's
-    destructive action is vetoed. Callers must treat the result as 'proof of
-    life', never as 'proof of death': use it only to VETO a destructive action,
-    never to trigger one.
+    For a NAMED group, returns TRUE while the evidence is not yet trustworthy
+    (fresh process) -- too soon after boot there is no way to tell "idle" from
+    "we have not listened yet", so it answers as though a game were live and
+    that caller's destructive action is vetoed. That is what the code below
+    does, and the opposite of what this line said before the qualifier was
+    added.
+
+    THE QUALIFIER IS LOAD-BEARING, and the ORDER below is why. An absent or
+    empty group id is answered FALSE first, before process age is consulted at
+    all, because there is no group that could have been heard from. So the
+    young-process veto covers every caller that passes a real id and covers
+    NOTHING for a caller that passes none — the opposite failure direction, on
+    the one input for which an unqualified sentence here would read as a
+    guarantee this function does not make (#351: a comment asserting a
+    guarantee is a claim about the whole state space, and it is usually
+    written from the one state its author had in mind). Every caller today
+    passes a row id or guards on truthiness first; a future one that can pass
+    None must not read the first sentence as covering it.
+
+    Callers must treat the result as 'proof of life', never as 'proof of
+    death': use it only to VETO a destructive action, never to trigger one.
 
     Caller contract (Codex batch finds 2/4): this CONSERVATIVE variant (young
     process => veto) belongs only to JANITOR closers, which re-fire every tick
