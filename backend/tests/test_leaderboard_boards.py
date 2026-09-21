@@ -45,7 +45,8 @@ WANT_FUNC = {"rank_emoji", "get_rank_name", "_lb_name", "_lb_line",
              "_build_board_embeds", "_board_medal", "_lb_line_2v2", "_lb_line_ffa", "_lb_line_ovt",
              "_enabled_boards", "_render_board", "_adopt_board_messages", "_boards_are_anchored",
              "_repost_board_set", "_remember_pending_delete", "_delete_board_message",
-             "_retry_pending_deletes", "publish_boards", "publish_lb_loop"}
+             "_retry_pending_deletes", "_cancel_owed_deletes_for_live_boards",
+             "publish_boards", "publish_lb_loop"}
 WANT_CLASS = {"LeaderboardPaginator"}
 WANT_ASSIGN = {"RANK_ROLES", "LB_PAGE_SIZE", "LB_TOTAL_FETCH", "BOARDS",
                "_lb_message_ids", "_lb_unknown_board_keys", "_lb_pending_deletes",
@@ -170,6 +171,13 @@ class _Channel:
         self.id, self.bot_user = cid, bot_user
         self.messages, self.deleted, self.sent = [], [], []
         self.history_raises = False
+        # A history read that dies PART-WAY, after the scan has already acted
+        # on some of what it saw. Discord pages history, so a read that
+        # succeeds for the first page and 500s on the second is an ordinary
+        # failure -- and it leaves the scan holding work it has done and
+        # keepers it has not merged. `history_raises` alone only ever models
+        # the read failing before it yields anything.
+        self.history_raises_after = None
         self.fetch_fails_once = set()
         # A live channel refuses sends, edits and deletes: a 5xx, a rate
         # limit, a revoked Manage-Messages. Without these the repost path --
@@ -212,7 +220,9 @@ class _Channel:
         snapshot = list(self.messages)[-limit:][::-1]      # newest first, as Discord answers
 
         async def gen():
-            for m in snapshot:
+            for i, m in enumerate(snapshot):
+                if self.history_raises_after is not None and i >= self.history_raises_after:
+                    raise RuntimeError("history boom part-way")
                 yield m
         return gen()
 
@@ -864,16 +874,21 @@ def test_buried_set_is_not_reposted_while_a_board_is_missing(ns):
     assert sum(1 for ln in ns["_log"] if "not at the channel bottom" in ln) == 1
 
 
-def _compose_bot_env():
-    """The bot service's `environment:` block, as {KEY: raw value}."""
+def _compose_service_env(service):
+    """One service's `environment:` block, as {KEY: raw value}."""
     import io as _io
     import re as _re
     from pathlib import Path
     p = Path(__file__).resolve().parents[1] / "docker-compose.yml"
     comp = _io.open(p, encoding="utf-8", newline="").read()
-    blk = comp[comp.index("\n  bot:"):]
+    blk = comp[comp.index("\n  %s:" % service):]
     blk = blk[:blk.index("\n    volumes:")]
     return dict(_re.findall(r"^      ([A-Z_0-9]+):\s*(.+?)\s*$", blk, _re.M))
+
+
+def _compose_bot_env():
+    """The bot service's `environment:` block, as {KEY: raw value}."""
+    return _compose_service_env("bot")
 
 
 def test_compose_passes_the_board_list_and_repeats_its_default_exactly():
@@ -919,18 +934,78 @@ def test_compose_passes_the_board_list_and_repeats_its_default_exactly():
         % (m.group(1), code_default))
 
 
+def test_the_footer_days_and_the_window_the_api_applies_are_one_number():
+    """The board footer states how many days of inactivity it hides at. The
+    api is what actually hides them, from its own read of the same key name
+    in a different process -- so the footer is a public claim about a number
+    it does not own, and nothing reports the two copies drifting.
+
+    Three copies must agree: `LB_ACTIVE_DAYS` in discord_bot.py (what the
+    footer prints), `LEADERBOARD_ACTIVE_DAYS` in api/main.py (what the window
+    IS), and the compose default, which is the only one an operator can move.
+
+    Compose must pass the key to BOTH services, and passing it to one is
+    worse than passing it to neither: it would move the api's window while
+    the footer kept printing the compiled default, or the reverse. A key
+    compose does not enumerate cannot be set from .env at all -- os.getenv
+    falls back to the compiled default with no error anywhere (#438) -- which
+    is how an operator tightening the window ends up with a wrong number on a
+    public channel and a normal-looking log.
+    """
+    import re as _re
+    from pathlib import Path
+
+    KEY = "LEADERBOARD_ACTIVE_DAYS"
+    bot_default = _re.search(
+        r'os\.getenv\(\s*"%s"\s*,\s*"([^"]*)"' % KEY, TEXT).group(1)
+    api_src = Path(__file__).resolve().parents[1] / "api" / "main.py"
+    api_default = _re.search(
+        r'os\.environ\.get\(\s*"%s"\s*,\s*"([^"]*)"' % KEY,
+        api_src.read_text(encoding="utf-8")).group(1)
+    assert bot_default == api_default, (
+        "the bot's %s default is %r and the api's is %r. The footer prints "
+        "the first and the api hides players by the second, so the board "
+        "states a window nobody applied." % (KEY, bot_default, api_default))
+    int(bot_default)                      # both are read through int()
+
+    for service, sentinel in (("api", "DATABASE_URL"), ("bot", "DISCORD_TOKEN")):
+        env = _compose_service_env(service)
+        assert sentinel in env, (
+            "read the wrong compose block for %r -- got keys %r"
+            % (service, sorted(env)))
+        assert KEY in env, (
+            "compose does not pass %s to the %s service, so .env cannot move "
+            "it there and the compiled default is the only value that "
+            "service will ever see (#438)." % (KEY, service))
+        m = _re.fullmatch(r"\$\{%s:-(.+)\}" % KEY, env[KEY])
+        assert m, (
+            "%s must reach the %s service as ${%s:-<default>} with a "
+            "NON-EMPTY default. Found %r; an empty value is present-and-empty, "
+            "which int() cannot read." % (KEY, service, KEY, env[KEY]))
+        assert m.group(1) == bot_default, (
+            "compose hands the %s service %s=%r while the code default is %r. "
+            "They are copies of one decision." % (service, KEY, m.group(1), bot_default))
+
+
 # Keys discord_bot.py reads that compose does NOT pass into the container.
 # This is a RECORDED GAP, not an approval: each is a setting that cannot be
 # changed from .env on a standard deployment, and none of them has been
 # checked to see whether its compiled default is the right one in production.
 # They are listed so the set cannot grow silently -- the same defect has now
-# been found three times here (CHAT_CHANNELS "wave-2 find 22", the Twitch trio
-# "D1 F12", and LEADERBOARD_BOARDS), which makes it a class and not an
-# incident. Removing a name from this list means compose now passes it.
+# been found four times here (CHAT_CHANNELS "wave-2 find 22", the Twitch trio
+# "D1 F12", LEADERBOARD_BOARDS, and LEADERBOARD_ACTIVE_DAYS), which makes it a
+# class and not an incident. Removing a name from this list means compose now
+# passes it.
+#
+# LEADERBOARD_ACTIVE_DAYS came off this list rather than staying a recorded
+# gap, because one of this wave's new board lines PRINTS it: a footer saying
+# "<n> inactive hidden (<d> days)" is a public claim about a window the api
+# applied from its own copy of the key. A number only the code can change is
+# tolerable while nothing quotes it; a wrong one on a public channel is not.
 _KNOWN_UNPASSED = {
     "ADMIN_CHANNEL", "BOT_GEN", "BUG_REPORTS_CHANNEL", "DISCORD_PRESENCE_INTENT",
     "GAMBLER_ROLE", "GAMBLER_SIGNUP_CHANNEL", "GITHUB_RELEASES_REPO",
-    "LEADERBOARD_ACTIVE_DAYS", "LFP_ROLE", "LIVE_BETS_CHANNEL",
+    "LFP_ROLE", "LIVE_BETS_CHANNEL",
     "SCR_TOURNAMENTS_CHANNEL", "STREAM_BRIDGE_TWITCH_CHANNEL", "TOURNAMENT_CHANNEL",
     "TROPHY_ROLE_CHAMPION", "TROPHY_ROLE_PARTICIPANT", "TROPHY_ROLE_PARTICIPANT2",
     "TROPHY_ROLE_RUNNER_UP", "TROPHY_ROLE_THIRD_PLACE",
@@ -1077,6 +1152,126 @@ def test_the_pending_delete_queue_is_bounded(ns):
     assert 9000 not in q and (9000 + cap + 4) in q
     ns["_remember_pending_delete"](q, 9000 + cap + 4)      # already queued
     assert len(q) == cap
+
+
+def _seed_board_message(ch, title):
+    """One board message left on the channel by an EARLIER process.
+
+    The publisher's id map is process memory, so a fresh process meets a
+    channel it did not post into. This is what the cold-start scan adopts.
+    """
+    return _run(ch.send(embeds=[_Embed(title=title)], view=None))
+
+
+def test_an_owed_delete_is_cancelled_when_its_message_becomes_the_live_board(ns):
+    """The owed-delete queue and the live-id map are two records of the same
+    message ids, and a scan can move an id from the first into the second.
+
+    An earlier run left two 1v1 messages. The cold-start scan keeps the newer
+    and queues the older, whose delete is refused. A moderator then deletes
+    the keeper -- so the next scan finds the QUEUED message as the only 1v1
+    board on the channel and adopts it. From that moment one id means both
+    "the board we publish" and "a delete we still owe", and the sweep at the
+    top of the next tick acts on the second reading.
+
+    The cost is not a churned message id. On a tick where that board's
+    endpoint is down, "no data this tick" leaves the board alone by design,
+    so nothing reposts what the sweep removed: the channel carries two boards
+    instead of three for the whole outage. That tick DOES log the sweep, but
+    nothing connects the two lines -- the board's own outcome line says it
+    was left as it is, and the line that removed it names a bare message id.
+    Every tick after it is indistinguishable from an ordinary outage tick.
+    """
+    ch = ns["_ch"]
+    old_1v1 = _seed_board_message(ch, T_1V1)
+    new_1v1 = _seed_board_message(ch, T_1V1)
+    _seed_board_message(ch, T_2V2)
+    _seed_board_message(ch, T_FFA)
+    ch.delete_fails = {old_1v1.id}
+
+    _tick(ns)
+    ids = ns["_lb_message_ids"][CID]
+    pending = ns["_lb_pending_deletes"][CID]
+    assert ids["1v1"] == new_1v1.id
+    assert pending == [old_1v1.id], pending
+
+    _run(new_1v1.delete())                 # a moderator removes the keeper
+
+    ns["_log"].clear()
+    _tick(ns)
+    assert ids["1v1"] == old_1v1.id, "the surviving 1v1 message was not adopted"
+    assert old_1v1.id not in pending, (
+        "mid=%d is the live 1v1 board AND is queued for deletion; the next "
+        "tick's sweep deletes the board it is publishing" % old_1v1.id)
+
+    # Now the sweep's own preconditions: the refusal clears, 1v1 is down.
+    ch.delete_fails = set()
+    ns["_api"].payloads[U_1V1] = None
+    ns["_log"].clear()
+    _tick(ns)
+    assert not any(f"swept stale board message mid={old_1v1.id}" in ln
+                   for ln in ns["_log"]), ns["_log"]
+    titles = [t for t in ch.titles() if t is not None]
+    assert titles.count(T_1V1) == 1, (
+        "the live 1v1 board was swept as an owed delete, and the outage means "
+        "nothing reposts it: %r" % titles)
+
+    _tick(ns)                              # the outage continues
+    assert T_1V1 in [t for t in ch.titles() if t is not None]
+
+
+def test_the_sweep_refuses_an_id_the_publisher_holds_after_a_part_way_scan(ns):
+    """Negative control's other half: the sweep's own check is not redundant.
+
+    The adopt path cancels an owed delete as it adopts, which covers the
+    ordinary route. It cannot cover this one. A history read that dies
+    PART-WAY has already queued whatever duplicates it got through, and it
+    returns without merging its keepers -- so the previous tick's id stays in
+    `ids` and may be exactly one of the ids it just queued. That state never
+    passes through the adopt-side cancel at all, and the only thing between
+    it and a deleted live board is the sweep checking at the point of use.
+    """
+    ch = ns["_ch"]
+    ch.post_from_someone_else()            # so the scan has a 5th thing to die on
+    held = _seed_board_message(ch, T_1V1)
+    _seed_board_message(ch, T_2V2)
+    _seed_board_message(ch, T_FFA)
+
+    _tick(ns)
+    ids = ns["_lb_message_ids"][CID]
+    assert ids["1v1"] == held.id
+
+    # Another process posts a newer 1v1, so the next scan calls OURS the
+    # duplicate -- while we are still publishing it.
+    newer = _seed_board_message(ch, T_1V1)
+    ch.delete_fails = {held.id}
+    ch.history_raises_after = 4            # dies after `held` has been queued
+
+    ns["_log"].clear()
+    _tick(ns)
+    pending = ns["_lb_pending_deletes"][CID]
+    assert pending == [held.id], pending
+    assert ids["1v1"] == held.id, "the failed scan must not have merged keepers"
+    assert any("rescan failed" in ln for ln in ns["_log"]), ns["_log"]
+
+    # The sweep's preconditions: a readable channel and a delete that works.
+    # A moderator removes the newer message, so the one we hold is once again
+    # the only 1v1 board there is -- and 1v1 goes down, so nothing reposts
+    # whatever the sweep takes. Without this last part the scan would delete
+    # mid=held itself, as a genuine duplicate, and the sweep's contribution
+    # would not be separable from it.
+    ch.history_raises_after = None
+    ch.delete_fails = set()
+    _run(newer.delete())
+    ns["_api"].payloads[U_1V1] = None
+    ns["_log"].clear()
+    _tick(ns)
+    assert not any(f"swept stale board message mid={held.id}" in ln
+                   for ln in ns["_log"]), ns["_log"]
+    titles = [t for t in ch.titles() if t is not None]
+    assert titles.count(T_1V1) == 1, (
+        "mid=%d is what the 1v1 board is published as and the sweep took it: "
+        "%r" % (held.id, titles))
 
 
 def test_history_failure_edits_in_place_rather_than_deleting(ns):

@@ -8298,11 +8298,52 @@ async def _delete_board_message(ch, msg, what: str, pending: list) -> bool:
         return False
 
 
-async def _retry_pending_deletes(ch, pending: list):
+def _cancel_owed_deletes_for_live_boards(pending: list, ids: dict) -> int:
+    """Drop every owed delete whose message is now a board we publish.
+
+    The queue and the id map are two records of the same message ids, and a
+    message can move from the first into the second: a duplicate is queued
+    because its delete was refused, and a later scan adopts it as a board's
+    keeper once the message that beat it is gone. Nothing about being queued
+    stops that adoption, and nothing about being adopted used to clear the
+    queue entry -- so one id meant both "the board we publish" and "a delete
+    we still owe", and the next sweep acted on the second reading.
+
+    Which way to resolve that is not a toss-up. An id in `ids` is the message
+    a board is being published as; a queue entry is a record of a delete that
+    was refused at some earlier tick, and the reason it was queued (it was a
+    duplicate, a replaced message, a retired board) is exactly what the scan
+    has just contradicted. The queue entry is the stale half, so it goes.
+
+    This says nothing about ids that are NOT live: those stay queued and are
+    retried, which is the whole point of the queue.
+    """
+    live = set(ids.values())
+    cancelled = [mid for mid in pending if mid in live]
+    if not cancelled:
+        return 0
+    pending[:] = [mid for mid in pending if mid not in live]
+    for mid in cancelled:
+        print(f"[LB] mid={mid} is owed a delete and is now the live board message "
+              f"-- cancelling the owed delete, not the board")
+    return len(cancelled)
+
+
+async def _retry_pending_deletes(ch, pending: list, ids: dict):
     """Re-try the deletes earlier ticks could not complete. Costs nothing on
-    the ordinary tick, where the queue is empty."""
+    the ordinary tick, where the queue is empty.
+
+    Reconciles against the live id map FIRST. The adopt path cancels an owed
+    delete the moment it makes that message a keeper, so on the ordinary
+    route this finds nothing; it is here because that is not the only route
+    into `ids`. An adopt whose history read raises part-way has already
+    queued the duplicates it got through, and returns without merging its
+    keepers -- leaving the previous tick's id in place, which may be one of
+    the ids it just queued. Checking at the point of USE is what keeps the
+    sweep off a live id however the queue and the map got out of step."""
     if not pending:
         return
+    _cancel_owed_deletes_for_live_boards(pending, ids)
     still = []
     for mid in list(pending):
         try:
@@ -8437,6 +8478,12 @@ async def _adopt_board_messages(ch, boards: list, ids: dict, pending: list) -> b
     # depth -- and dropping it would turn "buried deeper than the scan" into a
     # duplicate instead of the re-anchor it currently resolves to.
     ids.update(keepers)
+    # A keeper this scan just adopted may be a message an EARLIER tick queued
+    # for deletion -- a duplicate becomes the only message for its board the
+    # moment the one that beat it is deleted. It is a board now, so the owed
+    # delete is cancelled here, at the point the id changes meaning, rather
+    # than left for the next tick's sweep to act on.
+    _cancel_owed_deletes_for_live_boards(pending, ids)
     if dupes:
         print(f"[LB] deleted {dupes} duplicate stale board message(s)")
     if retired:
@@ -8581,8 +8628,10 @@ async def publish_boards():
     pending = _lb_pending_deletes.setdefault(ch.id, [])
     # Owed deletes first: a duplicate left standing is what a viewer reads as
     # a stale board, and every later step here assumes the channel holds one
-    # message per board.
-    await _retry_pending_deletes(ch, pending)
+    # message per board. It is given the id map because an owed delete and a
+    # live board id are the same kind of thing, and the sweep may not act on
+    # an id the publisher is currently using.
+    await _retry_pending_deletes(ch, pending, ids)
     scan_ok, adopted = True, False
     if any(b["key"] not in ids for b in boards):
         scan_ok = await _adopt_board_messages(ch, boards, ids, pending)
