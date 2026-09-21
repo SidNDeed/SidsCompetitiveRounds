@@ -155,7 +155,23 @@ $cases = @(
        OldRule = $true;
        Edits = @(
            @{ Log = 'tests'; Anchor = '^\$ powershell -NoProfile -ExecutionPolicy Bypass -File tools/roster-census-harness/run-source-claim-controls\.ps1';
-              Action = 'insert-before-section' }) }
+              Action = 'insert-before-section' }) },
+
+    # THE NAMED RESULT LIST IS HAND-MAINTAINED, AND NOTHING ASSERTED IT WAS
+    # COMPLETE. A gate that prints a verdict no pattern claims used to be swept
+    # straight past - which is how the citation gate's own verdict went unbound
+    # on its first run. E9 renames a verdict to a gate the list does not know;
+    # its twin changes the same line's outcome word, which the pattern still
+    # claims, so a red proves the rule is about COVERAGE and not about the line
+    # having moved.
+    @{ Name = 'E9-prints-a-verdict-no-named-pattern-claims'; Expect = 'FAIL'; Sweep = 'tests';
+       Why = 'a gate whose result no rule binds must red, not pass unswept';
+       Edits = @(@{ Log = 'tests'; Anchor = '^CITATIONS (PASS|FAIL|VOID)$'; Action = 'replace';
+                    Replacement = 'CITATIONS-EXTRA FAIL' }) },
+    @{ Name = 'E9-twin-changes-the-same-verdicts-outcome-word'; Expect = 'PASS'; Sweep = 'tests';
+       Why = 'inert twin: the same verdict line, a different outcome, still claimed by its named pattern';
+       Edits = @(@{ Log = 'tests'; Anchor = '^CITATIONS (PASS|FAIL|VOID)$'; Action = 'replace';
+                    Replacement = 'CITATIONS VOID' }) }
 )
 
 # The ROUND-3 rule, reimplemented here and nowhere else: a result is bound if

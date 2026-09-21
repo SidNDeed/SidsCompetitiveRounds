@@ -77,6 +77,7 @@ $resultPatterns = @(
     @{ Name = 'evidence-log';          Pattern = '^EVIDENCE (PASS|FAIL|VOID)';          Token = 'check-evidence-log.ps1' },
     @{ Name = 'evidence-log-controls'; Pattern = '^EVIDENCE-LOG CONTROLS (PASS|FAIL)';  Token = 'run-evidence-log-controls.ps1' },
     @{ Name = 'notes-privacy';         Pattern = '^NOTES (PASS|FAIL|VOID)';             Token = 'check-notes-privacy.ps1' },
+    @{ Name = 'notes-citations';       Pattern = '^CITATIONS (PASS|FAIL|VOID)';         Token = 'check-notes-citations.ps1' },
     # The build log's own two verdicts. They are results here because a process
     # computes and prints them above its own invocation line - which is what
     # made the build log sweepable at all.
@@ -100,6 +101,7 @@ Write-Output ""
 Write-Output "--- the rules this check enforces ---"
 Write-Output ("R1  every result is bound, INSIDE ITS OWN SECTION, to " + $selfPrintedPattern + " naming the process that produced it")
 Write-Output ("R1b every " + $sectionHeaderPattern + " header is followed by the command it announces (" + $echoedCommandPattern + "), and the counts agree")
+Write-Output "R1c every verdict-shaped line is claimed by one of the named result patterns above, so a gate nobody listed cannot pass unswept"
 Write-Output ("R2  the build log carries one rebuild section per rebuild, indices 1..n, and the exact command n times: " + $buildCommand)
 Write-Output "R3  one sha256 line per rebuild, indices 1..n, all values equal"
 Write-Output "R4  the build log carries 0 Error(s)"
@@ -167,6 +169,51 @@ if ($resultsFound -eq 0) {
     Write-Output "EVIDENCE VOID | nothing was checked - a log with no results is not a passing log"
     exit 3
 }
+
+# ---- R1c --------------------------------------------------------------------
+#
+# $resultPatterns is a hand-maintained list, and nothing asserted it was
+# complete. That is the same shape as the hand-kept span list the claims checker
+# was rebuilt to remove: a gate can print a verdict this sweep has no pattern
+# for, and the sweep reports a clean PASS over the sections it happens to know
+# about. It happened. check-notes-citations.ps1 was added, printed CITATIONS
+# PASS at the foot of its own section, and R1 swept four results past it without
+# a word.
+#
+# So the named list is reconciled against a GENERIC verdict shape: an
+# unindented, upper-case, PASS/FAIL/VOID line. Anything shaped like a verdict
+# that no named pattern claims is a gate nobody is binding, and it fails here.
+# Indented lines are excluded by the anchor, which is what keeps a verdict
+# echoed inside another section's control output from counting (the runners
+# indent those deliberately).
+#
+# WHICH WAY THE UNHANDLED CASE FAILS (#276 / #430). A new gate is UNCOVERED
+# until someone lists it, and uncovered is a failure rather than a silent pass.
+# The cost of that refusal is one line in the list above.
+
+$verdictShape = '^[A-Z][A-Z0-9 -]* (PASS|FAIL|VOID)$'
+Write-Output ""
+Write-Output "--- R1c: every verdict-shaped line is claimed by a named result pattern ---"
+
+$uncovered = 0
+$verdictLines = 0
+for ($i = 0; $i -lt $testLines.Count; $i++) {
+    $line = $testLines[$i]
+    if (-not ($line -match $verdictShape)) { continue }
+    $verdictLines = $verdictLines + 1
+    $claimedBy = $null
+    foreach ($p in $resultPatterns) {
+        if ($line -match $p.Pattern) { $claimedBy = $p.Name; break }
+    }
+    if ($null -eq $claimedBy) {
+        $uncovered = $uncovered + 1
+        $failures = $failures + 1
+        Write-Output ("FAIL | R1c | line {0}: '{1}' is shaped like a verdict and no named result pattern claims it - a gate whose result nothing binds" -f ($i + 1), $line.Trim())
+    } else {
+        Write-Output ("ok   | R1c | line {0,-5} | {1,-34} | claimed by '{2}'" -f ($i + 1), $line.Trim(), $claimedBy)
+    }
+}
+Write-Output ("     | R1c | verdict-shaped lines={0} uncovered={1} named patterns={2}" -f $verdictLines, $uncovered, $resultPatterns.Count)
 
 Write-Output ""
 Write-Output "--- R1b: every section header paired with the command it announces ---"
