@@ -21,6 +21,19 @@ WHAT THE COUNT COUNTS, AND WHY IT MOVED
   beside it, as the answer to its own smaller question -- and any edited
   handler that carries a fingerprint and was NOT re-pinned is a failure.
 
+WHAT THE DERIVATION READS FROM THE DIFF
+  Two shapes were read wrongly, and both failed in the direction that makes a
+  green report. A PURE DELETION prints `+K,0`, and `range(K, K)` is empty, so
+  a handler whose only change in this range is a removal contributed nothing
+  to the tree side while the manifest side would still show its fingerprint
+  moving -- the exact "four or five?" split this tool was built to close,
+  arriving from the other direction. And every changed line enclosed by no def
+  was dropped with no count and no listing, on a range where that is 83 lines
+  of module-level vocabulary, under a sentence in the notes invoking #441 to
+  say nothing was dropped silently. A deletion is now recorded as the two
+  new-side lines it sits between, and the module-level population is reported
+  as its own figure with its own listing.
+
 What it does NOT do: compute a fingerprint. It reads the fingerprints already
 STORED in two copies of the manifest -- the one committed at a base ref and the
 one on disk -- and diffs them. `repin_route_manifest.py` remains the only thing
@@ -117,6 +130,39 @@ SOURCES = ("backend/api/main.py", "backend/discord_bot.py")
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
 
+def hunk_lines(header: str) -> set[int]:
+    """The new-side line numbers one hunk header accounts for.
+
+    A hunk that adds or changes lines accounts for the lines it writes. A PURE
+    DELETION writes none: git prints `+K,0`, where K is the last new-side line
+    BEFORE the gap the removal leaves, and `range(K, K + 0)` is empty. Read
+    literally that says this range edits nothing there, so a handler whose only
+    change is a removed branch never reaches `functions_touching`, never
+    reaches THE COUNT, and the report ends "every edited handler is accounted
+    for" one short (#342).
+
+    A deletion is recorded as the two new-side lines it sits BETWEEN, K and
+    K + 1, clamped at 1 for a removal from the top of a file. That convention
+    was READ FROM GIT and not assumed: a dead branch removed from a handler
+    spanning new lines 3-5 prints `@@ -5,3 +4,0 @@ def handler():`, and {4, 5}
+    names the handler.
+
+    Kept separate from `changed_lines` so it can be exercised without a
+    repository: the self-test plants every shape including `+K,0`, which the
+    first version had no case for at all.
+    """
+    m = _HUNK.match(header)
+    if not m:
+        return set()
+    start = int(m.group(1))
+    count = int(m.group(2)) if m.group(2) is not None else 1
+    if count == 0:
+        first = max(1, start)
+        return {first, first + 1}
+    return set(range(start, start + count))
+
+
+
 def changed_lines(base: str, rel: str) -> set[int]:
     """New-side line numbers this range changes in one file.
 
@@ -133,12 +179,7 @@ def changed_lines(base: str, rel: str) -> set[int]:
             proc.returncode, "git diff", stderr=proc.stderr.decode("utf-8", "replace"))
     out: set[int] = set()
     for line in proc.stdout.decode("utf-8", "replace").splitlines():
-        m = _HUNK.match(line)
-        if not m:
-            continue
-        start = int(m.group(1))
-        count = int(m.group(2)) if m.group(2) is not None else 1
-        out.update(range(start, start + count))
+        out |= hunk_lines(line)
     return out
 
 
@@ -165,29 +206,68 @@ def def_spans(text: str) -> list[tuple[str, int, int]]:
     return spans
 
 
+def _narrowest(spans: list[tuple[str, int, int]], n: int):
+    best = None
+    for name, start, end in spans:
+        if start <= n <= end and (best is None or (end - start) < (best[2] - best[1])):
+            best = (name, start, end)
+    return best
+
+
 def functions_touching(spans: list[tuple[str, int, int]], lines: set[int]) -> set[str]:
-    """The narrowest enclosing def for each changed line. Unenclosed lines drop."""
-    out: set[str] = set()
-    for n in lines:
-        best = None
-        for name, start, end in spans:
-            if start <= n <= end and (best is None or (end - start) < (best[2] - best[1])):
-                best = (name, start, end)
-        if best is not None:
-            out.add(best[0])
-    return out
+    """The narrowest enclosing def for each changed line."""
+    return {best[0] for n in lines if (best := _narrowest(spans, n)) is not None}
 
 
-def edited_functions(base: str) -> dict[str, set[str]]:
-    """{module path: {qualname edited}} across the handler-bearing modules."""
-    out: dict[str, set[str]] = {}
+def unenclosed_lines(spans: list[tuple[str, int, int]], lines: set[int]) -> set[int]:
+    """The changed lines no def encloses: module level.
+
+    Reported rather than dropped. They do not belong in THE COUNT -- a
+    module-level line cannot move a handler's stored fingerprint, which is what
+    the count is about -- but §10.4.5 invoked #441 to say that nothing the
+    derivation cannot classify is dropped silently, and on this range 83 lines
+    were. A drop that is correct for the count is still a drop, and the
+    sentence claiming otherwise was the defect, not the arithmetic.
+    """
+    return {n for n in lines if _narrowest(spans, n) is None}
+
+
+def as_ranges(nums) -> str:
+    """`908-1028, 1200` -- a complete listing that stays readable.
+
+    The listing is the evidence, so it is never truncated: every number is
+    inside one of the printed ranges (#304).
+    """
+    out, run = [], []
+    for n in sorted(nums):
+        if run and n == run[-1] + 1:
+            run.append(n)
+            continue
+        if run:
+            out.append(str(run[0]) if len(run) == 1 else f"{run[0]}-{run[-1]}")
+        run = [n]
+    if run:
+        out.append(str(run[0]) if len(run) == 1 else f"{run[0]}-{run[-1]}")
+    return ", ".join(out)
+
+
+def edited_functions(base: str) -> dict[str, dict]:
+    """{module: {"functions": {qualname}, "unenclosed": {line}, "changed": n}}.
+
+    Every changed line lands in exactly one of the two populations, and the
+    totals are carried so the report can say so out loud rather than leave a
+    reader to subtract.
+    """
+    out: dict[str, dict] = {}
     for rel in SOURCES:
         lines = changed_lines(base, rel)
         if not lines:
-            out[rel] = set()
+            out[rel] = {"functions": set(), "unenclosed": set(), "changed": 0}
             continue
-        text = (REPO / rel).read_text(encoding="utf-8")
-        out[rel] = functions_touching(def_spans(text), lines)
+        spans = def_spans((REPO / rel).read_text(encoding="utf-8"))
+        out[rel] = {"functions": functions_touching(spans, lines),
+                    "unenclosed": unenclosed_lines(spans, lines),
+                    "changed": len(lines)}
     return out
 
 
@@ -267,6 +347,15 @@ def _self_test() -> int:
         functions_touching(spans, {12}) == {"beta"}
     checks["a module-level line names no function"] = \
         functions_touching(spans, {7}) == set()
+    checks["...and is REPORTED as module-level rather than dropped"] = \
+        unenclosed_lines(spans, {7}) == {7}
+    checks["a line inside a def is not in the module-level population"] = \
+        unenclosed_lines(spans, {4}) == set()
+    checks["the two populations partition the changed lines"] = (
+        len(functions_touching(spans, {4, 7, 11})) == 2
+        and unenclosed_lines(spans, {4, 7, 11}) == {7})
+    checks["a complete listing compresses without losing a number"] = \
+        as_ranges({908, 909, 910, 1200}) == "908-910, 1200"
     checks["a decorator line counts as part of its def"] = \
         functions_touching(def_spans("@dec\ndef gamma():\n    pass"), {1}) == {"gamma"}
 
@@ -289,6 +378,29 @@ def _self_test() -> int:
         _HUNK.match("@@ -10 +12 @@").groups() == ("12", None)
     checks["a counted hunk header parses to its span"] = \
         _HUNK.match("@@ -10,3 +12,4 @@ async def x():").groups() == ("12", "4")
+    checks["a one-line hunk accounts for exactly that line"] = \
+        hunk_lines("@@ -10 +12 @@") == {12}
+    checks["a counted hunk accounts for its whole span"] = \
+        hunk_lines("@@ -10,3 +12,4 @@ async def x():") == {12, 13, 14, 15}
+    # The shape the first version had no case for. `+4,0` is what git prints
+    # for a branch removed from a handler spanning new lines 3-5, verified
+    # against git rather than assumed.
+    checks["a PURE DELETION accounts for the lines it sits between"] = \
+        hunk_lines("@@ -5,3 +4,0 @@ def handler():") == {4, 5}
+    checks["a deletion at the top of a file does not name line zero"] = \
+        hunk_lines("@@ -1,2 +0,0 @@") == {1, 2}
+    checks["a deletion inside a handler NAMES that handler"] = \
+        functions_touching(def_spans("\n".join([
+            "import os", "", "def handler():", "    a = 1", "    return a"])),
+            hunk_lines("@@ -5,3 +4,0 @@ def handler():")) == {"handler"}
+    # The inert twin of that case at the same site: a deletion between two
+    # module-level lines must still name no handler, or the fix would have
+    # turned the derivation on for everything.
+    checks["a deletion at module level still names no handler"] = \
+        functions_touching(def_spans("\n".join([
+            "import os", "", "def handler():", "    a = 1", "    return a", "",
+            "TOP = 1", "MORE = 2"])),
+            hunk_lines("@@ -9,3 +7,0 @@")) == set()
 
     bad = [k for k, ok in checks.items() if not ok]
     for k, ok in checks.items():
@@ -326,8 +438,8 @@ def main() -> int:
     repinned = {k[3] for k in d["moved"]}
 
     edited_handlers, other_functions = {}, {}
-    for rel, names in touched.items():
-        for name in sorted(names):
+    for rel, found in touched.items():
+        for name in sorted(found["functions"]):
             if rel == "backend/api/main.py" and name in handlers:
                 edited_handlers[name] = handlers[name]
             else:
@@ -350,6 +462,11 @@ def main() -> int:
     print(f"routes removed  : {len(d['removed'])}")
     print(f"entry points    : {len(d['entry_moved'])} moved, "
           f"{len(d['entry_added'])} added, {len(d['entry_removed'])} removed")
+    for rel in SOURCES:
+        found = touched[rel]
+        enclosed = found["changed"] - len(found["unenclosed"])
+        print(f"changed lines   : {rel}: {found['changed']} "
+              f"= {enclosed} inside a def + {len(found['unenclosed'])} at module level")
     if args.names:
         for name in sorted(edited_handlers):
             h = edited_handlers[name]
@@ -368,6 +485,14 @@ def main() -> int:
         for rel in sorted(other_functions):
             for name in other_functions[rel]:
                 print(f"  edited, outside the routing table: {rel}::{name}")
+        # The third population. It cannot move a handler's fingerprint and is
+        # not in THE COUNT; it is listed because a derivation that dropped it
+        # in silence while the notes said otherwise is what this answers.
+        for rel in SOURCES:
+            nums = touched[rel]["unenclosed"]
+            if nums:
+                print(f"  edited at module level, enclosed by no def: "
+                      f"{rel}:{as_ranges(nums)}")
         for label, key in (("added", "added"), ("removed", "removed")):
             for k in d[key]:
                 print(f"  {label}: {k[2]}.{k[3]}")
