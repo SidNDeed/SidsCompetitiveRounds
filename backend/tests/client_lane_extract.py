@@ -122,6 +122,22 @@ ANCHORS = (
 )
 
 
+def read_blob(worktree: Path, sha: str, rel: str) -> list[str]:
+    """One committed file, as lines, read as BYTES and decoded here.
+
+    The committed blob and not the working copy: an uncommitted edit in that
+    worktree must not be able to reach this bundle, and this is the only read
+    that tree gets. Decoded explicitly because the seat's locale codec cannot
+    decode the UTF-8 these sources carry, and a pass that dies in the codec
+    reports nothing at all.
+    """
+    proc = subprocess.run(["git", "-C", str(worktree), "show", f"{sha}:{rel}"],
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if proc.returncode != 0:
+        raise SystemExit(f"REFUSING: cannot read {rel} at {sha} in {worktree.name}: "
+                         f"{proc.stderr.decode('utf-8', 'replace').strip()}")
+    return proc.stdout.decode("utf-8", "replace").splitlines()
+
 def rev(worktree: Path, spec: str) -> str | None:
     """The 40-character commit `spec` names in that worktree, or None.
 
