@@ -356,7 +356,7 @@
   "<color=#FFB347>2v2 History</color>",
   "<color=#FFB347>2v2:</color> {0}W / {1}L ({2})  <color=#888>Rating:</color> {3:F0}  <color=#888>Peak:</color> {4:F0}",
   "<color=#FFB347>2v2:</color> {0}W/{1}L",
-  "<color=#FFB347>Series paused — same 4 can re-queue to resume</color>  <color=#FF6688>{0}:{1}</color>  <color=#888>(score {2}-{3})</color>",
+  "<color=#FFB347>Series held — waiting on the final result</color>  <color=#FF6688>{0}</color>  <color=#888>(score {1}-{2})</color>",
   "<color=#FFB347>solo won</color>",
   "<color=#FFC8F0>=  DANCES  =</color>",
   "<color=#FFCC44>In {0}'s lobby</color> - waiting for the host to start ({1} in).",
@@ -2641,6 +2641,7 @@
   "also locks when any game is decided",
   "always earns x1.5 pay",
   "an empty slot - no crash, no fallback",
+  "any moment now",
   "art submitted in-game",
   "artist sets price + stock",
   "as DUO (w/ {0}) vs {1}",
@@ -4671,7 +4672,7 @@
    "location": "RefreshSession",
    "kind": "TrF"
   },
-  "<color=#FFB347>Series paused — same 4 can re-queue to resume</color>  <color=#FF6688>{0}:{1}</color>  <color=#888>(score {2}-{3})</color>": {
+  "<color=#FFB347>Series held — waiting on the final result</color>  <color=#FF6688>{0}</color>  <color=#888>(score {1}-{2})</color>": {
    "surface": "NativeUI",
    "location": "RefreshTeamTab",
    "kind": "TrF"
@@ -16094,6 +16095,11 @@
   "an empty slot - no crash, no fallback": {
    "surface": "InfoViz",
    "location": "BuildVisibilitySeats",
+   "kind": "Tr"
+  },
+  "any moment now": {
+   "surface": "NativeUI",
+   "location": "RefreshTeamTab",
    "kind": "Tr"
   },
   "art submitted in-game": {

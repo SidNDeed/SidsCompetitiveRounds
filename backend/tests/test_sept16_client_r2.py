@@ -3131,7 +3131,17 @@ def test_r5_h3_the_deferred_answer_is_a_three_value_measurement():
                          the answer is the one the row already held
       present and false  this box carries the build and took an exit this client
        + no ignored      does not model; the line claims nothing about the write
-      absent from a 200  the box that answered predates the flag
+      absent from a 200  the box that answered PREDATES the field, and that is
+                         the whole of what the absence proves
+
+    THE ABSENT BRANCH IS THE ROUND-6 CORRECTION.  It used to read a missing key
+    as a SETTLEMENT and name the status it assumed had been written.  A box that
+    predates the field still carries the three exits that write nothing and
+    answer {"ignored": true} -- the settled-row exit and the two room fences,
+    which the production pin has at its report-dc as well -- so "no deferred
+    key" covers a settle and a no-write refusal alike.  The branch now reads the
+    "ignored" key that generation DOES emit, says which of the two facts it
+    holds, and claims no write it cannot see.
 
     THE FOURTH VALUE IS THE LENS FINDING.  The line used to say "settled this
     report at one of its other exits ... still bounds the row to dc_incomplete".
@@ -3153,7 +3163,17 @@ def test_r5_h3_the_deferred_answer_is_a_three_value_measurement():
     assert "fallback DEFERRED by the server" in send
     assert "fallback NOT PARKED AND NOT APPLIED " in send
     assert 'ExtractJsonBool(resp, "ignored")' in send
-    assert "fallback SETTLED by a box that predates the deferral" in send
+    assert "fallback answered by a box that PREDATES the deferral" in send
+    # and the absent branch claims NO disposition: no settle, no status named
+    assert "That is all the absence proves" in send
+    assert "a settle and a no-write refusal are not distinguishable from" in send
+    assert "still bounds the row to dc_incomplete" not in send
+    # it reads the key that generation does emit rather than inferring
+    assert "bool oldIgnored = false;" in send
+    # exactly two readers of `ignored` in this method, one per branch that has a
+    # body to read it from -- counted within the FUNCTION span, never file-wide
+    # (#330, #279)
+    assert send.count('ExtractJsonBool(resp, "ignored")') == 2
     # the whole read sits inside `if (ok)`, so a non-200 says nothing
     assert send.index("if (ok)") < send.index('resp.IndexOf("\\"deferred\\"')
     # the deferred read happens on the FALLBACK path and before its return
@@ -3169,7 +3189,10 @@ def test_r5_h3_the_deferred_answer_is_a_three_value_measurement():
                 and 'ExtractJsonBool(resp, "deferred")' in b
                 and "fallback DEFERRED by the server" in b
                 and "fallback NOT PARKED AND NOT APPLIED " in b
-                and "fallback SETTLED by a box that predates the deferral" in b)
+                and "fallback answered by a box that PREDATES the deferral" in b
+                and "That is all the absence proves" in b
+                and "still bounds the row to dc_incomplete" not in b
+                and "bool oldIgnored = false;" in b)
 
     # MUTATION 1: the field is never read at all
     _assert_discriminating(
@@ -3829,10 +3852,19 @@ def test_r5lens_the_latch_darkens_what_the_banner_actually_renders_from():
     rendering a countdown that nothing would ever refresh again, for as long as
     the tab stayed open.
 
-    WHAT DARKENS IT: the render requires `dcRemaining > 0`, so clearing the
-    remaining seconds is the whole of it.  The clear is GUARDED to the series
-    the cache describes, because latching one series must not blank another's
-    (the ForId discipline, Codex r2 f8).
+    WHAT DARKENS IT, ROUND 6: the banner's whole input is the three deferral
+    fields the status route carries, so clearing those is the whole of it.
+
+    THE CONFINEMENT IS THE ROUND-6 CORRECTION.  The round-5 guard read
+    `LastSeriesStateForId == seriesId || seriesId == ActiveTeamSeriesId` under a
+    comment promising the clear happened "only while the cache describes THIS
+    series" -- and the second arm is exactly the case that breaks it: a late
+    answer for series B leaves the cache describing B, and a failed read of the
+    active series A then satisfied that arm and blanked B's numbers.  The
+    comment stated the rule the code broke (#351).  The clear is now confined to
+    the cached series, and the cross-series case it was reaching for is refused
+    at the RENDER, where the banner draws only while the cache's ForId names the
+    series it is about.
 
     This is the fix the box-matrix test could not see: that test models
     `latched` and never asks what the UI shows afterwards."""
@@ -3842,47 +3874,72 @@ def test_r5lens_the_latch_darkens_what_the_banner_actually_renders_from():
 
     # the clear sits in the SAME branch as the latch, before its return
     assert "_statusPollDarkSeries.Add(seriesId);" in ro
-    assert "LastSeriesDcGraceSeconds = 0;" in ro
-    assert "LastSeriesDcTeamRemaining = 0;" in ro
+    assert "LastSeriesDcDeferred = false;" in ro
+    assert "LastSeriesDcDeferredSecondsRemaining = 0;" in ro
+    assert "LastSeriesDcDeferredBoundSeconds = 0;" in ro
     assert (ro.index("_statusPollDarkSeries.Add(seriesId);")
-            < ro.index("LastSeriesDcGraceSeconds = 0;"))
-    # and it is guarded to the series the cache describes
-    assert ("if (LastSeriesStateForId == seriesId || seriesId == ActiveTeamSeriesId)"
-            in ro)
+            < ro.index("LastSeriesDcDeferred = false;"))
+    # and it is confined to the series the cache describes -- one arm, no OR.
+    # The retired arm survives in the comment that explains WHY it went, which is
+    # how the next reader learns not to re-add it; what must not survive is the
+    # arm as CODE.
+    assert "if (LastSeriesStateForId == seriesId)" in ro
+    for line in ro.split("\n"):
+        if "seriesId == ActiveTeamSeriesId" in line:
+            assert line.strip().startswith("//"), line
+    # the retired statics are gone from the whole client, not merely unread
+    assert "LastSeriesDcGraceSeconds" not in api
+    assert "LastSeriesDcTeamRemaining" not in api
+    assert "LastSeriesDcGraceSeconds" not in _src("NativeUI.cs")
 
     def claim(s):
         b = _method_body(s, "public static void PollTeamSeriesStatusReadOnly")
         if not b:
             return False
-        return ("LastSeriesDcGraceSeconds = 0;" in b
-                and "LastSeriesDcTeamRemaining = 0;" in b
-                and "if (LastSeriesStateForId == seriesId || seriesId == ActiveTeamSeriesId)" in b
+        return ("LastSeriesDcDeferred = false;" in b
+                and "LastSeriesDcDeferredSecondsRemaining = 0;" in b
+                and "LastSeriesDcDeferredBoundSeconds = 0;" in b
+                and "if (LastSeriesStateForId == seriesId)" in b
+                and all(ln.strip().startswith("//")
+                        for ln in b.split("\n") if "seriesId == ActiveTeamSeriesId" in ln)
                 and b.index("_statusPollDarkSeries.Add(seriesId);")
-                    < b.index("LastSeriesDcGraceSeconds = 0;"))
+                    < b.index("LastSeriesDcDeferred = false;"))
 
     # MUTATION 1: the latch goes back to stopping the poll and nothing else
     _assert_discriminating(
         claim, api,
         _mutate(api,
-                "                            LastSeriesDcGraceSeconds = 0;\n"
-                "                            LastSeriesDcTeamRemaining = 0;\n",
+                "                            LastSeriesDcDeferred = false;\n"
+                "                            LastSeriesDcDeferredSecondsRemaining = 0;\n"
+                "                            LastSeriesDcDeferredBoundSeconds = 0;\n",
                 "",
-                "R5lens the latch leaves the banner lit"),
-        "R5lens a latched series renders dark")
+                "R6 the latch leaves the banner lit"),
+        "R6 a latched series renders dark")
 
-    # MUTATION 2: the guard goes, so latching one series blanks whatever the
-    # cache currently describes
+    # MUTATION 2: the confinement goes, so latching one series blanks whatever
+    # the cache currently describes
     _assert_discriminating(
         claim, api,
         _mutate(api,
-                "if (LastSeriesStateForId == seriesId || seriesId == ActiveTeamSeriesId)",
+                "if (LastSeriesStateForId == seriesId)",
                 "if (true)",
-                "R5lens the clear is unguarded"),
-        "R5lens the clear names the series it is about")
+                "R6 the clear is unconfined"),
+        "R6 the clear names the series it is about")
+
+    # MUTATION 3: THE ROUND-5 SHAPE ITSELF.  The second OR arm is the defect the
+    # lens found, and putting it back must redden this test -- a late answer for
+    # B followed by a failed read of the active A would clear B again.
+    _assert_discriminating(
+        claim, api,
+        _mutate(api,
+                "if (LastSeriesStateForId == seriesId)",
+                "if (LastSeriesStateForId == seriesId || seriesId == ActiveTeamSeriesId)",
+                "R6 the round-5 second arm returns"),
+        "R6 the clear is confined to the cached series")
 
     # NEGATIVE CONTROL: rewording the comment above the clear changes nothing
     assert claim(_mutate(api, "DARK HAS TO MEAN DARK.", "DARK MUST MEAN DARK.",
-                         "R5lens latch negative control"))
+                         "R6 latch negative control"))
 
 
 def test_r5lens_the_refusal_line_splits_on_whether_a_box_answered():
@@ -3967,9 +4024,13 @@ def test_r5lens_a_deferred_false_answer_claims_no_write():
     send = _method_body(api, "private static IEnumerator SendTeamSeriesDcReport")
     assert send, "the dispatch half's own text could not be delimited"
 
-    # presence measured separately from value, the #604 shape, as for `deferred`
+    # presence measured separately from value, the #604 shape, as for `deferred`.
+    # ROUND 6: the absent-field branch reads `ignored` too, into its OWN variable,
+    # so a bare search for the extractor is no longer specific to THIS branch -- a
+    # predicate that a neighbouring reader can satisfy is a check that cannot fail
+    # where it matters (#342, #432).  The claim names the false branch's reader.
     assert 'resp.IndexOf("\\"ignored\\"", StringComparison.Ordinal) >= 0' in send
-    assert 'ExtractJsonBool(resp, "ignored")' in send
+    assert 'try { ignored = ExtractJsonBool(resp, "ignored"); } catch { ignored = false; }' in send
     assert "fallback NOT PARKED AND NOT APPLIED " in send
     assert "this report changed nothing and bounds nothing" in send
     # the two false claims are gone from the whole file
@@ -3980,7 +4041,7 @@ def test_r5lens_a_deferred_false_answer_claims_no_write():
         b = _method_body(s, "private static IEnumerator SendTeamSeriesDcReport")
         if not b:
             return False
-        return ('ExtractJsonBool(resp, "ignored")' in b
+        return ('try { ignored = ExtractJsonBool(resp, "ignored"); } catch { ignored = false; }' in b
                 and "fallback NOT PARKED AND NOT APPLIED " in b
                 and "this report changed nothing and bounds nothing" in b
                 and "settled this report at one of its other exits" not in s)
@@ -4008,56 +4069,548 @@ def test_r5lens_a_deferred_false_answer_claims_no_write():
                          "R5lens ignored negative control"))
 
 
-def test_r5lens_no_comment_prices_the_refusal_as_a_lost_countdown():
-    """REACHABILITY BEFORE LOGIC (#286, #405), AND THE COMMENTS SAY WHAT IT IS.
+def _dc_banner_block(ui):
+    """The DC banner's render block, and "" when its bounds cannot be
+    established.  A predicate read off the whole 30 000-line file would be
+    satisfied by any other method's text; the claim is about THIS block."""
+    a = "// DC banner, and THE POLL THAT FEEDS THE TEAM TAB."
+    b = "// In Queue panel"
+    if a not in ui or b not in ui:
+        return ""
+    start = ui.index(a)
+    end = ui.index(b, start)
+    return ui[start:end]
 
-    The banner this poll feeds renders only on status='dc_paused' with seconds
-    remaining.  Nothing writes that status: the flow that did was retired in
-    v1.30.0, the api's own comment beside the one UPDATE that still names the
-    value says new DCs no longer enter it, dc_grace_until is only ever written
-    NULL, and the primary holds no row in that status.  So three rounds of
-    comments priced a refusal at "one countdown in one banner" -- a cost that
-    cannot be paid, because the countdown cannot appear.
 
-    What a refusal actually costs is this series' 2 s refresh of the frozen
-    team-colour stamp and of the status cache the assembly loop reads.  That is
-    also why the poll is KEPT and why it still must not be the lifecycle route:
-    the payload is live even though the banner is not.
+def test_r6_item7_the_dead_banner_predicate_is_deleted_not_preserved():
+    """THE ROUND-5 TEST REQUIRED THE DEAD PREDICATE.  THIS ONE REJECTS IT.
 
-    The render site carries the same measurement, so a reader deciding whether
-    this UI can appear reads the answer where the predicate is."""
+    The banner rendered behind `status == "dc_paused" && remaining > 0`, and no
+    box could satisfy it: no statement in the api sets that status, the flow
+    that did was retired in v1.30.0, dc_grace_until is only ever written NULL,
+    and the primary holds no row in it.  Round 5 MEASURED that and kept the
+    predicate, with a test asserting it was still in the file -- so the check
+    that existed guarded the defect.  A dead mechanism is deleted, not
+    preserved (#310, #389), and the check that used to preserve it now fails if
+    it comes back.
+
+    WHAT REPLACES IT is the cross-lane contract's three fields, and the client
+    reads those names and no others.  The show predicate is `dc_deferred`
+    ALONE: a marker past its bound that no sweep tick has settled answers
+    dc_deferred=true with zero seconds remaining, and gating on a positive
+    remaining time would hide the banner in exactly the state it exists for --
+    the deleted defect in a new spelling.
+
+    TWO GATES BESIDE IT, both failing to OFF: the cache must describe this
+    series (the ForId discipline), and the series must not be latched dark."""
     api = _src("ApiClient.cs")
     ui = _src("NativeUI.cs")
+    block = _dc_banner_block(ui)
+    assert block, "the DC banner block's own bounds could not be established"
 
-    # no comment prices it as a countdown any more
+    # THE DELETION.  The predicate is gone, and `dc_paused` survives in this
+    # block only as PROSE explaining why it was removed -- never as code.
+    assert 'dcStatus == "dc_paused" && dcRemaining > 0' not in ui
+    assert "ApiClient.LastSeriesStateStatus" not in block
+    for line in block.split("\n"):
+        if "dc_paused" in line:
+            assert line.strip().startswith("//"), line
+
+    # WHAT IT READS INSTEAD: the contract's three names, and nothing of its own
+    assert "ApiClient.LastSeriesDcDeferred" in block
+    assert "ApiClient.LastSeriesDcDeferredSecondsRemaining" in block
+    assert "ApiClient.LastSeriesDcDeferredBoundSeconds" in block
+    # no local copy of the bound: 420 may be named in the prose that explains the
+    # window, never in a line of code that renders or computes with it
+    for line in block.split("\n"):
+        if "420" in line:
+            assert line.strip().startswith("//"), line
+
+    # THE SHOW PREDICATE IS dc_deferred ALONE
+    assert "&& ApiClient.LastSeriesDcDeferred;" in block
+    assert "dcRemaining > 0 &&" not in block
+    assert "bool dcShow = dcCacheIsThisSeries && !dcLatchedDark" in block
+    # the two gates
+    assert "ApiClient.LastSeriesStateForId == dcSeries" in block
+    assert "ApiClient.SeriesStatusLatchedDark(dcSeries)" in block
+    # and the banner's own witness, which the read's positive line is not
+    assert "LogDcBannerWitness(dcSeries, dcShow, dcCacheIsThisSeries, dcLatchedDark);" in block
+    assert "DC banner SHOWN for series" in ui
+    assert "DC banner OFF for series" in ui
+
+    # the retired pricing is gone from the tick's own comment, and the round-6
+    # price is stated there instead
     assert "costs is one countdown in one banner" not in api
-    # the measurement is stated at the tick, at the poller, and at the render
-    assert "WHAT THE REFUSAL COSTS, MEASURED RATHER THAN ASSUMED" in api
-    assert "team-colour stamp" in api
-    assert "REACHABILITY, MEASURED, NOT ASSUMED" in ui
-    assert "no statement in the api sets status='dc_paused'" in ui
-    assert "dc_grace_until is only ever written NULL" in ui
-    # and the render predicate it describes is still the one in the file
-    assert 'dcStatus == "dc_paused" && dcRemaining > 0' in ui
+    assert "AND THE PRICE CHANGED THIS ROUND" in api
+
+    def claim(s_ui):
+        b = _dc_banner_block(s_ui)
+        if not b:
+            return False
+        return ('dcStatus == "dc_paused" && dcRemaining > 0' not in s_ui
+                # `dc_paused` may survive as PROSE and never as code
+                and all(ln.strip().startswith("//")
+                        for ln in b.split("\n") if "dc_paused" in ln)
+                and "ApiClient.LastSeriesStateStatus" not in b
+                and "ApiClient.LastSeriesDcDeferred" in b
+                and "ApiClient.LastSeriesDcDeferredSecondsRemaining" in b
+                and "ApiClient.LastSeriesDcDeferredBoundSeconds" in b
+                and "&& ApiClient.LastSeriesDcDeferred;" in b
+                and "ApiClient.LastSeriesStateForId == dcSeries" in b
+                and "ApiClient.SeriesStatusLatchedDark(dcSeries)" in b
+                and "LogDcBannerWitness(dcSeries, dcShow, dcCacheIsThisSeries, dcLatchedDark);" in b)
+
+    # MUTATION 1: THE DEAD PREDICATE COMES BACK.  This is the mutation the
+    # round-5 test could not have: there, this shape was the requirement.
+    _assert_discriminating(
+        claim, ui,
+        _mutate(ui,
+                "if (dcShow)",
+                'if (ApiClient.LastSeriesStateStatus == "dc_paused" && dcRemaining > 0)',
+                "R6 the dead dc_paused predicate returns"),
+        "R6 the dead banner predicate is deleted")
+
+    # MUTATION 2: the show predicate becomes a positive remaining time, which
+    # hides the banner in the state it exists for
+    _assert_discriminating(
+        claim, ui,
+        _mutate(ui,
+                "&& ApiClient.LastSeriesDcDeferred;",
+                "&& ApiClient.LastSeriesDcDeferredSecondsRemaining > 0;",
+                "R6 the banner gates on remaining > 0"),
+        "R6 the show predicate is dc_deferred alone")
+
+    # MUTATION 3: the latch stops being a gate, so a dark series keeps drawing
+    _assert_discriminating(
+        claim, ui,
+        _mutate(ui,
+                "bool dcLatchedDark = ApiClient.SeriesStatusLatchedDark(dcSeries);",
+                "bool dcLatchedDark = false;",
+                "R6 a latched series still renders"),
+        "R6 a latched series draws nothing")
+
+    # MUTATION 4: the ForId gate goes, so another series' cache paints this one
+    _assert_discriminating(
+        claim, ui,
+        _mutate(ui,
+                "&& ApiClient.LastSeriesStateForId == dcSeries;",
+                "&& true;",
+                "R6 the banner renders another series' cache"),
+        "R6 the banner renders only the cached series")
+
+    # NEGATIVE CONTROL: rewording the prose above the block keeps every claim
+    assert claim(_mutate(ui, "A deleted mechanism beats a patched one",
+                         "A deleted mechanism is better than a patched one",
+                         "R6 banner-derivation negative control"))
+
+
+# ── ROUND 6: the cross-lane binding, and the two sentences the contract fixes ─
+# One lane cannot verify a contract by reading its own half.  These read BOTH
+# trees and grep them for the SAME literals (#341, #444).
+
+
+def _server_lane_main():
+    """(text, how) for the server lane's main.py, resolved at RUN TIME.
+
+    NEVER A HARDCODED PATH.  A hardcoded target is a check that cannot fail
+    where it matters (#342), and a workstation path written into the repository
+    is a privacy defect besides.  Three ways, and the first that actually
+    carries the route wins:
+
+      1. $SCR_SERVER_LANE -- what the mutation-control runner points at a COPY
+         of that tree, so the "remove a field from the route" control can be
+         exercised without writing to the other lane's worktree;
+      2. <root>/REVIEW-INPUT/server-lane -- the review pin's own layout, so a
+         cold reviewer runs the same check the builder ran;
+      3. `git worktree list` -- the sibling worktree whose branch names the
+         server lane.
+
+    Returns ("", ...) when none of them carries it; the caller FAILS rather
+    than skipping.  A cross-lane test that quietly skips is the check that
+    cannot fail."""
+    import os
+    import subprocess
+    route = '@app.get("/api/v1/team/series/{series_id}/status"'
+    cands = []
+    env = os.environ.get("SCR_SERVER_LANE")
+    if env:
+        cands.append((pathlib.Path(env), "the tree $SCR_SERVER_LANE names"))
+    cands.append((ROOT / "REVIEW-INPUT" / "server-lane", "the review pin's server-lane copy"))
+    try:
+        proc = subprocess.run(["git", "-C", str(ROOT), "worktree", "list"],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        for ln in proc.stdout.decode("utf-8", "replace").splitlines():
+            if "sept16-dc-server" in ln:
+                cands.append((pathlib.Path(ln.split()[0]), "the server lane's worktree"))
+    except Exception:
+        pass
+    for root, how in cands:
+        for rel in ("backend/api/main.py", "main.py"):
+            p = root / rel
+            try:
+                if not p.exists():
+                    continue
+                text = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if route in text:
+                return text, how
+    return "", "no candidate tree carried the status route"
+
+
+def _status_route_keys(server_main):
+    """The response keys the read-only status route EMITS, read out of that
+    route's own return statement -- not off the whole file, where any other
+    handler's dict would answer for it."""
+    a = '@app.get("/api/v1/team/series/{series_id}/status"'
+    if a not in server_main:
+        return set()
+    i = server_main.index(a)
+    j = server_main.find("@app.get(", i + len(a))
+    route = server_main[i:j if j > 0 else len(server_main)]
+    if "return {" not in route:
+        return set()
+    body = route[route.rindex("return {"):]
+    return set(re.findall(r'"([a-z0-9_]+)"\s*:', body))
+
+
+def _banner_parsed_keys(api):
+    """Every JSON key the client reads to feed the banner: the shared parse plus
+    the deferral-presence helper.  Scoped to those two methods, because a
+    file-wide sweep would collect report-dc's keys as well (#330: count the
+    operation inside the FUNCTION span)."""
+    parse = _method_body(api, "private static void ApplySeriesStateResponse")
+    helper = _method_body(api, "private static bool HasDeferralFields")
+    assert parse and helper, "the parse or the deferral helper could not be delimited"
+    pat = r'(?:HasJsonKey|ExtractJsonBool|ExtractJsonInt|ExtractJsonString)\(resp, "([a-z0-9_]+)"\)'
+    return set(re.findall(pat, parse + helper))
+
+
+def test_r6_item7_every_field_the_banner_reads_is_emitted_by_the_status_route():
+    """THE CROSS-LANE BINDING, AND IT MUST BE ABLE TO GO RED.
+
+    A name that exists on one lane and not the other is the defect this test
+    exists for, and it is invisible to either lane reading its own half: the
+    client would parse a key nobody sends and read a silent 0, the server would
+    ship a field nobody reads, and the feature would be inert with healthy logs
+    at both ends (#635: two halves of one contract need a test that reads BOTH
+    sides' literals, not two careful readings; #341, #444).  So the assertion
+    resolves the SERVER tree and compares its emitted key set against the keys
+    the client parse actually reads.
+
+    THE MUTATION IS THE POINT.  Removing one field from the route's response
+    reddens this; the inert twin -- the client-only deletion test above -- stays
+    green, because it never reads the server tree."""
+    api = _src("ApiClient.cs")
+    server, how = _server_lane_main()
+    assert server, (
+        "the server lane's main.py could not be located, so this cross-lane claim "
+        "was not checked: " + how)
+    keys = _status_route_keys(server)
+    assert keys, "the status route's own return keys could not be read"
+
+    CONTRACT = ["dc_deferred", "dc_deferred_seconds_remaining",
+                "dc_deferred_bound_seconds"]
+    for n in CONTRACT:
+        assert n in keys, (n, sorted(keys))
+
+    parsed = _banner_parsed_keys(api)
+    for n in CONTRACT:
+        assert n in parsed, (n, sorted(parsed))
+    # and EVERY key the parse reads is one this route emits -- not only the
+    # three, because a fourth invented name is the same defect
+    missing = sorted(parsed - keys)
+    assert not missing, ("client parses keys the status route does not emit", missing)
+
+    def claim(s_server):
+        k = _status_route_keys(s_server)
+        if not k:
+            return False
+        return (all(n in k for n in CONTRACT)
+                and not (parsed - k))
+
+    # MUTATION: one field leaves the route's response
+    _assert_discriminating(
+        claim, server,
+        _mutate(server, '"dc_deferred_bound_seconds":',
+                '"zz_not_a_contract_name":',
+                "R6 a contract field leaves the route"),
+        "R6 every banner field is emitted by the route")
+
+    # MUTATION 2: the field survives under a paraphrased name, which is the
+    # drift the single field list exists to prevent
+    _assert_discriminating(
+        claim, server,
+        _mutate(server, '"dc_deferred_seconds_remaining":',
+                '"dc_deferred_remaining_seconds":',
+                "R6 a contract field is renamed on one lane"),
+        "R6 the two lanes spell the field the same")
+
+    # NEGATIVE CONTROL, and a MEANINGFUL one: a key the route emits that the
+    # banner does not read may change without reddening this test.  The claim is
+    # about the banner's fields, not about the route's whole surface.
+    assert "deadline_seconds" not in parsed
+    assert claim(_mutate(server, '"deadline_seconds":', '"deadline_seconds_v2":',
+                         "R6 cross-lane negative control"))
+
+
+def test_r6_the_deferred_meaning_is_carried_from_the_contract_word_for_word():
+    """ONE DEFINITION, TWO TREES (#341, #444).
+
+    Round 5's client said a false `deferred` meant the call had settled the
+    report and that an absent one proved an old box settled it.  Both exceed
+    what the field carries, and the contract fixes the exact sentences each
+    lane may state.  They are COPIED rather than restated, which is the only
+    way a sentence this long stays true on two trees (#351)."""
+    api = _src("ApiClient.cs")
+
+    definition = ('"deferred" says only whether THIS call parked the report: true when it '
+                  'did, false on the five exits that do not park one -- two of which settle '
+                  'the series while the other three, the settled-row exit and the two room '
+                  'fences, decide nothing and say so with "ignored": true -- and absent only '
+                  'from a box that predates the flag.')
+    false_sentence = ('A FALSE "deferred" proves only that this call parked nothing. It is '
+                      'never proof of settlement: three of the five exits that answer false '
+                      'decide nothing and say so with "ignored": true.')
+    absent_sentence = ('An ABSENT "deferred" proves only that the box that answered predates '
+                       'the field. It says nothing about whether that box settled, ignored or '
+                       'fenced this report; the disposition, if the body carries one, is in '
+                       '"status" and "ignored".')
+
+    def flatten(s):
+        out = []
+        for line in s.split("\n"):
+            t = line.strip()
+            if t.startswith("///"):
+                t = t[3:]
+            elif t.startswith("//"):
+                t = t[2:]
+            out.append(t)
+        return " ".join(" ".join(out).split())
+
+    flat = flatten(api)
+    for sentence in (definition, false_sentence, absent_sentence):
+        assert flat.count(" ".join(sentence.split())) == 1, sentence[:48]
+
+    # and the two claims the round-5 lens rejected are gone from the file
+    assert "SETTLED by a box that predates the deferral" not in api
+    assert "settled this report at one of its other exits" not in api
+
+    def claim(s):
+        f = flatten(s)
+        return (all(f.count(" ".join(x.split())) == 1
+                    for x in (definition, false_sentence, absent_sentence))
+                and "SETTLED by a box that predates the deferral" not in s)
+
+    # MUTATION 1: the definition is paraphrased
+    _assert_discriminating(
+        claim, api,
+        _mutate(api, "says only whether THIS call parked the report",
+                "says whether THIS call parked the report",
+                "R6 the definition is paraphrased"),
+        "R6 the contract definition is carried word for word")
+
+    # MUTATION 2: the absent-field sentence goes back to claiming a settlement
+    _assert_discriminating(
+        claim, api,
+        _mutate(api, "An ABSENT \"deferred\" proves only that the box that",
+                "An ABSENT \"deferred\" proves that the box that",
+                "R6 the absent sentence overclaims again"),
+        "R6 the absent-field sentence is the contract's")
+
+    # NEGATIVE CONTROL: an unrelated comment edit leaves all three intact
+    assert claim(_mutate(api, "AN ABSENT FIELD IS A FACT ABOUT THE BOX",
+                         "AN ABSENT FIELD IS A FACT ABOUT THAT BOX",
+                         "R6 contract-sentence negative control"))
+
+
+def test_r6_the_read_witness_claims_the_answer_and_not_the_ui():
+    """W28 PROVES A READ ANSWER.  IT DOES NOT PROVE A BANNER.
+
+    The line said "the DC-grace banner is live for this series" while the
+    banner could not render at all, and its comment described one line per
+    series when the marker is a single remembered id -- a tab moving A to B and
+    back emits it twice for A, and a later refused answer emits the negative
+    line for a series that already emitted this one.  Three claims about
+    subsystems this line cannot see (#342).
+
+    The banner now reports ITSELF, which is what makes the split checkable."""
+    api = _src("ApiClient.cs")
+    ui = _src("NativeUI.cs")
+    ro = _method_body(api, "public static void PollTeamSeriesStatusReadOnly")
+    assert ro, "the read-only poller's own text could not be delimited"
+
+    assert "series status read PROVEN for series" in ro
+    assert "the DC-grace banner is live for this series" not in api
+    assert "nothing about what the banner renders" in ro
+    assert "This line can repeat for a series the tab returns to" in ro
+    assert "it is PER RESPONSE" in ro
+    # the banner's own witness lives in the UI, not here
+    assert "DC banner SHOWN for series" in ui
+    assert "DC banner SHOWN for series" not in api
+    # and the missing-field line, which is the other item-7 witness
+    assert "carried no complete deferral state" in ro
+    assert "Absence is never read as presence" in ro
 
     def claim(s_api, s_ui):
-        return ("costs is one countdown in one banner" not in s_api
-                and "WHAT THE REFUSAL COSTS, MEASURED RATHER THAN ASSUMED" in s_api
-                and "REACHABILITY, MEASURED, NOT ASSUMED" in s_ui
-                and "no statement in the api sets status='dc_paused'" in s_ui)
+        b = _method_body(s_api, "public static void PollTeamSeriesStatusReadOnly")
+        if not b:
+            return False
+        return ("the DC-grace banner is live for this series" not in s_api
+                and "nothing about what the banner renders" in b
+                and "This line can repeat for a series the tab returns to" in b
+                and "carried no complete deferral state" in b
+                and "DC banner SHOWN for series" in s_ui)
 
     assert claim(api, ui)
-    # MUTATION 1: the old pricing comes back on the tick
-    mutated_api = _mutate(api, "What a refusal actually costs is", "costs is one countdown in one banner and",
-                          "R5lens the countdown pricing returns")
-    assert not claim(mutated_api, ui), "the claim survives its own mutation (api)"
-    # MUTATION 2: the render site stops stating its reachability
-    mutated_ui = _mutate(ui, "REACHABILITY, MEASURED, NOT ASSUMED", "REACHABILITY, ASSUMED",
-                         "R5lens the render site stops measuring")
-    assert not claim(api, mutated_ui), "the claim survives its own mutation (ui)"
-    # and neither holds on a stub
+    # MUTATION 1: the read line certifies the UI again
+    m = _mutate(api, "nothing about what the banner renders",
+                "the DC-grace banner is live for this series",
+                "R6 the read witness certifies the UI")
+    assert not claim(m, ui), "the claim survives its own mutation (api)"
+    # MUTATION 2: the banner stops reporting itself
+    m_ui = _mutate(ui, "DC banner SHOWN for series", "DC banner drawn for series",
+                   "R6 the banner stops witnessing")
+    assert not claim(api, m_ui), "the claim survives its own mutation (ui)"
+    # MUTATION 3: the missing-field line goes, so an absent field is silent
+    m2 = _mutate(api, "carried no complete deferral state", "carried a deferral state",
+                 "R6 the missing-field line goes silent")
+    assert not claim(m2, ui), "the claim survives its own mutation (absence line)"
     assert not claim("// nothing here\n", "// nothing here\n")
 
-    # NEGATIVE CONTROL: rewording the colour sentence keeps every claim
-    assert claim(_mutate(api, "the frozen team-COLOUR stamp", "the frozen team-COLOUR mark",
-                         "R5lens reachability negative control"), ui)
+    # NEGATIVE CONTROL: rewording an adjacent sentence keeps every claim
+    assert claim(_mutate(api, "it is about the ANSWER, not about the UI",
+                         "it is about the ANSWER and not about the UI",
+                         "R6 read-witness negative control"), ui)
+
+
+def test_r6_item7_an_incomplete_deferral_state_is_read_as_not_deferred():
+    """ABSENCE IS NEVER READ AS PRESENCE.
+
+    A bool extractor answers False for "absent" and for "false" alike (#604),
+    so a body missing one of the three fields would otherwise parse to a silent
+    "not deferred" that looks exactly like a measured one -- and a partial body
+    (say the flag but no remaining time) would render a banner with a zero
+    countdown it never measured.  The presence of ALL THREE is measured first,
+    the else-branch zeroes all three, and the answer says so in the log.
+
+    The direction matters: the unhandled case leaves the banner OFF, which is
+    the direction an unknown costs least in (#276, #430)."""
+    api = _src("ApiClient.cs")
+    helper = _method_body(api, "private static bool HasDeferralFields")
+    parse = _method_body(api, "private static void ApplySeriesStateResponse")
+    assert helper and parse, "the helper or the parse could not be delimited"
+
+    # ALL three, never any: one HasJsonKey per contract field, joined by &&
+    assert helper.count("HasJsonKey(resp,") == 3
+    assert "||" not in helper
+    for n in ("dc_deferred", "dc_deferred_seconds_remaining",
+              "dc_deferred_bound_seconds"):
+        assert '"%s"' % n in helper
+    # the parse gates on it and the else-branch zeroes all three
+    assert "if (HasDeferralFields(resp))" in parse
+    tail = parse[parse.index("if (HasDeferralFields(resp))"):]
+    assert "else" in tail
+    els = tail[tail.index("else"):]
+    assert "LastSeriesDcDeferred = false;" in els
+    assert "LastSeriesDcDeferredSecondsRemaining = 0;" in els
+    assert "LastSeriesDcDeferredBoundSeconds = 0;" in els
+    # the remaining seconds can never render negative
+    assert "Math.Max(0, ExtractJsonInt(resp, \"dc_deferred_seconds_remaining\"))" in parse
+
+    def claim(s):
+        h = _method_body(s, "private static bool HasDeferralFields")
+        p = _method_body(s, "private static void ApplySeriesStateResponse")
+        if not h or not p or "if (HasDeferralFields(resp))" not in p:
+            return False
+        t = p[p.index("if (HasDeferralFields(resp))"):]
+        if "else" not in t:
+            return False
+        e = t[t.index("else"):]
+        return (h.count("HasJsonKey(resp,") == 3
+                and "||" not in h
+                and "LastSeriesDcDeferred = false;" in e
+                and "LastSeriesDcDeferredSecondsRemaining = 0;" in e
+                and "LastSeriesDcDeferredBoundSeconds = 0;" in e
+                and "Math.Max(0, ExtractJsonInt(resp, \"dc_deferred_seconds_remaining\"))" in p)
+
+    # MUTATION 1: any one field is enough, so a partial body parses as complete
+    _assert_discriminating(
+        claim, api,
+        _mutate(api,
+                '            return HasJsonKey(resp, "dc_deferred")\n'
+                '                   && HasJsonKey(resp, "dc_deferred_seconds_remaining")\n'
+                '                   && HasJsonKey(resp, "dc_deferred_bound_seconds");',
+                '            return HasJsonKey(resp, "dc_deferred")\n'
+                '                   || HasJsonKey(resp, "dc_deferred_seconds_remaining")\n'
+                '                   || HasJsonKey(resp, "dc_deferred_bound_seconds");',
+                "R6 a partial deferral state is accepted"),
+        "R6 all three fields or none")
+
+    # MUTATION 2: the else-branch stops zeroing, so a body without the fields
+    # leaves the previous answer's deferral state standing
+    _assert_discriminating(
+        claim, api,
+        _mutate(api,
+                "                LastSeriesDcDeferred = false;\n"
+                "                LastSeriesDcDeferredSecondsRemaining = 0;\n"
+                "                LastSeriesDcDeferredBoundSeconds = 0;\n",
+                "",
+                "R6 an absent deferral state leaves the last one standing"),
+        "R6 absence zeroes the banner's input")
+
+    # MUTATION 3: the floor goes, so a negative remaining time can reach the UI
+    _assert_discriminating(
+        claim, api,
+        _mutate(api,
+                '                    Math.Max(0, ExtractJsonInt(resp, "dc_deferred_seconds_remaining"));',
+                '                    ExtractJsonInt(resp, "dc_deferred_seconds_remaining");',
+                "R6 the remaining seconds are unfloored"),
+        "R6 the countdown cannot render negative")
+
+    # NEGATIVE CONTROL: rewording the comment above the gate changes nothing
+    assert claim(_mutate(api, "ABSENCE IS NEVER READ AS PRESENCE.",
+                         "ABSENCE IS NOT READ AS PRESENCE.",
+                         "R6 absence-rule negative control"))
+
+
+def test_r6_an_id_change_clears_the_banners_three_inputs():
+    """THE CACHE IS SCOPED TO THE SERIES IT DESCRIBED (Codex r2 f8).
+
+    The setter is the banner inputs' only other writer.  Without the three in
+    its reset, moving the tab from series A to series B would leave A's deferral
+    state under B's banner until B's first answer arrived -- a banner that is
+    correct about a series nobody is looking at."""
+    api = _src("ApiClient.cs")
+    a = "if (!string.Equals(value, activeTeamSeriesId, StringComparison.Ordinal))"
+    assert a in api
+    setter = api[api.index(a):api.index("activeTeamSeriesId = value;", api.index(a))]
+
+    for f in ("LastSeriesDcDeferred = false;",
+              "LastSeriesDcDeferredSecondsRemaining = 0;",
+              "LastSeriesDcDeferredBoundSeconds = 0;"):
+        assert f in setter, f
+
+    def claim(s):
+        if a not in s or "activeTeamSeriesId = value;" not in s:
+            return False
+        b = s[s.index(a):s.index("activeTeamSeriesId = value;", s.index(a))]
+        return all(f in b for f in ("LastSeriesDcDeferred = false;",
+                                    "LastSeriesDcDeferredSecondsRemaining = 0;",
+                                    "LastSeriesDcDeferredBoundSeconds = 0;"))
+
+    # MUTATION: the id change stops clearing the deferral state
+    _assert_discriminating(
+        claim, api,
+        _mutate(api,
+                "                    LastSeriesDcDeferred = false;\n"
+                "                    LastSeriesDcDeferredSecondsRemaining = 0;\n"
+                "                    LastSeriesDcDeferredBoundSeconds = 0;\n",
+                "",
+                "R6 an id change leaves the previous series' deferral state"),
+        "R6 an id change clears the banner's inputs")
+
+    # NEGATIVE CONTROL: rewording the comment beside the reset changes nothing
+    assert claim(_mutate(api, "The banner's three inputs are part of that scope",
+                         "The banner's three inputs belong to that scope",
+                         "R6 id-change negative control"))
