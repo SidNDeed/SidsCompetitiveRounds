@@ -73,7 +73,11 @@ Write-Output ("invocation-utc: " + (Get-Date).ToUniversalTime().ToString('yyyy-M
 Write-Output ""
 
 Write-Output "--- baseline (the scanner as it stands: must PASS, exit 0) ---"
-& powershell -NoProfile -ExecutionPolicy Bypass -File $Scanner -Dll $Dll | Select-Object -Last 3
+# Indented for the same reason as the source-claim controls: a nested verdict
+# is not this section's result.
+& powershell -NoProfile -ExecutionPolicy Bypass -File $Scanner -Dll $Dll |
+    Select-Object -Last 3 |
+    ForEach-Object { Write-Output ('     | ' + $_) }
 $baselineExit = $LASTEXITCODE
 Write-Output ("baseline exit=" + $baselineExit + " expected=0")
 Write-Output ""

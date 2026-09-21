@@ -33,12 +33,11 @@ namespace CompetitiveRounds
     /// <see cref="BoundaryMapCallIn"/> is taken in the Postfix of
     /// MapManager.RPCA_CallInNewMapAndMovePlayers. That Postfix runs when the
     /// RPC is RECEIVED — vanilla's own coroutine (wait for map, enter, clear
-    /// objects, move players) has not run yet, and PlayerManager.MovePlayers
-    /// is dispatched from inside it. So every field on a call-in row
-    /// describes the state this seat INHERITED from the point that just
-    /// ended: the previous round's terminal positions and the pre-revive dead
-    /// flags. It is a useful row, and a misleading one if read as the state
-    /// on the map being loaded.
+    /// objects, then dispatch PlayerManager.MovePlayers) has not run yet. So
+    /// every field on a call-in row describes the state this seat INHERITED
+    /// from the point that just ended: the previous round's terminal
+    /// positions and the pre-revive dead flags. It is a useful row, and a
+    /// misleading one if read as the state on the map being loaded.
     ///
     /// <see cref="BoundaryMapSettled"/> is taken a fixed delay later, from
     /// the per-frame tick, and carries <c>sinceCallInMs</c> so a reader sees
@@ -46,18 +45,32 @@ namespace CompetitiveRounds
     /// it. THAT DELAY IS ALL THE ROW ASSERTS ABOUT ITSELF: it is a sample
     /// taken about two seconds after the call-in, carrying the elapsed time
     /// it measured. The delay was chosen against learning #304's reading that
-    /// the per-player Move coroutine runs on the order of a second, but a
-    /// sample's TIMING is a timing and never an ORDERING — the row says
-    /// nothing about how far vanilla's map coroutine had got by then, and
-    /// nothing about whether the move ran.
+    /// the per-player MovePlayers coroutine runs on the order of a second,
+    /// but a sample's TIMING is a timing and never an ORDERING.
     ///
     /// Saying it any more strongly would be the false guarantee #351 is
     /// about, and it would be false in exactly the case the instrument exists
     /// for (#302): when the transition is the thing that stalled, the settled
-    /// row carries pre-move data, and post-move wording would file that
-    /// reading under a claim untrue of it. The PAIR is the instrument — a
-    /// settled row whose positions still equal its call-in row's is a seat
-    /// that never got moved.
+    /// row still carries the state the previous point ended in, and wording
+    /// that placed the row past the transition would file that reading under
+    /// a claim untrue of it.
+    ///
+    /// ── THE ONE CANONICAL INTERPRETATION ──────────────────────────────────
+    /// Each of the three sample sites carries the SAME interpretation
+    /// sentence, word for word, between the two markers below. The markers
+    /// exist for no other purpose than to be found (#306), and
+    /// tools/roster-census-harness/check-source-claims.ps1 holds the sentence
+    /// itself: between the markers the text must match it exactly, and
+    /// outside them a sample site may not use any of the vocabulary that
+    /// checker prints. The earlier arrangement was a list of forbidden
+    /// phrases, which is a check that cannot fail (#342 / #431) — a reworded
+    /// outcome claim walked straight past it.
+    /// SCR_CENSUS_MOVE_CLAIM_BEGIN
+    /// A settled row asserts the delay it measured and never a position in
+    /// vanilla's transition, so a call-in row and a settled row carrying
+    /// equal pos fields are two observations that agree and are not a
+    /// reading that the seat did not move.
+    /// SCR_CENSUS_MOVE_CLAIM_END
     ///
     /// ── FAILURE DIRECTION (#276 / #430) ───────────────────────────────────
     /// The census is pure observation and gates nothing. A seat it cannot
@@ -102,7 +115,14 @@ namespace CompetitiveRounds
         /// <summary>The sample taken about two seconds after the call-in,
         /// from the per-frame tick, carrying the elapsed time it measured as
         /// <c>sinceCallInMs</c>. The label asserts that delay and nothing
-        /// about where the transition had got to by then.</summary>
+        /// about where the transition had got to by then.
+        ///
+        /// SCR_CENSUS_MOVE_CLAIM_BEGIN
+        /// A settled row asserts the delay it measured and never a position
+        /// in vanilla's transition, so a call-in row and a settled row
+        /// carrying equal pos fields are two observations that agree and are
+        /// not a reading that the seat did not move.
+        /// SCR_CENSUS_MOVE_CLAIM_END</summary>
         internal const string BoundaryMapSettled = "map-settled";
 
         internal const string BoundaryGame = "game";
@@ -169,8 +189,27 @@ namespace CompetitiveRounds
 
         /// <summary>The read completed and every actor it held declared the
         /// spectator role, so the census set is empty by the filter rather
-        /// than by the room.</summary>
+        /// than by the room. EVERY entry: an entry the read handed back as
+        /// null is not a spectator declaration, so a roster holding one of
+        /// those cannot carry this token — see
+        /// <see cref="ReasonRosterEntryNull"/>.</summary>
         internal const string ReasonAllSpectators = "every-actor-is-a-spectator";
+
+        /// <summary>The read completed and handed back at least one NULL
+        /// entry, and no entry became a census seat. A null entry is an
+        /// observation in its own right, not an absence: skipping it before
+        /// classifying would let a roster of one null entry and one spectator
+        /// entry print the all-spectators token, which is a claim about every
+        /// entry that the null entry falsifies (#441).</summary>
+        internal const string ReasonRosterEntryNull = "roster-entry-null";
+
+        /// <summary>Not an empty cause at all: the observation produced at
+        /// least one census seat, so the boundary emits rows rather than a
+        /// notice. It is a token so that <see cref="ReasonForObservation"/>
+        /// is TOTAL — every observation it can be handed maps to exactly one
+        /// token that describes it, and the seats-present case is not an
+        /// absent answer or a null (#276).</summary>
+        internal const string ReasonRosterSeatsPresent = "roster-seats-present";
 
         /// <summary>A zero-seat boundary whose cause was not classified. It
         /// exists so that the unhandled case fails toward saying something
@@ -219,8 +258,129 @@ namespace CompetitiveRounds
             ReasonRosterListNull,
             ReasonRosterEmpty,
             ReasonAllSpectators,
+            ReasonRosterEntryNull,
             ReasonRosterEmptyUnclassified,
         };
+
+        // ── the roster observation, and the TOTAL mapping over it ─────────
+
+        /// <summary>What the roster read actually handed back, counted by
+        /// KIND before anything is classified. Three counts, because three
+        /// kinds is everything an entry can be once the read itself has
+        /// succeeded: the entry was null, the entry declared the spectator
+        /// role, or the entry became a census seat.
+        ///
+        /// The counts exist because the classification has to be a function
+        /// of what was OBSERVED, and an entry dropped by a filter before the
+        /// classification runs is an observation the cause token can then
+        /// contradict. <see cref="NotObserved"/> is the honest state for the
+        /// two causes that happen BEFORE any entry is seen — a read that
+        /// raised and a read that returned no list observed nothing, and
+        /// printing three zeroes there would assert three facts nobody
+        /// measured (#305).</summary>
+        internal struct RosterObservation
+        {
+            internal int NullEntries;
+            internal int SpectatorEntries;
+            internal int SeatEntries;
+
+            internal static RosterObservation Of(int nullEntries, int spectatorEntries, int seatEntries)
+            {
+                RosterObservation o;
+                o.NullEntries = nullEntries;
+                o.SpectatorEntries = spectatorEntries;
+                o.SeatEntries = seatEntries;
+                return o;
+            }
+
+            /// <summary>No entry was reached at all. Every count is negative,
+            /// which is what makes the fields print as <see cref="Unknown"/>
+            /// rather than as a measured zero.</summary>
+            internal static RosterObservation NotObserved
+            {
+                get { return Of(-1, -1, -1); }
+            }
+
+            internal bool Observed
+            {
+                get { return NullEntries >= 0 && SpectatorEntries >= 0 && SeatEntries >= 0; }
+            }
+
+            internal int Entries
+            {
+                get { return Observed ? NullEntries + SpectatorEntries + SeatEntries : -1; }
+            }
+        }
+
+        /// <summary>The TOTAL mapping from an observation to the one token
+        /// that describes it. Total means every observation this can be
+        /// handed — every multiset of null, spectator and seat entries, and
+        /// the un-observed state as well — reaches exactly one token, and the
+        /// token is true of the observation that produced it.
+        ///
+        /// The order of the arms is the whole content of the fix. A seat
+        /// present means rows, whatever else was seen. Otherwise a NULL entry
+        /// is decided BEFORE the spectator arm, because
+        /// <see cref="ReasonAllSpectators"/> is a claim about EVERY entry and
+        /// one null entry falsifies it: the earlier arrangement counted
+        /// spectators over a list the nulls had already been dropped from, so
+        /// a roster of one null entry and one spectator entry reported that
+        /// every actor had declared spectator. A cause a reader cannot
+        /// separate on the line is not distinguished, and a cause that does
+        /// not describe the observation is worse than none (#276 / #430).
+        ///
+        /// A negative count is not a multiset and cannot be described by any
+        /// of the four, so it takes the unclassified token rather than the
+        /// nearest plausible one.</summary>
+        internal static string ReasonForObservation(RosterObservation observed)
+        {
+            if (!observed.Observed) return ReasonRosterEmptyUnclassified;
+            if (observed.SeatEntries > 0) return ReasonRosterSeatsPresent;
+            if (observed.NullEntries > 0) return ReasonRosterEntryNull;
+            if (observed.SpectatorEntries > 0) return ReasonAllSpectators;
+            return ReasonRosterEmpty;
+        }
+
+        /// <summary>The room sizes the observation mapping is enumerated over
+        /// by the self-test. Eight rather than four: a 2v2 room is four
+        /// seats, an FFA lobby is larger, and the bound is stated here so the
+        /// enumeration cannot quietly shrink to the sizes that happen to
+        /// pass.</summary>
+        internal const int ObservationEnumerationBound = 8;
+
+        // ── the settled sample's clock ────────────────────────────────────
+
+        /// <summary>Where the settled sample's clock is anchored, and when it
+        /// comes due. Pure arithmetic, so the rule can be EXECUTED rather
+        /// than asserted about (#391).
+        ///
+        /// It is handed BOTH readings on purpose. The anchor is the one taken
+        /// BEFORE the call-in rows were emitted, because the field the
+        /// settled row prints is the call-in-to-sample delay: anchoring on
+        /// the reading taken AFTER the emission folds the cost of emitting
+        /// those rows into the gap and the printed field then UNDERSTATES the
+        /// delay by that cost, which on a slow synchronous log sink is the
+        /// part of the interval a reader most wants back. A wrong
+        /// implementation can therefore pick the wrong reading, which is what
+        /// makes the assertion able to fail.</summary>
+        internal static void ScheduleSettle(long beforeEmissionTicks, long afterEmissionTicks,
+                                            long frequency, double delaySeconds,
+                                            out long anchorTicks, out long dueTicks)
+        {
+            anchorTicks = beforeEmissionTicks;
+            dueTicks = beforeEmissionTicks + (long)(delaySeconds * frequency);
+        }
+
+        /// <summary>Milliseconds between two stopwatch readings. A backwards
+        /// pair reads 0 and an unusable frequency reads -1, which prints as
+        /// <see cref="Unknown"/> — never a fabricated number.</summary>
+        internal static long ElapsedMilliseconds(long fromTicks, long toTicks, long frequency)
+        {
+            long delta = toTicks - fromTicks;
+            if (delta < 0) return 0;
+            if (frequency <= 0) return -1;
+            return (long)(delta * 1000.0 / frequency);
+        }
 
         // ── the boundary context ─────────────────────────────────────────
 
@@ -435,14 +595,31 @@ namespace CompetitiveRounds
         /// rows and cannot tell a detached patch from a declined gate from an
         /// exhausted cap from a failed roster read.</summary>
         internal static string FormatEmptyRosterNotice(
-            BoundaryContext ctx, string reason, int suppressed, bool final)
+            BoundaryContext ctx, string reason, RosterObservation observed, int suppressed, bool final)
         {
-            var sb = new StringBuilder(220);
+            var sb = new StringBuilder(260);
             sb.Append(Prefix);
             AppendBoundaryFields(sb, ctx);
             sb.Append(" census=empty reason=").Append(Label(reason));
+            // The counts the reason was DERIVED from, on the same line as the
+            // reason. Without the null count a reader cannot tell the
+            // all-spectators reading from a roster that held entries the read
+            // could not hand back, and those have different next steps.
+            sb.Append(" observedEntries=").Append(Count(observed.Entries))
+              .Append(" nullEntries=").Append(Count(observed.NullEntries))
+              .Append(" spectatorEntries=").Append(Count(observed.SpectatorEntries))
+              .Append(" seatEntries=").Append(Count(observed.SeatEntries));
             AppendNoticeTail(sb, suppressed, final);
             return sb.ToString();
+        }
+
+        /// <summary>A count that was measured, or <see cref="Unknown"/> when
+        /// nothing was observed. A negative count never prints as a number:
+        /// "0 null entries" and "no entry was reached" are different
+        /// readings and the line has to keep them apart (#305).</summary>
+        private static string Count(int v)
+        {
+            return v < 0 ? Unknown : v.ToString(CultureInfo.InvariantCulture);
         }
 
         /// <summary>A boundary the emitter declined to census at all. The
@@ -748,6 +925,29 @@ namespace CompetitiveRounds
         /// shown to fail (#342).</summary>
         internal delegate string NoticeFormatter(BoundaryContext ctx, string reason, int suppressed, bool final);
 
+        /// <summary>The empty-roster notice under test. A separate seam from
+        /// <see cref="NoticeFormatter"/> because this line carries the counts
+        /// the reason was derived from, and "drop the counts, the reason says
+        /// it all" is the natural tidy-up edit that has to be shown to
+        /// fail.</summary>
+        internal delegate string EmptyNoticeFormatter(BoundaryContext ctx, string reason,
+                                                      RosterObservation observed, int suppressed, bool final);
+
+        /// <summary>The observation classifier under test. Same seam, same
+        /// reason: dropping the null entries before counting spectators is
+        /// the natural tidy-up edit ("a null entry is not an actor"), and
+        /// without a seam the enumeration asserting a TOTAL mapping could
+        /// never be shown to fail (#342).</summary>
+        internal delegate string RosterObservationClassifier(RosterObservation observed);
+
+        /// <summary>The settled sample's clock under test. Same seam: taking
+        /// the reading after the call-in rows were emitted is the natural
+        /// edit ("arm it when the work is done"), and it is only visible as a
+        /// defect when the two readings differ.</summary>
+        internal delegate void SettleScheduler(long beforeEmissionTicks, long afterEmissionTicks,
+                                               long frequency, double delaySeconds,
+                                               out long anchorTicks, out long dueTicks);
+
         /// <summary>The empty-cause classifier under test. Same seam, same
         /// reason: collapsing two causes onto one token is the natural
         /// tidy-up edit ("they are both a failed read"), and without a seam
@@ -771,19 +971,21 @@ namespace CompetitiveRounds
         }
 
         internal static SelfTestResult SelfTest(CensusEmitter emit, BudgetFactory budget,
-                                                NoticeFormatter emptyNotice, NoticeFormatter declinedNotice)
+                                                EmptyNoticeFormatter emptyNotice, NoticeFormatter declinedNotice)
         {
             return SelfTest(emit, budget, emptyNotice, declinedNotice,
-                            ReasonForEmptyCause, DefaultCauseNotices);
+                            ReasonForEmptyCause, DefaultCauseNotices,
+                            ReasonForObservation, ScheduleSettle);
         }
 
         internal static SelfTestResult SelfTest(CensusEmitter emit, BudgetFactory budget,
-                                                NoticeFormatter emptyNotice, NoticeFormatter declinedNotice,
-                                                EmptyCauseClassifier classify, CauseNoticesFactory causeNotices)
+                                                EmptyNoticeFormatter emptyNotice, NoticeFormatter declinedNotice,
+                                                EmptyCauseClassifier classify, CauseNoticesFactory causeNotices,
+                                                RosterObservationClassifier observe, SettleScheduler schedule)
         {
             var r = new SelfTestResult();
             if (emit == null || budget == null || emptyNotice == null || declinedNotice == null
-                || classify == null || causeNotices == null)
+                || classify == null || causeNotices == null || observe == null || schedule == null)
             {
                 r.Failed++;
                 r.Report.Append("FAIL | case=selftest was handed no implementation | got=null\n");
@@ -1143,11 +1345,13 @@ namespace CompetitiveRounds
             //     gate and an exhausted cap.
             {
                 var ctx = BoundaryContext.For(11, BoundaryMapCallIn, -1, 2);
-                string empty = emptyNotice(ctx, ReasonRosterReadThrew, 0, false);
+                string empty = emptyNotice(ctx, ReasonRosterReadThrew,
+                                           RosterObservation.NotObserved, 0, false);
                 string declined = declinedNotice(ctx, ReasonNotModRoom, 4, false);
                 bool ok = Value(empty, "census") == "empty"
                           && Value(empty, "reason") == ReasonRosterReadThrew
                           && Value(empty, "seats") == "0"
+                          && Value(empty, "nullEntries") == Unknown
                           && Value(empty, "SCR_ROSTER_PROBE") == "1"
                           && Value(declined, "census") == "declined"
                           && Value(declined, "reason") == ReasonNotModRoom
@@ -1203,7 +1407,8 @@ namespace CompetitiveRounds
                 var ctx = BoundaryContext.For(11, BoundaryMapCallIn, -1, 2);
                 if (ok)
                     for (int i = 0; i < tokens.Count; i++)
-                        if (Value(emptyNotice(ctx, tokens[i], 0, false), "reason") != tokens[i])
+                        if (Value(emptyNotice(ctx, tokens[i], RosterObservation.NotObserved, 0, false),
+                                  "reason") != tokens[i])
                         { ok = false; break; }
 
                 Check(r, "the four empty causes reach the line as four distinct reasons", ok,
@@ -1289,6 +1494,113 @@ namespace CompetitiveRounds
                 int s; bool f;
                 bool fired = t.ShouldFire("a-cause-not-on-the-list", 11, out s, out f);
                 Check(r, "an unrecognised empty cause still announces", fired, "fired=" + fired);
+            }
+
+            // 32. THE OBSERVATION MAPPING IS TOTAL, AND EVERY TOKEN IS TRUE
+            //     OF THE OBSERVATION THAT PRODUCED IT. Not a sample of the
+            //     interesting shapes: EVERY multiset over the three kinds an
+            //     entry can be — null, spectator, seat — up to the stated
+            //     room-size bound. Each of the four outcomes is asserted as a
+            //     BICONDITIONAL against its own predicate, so a token that is
+            //     right for one multiset and wrong for another still reds,
+            //     and so does a mapping that returns two plausible tokens for
+            //     the same observation.
+            //
+            //     The arm this case exists for is the null entry: the earlier
+            //     arrangement dropped nulls before counting, so [null,
+            //     spectator] reported that every actor had declared
+            //     spectator — a cause that does not describe the observation.
+            {
+                bool ok = true;
+                int enumerated = 0;
+                string firstBad = null;
+                for (int nulls = 0; nulls <= ObservationEnumerationBound && ok; nulls++)
+                    for (int spectators = 0; nulls + spectators <= ObservationEnumerationBound && ok; spectators++)
+                        for (int seats2 = 0;
+                             nulls + spectators + seats2 <= ObservationEnumerationBound && ok;
+                             seats2++)
+                        {
+                            var obs = RosterObservation.Of(nulls, spectators, seats2);
+                            string token = observe(obs);
+                            enumerated++;
+
+                            bool wantSeats = seats2 > 0;
+                            bool wantNull = !wantSeats && nulls > 0;
+                            bool wantAllSpec = !wantSeats && nulls == 0 && spectators > 0;
+                            bool wantEmpty = !wantSeats && nulls == 0 && spectators == 0;
+
+                            bool row = !string.IsNullOrEmpty(token)
+                                       && (token == ReasonRosterSeatsPresent) == wantSeats
+                                       && (token == ReasonRosterEntryNull) == wantNull
+                                       && (token == ReasonAllSpectators) == wantAllSpec
+                                       && (token == ReasonRosterEmpty) == wantEmpty;
+                            if (!row)
+                            {
+                                ok = false;
+                                firstBad = "nulls=" + nulls + " spectators=" + spectators
+                                           + " seats=" + seats2 + " token=" + (token ?? "(null)");
+                            }
+                        }
+
+                // The un-observed state is part of the domain: a read that
+                // raised or returned no list reached no entry at all, and a
+                // count it never took must not be classified as a zero.
+                if (ok && observe(RosterObservation.NotObserved) != ReasonRosterEmptyUnclassified)
+                {
+                    ok = false;
+                    firstBad = "not-observed token=" + observe(RosterObservation.NotObserved);
+                }
+
+                Check(r, "the observation mapping is total over every entry multiset", ok,
+                      ok ? "enumerated=" + enumerated.ToString(CultureInfo.InvariantCulture)
+                         : firstBad);
+            }
+
+            // 33. THE NULL COUNT IS ON THE LINE. A token nobody can check
+            //     against the counts it was derived from is a claim, and the
+            //     one reading this instrument has to keep apart from
+            //     all-spectators is a roster that held entries the read could
+            //     not hand back.
+            {
+                var ctx = BoundaryContext.For(11, BoundaryMapCallIn, -1, 2);
+                string reason = observe(RosterObservation.Of(1, 1, 0));
+                string line = emptyNotice(ctx, reason, RosterObservation.Of(1, 1, 0), 0, false);
+                bool ok = reason == ReasonRosterEntryNull
+                          && Value(line, "reason") == ReasonRosterEntryNull
+                          && Value(line, "nullEntries") == "1"
+                          && Value(line, "spectatorEntries") == "1"
+                          && Value(line, "seatEntries") == "0"
+                          && Value(line, "observedEntries") == "2";
+                Check(r, "a null entry carries its own token and its count onto the line", ok, line);
+            }
+
+            // 34. THE SETTLED SAMPLE'S CLOCK IS ANCHORED BEFORE THE CALL-IN
+            //     ROWS ARE EMITTED. The row's whole assertion about itself is
+            //     the delay it measured, so the field has to be the
+            //     call-in-to-sample gap and not the gap minus whatever
+            //     emitting the call-in rows cost. Anchoring after the
+            //     emission understates it by exactly that cost, which is
+            //     largest on the slow synchronous sink a stall investigation
+            //     is most likely to be reading.
+            {
+                const long frequency = 1000;            // one tick per millisecond
+                const long beforeEmission = 10000;      // the call-in instant
+                const long afterEmission = 10450;       // emitting the rows cost 450 ms
+                long anchor, due;
+                schedule(beforeEmission, afterEmission, frequency, 2.0, out anchor, out due);
+
+                long reported = ElapsedMilliseconds(anchor, due, frequency);
+                long actualSinceCallIn = ElapsedMilliseconds(beforeEmission, due, frequency);
+
+                bool ok = anchor == beforeEmission
+                          && due == beforeEmission + 2000
+                          && reported == actualSinceCallIn
+                          && reported == 2000;
+                Check(r, "the settled sample's clock is anchored at the call-in, not after the emission", ok,
+                      "anchor=" + anchor.ToString(CultureInfo.InvariantCulture)
+                      + " due=" + due.ToString(CultureInfo.InvariantCulture)
+                      + " reported=" + reported.ToString(CultureInfo.InvariantCulture)
+                      + " sinceCallIn=" + actualSinceCallIn.ToString(CultureInfo.InvariantCulture));
             }
 
             return r;

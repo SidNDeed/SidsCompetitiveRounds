@@ -2,14 +2,49 @@
 #
 # WHY THIS EXISTS
 # ---------------
-# Some of the round-2 closures are CLAIMS rather than behaviour: a remark that
-# said the settled sample sits after the move, and two remarks that said every
+# Some of this lane's closures are CLAIMS rather than behaviour: remarks about
+# what a settled sample does and does not assert, and remarks that said every
 # helper tests something only some of them test. A claim asserted about the
 # source and never run is exactly the shape #391 rejects, so each of those
 # claims is turned into a row here that a mutation can redden.
 #
-# WHAT A ROW IS
-# -------------
+# WHAT REPLACED THE FORBIDDEN-PHRASE LIST, AND WHY
+# ------------------------------------------------
+# Round 2 policed the settled sample's interpretation with a list of FORBIDDEN
+# phrases. That is a check that cannot fail (#342 / #431): it rejects the two
+# spellings someone thought of and accepts every other one, and a remark saying
+# equal snapshots prove no move passed it untouched while the check reported
+# success. A blacklist can only ever name what it has already seen.
+#
+# The rule here is an ALLOW-LIST instead, in two parts, and it is judged by what
+# it makes impossible rather than by what it forbids:
+#
+#   1. THE REGION. Each sample site carries exactly ONE interpretation
+#      sentence, between SCR_CENSUS_MOVE_CLAIM_BEGIN and
+#      SCR_CENSUS_MOVE_CLAIM_END. Those markers exist for no other purpose than
+#      to be found (#306). The canonical sentence is written out below, and the
+#      normalised text between the markers must equal it EXACTLY. A site with
+#      no region, two regions, or a region that says anything else, FAILS.
+#
+#   2. OUTSIDE THE REGION. In the rest of the sample site's span, none of the
+#      stated vocabulary may appear at all. So the only place at a sample site
+#      where the transition can be written about is the region, and the only
+#      thing the region may say is the canonical sentence.
+#
+# The one exemption is stated, bounded and PRINTED: ROUNDS' own log marker is
+# quoted verbatim in one remark and contains a vocabulary word. Only the exact
+# literals in $vocabularyExemptions are removed before the scan, and the
+# checker prints each one it removed and where. Any other occurrence fails.
+#
+# WHAT IT STILL CANNOT DO, STATED RATHER THAN IMPLIED (#310 / #389). A sentence
+# outside the region that describes the same outcome while using none of the
+# vocabulary is not caught. The bound is therefore: at a sample site, no
+# statement using the stated vocabulary can exist outside the one canonical
+# sentence. That is a bound, not a proof, and it is written here rather than
+# left for a reader to discover.
+#
+# WHAT A SPAN IS
+# --------------
 #   file   the lane source the claim lives in
 #   span   an anchored region of that file, start phrase to end phrase. NEVER
 #          the whole file: a flag names a line and the defect is a class, but a
@@ -76,6 +111,43 @@ $spans = @(
        Start = 'Every actor that is playing, ActorNumber-ascending'; End = 'Per-frame result cache' }
 )
 
+# ---- the sample sites, the canonical sentence, the vocabulary ---------------
+
+# Every span that documents one of the two map samples. A site listed here MUST
+# carry exactly one canonical region; a site that is listed and not read is a
+# VOID result, never a pass (#441).
+$sampleSites = @(
+    'rostercensus/two-samples-remark',
+    'rostercensus/boundary-labels',
+    'gamestatewatcher/map-boundary-patch'
+)
+
+$claimBegin = 'SCR_CENSUS_MOVE_CLAIM_BEGIN'
+$claimEnd = 'SCR_CENSUS_MOVE_CLAIM_END'
+
+# THE ONE SENTENCE A SAMPLE SITE MAY SAY ABOUT THE TRANSITION. Written out here
+# so the checker STATES the permitted text rather than merely reacting to text
+# it dislikes.
+$canonicalClaim = @'
+A settled row asserts the delay it measured and never a position in vanilla's transition, so a call-in row and a settled row carrying equal pos fields are two observations that agree and are not a reading that the seat did not move.
+'@
+
+# The vocabulary. Outside the region, at a sample site, none of these may
+# appear. Word-boundaried so that MovePlayers - a method name - is not a hit,
+# and case-insensitive so a claim cannot return in different capitals.
+$vocabulary = @(
+    '\bmove\b', '\bmoves\b', '\bmoved\b', '\bmoving\b', '\bmovement\b', '\bunmoved\b',
+    '\bteleport\w*\b', '\brelocat\w*\b', '\breposition\w*\b',
+    '\bfar side\b', '\bpre-move\b', '\bpost-move\b', '\bstayed put\b'
+)
+
+# The ONLY literals removed before the vocabulary scan. Each is a verbatim
+# quotation of something outside this codebase that a remark has to be able to
+# name. Every removal is printed.
+$vocabularyExemptions = @(
+    'CALL IN NEW MAP AND MOVE PLAYERS'
+)
+
 # ---- the claims -------------------------------------------------------------
 
 $claims = @(
@@ -86,12 +158,6 @@ $claims = @(
     @{ Span = 'rostercensus/two-samples-remark'; Kind = 'required'; MinCount = 1;
        Phrase = 'carrying the elapsed time it measured';
        Why = 'finding 6: and by the measured elapsed field it carries' },
-    @{ Span = 'rostercensus/two-samples-remark'; Kind = 'forbidden';
-       Phrase = 'far side';
-       Why = 'finding 6: a stalled transition leaves pre-move data under a post-move claim' },
-    @{ Span = 'rostercensus/two-samples-remark'; Kind = 'forbidden';
-       Phrase = 'after the move';
-       Why = 'finding 6: the row asserts a delay, never a position in the transition' },
 
     @{ Span = 'rostercensus/boundary-labels'; Kind = 'required'; MinCount = 1;
        Phrase = 'taken about two seconds after the call-in';
@@ -99,19 +165,10 @@ $claims = @(
     @{ Span = 'rostercensus/boundary-labels'; Kind = 'required'; MinCount = 1;
        Phrase = 'carrying the elapsed time it measured as';
        Why = 'finding 6: and that it carries the measured elapsed field' },
-    @{ Span = 'rostercensus/boundary-labels'; Kind = 'forbidden';
-       Phrase = 'far side';
-       Why = 'finding 6: no move-ordering claim on either map label' },
-    @{ Span = 'rostercensus/boundary-labels'; Kind = 'forbidden';
-       Phrase = 'after the move';
-       Why = 'finding 6: no move-ordering claim on either map label' },
 
     @{ Span = 'gamestatewatcher/map-boundary-patch'; Kind = 'required'; MinCount = 1;
        Phrase = 'taken about two seconds later and carrying the elapsed time it measured';
        Why = 'finding 6: the Postfix remark describes the second sample by its delay' },
-    @{ Span = 'gamestatewatcher/map-boundary-patch'; Kind = 'forbidden';
-       Phrase = 'far side';
-       Why = 'finding 6: the settled sample is not documented as being past the move' },
 
     # ---- finding 7: helper-wide comments match every helper gate ----
     @{ Span = 'roomactors/inertness-remark'; Kind = 'forbidden';
@@ -146,6 +203,14 @@ Write-Output "=== roster-census source-claim check ==="
 Write-Output ("invocation:     " + [Environment]::CommandLine)
 Write-Output ("invocation-root: " + $Root)
 Write-Output ("invocation-utc: " + (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))
+Write-Output ""
+Write-Output "--- the allow-list this check enforces at every sample site ---"
+Write-Output ("canonical claim: " + $canonicalClaim.Trim())
+Write-Output ("region markers:  " + $claimBegin + " .. " + $claimEnd)
+Write-Output ("vocabulary:      " + ($vocabulary -join '  '))
+foreach ($ex in $vocabularyExemptions) {
+    Write-Output ("exempt literal:  " + $ex)
+}
 Write-Output ""
 
 $failures = 0
@@ -185,6 +250,83 @@ foreach ($span in $spans) {
 }
 
 Write-Output ""
+Write-Output "--- sample sites (every listed site is READ and printed; a site not read is VOID) ---"
+
+$sitesRead = 0
+foreach ($site in $sampleSites) {
+    if (-not $spanText.ContainsKey($site)) {
+        Write-Output ("FAIL | site={0,-40} | span unavailable - the site could not be read" -f $site)
+        $failures = $failures + 1
+        continue
+    }
+
+    $sitesRead = $sitesRead + 1
+    $text = $spanText[$site]
+
+    $beginCount = Get-Occurrences -Haystack $text -Needle $claimBegin
+    $endCountMarker = Get-Occurrences -Haystack $text -Needle $claimEnd
+    if ($beginCount -ne 1 -or $endCountMarker -ne 1) {
+        Write-Output ("FAIL | site={0,-40} | canonical region markers: begin={1} end={2}, expected 1 and 1" -f `
+            $site, $beginCount, $endCountMarker)
+        $failures = $failures + 1
+        continue
+    }
+
+    $b = $text.IndexOf($claimBegin, [System.StringComparison]::OrdinalIgnoreCase)
+    $e = $text.IndexOf($claimEnd, [System.StringComparison]::OrdinalIgnoreCase)
+    if ($e -le $b) {
+        Write-Output ("FAIL | site={0,-40} | the end marker precedes the begin marker" -f $site)
+        $failures = $failures + 1
+        continue
+    }
+
+    $regionStart = $b + $claimBegin.Length
+    $region = $text.Substring($regionStart, $e - $regionStart)
+    $region = ($region -replace '\s+', ' ').Trim()
+    $want = ($canonicalClaim -replace '\s+', ' ').Trim()
+
+    $regionOk = [string]::Equals($region, $want, [System.StringComparison]::Ordinal)
+    if ($regionOk) {
+        Write-Output ("ok   | site={0,-40} | region matches the canonical claim, chars={1}" -f $site, $region.Length)
+    } else {
+        Write-Output ("FAIL | site={0,-40} | region is not the canonical claim" -f $site)
+        Write-Output ("     | want: " + $want)
+        Write-Output ("     | got:  " + $region)
+        $failures = $failures + 1
+    }
+
+    # Everything at this site EXCEPT the region, including the markers.
+    $outside = $text.Substring(0, $b) + $text.Substring($e + $claimEnd.Length)
+
+    foreach ($ex in $vocabularyExemptions) {
+        $n = Get-Occurrences -Haystack $outside -Needle $ex
+        if ($n -gt 0) {
+            Write-Output ("     | site={0,-40} | exempt literal removed {1}x before the scan: {2}" -f $site, $n, $ex)
+            $outside = [System.Text.RegularExpressions.Regex]::Replace(
+                $outside, [System.Text.RegularExpressions.Regex]::Escape($ex), ' ',
+                [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        }
+    }
+
+    $hits = 0
+    foreach ($pattern in $vocabulary) {
+        $matches = [System.Text.RegularExpressions.Regex]::Matches(
+            $outside, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        if ($matches.Count -gt 0) {
+            $hits = $hits + $matches.Count
+            foreach ($m in $matches) {
+                $at = [Math]::Max(0, $m.Index - 60)
+                $len = [Math]::Min(150, $outside.Length - $at)
+                Write-Output ("FAIL | site={0,-40} | vocabulary outside the canonical region: {1}" -f $site, $m.Value)
+                Write-Output ("     | context: ..." + $outside.Substring($at, $len).Trim() + "...")
+            }
+        }
+    }
+    if ($hits -gt 0) { $failures = $failures + 1 }
+    else { Write-Output ("ok   | site={0,-40} | no vocabulary outside the region, chars scanned={1}" -f $site, $outside.Length) }
+}
+
+Write-Output ""
 
 $checked = 0
 foreach ($claim in $claims) {
@@ -209,8 +351,13 @@ foreach ($claim in $claims) {
 }
 
 Write-Output ""
-Write-Output ("spans=" + $spans.Count + " claims=" + $claims.Count + " checked=" + $checked + " failures=" + $failures)
+Write-Output ("spans=" + $spans.Count + " sites=" + $sampleSites.Count + " sitesRead=" + $sitesRead `
+    + " claims=" + $claims.Count + " checked=" + $checked + " failures=" + $failures)
 
+if ($sitesRead -ne $sampleSites.Count) {
+    Write-Output "CLAIMS VOID | a sample site was not read - a site nobody read is not a site that passed"
+    exit 3
+}
 if ($checked -ne $claims.Count) {
     Write-Output "CLAIMS VOID | a claim was not checked - an unchecked claim is not a passing claim"
     exit 3

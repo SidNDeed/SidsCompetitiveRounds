@@ -13,7 +13,7 @@
 
 param(
     [string]$Root = (Resolve-Path -LiteralPath (Join-Path (Join-Path $PSScriptRoot '..') '..')).Path,
-    [string]$WorkDir = (Join-Path ([System.IO.Path]::GetTempPath()) 'scr-r2-source-claim-controls')
+    [string]$WorkDir = (Join-Path ([System.IO.Path]::GetTempPath()) 'scr-r3-source-claim-controls')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -25,13 +25,45 @@ $sources = @('plugin/RosterCensus.cs', 'plugin/GameStateWatcher.cs', 'plugin/Roo
 # with, and whether the checker must pass afterwards.
 $cases = @(
     @{ Name = 'M1-reinstates-the-far-side-claim'; Expect = 'FAIL'; File = 'plugin/RosterCensus.cs';
-       Find = "    /// nothing about whether the move ran.";
-       Into = "    /// the settled row is on the far side of the move and the revive.";
-       Why  = 'finding 6: a move-ordering claim on the settled sample must red' },
+       Find = "    /// but a sample's TIMING is a timing and never an ORDERING.";
+       Into = "    /// but the settled row sits on the far side of the transition.";
+       Why  = 'round-3 finding 2: vocabulary outside the canonical region must red' },
     @{ Name = 'M1-twin-rewords-the-same-line'; Expect = 'PASS'; File = 'plugin/RosterCensus.cs';
-       Find = "    /// nothing about whether the move ran.";
-       Into = "    /// nothing about whether the move ran at all.";
+       Find = "    /// but a sample's TIMING is a timing and never an ORDERING.";
+       Into = "    /// but a sample's TIMING is a timing and is never an ORDERING.";
        Why  = 'inert twin: the same line, reworded, asserts no ordering' },
+
+    # The claim the round-2 blacklist accepted, reinstated WORD FOR WORD. The
+    # old check listed 'far side' and 'after the move' and this sentence used
+    # neither, so it passed while saying the thing the check existed to reject.
+    @{ Name = 'M5-reinstates-the-equal-snapshots-claim'; Expect = 'FAIL'; File = 'plugin/RosterCensus.cs';
+       Find = "    /// a claim untrue of it.";
+       Into = "    /// a claim untrue of it. The PAIR is the instrument: a settled row whose positions still equal its call-in row's is a seat that never got moved.";
+       Why  = 'round-3 finding 2: the exact claim the phrase blacklist accepted must now red' },
+    @{ Name = 'M5-twin-rewords-the-same-line'; Expect = 'PASS'; File = 'plugin/RosterCensus.cs';
+       Find = "    /// a claim untrue of it.";
+       Into = "    /// a claim that is untrue of it.";
+       Why  = 'inert twin: the same line, reworded, makes no outcome claim' },
+
+    # The region itself is an allow-list: the ONE canonical sentence, exactly.
+    @{ Name = 'M6-alters-the-canonical-claim'; Expect = 'FAIL'; File = 'plugin/RosterCensus.cs';
+       Find = "    /// equal pos fields are two observations that agree and are not a";
+       Into = "    /// equal pos fields are two observations that agree and are a";
+       Why  = 'round-3 finding 2: the canonical region admits one sentence and no other' },
+    @{ Name = 'M6-twin-rewords-the-line-beside-the-region'; Expect = 'PASS'; File = 'plugin/RosterCensus.cs';
+       Find = "    /// itself: between the markers the text must match it exactly, and";
+       Into = "    /// itself: between those markers the text must match it exactly, and";
+       Why  = 'inert twin: the same remark, reworded outside the region, stays green' },
+
+    # A site with no region is not a site that passed.
+    @{ Name = 'M7-removes-a-sample-site-region'; Expect = 'FAIL'; File = 'plugin/GameStateWatcher.cs';
+       Find = "    /// SCR_CENSUS_MOVE_CLAIM_BEGIN";
+       Into = "    /// (this site carries no canonical interpretation)";
+       Why  = 'round-3 finding 2: a sample site that states no canonical claim must red, never skip' },
+    @{ Name = 'M7-twin-rewords-the-line-above-the-region'; Expect = 'PASS'; File = 'plugin/GameStateWatcher.cs';
+       Find = "    /// timing is a timing, never an ordering (#351). See that class's";
+       Into = "    /// timing is a timing and never an ordering (#351). See that class's";
+       Why  = 'inert twin: the same remark, reworded beside the region, stays green' },
 
     @{ Name = 'M2-reinstates-the-every-helper-claim'; Expect = 'FAIL'; File = 'plugin/RoomActors.cs';
        Find = "        /// on an unfrozen roster, so with no spectator present and no frozen";
@@ -73,7 +105,13 @@ Write-Output ""
 # ---- the baseline, first: an unmutated tree must PASS -----------------------
 Write-Output "--- baseline (the worktree as it stands: must PASS) ---"
 Write-Output ("run: powershell -NoProfile -File check-source-claims.ps1 -Root <worktree>")
-& powershell -NoProfile -ExecutionPolicy Bypass -File $checker -Root $Root | Select-Object -Last 2
+# The nested run's own verdict is INDENTED. An un-indented result line here
+# would read as this section's result to a log reader and to
+# check-evidence-log.ps1, which binds each result to the invocation above it:
+# a baseline echoed inside another section is not that section's result.
+& powershell -NoProfile -ExecutionPolicy Bypass -File $checker -Root $Root |
+    Select-Object -Last 2 |
+    ForEach-Object { Write-Output ('     | ' + $_) }
 $baselineExit = $LASTEXITCODE
 Write-Output ("baseline exit=" + $baselineExit + " expected=0")
 Write-Output ""

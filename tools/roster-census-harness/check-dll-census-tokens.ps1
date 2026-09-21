@@ -51,6 +51,10 @@ $needles = @(
        Why = 'finding 1: an all-spectator roster has its own token' },
     @{ Text = 'roster-empty-unclassified';   Utf16 = 'present';
        Why = 'findings 1-2: the unclassified cause fails toward saying something true' },
+    @{ Text = 'roster-entry-null';           Utf16 = 'present';
+       Why = 'round-3 finding 1: a null roster entry has its own token instead of being skipped' },
+    @{ Text = 'roster-seats-present';        Utf16 = 'present';
+       Why = 'round-3 finding 1: the observation mapping is total, so the seats-present arm is a token too' },
     @{ Text = 'SCR_ROSTER_PROBE=1';          Utf16 = 'present';
        Why = 'the census probe token is still in the build (#306)' },
     @{ Text = 'roster-read-failed';          Utf16 = 'absent';

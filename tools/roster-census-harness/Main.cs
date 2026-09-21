@@ -24,9 +24,11 @@ namespace CompetitiveRounds.Harness
     ///             CHANGE, not that it reacts to the change in BEHAVIOUR.
     ///
     /// The mutants live here and not in the plugin: production code with a
-    /// mutation switch in it is a hazard, and the three delegate seams on
-    /// SelfTest (the census, the budget, the notices) are enough to drive the
-    /// assertions from outside.</summary>
+    /// mutation switch in it is a hazard, and the delegate seams on SelfTest
+    /// (the census, the budget, the two notice builders, the empty-cause
+    /// classifier, the per-cause throttles, the total observation classifier
+    /// and the settle schedule) are enough to drive the assertions from
+    /// outside.</summary>
     internal static class Program
     {
         private static int Main(string[] args)
@@ -49,7 +51,8 @@ namespace CompetitiveRounds.Harness
             Console.WriteLine();
 
             Console.WriteLine("baseline: RosterCensus.FormatCensus + SessionLineBudget + the notice builders"
-                              + " + the empty-cause classifier + the per-cause notice throttles");
+                              + " + the empty-cause classifier + the per-cause notice throttles"
+                              + " + the total observation classifier + the settle schedule");
 
             RosterCensus.SelfTestResult baseline;
             try { baseline = RosterCensus.SelfTest(); }
@@ -146,6 +149,20 @@ namespace CompetitiveRounds.Harness
                              Causes(ListedCausesOnly),
                              "an unrecognised empty cause still announces", quiet);
 
+            // The round-3 finding: the classification was not TOTAL over what
+            // was actually observed, because a null entry was skipped before
+            // it ran. This mutant restores exactly that behaviour.
+            caught += Mutant(ref mutants, "skips-null-entries-before-classifying",
+                             Observation(SkipsNullEntries),
+                             "the observation mapping is total over every entry multiset", quiet);
+            caught += Mutant(ref mutants, "drops-the-entry-counts-from-the-empty-notice",
+                             Notices(CountlessEmpty, RosterCensus.FormatDeclinedNotice),
+                             "a null entry carries its own token and its count onto the line", quiet);
+            caught += Mutant(ref mutants, "anchors-the-settle-clock-after-the-emission",
+                             Settle(AnchorAfterEmission),
+                             "the settled sample's clock is anchored at the call-in, not after the emission",
+                             quiet);
+
             ok &= caught == mutants;
 
             // ── CONTROLS: each must stay green, at the baseline's count ──
@@ -170,6 +187,19 @@ namespace CompetitiveRounds.Harness
             green += Control(ref controls, "equivalent-cause-notices-by-parallel-arrays",
                              Causes(ArrayCauses), baseline.Passed, quiet);
 
+            // The INERT TWINS of the three round-3 mutants above: the same
+            // mapping, the same line and the same schedule, each reached by a
+            // different route. A red here would mean the new cases measure the
+            // shape of the implementation rather than what it does.
+            // The empty notice's own twin is `equivalent-notices-built-by-
+            // concatenation` above: it builds the SAME line, counts included,
+            // by concatenation, so the count-dropping mutant's red is evidence
+            // about the line's CONTENT and not about how it was assembled.
+            green += Control(ref controls, "equivalent-observation-classifier-by-decision-table",
+                             Observation(TabulatedObservation), baseline.Passed, quiet);
+            green += Control(ref controls, "equivalent-settle-schedule-by-reassociated-arithmetic",
+                             Settle(ReassociatedSchedule), baseline.Passed, quiet);
+
             ok &= green == controls;
 
             Console.WriteLine();
@@ -190,10 +220,12 @@ namespace CompetitiveRounds.Harness
         {
             internal RosterCensus.CensusEmitter Emit = RosterCensus.FormatCensus;
             internal RosterCensus.BudgetFactory Budget = Real;
-            internal RosterCensus.NoticeFormatter Empty = RosterCensus.FormatEmptyRosterNotice;
+            internal RosterCensus.EmptyNoticeFormatter Empty = RosterCensus.FormatEmptyRosterNotice;
             internal RosterCensus.NoticeFormatter Declined = RosterCensus.FormatDeclinedNotice;
             internal RosterCensus.EmptyCauseClassifier Classify = RosterCensus.ReasonForEmptyCause;
             internal RosterCensus.CauseNoticesFactory CauseNotices = RosterCensus.DefaultCauseNotices;
+            internal RosterCensus.RosterObservationClassifier Observe = RosterCensus.ReasonForObservation;
+            internal RosterCensus.SettleScheduler Schedule = RosterCensus.ScheduleSettle;
         }
 
         private static Variant Census(RosterCensus.CensusEmitter emit)
@@ -210,11 +242,26 @@ namespace CompetitiveRounds.Harness
             return v;
         }
 
-        private static Variant Notices(RosterCensus.NoticeFormatter empty, RosterCensus.NoticeFormatter declined)
+        private static Variant Notices(RosterCensus.EmptyNoticeFormatter empty,
+                                       RosterCensus.NoticeFormatter declined)
         {
             var v = new Variant();
             v.Empty = empty;
             v.Declined = declined;
+            return v;
+        }
+
+        private static Variant Observation(RosterCensus.RosterObservationClassifier observe)
+        {
+            var v = new Variant();
+            v.Observe = observe;
+            return v;
+        }
+
+        private static Variant Settle(RosterCensus.SettleScheduler schedule)
+        {
+            var v = new Variant();
+            v.Schedule = schedule;
             return v;
         }
 
@@ -242,7 +289,8 @@ namespace CompetitiveRounds.Harness
         {
             total++;
             RosterCensus.SelfTestResult r;
-            try { r = RosterCensus.SelfTest(v.Emit, v.Budget, v.Empty, v.Declined, v.Classify, v.CauseNotices); }
+            try { r = RosterCensus.SelfTest(v.Emit, v.Budget, v.Empty, v.Declined, v.Classify, v.CauseNotices,
+                                            v.Observe, v.Schedule); }
             catch (Exception ex)
             {
                 // A mutant that throws has not been SHOWN to red on an
@@ -263,7 +311,8 @@ namespace CompetitiveRounds.Harness
         {
             total++;
             RosterCensus.SelfTestResult r;
-            try { r = RosterCensus.SelfTest(v.Emit, v.Budget, v.Empty, v.Declined, v.Classify, v.CauseNotices); }
+            try { r = RosterCensus.SelfTest(v.Emit, v.Budget, v.Empty, v.Declined, v.Classify, v.CauseNotices,
+                                            v.Observe, v.Schedule); }
             catch (Exception ex)
             {
                 Console.WriteLine("CONTROL THREW | " + name + " | " + ex.GetType().Name + ": " + ex.Message);
@@ -542,9 +591,28 @@ namespace CompetitiveRounds.Harness
         /// <summary>The notice keeps the probe token and loses the REASON -
         /// "census=empty says it all". It does not: the four ways a boundary
         /// produces no rows have four different diagnoses behind them.</summary>
-        private static string ReasonlessEmpty(Ctx ctx, string reason, int suppressed, bool final)
+        private static string ReasonlessEmpty(Ctx ctx, string reason,
+                                              RosterCensus.RosterObservation observed,
+                                              int suppressed, bool final)
         {
-            return StripField(RosterCensus.FormatEmptyRosterNotice(ctx, reason, suppressed, final), "reason");
+            return StripField(
+                RosterCensus.FormatEmptyRosterNotice(ctx, reason, observed, suppressed, final), "reason");
+        }
+
+        /// <summary>"census=empty already carries a reason, the counts are
+        /// noise." They are not: the reason was DERIVED from them, and without
+        /// the null count a reader cannot check the all-spectators token
+        /// against a roster that held an entry the read could not hand
+        /// back.</summary>
+        private static string CountlessEmpty(Ctx ctx, string reason,
+                                             RosterCensus.RosterObservation observed,
+                                             int suppressed, bool final)
+        {
+            string line = RosterCensus.FormatEmptyRosterNotice(ctx, reason, observed, suppressed, final);
+            line = StripField(line, "observedEntries");
+            line = StripField(line, "nullEntries");
+            line = StripField(line, "spectatorEntries");
+            return StripField(line, "seatEntries");
         }
 
         private static string ReasonlessDeclined(Ctx ctx, string reason, int suppressed, bool final)
@@ -562,6 +630,33 @@ namespace CompetitiveRounds.Harness
         {
             if (cause == RosterCensus.EmptyCause.ListNull) return RosterCensus.ReasonRosterReadThrew;
             return RosterCensus.ReasonForEmptyCause(cause);
+        }
+
+        // ── mutant observation classifiers and settle schedules ──────────
+
+        /// <summary>THE PRE-FIX CLASSIFICATION. "A null entry is not an actor,
+        /// so drop it before counting" — and a roster holding one null entry
+        /// and one spectator entry then reports that EVERY actor declared the
+        /// spectator role, a cause that does not describe the observation it
+        /// was derived from.</summary>
+        private static string SkipsNullEntries(RosterCensus.RosterObservation observed)
+        {
+            if (!observed.Observed) return RosterCensus.ReasonForObservation(observed);
+            var withoutNulls = RosterCensus.RosterObservation.Of(
+                0, observed.SpectatorEntries, observed.SeatEntries);
+            return RosterCensus.ReasonForObservation(withoutNulls);
+        }
+
+        /// <summary>"Arm the clock when the work is done." The settled row's
+        /// measured field then reports the gap from the END of the call-in
+        /// emission, understating the call-in-to-sample delay by whatever
+        /// writing those rows cost.</summary>
+        private static void AnchorAfterEmission(long beforeEmissionTicks, long afterEmissionTicks,
+                                                long frequency, double delaySeconds,
+                                                out long anchorTicks, out long dueTicks)
+        {
+            anchorTicks = afterEmissionTicks;
+            dueTicks = afterEmissionTicks + (long)(delaySeconds * frequency);
         }
 
         // ── mutant per-cause notice throttles ────────────────────────────
@@ -697,9 +792,21 @@ namespace CompetitiveRounds.Harness
         /// a StringBuilder. Must stay green: it is what keeps the
         /// reason-dropping mutant above evidence about the notice's CONTENT
         /// and not about how the string was built.</summary>
-        private static string ConcatEmpty(Ctx ctx, string reason, int suppressed, bool final)
+        private static string ConcatEmpty(Ctx ctx, string reason,
+                                          RosterCensus.RosterObservation observed,
+                                          int suppressed, bool final)
         {
-            return Head(ctx) + " census=empty reason=" + reason + Tail(suppressed, final);
+            return Head(ctx) + " census=empty reason=" + reason
+                + " observedEntries=" + C(observed.Entries)
+                + " nullEntries=" + C(observed.NullEntries)
+                + " spectatorEntries=" + C(observed.SpectatorEntries)
+                + " seatEntries=" + C(observed.SeatEntries)
+                + Tail(suppressed, final);
+        }
+
+        private static string C(int v)
+        {
+            return v < 0 ? RosterCensus.Unknown : v.ToString(CultureInfo.InvariantCulture);
         }
 
         private static string ConcatDeclined(Ctx ctx, string reason, int suppressed, bool final)
@@ -747,6 +854,42 @@ namespace CompetitiveRounds.Harness
             };
             int i = (int)cause;
             return i >= 0 && i < table.Length ? table[i] : RosterCensus.ReasonRosterEmptyUnclassified;
+        }
+
+        /// <summary>The same TOTAL mapping, reached by a decision table over
+        /// the three kinds instead of an ordered chain of conditions. The
+        /// INERT TWIN of the null-skipping mutant: same site, same shape of
+        /// edit, and it must stay GREEN, which is what makes that mutant's red
+        /// evidence about the MAPPING rather than about the method having been
+        /// rewritten.</summary>
+        private static string TabulatedObservation(RosterCensus.RosterObservation observed)
+        {
+            if (!observed.Observed) return RosterCensus.ReasonRosterEmptyUnclassified;
+
+            // row index: 0 = no seats and no nulls, 1 = no seats with nulls,
+            // 2 = seats present. Column: whether any spectator was seen.
+            int row = observed.SeatEntries > 0 ? 2 : (observed.NullEntries > 0 ? 1 : 0);
+            int column = observed.SpectatorEntries > 0 ? 1 : 0;
+            string[,] table =
+            {
+                { RosterCensus.ReasonRosterEmpty,        RosterCensus.ReasonAllSpectators },
+                { RosterCensus.ReasonRosterEntryNull,    RosterCensus.ReasonRosterEntryNull },
+                { RosterCensus.ReasonRosterSeatsPresent, RosterCensus.ReasonRosterSeatsPresent },
+            };
+            return table[row, column];
+        }
+
+        /// <summary>The same anchor and the same due time, with the delay
+        /// converted to ticks first and the multiplication reassociated. The
+        /// INERT TWIN of the after-the-emission mutant; it must stay
+        /// green.</summary>
+        private static void ReassociatedSchedule(long beforeEmissionTicks, long afterEmissionTicks,
+                                                 long frequency, double delaySeconds,
+                                                 out long anchorTicks, out long dueTicks)
+        {
+            long delayTicks = (long)(frequency * delaySeconds);
+            anchorTicks = beforeEmissionTicks;
+            dueTicks = anchorTicks + delayTicks;
         }
 
         private static RosterCensus.ICauseNotices ArrayCauses(int interval, int ceiling)

@@ -8241,10 +8241,19 @@ namespace CompetitiveRounds
 
         internal static void OnMapCallIn()
         {
+            // THE CLOCK IS READ BEFORE THE ROWS ARE EMITTED. The settled row's
+            // whole assertion about itself is the delay it measured, so that
+            // field has to be the call-in-to-sample gap. Reading the clock
+            // after Emit returns folds the cost of writing the call-in rows
+            // into the gap and the printed field then UNDERSTATES the delay by
+            // that cost — largest on exactly the slow synchronous log sink a
+            // stall investigation is most likely to be reading.
+            long callInAt = System.Diagnostics.Stopwatch.GetTimestamp();
+
             // Arm only when the call-in was actually admitted: arming through a
             // declined gate would double every decline notice and tell a reader
             // nothing the call-in's own notice did not.
-            if (Emit(RosterCensus.BoundaryMapCallIn, -1)) ArmSettle();
+            if (Emit(RosterCensus.BoundaryMapCallIn, -1)) ArmSettle(callInAt);
         }
 
         internal static void OnGameBoundary() { Emit(RosterCensus.BoundaryGame, -1); }
@@ -8291,13 +8300,21 @@ namespace CompetitiveRounds
         /// the pending sample rather than queueing it: the older one would be
         /// measured against a map that is already gone. The call-in rows are
         /// all still emitted, so the sequence stays legible.</summary>
-        private static void ArmSettle()
+        private static void ArmSettle(long callInTicks)
         {
             try
             {
-                long now = System.Diagnostics.Stopwatch.GetTimestamp();
-                _settleArmedTicks = now;
-                _settleDueTicks = now + (long)(SettleDelaySeconds * System.Diagnostics.Stopwatch.Frequency);
+                // Both readings go to RosterCensus.ScheduleSettle, which picks
+                // the one taken BEFORE the emission. The arithmetic lives
+                // there so it can be executed by the harness rather than
+                // asserted about here (#391).
+                long afterEmission = System.Diagnostics.Stopwatch.GetTimestamp();
+                long anchor, due;
+                RosterCensus.ScheduleSettle(callInTicks, afterEmission,
+                                            System.Diagnostics.Stopwatch.Frequency,
+                                            SettleDelaySeconds, out anchor, out due);
+                _settleArmedTicks = anchor;
+                _settleDueTicks = due;
                 try { _settleRoomGeneration = NetworkReplicaDiagnostics.RoomGeneration; }
                 catch { _settleRoomGeneration = int.MinValue; }
             }
@@ -8312,11 +8329,8 @@ namespace CompetitiveRounds
 
         private static long MillisecondsBetween(long fromTicks, long toTicks)
         {
-            long delta = toTicks - fromTicks;
-            if (delta < 0) return 0;
-            long frequency = System.Diagnostics.Stopwatch.Frequency;
-            if (frequency <= 0) return -1;
-            return (long)(delta * 1000.0 / frequency);
+            return RosterCensus.ElapsedMilliseconds(fromTicks, toTicks,
+                                                    System.Diagnostics.Stopwatch.Frequency);
         }
 
         /// <summary>True when the gates admitted this boundary — whether or not
@@ -8349,7 +8363,8 @@ namespace CompetitiveRounds
                 SyncRoomGeneration();
 
                 string emptyReason;
-                var seats = ReadSeats(out emptyReason);
+                RosterCensus.RosterObservation observed;
+                var seats = ReadSeats(out emptyReason, out observed);
 
                 // The one case in which the census fails to measure must not be
                 // the one case it says nothing about. Without this line a reader
@@ -8364,7 +8379,7 @@ namespace CompetitiveRounds
                     // four readings and not a stand-in for the other three
                     // (#276 — the unhandled case fails toward saying something
                     // true rather than something convenient).
-                    AnnounceEmpty(ctx, emptyReason ?? RosterCensus.ReasonRosterEmptyUnclassified);
+                    AnnounceEmpty(ctx, emptyReason ?? RosterCensus.ReasonRosterEmptyUnclassified, observed);
                     return true;
                 }
 
@@ -8405,7 +8420,8 @@ namespace CompetitiveRounds
             catch { }
         }
 
-        private static void AnnounceEmpty(RosterCensus.BoundaryContext ctx, string reason)
+        private static void AnnounceEmpty(RosterCensus.BoundaryContext ctx, string reason,
+                                          RosterCensus.RosterObservation observed)
         {
             try
             {
@@ -8415,8 +8431,11 @@ namespace CompetitiveRounds
                 // on behalf of another.
                 if (!EmptyRosterNotices.ShouldFire(reason, ctx.Generation, out suppressed, out final)) return;
                 // A warning, not info: every other decline is a scoping
-                // decision, this one is the instrument failing to read.
-                Plugin.Log.LogWarning(RosterCensus.FormatEmptyRosterNotice(ctx, reason, suppressed, final));
+                // decision, this one is the instrument failing to read. The
+                // counts the reason was derived from ride on the same line, so
+                // the token can be checked against what was observed.
+                Plugin.Log.LogWarning(
+                    RosterCensus.FormatEmptyRosterNotice(ctx, reason, observed, suppressed, final));
             }
             catch { }
         }
@@ -8454,18 +8473,29 @@ namespace CompetitiveRounds
         /// an extra row never hides a seat, a missing row does.
         ///
         /// <paramref name="emptyReason"/> is set whenever the result is empty,
-        /// and the four ways that happens reach the LINE as four different
-        /// tokens — the read threw, the read returned no list, the room really
-        /// held no actors, or every actor was a spectator. Each of the four
-        /// sites below names its own <see cref="RosterCensus.EmptyCause"/> and
-        /// the reason is derived from it in one place, so no two causes can
-        /// share a token by a copied line. A cause a reader cannot separate on
-        /// the line is not distinguished, and an empty result with no reason
-        /// at all would be the filter discarding the very measurement it was
-        /// taken for (#441).</summary>
-        private static List<RosterCensus.SeatObservation> ReadSeats(out string emptyReason)
+        /// and every way that happens reaches the LINE as its own token — the
+        /// read threw, the read returned no list, the read handed back a null
+        /// entry, every entry declared the spectator role, or the room really
+        /// held no entries at all. The first two happen BEFORE any entry is
+        /// seen and name their own <see cref="RosterCensus.EmptyCause"/>. The
+        /// rest are decided by <see cref="RosterCensus.ReasonForObservation"/>
+        /// from the counts below, which is a TOTAL function: every multiset of
+        /// entry kinds reaches exactly one token that is true of it.
+        ///
+        /// <paramref name="observed"/> carries those counts out so the notice
+        /// can print them beside the token they produced. NOTHING IS SKIPPED
+        /// BEFORE THE CLASSIFICATION: a null entry is counted, not dropped,
+        /// because dropping it is what let a roster holding one null entry and
+        /// one spectator entry report that every actor had declared spectator
+        /// — the filter discarding the very measurement the line was taken for
+        /// (#441). A cause a reader cannot separate on the line is not
+        /// distinguished, and a cause that does not describe the observation
+        /// is worse than none.</summary>
+        private static List<RosterCensus.SeatObservation> ReadSeats(
+            out string emptyReason, out RosterCensus.RosterObservation observed)
         {
             emptyReason = null;
+            observed = RosterCensus.RosterObservation.NotObserved;
             var seats = new List<RosterCensus.SeatObservation>(4);
 
             Photon.Realtime.Player[] actors;
@@ -8480,28 +8510,30 @@ namespace CompetitiveRounds
                 emptyReason = RosterCensus.ReasonForEmptyCause(RosterCensus.EmptyCause.ListNull);
                 return seats;
             }
-            if (actors.Length == 0)
-            {
-                emptyReason = RosterCensus.ReasonForEmptyCause(RosterCensus.EmptyCause.NoActors);
-                return seats;
-            }
 
             int localActor;
             bool selfKnown = TryReadLocalActor(out localActor);
 
+            // Every entry is COUNTED by kind. The zero-length list needs no arm
+            // of its own any more: it is the observation with three zero counts
+            // and the total mapping names it.
+            int nullEntries = 0;
+            int spectatorEntries = 0;
             var ordered = new List<Photon.Realtime.Player>(actors.Length);
             for (int i = 0; i < actors.Length; i++)
             {
                 var actor = actors[i];
-                if (actor == null) continue;
+                if (actor == null) { nullEntries++; continue; }
                 bool spectator;
                 try { spectator = RoomActors.IsSpectator(actor); } catch { spectator = false; }
-                if (spectator) continue;
+                if (spectator) { spectatorEntries++; continue; }
                 ordered.Add(actor);
             }
+            observed = RosterCensus.RosterObservation.Of(nullEntries, spectatorEntries, ordered.Count);
+
             if (ordered.Count == 0)
             {
-                emptyReason = RosterCensus.ReasonForEmptyCause(RosterCensus.EmptyCause.AllSpectators);
+                emptyReason = RosterCensus.ReasonForObservation(observed);
                 return seats;
             }
 
@@ -8657,14 +8689,20 @@ namespace CompetitiveRounds
     /// PLAYERS" marker, which is how the report's log was read in the first
     /// place, so pairing a census with it makes the two readable together.
     ///
-    /// This Postfix observes the CALL-IN, not the move: vanilla's coroutine
-    /// runs afterwards, and PlayerManager.MovePlayers is dispatched from
-    /// inside it. The second sample is RosterCensusEmitter.TickSettle, taken
-    /// about two seconds later and carrying the elapsed time it measured. It
+    /// This Postfix observes the CALL-IN: vanilla's coroutine runs
+    /// afterwards, and PlayerManager.MovePlayers is dispatched from inside
+    /// it. The second sample is RosterCensusEmitter.TickSettle, taken about
+    /// two seconds later and carrying the elapsed time it measured. It
     /// asserts that DELAY and not a position in the transition: a sample's
-    /// timing is a timing, never an ordering, and a stalled transition is
-    /// precisely the case where a post-move claim would be false (#351). See
-    /// that class's remarks.
+    /// timing is a timing, never an ordering (#351). See that class's
+    /// remarks.
+    ///
+    /// SCR_CENSUS_MOVE_CLAIM_BEGIN
+    /// A settled row asserts the delay it measured and never a position in
+    /// vanilla's transition, so a call-in row and a settled row carrying
+    /// equal pos fields are two observations that agree and are not a
+    /// reading that the seat did not move.
+    /// SCR_CENSUS_MOVE_CLAIM_END
     ///
     /// TargetMethods RESOLVES the method and throws when it cannot, rather
     /// than naming it in an attribute and hoping. Plugin's Harmony bootstrap
