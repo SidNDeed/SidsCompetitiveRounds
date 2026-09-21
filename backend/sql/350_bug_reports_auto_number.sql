@@ -65,6 +65,17 @@
 -- spare. If the lane later wants 350, THIS file is the one that renumbers:
 -- it is unshipped until the hotfix deploys, and the lane's briefs are older.
 --
+-- EVERY GUARD IN THIS FILE IS SCOPED TO current_schema(). The preconditions
+-- used to read `information_schema.columns` with no schema predicate, so on a
+-- database carrying a second accessible schema that also holds
+-- `bug_reports.kind` they could read one relation while the ALTER statements
+-- changed another -- admitting a drifted target because the other schema was
+-- correct, and refusing a correct target because the other had drifted. The
+-- unqualified name every statement here uses is now resolved once, required
+-- to be the relation in `current_schema()`, and every lookup -- the object
+-- guard, the default guard and the executable post-check -- is bound to that
+-- one relation. If the two disagree the file REFUSES and names the remedy.
+--
 -- ORDER: 336 FIRST, THEN THIS FILE, THEN THE API. This file names `kind`, so
 -- it cannot be applied before 336; sorted order gives that for free, and the
 -- guard below says so out loud rather than failing as a bare UndefinedColumn.
@@ -106,6 +117,8 @@ BEGIN;
 DO $m350g$
 DECLARE
     v_default text;
+    v_target  oid;
+    v_schema  text;
     -- EXACTLY what 336 leaves, and nothing else. 336 declares
     -- `kind VARCHAR(16) NOT NULL DEFAULT 'report'`, which PostgreSQL renders
     -- in information_schema.columns.column_default as this string. It is
@@ -114,23 +127,56 @@ DECLARE
     -- satisfy by accident.
     c_336_default CONSTANT text := '''report''::character varying';
 BEGIN
+    -- ── THE RELATION THIS FILE WILL ACTUALLY ALTER ───────────────────────
+    --
+    -- RESOLVED ONCE, AND EVERY GUARD BELOW IS SCOPED TO IT. These checks
+    -- used to read `information_schema.columns` with no schema predicate at
+    -- all, so on a database carrying a SECOND accessible schema that also
+    -- holds a `bug_reports.kind` the row they read was whichever one the
+    -- catalogue happened to return. That is a guard inspecting one relation
+    -- while the DDL below alters another: a drifted default on the target
+    -- passes because the other schema's is correct, and a correct target is
+    -- refused because the other schema's has drifted. Both directions are
+    -- rehearsed against a database carrying two such schemas.
+    --
+    -- The unqualified name is what every statement in this file uses, so it
+    -- is what is resolved here -- and it is then REQUIRED to be the relation
+    -- in `current_schema()`, which is what the scoped lookups below read.
+    -- If the two disagree this file refuses rather than altering a table its
+    -- guards never looked at; the remedy is one line and the message says it
+    -- (#276 -- the unhandled case refuses).
+    v_target := to_regclass('bug_reports');
+    IF v_target IS NULL THEN
+        RAISE EXCEPTION '350: no relation named bug_reports is visible on the search_path (current_schema() is %), so neither the guards below nor the DDL in this file has a target. Apply 336_bug_reports_kind.sql to this database first', current_schema();
+    END IF;
+    SELECT n.nspname INTO v_schema
+      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE c.oid = v_target;
+    IF v_schema IS DISTINCT FROM current_schema() THEN
+        RAISE EXCEPTION '350: the unqualified name bug_reports resolves to %.bug_reports while current_schema() is %, so the guards in this file and its ALTER statements would not be looking at the same relation. Put the schema that owns bug_reports first on the path (SET search_path TO %) and apply this file again', v_schema, current_schema(), v_schema;
+    END IF;
+
     IF NOT EXISTS (
         SELECT 1 FROM information_schema.columns
-         WHERE table_name = 'bug_reports' AND column_name = 'kind'
+         WHERE table_schema = current_schema()
+           AND table_name = 'bug_reports' AND column_name = 'kind'
     ) THEN
-        RAISE EXCEPTION '350: bug_reports.kind is missing, so the shape 336 installs is not on this database. Apply 336_bug_reports_kind.sql first; this file constrains the automatic rows that column identifies';
+        RAISE EXCEPTION '350: bug_reports.kind is missing from schema %, so the shape 336 installs is not on this database. Apply 336_bug_reports_kind.sql first; this file constrains the automatic rows that column identifies', current_schema();
     END IF;
 
     -- The CHECK. Without it `kind` is a free-text column: 'auto' would carry
     -- no meaning the schema enforces, and this file's own constraint --
     -- `kind <> 'auto' OR bug_number < 0` -- would be written against a value
     -- anything at all could hold.
+    -- ON THE RESOLVED OID, not on a second resolution of the name: the
+    -- object guard and the default guard have to be about the one relation
+    -- established above.
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
          WHERE conname = 'bug_reports_kind_known'
-           AND conrelid = 'bug_reports'::regclass
+           AND conrelid = v_target
     ) THEN
-        RAISE EXCEPTION '350: bug_reports.kind exists but the bug_reports_kind_known CHECK does not, so the column admits any string and kind = ''auto'' is not a fact the schema enforces. Apply 336_bug_reports_kind.sql (either copy) before this file';
+        RAISE EXCEPTION '350: %.bug_reports.kind exists but the bug_reports_kind_known CHECK does not, so the column admits any string and kind = ''auto'' is not a fact the schema enforces. Apply 336_bug_reports_kind.sql (either copy) before this file', current_schema();
     END IF;
 
     -- The DEFAULT. Every row written by code that does not name the column --
@@ -152,15 +198,27 @@ BEGIN
     -- that is the value the CHECK below and the handler are written against.
     -- So the comparison is `IS DISTINCT FROM` -- which is also how a NULL
     -- default (no default at all) is refused by the same line.
+    --
+    -- AND ON THE TARGET SCHEMA'S ROW. Without `table_schema` this SELECT
+    -- INTO takes whichever `bug_reports.kind` the catalogue returns first,
+    -- which on a database with a second accessible schema is not necessarily
+    -- the column the ALTER statements below will constrain (R3-M1).
     SELECT column_default INTO v_default
       FROM information_schema.columns
-     WHERE table_name = 'bug_reports' AND column_name = 'kind';
+     WHERE table_schema = current_schema()
+       AND table_name = 'bug_reports' AND column_name = 'kind';
     IF v_default IS DISTINCT FROM c_336_default THEN
         RAISE EXCEPTION '350: bug_reports.kind must carry exactly the default 336 installs, %, and it reads % instead. A default that merely mentions ''report'' is not the same fact: rows written by code that does not name the column would take a value this file''s CHECK was not written against. Apply 336_bug_reports_kind.sql (either copy), or repair the default with ALTER TABLE bug_reports ALTER COLUMN kind SET DEFAULT ''report'', before this file', c_336_default, COALESCE(v_default, 'NULL');
     END IF;
 END $m350g$;
 
 -- ── 1. the descending sequence automatic rows draw from ──────────────────────
+--
+-- EVERY UNQUALIFIED NAME FROM HERE ON IS THE CURRENT SCHEMA'S, and that is a
+-- fact the guard above established rather than an assumption: it refused
+-- unless the unqualified `bug_reports` resolves inside `current_schema()`.
+-- So this sequence is created beside the table it is owned by, and the ALTER
+-- statements below constrain the column the guard inspected.
 --
 -- MINVALUE is the full bigint floor, so the range is not a limit anybody has
 -- to think about: at the published cap of 12 uploads per account per day it
@@ -188,11 +246,15 @@ ALTER SEQUENCE bug_reports_auto_number_seq OWNED BY bug_reports.bug_number;
 DO $m350c$
 DECLARE
     v_strays bigint;
+    -- THE SAME RELATION THE GUARD BLOCK INSPECTED, named the same way. A
+    -- second resolution of a bare name is a second chance to reach a
+    -- different schema's table, so it is qualified here (R3-M1).
+    v_target CONSTANT oid := to_regclass(quote_ident(current_schema()) || '.bug_reports');
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
          WHERE conname = 'bug_reports_auto_number_negative'
-           AND conrelid = 'bug_reports'::regclass
+           AND conrelid = v_target
     ) THEN
         -- ADD CONSTRAINT validates the existing rows, so an automatic row
         -- already holding a human number would abort this migration with a
@@ -200,8 +262,10 @@ BEGIN
         -- it plainly instead, and say what to do. On production today the
         -- count is zero because production has no automatic upload path at
         -- all -- this arm is for a database where one already ran.
-        SELECT COUNT(*) INTO v_strays
-          FROM bug_reports WHERE kind = 'auto' AND bug_number >= 0;
+        EXECUTE format('SELECT COUNT(*) FROM %I.bug_reports '
+                       'WHERE kind = ''auto'' AND bug_number >= 0',
+                       current_schema())
+           INTO v_strays;
         IF v_strays > 0 THEN
             RAISE EXCEPTION '350: % automatic row(s) already hold a non-negative bug number. Renumber them onto bug_reports_auto_number_seq (UPDATE bug_reports SET bug_number = nextval(''bug_reports_auto_number_seq'') WHERE kind = ''auto'' AND bug_number >= 0) before applying this file; adding the constraint over them would abort with an unexplained check violation', v_strays;
         END IF;
@@ -226,19 +290,33 @@ DECLARE
     v_human_after  bigint;
     v_a         bigint;
     v_b         bigint;
+    v_autos     bigint;
+    -- SCOPED LIKE THE GUARDS, for the same reason: a post-check that offers
+    -- rows to one schema's constraint while the ALTER above installed it on
+    -- another proves nothing about the database this file just changed
+    -- (R3-M1). Each name is resolved inside `current_schema()` once.
+    v_target CONSTANT oid := to_regclass(quote_ident(current_schema()) || '.bug_reports');
+    v_autoseq CONSTANT regclass :=
+        to_regclass(quote_ident(current_schema()) || '.bug_reports_auto_number_seq');
+    v_humanseq CONSTANT regclass :=
+        to_regclass(quote_ident(current_schema()) || '.bug_reports_number_seq');
 BEGIN
+    IF v_target IS NULL OR v_autoseq IS NULL OR v_humanseq IS NULL THEN
+        RAISE EXCEPTION '350: schema % does not carry all three of bug_reports, bug_reports_auto_number_seq and bug_reports_number_seq after this file ran, so its post-check has nothing to exercise', current_schema();
+    END IF;
     -- The human sequence's position, read BEFORE anything else in this block.
     -- The last assertion compares it with the position afterwards: the whole
     -- point of this migration is that automatic numbering stops moving this
     -- counter, and a post-check that advanced it itself would be a poor
     -- advertisement for that. 336 learned the same thing -- its probe supplies
     -- bug_number explicitly so a re-run cannot advance the human sequence.
-    SELECT last_value INTO v_human_before FROM bug_reports_number_seq;
+    EXECUTE format('SELECT last_value FROM %s', v_humanseq::text)
+       INTO v_human_before;
 
     SELECT pg_get_constraintdef(oid) INTO v_def
       FROM pg_constraint
      WHERE conname = 'bug_reports_auto_number_negative'
-       AND conrelid = 'bug_reports'::regclass;
+       AND conrelid = v_target;
     IF v_def IS NULL THEN
         RAISE EXCEPTION '350: bug_reports_auto_number_negative is missing; nothing would stop an automatic upload from taking a human bug number again';
     END IF;
@@ -251,8 +329,8 @@ BEGIN
     -- CHECK above -- 503s with no explanation. Checking the increment is what
     -- makes this file's re-run tell the difference (#342).
     IF (SELECT seqincrement FROM pg_sequence
-         WHERE seqrelid = 'bug_reports_auto_number_seq'::regclass) >= 0 THEN
-        RAISE EXCEPTION '350: bug_reports_auto_number_seq exists but does not descend (increment %), so it would hand out positive numbers into the human range', (SELECT seqincrement FROM pg_sequence WHERE seqrelid = 'bug_reports_auto_number_seq'::regclass);
+         WHERE seqrelid = v_autoseq) >= 0 THEN
+        RAISE EXCEPTION '350: bug_reports_auto_number_seq exists in schema % but does not descend (increment %), so it would hand out positive numbers into the human range', current_schema(), (SELECT seqincrement FROM pg_sequence WHERE seqrelid = v_autoseq);
     END IF;
 
     -- And that it actually yields descending negatives. Two draws, because a
@@ -260,14 +338,18 @@ BEGIN
     -- check -- which is exactly the difference between this sequence and the
     -- human one: a gap here names nothing and nobody reads it, which is the
     -- property being installed.
-    v_a := nextval('bug_reports_auto_number_seq');
-    v_b := nextval('bug_reports_auto_number_seq');
+    v_a := nextval(v_autoseq);
+    v_b := nextval(v_autoseq);
     IF NOT (v_a < 0 AND v_b < v_a) THEN
         RAISE EXCEPTION '350: bug_reports_auto_number_seq yielded % then %, which is not a descending negative run', v_a, v_b;
     END IF;
 
-    CREATE TEMP TABLE m350_number_probe
-        (LIKE bug_reports INCLUDING DEFAULTS INCLUDING CONSTRAINTS) ON COMMIT DROP;
+    -- FROM THE TARGET RELATION, named explicitly. `LIKE bug_reports` takes
+    -- whichever one the search_path resolves, and the probe below would then
+    -- be offering rows to a constraint this file never installed.
+    EXECUTE format('CREATE TEMP TABLE m350_number_probe (LIKE %s INCLUDING '
+                   'DEFAULTS INCLUDING CONSTRAINTS) ON COMMIT DROP',
+                   v_target::regclass::text);
 
     -- 1. An automatic row carrying a HUMAN-RANGE number must be refused. This
     --    is the defect itself, offered to the constraint.
@@ -305,14 +387,17 @@ BEGIN
 
     DROP TABLE m350_number_probe;
 
-    SELECT last_value INTO v_human_after FROM bug_reports_number_seq;
+    EXECUTE format('SELECT last_value FROM %s', v_humanseq::text)
+       INTO v_human_after;
     IF v_human_after <> v_human_before THEN
         RAISE EXCEPTION '350: this migration advanced the human bug-number sequence from % to %, which is the exact thing it exists to stop', v_human_before, v_human_after;
     END IF;
 
-    RAISE NOTICE '350: bug_reports_auto_number_seq descends (% then %); the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at %; % automatic row(s) present, all negative by construction',
-        v_a, v_b, v_human_after,
-        (SELECT COUNT(*) FROM bug_reports WHERE kind = 'auto');
+    EXECUTE format('SELECT COUNT(*) FROM %s WHERE kind = ''auto''',
+                   v_target::regclass::text)
+       INTO v_autos;
+    RAISE NOTICE '350: in schema %, bug_reports_auto_number_seq descends (% then %); the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at %; % automatic row(s) present, all negative by construction',
+        current_schema(), v_a, v_b, v_human_after, v_autos;
 END $m350p$;
 
 COMMIT;
