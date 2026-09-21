@@ -255,7 +255,7 @@ async def _row(Session, sid):
 
 async def _age_marker(Session, sid, seconds):
     """Back-date the marker by `seconds`, which is how a scenario reaches the
-    far side of a 120 s bound without sleeping for two minutes."""
+    far side of the 420 s bound without sleeping for seven minutes."""
     async with Session() as s:
         await s.execute(
             text("""UPDATE team_series
@@ -385,7 +385,7 @@ def test_a_sweep_between_the_reports_does_not_settle_inside_the_bound():
         try:
             with _harness_globals() as rated:
                 assert (await _fallback(Session, sid))["status"] == "deferred"
-                # The marker is seconds old; the bound is 120.
+                # The marker is seconds old; the bound is 420.
                 assert await _sweep(Session) == 0
                 mid = await _row(Session, sid)
                 assert mid["status"] == "active"
@@ -959,6 +959,106 @@ def test_the_read_only_status_route_issues_only_selects():
                     "the recorder saw no write on a call that demonstrably "
                     "wrote -- it is not measuring anything")
                 assert (await _row(Session, sid))["status"] == "canceled"
+        finally:
+            rec.close()
+            await engine.dispose()
+    _drive(body)
+
+
+async def _status(Session, sid):
+    async with Session() as s:
+        return await main.team_series_status_readonly(series_id=str(sid), db=s)
+
+
+# The three field names are the CONTRACT's, and they are written here once so
+# a rename on one lane cannot quietly become a rename on both.
+BANNER_FIELDS = ("dc_deferred", "dc_deferred_seconds_remaining",
+                 "dc_deferred_bound_seconds")
+
+
+def test_the_status_route_carries_the_deferral_state_it_read():
+    """The banner's whole input, read off the live route against a real row.
+
+    Every assertion below is of the form "change the ROW, and the field
+    changes with it": a field that reported a plausible constant would pass a
+    presence check and fail every one of these (#342). The last block re-runs
+    the no-write measurement on the widened SELECT, because a route that grew
+    a column is a route whose statements have to be counted again (#308).
+    """
+    async def body():
+        engine, Session, ids = await _fresh_series()
+        sid = ids["sid"]
+        rec = _RecordStatements(engine)
+        try:
+            with _harness_globals():
+                bound = main._DC_FALLBACK_DEFER_SECONDS
+
+                # 1. No marker: present, false, floored, and the bound echoed
+                #    from the one constant rather than from a literal.
+                out = await _status(Session, sid)
+                for f in BANNER_FIELDS:
+                    assert f in out, (f, sorted(out))
+                assert out["dc_deferred"] is False, out
+                assert out["dc_deferred_seconds_remaining"] == 0, out
+                assert out["dc_deferred_bound_seconds"] == bound, out
+                assert isinstance(out["dc_deferred_seconds_remaining"], int)
+                assert isinstance(out["dc_deferred_bound_seconds"], int)
+                assert isinstance(out["dc_deferred"], bool)
+
+                # 2. A parked report puts the row in the deferral window.
+                assert (await _fallback(Session, sid))["status"] == "deferred"
+                out = await _status(Session, sid)
+                assert out["dc_deferred"] is True, out
+                left = out["dc_deferred_seconds_remaining"]
+                assert bound - 30 <= left <= bound, left
+
+                # 3. DERIVED FROM THE ROW: age the marker and the remaining
+                #    time falls by the same amount. A field computed from
+                #    anything other than dc_fallback_at cannot follow this.
+                await _age_marker(Session, sid, 120)
+                after = (await _status(Session, sid))["dc_deferred_seconds_remaining"]
+                assert 110 <= (left - after) <= 130, (left, after)
+
+                # 4. Past the bound, before any tick settles it: still
+                #    deferred, and the remaining time is FLOORED at 0 rather
+                #    than going negative. This is the state the banner must
+                #    still render, which is why its predicate is the flag and
+                #    never "remaining > 0".
+                await _age_marker(Session, sid, bound)
+                out = await _status(Session, sid)
+                assert out["dc_deferred"] is True, out
+                assert out["dc_deferred_seconds_remaining"] == 0, out
+                assert (await _row(Session, sid))["marker_age"] > bound
+
+                # 5. Once the row is out of the statuses the sweep admits, the
+                #    marker is inert and the route says so -- even though the
+                #    columns still carry it.
+                async with Session() as s:
+                    await s.execute(
+                        text("UPDATE team_series SET status = 'completed'"
+                             " WHERE id = :sid"), {"sid": sid})
+                    await s.commit()
+                row = await _row(Session, sid)
+                assert row["dc_fallback_at"] is not None, row
+                out = await _status(Session, sid)
+                assert out["dc_deferred"] is False, out
+                assert out["dc_deferred_seconds_remaining"] == 0, out
+
+                # 6. The widened path still writes nothing, with the same
+                #    positive control the narrower one had: the recorder is
+                #    shown to see an UPDATE on a call that demonstrably writes.
+                rec.seen.clear()
+                await _status(Session, sid)
+                assert rec.non_selects() == [], rec.non_selects()
+                rec.seen.clear()
+                async with Session() as s:
+                    await s.execute(
+                        text("UPDATE team_series SET status = 'completed'"
+                             " WHERE id = :sid"), {"sid": sid})
+                    await s.commit()
+                assert any(s.upper().startswith("UPDATE") for s in rec.seen), (
+                    "the recorder saw no write on a statement that "
+                    "demonstrably wrote -- it is not measuring anything")
         finally:
             rec.close()
             await engine.dispose()

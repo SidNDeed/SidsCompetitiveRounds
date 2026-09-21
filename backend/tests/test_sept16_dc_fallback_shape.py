@@ -21,6 +21,7 @@ it runs everywhere:
 """
 
 import ast
+import os
 import pathlib
 import re
 
@@ -260,6 +261,109 @@ def test_the_read_only_route_states_the_capability_in_its_own_body():
     assert '"readonly": True,' in joined, joined
 
 
+# ── The deferral state on the read-only route (the banner's whole input) ─
+#
+# The three names below are the CROSS-LANE CONTRACT's, written once on this
+# lane. The client reads exactly these and carries no name of its own; a name
+# that appears on one lane and not the other is a finding on both (#341, #444).
+
+BANNER_FIELDS = ("dc_deferred", "dc_deferred_seconds_remaining",
+                 "dc_deferred_bound_seconds")
+
+
+def status_route_response_keys():
+    """Every key the read-only route's response literal carries, in order."""
+    code = code_only(span("team_series_status_readonly"))
+    return [m.group(1) for m in
+            (re.match(r'\s*"([a-z0-9_]+)":', ln) for ln in code) if m]
+
+
+def test_the_status_route_emits_the_deferral_state():
+    keys = status_route_response_keys()
+    for f in BANNER_FIELDS:
+        assert f in keys, (f, keys)
+    # Still the one capability key, and still first: a reader that does not
+    # see it parses nothing out of the body at all.
+    assert keys[0] == "readonly", keys
+
+
+def test_the_deferral_fields_are_derived_from_the_row_and_the_one_bound():
+    """No second literal and no second clock (#342, #426).
+
+    The bound reaches this route as the module constant, bound into the same
+    SELECT that reads the marker; the remaining time is measured with
+    clock_timestamp(), the clock that stamped dc_fallback_at and the clock the
+    sweep measures the bound on. A copy of 420 here, or a Python-side
+    subtraction against the api process clock, would make two numbers out of
+    one (#431) -- and would drift by whatever the api-to-database skew is.
+    """
+    code = code_only(span("team_series_status_readonly"))
+    joined = "\n".join(code)
+    assert "_DC_FALLBACK_DEFER_SECONDS" in joined
+    assert '"bound": float(_DC_FALLBACK_DEFER_SECONDS)' in joined, joined
+    # No second spelling of the bound anywhere in the route.
+    assert not re.search(r"(?<![\w.])420(?![\w.])", joined), joined
+    # dc_deferred repeats the SWEEP's predicate, read off the same row.
+    assert "dc_fallback_at IS NOT NULL" in joined
+    assert "AND status IN ('active', 'dc_paused')) AS dc_deferred" in joined
+    # The deadline is the marker plus the bound, measured on the row's clock.
+    assert "make_interval(secs => :bound)" in joined, joined
+    assert "clock_timestamp()" in joined, joined
+    # Floored, not clamped afterwards in Python only: a negative remaining
+    # time never leaves the database.
+    assert "GREATEST(0, EXTRACT(EPOCH FROM (" in joined, joined
+    # And the python side reads the two derived columns rather than
+    # recomputing either of them.
+    assert 'bool(r["dc_deferred"])' in joined, joined
+    assert 'int(r["dc_deferred_seconds_remaining"] or 0)' in joined, joined
+    assert "datetime.now" not in "\n".join(
+        ln for ln in code if "dc_deferred" in ln)
+
+
+def test_the_route_docstring_states_the_migration_dependency_it_created():
+    """A guarantee in a comment is a claim about the whole state space (#351).
+
+    The SELECT reads dc_fallback_at with no savepoint and no fallback branch,
+    so an api carrying this route on a box without migration 326 answers 500.
+    That is the deploy order's reason and it is stated where the reader of the
+    SELECT is, not only in a notes file nobody re-reads.
+    """
+    doc = ast.get_docstring(node_named("team_series_status_readonly"))
+    assert "MIGRATION 326" in doc.upper(), doc
+    assert "UndefinedColumn" in doc, doc
+    # And the refusal is priced at what it actually costs, not at "the banner".
+    assert "WHAT A REFUSAL COSTS" in doc, doc
+
+
+CROSS_LANE_ROOT = os.environ.get("SCR_CROSS_LANE_CLIENT_ROOT", "")
+
+
+@pytest.mark.skipif(not CROSS_LANE_ROOT,
+                    reason="set SCR_CROSS_LANE_CLIENT_ROOT to a client checkout")
+def test_every_deferral_field_the_client_reads_is_one_this_route_emits():
+    """CROSS-LANE. The field list is a single source, checked from this side.
+
+    The lenses grep both trees for the same literals; this makes the same
+    comparison a test, so a client that reads `dc_deferred_remaining` -- a
+    plausible name this route does not emit -- reddens here instead of
+    rendering a silent zero in front of a player. Skipped when no client
+    checkout is offered, never quietly passed: a skip says "not measured", a
+    pass would say "measured and agreed".
+    """
+    root = pathlib.Path(CROSS_LANE_ROOT) / "plugin"
+    sources = sorted(root.glob("*.cs"))
+    assert sources, f"no client sources under the offered checkout: {root}"
+    emitted = set(status_route_response_keys())
+    read = set()
+    for p in sources:
+        read |= set(re.findall(r'"(dc_deferred[A-Za-z0-9_]*)"',
+                               p.read_text(encoding="utf-8", errors="replace")))
+    assert read, ("the client reads no dc_deferred* field at all -- either the "
+                  "banner derives from something else, or this is the wrong "
+                  "checkout")
+    assert read <= emitted, sorted(read - emitted)
+
+
 def test_the_state_endpoint_has_no_lifecycle_parameter_left():
     # code_lines_of, not code_only: the docstring NAMES the deleted parameter
     # on purpose, and prose about a removal is not the removal (#302).
@@ -302,9 +406,21 @@ def test_the_marker_columns_are_added_by_a_migration_on_disk(token):
 # that one function -- so it could not fail on the other (#432, #330). What
 # follows asks the question of the FILE: which functions revive a series, and
 # does each of them clear the marker.
-
-REVIVAL = "SET status = 'active',"
-
+#
+# KEYED ON THE OPERATION, NOT ON ITS SPACING. The previous cut of this census
+# searched for the exact string "SET status = 'active'," -- one spelling, with
+# one space either side of the '=' and a trailing comma. A third funnel that
+# wrote the same UPDATE as "SET status='active' ," or split it across string
+# pieces differently was absent from the census, so the check stayed green
+# while the drift it exists to catch stood in the file. A check that cannot
+# fail is worse than no check (#342, #431, #441).
+#
+# What is read instead is the SQL the function CARRIES: every string literal
+# in its body (its docstring excluded), joined and whitespace-collapsed, then
+# the UPDATE ... team_series spans within it, then the SET list of each. The
+# negative control below feeds this census a module whose answer is known --
+# a third revival in different spacing, calling no helper -- and requires it
+# to be seen, beside a record of what the old needle saw of the same text.
 
 def node_named(name):
     for node in TREE.body:
@@ -329,21 +445,80 @@ def code_lines_of(node):
 
 
 def functions_performing(needle):
-    """Every top-level def whose own CODE contains `needle`, by name."""
+    """Every top-level def whose own CODE contains `needle`, by name.
+
+    Retained for the checks whose subject really is a LINE (a helper call by
+    name). The operation censuses below do not use it.
+    """
     return sorted(
         n.name for n in TREE.body
         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
         and any(needle in ln for ln in code_lines_of(n)))
 
 
+# The old needle, kept as a NAMED value rather than deleted, because the
+# negative control's whole job is to show what it could not see (#342).
+ROUND5_REVIVAL_NEEDLE = "SET status = 'active',"
+
+_WS = re.compile(r"\s+")
+_UPDATE_TEAM_SERIES = re.compile(
+    r"\bUPDATE\s+team_series\b(.*?)(?=\bUPDATE\b|\bINSERT\b|\bDELETE\b|$)",
+    re.I | re.S)
+_SET_LIST = re.compile(r"\bSET\b(.*?)(?=\bWHERE\b|\bRETURNING\b|$)", re.I | re.S)
+_ASSIGNS_ACTIVE = re.compile(r"(?<![\w.])status\s*=\s*'active'", re.I)
+_ASSIGNS_DC_PLAYER_NULL = re.compile(r"(?<![\w.])dc_player_id\s*=\s*NULL", re.I)
+_ASSIGNS_MARKER_NULL = re.compile(r"(?<![\w.])dc_fallback_at\s*=\s*NULL", re.I)
+
+
+def sql_carried_by(node):
+    """Every string literal in a def's body, joined and whitespace-collapsed.
+
+    The SQL a function carries, read as text rather than as source lines: a
+    statement re-indented, re-wrapped, or split across a different number of
+    adjacent string pieces is the SAME text here. The docstring is dropped
+    first -- prose about an operation is not the operation.
+    """
+    body = node.body
+    if ast.get_docstring(node) is not None:
+        body = body[1:]
+    parts = []
+    for stmt in body:
+        for sub in ast.walk(stmt):
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                parts.append(sub.value)
+    return _WS.sub(" ", " ".join(parts))
+
+
+def functions_updating_team_series(assignment, tree=None):
+    """Top-level defs whose SQL assigns `assignment` in an UPDATE team_series.
+
+    Deliberately GENEROUS at the margins: two statements in one function are
+    joined, so a SET list that runs into the next statement's text can pull in
+    that statement's assignments, and a CASE arm inside a SET list that
+    compares a column to a literal reads as an assignment. Both directions
+    over-report, which surfaces a function for a human to look at; under-
+    reporting is what let a second funnel ship unhandled.
+    """
+    out = []
+    for n in (tree or TREE).body:
+        if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        sql = sql_carried_by(n)
+        if any(assignment.search(s.group(1))
+               for u in _UPDATE_TEAM_SERIES.finditer(sql)
+               for s in _SET_LIST.finditer(u.group(1))):
+            out.append(n.name)
+    return sorted(out)
+
+
 def test_every_funnel_that_revives_a_series_clears_the_deferral_marker():
     # The set is named, not counted loosely: a third funnel appearing here is a
     # thing to look at, not a number to bump.
-    funnels = functions_performing(REVIVAL)
+    funnels = functions_updating_team_series(_ASSIGNS_ACTIVE)
     assert funnels == ["_team_relock_existing_series", "team_lobby_start"], funnels
     # "Revives a series" and "clears the DC fields" are ONE set, not two -- the
     # qualifier in the finding was 'the UPDATE ... that clears dc_player_id'.
-    assert functions_performing("dc_player_id = NULL,") == funnels
+    assert functions_updating_team_series(_ASSIGNS_DC_PLAYER_NULL) == funnels
     for name in funnels:
         code = code_lines_of(node_named(name))
         assert any("_team_clear_dc_fallback_marker(" in ln for ln in code), (
@@ -351,19 +526,122 @@ def test_every_funnel_that_revives_a_series_clears_the_deferral_marker():
             "deferral marker; the sweep will settle it again on its next tick")
 
 
+# A third revival, written the way a different hand would write it: different
+# spacing around every '=', no trailing comma after the first assignment, the
+# statement split across string pieces at different points, and no call to the
+# clearing helper. The census must SEE it; the round-5 needle must not.
+_THIRD_FUNNEL_DECOY = '''
+async def _team_rehost_revive_series(db, series_id):
+    await db.execute(text(
+        "UPDATE   team_series"
+        "   SET   status='active'"
+        "       , dc_player_id=NULL"
+        "       , dc_team_remaining = NULL"
+        " WHERE id = :sid"
+    ), {"sid": series_id})
+'''
+
+
+def test_the_revival_census_sees_a_funnel_written_in_different_spacing():
+    """NEGATIVE CONTROL for the census itself.
+
+    A census is worth exactly what its filter can see, so the filter is run
+    against a module whose answer is known. Without this, "the census reports
+    two funnels" and "the census cannot report a third" are indistinguishable.
+    """
+    decoy_tree = ast.parse(_THIRD_FUNNEL_DECOY)
+    seen = functions_updating_team_series(_ASSIGNS_ACTIVE, tree=decoy_tree)
+    assert seen == ["_team_rehost_revive_series"], seen
+    assert (functions_updating_team_series(_ASSIGNS_DC_PLAYER_NULL,
+                                           tree=decoy_tree) == seen)
+    # And the decoy carries no helper call, so the census finding it is what
+    # makes the funnel test above go red on such a file.
+    assert "_team_clear_dc_fallback_marker" not in _THIRD_FUNNEL_DECOY
+    # What the round-5 needle saw of the same text: nothing. This is the
+    # finding, stated as a measurement rather than as prose.
+    assert ROUND5_REVIVAL_NEEDLE not in _THIRD_FUNNEL_DECOY
+
+
+def test_no_revival_site_claims_the_marker_has_a_known_age():
+    """The three copies of the revival claim say what the clear guarantees.
+
+    Two of them used to assert the marker's age as an ABSOLUTE, in opposite
+    directions -- the helper said it is never older than the bound, the
+    migration header said it always is -- and neither followed from the
+    revival. The clear reads no age, so the comments may not claim one. Both
+    directions are NAMED at the two sites that reason about the age, which is
+    what makes the claim a bound rather than an absolute: a site that reverts
+    to one of them loses the other word and reddens here.
+    """
+    doc = ast.get_docstring(node_named("_team_clear_dc_fallback_marker"))
+    assert "THE CLEAR IS UNCONDITIONAL" in doc, doc
+    assert "YOUNGER than the bound" in doc and "leaves one OLDER" in doc, doc
+    # Collapsed, because the claim wraps across comment lines and a sentence
+    # is not less true for being re-wrapped.
+    adopt = re.sub(r"[\s#]+", " ", "\n".join(span("team_lobby_start")))
+    assert "The clear is unconditional for that reason" in adopt
+    assert "the revival tells us nothing about the age" in adopt
+    sql = (pathlib.Path(__file__).resolve().parents[1] / "sql"
+           / "326_team_series_dc_fallback_at.sql").read_text(encoding="utf-8")
+    assert "UNCONDITIONAL and reads no age" in sql, sql
+    assert "a YOUNGER marker" in sql and "an OLDER one" in sql, sql
+
+
+def test_the_liveness_helper_doc_matches_its_fresh_process_branch():
+    """A doc that states the opposite of its own branch (#351, #302).
+
+    The sweep's veto is built on this helper, and a reader who took the old
+    first line at face value would expect a fresh process to settle rows
+    immediately. It vetoes instead, deliberately -- the evidence map is empty
+    after a restart because nothing has been heard yet, not because nobody is
+    playing.
+    """
+    doc = ast.get_docstring(node_named("_group_game_in_progress"))
+    assert "Returns TRUE when the evidence is not yet trustworthy" in doc, doc
+    code = code_only(span("_group_game_in_progress"))
+    i = first_index(code, "if not _in_match_evidence_trustworthy():")
+    assert i >= 0, code
+    assert any("return True" in ln for ln in code[i:i + 6]), code[i:i + 6]
+
+
+def test_no_dc_file_names_a_superseded_bound():
+    """Every "N s bound" in this batch's files is the bound that is committed.
+
+    Two comments in the orderings file kept 120 after the constant moved to
+    420, which is how a scenario described as past the bound is read as past
+    the bound by the next person while being well inside it.
+    """
+    import main
+    bound = str(main._DC_FALLBACK_DEFER_SECONDS)
+    here = pathlib.Path(__file__).resolve().parent
+    for name in ("test_sept16_dc_fallback_shape.py",
+                 "test_sept16_dc_fallback_orderings.py"):
+        txt = (here / name).read_text(encoding="utf-8")
+        for m in re.finditer(r"(?<![\w.])(\d+)\s*s(?:econd)?s?\s+bound", txt,
+                             re.I):
+            assert m.group(1) == bound, (name, m.group(0))
+        for m in re.finditer(r"bound is (\d+)", txt):
+            assert m.group(1) == bound, (name, m.group(0))
+
+
 def test_the_marker_clear_lives_in_one_savepointed_helper():
     code = code_lines_of(node_named("_team_clear_dc_fallback_marker"))
     joined = "\n".join(code)
-    # Both columns, or a stale attribution survives the resume.
-    assert '"   SET dc_fallback_at = NULL, dc_fallback_player_id = NULL"' in joined
+    # Both columns, or a stale attribution survives the resume. Read off the
+    # collapsed SQL rather than one spelling of the source line.
+    helper_sql = sql_carried_by(node_named("_team_clear_dc_fallback_marker"))
+    assert _ASSIGNS_MARKER_NULL.search(helper_sql), helper_sql
+    assert re.search(r"(?<![\w.])dc_fallback_player_id\s*=\s*NULL", helper_sql,
+                     re.I), helper_sql
     # Its own savepoint: a caught SQL error poisons the whole transaction under
     # asyncpg (#235), and neither resume may start failing because a deploy ran
     # before migration 326.
     at = first_index(code, "SET dc_fallback_at = NULL")
     assert any("begin_nested()" in ln for ln in code[max(0, at - 4):at]), code
-    # And the SQL exists in exactly one place, so there is no second copy to
-    # drift: the two call sites carry a call, never their own UPDATE.
-    assert functions_performing("SET dc_fallback_at = NULL") == [
+    assert "begin_nested()" in joined
+    # And the operation exists in exactly one place, so there is no second copy
+    # to drift: the two call sites carry a call, never their own UPDATE.
+    assert functions_updating_team_series(_ASSIGNS_MARKER_NULL) == [
         "_team_clear_dc_fallback_marker"]
 
 

@@ -73,8 +73,15 @@
 -- it is left in place because "a fallback was filed for this series" is worth
 -- having in the admin panel. It IS cleared by the funnels that REVIVE a series
 -- -- the ones that flip it back to 'active' and clear the other DC fields --
--- because a marker surviving that is older than the bound by definition and
--- would have the sweep settle the resumed series on its next tick. There are
+-- because a marker surviving a revival comes due on the first tick after it
+-- passes the bound and settles the resumed series. The clear is
+-- UNCONDITIONAL and reads no age: a revival says nothing about how old the
+-- marker is -- a settlement inside the bound then an immediate revival leaves
+-- a YOUNGER marker, a post-bound sweep then a later revival an OLDER one --
+-- and both need the same clear. An earlier draft of this line said "older
+-- than the bound by definition" and the helper's own comment in main.py said
+-- the opposite; neither followed from the revival, and the code never
+-- depended on either. There are
 -- two such funnels, not one: the queue/sticky relock and the hosted-lobby
 -- Start adoption, which _team_lock_family_pick also admits a 'dc_incomplete'
 -- row into. An earlier draft of this header said "the ONE place", counted the

@@ -858,9 +858,13 @@ def _in_match_evidence_trustworthy() -> bool:
 def _group_game_in_progress(group_id) -> bool:
     """True if a client reported being IN a game for this lobby/series recently.
 
-    Returns False when the evidence is not yet trustworthy (fresh process) — so
-    callers must treat this as 'proof of life', never as 'proof of death'. Use it
-    only to VETO a destructive action, never to trigger one.
+    Returns TRUE when the evidence is not yet trustworthy (fresh process), which
+    is what the code below does and the opposite of what this line said until
+    now: too soon after boot there is no way to tell "idle" from "we have not
+    listened yet", so it answers as though a game were live and every caller's
+    destructive action is vetoed. Callers must treat the result as 'proof of
+    life', never as 'proof of death': use it only to VETO a destructive action,
+    never to trigger one.
 
     Caller contract (Codex batch finds 2/4): this CONSERVATIVE variant (young
     process => veto) belongs only to JANITOR closers, which re-fire every tick
@@ -3673,16 +3677,29 @@ async def _team_clear_dc_fallback_marker(db, series_id) -> None:
     marker that survives a resume comes due like any other: on the first
     tick after it passes the bound, the sweep settles the FRESHLY RESUMED
     series to dc_incomplete and attributes it to the previous sitting's
-    disconnect. It is not older than the bound by definition -- a resume
-    inside the window leaves a younger marker -- so the damage is delayed,
-    not avoided, which is why the clear belongs in the funnel and not in a
-    freshness test in the sweep. There are exactly two such funnels, the
-    queue/sticky resume (_team_relock_existing_series) and the hosted-lobby
-    Start adoption (team_lobby_start), and the first cut of this change cleared
-    the marker in only one of them. test_sept16_dc_fallback_shape.py now counts
-    the UPDATE ... SET status = 'active' operation across the WHOLE file and
-    requires this call inside every function that performs one, so a third
-    funnel cannot be added without either calling it or reddening.
+    disconnect.
+
+    THE CLEAR IS UNCONDITIONAL, AND THE MARKER'S AGE IS NOT SOMETHING ANY
+    CALLER MAY REASON FROM. A revival says nothing about how old the marker
+    is. A settlement inside the bound followed by an immediate revival leaves
+    a marker YOUNGER than the bound; a post-bound sweep followed by a later
+    revival leaves one OLDER. This comment and the header of migration 326
+    each used to assert one of those as if it were the only case, in opposite
+    directions, and neither followed from the revival. Both cases need the
+    same clear, so the clear is age-independent, and the only thing it
+    guarantees is the thing it does: after it runs, that row carries no
+    marker, whatever the marker's age was. That is also why the clear belongs
+    in the funnel and not in a freshness test in the sweep -- a freshness test
+    would have to pick one of those two cases to be right about.
+
+    There are exactly two such funnels, the queue/sticky resume
+    (_team_relock_existing_series) and the hosted-lobby Start adoption
+    (team_lobby_start), and the first cut of this change cleared the marker in
+    only one of them. test_sept16_dc_fallback_shape.py counts the revival
+    OPERATION across the WHOLE file -- matched on the columns the operation
+    writes, insensitive to how the SQL is spaced -- and requires this call
+    inside every function that performs one, so a third funnel cannot be added
+    without either calling it or reddening.
 
     Its own savepoint rather than a clause in the callers' own UPDATE (#235):
     pre-migration-326 the columns do not exist and a caught SQL error poisons
@@ -38674,11 +38691,35 @@ async def team_series_status_readonly(
     mutating state GET under the same recorder as the positive control that
     the recorder can see a write at all (#391).
 
-    The colour columns are read in the one SELECT rather than behind a
-    savepoint (#235). They arrived in migration 206 and the marker columns this
-    route ships beside arrive in 326, so any deployment that can serve this
-    route has had them for a long time; and a 500 here costs the banner, which
-    fails to OFF, where a 500 in the state GET would cost the assembly."""
+    WHAT THIS ROUTE CARRIES FOR THE BANNER, and what that costs. The response
+    carries the DEFERRAL STATE -- dc_deferred, dc_deferred_seconds_remaining
+    and dc_deferred_bound_seconds -- and the team tab's DC-grace banner derives
+    its shown/hidden state and its countdown from exactly those three fields.
+    The predicate the banner used before required status == 'dc_paused' and a
+    positive remaining time; no statement in this api writes that status and
+    dc_grace_until is only ever written NULL, so that predicate could not be
+    satisfied by any series this server produces. It is deleted on the client
+    rather than patched (#310, #389), and these fields are what replaces it.
+
+    THIS ROUTE NOW REQUIRES MIGRATION 326. The SELECT below reads
+    dc_fallback_at directly -- no savepoint, no fallback branch -- so on a box
+    where 326 has not been applied the statement raises UndefinedColumn and
+    this route answers 500. That is the reason the deploy order is the
+    migration FIRST and then the api on both boxes, and it is a deliberate
+    choice rather than an oversight: a branch that answered 200 with the
+    deferral fields missing would put the "is this box updated" question back
+    inside the body, which is the shape bug #266 turns on. The colour columns
+    beside them arrived in migration 206 and are read the same way (#235).
+
+    WHAT A REFUSAL COSTS, stated from the client's own use of this call rather
+    than from the name of the banner: the answer to this read is what the team
+    tab refreshes its cached series status, its series score and its frozen
+    team-colour stamp from, so a refused answer latches this series dark and
+    leaves ALL of that as stale as it leaves the banner. Pricing the refusal at
+    "the banner" alone understates it. What it does NOT cost is any outcome:
+    the assembly poll is a different call to a different route, nothing here
+    writes, and a dark banner changes no row. A 500 in the state GET would cost
+    the assembly; a 500 here costs a tab that stops updating."""
     try:
         sid_uuid = UUID(series_id)
     except (ValueError, TypeError):
@@ -38690,11 +38731,34 @@ async def team_series_status_readonly(
                    dc_team_remaining, dc_player_id,
                    t1_series_wins, t2_series_wins,
                    t1_color_name, t1_color_hex, t2_color_name, t2_color_hex,
-                   t1a_id, t1b_id, t2a_id, t2b_id
+                   t1a_id, t1b_id, t2a_id, t2b_id,
+                   -- THE DEFERRAL STATE, derived here in the one SELECT.
+                   -- dc_deferred repeats the sweep's own predicate against
+                   -- this row, so "the banner is up" and "the sweep could
+                   -- still act on this marker" are one condition read once
+                   -- rather than two that can disagree (#342). It is false on
+                   -- a settled row that still carries an inert marker.
+                   (dc_fallback_at IS NOT NULL
+                    AND status IN ('active', 'dc_paused')) AS dc_deferred,
+                   -- The DEADLINE, expressed as the seconds left on it: the
+                   -- marker plus the one bound constant, minus
+                   -- clock_timestamp(). The same clock that stamped
+                   -- dc_fallback_at and the same clock the sweep measures the
+                   -- bound on, so no api-to-database skew enters it and there
+                   -- is no second clock to reconcile (#426, #427).
+                   -- make_interval(secs => :bound) rather than arithmetic on
+                   -- the parameter: that spelling is the one whose binding
+                   -- this file already exercises against the driver, in the
+                   -- sweep's two statements (#275).
+                   CASE WHEN dc_fallback_at IS NULL THEN 0
+                        ELSE GREATEST(0, EXTRACT(EPOCH FROM (
+                                 (dc_fallback_at + make_interval(secs => :bound))
+                                 - clock_timestamp())))
+                   END AS dc_deferred_seconds_remaining
               FROM team_series
              WHERE id = :sid
         """),
-        {"sid": sid_uuid},
+        {"sid": sid_uuid, "bound": float(_DC_FALLBACK_DEFER_SECONDS)},
     )).mappings().first()
     if r is None:
         raise HTTPException(404, "Series not found")
@@ -38707,6 +38771,15 @@ async def team_series_status_readonly(
     if r["dc_grace_until"] is not None:
         _grace = max(0, int((r["dc_grace_until"]
                              - datetime.now(timezone.utc)).total_seconds()))
+    # Both values come out of the row above and nothing else is consulted. The
+    # floor to 0 when not deferred is not cosmetic: the SQL already returns 0
+    # for a NULL marker, and this second floor covers the row that DOES carry a
+    # marker with time left on it but is no longer in a status the sweep admits
+    # -- a completed series -- where a remaining count would be a countdown to
+    # nothing.
+    _deferred = bool(r["dc_deferred"])
+    _defer_left = (int(r["dc_deferred_seconds_remaining"] or 0)
+                   if _deferred else 0)
     return {
         # The whole capability, stated by the box that answered. A client that
         # does not see this key treats the answer as no answer.
@@ -38723,6 +38796,31 @@ async def team_series_status_readonly(
         "dc_grace_seconds_remaining": _grace,
         "dc_team_remaining": r["dc_team_remaining"],
         "dc_player_id": str(r["dc_player_id"]) if r["dc_player_id"] else None,
+        # THE DEFERRAL STATE, and the ONLY input the team tab's DC-grace
+        # banner has. Three fields, all three present on every 200 and none of
+        # them ever null: the client parses these bodies by hand (Unity's
+        # JsonUtility silently fails on nested arrays, so the codebase splits
+        # strings everywhere instead), and a null where an int is expected is
+        # the shape that reads as a silent 0 on one path and throws on another.
+        #
+        # WHAT EACH ONE IS A CLAIM ABOUT, and nothing wider:
+        #   dc_deferred                   -- this row, as read a few lines
+        #                                    above, carries a marker the sweep
+        #                                    could still act on. It is not a
+        #                                    claim that the sweep will act, or
+        #                                    that a report is still in flight.
+        #   dc_deferred_seconds_remaining -- seconds left on THAT marker's
+        #                                    bound at the moment of the read,
+        #                                    floored at 0. 0 with dc_deferred
+        #                                    true is a real state: the bound
+        #                                    has passed and no tick has
+        #                                    settled the row yet.
+        #   dc_deferred_bound_seconds     -- the one constant, emitted so no
+        #                                    client carries its own copy of the
+        #                                    number.
+        "dc_deferred": _deferred,
+        "dc_deferred_seconds_remaining": _defer_left,
+        "dc_deferred_bound_seconds": _DC_FALLBACK_DEFER_SECONDS,
         "t1_series_wins": int(r["t1_series_wins"] or 0),
         "t2_series_wins": int(r["t2_series_wins"] or 0),
         "t1_color_name": r["t1_color_name"] or "",
@@ -44617,12 +44715,15 @@ async def team_lobby_start(req: _LobbyStartReq, request: Request,
         # resume does. This is the SECOND same-four adoption funnel and it was
         # missed when the marker was introduced: _team_lock_family_pick admits
         # a 'dc_incomplete' row as resumable, so four players who pressed Start
-        # again carried the old marker back onto a now-'active' series. Older
-        # than the bound by definition, it made the sweep settle the sitting
-        # they had just resumed back to dc_incomplete on its next tick,
-        # attributed to the previous sitting's disconnect, every time they
-        # started. The helper says where the operation lives and the shape test
-        # counts it across the file (#432, #330).
+        # again carried the old marker back onto a now-'active' series. A
+        # carried marker comes due on the first tick after it passes the
+        # bound -- immediately if it was already past it, later if the resume
+        # happened inside the window -- and settles the sitting they had just
+        # resumed back to dc_incomplete, attributed to the previous sitting's
+        # disconnect. The clear is unconditional for that reason: the revival
+        # tells us nothing about the age, so neither age is assumed. The
+        # helper says where the operation lives and the shape test counts it
+        # across the file (#432, #330).
         await _team_clear_dc_fallback_marker(db, series_id)
         # relocked_at is stamped just before the COMMIT below (r4 finding:
         # stamping here left every later lock wait — the wager query, lobby
