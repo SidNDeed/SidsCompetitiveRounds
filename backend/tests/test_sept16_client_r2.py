@@ -3126,9 +3126,19 @@ def test_r5_h3_the_deferred_answer_is_a_three_value_measurement():
     two, and each line says exactly what its value proves:
 
       present and true   this box deferred this report
-      present and false  this box carries the deferral build and settled the
-                         report at one of its other exits
+      present and false  this box carries the deferral build and did NOT park
+       + ignored=true    this report -- and wrote nothing either: the status in
+                         the answer is the one the row already held
+      present and false  this box carries the build and took an exit this client
+       + no ignored      does not model; the line claims nothing about the write
       absent from a 200  the box that answered predates the flag
+
+    THE FOURTH VALUE IS THE LENS FINDING.  The line used to say "settled this
+    report at one of its other exits ... still bounds the row to dc_incomplete".
+    On a box carrying the rule the deferral branch PRECEDES every settling
+    write, so a report with is_fallback set reaches no settling exit at all --
+    the three exits it can reach answer {"ignored": true}, write nothing, and
+    echo the status the row already had, which may be `completed` and rated.
 
     A NON-200 proves nothing about any box, which is why the read is taken only
     on `ok`."""
@@ -3141,7 +3151,8 @@ def test_r5_h3_the_deferred_answer_is_a_three_value_measurement():
     assert 'ExtractJsonBool(resp, "deferred")' in send
     # three lines, one per value
     assert "fallback DEFERRED by the server" in send
-    assert "fallback SETTLED by the server (deferred=false" in send
+    assert "fallback NOT PARKED AND NOT APPLIED " in send
+    assert 'ExtractJsonBool(resp, "ignored")' in send
     assert "fallback SETTLED by a box that predates the deferral" in send
     # the whole read sits inside `if (ok)`, so a non-200 says nothing
     assert send.index("if (ok)") < send.index('resp.IndexOf("\\"deferred\\"')
@@ -3157,7 +3168,7 @@ def test_r5_h3_the_deferred_answer_is_a_three_value_measurement():
         return ('resp.IndexOf("\\"deferred\\"", StringComparison.Ordinal) >= 0' in b
                 and 'ExtractJsonBool(resp, "deferred")' in b
                 and "fallback DEFERRED by the server" in b
-                and "fallback SETTLED by the server (deferred=false" in b
+                and "fallback NOT PARKED AND NOT APPLIED " in b
                 and "fallback SETTLED by a box that predates the deferral" in b)
 
     # MUTATION 1: the field is never read at all
@@ -3798,3 +3809,255 @@ def test_r5_the_status_channel_reports_before_every_callback():
     assert claim(_mutate(api, "Both pre-wire refusals report 0 before the callback",
                          "Both pre-wire refusals report zero before the callback",
                          "R5 status-channel negative control"))
+
+
+# ── ROUND-5 COLD LENS ────────────────────────────────────────────────────────
+# One test per finding the lens raised against the round-5 client tip
+# (f5affa9).  Each pins the behaviour at the NEW tip, each carries a mutation
+# that removes the fix, and each carries a negative control that reworders
+# prose without touching the claim.
+
+
+def test_r5lens_the_latch_darkens_what_the_banner_actually_renders_from():
+    """LATCHING STOPS THE POLL; IT MUST ALSO DARKEN THE BANNER.
+
+    The lens found the two were different facts (#342).  `_statusPollDarkSeries
+    .Add(seriesId)` was followed by `return`, and the four fields the banner
+    renders from were left holding the last good answer.  Their only other
+    writer is the ActiveTeamSeriesId setter, which fires on an id CHANGE, so in
+    the one window the banner exists for the banner stayed LIT and frozen --
+    rendering a countdown that nothing would ever refresh again, for as long as
+    the tab stayed open.
+
+    WHAT DARKENS IT: the render requires `dcRemaining > 0`, so clearing the
+    remaining seconds is the whole of it.  The clear is GUARDED to the series
+    the cache describes, because latching one series must not blank another's
+    (the ForId discipline, Codex r2 f8).
+
+    This is the fix the box-matrix test could not see: that test models
+    `latched` and never asks what the UI shows afterwards."""
+    api = _src("ApiClient.cs")
+    ro = _method_body(api, "public static void PollTeamSeriesStatusReadOnly")
+    assert ro, "the read-only poller's own text could not be delimited"
+
+    # the clear sits in the SAME branch as the latch, before its return
+    assert "_statusPollDarkSeries.Add(seriesId);" in ro
+    assert "LastSeriesDcGraceSeconds = 0;" in ro
+    assert "LastSeriesDcTeamRemaining = 0;" in ro
+    assert (ro.index("_statusPollDarkSeries.Add(seriesId);")
+            < ro.index("LastSeriesDcGraceSeconds = 0;"))
+    # and it is guarded to the series the cache describes
+    assert ("if (LastSeriesStateForId == seriesId || seriesId == ActiveTeamSeriesId)"
+            in ro)
+
+    def claim(s):
+        b = _method_body(s, "public static void PollTeamSeriesStatusReadOnly")
+        if not b:
+            return False
+        return ("LastSeriesDcGraceSeconds = 0;" in b
+                and "LastSeriesDcTeamRemaining = 0;" in b
+                and "if (LastSeriesStateForId == seriesId || seriesId == ActiveTeamSeriesId)" in b
+                and b.index("_statusPollDarkSeries.Add(seriesId);")
+                    < b.index("LastSeriesDcGraceSeconds = 0;"))
+
+    # MUTATION 1: the latch goes back to stopping the poll and nothing else
+    _assert_discriminating(
+        claim, api,
+        _mutate(api,
+                "                            LastSeriesDcGraceSeconds = 0;\n"
+                "                            LastSeriesDcTeamRemaining = 0;\n",
+                "",
+                "R5lens the latch leaves the banner lit"),
+        "R5lens a latched series renders dark")
+
+    # MUTATION 2: the guard goes, so latching one series blanks whatever the
+    # cache currently describes
+    _assert_discriminating(
+        claim, api,
+        _mutate(api,
+                "if (LastSeriesStateForId == seriesId || seriesId == ActiveTeamSeriesId)",
+                "if (true)",
+                "R5lens the clear is unguarded"),
+        "R5lens the clear names the series it is about")
+
+    # NEGATIVE CONTROL: rewording the comment above the clear changes nothing
+    assert claim(_mutate(api, "DARK HAS TO MEAN DARK.", "DARK MUST MEAN DARK.",
+                         "R5lens latch negative control"))
+
+
+def test_r5lens_the_refusal_line_splits_on_whether_a_box_answered():
+    """THE TRIAGE LINE MUST NOT NAME A CAUSE IT DOES NOT HAVE.
+
+    The latch is taken on any answer that is not a 200 carrying readonly=true,
+    and that includes every cell where NOTHING answered: a refusal before the
+    wire (consent, sensitive transport), a transport failure, the 20 s timeout
+    -- all reported as HTTP 0.  The latch-site line already split on
+    `answeredWith > 0`.  The TICK's line, which is the one a triage grep for
+    "NOT polling" lands on, stated the box cause unconditionally: "a box
+    answering for this seat has no read-only status route for it".  In an
+    HTTP-0 cell that sentence is false and points an investigation at a
+    deployment that may be entirely correct.
+
+    The cause is carried to the tick in its own set, so the line can say which
+    of the two facts it holds."""
+    api = _src("ApiClient.cs")
+    ui = _method_body(api, "public static void UpdateTeamSeriesStatePoll")
+    assert ui, "the tick's own text could not be delimited"
+
+    assert "_statusPollDarkNoAnswer.Contains(sid)" in ui
+    assert "never reached a box" in ui
+    assert "This line says nothing about any box's routes" in ui
+    assert "did not answer that read AS a read" in ui
+    # the unconditional box claim is gone
+    assert "a box answering for this seat has no read-only status route" not in api
+
+    # the cause is RECORDED where the latch is taken, from this request's code
+    ro = _method_body(api, "public static void PollTeamSeriesStatusReadOnly")
+    assert "if (answeredWith <= 0) _statusPollDarkNoAnswer.Add(seriesId);" in ro
+
+    def claim(s):
+        b = _method_body(s, "public static void UpdateTeamSeriesStatePoll")
+        p = _method_body(s, "public static void PollTeamSeriesStatusReadOnly")
+        if not b or not p:
+            return False
+        return ("_statusPollDarkNoAnswer.Contains(sid)" in b
+                and "never reached a box" in b
+                and "did not answer that read AS a read" in b
+                and "if (answeredWith <= 0) _statusPollDarkNoAnswer.Add(seriesId);" in p
+                and "a box answering for this seat has no read-only status route" not in s)
+
+    # MUTATION 1: the line goes back to naming the box cause for every cell
+    _assert_discriminating(
+        claim, api,
+        _mutate(api,
+                '                        + (_statusPollDarkNoAnswer.Contains(sid)',
+                '                        + (false',
+                "R5lens the refusal line stops measuring"),
+        "R5lens the refusal line reads the cause it recorded")
+
+    # MUTATION 2: nothing records the cause, so the tick can only guess
+    _assert_discriminating(
+        claim, api,
+        _mutate(api, "if (answeredWith <= 0) _statusPollDarkNoAnswer.Add(seriesId);",
+                "",
+                "R5lens the cause is never recorded"),
+        "R5lens the cause is recorded at the latch")
+
+    # NEGATIVE CONTROL: rewording the no-answer half keeps both facts
+    assert claim(_mutate(api,
+                         "transport failure, or the 20 s timeout, recorded as HTTP 0 when ",
+                         "transport fault, or the 20 s timeout, recorded as HTTP 0 when ",
+                         "R5lens refusal negative control"))
+
+
+def test_r5lens_a_deferred_false_answer_claims_no_write():
+    """AN IGNORED REPORT WROTE NOTHING, AND THE LINE MUST SAY SO.
+
+    The three exits a fallback report can reach on a rule-carrying box answer
+    {"status": <the row's EXISTING status>, "ignored": true, "deferred": false}
+    and write nothing at all -- the deferral branch precedes every settling
+    write, so no settling exit is reachable with is_fallback set.  The client
+    line said the box "settled this report at one of its other exits" and that
+    "the zero-total form still bounds the row to dc_incomplete": two claims
+    about a write that did not happen, on a row whose real status may be
+    `completed` and rated from the other seat's prompt report.
+
+    The `ignored` key was in the body all along and was never read."""
+    api = _src("ApiClient.cs")
+    send = _method_body(api, "private static IEnumerator SendTeamSeriesDcReport")
+    assert send, "the dispatch half's own text could not be delimited"
+
+    # presence measured separately from value, the #604 shape, as for `deferred`
+    assert 'resp.IndexOf("\\"ignored\\"", StringComparison.Ordinal) >= 0' in send
+    assert 'ExtractJsonBool(resp, "ignored")' in send
+    assert "fallback NOT PARKED AND NOT APPLIED " in send
+    assert "this report changed nothing and bounds nothing" in send
+    # the two false claims are gone from the whole file
+    assert "settled this report at one of its other exits" not in api
+    assert "The zero-total form still bounds the row to dc_incomplete" not in api
+
+    def claim(s):
+        b = _method_body(s, "private static IEnumerator SendTeamSeriesDcReport")
+        if not b:
+            return False
+        return ('ExtractJsonBool(resp, "ignored")' in b
+                and "fallback NOT PARKED AND NOT APPLIED " in b
+                and "this report changed nothing and bounds nothing" in b
+                and "settled this report at one of its other exits" not in s)
+
+    # MUTATION 1: the ignored key stops being read, so both values collapse
+    # back into one line that claims a write
+    _assert_discriminating(
+        claim, api,
+        _mutate(api, 'try { ignored = ExtractJsonBool(resp, "ignored"); } catch { ignored = false; }',
+                "ignored = false;",
+                "R5lens the ignored key is never read"),
+        "R5lens deferred=false reads the ignored key")
+
+    # MUTATION 2: the honest line is replaced by the round-5 wording
+    _assert_discriminating(
+        claim, api,
+        _mutate(api, "fallback NOT PARKED AND NOT APPLIED ",
+                "fallback settled this report at one of its other exits ",
+                "R5lens the line claims a write again"),
+        "R5lens the line claims no write")
+
+    # NEGATIVE CONTROL: rewording the comment above it keeps the claim
+    assert claim(_mutate(api, "DOES NOT MEAN THIS REPORT SETTLED ANYTHING",
+                         "DOES NOT MEAN THIS REPORT SETTLED ANY ROW",
+                         "R5lens ignored negative control"))
+
+
+def test_r5lens_no_comment_prices_the_refusal_as_a_lost_countdown():
+    """REACHABILITY BEFORE LOGIC (#286, #405), AND THE COMMENTS SAY WHAT IT IS.
+
+    The banner this poll feeds renders only on status='dc_paused' with seconds
+    remaining.  Nothing writes that status: the flow that did was retired in
+    v1.30.0, the api's own comment beside the one UPDATE that still names the
+    value says new DCs no longer enter it, dc_grace_until is only ever written
+    NULL, and the primary holds no row in that status.  So three rounds of
+    comments priced a refusal at "one countdown in one banner" -- a cost that
+    cannot be paid, because the countdown cannot appear.
+
+    What a refusal actually costs is this series' 2 s refresh of the frozen
+    team-colour stamp and of the status cache the assembly loop reads.  That is
+    also why the poll is KEPT and why it still must not be the lifecycle route:
+    the payload is live even though the banner is not.
+
+    The render site carries the same measurement, so a reader deciding whether
+    this UI can appear reads the answer where the predicate is."""
+    api = _src("ApiClient.cs")
+    ui = _src("NativeUI.cs")
+
+    # no comment prices it as a countdown any more
+    assert "costs is one countdown in one banner" not in api
+    # the measurement is stated at the tick, at the poller, and at the render
+    assert "WHAT THE REFUSAL COSTS, MEASURED RATHER THAN ASSUMED" in api
+    assert "team-colour stamp" in api
+    assert "REACHABILITY, MEASURED, NOT ASSUMED" in ui
+    assert "no statement in the api sets status='dc_paused'" in ui
+    assert "dc_grace_until is only ever written NULL" in ui
+    # and the render predicate it describes is still the one in the file
+    assert 'dcStatus == "dc_paused" && dcRemaining > 0' in ui
+
+    def claim(s_api, s_ui):
+        return ("costs is one countdown in one banner" not in s_api
+                and "WHAT THE REFUSAL COSTS, MEASURED RATHER THAN ASSUMED" in s_api
+                and "REACHABILITY, MEASURED, NOT ASSUMED" in s_ui
+                and "no statement in the api sets status='dc_paused'" in s_ui)
+
+    assert claim(api, ui)
+    # MUTATION 1: the old pricing comes back on the tick
+    mutated_api = _mutate(api, "What a refusal actually costs is", "costs is one countdown in one banner and",
+                          "R5lens the countdown pricing returns")
+    assert not claim(mutated_api, ui), "the claim survives its own mutation (api)"
+    # MUTATION 2: the render site stops stating its reachability
+    mutated_ui = _mutate(ui, "REACHABILITY, MEASURED, NOT ASSUMED", "REACHABILITY, ASSUMED",
+                         "R5lens the render site stops measuring")
+    assert not claim(api, mutated_ui), "the claim survives its own mutation (ui)"
+    # and neither holds on a stub
+    assert not claim("// nothing here\n", "// nothing here\n")
+
+    # NEGATIVE CONTROL: rewording the colour sentence keeps every claim
+    assert claim(_mutate(api, "the frozen team-COLOUR stamp", "the frozen team-COLOUR mark",
+                         "R5lens reachability negative control"), ui)

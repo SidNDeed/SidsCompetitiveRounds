@@ -26990,9 +26990,28 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                 teamLobbyCreateBtn, teamLobbyCreatePrivBtn, teamLobbyStartBtn, teamLobbyLeaveBtn, teamLobbyPrefBtn,
                 teamLobbyRulesRow, teamLobbyFfBtn, teamLobbyScBtn);
 
-            // DC grace banner. Driven by ApiClient.LastSeriesStateStatus etc. —
-            // poll the most-recent series's state when we have one cached and
-            // the user might be in a sticky-team requeue window.
+            // DC grace banner, and THE POLL THAT FEEDS THE TEAM TAB. The poll is
+            // live and load-bearing: it refreshes the frozen team-colour stamp
+            // (TeamColorIdentity reads those statics) and the status cache the
+            // assembly loop reads. The BANNER below is not.
+            //
+            // REACHABILITY, MEASURED, NOT ASSUMED (#286, #405). The predicate on
+            // the next lines cannot be satisfied by any series the current server
+            // writes, and that is a reading of the server tree rather than a
+            // guess: no statement in the api sets status='dc_paused'; the flow
+            // that did was retired in v1.30.0 (2026-07-12), and the comment beside
+            // the one UPDATE that still names the value says new DCs no longer
+            // enter it; dc_grace_until is only ever written NULL; and the primary
+            // holds no team_series row in that status at all. The else-branch is
+            // the branch that runs, for every series, on every box.
+            //
+            // IT IS NOT DELETED HERE because what should replace it is a product
+            // decision and not this round's to take: a 2v2 survivor now sits in a
+            // 420 s deferral window, what they should be told about it is Sid's
+            // call, and rendering anything about it needs a field this route does
+            // not return today (dc_fallback_at). Until that is decided, nothing in
+            // this file may claim this banner informs anybody -- the round-5 notes
+            // carry the evidence, the deletion plan and the replacement brief.
             ApiClient.UpdateTeamSeriesStatePoll(force: false);
             int dcRemaining = ApiClient.LastSeriesDcGraceSeconds;
             string dcStatus = ApiClient.LastSeriesStateStatus;

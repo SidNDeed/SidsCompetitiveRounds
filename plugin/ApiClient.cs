@@ -13954,6 +13954,15 @@ namespace CompetitiveRounds
         // the rule belongs to the operation and not to one caller's discipline —
         // #432). A session holds one id per series it polled and was refused on.
         private static readonly HashSet<string> _statusPollDarkSeries = new HashSet<string>();
+        // THE CAUSE, for the subset of the latch above whose dark answer reached
+        // no box at all: HTTP 0 is a refusal before the wire (consent, sensitive
+        // transport), a transport failure, or the 20 s timeout. Kept as a second
+        // set rather than folded into the latch so the latch stays one structure
+        // with one writer. The refusal line below reads it because "a box answered
+        // and it was not a read" and "nothing answered" are different facts, and a
+        // triage grep must never read the first off a cell that was the second
+        // (#342, #430).
+        private static readonly HashSet<string> _statusPollDarkNoAnswer = new HashSet<string>();
         // The other half of the same rule: one line per series for the answer that
         // DID prove itself. Both directions speak, because "the banner is dark" and
         // "the banner is live" are different facts and a bundle has to be able to
@@ -14011,7 +14020,20 @@ namespace CompetitiveRounds
         /// quantity, and a guess that is WRONG exactly in the resume case the relock
         /// creates (#342: a check that cannot fail on the state it is meant to catch
         /// is worse than no check). The unhandled case fails toward touching nothing
-        /// (#276). What the refusal costs is one countdown in one banner (#430).</para></summary>
+        /// (#276).</para>
+        ///
+        /// <para>WHAT THE REFUSAL COSTS, MEASURED RATHER THAN ASSUMED (#286, #405). The
+        /// previous rounds priced it at "one countdown in one banner". It is not that,
+        /// because no countdown can appear at all: the banner this poll feeds renders
+        /// only on status='dc_paused' with seconds remaining, and nothing writes that
+        /// status -- the flow that did was retired in v1.30.0 (2026-07-12), the api's
+        /// own comment beside the one UPDATE still naming the value says new DCs no
+        /// longer enter it, dc_grace_until is only ever written NULL, and the primary
+        /// holds no team_series row in that status. What a refusal actually costs is
+        /// this series' 2 s refresh of the frozen team-COLOUR stamp and of the status
+        /// cache the assembly loop reads -- which is what this poll is for now, and
+        /// why it still must not be the lifecycle route. The banner is dead UI
+        /// pending a product decision: round-5 notes, residual 1 (#430).</para></summary>
         public static void UpdateTeamSeriesStatePoll(bool force)
         {
             string sid = ActiveTeamSeriesId;
@@ -14022,11 +14044,17 @@ namespace CompetitiveRounds
                 {
                     _statusPollRefusedForSeries = sid;
                     Plugin.Log.LogInfo("[2v2] DC-grace banner NOT polling series " + sid
-                        + " — a box answering for this seat has no read-only status route for it, "
-                        + "which the read below recorded when that answer arrived. The banner stays "
-                        + "dark for this series: there is no second route to fall back to, because "
-                        + "the only other per-series route performs a lifecycle write that can "
-                        + "cancel a played series and reconcile its bets");
+                        + (_statusPollDarkNoAnswer.Contains(sid)
+                            ? " — the status read for it never reached a box: a refusal before the "
+                              + "wire, a transport failure, or the 20 s timeout, recorded as HTTP 0 when "
+                              + "that read returned. This line says nothing about any box's routes"
+                            : " — a box answering for this seat did not answer that read AS a read: "
+                              + "it serves no such route, or it has no such series, which the read below "
+                              + "recorded when that answer arrived")
+                        + ". The banner stays dark for this series, and "
+                        + "there is no second route to fall back to: the only other per-series route "
+                        + "performs a lifecycle write that can cancel a played series and reconcile "
+                        + "its bets");
                 }
                 return;
             }
@@ -14389,11 +14417,36 @@ namespace CompetitiveRounds
                                 + "stays open: nothing here observes the sweep, so this line is the "
                                 + "deferral and not the disposition");
                         else if (present)
-                            Plugin.Log.LogInfo("[2v2-DC] fallback SETTLED by the server (deferred=false "
-                                + "in the answer) — this box carries the deferral rule and settled this "
-                                + "report at one of its other exits: the series was already out of "
-                                + "(active, dc_paused), or a fence refused it. The zero-total form still "
-                                + "bounds the row to dc_incomplete");
+                        {
+                            // deferred=false DOES NOT MEAN THIS REPORT SETTLED ANYTHING.
+                            // On a box carrying the rule the deferral branch precedes
+                            // every settling write, so a report with is_fallback set
+                            // reaches no settling exit at all: the exits it can reach
+                            // answer {"ignored": true}, write nothing, and echo the
+                            // status the row ALREADY held -- which may be `completed`
+                            // and rated, from the other seat's prompt report. The
+                            // previous wording claimed a write that did not happen and
+                            // a dc_incomplete bound the row need not be under, which
+                            // would point an investigation at this path instead of at
+                            // whatever actually wrote the row (#342, #351).
+                            bool ignored = false;
+                            if (resp.IndexOf("\"ignored\"", StringComparison.Ordinal) >= 0)
+                            {
+                                try { ignored = ExtractJsonBool(resp, "ignored"); } catch { ignored = false; }
+                            }
+                            if (ignored)
+                                Plugin.Log.LogInfo("[2v2-DC] fallback NOT PARKED AND NOT APPLIED "
+                                    + "(deferred=false with ignored=true) — this box carries the rule "
+                                    + "and refused the report WITHOUT WRITING: the row was already out of "
+                                    + "(active, dc_paused), or a room/resume fence rejected it. The status "
+                                    + "in this answer is the one the row already held, written by something "
+                                    + "else; this report changed nothing and bounds nothing");
+                            else
+                                Plugin.Log.LogInfo("[2v2-DC] fallback answered deferred=false with no "
+                                    + "ignored flag — this box carries the rule and took an exit this "
+                                    + "client does not model. The status in the answer is what the row "
+                                    + "reads now; nothing here claims this report produced it");
+                        }
                         else
                             Plugin.Log.LogInfo(
                                 "[2v2-DC] fallback SETTLED by a box that predates the deferral "
@@ -14575,8 +14628,10 @@ namespace CompetitiveRounds
         /// latch is therefore on the ANSWER this request got, whatever it was, and
         /// the status in the line says which case it was: 0 is no answer at all — a
         /// refusal before the wire, a transport failure, or the 20 s timeout. What
-        /// it costs is one countdown in one banner for one series (#430); what it
-        /// buys is that the rule has no cell in which it keeps trying. The one
+        /// it costs is one series' 2 s refresh of the team-colour stamp and of the
+        /// status cache -- not a countdown, which cannot appear on current data (see
+        /// the tick's own summary above and residual 1) -- for that series (#430);
+        /// what it buys is that the rule has no cell in which it keeps trying. The one
         /// outcome that does NOT latch is a dispatch that never became a request
         /// (the catch below): nothing was asked of any box, so there is no answer to
         /// judge.</para>
@@ -14624,6 +14679,24 @@ namespace CompetitiveRounds
                     if (!affirmed)
                     {
                         _statusPollDarkSeries.Add(seriesId);
+                        if (answeredWith <= 0) _statusPollDarkNoAnswer.Add(seriesId);
+                        // DARK HAS TO MEAN DARK. Latching stops the POLL; on its own
+                        // it does not change what the banner renders FROM, and those
+                        // are two different facts (#342). These fields are the
+                        // banner's whole input, and their only other writer is the
+                        // ActiveTeamSeriesId setter, which fires on an id CHANGE --
+                        // so without this the last good answer stays on screen,
+                        // frozen, counting down from a number nothing will ever
+                        // refresh, for as long as the tab is open. Clearing the
+                        // remaining seconds is what darkens it: the render requires
+                        // dcRemaining > 0. Cleared only while the cache describes
+                        // THIS series, so latching one series cannot blank another's
+                        // (the ForId discipline, Codex r2 f8).
+                        if (LastSeriesStateForId == seriesId || seriesId == ActiveTeamSeriesId)
+                        {
+                            LastSeriesDcGraceSeconds = 0;
+                            LastSeriesDcTeamRemaining = 0;
+                        }
                         Plugin.Log.LogWarning("[2v2] series status read for series " + seriesId
                             + " was not answered as a read: HTTP " + answeredWith
                             + (answeredWith > 0
