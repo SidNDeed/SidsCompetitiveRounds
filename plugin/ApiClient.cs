@@ -41,33 +41,18 @@ namespace CompetitiveRounds
         // their own callers rather than locking the menu (r3/r4 findings).
         public static bool ForceUpdateRequired { get; private set; } = false;
 
-        /// <summary>True only when THIS server said, on /api/v1/mod-version, that
-        /// <c>GET /api/v1/team/series/{id}/state</c> honours <c>?lifecycle=false</c>
-        /// — i.e. that it has a mode in which that endpoint performs no lifecycle
-        /// write. Default FALSE, and every older server leaves it false by simply not
-        /// emitting the field.
-        ///
-        /// <para>WHY AN ADVERTISEMENT AND NOT THE PARAMETER'S OWN ECHO. What this
-        /// gates is the refusal to send a GET that WRITES (see
-        /// UpdateTeamSeriesStatePoll). `lifecycle` is a QUERY parameter, and a server
-        /// that does not know it DROPS it, answers 200, and runs the mutating arms
-        /// anyway (#266). The echoed `lifecycle` field in the answer is a true
-        /// discriminator, but it is only readable AFTER the request — and on the
-        /// wrong server that request is the write. Only an out-of-band signal can
-        /// protect the FIRST one, and it has to be something the new behaviour
-        /// positively EMITS rather than the absence of an error (#438): an absent
-        /// field, a server that never answered and a parse that failed all land on
-        /// "not advertised", the branch that touches nothing (#276).</para>
-        ///
-        /// <para>The echo is still used — as gate 2 in PollTeamSeriesStatusReadOnly,
-        /// where it latches this capability off so a server that ignored the
-        /// parameter is never polled a second time.</para>
-        ///
-        /// <para>An old server cannot emit a RESPONSE field it does not have, so the
-        /// unknown-parameter direction does not reach this flag itself. It reaches
-        /// the two parameters this client sends: `lifecycle` here, and `is_fallback`
-        /// in ReportTeamSeriesDc.</para></summary>
-        public static bool ServerHasReadOnlySeriesStatus { get; private set; } = false;
+        // THERE IS NO ADVERTISED SERIES-STATUS CAPABILITY, and re-adding one is the
+        // defect this round removed. The previous round read a capability boolean
+        // off /api/v1/mod-version and spent it as permission to send a per-series
+        // request. Those are two requests and two routing decisions: the edge can
+        // answer /mod-version from one box and the series read from another, and a
+        // rollback moves a box under a flag already held. A capability read from
+        // one response is not a property of the box that answers the next one.
+        // What replaces it is in PollTeamSeriesStatusReadOnly: it polls a route the
+        // server lane adds as a pure read, which a box that predates it does not
+        // serve at all, and the answer it trusts has to say `readonly` in its own
+        // body — the answering box proves itself, per response, or the banner goes
+        // dark for that series.
 
         // Recent ranked series (for leaderboard sidebar)
         public static List<RecentSeriesEntry> CachedRecentSeries { get; private set; }
@@ -1906,24 +1891,13 @@ namespace CompetitiveRounds
                         Plugin.Log.LogWarning($"[VERSION] Mod is BELOW server minimum (v{Plugin.ModVersion} < v{minVer}) — update required");
                     }
                 }
-                // The one SERVER capability this client reads. It is not a version
-                // compare: a box can be behind or ahead of the advertised mod
-                // version for reasons that have nothing to do with which routes it
-                // serves, and the two backend boxes are deployed separately, so the
-                // route's presence is the only thing worth asking about (#604 — a
-                // wire version and a capability are two constants, never one).
-                // Absent field -> false -> the banner polls nothing at all.
-                bool roStatus = false;
-                try { roStatus = ExtractJsonBool(req.downloadHandler.text, "series_status_readonly"); }
-                catch { roStatus = false; }
-                ServerHasReadOnlySeriesStatus = roStatus;
-                Plugin.Log.LogInfo("[VERSION] series_status_readonly=" + (roStatus ? "yes" : "no")
-                    + (roStatus
-                        ? " — the team tab reads series status with lifecycle=false, which this "
-                          + "server honours"
-                        : " — this server advertises no read-only series-status mode, so the team "
-                          + "tab's DC-grace banner polls NOTHING (the only per-series route it "
-                          + "could use performs a lifecycle write by default)"));
+                // NOTHING IS READ OUT OF THIS ANSWER BUT THE TWO VERSION NUMBERS.
+                // The previous round parsed a series-status capability flag here
+                // and let it decide whether a later, separately routed request was
+                // safe to send. Both halves of that are gone — the parse and the
+                // field — because no answer from this route describes the box that
+                // will answer the next one. The per-series read proves itself in
+                // its own response body instead.
                 // Auto-fire update on launch if behind. The Update method is no-op
                 // when running the Thunderstore build (it surfaces a notification only).
                 // NOT on the broadcast seat: that binary is installed by the build
@@ -13970,10 +13944,35 @@ namespace CompetitiveRounds
         // through in silence — an unpolled banner and a banner whose poll was
         // refused are different facts (#342).
         private static string _statusPollRefusedForSeries = null;
+        // THE LATCH, and it is per SERIES because that is the scope the evidence
+        // has. One entry per series id whose status read came back as something
+        // other than a 2xx carrying `readonly` — the box that answered has no such
+        // route, or did not answer it as a read. It is written in exactly one place
+        // (the response callback in PollTeamSeriesStatusReadOnly, which is the only
+        // code that has ever seen such an answer) and read in two (the tick below,
+        // so the refusal can SPEAK and name the series, and the poller itself, so
+        // the rule belongs to the operation and not to one caller's discipline —
+        // #432). A session holds one id per series it polled and was refused on.
+        private static readonly HashSet<string> _statusPollDarkSeries = new HashSet<string>();
 
         /// <summary>The team tab's DC-grace banner refresh.
         ///
-        /// <para>THIS PATH MAY NOT REACH THE MUTATING ROUTE, IN ANY SERVER STATE.
+        /// <para>THIS PATH COMPOSES ONE URL AND HAS NO SECOND BRANCH. It dispatches
+        /// <see cref="PollTeamSeriesStatusReadOnly"/> and nothing else, on every
+        /// answer and in every server state; that method builds
+        /// <c>GET /team/series/{id}/status</c>, which the server lane adds as a
+        /// handler that issues one SELECT and no write, and which a box that
+        /// predates it has no handler for at all. It has no fallback — not on a
+        /// 404, not on a 5xx, not on a body it cannot read. The claim this makes
+        /// about the client is total; the claim it makes about a server is only
+        /// that those are the two shapes a box can be in, and the server lane's
+        /// notes carry the production-pin evidence for the second.
+        /// The previous round routed this banner at the LIFECYCLE
+        /// endpoint in a mode a separate advertisement said was safe, which is a
+        /// claim about one box spent on a request another box can answer; that
+        /// design and its advertisement are deleted rather than repaired.</para>
+        ///
+        /// <para>WHY THE ROUTE MATTERS AND NOT THE MODE.
         /// <c>GET /team/series/{id}/state</c> is a lifecycle WRITE — see the block
         /// above SendTeamSpawnConfirm for the full arm. It sets
         /// <c>status='canceled'</c> with <c>invalidation_reason='assembly_timeout'</c>,
@@ -13988,15 +13987,16 @@ namespace CompetitiveRounds
         /// the live-game veto reads an in-process map that every api restart empties.
         /// This method runs from the MENU, against whatever series id is cached, for
         /// as long as the team tab is open — precisely a caller outside the assembly
-        /// window that write exists for.</para>
+        /// window that write exists for. A query parameter cannot keep this method
+        /// away from that arm, because a box that does not know the parameter drops
+        /// it and runs the arm anyway (#266); a different PATH can, because a box
+        /// that does not have the path runs no handler at all.</para>
         ///
         /// <para>THE PREDICATE, stated as the code applies it: the banner polls the
-        /// READ-ONLY mode (`?lifecycle=false`) and nothing else, and it polls that
-        /// only while <see cref="ServerHasReadOnlySeriesStatus"/> is true — i.e. only
-        /// while THIS server has advertised that it honours the parameter. Against
-        /// any server that has not, this method polls NOTHING AT ALL and says so once
-        /// per series. It never sends the parameter hopefully: a server that does not
-        /// know it drops it and writes anyway (#266).</para>
+        /// status route until an answer says this box does not serve it as a read,
+        /// and then polls NOTHING AT ALL for that series and says so once. It never
+        /// degrades to the lifecycle route, and it never decides from a previous
+        /// answer that the next box is safe.</para>
         ///
         /// <para>AND IT DOES NOT TRY TO DECIDE "IS THIS SERIES PLAYED YET" FROM HERE.
         /// The three terms that actually select the cancel arm are the row's confirm
@@ -14006,24 +14006,22 @@ namespace CompetitiveRounds
         /// quantity, and a guess that is WRONG exactly in the resume case the relock
         /// creates (#342: a check that cannot fail on the state it is meant to catch
         /// is worse than no check). The unhandled case fails toward touching nothing
-        /// (#276). What the refusal costs is one countdown in one banner; what it
-        /// buys is that no UI poll can void a played series and refund its bets
-        /// (#430).</para></summary>
+        /// (#276). What the refusal costs is one countdown in one banner (#430).</para></summary>
         public static void UpdateTeamSeriesStatePoll(bool force)
         {
             string sid = ActiveTeamSeriesId;
             if (string.IsNullOrEmpty(sid)) return;
-            if (!ServerHasReadOnlySeriesStatus)
+            if (_statusPollDarkSeries.Contains(sid))
             {
                 if (_statusPollRefusedForSeries != sid)
                 {
                     _statusPollRefusedForSeries = sid;
                     Plugin.Log.LogInfo("[2v2] DC-grace banner NOT polling series " + sid
-                        + " — this server does not advertise series_status_readonly, and the only "
-                        + "per-series route it could use (GET .../state) performs a lifecycle write "
-                        + "by default that can cancel a played series and reconcile its bets. The "
-                        + "banner stays dark until a server that honours lifecycle=false answers "
-                        + "this seat");
+                        + " — a box answering for this seat has no read-only status route for it, "
+                        + "which the read below recorded when that answer arrived. The banner stays "
+                        + "dark for this series: there is no second route to fall back to, because "
+                        + "the only other per-series route performs a lifecycle write that can "
+                        + "cancel a played series and reconcile its bets");
                 }
                 return;
             }
@@ -14253,12 +14251,24 @@ namespace CompetitiveRounds
             // WHAT IT ASKS THE SERVER FOR. A server carrying the fallback-deferral
             // rule does not settle on a zero-total fallback: it records that a
             // survivor believes the series is abandoned and answers
-            // {"deferred": true}, leaving the row active so a real-totals prompt
-            // report arriving at any later time still reaches its normal branches,
-            // including the rated lead-forfeit. That is the half the client cannot
-            // close — two disconnects on different seats are not orderable from
-            // inside one client — and setting the flag is the client's whole part in
-            // closing it.
+            // {"deferred": true}, leaving the row open for a real-totals prompt
+            // report to reach its normal branches, including the rated
+            // lead-forfeit. THE BOUND ON THAT, in the cross-lane contract's words
+            // and carried character for character on both lanes and in the
+            // migration:
+            //
+            //   A real-totals report wins while the deferred marker is younger than
+            //   420 seconds, and after that only until a sweep tick finds no
+            //   live-game evidence for the series and settles the row; once a row is
+            //   settled, a later report is refused at the settled-row exit and is
+            //   not rated.
+            //
+            // So this is not "the client is safe afterwards": it is a window, and
+            // what happens past it is a stated loss rather than an unstated one. The
+            // ordering the client cannot close — two disconnects on different seats
+            // are not orderable from inside one client — is closed inside that
+            // window and not outside it, and setting the flag is the client's whole
+            // part in it.
             //
             // AGAINST AN OLDER SERVER (#266). An unknown query parameter is IGNORED,
             // the request is answered 200, and the report settles immediately exactly
@@ -14325,28 +14335,67 @@ namespace CompetitiveRounds
                     + $" (every attempt answered={answered})");
                 if (fallback)
                 {
-                    // WHICH SERVER ANSWERED, said positively rather than assumed. A
-                    // 200 alone does not distinguish a server that deferred this
-                    // fallback from one that ignored the is_fallback parameter and
-                    // settled the series on it (#266 — an unknown query parameter is
-                    // dropped silently and the response is a healthy 200). The
-                    // `deferred` field is the positive signal the new rule emits
-                    // (#438), and BOTH directions are logged, because "deferred" and
-                    // "settled by a server that never saw the flag" are different
-                    // facts and a bundle has to be able to tell them apart (#342).
+                    // WHICH BOX ANSWERED, said positively rather than assumed, and
+                    // now in THREE values rather than two. A 200 alone cannot tell a
+                    // box that deferred this fallback from one that ignored the
+                    // is_fallback parameter and settled the series on it (#266 — an
+                    // unknown query parameter is dropped silently and the answer is a
+                    // healthy 200). The cross-lane contract closes that by making
+                    // `deferred` PRESENT on every 200 that endpoint returns, so
+                    // presence is tracked separately from value (#604):
+                    //
+                    //   present and true   this box deferred this report
+                    //   present and false  this box carries the deferral build and
+                    //                      settled this report at one of its other
+                    //                      exits
+                    //   absent from a 200  the box that answered predates the flag
+                    //
+                    // and a NON-200 proves nothing about any box, which is why the
+                    // read below is taken only on `ok`. Each line says exactly that
+                    // much and no more: the previous round's version read absence as
+                    // "this server does not carry the rule", which was an inference
+                    // about a box from a field the rule's own validation exits did
+                    // not emit either (#342).
+                    //
+                    // WHAT THE DEFERRED LINE DOES NOT PROMISE. A deferral is not a
+                    // disposition. The only other writer of that row is the server's
+                    // sweep, which settles a marked series on a tick that finds no
+                    // live-game evidence for it — so a series whose evidence keeps
+                    // being refreshed, or whose row is skipped by every tick, stays
+                    // open, and nothing in this process observes either. The line
+                    // below therefore reports the deferral it was told about and
+                    // states the window; it does not claim the row will close.
                     if (ok)
                     {
+                        bool present = !string.IsNullOrEmpty(resp)
+                                       && resp.IndexOf("\"deferred\"", StringComparison.Ordinal) >= 0;
                         bool deferred = false;
-                        try { deferred = ExtractJsonBool(resp, "deferred"); } catch { deferred = false; }
-                        if (deferred)
+                        if (present)
+                        {
+                            try { deferred = ExtractJsonBool(resp, "deferred"); } catch { deferred = false; }
+                        }
+                        if (present && deferred)
                             Plugin.Log.LogInfo("[2v2-DC] fallback DEFERRED by the server — the row is "
-                                + "still open and a real-totals report arriving later still settles it "
-                                + "normally; the server's own sweep closes it if none does");
+                                + "left open so a real-totals report can still take its normal branches. "
+                                + "A real-totals report wins while the deferred marker is younger than "
+                                + "420 seconds, and after that only until a sweep tick finds no live-game "
+                                + "evidence for the series and settles the row; once a row is settled, a "
+                                + "later report is refused at the settled-row exit and is not rated. What "
+                                + "stays open: nothing here observes the sweep, so this line is the "
+                                + "deferral and not the disposition");
+                        else if (present)
+                            Plugin.Log.LogInfo("[2v2-DC] fallback SETTLED by the server (deferred=false "
+                                + "in the answer) — this box carries the deferral rule and settled this "
+                                + "report at one of its other exits: the series was already out of "
+                                + "(active, dc_paused), or a fence refused it. The zero-total form still "
+                                + "bounds the row to dc_incomplete");
                         else
-                            Plugin.Log.LogInfo("[2v2-DC] fallback SETTLED by the server (no deferred "
-                                + "flag in the answer) — this server does not carry the deferral rule, "
-                                + "or it declined to defer this report. The zero-total form still bounds "
-                                + "the row to dc_incomplete, and the displacement residual stands");
+                            Plugin.Log.LogInfo(
+                                "[2v2-DC] fallback SETTLED by a box that predates the deferral "
+                                + "(no deferred field in a 200) — it dropped is_fallback as an "
+                                + "unknown query parameter and settled the series on this report. The "
+                                + "zero-total form still bounds the row to dc_incomplete, and the "
+                                + "displacement residual stands unchanged against that box");
                     }
                     return;
                 }
@@ -14414,11 +14463,13 @@ namespace CompetitiveRounds
         // Both of those callers would have voided a partly-played series as never
         // assembled: not dc_incomplete, so never in the admin panel, bets settled on
         // the wrong reason, and a real report afterwards answered with
-        // {"ignored": true}. The tab's caller is gone as of this round — the banner
-        // goes through PollTeamSeriesStatusReadOnly, which sends `lifecycle=false`
-        // and only against a server that advertised it honours that, and polls
-        // nothing at all otherwise. This route keeps exactly one caller in its
-        // default, WRITING mode, and that method's name now says so.
+        // {"ignored": true}. The tab's caller is gone — the banner goes through
+        // PollTeamSeriesStatusReadOnly, which builds a DIFFERENT PATH
+        // (.../status) and never this one. That is the whole of the separation now:
+        // the round that tried to keep this route and make it safe in a mode did it
+        // with a query parameter, and a box that does not know a query parameter
+        // drops it and writes anyway (#266). This route has exactly one caller, in
+        // its default and only mode, which writes; the method's name says so.
         // NOTHING REPLACES IT, because nothing needed it. The question it was asked
         // ("is this series still open?") is answered by the report endpoint itself,
         // atomically, under the FOR NO KEY UPDATE reread it already takes: a status
@@ -14444,10 +14495,10 @@ namespace CompetitiveRounds
             }));
         }
 
-        /// <summary>GET /team/series/{id}/state in its LIFECYCLE mode — with no
-        /// `lifecycle` parameter, which is the default and the MUTATING one. Its
-        /// first arm cancels the series and reconciles its bets; the name carries
-        /// that so a call site cannot be written without reading it.
+        /// <summary>GET /team/series/{id}/state — the LIFECYCLE route, which has one
+        /// behaviour and it mutates. Its first arm cancels the series and reconciles
+        /// its bets; the name carries that so a call site cannot be written without
+        /// reading it.
         ///
         /// <para>EXACTLY ONE CALLER IS PERMITTED: Plugin.PollAssemblyStateLoop, which
         /// is the assembly window the cancel arm was written for — it starts 3 s
@@ -14456,10 +14507,10 @@ namespace CompetitiveRounds
         /// server's 180 s deadline and it cannot reach the arm. It is also the one
         /// caller that MUST keep the lifecycle behaviour: it is the only thing that
         /// frees four clients from an assembly that failed. Every other consumer of
-        /// series status uses PollTeamSeriesStatusReadOnly, which sends
-        /// `lifecycle=false`. The previous round removed a second caller from the DC
-        /// fallback path; a second one survived in the team tab and is removed this
-        /// round (see UpdateTeamSeriesStatePoll). Do not add a third.</para></summary>
+        /// series status uses PollTeamSeriesStatusReadOnly, which builds the separate
+        /// .../status path and never this one. Two callers of this route have been
+        /// removed on this branch — the DC fallback path's pre-check, then the team
+        /// tab's banner. Do not add a third.</para></summary>
         public static void PollTeamSeriesStateAssemblyOnly(string seriesId, Action<string, string, int> onResponse)
         {
             if (string.IsNullOrEmpty(seriesId)) return;
@@ -14471,79 +14522,126 @@ namespace CompetitiveRounds
             }));
         }
 
-        /// <summary>The READ-ONLY mode of the same route: `?lifecycle=false`, which
-        /// the server lane adds this round. With it, both mutating arms of
-        /// team_series_state are skipped — no UPDATE, no commit — and the row's real
-        /// current status is returned, with the answer echoing a `lifecycle` field.
+        /// <summary>A DIFFERENT ROUTE: <c>GET /team/series/{id}/status</c>, which the
+        /// server lane adds this round as a pure read — no cancel arm, no bet
+        /// reconciliation, no UPDATE of any kind — returning the status fields the
+        /// state endpoint returns plus <c>readonly: true</c>.
         ///
-        /// <para>TWO GATES, AND THEY DO DIFFERENT JOBS. `lifecycle` is a QUERY
-        /// parameter, so a server that does not know it DROPS it, answers 200, and
-        /// runs the mutating arms anyway (#266). The echoed field is the only thing
-        /// in the answer that tells the two servers apart — and it can only be read
-        /// once the request has already been sent, which on the wrong server is the
-        /// write itself. So:</para>
+        /// <para>WHY A ROUTE AND NOT A MODE. The previous round asked the mutating
+        /// state endpoint to behave as a read when sent a query flag, and protected
+        /// the first such request with a capability flag read earlier from
+        /// /mod-version. Both are unsound for the same reason: a query parameter is
+        /// DROPPED by a box that does not know it, which answers 200 and runs the
+        /// mutating arms (#266), and the flag that permitted the request was a
+        /// statement about whichever box answered /mod-version, not about the box
+        /// answering this one. Two requests are two routing decisions — the edge
+        /// routes reads to the standby and keeps the primary as a fallback upstream,
+        /// and a rollback moves a box under a flag already held. A path is not
+        /// droppable: a box without this route runs no handler for it, and what
+        /// comes back is a refusal rather than a write. The server lane's notes
+        /// carry the production-pin evidence for what such a box answers.</para>
         ///
-        /// <para>GATE 1, before anything is sent: the advertisement
-        /// (<see cref="ServerHasReadOnlySeriesStatus"/>). It is the only thing that
-        /// can protect the FIRST request, and it is checked here as well as at the
-        /// call site so the rule belongs to the operation rather than to one caller's
-        /// discipline (#432).</para>
+        /// <para>GATE 1, before anything is sent: this series must not already be
+        /// latched dark (<c>_statusPollDarkSeries</c>). Checked here as well as at
+        /// the call site, so the rule belongs to the operation rather than to one
+        /// caller's discipline (#432).</para>
         ///
-        /// <para>GATE 2, on the answer: the echo must be PRESENT and false. Presence
-        /// is tracked separately from value, because a bool extractor returns false
-        /// for "absent" and for "false" alike and absent is the dangerous one (#604).
-        /// An answer without the echo means this server ignored the parameter, so the
-        /// capability is latched OFF for the session and no further read goes out —
-        /// it stops the second request, never the first.</para>
+        /// <para>GATE 2, ON THE ANSWER, AND IT IS THE WHOLE CAPABILITY CHECK. The
+        /// answer is trusted only if the request SUCCEEDED and the body carries
+        /// <c>readonly</c> — presence tracked separately from value, because a bool
+        /// extractor answers false for "absent" and for "false" alike and absent is
+        /// the dangerous one (#604) — and that value is true. EVERY OTHER ANSWER —
+        /// a 404, whether from a box that predates the route or from one that does
+        /// not have this series, a 426 from the version gate, a 503, a 5xx, a
+        /// timeout, a body that does not say it or cannot be parsed — latches THIS
+        /// SERIES dark, logs one line naming the HTTP status and the series id, and
+        /// parses NOTHING out of the answer. The two 404s are not told apart, and
+        /// they do not need to be: neither has a status to show, and the banner's
+        /// disposition for both is the same one. There is no fallback:
+        /// this method composes one URL, and no branch of it reaches the lifecycle
+        /// route. The capability is proven per RESPONSE, by the box that answered,
+        /// and never inferred from a previous answer or an advertisement.</para>
         ///
-        /// <para>GATE 3, WHICH IS WHAT MAKES GATE 2's BOUND TRUE. "It stops the
-        /// second request" is a claim about how many reads can reach the wire before
-        /// the first answer arrives, and nothing used to enforce it. The caller is a
-        /// menu tick dispatching every TEAM_SERIES_STATE_INTERVAL (2 s), the latch
-        /// lives in a response callback, and a request may be outstanding for up to
-        /// the transport's own 20 s timeout — so the count was round-trip latency
-        /// divided by the tick interval, which on a slow answer is ten, not one. The
-        /// guard's cost was reasoned about on a bound of ONE write (#430), so the
-        /// bound is enforced rather than assumed: at most one read of this route is
-        /// outstanding at a time. The flag is cleared in the callback, which
-        /// GetRequest invokes on EVERY exit — consent refusal, transport refusal,
-        /// version gate, success and failure alike — and again if the dispatch
-        /// itself throws. A flag that somehow stuck would leave this route polling
-        /// nothing, which is the same cost the latch imposes and the same direction
-        /// the rest of this method fails in (#276).</para></summary>
+        /// <para>THE UNANSWERED CASE LATCHES TOO, and that is deliberate rather than
+        /// incidental. A timeout tells us nothing about which box serves what, so
+        /// the argument for retrying it is real; the argument against is that "keep
+        /// asking until something answers" is how a poll ends up spending a previous
+        /// box's answer on the next box, which is the defect this round removed. The
+        /// latch is therefore on the ANSWER this request got, whatever it was, and
+        /// the status in the line says which case it was: 0 is no answer at all — a
+        /// refusal before the wire, a transport failure, or the 20 s timeout. What
+        /// it costs is one countdown in one banner for one series (#430); what it
+        /// buys is that the rule has no cell in which it keeps trying. The one
+        /// outcome that does NOT latch is a dispatch that never became a request
+        /// (the catch below): nothing was asked of any box, so there is no answer to
+        /// judge.</para>
+        ///
+        /// <para>GATE 3, THE IN-FLIGHT BOUND. The caller is a menu tick dispatching
+        /// every TEAM_SERIES_STATE_INTERVAL (2 s), the latch lives in a response
+        /// callback, and a request may be outstanding for up to the transport's own
+        /// 20 s timeout — so without a rule the number of reads reaching the wire
+        /// before the first answer is round-trip latency over the tick interval,
+        /// about ten. It is bounded rather than assumed: at most one read of this
+        /// route is outstanding at a time. The flag is cleared in the callback,
+        /// which GetRequest invokes on EVERY exit — consent refusal, transport
+        /// refusal, version gate, success and failure alike — and again if the
+        /// dispatch itself throws. A flag that somehow stuck would leave this route
+        /// polling nothing, which is the same cost the latch imposes and the same
+        /// direction the rest of this method fails in (#276). The bound now costs
+        /// less than it did: the reads it limits are reads.</para></summary>
         private static bool _statusReadInFlight;
 
         public static void PollTeamSeriesStatusReadOnly(string seriesId, Action<string, string, int> onResponse)
         {
             if (string.IsNullOrEmpty(seriesId)) return;
-            if (!ServerHasReadOnlySeriesStatus) return;
-            if (_statusReadInFlight) return;            // GATE 3 — see the note above
-            string url = $"{baseUrl}/api/v1/team/series/{seriesId}/state?lifecycle=false";
+            if (_statusPollDarkSeries.Contains(seriesId)) return;   // GATE 1
+            if (_statusReadInFlight) return;                        // GATE 3
+            string url = $"{baseUrl}/api/v1/team/series/{seriesId}/status";
             _statusReadInFlight = true;
+            // The code THIS request was answered with, captured per dispatch rather
+            // than in a field: GetRequest reports it immediately before it invokes
+            // the callback below, and a field would be shared with every other
+            // request in flight. 0 is "no answer reached this process".
+            long answeredWith = 0;
             try
             {
                 Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
                 {
                     _statusReadInFlight = false;
-                    if (!ok || string.IsNullOrEmpty(resp)) return;
-                    bool echoed = resp.IndexOf("\"lifecycle\"", StringComparison.Ordinal) >= 0;
-                    if (!echoed || ExtractJsonBool(resp, "lifecycle"))
+                    // GATE 2 — the answering box proves the read, in this answer.
+                    bool present = !string.IsNullOrEmpty(resp)
+                                   && resp.IndexOf("\"readonly\"", StringComparison.Ordinal) >= 0;
+                    bool affirmed = false;
+                    if (ok && present)
                     {
-                        ServerHasReadOnlySeriesStatus = false;
-                        Plugin.Log.LogWarning("[2v2] series status read-only mode is NOT in effect on this "
-                            + "server — the answer carries no lifecycle=false echo, so the lifecycle query "
-                            + "parameter was dropped and this endpoint's mutating arms ran. Latching the "
-                            + "capability off for the session: the DC-grace banner goes dark rather than "
-                            + "polling a write again");
+                        try { affirmed = ExtractJsonBool(resp, "readonly"); } catch { affirmed = false; }
+                    }
+                    if (!affirmed)
+                    {
+                        _statusPollDarkSeries.Add(seriesId);
+                        Plugin.Log.LogWarning("[2v2] series status read for series " + seriesId
+                            + " was not answered as a read: HTTP " + answeredWith
+                            + (answeredWith > 0
+                                ? (ok
+                                    ? " carried no readonly=true in its body"
+                                    : " — this box did not answer it as a read: it serves no such "
+                                      + "route, or it has no such series")
+                                : " (no answer reached this process — a refusal before the wire, a "
+                                  + "transport failure, or the 20 s timeout)")
+                            + ". Latching the DC-grace banner dark for this series: the read is proved "
+                            + "by the box that answers it, in that answer, and this one did not. There "
+                            + "is no second route to try, and nothing is parsed out of this answer");
+                        return;
                     }
                     ApplySeriesStateResponse(seriesId, resp, onResponse);
-                }));
+                }, detailedErrors: true, onResponseCode: code => answeredWith = code));
             }
             catch (Exception ex)
             {
                 // The dispatch itself failed, so no callback will ever run and
                 // nothing would clear the flag: release it here or this route
-                // stops polling for the session on one transient failure.
+                // stops polling for the session on one transient failure. It does
+                // NOT latch — nothing was asked of any box.
                 _statusReadInFlight = false;
                 Plugin.Log.LogWarning("[2v2] series status read could not be dispatched: " + ex.Message);
             }
@@ -21361,13 +21459,35 @@ namespace CompetitiveRounds
         /// <param name="extraHeader2Name">Sept 10 WP-B: a second optional pair
         /// (the multiplayer polls' X-Region-Pings-Gen beside X-Region-Pings),
         /// stamped under the same rule as the first.</param>
+        /// <param name="onResponseCode">Sept 16 r5: an optional sink for the HTTP
+        /// status THIS request was answered with, invoked on every exit immediately
+        /// BEFORE <paramref name="callback"/>, so a caller reading it from inside
+        /// the callback always sees this request's own code. 0 means no answer
+        /// reached this process — a consent refusal, the insecure-transport refusal,
+        /// or a transport failure that never produced a status — which is a
+        /// different fact from any code a box returned (#342), and the one caller
+        /// that reads it treats the two differently. Default null: the ~100 other
+        /// callers are unchanged, and a null sink is never invoked.</param>
         private static IEnumerator GetRequest(string url, Action<bool, string> callback,
             bool detailedErrors = false, bool sessionAware = false,
             string extraHeaderName = null, string extraHeaderValue = null,
-            string extraHeader2Name = null, string extraHeader2Value = null)
+            string extraHeader2Name = null, string extraHeader2Value = null,
+            Action<long> onResponseCode = null)
         {
-            if (ConsentBlocksRequest(url)) { callback(false, "no-consent"); yield break; }
-            if (SensitiveTransportBlocked(url, null, callback)) yield break;
+            // Both pre-wire refusals report 0 before the callback they hand back.
+            // SensitiveTransportBlocked invokes the callback itself, so it is given
+            // a wrapper rather than the raw one — otherwise the code would arrive
+            // after the body it describes.
+            if (ConsentBlocksRequest(url))
+            {
+                if (onResponseCode != null) onResponseCode(0);
+                callback(false, "no-consent"); yield break;
+            }
+            if (SensitiveTransportBlocked(url, null, (ok0, body0) =>
+                {
+                    if (onResponseCode != null) onResponseCode(0);
+                    callback(ok0, body0);
+                })) yield break;
             NoteAttempt();
             using (var request = UnityWebRequest.Get(url))
             {
@@ -21384,10 +21504,16 @@ namespace CompetitiveRounds
                 request.timeout = 20;
                 yield return request.SendWebRequest();
 
-                if (HandleVersionGate(request)) { callback(false, "outdated"); yield break; }
+                if (HandleVersionGate(request))
+                {
+                    // The box DID answer this one, with the gate's own status.
+                    if (onResponseCode != null) onResponseCode(request.responseCode);
+                    callback(false, "outdated"); yield break;
+                }
                 if (sessionAware) HandleSessionReject(request, _sentTok);
                 bool success = request.result == UnityWebRequest.Result.Success;
                 NoteResult(success, request.responseCode);
+                if (onResponseCode != null) onResponseCode(request.responseCode);
                 callback(success, success
                     ? request.downloadHandler.text
                     : (detailedErrors ? FormatRequestError(request) : request.error));

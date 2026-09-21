@@ -4234,11 +4234,14 @@ namespace CompetitiveRounds
                 //      a rated lead-forfeit lost. The client-side table removes every
                 //      schedule one seat can observe; a SECOND disconnect on a
                 //      different seat is not orderable from inside any one client.
-                //      Closing it is the SERVER lane's half: this client now sends
-                //      `is_fallback=true` on exactly its fallback reports, and a
-                //      server carrying the deferral rule records the fallback without
-                //      settling, so a later real-totals report still rates the series.
-                //      Against a server that does not carry it the parameter is
+                //      NARROWING it is the SERVER lane's half, and narrowing is the
+                //      word: this client sends `is_fallback=true` on exactly its
+                //      fallback reports, and a server carrying the deferral rule
+                //      records the fallback without settling, so a later real-totals
+                //      report can still rate the series INSIDE A BOUND — one that is
+                //      stated once, in full, at the `is_fallback` site in
+                //      ApiClient.ReportTeamSeriesDc, and does not hold outside it.
+                //      Against a server that does not carry the rule the parameter is
                 //      ignored (#266) and the residual above stands unchanged — which
                 //      is why it is written here as a residual and not as a closure.
                 //      What neither covers is a refusal that would apply

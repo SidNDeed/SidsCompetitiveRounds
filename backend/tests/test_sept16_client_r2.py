@@ -733,13 +733,13 @@ def test_h1_the_fallback_never_probes_the_series_state_endpoint():
 
     # THIS LINE USED TO COUNT THE URL LITERAL, AND THAT IS WHY IT PASSED ON A
     # TREE WITH TWO LIVE CALLERS.  A route has one literal whether one method
-    # calls it or five (#432).  Round 4 replaces the measurement in two places:
-    # here, the count is of the route's WRITING mode -- the bare path, without
-    # lifecycle=false, which is what actually cancels -- and the caller count
-    # itself lives in test_r4_h1_the_mutating_state_route_has_exactly_one_caller.
+    # calls it or five (#432).  Round 4 replaced the measurement in two places:
+    # the count here and the CALLER count in its own test.  Round 5 makes the
+    # count here simple again -- the route that writes is built once, full
+    # stop, because the read the banner needs is a different PATH and not a
+    # mode of this one.
     writing_mode = [ln for ln in api.split("\n")
-                    if "/api/v1/team/series/{seriesId}/state" in ln
-                    and "?lifecycle=false" not in ln]
+                    if "/api/v1/team/series/{seriesId}/state" in ln]
     assert len(writing_mode) == 1, writing_mode
     loop = _method_body(_src("Plugin.cs"),
                         "private static System.Collections.IEnumerator PollAssemblyStateLoop")
@@ -2437,65 +2437,79 @@ _MUTATING_GET_OWNERS = {
     "/api/v1/ffa/queue/poll/{sid}": "UpdateFfaQueuePoll",
 }
 
-# The sixth route is built TWICE on purpose, because the server lane makes its
-# write conditional rather than moving the read elsewhere: the same path in two
-# MODES, separated by one query parameter.
+# THE SIXTH ROUTE IS BUILT ONCE AS OF ROUND 5, and the read the banner needs is
+# a DIFFERENT PATH.  Round 4 built this path twice -- one route in two "modes",
+# separated by a query parameter -- and that is the design round 5 deletes.  A
+# box that does not know a query parameter drops it and runs the mutating arms
+# anyway (#266), and the advertisement that was supposed to keep the first such
+# request off such a box was read from whichever box answered /mod-version,
+# which is not the box that answers this request.  A PATH cannot be dropped: a
+# box without the route registers no handler for it.
 _STATE_ROUTE = "/api/v1/team/series/{seriesId}/state"
-_READONLY_SUFFIX = "?lifecycle=false"
+_STATUS_ROUTE = "/api/v1/team/series/{seriesId}/status"
+# Neither literal contains the other, so counting them is two independent
+# measurements and not one literal counted twice (#342).
+assert _STATE_ROUTE not in _STATUS_ROUTE and _STATUS_ROUTE not in _STATE_ROUTE
 
 
-def test_r4_h1_every_mutating_get_is_built_in_exactly_one_method():
+def test_r5_h1_every_mutating_get_is_built_in_exactly_one_method():
     """The sweep, as an OPERATION over the whole class rather than one route.
 
     Each queue route above is constructed in exactly ONE client method, so each
-    has a single choke point where its rule can be stated.  The series-state
-    route is the one with two modes: the WRITING mode is the bare path, the
-    read-only mode is the same path plus lifecycle=false.  What must be true is
-    not "one construction" but "exactly one construction in the WRITING mode" --
-    a distinction that matters because the parameter is what separates a read
-    from a cancel, and an omitted parameter is the dangerous direction."""
+    has a single choke point where its rule can be stated.  Round 4 made the
+    sixth an exception -- one path built twice, in two modes -- and this round
+    removes the exception: the mutating path is built ONCE, by the assembly
+    poll, and the read the banner needs is a different path built once by the
+    read-only poller.  The distinction that used to live in a query parameter
+    now lives in the URL, where no box can drop it."""
     api = _src("ApiClient.cs")
     for route, owner in sorted(_MUTATING_GET_OWNERS.items()):
         assert api.count(route) == 1, (route, api.count(route))
         assert _member_owning(api, route) == owner, (route, _member_owning(api, route))
 
-    # the two modes of the sixth, counted as modes
-    lines = [ln for ln in api.split("\n") if _STATE_ROUTE in ln]
-    assert len(lines) == 2, lines
-    writing = [ln for ln in lines if _READONLY_SUFFIX not in ln]
-    reading = [ln for ln in lines if _READONLY_SUFFIX in ln]
-    assert len(writing) == 1 and len(reading) == 1, (writing, reading)
-    assert _member_owning(api, writing[0].strip()) == "PollTeamSeriesStateAssemblyOnly"
-    assert _member_owning(api, reading[0].strip()) == "PollTeamSeriesStatusReadOnly"
+    # the sixth: one construction, in the writing method, and no query mode
+    state_lines = [ln for ln in api.split("\n") if _STATE_ROUTE in ln]
+    assert len(state_lines) == 1, state_lines
+    assert _member_owning(api, state_lines[0].strip()) == "PollTeamSeriesStateAssemblyOnly"
+    assert "?lifecycle" not in api
+
+    # and the read is its own path, built once, by the read-only poller
+    status_lines = [ln for ln in api.split("\n") if _STATUS_ROUTE in ln]
+    assert len(status_lines) == 1, status_lines
+    assert _member_owning(api, status_lines[0].strip()) == "PollTeamSeriesStatusReadOnly"
 
     # and no OTHER file builds any of them
     for name, src in _all_sources().items():
         if name == "ApiClient.cs":
             continue
-        for route in list(_MUTATING_GET_OWNERS) + [_STATE_ROUTE]:
+        for route in list(_MUTATING_GET_OWNERS) + [_STATE_ROUTE, _STATUS_ROUTE]:
             assert route not in src, (name, route)
 
     def claim(s):
         if not all(s.count(r) == 1 and _member_owning(s, r) == o
                    for r, o in _MUTATING_GET_OWNERS.items()):
             return False
-        ls = [ln for ln in s.split("\n") if _STATE_ROUTE in ln]
-        return len(ls) == 2 and len([ln for ln in ls if _READONLY_SUFFIX not in ln]) == 1
+        st = [ln for ln in s.split("\n") if _STATE_ROUTE in ln]
+        ro = [ln for ln in s.split("\n") if _STATUS_ROUTE in ln]
+        return (len(st) == 1 and len(ro) == 1
+                and _member_owning(s, st[0].strip()) == "PollTeamSeriesStateAssemblyOnly"
+                and _member_owning(s, ro[0].strip()) == "PollTeamSeriesStatusReadOnly")
 
-    # the mutation: the read-only mode loses its parameter, so the banner's own
-    # construction becomes a second WRITING one
+    # THE MUTATION: the banner's read goes back to the mutating path, which is
+    # the round-4 shape and the defect its H1 named -- a second construction of
+    # the route that writes
     _assert_discriminating(
         claim, api,
         _mutate(api,
-                'string url = $"{baseUrl}/api/v1/team/series/{seriesId}/state?lifecycle=false";',
+                'string url = $"{baseUrl}/api/v1/team/series/{seriesId}/status";',
                 'string url = $"{baseUrl}/api/v1/team/series/{seriesId}/state";',
-                "R4 second writing-mode construction"),
-        "R4 H1 one construction site in the writing mode")
+                "R5 the read goes back to the mutating path"),
+        "R5 H1 one construction site for the mutating route")
 
     # NEGATIVE CONTROL: an unrelated edit in the same method leaves it true
-    assert claim(_mutate(api, "[VERSION] series_status_readonly=",
-                         "[VERSION] series-status-readonly=",
-                         "R4 H1 sweep negative control"))
+    assert claim(_mutate(api, "[2v2] series status read for series ",
+                         "[2v2] series-status read for series ",
+                         "R5 H1 sweep negative control"))
 
 
 def test_r4_h1_the_mutating_state_route_has_exactly_one_caller_in_the_whole_client():
@@ -2552,13 +2566,130 @@ def test_r4_h1_the_mutating_state_route_has_exactly_one_caller_in_the_whole_clie
                          "R4 H1 caller-count negative control"))
 
 
-def test_r4_h1_the_banner_polls_the_read_only_route_and_only_when_it_is_advertised():
+def status_read_outcome(box, fallback_to_state=False):
+    """ONE status read, transliterated from PollTeamSeriesStatusReadOnly.
+
+    `box` is what the box that ANSWERS THIS REQUEST does with the path -- not
+    what any other box does, and not what /mod-version said:
+
+      "final"        200 carrying readonly=true
+      "old"          404: production registers no handler on that path
+      "rolled-back"  404: it had one and does not now
+      "gate"         426 from the version gate, which never reaches routing
+      "torn"         200 whose body does not carry readonly
+      "down"         no answer at all -- a transport failure or the 20 s timeout
+
+    Returns (routes_dispatched, latched, status_logged).
+
+    `fallback_to_state` is the MODEL'S OWN NEGATIVE CONTROL (#391): a model that
+    cannot express the defect cannot measure its absence.  With it True the
+    model degrades to the lifecycle route when the read did not come back as a
+    read, which is the shape this round exists to make impossible."""
+    answered = {"final": 200, "torn": 200, "old": 404, "rolled-back": 404,
+                "gate": 426, "down": 0}[box]
+    routes = [_STATUS_ROUTE]
+    if box == "final":
+        return routes, False, answered
+    if fallback_to_state:
+        routes.append(_STATE_ROUTE)
+        return routes, False, answered
+    return routes, True, answered
+
+
+def test_r5_h1_no_cell_of_the_box_matrix_dispatches_the_lifecycle_route():
+    """THE ROUND-4 H1, ANSWERED BY ENUMERATION.
+
+    Round 4 claimed this path "may not reach the mutating route, in any server
+    state" and that "no UI poll can void a played series".  Both were false in
+    one cell: /mod-version answered by a final box set the capability, and the
+    state read was then answered by an old or rolled-back box, which DROPPED
+    the query parameter, answered 200 and ran the cancel arm -- one write
+    before the echo check could latch anything off.
+
+    The matrix is (which box answered /mod-version) x (which box answered the
+    status read).  The first dimension is now inert BY CONSTRUCTION, and that
+    is asserted rather than assumed: neither method reads any field the
+    mod-version answer writes.  The second dimension decides only whether this
+    series latches dark.
+
+    In every cell, the routes this path dispatches are exactly one: the status
+    route.  The lifecycle route appears in no cell."""
+    boxes = ("final", "torn", "old", "rolled-back", "gate", "down")
+    for mod_version_box in ("final", "old"):
+        for box in boxes:
+            routes, latched, status = status_read_outcome(box)
+            assert routes == [_STATUS_ROUTE], (mod_version_box, box, routes)
+            assert _STATE_ROUTE not in routes, (mod_version_box, box)
+            assert latched == (box != "final"), (mod_version_box, box, latched)
+            if box != "final":
+                assert isinstance(status, int)
+
+    # THE MODEL'S OWN NEGATIVE CONTROL: it can express the defect, so the
+    # absence above is a measurement
+    routes, latched, _ = status_read_outcome("old", fallback_to_state=True)
+    assert _STATE_ROUTE in routes and latched is False
+
+    srcs = _all_sources()
+    api = srcs["ApiClient.cs"]
+
+    # WHAT THE MOD-VERSION DIMENSION IS INERT BY: neither method reads anything
+    # the mod-version answer sets.  If a gate on one of these ever returns, the
+    # first dimension is live again and this goes red.
+    _MOD_VERSION_FIELDS = ("LatestModVersion", "MinModVersion", "ForceUpdateRequired")
+
+    def claim(api_text):
+        ro = _method_body(api_text, "public static void PollTeamSeriesStatusReadOnly")
+        ui = _method_body(api_text, "public static void UpdateTeamSeriesStatePoll")
+        if not ro or not ui:
+            return False
+        for body in (ro, ui):
+            if "PollTeamSeriesStateAssemblyOnly" in body:
+                return False
+            if _STATE_ROUTE in body:
+                return False
+            if any(f in body for f in _MOD_VERSION_FIELDS):
+                return False
+        s = dict(srcs)
+        s["ApiClient.cs"] = api_text
+        return _call_sites("PollTeamSeriesStateAssemblyOnly", s) == {
+            ("Plugin.cs", "PollAssemblyStateLoop")}
+
+    # THE MUTATION: a fallback to the lifecycle route on the answer that did not
+    # prove itself -- the cell round 4 lost
+    _assert_discriminating(
+        claim, api,
+        _mutate(api,
+                '                            + "is no second route to try, and nothing is parsed '
+                'out of this answer");\n                        return;',
+                '                            + "is no second route to try, and nothing is parsed '
+                'out of this answer");\n'
+                '                        PollTeamSeriesStateAssemblyOnly(seriesId, onResponse);\n'
+                '                        return;',
+                "R5 H1 a fallback to the lifecycle route"),
+        "R5 H1 no cell reaches the lifecycle route")
+
+    # NEGATIVE CONTROL: rewording the refusal line moves no dispatch
+    assert claim(_mutate(api, "was not answered as a read: HTTP ",
+                         "was not answered as a read -- HTTP ",
+                         "R5 H1 matrix negative control"))
+
+
+def test_r5_h1_the_banner_polls_the_status_route_and_proves_it_per_response():
     """THE PREDICATE, asserted as the code applies it.
 
-    The banner polls the read-only status route, and only while this server has
-    ADVERTISED it on /mod-version (`series_status_readonly`).  Against any other
-    server it polls NOTHING AT ALL -- it does not fall back to the write, and it
-    does not try to decide locally whether the series is "played" yet.
+    The banner polls GET .../status -- a route with no mutating arm on any box
+    -- and nothing else.  There is no advertisement to consult, no mode to
+    request and no fallback: the method composes one URL, and any answer that
+    is not a 200 carrying readonly=true latches THIS SERIES dark instead of
+    trying something else.
+
+    WHY THE ADVERTISEMENT WENT.  It was read from /mod-version and spent as
+    permission for a later, separately routed request.  Two requests are two
+    routing decisions: the edge routes reads to the standby and keeps the
+    primary as a fallback upstream, and a rollback moves a box under a flag
+    already held.  A capability read out of one response is not a property of
+    the box that answers the next one, so the proof now rides IN the answer it
+    is about.
 
     WHY THERE IS NO LOCAL PLAYED-YET TEST.  The three terms that select the
     cancel arm are the row's confirm count, its age from room_issued_at, and the
@@ -2568,101 +2699,197 @@ def test_r4_h1_the_banner_polls_the_read_only_route_and_only_when_it_is_advertis
     the relock zeroes the confirms and NULLs the room stamp.  A check that
     cannot fail on the state it exists to catch is worse than no check (#342).
 
-    THE GATE IS TAKEN TWICE, and that is the point (#432): once at the call site
-    so the refusal can SPEAK and name the series, and once inside the read-only
-    poller, so the rule belongs to the operation and not to one caller's
-    discipline.
-
-    THE SECOND GATE IS NOT INTERCHANGEABLE WITH THE FIRST.  lifecycle is a QUERY
-    parameter, so a server that does not know it drops it, answers 200 and runs
-    the mutating arms anyway (#266).  The echoed `lifecycle` field in the answer
-    does tell the two servers apart -- but only once the request has been sent,
-    which on the wrong server IS the write.  So the advertisement protects the
-    first request and the echo latches the capability off before a second.
-
-    SERVER DEPENDENCY: both the `lifecycle` parameter and the
-    `series_status_readonly` advertisement are the server lane's.  Until both are
-    deployed the banner is dark; the refusal is logged once per series id."""
+    THE GATE IS STILL TAKEN TWICE, and that is still the point (#432): once at
+    the call site so the refusal can SPEAK and name the series, and once inside
+    the poller, so the rule belongs to the operation and not to one caller's
+    discipline."""
     api = _src("ApiClient.cs")
-
-    # default FALSE: an older server leaves it false by not emitting the field
-    assert ("public static bool ServerHasReadOnlySeriesStatus { get; private set; } = false;"
-            in api)
-    # two writers, and only two: the advertisement sets it, the echo latches it off
-    assert api.count("ServerHasReadOnlySeriesStatus = ") == 2
-    assert _member_owning(api, "ServerHasReadOnlySeriesStatus = roStatus;") == "DoCheckModVersion"
-    assert (_member_owning(api, "ServerHasReadOnlySeriesStatus = false;")
-            == "PollTeamSeriesStatusReadOnly")
-    assert 'ExtractJsonBool(req.downloadHandler.text, "series_status_readonly")' in api
 
     ui = _method_body(api, "public static void UpdateTeamSeriesStatePoll")
     assert ui, "the banner poll's own text could not be delimited"
-    assert "if (!ServerHasReadOnlySeriesStatus)" in ui
+    assert "if (_statusPollDarkSeries.Contains(sid))" in ui
     assert "PollTeamSeriesStatusReadOnly(sid, null);" in ui
     assert "PollTeamSeriesStateAssemblyOnly" not in ui
     # the refusal speaks, once per series, and names why
     assert "DC-grace banner NOT polling series" in ui
     assert "_statusPollRefusedForSeries" in ui
     # and it returns BEFORE the throttle, so no poll is dispatched at all
-    assert ui.index("if (!ServerHasReadOnlySeriesStatus)") < ui.index("teamSeriesStateTimer +=")
+    assert (ui.index("if (_statusPollDarkSeries.Contains(sid))")
+            < ui.index("teamSeriesStateTimer +="))
 
     ro = _method_body(api, "public static void PollTeamSeriesStatusReadOnly")
     assert ro, "the read-only poller's own text could not be delimited"
-    assert "if (!ServerHasReadOnlySeriesStatus) return;" in ro
-    assert "/state?lifecycle=false" in ro
-    # GATE 2: presence is tracked separately from value, because a bool
-    # extractor answers False for "absent" and for "false" alike and absent is
-    # the dangerous one (#604)
-    assert 'resp.IndexOf("\\"lifecycle\\"", StringComparison.Ordinal) >= 0' in ro
-    assert 'if (!echoed || ExtractJsonBool(resp, "lifecycle"))' in ro
-    assert "ServerHasReadOnlySeriesStatus = false;" in ro
-    # the latch is set BEFORE the response is applied, so no later path can send
-    # another read on the strength of this one
-    assert ro.index("ServerHasReadOnlySeriesStatus = false;") < ro.index("ApplySeriesStateResponse")
+    assert "if (_statusPollDarkSeries.Contains(seriesId)) return;" in ro
+    assert _STATUS_ROUTE in ro and _STATE_ROUTE not in ro
+    # GATE 2: presence tracked separately from value, because a bool extractor
+    # answers False for "absent" and for "false" alike and absent is the
+    # dangerous one (#604)
+    assert 'resp.IndexOf("\\"readonly\\"", StringComparison.Ordinal) >= 0' in ro
+    assert 'affirmed = ExtractJsonBool(resp, "readonly");' in ro
+    # the latch is taken on the answer, before anything could be parsed out of
+    # it, and the non-conforming answer is not parsed at all
+    assert "_statusPollDarkSeries.Add(seriesId);" in ro
+    assert ro.index("_statusPollDarkSeries.Add(seriesId);") < ro.index("ApplySeriesStateResponse")
+    # ONE LINE, NAMING THE STATUS AND THE SERIES (the contract's words)
+    assert "was not answered as a read: HTTP " in ro
+    assert '+ seriesId' in ro and '+ answeredWith' in ro
+    # the status is this request's own, captured per dispatch rather than in a
+    # field shared with every other request in flight
+    assert "long answeredWith = 0;" in ro
+    assert "onResponseCode: code => answeredWith = code" in ro
 
     def claim(s):
         u = _method_body(s, "public static void UpdateTeamSeriesStatePoll")
         r = _method_body(s, "public static void PollTeamSeriesStatusReadOnly")
         if not u or not r:
             return False
-        return ("if (!ServerHasReadOnlySeriesStatus)" in u
-                and "if (!ServerHasReadOnlySeriesStatus) return;" in r
-                and "/state?lifecycle=false" in r
-                and 'if (!echoed || ExtractJsonBool(resp, "lifecycle"))' in r
+        return ("if (_statusPollDarkSeries.Contains(sid))" in u
+                and "if (_statusPollDarkSeries.Contains(seriesId)) return;" in r
+                and _STATUS_ROUTE in r
+                and 'affirmed = ExtractJsonBool(resp, "readonly");' in r
+                and "_statusPollDarkSeries.Add(seriesId);" in r
                 and "PollTeamSeriesStateAssemblyOnly" not in u)
 
-    # mutation 1: the call-site gate goes
+    # mutation 1: the call-site gate goes, so a series already refused is
+    # polled again at the tab's tick and the refusal never speaks
     _assert_discriminating(
         claim, api,
-        _mutate(api, "            if (!ServerHasReadOnlySeriesStatus)\n            {",
+        _mutate(api, "            if (_statusPollDarkSeries.Contains(sid))\n            {",
                 "            if (false)\n            {",
-                "R4 banner gate removed"),
-        "R4 H1 banner gated on the advertisement")
+                "R5 banner gate removed"),
+        "R5 H1 banner gated on the per-series latch")
 
     # mutation 2: the choke-point gate inside the poller goes
     _assert_discriminating(
         claim, api,
-        _mutate(api, "            if (!ServerHasReadOnlySeriesStatus) return;\n", "",
-                "R4 read-only poller gate removed"),
-        "R4 H1 read-only poller gated at the operation")
+        _mutate(api, "            if (_statusPollDarkSeries.Contains(seriesId)) return;   // GATE 1\n",
+                "", "R5 read-only poller gate removed"),
+        "R5 H1 read-only poller gated at the operation")
 
-    # mutation 3: the default flips, which would poll a write against every
-    # older server before /mod-version has answered
-    def default_claim(s):
-        return ("public static bool ServerHasReadOnlySeriesStatus { get; private set; } = false;"
-                in s)
-
+    # mutation 3: the answer is trusted on a 2xx alone, which is exactly what an
+    # old box returns for a route it does not have only by accident -- and what
+    # a torn or proxied 200 returns always
     _assert_discriminating(
-        default_claim, api,
-        _mutate(api,
-                "public static bool ServerHasReadOnlySeriesStatus { get; private set; } = false;",
-                "public static bool ServerHasReadOnlySeriesStatus { get; private set; } = true;",
-                "R4 advertisement defaults to true"),
-        "R4 H1 the advertisement defaults to absent")
+        claim, api,
+        _mutate(api, '                        try { affirmed = ExtractJsonBool(resp, "readonly"); } '
+                     'catch { affirmed = false; }',
+                '                        affirmed = true;',
+                "R5 the answer is trusted on a 2xx alone"),
+        "R5 H1 the answer proves itself or it is refused")
 
     # NEGATIVE CONTROL: rewording the refusal leaves every claim true
-    assert claim(_mutate(api, "banner stays dark", "banner remains dark",
-                         "R4 H1 predicate negative control"))
+    assert claim(_mutate(api, "there is no second route to fall back to",
+                         "there is no second route to fall back on",
+                         "R5 H1 predicate negative control"))
+
+
+def test_r5_the_advertised_capability_is_absent_from_every_source():
+    """THE DELETION, swept over the whole tree rather than one method (#432).
+
+    A mechanism that is deleted in one file and left in another is not deleted;
+    the round-4 notes claimed an absence that the server tree contradicted, and
+    the cost of that was a rollout validated against the wrong literal.  So the
+    check is over every plugin source, for every spelling of the removed
+    mechanism: the capability field, its parse, the query parameter and the
+    echoed key it used to read.
+
+    No shipped client depends on any of it -- the round-4 client is unreleased
+    (#310, #389: deleted mechanisms beat patched ones)."""
+    dead = ("ServerHasReadOnlySeriesStatus", "series_status_readonly",
+            "lifecycle=false", '"lifecycle"')
+    srcs = _all_sources()
+    for name, src in sorted(srcs.items()):
+        for token in dead:
+            assert token not in src, (name, token)
+
+    def claim(api_text):
+        # An absence claim alone holds on a stub, which is a claim that cannot
+        # fail (#342) -- so it is conjoined with the presence of what REPLACED
+        # the mechanism.  The pair can only hold on a tree that deleted the one
+        # and built the other.
+        if any(t in api_text for t in dead):
+            return False
+        return ('affirmed = ExtractJsonBool(resp, "readonly");' in api_text
+                and "_statusPollDarkSeries" in api_text)
+
+    # THE MUTATION: the parse comes back, which is how the capability returns
+    _assert_discriminating(
+        claim, srcs["ApiClient.cs"],
+        _mutate(srcs["ApiClient.cs"],
+                "                // NOTHING IS READ OUT OF THIS ANSWER BUT THE TWO VERSION NUMBERS.",
+                "                bool roStatus = ExtractJsonBool(req.downloadHandler.text, "
+                '"series_status_readonly");',
+                "R5 the advertisement parse returns"),
+        "R5 the advertised capability is gone")
+
+    # NEGATIVE CONTROL: the word "lifecycle" still describes the route that
+    # mutates, which is what the server's own handler is called -- the claim is
+    # about the deleted MECHANISM, not about a word
+    assert claim(_mutate(srcs["ApiClient.cs"], "is a lifecycle WRITE",
+                         "is a lifecycle write", "R5 deletion negative control"))
+    assert "lifecycle" in srcs["ApiClient.cs"]
+
+
+def test_r5_the_bound_sentence_is_carried_verbatim_from_the_contract():
+    """ONE SENTENCE, ONE WORDING, BOTH LANES (#341, #444).
+
+    The round-4 comment promised that a real-totals report arriving "at any
+    later time" still reaches the rated branches.  It does not: the deferral is
+    a window.  The cross-lane contract fixes the wording so the two lanes and
+    the migration cannot drift into three descriptions of one rule, and the
+    client carries it character for character -- once in the comment at the
+    is_fallback site, once in the line the deferred answer logs.
+
+    The claim this test makes is about TEXT, and that is the point: a comment
+    asserting a guarantee is a claim about the whole state space (#351), and
+    the way this one stays true is that it is copied rather than restated."""
+    api = _src("ApiClient.cs")
+
+    # the sentence, as the contract writes it, reflowed across comment lines and
+    # across string concatenation -- so the comparison is on the words, not on
+    # the line breaks
+    sentence = ("A real-totals report wins while the deferred marker is younger than 420 "
+                "seconds, and after that only until a sweep tick finds no live-game evidence "
+                "for the series and settles the row; once a row is settled, a later report is "
+                "refused at the settled-row exit and is not rated.")
+
+    def flatten(s):
+        out = []
+        for line in s.split("\n"):
+            t = line.strip()
+            if t.startswith("//"):
+                t = t[2:]
+            t = t.replace('+ "', " ").replace('"', " ")
+            out.append(t)
+        return " ".join(" ".join(out).split())
+
+    flat = flatten(api)
+    assert flat.count(" ".join(sentence.split())) == 2, flat.count(" ".join(sentence.split()))
+
+    # the withdrawn promise is gone, and so is the wording the contract retired
+    assert "arriving at any later time" not in api
+    assert "second refusal" not in api
+    assert "room quiet" not in api and "room-quiet" not in api
+
+    def claim(s):
+        return (flatten(s).count(" ".join(sentence.split())) == 2
+                and "arriving at any later time" not in s)
+
+    # THE MUTATION: one copy is paraphrased, which is exactly the drift the
+    # single wording exists to prevent
+    _assert_discriminating(
+        claim, api,
+        _mutate(api, "            //   A real-totals report wins while the deferred marker is "
+                     "younger than\n",
+                "            //   A real-totals report wins whenever the deferred marker is "
+                "younger than\n",
+                "R5 the bound sentence is paraphrased"),
+        "R5 the bound sentence is carried verbatim, twice")
+
+    # NEGATIVE CONTROL: an unrelated comment edit leaves both copies intact
+    assert claim(_mutate(api, "THE BOUND ON THAT, in the cross-lane contract's words",
+                         "THE BOUND ON IT, in the cross-lane contract's words",
+                         "R5 bound-sentence negative control"))
 
 
 # ── H2: the outcome protocol's own capability, and the mixed-room refusal ────
@@ -2880,22 +3107,39 @@ def test_r4_h3_a_fallback_report_carries_is_fallback_and_a_prompt_report_does_no
                          "R4 H3 is_fallback negative control"))
 
 
-def test_r4_h3_the_deferred_answer_is_named_in_both_directions():
-    """A 200 alone does not distinguish a server that deferred this fallback
-    from one that dropped the unknown parameter and settled on it (#266).  The
-    `deferred` field is the positive signal the new rule emits (#438), and BOTH
-    branches log, because "deferred" and "settled by a server that never saw the
-    flag" are different facts a bundle has to be able to tell apart (#342).
+def test_r5_h3_the_deferred_answer_is_a_three_value_measurement():
+    """A 200 alone does not distinguish a box that deferred this fallback from
+    one that dropped the unknown parameter and settled on it (#266).  Round 4
+    read `deferred` as a bool and called its absence "this server does not
+    carry the deferral rule" -- but a bool extractor answers False for "absent"
+    and for "false" alike (#604), and that endpoint's own validation exits
+    emitted no `deferred` either, so the line was an inference about a box from
+    a field several of its own answers withheld.
 
-    SERVER DEPENDENCY: `deferred` is the server lane's field.  Until that lane
-    is deployed this logs the SETTLED line on every fallback, which is the
-    truthful description of what the deployed endpoint does."""
+    THE CROSS-LANE CONTRACT CLOSES IT at the source: `deferred` is now PRESENT
+    on every 200 that endpoint returns.  So the client reads three values, not
+    two, and each line says exactly what its value proves:
+
+      present and true   this box deferred this report
+      present and false  this box carries the deferral build and settled the
+                         report at one of its other exits
+      absent from a 200  the box that answered predates the flag
+
+    A NON-200 proves nothing about any box, which is why the read is taken only
+    on `ok`."""
     api = _src("ApiClient.cs")
     send = _method_body(api, "private static IEnumerator SendTeamSeriesDcReport")
     assert send, "the dispatch half's own text could not be delimited"
+
+    # presence is measured separately from value -- the #604 shape
+    assert 'resp.IndexOf("\\"deferred\\"", StringComparison.Ordinal) >= 0' in send
     assert 'ExtractJsonBool(resp, "deferred")' in send
+    # three lines, one per value
     assert "fallback DEFERRED by the server" in send
-    assert "fallback SETTLED by the server" in send
+    assert "fallback SETTLED by the server (deferred=false" in send
+    assert "fallback SETTLED by a box that predates the deferral" in send
+    # the whole read sits inside `if (ok)`, so a non-200 says nothing
+    assert send.index("if (ok)") < send.index('resp.IndexOf("\\"deferred\\"')
     # the deferred read happens on the FALLBACK path and before its return
     assert send.index("if (fallback)") < send.index('ExtractJsonBool(resp, "deferred")')
     # the prompt path is untouched: it still publishes the three-way outcome
@@ -2903,22 +3147,38 @@ def test_r4_h3_the_deferred_answer_is_named_in_both_directions():
 
     def claim(s):
         b = _method_body(s, "private static IEnumerator SendTeamSeriesDcReport")
-        return (bool(b) and 'ExtractJsonBool(resp, "deferred")' in b
+        if not b:
+            return False
+        return ('resp.IndexOf("\\"deferred\\"", StringComparison.Ordinal) >= 0' in b
+                and 'ExtractJsonBool(resp, "deferred")' in b
                 and "fallback DEFERRED by the server" in b
-                and "fallback SETTLED by the server" in b)
+                and "fallback SETTLED by the server (deferred=false" in b
+                and "fallback SETTLED by a box that predates the deferral" in b)
 
+    # MUTATION 1: the field is never read at all
     _assert_discriminating(
         claim, api,
         _mutate(api, 'try { deferred = ExtractJsonBool(resp, "deferred"); } catch { deferred = false; }',
                 "deferred = false;",
-                "R4 deferred status never read"),
-        "R4 H3 the deferred answer is read and named")
+                "R5 deferred status never read"),
+        "R5 H3 the deferred answer is read and named")
 
-    # NEGATIVE CONTROL
-    assert claim(_mutate(api, "the server's own sweep closes it if none does",
-                         "the server's own sweep closes it when none does",
-                         "R4 H3 deferred negative control"))
+    # MUTATION 2: presence collapses back into value, which is the round-4
+    # reading -- absent and false become one fact again
+    _assert_discriminating(
+        claim, api,
+        _mutate(api,
+                '                        bool present = !string.IsNullOrEmpty(resp)\n'
+                '                                       && resp.IndexOf("\\"deferred\\"", '
+                'StringComparison.Ordinal) >= 0;',
+                "                        bool present = true;",
+                "R5 deferred presence collapsed into value"),
+        "R5 H3 absence and false are two facts")
 
+    # NEGATIVE CONTROL: rewording the prose of one line leaves all three claims
+    assert claim(_mutate(api, "left open so a real-totals report can still take",
+                         "left open so a real-totals report may still take",
+                         "R5 H3 deferred negative control"))
 
 # ── H5 / M1 / L1: comments that asserted what the tree does not keep ─────────
 
@@ -3169,40 +3429,42 @@ def test_r4lens_f1_the_zero_form_is_enforced_only_here_and_the_comment_says_so()
 
 
 def readonly_reads_before_the_latch(rtt_seconds, in_flight_rule):
-    """How many lifecycle-mode reads reach the wire before the first answer
-    latches the capability off.
+    """How many status reads reach the wire before the first answer latches
+    this series dark.
 
     The dispatcher is a 2 s menu tick; the latch is applied inside a response
     callback.  With no in-flight rule every tick inside the round trip sends.
     With one, a tick whose predecessor has not answered sends nothing, so the
     count is exactly one whatever the latency.
 
-    Transport bound: GetRequest sets request.timeout = 20, so an unanswered read
-    cannot outlive 20 s -- the un-guarded count is bounded, not unbounded, and
-    the bound is eleven.  That distinction is why this is a model and not a
-    rhetorical point: the lens finding stated there was no timeout, and there
-    is one."""
+    Transport bound: GetRequest sets request.timeout = 20, so an unanswered
+    read cannot outlive 20 s -- the un-guarded count is bounded, not unbounded,
+    and the bound is eleven.  That distinction is why this is a model and not a
+    rhetorical point: the round-4 lens finding stated there was no timeout, and
+    there is one (#327 -- a refutation is recorded, not smoothed over)."""
     rtt = min(rtt_seconds, 20.0)
     if in_flight_rule:
         return 1
     return 1 + int(rtt // 2.0)
 
 
-def test_r4lens_f2_at_most_one_lifecycle_read_is_outstanding():
-    """F2.  Gate 2 documented a bound of one that nothing enforced.
+def test_r5lens_f2_at_most_one_status_read_is_outstanding():
+    """F2, carried forward onto the route that replaced the mode.
 
-    "the capability is latched OFF for the session and no further read goes out
-    -- it stops the second request, never the first" is a claim about how many
-    reads reach the wire before the first ANSWER, and the code had no in-flight
-    flag: UpdateTeamSeriesStatePoll dispatched a fresh coroutine every 2 s.  The
-    guard's refusal cost was reasoned about on a bound of ONE write (#430), and
-    on a 6 s answer the real count was four.
+    The documented bound was ONE and nothing enforced it:
+    UpdateTeamSeriesStatePoll dispatched a fresh coroutine every 2 s, and on a
+    6 s answer the real count was four.
 
-    What the bound protects: a server advertises series_status_readonly at
-    launch (read once, never re-read) while the box answering the GET does not
-    honour lifecycle=false -- the standby half of a two-step deploy, a rollback,
-    a rebuild during which the edge falls back.  Each un-honoured read can run
-    the cancel arm on a played active series and reconcile its bets."""
+    WHAT THE BOUND IS FOR NOW, AND WHY IT IS CHEAPER.  Round 4 needed it
+    because each un-honoured read could run the cancel arm on a played active
+    series and reconcile its bets -- the reads it limited were WRITES on the
+    wrong box.  On this round's route they are reads on every box, so the bound
+    no longer stands between a menu tick and a voided series; it stands between
+    a menu tick and a queue of reads no answer has closed.  It is kept because
+    the refusal it implements is per-series and one-shot: without the rule, ten
+    reads can be in flight when the first 404 arrives, and nine of them land
+    after the series is already dark (#430 -- a guard is judged by what its
+    refusal costs, and this one costs nothing)."""
     # the model: un-guarded, the count grows with latency and tops out at the
     # transport timeout; guarded, it is one everywhere
     for rtt in (0.5, 2.0, 6.0, 19.0, 45.0):
@@ -3227,44 +3489,44 @@ def test_r4lens_f2_at_most_one_lifecycle_read_is_outstanding():
             return False
         if ro.index("_statusReadInFlight = true;") > ro.index("StartCoroutine("):
             return False
-        # ...cleared inside the response callback BEFORE any early return...
+        # ...cleared inside the response callback BEFORE the gate that can
+        # return early...
         if "_statusReadInFlight = false;" not in ro:
             return False
         after = ro[ro.index("StartCoroutine("):]
-        if "if (!ok ||" not in after:
+        if "if (!affirmed)" not in after:
             return False
-        if after.index("_statusReadInFlight = false;") > after.index("if (!ok ||"):
+        if after.index("_statusReadInFlight = false;") > after.index("if (!affirmed)"):
             return False
         # ...and released when the dispatch itself throws, or one transient
-        # failure latches this route dark for the session
+        # failure leaves this route unable to poll at all
         return "catch (Exception ex)" in ro and ro.count("_statusReadInFlight = false;") == 2
 
     # MUTATION: the in-flight gate is removed -- the round-4 tree
     _assert_discriminating(
         claim, api,
-        _mutate(api, "            if (_statusReadInFlight) return;            // GATE 3",
-                "            // no in-flight rule                          // GATE 3",
-                "R4-lens F2 in-flight gate removed"),
-        "R4-lens F2 one lifecycle read outstanding")
+        _mutate(api, "            if (_statusReadInFlight) return;                        // GATE 3",
+                "            // no in-flight rule                                    // GATE 3",
+                "R5-lens F2 in-flight gate removed"),
+        "R5-lens F2 one status read outstanding")
 
     # MUTATION 2: the flag is cleared only after the early return, so a failed
-    # read latches the route dark for the session
+    # read leaves the route unable to dispatch for the session
     assert not claim(_mutate(
         api,
-        "                    _statusReadInFlight = false;\n                    if (!ok ||",
-        "                    if (!ok ||",
-        "R4-lens F2 clear moved after the early return"))
+        "                    _statusReadInFlight = false;\n                    // GATE 2",
+        "                    // GATE 2",
+        "R5-lens F2 clear moved after the early return"))
 
     # NEGATIVE CONTROL: rewording the dispatch-failure log leaves the claim true
     assert claim(_mutate(api, "series status read could not be dispatched",
                          "series status read was not dispatched",
-                         "R4-lens F2 negative control"))
+                         "R5-lens F2 negative control"))
 
     # the documented bound names the mechanism rather than asserting it, and the
     # transport term the model uses is the one the source actually sets
     assert "GATE 3" in api
     assert "request.timeout = 20;" in api
-
 
 def test_r4lens_f3_the_outcome_quorum_is_dominated_by_the_election_quorum():
     """F3.  The mixed-room refusal cannot fire, and the comment justifying two
@@ -3437,3 +3699,97 @@ def test_r4lens_f4_no_comment_certifies_a_deployed_cr_dcr_parser():
     assert claim(_mutate(ra, "not about a deployed parser",
                          "and not about a deployed parser",
                          "R4-lens F4 negative control"))
+
+
+# ── R5: the status channel on the shared GET helper ─────────────────────────
+
+
+def test_r5_the_status_channel_reports_before_every_callback():
+    """THE ONE SHARED METHOD THIS ROUND TOUCHES, and the rule that keeps the
+    touch honest.
+
+    The status banner has to name the HTTP status its read was answered with --
+    that is the whole content of the line the contract requires, and "HTTP 404"
+    and "no answer at all" are the two facts a reviewer needs to tell apart
+    (#342).  GetRequest knew the code and threw it away.
+
+    IT IS ADDITIVE AND IT IS ORDERED.  The sink defaults to null, so the ~100
+    other callers are unchanged and a null sink is never invoked; and on EVERY
+    exit it is invoked immediately BEFORE the body callback, so a caller
+    reading it from inside that callback always reads this request's own code
+    rather than the previous one's.  The insecure-transport refusal invokes the
+    callback itself, so it is handed a wrapper rather than the raw callback --
+    otherwise the code would arrive after the body it describes.
+
+    The check below is ORDERING, not presence: it merges the report sites and
+    the callback sites into one sequence and requires every callback to be
+    immediately preceded by a report.  A presence check would pass on a tree
+    that reported once and called back four times."""
+    api = _src("ApiClient.cs")
+    sig = "private static IEnumerator GetRequest(string url, Action<bool, string> callback,"
+    body = _method_body(api, sig)
+    assert body, "GetRequest's own text could not be delimited"
+
+    def events(text):
+        out = []
+        for i, ln in enumerate(text.split("\n")):
+            if "onResponseCode(" in ln:
+                out.append(("report", i))
+            elif "callback(" in ln and "Action<bool" not in ln:
+                out.append(("call", i))
+        return out
+
+    def claim(s):
+        b = _method_body(s, sig)
+        if not b:
+            return False
+        if "Action<long> onResponseCode = null)" not in b:
+            return False
+        ev = events(b)
+        calls = [e for e in ev if e[0] == "call"]
+        if len(calls) < 4:
+            return False                      # the four exits must all be there
+        for idx, (kind, _line) in enumerate(ev):
+            if kind != "call":
+                continue
+            if idx == 0 or ev[idx - 1][0] != "report":
+                return False
+        return True
+
+    assert claim(api)
+
+    # the default keeps every other caller exactly as it was
+    assert "Action<long> onResponseCode = null)" in api
+    # and exactly one caller passes it
+    assert api.count("onResponseCode: ") == 1
+    assert _member_owning(api, "onResponseCode: code =>") == "PollTeamSeriesStatusReadOnly"
+
+    # MUTATION: the report on the answered exit goes, so the status the banner
+    # prints is whatever the previous request left behind
+    _assert_discriminating(
+        claim, api,
+        _mutate(api,
+                "                if (onResponseCode != null) onResponseCode(request.responseCode);\n"
+                "                callback(success, success",
+                "                callback(success, success",
+                "R5 the answered exit stops reporting its code"),
+        "R5 every GetRequest exit reports its code before the callback")
+
+    # MUTATION 2: the insecure-transport refusal is handed the raw callback
+    # again, so on that exit the code arrives after the body
+    _assert_discriminating(
+        claim, api,
+        _mutate(api,
+                "            if (SensitiveTransportBlocked(url, null, (ok0, body0) =>\n"
+                "                {\n"
+                "                    if (onResponseCode != null) onResponseCode(0);\n"
+                "                    callback(ok0, body0);\n"
+                "                })) yield break;",
+                "            if (SensitiveTransportBlocked(url, null, callback)) yield break;",
+                "R5 the transport refusal drops its report"),
+        "R5 the pre-wire refusals report before their callback")
+
+    # NEGATIVE CONTROL: rewording the sink's own comment changes no ordering
+    assert claim(_mutate(api, "Both pre-wire refusals report 0 before the callback",
+                         "Both pre-wire refusals report zero before the callback",
+                         "R5 status-channel negative control"))
