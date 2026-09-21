@@ -990,10 +990,12 @@ def test_every_settling_answer_says_it_was_not_deferred():
     """W23 is a measurement, not an absence (r4 client L4).
 
     Absent from a 200, "deferred" means the box that answered predates the
-    flag. Present and false, it means this build settled the report. The
-    client cannot tell those apart unless the settling exits carry the field,
-    so they do -- including the settled-row exit a post-sweep report takes,
-    which is the second half of the bound.
+    flag. Present and false, it means this build did not PARK the report --
+    which is a statement about this call and not about the series: the
+    settled-row exit below answers false for a row something else had already
+    terminated, and the next test drives the two fences, which answer false
+    and leave the series open. The client cannot tell false from absent
+    unless every non-deferring exit carries the field, so they all do.
     """
     async def body():
         engine, Session, ids = await _fresh_series()
@@ -1020,6 +1022,72 @@ def test_every_settling_answer_says_it_was_not_deferred():
                 await engine2.dispose()
         finally:
             await engine.dispose()
+    _drive(body)
+
+
+def test_a_fenced_report_answers_not_deferred_and_leaves_the_series_open():
+    """"deferred": false is not a statement that the call settled anything.
+
+    Three of the five non-deferring exits decide nothing. The settled-row exit
+    is covered above; the two room fences are here, and they are the ones a
+    reader is most likely to get wrong, because they answer false about a
+    series that is STILL ACTIVE and still expecting a real-totals report. A
+    guard built on "false means this build settled it" would close it.
+
+    Both fences are driven against the live schema rather than read off the
+    source: the source test pins the file's wording, and this pins what the
+    endpoint actually answers and what it leaves in the row.
+    """
+    async def body():
+        # 1. The stored-room fence: the report names a room this series does
+        #    not own -- its dead predecessor.
+        engine, Session, ids = await _fresh_series()
+        sid = ids["sid"]
+        try:
+            with _harness_globals():
+                async with Session() as s:
+                    await s.execute(
+                        text("UPDATE team_series"
+                             "   SET photon_room_id = 'sct-aaaaaaaaaaaa'"
+                             " WHERE id = :sid"), {"sid": sid})
+                    await s.commit()
+                async with Session() as s:
+                    out = await main.team_series_report_dc(
+                        series_id=str(sid), reporter_steam_id=SID_T2A,
+                        dc_player_steam_id=SID_T1A, t1_points_total=3,
+                        t2_points_total=4, photon_room_id="sct-zzzzzzzzzzzz",
+                        is_fallback=False, hmac_sig="", db=s)
+                assert out["ignored"] is True, out
+                assert out["reason"] == "dc_room_mismatch", out
+                assert out["deferred"] is False, out
+                row = await _row(Session, sid)
+                assert row["status"] == "active", row
+                assert row["dc_player_id"] is None, row
+        finally:
+            await engine.dispose()
+
+        # 2. The post-relock fence: a ROOMLESS report inside the ten minutes
+        #    after a resume, which is the held-report case the fence exists
+        #    for. The four are playing; the row must stay open.
+        engine2, Session2, ids2 = await _fresh_series()
+        sid2 = ids2["sid"]
+        try:
+            with _harness_globals():
+                async with Session2() as s:
+                    await s.execute(
+                        text("UPDATE team_series"
+                             "   SET relocked_at = clock_timestamp()"
+                             " WHERE id = :sid"), {"sid": sid2})
+                    await s.commit()
+                out = await _real_totals(Session2, sid2)
+                assert out["ignored"] is True, out
+                assert out["reason"] == "dc_after_resume", out
+                assert out["deferred"] is False, out
+                row = await _row(Session2, sid2)
+                assert row["status"] == "active", row
+                assert row["dc_player_id"] is None, row
+        finally:
+            await engine2.dispose()
     _drive(body)
 
 

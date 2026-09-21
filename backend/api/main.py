@@ -40145,15 +40145,14 @@ async def team_series_report_dc(
         # deferred-fallback sweep -- is ignored here and is not rated. That is
         # the second half of the bound stated in the deferral branch below.
         #
-        # "deferred": False on this and on every other 200 this endpoint
-        # returns. The field is what tells a client WHICH build answered it:
-        # present and true means this box deferred the report, present and
-        # false means this box carries the deferral build and settled it, and
-        # ABSENT from a 200 means the box that answered predates the flag
-        # entirely (bug #266, learning #422). Without it on the non-deferred
-        # exits, a client seeing no flag could not tell "this build settled
-        # it" from "an old build ignored the parameter", and the seat's log
-        # line would be measuring nothing.
+        # This call itself settles nothing: whatever wrote the terminal status
+        # wrote it before this report arrived, which is what "ignored": True
+        # says. "deferred": False rides this exit because every 200 this
+        # endpoint returns carries the field -- without it on the exits that
+        # do not park a report, a client could not tell this build from one
+        # that predates the flag and dropped the parameter (bug #266, learning
+        # #422). The field is DEFINED once, in the deferral branch below, and
+        # means here exactly what it says there and nothing more.
         return {"status": s["status"], "ignored": True, "deferred": False}
     # Bug 245 companion: a DEFERRED DC report (clients can hold one through an
     # assembly phase and fire it minutes later) must not decide a series the
@@ -40304,18 +40303,26 @@ async def team_series_report_dc(
               f"reporter={reporter_steam_id} bound={_DC_FALLBACK_DEFER_SECONDS}s")
         # "deferred" is a status this endpoint has never returned before, which
         # is how a client tells a deployed server from one that predates the
-        # flag and ignored it (bug #266, learning #422) — an old server answers
-        # 200 with a SETTLED status and has already decided the series. It is a
-        # 2xx either way, so the client's answered/unanswered split reads it as
+        # flag and dropped it (bug #266, learning #422): a box at 0cc7f75
+        # answers with one of ITS statuses — a settlement, or one of the same
+        # three ignoring exits it already had — and never with this one, and
+        # nothing on that box will revisit the report afterwards. It is a 2xx
+        # either way, so the client's answered/unanswered split reads it as
         # answered and the seat stops retrying. A caller that needs the
         # deferral must read this field; having sent the parameter proves
         # nothing about what answered.
         #
-        # The FIELD, not the status, is the discriminator, and it now rides
-        # every 200 this endpoint returns: true here, false on each settling
-        # exit, absent only from a box that predates the flag. A client that
-        # reads a 200 with no "deferred" key at all knows it reached an old
-        # box; a client that reads false knows this build settled its report.
+        # The FIELD, not the status, is the discriminator, and it rides every
+        # 200 this endpoint returns. THE DEFINITION, and the only one in this
+        # file: "deferred" says only whether THIS call parked the report: true
+        # when it did, false on the five exits that do not park one -- two of
+        # which settle the series while the other three, the settled-row exit
+        # and the two room fences, decide nothing and say so with "ignored":
+        # true -- and absent only from a box that predates the flag. False is
+        # therefore not a claim that this call settled anything: a caller that
+        # needs the disposition reads "ignored" and "status" out of the same
+        # body, and a caller that reads no "deferred" key at all knows it
+        # reached a box that predates the flag.
         return {
             "status": "deferred",
             "deferred": True,

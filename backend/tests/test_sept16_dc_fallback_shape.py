@@ -407,6 +407,43 @@ def test_the_sweep_does_not_consult_the_room_clock():
     assert joined.count("float(_DC_FALLBACK_DEFER_SECONDS)") == 2, joined
 
 
+def flat_code_of(node):
+    """A def's own code as ONE whitespace-normalized string.
+
+    A per-LINE substring test answers "does any single line spell it this
+    way", which is a question about formatting. The census below is about a
+    COLUMN and the value written to it, so the span is flattened first: a
+    respelling, a different amount of space around the `=`, or the column and
+    its value landing on two lines of the same SQL string all still count
+    (#619, #591 -- follow the value, never the spelling).
+    """
+    return re.sub(r"\s+", " ", " ".join(code_lines_of(node)))
+
+
+# `room_issued_at` preceded by no word character and no dot, so `ts.room_issued_at`
+# in a SELECT and `r["room_issued_at"]` in a read are not writes; then `=` and the
+# bare token of whatever is written -- NOW, clock_timestamp, NULL, :bind.
+ROOM_CLOCK_WRITE = re.compile(r"(?<![\w.])room_issued_at\s*=\s*([:\w]+)")
+
+
+def functions_touching_the_room_clock():
+    """{def name: the set of values it writes to room_issued_at}, file-wide.
+
+    An SQL equality test on the column would land here too, as a value it
+    appears to write. That is the direction this check is meant to fail in: a
+    new use of the column shows up as an unexpected NAME and reddens the test,
+    rather than being silently absent from a spelling-keyed census.
+    """
+    found = {}
+    for n in TREE.body:
+        if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        vals = {m.group(1) for m in ROOM_CLOCK_WRITE.finditer(flat_code_of(n))}
+        if vals:
+            found[n.name] = vals
+    return found
+
+
 def test_every_room_issue_clears_the_deferral_marker():
     """What makes the deletion above safe, asked of the FILE.
 
@@ -416,10 +453,21 @@ def test_every_room_issue_clears_the_deferral_marker():
     stamps room_issued_at must clear the marker in the same breath. Counted
     file-wide, because the defect is a class and a span-local count could not
     see a third funnel (#432, #330).
+
+    Keyed on the COLUMN, not on one spelling of the statement that writes it.
+    The first cut matched the literal line `room_issued_at = NOW()`, so a
+    rematch or re-host funnel spelled `room_issued_at=clock_timestamp()`, or
+    written across two lines of its SQL, would have left the census reading
+    exactly ["team_queue_poll"] and the per-issuer check below would never
+    have run on it -- silence for precisely the drift the test exists to
+    catch (#342, #431, #441).
     """
-    issuers = functions_performing("room_issued_at = NOW()")
-    assert issuers == ["team_queue_poll"], issuers
-    for name in issuers:
+    writers = functions_touching_the_room_clock()
+    stampers = sorted(n for n, vals in writers.items() if vals != {"NULL"})
+    clearers = sorted(n for n, vals in writers.items() if vals == {"NULL"})
+    # The set is named, not counted: a new funnel is a thing to look at.
+    assert stampers == ["team_queue_poll"], writers
+    for name in stampers:
         code = code_lines_of(node_named(name))
         assert any("_team_clear_dc_fallback_marker(" in ln for ln in code), (
             f"{name} stamps room_issued_at without clearing the deferral "
@@ -428,8 +476,7 @@ def test_every_room_issue_clears_the_deferral_marker():
     # And the only other writers of the column set it to NULL -- the two
     # resume funnels dropping the dead room. A third value would be a new
     # shape this reasoning has not been done for.
-    assert functions_performing("room_issued_at = NULL,") == [
-        "_team_relock_existing_series", "team_lobby_start"]
+    assert clearers == ["_team_relock_existing_series", "team_lobby_start"], writers
 
 
 def test_the_bound_sentence_is_one_sentence_in_every_copy():
@@ -595,12 +642,14 @@ def test_mod_version_advertises_no_capability():
 
 
 def test_every_200_exit_of_report_dc_carries_the_deferred_field():
-    """W23 is a measurement only if the field rides the settling exits too.
+    """W23 is a measurement only if the field rides the non-deferring exits.
 
     Absent from a 200, "deferred" means the answering box predates the flag;
-    present and false, it means this build settled the report. With the field
-    only on the deferral branch, a client could not tell those two apart and
-    its log line would measure nothing (r4 client L4).
+    present and false, it means this build did not park the report -- which is
+    NOT the same as "this call settled the series", and the next test holds
+    the file's wording to that difference. With the field only on the deferral
+    branch a client could not tell false from absent, and its log line would
+    measure nothing (r4 client L4).
     """
     node = node_named("team_series_report_dc")
     returns = [n for n in ast.walk(node) if isinstance(n, ast.Return)]
@@ -613,3 +662,85 @@ def test_every_200_exit_of_report_dc_carries_the_deferred_field():
     src = "\n".join(code_only(span("team_series_report_dc")))
     assert src.count('"deferred": True') == 1
     assert src.count('"deferred": False') == 5
+
+
+# The ONE definition of the field, as it stands in main.py. One copy, not four:
+# a rule restated in several places is re-derived in several places, and round
+# 5 shipped three restatements of this one that each said something the code
+# does not do (#660, #701, #351).
+FIELD_SENTENCE = (
+    '"deferred" says only whether THIS call parked the report: true when it '
+    'did, false on the five exits that do not park one -- two of which settle '
+    'the series while the other three, the settled-row exit and the two room '
+    'fences, decide nothing and say so with "ignored": true -- and absent '
+    'only from a box that predates the flag.')
+
+
+def test_the_deferred_definition_is_single_and_its_arithmetic_matches_the_exits():
+    """The field's definition is a claim about all six exits; count them.
+
+    The round-5 wording said false meant "this box carries the deferral build
+    and settled it". Three of the five false exits settle nothing: the
+    settled-row exit answers for a row somebody else had already terminated,
+    and the two room fences DISCARD a stale report and leave the series
+    'active' and open. A maintainer who built the next guard on "false means
+    settled" would close a series that is still expecting a real-totals
+    report.
+
+    So the definition now names the split, and this test binds its arithmetic
+    to the AST: change what an exit does, or add a sixth, and the sentence
+    stops being true and this goes red.
+    """
+    def normalized(text_):
+        return re.sub(r"\s+", " ", re.sub(r"(?m)^\s*#\s?", " ", text_))
+
+    # ONE definition in the file, at the branch that creates the deferral.
+    assert normalized(SRC).count(FIELD_SENTENCE) == 1, (
+        "the field is defined zero times, or restated in a second place "
+        "where the two copies can drift")
+    branch = "\n".join(span("team_series_report_dc"))
+    assert FIELD_SENTENCE in normalized(branch)
+
+    node = node_named("team_series_report_dc")
+    returns = [n for n in ast.walk(node) if isinstance(n, ast.Return)]
+
+    def key(r, name):
+        for k, v in zip(r.value.keys, r.value.values):
+            if isinstance(k, ast.Constant) and k.value == name:
+                return v
+        return None
+
+    deferring = [r for r in returns
+                 if isinstance(key(r, "deferred"), ast.Constant)
+                 and key(r, "deferred").value is True]
+    not_deferring = [r for r in returns if r not in deferring]
+    # "decide nothing and say so with ignored: true"
+    ignoring = [r for r in not_deferring
+                if isinstance(key(r, "ignored"), ast.Constant)
+                and key(r, "ignored").value is True]
+    # "two of which settle the series" -- a settling exit names the terminal
+    # status it wrote as a literal; the three that decide nothing echo the
+    # status they READ (s["status"]) or carry no terminal status at all.
+    settling = [r for r in not_deferring
+                if isinstance(key(r, "status"), ast.Constant)
+                and key(r, "status").value in ("completed", "dc_incomplete")]
+
+    assert len(deferring) == 1, [r.lineno for r in deferring]
+    assert len(not_deferring) == 5, [r.lineno for r in not_deferring]
+    assert len(ignoring) == 3, [r.lineno for r in ignoring]
+    assert len(settling) == 2, [r.lineno for r in settling]
+    # The two sets partition the five: no exit both settles and says it
+    # decided nothing, and none of the five is unaccounted for.
+    assert not set(id(r) for r in ignoring) & set(id(r) for r in settling)
+    assert len(ignoring) + len(settling) == len(not_deferring)
+
+    # A literal backstop for the exact claims round 5 carried. It catches a
+    # revert of the wording and nothing cleverer -- the arithmetic above is
+    # what catches a NEW overclaim, because a new one has to contradict a
+    # count (#441: a grep for a common spelling answers a weaker question
+    # than the one being asked).
+    for gone in ("carries the deferral build and settled it",
+                 "knows this build settled its report",
+                 "false on each settling exit",
+                 "present and false, it means this build settled the report"):
+        assert gone not in SRC, gone
