@@ -107,13 +107,22 @@ namespace CompetitiveRounds
         /// client advertising cr_prox1 has answered a different question. Same
         /// family and same pre-join discipline as cr_pois2 / cr_msv2.
         ///
-        /// Round 3 did NOT take a new key. The repair's answer is whatever
-        /// PlayerManager.GetOtherPlayer returns on the tick, which is what an
-        /// unpatched seat's own first call would have produced and what the
-        /// previous cr_prox1 build was reproducing by hand; what changed is that
-        /// this seat stopped computing that answer for itself. Both builds resolve
-        /// from the same roster through the same rule, so the census is still
-        /// comparing like with like.
+        /// Round 3 did NOT take a new key, and the reason is NOT that the two
+        /// builds choose alike. They do not. Round 2 ranked the candidates with a
+        /// selector of its own and deferred entirely on an Any-target ring, where
+        /// this build re-runs PlayerManager.GetOtherPlayer unconditionally; a room
+        /// holding one seat of each could drain different players on different
+        /// screens. Measured against the rule above, that is a cr_prox2 change.
+        ///
+        /// What makes cr_prox1 correct here is narrower and checkable: no
+        /// released build advertises it at all. The key is absent from the base
+        /// release v1.40.3 and from every earlier tag - it exists only on the
+        /// unreleased tips of this branch, none of which reached a player - so
+        /// there is no cr_prox1 population for a census to be wrong about. The
+        /// rotation rule binds from the FIRST RELEASE that ships the key onward,
+        /// and this paragraph is the last point at which it can be waived.
+        /// Harness case K3 holds the argument to that fact, and the runner checks
+        /// the absence at the base tag against a key that did ship.
         ///
         /// It lives in the pure half because three different places have to agree
         /// on it - the staging call, the census, and the spectator staging that
@@ -328,11 +337,28 @@ namespace CompetitiveRounds
         ///
         /// WHAT THIS CANNOT PROVE, and what carries it instead. That the decompiled
         /// emitter is the code path this game build actually takes is a claim about
-        /// a running process, and only the game can answer it (#83/#405). The bound
-        /// that does not depend on it: this repair's three prefixes return true on
-        /// every path, so under ANY composition the worst a foreign fold could do
-        /// is fail to run them - the repair goes inert and the seat keeps vanilla,
-        /// which is today's shipped behaviour. The witness carries the rest.</summary>
+        /// a running process, and only the game can answer it (#83/#405).
+        ///
+        /// The bound that does NOT depend on it is scoped to the two methods this
+        /// repair patches ALONE - DealDamageToPlayer.Go and TeleportToOpponent.Go.
+        /// There this is the only prefix, it returns true on every path (V5), and
+        /// the worst a foreign fold could do is fail to run it: the repair goes
+        /// inert and the seat keeps vanilla, which is today's shipped behaviour.
+        ///
+        /// StunPlayer.Go is NOT covered by that bound, and the wording this
+        /// paragraph used to carry - "any composition" - was wrong about it. That
+        /// method also carries PerfPatches.StunPlayerGoNullGuard, whose whole job
+        /// is to answer false when the ancestor Player is gone. An unconditional
+        /// true is the identity element of a CONJUNCTION and of nothing else: fold
+        /// the answers some other way, with this prefix last, and the guard's
+        /// refusal is lost, vanilla dereferences the missing ancestor, and the
+        /// seat is left WORSE than today rather than equal to it. Harness case P5
+        /// measures both halves - that the conjunction preserves the refusal, and
+        /// that the two shipped prefixes really do disagree somewhere, which is
+        /// what makes the scoping matter. On that one method the claim therefore
+        /// rests on the conjunction being real: read from the shipped 0Harmony.dll
+        /// above, matched by #352, which reached the same fold from a production
+        /// failure. The witness carries the rest.</summary>
         internal static bool RunOriginalAfter(bool runSoFar, bool prefixReturn)
         {
             return runSoFar && prefixReturn;

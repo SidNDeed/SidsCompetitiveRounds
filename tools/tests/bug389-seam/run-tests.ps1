@@ -284,6 +284,28 @@ if (-not (Assert-BuilderRejects 'fold-line-in-the-gate' `
     '            return runSoFar && prefixReturn;')) { $overall = 1 }
 Say ''
 
+# ---------- 2b. the capability key has never been released ----------
+# K3 holds the seam's non-rotation argument to one fact: no released build
+# advertises cr_prox1. That is a claim about the RELEASE HISTORY, which no
+# compiled case can reach, so the runner checks it here.
+#
+# WITH A POSITIVE CONTROL, because a search that finds nothing proves nothing
+# (#342/#441): cr_pois2 is a capability key of the same family that DID ship, so
+# the same probe against the same tag must find it. A probe that reports both
+# keys absent has told us about the probe, not about the keys.
+$baseTag = 'v1.40.3'
+& git -C $repo grep -q 'cr_prox1' $baseTag -- plugin 2>&1 | Out-Null
+$keyAbsentAtBase = ($LASTEXITCODE -ne 0)
+& git -C $repo grep -q 'cr_pois2' $baseTag -- plugin 2>&1 | Out-Null
+$controlKeyPresent = ($LASTEXITCODE -eq 0)
+if ($keyAbsentAtBase -and $controlKeyPresent) {
+    Say ('RESULT capability key never released: OK - cr_prox1 absent at ' + $baseTag + ', control key cr_pois2 present at the same tag')
+} else {
+    Say ('RESULT capability key never released: FAILED - cr_prox1 absent=' + $keyAbsentAtBase + ', control cr_pois2 present=' + $controlKeyPresent)
+    $overall = 1
+}
+Say ''
+
 # ---------- 3. answer only the first time ----------
 # THE DEFECT, PUT BACK. Vanilla resolves its victim once and keeps it; if this
 # decision answered only the first time the effect would keep its first victim
@@ -401,7 +423,9 @@ $mutChain = New-Mutant 'chainlast' @(, @(
     '            return runSoFar && prefixReturn;',
     '            return prefixReturn;'))
 $runChain = Invoke-Suite 'mut-chainlast' $mutChain $repo
-if (-not (Assert-Mutation 'prefix-fold mutation' $runChain 'P3' 'P1')) { $overall = 1 }
+# P5 too: the conjunction is what carries the bound on StunPlayer.Go, so a fold
+# that keeps only the last answer must be visible to the case that says so.
+if (-not (Assert-Mutations 'prefix-fold mutation' $runChain @('P3', 'P5') 'P1')) { $overall = 1 }
 Say ''
 
 # ---------- 13. open the sibling null guard ----------
@@ -413,7 +437,10 @@ $mutGuard = New-Mutant 'guardopen' @(, @(
     '            return ProximityPrefixAction.SkipOriginal;',
     '            return ProximityPrefixAction.RunVanillaUntouched;'))
 $runGuard = Invoke-Suite 'mut-guardopen' $mutGuard $repo
-if (-not (Assert-Mutation 'null-guard mutation' $runGuard 'P4' 'P1')) { $overall = 1 }
+# P5's second half is that the two shipped prefixes CAN disagree. Open the guard
+# and they never do, which would make scoping the bound to a conjunction an
+# argument about nothing - so P5 must redden here as well as P4.
+if (-not (Assert-Mutations 'null-guard mutation' $runGuard @('P4', 'P5') 'P1')) { $overall = 1 }
 Say ''
 
 # ---------- 14-21. the wiring: the halves this harness cannot compile --------
@@ -495,6 +522,31 @@ $wireRoster = New-WireRoot 'roster' 'plugin/ProximityVictimPatches.cs' `
     '                if (pm == null || pm.players == null) return null;' ''
 $runWireRoster = Invoke-Suite 'wire-roster' $seam $wireRoster
 if (-not (Assert-Mutation 'authored-roster wiring' $runWireRoster 'N2' 'W1')) { $overall = 1 }
+Say ''
+
+# Put the refuted key argument back. The claim that a round-2 seat and a round-3
+# seat resolve the same player is false - round 2 ranked with a selector of its
+# own and deferred on an Any-target ring - and it was the stated reason for not
+# rotating cr_prox1. K3 is the case that holds the seam to the fact that
+# replaced it; without a mutant it would be a restatement of the comment.
+$wireKeyClaim = New-WireRoot 'keyclaim' 'plugin/ProximityVictimSeam.cs' `
+    'internal static class ProximityVictim' `
+    '        /// released build advertises it at all. The key is absent from the base' `
+    '        /// comparing like with like. The key is absent from the base' ''
+$runWireKeyClaim = Invoke-Suite 'wire-keyclaim' $seam $wireKeyClaim
+if (-not (Assert-Mutation 'key-non-rotation-claim wiring' $runWireKeyClaim 'K3' 'W1')) { $overall = 1 }
+Say ''
+
+# Put the unscoped composition bound back. "Under ANY composition the worst a
+# foreign fold could do is fail to run them" is true of the two methods this
+# repair patches alone and false of StunPlayer.Go, which also carries the perf
+# null guard. W13 is the case that holds the prose to what P5 measured.
+$wireBoundClaim = New-WireRoot 'boundclaim' 'plugin/ProximityVictimSeam.cs' `
+    'internal static class ProximityVictim' `
+    '        /// StunPlayer.Go is NOT covered by that bound, and the wording this' `
+    '        /// under ANY composition nothing here needs scoping, and the wording this' ''
+$runWireBoundClaim = Invoke-Suite 'wire-boundclaim' $seam $wireBoundClaim
+if (-not (Assert-Mutation 'composition-bound-claim wiring' $runWireBoundClaim 'W13' 'W1')) { $overall = 1 }
 Say ''
 
 # ---------- 22. the prior mechanism ----------

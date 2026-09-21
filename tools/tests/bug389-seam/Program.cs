@@ -27,8 +27,8 @@ using CompetitiveRounds;
 //   mutation reasonkey  : S1 must FAIL;  S2 control must PASS
 //   mutation capkey     : C1 must FAIL;  C2 control must PASS
 //   mutation fighterkeys: K1 must FAIL;  K2 control must PASS
-//   mutation chainlast  : P3 must FAIL;  P1 control must PASS
-//   mutation guardopen  : P4 must FAIL;  P1 control must PASS
+//   mutation chainlast  : P3 P5 must FAIL; P1 control must PASS
+//   mutation guardopen  : P4 P5 must FAIL; P1 control must PASS
 //   wiring   wire-spec  : W1 must FAIL;  W5 control must PASS
 //   wiring   wire-prop  : W2 must FAIL;  W5 control must PASS
 //   wiring   wire-gen   : W3 must FAIL;  W5 control must PASS
@@ -38,11 +38,19 @@ using CompetitiveRounds;
 //   wiring   wire-sitekey: S4 must FAIL; W1 control must PASS
 //   wiring   wire-rank  : N1 must FAIL;  W1 control must PASS
 //   wiring   wire-roster: N2 must FAIL;  W1 control must PASS
+//   wiring   wire-keyclaim:   K3 must FAIL; W1 control must PASS
+//   wiring   wire-boundclaim: W13 must FAIL; W1 control must PASS
 //   prior-r2            : N1 N2 N3 N4 N5 N6 must all FAIL; W1 control must PASS
 // Every OTHER case here - G3, G5, C3, D1, D2, D3, S2, S3, K2, P1, P2, W4, W6,
 // W7a-c, W9a-c, W12 - is a control, a companion assertion or a claim with no
 // runtime behaviour to mutate, and has NO mutant of its own. That list is the
 // whole of it.
+//
+// run-tests.ps1 also carries ONE check that is not a case here at all: the
+// capability key's absence from the base release tag, which K3's argument
+// rests on and no compiled case can reach. It has a positive control of its
+// own - a key of the same family that did ship - and is reported in the log
+// as "RESULT capability key never released".
 internal static class Program
 {
     private static int _failed;
@@ -514,15 +522,32 @@ internal static class Program
         // The key's NAME carries the protocol version and is read by peers; it is
         // unaffected by what the cleared set contains.
         //
-        // Round 3 kept cr_prox1 deliberately. The answer this build writes is
-        // whatever PlayerManager.GetOtherPlayer returns on the tick, which is what
-        // the previous cr_prox1 build was reproducing by hand and what an
-        // unpatched seat's own first call produces; what changed is that the seat
-        // stopped computing it for itself. A seat on either build resolves the
-        // same player, so the census still compares like with like.
+        // Round 3 kept cr_prox1, and NOT because the two builds choose alike.
+        // They do not: round 2 ranked the candidates with a selector of its own
+        // and deferred entirely on an Any-target ring, where this build re-runs
+        // PlayerManager.GetOtherPlayer unconditionally. Under the key's own rule
+        // that is a cr_prox2 change. What makes cr_prox1 correct is narrower: no
+        // released build advertises the key at all, so there is no population for
+        // a census to be wrong about. K3 holds the seam to that argument and the
+        // runner checks the absence at the base release tag.
         Check("K2 Capability_KeyIsTheVersionedName",
             ProximityVictim.CapabilityProp == "cr_prox1" && ProximityVictim.CapabilityValue == 1,
             "got " + ProximityVictim.CapabilityProp + "=" + ProximityVictim.CapabilityValue);
+
+        // ---- K3: the non-rotation argument is the checkable one. RED under ---
+        // the "keyclaim" wiring mutant.
+        //
+        // A capability key is a promise to peers, so the argument for NOT moving
+        // it is load-bearing and the one that shipped was false: it said both
+        // builds resolve alike. This asserts the seam rests on the fact instead -
+        // that the key has never left this branch - and that the refuted sentence
+        // is gone rather than merely joined by a truer one.
+        string seamForKey = LoadSource("plugin/ProximityVictimSeam.cs");
+        Check("K3 Capability_TheNonRotationArgumentIsTheNeverReleasedOne",
+            seamForKey != null
+            && CountOf(seamForKey, "released build advertises it at all") == 1
+            && CountOf(seamForKey, "comparing like with like") == 0,
+            "the key paragraph must rest on the key never having been released, not on the two builds choosing alike");
 
         // =================================================================
         // P - THE TWO PREFIXES ON StunPlayer.Go.
@@ -561,9 +586,12 @@ internal static class Program
         // HarmonyX composes this way in the running game; the emitted fold is read
         // from the shipped 0Harmony.dll and cited on RunOriginalAfter, and the
         // claim that this game build takes that code path is the witness's (#83).
-        // The bound that holds without either: this repair returns true on every
-        // path (V5), so the worst a different composition could do is fail to run
-        // it, leaving the seat on vanilla.
+        // What holds without either is NARROWER than this case used to say, and P5
+        // is where it is measured: on the two methods this repair patches alone it
+        // returns true on every path (V5), so a different fold can only fail to run
+        // it and leave the seat on vanilla - but on StunPlayer.Go, which also
+        // carries the perf null guard, an unconditional true is the identity
+        // element of a CONJUNCTION and of nothing else.
         bool orderStable = true;
         string firstDivergence = "";
         foreach (var gate in GateStates)
@@ -623,6 +651,67 @@ internal static class Program
                 }
         Check("P4 Prefix_TheSiblingNullGuardStillSuppressesWhenTheAncestorIsMissing",
             guardMatches, "the refactored guard changed its answer at " + guardLeak);
+
+        // ---- P5: the unconditional bound is CONJUNCTION-scoped. RED under -----
+        // "chainlast" (first half) and under "guardopen" (second half).
+        //
+        // The seam's bound on a foreign fold used to be stated over ANY
+        // composition. It does not hold there, and this is the case that says so
+        // in numbers rather than in prose. Two halves, both computed from the two
+        // SHIPPED decision functions:
+        //
+        //   a. Under the fold the seam models - the conjunction read from the
+        //      shipped 0Harmony.dll - the sibling's refusal SURVIVES this
+        //      prefix at every corner. That is the bound that is actually true.
+        //   b. The two prefixes DO disagree at some corner: the guard refuses
+        //      where this repair runs vanilla. So a fold that is not a
+        //      conjunction can reach a different answer there, which is exactly
+        //      why the bound cannot be stated composition-independently.
+        //
+        // Half b is what keeps half a from being decoration: if the two prefixes
+        // could never disagree, scoping the claim to a conjunction would be an
+        // argument about nothing. "guardopen" removes the disagreement and this
+        // case reddens on it; "chainlast" breaks the conjunction and it reddens
+        // on that. P1 is the control for both.
+        bool refusalSurvivesTheConjunction = true;
+        string conjunctionLeak = "none";
+        bool prefixesCanDisagree = false;
+        string disagreeingCorner = "NONE";
+        foreach (bool guardOn in Booleans)
+            foreach (bool instPresent in Booleans)
+                foreach (bool ancPresent in Booleans)
+                {
+                    bool sibling = ProximityVictim.PrefixReturn(
+                        ProximityVictim.NullGuardAction(guardOn, instPresent, ancPresent));
+                    foreach (var gate in GateStates)
+                        foreach (bool other in Booleans)
+                            foreach (bool ring in Booleans)
+                                foreach (bool answered in Booleans)
+                                {
+                                    bool ours = ProximityVictim.PrefixReturn(
+                                        ProximityVictim.VictimAction(gate, other, ring, answered));
+                                    bool folded = ProximityVictim.RunOriginalAfter(
+                                        ProximityVictim.RunOriginalAfter(true, sibling), ours);
+                                    string corner = "guard=" + guardOn + "/inst=" + instPresent
+                                        + "/anc=" + ancPresent + " " + gate + "/other=" + other
+                                        + "/ring=" + ring + "/answered=" + answered;
+                                    if (!sibling && folded)
+                                    {
+                                        refusalSurvivesTheConjunction = false;
+                                        if (conjunctionLeak == "none") conjunctionLeak = corner;
+                                    }
+                                    if (!sibling && ours)
+                                    {
+                                        prefixesCanDisagree = true;
+                                        if (disagreeingCorner == "NONE") disagreeingCorner = corner;
+                                    }
+                                }
+                }
+        Check("P5 Prefix_TheUnconditionalBoundIsScopedToAConjunction",
+            refusalSurvivesTheConjunction && prefixesCanDisagree,
+            "the guard's refusal was lifted at " + conjunctionLeak
+            + "; the corner where the two shipped prefixes disagree = " + disagreeingCorner
+            + (prefixesCanDisagree ? "" : " - they never disagree, so scoping the bound to a conjunction argues about nothing"));
 
         // =================================================================
         // N - THE METHOD CHANGE. These read the shipped sources and assert
@@ -832,6 +921,21 @@ internal static class Program
             && CountOf(seamText, "2.9.0.0") == 1
             && CountOf(seamText, "WritePrefixes") == 1,
             "the fold claim must name the shipped assembly, its version and the emitter it was read from");
+
+        // W13 - the composition bound names the method it does NOT cover.
+        // RED under the "boundclaim" wiring mutant.
+        //
+        // The seam used to bound a foreign fold with "under ANY composition the
+        // worst it could do is fail to run them". That is true of the two methods
+        // this repair patches alone and false of StunPlayer.Go, which carries the
+        // perf null guard as well: an unconditional true is the identity element
+        // of a CONJUNCTION and of nothing else. P5 measures it; this holds the
+        // prose to what P5 measured, because the file is what the next reader has.
+        Check("W13 Wiring_TheCompositionBoundIsScopedToAConjunction",
+            seamText != null
+            && CountOf(seamText, "StunPlayer.Go is NOT covered by that bound") == 1
+            && CountOf(seamText, "under ANY composition") == 0,
+            "the fold bound must be scoped to a conjunction and must name the method that sits outside it");
 
         Console.WriteLine("=== passed=" + _passed + " failed=" + _failed + " ===");
         return _failed == 0 ? 0 : 1;
