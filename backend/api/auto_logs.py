@@ -158,6 +158,7 @@ not touch it; this note is here so that stays deliberate.
 import asyncio
 import gzip
 import hashlib
+import heapq
 import json
 import os
 import pathlib
@@ -275,6 +276,41 @@ AUTO_LOG_FREE_SPACE_RESERVE_BYTES = 64 * 1024 * 1024
 _BLOB_RESERVE_LOCK = asyncio.Lock()
 _BLOB_RESERVE_LOCK_WAIT_S = 20.0
 
+# WHAT THE BOUNDED WAIT IS PAID WITH, AND WHY IT IS NOT PAID TWICE.
+#
+# The wait above is served inside this request's DATABASE TRANSACTION: the
+# per-account advisory lock is taken before it (that ordering is what keeps a
+# blob from existing before the cap admitted it) and the transaction is not
+# committed until after the INSERT.
+#
+# The CONNECTION is not what this span introduced -- this handler has had one
+# checked out since its first statement, the session-token lookup, and held it
+# across the scrub and the gzip before that was ever true here. What this span
+# adds is time in which that connection is idle IN A TRANSACTION and the
+# per-account advisory lock is held with it, and the length of it is decided
+# by a volume rather than by this process. The pool is 20 + 10 with a 30 s
+# checkout timeout (`database.py`), so one request paying the full wait is the
+# design; EVERY arriving request paying it, because the holder is stuck on a
+# volume that is not answering, is a queue that consumes connections other
+# endpoints need -- and each of them ends in the same 503 it could have been
+# given immediately.
+#
+# So a pass records when it started its measure-and-write, and an arriving
+# request that finds one in flight PAST this ceiling refuses at once instead
+# of joining the queue. It is a refusal either way; the difference is whether
+# it costs a connection for twenty seconds first. The ceiling is generous
+# against an ordinary slow write -- an 8 MiB write that takes this long is not
+# a volume this route should be adding to.
+_BLOB_WRITE_STARTED = [0.0]
+_BLOB_WRITE_STALL_S = 5.0
+
+# Above this, the hold is REPORTED. An unmeasured hold is the one nobody can
+# argue about afterwards: without this line "the volume was slow" and "the
+# route was slow" are the same log (#438/#443). Under it, nothing is printed
+# -- the accepted path already prints its landing line and a second line per
+# upload would bury it.
+_BLOB_HOLD_REPORT_S = 5.0
+
 # The token the indeterminate-commit arm prints and the orphan sweep matches.
 # ONE literal for both halves: the handler writes a blob it cannot prove has a
 # row, and the sweep is the only thing that ever removes it, so two spellings
@@ -344,10 +380,41 @@ AUTO_LOG_SWEEP_BOOT_DELAY_S = 120.0
 # is the one thing this route is not allowed to spend.
 _ORPHAN_MIN_AGE_S = AUTO_LOG_SWEEP_EVERY_S
 
-# Files examined per pass. Same bound and the same reason as `_PRUNE_BATCH`: a
-# backlog drains over consecutive ticks instead of one pass holding a
-# directory listing and a transaction open over an unbounded loop.
+# Files UNLINKED per pass. NOT files examined, and the distinction is the
+# whole correctness of this sweep.
+#
+# `_PRUNE_BATCH` above drains because `prune_auto_logs` DELETES the rows it
+# handled, so the next selection sees the next cohort. This pass keeps every
+# file it finds referenced -- that is its job -- so a budget spent on
+# EXAMINING would be spent on the same referenced files at every tick for
+# ever, and a file beyond it would never be offered to the database at all.
+# BUG_REPORT_LOG_DIR holds player-filed attachments permanently, so that
+# budget is spent on files this pass is required to keep, and the leak it
+# exists to close would stay open while it reported `0 unreferenced` every
+# hour.
+#
+# So the bound moved to the only place a bound buys anything: the number of
+# files one pass may REMOVE. Examination is bounded separately and far higher
+# (`_ORPHAN_SCAN_MAX`), and the candidates are ordered OLDEST FIRST, so a
+# backlog of orphans larger than one batch genuinely drains -- each pass takes
+# the oldest `_ORPHAN_BATCH` of them and they are gone from the directory by
+# the next one.
 _ORPHAN_BATCH = _PRUNE_BATCH
+
+# Aged files one pass may hold in memory and offer to the database. This is
+# the bound that keeps a pass finite; it is not a cursor, because the oldest
+# entries are selected by mtime rather than by directory order, so the pass
+# that hits this ceiling still makes progress on exactly the files a collector
+# should be looking at first. A pass that hits it SAYS SO in its line -- a
+# truncated listing read as a complete one is how a count stops being evidence
+# (#304).
+_ORPHAN_SCAN_MAX = 50 * _ORPHAN_BATCH
+
+# Names per `log_filename = ANY(...)` lookup. The examined set is now up to
+# `_ORPHAN_SCAN_MAX` names and a single bound array parameter that size is a
+# statement nobody wants to see in a log; the predicate is unchanged and the
+# chunks are unioned.
+_ORPHAN_NAME_CHUNK = 500
 
 
 # The widths are the DATABASE's, per column, not one number for all of them:
@@ -825,11 +892,28 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
     # cosmetic here -- the client half is a background retry loop, and 503 is
     # the code that says the same request will work later.
     path = None
+    hold_started = time.monotonic()
     try:
         # THE MEASURE-AND-WRITE PAIR, UNDER ONE PROCESS-WIDE LOCK.
         # See `_BLOB_RESERVE_LOCK` for the bound this holds (N = 1 blob per
         # reading) and for why the per-account advisory lock above cannot hold
         # it: two seats have two keys, and the reserve is one volume.
+        #
+        # BEFORE THE WAIT: IS THERE ANYTHING TO WAIT FOR? The wait is served
+        # inside this request's open transaction, so it is paid in pooled
+        # connections (see `_BLOB_WRITE_STALL_S`). A measure-and-write that
+        # has already been in flight past the stall ceiling is a volume that
+        # is not answering, and every request that queues behind it spends a
+        # connection for the full ceiling to be told the same 503 it could
+        # have had at once.
+        in_flight = _BLOB_WRITE_STARTED[0]
+        stalled_for = (time.monotonic() - in_flight) if in_flight else 0.0
+        if stalled_for >= _BLOB_WRITE_STALL_S:
+            print(f"[AUTO-LOG] refused 503: the blob volume has had a write in "
+                  f"flight for {stalled_for:.1f}s (ceiling {_BLOB_WRITE_STALL_S}s), "
+                  f"so this upload refuses now rather than holding a database "
+                  f"connection for {_BLOB_RESERVE_LOCK_WAIT_S}s to be refused then")
+            raise HTTPException(status_code=503, detail="log storage unavailable")
         try:
             await asyncio.wait_for(_BLOB_RESERVE_LOCK.acquire(),
                                    _BLOB_RESERVE_LOCK_WAIT_S)
@@ -839,6 +923,7 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
                   f"rather than measuring the reserve against a reading this "
                   f"request never took")
             raise HTTPException(status_code=503, detail="log storage unavailable")
+        _BLOB_WRITE_STARTED[0] = time.monotonic()
         try:
             path = _bug_report_log_path(str(report_id))
 
@@ -893,7 +978,23 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
             # to close.
             await asyncio.to_thread(_write_blob, path, data)
         finally:
+            # The in-flight stamp is cleared BEFORE the release, so the next
+            # waiter can never read a stamp belonging to a pass that has
+            # already handed the lock on.
+            _BLOB_WRITE_STARTED[0] = 0.0
             _BLOB_RESERVE_LOCK.release()
+            # MEASURED, whichever way this went. This span -- the wait for the
+            # volume lock plus the measure-and-write under it -- is the part
+            # of the open transaction that this route added when admission
+            # moved ahead of the write, and it is the part a contended volume
+            # extends. Reported only past the ceiling, so an ordinary upload
+            # still prints exactly one landing line.
+            held = time.monotonic() - hold_started
+            if held >= _BLOB_HOLD_REPORT_S:
+                print(f"[AUTO-LOG] slow blob volume: {held:.1f}s holding an open "
+                      f"transaction and the per-account lock for {req.steam_id} "
+                      f"across the volume lock and a {len(data)}-byte write "
+                      f"(report ceiling {_BLOB_HOLD_REPORT_S}s)")
     except HTTPException:
         # The reserve refusal above is already the answer it wants to give,
         # and nothing has been written for it to clean up. Re-raised as-is so
@@ -1172,8 +1273,28 @@ async def prune_auto_logs(db: AsyncSession, *, days: int = AUTO_LOG_RETENTION_DA
             "due": len(due), "held": len(_PRUNE_HELD)}
 
 
-def _stale_blob_names(base, cutoff: float, limit: int) -> list[str]:
-    """Up to `limit` file names under `base` last modified before `cutoff`.
+def _stale_blob_names(base, cutoff: float, scan_max: int) -> tuple[list[str], int, bool]:
+    """The OLDEST aged files under `base`, plus how many aged files there are.
+
+    Returns `(names_oldest_first, aged_total, truncated)`. A file is "aged"
+    when it was last modified before `cutoff`.
+
+    ORDERED BY mtime, AND THAT IS NOT COSMETIC. This used to stop at the first
+    `limit` entries `os.scandir` happened to yield and return them unordered.
+    Directory order is a property of the NAME SET rather than of the files'
+    history: it is not age-ordered, and nothing promises it rotates. So a pass
+    that filled its budget with referenced files -- which this sweep keeps, by
+    design -- had no mechanism by which a file beyond that budget would ever
+    be examined, on a directory that also holds every player-filed attachment
+    (nothing in this tree deletes a referenced one). Taking the OLDEST first
+    makes each pass examine the files a collector should look at first, and
+    makes what it leaves behind a backlog rather than a blind spot.
+
+    `scan_max` bounds what one pass holds in memory, through a heap rather
+    than an early `break`, so the ceiling costs the NEWEST candidates and
+    never the oldest. `aged_total` is counted past the ceiling, so the caller
+    can say a listing was truncated instead of reporting it as complete
+    (#304).
 
     On the worker thread, because it is a directory walk plus one `stat` per
     entry and the corpus is thousands of files on a contended volume.
@@ -1183,24 +1304,32 @@ def _stale_blob_names(base, cutoff: float, limit: int) -> list[str]:
     answer about its own age is not one to act on. Nothing is lost -- the next
     tick asks again.
     """
-    out: list[str] = []
+    # A max-heap on mtime: push, then drop the newest whenever the heap is
+    # over the ceiling, which leaves the `scan_max` OLDEST entries.
+    heap: list[tuple[float, str]] = []
+    aged_total = 0
     try:
         entries = os.scandir(str(base))
     except OSError:
-        return out
+        return [], 0, False
     with entries:
         for e in entries:
-            if len(out) >= limit:
-                break
             try:
                 if not e.is_file():
                     continue
-                if e.stat().st_mtime >= cutoff:
-                    continue
+                mtime = e.stat().st_mtime
             except OSError:
                 continue
-            out.append(e.name)
-    return out
+            if mtime >= cutoff:
+                continue
+            aged_total += 1
+            if scan_max <= 0:
+                continue
+            heapq.heappush(heap, (-mtime, e.name))
+            if len(heap) > scan_max:
+                heapq.heappop(heap)
+    names = [name for _, name in sorted((-key, name) for key, name in heap)]
+    return names, aged_total, aged_total > len(names)
 
 
 async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None,
@@ -1238,8 +1367,13 @@ async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None
       directory" -- a restored volume, a mis-set BUG_REPORT_LOG_DIR, a
       pointed-at scratch database -- and the honest answer to it is to delete
       nothing.
-    * BOUNDED. `limit` files per pass, so a mistake is bounded by the batch and
-      a backlog drains over ticks.
+    * BOUNDED, ON THE REMOVALS. `limit` files may be UNLINKED per pass, so a
+      mistake is bounded by the batch. Examination is bounded separately and
+      far higher (`_ORPHAN_SCAN_MAX`), because a budget spent on examination
+      is spent on the referenced files this sweep keeps and never returns:
+      see `_ORPHAN_BATCH`. Candidates are taken OLDEST FIRST, so a backlog of
+      orphans larger than one batch drains across ticks instead of the same
+      prefix being re-read for ever.
 
     Read-only on the database: the transaction the SELECT opens is ENDED with a
     rollback, for the same reason the early returns above are (an
@@ -1249,9 +1383,11 @@ async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None
 
     base = pathlib.Path(BUG_REPORT_LOG_DIR)
     cutoff = time.time() - float(_ORPHAN_MIN_AGE_S if min_age_s is None else min_age_s)
-    names = await asyncio.to_thread(_stale_blob_names, base, cutoff, int(limit))
+    names, aged_total, truncated = await asyncio.to_thread(
+        _stale_blob_names, base, cutoff, _ORPHAN_SCAN_MAX)
     if not names:
-        return {"candidates": 0, "orphans": 0, "unlinked": 0, "refused": False}
+        return {"candidates": 0, "aged": aged_total, "orphans": 0, "unlinked": 0,
+                "deferred": 0, "truncated": truncated, "refused": False}
 
     named_total = (await db.execute(
         text("SELECT COUNT(*) AS n FROM bug_reports WHERE log_filename IS NOT NULL")
@@ -1262,17 +1398,33 @@ async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None
               f"{base}, and bug_reports names no blob at all. That reads as a "
               f"database which does not own this directory, not as a directory "
               f"full of orphans -- nothing removed")
-        return {"candidates": len(names), "orphans": 0, "unlinked": 0,
+        return {"candidates": len(names), "aged": aged_total, "orphans": 0,
+                "unlinked": 0, "deferred": 0, "truncated": truncated,
                 "refused": True}
 
-    known = {r["log_filename"] for r in (await db.execute(
-        text("""SELECT log_filename FROM bug_reports
-                 WHERE log_filename = ANY(CAST(:names AS text[]))"""),
-        {"names": list(names)},
-    )).mappings().all()}
+    # CHUNKED, and the predicate is the same one in every chunk. The examined
+    # set is up to `_ORPHAN_SCAN_MAX` names; asking for all of them in one
+    # bound array is a statement nobody wants in a log and nothing is gained
+    # by it. A name absent from its own chunk's answer is unreferenced --
+    # union, never intersect.
+    known: set[str] = set()
+    for start in range(0, len(names), _ORPHAN_NAME_CHUNK):
+        chunk = names[start:start + _ORPHAN_NAME_CHUNK]
+        known |= {r["log_filename"] for r in (await db.execute(
+            text("""SELECT log_filename FROM bug_reports
+                     WHERE log_filename = ANY(CAST(:names AS text[]))"""),
+            {"names": chunk},
+        )).mappings().all()}
     await db.rollback()
 
-    orphans = [n for n in names if n not in known]
+    # `names` is oldest-first, so `orphans` is too and the slice below takes
+    # the oldest unreferenced files rather than whichever the filesystem
+    # listed first. That ordering is what makes the deferred remainder a
+    # BACKLOG -- the files taken here are gone by the next tick -- instead of
+    # a set that keeps being skipped.
+    all_orphans = [n for n in names if n not in known]
+    orphans = all_orphans[:int(limit)]
+    deferred = len(all_orphans) - len(orphans)
     unlinked = 0
     for name in orphans:
         try:
@@ -1291,10 +1443,19 @@ async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None
               f"older than {int(_ORPHAN_MIN_AGE_S)}s and no bug_reports row "
               f"names it")
 
-    print(f"[AUTO-LOG] orphan sweep: {len(names)} aged file(s) examined, "
-          f"{len(orphans)} unreferenced, {unlinked} removed")
-    return {"candidates": len(names), "orphans": len(orphans),
-            "unlinked": unlinked, "refused": False}
+    # The line says EXAMINED and AGED separately, and says when the two
+    # differ. "200 examined, 0 unreferenced" read as a clean directory is
+    # exactly the reading that let the old prefix-bounded pass report an hour
+    # of nothing while the leak grew (#304).
+    print(f"[AUTO-LOG] orphan sweep: {len(names)} aged file(s) examined of "
+          f"{aged_total} aged"
+          + (" (LISTING TRUNCATED at the scan ceiling; the oldest were taken)"
+             if truncated else "")
+          + f", {len(all_orphans)} unreferenced, {unlinked} removed, "
+          + f"{deferred} left for the next tick")
+    return {"candidates": len(names), "aged": aged_total,
+            "orphans": len(all_orphans), "unlinked": unlinked,
+            "deferred": deferred, "truncated": truncated, "refused": False}
 
 
 async def _maybe_prune(db: AsyncSession) -> None:

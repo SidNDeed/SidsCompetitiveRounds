@@ -36,6 +36,7 @@ import os
 import pathlib
 import re
 import sys
+import textwrap
 import time
 import unittest.mock as mock
 from datetime import datetime, timedelta, timezone
@@ -61,10 +62,17 @@ import schemas  # noqa: E402
 # `...002` are the shape the rest of the suite already uses: a valid 17-digit
 # Steam64 with a filler account part that resolves to nobody.
 #
-# `test_this_files_account_ids_are_synthetic` below is what keeps them that
+# `test_this_branchs_files_name_no_real_account` below is what keeps them that
 # way. It names no real id -- a test that asserted "the real one is absent"
 # would have to write the real one down -- and instead requires every Steam
 # -shaped literal in the files THIS BRANCH owns to come from _SYNTHETIC_IDS.
+# (This line used to cite a test_this_files_account_ids_are_synthetic, which
+# is not a test in this file or any other -- backticks deliberately omitted
+# there, because a citation in this file's convention is a claim that the name
+# resolves. Someone checking it would have found nothing and concluded the
+# allow-list guard had been removed: a comment naming a mechanism the tree
+# does not carry, #432/#459. The guard below now holds every backticked
+# citation in this file to a test that exists.)
 STEAM = "76561198000000001"
 OTHER = "76561198000000002"
 TOKEN = "a-session-token"
@@ -2856,6 +2864,151 @@ def test_the_orphan_sweep_refuses_a_database_that_knows_no_blobs(logdir, capsys)
         "database does not own this directory")
 
 
+def _aged_corpus(logdir, count, first_mtime):
+    """`count` aged blobs, one second apart, OLDEST first. Returns the names
+    in age order, so a test can say "the newest of them" and mean it whatever
+    order the filesystem lists the directory in."""
+    names = []
+    for i in range(count):
+        p = logdir / ("%08x-0000-4000-8000-00000000000%1d.log.gz" % (i, i % 10))
+        p.write_bytes(b"x")
+        stamp = first_mtime + i
+        os.utime(p, (stamp, stamp))
+        names.append(p.name)
+    return names
+
+
+def _exec_mutant(fn, anchor, replacement):
+    """`fn`'s source with `anchor` replaced, compiled against a COPY of the
+    module's globals so the module itself is untouched.
+
+    The anchor is asserted to occur exactly once inside the function's own
+    span before anything is concluded from the result (#432/#279): a mutation
+    that silently matched two sites, or none, would make the red below mean
+    something other than what the test says it means.
+    """
+    src = textwrap.dedent(inspect.getsource(fn))
+    assert src.count(anchor) == 1, (
+        "the mutation anchor occurs %d time(s) in %s, not once -- re-derive it "
+        "before reading anything into the result (%r)"
+        % (src.count(anchor), fn.__name__, anchor))
+    mutant_src = src.replace(anchor, replacement)
+    assert mutant_src != src, "the mutation changed nothing"
+    namespace = dict(vars(auto_logs))
+    exec(compile(mutant_src, "<mutant:%s>" % fn.__name__, "exec"), namespace)
+    return namespace[fn.__name__]
+
+
+def test_the_orphan_sweep_examines_every_aged_file_not_a_directory_prefix(logdir):
+    """THE PASS HAS TO BE ABLE TO DRAIN, and a budget spent on EXAMINING
+    cannot.
+
+    `prune_auto_logs` drains because it DELETES the rows it handled, so the
+    next selection sees the next cohort. This pass keeps every file it finds
+    referenced -- that is its whole job -- so a budget spent on examination is
+    spent on the same referenced files at every tick, for ever, and a file
+    beyond it is never offered to the database at all. BUG_REPORT_LOG_DIR
+    holds player-filed attachments permanently as well as fourteen days of
+    automatic blobs, so that budget is exhausted by design rather than in a
+    corner case, and the kept blob the indeterminate-commit arm leaves behind
+    would stay on the volume for ever while the sweep reported `0
+    unreferenced` every hour.
+
+    Driven without any dependence on the order the filesystem lists names in:
+    the corpus is aged one second apart and the orphan is the NEWEST of it, so
+    the mutation below -- examining only `limit` files -- excludes it by the
+    file's own mtime.
+    """
+    size = auto_logs._ORPHAN_BATCH + 5
+    names = _aged_corpus(logdir, size, time.time() - 100_000)
+    orphan = names[-1]                      # the newest aged file
+    referenced = names[:-1]
+
+    def _db():
+        return Scripted({
+            "COUNT(*) AS n FROM bug_reports": [[{"n": 7}]],
+            "SELECT log_filename FROM bug_reports": [
+                [{"log_filename": n} for n in referenced]],
+        })
+
+    # MUTATION FIRST, so the control below runs on a directory the mutant has
+    # demonstrably not touched. `_ORPHAN_SCAN_MAX` -> `int(limit)` is exactly
+    # the pre-fix call: examination bounded by the unlink budget.
+    mutant = _exec_mutant(auto_logs.prune_orphan_blobs,
+                          "_stale_blob_names, base, cutoff, _ORPHAN_SCAN_MAX)",
+                          "_stale_blob_names, base, cutoff, int(limit))")
+    out = _run(mutant(_db(), min_age_s=3600))
+    assert out["unlinked"] == 0 and (logdir / orphan).exists(), (
+        "the mutation removed the orphan anyway, so this test proves nothing "
+        "about the examination budget: %r" % (out,))
+    assert out["candidates"] == auto_logs._ORPHAN_BATCH, (
+        "the mutant examined %d file(s), not the %d its budget allows -- the "
+        "anchor no longer bounds what it says it bounds"
+        % (out["candidates"], auto_logs._ORPHAN_BATCH))
+
+    # CONTROL: the live sweep, same directory, same database.
+    out = _run(auto_logs.prune_orphan_blobs(_db(), min_age_s=3600))
+    assert out["candidates"] == size, (
+        "the sweep examined %d of %d aged files" % (out["candidates"], size))
+    assert out["aged"] == size and out["truncated"] is False, out
+    assert out["unlinked"] == 1 and not (logdir / orphan).exists(), (
+        "the unreferenced blob survived a pass that examined the whole "
+        "corpus: %r" % (out,))
+    assert all((logdir / n).exists() for n in referenced), (
+        "a file a bug_reports row names was removed")
+
+
+def test_an_orphan_backlog_larger_than_one_batch_drains_over_ticks(logdir):
+    """The bound that remains is on REMOVALS, and the docstring says a backlog
+    drains across ticks. It does, because the files taken are gone by the next
+    pass and the candidates are ordered oldest-first -- so the remainder is a
+    backlog and not a set that keeps being skipped."""
+    size = auto_logs._ORPHAN_BATCH + 3
+    names = _aged_corpus(logdir, size, time.time() - 100_000)
+
+    def _db():
+        # The table names a blob (so the "this database does not own the
+        # directory" refusal does not fire) and names none of THESE.
+        return Scripted({
+            "COUNT(*) AS n FROM bug_reports": [[{"n": 7}]],
+            "SELECT log_filename FROM bug_reports": [
+                [{"log_filename": "a-blob-that-is-not-in-this-directory.log.gz"}]],
+        })
+
+    first = _run(auto_logs.prune_orphan_blobs(_db(), min_age_s=3600))
+    assert first["unlinked"] == auto_logs._ORPHAN_BATCH, first
+    assert first["deferred"] == 3, (
+        "the pass did not report what it left behind: %r" % (first,))
+    assert [n for n in names if (logdir / n).exists()] == names[-3:], (
+        "the pass removed something other than the oldest batch")
+
+    second = _run(auto_logs.prune_orphan_blobs(_db(), min_age_s=3600))
+    assert second["unlinked"] == 3 and second["deferred"] == 0, second
+    assert not any((logdir / n).exists() for n in names), (
+        "the backlog did not drain on the following tick")
+
+
+def test_a_truncated_orphan_listing_says_so(logdir):
+    """A count is evidence only if the listing behind it is complete (#304).
+    The scan ceiling exists, so the pass that hits it has to report a
+    truncated reading rather than a clean directory."""
+    names = _aged_corpus(logdir, 6, time.time() - 100_000)
+    taken, aged_total, truncated = auto_logs._stale_blob_names(
+        logdir, time.time() - 3600, 4)
+    assert aged_total == 6 and len(taken) == 4 and truncated is True, (
+        taken, aged_total, truncated)
+    assert taken == names[:4], (
+        "the ceiling cost the OLDEST candidates instead of the newest, which "
+        "is the half a collector needs: %r" % (taken,))
+
+    # CONTROL: a ceiling above the corpus reports a complete listing, so the
+    # flag above is about the ceiling and not about the function always
+    # claiming truncation.
+    taken, aged_total, truncated = auto_logs._stale_blob_names(
+        logdir, time.time() - 3600, 50)
+    assert taken == names and aged_total == 6 and truncated is False
+
+
 def test_the_retention_loop_runs_the_orphan_sweep():
     """The collector has to be WIRED, not merely written: a sweep nothing
     calls is the same leak with more code in it (#438/#443)."""
@@ -2990,6 +3143,157 @@ def test_a_seat_that_cannot_take_the_blob_lock_in_time_refuses(logdir, verified,
     assert _run(auto_logs.upload_auto_log(_request(), _ok_db()))["log_persisted"] is True
 
 
+def test_a_volume_already_stalled_refuses_now_instead_of_queueing(logdir, verified,
+                                                                  monkeypatch,
+                                                                  capsys):
+    """WHAT THE BOUNDED WAIT IS PAID WITH.
+
+    The wait for the blob-volume lock is served inside this request's open
+    database transaction -- the per-account advisory lock is taken before it,
+    and the transaction is not committed until after the INSERT -- so every
+    second of it is a second a pooled connection is checked out and idle in a
+    transaction. One request paying that is the design. Every arriving request
+    paying it, because the holder is stuck on a volume that is not answering,
+    consumes connections other endpoints need and ends in the same 503 it
+    could have been given at once.
+
+    So a pass STAMPS when its measure-and-write began, and an arriving request
+    that finds one in flight past the ceiling refuses immediately. Both arms
+    refuse; the test is about what the refusal COSTS (#430).
+
+    Driven by a real held write rather than by a stamp set from here, so both
+    halves are under test: the stamp a pass takes, and the pre-check that
+    reads it.
+    """
+    # THE ANCHORS, asserted before anything is read into the results below:
+    # each of the two lines this test's mutations target is ONE site inside
+    # this handler's span (#432/#279).
+    handler = _normalise(inspect.getsource(auto_logs.upload_auto_log))
+    assert handler.count("if stalled_for >= _BLOB_WRITE_STALL_S:") == 1, (
+        "the pre-check this test mutates is not a single site in the handler")
+    assert handler.count("_BLOB_WRITE_STARTED[0] = time.monotonic()") == 1, (
+        "the in-flight stamp is set at %d site(s), not one"
+        % handler.count("_BLOB_WRITE_STARTED[0] = time.monotonic()"))
+
+    import threading
+
+    monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK_WAIT_S", 1.0)
+    real_write = auto_logs._write_blob
+    started = threading.Event()
+    release = threading.Event()
+
+    def held_write(path, data):
+        if not started.is_set():
+            started.set()
+            release.wait(10.0)
+        real_write(path, data)
+
+    async def drive():
+        """One upload holds the volume; a second arrives after the ceiling."""
+        first = asyncio.create_task(auto_logs.upload_auto_log(_request(), _ok_db()))
+        for _ in range(2000):
+            if started.is_set():
+                break
+            await asyncio.sleep(0.005)
+        assert started.is_set(), "the first upload never reached its write"
+        # Past the stall ceiling, with the first still inside its write.
+        await asyncio.sleep(0.15)
+        at = time.monotonic()
+        second = await asyncio.gather(
+            auto_logs.upload_auto_log(_request(), _ok_db()),
+            return_exceptions=True)
+        waited = time.monotonic() - at
+        release.set()
+        await asyncio.gather(first, return_exceptions=True)
+        return second[0], waited
+
+    def run_drive():
+        # A FRESH LOCK PER RUN. `asyncio.Lock` binds to the loop its first
+        # CONTENDED acquire happens on and refuses a second one; each `_run`
+        # here is its own loop. That is a property of this harness -- the api
+        # has one loop for the life of the process -- so the lock is renewed
+        # rather than the two phases being merged, which would stop them being
+        # two independent measurements.
+        monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", asyncio.Lock())
+        started.clear()
+        release.clear()
+        for p in list(logdir.iterdir()):
+            p.unlink()
+        return _run(drive())
+
+    monkeypatch.setattr(auto_logs, "_write_blob", held_write)
+    monkeypatch.setattr(auto_logs, "_BLOB_WRITE_STALL_S", 0.05)
+    result, waited = run_drive()
+    assert isinstance(result, HTTPException) and result.status_code == 503, result
+    assert waited < auto_logs._BLOB_RESERVE_LOCK_WAIT_S / 2, (
+        "the second upload spent %.2fs holding its transaction open before "
+        "refusing, against a %.2fs lock wait -- it queued behind a volume "
+        "already known to be stalled"
+        % (waited, auto_logs._BLOB_RESERVE_LOCK_WAIT_S))
+    assert "write in flight" in capsys.readouterr().out, (
+        "the refusal does not say the volume was already stalled, so an "
+        "operator cannot tell it from the ordinary lock-wait refusal")
+
+    # NEGATIVE CONTROL: with the stall ceiling out of reach the same second
+    # upload goes back to queueing for the full wait. Same held write, same
+    # 503 -- so the measurement above is about the pre-check reading the
+    # stamp, and not about the lock being held.
+    monkeypatch.setattr(auto_logs, "_BLOB_WRITE_STALL_S", 10 ** 9)
+    result, waited = run_drive()
+    assert isinstance(result, HTTPException) and result.status_code == 503, result
+    assert waited >= auto_logs._BLOB_RESERVE_LOCK_WAIT_S, (
+        "without the stall pre-check the second upload refused after %.2fs, "
+        "which is less than the %.2fs wait it was supposed to sit through -- "
+        "the control is not exercising the queueing path"
+        % (waited, auto_logs._BLOB_RESERVE_LOCK_WAIT_S))
+
+
+def test_the_hold_on_the_open_transaction_is_measured_and_reported(logdir, verified,
+                                                                   monkeypatch,
+                                                                   capsys):
+    """AN UNMEASURED HOLD IS THE ONE NOBODY CAN ARGUE ABOUT AFTERWARDS.
+
+    The span this route added when admission moved ahead of the write -- the
+    wait for the volume lock plus the measure-and-write under it, all of it
+    inside an open transaction holding the per-account advisory lock -- is
+    reported past a ceiling. Without the line, "the volume was slow" and "the
+    route was slow" are the same log (#438/#443).
+    """
+    handler = _normalise(inspect.getsource(auto_logs.upload_auto_log))
+    assert handler.count("if held >= _BLOB_HOLD_REPORT_S:") == 1, (
+        "the report this test mutates is not a single site in the handler")
+    assert handler.count("hold_started = time.monotonic()") == 1, (
+        "the span's start is stamped %d time(s); the measurement below is "
+        "anchored on one" % handler.count("hold_started = time.monotonic()"))
+
+    real_write = auto_logs._write_blob
+
+    def slow_write(path, data):
+        time.sleep(0.05)
+        real_write(path, data)
+
+    monkeypatch.setattr(auto_logs, "_write_blob", slow_write)
+    monkeypatch.setattr(auto_logs, "_BLOB_HOLD_REPORT_S", 0.01)
+    assert _run(auto_logs.upload_auto_log(_request(), _ok_db()))["log_persisted"] is True
+    out = capsys.readouterr().out
+    assert "slow blob volume" in out, (
+        "an upload that held the volume lock past the report ceiling printed "
+        "no measurement of it. Printed: %r" % (out,))
+    assert STEAM in out.split("slow blob volume")[1][:200], (
+        "the measurement does not name the account whose transaction was held")
+
+    # CONTROL: the same upload under a ceiling it cannot reach prints no such
+    # line, so the assertion above is about the span and not about a line this
+    # route emits on every request.
+    for p in list(logdir.iterdir()):
+        p.unlink()
+    monkeypatch.setattr(auto_logs, "_BLOB_HOLD_REPORT_S", 10 ** 9)
+    assert _run(auto_logs.upload_auto_log(_request(), _ok_db()))["log_persisted"] is True
+    assert "slow blob volume" not in capsys.readouterr().out, (
+        "the measurement is printed on every upload; past the ceiling is the "
+        "only time it says anything")
+
+
 # ── privacy: the fixtures name no real account ───────────────────────────────
 
 _SYNTHETIC_IDS = {"76561198000000001", "76561198000000002"}
@@ -3036,6 +3340,69 @@ def test_this_branchs_files_name_no_real_account():
         "account ids outside the synthetic set appear in this branch's files: "
         "%r. Use a filler id (7656119800000000N); a real one is republished on "
         "every clone of a public tree." % (stray,))
+
+
+def _cited_test_names(source):
+    """Every `test_...` this file's prose names in backticks."""
+    return sorted(set(re.findall(r"`(test_[A-Za-z0-9_]+)`", source)))
+
+
+def test_every_test_this_files_prose_cites_actually_exists():
+    """A backticked test name in this file's prose is a claim about this
+    file, and one such claim was false: the synthetic-ids note at the top
+    cited a test that is not defined here or anywhere else. Someone checking
+    what holds those ids synthetic would have found nothing and concluded the
+    guard had been deleted -- the class this branch is closing elsewhere, a
+    comment naming a mechanism the code beneath it does not carry
+    (#432/#459).
+
+    The names themselves are the anchor: each one is a module-level function
+    in this file or it is not, which is a question with an answer. Names that
+    this file deliberately discusses as ABSENT are written without backticks,
+    which is why the mutation below has to assemble its citation at run time
+    rather than spell one out in the source this check reads.
+    """
+    source = pathlib.Path(__file__).read_text(encoding="utf-8")
+    defined = {name for name, obj in globals().items()
+               if name.startswith("test_") and callable(obj)}
+
+    # THE ANCHOR: the note this finding corrected cites exactly one test, and
+    # it is the guard it claims to be about. Two citations there, or none,
+    # and the correction has moved and this control has to be re-derived.
+    note = source.split("# SYNTHETIC ACCOUNT IDS")[1].split("STEAM = ")[0]
+    assert _cited_test_names(note) == ["test_this_branchs_files_name_no_real_account"], (
+        "the synthetic-ids note cites %r; it is supposed to cite the one "
+        "guard that holds those ids synthetic" % (_cited_test_names(note),))
+
+    def check(text):
+        cited = _cited_test_names(text)
+        # Two halves. "every citation resolves" alone passes vacuously on a
+        # file that cites nothing, which is also what a bad regex produces.
+        return bool(cited) and all(c in defined for c in cited)
+
+    # CONTROL: the live file passes, and it passes on a non-empty set.
+    cited = _cited_test_names(source)
+    assert cited, (
+        "no `test_...` citation was found in this file, so this check "
+        "asserted nothing -- the prose stopped naming tests, or the pattern "
+        "stopped matching them")
+    missing = [c for c in cited if c not in defined]
+    assert not missing, (
+        "this file's comments name %r, which no function here defines. A "
+        "comment naming a test that does not exist reads as a guard that was "
+        "removed (#432/#459)" % (missing,))
+
+    # MUTATION: one more citation, of a test that does not exist -- which is
+    # exactly the defect this closes. The name is ASSEMBLED, so the literal
+    # never appears in the file this check reads and the mutation cannot
+    # redden the control above.
+    bogus = "test_" + "a_guard_nothing_defines"
+    assert bogus not in source, "the mutation's name leaked into the file"
+    mutant = source + "\n# see " + chr(96) + bogus + chr(96) + " for this\n"
+    assert mutant != source
+    assert not check(mutant), (
+        "the check still passes with a citation of a test nothing defines, so "
+        "it proves nothing about this file's prose")
 
 
 # ── migration 350 does not depend on WHICH copy of 336 ran ───────────────────
