@@ -14282,8 +14282,10 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // could reach it. A finished feature with no entry point is
             // indistinguishable in the logs from one that works (#438/#443).
             // It lives in the Display box because it changes how a number is
-            // drawn and nothing else: the wire format is produced by WireNum,
-            // which ignores StatRow.fmt entirely (#47).
+            // drawn and nothing else: the wire format is produced by
+            // TabStatsOverlay.WireNum, which never reads StatRow.fmt and
+            // formats invariantly per #47 -- so no value of this setting can
+            // move a byte of a stored build.
             healthPrecToggleBtn = SettingsToggle(dispBox.transform, "SHpPrec", new Vector2(260, 28),
                 () =>
                 {

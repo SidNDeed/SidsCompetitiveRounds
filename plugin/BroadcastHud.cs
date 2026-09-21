@@ -385,16 +385,25 @@ namespace CompetitiveRounds
 
         /// <summary>The FFA strip's per-fighter cell width. ONE definition,
         /// because RefreshCaches now measures a composed line against it and
-        /// DrawFfaStrip lays out with it — two copies of this expression would
-        /// agree only by coincidence.</summary>
+        /// DrawFfaStrip lays out with it. Two copies of this expression would
+        /// agree deterministically — until one of them is edited, which is
+        /// the whole risk: nothing would report the disagreement. The line
+        /// would go on being measured against one width and drawn into
+        /// another, and the only symptom is a cell that clips on stream.
+        /// </summary>
         private static float FfaCellWidth(int n)
             => Mathf.Min(180f, (Screen.width - 40f) / Mathf.Max(1, n));
 
         /// <summary>Rendered width of <paramref name="s"/> in
         /// <paramref name="st"/>, reusing FitNameLine's scratch GUIContent (:77)
         /// so this snapshot-cadence caller allocates nothing; both uses are
-        /// synchronous and never interleave. 0 on any failure, i.e. "it fits" —
-        /// the fallback is the layout that shipped before the measurement.</summary>
+        /// synchronous and never interleave. 0 on any failure, i.e. "it fits":
+        /// the long composition is kept, which is exactly what this strip drew
+        /// before the measurement existed. What a failure does NOT undo is the
+        /// style change alongside it — stStat is TextClipping.Clip in this
+        /// batch whether the measurement runs or not (:767), so an over-long
+        /// line ends at the cell edge instead of wrapping into a second row
+        /// that a 17px rect clips top and bottom.</summary>
         private static float MeasureWidth(GUIStyle st, string s)
         {
             try { _measure.text = s; return st.CalcSize(_measure).x; }

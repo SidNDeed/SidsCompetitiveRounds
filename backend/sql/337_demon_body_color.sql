@@ -17,17 +17,30 @@
 -- CardChoice.GetCardColor() is the accessor the game uses for that same field,
 -- so this is the color the card is drawn with rather than a color near it.
 --
--- Controls run on the same parse before trusting either read:
---   * A_Poison / RayHitPoison.color re-derives #4AD652 and A_Parasite #9E79FF
---     — the two values 221 recorded, reproduced byte for byte.
---   * colorTheme read across all 67 CardInfo objects spans the full enum 0-8
---     and lands where the card's look says it should (Cold bullets = ColdBlue,
---     Poison bullets = PoisonGreen, Tank = DefensiveBlue, Explosive bullet =
---     DestructiveRed). An earlier field offset that read 0 for all 67 cards was
---     rejected on exactly that: a reading that cannot vary is not a reading.
+-- Both reads are REPRODUCIBLE, not recorded:
+-- backend/tests/reproduce_337_theme_color.py performs them against the
+-- installed game and prints a result only if the controls below pass. It is
+-- not a pytest because it needs the game's assets, which no test environment
+-- is entitled to assume; run it before taking another body colour from a card
+-- theme, and again if this hex is ever doubted. An earlier version of this
+-- comment also cited a re-derivation of 221's poison values and a sweep of
+-- every CardInfo in the file; neither is something this tree can repeat, so
+-- neither is claimed here any more.
+--
+-- Controls, run on the same parse before either read is trusted:
 --   * The 9-row theme table self-checks — each themeType's targetColor is the
 --     color its name claims (DestructiveRed #CC4646, PoisonGreen #00934C,
---     MagicPink #D15088).
+--     MagicPink #D15088). The table is found by its SHAPE (a count of 9, then
+--     nine records whose themeType is 0..8 and whose components are all in
+--     [0,1]), never at a hardcoded offset.
+--   * colorTheme lands where the card's own look says it should on four cards
+--     named for their element: Poison bullets = PoisonGreen, Cold bullets =
+--     ColdBlue, Tank = DefensiveBlue, Explosive bullet = DestructiveRed.
+--   * The negative control for that offset: the neighbouring ints at the same
+--     end of the record are CONSTANT across all five cards read, and this one
+--     is not. An earlier candidate offset read the same value for every card
+--     and was rejected on exactly that — a reading that cannot vary is not a
+--     reading.
 --
 -- Distance to what is already in the shop (CIELAB dE76, same metric 221 used —
 -- the implementation reproduces 221's published poison numbers: Lime 24,
@@ -80,14 +93,21 @@ ON CONFLICT (sku) DO NOTHING;
 
 DO $$
 DECLARE
-    v_kind  TEXT;
-    v_hex   TEXT;
-    v_price INTEGER;
-    v_ready BOOLEAN;
-    v_pool  TEXT;
+    v_kind   TEXT;
+    v_name   TEXT;
+    v_desc   TEXT;
+    v_hex    TEXT;
+    v_price  INTEGER;
+    v_rarity TEXT;
+    v_ready  BOOLEAN;
+    v_pool   TEXT;
+    v_artist TEXT;
+    v_stock  INTEGER;
 BEGIN
-    SELECT kind, preview_color, price, catalog_ready, rotation_pool
-      INTO v_kind, v_hex, v_price, v_ready, v_pool
+    SELECT kind, name, description, preview_color, price, rarity,
+           catalog_ready, rotation_pool, artist_steam_id, stock_limit
+      INTO v_kind, v_name, v_desc, v_hex, v_price, v_rarity,
+           v_ready, v_pool, v_artist, v_stock
       FROM shop_items
      WHERE sku = 'pcolor_demonic';
 
@@ -95,21 +115,54 @@ BEGIN
         RAISE EXCEPTION 'pcolor_demonic row is missing after the write';
     END IF;
 
-    -- A pre-existing row would have made ON CONFLICT DO NOTHING a silent
-    -- no-op, so verify the row we ended up with is the one intended.
-    IF v_kind <> 'player_color' OR upper(COALESCE(v_hex, '')) <> '#7A50D1' THEN
-        RAISE EXCEPTION
-            'pcolor_demonic already existed as kind=% hex=% (expected player_color / #7A50D1)',
-            v_kind, v_hex;
+    -- A pre-existing row makes ON CONFLICT DO NOTHING a silent no-op, so the
+    -- post-check verifies EVERY column this migration writes -- not only the
+    -- ones that decide what the swatch looks like. A row that already
+    -- existed at price 0, or under another name, or at the wrong rarity,
+    -- passes a kind-and-hex check and then sells for nothing, or reads as
+    -- something else in the shop, while the deploy reports success.
+    IF v_kind <> 'player_color'
+       OR upper(COALESCE(v_hex, '')) <> '#7A50D1'
+       OR v_name <> 'Demonic'
+       OR v_price <> 3000
+       OR v_rarity <> 'rare'
+       OR v_desc IS DISTINCT FROM 'The purple the Demonic Pact card is drawn in.'
+    THEN
+        RAISE EXCEPTION 'pcolor_demonic already existed as kind=% hex=% name=% price=% rarity=% description=% (expected player_color / #7A50D1 / Demonic / 3000 / rare)',
+            v_kind, v_hex, v_name, v_price, v_rarity, v_desc;
+    END IF;
+
+    -- Ownership and stock, which are a different question from identity: a
+    -- house colour is unowned and unlimited. A non-NULL artist_steam_id
+    -- routes the row through the /artist stock, gift and block rules
+    -- (migration 109), and stock_limit caps copies in circulation -- where
+    -- -1 is the born-out-of-stock state migration 131 stamps, which nothing
+    -- in this migration would ever clear. Either one leaves the item
+    -- unbuyable or someone else's while the row looks perfectly fine.
+    IF v_artist IS NOT NULL OR v_stock IS NOT NULL THEN
+        RAISE EXCEPTION 'pcolor_demonic is not a plain house item (artist_steam_id=%, stock_limit=%)',
+            v_artist, v_stock;
     END IF;
 
     -- Visibility invariants, re-read this pass rather than carried over from
-    -- 221: list_shop_items (main.py, /api/v1/shop/items) filters on
-    -- rotation_pool IS NULL AND catalog_ready, newest_shop_items
-    -- (/api/v1/shop/newest) on the same pair, and the purchase path re-checks
-    -- catalog_ready under its lock. rotation_pool is the achievement-gated
-    -- pool. Either column set wrong makes the item unbuyable while the row
-    -- looks perfectly fine in the table.
+    -- 221. list_shop_items (main.py, /api/v1/shop/items) filters on
+    -- rotation_pool IS NULL AND catalog_ready, and the purchase path
+    -- re-checks catalog_ready under its lock.
+    --
+    -- /api/v1/shop/newest is NOT a surface this row reaches. An earlier
+    -- version of this comment presented it as one by saying it filters "on
+    -- the same pair": newest_shop_items was narrowed to kind='face' plus the
+    -- caller's supported music albums (Sept 2026), so a player_color never
+    -- appears in the Home tab's newest panel. Expected, not a defect to
+    -- chase later.
+    --
+    -- The two columns are not symmetric either. catalog_ready = FALSE makes
+    -- the item invisible AND unbuyable, because the purchase path re-checks
+    -- it. A non-NULL rotation_pool always hides it from the list, but only
+    -- the literal 'achievement' refuses a PURCHASE (main.py:29297) -- any
+    -- other non-NULL value would leave the item buyable by sku while nothing
+    -- lists it. NULL is the only value this row may carry, which is what
+    -- this check asserts: stricter than either endpoint, deliberately.
     IF NOT v_ready OR v_pool IS NOT NULL THEN
         RAISE EXCEPTION
             'pcolor_demonic would be hidden from the shop (catalog_ready=%, rotation_pool=%)',

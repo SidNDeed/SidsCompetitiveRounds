@@ -3110,14 +3110,25 @@ namespace CompetitiveRounds
                 // Horizontally the frame is centred on the BODY, not on that union. The union
                 // carries the gun (reserved to about +1.9 above, hand at +1.2), the free arm and
                 // any one-sided cosmetic, so centring on it put the body left of centre in every
-                // run recorded at r=2 (BepInEx/pc_portrait_report_*.txt: fit centre x +0.25 and
-                // +0.37 on sides of 4.28 and 4.59, the rig 6.0% and 8.2% of the width left of it).
-                // The body is built AT the rig transform -- PlayerSkinHandler.Init instantiates the
-                // skin at base.transform.position under base.transform (decompile:
-                // logs-snapshot/decompiled/full/PlayerSkinHandler.cs) -- and eroding the r2 matte
-                // until the thin arm/gun link breaks leaves a body core centred on rig x -0.006
-                // (bbox mid -0.004), the same at every erosion depth from 20 to 56 px.
-                // So rigPos.x is a measured body centre here, not a stand-in for one.
+                // run recorded at r=2: fit centre x +0.25 and +0.37 on sides of 4.28 and 4.59,
+                // the rig 6.0% and 8.2% of the width left of it. Those figures are read out of
+                // the per-run portrait reports this file writes next to the game, which are run
+                // output and not carried by the repo -- re-read them from a run rather than
+                // taking them from a comment.
+                //
+                // rigPos.x stands in for the body centre because the skin is built at the rig
+                // transform. That holds for a rig this code assembled, and nothing here proves
+                // it for every rig it may be handed, which is why the fallback just below does
+                // not trust it: it asks the GEOMETRY whether the rig even lies inside the span
+                // being framed, and centres on the union when it does not. A re-rooted rig or a
+                // clone whose skin never spawned is caught there, by measurement, on the frame
+                // it happens.
+                //
+                // An earlier version of this comment also offered a matte-erosion measurement
+                // (a body core on rig x -0.006, bbox mid -0.004, "the same at every erosion
+                // depth from 20 to 56 px"). Eroding the checked-in mattes does not reproduce
+                // it -- the centre moves across those depths -- so whatever that run measured,
+                // it is not something this tree shows, and it is no longer claimed.
                 float bodyCx = rigPos.x;
                 if (bodyCx < use.min.x || bodyCx > use.max.x)
                 {
