@@ -263,12 +263,18 @@ def _ffa_insert_call() -> ast.Call:
 def test_reconciled_set_is_read_only_by_the_match_row_insert():
     """The heart of "display only", as a containment check rather than prose.
 
-    `_involuntary_departed` is derived once and consumed once. Every load of
-    it must fall inside the ffa_match_players INSERT call — so it cannot have
-    reached the placement sort, the rating application, the XP/gold award, the
-    `unrated` set, or the departure record. The mutation that reddens it is
-    adding any second reader; the control is the >= 1 assertion, which reds if
-    a later edit deletes the consumer and leaves a dead variable.
+    `_involuntary_departed` is derived once and consumed at least once, and
+    every load of it must fall INSIDE the ffa_match_players INSERT call — so
+    no load reached the placement sort, the rating application, the XP/gold
+    award, the `unrated` set, or the departure record.
+
+    What this enforces is the LOCATION of each read, not how many reads there
+    are: a second read INSIDE the INSERT is permitted by design and leaves
+    this check passing, which is what the inert twin beside the mutation
+    demonstrates. What reddens it is a load OUTSIDE the call — the store count
+    above pins the single derivation, and the >= 1 assertion is the control
+    that fires if a later edit deletes the consumer and leaves a dead
+    variable.
     """
     fn = _function("submit_ffa_match")
     assert len(_name_events(fn, "_involuntary_departed", ast.Store)) == 1
