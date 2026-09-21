@@ -6626,8 +6626,6 @@ namespace CompetitiveRounds
                                     GameStateWatcher.IncrementSessionRankedSeries(meWon);
                                 }
                                 catch (Exception ex) { Plugin.Log.LogWarning($"[SESSION] series tally update failed: {ex.Message}"); }
-                                // Regicide is now handled server-side after series completion
-                                GameStateWatcher.pendingRegicideCheck = false;
                             }
                         }
                     }

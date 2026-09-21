@@ -782,9 +782,6 @@ namespace CompetitiveRounds
         // or any round-end marker. CharacterData often reports !dead && health>0 during pick.
         private static bool inPickPhase = false;
 
-        // Sid's Steam ID for "Regicide" achievement
-        private const string SID_STEAM_ID = "76561198040410653";
-
         // Public state
         public static MatchTracker.MatchResult LastResult { get; private set; }
         public static bool HasPendingResult { get; private set; } = false;
@@ -5231,7 +5228,6 @@ namespace CompetitiveRounds
             abyssalRoundsActivated = 0;
             abyssalActivatedThisRound = false;
             inPickPhase = false;
-            pendingRegicideCheck = false;
             ResetPerMatchCombatCounters();
 
             // Retry card rarity scan if it didn't work at startup
@@ -7464,10 +7460,9 @@ namespace CompetitiveRounds
                     }
                 }
 
-                // 9. Regicide — now handled server-side after series completion
-                // (pendingRegicideCheck flag is still set but consumed/cleared by ApiClient)
-                if (matchIsRanked && localWon && opponentSteamId == SID_STEAM_ID)
-                    pendingRegicideCheck = true;
+                // 9. Regicide — decided server-side at series completion, against
+                // the server's own roster. The client evaluates nothing here and
+                // carries no identity for it.
 
                 // 10. Pacifist — won without firing a single shot
                 if (localWon && !achFiredShot)
@@ -7573,9 +7568,6 @@ namespace CompetitiveRounds
                 Plugin.Log.LogWarning($"[ACH] Achievement evaluation error: {ex.Message}");
             }
         }
-
-        // Regicide flag — consumed in ApiClient when series_status == "completed"
-        public static bool pendingRegicideCheck = false;
 
         // \u2500\u2500 Card tracking via CardBar \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
@@ -8087,7 +8079,6 @@ namespace CompetitiveRounds
             abyssalRoundsActivated = 0;
             abyssalActivatedThisRound = false;
             inPickPhase = false;
-            pendingRegicideCheck = false;
             LocalShotsThisMatch = 0;
             LocalBlocksThisMatch = 0;
             LocalKeysThisMatch = 0;
