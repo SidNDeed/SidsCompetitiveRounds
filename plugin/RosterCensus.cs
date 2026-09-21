@@ -161,7 +161,7 @@ namespace CompetitiveRounds
         /// throttle is far coarser than the others. One notice per roster
         /// generation is what marks the window an investigation is looking
         /// at; the interval is the backstop for a room whose generation never
-        /// moves.</summary>
+        /// changes.</summary>
         internal const int DeclineNoticeInterval = 240;
         internal const int DeclineNoticeCeiling = 12;
 
@@ -341,12 +341,31 @@ namespace CompetitiveRounds
             return ReasonRosterEmpty;
         }
 
-        /// <summary>The room sizes the observation mapping is enumerated over
-        /// by the self-test. Eight rather than four: a 2v2 room is four
-        /// seats, an FFA lobby is larger, and the bound is stated here so the
-        /// enumeration cannot quietly shrink to the sizes that happen to
-        /// pass.</summary>
-        internal const int ObservationEnumerationBound = 8;
+        /// <summary>How deep the self-test's multiset enumeration goes. It is
+        /// a SAMPLING DEPTH and not a room-size bound, and the difference is
+        /// the whole point of this remark (#302).
+        ///
+        /// There is no compile-time bound on the room size to be had. A 2v2
+        /// room is four seats and the mod's own FFA lobby maximum is ten, but
+        /// that maximum is a mutable field the server's <c>max_players</c>
+        /// response overwrites, so no constant here could claim to cover
+        /// "every room the mod can produce". An earlier version of this
+        /// remark said eight covered the FFA case; it did not, and the
+        /// coverage claim was larger than the evidence.
+        ///
+        /// What makes the mapping total over EVERY room size is not this
+        /// number. <see cref="ReasonForObservation"/> tests each count only
+        /// against zero, so its result is a function of the three counts'
+        /// SIGNS and not of their magnitudes — and that is asserted
+        /// executably, at magnitudes far above any room, by the
+        /// size-independence case in <see cref="SelfTest"/>. Given that, the
+        /// enumeration below is a witness for every size rather than for the
+        /// sizes it happens to reach.
+        ///
+        /// Ten so the enumeration still reaches the largest lobby the mod
+        /// itself configures, and stated here so it cannot quietly shrink to
+        /// the sizes that happen to pass.</summary>
+        internal const int ObservationEnumerationBound = 10;
 
         // ── the settled sample's clock ────────────────────────────────────
 
@@ -1116,9 +1135,12 @@ namespace CompetitiveRounds
             }
 
             // 10. All THREE boundary labels reach the line as themselves. A
-            //     reader pairs a call-in with its settled sample to see
-            //     whether the move happened at all, so the two map labels
-            //     being distinct is load-bearing, not cosmetic.
+            //     reader has to be able to say WHICH sample a row came from
+            //     before reading anything else off it, so the two map labels
+            //     being distinct is load-bearing, not cosmetic. What a
+            //     call-in row and a settled row may be read as TOGETHER is
+            //     stated once, in the canonical region at the top of this
+            //     file, and is not restated here or anywhere else.
             {
                 var seats = new List<SeatObservation> { Solo() };
                 string callIn = Field(emit(BoundaryContext.For(11, BoundaryMapCallIn, -1, 1), seats), "actor", "1");
@@ -1435,7 +1457,7 @@ namespace CompetitiveRounds
 
             // 28. EACH EMPTY CAUSE COUNTS ITS OWN SUPPRESSED TOTAL, on its own
             //     interval clock. Occurrences of another cause in between must
-            //     move neither the count nor the moment the notice is due.
+            //     change neither the count nor the moment the notice is due.
             {
                 var t = causeNotices(2, 99);
                 int s; bool f;
@@ -1601,6 +1623,67 @@ namespace CompetitiveRounds
                       + " due=" + due.ToString(CultureInfo.InvariantCulture)
                       + " reported=" + reported.ToString(CultureInfo.InvariantCulture)
                       + " sinceCallIn=" + actualSinceCallIn.ToString(CultureInfo.InvariantCulture));
+            }
+
+            // 35. THE TOKEN IS A FUNCTION OF THE THREE COUNTS' SIGNS AND NOT
+            //     OF THEIR MAGNITUDES — which is what makes case 32's
+            //     enumeration a witness for EVERY room size rather than for
+            //     the sizes it reaches.
+            //
+            //     Case 32 alone cannot say that. It enumerates up to a stated
+            //     depth, and a room size is not bounded at compile time: the
+            //     mod's own FFA lobby maximum is a mutable field the server's
+            //     max_players response overwrites. So a mapping that treated
+            //     some larger count specially would sit outside every
+            //     enumeration and the suite would still print a pass. That is
+            //     the coverage-claim shape #302 is about, and this case is the
+            //     positive signal that closes it.
+            //
+            //     For each of the eight zero/non-zero patterns the three
+            //     counts can take, every magnitude assignment must yield the
+            //     SAME token as the pattern's 0/1 representative — including
+            //     magnitudes far above any room this game can hold.
+            {
+                int[] magnitudes = { 1, 2, 3, 4, 7, 10, 11, 64, 1000, int.MaxValue };
+                bool ok = true;
+                int compared = 0;
+                string firstBad = null;
+
+                for (int pattern = 0; pattern < 8 && ok; pattern++)
+                {
+                    bool nullsOn = (pattern & 1) != 0;
+                    bool specsOn = (pattern & 2) != 0;
+                    bool seatsOn = (pattern & 4) != 0;
+
+                    string want = observe(RosterObservation.Of(nullsOn ? 1 : 0,
+                                                               specsOn ? 1 : 0,
+                                                               seatsOn ? 1 : 0));
+
+                    for (int a = 0; a < magnitudes.Length && ok; a++)
+                        for (int b = 0; b < magnitudes.Length && ok; b++)
+                            for (int c = 0; c < magnitudes.Length && ok; c++)
+                            {
+                                var obs = RosterObservation.Of(nullsOn ? magnitudes[a] : 0,
+                                                               specsOn ? magnitudes[b] : 0,
+                                                               seatsOn ? magnitudes[c] : 0);
+                                string got = observe(obs);
+                                compared++;
+                                if (got != want)
+                                {
+                                    ok = false;
+                                    firstBad = "pattern=" + pattern
+                                               + " nulls=" + obs.NullEntries.ToString(CultureInfo.InvariantCulture)
+                                               + " spectators=" + obs.SpectatorEntries.ToString(CultureInfo.InvariantCulture)
+                                               + " seats=" + obs.SeatEntries.ToString(CultureInfo.InvariantCulture)
+                                               + " token=" + (got ?? "(null)")
+                                               + " expected=" + (want ?? "(null)");
+                                }
+                            }
+                }
+
+                Check(r, "the observation token depends on the counts' signs and not on the room size", ok,
+                      ok ? "patterns=8 compared=" + compared.ToString(CultureInfo.InvariantCulture)
+                         : firstBad);
             }
 
             return r;

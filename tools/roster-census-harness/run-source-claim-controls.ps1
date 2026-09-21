@@ -19,7 +19,12 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $checker = Join-Path $PSScriptRoot 'check-source-claims.ps1'
-$sources = @('plugin/RosterCensus.cs', 'plugin/GameStateWatcher.cs', 'plugin/RoomActors.cs')
+# Every file the checker reads. NetworkReplicaDiagnostics.cs carries no claim
+# and no territory, but the checker COUNTS the claim markers across all four
+# lane files, so a temporary root missing one would VOID every case - making
+# each mutation look caught and each twin look broken at the same time.
+$sources = @('plugin/RosterCensus.cs', 'plugin/GameStateWatcher.cs', 'plugin/RoomActors.cs',
+             'plugin/NetworkReplicaDiagnostics.cs')
 
 # Each case: the file it edits, the EXACT line it replaces, what it replaces it
 # with, and whether the checker must pass afterwards.
@@ -64,6 +69,43 @@ $cases = @(
        Find = "    /// timing is a timing, never an ordering (#351). See that class's";
        Into = "    /// timing is a timing and never an ordering (#351). See that class's";
        Why  = 'inert twin: the same remark, reworded beside the region, stays green' },
+
+    # THE LENS FINDING. The allow-list fixed the WORDING and left the LOCATION
+    # alone: this site is 1050 lines below the nearest span, and the refuted
+    # reading sat here while the check reported success. It is caught now
+    # because the sweep runs over the WHOLE FILE and not over a span list.
+    @{ Name = 'M8-reinstates-the-pair-as-proof-reading-outside-every-span'; Expect = 'FAIL';
+       File = 'plugin/RosterCensus.cs';
+       Find = "            //     file, and is not restated here or anywhere else.";
+       Into = "            //     file. In practice: a settled row whose pos fields equal its call-in row's is a seat that never moved.";
+       Why  = 'lens finding 1: an outcome claim far from every span must red on the territory sweep' },
+    @{ Name = 'M8-twin-rewords-the-same-line'; Expect = 'PASS'; File = 'plugin/RosterCensus.cs';
+       Find = "            //     file, and is not restated here or anywhere else.";
+       Into = "            //     file, and is not restated here nor anywhere else.";
+       Why  = 'inert twin: the same line, reworded, makes no outcome claim' },
+
+    # A FOURTH canonical region, carrying the canonical sentence word for word.
+    # Nothing about its WORDING is wrong - the vocabulary inside a region is
+    # excised before the sweep - so the only thing that can catch it is the
+    # census of markers across the lane files.
+    @{ Name = 'M9-adds-a-fourth-canonical-region'; Expect = 'FAIL'; File = 'plugin/RosterCensus.cs';
+       Find = "            // 9. Degenerate inputs are empty, not exceptions.";
+       Into = "            // SCR_CENSUS_MOVE_CLAIM_BEGIN`r`n            // A settled row asserts the delay it measured and never a position in vanilla's transition, so a call-in row and a settled row carrying equal pos fields are two observations that agree and are not a reading that the seat did not move.`r`n            // SCR_CENSUS_MOVE_CLAIM_END`r`n            // 9. Degenerate inputs are empty, not exceptions.";
+       Why  = 'lens finding 1: an interpretation region at an undeclared site must red on the marker census' },
+    @{ Name = 'M9-twin-adds-the-same-note-without-markers'; Expect = 'PASS'; File = 'plugin/RosterCensus.cs';
+       Find = "            // 9. Degenerate inputs are empty, not exceptions.";
+       Into = "            // A reader is told once, at the top of this file, how to read a`r`n            // pair of rows; this note adds nothing to that.`r`n            // 9. Degenerate inputs are empty, not exceptions.";
+       Why  = 'inert twin: the same remark at the same site, carrying no region, stays green' },
+
+    # A territory that stops being marked is a territory nobody swept.
+    @{ Name = 'M10-unmarks-the-census-territory'; Expect = 'FAIL'; File = 'plugin/GameStateWatcher.cs';
+       Find = "    // SCR_CENSUS_PROSE_BEGIN";
+       Into = "    // (the census block is no longer marked as a territory)";
+       Why  = 'lens finding 1: an unswept territory is VOID, never a pass (#441)' },
+    @{ Name = 'M10-twin-rewords-the-line-below-the-marker'; Expect = 'PASS'; File = 'plugin/GameStateWatcher.cs';
+       Find = "    // Everything between this marker and its matching end marker, at the very";
+       Into = "    // Everything between this marker and the matching end marker, at the very";
+       Why  = 'inert twin: the same remark, reworded beside the marker, stays green' },
 
     @{ Name = 'M2-reinstates-the-every-helper-claim'; Expect = 'FAIL'; File = 'plugin/RoomActors.cs';
        Find = "        /// on an unfrozen roster, so with no spectator present and no frozen";

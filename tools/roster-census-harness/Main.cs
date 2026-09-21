@@ -155,6 +155,14 @@ namespace CompetitiveRounds.Harness
             caught += Mutant(ref mutants, "skips-null-entries-before-classifying",
                              Observation(SkipsNullEntries),
                              "the observation mapping is total over every entry multiset", quiet);
+            // The lens finding: the enumeration's DEPTH was doing work the
+            // enumeration cannot do. This mutant trips only above any depth a
+            // test would choose, so case 32 cannot see it at all, and the
+            // size-independence case is what reds it.
+            caught += Mutant(ref mutants, "classifies-a-large-room-by-its-count-rather-than-its-sign",
+                             Observation(CountThresholdObservation),
+                             "the observation token depends on the counts' signs and not on the room size",
+                             quiet);
             caught += Mutant(ref mutants, "drops-the-entry-counts-from-the-empty-notice",
                              Notices(CountlessEmpty, RosterCensus.FormatDeclinedNotice),
                              "a null entry carries its own token and its count onto the line", quiet);
@@ -199,6 +207,8 @@ namespace CompetitiveRounds.Harness
                              Observation(TabulatedObservation), baseline.Passed, quiet);
             green += Control(ref controls, "equivalent-settle-schedule-by-reassociated-arithmetic",
                              Settle(ReassociatedSchedule), baseline.Passed, quiet);
+            green += Control(ref controls, "equivalent-observation-classifier-by-sign-vector",
+                             Observation(SignVectorObservation), baseline.Passed, quiet);
 
             ok &= green == controls;
 
@@ -645,6 +655,45 @@ namespace CompetitiveRounds.Harness
             var withoutNulls = RosterCensus.RosterObservation.Of(
                 0, observed.SpectatorEntries, observed.SeatEntries);
             return RosterCensus.ReasonForObservation(withoutNulls);
+        }
+
+        /// <summary>A classification that tests a count's MAGNITUDE rather
+        /// than only its sign: above a threshold no enumeration reaches, a
+        /// seats-present observation reports the unclassified token instead.
+        ///
+        /// It exists to show what a bounded enumeration cannot see. Case 32
+        /// walks every multiset up to a stated depth and this mutant is
+        /// invisible to it at any depth a test would choose, because the
+        /// threshold sits above them all — and a room size is not bounded at
+        /// compile time, so no depth could be chosen that covers every room.
+        /// The size-independence case is what reds it, which is the whole
+        /// reason that case exists.</summary>
+        private static string CountThresholdObservation(RosterCensus.RosterObservation observed)
+        {
+            if (observed.Observed && observed.SeatEntries > 64)
+                return RosterCensus.ReasonRosterEmptyUnclassified;
+            return RosterCensus.ReasonForObservation(observed);
+        }
+
+        /// <summary>The same TOTAL mapping, computed from the three counts'
+        /// SIGN VECTOR and nothing else. The INERT TWIN of the
+        /// count-threshold mutant: the same site, the same shape of edit —
+        /// one that also reads the counts before deciding — and it must stay
+        /// GREEN at every magnitude, which is what makes that mutant's red
+        /// evidence about magnitude-dependence rather than about the mapping
+        /// having been rewritten.</summary>
+        private static string SignVectorObservation(RosterCensus.RosterObservation observed)
+        {
+            if (!observed.Observed) return RosterCensus.ReasonRosterEmptyUnclassified;
+
+            int signs = (observed.NullEntries > 0 ? 1 : 0)
+                        | (observed.SpectatorEntries > 0 ? 2 : 0)
+                        | (observed.SeatEntries > 0 ? 4 : 0);
+
+            if ((signs & 4) != 0) return RosterCensus.ReasonRosterSeatsPresent;
+            if ((signs & 1) != 0) return RosterCensus.ReasonRosterEntryNull;
+            if ((signs & 2) != 0) return RosterCensus.ReasonAllSpectators;
+            return RosterCensus.ReasonRosterEmpty;
         }
 
         /// <summary>"Arm the clock when the work is done." The settled row's

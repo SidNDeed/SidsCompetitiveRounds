@@ -8125,6 +8125,18 @@ namespace CompetitiveRounds
     }
 
     // ── roster census (bug 391 §4.1) ─────────────────────────────────────
+    //
+    // SCR_CENSUS_PROSE_BEGIN
+    // Everything between this marker and its matching end marker, at the very
+    // bottom of this file, is a TERRITORY of
+    // tools/roster-census-harness/check-source-claims.ps1: inside it, the
+    // transition vocabulary that checker prints may appear ONLY inside a
+    // canonical region, and nowhere else. The pair exists for no other purpose
+    // than to be found (#306) — which is why neither marker is spelled out in
+    // prose anywhere, here included: the checker FAILS unless this file carries
+    // exactly one of each, and a mention would be a second one. The rest of
+    // this file is outside the lane and is not swept, which is why the census
+    // is one contiguous block.
 
     /// <summary>Reads the roster the way the REPORTING seat sees it and hands
     /// it to <see cref="RosterCensus"/> to format. Everything contextual —
@@ -8142,7 +8154,8 @@ namespace CompetitiveRounds
     /// ── TWO SAMPLES PER MAP LOAD ──────────────────────────────────────────
     /// <see cref="OnMapCallIn"/> fires from the RPCA_CallInNewMapAndMovePlayers
     /// Postfix, which runs when the RPC is RECEIVED — BEFORE vanilla's map
-    /// coroutine (wait for map, enter, clear objects, move players) has run.
+    /// coroutine (wait for map, enter, clear objects, then dispatch
+    /// PlayerManager.MovePlayers) has run.
     /// SpectatorPatches.cs and SpectatorSync.cs both state that ordering about
     /// this same method, and FfaMapScale's MovePlayers patch records that
     /// MovePlayers itself runs inside that coroutine. So the call-in sample
@@ -8227,7 +8240,7 @@ namespace CompetitiveRounds
         private static int _batchesRoomGeneration = int.MinValue;
 
         /// <summary>How long after a call-in the settled sample is taken.
-        /// Vanilla's per-player Move coroutine runs on the order of a second
+        /// Vanilla's per-player MovePlayers coroutine runs on the order of a second
         /// (learning #304 reads one CALL IN NEW MAP block as N MOVE PLAYERS
         /// START lines and N END lines about a second apart), and learning #45
         /// uses a ~2s deferral for exactly this "let the transition finish"
@@ -8728,4 +8741,6 @@ namespace CompetitiveRounds
             try { RosterCensusEmitter.OnMapCallIn(); } catch { }
         }
     }
+
+    // SCR_CENSUS_PROSE_END
 }

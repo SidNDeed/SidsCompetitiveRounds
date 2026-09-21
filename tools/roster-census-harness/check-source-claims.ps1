@@ -16,42 +16,69 @@
 # equal snapshots prove no move passed it untouched while the check reported
 # success. A blacklist can only ever name what it has already seen.
 #
-# The rule here is an ALLOW-LIST instead, in two parts, and it is judged by what
-# it makes impossible rather than by what it forbids:
+# WHAT REPLACED THE SPAN LIST, AND WHY
+# ------------------------------------
+# The allow-list that replaced it fixed the WORDING dimension and left the
+# LOCATION dimension alone. Its sweep ran over six hand-maintained spans, so
+# the refuted reading survived 1050 lines away in the same file, in a self-test
+# remark no span covered, and the check still reported CLAIMS PASS. A rule that
+# only reaches the places someone remembered to list is a rule about the list
+# (#432): the flag named a line and the defect was a class.
 #
-#   1. THE REGION. Each sample site carries exactly ONE interpretation
-#      sentence, between SCR_CENSUS_MOVE_CLAIM_BEGIN and
+# So the sweep no longer runs over spans. It runs over TERRITORIES, and two
+# further rules make the territory set answer for itself:
+#
+#   1. THE REGION, per sample site. Each site carries exactly ONE
+#      interpretation sentence, between SCR_CENSUS_MOVE_CLAIM_BEGIN and
 #      SCR_CENSUS_MOVE_CLAIM_END. Those markers exist for no other purpose than
 #      to be found (#306). The canonical sentence is written out below, and the
 #      normalised text between the markers must equal it EXACTLY. A site with
 #      no region, two regions, or a region that says anything else, FAILS.
 #
-#   2. OUTSIDE THE REGION. In the rest of the sample site's span, none of the
-#      stated vocabulary may appear at all. So the only place at a sample site
-#      where the transition can be written about is the region, and the only
-#      thing the region may say is the canonical sentence.
+#   2. THE TERRITORY. A territory is a WHOLE FILE, or a region of a file marked
+#      by SCR_CENSUS_PROSE_BEGIN / SCR_CENSUS_PROSE_END. Anywhere inside a
+#      territory, outside a canonical region, none of the stated vocabulary may
+#      appear at all. plugin/RosterCensus.cs is a territory in its entirety
+#      because the file exists for nothing but the census; the census block of
+#      plugin/GameStateWatcher.cs is a marked territory because the rest of
+#      that file is another lane's.
 #
-# The one exemption is stated, bounded and PRINTED: ROUNDS' own log marker is
-# quoted verbatim in one remark and contains a vocabulary word. Only the exact
-# literals in $vocabularyExemptions are removed before the scan, and the
-# checker prints each one it removed and where. Any other occurrence fails.
+#   3. THE CENSUS. Across the lane's source files, the claim markers must occur
+#      exactly as many times as there are sample sites - so a FOURTH
+#      interpretation region cannot appear anywhere without this failing - and
+#      every file that carries one must be a declared territory, so a region
+#      cannot escape the sweep by moving to a file nobody listed.
+#
+# What that makes impossible: at any line of plugin/RosterCensus.cs, and at any
+# line of the census block of plugin/GameStateWatcher.cs, no statement using
+# the stated vocabulary can exist outside the one canonical sentence, whether or
+# not anyone remembered to add a span for it; and no fourth region can be added
+# anywhere in the lane's sources without a FAIL.
+#
+# The one exemption is stated, bounded and PRINTED: ROUNDS' own log markers are
+# quoted verbatim in two remarks and contain vocabulary words. Only the exact
+# literals in $vocabularyExemptions are removed before the scan, and the checker
+# prints each one it removed and where. Any other occurrence fails.
 #
 # WHAT IT STILL CANNOT DO, STATED RATHER THAN IMPLIED (#310 / #389). A sentence
-# outside the region that describes the same outcome while using none of the
-# vocabulary is not caught. The bound is therefore: at a sample site, no
-# statement using the stated vocabulary can exist outside the one canonical
-# sentence. That is a bound, not a proof, and it is written here rather than
-# left for a reader to discover.
+# inside a territory that describes the same outcome while using none of the
+# vocabulary is not caught. And a territory is still a declared thing: lane
+# source added in a NEW file is swept only once that file is a territory - which
+# is what rule 3's second half exists to force, since a region in an undeclared
+# file FAILS rather than passing quietly.
 #
 # WHAT A SPAN IS
 # --------------
+# Spans remain, for the PHRASE claims below - the ones that assert a particular
+# remark says a particular thing. They are no longer what bounds the vocabulary
+# sweep.
+#
 #   file   the lane source the claim lives in
 #   span   an anchored region of that file, start phrase to end phrase. NEVER
-#          the whole file: a flag names a line and the defect is a class, but a
-#          forbidden phrase searched file-wide reds on an unrelated paragraph
-#          and stops meaning anything (#432). An anchor that does not match, or
-#          that matches more than once, is a FAIL and never a skip - a skipped
-#          row and a passed row differ by one word the eye slides past (#679).
+#          the whole file: a required phrase searched file-wide would pass on an
+#          unrelated paragraph. An anchor that does not match, or that matches
+#          more than once, is a FAIL and never a skip - a skipped row and a
+#          passed row differ by one word the eye slides past (#679).
 #   kind   required (must appear at least MinCount times in the span) or
 #          forbidden (must appear zero times).
 #
@@ -124,6 +151,8 @@ $sampleSites = @(
 
 $claimBegin = 'SCR_CENSUS_MOVE_CLAIM_BEGIN'
 $claimEnd = 'SCR_CENSUS_MOVE_CLAIM_END'
+$proseBegin = 'SCR_CENSUS_PROSE_BEGIN'
+$proseEnd = 'SCR_CENSUS_PROSE_END'
 
 # THE ONE SENTENCE A SAMPLE SITE MAY SAY ABOUT THE TRANSITION. Written out here
 # so the checker STATES the permitted text rather than merely reacting to text
@@ -132,9 +161,30 @@ $canonicalClaim = @'
 A settled row asserts the delay it measured and never a position in vanilla's transition, so a call-in row and a settled row carrying equal pos fields are two observations that agree and are not a reading that the seat did not move.
 '@
 
-# The vocabulary. Outside the region, at a sample site, none of these may
-# appear. Word-boundaried so that MovePlayers - a method name - is not a hit,
-# and case-insensitive so a claim cannot return in different capitals.
+# ---- the territories, and the files a region may live in --------------------
+
+# Every source file this lane owns that could carry a canonical region. The
+# census rule below counts markers across exactly these, so a region added to
+# any of them is seen whether or not it is inside a declared span.
+$laneFiles = @(
+    'plugin/RosterCensus.cs',
+    'plugin/GameStateWatcher.cs',
+    'plugin/RoomActors.cs',
+    'plugin/NetworkReplicaDiagnostics.cs'
+)
+
+# Where the vocabulary sweep runs. Kind 'file' is the whole file; kind 'region'
+# is the text between the prose markers, which must occur exactly once each.
+$territories = @(
+    @{ Name = 'rostercensus/whole-file';          File = 'plugin/RosterCensus.cs';     Kind = 'file';
+       Why  = 'the file exists for nothing but the census, so every line of it is in scope' },
+    @{ Name = 'gamestatewatcher/census-block';    File = 'plugin/GameStateWatcher.cs'; Kind = 'region';
+       Why  = 'the census block only - the rest of the file belongs to other work and is not this lane to police' }
+)
+
+# The vocabulary. Inside a territory, outside a canonical region, none of these
+# may appear. Word-boundaried so that MovePlayers - a method name - is not a
+# hit, and case-insensitive so a claim cannot return in different capitals.
 $vocabulary = @(
     '\bmove\b', '\bmoves\b', '\bmoved\b', '\bmoving\b', '\bmovement\b', '\bunmoved\b',
     '\bteleport\w*\b', '\brelocat\w*\b', '\breposition\w*\b',
@@ -142,10 +192,11 @@ $vocabulary = @(
 )
 
 # The ONLY literals removed before the vocabulary scan. Each is a verbatim
-# quotation of something outside this codebase that a remark has to be able to
-# name. Every removal is printed.
+# quotation of a ROUNDS log marker that a remark has to be able to name. Every
+# removal is printed, with the territory it was removed from.
 $vocabularyExemptions = @(
-    'CALL IN NEW MAP AND MOVE PLAYERS'
+    'CALL IN NEW MAP AND MOVE PLAYERS',
+    'MOVE PLAYERS START'
 )
 
 # ---- the claims -------------------------------------------------------------
@@ -204,12 +255,19 @@ Write-Output ("invocation:     " + [Environment]::CommandLine)
 Write-Output ("invocation-root: " + $Root)
 Write-Output ("invocation-utc: " + (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))
 Write-Output ""
-Write-Output "--- the allow-list this check enforces at every sample site ---"
+Write-Output "--- the allow-list this check enforces ---"
 Write-Output ("canonical claim: " + $canonicalClaim.Trim())
 Write-Output ("region markers:  " + $claimBegin + " .. " + $claimEnd)
+Write-Output ("prose markers:   " + $proseBegin + " .. " + $proseEnd)
 Write-Output ("vocabulary:      " + ($vocabulary -join '  '))
 foreach ($ex in $vocabularyExemptions) {
     Write-Output ("exempt literal:  " + $ex)
+}
+foreach ($t in $territories) {
+    Write-Output ("territory:       {0,-34} | {1,-28} | {2}" -f $t.Name, $t.File, $t.Kind)
+}
+foreach ($f in $laneFiles) {
+    Write-Output ("lane file:       " + $f)
 }
 Write-Output ""
 
@@ -248,6 +306,137 @@ foreach ($span in $spans) {
     $spanText[$span.Name] = $text.Substring($from, $to - $from)
     Write-Output ("ok   | span={0,-40} | chars={1}" -f $span.Name, ($to - $from))
 }
+
+# ---- the census of regions --------------------------------------------------
+
+Write-Output ""
+Write-Output "--- region census: the markers are counted across every lane file, so a fourth region cannot hide ---"
+
+$territoryFiles = @($territories | ForEach-Object { $_.File })
+$totalBegin = 0
+$totalEnd = 0
+$censusRead = 0
+
+foreach ($file in $laneFiles) {
+    $path = Join-Path $Root $file
+    if (-not (Test-Path -LiteralPath $path)) {
+        Write-Output ("FAIL | census | no such lane file: " + $file)
+        $failures = $failures + 1
+        continue
+    }
+    $censusRead = $censusRead + 1
+    $text = Get-NormalisedText -Path $path
+    $b = Get-Occurrences -Haystack $text -Needle $claimBegin
+    $e = Get-Occurrences -Haystack $text -Needle $claimEnd
+    $totalBegin = $totalBegin + $b
+    $totalEnd = $totalEnd + $e
+
+    $isTerritory = $territoryFiles -contains $file
+    $row = 'ok  '
+    # A region in a file no territory covers would be policed for its WORDING
+    # and swept nowhere, which is the hole the span list left.
+    if (($b -gt 0 -or $e -gt 0) -and -not $isTerritory) {
+        $row = 'FAIL'
+        $failures = $failures + 1
+    }
+    Write-Output ("{0} | census | {1,-38} | begin={2} end={3} | territory={4}" -f `
+        $row, $file, $b, $e, $(if ($isTerritory) { 'yes' } else { 'NO' }))
+}
+
+$wantMarkers = $sampleSites.Count
+$censusOk = ($totalBegin -eq $wantMarkers -and $totalEnd -eq $wantMarkers)
+if (-not $censusOk) { $failures = $failures + 1 }
+Write-Output ("{0} | census | totals across the lane files: begin={1} end={2}, expected {3} and {3}" -f `
+    $(if ($censusOk) { 'ok  ' } else { 'FAIL' }), $totalBegin, $totalEnd, $wantMarkers)
+
+# ---- the territories --------------------------------------------------------
+
+Write-Output ""
+Write-Output "--- territories (every declared territory is READ and printed; one not read is VOID) ---"
+
+$territoriesRead = 0
+foreach ($t in $territories) {
+    $path = Join-Path $Root $t.File
+    if (-not (Test-Path -LiteralPath $path)) {
+        Write-Output ("FAIL | territory={0,-34} | no such file: {1}" -f $t.Name, $t.File)
+        $failures = $failures + 1
+        continue
+    }
+
+    $text = Get-NormalisedText -Path $path
+
+    if ($t.Kind -eq 'region') {
+        $pb = Get-Occurrences -Haystack $text -Needle $proseBegin
+        $pe = Get-Occurrences -Haystack $text -Needle $proseEnd
+        if ($pb -ne 1 -or $pe -ne 1) {
+            Write-Output ("FAIL | territory={0,-34} | prose markers: begin={1} end={2}, expected 1 and 1" -f `
+                $t.Name, $pb, $pe)
+            $failures = $failures + 1
+            continue
+        }
+        $tb = $text.IndexOf($proseBegin, [System.StringComparison]::OrdinalIgnoreCase)
+        $te = $text.IndexOf($proseEnd, [System.StringComparison]::OrdinalIgnoreCase)
+        if ($te -le $tb) {
+            Write-Output ("FAIL | territory={0,-34} | the end marker precedes the begin marker" -f $t.Name)
+            $failures = $failures + 1
+            continue
+        }
+        $text = $text.Substring($tb, $te - $tb)
+    }
+
+    $territoriesRead = $territoriesRead + 1
+
+    # Excise every canonical region in the territory. What is left is
+    # everything the vocabulary may not appear in.
+    $outside = $text
+    $regions = 0
+    while ($true) {
+        $b = $outside.IndexOf($claimBegin, [System.StringComparison]::OrdinalIgnoreCase)
+        if ($b -lt 0) { break }
+        $e = $outside.IndexOf($claimEnd, $b, [System.StringComparison]::OrdinalIgnoreCase)
+        if ($e -lt 0) {
+            Write-Output ("FAIL | territory={0,-34} | a begin marker with no end marker after it" -f $t.Name)
+            $failures = $failures + 1
+            break
+        }
+        $regions = $regions + 1
+        $outside = $outside.Substring(0, $b) + ' ' + $outside.Substring($e + $claimEnd.Length)
+    }
+
+    Write-Output ("ok   | territory={0,-34} | {1,-28} | {2,-6} | chars={3} | canonical regions excised={4}" -f `
+        $t.Name, $t.File, $t.Kind, $text.Length, $regions)
+    Write-Output ("     | why: " + $t.Why)
+
+    foreach ($ex in $vocabularyExemptions) {
+        $n = Get-Occurrences -Haystack $outside -Needle $ex
+        if ($n -gt 0) {
+            Write-Output ("     | territory={0,-34} | exempt literal removed {1}x before the scan: {2}" -f `
+                $t.Name, $n, $ex)
+            $outside = [System.Text.RegularExpressions.Regex]::Replace(
+                $outside, [System.Text.RegularExpressions.Regex]::Escape($ex), ' ',
+                [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        }
+    }
+
+    $hits = 0
+    foreach ($pattern in $vocabulary) {
+        $matches = [System.Text.RegularExpressions.Regex]::Matches(
+            $outside, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        if ($matches.Count -gt 0) {
+            $hits = $hits + $matches.Count
+            foreach ($m in $matches) {
+                $at = [Math]::Max(0, $m.Index - 60)
+                $len = [Math]::Min(150, $outside.Length - $at)
+                Write-Output ("FAIL | territory={0,-34} | vocabulary outside a canonical region: {1}" -f $t.Name, $m.Value)
+                Write-Output ("     | context: ..." + $outside.Substring($at, $len).Trim() + "...")
+            }
+        }
+    }
+    if ($hits -gt 0) { $failures = $failures + 1 }
+    else { Write-Output ("ok   | territory={0,-34} | no vocabulary outside a canonical region, chars scanned={1}" -f $t.Name, $outside.Length) }
+}
+
+# ---- the sample sites -------------------------------------------------------
 
 Write-Output ""
 Write-Output "--- sample sites (every listed site is READ and printed; a site not read is VOID) ---"
@@ -294,36 +483,6 @@ foreach ($site in $sampleSites) {
         Write-Output ("     | got:  " + $region)
         $failures = $failures + 1
     }
-
-    # Everything at this site EXCEPT the region, including the markers.
-    $outside = $text.Substring(0, $b) + $text.Substring($e + $claimEnd.Length)
-
-    foreach ($ex in $vocabularyExemptions) {
-        $n = Get-Occurrences -Haystack $outside -Needle $ex
-        if ($n -gt 0) {
-            Write-Output ("     | site={0,-40} | exempt literal removed {1}x before the scan: {2}" -f $site, $n, $ex)
-            $outside = [System.Text.RegularExpressions.Regex]::Replace(
-                $outside, [System.Text.RegularExpressions.Regex]::Escape($ex), ' ',
-                [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-        }
-    }
-
-    $hits = 0
-    foreach ($pattern in $vocabulary) {
-        $matches = [System.Text.RegularExpressions.Regex]::Matches(
-            $outside, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-        if ($matches.Count -gt 0) {
-            $hits = $hits + $matches.Count
-            foreach ($m in $matches) {
-                $at = [Math]::Max(0, $m.Index - 60)
-                $len = [Math]::Min(150, $outside.Length - $at)
-                Write-Output ("FAIL | site={0,-40} | vocabulary outside the canonical region: {1}" -f $site, $m.Value)
-                Write-Output ("     | context: ..." + $outside.Substring($at, $len).Trim() + "...")
-            }
-        }
-    }
-    if ($hits -gt 0) { $failures = $failures + 1 }
-    else { Write-Output ("ok   | site={0,-40} | no vocabulary outside the region, chars scanned={1}" -f $site, $outside.Length) }
 }
 
 Write-Output ""
@@ -352,10 +511,21 @@ foreach ($claim in $claims) {
 
 Write-Output ""
 Write-Output ("spans=" + $spans.Count + " sites=" + $sampleSites.Count + " sitesRead=" + $sitesRead `
-    + " claims=" + $claims.Count + " checked=" + $checked + " failures=" + $failures)
+    + " laneFiles=" + $laneFiles.Count + " censusRead=" + $censusRead `
+    + " territories=" + $territories.Count + " territoriesRead=" + $territoriesRead `
+    + " markers=" + $totalBegin + " claims=" + $claims.Count + " checked=" + $checked `
+    + " failures=" + $failures)
 
 if ($sitesRead -ne $sampleSites.Count) {
     Write-Output "CLAIMS VOID | a sample site was not read - a site nobody read is not a site that passed"
+    exit 3
+}
+if ($territoriesRead -ne $territories.Count) {
+    Write-Output "CLAIMS VOID | a territory was not read - an unswept territory is not a clean one"
+    exit 3
+}
+if ($censusRead -ne $laneFiles.Count) {
+    Write-Output "CLAIMS VOID | a lane file was not read - the region census is only a census if it saw every file"
     exit 3
 }
 if ($checked -ne $claims.Count) {
