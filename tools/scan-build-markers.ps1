@@ -143,6 +143,11 @@ $evenHay = $latin1.GetString($evenSalt.Bytes)
 $sha = (Get-FileHash -LiteralPath $Dll -Algorithm SHA256).Hash.ToLowerInvariant()
 
 Write-Output "=== build marker scan ==="
+# THE INVOCATION, PRINTED BY THE PROCESS ABOUT ITSELF, ABOVE THE RESULTS. A
+# verdict with no invocation above it is a number a reader cannot bind to the
+# run that produced it, and check-evidence-log.ps1 rejects exactly that.
+Write-Output ("invocation:     " + [Environment]::CommandLine)
+Write-Output ("invocation-utc: " + (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))
 Write-Output ("dll:    " + (Resolve-Path -LiteralPath $Dll).Path)
 Write-Output ("bytes:  " + $bytes.Length)
 Write-Output ("sha256: " + $sha)
