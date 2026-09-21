@@ -82,6 +82,7 @@ input was unusable or the self-test failed.
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -200,20 +201,96 @@ def write_provenance(out_dir: Path, sha: str, rows: list[str]) -> None:
                                       encoding="utf-8", newline="\n")
 
 
-def check_provenance(out_dir: Path, sha: str) -> list[str]:
-    """Complaints when the extract does not name the commit it was taken from."""
+# The one shape a provenance row is written in, read back strictly. The
+# round-3 reader matched `commit: ` and RETURNED on it, so every other row was
+# accepted unread: a row promising a file the extract does not carry, or
+# promising no count at all, verified and was sealed. A file of promises whose
+# only checked promise is the one it happens to open with is a check that
+# cannot fail (#342), and provenance is exactly the artifact where that costs
+# the most -- it is what a reviewer reads INSTEAD of the lane.
+_ROW = re.compile(r"^(?P<name>[A-Za-z0-9_.\-]+): (?P<lines>\d+) lines, "
+                  r"(?P<blanked>\d+) blanked, from (?P<rel>\S+)$")
+
+
+def check_provenance(out_dir: Path, sha: str,
+                     measured: dict[str, tuple[str, int, int]] | None = None
+                     ) -> list[str]:
+    """Complaints when PROVENANCE.txt does not describe the extract beside it.
+
+    EVERY row is verified, not the commit alone: the name must be one this
+    extract carries, the file must be present in the directory, the source it
+    claims must be the one the lane reads, and both counts must hold -- the
+    line count against the file on disk, and, when this run has the committed
+    blob in hand (`measured`), the same count against the blob and the blanked
+    count against what was actually blanked. A row for a file nobody produced,
+    a row whose file is missing, a row whose counts are absent or unreadable, a
+    duplicate row, and a promised file with no row are each their own refusal,
+    because each of them is a different way for the file to be false.
+    """
     p = out_dir / PROVENANCE
     if not p.is_file():
         return [f"{PROVENANCE}: absent -- the extract names no commit, so what "
                 "a reviewer is reading cannot be bound to the lane"]
-    for line in p.read_text(encoding="utf-8").splitlines():
-        if line.startswith("commit: "):
-            recorded = line.split(" ", 1)[1].strip()
-            if recorded != sha:
-                return [f"{PROVENANCE}: names {recorded[:12]}, the lane is at "
-                        f"{sha[:12]} -- this extract is from another commit"]
-            return []
-    return [f"{PROVENANCE}: carries no commit line"]
+    bad: list[str] = []
+    commits: list[str] = []
+    rows: dict[str, re.Match] = {}
+    for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if line.startswith("commit:"):
+            commits.append(line.split(":", 1)[1].strip())
+            continue
+        m = _ROW.match(line)
+        if m is None:
+            bad.append(f"{PROVENANCE}:{n}: unreadable row {line!r} -- a row reads "
+                       "'NAME: N lines, M blanked, from REL', and a row whose "
+                       "counts cannot be read promises nothing")
+            continue
+        if m.group("name") in rows:
+            bad.append(f"{PROVENANCE}:{n}: a second row for {m.group('name')} -- "
+                       "two rows for one file cannot both be the provenance")
+            continue
+        rows[m.group("name")] = m
+    if len(commits) != 1:
+        bad.append(f"{PROVENANCE}: carries {len(commits)} commit lines, wants "
+                   "exactly one")
+    elif commits[0] != sha:
+        bad.append(f"{PROVENANCE}: names {commits[0][:12]}, the lane is at "
+                   f"{sha[:12]} -- this extract is from another commit")
+    carried = {Path(rel).name: rel for rel in SOURCES}
+    for name in sorted(rows):
+        m = rows[name]
+        if name not in carried:
+            bad.append(f"{PROVENANCE}: promises {name}, which this extract does "
+                       "not carry -- a row naming a file nobody produced is a "
+                       "promise nothing keeps")
+            continue
+        if m.group("rel") != carried[name]:
+            bad.append(f"{PROVENANCE}: {name} claims to come from "
+                       f"{m.group('rel')}, the lane reads it from {carried[name]}")
+        target = out_dir / name
+        if not target.is_file():
+            bad.append(f"{PROVENANCE}: promises {name}, which is absent from "
+                       f"{out_dir.name}")
+            continue
+        promised = int(m.group("lines"))
+        on_disk = len(target.read_text(encoding="utf-8").splitlines())
+        if on_disk != promised:
+            bad.append(f"{PROVENANCE}: {name} promises {promised} lines, the file "
+                       f"beside it has {on_disk}")
+        if measured is not None and name in measured:
+            _, src_lines, blanked = measured[name]
+            if promised != src_lines:
+                bad.append(f"{PROVENANCE}: {name} promises {promised} lines, the "
+                           f"committed blob has {src_lines}")
+            if int(m.group("blanked")) != blanked:
+                bad.append(f"{PROVENANCE}: {name} promises {m.group('blanked')} "
+                           f"blanked, this run blanked {blanked}")
+    for name in sorted(carried):
+        if name not in rows:
+            bad.append(f"{PROVENANCE}: carries no row for {name} -- a file in the "
+                       "extract the provenance does not describe is uncovered")
+    return bad
 
 
 
@@ -323,6 +400,7 @@ def generate(args) -> int:
     sha = bind_sha(worktree, args.sha)
     print(f"committed sha   : {args.sha} -> {sha}")
     provenance: list[str] = []
+    measured: dict[str, tuple[str, int, int]] = {}
     print(f"blank classes   : {'ALL' if classes is None else sorted(classes)}")
     for rel in SOURCES:
         source = read_blob(worktree, sha, rel)
@@ -342,8 +420,11 @@ def generate(args) -> int:
             bad.append(f"{rel}:{lineno}: {cls} survived into the extract")
         provenance.append(f"{Path(rel).name}: {len(source)} lines, "
                           f"{len(protected)} blanked, from {rel}")
+        measured[Path(rel).name] = (rel, len(source), len(protected))
     write_provenance(out_dir, sha, provenance)
-    bad += check_provenance(out_dir, sha)
+    # Read back what was WRITTEN, against what this run MEASURED: the rows are
+    # not trusted because this function produced them.
+    bad += check_provenance(out_dir, sha, measured)
     for line in bad:
         print(line)
     print("EXTRACT:", "written, every property held" if not bad
@@ -357,7 +438,7 @@ def verify(args) -> int:
     print(f"verifying       : {args.verify.name}")
     sha = bind_sha(args.client_worktree, args.sha)
     print(f"committed sha   : {args.sha} -> {sha}")
-    bad += check_provenance(args.verify, sha)
+    measured: dict[str, tuple[str, int, int]] = {}
     for rel in SOURCES:
         source = read_blob(args.client_worktree, sha, rel)
         target = args.verify / Path(rel).name
@@ -366,6 +447,7 @@ def verify(args) -> int:
             continue
         extract = target.read_text(encoding="utf-8").splitlines()
         protected = protected_lines(source, terms, None, guard_rx)
+        measured[Path(rel).name] = (rel, len(source), len(protected))
         if len(extract) != len(source):
             bad.append(f"{rel}: {len(extract)} lines, source has {len(source)}")
         else:
@@ -374,9 +456,13 @@ def verify(args) -> int:
                     bad.append(f"{rel}:{n}: a protected line survived")
         bad += check_anchors(rel, source, extract)
         print(f"  {rel}: {len(extract)} lines, {len(protected)} protected")
+    # After the loop, so every row can be judged against the blob this run read
+    # rather than against the directory listing alone.
+    bad += check_provenance(args.verify, sha, measured)
     for line in bad:
         print(line)
-    print("VERIFY:", "line-preserving, protected blanked, every anchor readable"
+    print("VERIFY:", "line-preserving, protected blanked, every anchor readable, "
+          "provenance describes this extract"
           if not bad else f"{len(bad)} checks failed")
     return 1 if bad else 0
 
@@ -435,14 +521,51 @@ def _self_test() -> int:
         d = Path(tmp)
         checks["an extract naming no commit is reported"] = \
             bool(check_provenance(d, "a" * 40))
-        write_provenance(d, "a" * 40, ["ApiClient.cs: 3 lines, 0 blanked"])
-        checks["an extract naming THIS commit is green"] = \
-            not check_provenance(d, "a" * 40)
+        # A directory shaped like a real extract: both files this tool carries,
+        # with rows that describe them. Everything below is one row away from
+        # this, so each check separates one property and not a bundle of them.
+        (d / "ApiClient.cs").write_text("one\ntwo\n\n", encoding="utf-8")
+        (d / "TransportExit.cs").write_text("only\n", encoding="utf-8")
+        truth = {"ApiClient.cs": ("plugin/ApiClient.cs", 3, 1),
+                 "TransportExit.cs": ("plugin/TransportExit.cs", 1, 0)}
+        rows = ["ApiClient.cs: 3 lines, 1 blanked, from plugin/ApiClient.cs",
+                "TransportExit.cs: 1 lines, 0 blanked, from plugin/TransportExit.cs"]
+        write_provenance(d, "a" * 40, rows)
+        checks["PROV-TWIN: provenance that describes the files beside it is green"] = \
+            not check_provenance(d, "a" * 40, truth)
         checks["an extract naming ANOTHER commit is reported"] = \
-            bool(check_provenance(d, "b" * 40))
+            bool(check_provenance(d, "b" * 40, truth))
         checks["the provenance carries counts and never a line of source"] = (
             "0 blanked" in (d / PROVENANCE).read_text(encoding="utf-8")
             and "class A {" not in (d / PROVENANCE).read_text(encoding="utf-8"))
+
+        def reported(rs, m=truth, sha="a" * 40):
+            write_provenance(d, sha, rs)
+            out = check_provenance(d, sha, m)
+            write_provenance(d, "a" * 40, rows)     # back to the true file
+            return bool(out)
+
+        checks["PROV-FALSE-FILE: a row naming a file the extract does not carry is reported"] = \
+            reported(rows + ["Nowhere.cs: 9 lines, 0 blanked, from plugin/Nowhere.cs"])
+        checks["PROV-BLANK-COUNT: a row whose counts are blank is reported"] = \
+            reported([rows[0].replace("3 lines, 1 blanked", " lines,  blanked"), rows[1]])
+        checks["PROV-WRONG-LINES: a row promising the wrong line count is reported"] = \
+            reported([rows[0].replace("3 lines", "4 lines"), rows[1]])
+        checks["PROV-WRONG-BLANKED: a row promising the wrong blanked count is reported"] = \
+            reported([rows[0].replace("1 blanked", "0 blanked"), rows[1]])
+        checks["PROV-WRONG-SOURCE: a row claiming another source path is reported"] = \
+            reported([rows[0].replace("from plugin/ApiClient.cs", "from plugin/Other.cs"),
+                      rows[1]])
+        checks["PROV-MISSING-ROW: a carried file with no row is reported"] = \
+            reported([rows[0]])
+        checks["PROV-DUPLICATE: two rows for one file are reported"] = \
+            reported(rows + [rows[0]])
+        (d / "TransportExit.cs").rename(d / "TransportExit.cs.moved")
+        checks["PROV-ABSENT-FILE: a row promising a file that is not there is reported"] = \
+            bool(check_provenance(d, "a" * 40, truth))
+        (d / "TransportExit.cs.moved").rename(d / "TransportExit.cs")
+        checks["PROV-TWIN again: the same provenance is green after every control"] = \
+            not check_provenance(d, "a" * 40, truth)
     for k, ok in checks.items():
         print(f"  {'ok  ' if ok else 'FAIL'} {k}")
     bad = [k for k, ok in checks.items() if not ok]

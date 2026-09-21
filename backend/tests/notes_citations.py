@@ -461,6 +461,109 @@ def emit(records: list[dict], notes_rel: str, write) -> tuple[int, int]:
     return printed, reportable
 
 
+# The notes state their own citation totals in prose, and round 3 shipped a
+# certified file whose prose said 141 + 4 while the run that certified it
+# measured 163. Nothing could see it: the tool measured a population and the
+# file claimed another, and only a reader holding both artifacts at once could
+# compare them. A number a reviewer is invited to trust has to be a CHECKED
+# claim, so the claim is written in ONE machine-readable shape and this tool
+# asserts it against what it just measured (#302, #342).
+_POPULATION_CLAIM = re.compile(
+    r"CITATION POPULATION:\s*(\d+)\s*=\s*(\d+)\s+read\s*\+\s*(\d+)\s+declined")
+# The same proximity rule notes_superseded.py keeps, for the same reason: a
+# retired figure stays readable as history, and says so where it is read.
+_CLAIM_WINDOW = 3
+_CLAIM_MARKER = "SUPERSEDED"
+
+
+def population_claims(notes_text: str) -> list[tuple[int, tuple[int, int, int], bool]]:
+    """[(line, (total, read, declined), retired?)] for every stated population.
+
+    A claim with the retirement marker within `_CLAIM_WINDOW` lines is a record
+    of what an earlier round measured; one without it is a claim about THIS
+    file, and this run has to be able to fail it.
+    """
+    lines = notes_text.splitlines()
+    out: list[tuple[int, tuple[int, int, int], bool]] = []
+    for i, line in enumerate(lines):
+        m = _POPULATION_CLAIM.search(line)
+        if not m:
+            continue
+        window = lines[max(0, i - _CLAIM_WINDOW): i + _CLAIM_WINDOW + 1]
+        out.append((i + 1,
+                    (int(m.group(1)), int(m.group(2)), int(m.group(3))),
+                    any(_CLAIM_MARKER in w for w in window)))
+    return out
+
+
+def check_population(notes_text: str, measured: tuple[int, int, int],
+                     notes_rel: str, write=print) -> int:
+    """0 when the file's own stated population is this run's; 2 when it is not.
+
+    Exactly one live claim, because no claim means the figures a reader quotes
+    are unchecked again, and two live claims mean the file states a population
+    twice and this tool cannot say which one a reader will take.
+    """
+    claims = population_claims(notes_text)
+    for lineno, nums, retired in claims:
+        write(f"claim: {notes_rel}:{lineno} states {nums[0]} = {nums[1]} read "
+              f"+ {nums[2]} declined" + ("  [retired, marker in place]"
+                                         if retired else "  [LIVE]"))
+    live = [c for c in claims if not c[2]]
+    if len(live) != 1:
+        write(f"REFUSING a verdict: {len(live)} live CITATION POPULATION claims "
+              f"in {notes_rel}, wants exactly one. This run measured "
+              f"{measured[0]} = {measured[1]} read + {measured[2]} declined, and "
+              "a population no line of the file states is a number a reader "
+              "cannot check.")
+        return 2
+    lineno, nums, _ = live[0]
+    if nums != measured:
+        write(f"REFUSING a verdict: {notes_rel}:{lineno} states {nums[0]} = "
+              f"{nums[1]} read + {nums[2]} declined; this run measured "
+              f"{measured[0]} = {measured[1]} read + {measured[2]} declined. The "
+              "prose and the measurement disagree, so one of them is stale and "
+              "a review reading the file would certify the wrong population.")
+        return 2
+    write(f"POPULATION CLAIM: {notes_rel}:{lineno} states what this run measured "
+          f"— {nums[0]} = {nums[1]} read + {nums[2]} declined")
+    return 0
+
+
+def _population_control() -> dict[str, bool]:
+    """The claim checker's own controls: a stale figure must not pass.
+
+    Same text, one number of difference -- and the twin is the same file with
+    the stale figure RETIRED beside a live correct one, so the check is shown
+    discriminating between a wrong claim and an old claim that says it is old.
+    """
+    def body(claim: str, extra: str = "") -> str:
+        # Eight lines between the two, so the proximity window around one of
+        # them cannot reach the other and decide its status for it.
+        filler = "\n".join(["prose"] * 8)
+        return f"# notes\n\n{filler}\n\n{claim}\n\n{filler}\n\n{extra}\n"
+
+    live = "CITATION POPULATION: 163 = 158 read + 5 declined"
+    stale = "CITATION POPULATION: 141 = 137 read + 4 declined"
+    quiet: list[str] = []
+    return {
+        "POP-TWIN: a stated population equal to the measurement is green":
+            check_population(body(live), (163, 158, 5), "n.md", quiet.append) == 0,
+        "POP-STALE: a stated population one number off REFUSES":
+            check_population(body(live), (164, 159, 5), "n.md", quiet.append) == 2,
+        "POP-ABSENT: a file stating no population REFUSES":
+            check_population(body(""), (163, 158, 5), "n.md", quiet.append) == 2,
+        "POP-TWO-LIVE: two live claims REFUSE":
+            check_population(body(live, live), (163, 158, 5), "n.md", quiet.append) == 2,
+        "POP-RETIRED: a retired figure beside the live one is green":
+            check_population(body(live, "SUPERSEDED in round 3: " + stale),
+                             (163, 158, 5), "n.md", quiet.append) == 0,
+        "POP-RETIRED-ALONE: a retired figure with no live one REFUSES":
+            check_population(body("SUPERSEDED in round 3: " + stale),
+                             (163, 158, 5), "n.md", quiet.append) == 2,
+    }
+
+
 def _listing_control() -> dict[str, bool]:
     """A writer that drops a line must be caught; one that drops none must not.
 
@@ -637,6 +740,7 @@ def _self_test() -> int:
                   lambda rel: ["kept", "", "kept"])[0]["verdict"] == "OK",
     }
     checks.update(_listing_control())
+    checks.update(_population_control())
     for k, ok in checks.items():
         print(f"  {'ok  ' if ok else 'FAIL'} {k}")
     print("  planted:", expected)
@@ -671,6 +775,9 @@ def main() -> int:
                          "repeatable. Give the EXTRACT the bundle carries to check "
                          "what a reviewer can read, or the committed blob to check "
                          "what the lane says.")
+    ap.add_argument("--assert-population", action="store_true",
+                    help="require the notes' own stated CITATION POPULATION line "
+                         "to equal what this run measured; a stale figure REFUSES")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
     _force_utf8()
@@ -706,8 +813,9 @@ def main() -> int:
             cache[rel] = p.read_text(encoding="utf-8").splitlines() if p else None
         return cache[rel]
 
+    notes_text = args.notes.read_text(encoding="utf-8")
     try:
-        records = check(args.notes.read_text(encoding="utf-8"), read_source)
+        records = check(notes_text, read_source)
     except UnbalancedFence as exc:
         print(f"REFUSING a verdict: {exc}. From that marker on, the scan read "
               "the COMPLEMENT of this file: the citations it makes were skipped "
@@ -753,6 +861,11 @@ def main() -> int:
         print(f"REFUSING a verdict: the listing is short by {reportable - printed} "
               "lines — a count with an incomplete listing beneath it is not evidence.")
         return 2
+    if args.assert_population:
+        if check_population(notes_text,
+                            (len(records), len(records) - declined, declined),
+                            notes_rel) != 0:
+            return 2
     print("VERDICT:", "every citation resolved" if not bad else f"{bad} unresolved")
     return 1 if bad else 0
 
