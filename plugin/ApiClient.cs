@@ -13954,6 +13954,11 @@ namespace CompetitiveRounds
         // the rule belongs to the operation and not to one caller's discipline —
         // #432). A session holds one id per series it polled and was refused on.
         private static readonly HashSet<string> _statusPollDarkSeries = new HashSet<string>();
+        // The other half of the same rule: one line per series for the answer that
+        // DID prove itself. Both directions speak, because "the banner is dark" and
+        // "the banner is live" are different facts and a bundle has to be able to
+        // tell them apart (#342, #438).
+        private static string _statusPollProvenForSeries = null;
 
         /// <summary>The team tab's DC-grace banner refresh.
         ///
@@ -14632,6 +14637,21 @@ namespace CompetitiveRounds
                             + "by the box that answers it, in that answer, and this one did not. There "
                             + "is no second route to try, and nothing is parsed out of this answer");
                         return;
+                    }
+                    // AND THE POSITIVE ONE, once per series. A feature that works
+                    // in silence and a feature that never ran look identical in a
+                    // bundle, so acceptance has to be a signal the feature EMITS
+                    // (#438) — this is the only line that says a box answered this
+                    // read AS a read. Once per series, not once per tick: the poll
+                    // runs every two seconds for as long as the tab is open.
+                    if (_statusPollProvenForSeries != seriesId)
+                    {
+                        _statusPollProvenForSeries = seriesId;
+                        Plugin.Log.LogInfo("[2v2] series status read PROVEN for series " + seriesId
+                            + " — HTTP " + answeredWith + " carrying readonly=true, so the box that "
+                            + "answered THIS read serves it as a read. It proves nothing about the "
+                            + "box that answers the next one, which is why the check is taken on "
+                            + "every answer; the DC-grace banner is live for this series");
                     }
                     ApplySeriesStateResponse(seriesId, resp, onResponse);
                 }, detailedErrors: true, onResponseCode: code => answeredWith = code));

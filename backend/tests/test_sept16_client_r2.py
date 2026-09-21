@@ -2732,6 +2732,10 @@ def test_r5_h1_the_banner_polls_the_status_route_and_proves_it_per_response():
     assert ro.index("_statusPollDarkSeries.Add(seriesId);") < ro.index("ApplySeriesStateResponse")
     # ONE LINE, NAMING THE STATUS AND THE SERIES (the contract's words)
     assert "was not answered as a read: HTTP " in ro
+    # ...and the POSITIVE line, once per series, so a bundle can tell a banner
+    # that works from one that never ran (#438)
+    assert "series status read PROVEN for series " in ro
+    assert "_statusPollProvenForSeries" in ro
     assert '+ seriesId' in ro and '+ answeredWith' in ro
     # the status is this request's own, captured per dispatch rather than in a
     # field shared with every other request in flight
@@ -2748,6 +2752,7 @@ def test_r5_h1_the_banner_polls_the_status_route_and_proves_it_per_response():
                 and _STATUS_ROUTE in r
                 and 'affirmed = ExtractJsonBool(resp, "readonly");' in r
                 and "_statusPollDarkSeries.Add(seriesId);" in r
+                and "series status read PROVEN for series " in r
                 and "PollTeamSeriesStateAssemblyOnly" not in u)
 
     # mutation 1: the call-site gate goes, so a series already refused is
