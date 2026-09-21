@@ -1,25 +1,34 @@
-# Bug 389 - run the victim-choice seam clean, then under twenty mutations. Each
-# mutation names a test that MUST redden and a control that MUST stay green
-# (#391): a suite that reddens at any change measures nothing, and one with no
-# control cannot tell "the mutation was detected" from "the build broke".
+# Bug 389 - run the seam clean, then under mutation. Each mutation names a test
+# that MUST redden and a control that MUST stay green (#391): a suite that
+# reddens at any change measures nothing, and one with no control cannot tell
+# "the mutation was detected" from "the build broke".
 #
 # Takes no arguments and contains no absolute path: everything is resolved from
 # this script's own location, so the harness runs from any clone.
 #
-#   pwsh -File tools/tests/bug389-seam/run-tests.ps1
+#   powershell -NoProfile -File tools/tests/bug389-seam/run-tests.ps1
 #
-# TWO KINDS OF MUTATION, because the repair has two halves.
+# EVERY ANCHOR IS RESOLVED INSIDE A NAMED MEMBER, never file-wide (#432). A
+# file-wide count cannot tell the site that is where it belongs from the same
+# line relocated into another member, and a file-wide Replace would rewrite both.
+# Get-MemberSpan bounds the member, the hit count is asserted INSIDE that span,
+# and the splice is applied to the span alone - so a matching line elsewhere in
+# the file is reported and left untouched. Assert-BuilderRejects is the negative
+# control on the builder itself: hand it an anchor that lives in another member
+# and it must refuse to produce a mutant at all.
+#
+# THREE KINDS OF RUN, because the repair has three halves.
 #   * SEAM mutations compile a one-line-changed COPY of
 #     plugin/ProximityVictimSeam.cs. The seam itself is never written to, so a
 #     crashed run cannot leave the shipped file mutated.
 #   * WIRING mutations leave the seam alone and point the suite's
 #     BUG389_SOURCE_ROOT at a one-line-changed COPY of the shipped files this
-#     harness cannot compile - they carry Unity, Photon and MSBuild. Without
-#     them the foreach in SpectatorSession that clears the capability, the
-#     cr_prox1 clause in Plugin that moves the census key, and the csproj
-#     condition that keeps a music-less build green could each be deleted with
-#     every seam mutant still reddening its own case and the suite still
-#     reporting a clean green (#391/#342).
+#     harness cannot compile - they carry Unity, Photon and MSBuild.
+#   * The PRIOR-MECHANISM run points that same root at the round-2 files,
+#     recovered from git rather than copied by hand, and requires every N case -
+#     the ones that assert round 3's deletions - to redden there while a case
+#     untouched by the change stays green. Without it "no selector here" is a
+#     statement no run has ever seen fail.
 #
 # Generated mutants and build output go under work/, which is gitignored.
 $ErrorActionPreference = 'Stop'
@@ -30,14 +39,19 @@ $repo = (Resolve-Path (Join-Path $root (Join-Path '..' (Join-Path '..' '..')))).
 $seam = (Resolve-Path (Join-Path $repo (Join-Path 'plugin' 'ProximityVictimSeam.cs'))).Path
 $overall = 0
 
-# The shipped files the W cases read. A wiring mutant copies all of them and
-# changes one line in one of them, so every other W case in the same run is an
-# untouched control.
+# The round-2 tip. The N cases must redden against these files.
+$priorTip = '93f4db3018048149a5f9dbe2ef76fc28d82ddf52'
+
+# The shipped files the W, N and S4 cases read. A wiring mutant copies all of
+# them and changes one line in one of them, so every other case in the same run
+# is an untouched control.
 $wireFiles = @(
     'plugin/SpectatorSession.cs',
     'plugin/Plugin.cs',
     'plugin/RoomActors.cs',
     'plugin/ProximityVictimPatches.cs',
+    'plugin/ProximityVictimSeam.cs',
+    'plugin/PerfPatches.cs',
     'plugin/ApiClient.cs',
     'plugin/CompetitiveRounds.csproj'
 )
@@ -55,6 +69,57 @@ function Rel([string]$p) {
         return ($r -replace '\\', '/')
     }
     return $full
+}
+
+# ---------------------------------------------------------------------------
+# Member spans. Returns @(openBraceIndex, closeBraceIndex) for the C# member
+# whose declaration is $signature, or for the region delimited by $signature and
+# $endMarker when one is given (project files have no braces to match).
+# ---------------------------------------------------------------------------
+function Get-MemberSpan([string]$text, [string]$signature, [string]$endMarker) {
+    $sigs = ([regex]::Matches($text, [regex]::Escape($signature))).Count
+    if ($sigs -ne 1) {
+        throw ('member signature matched ' + $sigs + ' site(s), expected 1: ' + $signature)
+    }
+    $sig = $text.IndexOf($signature, [System.StringComparison]::Ordinal)
+
+    if (-not [string]::IsNullOrEmpty($endMarker)) {
+        $close = $text.IndexOf($endMarker, $sig, [System.StringComparison]::Ordinal)
+        if ($close -lt 0) { throw ('could not find the end marker after: ' + $signature) }
+        return @($sig, $close)
+    }
+
+    # Bound the member by INDENTATION, not by counting braces. A literal brace
+    # inside a string reads as structure to a counter, and ApiClient.cs carries
+    # JSON in string literals - the count never returns to zero and the member
+    # cannot be bounded at all. Every member in this tree closes with a brace
+    # alone on a line at the declaration's own indentation.
+    $open = $text.IndexOf([char]123, $sig)
+    if ($open -lt 0) { throw ('could not find a member body for: ' + $signature) }
+    $lineStart = $text.LastIndexOf([char]10, $sig) + 1
+    $indent = 0
+    while ((($lineStart + $indent) -lt $text.Length) -and ($text[$lineStart + $indent] -eq [char]32)) { $indent++ }
+    $closer = ([string][char]10) + (' ' * $indent) + '}'
+    $close = $text.IndexOf($closer, $open, [System.StringComparison]::Ordinal)
+    if ($close -lt 0) { throw ('could not bound the member body for: ' + $signature) }
+    return @($open, ($close + $closer.Length - 1))
+}
+
+# Splice one anchor inside one member. Asserts EXACTLY ONE hit inside the span,
+# reports how many identical lines live elsewhere in the file, and leaves those
+# alone.
+function Edit-InMember([string]$label, [string]$text, [string]$member, [string]$find, [string]$replace, [string]$endMarker) {
+    $span  = Get-MemberSpan $text $member $endMarker
+    $open  = [int]$span[0]
+    $close = [int]$span[1]
+    $body  = $text.Substring($open, $close - $open + 1)
+    $inside = ([regex]::Matches($body, [regex]::Escape($find))).Count
+    if ($inside -ne 1) {
+        throw ('mutation ' + $label + ' anchor matched ' + $inside + ' site(s) inside "' + $member + '", expected 1: ' + $find)
+    }
+    $total = ([regex]::Matches($text, [regex]::Escape($find))).Count
+    Say ('---   anchor in "' + $member + '": 1 site inside, ' + ($total - $inside) + ' elsewhere (left untouched)')
+    return $text.Substring(0, $open) + $body.Replace($find, $replace) + $text.Substring($close + 1)
 }
 
 function New-RunDir([string]$name) {
@@ -98,35 +163,27 @@ function Test-Result([object]$run, [string]$testPrefix, [string]$wanted) {
     return $false
 }
 
-# $pairs is an array of two-element arrays: @(@('find','replace'), ...). Every
-# pair must match EXACTLY ONE site, or the mutation is not the one intended and
-# the run is void.
-function New-Mutant([string]$name, [object[]]$pairs) {
+# $edits is an array of three-element arrays: @(@('member','find','replace'), ...)
+function New-Mutant([string]$name, [object[]]$edits) {
     if (-not (Test-Path $work)) { New-Item -ItemType Directory -Path $work -Force | Out-Null }
     $dst  = Join-Path $work ('mutant-' + $name + '.cs')
     $text = [System.IO.File]::ReadAllText($seam)
-    # A single nested pair is flattened on the way into an [object[]] parameter,
-    # which turns $pair into a STRING and $pair[0] into its first CHARACTER - a
-    # one-space "anchor" that matches everywhere. Re-nest it.
-    if ($pairs.Count -eq 2 -and ($pairs[0] -is [string])) { $pairs = @(, $pairs) }
-    foreach ($pair in $pairs) {
-        $find    = [string]$pair[0]
-        $replace = [string]$pair[1]
-        $hits = ([regex]::Matches($text, [regex]::Escape($find))).Count
-        if ($hits -ne 1) {
-            throw ('mutation ' + $name + ' anchor matched ' + $hits + ' sites, expected 1: ' + $find)
-        }
-        $text = $text.Replace($find, $replace)
+    # A single nested triple is flattened on the way into an [object[]]
+    # parameter, which turns $edit into a STRING and $edit[0] into its first
+    # CHARACTER - a one-character "member" that matches everywhere. Re-nest it.
+    if ($edits.Count -eq 3 -and ($edits[0] -is [string])) { $edits = @(, $edits) }
+    Say ('--- mutant ' + $name + ': ' + $edits.Count + ' edit(s)')
+    foreach ($edit in $edits) {
+        $text = Edit-InMember $name $text ([string]$edit[0]) ([string]$edit[1]) ([string]$edit[2]) ''
     }
     [System.IO.File]::WriteAllText($dst, $text)
-    Say ('--- mutant ' + $name + ': ' + $pairs.Count + ' anchor(s), 1 site each')
     return $dst
 }
 
-# A wiring mutation: copy the shipped files the W cases read, change ONE line in
-# ONE of them, and hand the copy to the suite as its source root. The shipped
-# tree is never written to, exactly as for a seam mutation.
-function New-WireRoot([string]$name, [string]$file, [string]$find, [string]$replace) {
+# A wiring mutation: copy the shipped files the cases read, change ONE line
+# inside ONE named member of ONE of them, and hand the copy to the suite as its
+# source root. The shipped tree is never written to.
+function New-WireRoot([string]$name, [string]$file, [string]$member, [string]$find, [string]$replace, [string]$endMarker) {
     $dir = Join-Path $work ('wire-' + $name)
     if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
     New-Item -ItemType Directory -Path (Join-Path $dir 'plugin') -Force | Out-Null
@@ -134,13 +191,25 @@ function New-WireRoot([string]$name, [string]$file, [string]$find, [string]$repl
         Copy-Item (Join-Path $repo $rel) (Join-Path $dir $rel)
     }
     $target = Join-Path $dir $file
+    Say ('--- wiring mutant ' + $name + ': in ' + $file)
     $text = [System.IO.File]::ReadAllText($target)
-    $hits = ([regex]::Matches($text, [regex]::Escape($find))).Count
-    if ($hits -ne 1) {
-        throw ('wiring mutation ' + $name + ' anchor matched ' + $hits + ' sites in ' + $file + ', expected 1: ' + $find)
+    $text = Edit-InMember ('wire-' + $name) $text $member $find $replace $endMarker
+    [System.IO.File]::WriteAllText($target, $text)
+    return $dir
+}
+
+# The round-2 files, recovered from git rather than copied by hand, so the
+# comparison cannot drift and needs no absolute path.
+function New-PriorRoot([string]$name, [string]$tip) {
+    $dir = Join-Path $work ('prior-' + $name)
+    if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+    New-Item -ItemType Directory -Path (Join-Path $dir 'plugin') -Force | Out-Null
+    foreach ($rel in $wireFiles) {
+        $blob = & git -C $repo show ($tip + ':' + $rel) 2>&1
+        if ($LASTEXITCODE -ne 0) { throw ('could not read ' + $rel + ' at ' + $tip) }
+        [System.IO.File]::WriteAllText((Join-Path $dir $rel), (($blob | ForEach-Object { [string]$_ }) -join [Environment]::NewLine))
     }
-    [System.IO.File]::WriteAllText($target, $text.Replace($find, $replace))
-    Say ('--- wiring mutant ' + $name + ': 1 anchor, 1 site, in ' + $file)
+    Say ('--- prior-mechanism root ' + $name + ': ' + $wireFiles.Count + ' files at ' + $tip.Substring(0, 7))
     return $dir
 }
 
@@ -155,10 +224,49 @@ function Assert-Mutation([string]$label, [object]$run, [string]$redTest, [string
     return $false
 }
 
+function Assert-Mutations([string]$label, [object]$run, [string[]]$redTests, [string]$controlTest) {
+    $ok = $true
+    $detail = @()
+    foreach ($t in $redTests) {
+        $red = Test-Result $run $t 'FAIL'
+        if (-not $red) { $ok = $false }
+        $detail += ($t + '=' + $(if ($red) { 'red' } else { 'GREEN' }))
+    }
+    $ctl = Test-Result $run $controlTest 'PASS'
+    if (-not $ctl) { $ok = $false }
+    if ($ok) {
+        Say ('RESULT ' + $label + ': OK - ' + ($redTests -join ', ') + ' all reddened, ' + $controlTest + ' control stayed green')
+        return $true
+    }
+    Say ('RESULT ' + $label + ': FAILED - ' + ($detail -join ' ') + ' ' + $controlTest + ' green=' + $ctl)
+    return $false
+}
+
+# THE NEGATIVE CONTROL ON THE BUILDER ITSELF. Hand it a real anchor that lives
+# in a DIFFERENT member and it must refuse: that is the whole difference between
+# an anchor resolved inside its member and one counted file-wide.
+function Assert-BuilderRejects([string]$label, [string]$member, [string]$find) {
+    $threw = $false
+    $message = ''
+    try {
+        New-Mutant ('reject-' + $label) @(, @($member, $find, '// (relocated anchor)')) | Out-Null
+    } catch {
+        $threw = $true
+        $message = [string]$_.Exception.Message
+    }
+    if ($threw) {
+        Say ('RESULT builder rejects a relocated anchor (' + $label + '): OK - ' + $message)
+        return $true
+    }
+    Say ('RESULT builder rejects a relocated anchor (' + $label + '): FAILED - the builder accepted an anchor outside "' + $member + '"')
+    return $false
+}
+
 Say ('date-utc: ' + (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))
 Say ('seam:     ' + (Split-Path -Leaf $seam))
 Say ('seam sha256: ' + (Get-FileHash -Algorithm SHA256 $seam).Hash)
 Say ('source root for the wiring cases: ' + (Rel $repo))
+Say ('prior mechanism tip: ' + $priorTip)
 Say ''
 
 # ---------- 1. clean ----------
@@ -167,239 +275,237 @@ if ($clean.Code -ne 0) { Say 'RESULT clean: FAILED (expected every test to pass)
 else { Say 'RESULT clean: OK - every test passed' }
 Say ''
 
-# ---------- 2. restore the cache ----------
-# THE defect, put back: remember the first answer per holder and return it
-# forever. This is the mutation that proves the suite measures the bug and not
-# merely that a function is reachable.
-# Every replacement stays on ONE line: a mutation that has to splice newlines
-# into the source is a second thing that can go wrong inside the tool that is
-# supposed to be checking the tests.
-$cachePairs = @(
-    @('        internal const int None = -1;',
-      '        internal const int None = -1; internal static readonly System.Collections.Generic.Dictionary<int, int> MutantCache = new System.Collections.Generic.Dictionary<int, int>();'),
-    @('            if (candidates == null || candidates.Count == 0) return None;',
-      '            if (candidates == null || candidates.Count == 0) return None; { int mutantMemo; if (MutantCache.TryGetValue(holderId, out mutantMemo)) return mutantMemo; }'),
-    @('            return chosen.Id;',
-      '            MutantCache[holderId] = chosen.Id; return chosen.Id;')
-)
-$mutCache = New-Mutant 'cache' $cachePairs
-$runCache = Invoke-Suite 'mut-cache' $mutCache $repo
-if (-not (Assert-Mutation 'cache mutation' $runCache 'F1' 'F2')) { $overall = 1 }
+# ---------- 2. the builder's own negative control ----------
+# `return runSoFar && prefixReturn;` is a real line of the seam - it lives in
+# RunOriginalAfter. Naming ShouldRepair as its member must be refused rather
+# than silently spliced somewhere else.
+if (-not (Assert-BuilderRejects 'fold-line-in-the-gate' `
+    'internal static bool ShouldRepair(ProximityGateState state, bool targetsOther)' `
+    '            return runSoFar && prefixReturn;')) { $overall = 1 }
 Say ''
 
-# ---------- 3. make the capability gate vacuous ----------
-$mutGate = New-Mutant 'gate' @(
-    @('            return state == ProximityGateState.Capable && targetsOther;', '            return targetsOther;')
+# ---------- 3. answer only the first time ----------
+# THE DEFECT, PUT BACK. Vanilla resolves its victim once and keeps it; if this
+# decision answered only the first time the effect would keep its first victim
+# exactly as an unpatched build does. This is the mutation that proves the suite
+# measures the bug and not merely that a function is reachable.
+$mutOnce = New-Mutant 'once' @(
+    @('internal static class ProximityVictim',
+      '        internal const int MaxOutcomeSignals = 1;',
+      '        internal const int MaxOutcomeSignals = 1; private static bool _mutantAnswered;'),
+    @('internal static ProximityPrefixAction VictimAction(',
+      '            return ProximityPrefixAction.WriteVictimAndRun;',
+      '            { if (_mutantAnswered) return ProximityPrefixAction.RunVanillaUntouched; _mutantAnswered = true; return ProximityPrefixAction.WriteVictimAndRun; }')
 )
+$runOnce = Invoke-Suite 'mut-once' $mutOnce $repo
+if (-not (Assert-Mutation 'answer-once mutation' $runOnce 'V1' 'V2')) { $overall = 1 }
+Say ''
+
+# ---------- 4. repair a call no ring drives ----------
+# The defect is a field that survives REPEATED invocation, and only a
+# PlayerInRangeTrigger invokes these effects repeatedly. Drop the term and an
+# AttackTrigger- or DelayEvent-driven call is repaired against a rule this
+# repair never measured.
+$mutRingless = New-Mutant 'ringless' @(, @(
+    'internal static ProximityPrefixAction VictimAction(',
+    '            if (!ringDriven) return ProximityPrefixAction.RunVanillaUntouched;',
+    '            if (false) return ProximityPrefixAction.RunVanillaUntouched;'))
+$runRingless = Invoke-Suite 'mut-ringless' $mutRingless $repo
+if (-not (Assert-Mutation 'ring-driven mutation' $runRingless 'V3' 'V2')) { $overall = 1 }
+Say ''
+
+# ---------- 5. write an empty resolution ----------
+# Vanilla dereferences its victim field with no null guard
+# (DealDamageToPlayer.cs:45). Writing the empty answer turns "the game's own
+# targeting found nobody" into an exception on a path vanilla, holding its
+# cache, never takes.
+$mutWriteNull = New-Mutant 'writenull' @(, @(
+    'internal static ProximityPrefixAction VictimAction(',
+    '            if (!vanillaAnswered) return ProximityPrefixAction.RunVanillaUntouched;',
+    '            if (false) return ProximityPrefixAction.RunVanillaUntouched;'))
+$runWriteNull = Invoke-Suite 'mut-writenull' $mutWriteNull $repo
+if (-not (Assert-Mutation 'empty-resolution mutation' $runWriteNull 'V4' 'V2')) { $overall = 1 }
+Say ''
+
+# ---------- 6. let the repair suppress the original ----------
+# The bar row the previous design could not meet. A victim repair that can
+# return false can turn a change about WHO takes damage into a change about
+# WHETHER anyone does.
+$mutSuppress = New-Mutant 'suppress' @(, @(
+    'internal static ProximityPrefixAction VictimAction(',
+    '            if (!ringDriven) return ProximityPrefixAction.RunVanillaUntouched;',
+    '            if (!ringDriven) return ProximityPrefixAction.SkipOriginal;'))
+$runSuppress = Invoke-Suite 'mut-suppress' $mutSuppress $repo
+if (-not (Assert-Mutation 'suppression mutation' $runSuppress 'V5' 'V2')) { $overall = 1 }
+Say ''
+
+# ---------- 7. make the capability gate vacuous ----------
+$mutGate = New-Mutant 'gate' @(, @(
+    'internal static bool ShouldRepair(ProximityGateState state, bool targetsOther)',
+    '            return state == ProximityGateState.Capable && targetsOther;',
+    '            return targetsOther;'))
 $runGate = Invoke-Suite 'mut-gate' $mutGate $repo
 if (-not (Assert-Mutation 'gate mutation' $runGate 'G1' 'G2')) { $overall = 1 }
 Say ''
 
-# ---------- 4. remove the range bound ----------
-$mutRange = New-Mutant 'range' @(
-    @('            if (!(Distance3D(triggerX, triggerY, triggerZ, chosen.X, chosen.Y, chosen.Z) < effectiveRange)) return None;',
-      '            if (false) return None;')
-)
-$runRange = Invoke-Suite 'mut-range' $mutRange $repo
-if (-not (Assert-Mutation 'range mutation' $runRange 'F3a' 'F3b')) { $overall = 1 }
-Say ''
-
-# ---------- 5. flatten the predicate ----------
-# Measure the range test in the plane instead of in three dimensions, which is
-# what an earlier draft did. F3a is the control: a candidate out of range in the
-# plane is still refused, so the control cannot notice the z term - which is
-# exactly what makes F8 a measurement of the z term specifically.
-$mutFlat = New-Mutant 'flat' @(
-    @('            if (!(Distance3D(triggerX, triggerY, triggerZ, chosen.X, chosen.Y, chosen.Z) < effectiveRange)) return None;',
-      '            if (!((float)Math.Sqrt(DistanceSquared(triggerX, triggerY, chosen.X, chosen.Y)) < effectiveRange)) return None;')
-)
-$runFlat = Invoke-Suite 'mut-flat' $mutFlat $repo
-if (-not (Assert-Mutation 'flat-predicate mutation' $runFlat 'F8' 'F3a')) { $overall = 1 }
-Say ''
-
-# ---------- 6. treat an Any-target ring as the effect's own rule ----------
-# The ring's TargetType.Any selection is GetClosestPlayer, which excludes nobody
-# but the dead; the effect it fires resolves its own victim through
-# GetOtherPlayer. Substituting one for the other is how a TEAMMATE gets written
-# into an effect whose own rule resolves an opponent. F2 is the control - it
-# never uses the Any selection, so it cannot see this.
-$mutAny = New-Mutant 'anyselect' @(
-    @('            if (selection == ProximitySelection.NearestAny) return Defer;',
-      '            if (selection == ProximitySelection.NearestAny) { selection = ProximitySelection.NearestEnemyFfa; }')
-)
-$runAny = Invoke-Suite 'mut-anyselect' $mutAny $repo
-if (-not (Assert-Mutation 'any-ring mutation' $runAny 'F5' 'F2')) { $overall = 1 }
-Say ''
-
-# ---------- 7. "tidy up" the mis-indexed liveness gate ----------
-# Outside FFA the trigger runs stock GetClosestPlayerInTeam, which reads its
-# liveness test from the GLOBAL roster at the enemy subset's ordinal
-# (PlayerManager.cs:113 vs :115). The seam reproduces that. This mutation
-# replaces it with the per-candidate check a tidier loop would use - the exact
-# change that makes the seam select enemies the trigger never looked at.
-# F11 is the control: the same board with nobody dead, where both gates agree,
-# so it cannot see the mutation and F10 is left measuring the indexing itself.
-$mutMis = New-Mutant 'misindex' @(
-    @('                    bool gateAlive = teamIndex < candidates.Count && !candidates[teamIndex].Dead;',
-      '                    bool gateAlive = !c.Dead;')
-)
-$runMis = Invoke-Suite 'mut-misindex' $mutMis $repo
-if (-not (Assert-Mutation 'mis-index mutation' $runMis 'F10' 'F11')) { $overall = 1 }
-Say ''
-
-# ---------- 8. admit an unreadable roster entry at its defaults ----------
-# The r1 HIGH put back: let a candidate the marshaller could not read through
-# to the selection, where its defaulted team of zero decides which subset the
-# enemy branch walks. F15 is the control - the same board with every entry
-# read, so no entry carries the flag and the mutation is invisible to it.
-$mutUnread = New-Mutant 'unread' @(
-    @('                if (candidates[i].Unreadable) return Defer;',
-      '                if (false) return Defer;')
-)
-$runUnread = Invoke-Suite 'mut-unread' $mutUnread $repo
-if (-not (Assert-Mutation 'unreadable-entry mutation' $runUnread 'F14' 'F15')) { $overall = 1 }
-Say ''
-
-# ---------- 9. let the FFA branch skip an unreadable entry ----------
-# FfaTargeting.NearestOpponent skips such an entry rather than throwing
-# (FfaMode.cs:3812), so this is the per-branch mechanism the uniform bound was
-# chosen over. F14 is the control - the team branch, where the bound and the
-# rule it reproduces agree, so it cannot see the change.
-$mutFfaSkip = New-Mutant 'ffaskip' @(
-    @('                if (candidates[i].Unreadable) return Defer;',
-      '                if (candidates[i].Unreadable) { if (selection == ProximitySelection.NearestEnemyFfa) continue; return Defer; }')
-)
-$runFfaSkip = Invoke-Suite 'mut-ffaskip' $mutFfaSkip $repo
-if (-not (Assert-Mutation 'ffa-skip mutation' $runFfaSkip 'F18' 'F14')) { $overall = 1 }
-Say ''
-
-# ---------- 10. key the capability cache on the frame alone ----------
-# The r1 HIGH on the gate: drop the change stamp, so a join, a leave or a
-# property delivery inside one frame cannot reach the cached answer. C2 is the
-# control - both key terms are unchanged there, so a frame-only key reuses the
-# answer exactly as the real one does.
-$mutCapKey = New-Mutant 'capkey' @(
-    @('            if (_has && frame == _frame && stamp == _stamp) return _value;',
-      '            if (_has && frame == _frame) return _value;')
-)
-$runCapKey = Invoke-Suite 'mut-capkey' $mutCapKey $repo
-if (-not (Assert-Mutation 'capability-cache-key mutation' $runCapKey 'C1' 'C2')) { $overall = 1 }
-Say ''
-
-# ---------- 11. collapse the outcome signals onto one budget ----------
-# Drop the reason from the diagnostic key, so two different reasons under one
-# outcome share a budget and the second is never printed. S2 is the control: the
-# LINE still names all three things, so it cannot see the key change.
-$mutReason = New-Mutant 'reason' @(
-    @('            return DiagKeyRoot + "/" + site + "/" + outcome + "/" + reason;',
-      '            return DiagKeyRoot + "/" + site;')
-)
-$runReason = Invoke-Suite 'mut-reason' $mutReason $repo
-if (-not (Assert-Mutation 'outcome-signal mutation' $runReason 'S1' 'S2')) { $overall = 1 }
-Say ''
-
-# ---------- 12. give two gate states one reason line ----------
+# ---------- 8. give two gate states one reason line ----------
 # The line is also the budget key, so two causes sharing it means the second is
 # never printed and the reader is told the first one instead: "the room does not
-# all carry the repair" for a patch that failed to attach on this seat. G2 is
-# the control - the own-player polarity, which has its own line either way.
-$mutGateReason = New-Mutant 'gatereason' @(
-    @('                case ProximityGateState.PatchesNotAttached: return "this seat''s repair patches are not attached";',
-      '                case ProximityGateState.PatchesNotAttached: return "the room does not all carry the repair";')
-)
+# all carry the repair" for a patch that failed to attach on this seat.
+$mutGateReason = New-Mutant 'gatereason' @(, @(
+    'internal static string GateReason(ProximityGateState state)',
+    '                case ProximityGateState.PatchesNotAttached: return "this seat''s repair patches are not attached";',
+    '                case ProximityGateState.PatchesNotAttached: return "the room does not all carry the repair";'))
 $runGateReason = Invoke-Suite 'mut-gatereason' $mutGateReason $repo
 if (-not (Assert-Mutation 'gate-reason mutation' $runGateReason 'G4' 'G2')) { $overall = 1 }
 Say ''
 
-# ---------- 13. compare the predicate in squares ----------
-# Restore the squared comparison. It agrees with vanilla almost everywhere,
-# which is the point: only at exact overlap with a range small enough for the
-# product to underflow does it refuse where vanilla arms. F3a is the control -
-# its candidate is far outside the ring, where both forms agree.
-$mutSqRange = New-Mutant 'sqrange' @(
-    @('            if (!(Distance3D(triggerX, triggerY, triggerZ, chosen.X, chosen.Y, chosen.Z) < effectiveRange)) return None;',
-      '            { float mutRange = effectiveRange * effectiveRange; float mutDist = Distance3D(triggerX, triggerY, triggerZ, chosen.X, chosen.Y, chosen.Z); if (mutDist * mutDist >= mutRange) return None; }')
-)
-$runSqRange = Invoke-Suite 'mut-sqrange' $mutSqRange $repo
-if (-not (Assert-Mutation 'squared-predicate mutation' $runSqRange 'F16' 'F3a')) { $overall = 1 }
+# ---------- 9. collapse the outcome signals onto one budget ----------
+# Drop the reason from the key, so two reasons under one outcome share a budget
+# and the second is never printed. S2 is the control: the LINE still names all
+# three things, so it cannot see the key change.
+$mutReasonKey = New-Mutant 'reasonkey' @(, @(
+    'internal static string SignalKey(string outcome, string reason)',
+    '            return DiagKeyRoot + "/" + outcome + "/" + reason;',
+    '            return DiagKeyRoot + "/" + outcome;'))
+$runReasonKey = Invoke-Suite 'mut-reasonkey' $mutReasonKey $repo
+if (-not (Assert-Mutation 'outcome-signal mutation' $runReasonKey 'S1' 'S2')) { $overall = 1 }
 Say ''
 
-# ---------- 14. stop clearing the fighter capability on spectator staging ----------
-# Empty the list the spectator pre-join merge loops over, so a seat that fought
-# a match keeps advertising the fighter capability while watching one. K2 is the
-# control - the key's own name and value are untouched by the list. The other
-# half of this closure - that the staging code still loops over the list at all
-# - is the wiring mutation below.
-$mutKeys = New-Mutant 'fighterkeys' @(
-    @('        internal static readonly string[] FighterCapabilityKeys = new string[] { CapabilityProp };',
-      '        internal static readonly string[] FighterCapabilityKeys = new string[0];')
-)
+# ---------- 10. key the capability cache on the frame alone ----------
+$mutCapKey = New-Mutant 'capkey' @(, @(
+    'internal bool Evaluate(int frame, long stamp, Func<bool> census)',
+    '            if (_has && frame == _frame && stamp == _stamp) return _value;',
+    '            if (_has && frame == _frame) return _value;'))
+$runCapKey = Invoke-Suite 'mut-capkey' $mutCapKey $repo
+if (-not (Assert-Mutation 'capability-cache-key mutation' $runCapKey 'C1' 'C2')) { $overall = 1 }
+Say ''
+
+# ---------- 11. stop clearing the fighter capability on spectator staging ----
+$mutKeys = New-Mutant 'fighterkeys' @(, @(
+    'internal static class ProximityVictim',
+    '        internal static readonly string[] FighterCapabilityKeys = new string[] { CapabilityProp };',
+    '        internal static readonly string[] FighterCapabilityKeys = new string[0];'))
 $runKeys = Invoke-Suite 'mut-fighterkeys' $mutKeys $repo
 if (-not (Assert-Mutation 'fighter-capability-keys mutation' $runKeys 'K1' 'K2')) { $overall = 1 }
 Say ''
 
-# ---------- 15. write vanilla's field without a victim ----------
-# Drop the victim term from the prefix decision, so a Victim resolution with
-# nothing resolved still writes. Vanilla dereferences that field with no null
-# guard. P1 is the control: the Defer branch is untouched.
-$mutPrefix = New-Mutant 'prefixwrite' @(
-    @('            if (outcome != ProximityResolution.Victim || !victimKnown) return ProximityPrefixAction.SkipOriginal;',
-      '            if (outcome != ProximityResolution.Victim) return ProximityPrefixAction.SkipOriginal;')
-)
-$runPrefix = Invoke-Suite 'mut-prefixwrite' $mutPrefix $repo
-if (-not (Assert-Mutation 'prefix-write mutation' $runPrefix 'P2' 'P1')) { $overall = 1 }
-Say ''
-
-# ---------- 16. make the prefix fold keep the last answer ----------
+# ---------- 12. make the prefix fold keep the last answer ----------
 # HarmonyX ANDs every prefix's return into __runOriginal whichever order it
-# called them in (#352). Fold only the last answer instead and the two orders
-# disagree - which is what P3 composes and compares. P1 is the control: it does
-# not use the fold at all.
-$mutChain = New-Mutant 'chainlast' @(
-    @('            return runSoFar && prefixReturn;', '            return prefixReturn;')
-)
+# called them in - read from the shipped 0Harmony.dll and cited on
+# RunOriginalAfter. Fold only the last answer instead and the two orders
+# disagree wherever the two SHIPPED prefixes disagree, which is what P3
+# composes. P1 is the control: it does not use the fold at all.
+$mutChain = New-Mutant 'chainlast' @(, @(
+    'internal static bool RunOriginalAfter(bool runSoFar, bool prefixReturn)',
+    '            return runSoFar && prefixReturn;',
+    '            return prefixReturn;'))
 $runChain = Invoke-Suite 'mut-chainlast' $mutChain $repo
 if (-not (Assert-Mutation 'prefix-fold mutation' $runChain 'P3' 'P1')) { $overall = 1 }
 Say ''
 
-# ---------- 17-21. the wiring: the halves this harness cannot compile ----------
-# Each of these deletes one shipped line from a COPY of the tree and points the
-# suite at the copy. Before the W cases existed, every one of them left the
-# suite at a clean green.
+# ---------- 13. open the sibling null guard ----------
+# Moving PerfPatches.StunPlayerGoNullGuard's decision into the seam is a
+# refactor and must not change what it decides. P4 is what says so; without a
+# mutant it would be a restatement of the code beneath it.
+$mutGuard = New-Mutant 'guardopen' @(, @(
+    'internal static ProximityPrefixAction NullGuardAction(',
+    '            return ProximityPrefixAction.SkipOriginal;',
+    '            return ProximityPrefixAction.RunVanillaUntouched;'))
+$runGuard = Invoke-Suite 'mut-guardopen' $mutGuard $repo
+if (-not (Assert-Mutation 'null-guard mutation' $runGuard 'P4' 'P1')) { $overall = 1 }
+Say ''
+
+# ---------- 14-21. the wiring: the halves this harness cannot compile --------
+# Each of these changes one shipped line inside one named member of a COPY of
+# the tree and points the suite at the copy.
 
 $wireSpec = New-WireRoot 'spec' 'plugin/SpectatorSession.cs' `
+    'internal static bool StagePreJoinProperties(string localSteamId)' `
     '                foreach (var capabilityKey in ProximityVictim.FighterCapabilityKeys)' `
-    '                foreach (var capabilityKey in new string[0])'
+    '                foreach (var capabilityKey in new string[0])' ''
 $runWireSpec = Invoke-Suite 'wire-spec' $seam $wireSpec
 if (-not (Assert-Mutation 'spectator-clearing wiring' $runWireSpec 'W1' 'W5')) { $overall = 1 }
 Say ''
 
 $wireProp = New-WireRoot 'prop' 'plugin/Plugin.cs' `
+    'public void OnPlayerPropertiesUpdate(Photon.Realtime.Player target, ExitGames.Client.Photon.Hashtable changedProps)' `
     '                    || changedProps.ContainsKey(ProximityVictim.CapabilityProp))' `
-    '                    || false)'
+    '                    || false)' ''
 $runWireProp = Invoke-Suite 'wire-prop' $seam $wireProp
 if (-not (Assert-Mutation 'capability-delivery wiring' $runWireProp 'W2' 'W5')) { $overall = 1 }
 Say ''
 
 $wireGen = New-WireRoot 'gen' 'plugin/RoomActors.cs' `
+    'private static void EnsureCacheRoom()' `
     '                _rosterGeneration++;' `
-    '                // (mutant) a room change no longer moves the generation'
+    '                // (mutant) a room change no longer moves the generation' ''
 $runWireGen = Invoke-Suite 'wire-gen' $seam $wireGen
 if (-not (Assert-Mutation 'room-change wiring' $runWireGen 'W3' 'W5')) { $overall = 1 }
 Say ''
 
 $wireDoc = New-WireRoot 'doc' 'plugin/ProximityVictimPatches.cs' `
-    '            // NO OWNING TRIGGER - AND THEREFORE NO REPAIR. The effect is driven by' `
-    '            // (mutant) this block has drifted off the branch it describes'
+    'internal static PlayerInRangeTrigger OwningTrigger(Transform start)' `
+    '            // This is the ONLY thing the walk is asked. The repair does not read' `
+    '            // (mutant) this block has drifted off the member it describes' ''
 $runWireDoc = Invoke-Suite 'wire-doc' $seam $wireDoc
-if (-not (Assert-Mutation 'no-trigger-doc wiring' $runWireDoc 'W8' 'W1')) { $overall = 1 }
+if (-not (Assert-Mutation 'no-ring-reasoning wiring' $runWireDoc 'W8' 'W1')) { $overall = 1 }
 Say ''
 
 $wireMsb = New-WireRoot 'msb' 'plugin/CompetitiveRounds.csproj' `
+    '<MusicPreviewsToCopy Include="music\*_preview.ogg" />' `
     '    <MusicManifestToCopy Include="music\manifest.json" Condition="Exists(''music\manifest.json'')" />' `
-    '    <MusicManifestToCopy Include="music\manifest.json" />'
+    '    <MusicManifestToCopy Include="music\manifest.json" />' `
+    '</ItemGroup>'
 $runWireMsb = Invoke-Suite 'wire-msb' $seam $wireMsb
 if (-not (Assert-Mutation 'music-manifest-condition wiring' $runWireMsb 'W10' 'W1')) { $overall = 1 }
+Say ''
+
+$wirePerf = New-WireRoot 'perf' 'plugin/PerfPatches.cs' `
+    'static bool Prefix(StunPlayer __instance)' `
+    '            return ProximityVictim.PrefixReturn(action);' `
+    '            return action != ProximityPrefixAction.SkipOriginal;' ''
+$runWirePerf = Invoke-Suite 'wire-perf' $seam $wirePerf
+if (-not (Assert-Mutation 'sibling-prefix-shape wiring' $runWirePerf 'W11' 'W1')) { $overall = 1 }
+Say ''
+
+$wireSiteKey = New-WireRoot 'sitekey' 'plugin/ProximityVictimPatches.cs' `
+    'internal static void NoteOutcome(string site, string outcome, string why)' `
+    '                ProximityVictim.SignalKey(outcome, why),' `
+    '                ProximityVictim.SignalKey(site + "/" + outcome, why),' ''
+$runWireSiteKey = Invoke-Suite 'wire-sitekey' $seam $wireSiteKey
+if (-not (Assert-Mutation 'per-site-budget wiring' $runWireSiteKey 'S4' 'W1')) { $overall = 1 }
+Say ''
+
+# Plant a proximity comparison of our own back into the repair. This is the
+# negative control for the round's acceptance assertion: without it "no ranking
+# here" is a statement no run has ever seen fail.
+$wireRank = New-WireRoot 'rank' 'plugin/ProximityVictimPatches.cs' `
+    'private static Player VanillaVictimFor(Component instance)' `
+    '                if (victim == null) return null;' `
+    '                if (victim == null) return null; if (Vector2.Distance(holder.transform.position, victim.transform.position) > 99f) return null;' ''
+$runWireRank = Invoke-Suite 'wire-rank' $seam $wireRank
+if (-not (Assert-Mutation 'authored-ranking wiring' $runWireRank 'N1' 'W1')) { $overall = 1 }
+Say ''
+
+# Plant a roster read of our own back into the repair.
+$wireRoster = New-WireRoot 'roster' 'plugin/ProximityVictimPatches.cs' `
+    'private static Player VanillaVictimFor(Component instance)' `
+    '                if (pm == null) return null;' `
+    '                if (pm == null || pm.players == null) return null;' ''
+$runWireRoster = Invoke-Suite 'wire-roster' $seam $wireRoster
+if (-not (Assert-Mutation 'authored-roster wiring' $runWireRoster 'N2' 'W1')) { $overall = 1 }
+Say ''
+
+# ---------- 22. the prior mechanism ----------
+# The round-2 files, recovered from git. Every N case asserts something round 3
+# DELETED, so every one of them must redden here; W1 reads a file the change
+# never touched and must stay green, which is what stops this run from passing
+# for the trivial reason that the root is wrong.
+$priorRoot = New-PriorRoot 'r2' $priorTip
+$runPrior = Invoke-Suite 'prior-r2' $seam $priorRoot
+if (-not (Assert-Mutations 'round-2 mechanism' $runPrior `
+    @('N1', 'N2', 'N3', 'N4', 'N5', 'N6a', 'N6b', 'N6c') 'W1')) { $overall = 1 }
 Say ''
 
 if ($overall -eq 0) { Say 'BUG 389 SEAM SUITE: ALL CHECKS PASSED' }
