@@ -309,15 +309,25 @@ namespace CompetitiveRounds
         /// count is one-way in the other direction.
         ///
         /// The reason there is still no advertising direction is therefore not
-        /// monotonicity. It is #287 above, plus StageInto's own latch: a seat that
-        /// declined once never stages again in that session. That combination has a
-        /// reachable corner - patches that complete AFTER the first staging attempt
-        /// leave this seat Capable, un-advertised and with nothing for this function
-        /// to withdraw - and what makes that corner safe is NOT this function. It is
-        /// the census, which walks the room's own actor list INCLUDING this seat, so
-        /// this seat's missing key refuses the repair for every seat including
-        /// itself (ProximityVictimGate.Census, held by W22). Fail-closed for the
-        /// repair, which is today's shipped behaviour.
+        /// monotonicity, and it is not a latch in StageInto either. An earlier
+        /// wording named one - a seat that declined once never staging again in
+        /// that session - and the flag it named does not do that. It is read only
+        /// on the branch that has ALREADY declined, where it bounds a repeated log
+        /// line; StageInto's advertising branch asks the local gate and the
+        /// withdrawal latch and nothing else. So a seat whose patches complete
+        /// after a declined attempt DOES stage the key on its next pre-join merge,
+        /// and that is the design rather than a leak: what makes an advertisement
+        /// safe is #287 above - the value travels with the Player object and is
+        /// never observable before use - and a later one travels the same way.
+        /// W23 holds that branch clear of the flag.
+        ///
+        /// The corner that remains is the window BEFORE that next pre-join merge:
+        /// this seat is Capable, has not advertised, and has nothing for this
+        /// function to withdraw. What makes that corner safe is NOT this function.
+        /// It is the census, which walks the room's own actor list INCLUDING this
+        /// seat, so this seat's missing key refuses the repair for every seat
+        /// including itself (ProximityVictimGate.Census, held by W22).
+        /// Fail-closed for the repair, which is today's shipped behaviour.
         ///
         /// If a later change makes the disabled term reversible, this function is
         /// where that has to be answered rather than assumed - and the answer is

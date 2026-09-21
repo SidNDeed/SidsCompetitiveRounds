@@ -48,9 +48,13 @@ using CompetitiveRounds;
 //   wiring   wire-advertise:  W14b W15b must FAIL; W1 control must PASS
 //   wiring   wire-patcheslive: W14c must FAIL; W1 control must PASS
 //   wiring   wire-compatclaim: W17 must FAIL; W1 control must PASS
-//   wiring   wire-logquote:   W19 must FAIL; W1 control must PASS
+//   wiring   wire-compatharness: W17 must FAIL; W1 control must PASS
+//   wiring   wire-logquote:   W19 must FAIL; W1 control must PASS  (and W23 control must PASS)
 //   wiring   wire-blindwrite: W20 must FAIL; W1 control must PASS
 //   wiring   wire-monotone:   W21 must FAIL; W1 control must PASS
+//   wiring   wire-stagelatch: W23 must FAIL; W1 control must PASS
+//   wiring   wire-pathswap:   D6 must FAIL;  D4 and D5 controls must PASS
+//   wiring   wire-paththrew:  D6 must FAIL;  D4 and D5 controls must PASS
 //   prior-r2            : N1 N2 N3 N4 N5 N6 must all FAIL; W1 control must PASS
 // Every OTHER case here has NO mutant of its own, and this is the whole list
 // with the reason each one is on it:
@@ -167,6 +171,43 @@ internal static class Program
         int close = text.IndexOf(closer, open, StringComparison.Ordinal);
         if (close < 0) return -1;
         return close + closer.Length - 1;
+    }
+
+    /// <summary>The text of ONE member's body, or null when the file cannot be
+    /// read or the signature is not unique.
+    ///
+    /// The same bound CheckAnchorInMember applies, exposed for the cases that
+    /// have to say more about a member than "this anchor occurs once" - the
+    /// exit-path table in D6 asks which outcome each guarded exit assigns and in
+    /// what ORDER two statements occur, and neither is a count. The span starts
+    /// at the opening brace, so the member's own signature is NOT part of it:
+    /// `out ProximityVanillaAnswer answer` in a declaration must not be mistaken
+    /// for an assignment inside the body.</summary>
+    private static string MemberBody(string relative, string signature, out string problem)
+    {
+        problem = null;
+        string text = LoadSource(relative);
+        if (text == null)
+        {
+            problem = "cannot read " + relative + " under BUG389_SOURCE_ROOT='"
+                + (SourceRoot ?? "<unset>") + "' - an unset or wrong root is a failure, not a skip";
+            return null;
+        }
+        int sigs = CountOf(text, signature);
+        if (sigs != 1)
+        {
+            problem = "member signature found " + sigs + " time(s) (want 1) in " + relative + ": " + signature;
+            return null;
+        }
+        int sig = text.IndexOf(signature, StringComparison.Ordinal);
+        int open = text.IndexOf('{', sig);
+        int close = open < 0 ? -1 : MemberEnd(text, sig, open);
+        if (open < 0 || close < 0)
+        {
+            problem = "could not bound the member span in " + relative + ": " + signature;
+            return null;
+        }
+        return text.Substring(open, close - open + 1);
     }
 
     /// <summary>Assert an anchor occurs EXACTLY ONCE inside the member that must
@@ -377,9 +418,18 @@ internal static class Program
             "a victim repair may never decline a tick vanilla applies; first at " + suppressAt);
 
         // ---- V6: the accepting case is EXACTLY one corner of that product. ----
-        // Companion to V5 rather than a mutant of its own: it states that the
-        // four terms are all required, so none of them can be dropped without
-        // another case noticing.
+        // RED under "ownplayer", which drops the polarity term at VictimAction's
+        // OWN call site into ShouldRepair - G1, G5 and D3 ask ShouldRepair
+        // directly and stay green, so this is the case that sees it. It states
+        // that all four terms are required, so none can be dropped without a case
+        // noticing.
+        //
+        // This paragraph used to call V6 a companion to V5 with no mutant of its
+        // own. That was true for exactly one round and was left standing when the
+        // mutant was added, so the run list at the top of this file and the
+        // explanation beside the case contradicted each other: a reader asking
+        // whether V6 was load-bearing got opposite answers from two places in one
+        // file, and the coverage accounting could not be read at all (#342).
         bool onlyTheOneCorner = true;
         string acceptLeak = "";
         foreach (var gate in GateStates)
@@ -562,6 +612,85 @@ internal static class Program
             eachOutcomeNamed && expectedAnswerLines.Count == VanillaAnswers.Length,
             "named=" + expectedAnswerLines.Count + " outcomes=" + VanillaAnswers.Length
             + " a declined call named another path's outcome: " + misnamed);
+
+        // ---- D6: the outcome an exit assigns is the outcome that exit IS. -----
+        // RED under "pathswap" and "paththrew". THE SURFACE D4 AND D5 CANNOT
+        // REACH, AND THE REASON THIS CASE EXISTS.
+        //
+        // D4 says the six sentences differ from each other; D5 says each sentence
+        // is attached to its own outcome. Both are statements about the seam, and
+        // both are blind to the half that decides which outcome a PATH gets -
+        // VanillaVictimFor in the patches file, five exits, one assignment each.
+        // Swap two of those assignments and every sentence is still distinct and
+        // still bound to its own enum value, so D4, D5 and BOTH of their mutation
+        // runs stay green while a missing PlayerManager reports itself as an
+        // effect with no holder of its own: the exact false statement the whole
+        // reason-plumbing was built to end. A mutant that cannot reach the code
+        // its case claims to close is a check that cannot fail (#342/#431).
+        //
+        // The expectation is a table keyed on the PATH - the guard is the
+        // identity of the exit - derived by reading that member and written out
+        // here. It never asks the seam what a path ought to produce, so path to
+        // outcome and outcome to sentence are measured against two independent
+        // statements and neither half can certify the other.
+        string exitProblem;
+        string victimForBody = MemberBody("plugin/ProximityVictimPatches.cs",
+            "private static Player VanillaVictimFor(Component instance, out ProximityVanillaAnswer answer)",
+            out exitProblem);
+        var expectedExits = new[]
+        {
+            new[] { "pm == null - the game's player manager was not available",
+                    "if (pm == null) { answer = ProximityVanillaAnswer.NoManager; return null; }",
+                    "NoManager" },
+            new[] { "holder == null - this effect has no player of its own",
+                    "if (holder == null) { answer = ProximityVanillaAnswer.NoHolder; return null; }",
+                    "NoHolder" },
+            new[] { "victim == null - the game's own call answered with nobody",
+                    "if (victim == null) { answer = ProximityVanillaAnswer.Nobody; return null; }",
+                    "Nobody" },
+            new[] { "the fall-through - a usable player came back",
+                    "answer = ProximityVanillaAnswer.Answered;",
+                    "Answered" },
+            new[] { "catch - the resolution could not complete",
+                    "catch { answer = ProximityVanillaAnswer.Threw; return null; }",
+                    "Threw" },
+        };
+        var exitProblems = new List<string>();
+        if (victimForBody == null) exitProblems.Add(exitProblem);
+        else
+        {
+            foreach (string[] row in expectedExits)
+            {
+                int onItsExit = CountOf(victimForBody, row[1]);
+                if (onItsExit != 1)
+                    exitProblems.Add("the exit [" + row[0] + "] must assign " + row[2]
+                        + " on exactly one line of its own; that line occurs " + onItsExit + " time(s)");
+                int perOutcome = CountOf(victimForBody, "ProximityVanillaAnswer." + row[2]);
+                if (perOutcome != 1)
+                    exitProblems.Add(row[2] + " is named on " + perOutcome
+                        + " line(s) in this member (want exactly 1 - one exit owns it)");
+            }
+            // No sixth exit and no exit that assigns twice.
+            int assignments = CountOf(victimForBody, "answer = ProximityVanillaAnswer.");
+            if (assignments != expectedExits.Length)
+                exitProblems.Add("this member assigns the outcome " + assignments
+                    + " time(s); the table names " + expectedExits.Length + " exits");
+            // NotAsked describes a call that was never made. A member that HAS
+            // made the call may never claim otherwise (#351).
+            int notAsked = CountOf(victimForBody, "ProximityVanillaAnswer.NotAsked");
+            if (notAsked != 0)
+                exitProblems.Add("NotAsked is assigned here " + notAsked
+                    + " time(s); it belongs to the caller's ring-less path and to nothing in this member");
+        }
+        // Every value of the outcome type is either owned by one exit above or is
+        // NotAsked. A COUNT against the enum, never a sentence read back from it -
+        // this is what stops a new outcome being added and silently skipped.
+        if (expectedExits.Length + 1 != VanillaAnswers.Length)
+            exitProblems.Add("the outcome type has " + VanillaAnswers.Length
+                + " values; this table accounts for " + (expectedExits.Length + 1));
+        Check("D6 Decline_EachExitOfTheVanillaCallAssignsItsOwnOutcome",
+            exitProblems.Count == 0,
+            string.Join("; ", exitProblems.ToArray()));
 
         // =================================================================
         // G - THE CAPABILITY GATE.
@@ -1300,8 +1429,9 @@ internal static class Program
         // W16b/c - and it is DRIVEN, from the always-on persistent tick and from
         // the compat check that disables the mod. The tick is what makes the
         // guarantee survive a respawned persistent host or a later toggle without
-        // anyone having to remember the member (#275); the compat site is the one
-        // transition that exists today.
+        // anyone having to remember the member (#275).
+        // W17 holds the other half of that in the shipped files AND, since this
+        // sentence survived a round here, in this one: the compat site can only withdraw on a second DoInitialize.
         // The span deliberately ENDS at the modDisabled return: the withdrawal
         // exists for a seat that has been disabled, so a driver placed below that
         // return would inherit the dead zone of the very condition it answers
@@ -1334,15 +1464,40 @@ internal static class Program
         // worse, reads the two that did print as covering this one. The signal this
         // feature emits has to be producible by the route the prose names
         // (#438/#443).
+        // AND IN THE HARNESS'S OWN TEXT, which is where the deleted claim was
+        // still standing a round later. W16b/c's comment above called the compat
+        // site "the one transition that exists today" - outside every file this
+        // case inspected - so the sentence the round had deleted from two shipped
+        // files was still being handed to the next reader by the suite that
+        // certifies the deletion. A search surface that stops short of the
+        // document making the claim is not a bound on the claim (#306/#434).
+        //
+        // A CASE THAT SEARCHES ITS OWN FILE MAY NOT SPELL ITS NEEDLE WHOLE. The
+        // literal would be found in this very expression and the forbidden count
+        // could never be zero, nor the required count one - a check that cannot
+        // fail (#342). Both needles are therefore built from halves, and the
+        // sentences they look for live in the comment above, spelled out once.
+        string progText = LoadSource("tools/tests/bug389-seam/Program.cs");
+        string deletedCompatClaim = "the compat site is the one " + "transition that exists today";
+        string correctedCompatClaim = "the compat site can only withdraw on a second " + "DoInitialize";
         string pluginText = LoadSource("plugin/Plugin.cs");
         Check("W17 Wiring_TheCompatSiteClaimsOnlyWhatItCanDo",
-            pluginText != null && patchesText != null
+            pluginText != null && patchesText != null && progText != null
             && CountOf(pluginText, "A pre-join stage may already have advertised") == 0
             && CountOf(pluginText, "This call is a no-op on a first initialisation.") == 1
             && CountOf(patchesText, "the one transition that exists today") == 0
-            && CountOf(patchesText, "THE TICK IS THE TRANSITION THAT EXISTS TODAY") == 1,
-            "the compat site and the member's doc must both say that site can only withdraw on a "
-            + "second initialisation, and must not claim a first-init advert");
+            && CountOf(patchesText, "THE TICK IS THE TRANSITION THAT EXISTS TODAY") == 1
+            && CountOf(progText, deletedCompatClaim) == 0
+            && CountOf(progText, correctedCompatClaim) == 1,
+            "the compat site, the member's doc and this harness must all say that site can only "
+            + "withdraw on a later initialisation, and none of them may claim a first-init advert"
+            + " [deleted-claim/required-wording counts, want 0/1 each - Plugin.cs="
+            + (pluginText == null ? "unread" : CountOf(pluginText, "A pre-join stage may already have advertised")
+                + "/" + CountOf(pluginText, "This call is a no-op on a first initialisation."))
+            + ", patches=" + (patchesText == null ? "unread" : CountOf(patchesText, "the one transition that exists today")
+                + "/" + CountOf(patchesText, "THE TICK IS THE TRANSITION THAT EXISTS TODAY"))
+            + ", harness=" + (progText == null ? "unread" : CountOf(progText, deletedCompatClaim)
+                + "/" + CountOf(progText, correctedCompatClaim)) + "]");
 
         // W18 - and the ORDERING that claim rests on. No mutant of its own: it is
         // the structural half of W17's property and wire-compatclaim is the group's
@@ -1416,6 +1571,57 @@ internal static class Program
             "private static bool Census()",
             new[] { "PhotonNetwork.PlayerList" },
             new[] { "RoomActors.ActiveFighters", "PhotonNetwork.LocalPlayer" });
+
+        // W23 - THE ADVERTISEMENT IS NOT LATCHED BY THE SHORTFALL FLAG. RED under
+        // "wire-stagelatch"; green under "wire-logquote", which edits another line
+        // of the same member and is this case's inert twin.
+        //
+        // Two files used to say _stageFailedPermanently latched the ADVERTISEMENT
+        // - "once we have declined to advertise, we never advertise later in the
+        // session" in the field's own doc, and "plus StageInto's own latch: a seat
+        // that declined once never stages again in that session" carried into the
+        // withdrawal's argument for having no advertising direction. The flag does
+        // no such thing. It is read only on the branch that has already declined,
+        // where it bounds a second LogError, and the advertising branch asks the
+        // local gate and the withdrawal latch and nothing else. A seat whose third
+        // patch attaches after a declined attempt is Capable and its next pre-join
+        // merge stages the key - which is correct, and the opposite of what both
+        // comments told a reader to expect.
+        //
+        // It matters beyond the prose. The withdrawal's doc used that latch as a
+        // PREMISE for why no advertising direction is needed, so a later reader
+        // re-deriving that argument would have been reasoning from a mechanism
+        // that does not exist (#351/#434). What holds instead is #287: the value
+        // travels with the Player object, so a later advertisement is no more
+        // observable before use than the first. This case keeps the branch clear
+        // of the flag, which is the sentence both files now make.
+        string stageProblem;
+        string stageBody = MemberBody("plugin/ProximityVictimPatches.cs",
+            "internal static void StageInto(ExitGames.Client.Photon.Hashtable prejoin)",
+            out stageProblem);
+        var stageProblems = new List<string>();
+        if (stageBody == null) stageProblems.Add(stageProblem);
+        else
+        {
+            string advertGuard = "if (local == ProximityGateState.Capable && !_withdrawn)";
+            string advertWrite = "prejoin[ProximityVictim.CapabilityProp] = ProximityVictim.CapabilityValue;";
+            int guards = CountOf(stageBody, advertGuard);
+            if (guards != 1)
+                stageProblems.Add("the advertising guard must be exactly '" + advertGuard
+                    + "' and occur once - two terms, neither of them the shortfall flag; found " + guards);
+            int flagReads = CountOnCodeLines(stageBody, "_stageFailedPermanently");
+            if (flagReads != 2)
+                stageProblems.Add("_stageFailedPermanently must occur on exactly two code lines here - "
+                    + "the test and the set, both on the declining branch; found " + flagReads);
+            int writeAt = stageBody.IndexOf(advertWrite, StringComparison.Ordinal);
+            int flagAt = stageBody.IndexOf("_stageFailedPermanently", StringComparison.Ordinal);
+            if (writeAt < 0 || flagAt < 0 || writeAt > flagAt)
+                stageProblems.Add("the key must be staged BEFORE this member reads the flag at all "
+                    + "(staged at " + writeAt + ", first flag read at " + flagAt + ")");
+        }
+        Check("W23 Wiring_TheAdvertisementIsNotLatchedByTheShortfallFlag",
+            stageProblems.Count == 0,
+            string.Join("; ", stageProblems.ToArray()));
 
         Console.WriteLine("=== passed=" + _passed + " failed=" + _failed + " ===");
         return _failed == 0 ? 0 : 1;

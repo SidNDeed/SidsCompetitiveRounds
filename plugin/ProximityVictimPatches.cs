@@ -125,11 +125,33 @@ namespace CompetitiveRounds
         /// direction is to stay withdrawn for the session.</summary>
         private static bool _withdrawn;
 
-        /// <summary>Once we have declined to advertise, we never advertise later in
-        /// the session. Harmony patching is finished before anything can connect, so
-        /// a false PatchesLive at the first staging attempt is the final answer, and
-        /// a key that appeared on a later join would describe a seat that still runs
-        /// vanilla.</summary>
+        /// <summary>THIS SUPPRESSES A REPEATED LOG LINE, AND NOTHING ELSE.
+        ///
+        /// It was documented as a latch on the ADVERTISEMENT: one declined
+        /// staging attempt was said to settle the question for the rest of the
+        /// session. That is not what StageInto does with it. The deleted sentence
+        /// is deliberately not reproduced here - a shipped file should carry no
+        /// copy of a claim a round removed, or the next grep for it finds one
+        /// (#306/#434).
+        ///
+        /// What StageInto actually does: the advertising branch is guarded by the
+        /// local gate and the withdrawal latch and nothing else, and this flag is
+        /// read only on the branch that has ALREADY decided not to advertise. So
+        /// what it bounds is a second LogError, never a capability.
+        ///
+        /// A seat whose third patch attaches after a declined attempt is
+        /// therefore Capable, and - having never advertised, it can never have
+        /// withdrawn - its NEXT pre-join merge stages the key. That is the design
+        /// and not a leak: the key reaches a peer only with the Player object
+        /// itself and is therefore never observable before use (#287), a later
+        /// advertisement travels exactly the same way, and a seat that is
+        /// genuinely capable is the seat the room wants carrying it. W23 holds
+        /// the branch clear of this flag so this paragraph and the code cannot
+        /// drift apart again (#351/#434).
+        ///
+        /// What the flag does buy is the one thing its name is about: the
+        /// shortfall message states itself once per session rather than on every
+        /// pre-join merge.</summary>
         private static bool _stageFailedPermanently;
 
         /// <summary>THE ONLY way this key reaches a peer. Staging is gated on

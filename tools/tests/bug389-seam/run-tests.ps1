@@ -45,6 +45,14 @@ $priorTip = '93f4db3018048149a5f9dbe2ef76fc28d82ddf52'
 # The shipped files the W, N and S4 cases read. A wiring mutant copies all of
 # them and changes one line in one of them, so every other case in the same run
 # is an untouched control.
+#
+# Program.cs IS ON THIS LIST, and it is not a shipped file. W17 asserts that a
+# claim deleted from two shipped files is absent, and the round-4 pass left that
+# same claim standing in the harness's own comment - outside every file the case
+# read, so the suite that certifies the deletion was still making the claim. The
+# text under test therefore includes this file. Note what is NOT affected: the
+# COMPILED harness in every run comes from $root, so a wiring mutant changes only
+# what W17 reads, never what executes.
 $wireFiles = @(
     'plugin/SpectatorSession.cs',
     'plugin/Plugin.cs',
@@ -53,7 +61,8 @@ $wireFiles = @(
     'plugin/ProximityVictimSeam.cs',
     'plugin/PerfPatches.cs',
     'plugin/ApiClient.cs',
-    'plugin/CompetitiveRounds.csproj'
+    'plugin/CompetitiveRounds.csproj',
+    'tools/tests/bug389-seam/Program.cs'
 )
 
 function Say([string]$text) { [Console]::WriteLine($text) }
@@ -183,17 +192,43 @@ function New-Mutant([string]$name, [object[]]$edits) {
 # A wiring mutation: copy the shipped files the cases read, change ONE line
 # inside ONE named member of ONE of them, and hand the copy to the suite as its
 # source root. The shipped tree is never written to.
+function Copy-WireFiles([string]$dir) {
+    foreach ($rel in $wireFiles) {
+        $dst = Join-Path $dir $rel
+        New-Item -ItemType Directory -Path (Split-Path -Parent $dst) -Force | Out-Null
+        Copy-Item (Join-Path $repo $rel) $dst
+    }
+}
+
 function New-WireRoot([string]$name, [string]$file, [string]$member, [string]$find, [string]$replace, [string]$endMarker) {
     $dir = Join-Path $work ('wire-' + $name)
     if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
-    New-Item -ItemType Directory -Path (Join-Path $dir 'plugin') -Force | Out-Null
-    foreach ($rel in $wireFiles) {
-        Copy-Item (Join-Path $repo $rel) (Join-Path $dir $rel)
-    }
+    Copy-WireFiles $dir
     $target = Join-Path $dir $file
     Say ('--- wiring mutant ' + $name + ': in ' + $file)
     $text = [System.IO.File]::ReadAllText($target)
     $text = Edit-InMember ('wire-' + $name) $text $member $find $replace $endMarker
+    [System.IO.File]::WriteAllText($target, $text)
+    return $dir
+}
+
+# The same, for a mutation that is only honest as SEVERAL edits: a genuine swap
+# of two exit assignments has to move both, or it is a collapse of one path onto
+# another and not a swap. Every edit is resolved inside the named member and
+# still has to match EXACTLY ONE site there, so an edit that would rewrite a
+# line another edit has already produced is refused rather than applied twice.
+# $edits is an array of three-element arrays: @(@('member','find','replace'), ...)
+function New-WireRootEdits([string]$name, [string]$file, [object[]]$edits) {
+    $dir = Join-Path $work ('wire-' + $name)
+    if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+    Copy-WireFiles $dir
+    $target = Join-Path $dir $file
+    if ($edits.Count -eq 3 -and ($edits[0] -is [string])) { $edits = @(, $edits) }
+    Say ('--- wiring mutant ' + $name + ': in ' + $file + ', ' + $edits.Count + ' edit(s)')
+    $text = [System.IO.File]::ReadAllText($target)
+    foreach ($edit in $edits) {
+        $text = Edit-InMember ('wire-' + $name) $text ([string]$edit[0]) ([string]$edit[1]) ([string]$edit[2]) ''
+    }
     [System.IO.File]::WriteAllText($target, $text)
     return $dir
 }
@@ -203,11 +238,12 @@ function New-WireRoot([string]$name, [string]$file, [string]$member, [string]$fi
 function New-PriorRoot([string]$name, [string]$tip) {
     $dir = Join-Path $work ('prior-' + $name)
     if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
-    New-Item -ItemType Directory -Path (Join-Path $dir 'plugin') -Force | Out-Null
     foreach ($rel in $wireFiles) {
         $blob = & git -C $repo show ($tip + ':' + $rel) 2>&1
         if ($LASTEXITCODE -ne 0) { throw ('could not read ' + $rel + ' at ' + $tip) }
-        [System.IO.File]::WriteAllText((Join-Path $dir $rel), (($blob | ForEach-Object { [string]$_ }) -join [Environment]::NewLine))
+        $dst = Join-Path $dir $rel
+        New-Item -ItemType Directory -Path (Split-Path -Parent $dst) -Force | Out-Null
+        [System.IO.File]::WriteAllText($dst, (($blob | ForEach-Object { [string]$_ }) -join [Environment]::NewLine))
     }
     Say ('--- prior-mechanism root ' + $name + ': ' + $wireFiles.Count + ' files at ' + $tip.Substring(0, 7))
     return $dir
@@ -453,6 +489,59 @@ $runAnswerLine = Invoke-Suite 'mut-answerline' $mutAnswerLine $repo
 if (-not (Assert-Mutation 'single-outcome-misnaming mutation' $runAnswerLine 'D5' 'D4')) { $overall = 1 }
 Say ''
 
+# ---------- 8g. SWAP TWO EXIT ASSIGNMENTS IN THE PATH PLUMBING ----------
+# THE SURFACE THE TWO RUNS ABOVE COULD NOT REACH, and the reason this pair
+# exists. `answerreason` and `answerline` both edit the SEAM's enum-to-sentence
+# table; the code that decides which outcome a PATH gets is VanillaVictimFor in
+# the patches file, and nothing in the round-4 suite touched it. A swapped
+# assignment there leaves every sentence distinct and every sentence bound to
+# its own enum value, so D4, D5 and BOTH advertised mutation runs stayed green
+# while a missing PlayerManager would report itself as an effect with no holder.
+# A mutant that cannot reach the code its case claims to close is a check that
+# cannot fail (#342/#431), which is what this moves.
+#
+# It is a WIRING mutant because the harness cannot compile that file - it
+# carries Unity, Photon and Harmony - so D6 reads its text. Two edits, because a
+# swap that moves one assignment is a collapse and not a swap; each is still
+# resolved inside VanillaVictimFor and still has to match exactly one site there.
+#
+# D4 AND D5 ARE THE CONTROLS AND MUST STAY GREEN. That is what says the surface
+# actually moved rather than being duplicated: the seam is untouched here, so
+# the cases that measure the seam cannot see this and the case that measures the
+# path can.
+$wirePathSwap = New-WireRootEdits 'pathswap' 'plugin/ProximityVictimPatches.cs' @(
+    @('private static Player VanillaVictimFor(Component instance, out ProximityVanillaAnswer answer)',
+      '                if (pm == null) { answer = ProximityVanillaAnswer.NoManager; return null; }',
+      '                if (pm == null) { answer = ProximityVanillaAnswer.NoHolder; return null; }'),
+    @('private static Player VanillaVictimFor(Component instance, out ProximityVanillaAnswer answer)',
+      '                if (holder == null) { answer = ProximityVanillaAnswer.NoHolder; return null; }',
+      '                if (holder == null) { answer = ProximityVanillaAnswer.NoManager; return null; }')
+)
+$runWirePathSwap = Invoke-Suite 'wire-pathswap' $seam $wirePathSwap
+if (-not (Assert-Mutation 'path-to-outcome swap, D4 control' $runWirePathSwap 'D6' 'D4')) { $overall = 1 }
+if (-not (Assert-Mutation 'path-to-outcome swap, D5 control (the sentence-table case stays green)' `
+    $runWirePathSwap 'D6' 'D5')) { $overall = 1 }
+Say ''
+
+# ---------- 8h. report a thrown resolution as one that answered ----------
+# The round-3 MEDIUM in its original shape, planted back at the only place that
+# can produce it now. A resolution that could not complete is not a resolution
+# that ran and found nobody: the second sentence sends a reader to look at who
+# was standing where, for a call that never reached the ranking, and the
+# sentence is also the budget key so the true cause is then unprintable for the
+# session. D4 and D5 are green on it - the seam still names both outcomes
+# correctly - and D6 is the case that sees the exit lying about which one it is.
+$wirePathThrew = New-WireRoot 'paththrew' 'plugin/ProximityVictimPatches.cs' `
+    'private static Player VanillaVictimFor(Component instance, out ProximityVanillaAnswer answer)' `
+    '            catch { answer = ProximityVanillaAnswer.Threw; return null; }' `
+    '            catch { answer = ProximityVanillaAnswer.Nobody; return null; }' ''
+$runWirePathThrew = Invoke-Suite 'wire-paththrew' $seam $wirePathThrew
+if (-not (Assert-Mutation 'thrown-resolution misreported as answered-with-nobody, D4 control' `
+    $runWirePathThrew 'D6' 'D4')) { $overall = 1 }
+if (-not (Assert-Mutation 'thrown-resolution misreported as answered-with-nobody, D5 control' `
+    $runWirePathThrew 'D6' 'D5')) { $overall = 1 }
+Say ''
+
 # ---------- 9. collapse the outcome signals onto one budget ----------
 # Drop the reason from the key, so two reasons under one outcome share a budget
 # and the second is never printed. S2 is the control: the LINE still names all
@@ -648,6 +737,52 @@ $wireLogQuote = New-WireRoot 'logquote' 'plugin/ProximityVictimPatches.cs' `
     '                        + RequiredAttachments + " patches did NOT attach); this seat stays on vanilla");' ''
 $runWireLogQuote = Invoke-Suite 'wire-logquote' $seam $wireLogQuote
 if (-not (Assert-Mutation 'quoted-log-line wiring' $runWireLogQuote 'W19' 'W1')) { $overall = 1 }
+# W23's INERT TWIN. This run edits StageInto - the same member W23 bounds - on a
+# line W23 makes no claim about, so W23 must stay green here while it reddens
+# under wire-stagelatch. Without this row "W23 reddens when the advertising
+# branch is latched" and "W23 reddens whenever anything in StageInto moves" look
+# the same from the log.
+if (-not (Assert-Mutation 'quoted-log-line wiring, W23 inert twin' $runWireLogQuote 'W19' 'W23')) { $overall = 1 }
+Say ''
+
+# ---------- latch the ADVERTISEMENT on the shortfall flag ----------
+# Put the mechanism two comments claimed into the code that never had it. The
+# field's own doc said "once we have declined to advertise, we never advertise
+# later in the session", and the withdrawal's doc carried that latch as a
+# PREMISE for why no advertising direction is needed. What the flag actually
+# does is suppress a second LogError on the branch that has already declined; a
+# seat whose third patch attaches after a declined attempt is Capable and its
+# next pre-join merge stages the key, which is the design. This is the shape the
+# comments described, so W23 has to be able to fail on it (#351/#434).
+$wireStageLatch = New-WireRoot 'stagelatch' 'plugin/ProximityVictimPatches.cs' `
+    'internal static void StageInto(ExitGames.Client.Photon.Hashtable prejoin)' `
+    '                if (local == ProximityGateState.Capable && !_withdrawn)' `
+    '                if (local == ProximityGateState.Capable && !_withdrawn && !_stageFailedPermanently)' ''
+$runWireStageLatch = Invoke-Suite 'wire-stagelatch' $seam $wireStageLatch
+if (-not (Assert-Mutation 'advertisement-latched-on-the-shortfall-flag wiring' $runWireStageLatch 'W23' 'W1')) { $overall = 1 }
+Say ''
+
+# ---------- put the deleted compat claim back in the HARNESS'S own text ----------
+# The round-4 pass deleted "the one transition that exists today" from the
+# patches file and "A pre-join stage may already have advertised it" from the
+# compat site, and left the same claim standing in this suite's own comment -
+# outside every file W17 read. So the document certifying the deletion was still
+# making the claim, and a tester reading it would still wait for a line a plain
+# compat disable cannot produce. W17's surface now includes this file; this is
+# what proves that half can fail.
+#
+# THE ANCHOR IS DELIBERATELY A LINE THAT EXISTS IN BOTH THE CURRENT HARNESS AND
+# THE PREVIOUS TIP'S. The blindness run re-executes these mutants against the
+# harness as it stood at the previous tip, and an anchor that only this round's
+# file carries would abort that whole run at this line instead of producing the
+# FAILED row it exists to produce (#342: a control that cannot be executed
+# reports nothing about anything).
+$wireCompatHarness = New-WireRoot 'compatharness' 'tools/tests/bug389-seam/Program.cs' `
+    'private static int Main()' `
+    '        // W16 - the withdrawal can only withdraw. The capable value reaches a peer' `
+    '        // W16 - the withdrawal can only withdraw, and the compat site is the one transition that exists today. The capable value reaches a peer' ''
+$runWireCompatHarness = Invoke-Suite 'wire-compatharness' $seam $wireCompatHarness
+if (-not (Assert-Mutation 'deleted-compat-claim-in-the-harness wiring' $runWireCompatHarness 'W17' 'W1')) { $overall = 1 }
 Say ''
 
 # Read the property write as if failure could only arrive as an exception.
