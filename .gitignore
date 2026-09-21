@@ -52,6 +52,11 @@ SETUP.md
 docs/HANDOFF.md
 docs/TODO.md
 docs/learnings.md
+# The writer replaces that file through a temp copy beside it. If the replace
+# fails (on Windows, any process holding the file open is enough), the temp is
+# a complete copy of the same local-only content, and the ignore above matches
+# one exact name.
+docs/learnings.md.*
 docs/deploy-reference.md
 docs/SECURITY_ACTION_ITEMS.md
 docs/https-migration.md
@@ -95,3 +100,5 @@ backend/api/assets/fonts/*.otf
 backend/api/assets/fonts/*.ttc
 backend/api/assets/fonts/*.part
 backend/tests/_out/
+# Working scratch left in the repo root by tooling; never content.
+scratchpad/
