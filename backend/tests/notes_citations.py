@@ -53,7 +53,17 @@ REPO = BACKEND.parent
 # `:N` inherits the path most recently named on the SAME notes line, which is
 # how the tables in these notes are written.
 _PATH = r"(?:backend/[A-Za-z0-9_./-]+|[A-Za-z0-9_-]+\.(?:py|sql))"
-_CITE = re.compile(rf"(?P<path>{_PATH})?\s*:(?P<a>\d{{3,6}})(?:\s*[-–]\s*(?P<b>\d{{3,6}}))?")
+_CITE = re.compile(rf"(?P<path>{_PATH})?\s*:(?P<a>\d{{1,6}})(?:\s*[-–]\s*(?P<b>\d{{1,6}}))?")
+# A citation that NAMES its file is read at any line number; a bare `:N`
+# continuation, which inherits the path most recently named on the line, is
+# read only from three digits up. The floor exists for the bare form alone,
+# where a clock time or a version string on a line that happens to have named
+# a source file earlier would otherwise be read as a citation. The first
+# version applied the floor to BOTH forms and therefore skipped five citations
+# in these notes -- a migration line and a fixture line among them -- while the
+# prose beside it claimed every citation was checked. A checker narrower than
+# the sentence describing it is the defect this whole round is about.
+_BARE_CITATION_MIN_DIGITS = 3
 _BACKTICKED = re.compile(r"`([^`\n]+)`")
 # `main.py` on its own means the api module in these notes.
 _ALIASES = {"main.py": "backend/api/main.py",
@@ -138,6 +148,8 @@ def check(notes_text: str, read_source) -> list[dict]:
         for m in _CITE.finditer(line):
             if m.group("path"):
                 current = m.group("path")
+            elif len(m.group("a")) < _BARE_CITATION_MIN_DIGITS:
+                continue
             if current is None:
                 continue
             src = read_source(current)

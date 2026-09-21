@@ -131,6 +131,13 @@ def scan_text(text: str, terms: dict[str, list[str]]) -> list[tuple[int, str]]:
     for lineno, line in enumerate(text.splitlines(), 1):
         # Remove the allowed form before any shape runs, so the allowance is
         # one rule in one place rather than an exception per class.
+        #
+        # Its boundary, stated because a removal is a hole by construction: a
+        # login target aimed AT the allowed test database -- an account name,
+        # the at sign, then the allowed form -- loses its host to this
+        # substitution and no longer matches the login shape. The account name
+        # is still caught if it is in the wordlist. Narrow, deliberate, and
+        # named here rather than discovered later.
         probe = _ALLOWED.sub(" ", line)
         seen: set[str] = set()
         for cls, rx in _SHAPE_CLASSES:
