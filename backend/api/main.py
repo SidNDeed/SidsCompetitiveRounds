@@ -905,6 +905,129 @@ def _group_game_positively_live(group_id) -> bool:
     return at is not None and (time.monotonic() - at) <= IN_MATCH_TTL_SEC
 
 
+# ── Queue-leave cause vocabulary (bug #392) ──────────────────────────────
+#
+# Every queue-leave route takes `cause` from the client. TWO different
+# questions are asked of that one string, and conflating them is the defect
+# this vocabulary exists to prevent:
+#
+#   in-room?      Was the leaver demonstrably at or past assembly? An exit
+#                 from inside the room can never be "failed assembly", so it
+#                 VETOES the dissolution branch in every leave handler.
+#   involuntary?  Did the player choose to go? Read for DISPLAY only.
+#
+# Both handlers used to answer the first question with a bare
+# `cause == "in_room_exit"`. Adding a second in-room tag beside that equality
+# would have removed the veto for the new tag: a seat dropped by a transport
+# timeout during live game 1 (games_played still 0, heartbeat evidence not yet
+# trustworthy) would have taken the dissolution branch, cancelling the game
+# and refunding the wagers of the three players still in it. The recognition
+# is therefore a SET, asked through the helper below, and every site that used
+# to compare against the literal asks the helper instead.
+#
+# Wire constraint: both leave routes declare `cause: str = Query("",
+# max_length=16)`, so a tag of 17+ characters is rejected with 422 before the
+# handler runs. `in_room_timeout` is 15. The test reads that limit off the
+# live route rather than restating the number.
+_IN_ROOM_EXIT_CAUSES = frozenset({"in_room_exit", "in_room_timeout"})
+# The involuntary tags are a strict SUBSET of the in-room ones, and must stay
+# one: an involuntary tag that was not also in-room would un-veto dissolution
+# on the exact path this bug is about. test_ffa_leave_cause.py asserts the
+# containment, and the capability advertised on /api/v1/mod-version is derived
+# from it rather than hardcoded, so a vocabulary that lost the tag also stops
+# advertising it.
+_INVOLUNTARY_EXIT_CAUSES = frozenset({"in_room_timeout"})
+
+# ── The capability field's NAME is half of the wire contract. ────────────
+# The two lanes of bug #392 are built in separate trees that cannot see each
+# other, and the first build of this one advertised the capability under a
+# name the client never asks for: the server said `involuntary_leave_cause`,
+# the client read `ffa_involuntary_cause`. Both lanes were green — the server
+# test asserted its own key was present, the client test asserted its own key
+# was read, and no test compared the two literals — while the gate could never
+# open, the tag could never reach the wire, and every column, writer and
+# renderer this bug added was live and inert. That is the #438/#443 shape:
+# acceptance was a positive signal the PRODUCER emits, not one the CONSUMER
+# consumes.
+#
+# So the canonical name is now the one the only consumer actually reads,
+# transcribed byte-for-byte from the client's own constant rather than chosen
+# here. That constant is AUTHORITATIVE in exactly one place — the client lane,
+# branch `claude/bug392-client`, `plugin/TransportExit.cs:95`,
+# `internal const string CapabilityField = "ffa_involuntary_cause"` — and that
+# tree is not this one. This branch's own `plugin/` folder is the PRODUCTION
+# client and carries no `TransportExit.cs` at all, so a bare
+# `plugin/TransportExit.cs` resolved against this checkout finds nothing and
+# would send the next reader to re-derive the name from whatever the shipped
+# client happens to do, which is how the first build of this lane picked a
+# spelling no consumer reads. The server-side pin of the literal is
+# `backend/tests/test_ffa_leave_cause.py`,
+# `test_the_capability_field_is_spelled_the_way_the_client_reads_it`; a rename
+# on either side has to get past that assertion. Once both lanes sit on one
+# tree the pin becomes a cross-file read of the constant itself — the owed
+# action recorded in this lane's notes — and this note loses its "not in this
+# tree" half. That hand-over is not left to memory:
+# test_the_wire_name_note_points_at_the_tree_that_owns_the_constant reddens as
+# soon as `claude/bug392-client`'s `plugin/TransportExit.cs` appears here.
+_INVOLUNTARY_CAUSE_CAPABILITY_FIELD = "ffa_involuntary_cause"
+# The first spelling, kept as a transitional ALIAS carrying the identical
+# value. Two keys for one boolean is not a contract we want to keep, but while
+# the two lanes are unmerged either spelling may be what a built client or a
+# recorded deploy check is pinned to, and a box that cannot support the tag
+# advertises NEITHER. The cost of the extra key is one JSON field; the cost of
+# guessing wrong is the whole fix shipping inert again. test_ffa_leave_cause
+# asserts the two keys can never carry different values, so they cannot drift.
+# Drop the alias once both lanes are merged and the client literal is read off
+# the merged tree.
+_INVOLUNTARY_CAUSE_CAPABILITY_ALIAS = "involuntary_leave_cause"
+
+
+def _is_in_room_exit_cause(cause: str | None) -> bool:
+    """True when the client attests this leave came from INSIDE the room.
+
+    The single authority for the dissolution veto, shared by the FFA and 1v2
+    leave handlers. An absent cause (old clients) is False and keeps exactly
+    the evidence-based behaviour those handlers had before any tag existed.
+    """
+    return (cause or "") in _IN_ROOM_EXIT_CAUSES
+
+
+def _is_involuntary_exit_cause(cause: str | None) -> bool:
+    """True when the client attests the departure was NOT chosen.
+
+    Read for one purpose only: labelling a departure that is recorded either
+    way. It grants nothing - no readmission, no refund, no placement or rating
+    change, and no suppression of the departure itself.
+    """
+    return (cause or "") in _INVOLUNTARY_EXIT_CAUSES
+
+
+def _persistable_exit_cause(cause: str | None) -> str:
+    """The cause as it may be STORED, or "" for anything outside the vocabulary.
+
+    The three writers used to persist any non-empty `cause` verbatim, with the
+    route's `max_length=16` as the only filter — which made
+    `ffa_lobbies.departure_causes` a client-writable free-text map keyed by
+    player id, while the migration's own comment described its values as the
+    wire vocabulary. Nothing read the extra values, so there was no defect to
+    see today; the exposure was the NEXT reader, which would have inherited
+    unvalidated text with no schema. The column now holds only what the
+    vocabulary defines, so it means what the migration says it means.
+
+    Both in-room tags are storable, not just the involuntary one, and that is
+    deliberate (#283). A recorded `in_room_exit` occupies the (lobby, player)
+    slot that first-attestation-wins protects, so a seat that has already
+    attested a chosen exit cannot follow it with a transport claim. Narrowing
+    storage to the involuntary tag alone would have left the voluntary
+    attestation unrecorded and handed the slot to the later claim.
+
+    An unrecognised tag stores nothing, which reads downstream as "no cause
+    recorded" — today's behaviour for every client, and the direction that
+    costs only the label (#276).
+    """
+    return (cause or "") if (cause or "") in _IN_ROOM_EXIT_CAUSES else ""
+
+
 # Sept 6 (bug 342 review, Codex Group 2 M1 + L1): the online marker on the four
 # boards, ONE expression. presence_seen_at is stamped only by /presence/ping
 # (the mod's ~60 s heartbeat) -- never by get_or_create_player, which also
@@ -5656,8 +5779,39 @@ LATEST_MOD_VERSION = "1.40.3"
 
 @app.get("/api/v1/mod-version", tags=["System"])
 async def get_mod_version():
-    """Returns the latest recommended mod version and the gating floor."""
-    return {"version": LATEST_MOD_VERSION, "min_version": MIN_MOD_VERSION_EFFECTIVE}
+    """Returns the latest recommended mod version, the gating floor, and the
+    capability flags a client must see BEFORE it changes what it puts on the
+    wire.
+
+    The involuntary-cause capability (bug #392) is the ordering gate between
+    the two lanes of that fix. True means this box's leave handlers recognise the
+    in-room involuntary tag as in-room, so the tag keeps the dissolution veto.
+    False means they do not — on a box still running the pre-#392 code, because
+    it decides in-room-ness by comparing against one literal. The same tag
+    reads there as a PRE-ROOM leave and takes the dissolution branch,
+    cancelling a live game for the seats still in it. A client must therefore
+    send the tag only against a box that advertises it, and this is the route
+    the client already reads at startup (it is in _VERSION_GATE_BYPASS, so even
+    a pre-version-check client can ask).
+
+    Derived from the vocabulary rather than hardcoded (#342): a change that
+    emptied _INVOLUNTARY_EXIT_CAUSES, or moved a tag out of the in-room set,
+    stops the advertisement instead of leaving a flag that cannot go false.
+
+    The NAME is not chosen here — it is the client's own constant, and the
+    alias beside it is the spelling this lane first shipped. See the two
+    capability constants for why both are on the wire and when the alias goes.
+    """
+    _involuntary = bool(_INVOLUNTARY_EXIT_CAUSES) and (
+        _INVOLUNTARY_EXIT_CAUSES <= _IN_ROOM_EXIT_CAUSES)
+    return {
+        "version": LATEST_MOD_VERSION,
+        "min_version": MIN_MOD_VERSION_EFFECTIVE,
+        # One value, bound to both names from one expression, so the alias can
+        # never advertise something the canonical field does not.
+        _INVOLUNTARY_CAUSE_CAPABILITY_FIELD: _involuntary,
+        _INVOLUNTARY_CAUSE_CAPABILITY_ALIAS: _involuntary,
+    }
 
 
 # ── Internal endpoints (used by the Discord bot) ───────────────
@@ -10827,6 +10981,7 @@ async def get_match_by_code(code: str, db: AsyncSession = Depends(get_db)):
         p_rows = (await db.execute(text("""
             SELECT fmp.player_id, p.steam_id, p.display_name,
                    fmp.slot, fmp.placement, fmp.left_early,
+                   fmp.left_early_involuntary,
                    fmp.rounds_won, fmp.points_total, fmp.kills,
                    fmp.rating_change, fmp.xp_gained, fmp.gold_gained,
                    fmp.fps_avg, fmp.ping_avg,
@@ -10878,6 +11033,10 @@ async def get_match_by_code(code: str, db: AsyncSession = Depends(get_db)):
                 "placement": int(r["placement"]),
                 "won": int(r["placement"]) == 1,
                 "left_early": bool(r["left_early"]),
+                # Bug #392: the departure is still reported — `left_early`
+                # keeps its value — but a renderer can now say WHICH KIND of
+                # departure it was instead of calling every absence a choice.
+                "left_early_involuntary": bool(r["left_early_involuntary"]),
                 "slot": int(r["slot"]) if r["slot"] is not None else None,
                 "rounds_won": int(r["rounds_won"] or 0),
                 "points_total": int(r["points_total"] or 0),
@@ -40351,7 +40510,13 @@ async def ovt_queue_leave(request: Request, steam_id: str = Query(...),
         # one-shot dissolution (#270a).
         # Round-9 gate: same cause-fencing as the FFA leave — an exit from
         # inside the ovt_ ROOM is never assembly failure.
-        _ovt_in_room_exit = cause == "in_room_exit"
+        # Bug #392: the recognition is the shared SET, not an equality against
+        # one literal. The client's exit hook is a mode-agnostic sweep, so a
+        # new in-room tag reaches THIS handler too; left as an equality it
+        # would have dissolved a live 1v2 series for the same reason it would
+        # have dissolved a live FFA lobby (#432 — the flag named a line, the
+        # defect was the class).
+        _ovt_in_room_exit = _is_in_room_exit_cause(cause)
         _ovt_startup_indeterminate = False
         if (not _ovt_in_room_exit
                 and srow is not None and srow["status"] == "active"
@@ -45083,6 +45248,11 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
     that room (Codex design find 4 — leaving them 'ready_join' would re-feed
     a dead room forever). Everyone's rows are deleted; they requeue fresh."""
     await _check_steam_session(request, steam_id, db)
+    # Bug #392 lens find 7: narrowed ONCE, here, so all three writers below
+    # bind the same value and none of them can be the site that persists an
+    # unrecognised tag. `cause` itself is left alone — the in-room decisions
+    # and the fresh_cancel log read the tag as sent.
+    _pcause = _persistable_exit_cause(cause)
     # Fenced on the lobby the client actually means, so a delayed retry for a
     # finished lobby cannot revoke the lease of one joined since.
     await _lease_release_by_steam(db, steam_id, expected_lobby_id)
@@ -45110,17 +45280,54 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
                 marked = (await db.execute(text("""
                     UPDATE ffa_lobbies l
                        SET departed_ids = (SELECT ARRAY(SELECT DISTINCT e
-                                             FROM unnest(l.departed_ids || p.id) e))
+                                             FROM unnest(l.departed_ids || p.id) e)),
+                           departure_causes = CASE WHEN CAST(:cause AS text) = ''
+                                                   THEN l.departure_causes
+                                                   ELSE jsonb_build_object(p.id::text,
+                                                                           CAST(:cause AS text))
+                                                        || l.departure_causes END
                       FROM players p
                      WHERE p.steam_id = :sid
                        AND l.id = CAST(:lid AS uuid)
                        AND l.status = 'active'
                        AND p.id = ANY(l.member_ids)
-                       AND NOT (l.departed_ids @> ARRAY[p.id])
+                       -- Bug #392 lens find 2: TWO ways in, not one. The
+                       -- original predicate admitted only a departure that
+                       -- was not yet marked, which made the cause reachable
+                       -- ONLY on the request that first appended the player.
+                       -- The client's durable-cause machinery exists to
+                       -- re-send the attestation on a LATER request, after a
+                       -- teardown's own untagged leave has already taken the
+                       -- row path, appended the player and deleted the queue
+                       -- row: by the time the tagged retry arrives there is
+                       -- no row (so `me` is None, we are here) and the player
+                       -- is already departed (so the old predicate was false
+                       -- and zero rows were updated). Every attestation that
+                       -- survived a teardown was dropped in silence.
+                       --
+                       -- "First attestation wins" still holds, and now means
+                       -- what it says: the slot is the CAUSE key, not
+                       -- membership of departed_ids. A tagged retry may fill
+                       -- an empty slot; it can never overwrite a filled one.
+                       -- An untagged retry ON AN ALREADY-MARKED departure
+                       -- still matches nothing and stays the no-op it was;
+                       -- an untagged FIRST leave is unaffected and marks the
+                       -- departure through the original clause, as before.
+                       AND (NOT (l.departed_ids @> ARRAY[p.id])
+                            OR (CAST(:cause AS text) <> ''
+                                AND NOT jsonb_exists(l.departure_causes,
+                                                     p.id::text)))
                      RETURNING l.id
-                """), {"sid": steam_id, "lid": expected_lobby_id})).scalars().all()
+                """), {"sid": steam_id, "lid": expected_lobby_id,
+                       "cause": _pcause})).scalars().all()
                 if marked:
-                    print(f"[FFA-LOCK] rowless leaver {steam_id} marked departed on lobby {expected_lobby_id}")
+                    # "recorded", not "marked departed": this statement now
+                    # reaches the row to append the departure OR to fill an
+                    # empty cause slot for a departure already marked, and
+                    # PostgreSQL 16's RETURNING sees only the new row, so the
+                    # print cannot honestly claim which of the two it did
+                    # (#302 — a claim a reader cannot trace to the code).
+                    print(f"[FFA-LOCK] rowless leaver {steam_id} departure recorded on lobby {expected_lobby_id}")
             except Exception as ex:
                 print(f"[FFA-LOCK] rowless departure mark failed for {steam_id}: {ex}")
                 try:
@@ -45205,7 +45412,13 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
         # clicks, declines, watchdog bails — cause absent or other) may
         # dissolve. Old clients send no cause and keep the evidence-based
         # behaviour below.
-        _in_room_exit = cause == "in_room_exit"
+        # Bug #392: the recognition is the shared SET
+        # (_IN_ROOM_EXIT_CAUSES), so a seat taken out of the room by a
+        # transport timeout is in-room too and keeps the veto. Every reader of
+        # `_in_room_exit` below — the two dissolution predicates and
+        # `game_live_now` — is therefore covered by one change; none of them
+        # compares against a literal any more.
+        _in_room_exit = _is_in_room_exit_cause(cause)
         # Round-13 REVERSAL of the round-12 fresh_cancel override: Codex
         # proved it was a hostile-void primitive — ONE member's unverified
         # claim cancelled a LIVE game (warm heartbeat and all), refunded its
@@ -45306,22 +45519,48 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
                 # therefore recorded and then acted on by nobody, leaving the
                 # last survivor holding a ready_join row on a permanently
                 # 'active' lobby.
+                # Bug #392: the cause rides the SAME statement as the
+                # departed_ids append, at all three append sites, so the two
+                # can never disagree about which lobby a departure belongs to
+                # and a persisted cause can never exist without its departure.
+                # `jsonb_build_object(new) || existing` keeps the EXISTING key
+                # on a conflict (`||` lets the right operand win), so the
+                # FIRST attestation for a (lobby, player) pair is what sticks
+                # and a retried or contradicting later leave cannot rewrite
+                # it. `:pidt` is a second bind of the same value deliberately:
+                # binding one parameter under both CAST(... AS uuid) and
+                # CAST(... AS text) asks Postgres to deduce two types for one
+                # placeholder, which fails at parse time.
                 all_but_one = bool((await db.execute(text("""
                     UPDATE ffa_lobbies
-                       SET departed_ids = (SELECT ARRAY(SELECT DISTINCT e FROM unnest(departed_ids || CAST(:pid AS uuid)) e))
+                       SET departed_ids = (SELECT ARRAY(SELECT DISTINCT e FROM unnest(departed_ids || CAST(:pid AS uuid)) e)),
+                           departure_causes = CASE WHEN CAST(:cause AS text) = ''
+                                                   THEN departure_causes
+                                                   ELSE jsonb_build_object(CAST(:pidt AS text),
+                                                                           CAST(:cause AS text))
+                                                        || departure_causes END
                      WHERE id = :lid AND status = 'active'
                     RETURNING cardinality(departed_ids)
                               >= COALESCE(player_count, cardinality(member_ids)) - 1
-                """), {"lid": lobby_id, "pid": me["player_id"]})).scalar())
+                """), {"lid": lobby_id, "pid": me["player_id"],
+                       "pidt": str(me["player_id"]), "cause": _pcause})).scalar())
                 # Still 'active' on purpose: the final game's report may be in
                 # flight, and closing here would quarantine it and refund bets
                 # that should settle. The survivors are released below without
                 # touching the lobby (round-3 regression 7 stands).
                 closed = "active"
             else:
+                # Bug #392: same cause persistence as the live-game branch
+                # above — same statement, same first-wins order, same second
+                # text bind of the player id.
                 closed = (await db.execute(text("""
                     UPDATE ffa_lobbies
                        SET departed_ids = (SELECT ARRAY(SELECT DISTINCT e FROM unnest(departed_ids || CAST(:pid AS uuid)) e)),
+                           departure_causes = CASE WHEN CAST(:cause AS text) = ''
+                                                   THEN departure_causes
+                                                   ELSE jsonb_build_object(CAST(:pidt AS text),
+                                                                           CAST(:cause AS text))
+                                                        || departure_causes END,
                            status = CASE WHEN cardinality((SELECT ARRAY(SELECT DISTINCT e FROM unnest(departed_ids || CAST(:pid AS uuid)) e)))
                                               >= COALESCE(player_count, cardinality(member_ids)) - 1
                                          THEN 'completed' ELSE status END,
@@ -45330,7 +45569,8 @@ async def ffa_queue_leave(request: Request, steam_id: str = Query(...),
                                                THEN NOW() ELSE completed_at END
                      WHERE id = :lid AND status = 'active'
                      RETURNING status
-                """), {"lid": lobby_id, "pid": me["player_id"]})).scalar()
+                """), {"lid": lobby_id, "pid": me["player_id"],
+                       "pidt": str(me["player_id"]), "cause": _pcause})).scalar()
             if closed == "completed" or all_but_one:
                 # The sitting is over — now the survivors' rows go too, so
                 # nobody stays locked out of other queues by a closed lobby.
@@ -46585,6 +46825,61 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                                    reference_id=str(match_id)))
         award_info[sid_] = (xp, total_gold)
 
+    # ── Bug #392: the DISPLAY reconciliation, and nothing else. ──
+    # The `left_early` flag on a report is authored by a SURVIVING seat — the
+    # dropped player cannot report their own absence. Where that seat's OWN
+    # authenticated leave request attested an involuntary cause, the departure
+    # is still a departure: it is already in `departed_ids`, the seat is still
+    # placed, still rated, still paid, and every guard above has already run
+    # on the report as sent. The only thing this changes is how the departure
+    # is LABELLED to readers, through one extra column that renderers read
+    # beside `left_early` (#283 — a client-attested cause moves the server
+    # only toward the conservative outcome, and the conservative outcome here
+    # is to keep recording the departure and qualify it, never to erase it).
+    #
+    # SCOPE, stated because the two sides of this comparison are not scoped
+    # alike (lens find 6): the cause is recorded per LOBBY — per sitting —
+    # while the label it produces is stamped per MATCH ROW. The lobby has one
+    # cause slot per player for the whole sitting, and this read applies no
+    # time and no game bound, because neither side offers one: the cause map
+    # stores a bare string with no attestation time, and a match carries no
+    # game index, only its lobby. (`ffa_matches` does carry `started_at` and
+    # `ended_at`, so it is the CAUSE side that lacks the timestamp — a time
+    # bound would mean changing the map's value shape, not adding a predicate
+    # here.) So in a multi-game sitting the label reads "the seat attested an
+    # involuntary departure from this sitting", not "...from this game".
+    # Two consequences, both display
+    # and both accepted here rather than left implied: a report for an earlier
+    # game submitted late — the handler tolerates a late report by design —
+    # takes a cause attested after that game ended, and a frozen-roster row
+    # carried into a later game inherits the same cause. Bounding it needs a
+    # per-match game number, which another lane is adding; when that column
+    # exists this read gains one predicate. Recorded in the notes as an
+    # ACCEPTED residual — display-only, and it cannot move a placement, a
+    # rating, gold or XP, nor reach another player's row, because the set is
+    # keyed by player id and the label is gated on that row's own left_early —
+    # so the next reader does not have to re-derive it. It is pinned as well
+    # as written down: tests/test_ffa_leave_cause.py's
+    # test_the_cause_carries_no_time_and_the_read_applies_no_game_bound
+    # reddens the moment this read gains a bound or the stored cause gains a
+    # timestamp, which is the moment the residual has to be closed properly
+    # instead of inherited.
+    #
+    # `jsonb_each_text` over a scalar subquery, NOT a LATERAL join: asyncpg
+    # does not support LATERAL (CLAUDE.md hard rule), and text pairs keep the
+    # value's Python type independent of whether a driver JSON codec is
+    # registered. A lobby predating the departure-cause migration has an empty
+    # object, so the set is empty and every row is written exactly as before.
+    _involuntary_departed: set[str] = {
+        str(_dpid)
+        for _dpid, _dcause in (await db.execute(text("""
+            SELECT key, value FROM jsonb_each_text(
+                (SELECT COALESCE(departure_causes, '{}'::jsonb)
+                   FROM ffa_lobbies WHERE id = :lid))
+        """), {"lid": lobby_uuid})).all()
+        if _is_involuntary_exit_cause(_dcause)
+    }
+
     # ── Per-player rows + cards. ──
     for p in report.players:
         pid = id_by_steam[p.steam_id]
@@ -46599,10 +46894,10 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                 blocks_activated, blocks_successful, keys_pressed, active_seconds,
                 fps_timeline, ping_timeline, hit_timeline, block_timeline,
                 damage_dealt, damage_dealt_timeline, kill_timeline, absent, end_stats,
-                game_points_at_leave)
+                game_points_at_leave, left_early_involuntary)
             VALUES (:m, :p, :slot, :rw, :pt, :k, :pl, :le, :rb, :ra, :rc, :xp, :g, :fps, :ping,
                     :bf, :bh, :ba, :bs, :kp, :asec, :ft, :pt2, :ht, :bt,
-                    :dmg, :dmgtl, :killtl, :absent, :estats, :gpal)
+                    :dmg, :dmgtl, :killtl, :absent, :estats, :gpal, :lei)
         """), {"m": match_id, "p": pid, "slot": p.slot, "rw": p.rounds_won, "pt": p.points_total,
                "k": int(getattr(p, "kills", 0) or 0),
                # Aug 12 item 1 (migration 216) — this player's end-of-game
@@ -46633,6 +46928,15 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                # later, and `absent` already carries the decision itself.
                "gpal": (getattr(p, "game_points_at_leave", None)
                         if p.left_early else None),
+               # Bug #392 — the LABEL, never the outcome. True only when this
+               # row is already a left_early row AND the seat's own leave
+               # request attested an involuntary cause on this lobby. It is
+               # written here and read by the two renderers; nothing between
+               # them consumes it. Gated on `p.left_early` because there is no
+               # mark to qualify otherwise, and left at false for every lobby
+               # whose departure has no recorded cause (old clients, and every
+               # lobby that predates the departure-cause migration).
+               "lei": bool(p.left_early) and str(pid) in _involuntary_departed,
                "dmgtl": (getattr(p, "damage_dealt_timeline", None) or None),
                "killtl": (getattr(p, "kill_timeline", None) or None),
                "pl": placements[p.steam_id], "le": bool(p.left_early),
@@ -47078,6 +47382,10 @@ async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1,
                 "points_total": int(r["points_total"] or 0),
                 "kills": int(r["kills"] or 0),
                 "left_early": bool(r["left_early"]),
+                # Bug #392: the involuntary qualifier beside the mark, not
+                # instead of it. `.get` so a row written before the departure-cause migration
+                # degrades to false, exactly as `absent` does below.
+                "left_early_involuntary": bool(r.get("left_early_involuntary")),
                 # Bug 254 follow-up: the authoritative frozen-roster-ghost
                 # bit (#227/#239) — TRUE means this row was carried for
                 # report continuity but the player was NOT in this game.
