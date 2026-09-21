@@ -4,7 +4,7 @@ Round 2 of bug 392 closed its privacy row with "0 hits" from a script that
 lived outside the worktree, so the row's only witness was the session that ran
 it. This file is that sweep, in the tree, with its own negative control.
 
-FIVE CLASSES
+SIX CLASSES
   user-path              a path under a user home directory, in either
                          separator: a drive letter followed by the users
                          directory, or the two posix forms of the same thing.
@@ -16,6 +16,28 @@ FIVE CLASSES
                          sign, a host), a five-field cron line, an
                          orchestration command -- plus any wordlist term.
   handle                 a person's handle. Terms only; there is no shape.
+  real-name              the maintainer's own name, in any case. Read AT RUN
+                         TIME from the repository's pre-commit privacy guard,
+                         which is the one place on this machine that already
+                         holds it; see below.
+
+WHY THE REAL-NAME CLASS READS SOMEONE ELSE'S MATCHER
+  The other five classes are a shape or a wordlist. A real name is neither: it
+  has no shape, and putting it in the wordlist would mean the reviewer running
+  this needs a wordlist carrying it, which is one more copy of the thing.
+
+  There is already exactly one authority for it on this machine -- the
+  repository's own pre-commit guard, which refuses a commit carrying it. This
+  class READS that guard's pattern constant, and the environment override the
+  guard honours, at run time, by PARSING the guard rather than importing or
+  executing it. The value is never copied into this file, never written to a
+  temporary file, never printed, and never reaches a log: the class reports a
+  location and its own name, exactly as the other five do.
+
+  A run that cannot read the guard REFUSES a verdict. A sweep that silently
+  dropped the one class the pre-commit hook exists for would be green on the
+  artifact that carried it (#342), and this sweep's whole job is the artifacts
+  the hook never sees -- the scratch notes, the logs, the review bundle.
 
 WHY TWO CLASSES COME FROM A FILE AND NOT FROM HERE
   A detector that hardcodes the strings it looks for reproduces them. That is
@@ -39,7 +61,8 @@ WHAT IT PRINTS
 
 Usage:
 
-    python backend/tests/privacy_sweep.py --wordlist <file> <path> [<path> ...]
+    python backend/tests/privacy_sweep.py --wordlist <file> [--guard <file>] \\
+        <path> [<path> ...]
     python backend/tests/privacy_sweep.py --self-test
 
 Exit codes: 0 no hits, 1 hits reported, 2 a class was not configured or the
@@ -48,7 +71,10 @@ self-test failed.
 from __future__ import annotations
 
 import argparse
+import ast
+import os
 import re
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -100,6 +126,79 @@ _SHAPE_CLASSES = (
 )
 _DEPLOY_SHAPES = (_SSH_TARGET, _DEPLOY_CMD)
 _WORDLIST_CLASSES = ("handle", "deployment-identifier")
+_REAL_NAME_CLASS = "real-name"
+_GUARD_REL = "hooks/privacy-guard.py"
+
+
+def guard_path(explicit: Path | None = None) -> Path | None:
+    """Where the pre-commit privacy guard lives, resolved and never written down.
+
+    Asked of git rather than hardcoded. A literal path to it would be a path
+    under a user home in a tracked file, which is the first class this very
+    sweep reports -- a detector that carries an instance of what it detects
+    (#756). `--git-common-dir` and not `--git-dir`, so this resolves from a
+    linked worktree, where `.git` is a file and the hooks are elsewhere.
+    """
+    if explicit is not None:
+        return explicit if explicit.is_file() else None
+    try:
+        out = subprocess.run(["git", "rev-parse", "--git-common-dir"],
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             cwd=str(Path(__file__).resolve().parent))
+        if out.returncode != 0:
+            return None
+        common = Path(out.stdout.decode("utf-8", "replace").strip())
+        if not common.is_absolute():
+            common = (Path(__file__).resolve().parents[2] / common).resolve()
+        candidate = common / _GUARD_REL
+        return candidate if candidate.is_file() else None
+    except OSError:
+        return None
+
+
+def guard_matcher(explicit: Path | None = None):
+    """The compiled real-name matcher, or None when it cannot be read.
+
+    PARSED, not imported and not executed: this module must not run a git hook
+    as a side effect of scanning a text file, and parsing is enough to read a
+    string constant. Both halves the guard itself uses are honoured -- the
+    default pattern and the environment variable it lets a disposable test
+    override it with -- because a sweep that ignored the override would
+    disagree with the hook it is supposed to mirror.
+
+    Returns a compiled pattern. Nothing in this module ever prints it, writes
+    it, or returns the text it matched.
+    """
+    path = guard_path(explicit)
+    if path is None:
+        return None
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, SyntaxError):
+        return None
+    default = None
+    env_var = None
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if "DEFAULT_PATTERN" in names and isinstance(node.value, ast.Constant) \
+                and isinstance(node.value.value, str):
+            default = node.value.value
+        if "PATTERN" in names and isinstance(node.value, ast.Call):
+            for arg in node.value.args:
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    env_var = arg.value
+                    break
+    if default is None:
+        return None
+    pattern = os.environ.get(env_var, default) if env_var else default
+    if not pattern:
+        return None
+    try:
+        return re.compile(pattern, re.I)
+    except re.error:
+        return None
 
 
 def load_wordlist(path: Path | None) -> dict[str, list[str]]:
@@ -117,7 +216,8 @@ def load_wordlist(path: Path | None) -> dict[str, list[str]]:
     return terms
 
 
-def scan_text(text: str, terms: dict[str, list[str]]) -> list[tuple[int, str]]:
+def scan_text(text: str, terms: dict[str, list[str]],
+              guard_rx=None) -> list[tuple[int, str]]:
     """[(line number, class)] for one file's text, deduplicated per line+class.
 
     The matched text is deliberately not returned: nothing downstream can
@@ -148,26 +248,84 @@ def scan_text(text: str, terms: dict[str, list[str]]) -> list[tuple[int, str]]:
         for cls, rx in term_rx.items():
             if rx.search(probe):
                 seen.add(cls)
+        if guard_rx is not None and guard_rx.search(probe):
+            seen.add(_REAL_NAME_CLASS)
         out.extend((lineno, cls) for cls in sorted(seen))
     return out
 
 
-def sweep(paths: list[Path], terms: dict[str, list[str]]) -> list[tuple[str, int, str]]:
+def sweep(paths: list[Path], terms: dict[str, list[str]],
+          guard_rx=None) -> list[tuple[str, int, str]]:
     hits: list[tuple[str, int, str]] = []
     for path in paths:
         text = path.read_text(encoding="utf-8", errors="replace")
-        for lineno, cls in scan_text(text, terms):
+        for lineno, cls in scan_text(text, terms, guard_rx):
             hits.append((path.as_posix(), lineno, cls))
     return hits
 
 
-def _self_test() -> int:
+def _needle_from(rx) -> str | None:
+    """A string the matcher matches, derived FROM the matcher.
+
+    The real-name control cannot carry its own needle -- a control that spelled
+    out the protected word would be the leak it exists to prevent, in the test
+    file, in the patch and in every pin (#756). So the needle is derived: the
+    pattern with its regex punctuation removed, tried whole and then per
+    alternation branch, and KEPT ONLY IF THE MATCHER ACTUALLY MATCHES IT.
+
+    Returns None when no branch yields a matching literal -- for a pattern with
+    real structure, say. The caller then REFUSES rather than reporting a green
+    control it could not run (#342). The value is returned for matching only;
+    nothing in this module prints it.
+    """
+    pattern = rx.pattern
+    for branch in [pattern] + pattern.split("|"):
+        candidate = re.sub(r"[\\^$.|?*+()\[\]{}]", "", branch)
+        if candidate and rx.search(candidate):
+            return candidate
+    return None
+
+
+def _real_name_control(guard_rx) -> dict[str, bool]:
+    """Plant the derived needle in a file OUTSIDE the tree; require a catch.
+
+    With its INERT TWIN at the same site: a synthetic token of similar shape
+    that the matcher does NOT match, on its own line, which must stay clean. A
+    class that fired on both would prove only that something moved.
+    """
+    if guard_rx is None:
+        return {"the real-name matcher was readable": False}
+    needle = _needle_from(guard_rx)
+    if needle is None:
+        return {"a needle could be derived from the real-name matcher": False}
+    twin = "zz" + "probe" + "person"
+    if guard_rx.search(twin):
+        return {"the inert twin is genuinely not the protected word": False}
+    with tempfile.TemporaryDirectory() as td:
+        planted = Path(td) / "planted-real-name.txt"
+        planted.write_text("\n".join([
+            "a line with nothing on it",
+            f"reported by {needle} in passing",
+            f"reported by {twin} in passing",
+        ]) + "\n", encoding="utf-8")
+        hits = sweep([planted], {c: [] for c in _WORDLIST_CLASSES}, guard_rx)
+    lines = [n for _f, n, cls in hits if cls == _REAL_NAME_CLASS]
+    return {
+        "the real-name class catches the planted needle": lines == [2],
+        "the inert twin on line 3 is NOT reported": 3 not in lines,
+        "line 1 is not reported": 1 not in lines,
+    }
+
+
+def _self_test(guard: Path | None = None) -> int:
     """Plant one instance of every class and require every one to be reported.
 
     Every planted value is ASSEMBLED AT RUN TIME from fragments, so no real
     handle, address, path or id is written into this file, into a temporary
     file, or into any log -- the failure round 2 recorded, where the control's
-    own output carried real values into an outbound log (#756).
+    own output carried real values into an outbound log (#756). The real-name
+    needle goes further still: it is derived from the guard's own matcher, so
+    this file never holds it even in fragments.
     """
     user = "C:" + chr(92) + "Users" + chr(92) + "someone" + chr(92) + "tree"
     addr = "192." + "168." + "0." + "7"
@@ -205,6 +363,10 @@ def _self_test() -> int:
         "the allowed local DSN is NOT reported": 8 not in [n for _f, n, _c in hits],
         "no matched text is returned": all(len(h) == 3 and isinstance(h[2], str) for h in hits),
     }
+    checks.update(_real_name_control(guard_matcher(guard)))
+    required = required | {_REAL_NAME_CLASS}
+    found = found | ({_REAL_NAME_CLASS}
+                     if checks.get("the real-name class catches the planted needle") else set())
     for cls in sorted(required):
         print(f"  {'ok  ' if cls in found else 'FAIL'} class reported: {cls}")
     for k, ok in checks.items():
@@ -220,21 +382,28 @@ def main() -> int:
     ap.add_argument("paths", nargs="*", type=Path)
     ap.add_argument("--wordlist", type=Path,
                     help="local-only file of `class:term` lines; see the module docstring")
+    ap.add_argument("--guard", type=Path,
+                    help="the pre-commit privacy guard whose matcher drives the "
+                         "real-name class; found through git when not given")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
     if args.self_test:
-        return _self_test()
+        return _self_test(args.guard)
     if not args.paths:
         ap.error("give at least one path to sweep, or --self-test")
 
     terms = load_wordlist(args.wordlist)
+    guard_rx = guard_matcher(args.guard)
     unconfigured = [c for c in _WORDLIST_CLASSES if not terms[c]]
+    # Two different remedies, so two different refusals. One message naming
+    # the wrong one sends a reader to fix a file that was never the problem.
+    guard_unconfigured = guard_rx is None
     missing = [p for p in args.paths if not p.is_file()]
     if missing:
         print("REFUSING: not a file: " + ", ".join(p.as_posix() for p in missing))
         return 2
 
-    hits = sweep(args.paths, terms)
+    hits = sweep(args.paths, terms, guard_rx)
     print(f"swept {len(args.paths)} files")
     for cls, _rx in _SHAPE_CLASSES:
         print(f"  class {cls}: by shape")
@@ -243,6 +412,10 @@ def main() -> int:
              if terms["deployment-identifier"] else ""))
     print(f"  class handle: {len(terms['handle'])} terms"
           if terms["handle"] else "  class handle: NOT CONFIGURED")
+    # The matcher itself is never printed -- only whether one was found.
+    print(f"  class {_REAL_NAME_CLASS}: "
+          + ("read from the pre-commit guard" if guard_rx is not None
+             else "NOT CONFIGURED"))
     for f, n, cls in hits:
         print(f"{f}:{n}: {cls}")
     print(f"HITS: {len(hits)}")
@@ -250,6 +423,11 @@ def main() -> int:
         print("REFUSING a verdict: no terms supplied for "
               + ", ".join(unconfigured)
               + " — those classes were NOT checked. Supply --wordlist.")
+    if guard_unconfigured:
+        print(f"REFUSING a verdict: the {_REAL_NAME_CLASS} matcher could not be "
+              "read from the pre-commit guard — that class was NOT checked. "
+              "Supply --guard.")
+    if unconfigured or guard_unconfigured:
         return 2
     return 1 if hits else 0
 
