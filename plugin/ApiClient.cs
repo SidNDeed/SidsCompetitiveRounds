@@ -14906,8 +14906,13 @@ namespace CompetitiveRounds
                         // DARK HAS TO MEAN DARK, AND THAT IS THREE FACTS, NOT TWO.
                         // Latching stops the POLL; on its own it does not change what
                         // the banner renders FROM; and changing what it renders from
-                        // does not repaint it (#342). These three fields are the
-                        // banner's whole input, and their only other writer is the
+                        // does not repaint it (#342). WHAT THE BANNER READS IS THE
+                        // THREE NUMBERS, THE PRESENCE BIT AND THIS LATCH -- not the
+                        // three numbers alone, which is what this comment said while
+                        // the render predicate beside it read `!latchedDark` and the
+                        // witness read the presence bit. The key below is built from
+                        // every one of them, and a census asserts that. The numbers'
+                        // only other writer is the
                         // ActiveTeamSeriesId setter, which fires on an id CHANGE --
                         // so without the clear the last good answer stays on screen,
                         // frozen, counting down from a number nothing will ever
@@ -14944,6 +14949,15 @@ namespace CompetitiveRounds
                             LastSeriesDcDeferred = false;
                             LastSeriesDcDeferredSecondsRemaining = 0;
                             LastSeriesDcDeferredBoundSeconds = 0;
+                            // AND THE PRESENCE BIT, WITH THEM. Cleared numbers beside
+                            // a standing presence bit is a state no answer produces:
+                            // it reads as "the last answer for this series carried
+                            // dc_deferred=false", a denial about the series, when what
+                            // happened is that no answer arrived or none proved itself.
+                            // The id setter clears the bit with the numbers for exactly
+                            // this reason; so does this branch, or the two writers of
+                            // one cache disagree about what the cache means (#342).
+                            LastSeriesDcDeferredFieldsPresent = false;
                         }
                         Plugin.Log.LogWarning("[2v2] series status read for series " + seriesId
                             + " was not answered as a read: HTTP " + answeredWith
@@ -15047,7 +15061,22 @@ namespace CompetitiveRounds
         /// ActiveTeamSeriesId beside the cache, so a key built from the cache alone
         /// would call an id change "no change" in the one case where the banner has
         /// to stop drawing. The key is the WHOLE input set or it is a key to
-        /// something else (#342).</para></summary>
+        /// something else (#342).</para>
+        ///
+        /// <para>AND SO IS THE DARK LATCH. The render predicate is
+        /// <c>cacheIsThisSeries &amp;&amp; !latchedDark &amp;&amp; dc_deferred</c>;
+        /// the latch is one of its three terms and therefore one of this key's
+        /// terms. The first cut of this key left it out because it is the one input
+        /// that is a SET and not a field: the census that enumerates the writers
+        /// greps assignments, and a set is written by <c>Add</c>. That made the two
+        /// halves of the refusal branch come apart — the latch add is
+        /// unconditional, the clear beneath it is confined to the cached series, so
+        /// a refusal for a series the cache does not describe changed what the
+        /// banner reads while no keyed field moved and the repaint was never asked
+        /// for. The key asks the set the ONE question the render asks it: is the
+        /// ACTIVE series latched. Membership for any other series is not an input
+        /// here, because the banner never reads it (#330: the question is asked
+        /// within the span that asks it, not file-wide).</para></summary>
         private static string BannerRenderKey()
         {
             return (activeTeamSeriesId ?? "-")
@@ -15056,6 +15085,7 @@ namespace CompetitiveRounds
                    + "|" + LastSeriesDcDeferredSecondsRemaining
                    + "|" + LastSeriesDcDeferredBoundSeconds
                    + "|" + (LastSeriesDcDeferredFieldsPresent ? "p" : "-")
+                   + "|" + (SeriesStatusLatchedDark(activeTeamSeriesId) ? "d" : "-")
                    + "|" + LastSeriesT1Wins + "|" + LastSeriesT2Wins;
         }
 
