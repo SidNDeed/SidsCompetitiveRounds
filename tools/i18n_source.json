@@ -31,6 +31,7 @@
   " (inactive)",
   " (pays {0}g)",
   " 3rd Place",
+  " <color=#888888>(disconnected)</color>",
   " <color=#888888>(left)</color>",
   " at x{0}",
   "(AoE)",
@@ -1465,6 +1466,7 @@
   "Match canceled — searching again...",
   "Match could not start — only {0} of {1} players connected. Leave to the menu to requeue.",
   "Match dissolved — searching again...",
+  "Match interrupted - the connection to the match server was lost",
   "Match recorded",
   "Matchmaking hiccup — putting you back in the Quick Match queue...",
   "Matchmaking keeps failing - returning to menu. Please try again in a minute.",
@@ -1581,6 +1583,7 @@
   "No articles match your search.",
   "No blocked senders.",
   "No cards yet - open a pack",
+  "No data from the match server for {0}s - you may be dropped",
   "No games recorded for this session yet.",
   "No games this session",
   "No games together yet",
@@ -3026,6 +3029,11 @@
   " 3rd Place": {
    "surface": "NativeUI",
    "location": "RefreshTournaments",
+   "kind": "Tr"
+  },
+  " <color=#888888>(disconnected)</color>": {
+   "surface": "NativeUI",
+   "location": "BuildFfaRecentRowText",
    "kind": "Tr"
   },
   " <color=#888888>(left)</color>": {
@@ -10198,6 +10206,11 @@
    "location": "ReadyUp",
    "kind": "Tr"
   },
+  "Match interrupted - the connection to the match server was lost": {
+   "surface": "GameStateWatcher, LagNotices",
+   "location": "PollRoomState, TransportSilenceLine",
+   "kind": "ShowNotification, Tr"
+  },
   "Match recorded": {
    "surface": "ApiClient",
    "location": "OutboxPass",
@@ -10777,6 +10790,11 @@
    "surface": "PlayerCardsUI",
    "location": "RefreshBinder",
    "kind": "Tr"
+  },
+  "No data from the match server for {0}s - you may be dropped": {
+   "surface": "LagNotices",
+   "location": "TransportSilenceLine",
+   "kind": "TrF"
   },
   "No games recorded for this session yet.": {
    "surface": "PostSessionReport",

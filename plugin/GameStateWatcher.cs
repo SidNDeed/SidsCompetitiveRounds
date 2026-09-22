@@ -782,9 +782,6 @@ namespace CompetitiveRounds
         // or any round-end marker. CharacterData often reports !dead && health>0 during pick.
         private static bool inPickPhase = false;
 
-        // Sid's Steam ID for "Regicide" achievement
-        private const string SID_STEAM_ID = "76561198040410653";
-
         // Public state
         public static MatchTracker.MatchResult LastResult { get; private set; }
         public static bool HasPendingResult { get; private set; } = false;
@@ -1956,8 +1953,31 @@ namespace CompetitiveRounds
                             Plugin.Log.LogInfo($"[LAG-DIAG] recv gap open silent={silent}ms n={localRecvGapCount}");
                         }
                         if (silent > localRecvGapMaxMs) localRecvGapMaxMs = silent;
+                        // Bug 392 item B: this seat already knew. Tell the
+                        // player while there is still something to say, rather
+                        // than only after Photon has given up — the reported
+                        // complaint is precisely that the game ended with no
+                        // apparent reason. peer.DisconnectTimeout is READ and
+                        // logged rather than assumed: "well inside the
+                        // timeout" is then a reading from the seat that fired,
+                        // not a claim this comment makes (#302). One line per
+                        // episode — NoteSilence returns the rising edge only.
+                        if (TransportExit.NoteSilence(silent, TransportExit.NowSeconds()))
+                        {
+                            int dcTimeout = 0;
+                            try { dcTimeout = peer.DisconnectTimeout; } catch { }
+                            Plugin.Log.LogWarning(
+                                $"[LAG-DIAG] transport silence notice silent={silent}ms " +
+                                $"threshold={TransportExit.SilenceNoticeMs}ms peerDisconnectTimeout={dcTimeout}ms");
+                        }
                     }
-                    else _recvGapOpen = false;
+                    else
+                    {
+                        _recvGapOpen = false;
+                        // Cleared on the same edge that clears _recvGapOpen: a
+                        // hiccup that recovers takes its notice with it.
+                        TransportExit.ClearSilence();
+                    }
                 }
                 if (lastOppGstatsSeq >= 0 && lastOppSeqAdvanceTime > 0f)
                 {
@@ -3281,6 +3301,12 @@ namespace CompetitiveRounds
                             $"[FFA-LOBBY] joined competitive room '{photonRoomId}' while in an open lobby — leaving the lobby");
                         // Pre-room cause: this is an open-lobby SEAT being
                         // abandoned, not an exit from the ffa_ room itself.
+                        // Bug 392 sweep: deliberately NOT upgraded to the
+                        // involuntary tag. Reaching this line required a
+                        // successful join of a DIFFERENT room, so it is not a
+                        // transport failure; and an in-room tag here would
+                        // veto the dissolution that frees an open lobby whose
+                        // seat has gone.
                         try { ApiClient.FfaLeaveQueue("seat_abandon"); } catch { }
                         CompetitiveUI.ShowNotification(
                             "Left your FFA lobby - you joined a competitive game",
@@ -3452,12 +3478,63 @@ namespace CompetitiveRounds
                 // Accumulate session time for this opponent
                 AccumulateSessionTime();
 
-                if (isTracking && !gameOverReported)
+                if (isTracking && !gameOverReported && RoomModeLabels.SuppressOneVOneOutcome(photonRoomId))
+                {
+                    // Bug 392 item D: an FFA sitting keeps its score in the FFA
+                    // engine, not in the 1v1 tracker's round counters, so every
+                    // outcome the cascade below could derive here is derived
+                    // from zeros. That is how a game at three rounds each came
+                    // out of this path as "=== RANKED Canceled === Disconnect
+                    // at 0-0 (not counted)" — wrong on the mode, wrong on the
+                    // score, and wrong about counting: the FFA reporter counted
+                    // that game and the seat was rated into it.
+                    //
+                    // The line below states only what this seat can support: no
+                    // 1v1 outcome was derived, and the FFA engine's own tally
+                    // for this seat at the moment of the exit.
+                    int ffaGame = 0, ffaRounds = 0, ffaPoints = 0;
+                    try
+                    {
+                        ffaGame = FfaMode.GameNumber;
+                        ffaRounds = FfaMode.RoundsFor(localTeamId);
+                        ffaPoints = FfaMode.PointsTotalFor(localTeamId);
+                    }
+                    catch { }
+                    Plugin.Log.LogInfo(
+                        $"[POLL] === FFA Room Exit === no 1v1 outcome derived; " +
+                        $"FFA engine tally for this seat: game={ffaGame} rounds={ffaRounds} points={ffaPoints}");
+                    // The toast is raised ONLY when this seat has a recorded
+                    // transport cause. Today this path shows "Match canceled
+                    // (disconnect)" on EVERY tracked FFA room exit, including
+                    // the clean end of a sitting, which is its own false claim;
+                    // the FFA engine does its own messaging for those.
+                    string ffaCause;
+                    if (TransportExit.TryGetFreshInvoluntary(TransportExit.NowSeconds(), out ffaCause))
+                    {
+                        // The toast is the nicer surface, not the carrying
+                        // one: it declines the message when the player has
+                        // notifications off or a critical cue owns the slot,
+                        // and says so by returning false. The amber transport
+                        // line raised at the disconnect is what guarantees the
+                        // player is told; this is an upgrade on top of it.
+                        // The result is LOGGED rather than discarded so the
+                        // witness shows which surface actually spoke.
+                        bool toasted = CompetitiveUI.ShowNotification(
+                            "Match interrupted - the connection to the match server was lost",
+                            new Color(1f, 0.7f, 0.3f));
+                        Plugin.Log.LogInfo(
+                            $"[POLL] FFA exit followed an involuntary disconnect cause={ffaCause} toast={(toasted ? "shown" : "declined")}");
+                    }
+                }
+                else if (isTracking && !gameOverReported)
                 {
                     // Someone disconnected mid-match
                     int localRounds = localTeamId == 0 ? p1Rounds : p2Rounds;
                     int oppRounds = localTeamId == 0 ? p2Rounds : p1Rounds;
-                    string matchType = matchIsRanked ? "RANKED" : "CASUAL";
+                    // Bug 392 item D: the label names the room's ACTUAL mode.
+                    // matchIsRanked is forced true for any mod-issued room, so
+                    // on its own it labelled team_ and ovt_ exits "RANKED" too.
+                    string matchType = RoomModeLabels.ModeLabel(photonRoomId, matchIsRanked);
 
                     // If this client is the leaver while the opponent already
                     // has a reportable DC-win lead, preserve its exact local
@@ -3522,11 +3599,48 @@ namespace CompetitiveRounds
                             Plugin.Log.LogInfo($"[POLL] === {matchType} Canceled === Opp DC'd while ahead at {localRounds}-{oppRounds} (no win awarded)");
                         else
                             Plugin.Log.LogInfo($"[POLL] === {matchType} Canceled === Disconnect at {localRounds}-{oppRounds} (not counted)");
-                        CompetitiveUI.ShowNotification("Match canceled (disconnect)", new Color(1f, 0.7f, 0.3f));
+                        // Bug 392 item B: when the exit followed an involuntary
+                        // DisconnectCause on THIS seat, name the transport. The
+                        // old text says the match was canceled and nothing
+                        // about why, which is what the report described as "no
+                        // apparent reason". Unknown / voluntary / stale cause
+                        // keeps today's wording exactly — the text can only get
+                        // MORE specific when the seat actually has the cause.
+                        string dcCause;
+                        bool involuntaryExit = TransportExit.TryGetFreshInvoluntary(
+                            TransportExit.NowSeconds(), out dcCause);
+                        // Same handover as the FFA path above: this toast may
+                        // be declined, and on an involuntary exit the amber
+                        // transport line is the surface that cannot decline.
+                        bool toasted = CompetitiveUI.ShowNotification(
+                            involuntaryExit
+                                ? "Match interrupted - the connection to the match server was lost"
+                                : "Match canceled (disconnect)",
+                            new Color(1f, 0.7f, 0.3f));
+                        if (involuntaryExit)
+                            Plugin.Log.LogInfo(
+                                $"[POLL] exit followed an involuntary disconnect cause={dcCause} toast={(toasted ? "shown" : "declined")}");
                     }
                 }
 
                 Plugin.Log.LogInfo("[POLL] Left room");
+                // Bug 392 item C: this seat's own receive-gap and opponent
+                // heartbeat-gap counters, at EVERY room exit.
+                //
+                // They reach the server only inside the 1v1 match report
+                // (local_recv_gap_max_ms / opp_hb_gap_count on PlayerMatchData
+                // — the only schema that has fields for them), so on an FFA,
+                // 2v2 or 1v2 exit, and on any exit where no report is sent,
+                // this line is the ONLY record that the seat measured
+                // anything. It is written rather than sent because there is no
+                // field to send it to: the FFA report carries no telemetry of
+                // this kind, and putting the numbers into a field that means
+                // something else would be worse than not sending them. The
+                // server-lane dependency is named in the batch notes.
+                Plugin.Log.LogInfo(
+                    $"[LAG-DIAG] room exit recvGapCount={localRecvGapCount} " +
+                    $"recvGapMaxMs={localRecvGapMaxMs} oppHbGapCount={oppHbGapCount} " +
+                    $"oppRecvGapCount={oppRecvGapCount}");
                 // Bug 199 adjacent: retract this fighter's spectate attestation
                 // so the room stops being advertised the moment it dies, rather
                 // than lingering for the 150s attest-freshness window and
@@ -3567,11 +3681,18 @@ namespace CompetitiveRounds
                     // FfaLeaveQueue closes/dissolves it server-side and clears
                     // ActiveFfaLobbyId + the pending slot. Idempotent when
                     // several members leave at sitting end.
-                    // in_room_exit only when a game ACTUALLY STARTED here
+                    // An in-room tag only when a game ACTUALLY STARTED here
                     // (round-10 find 4): occupancy of a never-filled room is
                     // not assembly, and tagging it would refuse the
                     // dissolution that frees the other seats.
-                    try { ApiClient.FfaLeaveQueue(FfaMode.GameStartedInRoom ? "in_room_exit" : ""); } catch { }
+                    // Bug 392 item A step 2: WHICH in-room tag is decided by
+                    // FfaInRoomExitCause — the involuntary one when this seat
+                    // recorded a transport failure and the server advertised
+                    // that it recognises it, today's tag otherwise. The
+                    // never-started branch is untouched: it still sends the
+                    // empty tag, so a room that never assembled still
+                    // dissolves for the other seats.
+                    try { ApiClient.FfaLeaveQueue(FfaMode.GameStartedInRoom ? ApiClient.FfaInRoomExitCause() : ""); } catch { }
                     try { Plugin.ClearPendingFfaSlot(); } catch { }
                     try { FfaMode.OnRoomLeft(); } catch { }
                 }
@@ -3693,9 +3814,16 @@ namespace CompetitiveRounds
                         // server-side (cancels the series, resets the other two
                         // rows to searching) and clears the local lock state —
                         // otherwise the husk re-feeds this dead room forever.
-                        // Cause deliberately NOT in_room_exit (round-9): the
+                        // Cause deliberately NOT an in-room tag (round-9): the
                         // room never assembled — dissolution is the correct
                         // outcome, and the in-room fence must not veto it.
+                        // Bug 392 sweep: this is the site where an involuntary
+                        // upgrade would do the most damage, because the
+                        // opponent-never-arrived watchdog fires on exactly the
+                        // kind of failure that also produces a transport
+                        // cause. It stays assembly_bail, and the cause store
+                        // is dropped here so no later leave inherits it.
+                        try { TransportExit.ClearCause(); } catch { }
                         if (isOvtRoom) { try { ApiClient.OvtLeaveQueue("assembly_bail"); } catch { } }
                         if (isFfaRoom) { try { ApiClient.FfaLeaveQueue("assembly_bail"); } catch { } }
                         // 2v2: the fenced queue leave is what tells the server this
@@ -5103,7 +5231,6 @@ namespace CompetitiveRounds
             abyssalRoundsActivated = 0;
             abyssalActivatedThisRound = false;
             inPickPhase = false;
-            pendingRegicideCheck = false;
             ResetPerMatchCombatCounters();
 
             // Retry card rarity scan if it didn't work at startup
@@ -5251,7 +5378,12 @@ namespace CompetitiveRounds
             // users is still ranked — that's an intended feature.
             matchIsRanked = Plugin.RankedEnabled.Value && opponentIsRanked && OpponentHasMod();
 
-            string matchType = matchIsRanked ? "RANKED" : "CASUAL";
+            // Bug 392 item D, sibling sweep: same expression, same false
+            // claim. matchIsRanked is forced true for any mod-issued room, so
+            // an FFA, 2v2 or 1v2 sitting opened its log with "=== RANKED Match
+            // Started ===". The label names the room's mode now; the ranked
+            // decision above is untouched.
+            string matchType = RoomModeLabels.ModeLabel(photonRoomId, matchIsRanked);
             Plugin.Log.LogInfo($"[POLL] === {matchType} Match Started ===");
             Plugin.Log.LogInfo($"[POLL] Me: {localDisplayName} ({localSteamId}) team {localTeamId}");
             Plugin.Log.LogInfo($"[POLL] Opp: {opponentDisplayName} ({opponentSteamId}) oppRanked={opponentIsRanked}");
@@ -5290,7 +5422,10 @@ namespace CompetitiveRounds
 
             bool localWon = (winnerTeam == localTeamId);
 
-            string matchType = matchIsRanked ? "RANKED" : "CASUAL";
+            // Bug 392 item D, sibling sweep: the third site built from the
+            // same expression (the other two are the room-exit cancel line and
+            // the match-start line).
+            string matchType = RoomModeLabels.ModeLabel(photonRoomId, matchIsRanked);
             Plugin.Log.LogInfo($"[POLL] === {matchType} Match Over === Winner: team {winnerTeam}");
             // Bug #91 item 2 (cosmetic): in a 1v2 room the old line named only
             // whichever single opponent the 1v1 poll latched onto ("YOU WON vs
@@ -7329,10 +7464,9 @@ namespace CompetitiveRounds
                     }
                 }
 
-                // 9. Regicide — now handled server-side after series completion
-                // (pendingRegicideCheck flag is still set but consumed/cleared by ApiClient)
-                if (matchIsRanked && localWon && opponentSteamId == SID_STEAM_ID)
-                    pendingRegicideCheck = true;
+                // 9. Regicide — decided server-side at series completion, against
+                // the server's own roster. The client evaluates nothing here and
+                // carries no identity for it.
 
                 // 10. Pacifist — won without firing a single shot
                 if (localWon && !achFiredShot)
@@ -7438,9 +7572,6 @@ namespace CompetitiveRounds
                 Plugin.Log.LogWarning($"[ACH] Achievement evaluation error: {ex.Message}");
             }
         }
-
-        // Regicide flag — consumed in ApiClient when series_status == "completed"
-        public static bool pendingRegicideCheck = false;
 
         // \u2500\u2500 Card tracking via CardBar \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
@@ -7952,7 +8083,6 @@ namespace CompetitiveRounds
             abyssalRoundsActivated = 0;
             abyssalActivatedThisRound = false;
             inPickPhase = false;
-            pendingRegicideCheck = false;
             LocalShotsThisMatch = 0;
             LocalBlocksThisMatch = 0;
             LocalKeysThisMatch = 0;

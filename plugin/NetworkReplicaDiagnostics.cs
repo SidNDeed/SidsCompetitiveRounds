@@ -195,8 +195,8 @@ namespace CompetitiveRounds
                     if (best == null || a.Game.Views > best.Game.Views) best = a;
                 if (best == null || best.Game.Views == 0) return false;
                 TimingWindow w = best.Game;
-                o.Gap300 = w.Gap300; o.Gap750 = w.Gap750; o.Gap1500 = w.Gap1500;
-                o.Excess150 = w.Jitter150; o.MaxGapMs = w.MaxArrivalGapMs; o.MaxExcessMs = w.MaxDeliveryExcessMs;
+                o.Gap300 = w.Gaps.Gap300; o.Gap750 = w.Gaps.Gap750; o.Gap1500 = w.Gaps.Gap1500;
+                o.Excess150 = w.Jitter150; o.MaxGapMs = w.Gaps.MaxArrivalGapMs; o.MaxExcessMs = w.MaxDeliveryExcessMs;
                 o.PayloadEqualGaps = w.PayloadEqualGaps; o.ReceiverFrameGaps = w.ReceiverFrameGaps;
                 o.PhoenixIntervals = w.PhoenixIntervals; o.Batches = w.Batches;
                 return true;
@@ -409,6 +409,10 @@ namespace CompetitiveRounds
                 // before replacing it rather than silently merging two sittings.
                 if (_roomActive)
                 {
+                    // Bug 392 item C: this branch IS a room exit — one that
+                    // produced no OnLeftRoom — so the open gaps are terminal
+                    // here for the same reason.
+                    FlushOpenArrivalGaps("room-replaced");
                     if (_gameActive)
                         EmitGameSummary(_gameEnded
                             ? "complete"
@@ -432,12 +436,108 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>Bug 392 item C: account for every arrival gap that is
+        /// still OPEN at a room exit, BEFORE the summaries are built.
+        ///
+        /// The counters were bumped only when a batch ARRIVED, so a silence
+        /// that no batch ever ends was never measured — which is why the
+        /// reported 47-second outage came out as gap1500=0, maxGap=542ms. The
+        /// flush runs on the room edge only: a game end mid-room is not a
+        /// terminal gap, and flushing there would inject one into the room
+        /// window every game.
+        ///
+        /// The flush uses the SAME bin thresholds as a measured gap. That on
+        /// its own does NOT keep a clean exit at zero, which is what an
+        /// earlier version of this comment claimed: identical thresholds only
+        /// mean a short interval bins low, and nothing about them stops a LONG
+        /// interval being open at the room edge for a perfectly healthy reason
+        /// (#302/#351). The gate below is what makes the clean-exit case
+        /// true, and the C1 control only covers the accounting helper, not
+        /// this method's decision to call it.</summary>
+        private static void FlushOpenArrivalGaps(string reason)
+        {
+            try
+            {
+                // An open interval is a MEASUREMENT only while the stream it
+                // belongs to was still expected to deliver. Every other
+                // baseline decision in this file already says so:
+                // SetBattleActive clears all baselines on each falling combat
+                // edge because pick/map/death intervals are expected
+                // serialization silences, OnGameEnded clears them at the score
+                // edge, OnAcceptedDeath clears them on a death. The flush was
+                // the one place that ignored all of it and binned whatever
+                // interval happened to be open when the room ended.
+                //
+                // A clearing edge does not stop traffic, so that gap is
+                // reachable: orphan bullet tails keep arriving between the
+                // score edge and the next game's start — this file counts them
+                // and rebases for them — so a single straggler after
+                // OnGameEnded re-arms a baseline. The players then read the
+                // end-of-sitting scoreboard for several seconds and the room
+                // edge bins that reading time as a terminal outage: gap300,
+                // gap750 and gap1500 all incremented and maxArrivalGapMs in
+                // the thousands, on a sitting where nothing went wrong. The
+                // next lag diagnosis reads that as an outage and starts
+                // looking for a cause that does not exist — the same false
+                // mechanism in the log that item D removes, one method over.
+                //
+                // So: flush only while a game is OPEN and has not reached its
+                // score edge. The reported 47-second outage is exactly that
+                // case (the seat was dropped mid-game; no score edge ran), and
+                // a silence measured after a completed game is the expected
+                // one. Direction of the unhandled case (#276): a room whose
+                // state cannot be read as live is NOT flushed, so this gate
+                // can only withhold a bin, never manufacture one.
+                bool streamExpected = NetGapAccounting.RoomExitGapIsMeasurable(_gameActive, _gameEnded);
+                if (!streamExpected)
+                {
+                    // Said out loud rather than returning quietly: a gate that
+                    // can only remove evidence has to report when it fired, or
+                    // a reader cannot tell a suppressed flush from a room that
+                    // had nothing open, and the suppression becomes its own
+                    // invisible mechanism (#342).
+                    Plugin.Log?.LogInfo(
+                        "[NET-ROOM] open-gap flush skipped reason=" + reason +
+                        " gameActive=" + (_gameActive ? "1" : "0") +
+                        " gameEnded=" + (_gameEnded ? "1" : "0") +
+                        " (silence after the score edge is expected, not measured)");
+                    return;
+                }
+
+                long now = Stopwatch.GetTimestamp();
+                int actors = 0;
+                int worstOpenMs = 0;
+                foreach (ActorStats actor in Actors.Values)
+                {
+                    int game = actor.Game.FlushOpenGap(now);
+                    int room = actor.Room.FlushOpenGap(now);
+                    int worst = Math.Max(game, room);
+                    if (worst <= 0) continue;
+                    actors++;
+                    if (worst > worstOpenMs) worstOpenMs = worst;
+                }
+                if (actors > 0)
+                    Plugin.Log?.LogInfo(
+                        "[NET-ROOM] open-gap flush reason=" + reason +
+                        " actors=" + actors.ToString(CultureInfo.InvariantCulture) +
+                        // RAW: what the clock measured. The histogram holds the
+                        // same gap clamped at MaxMeasuredGapMs, with gapOverCap
+                        // marking the clamp — two numbers, two meanings (#342).
+                        " worstOpenMs=" + worstOpenMs.ToString(CultureInfo.InvariantCulture));
+            }
+            catch (Exception ex)
+            {
+                VanillaFixSupport.LogError("NetworkReplicaDiagnostics.FlushOpenArrivalGaps", ex);
+            }
+        }
+
         internal static void OnRoomLeft()
         {
             try
             {
                 if (_roomActive)
                 {
+                    FlushOpenArrivalGaps("room-exit");
                     if (_gameActive)
                         EmitGameSummary(_gameEnded
                             ? "complete"
@@ -866,10 +966,11 @@ namespace CompetitiveRounds
                     " actor=" + actorNumber.ToString(CultureInfo.InvariantCulture) +
                     " view=" + actor.PlayerViewId.ToString(CultureInfo.InvariantCulture) +
                     " batches=" + w.Batches.ToString(CultureInfo.InvariantCulture) +
-                    " gap300=" + w.Gap300.ToString(CultureInfo.InvariantCulture) +
-                    " gap750=" + w.Gap750.ToString(CultureInfo.InvariantCulture) +
-                    " gap1500=" + w.Gap1500.ToString(CultureInfo.InvariantCulture) +
-                    " maxGap=" + w.MaxArrivalGapMs.ToString(CultureInfo.InvariantCulture) + "ms" +
+                    " gap300=" + w.Gaps.Gap300.ToString(CultureInfo.InvariantCulture) +
+                    " gap750=" + w.Gaps.Gap750.ToString(CultureInfo.InvariantCulture) +
+                    " gap1500=" + w.Gaps.Gap1500.ToString(CultureInfo.InvariantCulture) +
+                    " gapOverCap=" + w.Gaps.GapOverCap.ToString(CultureInfo.InvariantCulture) +
+                    " maxGap=" + w.Gaps.MaxArrivalGapMs.ToString(CultureInfo.InvariantCulture) + "ms" +
                     " jit150=" + w.Jitter150.ToString(CultureInfo.InvariantCulture) +
                     " maxJit=" + w.MaxDeliveryExcessMs.ToString(CultureInfo.InvariantCulture) + "ms" +
                     " reorder=" + w.Reordered.ToString(CultureInfo.InvariantCulture) +
@@ -997,10 +1098,15 @@ namespace CompetitiveRounds
                 text.Append('a').Append(actorNumber.ToString(CultureInfo.InvariantCulture));
                 text.Append("{views=").Append(window.Views.ToString(CultureInfo.InvariantCulture));
                 text.Append(",batches=").Append(window.Batches.ToString(CultureInfo.InvariantCulture));
-                text.Append(",gap300=").Append(window.Gap300.ToString(CultureInfo.InvariantCulture));
-                text.Append(",gap750=").Append(window.Gap750.ToString(CultureInfo.InvariantCulture));
-                text.Append(",gap1500=").Append(window.Gap1500.ToString(CultureInfo.InvariantCulture));
-                text.Append(",maxGap=").Append(window.MaxArrivalGapMs.ToString(CultureInfo.InvariantCulture)).Append("ms");
+                text.Append(",gap300=").Append(window.Gaps.Gap300.ToString(CultureInfo.InvariantCulture));
+                text.Append(",gap750=").Append(window.Gaps.Gap750.ToString(CultureInfo.InvariantCulture));
+                text.Append(",gap1500=").Append(window.Gaps.Gap1500.ToString(CultureInfo.InvariantCulture));
+                // Bug 392 item C: a clamped sample is counted here and NOT in
+                // maxGap, which now reads as "the largest gap MEASURED, capped
+                // at MaxMeasuredGapMs" — gapOverCap>0 says the real one was
+                // longer than the cap and is not knowable from this line.
+                text.Append(",gapOverCap=").Append(window.Gaps.GapOverCap.ToString(CultureInfo.InvariantCulture));
+                text.Append(",maxGap=").Append(window.Gaps.MaxArrivalGapMs.ToString(CultureInfo.InvariantCulture)).Append("ms");
                 text.Append(",jit150=").Append(window.Jitter150.ToString(CultureInfo.InvariantCulture));
                 text.Append(",maxJit=").Append(window.MaxDeliveryExcessMs.ToString(CultureInfo.InvariantCulture)).Append("ms");
                 text.Append(",reorder=").Append(window.Reordered.ToString(CultureInfo.InvariantCulture));
@@ -1131,12 +1237,14 @@ namespace CompetitiveRounds
         {
             internal long Views;
             internal long Batches;
-            internal long Gap300;
-            internal long Gap750;
-            internal long Gap1500;
+            // Bug 392 item C: the arrival-gap counters live in one accounting
+            // type now (NetGapAccounting.Bins — gap300/750/1500, the clamp
+            // counter and the max), so the closed-gap path and the room-exit
+            // flush cannot drift apart. Gap300/Gap750/Gap1500/MaxArrivalGapMs
+            // are read through Gaps at every site.
+            internal NetGapAccounting.Bins Gaps;
             internal long Jitter150;
             internal long Reordered;
-            internal int MaxArrivalGapMs;
             internal int MaxDeliveryExcessMs;
             // v6 §1.1/§1.2 classification counters.
             internal long PayloadEqualGaps;
@@ -1190,13 +1298,18 @@ namespace CompetitiveRounds
                 _lastArrivalTick = arrivalTick;
                 Batches++;
                 LastAccepted = true;
-                if (arrivalGap < 0 || arrivalGap > MaxMeasuredGapMs ||
-                    senderGap > MaxMeasuredGapMs) return;
+                // Bug 392 item C: the arrival gap is binned FIRST and on its
+                // own terms. An over-cap gap is clamped into the top bin and
+                // counted as a clamp instead of being dropped whole — dropping
+                // it is what made this histogram blind to exactly the outages
+                // it exists to record. A negative reading is still no
+                // measurement at all.
+                if (NetGapAccounting.Record(ref Gaps, arrivalGap, senderGap) < 0) return;
 
-                if (arrivalGap >= 300) Gap300++;
-                if (arrivalGap >= 750) Gap750++;
-                if (arrivalGap >= 1500) Gap1500++;
-                if (arrivalGap > MaxArrivalGapMs) MaxArrivalGapMs = arrivalGap;
+                // The delivery-excess half needs BOTH stamps inside the cap;
+                // with either half clamped the difference is not an
+                // observation. The arrival bins above are unaffected by that.
+                if (!NetGapAccounting.ExcessUsable(arrivalGap, senderGap)) return;
 
                 // r6 M2: arrivalGap is this seat's clock; senderGap is the
                 // difference of two peer-supplied timestamps (the networkTime
@@ -1216,12 +1329,9 @@ namespace CompetitiveRounds
             {
                 Views = 0;
                 Batches = 0;
-                Gap300 = 0;
-                Gap750 = 0;
-                Gap1500 = 0;
+                Gaps.Clear();
                 Jitter150 = 0;
                 Reordered = 0;
-                MaxArrivalGapMs = 0;
                 MaxDeliveryExcessMs = 0;
                 PayloadEqualGaps = 0;
                 ReceiverFrameGaps = 0;
@@ -1241,6 +1351,31 @@ namespace CompetitiveRounds
                 _lastNetworkTime = 0;
                 _lastSeenNetworkTime = 0;
                 _lastArrivalTick = 0;
+            }
+
+            /// <summary>Bug 392 item C: account for the gap that was still
+            /// OPEN when the room ended — the interval since the last batch
+            /// this window accepted, which no arrival ever closed. Returns the
+            /// RAW measured gap (the bins hold the clamped value), or 0 when
+            /// there was nothing open to flush.
+            ///
+            /// A window with no baseline has nothing open: a stream that
+            /// stopped because the player died has already had its baseline
+            /// cleared, so a normal death is not reported as a terminal gap.
+            /// The baseline is cleared here too, which makes a second call a
+            /// no-op — the room-exit edge can be reached twice (OnLeftRoom and
+            /// the disconnect handler both route here).</summary>
+            internal int FlushOpenGap(long nowTick)
+            {
+                if (!_hasBaseline) return 0;
+                long ticks = nowTick - _lastArrivalTick;
+                int openGap = ticks < 0
+                    ? -1
+                    : (int)Math.Min(int.MaxValue, ticks * 1000L / Stopwatch.Frequency);
+                ClearBaseline();
+                if (openGap <= 0) return 0;
+                NetGapAccounting.FlushOpenGap(ref Gaps, openGap);
+                return openGap;
             }
         }
 

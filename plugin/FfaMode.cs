@@ -1776,7 +1776,13 @@ namespace CompetitiveRounds
             // GameStartedInRoom resets FIRST so the generic room-exit hook
             // (firing after NetworkRestart) cannot re-tag this leave, and
             // the durable-cause store is cleared of any earlier upgrade.
+            // Bug 392 sweep: the disconnect-cause store is dropped for the
+            // same reason. This leave WANTS the dissolution, so it must not
+            // be upgraded to an in-room tag by a transport failure recorded
+            // moments earlier, and "fresh_cancel" overwrites the durable
+            // leave cause in FfaLeaveQueue on the way past.
             GameStartedInRoom = false;
+            try { TransportExit.ClearCause(); } catch { }
             try { ApiClient.FfaLeaveQueue("fresh_cancel"); } catch { }
             try { NetworkConnectionHandler.instance.NetworkRestart(); }
             catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] end-sitting NetworkRestart: {ex.Message}"); }
@@ -1798,10 +1804,15 @@ namespace CompetitiveRounds
                     new Color(1f, 0.8f, 0.4f), 7f);
             }
             catch { }
-            // in_room_exit (round-10 find 3): this teardown runs AFTER a
+            // An in-room tag (round-10 find 3): this teardown runs AFTER a
             // recorded game with the reporter's POST possibly still in
             // flight — the pre-room dissolution must never eat that report.
-            try { ApiClient.FfaLeaveQueue("in_room_exit"); } catch { }
+            // Bug 392: which in-room tag is FfaInRoomExitCause's decision.
+            // This path is a local engine decision and normally carries no
+            // recorded cause, so it normally sends today's tag; it reads the
+            // store anyway because a seat CAN reach here right after a
+            // transport failure, and both values are in-room.
+            try { ApiClient.FfaLeaveQueue(ApiClient.FfaInRoomExitCause()); } catch { }
             try { NetworkConnectionHandler.instance.NetworkRestart(); }
             catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] end-sitting NetworkRestart: {ex.Message}"); }
         }
@@ -1862,11 +1873,12 @@ namespace CompetitiveRounds
                             new Color(1f, 0.8f, 0.4f), 7f);
                     }
                     catch { }
-                    // in_room_exit (round-11 find 3): the rematch abort
+                    // An in-room tag (round-11 find 3): the rematch abort
                     // runs AFTER game 1 recorded, with the reporter's POST
                     // possibly still in flight — same report-preserving rule
-                    // as EndSittingBelowMinimum.
-                    try { ApiClient.FfaLeaveQueue("in_room_exit"); } catch { }
+                    // as EndSittingBelowMinimum, and the same bug-392 choice
+                    // of WHICH in-room tag.
+                    try { ApiClient.FfaLeaveQueue(ApiClient.FfaInRoomExitCause()); } catch { }
                     try { NetworkConnectionHandler.instance.NetworkRestart(); }
                     catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] end-sitting NetworkRestart: {ex.Message}"); }
                     yield break;

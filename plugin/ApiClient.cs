@@ -1834,6 +1834,22 @@ namespace CompetitiveRounds
             CheckModVersion();
         }
 
+        /// <summary>Bug 392 item A step 2: whether the server has said it
+        /// recognises the in-room INVOLUNTARY leave cause.
+        ///
+        /// FALSE until a mod-version response says otherwise, and false again
+        /// the moment a response stops saying it — so an older box, a rolled
+        /// back box, a startup check that never landed and a client that has
+        /// not reached the API yet all behave exactly as this client behaves
+        /// today. The capability is what makes the ordering safe: `cause` is
+        /// compared by exact string equality on the server, so a new tag sent
+        /// to a box that does not know it would lose the in-room veto that
+        /// keeps a live lobby from being dissolved for the other seats. The
+        /// advert therefore has to be emitted by the same code that recognises
+        /// the tag, and the ordering constraints that follow from that are
+        /// written down in the batch notes rather than asserted here.</summary>
+        public static bool ServerAcceptsInvoluntaryFfaCause { get; private set; }
+
         public static void CheckModVersion()
         {
             Plugin.Instance.StartCoroutine(DoCheckModVersion());
@@ -1847,6 +1863,32 @@ namespace CompetitiveRounds
             {
                 string ver = ExtractJsonString(req.downloadHandler.text, "version");
                 string minVer = ExtractJsonString(req.downloadHandler.text, "min_version");
+                // Re-read on EVERY successful response, not only the first: an
+                // absent field extracts as false (the same shape the FFA lobby
+                // config uses for sudden_death), so a response that stops
+                // advertising takes the capability away again.
+                //
+                // What that does NOT buy, stated because the earlier wording
+                // here claimed more than the code does (#302/#351): this route
+                // is fetched at STARTUP only — the two callers are at :642 and
+                // :1817 — so within one game session the value is read once and
+                // then held. "A box that stops advertising" is only observed if
+                // something fetches again, and nothing does. The residual that
+                // follows (a client that latched TRUE against a box later rolled
+                // back below the tag) is a named cross-lane dependency in the
+                // batch notes, and its conservative handling belongs to the
+                // side that reads the tag.
+                bool involuntaryCause = ExtractJsonBool(req.downloadHandler.text, TransportExit.CapabilityField);
+                // Logged on every check, not only on a change: with the field
+                // absent the value equals its own default, so a change-only
+                // line is silent in exactly the case worth seeing — a feature
+                // that is gated shut. The field NAME is in the line because the
+                // failure this lane actually shipped was a name disagreement,
+                // which a bare "False" would not have distinguished from a box
+                // that simply has not deployed yet (#281/#438/#443).
+                Plugin.Log.LogInfo(
+                    $"[VERSION] involuntary-cause capability: probed '{TransportExit.CapabilityField}' -> {involuntaryCause}");
+                ServerAcceptsInvoluntaryFfaCause = involuntaryCause;
                 if (!string.IsNullOrEmpty(ver))
                 {
                     LatestModVersion = ver;
@@ -7505,8 +7547,6 @@ namespace CompetitiveRounds
                                     GameStateWatcher.IncrementSessionRankedSeries(meWon);
                                 }
                                 catch (Exception ex) { Plugin.Log.LogWarning($"[SESSION] series tally update failed: {ex.Message}"); }
-                                // Regicide is now handled server-side after series completion
-                                GameStateWatcher.pendingRegicideCheck = false;
                             }
                         }
                     }
@@ -15812,6 +15852,13 @@ namespace CompetitiveRounds
             // result; never re-derive positional labels here.
             public string end_stats;
             public bool left_early;
+            /* Bug 392: WHY the seat left early, for the mark the report was
+             * about. TRUE only when the server recorded the departure as a
+             * transport failure rather than a choice. A missing key (a box
+             * that has not deployed the server half) parses false, which is
+             * "left" — today's wording, and the direction that says less
+             * rather than claiming a failure the server never recorded. */
+            public bool left_early_involuntary;
             // Bug 254: the server's authoritative frozen-roster-ghost bit
             // (ffa_match_players.absent, #227/#239). TRUE means this player
             // was carried on the report for roster continuity but was NOT in
@@ -16500,7 +16547,28 @@ namespace CompetitiveRounds
             UpdateFfaQueuePoll(force: true);
         }
 
-        /// <summary>cause (round-9 gate): "in_room_exit" when fired by the
+        /// <summary>The cause tag an in-room FFA exit should send (bug 392
+        /// item A step 2). "in_room_exit" — today's tag — unless this seat
+        /// recorded a fresh involuntary DisconnectCause AND the server
+        /// advertised that it recognises the involuntary tag. Both possible
+        /// results are IN-ROOM tags, so this can only ever change which
+        /// in-room value is sent; it can never turn an in-room exit into one
+        /// the server reads as failed assembly.
+        ///
+        /// Call it at the exit site, not earlier: the value is a function of
+        /// the cause store's freshness at the moment of the leave.</summary>
+        public static string FfaInRoomExitCause()
+        {
+            try
+            {
+                return TransportExit.InRoomLeaveTag(
+                    ServerAcceptsInvoluntaryFfaCause, TransportExit.NowSeconds());
+            }
+            catch { return TransportExit.InRoomExitTag; }
+        }
+
+        /// <summary>cause (round-9 gate): an IN-ROOM tag — "in_room_exit", or
+        /// the involuntary "in_room_timeout" (bug 392) — when fired by the
         /// room-exit hook (the leaver was demonstrably IN the ffa_ room, so
         /// the server must never classify it as failed assembly); anything
         /// else / empty = pre-room (menu leave, decline, watchdog).</summary>
@@ -16512,10 +16580,33 @@ namespace CompetitiveRounds
             // in flight (the room-exit hook fires AFTER a teardown's own
             // leave and used to be discarded whole); an untagged call
             // inherits it so every retry path re-sends the attestation.
-            if (cause == "in_room_exit") _ffaLeaveCause = cause;
+            // Bug 392: the upgrade keys on the CLASS of tag, not on one
+            // literal — the involuntary tag is an in-room attestation too, and
+            // a bare equality here would have carried it on the first call and
+            // silently dropped it on every retry (#432).
+            if (TransportExit.IsInRoomTag(cause)) _ffaLeaveCause = cause;
             if (FfaQueueStatus == "leaving") return;
             if (string.IsNullOrEmpty(cause)) cause = _ffaLeaveCause;
             else _ffaLeaveCause = cause;
+            // Bug 392: an involuntary attestation is only sent while this seat
+            // can still justify it. The durable cause is inherited by every
+            // untagged caller — the Leave button, the reconciliation paths, a
+            // retry — and those callers know nothing about the transport. If
+            // the cause store no longer holds a fresh involuntary cause, the
+            // tag DOWNGRADES to today's in-room value: the exit is still
+            // attested as in-room (the veto that protects the other seats is
+            // kept), only the claim about WHY is dropped. A client-attested
+            // cause may move the server toward the conservative outcome and
+            // never away from it (#283).
+            if (string.Equals(cause, TransportExit.InRoomInvoluntaryTag, StringComparison.Ordinal))
+            {
+                string stillFresh;
+                if (!TransportExit.TryGetFreshInvoluntary(TransportExit.NowSeconds(), out stillFresh))
+                {
+                    cause = TransportExit.InRoomExitTag;
+                    _ffaLeaveCause = cause;
+                }
+            }
             // Capture the expected target BEFORE any clears (impl review find
             // 2: the old order captured after clearing ActiveFfaLobbyId, so a
             // locked-lobby leave carried no expected id and no recovery
@@ -16549,6 +16640,15 @@ namespace CompetitiveRounds
                 url += $"&expected_lobby_id={UnityWebRequest.EscapeURL(expectedLobby)}";
             if (!string.IsNullOrEmpty(cause))
                 url += $"&cause={UnityWebRequest.EscapeURL(cause)}";
+            // Bug 392: the cause that actually goes on the wire, named in the
+            // log. Without it the attestation is unobservable on this seat —
+            // the URL is not logged, and the difference between the two
+            // in-room tags is the whole point of the change, so a run that
+            // cannot show which one was sent proves nothing (#438/#443). One
+            // line per leave: the "leaving" early-return above bounds it.
+            Plugin.Log.LogInfo(
+                $"[FFA] leave cause={(string.IsNullOrEmpty(cause) ? "(none)" : cause)} " +
+                $"involuntaryCapability={ServerAcceptsInvoluntaryFfaCause}");
             Plugin.Instance.StartCoroutine(PostRequestWithRetry(url, "",
                 (ok, resp) =>
                 {
@@ -19130,6 +19230,13 @@ namespace CompetitiveRounds
                                         xp_gained = ExtractJsonInt(pObj, "xp_gained"),
                                         gold_gained = ExtractJsonInt(pObj, "gold_gained"),
                                         left_early = ExtractJsonBool(pObj, "left_early"),
+                                        // Bug 392: the key name is the shared
+                                        // constant, not a literal typed here,
+                                        // so the harness can pin it against
+                                        // the server's own source (X5/X6) the
+                                        // way the capability field is pinned.
+                                        left_early_involuntary =
+                                            ExtractJsonBool(pObj, TransportExit.InvoluntaryMarkField),
                                         absent = ExtractJsonBool(pObj, "absent"),
                                         color_name = ExtractJsonString(pObj, "color_name") ?? "",
                                         color_hex = ExtractJsonString(pObj, "color_hex") ?? "",
