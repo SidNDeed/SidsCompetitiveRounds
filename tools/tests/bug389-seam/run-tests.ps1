@@ -1665,6 +1665,68 @@ $runWireClosuresInert = Invoke-Suite 'wire-closuresinert' $seam $wireClosuresIne
 if (-not (Assert-Inert 'the closure table, inert edit' $runWireClosuresInert @('H3', 'W25'))) { $overall = 1 }
 Say ''
 
+# ================= THE COLD LENS ON THIS ROUND'S OWN BUILD TIP ================
+# Four findings, read on 7786d7c. Three of them are checkable and have mutants
+# here; the fourth - the two source views drifting apart in membership - fires
+# on a sparse root, which prior-r2 already is, so it has no mutant of its own
+# and says so rather than inventing one that cannot fail.
+
+# ---------- lens 1: the permitted-member size read off part of the set --------
+# H2 opened its span at the pluginRel assignment and closed it at the nearest
+# brace-shaped line, which belongs to the apiRel block only because the other
+# two assignments are one-liners and apiRel's comes last. An assignment written
+# AFTER that block is invisible to the count the route sentences are held to.
+$wireProseMember = New-WireRoot 'prosemember' 'tools/tests/bug389-seam/Program.cs' `
+    'private static int Main()' `
+    '            string[] allowedHere;' `
+    '            string[] allowedHere; permittedMembers[pluginRel] = new[] { "private void Extra()" };' ''
+$runWireProseMember = Invoke-Suite 'wire-prosemember' $seam $wireProseMember
+if (-not (Assert-Mutation 'a permitted member written outside the counted block' $runWireProseMember 'H2' 'W25')) { $overall = 1 }
+Say ''
+
+# ---------- lens 2: two spellings of the severity marker ----------------------
+# H1 holds a body count and a marker count to each other, which is only evidence
+# while the two are taken off DIFFERENT evidence. Counting the markers twice
+# from two copies of the same rule is two counters of one thing (#342).
+$wireSecondMarker = New-WireRoot 'secondmarker' 'tools/tests/bug389-seam/Program.cs' `
+    'private static int Main()' `
+    '        string findText = LoadSource(findRel);' `
+    '        string findText = LoadSource(findRel); string sevSecond = "SEVERITY:";' ''
+$runWireSecondMarker = Invoke-Suite 'wire-secondmarker' $seam $wireSecondMarker
+if (-not (Assert-Mutation 'a second literal spelling of the severity marker' $runWireSecondMarker 'W28' 'W25')) { $overall = 1 }
+Say ''
+
+$wireMarkerInert = New-WireRoot 'markerinert' 'tools/tests/bug389-seam/Program.cs' `
+    'private static int Main()' `
+    '                    + "no census and leaves the round unrecorded; these carry none: "' `
+    '                    + "no census and leaves the round unrecorded; these carry none - "' ''
+$runWireMarkerInert = Invoke-Suite 'wire-markerinert' $seam $wireMarkerInert
+if (-not (Assert-Inert 'the single marker spelling, inert edit' $runWireMarkerInert @('W28', 'W25'))) { $overall = 1 }
+Say ''
+
+# ---------- lens 3: the premise the bare-name rule rests on -------------------
+# The caller bound searches the writers' owner by ONE name and admits the bare
+# form only in the declaring file. Both halves assume no shipped file aliases
+# that owner and none imports its members statically. That was true, and it was
+# written in a comment instead of checked.
+$wireAliasUsing = New-WireRootSpans 'aliasusing' 'plugin/NativeUI.cs' `
+    @(, @('using System;',
+          'using Photon.Pun;',
+          ('using Photon.Pun;' + $nl + 'using AC = CompetitiveRounds.ApiClient;'),
+          'namespace CompetitiveRounds'))
+$runWireAliasUsing = Invoke-Suite 'wire-aliasusing' $seam $wireAliasUsing
+if (-not (Assert-Mutation 'a second name for the writers own type' $runWireAliasUsing 'W25' 'W1')) { $overall = 1 }
+Say ''
+
+$wireAliasInert = New-WireRootSpans 'aliasinert' 'plugin/NativeUI.cs' `
+    @(, @('using System;',
+          'using Photon.Pun;',
+          ('using Photon.Pun;' + $nl + 'using System.Globalization;'),
+          'namespace CompetitiveRounds'))
+$runWireAliasInert = Invoke-Suite 'wire-aliasinert' $seam $wireAliasInert
+if (-not (Assert-Inert 'an ordinary using added, inert edit' $runWireAliasInert @('W25', 'W1'))) { $overall = 1 }
+Say ''
+
 # ---------- 22. the prior mechanism ----------
 # The round-2 files, recovered from git. Every N case asserts something round 3
 # DELETED, so every one of them must redden here; W1 reads a file the change

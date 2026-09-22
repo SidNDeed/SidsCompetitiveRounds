@@ -126,4 +126,41 @@ NOW: the canonical copy is tracked beside the harness, so it rides every clone a
 every pin; two published copies are made from it byte for byte; H3 holds it to
 naming all three paths. See the head of this file.
 
+THIS PASS'S OWN COLD LENS, read on the build tip 7786d7c. Four findings, all
+REAL, one MEDIUM and three LOW, applied on the tip this table describes. They are
+NOT round-7 findings and are listed apart from them.
+
+LENS 1 MEDIUM - H2 READ THE PERMITTED-MEMBER SIZE OFF PART OF THE SET. Its span
+opened at one assignment and closed at the nearest brace-shaped line, which
+belongs to the last block only by accident of formatting and order, so an
+assignment written after that block is invisible to the very count the route
+sentences are held to. NOW: the span opens at the declaration and closes at the
+first statement after the assignments, and the assignment count inside the span
+must equal the count in the whole file. wire-prosemember reddens H2;
+wire-proseinert is the twin. The fix's own first cut spelled its needle whole in
+the file it counts and reddened on that literal; the needle is in halves now and
+the episode is recorded in the notes at 15m-9 rather than tidied away.
+
+LENS 2 LOW - TWO COUNTERS OF ONE THING INSIDE THE CASE BUILT TO HOLD TWO COUNTS
+APART. H1's marker count was a second copy of DerivedCensus's own rule. NOW: one
+SeverityMarker constant, the census returns the marker total it already computed,
+and the BODY count stays independent because that is the half that must be. W28
+holds the literal to one spelling; wire-secondmarker reddens it,
+wire-markerinert is the twin.
+
+LENS 3 LOW - THE PREMISE THE BARE-NAME RULE RESTS ON WAS WRITTEN DOWN, NOT
+CHECKED. R9 admits a bare name only in the declaring file, which is complete only
+while no shipped file imports those members statically or aliases their owner.
+NOW: a clause in the same group reads the enumerated surface and reddens on
+either construct, naming file and line. wire-aliasusing reddens W25;
+wire-aliasinert is the twin. Its price - a legitimate static import anywhere under
+plugin/ now has to be answered - is stated in the notes at 15m-7.
+
+LENS 4 LOW - THE TWO SOURCE VIEWS WERE ONE MEMBERSHIP BY ACCIDENT. Every reach
+scan treats an absent CODE view as a SKIP, and what made that safe was a null
+check on the OTHER dictionary a hundred lines up. NOW: one guard populates both,
+a missing file is a recorded failure, and the two dictionaries must cover the
+same count. NO MUTANT, and the reason instead of a substitute: the clause fires
+on a sparse source root and prior-r2 already is one.
+
 B14b STAYS OWED and is never claimed here.

@@ -198,6 +198,18 @@ using CompetitiveRounds;
 //     the promised repository copy unnamed, which is the state that made a
 //     reviewer's pin-only read of the round-7 promise resolve to nothing.
 //   wiring   wire-closuresinert: H3 and W25 must both stay green.
+//   wiring   wire-prosemember: H2 must FAIL; W25 control must PASS. Writes a
+//     FOURTH assignment to the permitted-member set, outside the block whose
+//     size the route sentences are held to - the state in which the first cut
+//     of H2 counted part of the set and passed.
+//   wiring   wire-secondmarker: W28 must FAIL; W25 control must PASS. Plants
+//     a second literal spelling of the severity marker, which is the state in
+//     which H1 holds two counts of one thing to each other.
+//   wiring   wire-markerinert: W28 and W25 must both stay green.
+//   wiring   wire-aliasusing: W25 must FAIL; W1 control must PASS. Gives the
+//     writers' owner a second name in a shipped file, which is the premise
+//     the bare-name half of the caller bound rests on.
+//   wiring   wire-aliasinert: W25 and W1 must both stay green.
 //   wiring   wire-pathswap:   D6 must FAIL;  D4 and D5 controls must PASS
 //   wiring   wire-paththrew:  D6 must FAIL;  D4 and D5 controls must PASS
 //   prior-r2            : N1 N2 N3 N4 N5 N6 must all FAIL; W1 control must PASS
@@ -1418,7 +1430,14 @@ internal static class Program
     /// SECOND, INDEPENDENT count - FindingBodies, which counts the bodies by
     /// their own heading and knows nothing about markers - and H1 requiring the
     /// two to agree.</summary>
-    private static string DerivedCensus(string findings)
+    /// <summary>How a finding body declares its severity. ONE PLACE KNOWS
+    /// THIS SPELLING, and W28 holds it to one: the census and the body
+    /// counter both read it from here, so the two cannot come to disagree
+    /// about what a marker is while still being held to each other. A second
+    /// copy of the rule is two counters of one thing (#342).</summary>
+    private const string SeverityMarker = "SEVERITY:";
+
+    private static string DerivedCensus(string findings, out int markers)
     {
         int high = 0, medium = 0, low = 0, other = 0, total = 0;
         if (findings != null)
@@ -1429,14 +1448,15 @@ internal static class Program
                 // including the paragraph in that file explaining what this
                 // counts - would otherwise be counted as a body, which is a
                 // reading that finds its own needle (#342).
-                if (!t.StartsWith("SEVERITY:", StringComparison.Ordinal)) continue;
+                if (!t.StartsWith(SeverityMarker, StringComparison.Ordinal)) continue;
                 total++;
-                string v = t.Substring("SEVERITY:".Length).Trim();
+                string v = t.Substring(SeverityMarker.Length).Trim();
                 if (v == "HIGH") high++;
                 else if (v == "MEDIUM") medium++;
                 else if (v == "LOW") low++;
                 else other++;
             }
+        markers = total;
         return total + " findings: " + high + " HIGH, " + medium + " MEDIUM, " + low + " LOW"
             + (other == 0 ? "" : ", " + other + " UNRECOGNISED");
     }
@@ -1470,7 +1490,7 @@ internal static class Program
                 bodies++;
                 continue;
             }
-            if (heading != null && t.StartsWith("SEVERITY:", StringComparison.Ordinal)) marked = true;
+            if (heading != null && t.StartsWith(SeverityMarker, StringComparison.Ordinal)) marked = true;
         }
         if (heading != null && !marked) unmarked.Add(heading);
         return bodies;
@@ -3108,9 +3128,28 @@ internal static class Program
                 reachProblems.Add("cannot read " + rel + " - an unread file is a failure, not a skip");
                 continue;
             }
+            string blank = LoadBlanked(rel);
+            if (blank == null)
+            {
+                reachProblems.Add("cannot build the code view of " + rel
+                    + " - an unread file is a failure, not a skip");
+                continue;
+            }
             surfaceText[rel] = text;
-            surfaceBlank[rel] = LoadBlanked(rel);
+            surfaceBlank[rel] = blank;
         }
+        // THE TWO VIEWS ARE ONE MEMBERSHIP. Every scan below reads the code
+        // view through "if (!surfaceBlank.TryGetValue(rel, out blanked)) continue;"
+        // - a SKIP - and what made that safe was a null check a hundred lines
+        // above, on the OTHER dictionary. Nothing said so and nothing would
+        // have caught the two drifting apart: the same shape as the register
+        // entry N5 closed, a guarantee kept by a mechanism that is not where
+        // the reader is (#351/#434). The sparse prior-tip root is where this
+        // clause can actually fire.
+        if (surfaceText.Count != surfaceBlank.Count)
+            reachProblems.Add("the prose view and the code view must cover the same files - one present "
+                + "in either and absent from the other is skipped silently by every scan below; "
+                + surfaceText.Count + " prose, " + surfaceBlank.Count + " code");
 
         if (patchesText == null) reachProblems.Add("cannot read plugin/ProximityVictimPatches.cs");
         if (seamText == null) reachProblems.Add("cannot read plugin/ProximityVictimSeam.cs");
@@ -3630,6 +3669,36 @@ internal static class Program
         Console.WriteLine("NOTE  W25 permitted-writer callers: "
             + (callerMap.Count == 0 ? "none" : string.Join("; ", callerMap.ToArray())));
 
+        // AND THE PREMISE THAT RULE RESTS ON, CHECKED INSTEAD OF WRITTEN
+        // DOWN. Confining the bare search to the declaring file is complete
+        // only while no other file can reach one of these members by a bare
+        // name, and only while the owner has one name. Two constructs break
+        // that: "using static" imports the member itself, and a using ALIAS
+        // gives the owner a second name this scan does not search for.
+        // Neither was present when the rule was written and a comment said
+        // so - a premise nothing re-checks is one the next edit is free to
+        // falsify, which is the whole of #351/#434. The price is real and
+        // named in the residuals: a legitimate static import anywhere under
+        // plugin/ reddens this and has to be answered.
+        const string apiType = "ApiClient";
+        foreach (string rel in shippedCs)
+        {
+            string usingView;
+            if (!surfaceBlank.TryGetValue(rel, out usingView)) continue;
+            foreach (string raw in usingView.Split((char)10))
+            {
+                string t = raw.Trim();
+                if (t.StartsWith("using static", StringComparison.Ordinal))
+                    reachProblems.Add(rel + " carries '" + t + "' - a static import can bring a bare "
+                        + "member name into a file where this bound searches qualified only, so the "
+                        + "caller set would no longer be closed");
+                else if (t.StartsWith("using ", StringComparison.Ordinal) && t.IndexOf('=') > 0
+                         && t.TrimEnd(';', ' ').EndsWith(apiType, StringComparison.Ordinal))
+                    reachProblems.Add(rel + " carries '" + t + "' - an alias gives the writers' owner a "
+                        + "second name and this bound searches for one");
+            }
+        }
+
         // R2 - the gate flag.
         SurfaceScan initScan = ScanField(shippedCs, surfaceText, surfaceBlank,
             "initialized", pluginRel, "false");
@@ -3979,10 +4048,17 @@ internal static class Program
                 + "so an unread file is a failure, not a skip");
         else
         {
-            string derived = DerivedCensus(findText);
+            // THE MARKER COUNT COMES BACK FROM THE CENSUS ITSELF. The first
+            // cut of this clause counted the markers a second time here,
+            // with a second copy of the rule for what a marker looks like -
+            // two counters of one thing, which is the defect N5 closed one
+            // screen further up and #342 names outright. The BODIES are
+            // still counted off different evidence, which is the half that
+            // has to stay independent.
+            int markers;
+            string derived = DerivedCensus(findText, out markers);
             List<string> unmarked;
             int bodies = FindingBodies(findText, out unmarked);
-            int markers = LinesOpeningWith(findText, "SEVERITY:");
             if (unmarked.Count != 0)
                 censusProblems.Add("every finding body must carry its own SEVERITY marker, or it counts in "
                     + "no census and leaves the round unrecorded; these carry none: "
@@ -4068,6 +4144,43 @@ internal static class Program
             viewProblems.Count == 0,
             string.Join("; ", viewProblems.ToArray()));
 
+        // W28 - THE SEVERITY MARKER IS SPELLED IN EXACTLY ONE PLACE. RED
+        // under "wire-secondmarker", which plants a second spelling of it;
+        // GREEN under "wire-markerinert".
+        //
+        // H1 holds two counts of the finding bodies against each other and
+        // that is the point of it - but only while they are counted off
+        // DIFFERENT evidence. The first cut of this round counted the
+        // markers twice, from two copies of the rule for what a marker looks
+        // like, so a change to one copy would have made the clause fire on a
+        // file that was correct or pass one that was not. The rule lives in
+        // SeverityMarker now, and this holds that literal to a single
+        // spelling in the harness.
+        //
+        // ITS NEEDLE IS BUILT IN PIECES, for the same reason W27's is: this
+        // case is written in the file it counts, so a needle spelled whole
+        // here would be one of the occurrences it counts and the case could
+        // never pass (#342).
+        var markerProblems = new List<string>();
+        if (progCode == null)
+            markerProblems.Add("cannot read " + progRel + " in the code view - an unread file is a "
+                + "failure, not a skip");
+        else
+        {
+            string quote = ((char)34).ToString();
+            string markerLiteral = quote + "SEVER" + "ITY:" + quote;
+            int spellings = CountOf(progCode, markerLiteral);
+            if (spellings != 1)
+                markerProblems.Add("the severity marker must be spelled in exactly one place - two "
+                    + "copies of the rule are two counters of one thing, and H1 holds its two counts "
+                    + "to each other on the premise that they are taken off different evidence; found "
+                    + spellings + " literal spelling(s) in " + progRel);
+            Console.WriteLine("NOTE  W28 severity-marker literals: " + spellings);
+        }
+        Check("W28 Report_TheSeverityMarkerIsSpelledInExactlyOnePlace",
+            markerProblems.Count == 0,
+            string.Join("; ", markerProblems.ToArray()));
+
         // H2 - EVERY PROSE COUNT IS DERIVED FROM THE ARTIFACT IT DESCRIBES.
         // RED under "wire-prosecount", which adds a member to permittedMembers
         // so the route sentences no longer carry the set's size, and under
@@ -4095,17 +4208,45 @@ internal static class Program
                 + "not a skip");
         else
         {
-            const string mapOpen = "permittedMembers[pluginRel] = new[]";
+            // THE SPAN IS THE WHOLE DECLARATION, not the first assignment
+            // to the nearest brace-shaped line. This clause first opened at
+            // the pluginRel assignment and closed at the next "\n        };",
+            // which is the apiRel block's closer only because the other two
+            // assignments happen to be one-liners and apiRel's happens to
+            // come last. Reorder them, or add a fourth file's entries after
+            // that block, and the size is read out of a span that no longer
+            // holds the set while the sentences still agree with it - a
+            // check that cannot fail for the case it exists to catch
+            // (#342/#431). It opens at the DECLARATION and closes at the
+            // first statement after the assignments, and the number of
+            // assignments inside the span must equal the number in the whole
+            // file, so one written anywhere else is named instead of missed.
+            const string mapOpen = "var permittedMembers = new Dictionary<string, string[]>";
+            const string mapClose = "foreach (string rel in shippedCs)";
             int mo = progCode.IndexOf(mapOpen, StringComparison.Ordinal);
-            int mc = mo < 0 ? -1 : progCode.IndexOf((char)10 + "        };", mo, StringComparison.Ordinal);
+            int mc = mo < 0 ? -1 : progCode.IndexOf(mapClose, mo, StringComparison.Ordinal);
             if (mo < 0 || mc < 0)
                 proseProblems.Add("could not bound the permitted-member set in " + progRel
                     + " - the count the route sentences carry is read out of it");
             else
             {
+                string mapSpan = progCode.Substring(mo, mc - mo);
+                // SPELLED IN HALVES. Written whole this needle is itself an
+                // occurrence of what it counts, in the file it counts over,
+                // so the file read four assignments where three exist and
+                // the clause reddened on its own literal - a reading that
+                // finds its own needle (#342), and the same discipline W27
+                // and W28 already use one screen further down.
+                const string assign = "permittedMembers" + "[";
+                int assignHere = CountOf(mapSpan, assign);
+                int assignAll = CountOf(progCode, assign);
+                if (assignHere != assignAll)
+                    proseProblems.Add("every assignment to the permitted-member set must stand in the "
+                        + "block its size is read from, or the size is read off part of the set; the "
+                        + "file carries " + assignAll + " and the block holds " + assignHere);
                 // Each entry is a member SIGNATURE, so each ends with the close
                 // of its parameter list immediately before the closing quote.
-                int members = CountOf(progCode.Substring(mo, mc - mo), ")\"");
+                int members = CountOf(mapSpan, ")\"");
                 // The SENTENCES are comments, so they are counted over the PROSE
                 // view; the SET is code, so its size is counted over the CODE
                 // view, where a signature quoted in a comment declares nothing.
