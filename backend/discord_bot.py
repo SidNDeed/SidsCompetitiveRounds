@@ -8403,12 +8403,49 @@ def _pc_name(s):
 
 
 def _pc_print_line(p):
-    """One binder line: rarity, name, pool rank, rating, flags."""
+    """One binder line: rarity, name, pool rank, rating, top card, flags."""
     flags = ("✨ foil" if p.get("foil") else "") + (" ✒️ signed" if p.get("signed") else "")
     rating = p.get("rating")
     rt = f" · {int(rating)}" if isinstance(rating, (int, float)) else ""
+    # The print's Top card, routed through _pc_name exactly as /card renders
+    # it. An absent or empty value contributes the empty string -- no
+    # separator and no placeholder dash -- so a print without a top card
+    # renders the same characters it rendered before this field was added.
+    top = p.get("top_card")
+    tc = f" · 🃏 {_pc_name(top)}" if top else ""
     return (f"{_PC_RARITY_EMOJI.get(p.get('rarity'), '')} **{_pc_name(p.get('subject_name'))}**"
-            f" #{p.get('pool_rank', '?')}{rt} {flags}").rstrip()
+            f" #{p.get('pool_rank', '?')}{rt}{tc} {flags}").rstrip()
+
+
+def _pc_fit_field(lines, cap=1024):
+    """Join lines into an embed field value, cutting only BETWEEN lines.
+
+    Discord rejects a field value longer than 1024 characters, so a block of
+    lines has to be bounded somewhere. Slicing the joined string is the wrong
+    place: the cut lands wherever 1024 falls, which can be inside a `**bold**`
+    run — the field then renders with an unclosed run that swallows the rest
+    of it. Lines are added here only while the WHOLE value still fits, so a
+    line is either present in full or not at all. When something was left out
+    the value ends with a single-character marker, and that marker is inside
+    the cap too (lines are popped to make room for it if need be).
+
+    A single line longer than the cap yields just the marker. That is a
+    degradation rather than a failure -- a one-character value is still a
+    legal field -- and it is the honest outcome, because the alternative is
+    the mid-line cut this function exists to avoid. Whether any caller can
+    actually produce such a line is NOT claimed here: it depends on how long
+    a name the api will hand over and on what escaping does to it.
+    """
+    out = []
+    for line in lines:
+        if len("\n".join(out + [line])) > cap:
+            break
+        out.append(line)
+    if len(out) < len(lines):
+        while out and len("\n".join(out + ["…"])) > cap:
+            out.pop()
+        out.append("…")
+    return "\n".join(out)
 
 
 def _pc_not_linked(ctx, target):
@@ -8678,7 +8715,11 @@ async def cmd_pc_collection(ctx, member: discord.Member = None):
                     inline=False)
     best = body.get("best") or []
     if best:
-        embed.add_field(name="⭐  Best prints", value="\n".join(_pc_print_line(p) for p in best[:10])[:1024], inline=False)
+        # Line-wise, not a slice of the join: the Top card segment added up to
+        # ~24 characters per line, which is what brings a ten-print binder of
+        # long names within reach of the 1024 cap.
+        embed.add_field(name="⭐  Best prints",
+                        value=_pc_fit_field([_pc_print_line(p) for p in best[:10]]), inline=False)
     else:
         embed.add_field(name="⭐  Best prints", value="No prints yet — `/daily` claims today's free pack.", inline=False)
     if face is None:
@@ -8801,10 +8842,16 @@ def _pc_event_lines(events):
         copy = ""
         if isinstance(dup, int):
             copy = "  ·  NEW to the binder" if dup == 0 else f"  ·  Duplicate · copy {dup + 1}"
+        # The print's Top card, from the event payload's nested print dict.
+        # Absent contributes the empty string, which is what an api older
+        # than this field hands the bot: the line then reads exactly as it
+        # read before, rather than carrying a separator with nothing after it.
+        top = p.get("top_card")
+        tc = f"  ·  🃏 {_pc_name(top)}" if top else ""
         if "self" in kinds:
-            lines.append(f"🪞 **{puller}** pulled their OWN card — a {what.strip()}{rank}!{copy}")
+            lines.append(f"🪞 **{puller}** pulled their OWN card — a {what.strip()}{rank}!{copy}{tc}")
         else:
-            lines.append(f"**{puller}** pulled a {what.strip()} **{subject}**{rank}!{copy}")
+            lines.append(f"**{puller}** pulled a {what.strip()} **{subject}**{rank}!{copy}{tc}")
         lines.append([int(e["id"]) for e in group])
     return lines
 
