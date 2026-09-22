@@ -86,9 +86,13 @@ code does not supply, so the numbers here are the ones in the list, counted off
 it: 22 unmarked and still live (rounds 1 and 2), 1 unmarked and RETIRED because
 round 4 deleted the code it mutated (prior-tail-only, annotated in place), 16
 marked (r3), 15 marked (r4), 10 marked (r5), 7 marked (r6), 7 marked (r7), 8
-marked (r8), 3 marked (r9), 8 marked (r10), and
+marked (r8), 3 marked (r9), 8 marked (r10), 6 marked (r11), and
 one more that is a committed test rather than a hand-run control
-(backfill-neutered, at the end). Rounds 4 through 8's are the ones with a
+(backfill-neutered, at the end). The rounds in that sentence are read off the
+sentence and compared with the rounds the list carries, both ways: a round
+whose controls are here and whose count is not stated reds as loudly as a
+count that disagrees, which is what stops the sentence going one round stale.
+Rounds 4 through 8's are the ones with a
 NEGATIVE control — an inert edit at the same site that must leave the same
 test GREEN — so each test is shown to redden for the mutation and not for any
 edit at all (#391); the runner, the red line of every mutant and the
@@ -346,6 +350,49 @@ All KILLED:
                            settled number and is refused for ever, which is the
                            permanent exclusion the sole-allocator rule rules
                            out.
+
+  evidence-scope-keys-on-the-opt-in-set (r11)  evidence_rules.scope_problems:
+                           derive the newest round from the reports that
+                           already declare a stdout, which is what round 10
+                           did. A later round whose reports declare none then
+                           moves the scope with it and is bound by nothing.
+                           The rule's own fabricated directory is what reds,
+                           because a directory satisfying both readings cannot
+                           tell them apart.
+  scope-lets-a-report-belong-to-no-round (r11)  evidence_rules.scope
+                           _problems: drop the clause that refuses a report
+                           whose NAME carries no round. The scope is derived
+                           from the name so that no report can opt out, which
+                           makes an unparseable name the same escape one
+                           spelling over.
+  selftest-count-is-not-derived (r11)  assemble-evidence.selftest: print the
+                           check count as the constant it used to be instead
+                           of the number of checks the run recorded. Its inert
+                           twin is the same expression REFLOWED, so the test
+                           is shown to measure a number and not a line shape
+                           (#441).
+  new-controls-list-credits-another-round (r11)  the previous round's
+                           mutation-controls report: swap one listed name for
+                           a control the inventory tags for an earlier round,
+                           which is round 10's own defect. It reds in both
+                           directions at once -- one name listed and not
+                           tagged, one tagged and not listed.
+  residual-reach-rule-admits-a-prose-count (r11)  residual_rules.reach
+                           _problems: search an EMPTY remainder for a second
+                           statement of the reach, so a hand-counted summary
+                           beside the tags passes. Its inert twin is a comment
+                           at the same site.
+  invocation-frame-drops-a-known-key (r11)  evidence_rules.BETWEEN: take the
+                           two frame keys this round's runner prints --
+                           reports and swap -- back out of the list the
+                           upward scan reads past, so a result whose command
+                           IS above it is reported as carrying none. The
+                           rule's own fabricated frame reds, and the negative
+                           twin inside that self-test -- a frame key the list
+                           has never been told about, which must still STOP
+                           the scan -- proves the list is what reads past a
+                           frame rather than something else. Its inert twin
+                           here is a comment at the same site.
 
 ...and one more that is a COMMITTED TEST rather than a hand-run control:
   backfill-neutered        327's room_tail backfill: WHERE FALSE. See
@@ -1703,41 +1750,44 @@ def test_the_control_tally_matches_the_list_it_sits_next_to():
     doc = sys.modules[__name__].__doc__
     entries = [ln for ln in doc.splitlines()
                if re.match(r"^  [a-z0-9-]+( \((?:r3|r4|retired)\))? +\S", ln)]
-    counted = {
-        "r3": sum(1 for ln in entries if "(r3)" in ln),
-        "r4": sum(1 for ln in entries if "(r4)" in ln),
-        "r5": sum(1 for ln in entries if "(r5)" in ln),
-        "r6": sum(1 for ln in entries if "(r6)" in ln),
-        "r7": sum(1 for ln in entries if "(r7)" in ln),
-        "r8": sum(1 for ln in entries if "(r8)" in ln),
-        "r9": sum(1 for ln in entries if "(r9)" in ln),
-        "r10": sum(1 for ln in entries if "(r10)" in ln),
-        "retired": sum(1 for ln in entries if "(retired)" in ln),
-    }
-    counted["plain"] = len(entries) - sum(counted.values())
+    # The ROUNDS are derived from the entries too, not listed here. A check
+    # whose round list is written down goes stale the round after it is
+    # written, and then covers a growing set with a fixed question -- which is
+    # the defect two of round 11's findings are about, one level up.
+    counted = {}
+    for line in entries:
+        tag = re.match(r"^  [a-z0-9-]+ \((r\d+|retired)\)", line)
+        key = tag.group(1) if tag else "plain"
+        counted[key] = counted.get(key, 0) + 1
+    counted.setdefault("retired", 0)
     # The committed-test one is listed in the same shape but is called out
     # separately in the prose, so it is not a hand-run control.
     assert any("backfill-neutered" in ln for ln in entries)
-    counted["plain"] -= 1
+    counted["plain"] = counted.get("plain", 0) - 1
 
-    claimed = re.search(
-        r"counted off\s*\n?it: (\d+) unmarked and still live .*?(\d+) unmarked and RETIRED"
-        r".*?(\d+)\s*\n?marked \(r3\), (\d+) marked \(r4\), (\d+) marked \(r5\),"
-        r" (\d+) marked \(r6\), (\d+) marked \(r7\), (\d+)\s*\n?marked \(r8\),"
-        r" (\d+) marked \(r9\), (\d+) marked \(r10\)",
-        doc, re.S)
-    assert claimed, "the docstring no longer states a tally in a readable form"
-    want = tuple(int(g) for g in claimed.groups())
-    have = (counted["plain"], counted["retired"],
-            counted["r3"], counted["r4"], counted["r5"], counted["r6"],
-            counted["r7"], counted["r8"], counted["r9"], counted["r10"])
+    head = re.search(
+        r"counted off\s*\n?it: (\d+) unmarked and still live .*?"
+        r"(\d+) unmarked and RETIRED", doc, re.S)
+    assert head, "the docstring no longer states a tally in a readable form"
+    region = doc.split("counted off", 1)[1].split("(backfill-neutered", 1)[0]
+    claimed = {}
+    for number, tag in re.findall(r"(\d+)\s+marked \((r\d+)\)", region):
+        assert tag not in claimed, f"the tally states {tag} twice"
+        claimed[tag] = int(number)
+    assert claimed, "the docstring states no per-round tally"
+
+    listed = {k: v for k, v in counted.items()
+              if k not in ("plain", "retired")}
+    assert claimed == listed, (
+        f"the docstring's tally and its own list disagree: claimed {claimed}, "
+        f"listed {listed}")
+    want = (int(head.group(1)), int(head.group(2)))
+    have = (counted["plain"], counted["retired"])
     assert want == have, (
-        f"the docstring's tally and its own list disagree: claimed {want}, "
-        f"listed {have}")
+        f"the unmarked tallies disagree: claimed {want}, listed {have}")
     # ...and the list is not empty, or the whole check passes on nothing.
-    assert counted["r4"] >= 10 and counted["r5"] >= 5 and counted["r6"] >= 5
-    assert counted["r7"] >= 5 and counted["r8"] >= 5
-    assert counted["r9"] >= 3 and counted["r10"] >= 5
+    assert len(listed) >= 8, listed
+    assert all(n >= 3 for n in listed.values()), listed
     assert counted["plain"] >= 10
     # The evidence sentence names a path that EXISTS in this repository. Round
     # 5 pointed at two files under the gitignored ai-collab scratch, so the
@@ -4593,44 +4643,36 @@ def test_the_committed_evidence_re_derives_its_own_numbers():
     # SCOPE, derived from the files rather than written down, and stated
     # rather than left implicit.
     #
-    # The rule applies to every report the assembler built -- which is exactly
-    # the set that declares its stdout in a `stdout:` header. Earlier rounds'
-    # reports are the record of rounds already judged, on the shapes their
-    # instruments printed at the time; rewriting them now would be editing a
-    # log to satisfy a rule written after it, which is not the same artifact
-    # as a log that was true when it was written.
+    # The rule binds the NEWEST round, and the round is derived from the file
+    # NAMES. Earlier rounds' reports stay exempt: they are the record of
+    # rounds already judged, on the shapes their instruments printed at the
+    # time, and rewriting one now would be editing a log to satisfy a rule
+    # written after it, which is not the same artifact as a log that was true
+    # when it was written.
+    #
+    # ROUND 11 CORRECTED WHERE THAT BOUNDARY IS READ FROM. Round 10 derived
+    # the newest round from the reports that DECLARED a stdout header -- the
+    # ones that had already adopted the rule -- and then required that round
+    # to be whole. A later round that declared no stdout in any of its reports
+    # therefore moved the boundary with it: it was not the newest ADOPTING
+    # round, so none of its files were read, and the rule was satisfied by a
+    # directory that had dropped it. That is the check that cannot fail on its
+    # own class (#342). A file name carries its round whatever the file says,
+    # so the scope is taken from there and no report can opt itself out.
     #
     # THE SET IS TOTAL OVER WHAT EXISTS, and that is what makes it usable: a
     # round's reports are written one at a time, and the suite pair that
     # certifies the source necessarily runs before ANY of them exists, since
     # a report is written FROM that pair's output. So this check covers
-    # whatever is there when it runs, and the clause below stops a round
-    # half-adopting the rule. What covers the completed set is the re-pin
-    # wrapper, which runs last over the directory as committed.
-    assembled = [p for p in reports
-                 if re.search(r"^stdout:",
-                              p.read_text(encoding="utf-8", errors="replace"),
-                              re.M)]
-    for path in assembled:
-        body = path.read_text(encoding="utf-8", errors="replace")
-        assert rules.run_section(body) is not None, (
-            f"{path.name} declares its stdout and no verbatim run section, so "
-            f"nothing it says can be traced to a run")
-        bad = rules.results_without_an_invocation(body)
-        assert not bad, (path.name, bad)
-    # ...and once a round has ONE assembled report, every other report of that
-    # same round has to be one too. A round cannot adopt the rule for the file
-    # that satisfies it and drop it for the file that would not.
-    if assembled:
-        current_round = max(
-            int(m.group(1)) for m in
-            (re.match(r"^r(\d+)-", p.name) for p in assembled) if m)
-        prefix = "r%d-" % current_round
-        for path in reports:
-            if path.name.startswith(prefix):
-                assert path in assembled, (
-                    f"{path.name} is a report of the round that adopted the "
-                    f"assembler and names no stdout of its own")
+    # whatever is there when it runs. What covers the completed set is the
+    # re-pin wrapper, which runs last over the directory as committed.
+    bodies = {p.name: p.read_text(encoding="utf-8", errors="replace")
+              for p in reports}
+    newest = rules.newest_round(bodies)
+    assert newest is not None, sorted(bodies)
+    bound = [n for n in bodies if rules.round_of(n) == newest]
+    assert bound, (newest, sorted(bodies))
+    assert not rules.scope_problems(bodies), rules.scope_problems(bodies)
 
 
 def test_the_committed_evidence_is_assembled_from_its_run_stdout():
@@ -4667,15 +4709,21 @@ def test_the_committed_evidence_is_assembled_from_its_run_stdout():
     assert "rule checks, all as stated" in selftest.stdout, selftest.stdout
 
     reports = sorted(p for p in evidence.iterdir() if p.suffix == ".txt")
-    # Every report the assembler built, derived from the files: the ones that
-    # declare their stdout. Total over what exists when this runs, for the
-    # reason the invocation rule's scope states -- a report cannot exist while
-    # the run it is written from is still going.
-    assembled = [p for p in reports
-                 if re.search(r"^stdout:",
-                              p.read_text(encoding="utf-8", errors="replace"),
-                              re.M)]
-    for path in assembled:
+    # EVERY report of the newest round, by its file name, plus every earlier
+    # one that declares a stdout of its own. The first half is the scope the
+    # invocation rule states -- a round cannot leave itself out by writing a
+    # report the assembler never built -- and the second keeps an earlier
+    # round's adopted report checked rather than dropping it.
+    rules = _evidence_rules()
+    names = {p.name: p.read_text(encoding="utf-8", errors="replace")
+             for p in reports}
+    newest = rules.newest_round(names)
+    assert newest is not None, sorted(names)
+    checked = [p for p in reports
+               if rules.round_of(p.name) == newest
+               or rules.STDOUT_HEADER.search(names[p.name])]
+    assert checked, sorted(names)
+    for path in checked:
         done = run_tool("--check", str(path))
         assert done.returncode == 0, (path.name, done.stdout + done.stderr)
         assert "all derived from" in done.stdout, (path.name, done.stdout)
@@ -4691,6 +4739,199 @@ def test_the_committed_evidence_is_assembled_from_its_run_stdout():
     assert assembler.undrivable("9 paths were hashed\n", "9 paths\n") == []
     refused = assembler.undrivable("12 paths were hashed\n", "9 paths\n")
     assert [c for _k, c in refused] == ["12 paths"], refused
+
+
+def newest_of_all(rules, paths):
+    """The newest round over EVERY report in the directory, not just one kind.
+
+    The kind-restricted maximum answers a different question: a round that has
+    written its suites report and not yet its controls report is the newest
+    round of the directory and not of the controls reports, and the two
+    questions want different answers in different places."""
+    return rules.newest_round([p.name for p in paths])
+
+
+def _load_evidence_module(filename, modname):
+    import importlib.util
+
+    path = pathlib.Path(__file__).resolve().parent / "evidence" / filename
+    assert path.is_file(), path
+    spec = importlib.util.spec_from_file_location(modname, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_assembler_counts_the_checks_it_ran():
+    """Control: selftest-count-is-not-derived (r11).
+
+    The assembler exists to refuse a number a run did not produce, and the
+    last line of its own self-test was one: `len(TERMS) + 19`, a constant
+    beside a body that runs two loops and thirteen standalone checks. It
+    printed one fewer than the run made, and that line is committed verbatim
+    in several of the previous round's logs -- so every report of that round
+    carried a count of the instrument's own checks that the instrument could
+    not derive. Nothing noticed, because the test that read the output
+    asserted the PHRASE and never the number (#342).
+
+    Two comparisons here, and the second is the one that makes the first
+    worth making. The printed number has to equal the number of check RECORDS
+    the run produced -- and that number has to equal the number of times the
+    run actually invoked `expect`, counted independently by tracing the run
+    rather than by reading the source, because the source's two loops are
+    exactly why a count read off the source went wrong."""
+    evidence = pathlib.Path(__file__).resolve().parent / "evidence"
+    tool = evidence / "assemble-evidence.py"
+    assert tool.is_file(), tool
+    root = pathlib.Path(__file__).resolve().parent.parent.parent
+
+    done = subprocess.run([sys.executable, str(tool), "--selftest"],
+                          cwd=str(root), capture_output=True, text=True,
+                          timeout=120)
+    assert done.returncode == 0, done.stdout + done.stderr
+    printed = re.search(r"selftest: (\d+) rule checks, all as stated",
+                        done.stdout)
+    assert printed, done.stdout
+
+    assembler = _load_evidence_module("assemble-evidence.py", "_scr_assembler2")
+    records = assembler.run_checks()
+    assert all(ok for _name, ok, _detail in records), [
+        (name, detail) for name, ok, detail in records if not ok]
+    assert len(records) >= 30, len(records)
+
+    # The independent count: what the run DID, not what the file looks like.
+    seen = []
+
+    def tracer(frame, event, _arg):
+        if event == "call" and frame.f_code.co_name == "expect":
+            seen.append(frame.f_code.co_name)
+        return None
+
+    previous = sys.gettrace()
+    sys.settrace(tracer)
+    try:
+        assembler.run_checks()
+    finally:
+        sys.settrace(previous)
+
+    assert len(seen) == len(records), (
+        f"the self-test invoked its check {len(seen)} times and recorded "
+        f"{len(records)} results")
+    assert int(printed.group(1)) == len(records), (
+        f"the self-test printed {printed.group(1)} and ran {len(records)} "
+        f"checks")
+
+
+def test_the_new_controls_a_report_claims_are_the_ones_the_inventory_tags():
+    """Control: new-controls-list-credits-another-round (r11).
+
+    A mutation-controls report lists the controls that are new in its round.
+    That list is written beside a set that grows, which is the shape this
+    file has already been wrong in twice -- and it was wrong again: round
+    10's report listed nine, one of which a previous round had added and this
+    one had not touched, while the inventory below tagged eight. Two
+    statements of one set, and nothing compared them.
+
+    This compares them, in both directions: a name listed as new that the
+    inventory tags for another round reds, and a name the inventory tags for
+    this round that the report does not list reds. The inventory is this
+    module's own docstring, so the comparison is against the place every
+    control is already registered rather than against a third list."""
+    rules = _evidence_rules()
+    evidence = pathlib.Path(__file__).resolve().parent / "evidence"
+    doc = sys.modules[__name__].__doc__
+    reports = sorted(p for p in evidence.iterdir()
+                     if p.name.endswith("-mutation-controls.txt"))
+    assert len(reports) >= 4, [p.name for p in reports]
+
+    newest = rules.newest_round([p.name for p in reports])
+    assert newest is not None, [p.name for p in reports]
+    claiming = []
+    for path in reports:
+        body = path.read_text(encoding="utf-8", errors="replace")
+        number = rules.round_of(path.name)
+        if rules.controls_claimed_new(body) is None:
+            # A report written before the heading existed says nothing this
+            # rule can check, and is left as its round wrote it. The newest
+            # round's report is NOT allowed that: a round cannot answer the
+            # rule by making no claim.
+            assert number != newest, (
+                f"{path.name} is the newest round's mutation-controls report "
+                f"and lists no controls as new in its round")
+            continue
+        claiming.append(path.name)
+        bad = rules.new_control_problems(body, doc, number)
+        assert not bad, (path.name, bad)
+    assert len(claiming) >= 2, claiming
+
+    # ...and the same requirement keyed on CONTENT rather than on the file
+    # name, because a name is something a round chooses. Any report of the
+    # newest round that names the mutation runner's own log as its stdout IS
+    # that round's mutation-controls report, whatever it is called, and has to
+    # carry the list. Vacuous while the round is still being written -- the
+    # report is assembled from that log and cannot exist before it -- and
+    # binding by the time the closing check runs over the directory as
+    # committed.
+    evidence_reports = sorted(p for p in evidence.iterdir()
+                              if p.suffix == ".txt")
+    for path in evidence_reports:
+        if rules.round_of(path.name) != newest_of_all(rules, evidence_reports):
+            continue
+        body = path.read_text(encoding="utf-8", errors="replace")
+        if not re.search(r"^stdout:.*mutation-run", body, re.M):
+            continue
+        assert rules.controls_claimed_new(body) is not None, (
+            f"{path.name} names the mutation runner's log as its stdout and "
+            f"lists no controls as new in its round")
+
+    # Both directions, on the rule, from here -- so a parse that silently
+    # matched nothing would red on an assertion ABOUT the rule rather than
+    # pass over whatever the directory happens to hold (#391).
+    good = rules.FABRICATED_REPORT
+    assert rules.new_control_problems(good, rules.FABRICATED_INVENTORY,
+                                      3) == []
+    credited = good.replace("  another-thing-that-broke\n",
+                            "  an-older-control\n")
+    named = sorted(n for n, _why in
+                   rules.new_control_problems(credited,
+                                              rules.FABRICATED_INVENTORY, 3))
+    assert named == ["an-older-control", "another-thing-that-broke"], named
+
+
+def test_the_residual_reach_rule_holds_in_both_directions():
+    """Control: residual-reach-rule-admits-a-prose-count (r11).
+
+    A round's residual list is the one place it says what it did not close,
+    and it is read by somebody deliberately not reading the rest. One list
+    said, in an item, that two seats one number apart can both settle -- a
+    second settlement of one physical game, which pays and rates twice -- and
+    said sixteen lines later that a different item was the only one that
+    could move a rating. Neither sentence was wrong about its own subject;
+    the second was a hand-made count of the first.
+
+    `residual_rules.py` takes the reach out of the prose: each item carries
+    one tag in a pinned shape, the count under the list is derived from the
+    tags, and no other line in the section may state a reach. This asserts
+    the rule in both directions on its own fixtures -- a clean list, an inert
+    reword, a second statement of the reach, an item with no tag, a count
+    that disagrees, and a list with no count at all.
+
+    The document it is run against lives under the gitignored scratch, so it
+    is not named here and not read here: the executed run over the real list,
+    with its mutation and its inert twin, is in this round's report."""
+    rules = _load_evidence_module("residual_rules.py", "_scr_residual_rules")
+    checks = rules.selftest_checks()
+    assert all(ok for _name, ok, _detail in checks), [
+        (name, detail) for name, ok, detail in checks if not ok]
+    assert len(checks) >= 8, len(checks)
+    assert rules.selftest() == [], rules.selftest()
+
+    # The two directions again from here, on the claim the round is about, so
+    # that a fixture quietly edited to agree with a broken rule still reds.
+    assert rules.reach_problems(rules.CLEAN) == []
+    assert rules.reach_problems(rules.INERT) == []
+    stale = rules.reach_problems(rules.DIRTY_CLAIM)
+    assert len(stale) == 1 and "one item in this list" in stale[0], stale
 
 
 def test_every_round_seven_control_names_a_test_that_exists():

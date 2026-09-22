@@ -1,0 +1,29 @@
+script    <repo>/backend/tests/evidence/run-both-suites.sh
+cwd       <repo>/backend
+python    Python 3.12.10
+command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
+tree      10 paths differ from HEAD or are untracked; fingerprinted before and after
+  3c60fa9362cdf5efc4140e1294a8e44b  backend/tests/evidence/assemble-evidence.py
+  658fe99152bb8f086048070c1121e827  backend/tests/evidence/evidence_rules.py
+  ec913076eb1c1f74313f2fd6f7d1a226  backend/tests/evidence/mutation-runner.py
+  36620e8cb0a8cee1341d2d1f702a585b  backend/tests/evidence/r10-mutation-controls.txt
+  eceb23b5051f2a942f62c3c879387154  backend/tests/evidence/repin-last.py
+  10b8212f2e7bb2f6576cb36ea5d8b647  backend/tests/evidence/residual-reach-control.py
+  cdb3642de49482f6ea8c7e0a6a820a6a  backend/tests/evidence/residual_rules.py
+  a4710b8b77c631a1117d8a5a05dcf4d7  backend/tests/evidence/run-both-suites.sh
+  ffb23adc8447bee0dd32391c92c1faf2  backend/tests/evidence/run-pg-controls.sh
+  4f931228fdc4cbc8d05f3e05cfc7dff0  backend/tests/test_ffa_game_number_anchor.py
+=== opt-out started 02:53:10 ===
+command   env -u FFA_TEST_PG_DSN FFA_TEST_PG_OPTOUT=1 python -m pytest tests/ -q -p no:cacheprovider
+opt-out rc=0
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1740 passed, 44 skipped, 1 xfailed, 2 warnings in 572.39s (0:09:32)
+=== live DSN started 03:02:46 ===
+command   FFA_TEST_PG_DSN=postgresql+asyncpg://<user>@<host>:<port>/<db> python -m pytest tests/ -q -p no:cacheprovider
+dsn rc=0
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1769 passed, 15 skipped, 1 xfailed, 2 warnings in 567.57s (0:09:27)
+=== tree re-fingerprinted 03:12:17 ===
+command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
+UNCHANGED: the same 10 paths, each byte-identical to the pre-run fingerprint
+=== done 03:12:18 ===

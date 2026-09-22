@@ -238,12 +238,23 @@ DIRTY_BIG = CLEAN.replace("The total was 1761.", "The total was 1762.")
 LOG = "7 passed, 3 skipped\n9 paths differ\n1761 passed\n"
 
 
-def selftest():
-    failures = []
+def run_checks():
+    """Every rule check this instrument makes, as (name, ok, detail) records.
+
+    The records are what the printed count is taken from. It used to be
+    written as `len(TERMS) + 19` -- a constant beside a body that runs two
+    loops and thirteen standalone checks -- and it printed one fewer than the
+    run made, on the one instrument whose whole purpose is to refuse a number
+    a run did not produce (#342). Adding or removing a check now moves the
+    printed number by construction, and the paired test compares that number
+    against the invocations the run actually made rather than against a second
+    constant."""
+    checks = []
 
     def expect(name, got, want):
-        if got != want:
-            failures.append("%s: %r, expected %r" % (name, got, want))
+        checks.append((name, got == want,
+                       None if got == want
+                       else "%r, expected %r" % (got, want)))
 
     expect("a clean narrative has nothing undrivable",
            undrivable(CLEAN, LOG), [])
@@ -292,13 +303,19 @@ def selftest():
            ["761"])
     expect("...and IS satisfied by itself",
            undrivable("761 things\n", "761 passed\n"), [])
+    return checks
 
+
+def selftest():
+    checks = run_checks()
+    failures = ["%s: %s" % (name, detail)
+                for name, ok, detail in checks if not ok]
     if failures:
         print("SELFTEST FAILED: %d" % len(failures))
         for f in failures:
             print("  " + f)
         return 1
-    print("selftest: %d rule checks, all as stated" % (len(TERMS) + 19))
+    print("selftest: %d rule checks, all as stated" % len(checks))
     return 0
 
 
@@ -315,5 +332,17 @@ def main(argv):
     return 2
 
 
+def lf_stdout():
+    """Write LF. The reason in full is in mutation-runner.py's copy of this:
+    this instrument's stdout is quoted into a committed report, every file
+    under this directory is LF, and a Windows text stream writes CRLF --
+    which would make that report mixed, and a mixed report cannot be restored
+    byte-for-byte by the control that mutates it."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(newline="\n")
+
+
 if __name__ == "__main__":
+    lf_stdout()
     sys.exit(main(sys.argv))

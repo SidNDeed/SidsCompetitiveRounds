@@ -43,8 +43,21 @@ OUT="${SUITE_OUT:-${TMPDIR:-/tmp}}"
 # round is an INPUT rather than a literal here: a tag baked into the script
 # is a thing to remember to bump, and a forgotten one makes this round's
 # report name last round's capture.
-TAG="${SUITE_TAG:-r10}"
+#
+# ROUND 11: and it has no DEFAULT either. A default round tag is a baked-in
+# one with a longer fuse. It read `r10`, so a caller who forgot the variable
+# would have had this round's two halves overwrite the previous round's
+# captures, under the previous round's names, with a green run and nothing to
+# see. There is nothing to fall back to, so the script refuses.
+TAG="${SUITE_TAG:-}"
 DSN="${FFA_TEST_PG_DSN:-}"
+
+if [ -z "${TAG}" ]; then
+  echo "REFUSED: SUITE_TAG is unset. It names the round these captures" >&2
+  echo "         belong to, and a default would let one round overwrite" >&2
+  echo "         another round's logs under that round's own name." >&2
+  exit 2
+fi
 
 if [ -z "${DSN}" ]; then
   echo "REFUSED: FFA_TEST_PG_DSN is unset, so the live half would be skips" >&2
@@ -102,7 +115,18 @@ env -u FFA_TEST_PG_DSN FFA_TEST_PG_OPTOUT=1 \
     python -m pytest tests/ -q -p no:cacheprovider \
     > "${OUT}/${TAG}-suite-optout.log" 2>&1
 echo "opt-out rc=$?"
-tail -2 "${OUT}/${TAG}-suite-optout.log"
+# ROUND 11: the tail is stripped of carriage returns HERE, in the instrument,
+# rather than at the copy-in step. These two lines are the only ones in this
+# script's stdout that arrive as CRLF -- they are read back from a pytest log
+# the interpreter wrote through a translating stream, while everything else
+# here and every other file under this directory is LF. Round 10 normalised
+# them when the capture was copied into the report and recorded that as a
+# deviation, because a report that mixes the two conventions cannot survive
+# the control that mutates it: the runner records a file's convention when it
+# first reads it and writes that one back, so a mixed file returns uniform and
+# is reported as not restored. Normalising in the instrument means the capture
+# and the report are the same bytes with no step in between.
+tail -2 "${OUT}/${TAG}-suite-optout.log" | tr -d '\r'
 # The skip count in that line IS the check: an opt-out run that skipped as few
 # as the live run did is a live run, whatever the flag said.
 
@@ -111,7 +135,7 @@ echo 'command   FFA_TEST_PG_DSN=postgresql+asyncpg://<user>@<host>:<port>/<db> p
 FFA_TEST_PG_DSN="${DSN}" python -m pytest tests/ -q -p no:cacheprovider \
     > "${OUT}/${TAG}-suite-dsn.log" 2>&1
 echo "dsn rc=$?"
-tail -2 "${OUT}/${TAG}-suite-dsn.log"
+tail -2 "${OUT}/${TAG}-suite-dsn.log" | tr -d '\r'
 
 echo "=== tree re-fingerprinted $(date -u +%H:%M:%S) ==="
 # The invocation again, immediately above the verdict it produces:

@@ -45,6 +45,7 @@ log names paths a clone has rather than this machine's checkout.
 """
 import datetime
 import hashlib
+import importlib.util
 import io
 import os
 import subprocess
@@ -55,15 +56,124 @@ BACKEND = os.path.dirname(os.path.dirname(HERE))           # backend
 ROOT = os.path.dirname(BACKEND)                            # repository root
 MAIN = os.path.join(BACKEND, "api", "main.py")
 TESTS = os.path.join(BACKEND, "tests", "test_ffa_game_number_anchor.py")
+EVIDENCE_RULES = os.path.join(HERE, "evidence_rules.py")
+RESIDUAL_RULES = os.path.join(HERE, "residual_rules.py")
+ASSEMBLER = os.path.join(HERE, "assemble-evidence.py")
 # Shipped by the same deploy as the api (docs/deploy-reference.md maps it to
 # the primary), and outside every glob round 8's shipped-file rule read.
 DOCKERFILE_BOT = os.path.join(BACKEND, "Dockerfile.bot")
-# The suites report of the round this runner is being run FOR. Two
-# controls mutate it -- the citation rule and the assembler's -- so it
-# has to exist before the runner starts, which is why the suite pair
-# runs first and the runner after it.
-SUITES = os.path.join(HERE, "r10-suites.txt")
+
+
+def _load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+# The round a report's NAME puts it in, from the one implementation of that
+# rule rather than from a second regex here (#432).
+_RULES = _load("_scr_evidence_rules_for_runner", EVIDENCE_RULES)
+
+
+def _newest_report(suffix):
+    """The highest-numbered report of one kind that EXISTS right now.
+
+    Round 10 wrote `r10-suites.txt` here as a literal, with a comment saying
+    which round it belonged to. A path with a round number in it is a thing to
+    remember to bump, and a forgotten one makes this round's controls mutate
+    the PREVIOUS round's report -- a mutation that resolves, reds its test and
+    proves nothing about the artifact this round is committing. Derived, it
+    cannot be stale."""
+    best = None
+    for name in sorted(os.listdir(HERE)):
+        if not name.endswith(suffix):
+            continue
+        number = _RULES.round_of(name)
+        if number is not None and (best is None or number > best[0]):
+            best = (number, name)
+    return None if best is None else os.path.join(HERE, best[1])
+
+
+# The suites report of the round this runner is being run FOR. Two controls
+# mutate it -- the invocation rule and the assembler's -- so it has to exist
+# before the runner starts, which is why the suite pair runs first and the
+# runner after it.
+SUITES = _newest_report("-suites.txt")
+# ...and the newest mutation-controls report, which is the PREVIOUS round's:
+# this round's is assembled from this runner's own output and cannot exist
+# while the runner runs. The control over it is about the claim a report makes
+# regarding its own round, and every report carrying that heading is checked,
+# so the previous round's is a real target rather than a stand-in.
+MUTATION_REPORT = _newest_report("-mutation-controls.txt")
 DSN = os.environ.get("FFA_TEST_PG_DSN")
+
+# The last of this runner's values that had to RESOLVE against a real artifact
+# and was still written by hand. Scope stated exactly, because "the last one"
+# is a count of a set and this round exists to stop those being written from
+# memory: round-numbered strings remain in this directory in two shapes that
+# resolve against nothing -- the fabricated report names in evidence_rules.py,
+# which are fixtures, and the example stdout header in assemble-evidence.py's
+# docstring, which is prose. Neither is a value a run dereferences. The two
+# that were, SUITES and MUTATION_REPORT, are derived above; this was the third.
+#
+# The control below reproduces a report crediting its own round with a control
+# another round added, and it did so by naming two controls here: one to take
+# out of the report's list and one to put in. Both are names belonging to one
+# round, so both go stale the round after they are written -- the same shape as
+# the round-numbered path two definitions up, and the same shape as the defect
+# the control exists FOR. A stale anchor refuses loudly at the pre-check rather
+# than passing, so what it costs is a runner that will not start; that is still
+# a control somebody has to hand-carry, which is what the method says not to do.
+UNDERIVED = "\x00 this control's anchor could not be derived \x00"
+
+
+def _report_claim_swap():
+    """(anchor, mutant, inert, why) for the new-controls control.
+
+    The anchor is a control the report LISTS as new in its own round; the
+    mutant is one the inventory tags for an EARLIER round and the report does
+    not list, so the swap reds in both directions at once -- one name listed
+    and not tagged, one tagged and not listed. The inert twin is the anchor
+    with a trailing space: still the same claim, so a rule keyed on the line's
+    shape rather than on the name it carries would red here (#391). `why` is
+    None when all three resolved, and names the one fact that is wrong
+    otherwise."""
+    if MUTATION_REPORT is None or not os.path.isfile(MUTATION_REPORT):
+        return UNDERIVED, UNDERIVED, UNDERIVED, (
+            "there is no mutation-controls report in this directory to "
+            "derive the swap from")
+    with io.open(MUTATION_REPORT, "r", encoding="utf-8",
+                 errors="replace") as fh:
+        body = fh.read()
+    with io.open(TESTS, "r", encoding="utf-8", errors="replace") as fh:
+        doc = fh.read()
+    number = _RULES.round_of(os.path.basename(MUTATION_REPORT))
+    claimed = _RULES.controls_claimed_new(body) or []
+    # Exactly once, or the mutation would edit two places and the control
+    # would be about something other than the one claim it names.
+    takeable = sorted(n for n in claimed if body.count("  %s\n" % n) == 1)
+    mine = _RULES.inventory_tags(doc, number)
+    earlier = set()
+    for other in range(1, number):
+        earlier |= _RULES.inventory_tags(doc, other)
+    puttable = sorted(n for n in (earlier - mine)
+                      if n not in claimed and ("  %s\n" % n) not in body)
+    if not takeable:
+        return UNDERIVED, UNDERIVED, UNDERIVED, (
+            "%s lists no control as new in round %s that appears exactly "
+            "once, so there is nothing to take out of its list"
+            % (os.path.basename(MUTATION_REPORT), number))
+    if not puttable:
+        return UNDERIVED, UNDERIVED, UNDERIVED, (
+            "the inventory tags no control for a round before %s that is "
+            "absent from %s, so there is nothing to put in its place"
+            % (number, os.path.basename(MUTATION_REPORT)))
+    return ("  %s\n" % takeable[0], "  %s\n" % puttable[0],
+            "  %s \n" % takeable[0], None)
+
+
+_SWAP_ANCHOR, _SWAP_MUTANT, _SWAP_INERT, _SWAP_WHY = _report_claim_swap()
 
 # name -> (file, anchor, mutant, inert, test)
 CONTROLS = [
@@ -539,6 +649,97 @@ CONTROLS = [
      '        # (inert: a comment at the same site)\n'
      '        out["settled_game"] = int(gno)\n',
      "test_pg_a_seat_that_missed_an_update_recovers_in_one_submission"),
+
+    # ── round 11 ─────────────────────────────────────────────────────────
+    # All four are at the level the r10 lens found: the instruments and the
+    # documents, rather than the endpoint. Each mutant is the shape that was
+    # actually there, put back.
+    #
+    # The scope of the invocation rule was derived from the reports that had
+    # already adopted it, so a later round that adopted none moved the scope
+    # with it and was checked by nothing. The mutant restores exactly that
+    # derivation; the fabricated directory in the rule's own self-test is what
+    # reds, because a directory that satisfies both readings cannot tell them
+    # apart (#391: the control has to be about the RULE).
+    ("evidence-scope-keys-on-the-opt-in-set", EVIDENCE_RULES,
+     '    latest = newest_round(reports)\n',
+     '    latest = newest_round([n for n in reports\n'
+     '                           if STDOUT_HEADER.search(reports[n])])\n',
+     '    # (inert: a comment at the same site)\n'
+     '    latest = newest_round(reports)\n',
+     "test_the_committed_evidence_re_derives_its_own_numbers"),
+
+    # ...and the escape one spelling over, swept with it: the round is taken
+    # from the file NAME so that no report can opt out, which makes a name
+    # carrying no round an opt-out by unparseability. The mutant drops the
+    # clause that refuses one; the rule's fabricated directory is again what
+    # reds, and the inert twin is a comment at the same site.
+    ("scope-lets-a-report-belong-to-no-round", EVIDENCE_RULES,
+     '        if round_of(name) is None:\n'
+     '            bad.append((name, "carries no round number in its name, so no "\n'
+     '                              "round\'s scope reaches it"))\n'
+     '            continue\n',
+     '        if round_of(name) is None:\n'
+     '            continue\n',
+     '        # (inert: a comment at the same site)\n'
+     '        if round_of(name) is None:\n'
+     '            bad.append((name, "carries no round number in its name, so no "\n'
+     '                              "round\'s scope reaches it"))\n'
+     '            continue\n',
+     "test_the_committed_evidence_re_derives_its_own_numbers"),
+
+    # The assembler's own check count, written as a constant beside a body
+    # that runs two loops -- on the instrument that exists to refuse a number
+    # a run did not produce. The inert twin is the SAME expression REFLOWED,
+    # which is the negative control that matters: the test compares a number,
+    # so it must not be satisfiable by a line's shape (#441).
+    ("selftest-count-is-not-derived", ASSEMBLER,
+     '    print("selftest: %d rule checks, all as stated" % len(checks))\n',
+     '    print("selftest: %d rule checks, all as stated" % (len(TERMS) + 19))\n',
+     '    print("selftest: %d rule checks, all as stated"\n'
+     '          % len(checks))\n',
+     "test_the_assembler_counts_the_checks_it_ran"),
+
+    # A report crediting its own round with a control another round added.
+    # The mutant is the defect reproduced on the committed report: one name
+    # swapped for a name the inventory tags for an earlier round, which reds
+    # in BOTH directions -- one listed and not tagged, one tagged and not
+    # listed. All three strings are DERIVED from the report and the inventory
+    # by _report_claim_swap above, so this control does not carry a round's
+    # control names into the round after it.
+    ("new-controls-list-credits-another-round", MUTATION_REPORT,
+     _SWAP_ANCHOR, _SWAP_MUTANT, _SWAP_INERT,
+     "test_the_new_controls_a_report_claims_are_the_ones_the_inventory_tags"),
+
+    # The invocation rule's list of frame keys, which is itself a hand-written
+    # set beside a growing one -- the sibling of finding 2, one level down.
+    # The upward scan stops at the first line it does not recognise, so a key
+    # the list has never been told about turns a result whose command IS above
+    # it into a reported violation. This round's runner prints two new frame
+    # lines, `reports` and `swap`; the mutant takes both keys back out, and
+    # the rule's own fabricated frame is what reds. Its inert twin is a
+    # comment at the same site.
+    ("invocation-frame-drops-a-known-key", EVIDENCE_RULES,
+     '    r"|^\\s*(file|cwd|python|script|dsn|started|controls|pytest|selection"\n'
+     '    r"|reports|swap)\\s"\n',
+     '    r"|^\\s*(file|cwd|python|script|dsn|started|controls|pytest|selection)\\s"\n',
+     '    # (inert: a comment at the same site)\n'
+     '    r"|^\\s*(file|cwd|python|script|dsn|started|controls|pytest|selection"\n'
+     '    r"|reports|swap)\\s"\n',
+     "test_the_committed_evidence_re_derives_its_own_numbers"),
+
+    # The residual list's reach rule, with the clause that reds on a second
+    # statement of the reach removed: the section is then searched for the
+    # claim with every line taken out of it, so the hand-counted summary the
+    # r10 lens found passes. The inert twin is a comment at the same site.
+    ("residual-reach-rule-admits-a-prose-count", RESIDUAL_RULES,
+     '    rest = [lines[i] for i in range(start, end)\n'
+     '            if i not in exempt and not TAG.match(lines[i])]\n',
+     '    rest = []\n',
+     '    # (inert: a comment at the same site)\n'
+     '    rest = [lines[i] for i in range(start, end)\n'
+     '            if i not in exempt and not TAG.match(lines[i])]\n',
+     "test_the_residual_reach_rule_holds_in_both_directions"),
 ]
 
 
@@ -648,6 +849,23 @@ def main():
         print("REFUSED: FFA_TEST_PG_DSN is unset, so the PostgreSQL-gated "
               "controls would be skips rather than runs.")
         return 2
+    # The two derived targets, checked before anything is read: a None here
+    # would surface as a confusing path error in the middle of the anchor
+    # pre-check rather than as the one fact that is wrong.
+    for label, path in (("suites", SUITES),
+                        ("mutation-controls", MUTATION_REPORT)):
+        if path is None or not os.path.isfile(path):
+            print("REFUSED: no %s report to mutate. The suite pair and the "
+                  "previous round's report have to be in this directory "
+                  "before the runner starts." % label)
+            return 2
+    # ...and the swap this runner derives rather than holds, for the same
+    # reason: "anchor resolves 0 times" names the symptom, and the fact that
+    # is wrong is which report or which inventory tag is missing.
+    if _SWAP_WHY is not None:
+        print("REFUSED: the new-controls control has no swap to make -- %s"
+              % _SWAP_WHY)
+        return 2
 
     originals = {}
     for _, path, _, _, _, _ in CONTROLS:
@@ -690,6 +908,16 @@ def main():
                     .strftime("%Y-%m-%d %H:%M:%S"))
     print("  controls  %d, each RED under its mutation and GREEN under an "
           "inert edit" % len(CONTROLS))
+    # The two targets this runner DERIVES rather than holds as literals, named
+    # here so the log says which files the evidence-level controls ran against
+    # instead of leaving a reader to work out which round they belonged to.
+    print("  reports   %s (suites), %s (mutation controls)"
+          % (rel(SUITES), rel(MUTATION_REPORT)))
+    # ...and the swap derived from that report, named here so the log records
+    # which claim was taken out and which name was put in its place, rather
+    # than leaving a reader to re-derive it from the two files.
+    print("  swap      %s -> %s (derived)"
+          % (_SWAP_ANCHOR.strip(), _SWAP_MUTANT.strip()))
     print("=" * 70)
     print("")
 
@@ -748,5 +976,32 @@ def main():
     return 0
 
 
+def lf_stdout():
+    """Write LF, on the platform whose text streams write CRLF.
+
+    Every committed file under this directory is LF, and this instrument's
+    stdout IS a committed file -- the caller redirects it and the report is
+    assembled from those exact bytes. On Windows a text stream translates
+    every \\n to \\r\\n, so an instrument that does nothing here produces a
+    log in the one convention the directory does not use, and the report
+    built from it ends up LF above the marker and CRLF below: a MIXED file.
+
+    That is not cosmetic. The mutation runner records a file's newline
+    convention when it first reads it and writes that one convention back, so
+    a mixed report comes back uniform, differs from the bytes it started as,
+    and is reported as not restored -- correctly, and for a reason that has
+    nothing to do with the control being run.
+
+    Round 10 normalised its captures at the COPY step instead and recorded
+    that as a deviation. Round 11 moved it into the instruments, here and in
+    run-both-suites.sh, so the capture and the report are the same bytes with
+    no step between them. Guarded because a stream that is not a text wrapper
+    has no reconfigure and needs none."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(newline="\n")
+
+
 if __name__ == "__main__":
+    lf_stdout()
     sys.exit(main())

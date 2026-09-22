@@ -44,11 +44,10 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 BACKEND = os.path.dirname(os.path.dirname(HERE))
 ROOT = os.path.dirname(BACKEND)
-REPORT = os.path.join(HERE, "r10-repin.txt")
-LOG = os.path.join(HERE, "r10-repin-run.log")
 CLOSING_K = ("committed_evidence or assembled_from_its_run or "
              "round_eight_control or round_seven_control or production_file "
-             "or runner_carries or control_tally")
+             "or runner_carries or control_tally or counts_the_checks or "
+             "new_controls_a_report or residual_reach")
 
 
 def load(name, filename):
@@ -67,6 +66,24 @@ def git(*args):
 def main():
     rules = load("_scr_evidence_rules", "evidence_rules.py")
     assembler = load("_scr_assembler", "assemble-evidence.py")
+
+    # WHICH ROUND THIS RECORD BELONGS TO, derived from the reports already in
+    # the directory rather than written here. A round number in a path is a
+    # thing to remember to bump, and the failure it produces is the worst
+    # shape available: the wrapper would overwrite the PREVIOUS round's re-pin
+    # record with this round's run, under that round's name, and report
+    # success. Every other report of this round is committed before this runs
+    # -- the wrapper refuses otherwise -- so the newest round in the directory
+    # is this one by construction.
+    names = [n for n in os.listdir(HERE) if n.endswith(".txt")]
+    number = rules.newest_round(names)
+    if number is None:
+        print("REFUSED: this directory carries no round-numbered report, so "
+              "the round this re-pin belongs to cannot be derived")
+        return 2
+    report = os.path.join(HERE, "r%d-repin.txt" % number)
+    log_name = "r%d-repin-run.log" % number
+    log_path = os.path.join(HERE, log_name)
 
     problems = rules.selftest()
     if problems:
@@ -103,7 +120,7 @@ def main():
     say("The route manifest re-pin, RUN LAST, with the order as evidence")
     say("===============================================================")
     say()
-    say("stdout: r10-repin-run.log")
+    say("stdout: %s" % log_name)
     say()
     say("Instrument: backend/tests/evidence/repin-last.py, which produces this")
     say("file as its OUTPUT. Nothing here is typed and nothing is appended")
@@ -193,15 +210,15 @@ def main():
         ROOT)
 
     body = log.getvalue()
-    with io.open(LOG, "w", encoding="utf-8", newline="") as fh:
+    with io.open(log_path, "w", encoding="utf-8", newline="") as fh:
         fh.write(body)
 
     text = out.getvalue()
     # The directory's own rules, applied to what is about to be written.
-    rebuilt = text + "========== r10-repin-run.log ==========\n" + body
+    rebuilt = text + ("========== %s ==========\n" % log_name) + body
     bad = assembler.undrivable(text, body)
     if bad:
-        os.remove(LOG)
+        os.remove(log_path)
         print("REFUSED: %d claim(s) in this report are absent from its own "
               "run:" % len(bad))
         for kind, claim in bad:
@@ -209,17 +226,18 @@ def main():
         return 1
     missing = rules.results_without_an_invocation(rebuilt)
     if missing:
-        os.remove(LOG)
+        os.remove(log_path)
         print("REFUSED: %d result line(s) in this report have no invocation "
               "above them:" % len(missing))
         for n, line in missing:
             print("  line %d: %s" % (n, line))
         return 1
 
-    with io.open(REPORT, "w", encoding="utf-8", newline="") as fh:
+    with io.open(report, "w", encoding="utf-8", newline="") as fh:
         fh.write(rebuilt)
-    print("written backend/tests/evidence/r10-repin.txt "
-          "(closing check rc=%d, re-pin rc=%d)" % (closing_rc, repin_rc))
+    print("written backend/tests/evidence/r%d-repin.txt "
+          "(closing check rc=%d, re-pin rc=%d)"
+          % (number, closing_rc, repin_rc))
     return 0 if (closing_rc == 0 and repin_rc == 0) else 1
 
 
