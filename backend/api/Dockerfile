@@ -1,4 +1,35 @@
-FROM python:3.12-slim
+# PINNED BY DIGEST, not by tag. `python:3.12-slim` is a moving tag, and what
+# this image supplies feeds `renderer_fp` -- the Player Cards face key --
+# through `runtime_provenance()`.
+#
+# WHAT IS ACTUALLY HASHED, stated exactly, because an earlier version of this
+# comment said "this image's bytes" and that is not what happens.
+# `runtime_provenance()` records the interpreter VERSION STRING, Pillow's and
+# `regex`'s version strings, a per-feature record for zlib / freetype2 /
+# harfbuzz / fribidi / raqm, the layout engine name, and a digest over SELECTED
+# PILLOW FILES. Nothing walks the base image, the interpreter binary, or
+# libfribidi's bytes. So a rebuild that changed a shared library WITHOUT moving
+# any of those strings would produce the SAME fingerprint over different
+# pixels, which fails in the quiet direction -- and is why the digest pin below
+# matters more rather than less. Two consequences, and the first is the one
+# that bites:
+#
+#   1. The primary and the standby are built from this file at DIFFERENT times.
+#      If the tag moves in between, the two boxes bake different interpreter and
+#      libfribidi bytes, compute different `renderer_fp`, and therefore disagree
+#      about every `face_rev`. The binder route produces the revision and the
+#      face route consumes it, so a player whose two requests land on the two
+#      boxes gets a 404 for a picture that exists -- and both boxes answer 200
+#      on /health, with nothing in either log.
+#   2. A rollback would produce a THIRD fingerprint rather than returning to the
+#      pre-release one, so the still-warm cache from before the release becomes
+#      unreachable and the emergency path runs cold.
+#
+# Resolved 2026-09-19 from the registry: the OCI index for 3.12-slim, which
+# carries linux/amd64. The tag is kept beside the digest for readability only --
+# Docker resolves the digest. To move it deliberately, re-resolve and change it
+# here in its own commit, expecting every face to re-render once.
+FROM python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea
 
 WORKDIR /app
 
