@@ -40,7 +40,17 @@
 #   LastWriteTimeUtc on disk must fall inside the build window recorded for ITS
 #   OWN section and inside no other section's window. A file copied out of
 #   rebuild 1 carries rebuild 1's write time wherever it is later placed, so it
-#   reddens against rebuild 2's window.
+#   reddens against rebuild 2's window. The windows are recorded to the
+#   MILLISECOND and compared with no slack, because two rebuilds run back to
+#   back are adjacent to within a few tens of milliseconds: at second
+#   granularity, or with a second of slack, every capture lies inside both
+#   windows and the rule stops distinguishing anything. That is not a
+#   hypothetical - it is how this tool's first trial run failed.
+#
+# The captureWriteUtc field in the record is INFORMATIONAL. The value this
+# rule reads is the one on disk now, so replacing the file cannot be hidden by
+# rewriting the record, and no rule is stated over the field that a control
+# does not exercise.
 # * Evidence cannot simply be absent: a rebuild section with no provenance line,
 #   a provenance line with a missing field, a capture that is no longer on disk,
 #   or a capture whose size no longer matches what was recorded, are each a
@@ -98,13 +108,13 @@ $script:ExitRe          = '^exit=(-?\d+)$'
 
 function Get-Utc {
     param([datetime]$When)
-    return $When.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    return $When.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
 }
 
 function Read-Utc {
     param([string]$Text)
     $parsed = [datetime]::MinValue
-    $ok = [datetime]::TryParseExact($Text, 'yyyy-MM-ddTHH:mm:ssZ',
+    $ok = [datetime]::TryParseExact($Text, 'yyyy-MM-ddTHH:mm:ss.fffZ',
         [System.Globalization.CultureInfo]::InvariantCulture,
         ([System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal),
         [ref]$parsed)
@@ -153,7 +163,7 @@ function Invoke-BuildPhase {
         if (-not (Test-Path -LiteralPath $outAbs)) {
             $lines.Add(("REFUSED | rebuild {0}: the build produced no artifact at {1}" -f $i, $Output))
             foreach ($l in $lines) { Write-Output $l }
-            Add-Content -LiteralPath $BuildLog -Value $lines
+            [System.IO.File]::AppendAllLines($BuildLog, [string[]]$lines, (New-Object System.Text.UTF8Encoding($false)))
             exit 1
         }
 
@@ -170,7 +180,7 @@ function Invoke-BuildPhase {
     }
 
     foreach ($l in $lines) { Write-Output $l }
-    Add-Content -LiteralPath $BuildLog -Value $lines
+    [System.IO.File]::AppendAllLines($BuildLog, [string[]]$lines, (New-Object System.Text.UTF8Encoding($false)))
 }
 
 # ---------------------------------------------------------------------------
@@ -389,7 +399,13 @@ function Invoke-VerifyPhase {
         }
     }
 
-    $slack = [timespan]::FromSeconds(1)
+    # NO SLACK, and millisecond window bounds. Two rebuilds run back to back
+    # are adjacent to within a few milliseconds, so a window widened by a
+    # second would contain both captures and P6 would stop distinguishing the
+    # thing it exists to distinguish - the first trial run of this tool failed
+    # exactly that way. The bounds are safe without slack because the artifact
+    # is written DURING the build and the window is recorded around it.
+    $slack = [timespan]::Zero
     foreach ($k in (@($prov.Keys) | Sort-Object)) {
         $cp = $prov[$k]['capture']
         if (-not (Test-Path -LiteralPath $cp)) {

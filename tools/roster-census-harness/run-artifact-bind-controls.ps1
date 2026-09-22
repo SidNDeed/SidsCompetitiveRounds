@@ -77,7 +77,7 @@ Write-Output ('donor ProductVersion (used as the synthetic head): ' + $head)
 if (Test-Path -LiteralPath $WorkDir) { Remove-Item -LiteralPath $WorkDir -Recurse -Force }
 [void](New-Item -ItemType Directory -Path $WorkDir -Force)
 
-function Utc { param([datetime]$W) return $W.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') }
+function Utc { param([datetime]$W) return $W.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ') }
 
 $t0 = (Get-Date).ToUniversalTime()
 $start1 = $t0.AddSeconds(-200); $end1 = $t0.AddSeconds(-180); $wrote1 = $t0.AddSeconds(-190)
