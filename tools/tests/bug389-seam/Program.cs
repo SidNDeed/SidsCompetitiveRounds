@@ -1243,6 +1243,125 @@ internal static class Program
         return kept;
     }
 
+    /// <summary>One construction site: the offset of its `new` keyword, the type
+    /// spelling that construction carries, and whether that spelling has a
+    /// type-argument list - which is what tells a PAIR from a MAP of pairs.</summary>
+    private sealed class NewSite
+    {
+        internal readonly int At;
+        internal readonly string TypeText;
+        internal readonly bool Generic;
+        internal NewSite(int at, string typeText, bool generic)
+        { At = at; TypeText = typeText; Generic = generic; }
+    }
+
+    /// <summary>The type spelling that starts at <paramref name="from"/>:
+    /// identifier characters, qualifier dots, whitespace, and a balanced
+    /// type-argument list read as one unit. It stops at the first character that
+    /// can open a construction argument list or an initialiser, so the caller
+    /// can require one.</summary>
+    private static string TypeSpellingAt(string blanked, int from, out int end)
+    {
+        int k = from, depth = 0;
+        while (k < blanked.Length)
+        {
+            char c = blanked[k];
+            if (c == '<') { depth++; k++; continue; }
+            if (c == '>') { if (depth == 0) break; depth--; k++; continue; }
+            if (IsIdentChar(c) || c == '.' || c == ' ' || c == '\t' || c == '\r' || c == (char)10
+                || (depth > 0 && (c == ',' || c == '[' || c == ']' || c == '?'))) { k++; continue; }
+            break;
+        }
+        end = k;
+        return blanked.Substring(from, k - from);
+    }
+
+    /// <summary>The declaration head of the statement a target-typed `new`
+    /// completes: everything between the previous statement boundary and the `=`
+    /// this `new` is the right-hand side of. `SurfaceFile x = new(a, b);` names
+    /// its type there and nowhere else, so a reader that looks only at the `new`
+    /// cannot see the type at all. Returns "" when the `new` is not the whole
+    /// right-hand side of a simple assignment.</summary>
+    private static string StatementHeadBefore(string blanked, int at)
+    {
+        int e = SkipWsBack(blanked, at - 1);
+        if (e < 0 || blanked[e] != '=') return "";
+        if (e > 0 && (blanked[e - 1] == '=' || blanked[e - 1] == '!'
+                      || blanked[e - 1] == '<' || blanked[e - 1] == '>')) return "";
+        int s = e - 1;
+        while (s >= 0 && blanked[s] != ';' && blanked[s] != '{' && blanked[s] != '}') s--;
+        return blanked.Substring(s + 1, e - s - 1);
+    }
+
+    /// <summary>True when <paramref name="segment"/> stands in
+    /// <paramref name="typeText"/> as a whole identifier - so `MySurfaceFile` and
+    /// `SurfaceFileCache` are not it.</summary>
+    private static bool NamesSegment(string typeText, string segment)
+    {
+        if (string.IsNullOrEmpty(typeText) || string.IsNullOrEmpty(segment)) return false;
+        int i = 0;
+        while (true)
+        {
+            int at = typeText.IndexOf(segment, i, StringComparison.Ordinal);
+            if (at < 0) return false;
+            i = at + segment.Length;
+            if (at > 0 && IsIdentChar(typeText[at - 1])) continue;
+            int after = at + segment.Length;
+            if (after < typeText.Length && IsIdentChar(typeText[after])) continue;
+            return true;
+        }
+    }
+
+    /// <summary>Every CONSTRUCTION whose type spelling names one segment, as the
+    /// offset of its `new` keyword.
+    ///
+    /// COUNTING A CONSTRUCTION BY ITS EXACT SPELLING IS THE SAME DEFECT AS
+    /// COUNTING A CALL BY ONE. The round-8 form of W29 searched the two literals
+    /// `new SurfaceFile(` and `new Dictionary&lt;string, SurfaceFile&gt;`, so an
+    /// ordinary target-typed `SurfaceFile x = new(...)`, a qualified
+    /// `new Ns.SurfaceFile(`, an extra space, or a differently spaced type
+    /// -argument list built a second pair or a second map while the case went on
+    /// reporting one of each (#432/#342/#431). This reads the construction
+    /// STRUCTURALLY, through the same boundary rule CallSitesIn applies to a
+    /// call: the `new` keyword is found at its own identifier boundaries, the
+    /// type spelling after it is read as a unit - or, for the target-typed form,
+    /// out of the declaration head the assignment carries - and the segment is
+    /// matched as a whole identifier inside it.
+    ///
+    /// WHAT IT DOES NOT COUNT, stated rather than left to be found: an array
+    /// creation `new T[..]`, which makes no instance of T; an assignment to an
+    /// already-declared variable, `x = new();`, whose head names no type; and any
+    /// construction reached through a factory, which is residual 16's subject and
+    /// not a construction at all.</summary>
+    private static List<NewSite> NewSitesIn(string blanked, string segment)
+    {
+        var found = new List<NewSite>();
+        if (string.IsNullOrEmpty(blanked) || string.IsNullOrEmpty(segment)) return found;
+        const string kw = "new";
+        int i = 0;
+        while (true)
+        {
+            int at = blanked.IndexOf(kw, i, StringComparison.Ordinal);
+            if (at < 0) return found;
+            i = at + kw.Length;
+            if (at > 0 && IsIdentChar(blanked[at - 1])) continue;
+            int after = at + kw.Length;
+            if (after < blanked.Length && IsIdentChar(blanked[after])) continue;
+            int p = SkipWs(blanked, after);
+            string typeText;
+            if (p < blanked.Length && blanked[p] == '(')
+                typeText = StatementHeadBefore(blanked, at);
+            else
+            {
+                int end;
+                typeText = TypeSpellingAt(blanked, p, out end);
+                if (end >= blanked.Length || (blanked[end] != '(' && blanked[end] != '{')) continue;
+            }
+            if (!NamesSegment(typeText, segment)) continue;
+            found.Add(new NewSite(at, Collapse(typeText), Collapse(typeText).IndexOf('<') >= 0));
+        }
+    }
+
     /// <summary>Attribute applications [Name] or [Name(...)], likewise
     /// whitespace-tolerant, over a text already in the CODE view.</summary>
     private static int AttributesOf(string blanked, string name)
@@ -3842,6 +3961,19 @@ internal static class Program
         // falsify, which is the whole of #351/#434. The price is real and
         // named in the residuals: a legitimate static import anywhere under
         // plugin/ reddens this and has to be answered.
+        //
+        // AND THE DIRECTIVE IS READ AS TOKENS, NOT AS A LINE PREFIX. The first
+        // cut of this guard tested StartsWith("using static") and
+        // StartsWith("using ") on the trimmed line, so the file-spanning forms
+        // `global using static ...;` and `global using Alias = ...;` walked
+        // straight past it, and so did `using  static` with two spaces. That is
+        // not a hypothetical spelling here either: plugin/MusicEngine.cs already
+        // opens with a `global using` alias. A guard that holds for one spelling
+        // of a construct the tree ALREADY USES is the spelling bound
+        // #432/#342/#431 name - the same defect LENS 5 found in the call
+        // counter, one screen of this file away. The line is collapsed, an
+        // optional leading `global` is consumed, and what is left is read as
+        // `using`, then the rest of the directive.
         const string apiType = "ApiClient";
         foreach (string rel in shippedCs)
         {
@@ -3850,14 +3982,17 @@ internal static class Program
             string usingView = usingViewPair.Code;
             foreach (string raw in usingView.Split((char)10))
             {
-                string t = raw.Trim();
-                if (t.StartsWith("using static", StringComparison.Ordinal))
-                    reachProblems.Add(rel + " carries '" + t + "' - a static import can bring a bare "
+                string t = Collapse(raw);
+                if (t.StartsWith("global ", StringComparison.Ordinal)) t = t.Substring("global ".Length);
+                if (!t.StartsWith("using ", StringComparison.Ordinal)) continue;
+                string directive = t.Substring("using ".Length);
+                if (directive.StartsWith("static ", StringComparison.Ordinal))
+                    reachProblems.Add(rel + " carries '" + Collapse(raw) + "' - a static import can bring a bare "
                         + "member name into a file where this bound searches qualified only, so the "
                         + "caller set would no longer be closed");
-                else if (t.StartsWith("using ", StringComparison.Ordinal) && t.IndexOf('=') > 0
-                         && t.TrimEnd(';', ' ').EndsWith(apiType, StringComparison.Ordinal))
-                    reachProblems.Add(rel + " carries '" + t + "' - an alias gives the writers' owner a "
+                else if (directive.IndexOf('=') > 0
+                         && directive.TrimEnd(';', ' ').EndsWith(apiType, StringComparison.Ordinal))
+                    reachProblems.Add(rel + " carries '" + Collapse(raw) + "' - an alias gives the writers' owner a "
                         + "second name and this bound searches for one");
             }
         }
@@ -4336,33 +4471,44 @@ internal static class Program
         // carries them, one dictionary holds the pairs - and this is what keeps
         // the structure, in the shape W27 already uses for blanking.
         //
-        // ITS NEEDLES ARE BUILT IN HALVES, like W27's and W28's, because this
+        // ITS NEEDLE IS BUILT IN HALVES, like W27's and W28's, because this
         // case is written in the file it counts.
+        //
+        // AND IT COUNTS CONSTRUCTIONS, NOT SPELLINGS. The first cut searched the
+        // two literals "new SurfaceFile(" and "new Dictionary<string,
+        // SurfaceFile>", which is the same spelling bound the call counter had:
+        // a target-typed `SurfaceFile x = new(...)` - the form the language
+        // offers for exactly this declaration - builds a second pair while the
+        // case goes on reporting one, and so does one extra space. NewSitesIn
+        // reads the construction through the same boundary rule CallSitesIn uses
+        // for a call, and the type-argument list is what separates the PAIR from
+        // the MAP of pairs, so neither count is a substring count any more.
         var oneSurfaceProblems = new List<string>();
         if (progCode == null)
             oneSurfaceProblems.Add("cannot read " + progRel + " in the code view - an unread file is a "
                 + "failure, not a skip");
         else
         {
-            string pairCtor = "new Surface" + "File(";
-            string pairMap = "new Dictionary<string, Surface" + "File>";
+            string pairType = "Surface" + "File";
             string loadSig = "internal static SurfaceFile " + "Load(string relative)";
-            int ctors = CountOf(progCode, pairCtor);
-            int maps = CountOf(progCode, pairMap);
+            int ctors = 0, maps = 0, at = -1;
+            var mapWhere = new List<string>();
+            foreach (NewSite site in NewSitesIn(progCode, pairType))
+            {
+                if (site.Generic) { maps++; mapWhere.Add("line " + LineOf(progCode, site.At)); }
+                else { ctors++; if (at < 0) at = site.At; }
+            }
             int so, sc; string sp;
             if (!TryMemberSpan(progCode, loadSig, out so, out sc, out sp)) oneSurfaceProblems.Add(sp);
-            else
-            {
-                int at = progCode.IndexOf(pairCtor, StringComparison.Ordinal);
-                if (ctors != 1 || at < so || at > sc)
-                    oneSurfaceProblems.Add("both views of a shipped file must be built in exactly one place - "
-                        + "the loader in '" + loadSig + "' - or the surface has two memberships again and the "
-                        + "guarantee is back to being a clause that cannot fire; found " + ctors
-                        + " construction(s), first at line " + (ctors == 0 ? -1 : LineOf(progCode, at)));
-            }
+            else if (ctors != 1 || at < so || at > sc)
+                oneSurfaceProblems.Add("both views of a shipped file must be built in exactly one place - "
+                    + "the loader in '" + loadSig + "' - or the surface has two memberships again and the "
+                    + "guarantee is back to being a clause that cannot fire; found " + ctors
+                    + " construction(s), first at line " + (ctors == 0 ? -1 : LineOf(progCode, at)));
             if (maps != 1)
                 oneSurfaceProblems.Add("exactly one dictionary may carry the scan surface, or the membership "
-                    + "every scan skips on is two memberships again; found " + maps);
+                    + "every scan skips on is two memberships again; found " + maps
+                    + (mapWhere.Count == 0 ? "" : " at " + string.Join(", ", mapWhere.ToArray())));
             Console.WriteLine("NOTE  W29 surface pair: " + ctors + " construction(s), " + maps + " map(s)");
         }
         Check("W29 Report_TheScanSurfaceIsOneMembership",
@@ -4480,69 +4626,92 @@ internal static class Program
         // typed numbers: the number is READ OUT of the thing it counts, and the
         // sentence has to carry that number.
         //
-        // Both counts are taken from the TEXT under test, never from the running
-        // harness's own values: a mutant edits what the case READS, so a count
-        // taken from the compiled dictionary would move with neither and the
-        // check could not fail.
+        // THE PERMITTED-MEMBER COUNT IS THE COLLECTION'S OWN Count, AND THE
+        // SENTENCE IT IS HELD TO IS PROSE. The earlier wording here said both
+        // counts had to come from the TEXT under test, "never from the running
+        // harness's own values", because a wiring mutant edits what a case READS
+        // and a count taken from the compiled dictionary would not move with it.
+        // That argument was about the MUTANT MECHANISM and it decided the
+        // MEASUREMENT: the size was read off source spellings - the parity of
+        // `permittedMembers[` and a count of `)"` inside a bounded span - so a
+        // signature extracted to a constant and named in the array enlarged the
+        // COMPILED permitted set while the case went on reporting eight and both
+        // route sentences stayed green. The measurement is the executable set
+        // now, and the mechanism moved to meet it: a HARNESS mutant compiles a
+        // one-line-changed copy of this file, so a case that reads the running
+        // object can still be made to fail. See New-HarnessMutant in
+        // run-tests.ps1, and harness-ninthmember / harness-memberdropped.
+        //
+        // AND THE SET IS BOUND BOTH WAYS TO A LIST THE ROUND WROTE DOWN. A count
+        // alone cannot tell a ninth member from a swapped one, and the
+        // PERMITTED-MEMBER: lines in round-findings.md are the independent
+        // artifact - the shape H4 already uses for closures and bodies. Every
+        // executable member must be declared there and every declared member must
+        // be executable; the keys are collapsed, so a respelling that changes
+        // only spacing is not a finding (#342).
         var proseProblems = new List<string>();
         if (progCode == null || progText == null)
             proseProblems.Add("cannot read " + progRel + " in both views - an unread file is a failure, "
                 + "not a skip");
         else
         {
-            // THE SPAN IS THE WHOLE DECLARATION, not the first assignment
-            // to the nearest brace-shaped line. This clause first opened at
-            // the pluginRel assignment and closed at the next "\n        };",
-            // which is the apiRel block's closer only because the other two
-            // assignments happen to be one-liners and apiRel's happens to
-            // come last. Reorder them, or add a fourth file's entries after
-            // that block, and the size is read out of a span that no longer
-            // holds the set while the sentences still agree with it - a
-            // check that cannot fail for the case it exists to catch
-            // (#342/#431). It opens at the DECLARATION and closes at the
-            // first statement after the assignments, and the number of
-            // assignments inside the span must equal the number in the whole
-            // file, so one written anywhere else is named instead of missed.
-            const string mapOpen = "var permittedMembers = new Dictionary<string, string[]>";
-            const string mapClose = "foreach (string rel in shippedCs)";
-            int mo = progCode.IndexOf(mapOpen, StringComparison.Ordinal);
-            int mc = mo < 0 ? -1 : progCode.IndexOf(mapClose, mo, StringComparison.Ordinal);
-            if (mo < 0 || mc < 0)
-                proseProblems.Add("could not bound the permitted-member set in " + progRel
-                    + " - the count the route sentences carry is read out of it");
+            // THE EXECUTABLE SET, enumerated out of the collection the harness
+            // actually built one screen above the route loop. Its size is the
+            // collection's own Count and never a substring count, so nothing
+            // about how a signature is spelled, extracted or qualified can
+            // change it.
+            var executableMembers = new List<string>();
+            foreach (KeyValuePair<string, string[]> entry in permittedMembers)
+                foreach (string signature in entry.Value)
+                    executableMembers.Add(entry.Key + " :: " + Collapse(signature));
+            int members = executableMembers.Count;
+            var declaredMembers = new List<string>();
+            if (findText == null)
+                proseProblems.Add("cannot read " + findRel + " - the declared permitted-member list is one "
+                    + "of the two lists this case holds to each other, so an unread file is a failure, "
+                    + "not a skip");
             else
-            {
-                string mapSpan = progCode.Substring(mo, mc - mo);
-                // SPELLED IN HALVES. Written whole this needle is itself an
-                // occurrence of what it counts, in the file it counts over,
-                // so the file read four assignments where three exist and
-                // the clause reddened on its own literal - a reading that
-                // finds its own needle (#342), and the same discipline W27
-                // and W28 already use one screen further down.
-                const string assign = "permittedMembers" + "[";
-                int assignHere = CountOf(mapSpan, assign);
-                int assignAll = CountOf(progCode, assign);
-                if (assignHere != assignAll)
-                    proseProblems.Add("every assignment to the permitted-member set must stand in the "
-                        + "block its size is read from, or the size is read off part of the set; the "
-                        + "file carries " + assignAll + " and the block holds " + assignHere);
-                // Each entry is a member SIGNATURE, so each ends with the close
-                // of its parameter list immediately before the closing quote.
-                int members = CountOf(mapSpan, ")\"");
-                // The SENTENCES are comments, so they are counted over the PROSE
-                // view; the SET is code, so its size is counted over the CODE
-                // view, where a signature quoted in a comment declares nothing.
-                foreach (string sentence in new[] {
-                    "one of the " + members + " named below",
-                    members + " members, and no others, reach a staging entry point." })
+                foreach (string raw in findText.Split((char)10))
                 {
-                    int n = CountOf(progText, sentence);
-                    if (n != 1)
-                        proseProblems.Add("the route comment must carry the permitted-member set's own size ("
-                            + members + "); the sentence '" + sentence + "' occurs " + n + " time(s)");
+                    string t = raw.Trim();
+                    if (!t.StartsWith("PERMITTED-MEMBER:", StringComparison.Ordinal)) continue;
+                    string key = Collapse(t.Substring("PERMITTED-MEMBER:".Length));
+                    if (key.Length != 0 && !declaredMembers.Contains(key)) declaredMembers.Add(key);
                 }
-                Console.WriteLine("NOTE  H2 permitted members, counted from the set: " + members);
+            if (findText != null)
+            {
+                var undeclared = new List<string>();
+                foreach (string key in executableMembers)
+                    if (!declaredMembers.Contains(key)) undeclared.Add(key);
+                var unexecutable = new List<string>();
+                foreach (string key in declaredMembers)
+                    if (!executableMembers.Contains(key)) unexecutable.Add(key);
+                if (declaredMembers.Count == 0)
+                    proseProblems.Add(findRel + " must declare the permitted staging-entry members on "
+                        + "'PERMITTED-MEMBER:' lines - the two lists cannot be held to each other while "
+                        + "one of them is empty");
+                if (undeclared.Count != 0)
+                    proseProblems.Add("every member the harness permits must be declared in " + findRel
+                        + ", or the set a reader is shown is not the set the run enforces; permitted and "
+                        + "undeclared: " + string.Join(", ", undeclared.ToArray()));
+                if (unexecutable.Count != 0)
+                    proseProblems.Add("every member declared in " + findRel + " must be one the harness "
+                        + "actually permits, or the declaration outlives the route it describes; declared "
+                        + "and not permitted: " + string.Join(", ", unexecutable.ToArray()));
             }
+            // The SENTENCES are comments, so they are counted over the PROSE
+            // view; the SET is the running object, so its size is its Count.
+            foreach (string sentence in new[] {
+                "one of the " + members + " named below",
+                members + " members, and no others, reach a staging entry point." })
+            {
+                int n = CountOf(progText, sentence);
+                if (n != 1)
+                    proseProblems.Add("the route comment must carry the permitted-member set's own size ("
+                        + members + "); the sentence '" + sentence + "' occurs " + n + " time(s)");
+            }
+            Console.WriteLine("NOTE  H2 permitted members, counted from the set: " + members
+                + " executable, " + declaredMembers.Count + " declared");
         }
         if (findText == null)
             proseProblems.Add("cannot read " + findRel + " - the streak list is the streak count's only "
@@ -4675,6 +4844,160 @@ internal static class Program
         Check("H4 Report_TheFindingsFileHoldsEveryFindingTheRoundCloses",
             scopeProblems.Count == 0,
             string.Join("; ", scopeProblems.ToArray()));
+
+        // H5 - EVERY SYNTACTIC FORM A RESIDUAL NAMES IS PROBED AGAINST THE
+        // WALKER ITSELF. RED under "wire-formstale", which restores a verdict the
+        // walker contradicts; GREEN under "wire-forminert".
+        //
+        // Two of this round's documents said a null-conditional dot stayed
+        // invisible to the call walker, and the walker had stepped over `?.` on
+        // purpose since the LENS 5 rewrite - the closure record was handing a
+        // reader a residual the code had already closed. H4 holds identifiers to
+        // identifiers; it cannot read a body and has no opinion about whether
+        // what a body SAYS is true. Nothing could, while the claim was prose.
+        //
+        // So the claim is a LINE with a verdict on it, and the verdict is the
+        // walker's own answer to a live probe. Each form below is spelled into a
+        // snippet, CallSitesIn is asked for `Owner.Member` in it, and SEEN or
+        // UNSEEN is what comes back - never what a document says. Both documents
+        // must carry every form's live verdict and no other, which is the
+        // both-ways shape H2 and H4 already use. `!.` is a TRUE residual and
+        // stays one; if the walker ever gained it, this case would redden until
+        // the documents said so.
+        string[][] formProbes = new[]
+        {
+            new[] { "?.",          "        Owner?.Member(x);" + "\n" },
+            new[] { "!.",          "        Owner!.Member(x);" + "\n" },
+            new[] { "line-break",  "        Owner" + "\n" + "            .Member(x);" + "\n" },
+            new[] { "spaced-dot",  "        Owner . Member(x);" + "\n" },
+            new[] { "type-args",   "        Owner.Member<int>(x);" + "\n" },
+            new[] { "alias",       "        Alias.Member(x);" + "\n" }
+        };
+        var formVerdicts = new List<string>();
+        foreach (string[] probe in formProbes)
+            formVerdicts.Add(probe[0] + " = "
+                + (CallSitesIn(probe[1], "Owner.Member").Count != 0 ? "SEEN" : "UNSEEN"));
+        var formProblems = new List<string>();
+        string[][] evidenceDocs = new[] { new[] { closRel, closText }, new[] { findRel, findText } };
+        foreach (string[] doc in evidenceDocs)
+        {
+            if (doc[1] == null)
+            {
+                formProblems.Add("cannot read " + doc[0] + " - it is one of the documents whose residual "
+                    + "forms this case probes, so an unread file is a failure, not a skip");
+                continue;
+            }
+            var stated = new List<string>();
+            foreach (string raw in doc[1].Split((char)10))
+            {
+                string t = Collapse(raw);
+                if (!t.StartsWith("WALKER-FORM:", StringComparison.Ordinal)) continue;
+                string key = Collapse(t.Substring("WALKER-FORM:".Length));
+                if (key.Length != 0 && !stated.Contains(key)) stated.Add(key);
+            }
+            foreach (string want in formVerdicts)
+                if (!stated.Contains(want))
+                    formProblems.Add(doc[0] + " must record the walker's own answer for every form its "
+                        + "residuals name; it does not carry 'WALKER-FORM: " + want + "'. The walker was "
+                        + "asked and said: " + string.Join(" | ", formVerdicts.ToArray()));
+            foreach (string got in stated)
+                if (!formVerdicts.Contains(got))
+                    formProblems.Add(doc[0] + " carries 'WALKER-FORM: " + got + "', which the walker "
+                        + "contradicts - a residual naming a form the code already handles is a false "
+                        + "residual, and a reader stops looking. The live answers are "
+                        + string.Join(" | ", formVerdicts.ToArray()));
+        }
+        Console.WriteLine("NOTE  H5 walker forms, probed live: "
+            + string.Join(" | ", formVerdicts.ToArray()));
+        Check("H5 Report_EveryResidualFormIsProbedAgainstTheWalker",
+            formProblems.Count == 0,
+            string.Join("; ", formProblems.ToArray()));
+
+        // H6 - THE NUMBER OF BLIND-CONTROL LOGS EVERY DOCUMENT CARRIES IS READ
+        // OUT OF THE EVIDENCE SET. RED under "evidence-logrenamed", which takes
+        // one log out of the set; GREEN under "evidence-otherfile", which renames
+        // a file the count does not describe.
+        //
+        // The closure table's key legend named TWO blind-control logs for a round
+        // that ran THREE, and the sentence that inventories them was the last
+        // count in these documents still typed. Every other one is read out of
+        // its artifact; this one is read out of the FILES - the round's own
+        // evidence directory - and both documents are held to what is there.
+        //
+        // THE EVIDENCE SET IS AN INPUT, and an absent one is a FAILURE, never a
+        // skip - the same polarity every "cannot read" in this harness has.
+        // BUG389_EVIDENCE_DIR names it; run-tests.ps1 resolves the default from
+        // the repository root, so the driver still carries no absolute path.
+        string evidenceDir = Environment.GetEnvironmentVariable("BUG389_EVIDENCE_DIR");
+        var blindProblems = new List<string>();
+        var blindCounts = new List<string>();
+        if (string.IsNullOrEmpty(evidenceDir) || !System.IO.Directory.Exists(evidenceDir))
+            blindProblems.Add("cannot read the evidence set - BUG389_EVIDENCE_DIR is '"
+                + (evidenceDir == null ? "(unset)" : evidenceDir) + "' and the blind-control count every "
+                + "document carries is read out of the files present there, so an unread evidence set is "
+                + "a failure, not a skip");
+        else
+        {
+            const string prefix = "bug389-";
+            var perRound = new List<string>();
+            var perRoundCount = new List<int>();
+            foreach (string path in System.IO.Directory.GetFiles(evidenceDir,
+                                                                 prefix + "r*-*prior-harness.log"))
+            {
+                string name = System.IO.Path.GetFileName(path);
+                int dash = name.IndexOf('-', prefix.Length);
+                if (dash < 0) continue;
+                string round = name.Substring(prefix.Length, dash - prefix.Length);
+                int seen = perRound.IndexOf(round);
+                if (seen < 0) { perRound.Add(round); perRoundCount.Add(1); }
+                else perRoundCount[seen] = perRoundCount[seen] + 1;
+            }
+            for (int k = 0; k < perRound.Count; k++)
+                for (int j = k + 1; j < perRound.Count; j++)
+                    if (string.CompareOrdinal(perRound[j], perRound[k]) < 0)
+                    {
+                        string sr = perRound[k]; perRound[k] = perRound[j]; perRound[j] = sr;
+                        int sc = perRoundCount[k]; perRoundCount[k] = perRoundCount[j]; perRoundCount[j] = sc;
+                    }
+            for (int k = 0; k < perRound.Count; k++)
+                blindCounts.Add(perRound[k] + " = " + perRoundCount[k]);
+            if (blindCounts.Count == 0)
+                blindProblems.Add("the evidence set at " + evidenceDir + " holds no blind-control log at "
+                    + "all - the count the documents carry cannot be derived from an empty set");
+            foreach (string[] doc in evidenceDocs)
+            {
+                if (doc[1] == null)
+                {
+                    blindProblems.Add("cannot read " + doc[0] + " - it is one of the documents whose "
+                        + "blind-control count this case derives, so an unread file is a failure, not a skip");
+                    continue;
+                }
+                var stated = new List<string>();
+                foreach (string raw in doc[1].Split((char)10))
+                {
+                    string t = Collapse(raw);
+                    if (!t.StartsWith("BLIND-CONTROLS:", StringComparison.Ordinal)) continue;
+                    string key = Collapse(t.Substring("BLIND-CONTROLS:".Length));
+                    if (key.Length != 0 && !stated.Contains(key)) stated.Add(key);
+                }
+                foreach (string want in blindCounts)
+                    if (!stated.Contains(want))
+                        blindProblems.Add(doc[0] + " must carry the blind-control count the evidence set "
+                            + "shows; it does not carry 'BLIND-CONTROLS: " + want + "'. The files present "
+                            + "say: " + string.Join(" | ", blindCounts.ToArray()));
+                foreach (string got in stated)
+                    if (!blindCounts.Contains(got))
+                        blindProblems.Add(doc[0] + " carries 'BLIND-CONTROLS: " + got + "', which the "
+                            + "evidence set contradicts - the legend a reader uses to find the logs names "
+                            + "a set that is not there. The files present say: "
+                            + string.Join(" | ", blindCounts.ToArray()));
+            }
+        }
+        Console.WriteLine("NOTE  H6 blind-control logs, counted from the evidence set: "
+            + (blindCounts.Count == 0 ? "(none)" : string.Join(" | ", blindCounts.ToArray())));
+        Check("H6 Report_TheBlindControlCountIsDerivedFromTheEvidenceSet",
+            blindProblems.Count == 0,
+            string.Join("; ", blindProblems.ToArray()));
 
         Console.WriteLine("=== passed=" + _passed + " failed=" + _failed + " ===");
         return _failed == 0 ? 0 : 1;

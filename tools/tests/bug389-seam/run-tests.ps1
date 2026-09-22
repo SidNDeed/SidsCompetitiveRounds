@@ -42,6 +42,17 @@ $overall = 0
 # The round-2 tip. The N cases must redden against these files.
 $priorTip = '93f4db3018048149a5f9dbe2ef76fc28d82ddf52'
 
+# THE ROUND'S EVIDENCE SET. H6 reads the blind-control logs that are actually
+# present here and holds both finding documents to that count, because the
+# closure table's legend inventoried two logs for a round that ran three and it
+# was the last count in those documents still typed. The default is resolved
+# from the repository root, so this script still carries no absolute path;
+# BUG389_EVIDENCE_DIR overrides it, which is what the two evidence controls use.
+$evidence = $env:BUG389_EVIDENCE_DIR
+if ([string]::IsNullOrEmpty($evidence)) {
+    $evidence = (Join-Path $repo (Join-Path 'ai-collab' 'bugs'))
+}
+
 # The shipped files the W, N and S4 cases read. A wiring mutant copies all of
 # them and changes one line in one of them, so every other case in the same run
 # is an untouched control.
@@ -162,17 +173,23 @@ function Edit-InMember([string]$label, [string]$text, [string]$member, [string]$
     return $text.Substring(0, $open) + $body.Replace($find, $replace) + $text.Substring($close + 1)
 }
 
-function New-RunDir([string]$name) {
+function New-RunDir([string]$name, [string]$harnessSource) {
     $dir = Join-Path $work ('run-' + $name)
     if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
     Copy-Item (Join-Path $root 'FixTests.csproj') $dir
-    Copy-Item (Join-Path $root 'Program.cs') $dir
+    # THE COMPILED HARNESS, which is $root's copy unless a HARNESS MUTANT names
+    # another. Every wiring mutant changes only what a case READS; a case that
+    # reads the running harness's own objects - H2's permitted-member set - can
+    # only be made to fail by changing what EXECUTES, and that is this parameter.
+    if ([string]::IsNullOrEmpty($harnessSource)) { $harnessSource = (Join-Path $root 'Program.cs') }
+    Copy-Item $harnessSource (Join-Path $dir 'Program.cs')
     return $dir
 }
 
-function Invoke-Suite([string]$name, [string]$seamSource, [string]$sourceRoot) {
-    $dir  = New-RunDir $name
+function Invoke-Suite([string]$name, [string]$seamSource, [string]$sourceRoot,
+                      [string]$harnessSource, [string]$evidenceDir) {
+    $dir  = New-RunDir $name $harnessSource
     $proj = Join-Path $dir 'FixTests.csproj'
     Say ('--- build ' + $name + ' (seam: ' + (Split-Path -Leaf $seamSource) + ')')
     $build = & dotnet build $proj -c Release --nologo -p:SeamSource=$seamSource 2>&1
@@ -182,9 +199,13 @@ function Invoke-Suite([string]$name, [string]$seamSource, [string]$sourceRoot) {
     $exe = Join-Path $dir (Join-Path 'bin' (Join-Path 'Release' (Join-Path 'net10.0' 'FixTests.exe')))
     if (-not (Test-Path $exe)) { throw ('no test binary produced for variant ' + $name) }
     Say ('--- run ' + $name)
+    if ([string]::IsNullOrEmpty($evidenceDir)) { $evidenceDir = $evidence }
     # The invocation, immediately above the results it produced.
-    Say ('--- command: ' + (Rel $exe) + '   [BUG389_SOURCE_ROOT=' + (Rel $sourceRoot) + ']')
+    Say ('--- command: ' + (Rel $exe) + '   [BUG389_SOURCE_ROOT=' + (Rel $sourceRoot) +
+         '] [BUG389_EVIDENCE_DIR=' + (Rel $evidenceDir) + '] [harness=' +
+         (Rel (Join-Path $dir 'Program.cs')) + ']')
     $env:BUG389_SOURCE_ROOT = $sourceRoot
+    $env:BUG389_EVIDENCE_DIR = $evidenceDir
     $out = & $exe 2>&1
     $code = $LASTEXITCODE
     $lines = @($out | ForEach-Object { [string]$_ })
@@ -218,6 +239,66 @@ function New-Mutant([string]$name, [object[]]$edits) {
     }
     [System.IO.File]::WriteAllText($dst, $text)
     return $dst
+}
+
+# A HARNESS mutation: compile a one-line-changed copy of Program.cs itself and
+# leave every file the cases READ alone.
+#
+# WHY THIS KIND EXISTS. A wiring mutant changes the TEXT a case reads and never
+# what executes, which is exactly right for a case whose subject is the shipped
+# source - and it is the reason the permitted-member size used to be read off
+# source spellings: a count taken from the compiled dictionary would not have
+# moved under any mutant this driver could build, so the clause was written to
+# measure what the mutant could reach instead of what the round claims. That is a
+# measurement chosen by its test harness. H2 reads the running object now, and
+# this builder is what can still make it fail: the anchor is resolved inside a
+# named member under the same exactly-one-site rule, and the source root handed
+# to the run is the untouched tree, so every other case is a control.
+#
+# THE ANCHOR MUST EXIST AT THE BLIND TIP TOO. A harness mutant is built from
+# whatever Program.cs is in the tree, so during a blind control it is built from
+# the swapped-in previous harness; an anchor added by this round would throw
+# there and take the whole control down with it. That is LENS 8's lesson, applied
+# to a new builder rather than re-learned.
+# $edits is an array of three-element arrays: @(@('member','find','replace'), ...)
+function New-HarnessMutant([string]$name, [object[]]$edits) {
+    if (-not (Test-Path $work)) { New-Item -ItemType Directory -Path $work -Force | Out-Null }
+    $dst  = Join-Path $work ('harness-' + $name + '.cs')
+    $text = [System.IO.File]::ReadAllText((Join-Path $root 'Program.cs'))
+    if ($edits.Count -eq 3 -and ($edits[0] -is [string])) { $edits = @(, $edits) }
+    Say ('--- harness mutant ' + $name + ': ' + $edits.Count +
+         ' edit(s) in tools/tests/bug389-seam/Program.cs (COMPILED, not read)')
+    foreach ($edit in $edits) {
+        $text = Edit-InMember ('harness-' + $name) $text ([string]$edit[0]) ([string]$edit[1]) ([string]$edit[2]) ''
+    }
+    [System.IO.File]::WriteAllText($dst, $text)
+    return $dst
+}
+
+# AN EVIDENCE-SET mutation: copy the round's evidence directory and rename ONE
+# file in it. H6 derives the blind-control count from the files that are there,
+# so taking a log out of the set must redden it and renaming a file the count
+# does not describe must not. Nothing is written to the real evidence set.
+function New-EvidenceDir([string]$name, [string]$find, [string]$replace) {
+    $dir = Join-Path $work ('evidence-' + $name)
+    if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    if (-not (Test-Path $evidence)) {
+        throw ('no evidence set at ' + (Rel $evidence) + ' - H6 derives the blind-control count from it')
+    }
+    $copied = 0
+    foreach ($f in (Get-ChildItem -Path $evidence -File)) {
+        $target = $f.Name
+        if ($target -eq $find) { $target = $replace }
+        Copy-Item $f.FullName (Join-Path $dir $target)
+        $copied++
+    }
+    if (-not (Test-Path (Join-Path $dir $replace))) {
+        throw ('evidence mutant ' + $name + ': ' + $find + ' is not in the evidence set, so the ' +
+               'rename measured nothing')
+    }
+    Say ('--- evidence mutant ' + $name + ': ' + $copied + ' file(s) copied, ' + $find + ' -> ' + $replace)
+    return $dir
 }
 
 # A wiring mutation: copy the shipped files the cases read, change ONE line
@@ -1602,6 +1683,29 @@ Say ''
 # The same body, WITH its marker and with the declared census moved to match:
 # the case must pass, or it would be failing on "the file changed" rather than on
 # the property it names.
+#
+# THE CENSUS LINE IS READ, NOT TYPED (round 9). This mutant carried the census
+# spelled out - "20 findings: 1 HIGH, 4 MEDIUM, 15 LOW" - so the round that added
+# five findings did not fail a case, it brought the whole driver down on a
+# missing anchor. A number typed in a mutant is the same defect as a number typed
+# in a report (#431): it is read out of the file it describes now, and the
+# replacement is that line with one LOW added.
+$censusFile = Join-Path $repo (Join-Path 'tools' (Join-Path 'tests' (Join-Path 'bug389-seam' 'round-findings.md')))
+$censusLine = @([System.IO.File]::ReadAllText($censusFile).Split([char]10) |
+    ForEach-Object { $_.Trim() } |
+    Where-Object { $_.StartsWith('CENSUS: ') })
+if ($censusLine.Count -ne 1) {
+    throw ('the findings file must declare the census exactly once; found ' + $censusLine.Count)
+}
+$censusNow = [string]$censusLine[0]
+$censusMatch = [regex]::Match($censusNow, '^CENSUS: (\d+) findings: (\d+) HIGH, (\d+) MEDIUM, (\d+) LOW$')
+if (-not $censusMatch.Success) {
+    throw ('cannot read the declared census to build wire-bodymarked: ' + $censusNow)
+}
+$censusPlus = ('CENSUS: ' + ([int]$censusMatch.Groups[1].Value + 1) + ' findings: ' +
+               $censusMatch.Groups[2].Value + ' HIGH, ' + $censusMatch.Groups[3].Value + ' MEDIUM, ' +
+               ([int]$censusMatch.Groups[4].Value + 1) + ' LOW')
+Say ('--- census read from the findings file: "' + $censusNow + '" -> "' + $censusPlus + '"')
 $wireBodyMarked = New-WireRootSpansMulti 'bodymarked' `
     @(@('tools/tests/bug389-seam/round-findings.md',
         '### N9 - the untouched-selection streak was called both sixth and fifth',
@@ -1610,8 +1714,8 @@ $wireBodyMarked = New-WireRootSpansMulti 'bodymarked' `
         '### N10 '),
       @('tools/tests/bug389-seam/round-findings.md',
         'CENSUS: ',
-        'CENSUS: 20 findings: 1 HIGH, 4 MEDIUM, 15 LOW',
-        'CENSUS: 21 findings: 1 HIGH, 4 MEDIUM, 16 LOW',
+        $censusNow,
+        $censusPlus,
         '## The selection-method streak'),
       @('tools/tests/bug389-seam/R8-CLOSURES.md',
         'N10 LOW - THE PROMISED REPOSITORY COPY NEVER REACHED THE PIN.',
@@ -1656,20 +1760,65 @@ Say ''
 # closure is not four corrections but reading each number OUT of the thing it
 # counts: H2 counts permittedMembers from the file's own text and requires both
 # route sentences to carry that count.
-$wireProseCount = New-WireRoot 'prosecount' 'tools/tests/bug389-seam/Program.cs' `
-    'private static int Main()' `
-    '            "public static void FfaProbeServerState()",' `
-    ('            "public static void FfaProbeServerState()",' + $nl + '            "public static void FfaProbeServerStateAgain()",') ''
-$runWireProseCount = Invoke-Suite 'wire-prosecount' $seam $wireProseCount
-if (-not (Assert-Mutation 'a ninth permitted member under a prose count of eight' $runWireProseCount 'H2' 'W25')) { $overall = 1 }
+# RESHAPED INTO A HARNESS MUTANT (round 9). This was a wiring mutant that added a
+# ninth signature to the source-root COPY of Program.cs, which is what H2 used to
+# read. H2 reads the running collection now, so a text-only edit moves nothing;
+# the ninth member is added to the COMPILED harness, and it is added the way a
+# maintainer really would - a signature extracted to a constant and named in the
+# array - which is precisely the route the old spelling-bound count could not see.
+$harnessNinthMember = New-HarnessMutant 'ninthmember' `
+    @(@('private static int Main()',
+        '        var permittedMembers = new Dictionary<string, string[]>(StringComparer.Ordinal);',
+        ('        const string extractedSignature = "public static void FfaProbeAgain()";' + $nl +
+         '        var permittedMembers = new Dictionary<string, string[]>(StringComparer.Ordinal);')),
+      @('private static int Main()',
+        '            "public static void FfaProbeServerState()",',
+        ('            "public static void FfaProbeServerState()",' + $nl + '            extractedSignature,')))
+$runHarnessNinthMember = Invoke-Suite 'harness-ninthmember' $seam $repo $harnessNinthMember
+if (-not (Assert-Mutation 'a ninth permitted member reached through an extracted constant' $runHarnessNinthMember 'H2' 'W25')) { $overall = 1 }
+Say ''
+
+# The other direction of the same binding: a member the declared list still names
+# is taken OUT of the array. W25 reddens here too - the staging call inside that
+# member is no longer inside a placed one - so the control is W1, a case that
+# reads a file neither edit touches.
+$harnessMemberDropped = New-HarnessMutant 'memberdropped' `
+    @(, @('private static int Main()',
+          '            "public static void FfaKickFromLobby(string targetSteamId)"',
+          ''))
+$runHarnessMemberDropped = Invoke-Suite 'harness-memberdropped' $seam $repo $harnessMemberDropped
+if (-not (Assert-Mutation 'a declared permitted member dropped from the array' $runHarnessMemberDropped 'H2' 'W1')) { $overall = 1 }
+Say ''
+
+# And the case where the COUNT cannot see it at all: one member renamed, so the
+# collection still holds eight and only the both-ways binding to the declared
+# list can tell. This is the control the count-only clause could never have had.
+$harnessMemberSwapped = New-HarnessMutant 'memberswapped' `
+    @(, @('private static int Main()',
+          '            "public static void FfaKickFromLobby(string targetSteamId)"',
+          '            "public static void FfaKickFromLobbyLater(string targetSteamId)"'))
+$runHarnessMemberSwapped = Invoke-Suite 'harness-memberswapped' $seam $repo $harnessMemberSwapped
+if (-not (Assert-Mutation 'a permitted member renamed under an unchanged count' $runHarnessMemberSwapped 'H2' 'W1')) { $overall = 1 }
+Say ''
+
+# The inert twin for all three: the DECLARED list respelled with different
+# spacing. The keys are collapsed on both sides, so a respelling is not a
+# finding - and a case that reddened on one would be measuring the typist.
+$wireMemberSpacing = New-WireRootSpans 'memberspacing' 'tools/tests/bug389-seam/round-findings.md' `
+    @(, @('## The permitted staging-entry members',
+          'PERMITTED-MEMBER: plugin/ApiClient.cs :: public static void FfaProbeServerState()',
+          'PERMITTED-MEMBER:  plugin/ApiClient.cs  ::  public static void   FfaProbeServerState()',
+          '## The selection-method streak'))
+$runWireMemberSpacing = Invoke-Suite 'wire-memberspacing' $seam $wireMemberSpacing
+if (-not (Assert-Inert 'a declared permitted member respelled' $runWireMemberSpacing @('H2', 'W25'))) { $overall = 1 }
 Say ''
 
 # The other half of the same case: the streak list is the artifact, and the
 # declared streak is counted from it rather than typed as an ordinal twice.
 $wireStreakRow = New-WireRootSpans 'streakrow' 'tools/tests/bug389-seam/round-findings.md' `
     @(, @('## The selection-method streak',
-          'STREAK-ROUND: R7',
-          ('STREAK-ROUND: R7' + $nl + 'STREAK-ROUND: R8'),
+          'STREAK-ROUND: R8',
+          ('STREAK-ROUND: R8' + $nl + 'STREAK-ROUND: R9'),
           '### N1 - '))
 $runWireStreakRow = Invoke-Suite 'wire-streakrow' $seam $wireStreakRow
 if (-not (Assert-Mutation 'a round added to the streak list under a typed streak' $runWireStreakRow 'H2' 'W25')) { $overall = 1 }
@@ -1713,17 +1862,14 @@ Say ''
 # and says so rather than inventing one that cannot fail.
 
 # ---------- lens 1: the permitted-member size read off part of the set --------
-# H2 opened its span at the pluginRel assignment and closed it at the nearest
-# brace-shaped line, which belongs to the apiRel block only because the other
-# two assignments are one-liners and apiRel's comes last. An assignment written
-# AFTER that block is invisible to the count the route sentences are held to.
-$wireProseMember = New-WireRoot 'prosemember' 'tools/tests/bug389-seam/Program.cs' `
-    'private static int Main()' `
-    '            string[] allowedHere;' `
-    '            string[] allowedHere; permittedMembers[pluginRel] = new[] { "private void Extra()" };' ''
-$runWireProseMember = Invoke-Suite 'wire-prosemember' $seam $wireProseMember
-if (-not (Assert-Mutation 'a permitted member written outside the counted block' $runWireProseMember 'H2' 'W25')) { $overall = 1 }
-Say ''
+# DELETED WITH ITS CLAUSE (round 9). wire-prosemember planted an assignment
+# outside the span H2 read its size from, which was the right mutant for a size
+# read out of a bounded region of SOURCE TEXT. There is no span and no region
+# any more: H2 enumerates the collection the harness built, so "inside the
+# block" and "outside the block" have stopped being different states and a
+# mutant naming them would be a mutant of a mechanism that no longer exists
+# (#310). Its successors are harness-ninthmember, harness-memberdropped and
+# harness-memberswapped above, which change what EXECUTES.
 
 # ---------- lens 2: two spellings of the severity marker ----------------------
 # H1 holds a body count and a marker count to each other, which is only evidence
@@ -1874,6 +2020,112 @@ $wireClosureBodyInert = New-WireRootSpans 'closurebodyinert' 'tools/tests/bug389
           "THIS PASS'S COLD LENS, read on the build tip ed3b1e5."))
 $runWireClosureBodyInert = Invoke-Suite 'wire-closurebodyinert' $seam $wireClosureBodyInert
 if (-not (Assert-Inert 'the closed-set of findings, inert edit' $runWireClosureBodyInert @('H4', 'W25'))) { $overall = 1 }
+Say ''
+
+# ============ THE COLD LENS ON THE ROUND-8 APPLY TIP 934b35e ================
+# The round-8 gate returned one MEDIUM and four LOW, every one of them in the
+# test surface or in the closure documents. The MEDIUM's three controls are the
+# harness mutants above; these are the rest.
+
+# ---------- R8-new-L1: the guard read a line prefix, not a directive ---------
+# The alias and static-import guard tested StartsWith('using static') and
+# StartsWith('using '), so the file-spanning forms walked past it. This plants
+# the static one: a bare writer name brought into a file where the caller bound
+# searches qualified only.
+$wireGlobalStatic = New-WireRootSpans 'globalstatic' 'plugin/NativeUI.cs' `
+    @(, @('using System;',
+          'using Photon.Pun;',
+          ('using Photon.Pun;' + $nl + 'global using static CompetitiveRounds.ApiClient;'),
+          'namespace CompetitiveRounds'))
+$runWireGlobalStatic = Invoke-Suite 'wire-globalstatic' $seam $wireGlobalStatic
+if (-not (Assert-Mutation 'a global static import of the writers own type' $runWireGlobalStatic 'W25' 'W1')) { $overall = 1 }
+Say ''
+
+# And the alias half: a second name for the owner, in the form the shipped tree
+# already uses at plugin/MusicEngine.cs.
+$wireGlobalAlias = New-WireRootSpans 'globalalias' 'plugin/NativeUI.cs' `
+    @(, @('using System;',
+          'using Photon.Pun;',
+          ('using Photon.Pun;' + $nl + 'global using GAC = CompetitiveRounds.ApiClient;'),
+          'namespace CompetitiveRounds'))
+$runWireGlobalAlias = Invoke-Suite 'wire-globalalias' $seam $wireGlobalAlias
+if (-not (Assert-Mutation 'a global alias for the writers own type' $runWireGlobalAlias 'W25' 'W1')) { $overall = 1 }
+Say ''
+
+# The twin: an ordinary global using, which names no member and no second name
+# for the owner. The shipped tree carries one of these already, so a guard that
+# reddened here would redden on the tree it is run against.
+$wireGlobalInert = New-WireRootSpans 'globalinert' 'plugin/NativeUI.cs' `
+    @(, @('using System;',
+          'using Photon.Pun;',
+          ('using Photon.Pun;' + $nl + 'global using System.Globalization;'),
+          'namespace CompetitiveRounds'))
+$runWireGlobalInert = Invoke-Suite 'wire-globalinert' $seam $wireGlobalInert
+if (-not (Assert-Inert 'an ordinary global using added' $runWireGlobalInert @('W25', 'W1'))) { $overall = 1 }
+Say ''
+
+# ---------- R8-new-L2: the construction count was a substring count ----------
+# W29 searched the literals 'new SurfaceFile(' and 'new Dictionary<string,
+# SurfaceFile>'. This builds the pair a second time in the form the language
+# offers for exactly this declaration, which the literals cannot see.
+$wireSurfaceTargetTyped = New-WireRoot 'surfacetargettyped' 'tools/tests/bug389-seam/Program.cs' `
+    'private static int Main()' `
+    '        var answerOwner = new Dictionary<string, string>();' `
+    '        var answerOwner = new Dictionary<string, string>(); SurfaceFile surfaceTargetTyped = new(LoadSource(apiRel), LoadBlanked(apiRel));' ''
+$runWireSurfaceTargetTyped = Invoke-Suite 'wire-surfacetargettyped' $seam $wireSurfaceTargetTyped
+if (-not (Assert-Mutation 'a target-typed second construction of the surface pair' $runWireSurfaceTargetTyped 'W29' 'W25')) { $overall = 1 }
+Say ''
+
+# The twin for the same change: the ONE real construction, respelled with
+# different spacing. A structural reader must still find exactly one and still
+# find it inside its loader; a literal search finds none and reddens on the
+# typist.
+$wireSurfaceSpacing = New-WireRoot 'surfacespacing' 'tools/tests/bug389-seam/Program.cs' `
+    'internal static SurfaceFile Load(string relative)' `
+    '            return new SurfaceFile(prose, LoadBlanked(relative));' `
+    '            return new  SurfaceFile (prose, LoadBlanked(relative));' ''
+$runWireSurfaceSpacing = Invoke-Suite 'wire-surfacespacing' $seam $wireSurfaceSpacing
+if (-not (Assert-Inert 'the one construction, respelled' $runWireSurfaceSpacing @('W29', 'W25'))) { $overall = 1 }
+Say ''
+
+# ---------- R8-new-L3: a residual the code had already closed ----------------
+# Both finding documents said a null-conditional dot stayed invisible to the call
+# walker, which has stepped over it since the LENS 5 rewrite. H5 asks the walker
+# and holds both documents to its answer; this restores the stale verdict.
+$wireFormStale = New-WireRootSpans 'formstale' 'tools/tests/bug389-seam/R8-CLOSURES.md' `
+    @(, @('WHAT THE CALL WALKER ACTUALLY SEES',
+          'WALKER-FORM: ?. = SEEN',
+          'WALKER-FORM: ?. = UNSEEN',
+          'ROUND-7 FINDINGS, BY NUMBER.'))
+$runWireFormStale = Invoke-Suite 'wire-formstale' $seam $wireFormStale
+if (-not (Assert-Mutation 'a residual naming a form the walker already handles' $runWireFormStale 'H5' 'W25')) { $overall = 1 }
+Say ''
+
+$wireFormInert = New-WireRootSpans 'forminert' 'tools/tests/bug389-seam/R8-CLOSURES.md' `
+    @(, @('WHAT THE CALL WALKER ACTUALLY SEES',
+          'the forms are answered by the walker itself',
+          'the forms are answered by the walker alone',
+          'ROUND-7 FINDINGS, BY NUMBER.'))
+$runWireFormInert = Invoke-Suite 'wire-forminert' $seam $wireFormInert
+if (-not (Assert-Inert 'the walker-form verdicts, inert edit' $runWireFormInert @('H5', 'W25'))) { $overall = 1 }
+Say ''
+
+# ---------- R8-new-L4: a legend that inventoried two logs of three -----------
+# H6 counts the blind-control logs that are in the evidence set and holds both
+# documents to that count. This takes one log out of the set.
+$evidenceLogRenamed = New-EvidenceDir 'logrenamed' `
+    'bug389-r8-lens2-prior-harness.log' 'bug389-r8-lens2-prior-harness.log.kept'
+$runEvidenceLogRenamed = Invoke-Suite 'evidence-logrenamed' $seam $repo '' $evidenceLogRenamed
+if (-not (Assert-Mutation 'a blind-control log taken out of the evidence set' $runEvidenceLogRenamed 'H6' 'W25')) { $overall = 1 }
+Say ''
+
+# The twin: the same log RENAMED to another name the count still describes. The
+# count is of files, not of names, so this must not move it - a case that
+# reddened here would be reading the legend and not the set.
+$evidenceOtherFile = New-EvidenceDir 'otherfile' `
+    'bug389-r8-lens2-prior-harness.log' 'bug389-r8-lens3-prior-harness.log'
+$runEvidenceOtherFile = Invoke-Suite 'evidence-otherfile' $seam $repo '' $evidenceOtherFile
+if (-not (Assert-Inert 'a blind-control log renamed within the set' $runEvidenceOtherFile @('H6', 'W25'))) { $overall = 1 }
 Say ''
 
 # ---------- 22. the prior mechanism ----------

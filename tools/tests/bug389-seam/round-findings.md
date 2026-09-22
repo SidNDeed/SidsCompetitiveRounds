@@ -1,10 +1,13 @@
 # Bug 389 client, round 8 - the findings this round answers
 
 The round-7 gate returned a NO-GO: 0 HIGH, 1 MEDIUM, 9 LOW. This file holds a
-body for EVERY finding the round closes - the ten from that gate and the ten its
-own two cold lenses found on its own build tips - and it exists so the severity
-census in the test log can be COMPUTED from the bodies instead of typed beside
-them.
+body for EVERY finding the round closes - the ten from that gate, the ten its
+own two cold lenses found on its own build tips, and the five the round-8 gate
+returned - and it exists so the severity census in the test log can be COMPUTED
+from the bodies instead of typed beside them. The round-8 gate returned a NO-GO
+of its own: 0 HIGH, 1 MEDIUM, 4 LOW, every one of them in the test surface or in
+the closure documents, and the round-9 pass answers them here by the same
+numbers it received.
 
 **The scope is the whole round, and that is CHECKED rather than promised.** The
 round-8 build closed fourteen findings and wrote bodies for ten, so the derived
@@ -33,7 +36,57 @@ now counts the bodies a SECOND time, by their own `###` heading, by a counter
 that knows nothing about markers, requires the two counts to agree, and NAMES any
 body that carries none.
 
-CENSUS: 20 findings: 1 HIGH, 4 MEDIUM, 15 LOW
+CENSUS: 25 findings: 1 HIGH, 5 MEDIUM, 19 LOW
+
+## The permitted staging-entry members
+
+The members that may hold a call to a staging entry point, one per line. This is
+the DECLARED list, and `H2` holds it to the collection the harness actually
+builds - in both directions, so a member permitted and not declared reddens and
+so does one declared and not permitted. The keys are compared with runs of
+whitespace collapsed, so a respelling is not a finding.
+
+The round-8 form of that case read the set's size off SOURCE SPELLINGS: the
+parity of one assignment token and a count of `)"` inside a bounded span. A
+signature extracted to a constant and named in the array enlarged the compiled
+set while the case went on reporting eight, and both route sentences stayed
+green. A size is not a set, and a spelling is not either.
+
+PERMITTED-MEMBER: plugin/Plugin.cs :: private void Update()
+PERMITTED-MEMBER: plugin/NativeUI.cs :: private static void MaybeRefreshOvtTab()
+PERMITTED-MEMBER: plugin/NativeUI.cs :: private static void MaybeRefreshFfaTab()
+PERMITTED-MEMBER: plugin/ApiClient.cs :: public static void UpdateTeamQueuePoll(string steamId)
+PERMITTED-MEMBER: plugin/ApiClient.cs :: private static void FfaEnrollResult(bool ok, string resp, string intendedLobbyId, bool wasRecovery)
+PERMITTED-MEMBER: plugin/ApiClient.cs :: public static void FfaProbeServerState()
+PERMITTED-MEMBER: plugin/ApiClient.cs :: private void HandleResolveProbe(string status, string resp, string sid)
+PERMITTED-MEMBER: plugin/ApiClient.cs :: public static void FfaKickFromLobby(string targetSteamId)
+
+## What the call walker actually sees
+
+One line per syntactic form the residuals in these documents name, with the
+answer the walker gives when it is ASKED. `H5` spells each form into a snippet,
+puts it to `CallSitesIn`, and holds both documents to what comes back - so a
+residual describing a form the code already handles reddens instead of standing.
+Round 8 said a null-conditional dot stayed invisible while the walker had
+stepped over `?.` since the `LENS 5` rewrite; a false residual is worse than a
+missing one, because a reader stops looking.
+
+WALKER-FORM: ?. = SEEN
+WALKER-FORM: !. = UNSEEN
+WALKER-FORM: line-break = SEEN
+WALKER-FORM: spaced-dot = SEEN
+WALKER-FORM: type-args = UNSEEN
+WALKER-FORM: alias = UNSEEN
+
+## The blind controls this evidence set holds
+
+One line per round, with the number of blind-control logs that round's evidence
+set carries. `H6` counts the files and holds both documents to the count, so the
+legend a reader uses to find the logs cannot name a set that is not there. The
+round-8 legend inventoried two logs for a round that ran three.
+
+BLIND-CONTROLS: r8 = 3
+BLIND-CONTROLS: r9 = 1
 
 ## The selection-method streak
 
@@ -48,7 +101,8 @@ STREAK-ROUND: R4
 STREAK-ROUND: R5
 STREAK-ROUND: R6
 STREAK-ROUND: R7
-STREAK: 5 gate verdicts have landed no finding inside the selection method
+STREAK-ROUND: R8
+STREAK: 6 gate verdicts have landed no finding inside the selection method
 
 ### N1 - the allowed writer methods were closed by owner and not by caller
 
@@ -239,10 +293,12 @@ spellings the codebase uses - a spelling bound of the class `#432`/`#342`/`#431`
 name. Closed at the root: the last segment is found first and the qualifier is
 walked BACKWARD across whitespace and its dots, so both spellings reach the same
 answer, and the two remaining `IndexOf` searches of a qualified call go through
-the same counter. The summary now names what it still cannot see - an alias, a
-static import, a generic call, a null-conditional dot, a target named at run
-time. `wire-splitcall` and `wire-splitentry` redden `W25`; `wire-splitinert`
-leaves it green.
+the same counter. The summary names what it still cannot see - an alias, a
+static import, a generic call, a target named at run time. CORRECTED in round 9
+(`R8-new-L3`): this sentence also listed a null-conditional dot, which the walker
+had stepped over from the day it was written. The forms are answered by the
+walker itself now, above, and not by this sentence. `wire-splitcall` and
+`wire-splitentry` redden `W25`; `wire-splitinert` leaves it green.
 
 ### LENS 6 - the clause added to close LENS 4 could not fail
 
@@ -329,3 +385,97 @@ names every finding the round closes - and requires that list and the bodies her
 to be the same list, in both directions. Every finding of this round now has a
 body above and the declared census is the twenty they produce.
 `wire-closurenobody` reddens `H4`; `wire-closurebodyinert` is the twin.
+
+### R8-new-M1 - the permitted-member size was read off source spellings
+
+SEVERITY: MEDIUM
+
+`H2` bounded the permitted-member declaration by two literals and read the set's
+size out of the span between them: the parity of a `permittedMembers[` token and
+a count of `)"`. Both are spellings, and neither is the set. A signature
+extracted to a constant and then named in the array - an ordinary refactor -
+enlarges the COMPILED permitted set while the count stays at eight and both route
+sentences stay green, so a member could join the staging route with nothing
+saying so. The clause was written that way on purpose: a wiring mutant changes
+what a case READS and never what executes, so a count taken from the running
+dictionary could not have been made to fail. That is a measurement chosen by its
+test harness. Closed by measuring the right thing and moving the mechanism to
+meet it: `H2` enumerates the collection the harness built, its size is that
+collection's own `Count`, and the members are bound BOTH WAYS to the
+`PERMITTED-MEMBER:` lines above - the shape `H4` already uses for closures and
+bodies. `New-HarnessMutant` compiles a one-line-changed copy of the harness, so
+a case that reads a running object can still be made to fail.
+`harness-ninthmember` adds the ninth through an extracted constant and
+`harness-memberdropped` takes a declared one out; `harness-memberswapped` renames
+one so the count cannot move and only the binding can tell.
+`wire-memberspacing` is the twin. The span, the parity clause and the `)"` count
+are DELETED, not corrected, and `wire-prosemember` went with them.
+
+### R8-new-L1 - the using guard read a line prefix and not a directive
+
+SEVERITY: LOW
+
+The premise the bare-name search rests on - that no shipped file imports the
+writers' members statically or gives their owner a second name - was checked by
+`StartsWith("using static")` and `StartsWith("using ")` on the trimmed line. Both
+miss `global using static ...;` and `global using Alias = ...;`, and `using
+static` spelled with two spaces misses too. This is not a hypothetical spelling:
+`plugin/MusicEngine.cs` opens with a `global using` alias today. A guard that
+holds for one spelling of a construct the tree already uses is the spelling bound
+`#432`/`#342`/`#431` name, and it is the same defect `LENS 5` found in the call
+counter. Closed by reading the directive as TOKENS: the line is collapsed, an
+optional leading `global` is consumed, and what remains is read as `using` and
+then as the rest of the directive. `wire-globalstatic` and `wire-globalalias`
+redden `W25`; `wire-globalinert` adds an ordinary global using and leaves it
+green.
+
+### R8-new-L2 - the construction count was a substring count
+
+SEVERITY: LOW
+
+`W29` holds the scan surface to one membership by counting the literals
+`new SurfaceFile(` and `new Dictionary<string, SurfaceFile>`. A target-typed
+`SurfaceFile x = new(...)` - the form the language offers for exactly this
+declaration - builds a second pair that neither literal can see, and so does a
+qualified spelling or one extra space; meanwhile a respelling of the one real
+site makes the count read zero and reddens on the typist rather than on the
+structure. Closed by reading the construction structurally, through the same
+boundary rule `CallSitesIn` applies to a call: `NewSitesIn` finds the `new`
+keyword at its own identifier boundaries, reads the type spelling after it as a
+unit - or, for the target-typed form, out of the declaration head the assignment
+carries - and matches the segment as a whole identifier, with the type-argument
+list telling a PAIR from a MAP of pairs. `wire-surfacetargettyped` reddens `W29`;
+`wire-surfacespacing` respells the one real site and leaves it green.
+
+### R8-new-L3 - a residual named a form the walker already handled
+
+SEVERITY: LOW
+
+This file and the closure table both said a null-conditional dot stayed invisible
+to the call walker. The walker has stepped over `?.` since the `LENS 5` rewrite
+and says so at the walk. A false residual is worse than a missing one: it tells a
+reader a hole exists where none does, and the reader stops looking at the ones
+that do. `H4` holds identifiers to identifiers and has no opinion about whether a
+body's prose is true, and nothing else could see it while the claim was prose.
+Closed by making the claim a LINE with a verdict on it and the verdict the
+walker's own answer to a live probe: `H5` spells each named form into a snippet,
+asks `CallSitesIn`, and requires both documents to carry every live verdict and
+no other. `!.` is a TRUE residual and stays one - if the walker ever gained it,
+`H5` would redden until the documents said so. `wire-formstale` restores the
+stale verdict and reddens `H5`; `wire-forminert` is the twin.
+
+### R8-new-L4 - the evidence legend inventoried two logs of three
+
+SEVERITY: LOW
+
+The closure table's key legend named "the two blind-control logs" and its `N6-N9`
+closure said "Both blind-control log headers" for a round that ran three: a build
+control, an apply control and the third the cold-lens pass added. Every other
+count in these documents is read out of its artifact; this one was typed, which
+is the one a reader cannot tell from the derived ones. Closed by deriving it from
+the FILES: `H6` counts the blind-control logs present in the round's evidence set,
+per round, and holds both documents to that count in both directions, so a legend
+naming a set that is not there reddens. The evidence set is an input and an absent
+one is a FAILURE, never a skip. `evidence-logrenamed` takes a log out of the set
+and reddens `H6`; `evidence-otherfile` renames one WITHIN the set - the count is
+of files, not of names - and leaves it green.

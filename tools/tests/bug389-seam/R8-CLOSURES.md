@@ -23,18 +23,49 @@ census and the bodies were two readings of one file (LENS 10).
 
 Keys as in the round-8 brief. Every offset is at the round-8 tip. Prog =
 tools/tests/bug389-seam/Program.cs, Run = its run-tests.ps1, P and S = the two
-plugin/ProximityVictim files, log = bug389-r8-tests-final.log, lensprior and
-applyprior = the two blind-control logs, notes = BUG389-R8-NOTES.md.
+plugin/ProximityVictim files, log = bug389-r8-tests-final.log, lensprior,
+applyprior and lens2prior = the THREE blind-control logs round 8 ran, notes =
+BUG389-R8-NOTES.md. CORRECTED in round 9 (R8-new-L4): this legend said "the two
+blind-control logs" for a round that ran three, and it was the last count in
+these documents still typed. It is derived now - see the BLIND-CONTROLS: lines
+below, which H6 reads out of the files in the evidence set.
 
-THE METHOD IS HELD AND NO PRODUCT MECHANISM CHANGED THIS ROUND. The round-7
-verdict landed no finding inside the selection method - the fifth gate verdict in
-a row to do so, counted from the list in round-findings.md rather than typed - and
-every one of the round's twenty findings, the gate's ten and the two cold lenses'
-ten, is a defect in the TEST SURFACE, in the evidence logs or in the NOTES. The
-two shipped files are untouched by this round.
+THE METHOD IS HELD AND NO PRODUCT MECHANISM CHANGED THIS ROUND. Neither the
+round-7 verdict nor the round-8 verdict landed a finding inside the selection
+method - the sixth gate verdict in a row to do so, counted from the list in
+round-findings.md rather than typed - and every one of the round's twenty-five
+findings, the round-7 gate's ten, the two cold lenses' ten and the round-8 gate's
+five, is a defect in the TEST SURFACE, in the evidence logs or in the NOTES. The
+two shipped files are untouched by this round and by the round-9 pass below:
+git diff --name-only 934b35e..HEAD -- plugin/ is EMPTY and is rendered, never
+typed.
 
 WHERE THE MECHANISM PROSE LIVES. Mechanism REPLACED and mechanism NOW, per
 finding, are tabled in the notes at section 15m-2.
+
+WHAT THE CALL WALKER ACTUALLY SEES. One line per syntactic form the residuals in
+these documents name, carrying the answer the walker gives when it is ASKED - so
+a residual describing a form the code already handles reddens instead of
+standing. H5 spells each form into a snippet, puts it to CallSitesIn, and holds
+both documents to what comes back; the forms are answered by the walker itself
+and never by this table. A false residual is worse than a missing one, because a
+reader stops looking.
+
+WALKER-FORM: ?. = SEEN
+WALKER-FORM: !. = UNSEEN
+WALKER-FORM: line-break = SEEN
+WALKER-FORM: spaced-dot = SEEN
+WALKER-FORM: type-args = UNSEEN
+WALKER-FORM: alias = UNSEEN
+
+THE BLIND CONTROLS THIS EVIDENCE SET HOLDS. One line per round, with the number
+of blind-control logs that round's evidence set carries. H6 counts the FILES and
+holds both documents to the count in both directions, so the legend a reader uses
+to find the logs cannot name a set that is not there. An absent evidence set is a
+FAILURE, never a skip.
+
+BLIND-CONTROLS: r8 = 3
+BLIND-CONTROLS: r9 = 1
 
 ROUND-7 FINDINGS, BY NUMBER.
 
@@ -128,7 +159,9 @@ out of the file's own text - over the CODE view, so a signature quoted in a
 comment declares nothing - and requires both route sentences to carry that count
 over the PROSE view, so a ninth member reddens the prose. H2 also counts the
 STREAK-ROUND list in round-findings.md and requires the declared STREAK line to be
-that length. Both blind-control log headers, table AND lead sentence, are computed
+that length. CORRECTED in round 9 (R8-new-L4): "Both" named two of the round's
+three blind-control logs; the count is derived by H6 now and the legend above is
+right. All three blind-control log headers, table AND lead sentence, are computed
 by one assembler from the rows the run produced; the assembler refuses to emit a
 header whose prose and table disagree, and that refusal is exercised on a doctored
 copy rather than assumed. The corrections to what section 15l said are recorded in
@@ -212,10 +245,13 @@ so both spellings reach the same answer; the boundary rule is applied at the FIR
 segment, so MyApiClient cannot satisfy a search for ApiClient.Initialize. The two
 remaining IndexOf searches of a qualified call - the merge site inside a staging
 member and the initialisation call inside DoInitialize - go through the same
-counter, so no second rule can answer differently. The summary now NAMES what it
-still cannot see: an alias, a static import, a generic call, a null-conditional
-dot, a target named at run time. wire-splitcall and wire-splitentry redden W25;
-wire-splitinert is the twin.
+counter, so no second rule can answer differently. The summary NAMES what it
+still cannot see: an alias, a static import, a generic call, a target named at
+run time. CORRECTED in round 9 (R8-new-L3): this list also carried a
+null-conditional dot, which the walker had stepped over from the day the list was
+written - see the WALKER-FORM: lines above, which H5 reads out of the walker
+itself. wire-splitcall and wire-splitentry redden W25; wire-splitinert is the
+twin.
 CLOSES: LENS 5
 
 LENS 6 MEDIUM and LENS 9 MEDIUM - THE CLAUSES THAT CLOSED LENS 4 COULD NOT FIRE,
@@ -280,5 +316,74 @@ directions. Every finding of this round has a body, and the declared census is t
 twenty they produce. wire-closurenobody reddens H4; wire-closurebodyinert is the
 twin.
 CLOSES: LENS 10
+
+ROUND-8 GATE FINDINGS, BY NUMBER - the round-9 pass.
+
+R8-new-M1 MEDIUM - THE PERMITTED-MEMBER SIZE WAS READ OFF SOURCE SPELLINGS.
+REPLACED: H2 bounded the permitted-member declaration with two literals and read
+the set's size out of the span between them - the parity of a permittedMembers[
+token and a count of )" - so a signature extracted to a constant and named in the
+array enlarged the COMPILED set while the count stayed at eight and both route
+sentences stayed green. The clause was written that way because a wiring mutant
+changes what a case READS and never what executes, which is a measurement chosen
+by its test harness.
+NOW: H2 enumerates the collection the harness actually builds, its size is that
+collection's own Count, and the members are bound BOTH WAYS to the
+PERMITTED-MEMBER: lines in round-findings.md - every executable member declared,
+every declared member executable, keys collapsed so spacing is not a finding. The
+span, the parity clause and the )" count are DELETED, and wire-prosemember went
+with them: "inside the block" and "outside the block" are no longer different
+states. New-HarnessMutant compiles a one-line-changed copy of the harness, so a
+case that reads a running object can still be made to fail. harness-ninthmember
+adds the ninth through an extracted constant, harness-memberdropped takes a
+declared one out, harness-memberswapped renames one so the count cannot move and
+only the binding can tell; wire-memberspacing is the twin.
+CLOSES: R8-new-M1
+
+R8-new-L1 LOW - THE USING GUARD READ A LINE PREFIX AND NOT A DIRECTIVE.
+REPLACED: StartsWith("using static") and StartsWith("using ") on the trimmed
+line, which miss global using static ...; and global using Alias = ...; - and
+plugin/MusicEngine.cs opens with a global using alias today, so the guard held
+for one spelling of a construct the tree already uses.
+NOW: the line is collapsed, an optional leading global is consumed, and what
+remains is read as using and then as the rest of the directive.
+wire-globalstatic and wire-globalalias redden W25; wire-globalinert adds an
+ordinary global using and leaves it green.
+CLOSES: R8-new-L1
+
+R8-new-L2 LOW - THE CONSTRUCTION COUNT WAS A SUBSTRING COUNT.
+REPLACED: W29 counted the literals new SurfaceFile( and new Dictionary<string,
+SurfaceFile>, so a target-typed SurfaceFile x = new(...), a qualified spelling or
+one extra space built a second pair the case could not see - while a respelling
+of the one real site made the count read zero.
+NOW: NewSitesIn reads the construction structurally, through the same boundary
+rule CallSitesIn applies to a call, taking the type out of the declaration head
+for the target-typed form and using the type-argument list to tell a PAIR from a
+MAP of pairs. wire-surfacetargettyped reddens W29; wire-surfacespacing respells
+the one real site and leaves it green.
+CLOSES: R8-new-L2
+
+R8-new-L3 LOW - A RESIDUAL NAMED A FORM THE WALKER ALREADY HANDLED.
+REPLACED: both documents said a null-conditional dot stayed invisible to the call
+walker, which has stepped over ?. since the LENS 5 rewrite. H4 holds identifiers
+to identifiers and has no opinion about whether a body's prose is true.
+NOW: the claim is a LINE with a verdict on it and the verdict is the walker's own
+answer to a live probe - H5 spells each named form into a snippet, asks
+CallSitesIn, and requires both documents to carry every live verdict and no
+other. !. is a TRUE residual and stays one. The two stale sentences are corrected
+where they stand. wire-formstale reddens H5; wire-forminert is the twin.
+CLOSES: R8-new-L3
+
+R8-new-L4 LOW - THE EVIDENCE LEGEND INVENTORIED TWO LOGS OF THREE.
+REPLACED: this table's key legend named "the two blind-control logs" and its
+N6-N9 closure said "Both blind-control log headers" for a round that ran three.
+Every other count in these documents is read out of its artifact; that one was
+typed.
+NOW: H6 counts the blind-control logs PRESENT in the round's evidence set, per
+round, and holds both documents to that count in both directions; the evidence
+set is an input and an absent one is a FAILURE, never a skip. Both sentences are
+corrected where they stand. evidence-logrenamed takes a log out of the set and
+reddens H6; evidence-otherfile renames one WITHIN the set and leaves it green.
+CLOSES: R8-new-L4
 
 B14b STAYS OWED and is never claimed here.
