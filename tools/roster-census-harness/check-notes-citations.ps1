@@ -226,7 +226,14 @@ function Invoke-CitationScan {
     # bearing heading INSIDE the policed section whose region no block in that
     # section claims is reported, because a lens section that summarises itself
     # nowhere is the case the round-3 sentence was one edit away from.
-    $headingRe = '^###\s+(?<region>\S+)-(?<num>\d+)\s+[—-]\s+(?<sev>HIGH|MEDIUM|LOW)\b'
+    # The separator is written as ESCAPES, never as the character itself:
+    # Windows PowerShell reads a BOM-less .ps1 through the ANSI code page, so a
+    # literal em dash in this file would arrive as mojibake and the class would
+    # stop matching the headings it was written for. Em dash, en dash and
+    # hyphen are all accepted; the controls below exercise the EM DASH, because
+    # that is the one the lane notes actually use.
+    $dashes = '[' + [char]0x2013 + [char]0x2014 + '-]'
+    $headingRe = '^###\s+(?<region>\S+)-(?<num>\d+)\s+' + $dashes + '\s+(?<sev>HIGH|MEDIUM|LOW)\b'
     $sevs = @('HIGH', 'MEDIUM', 'LOW')
 
     $byRegion = @{}
@@ -406,6 +413,10 @@ $demo = @(
 )
 [System.IO.File]::WriteAllLines((Join-Path $WorkDir 'plugin/Demo.cs'), $demo)
 
+# The em dash the lane notes use, built from its code point so this file stays
+# ASCII while the controls still measure the real character.
+$emd = [string][char]0x2014
+
 $baseNotes = @(
     '# Bug notes - synthetic control baseline',
     'Nothing above the section header is in scope.',
@@ -418,11 +429,11 @@ $baseNotes = @(
     'The synthetic lens pass returned **3** findings: **1** HIGH, **1** MEDIUM and **1** LOW.',
     '<!-- SCR-LENS-CENSUS END -->',
     '',
-    '### SYN-LENS-1 - HIGH - a synthetic finding',
+    ('### SYN-LENS-1 ' + $emd + ' HIGH - a synthetic finding'),
     'text',
-    '### SYN-LENS-2 - MEDIUM - a synthetic finding',
+    ('### SYN-LENS-2 ' + $emd + ' MEDIUM - a synthetic finding'),
     'text',
-    '### SYN-LENS-3 - LOW - a synthetic finding',
+    ('### SYN-LENS-3 ' + $emd + ' LOW - a synthetic finding'),
     'text'
 )
 $basePath = Join-Path $WorkDir 'baseline.md'
@@ -492,12 +503,12 @@ $controls = @(
        Why  = 'inert twin: the same block, its sentence rewritten around the same figures' }
 
     @{ Name = 'C7-adds-a-finding-heading-without-updating-the-census'; Expect = 'FAIL'
-       From = '### SYN-LENS-3 - LOW - a synthetic finding'
-       To   = "### SYN-LENS-3 - LOW - a synthetic finding`r`ntext`r`n### SYN-LENS-4 - LOW - one more synthetic finding"
+       From = ('### SYN-LENS-3 ' + $emd + ' LOW - a synthetic finding')
+       To   = ('### SYN-LENS-3 ' + $emd + " LOW - a synthetic finding`r`ntext`r`n### SYN-LENS-4 " + $emd + ' LOW - one more synthetic finding')
        Why  = 'the census is DERIVED from the headings, so a heading added beneath it must move the count or red' }
     @{ Name = 'C7-twin-adds-a-heading-that-carries-no-severity';       Expect = 'PASS'
-       From = '### SYN-LENS-3 - LOW - a synthetic finding'
-       To   = "### SYN-LENS-3 - LOW - a synthetic finding`r`ntext`r`n### SYN-SELF - found by running the gate, not by review"
+       From = ('### SYN-LENS-3 ' + $emd + ' LOW - a synthetic finding')
+       To   = ('### SYN-LENS-3 ' + $emd + " LOW - a synthetic finding`r`ntext`r`n### SYN-SELF " + $emd + ' found by running the gate, not by review')
        Why  = 'inert twin: an insertion of the same kind at the same site, of a heading the census does not count' }
 
     @{ Name = 'C8-states-a-total-the-severities-do-not-sum-to';        Expect = 'FAIL'
