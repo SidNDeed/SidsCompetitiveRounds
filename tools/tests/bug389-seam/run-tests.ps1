@@ -78,9 +78,16 @@ $wireFiles = @(
     'plugin/CompetitiveUI.cs',
     'plugin/CompetitiveRounds.csproj',
     'tools/tests/bug389-seam/Program.cs',
-    # H1 reads this one: the round's finding bodies, from which the severity
-    # census is derived rather than typed.
+    # H1 and H2 read this one: the round's finding bodies, from which the
+    # severity census is derived rather than typed, and the streak list, from
+    # which the streak ordinal is counted rather than typed.
     'tools/tests/bug389-seam/round-findings.md',
+    # H3 reads this one. The round-7 closure table promised a copy at a path
+    # inside the gitignored ai-collab tree, so it never reached the pin and the
+    # promise a reviewer read could not be resolved. The canonical copy is
+    # TRACKED, here beside the harness it describes, so every clone and every pin
+    # built from the tip carries it; the two published copies are made from it.
+    'tools/tests/bug389-seam/R8-CLOSURES.md',
     # W24 searches this file too. A deletion is not bounded by a search that
     # stops short of a document still making the claim, and the driver's own
     # comments are such a document - the previous deletion survived a round
@@ -343,6 +350,47 @@ function Assert-Mutations([string]$label, [object]$run, [string[]]$redTests, [st
         return $true
     }
     Say ('RESULT ' + $label + ': FAILED - ' + ($detail -join ' ') + ' ' + $controlTest + ' green=' + $ctl)
+    return $false
+}
+
+# The same again, for a mutation whose edits sit in a file with no braces to
+# match - a markdown findings file, a closure table - where each edit's span is
+# delimited by a start marker and an end marker instead. Each edit is
+# @('start','find','replace','end') and is resolved under the same
+# exactly-one-site-inside-the-span rule as every other anchor here.
+function New-WireRootSpans([string]$name, [string]$file, [object[]]$edits) {
+    $dir = Join-Path $work ('wire-' + $name)
+    if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+    Copy-WireFiles $dir
+    $target = Join-Path $dir $file
+    if ($edits.Count -eq 4 -and ($edits[0] -is [string])) { $edits = @(, $edits) }
+    Say ('--- wiring mutant ' + $name + ': in ' + $file + ', ' + $edits.Count + ' edit(s)')
+    $text = [System.IO.File]::ReadAllText($target)
+    foreach ($edit in $edits) {
+        $text = Edit-InMember ('wire-' + $name) $text ([string]$edit[0]) ([string]$edit[1]) ([string]$edit[2]) ([string]$edit[3])
+    }
+    [System.IO.File]::WriteAllText($target, $text)
+    return $dir
+}
+
+# AN INERT TWIN AS ITS OWN ROOT, not as a second test inside the reddening run.
+# The reddening mutant proves the case CAN fail; this proves it does not fail for
+# an edit of comparable size in the same file that touches nothing the case
+# names. Without both halves a case is either one that cannot fail or one that
+# fails on anything, and neither measures the property (#391).
+function Assert-Inert([string]$label, [object]$run, [string[]]$greenTests) {
+    $ok = $true
+    $detail = @()
+    foreach ($t in $greenTests) {
+        $g = Test-Result $run $t 'PASS'
+        if (-not $g) { $ok = $false }
+        $detail += ($t + '=' + $(if ($g) { 'green' } else { 'RED' }))
+    }
+    if ($ok) {
+        Say ('RESULT ' + $label + ': OK - ' + ($greenTests -join ', ') + ' stayed green under an inert edit')
+        return $true
+    }
+    Say ('RESULT ' + $label + ': FAILED - ' + ($detail -join ' '))
     return $false
 }
 
@@ -1320,10 +1368,10 @@ Say ''
 #
 # W25 is the inert twin and must stay GREEN: it reads no findings file.
 $wireSeverityCensus = New-WireRoot 'severitycensus' 'tools/tests/bug389-seam/round-findings.md' `
-    '### F6 - the severity line was typed' `
+    '### N6 - the BUILD blind-control lead said twelve rows over a body of fourteen' `
     'SEVERITY: LOW' `
     'SEVERITY: MEDIUM' `
-    '### F7 '
+    '### N7 '
 $runWireSeverityCensus = Invoke-Suite 'wire-severitycensus' $seam $wireSeverityCensus
 if (-not (Assert-Mutation 'a finding body severity changed under the declared census' $runWireSeverityCensus 'H1' 'W1')) { $overall = 1 }
 if (-not (Assert-Mutation 'moved severity census, W25 inert twin' $runWireSeverityCensus 'H1' 'W25')) { $overall = 1 }
@@ -1402,6 +1450,219 @@ $wireBoundClaim = New-WireRoot 'boundclaim' 'plugin/ProximityVictimSeam.cs' `
     '        /// under ANY composition nothing here needs scoping, and the wording this' ''
 $runWireBoundClaim = Invoke-Suite 'wire-boundclaim' $seam $wireBoundClaim
 if (-not (Assert-Mutation 'composition-bound-claim wiring' $runWireBoundClaim 'W13' 'W1')) { $overall = 1 }
+Say ''
+
+# =====================  ROUND 8  =====================
+# Every mutant below closes one numbered round-7 finding. Each has an anchor
+# resolved INSIDE the member that holds the behaviour the finding names, a test
+# that must redden, and a SEPARATE inert root of comparable size in the same file
+# that must leave that test green.
+#
+# ANCHORS IN Program.cs ARE DELIBERATELY LINES THAT EXIST AT THE PREVIOUS TIP
+# TOO. The blindness run re-executes these mutants with the previous round's
+# harness swapped into the tree, and that file is also the copy the wiring roots
+# carry - so an anchor only this round's file has would abort the whole run at
+# this line instead of producing the FAILED row it exists to produce.
+$nl = [string][char]10
+# AND EVERY ELEMENT BUILT WITH $nl IS PARENTHESISED. PowerShell's comma binds
+# TIGHTER than binary +, so @('a', 'b' + $nl + 'c', 'd') is not a three-element
+# array: it reads as ('a','b') + ($nl) + ('c','d'), six elements, and the edit
+# arrives with every argument shifted. It cost a run to find, and it found it by
+# ABORTING rather than by reddening - the anchor named in the refusal was the
+# right one and the string beside it was a bare newline.
+
+# ---------- N1: a second call to an allowed writer, in another member ----------
+# R8 closed who may WRITE the request prefix and nothing closed who may CALL the
+# writers. W25c requires only that the existing ApiClient.Initialize call SIT
+# inside DoInitialize, so initialising the client from Start() - an ordinary
+# startup refactor - left every clause green. R9 resolves every call site of each
+# allowed writer to its enclosing member and compares the set with a closed one.
+#
+# W1 is the inert twin and must stay GREEN.
+$wireCallerExtra = New-WireRoot 'callerextra' 'plugin/Plugin.cs' `
+    'private void Start()' `
+    '            CacheTmpReferences();' `
+    '            CacheTmpReferences(); ApiClient.Initialize(Plugin.ApiBaseUrl.Value);' ''
+$runWireCallerExtra = Invoke-Suite 'wire-callerextra' $seam $wireCallerExtra
+if (-not (Assert-Mutation 'a second call to an allowed writer, from an unbound member' $runWireCallerExtra 'W25' 'W1')) { $overall = 1 }
+Say ''
+
+# ---------- N1: the permitted FFA wrapper called from an unbound member --------
+# FfaProbeServerState is a permitted MEMBER of the staging entry-point set and is
+# not itself an entry point, so R6 never placed its callers. Moved into the 1v2
+# tab refresher it changes no count R6 takes.
+$wireProbeCaller = New-WireRoot 'probecaller' 'plugin/NativeUI.cs' `
+    'private static void MaybeRefreshOvtTab()' `
+    '            ApiClient.UpdateOvtQueuePoll(false);   // safe no-op when not polling' `
+    '            ApiClient.UpdateOvtQueuePoll(false); ApiClient.FfaProbeServerState();   // safe no-op when not polling' ''
+$runWireProbeCaller = Invoke-Suite 'wire-probecaller' $seam $wireProbeCaller
+if (-not (Assert-Mutation 'the permitted FFA wrapper called from an unbound member' $runWireProbeCaller 'W25' 'W1')) { $overall = 1 }
+Say ''
+
+# ---------- N1: the inert twin - same file, same size, no call site ------------
+$wireCallerInert = New-WireRoot 'callerinert' 'plugin/Plugin.cs' `
+    'private void Start()' `
+    '            // Cache the TMP component and text property for text enforcement' `
+    '            // Cache the TMP component and the text property for enforcement' ''
+$runWireCallerInert = Invoke-Suite 'wire-callerinert' $seam $wireCallerInert
+if (-not (Assert-Inert 'the permitted-caller set, inert edit' $runWireCallerInert @('W25', 'W1'))) { $overall = 1 }
+Say ''
+
+# ---------- N2: a QUALIFIED pre-decrement and a qualified out write ------------
+# ClassifyWrite's backward half read the character immediately before the BARE
+# name, found the '.' of a qualifier and filed the occurrence as a READ - so the
+# attachment count could be driven below the required three, and passed by
+# reference, by a pass whose case is called "every write in ANY spelling".
+# Planted on the DECLINING branch, where it does the damage. Both backward forms
+# are in the one edit because one line fixed them both.
+#
+# W1 is the inert twin and must stay GREEN.
+$wireQualifiedPrefix = New-WireRoot 'qualifiedprefix' 'plugin/ProximityVictimPatches.cs' `
+    'internal static void StageInto(ExitGames.Client.Photon.Hashtable prejoin)' `
+    '                    _stageFailedPermanently = true;' `
+    '                    _stageFailedPermanently = true; --ProximityVictimGate._attached; int.TryParse("0", out ProximityVictimGate._attached);' ''
+$runWireQualifiedPrefix = Invoke-Suite 'wire-qualifiedprefix' $seam $wireQualifiedPrefix
+if (-not (Assert-Mutation 'qualified pre-decrement and out write to the attachment count' $runWireQualifiedPrefix 'W25' 'W1')) { $overall = 1 }
+Say ''
+
+$wireQualifiedPrefixInert = New-WireRoot 'qualifiedprefixinert' 'plugin/ProximityVictimPatches.cs' `
+    'internal static void StageInto(ExitGames.Client.Photon.Hashtable prejoin)' `
+    '                    // declining, and printing it would name a cause that has been' `
+    '                    // declining, and printing it would name a cause that was' ''
+$runWireQualifiedPrefixInert = Invoke-Suite 'wire-qualifiedprefixinert' $seam $wireQualifiedPrefixInert
+if (-not (Assert-Inert 'the qualified backward classifier, inert edit' $runWireQualifiedPrefixInert @('W25', 'W23', 'W1'))) { $overall = 1 }
+Say ''
+
+# ---------- N3: the TLS fallback rewritten to ??= ------------------------------
+# The request prefix is declared with the EMPTY string, which is not null, so
+# `baseUrl ??= ...` reads as a writer and leaves the previous value standing.
+# ClassifyWrite did not know the operator at all, so the write was invisible;
+# R8 now also requires every write to that field to be a form that retargets.
+$wireNullCoalesceAssign = New-WireRoot 'nullcoalesceassign' 'plugin/ApiClient.cs' `
+    'private static IEnumerator ProbeEndpointThenStart()' `
+    '                baseUrl = Plugin.LegacyApiUrl.TrimEnd(''/'');' `
+    '                baseUrl ??= Plugin.LegacyApiUrl.TrimEnd(''/'');' ''
+$runWireNullCoalesceAssign = Invoke-Suite 'wire-nullcoalesceassign' $seam $wireNullCoalesceAssign
+if (-not (Assert-Mutation 'a null-coalescing write to the request prefix' $runWireNullCoalesceAssign 'W25' 'W1')) { $overall = 1 }
+Say ''
+
+$wireNullCoalesceInert = New-WireRoot 'nullcoalesceinert' 'plugin/ApiClient.cs' `
+    'private static IEnumerator ProbeEndpointThenStart()' `
+    '                UsingLegacyFallback = true;' `
+    '                UsingLegacyFallback = true;   // session only' ''
+$runWireNullCoalesceInert = Invoke-Suite 'wire-nullcoalesceinert' $seam $wireNullCoalesceInert
+if (-not (Assert-Inert 'the null-coalescing classifier, inert edit' $runWireNullCoalesceInert @('W25', 'W1'))) { $overall = 1 }
+Say ''
+
+# ---------- N4: a finding body with no SEVERITY marker -------------------------
+# The census was derived FROM the markers, so a body written without one moved
+# neither the derived number nor the declared one: H1 stayed green and the body
+# left the round unrecorded. H1 now counts the bodies by their own heading, off
+# different evidence, and requires the two counts to agree.
+#
+# W25 is the inert twin and stays GREEN: it reads no findings file.
+$wireBodyNoMarker = New-WireRootSpans 'bodynomarker' 'tools/tests/bug389-seam/round-findings.md' `
+    @(, @('### N9 - the untouched-selection streak was called both sixth and fifth',
+          'SEVERITY: LOW',
+          ('SEVERITY: LOW' + $nl + $nl + '### N11 - a body added without its severity marker' + $nl + $nl + 'This body carries no marker at all.'),
+          '### N10 '))
+$runWireBodyNoMarker = Invoke-Suite 'wire-bodynomarker' $seam $wireBodyNoMarker
+if (-not (Assert-Mutation 'a finding body written with no severity marker' $runWireBodyNoMarker 'H1' 'W25')) { $overall = 1 }
+Say ''
+
+# The same body, WITH its marker and with the declared census moved to match:
+# the case must pass, or it would be failing on "the file changed" rather than on
+# the property it names.
+$wireBodyMarked = New-WireRootSpans 'bodymarked' 'tools/tests/bug389-seam/round-findings.md' `
+    @(@('### N9 - the untouched-selection streak was called both sixth and fifth',
+        'SEVERITY: LOW',
+        ('SEVERITY: LOW' + $nl + $nl + '### N11 - a body added with its severity marker' + $nl + $nl + 'SEVERITY: LOW' + $nl + $nl + 'This one is counted by both.'),
+        '### N10 '),
+      @('CENSUS: ',
+        'CENSUS: 10 findings: 0 HIGH, 1 MEDIUM, 9 LOW',
+        'CENSUS: 11 findings: 0 HIGH, 1 MEDIUM, 10 LOW',
+        '## The selection-method streak'))
+$runWireBodyMarked = Invoke-Suite 'wire-bodymarked' $seam $wireBodyMarked
+if (-not (Assert-Inert 'a finding body added with its marker' $runWireBodyMarked @('H1', 'W25'))) { $overall = 1 }
+Say ''
+
+# ---------- N5: a counter that blanks raw text of its own ----------------------
+# The deletion register named one cached CODE view read by every code counter,
+# and four counters plus three call sites blanked raw text again. Nothing was
+# wrong - blanking is deterministic and every caller held a .cs file - but the
+# register entry was not true of the code, and an absence bound whose named
+# replacement is not present is one a reader cannot use.
+#
+# W25 is the inert twin and stays GREEN.
+$wireUncachedView = New-WireRoot 'uncachedview' 'tools/tests/bug389-seam/Program.cs' `
+    'private static int CountOnCodeLines(string text, string needle)' `
+    '        if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(needle)) return 0;' `
+    '        if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(needle)) return 0; text = BlankComments(text);' ''
+$runWireUncachedView = Invoke-Suite 'wire-uncachedview' $seam $wireUncachedView
+if (-not (Assert-Mutation 'a counter that blanks raw text of its own' $runWireUncachedView 'W27' 'W25')) { $overall = 1 }
+Say ''
+
+$wireViewInert = New-WireRoot 'viewinert' 'tools/tests/bug389-seam/Program.cs' `
+    'private static int Main()' `
+    '        // An earlier wording of this comment reached that corner by the other' `
+    '        // An earlier version of this comment reached that corner by the other' ''
+$runWireViewInert = Invoke-Suite 'wire-viewinert' $seam $wireViewInert
+if (-not (Assert-Inert 'the single blanking site, inert edit' $runWireViewInert @('W27', 'W25'))) { $overall = 1 }
+Say ''
+
+# ---------- N6-N9: a derived artifact moved under a typed prose count ----------
+# Four prose counts disagreed with the numbers their own artifacts derive. The
+# closure is not four corrections but reading each number OUT of the thing it
+# counts: H2 counts permittedMembers from the file's own text and requires both
+# route sentences to carry that count.
+$wireProseCount = New-WireRoot 'prosecount' 'tools/tests/bug389-seam/Program.cs' `
+    'private static int Main()' `
+    '            "public static void FfaProbeServerState()",' `
+    ('            "public static void FfaProbeServerState()",' + $nl + '            "public static void FfaProbeServerStateAgain()",') ''
+$runWireProseCount = Invoke-Suite 'wire-prosecount' $seam $wireProseCount
+if (-not (Assert-Mutation 'a ninth permitted member under a prose count of eight' $runWireProseCount 'H2' 'W25')) { $overall = 1 }
+Say ''
+
+# The other half of the same case: the streak list is the artifact, and the
+# declared streak is counted from it rather than typed as an ordinal twice.
+$wireStreakRow = New-WireRootSpans 'streakrow' 'tools/tests/bug389-seam/round-findings.md' `
+    @(, @('## The selection-method streak',
+          'STREAK-ROUND: R7',
+          ('STREAK-ROUND: R7' + $nl + 'STREAK-ROUND: R8'),
+          '### N1 - '))
+$runWireStreakRow = Invoke-Suite 'wire-streakrow' $seam $wireStreakRow
+if (-not (Assert-Mutation 'a round added to the streak list under a typed streak' $runWireStreakRow 'H2' 'W25')) { $overall = 1 }
+Say ''
+
+$wireProseInert = New-WireRoot 'proseinert' 'tools/tests/bug389-seam/Program.cs' `
+    'private static int Main()' `
+    '        // route - a seat whose patches complete after its first staging attempt -' `
+    '        // path - a seat whose patches complete after its first staging attempt -' ''
+$runWireProseInert = Invoke-Suite 'wire-proseinert' $seam $wireProseInert
+if (-not (Assert-Inert 'the derived prose counts, inert edit' $runWireProseInert @('H2', 'W25'))) { $overall = 1 }
+Say ''
+
+# ---------- N10: the promised repository copy left unnamed ---------------------
+# The round-7 closure table promised an identical copy inside the repository and
+# named a path in the gitignored ai-collab tree, so a pin-only read found neither
+# the file nor the directory. The canonical copy is tracked beside the harness
+# now, and this is what holds it to naming each published copy.
+$wireClosuresMissing = New-WireRootSpans 'closuresmissing' 'tools/tests/bug389-seam/R8-CLOSURES.md' `
+    @(, @('WHY THIS FILE IS HERE AND NOT IN ai-collab.',
+          'ai-collab/bugs/BUG389-R8-CLOSURES.md',
+          'ai-collab/bugs/R7-CLOSURES.md',
+          'Keys as in the round-8 brief.'))
+$runWireClosuresMissing = Invoke-Suite 'wire-closuresmissing' $seam $wireClosuresMissing
+if (-not (Assert-Mutation 'the promised repository copy left unnamed' $runWireClosuresMissing 'H3' 'W25')) { $overall = 1 }
+Say ''
+
+$wireClosuresInert = New-WireRootSpans 'closuresinert' 'tools/tests/bug389-seam/R8-CLOSURES.md' `
+    @(, @('WHY THIS FILE IS HERE AND NOT IN ai-collab.',
+          'tracked beside the harness it describes',
+          'tracked next to the harness it describes',
+          'Keys as in the round-8 brief.'))
+$runWireClosuresInert = Invoke-Suite 'wire-closuresinert' $seam $wireClosuresInert
+if (-not (Assert-Inert 'the closure table, inert edit' $runWireClosuresInert @('H3', 'W25'))) { $overall = 1 }
 Say ''
 
 # ---------- 22. the prior mechanism ----------

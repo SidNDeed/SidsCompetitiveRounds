@@ -1,8 +1,8 @@
-# Bug 389 client, round 7 - the findings this round answers
+# Bug 389 client, round 8 - the findings this round answers
 
-The round-6 gate returned a NO-GO. This file is the ONE place the round's
-findings are written down, and it exists so the severity census in the test log
-can be COMPUTED from the bodies instead of typed beside them.
+The round-7 gate returned a NO-GO: 0 HIGH, 1 MEDIUM, 9 LOW. This file is the ONE
+place the round's findings are written down, and it exists so the severity census
+in the test log can be COMPUTED from the bodies instead of typed beside them.
 
 The round-6 log's header said "two MEDIUM, five LOW" while its own seven bodies
 read three MEDIUM and four LOW. Every other number in that header was counted
@@ -12,138 +12,147 @@ ones is the one a reader cannot tell apart. `H1` in `Program.cs` reads the
 `CENSUS:` line disagrees with what the bodies say - so the line a reader sees
 cannot drift from the bodies it summarises.
 
-One marker per finding. The total is derived too, so a body added without a
-marker changes the total rather than quietly not counting. The round-7 COLD LENS
-bodies are in this file for the same reason the gate's are: a finding answered
-without a body here would leave the census describing a smaller round than the
-one that ran.
+One marker per finding. **A body written WITHOUT a marker is a RED FAILURE, not
+a skip.** The round-7 wording here promised that the total was derived too, "so a
+body added without a marker changes the total rather than quietly not counting" -
+and it did not: the total was derived FROM the markers, so an unmarked body moved
+neither number, `H1` stayed green and the body left the round unrecorded. `H1`
+now counts the bodies a SECOND time, by their own `###` heading, by a counter
+that knows nothing about markers, requires the two counts to agree, and NAMES any
+body that carries none.
 
-CENSUS: 10 findings: 0 HIGH, 2 MEDIUM, 8 LOW
+CENSUS: 10 findings: 0 HIGH, 1 MEDIUM, 9 LOW
 
-### F1 - the staging merges' downstream relation is asserted by a count
+## The selection-method streak
 
-SEVERITY: MEDIUM
+The rounds whose gate verdict landed no finding inside the selection method, one
+per line. The method was established by round 3 and is unchanged since. The
+streak line below is COUNTED from this list by `H2` and never typed: the
+round-7 notes gave the same streak as both "sixth" and "fifth", which is what a
+typed ordinal does.
 
-`W25` said the three staging merges are downstream of `ApiClient.Initialize`,
-but its executable condition only COUNTED three calls, and `W25c` only LOCATES
-that call inside `DoInitialize`. Where a thing is is not when it runs, so the
-check could not reject a source change that makes a staging member reachable
-before initialisation. Closed by the R1-R5 clauses inside `W25`, with
-`wire-stageabove` and `wire-stagecaller` as the two reddening mutations and
-`W23` as the inert twin for both. Distinct from the disclosed
-Awake-before-the-first-frame premise, which stays OPEN.
+STREAK-ROUND: R3
+STREAK-ROUND: R4
+STREAK-ROUND: R5
+STREAK-ROUND: R6
+STREAK-ROUND: R7
+STREAK: 5 gate verdicts have landed no finding inside the selection method
 
-### F2 - a deconstruction assignment reads as a read
-
-SEVERITY: LOW
-
-The every-write, ANY-spelling classifier did not recognise a legal
-DECONSTRUCTION assignment targeting a monitored field: the identifier is
-followed by `,` or `)` and never by an operator, so `ClassifyWrite` filed it as
-a read and both `W23` and `W25` passed over it. The project sets
-`LangVersion` `latest`, so the form compiles today. Closed by
-`DeconstructionRhs`, with `wire-deconstructwrite` planting one in the declining
-branch.
-
-### F3 - three views of one source
-
-SEVERITY: LOW
-
-`W7a-c` and `W25` counted raw call text; `CallsTo` excluded only whole-line
-comments; the member anchors used raw `CountOf`. Three readings of the same
-file, so a live call could be lost while its spelling survived inside a block
-comment and every counter went on printing the same number. Closed by the single
-comment-blanked, offset-preserving CODE view that every code counter and every
-anchor now reads, with `wire-blockcommentcall` as the reddening mutation.
-
-### F4 - the gold provenance pointer names the deletion table
-
-SEVERITY: LOW
-
-The residual lead and the `L7` body pointed at section 14f for the gold answer.
-14f is the DELETED-MECHANISM table; the answer - the grep, the buckets and the
-two expiry conditions - is in 15f. A reviewer following the pointer landed on
-unrelated evidence. Corrected at every pointer, with the legitimate 14f
-deletion-register cites left alone.
-
-### F5 - a provenance comment names a bar that was never written
-
-SEVERITY: LOW
-
-The new harness comments claimed round 3's bar named `FfaMode` beside the seam
-and the patches. It did not: the round-5 brief, the round-5 report and all five
-places the notes carry the clause say "in the seam and the patches" or "in
-either file". Corrected so the text distinguishes the ACTUAL acceptance bar from
-the later hazard observation that `N1b` answers.
-
-### F6 - the severity line was typed
-
-SEVERITY: LOW
-
-The final log printed two MEDIUM and five LOW while the bodies read three MEDIUM
-and four LOW. Closed by this file and by `H1`, which derives the census from the
-markers above and fails when the declared line disagrees.
-
-### F7 - one file called an untested step pinned
-
-SEVERITY: LOW
-
-Only the patches file recorded the Unity lifecycle step as an assumption. The
-seam stated the ordering and said `W25` pins the premises, which `W25` expressly
-does not do for that step. Closed by stating the same disclosure in both shipped
-files in the same words, and by `W26`, whose negative control removes it from
-one of them.
-
-## The round-7 cold lens
-
-The three bodies below are the round-7 COLD LENS findings, read on the build tip
-of this same round rather than on the round-6 gate. They are findings this round
-answers, so they carry markers and count in the census above exactly as F1-F7 do.
-
-### F8 - the route walk placed three of ten call sites
+### N1 - the allowed writer methods were closed by owner and not by caller
 
 SEVERITY: MEDIUM
 
-`W25`'s new route walk position-checked a staging entry-point call only in
-`Plugin.cs`: the per-file loop skipped every other file before it looked at a
-position, and the closed CALLER SET was closed at FILE grain. The run's own NOTE
-printed ten entry-point call sites - five in `ApiClient.cs`, two in `NativeUI.cs`,
-three in `Plugin.cs` - so seven of them carried no position constraint at all,
-and the round-6 condition ("must fail when something other than the
-initialisation path is the caller") was met for one file of the three. Worse,
-the model the comment stated - every route passes through the persistent tick
-below its gate - is FALSE of those five `ApiClient.cs` sites, which are reached
-from a response callback, a coroutine and a delegate the menu stores. Closed by
-DELETING that model and asserting the bound that holds: `R6` closes the caller
-set at MEMBER grain over every file, `R7` requires each merge to sit INSIDE the
-response callback of its own (or its host's) `baseUrl` request, and `R8` holds
-that request prefix to one declaring file, the empty initialiser and a closed
-set of writer members containing `ApiClient.Initialize`.
+`R8` bounds the members that may WRITE the request prefix - `ApiClient.Initialize`
+and `ProbeEndpointThenStart` - and nothing bounded who may CALL them. `W25c` only
+requires the existing `ApiClient.Initialize` call to SIT inside `DoInitialize`; it
+does not reject a second one elsewhere. `FfaProbeServerState` is a permitted
+member of the staging entry-point set but is not itself an entry point, so `R6`
+never placed its callers either. The eight-member map the run prints is evidence
+for a reader and cannot fail. Closed by `R9`, which resolves every call site of
+each allowed writer and of the FFA wrapper to its enclosing member across the
+whole shipped assembly and compares that set, site for site, with a closed set
+written out in the harness. `wire-callerextra` and `wire-probecaller` redden it;
+`wire-callerinert` leaves it green. Distinct from the three disclosed OPEN
+PREMISES, which this does not close.
 
-### F9 - one field scan narrowed its surface with no line in the log
+### N2 - qualified pre-increment, `ref` and `out` writes read as reads
 
 SEVERITY: LOW
 
-`ScanField` dropped any file that declared its own field of the scanned name.
-For the attachment count and the withdrawal latch the drop was printed; for the
-disabled flag a second declarer was a hard failure; for `initialized` - the
-field the round-7 gate-flag argument newly rested on - it was neither printed
-nor asserted, and `plugin/CustomCosmetics.cs` declares one. The failure text
-named "the 91 shipped file(s)" over a surface of 90, and the string
-"CustomCosmetics" appeared nowhere in the run log. Closed by NARROWING instead
-of dropping - a file that declares its own field is read for QUALIFIED writes,
-which name the home field outright - by deriving the count message from the
-files actually read, and by one `ScanNote` line per field on every run.
+`ClassifyWrite` has two halves. The forward half reads the operator after the
+name and sees a qualified occurrence for free. The backward half - the
+pre-increment, pre-decrement, `ref` and `out` forms - read the character
+immediately before the BARE name, found the `.` of a qualifier and filed the
+occurrence as a read, so `--ProximityVictimGate._attached` and
+`out ProximityVictimGate._attached` were invisible to a pass whose case is called
+"every write in ANY spelling". `SkipQualifierBack` already solved exactly this and
+was wired only into the deconstruction recogniser. Closed by putting the backward
+half through it, with `wire-qualifiedprefix` planting both forms in the declining
+branch and `wire-qualifiedprefixinert` as the green twin.
 
-### F10 - a qualified deconstruction target read as a read
+### N3 - `??=` was absent from the classifier
 
 SEVERITY: LOW
 
-The deconstruction recogniser asked what the previous non-whitespace character
-was and read it off the BARE name, so `(ProximityVictimGate._attached,
-_advertised) = (0, true);` - legal C#, and legal for a private static field from
-inside its own class - found '.' there and was filed as a READ by the pass whose
-case is called "every write in ANY spelling". Every other form the classifier
-knows is recognised qualified already, because an operator FOLLOWS the name.
-Closed by `SkipQualifierBack`, which walks a '.'-separated identifier chain
-backwards before the test.
+`ClassifyWrite` recognised `++`, `--`, `<<=`, `>>=`, the arithmetic and bitwise
+compound forms and the simple assignment, and not `??=`. Closed by classifying it
+as a compound assignment with its right-hand side, in the same place and shape as
+the others. Seeing it is only half: the request prefix is declared with the EMPTY
+string, which is not null, so `baseUrl ??= ...` reads as a writer and leaves the
+previous value standing - `R8` now requires every write to that field to be a
+form that always retargets. `wire-nullcoalesceassign` rewrites the TLS fallback
+to `??=` and reddens; `wire-nullcoalesceinert` stays green.
+
+### N4 - an unmarked finding body was invisible to both censuses
+
+SEVERITY: LOW
+
+`DerivedCensus` counts `SEVERITY:` markers and derives the total from them, so a
+body added without a marker moved neither the derived census nor the declared
+one: `H1` stayed green and the body disappeared. This file stated a total
+guarantee the code did not implement. Closed by `FindingBodies`, which counts the
+bodies by their own heading and knows nothing about markers, and by `H1`
+requiring bodies to equal markers and naming any body that has none.
+`wire-bodynomarker` reddens; `wire-bodymarked` stays green.
+
+### N5 - the promised universal cached CODE view was not what every counter read
+
+SEVERITY: LOW
+
+The deletion register named "one cached CODE view read by every code counter" as
+the replacement for the three-views defect. `LoadBlanked` did cache one, and
+`CountOnCodeLines`, `CallsTo`, `AttributesOf` and `WritesTo` each blanked raw text
+again, as did the FFA distance count, the `W25` surface map and the `MarkAttached`
+tag count - seven blanking sites and one cache. The semantics agreed at that tip,
+so nothing was wrong; the CLAIM was false, and `B0g`, `B16` and `B21` read NOT MET
+on it. Closed by making it true: every counter is handed the cached view,
+`CallsTo` is deleted in favour of `CallsToIn`, and `W27` asserts that a shipped
+file is blanked in exactly one place and that the place is the cache.
+`wire-uncachedview` reddens; `wire-viewinert` stays green.
+
+### N6 - the BUILD blind-control lead said twelve rows over a body of fourteen
+
+SEVERITY: LOW
+
+The tabulated block of that header was counted from the run; the lead sentence
+was typed. Corrected to the derived number, and the round-8 control logs compute
+the lead sentence from the same value as the table, with the assembler refusing
+to write a header whose prose and table disagree.
+
+### N7 - the APPLY blind-control lead called six variants "six new rows"
+
+SEVERITY: LOW
+
+Variant count and assertion-row count are different quantities; the body carried
+thirteen failed rows. Same correction and same computed-lead rule as N6.
+
+### N8 - the route prose named seven permitted members over a set of eight
+
+SEVERITY: LOW
+
+`permittedMembers` holds 1 + 2 + 5 entries and two comment sentences said seven.
+Corrected, and closed by `H2`, which counts the set out of the file's own text and
+requires both sentences to carry that count, so a ninth member reddens the prose.
+`wire-prosecount` reddens; `wire-proseinert` stays green.
+
+### N9 - the untouched-selection streak was called both sixth and fifth
+
+SEVERITY: LOW
+
+The substantive claim was true and the ordinal was typed twice, differently.
+Closed by the list at the head of this file and by `H2`, which counts it and
+requires the declared streak to be that length. `wire-streakrow` reddens.
+
+### N10 - the promised repository copy of the closure table never reached the pin
+
+SEVERITY: LOW
+
+The round-7 closure table promised an identical copy at
+`ai-collab/bugs/R7-CLOSURES.md` so the archived brief would be reproducible, and a
+pin-only read found neither that file nor the directory: the whole `ai-collab`
+tree is gitignored, so the promise was made by a document that lived only where it
+could not travel, and `B19` read NOT MET on that alone. Closed by making the
+canonical copy a TRACKED file beside the harness - `tools/tests/bug389-seam/R8-CLOSURES.md` -
+so every clone and every pin built from the tip carries it by construction, and by
+`H3`, which holds it to naming each published copy. `wire-closuresmissing`
+reddens; `wire-closuresinert` stays green.

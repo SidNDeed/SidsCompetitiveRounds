@@ -156,6 +156,48 @@ using CompetitiveRounds;
 //     deconstruction - "(ProximityVictimGate._attached,
 //     ProximityVictimGate._withdrawn) = (0, true);" - which the bare-name
 //     recogniser filed as a read because the character before the name is '.'.
+//   wiring   wire-callerextra: W25 must FAIL; W1 control must PASS. Calls the
+//     API client's initialiser a second time, from Plugin.Start - a member
+//     outside the bound caller set. R8 closed who may WRITE the request prefix
+//     and nothing closed who may CALL that writer, so this moved no count and
+//     no file and stayed green.
+//   wiring   wire-probecaller: W25 must FAIL; W1 control must PASS. Calls the
+//     permitted FFA wrapper from the 1v2 tab refresher. That wrapper is a
+//     permitted MEMBER of the staging set and is not itself a staging entry
+//     point, so nothing placed its own callers.
+//   wiring   wire-callerinert: W25 and W1 must BOTH stay green. An edit of
+//     comparable size in the same file that touches no call site - the half
+//     that stops the two rows above reading as "the file changed".
+//   wiring   wire-qualifiedprefix: W25 must FAIL; W1 control must PASS. A
+//     QUALIFIED pre-decrement and a qualified `out` use of the attachment count
+//     on the declining branch. Both forms read BACKWARDS from the name, and the
+//     backward half stopped at the '.' of the qualifier and filed each as a
+//     read.
+//   wiring   wire-qualifiedprefixinert: W25, W23 and W1 must all stay green.
+//   wiring   wire-nullcoalesceassign: W25 must FAIL; W1 control must PASS.
+//     Rewrites the TLS fallback to "??=". The prefix is declared with the empty
+//     string, which is not null, so that form reads as a writer and retargets
+//     nothing - and the classifier did not know the operator at all.
+//   wiring   wire-nullcoalesceinert: W25 and W1 must both stay green.
+//   wiring   wire-bodynomarker: H1 must FAIL; W25 control must PASS. Adds a
+//     finding body with no SEVERITY marker. The census was derived FROM the
+//     markers, so the body moved neither number and left the round unrecorded.
+//   wiring   wire-bodymarked: H1 and W25 must both stay green. The same body
+//     WITH its marker and with the declared census moved to match.
+//   wiring   wire-uncachedview: W27 must FAIL; W25 control must PASS. Puts a
+//     re-blank of raw text back inside a counter, so a shipped file is blanked
+//     in two places while the register names one cached view.
+//   wiring   wire-viewinert: W27 and W25 must both stay green.
+//   wiring   wire-prosecount: H2 must FAIL; W25 control must PASS. Adds a ninth
+//     entry to the permitted-member set, so the two route sentences no longer
+//     carry the set's own size.
+//   wiring   wire-streakrow: H2 must FAIL; W25 control must PASS. Adds a round
+//     to the streak list, so the declared streak is no longer its length.
+//   wiring   wire-proseinert: H2 and W25 must both stay green.
+//   wiring   wire-closuresmissing: H3 must FAIL; W25 control must PASS. Leaves
+//     the promised repository copy unnamed, which is the state that made a
+//     reviewer's pin-only read of the round-7 promise resolve to nothing.
+//   wiring   wire-closuresinert: H3 and W25 must both stay green.
 //   wiring   wire-pathswap:   D6 must FAIL;  D4 and D5 controls must PASS
 //   wiring   wire-paththrew:  D6 must FAIL;  D4 and D5 controls must PASS
 //   prior-r2            : N1 N2 N3 N4 N5 N6 must all FAIL; W1 control must PASS
@@ -251,7 +293,11 @@ internal static class Program
     // expression means two different inputs).
     //
     // There are now TWO views, named, and each counter declares the one it
-    // reads:
+    // reads. ONE PLACE BLANKS A FILE, and W27 is what holds it to one: the
+    // register entry claiming a single cached view was written while four
+    // counters and three call sites still blanked raw text of their own, and a
+    // register entry nobody can check is the next false mechanism a reader
+    // builds on (#302/#351/#342).
     //   * CODE  - the comment-blanked, offset-preserving copy, built once per
     //             file and cached. Every counter of CODE reads it.
     //   * PROSE - the raw text. An ABSENCE bound reads it on purpose, because
@@ -289,11 +335,23 @@ internal static class Program
 
     /// <summary>CountOf over the CODE view: a needle that survives only inside a
     /// comment is not counted, in any comment form. This used to drop whole-line
-    /// "//" lines and nothing else, so a block comment was code to it.</summary>
+    /// "//" lines and nothing else, so a block comment was code to it.
+    ///
+    /// IT IS HANDED THE CODE VIEW; IT DOES NOT BUILD ONE. The deletion register
+    /// named "one cached CODE view read by every code counter" as the
+    /// replacement for the three-views defect, and this counter - with CallsTo,
+    /// AttributesOf and WritesTo - went on blanking raw text itself, so the
+    /// shipped files were blanked in seven places and cached in one. The
+    /// semantics agreed, because blanking is deterministic and every caller held
+    /// a .cs file; the CLAIM did not, and a register entry nobody can check is
+    /// the next false mechanism a reader will build on (#302/#351). The single
+    /// place a file is blanked is now LoadBlanked, and W27 is what holds it
+    /// there. Callers pass LoadBlanked(rel), or a member body, which came from
+    /// it.</summary>
     private static int CountOnCodeLines(string text, string needle)
     {
         if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(needle)) return 0;
-        return CountOf(BlankComments(text), needle);
+        return CountOf(text, needle);
     }
 
     private static int CountOf(string text, string needle)
@@ -574,7 +632,36 @@ internal static class Program
 
     /// <summary>What this occurrence DOES to the field, or null when it reads
     /// it. Comparisons are the trap: ==, =>, !=, &lt;= and &gt;= all put an '='
-    /// next to the name and none of them writes anything.</summary>
+    /// next to the name and none of them writes anything.
+    ///
+    /// TWO HALVES, AND THEY DO NOT SEE THE SAME SPELLINGS. The FORWARD half
+    /// reads the operator that follows the name, so it recognises a qualified
+    /// occurrence for free - nothing in front of the name is looked at. The
+    /// BACKWARD half - the pre-increment, pre-decrement, `ref` and `out` forms -
+    /// used to read the character immediately before the BARE name, so on
+    /// `--ProximityVictimGate._attached` it found the '.' of the qualifier,
+    /// stopped, and filed the occurrence as a READ. That is the round-7 hole in
+    /// the DECONSTRUCTION form all over again, in the three other places that
+    /// read backwards, and `SkipQualifierBack` - which already solved it - was
+    /// wired only into the deconstruction recogniser. The backward half now
+    /// skips the qualifier chain first, so the qualified spelling of a
+    /// pre-decrement or of a `ref`/`out` argument classifies in the same terms
+    /// as the bare one (#342/#431/#432).
+    ///
+    /// `??=` IS A WRITE, and it was absent from the forward table. It is
+    /// classified as a compound assignment with its right-hand side, exactly as
+    /// `+=` and `&lt;&lt;=` are, because a bound that reads "every write in ANY
+    /// spelling" must not be a list of the spellings that happened to be in the
+    /// file when it was written.
+    ///
+    /// THE SPELLINGS IT NOW SEES: bare and qualified, for the increment and
+    /// decrement forms in both positions, `ref` and `out`, every compound
+    /// assignment including `??=`, the simple assignment, and the deconstruction
+    /// target. WHAT IT STILL CANNOT SEE, unchanged and disclosed: a write
+    /// through a PROPERTY SETTER, through an ALIAS whose name this scan does not
+    /// know, through REFLECTION, and behind a null-conditional '.' that
+    /// `SkipQualifierBack` refuses to walk past because no identifier precedes
+    /// it.</summary>
     private static string ClassifyWrite(string text, int at, int after, out string rhs)
     {
         rhs = null;
@@ -588,6 +675,7 @@ internal static class Program
             if (c0 == '-' && c1 == '-') return "-- (decrement)";
             if (c0 == '<' && c1 == '<' && c2 == '=') { rhs = RhsTo(text, f + 3); return "<<= (compound assignment)"; }
             if (c0 == '>' && c1 == '>' && c2 == '=') { rhs = RhsTo(text, f + 3); return ">>= (compound assignment)"; }
+            if (c0 == '?' && c1 == '?' && c2 == '=') { rhs = RhsTo(text, f + 3); return "??= (compound assignment)"; }
             if (c1 == '=' && (c0 == '+' || c0 == '-' || c0 == '*' || c0 == '/' || c0 == '%'
                               || c0 == '&' || c0 == '|' || c0 == '^'))
             {
@@ -600,7 +688,11 @@ internal static class Program
                 return "= (simple assignment)";
             }
         }
-        int b = SkipWsBack(text, at - 1);
+        // THE QUALIFIER CHAIN IS SKIPPED BEFORE THE BACKWARD HALF LOOKS. On
+        // `--A._attached` and `out A._attached` the character immediately before
+        // the name is the '.' of the qualifier, and reading it there answers a
+        // question about the qualifier rather than about the operator.
+        int b = SkipQualifierBack(text, at);
         if (b >= 1)
         {
             if (text[b] == '+' && text[b - 1] == '+') return "++ (pre-increment)";
@@ -773,10 +865,12 @@ internal static class Program
         }
     }
 
-    /// <summary>Every WRITE to one field in one text, in any spelling.</summary>
-    private static List<FieldWrite> WritesTo(string text, string field)
+    /// <summary>Every WRITE to one field in one text ALREADY in the CODE view,
+    /// in any spelling. Its two callers hand it a member body, which MemberBody
+    /// took from the cached view, so there is nothing left to blank.</summary>
+    private static List<FieldWrite> WritesTo(string code, string field)
     {
-        return WritesToBlanked(text, BlankComments(text), field);
+        return WritesToBlanked(code, code, field);
     }
 
     /// <summary>The same, over a text whose comments have ALREADY been blanked -
@@ -925,16 +1019,12 @@ internal static class Program
     /// <summary>Calls to one (optionally qualified) name, whitespace-tolerant:
     /// "Foo.Bar (x)" is the same call as "Foo.Bar(x)" and a count that reads one
     /// and not the other is the same class of defect as a spelling-bound
-    /// assignment count.</summary>
-    private static int CallsTo(string text, string name)
-    {
-        return CallsToIn(BlankComments(text), name);
-    }
-
-    /// <summary>The same, over a text already in the CODE view, so a caller that
-    /// holds a blanked copy does not blank it again. It is the COUNT of
-    /// CallSitesIn and never a second rule - two counters of one thing is two
-    /// answers waiting to disagree (#342).</summary>
+    /// assignment count. It is handed the CODE view, like every other counter of
+    /// code here; CallsTo, which blanked raw text of its own, is DELETED and its
+    /// two callers pass LoadBlanked's answer to this one instead.
+    ///
+    /// It is the COUNT of CallSitesIn and never a second rule - two counters of
+    /// one thing is two answers waiting to disagree (#342).</summary>
     private static int CallsToIn(string blanked, string name)
     {
         return CallSitesIn(blanked, name).Count;
@@ -966,11 +1056,34 @@ internal static class Program
         }
     }
 
-    /// <summary>Attribute applications [Name] or [Name(...)], likewise
-    /// whitespace-tolerant.</summary>
-    private static int AttributesOf(string text, string name)
+    /// <summary>The call sites of a BARE name: the same, minus every occurrence
+    /// that stands behind a '.'.
+    ///
+    /// CallSitesIn accepts a '.' in front of the name, because a '.' is not an
+    /// identifier character - which is right for a name searched WITH its
+    /// qualifier ("ApiClient.Initialize") and wrong for one searched bare.
+    /// `Initialize` is declared by nine shipped types, and six of their calls
+    /// sit in the SAME member as the one call this round binds, so a bare search
+    /// that counted `GameStateWatcher.Initialize()` would resolve every one of
+    /// them into the bound set and the clause could never fail (#342/#431). A
+    /// bare search is therefore confined to the file that DECLARES the target,
+    /// and rejects a qualified occurrence there too.</summary>
+    private static List<int> BareCallSitesIn(string blanked, string name)
     {
-        string blanked = BlankComments(text);
+        var kept = new List<int>();
+        foreach (int at in CallSitesIn(blanked, name))
+        {
+            int b = SkipWsBack(blanked, at - 1);
+            if (b >= 0 && blanked[b] == '.') continue;
+            kept.Add(at);
+        }
+        return kept;
+    }
+
+    /// <summary>Attribute applications [Name] or [Name(...)], likewise
+    /// whitespace-tolerant, over a text already in the CODE view.</summary>
+    private static int AttributesOf(string blanked, string name)
+    {
         if (string.IsNullOrEmpty(blanked) || string.IsNullOrEmpty(name)) return 0;
         int n = 0, i = 0;
         while (true)
@@ -1293,9 +1406,18 @@ internal static class Program
     }
 
     /// <summary>The severity census a set of finding bodies produces, counted
-    /// from their own `SEVERITY:` markers and never typed. One marker per body,
-    /// so the total is also derived: a body added without a marker changes the
-    /// total and is visible, rather than silently not counting.</summary>
+    /// from their own `SEVERITY:` markers and never typed.
+    ///
+    /// IT COUNTS MARKERS, AND THAT IS ALL IT CAN COUNT. The round-7 comment here
+    /// said "a body added without a marker changes the total and is visible".
+    /// It does not: the total is derived FROM the markers, so a body with no
+    /// marker moves neither the derived census nor the declared one, H1 stays
+    /// green, and the body disappears from the round. The guarantee was a claim
+    /// about the whole state space written from the one state the author had in
+    /// mind (#351/#434). What closes it is not a better sentence here but a
+    /// SECOND, INDEPENDENT count - FindingBodies, which counts the bodies by
+    /// their own heading and knows nothing about markers - and H1 requiring the
+    /// two to agree.</summary>
     private static string DerivedCensus(string findings)
     {
         int high = 0, medium = 0, low = 0, other = 0, total = 0;
@@ -1317,6 +1439,55 @@ internal static class Program
             }
         return total + " findings: " + high + " HIGH, " + medium + " MEDIUM, " + low + " LOW"
             + (other == 0 ? "" : ", " + other + " UNRECOGNISED");
+    }
+
+    /// <summary>The finding BODIES in a findings file, counted by their own
+    /// heading and knowing nothing about the SEVERITY markers, together with the
+    /// heading of every body that carries none.
+    ///
+    /// A body opens with a line whose trimmed text starts with "### " and runs
+    /// to the next such line or to the end of the file; it is MARKED when a line
+    /// inside it opens with "SEVERITY:". Counting the bodies a SECOND way, off
+    /// different evidence, is the whole point - a marker count and a body count
+    /// can only be held to each other when neither is derived from the other
+    /// (#342/#431). A marker standing outside every body makes markers exceed
+    /// bodies and reddens in the same clause.</summary>
+    private static int FindingBodies(string findings, out List<string> unmarked)
+    {
+        unmarked = new List<string>();
+        if (findings == null) return 0;
+        int bodies = 0;
+        string heading = null;
+        bool marked = false;
+        foreach (string line in findings.Split((char)10))
+        {
+            string t = line.Trim();
+            if (t.StartsWith("### ", StringComparison.Ordinal))
+            {
+                if (heading != null && !marked) unmarked.Add(heading);
+                heading = t;
+                marked = false;
+                bodies++;
+                continue;
+            }
+            if (heading != null && t.StartsWith("SEVERITY:", StringComparison.Ordinal)) marked = true;
+        }
+        if (heading != null && !marked) unmarked.Add(heading);
+        return bodies;
+    }
+
+    /// <summary>The number of lines in a text whose trimmed form OPENS with a
+    /// marker. The marker has to open the line for the same reason the census
+    /// requires it: prose naming the marker would otherwise be counted as one
+    /// more of the thing it describes, a reading that finds its own needle
+    /// (#342).</summary>
+    private static int LinesOpeningWith(string text, string marker)
+    {
+        if (text == null) return 0;
+        int n = 0;
+        foreach (string line in text.Split((char)10))
+            if (line.Trim().StartsWith(marker, StringComparison.Ordinal)) n++;
+        return n;
     }
 
     /// <summary>The name a member signature declares: the identifier that stands
@@ -2247,7 +2418,7 @@ internal static class Program
             ffaProblems.Add("cannot read plugin/FfaMode.cs - an unread file is a failure, not a skip");
         else
         {
-            string ffaBlank = BlankComments(ffaText);
+            string ffaBlank = LoadBlanked("plugin/FfaMode.cs");
             int dist = CountOf(ffaBlank, "Vector2.Distance(") + CountOf(ffaBlank, "Vector3.Distance(");
             if (dist != 2)
                 ffaProblems.Add("FfaMode.cs must carry exactly the two distance comparisons this branch "
@@ -2487,6 +2658,9 @@ internal static class Program
             new[] { "ProximityVictim.LocalGateState(Plugin.modDisabled, PatchesLive)" },
             new string[0]);
         string patchesText = LoadSource("plugin/ProximityVictimPatches.cs");
+        // The CODE view of the same file, from the one cache. Every counter of
+        // code below reads THIS; the PROSE copy above keeps its declared job.
+        string patchesCode = LoadBlanked("plugin/ProximityVictimPatches.cs");
         Check("W14b Wiring_TheDisabledFlagIsReadNowhereElseInTheFile",
             patchesText != null && CountOf(patchesText, "Plugin.modDisabled") == 1,
             "the mod-disabled flag must be read exactly once in the file (inside LocalCapability); found "
@@ -2502,10 +2676,10 @@ internal static class Program
         // own declaration, and the single read inside LocalCapability that W14
         // anchors.
         Check("W14c Wiring_TheAttachmentAnswerIsReadNowhereElseInTheFile",
-            patchesText != null && CountOnCodeLines(patchesText, "PatchesLive") == 2,
+            patchesCode != null && CountOnCodeLines(patchesCode, "PatchesLive") == 2,
             "PatchesLive must occur on exactly two code lines - its own declaration and the read "
             + "inside LocalCapability; found "
-            + (patchesText == null ? -1 : CountOnCodeLines(patchesText, "PatchesLive")));
+            + (patchesCode == null ? -1 : CountOnCodeLines(patchesCode, "PatchesLive")));
 
         // W15 - the advertiser and the gate BOTH ask it, and neither re-derives
         // it. The advert used to be staged on the attachment count alone while the
@@ -2935,7 +3109,7 @@ internal static class Program
                 continue;
             }
             surfaceText[rel] = text;
-            surfaceBlank[rel] = BlankComments(text);
+            surfaceBlank[rel] = LoadBlanked(rel);
         }
 
         if (patchesText == null) reachProblems.Add("cannot read plugin/ProximityVictimPatches.cs");
@@ -3005,10 +3179,10 @@ internal static class Program
             if (realWithdraw < 1)
                 reachProblems.Add("the withdrawal latch must have at least one write, or this premise is vacuous");
 
-            int callers = CallsTo(patchesText, "ProximityVictimGate.MarkAttached");
+            int callers = CallsToIn(patchesCode, "ProximityVictimGate.MarkAttached");
             if (callers != 3)
                 reachProblems.Add("MarkAttached must be called from exactly three sites; found " + callers);
-            int cleanups = AttributesOf(patchesText, "HarmonyCleanup");
+            int cleanups = AttributesOf(patchesCode, "HarmonyCleanup");
             if (cleanups != 3)
                 reachProblems.Add("and those sites must be Harmony cleanup callbacks, which run inside the "
                     + "patch loop; found " + cleanups + " cleanup attribute(s)");
@@ -3023,7 +3197,7 @@ internal static class Program
             // checked here rather than read once and trusted (#342/#431).
             foreach (string tag in new[] { "DealDamageToPlayer.Go", "StunPlayer.Go", "TeleportToOpponent.Go" })
             {
-                int tagged = CountOf(BlankComments(patchesText),
+                int tagged = CountOf(patchesCode,
                     "ProximityVictimGate.MarkAttached(\"" + tag + "\")");
                 if (tagged != 1)
                     reachProblems.Add("MarkAttached must be called exactly once with the literal \"" + tag
@@ -3174,9 +3348,9 @@ internal static class Program
         //       below the gate;
         //   R6  the CALLER SET AT MEMBER GRAIN, over every file: each staging
         //       entry-point call site is resolved to the member that encloses it
-        //       and that member must be one of the seven named below - so a call
+        //       and that member must be one of the 8 named below - so a call
         //       lifted out of a tab refresher into another NativeUI member, or
-        //       added to an eighth ApiClient member, reddens and is named. This
+        //       added to a sixth ApiClient member, reddens and is named. This
         //       is what R3/R4 could not do: R3 skipped every file that was not
         //       Plugin.cs and R4 closed only the FILE set, leaving seven of the
         //       ten sites the map prints with no position constraint at all;
@@ -3361,12 +3535,100 @@ internal static class Program
                     reachProblems.Add("the request prefix may be written only from " + urlWriters[0]
                         + " or the TLS fallback that runs from it; found a write at " + apiRel + " line "
                         + w.Line + " inside '" + (owner ?? "no member") + "'");
+                // AND EVERY ONE OF THOSE WRITES MUST ACTUALLY RETARGET IT. The
+                // prefix is declared with the EMPTY string, which is not null,
+                // so a conditional form - `baseUrl ??= ...` - reads as a writer
+                // and leaves the previous value standing. R7 and R8 rest on the
+                // prefix being what initialisation SET; a writer that may
+                // decline to write is not that, and the TLS fallback written
+                // that way would go on addressing the host it could not reach.
+                // A member that owns a write is not the same property as a write
+                // that happens (#342).
+                if (w.Kind != "= (simple assignment)")
+                    reachProblems.Add("every write to the request prefix must RETARGET it - the field is "
+                        + "declared with the empty string, which is not null, so a conditional or compound "
+                        + "form can leave the previous value in place while still reading as a writer; found "
+                        + w.Kind + " at " + apiRel + " line " + w.Line + " [" + w.Text + "]");
             }
             if (!initWrites)
                 reachProblems.Add("ApiClient.Initialize must be one of the request prefix's writers - it is "
                     + "what makes a reply downstream of initialisation at all; writers found: "
                     + (urlWhere.Count == 0 ? "none" : string.Join(" | ", urlWhere.ToArray())));
         }
+
+        // R9 - AND WHO CALLS THOSE WRITERS. One link further up than R8.
+        //
+        // R8 closes the members that may WRITE the request prefix. Nothing
+        // closed who may CALL them: W25c requires the existing
+        // ApiClient.Initialize call to SIT inside DoInitialize and does not
+        // reject a second one elsewhere, so an ordinary startup refactor could
+        // initialise the client from another member with every clause above
+        // green. The same gap sits under FfaProbeServerState: it is a permitted
+        // member of the staging entry-point set, but it is not itself a staging
+        // entry point, so R6 never places ITS callers.
+        //
+        // The map this case prints is evidence for a reader and is not an
+        // assertion; a printed map cannot fail (#342/#431). So the resolved
+        // caller set is compared, as a SET and site for site, against a closed
+        // set written out here - the shape R6 uses for staging entry points,
+        // applied to the writers. The map stays, beside it.
+        //
+        // TWO SPELLING RULES, and both are load-bearing. A call is searched
+        // QUALIFIED across the assembly and BARE only in the file that declares
+        // the target, because nine shipped types declare a method called
+        // Initialize and six of those calls stand in the very member this set
+        // names. And a bare hit behind a '.' is rejected, which is what
+        // BareCallSitesIn is for.
+        //
+        // ONE CALL PER NAMED MEMBER, not merely the right members: a second call
+        // added inside DoInitialize would leave the SET equal, and it is a
+        // second initialisation either way.
+        var callerBound = new Dictionary<string, string[]>(StringComparer.Ordinal);
+        callerBound["ApiClient.Initialize"] =
+            new[] { pluginRel + " :: private void DoInitialize()" };
+        callerBound["ApiClient.ProbeEndpointThenStart"] =
+            new[] { apiRel + " :: public static void Initialize(string url)" };
+        callerBound["ApiClient.FfaProbeServerState"] =
+            new[] { uiRel + " :: private static void MaybeRefreshFfaTab()" };
+        // { qualified spelling, bare spelling, the file that DECLARES it }
+        string[][] callerTargets = new[]
+        {
+            new[] { "ApiClient.Initialize",             "Initialize",             apiRel },
+            new[] { "ApiClient.ProbeEndpointThenStart", "ProbeEndpointThenStart", apiRel },
+            new[] { "ApiClient.FfaProbeServerState",    "FfaProbeServerState",    apiRel }
+        };
+        var callerMap = new List<string>();
+        foreach (string[] t in callerTargets)
+        {
+            string key = t[0], bare = t[1], home = t[2];
+            var resolved = new List<string>();
+            foreach (string rel in shippedCs)
+            {
+                string blanked;
+                if (!surfaceBlank.TryGetValue(rel, out blanked)) continue;
+                var sites = CallSitesIn(blanked, key);
+                if (rel == home) sites.AddRange(BareCallSitesIn(blanked, bare));
+                foreach (int at in sites)
+                {
+                    string owner = EnclosingMemberOf(blanked, at);
+                    resolved.Add(rel + " :: " + (owner ?? "(no enclosing member)"));
+                    callerMap.Add(key + " at " + rel + " line " + LineOf(blanked, at) + " in "
+                        + (owner ?? "(no enclosing member)"));
+                }
+            }
+            string[] wanted = callerBound[key];
+            var want = new List<string>(wanted);
+            resolved.Sort(StringComparer.Ordinal);
+            want.Sort(StringComparer.Ordinal);
+            string got = resolved.Count == 0 ? "(nothing)" : string.Join(" | ", resolved.ToArray());
+            if (resolved.Count != want.Count
+                || string.Join(" | ", resolved.ToArray()) != string.Join(" | ", want.ToArray()))
+                reachProblems.Add("every call to '" + key + "' must come from the closed set this argument "
+                    + "has placed, one call per named member; wanted " + string.Join(" | ", want.ToArray())
+                    + "; found " + got);
+        }
+        Console.WriteLine("NOTE  W25 permitted-writer callers: "
+            + (callerMap.Count == 0 ? "none" : string.Join("; ", callerMap.ToArray())));
 
         // R2 - the gate flag.
         SurfaceScan initScan = ScanField(shippedCs, surfaceText, surfaceBlank,
@@ -3467,9 +3729,15 @@ internal static class Program
         // staging call moved out of a tab refresher into a menu member, or added
         // to a sixth ApiClient member, changed no count and no file and stayed
         // green. The set below is written out because it is the CLAIM: these
-        // seven members, and no others, reach a staging entry point. Its price
+        // 8 members, and no others, reach a staging entry point. Its price
         // is that it must be edited when a caller legitimately moves; that is
         // the point - the edit is where a reader is told the route changed.
+        //
+        // BOTH NUMBERS ABOVE ARE DERIVED, NOT TYPED. H2 counts the entries of
+        // permittedMembers out of this file's own text and requires each
+        // sentence to carry that count, so a ninth member reddens the prose that
+        // describes the set. A typed number standing beside derived ones is the
+        // one a reader has no way to tell apart (#431).
         //
         // The two ApiClient members that are neither the tick nor a tab
         // refresher are exactly the routes no scan can walk: FfaKickFromLobby is
@@ -3693,6 +3961,16 @@ internal static class Program
         // census line is COMPUTED from those markers, and the log's header
         // quotes the computed line. This case is what makes the declared line
         // unable to disagree with the bodies.
+        //
+        // AND AN UNMARKED BODY IS A RED FAILURE, NEVER A SKIP. Deriving the
+        // total FROM the markers made a body written without one invisible to
+        // both numbers: the census did not move, this case stayed green, and the
+        // body left the round without anything saying so. The bodies are now
+        // counted a SECOND time, by their own heading, by a counter that knows
+        // nothing about markers, and the two counts must agree - the body that
+        // has no marker is NAMED. RED under "wire-bodynomarker", which adds a
+        // body with no marker; GREEN under "wire-bodymarked", which adds one
+        // with its marker and moves the declared census with it.
         const string findRel = "tools/tests/bug389-seam/round-findings.md";
         string findText = LoadSource(findRel);
         var censusProblems = new List<string>();
@@ -3702,6 +3980,19 @@ internal static class Program
         else
         {
             string derived = DerivedCensus(findText);
+            List<string> unmarked;
+            int bodies = FindingBodies(findText, out unmarked);
+            int markers = LinesOpeningWith(findText, "SEVERITY:");
+            if (unmarked.Count != 0)
+                censusProblems.Add("every finding body must carry its own SEVERITY marker, or it counts in "
+                    + "no census and leaves the round unrecorded; these carry none: "
+                    + string.Join(" | ", unmarked.ToArray()));
+            if (bodies != markers)
+                censusProblems.Add("the finding BODIES and the SEVERITY markers must be equal in number - "
+                    + "they are counted off different evidence precisely so they can disagree; " + bodies
+                    + " body/bodies, " + markers + " marker(s)");
+            Console.WriteLine("NOTE  H1 finding bodies: " + bodies + " heading(s), " + markers + " marker(s), "
+                + unmarked.Count + " unmarked");
             int declared = CountOf(findText, "CENSUS: ");
             if (declared != 1)
                 censusProblems.Add(findRel + " must declare the census exactly once on a 'CENSUS: ' line; found "
@@ -3722,6 +4013,172 @@ internal static class Program
         Check("H1 Report_TheSeverityCensusIsDerivedFromTheFindingBodies",
             censusProblems.Count == 0,
             string.Join("; ", censusProblems.ToArray()));
+
+        // W27 - A SHIPPED FILE IS BLANKED IN EXACTLY ONE PLACE, AND THAT PLACE
+        // IS THE CACHE. RED under "wire-uncachedview", which puts a re-blank
+        // back inside CountOnCodeLines; GREEN under "wire-viewinert", an edit of
+        // comparable size in this same file that touches no blanking call.
+        //
+        // The deletion register named "one cached CODE view read by every code
+        // counter" as the replacement for the three-views defect. LoadBlanked
+        // did cache one - and CountOnCodeLines, CallsTo, AttributesOf and
+        // WritesTo each blanked raw text again, as did the FFA count, the W25
+        // surface map and the MarkAttached tag count. Seven blanking sites and
+        // one cache. Nothing was WRONG at that tip, because blanking is
+        // deterministic and every one of those callers held a .cs file; the
+        // CLAIM was wrong, and an absence bound whose named replacement is not
+        // actually present is a register a reader cannot use (#302/#351). The
+        // one case where the two answers genuinely differ is a file that is not
+        // C#: LoadBlanked returns it unchanged, a direct re-blank would run the
+        // C# blanker over it and eat the line W10 reads.
+        //
+        // This case is written against the CALL, not against the count of the
+        // word: a declaration is not a call, and CallSitesIn tells them apart.
+        const string progRel = "tools/tests/bug389-seam/Program.cs";
+        string progCode = LoadBlanked(progRel);
+        var viewProblems = new List<string>();
+        if (progCode == null)
+            viewProblems.Add("cannot read " + progRel + " in the code view - an unread file is a failure, "
+                + "not a skip");
+        else
+        {
+            // SPELLED IN HALVES, because this case searches the file it is
+            // written in: a signature written whole here would be found here as
+            // well as at its declaration, the span would resolve to neither, and
+            // the case could never pass. The same discipline W24's needles use.
+            string blankSig = "private static string " + "LoadBlanked(string relative)";
+            var blankSites = CallSitesIn(progCode, "BlankComments");
+            int bo, bc; string bp;
+            if (!TryMemberSpan(progCode, blankSig, out bo, out bc, out bp)) viewProblems.Add(bp);
+            else
+            {
+                var outside = new List<string>();
+                foreach (int at in blankSites)
+                    if (at < bo || at > bc) outside.Add("line " + LineOf(progCode, at));
+                if (blankSites.Count != 1 || outside.Count != 0)
+                    viewProblems.Add("a shipped file may be blanked in exactly one place - the cache in '"
+                        + blankSig + "' - or 'one cached CODE view read by every code counter' is a claim "
+                        + "the code does not implement; found " + blankSites.Count + " call site(s), "
+                        + (outside.Count == 0 ? "none" : string.Join(", ", outside.ToArray()))
+                        + " outside it");
+            }
+            Console.WriteLine("NOTE  W27 BlankComments call sites: " + blankSites.Count);
+        }
+        Check("W27 Report_TheCodeViewIsBuiltInExactlyOnePlace",
+            viewProblems.Count == 0,
+            string.Join("; ", viewProblems.ToArray()));
+
+        // H2 - EVERY PROSE COUNT IS DERIVED FROM THE ARTIFACT IT DESCRIBES.
+        // RED under "wire-prosecount", which adds a member to permittedMembers
+        // so the route sentences no longer carry the set's size, and under
+        // "wire-streakrow", which adds a round to the streak list so the streak
+        // line no longer carries its length. GREEN under "wire-proseinert".
+        //
+        // Four prose counts disagreed with the numbers their own artifacts
+        // derive: a blind-control lead saying twelve rows over a body of
+        // fourteen, another calling six mutant variants "six new rows" over
+        // thirteen assertion rows, a route comment naming seven permitted
+        // members over a dictionary of eight, and a streak called both sixth and
+        // fifth. Correcting the four numbers is not the closure - they would
+        // drift again the next time the artifact moved. This is the same class
+        // H1 already closed for the severity census (#431), applied to the other
+        // typed numbers: the number is READ OUT of the thing it counts, and the
+        // sentence has to carry that number.
+        //
+        // Both counts are taken from the TEXT under test, never from the running
+        // harness's own values: a mutant edits what the case READS, so a count
+        // taken from the compiled dictionary would move with neither and the
+        // check could not fail.
+        var proseProblems = new List<string>();
+        if (progCode == null || progText == null)
+            proseProblems.Add("cannot read " + progRel + " in both views - an unread file is a failure, "
+                + "not a skip");
+        else
+        {
+            const string mapOpen = "permittedMembers[pluginRel] = new[]";
+            int mo = progCode.IndexOf(mapOpen, StringComparison.Ordinal);
+            int mc = mo < 0 ? -1 : progCode.IndexOf((char)10 + "        };", mo, StringComparison.Ordinal);
+            if (mo < 0 || mc < 0)
+                proseProblems.Add("could not bound the permitted-member set in " + progRel
+                    + " - the count the route sentences carry is read out of it");
+            else
+            {
+                // Each entry is a member SIGNATURE, so each ends with the close
+                // of its parameter list immediately before the closing quote.
+                int members = CountOf(progCode.Substring(mo, mc - mo), ")\"");
+                // The SENTENCES are comments, so they are counted over the PROSE
+                // view; the SET is code, so its size is counted over the CODE
+                // view, where a signature quoted in a comment declares nothing.
+                foreach (string sentence in new[] {
+                    "one of the " + members + " named below",
+                    members + " members, and no others, reach a staging entry point." })
+                {
+                    int n = CountOf(progText, sentence);
+                    if (n != 1)
+                        proseProblems.Add("the route comment must carry the permitted-member set's own size ("
+                            + members + "); the sentence '" + sentence + "' occurs " + n + " time(s)");
+                }
+                Console.WriteLine("NOTE  H2 permitted members, counted from the set: " + members);
+            }
+        }
+        if (findText == null)
+            proseProblems.Add("cannot read " + findRel + " - the streak list is the streak count's only "
+                + "source, so an unread file is a failure, not a skip");
+        else
+        {
+            int rounds = LinesOpeningWith(findText, "STREAK-ROUND:");
+            int streakLines = LinesOpeningWith(findText, "STREAK: ");
+            string want = "STREAK: " + rounds + " gate verdicts";
+            if (streakLines != 1)
+                proseProblems.Add(findRel + " must declare the streak exactly once on a 'STREAK: ' line; found "
+                    + streakLines);
+            else if (LinesOpeningWith(findText, want) != 1)
+                proseProblems.Add("the declared streak must be the length of the list above it - the ordinal "
+                    + "was given as both sixth and fifth because it was typed; the list holds " + rounds
+                    + " round(s), so the line must open '" + want + "'");
+            Console.WriteLine("NOTE  H2 selection-method streak, counted from the list: " + rounds
+                + " gate verdict(s)");
+        }
+        Check("H2 Report_EveryProseCountIsDerivedFromItsOwnArtifact",
+            proseProblems.Count == 0,
+            string.Join("; ", proseProblems.ToArray()));
+
+        // H3 - THE CLOSURE TABLE IS IN THE SOURCE TREE AND PROMISES THE PATHS
+        // THAT WERE PUBLISHED. RED under "wire-closuresmissing", which removes
+        // the promised repository path from it; GREEN under "wire-closuresinert".
+        //
+        // The round-7 closure table promised an identical copy at
+        // ai-collab/bugs/R7-CLOSURES.md "so the archived brief is reproducible",
+        // and a pin-only read found neither that file nor the directory: the
+        // whole ai-collab tree is gitignored, so it never reached the pin, and
+        // B19 read NOT MET on that alone. The promise was made by a document
+        // that lived only where it could not travel.
+        //
+        // What makes it travel is being TRACKED. The canonical copy is this
+        // file, beside the harness it describes, so every clone and every pin
+        // built from the tip carries it by construction rather than by somebody
+        // remembering to copy it. The two published copies are named IN it, and
+        // this case holds it to naming them.
+        const string closRel = "tools/tests/bug389-seam/R8-CLOSURES.md";
+        string closText = LoadSource(closRel);
+        var closProblems = new List<string>();
+        if (closText == null)
+            closProblems.Add("cannot read " + closRel + " - the closure table is part of the round's brief, "
+                + "so an unread file is a failure, not a skip");
+        else
+            foreach (string needle in new[] { "ai-collab/bugs/BUG389-R8-CLOSURES.md",
+                                              "REVIEW-INPUT/R8-CLOSURES.md",
+                                              "tools/tests/bug389-seam/R8-CLOSURES.md" })
+            {
+                int n = CountOf(closText, needle);
+                if (n != 1)
+                    closProblems.Add(closRel + " must name the published copy '" + needle
+                        + "' exactly once - a promise a reader cannot resolve is what B19 read NOT MET; found "
+                        + n);
+            }
+        Check("H3 Report_TheClosureTableTravelsWithTheTipItDescribes",
+            closProblems.Count == 0,
+            string.Join("; ", closProblems.ToArray()));
 
         Console.WriteLine("=== passed=" + _passed + " failed=" + _failed + " ===");
         return _failed == 0 ? 0 : 1;
