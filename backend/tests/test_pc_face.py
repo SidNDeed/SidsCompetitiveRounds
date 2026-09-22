@@ -23,6 +23,9 @@ if str(API) not in sys.path:
     sys.path.insert(0, str(API))
 
 import pc_face  # noqa: E402
+from pc_themes_data import rgb as _rgb, rgb_map as _rgb_map, rows  # noqa: E402
+
+CARD_THEMES = _rgb_map()
 
 PC_ASSETS = API / "assets" / "pc"
 if str(PC_ASSETS) not in sys.path:
@@ -64,7 +67,11 @@ def _spec(**overrides):
         "edition_label": "Edition 1",
         "minted_on": "2026-09-11",
         "print_short": "#a3f2c1",
-        "top_card": True,
+        # The LONGEST card name in the game, so the proof sheet Sid signs off
+        # carries the hardest fit rather than an easy one -- and a real name,
+        # because a `True` here used to be drawn as the literal "True".
+        "top_card": "Pristine Perseverance",
+        "top_card_rgb": CARD_THEMES["Pristine Perseverance"],
     }
     values.update(overrides)
     return values
@@ -79,7 +86,6 @@ UK_CHIPS = {
 UK_ALL = {
     **UK_CHIPS,
     "pc.signed": "ПІДПИСАНО",
-    "pc.top_card": "ТОП-КАРТА",
     "pc.stat.rank": "РАНГ",
     "pc.stat.rating": "РЕЙТИНГ ГРАВЦЯ",
     "pc.stat.pool": "ПУЛ",
@@ -398,13 +404,14 @@ def test_tile_is_not_a_downscaled_card(proof_outputs):
 
 def test_signed_badge_localization_and_foil_semantics(canonical_portraits):
     portrait = canonical_portraits["cos"][0]
-    base = _spec(band="legendary", top_card=False)
+    base = _spec(band="legendary", top_card="", top_card_rgb=None)
+    top = {"top_card": "Poison", "top_card_rgb": CARD_THEMES["Poison"]}
     unsigned = pc_face.render_face(base, {}, portrait, "card")
     signed = pc_face.render_face({**base, "signed": True}, {}, portrait, "card")
-    badge = pc_face.render_face({**base, "top_card": True}, {}, portrait, "card")
-    plain = pc_face.render_face({**base, "top_card": True}, {}, portrait, "card")
-    foil = pc_face.render_face({**base, "top_card": True, "foil": True}, {}, portrait, "card")
-    localized = pc_face.render_face({**base, "top_card": True}, UK_ALL, portrait, "card")
+    badge = pc_face.render_face({**base, **top}, {}, portrait, "card")
+    plain = pc_face.render_face({**base, **top}, {}, portrait, "card")
+    foil = pc_face.render_face({**base, **top, "foil": True}, {}, portrait, "card")
+    localized = pc_face.render_face({**base, **top}, UK_ALL, portrait, "card")
     with (
         Image.open(io.BytesIO(unsigned)) as a,
         Image.open(io.BytesIO(signed)) as b,
@@ -419,8 +426,15 @@ def test_signed_badge_localization_and_foil_semantics(canonical_portraits):
                                      c.crop((58, 642, 178, 754))).convert("RGB").getbbox() is not None
         assert d.getpixel((400, 880)) == e.getpixel((400, 880))
         assert d.getpixel((400, 400)) != e.getpixel((400, 400))
+        # The badge carries no i18n content since 9a -- it draws the ROUNDS
+        # card's own name, which is frozen English in every data path. So the
+        # assertion inverts: the two locales must be IDENTICAL here. On its
+        # own that would also pass if the badge stopped drawing entirely,
+        # which is why it is stated as a conjunction with the two lines
+        # above: identical across locales, AND different from a face with no
+        # top card at all.
         assert ImageChops.difference(c.crop((58, 642, 178, 754)),
-                                     f.crop((58, 642, 178, 754))).convert("RGB").getbbox() is not None
+                                     f.crop((58, 642, 178, 754))).convert("RGB").getbbox() is None
 
 
 def test_tile_short_chips_footer_and_signed_signal(canonical_portraits):
@@ -751,6 +765,73 @@ def test_the_fingerprint_requires_every_declared_font_before_it_answers(tmp_path
         pc_face.renderer_fingerprint()
 
 
+def test_a_redirected_font_directory_leaves_nothing_cached_behind(tmp_path, monkeypatch):
+    """The test above redirects `_FONTS_PATH`, and monkeypatch puts the global
+    back -- but it cannot evict what was cached while the global pointed at the
+    stand-in. Every font-derived cache here is unbounded, so an entry loaded
+    during that window would answer for the rest of the process, and the tests
+    that measure names would be measuring a font the renderer never declares.
+    Observed as a name fitted at 406.0 px before a redirect and 351.0 px after
+    it, with the global already restored.
+
+    Each measurement is taken three times and every one of them is a control.
+    BEFORE the redirect, to have something to compare to and -- deliberately --
+    to warm the key. DURING it, which must differ: a stand-in that measured the
+    same would make the last assertion true of any two fonts. AFTER the revert,
+    which must equal the before value: that is the rule itself.
+
+    MUTATION CONTROL: drop the directory from the cache keys (make `_font_at`
+    read `_FONTS_PATH` and key on role and size alone) and every DURING
+    assertion fails, because the matching before-call has already cached that
+    key against the real directory and the cache cannot see that the global
+    moved. The failure therefore lands on the during-assertions and never
+    reaches the after-assertions -- which is the defect stated exactly: a
+    path-blind cache does not observe the redirect at all, it just keeps
+    answering, and whether that answer is stale or fresh is decided by which
+    call happened to come first."""
+    # A real font, metrically unlike the declared ones, under every declared
+    # name: `_require_every_font` is satisfied and nothing refuses before the
+    # measurement happens.
+    stand_in = (Path(pc_face.FONTS_DIR) / pc_face._FONT_FILES["script"]).read_bytes()
+    for name in pc_face._FONT_FILES.values():
+        (tmp_path / name).write_bytes(stand_in)
+
+    # 97 px is no size the renderer draws at, so this test's own calls are the
+    # only ones touching these keys and no other test decides the outcome.
+    # Under the shipped keying it makes no difference whether a key is warm --
+    # which is the whole point of putting the directory in it.
+    name, size = "Twenty Character Nam", 97
+    han = 0x4E00                       # in the CJK font, not in the stand-in
+    party = "🎉"
+    before = pc_face._measure_text(name, size, "black")
+    glyph_before = pc_face._has_glyph("cjk", han)
+    emoji_before = pc_face._emoji_image(party, 32).tobytes()
+    pc_face._emoji_font()              # warmed on purpose: see MUTATION CONTROL
+
+    monkeypatch.setattr(pc_face, "_FONTS_PATH", tmp_path)
+    during = pc_face._measure_text(name, size, "black")
+    glyph_during = pc_face._has_glyph("cjk", han)
+    emoji_during = pc_face._emoji_image(party, 32).tobytes()
+    assert during != before, (
+        "measuring under the stand-in returned the real font's answer: either "
+        "the stand-in is not metrically different, or this (role, size) was "
+        "already cached and the directory is not part of the key"
+    )
+    assert glyph_before and not glyph_during, "the stand-in covers the same code points"
+    assert emoji_during != emoji_before, "the emoji path answered from the real font"
+    # the emoji table reader has no stand-in to fall back on, so under the
+    # redirect it must refuse rather than serve the font it read last time
+    with pytest.raises(KeyError):
+        pc_face._emoji_font()
+
+    monkeypatch.undo()                 # what the end of the test above does
+    assert pc_face._FONTS_PATH != tmp_path
+    assert pc_face._measure_text(name, size, "black") == before
+    assert pc_face._has_glyph("cjk", han) == glyph_before
+    assert pc_face._emoji_image(party, 32).tobytes() == emoji_before
+    assert pc_face._emoji_font() is not None
+
+
 def test_renderer_fingerprint_and_provenance(monkeypatch):
     first = pc_face.renderer_fingerprint()
     assert len(first) == 16 and all(char in "0123456789abcdef" for char in first)
@@ -768,7 +849,7 @@ def test_catalogue_keys_equal_label_ids():
         "pc.band.common", "pc.band.uncommon", "pc.band.rare", "pc.band.epic",
         "pc.band.legendary", "pc.band_short.common", "pc.band_short.uncommon",
         "pc.band_short.rare", "pc.band_short.epic", "pc.band_short.legendary",
-        "pc.foil", "pc.foil_short", "pc.signed", "pc.top_card", "pc.stat.rank",
+        "pc.foil", "pc.foil_short", "pc.signed", "pc.stat.rank",
         "pc.stat.rating", "pc.stat.pool", "pc.stat.board", "pc.stat.record",
         "pc.preview_footer", "pc.unnamed", "pc.edition", "pc.unranked",
     )
@@ -888,3 +969,304 @@ def test_the_rendered_name_never_reaches_the_chips_on_either_size():
                 chip_left = x
                 assert right - chip_left >= pc_face._scale_value(60, scale), (size, label, chip_left)   # a chip, not a stray pixel
                 assert name_right + gap <= chip_left, (size, name, label, name_right, chip_left)
+
+
+# ── item 9a: the top-card badge draws the card's NAME, in the card's colour ──
+
+_BADGE = (58, 642, 178, 754)
+_BG = (18, 20, 26)          # colours.card, what the name is laid over
+_COMMON_BAND = (128, 133, 148)
+
+
+def _name_box(scale=1.0):
+    return tuple(pc_face._scale_value(v, scale)
+                 for v in pc_face.LAYOUT["rects"]["badge_name"])
+
+
+def _ink_core(image, scale=1.0):
+    """The least-blended drawn pixel in the name column.
+
+    Judged on the CORE rather than the mean: antialiasing pulls every edge
+    pixel toward the dark background, and a blended grey sits numerically
+    nearer the green than the grey it came from -- so a mean would call the
+    band fallback "themed"."""
+    crop = image.crop(_name_box(scale))
+    px = [p for p in crop.convert("RGBA").getdata() if p[3] > 128]
+    if not px:
+        return None
+    return max(px, key=lambda p: sum((p[i] - _BG[i]) ** 2 for i in range(3)))[:3]
+
+
+def _render(**over):
+    spec = _spec(**over)
+    return Image.open(io.BytesIO(pc_face.render_face(spec, {}, None, "card"))).convert("RGBA")
+
+
+def _differs(first, second, box=None):
+    """Whether two renders differ inside `box`.
+
+    The `.convert("RGB")` is load-bearing, not tidying: `getbbox()` on an
+    RGBA difference answers from the ALPHA band, and every pixel of a card
+    face is fully opaque -- so a pure colour difference, which is the whole
+    subject of these assertions, reads as no difference at all."""
+    box = box or _BADGE
+    return ImageChops.difference(first.crop(box).convert("RGB"),
+                                 second.crop(box).convert("RGB")).getbbox() is not None
+
+
+def test_badge_name_is_drawn_in_the_cards_own_theme_colour():
+    """The positive signal, with the negative control beside it.
+
+    The band under test is COMMON on purpose. Its colour is grey, so a green
+    ink cannot be the band by accident -- on an uncommon print the band is
+    itself green and "Poison renders green" passes with a wholly broken
+    lookup."""
+    themed = _render(band="common", top_card="Poison", top_card_rgb=CARD_THEMES["Poison"])
+    assert _ink_core(themed) == CARD_THEMES["Poison"]
+
+    # a name with no theme row falls back to the band, and the two differ
+    unmapped = _render(band="common", top_card="Nonexistent Card", top_card_rgb=None)
+    assert _ink_core(unmapped) == _COMMON_BAND
+    assert _differs(themed, unmapped, _name_box())
+
+
+def test_badge_name_differs_by_name():
+    """Two different names must make two different pictures. An empty column,
+    a boolean, or a constant scribble all fail this."""
+    a = _render(band="common", top_card="Poison", top_card_rgb=CARD_THEMES["Poison"])
+    b = _render(band="common", top_card="Tank", top_card_rgb=CARD_THEMES["Poison"])
+    assert _differs(a, b, _name_box())
+
+
+def test_no_top_card_draws_no_badge():
+    """"" and None are the same absence, and neither draws the badge at all.
+
+    Stated against a baseline rather than as "no ink found": the column sits
+    over an opaque card, so there is no such thing as an empty crop -- the
+    question is only whether this render differs from one with no top card."""
+    baseline = _render(band="common", top_card="", top_card_rgb=None)
+    named = _render(band="common", top_card="Poison", top_card_rgb=CARD_THEMES["Poison"])
+    assert _differs(baseline, named), "the badge must draw for a real name"
+    for value in (None, "   ", "\t \n"):
+        blank = _render(band="common", top_card=value, top_card_rgb=None)
+        assert not _differs(baseline, blank), value
+
+
+def _ink_mask(image):
+    """The drawn shape, binarised and cropped to itself -- `None` if nothing
+    was drawn. Comparing two of these compares WHERE the ink is, without
+    asking the two paths to agree on antialias values."""
+    flat = image.getchannel("A").point(lambda a: 255 if a > 0 else 0)
+    box = flat.getbbox()
+    return None if box is None else flat.crop(box)
+
+
+def test_badge_name_never_lands_on_the_frame():
+    """The column is sized against BadgeFrame.png's own ink, not against the
+    badge rect: the frame's rails and corner arcs own the box edges, so a run
+    measured off the 112 px rect puts the first and last glyphs on the frame.
+
+    Every seeded name, at both render sizes, each against THAT size's own
+    BadgeFrame asset. The claim used to be the same sentence over a body that
+    loaded only the card asset and called the renderer only at scale 1.0 --
+    which left the tile unmeasured, and the tile is the tight one: its 16 px
+    column is the bound `_badge_name_fit` has to step the size down into, so a
+    fit that stopped one pixel short would land on the frame there and nowhere
+    else."""
+    covered = set()
+    for size, scale, canvas in (("card", 1.0, (pc_face.CARD_W, pc_face.CARD_H)),
+                                ("tile", 0.5, (pc_face.TILE_W, pc_face.TILE_H))):
+        frame = pc_face._asset("BadgeFrame.png", size).convert("RGBA")
+        assert frame.size == canvas, (size, frame.size, canvas)
+        solid = frame.getchannel("A").point(lambda a: 255 if a > 0 else 0)
+        for name, _theme, ink, _source in rows():
+            rgb = _rgb(ink)
+            layer = Image.new("RGBA", canvas, (0, 0, 0, 0))
+            pc_face._draw_badge_name(layer, name, rgb, scale)
+            drawn = _ink_mask(layer)
+            assert drawn is not None, (size, name)
+            overlap = ImageChops.multiply(
+                layer.getchannel("A").point(lambda a: 255 if a > 0 else 0), solid)
+            assert overlap.getbbox() is None, (size, name)
+
+            # ...and clear of the frame WITHOUT the clip having bought it. The
+            # renderer multiplies the layer by the column rect, so ink pushed
+            # past the column is silently shaved rather than composited onto
+            # the frame: on that reading alone this assertion could not fail.
+            # The whole rotated line must survive, shape for shape.
+            fitted, px = pc_face._badge_name_fit(name, size)
+            line, _w = pc_face._render_text_line(fitted, px, pc_face._rgba(rgb), "script")
+            whole = _ink_mask(line.transpose(Image.Transpose.ROTATE_90))
+            assert drawn.size == whole.size, (size, name, drawn.size, whole.size)
+            assert drawn.tobytes() == whole.tobytes(), (size, name)
+        covered.add(size)
+    assert covered == {"card", "tile"}, covered
+
+
+def test_badge_name_reads_upward_not_downward():
+    """`_draw_badge_name` rotates the rendered line with ROTATE_90, and the
+    comment beside it states the consequence: source column 0 becomes the
+    BOTTOM row, so the first glyph sits lowest and the name reads UPWARD.
+
+    Nothing else in this file pins that direction. ROTATE_270 produces the
+    same colour, the same bounding box, the same card/tile parity and the same
+    ink centring -- it just reads the name downward, which is the one property
+    a reader would notice and no assertion would. This one compares the drawn
+    pixels against BOTH rotations of the same line and requires the upward
+    one, with the two rotations proven distinct first so the comparison cannot
+    be vacuous."""
+    name, ink = "Poison", CARD_THEMES["Poison"]
+    fitted, px = pc_face._badge_name_fit(name, "card")
+    assert fitted == name, fitted            # an asymmetric run, drawn whole
+
+    line, _width = pc_face._render_text_line(fitted, px, pc_face._rgba(ink), "script")
+    upward = _ink_mask(line.transpose(Image.Transpose.ROTATE_90))
+    downward = _ink_mask(line.transpose(Image.Transpose.ROTATE_270))
+    assert upward.tobytes() != downward.tobytes(), (
+        "the control: a name whose two rotations agree could not tell them apart"
+    )
+
+    layer = Image.new("RGBA", (pc_face.CARD_W, pc_face.CARD_H), (0, 0, 0, 0))
+    pc_face._draw_badge_name(layer, name, ink, 1.0)
+    drawn = _ink_mask(layer)
+    assert drawn.size == upward.size, (drawn.size, upward.size)
+    assert drawn.tobytes() == upward.tobytes(), "the name reads downward"
+    assert drawn.tobytes() != downward.tobytes()
+
+
+def test_the_badge_column_comments_state_the_rect_the_layout_holds():
+    """The badge-column geometry is asserted in PROSE three times in pc_face
+    and was nowhere checked.
+
+    That is how `x 64..84` and `a 20 px column` survived a widening and went
+    on describing a rect that had become `[64, 654, 96, 742]`. Correcting the
+    words fixes today; pinning them to the layout is what stops the next
+    widening from re-opening the same finding, because a rect change now has
+    to move this test.
+
+    Both directions are required. The rect alone would pass over comments that
+    still said 20, and the comment text alone would pass over a rect that had
+    moved underneath it.
+    """
+    rect = pc_face.LAYOUT["rects"]["badge_name"]
+    assert rect == [64, 654, 96, 742], (
+        "the badge-name column moved to %r. The comments around "
+        "_draw_badge_name state its numbers in prose; move them in the same "
+        "commit." % (rect,))
+    assert rect[2] - rect[0] == 32, rect
+
+    src = Path(pc_face.__file__).read_text(encoding="utf-8")
+    assert "[64, 654, 96, 742]" in src, (
+        "no comment in pc_face.py names the badge-name rect, so the prose "
+        "around it can drift from the layout unobserved again")
+    assert "32 px column" in src, (
+        "the comments no longer state the column WIDTH; `20 px` is what they "
+        "said across a widening")
+    # The LIVE sentence, asserted positively. A negative grep for the
+    # retracted `x 64..84` cannot be used here: the correction quotes the old
+    # number in order to retract it, so the stale string is present on purpose
+    # and `not in` fails on the fix itself. What must be true is that the
+    # describing sentence names the real bounds.
+    assert "At x 64..96 the frame is clear from y 654 to y 742" in src, (
+        "the sentence that describes the clear span of BadgeFrame.png no "
+        "longer matches the rect above it")
+
+
+def test_the_dockerfile_does_not_overstate_what_the_fingerprint_hashes():
+    """`api/Dockerfile`'s header explains why the base image is pinned by
+    digest, and it used to justify the pin by saying the image's BYTES feed
+    `renderer_fp`. They do not: `runtime_provenance()` records version
+    STRINGS, per-feature records and a digest over selected Pillow files, and
+    nothing walks the base image, the interpreter binary or a shared library.
+
+    The correction matters in the unsafe direction -- a rebuild that changed
+    libfribidi without moving any of those strings would keep the fingerprint
+    over different pixels -- so what the function actually returns is pinned
+    here rather than left as prose that was right once.
+    """
+    import platform as _platform
+
+    prov = pc_face.runtime_provenance()
+    assert sorted(prov) == ["PIL", "features", "layout_engine",
+                            "package_digest", "python", "regex"], sorted(prov)
+    assert prov["python"] == _platform.python_version()
+    assert isinstance(prov["features"], dict) and prov["features"]
+
+    dockerfile = (Path(pc_face.__file__).parent / "Dockerfile").read_text(
+        encoding="utf-8")
+    header = dockerfile[:dockerfile.find("FROM ")]
+    # Positive only. The header retracts "this image's bytes" by quoting it,
+    # so a `not in` grep for the old claim fails on the correction rather than
+    # on a regression -- the same trap the badge-geometry check walked into.
+    assert "WHAT IS ACTUALLY HASHED" in header, (
+        "the Dockerfile header no longer states what feeds the fingerprint, "
+        "which is the whole content of the correction")
+    # The exact live sentence, not a case-folded keyword: `VERSION STRING`
+    # upper-cased also matches the "version strings" two lines below, so the
+    # loose form stayed green over a header that had gone back to claiming the
+    # image's bytes.
+    assert "records the interpreter VERSION STRING" in header, (
+        "the Dockerfile header no longer says WHAT is actually hashed, which "
+        "is the correction that makes the digest pin matter more rather than "
+        "less")
+    assert "SELECTED\n# PILLOW FILES" in header.upper(), (
+        "the header no longer says the Pillow digest is over SELECTED files")
+
+
+def test_badge_name_card_tile_parity():
+    """A name whole on the card is whole on the tile, by construction: the
+    text is decided ONCE at card scale and the size halved. Fitting the two
+    independently is what cut the long names on the tile only."""
+    column = pc_face.LAYOUT["rects"]["badge_name"]
+    width = column[2] - column[0]
+    cut = 0
+    for name, _theme, _ink, _source in rows():
+        card_text, card_px = pc_face._badge_name_fit(name, "card")
+        tile_text, tile_px = pc_face._badge_name_fit(name, "tile")
+
+        # the same text at both sizes -- including the same truncation
+        assert card_text == tile_text, name
+        # one size on the card; a long name is CUT, never shrunk
+        assert card_px == pc_face.BADGE_NAME_SIZE, (name, card_px)
+        if card_text.endswith("..."):
+            cut += 1
+        else:
+            assert card_text == " ".join(name.split()), name
+
+        # ...and neither size may overflow the column, which is what the clip
+        # would otherwise hide: the tile's halved size does not halve the line
+        # box with it.
+        for text, px, scale in ((card_text, card_px, 1.0), (tile_text, tile_px, 0.5)):
+            line = pc_face._render_text_line(text, px, (0, 0, 0, 0), "script")[0]
+            assert line.height <= width * scale, (name, px, line.height, width * scale)
+
+    # a negative control on the count: if NOTHING is truncated the fit rule has
+    # silently gone back to shrinking, and if everything is, the size is wrong.
+    assert 0 < cut < len(rows()) // 2, cut
+
+
+def test_badge_name_centres_on_ink_not_metrics():
+    """`_draw_text`'s "m" anchor subtracts half the LINE height, and that
+    height carries the font's descent whether or not the name has a
+    descender. Rotated, that asymmetry becomes a sideways wander in a 20 px
+    column. Centring on the ink removes it."""
+    def centre(name):
+        layer = Image.new("RGBA", (pc_face.CARD_W, pc_face.CARD_H), (0, 0, 0, 0))
+        pc_face._draw_badge_name(layer, name, (255, 255, 255), 1.0)
+        box = layer.getchannel("A").getbbox()
+        return (box[0] + box[2]) / 2.0
+
+    assert abs(centre("Barrage") - centre("Taste Of Blood")) <= 1.0
+
+
+def test_a_whitespace_only_name_draws_no_badge_name():
+    """`coverage_strip` can empty a name completely -- a name of nothing but
+    undrawable clusters strips to "". The column must then draw nothing,
+    rather than a zero-width artefact or a tofu box under a `face_rev` that
+    promises the pixels are right."""
+    from pc_portrait import coverage_strip
+
+    assert coverage_strip("\ue001\ue002") == "", "the probe clusters are undrawable"
+    baseline = _render(band="common", top_card="", top_card_rgb=None)
+    stripped = _render(band="common", top_card=coverage_strip("\ue001\ue002"), top_card_rgb=None)
+    assert not _differs(baseline, stripped)

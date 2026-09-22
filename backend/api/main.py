@@ -3466,6 +3466,11 @@ async def lifespan(app: FastAPI):
             # stack imported; the health word says which of those it is.
             if not IS_REPLICA and _pcs is not None:
                 tasks.append(asyncio.create_task(_pc_steam_sweep_loop()))
+        # Awaited, before anything can render: a face keyed off a colour
+        # this box has not read yet is a promise about pixels it cannot make.
+        if _pcf is not None:
+            async with async_session() as _theme_db:
+                await _pc_load_card_themes(_theme_db)
         # The Steam-render probe (v3 §9) runs on BOTH roles: each box
         # composites a stored Steam picture through its own face path and
         # reports the word on /health; the standby serves faces too.
@@ -24015,6 +24020,52 @@ def _is_shop_owner(steam_id: str | None) -> bool:
     return steam_id is not None and steam_id in SHOP_OWNER_STEAM_IDS
 
 
+# ── The one carve-out from that exemption ──────────────────────────
+#
+# Title-ladder rungs above the first are PROGRESSION, not cosmetics: each one
+# is granted by finishing a number of rated series while wearing the rung
+# below it. The shop-owner exemption above does two things that are wrong for
+# such a row — it lists the whole `rotation_pool = 'achievement'` pool to the
+# exempt account whether owned or not, and it skips the ownership check on
+# equip — and the combination means an exempt account is listed all forty
+# higher rungs and can equip any of them without the ladder ever having
+# advanced. A rung that can be worn without being earned is not a rung.
+#
+# The set is imported from `title_ladders`, which is the module that DEFINES
+# the catalogue, rather than matched on the `title_ladder_` sku prefix: a
+# prefix is a naming convention that a later sku can join by accident and that
+# a rename silently empties, which is the shape of a check that cannot fail
+# (#306/#342). Importing the module does NOT wire the ladder — the router is
+# still unmounted and the progression hook is still uncalled; see that
+# module's docstring, which records this import as the one production
+# reference that exists.
+import title_ladders as _title_ladders
+
+_GRANTED_ONLY_TITLE_SKUS = _title_ladders.GRANTED_ONLY_SKUS
+
+
+def _auto_owned(steam_id: str | None, sku: str | None) -> bool:
+    """Does the shop-owner exemption cover THIS sku?
+
+    Everything except a granted-only ladder rung. The defect this closes was
+    two surfaces reading the same exemption and neither excluding the rungs
+    (#279: a flag names a line, the defect is a class).
+
+    BOTH SURFACES CALL THIS FUNCTION: `_set_active_cosmetic` on equip, and the
+    achievement append in `list_shop_items` on the listing. That is asserted
+    rather than left to hold, by
+    `test_the_listing_decides_visibility_with_the_same_predicate_as_equip`,
+    which reads the listing's AST for the call. It is asserted because the
+    listing spent a round spelling the same rule a second time in SQL, under a
+    comment saying the two could not drift. Two predicates that agree are not
+    one predicate; they are one edit away from disagreeing, and no test of the
+    behaviour can see the difference until they do.
+    """
+    if not _is_shop_owner(steam_id):
+        return False
+    return sku not in _GRANTED_ONLY_TITLE_SKUS
+
+
 @app.get("/api/v1/shop/items", tags=["Shop"])
 async def list_shop_items(request: Request, steam_id: str | None = Query(None), db: AsyncSession = Depends(get_db)):
     """Always-available items + (future) today's rotation pick. If steam_id is
@@ -24051,12 +24102,37 @@ async def list_shop_items(request: Request, steam_id: str | None = Query(None), 
     if steam_id:
         ach_q = select(ShopItem).where(ShopItem.rotation_pool == "achievement")
         if not _is_shop_owner(steam_id):
+            # Not exempt: this player sees what this player owns. Narrowed in
+            # SQL because the predicate below cannot widen that set, so there
+            # is nothing to gain by reading rows it would drop.
             if not owned_ids:
                 ach_q = None
             else:
                 ach_q = ach_q.where(ShopItem.id.in_(owned_ids))
+        # The exempt account takes NO sql narrowing, deliberately. The
+        # visibility decision is `_auto_owned` -- one function, the same call
+        # the equip path makes -- and not a second predicate in SQL that says
+        # the same thing today. What is read whole here is the achievement
+        # ROTATION POOL, which is catalogue-sized and not something a player
+        # can grow, so reading it and dropping some of it is bounded by the
+        # catalogue; what it buys is that editing `_auto_owned` moves BOTH
+        # surfaces.
+        #
+        # The previous shape spelled the carve-out a second time, as
+        # `sku NOT IN (...) OR id IN (...)`, under a comment claiming the two
+        # surfaces could not drift. What actually held them together was that
+        # both said the same thing at the time. A flag names a line and the
+        # defect is a class (#279), and here the class is "the exemption,
+        # decided twice".
+        #
+        # What the predicate decides for the exempt account: everything except
+        # a granted-only ladder rung, plus any rung it has actually been
+        # granted. A rung is earned by playing the ladder, and listing forty
+        # unearned ones turns the ladder into a dropdown.
         if ach_q is not None:
-            rows.extend((await db.execute(ach_q.order_by(ShopItem.price))).scalars().all())
+            pool = (await db.execute(ach_q.order_by(ShopItem.price))).scalars().all()
+            rows.extend(r for r in pool
+                        if r.id in owned_ids or _auto_owned(steam_id, r.sku))
 
     # Dance emotes are version-gated (see DANCES_MIN_VERSION): a pre-dance
     # client would list + sell rows it can never play or preview. The header
@@ -24110,7 +24186,7 @@ async def list_shop_items(request: Request, steam_id: str | None = Query(None), 
                 "price": r.price,
                 "rarity": r.rarity,
                 "preview_color": r.preview_color,
-                "owned": _is_shop_owner(steam_id) or (r.id in owned_ids),
+                "owned": _auto_owned(steam_id, r.sku) or (r.id in owned_ids),
                 "artist_steam_id": getattr(r, "artist_steam_id", None) or "",
                 "artist_name": artist_names.get(getattr(r, "artist_steam_id", None) or "", ""),
                 "stock_limit": getattr(r, "stock_limit", None) or 0,
@@ -24717,8 +24793,157 @@ async def _pc_snapshot_due(db: AsyncSession):
     return "daily"
 
 
+# The Discord channel the edition notice posts to: the gambler chat, the
+# same channel the bot's pack-pull announcements land in. Hardcoded for the
+# reason _CHAT_GLOBAL_DISCORD_CHANNEL above is -- docker-compose passes the
+# channel environment to the BOT service only, so the api cannot read the
+# bot's value. This id is the bot's compiled default: LIVE_BETS_CHANNEL is
+# not in the compose environment at all, so the bot always resolves it to
+# this, and PC_EVENTS_CHANNEL (which is) falls back to it when unset. An
+# operator who sets PC_EVENTS_CHANNEL moves the pull posts and not this one.
+_PC_EDITION_DISCORD_CHANNEL = "1456460424831701074"
+
+# ── Player Cards: the edition schedule (2026-09-18) ──────────────────────
+# Editions are seasonal -- four months each, ending on the 21st of December,
+# April and August at 00:00 UTC. The schedule lives in DATA, in the open
+# row's pc_editions.ends_at_planned (migration 332), and not in a constant
+# here: moving a boundary is one UPDATE and needs no deploy. A row whose
+# ends_at_planned is NULL never rolls at all -- no schedule stops the clock
+# rather than starting it early, which is the direction this has to fail in
+# (#276).
+#
+# The successor's planned end comes from the INCUMBENT's planned end, never
+# from now() and never from the successor's started_at. A rollover that runs
+# late -- the api was down across the boundary -- must still put the next
+# boundary on the 21st. generate_series picks the first four-month multiple
+# after the incumbent's planned end that is still in the future, so an
+# outage spanning two boundaries yields ONE successor on the right anchor
+# instead of a chain of empty editions.
+#
+# The month arithmetic runs on a naive UTC timestamp and converts back (AT
+# TIME ZONE 'UTC' both ways, the idiom _pc_snapshot_due already uses):
+# adding months to a timestamptz is evaluated in the SESSION's TimeZone, so
+# on a box whose TimeZone is not UTC the anchor would land on another day.
+#
+# IDEMPOTENT, WHICH IS LOAD-BEARING HERE rather than tidy. This runs on
+# EVERY janitor pass -- queue_cleanup_loop's ~60 s tick, plus once on the
+# primary's boot path via _pc_snapshot_boot_retake -- because it sits
+# AHEAD of the snapshot's due gate and inherits none of that gate's
+# conditions. So it is called some fourteen hundred times a day and must
+# do nothing fourteen hundred times a day. Every case hangs off the
+# incumbent's ended_at:
+#   * not due yet           -> cur is empty, nothing happens;
+#   * already rolled        -> the new row's planned end is months away;
+#   * two api processes     -> the loser's UPDATE blocks on the row lock,
+#     re-checks its own e.ended_at IS NULL against the committed version,
+#     matches no row, and an empty `closed` means no INSERT and no post.
+# That last case is why the close and the insert are ONE statement and why
+# the UPDATE repeats the predicate the CTE already applied: the partial
+# unique index pc_editions_one_active (308:35) makes close-before-insert
+# mandatory, and a second successor would violate it.
+#
+# WHAT IT DOES NOT CLAIM. A pack opened while the rollover TRANSACTION is
+# open -- the statement plus the caller's commit -- can still be refused
+# no_edition. The mint reads the open row FOR SHARE, so it waits on the row
+# lock and is then skipped: the row it waited for no longer satisfies
+# ended_at IS NULL, and the LIMIT 1 above the lock means it does not go
+# looking for another. Nothing is lost -- that refusal is step 2 of the
+# open, before the debit, and a held pack goes back to 'unopened' -- and a
+# retry lands on the new edition. But the refusal is REACHABLE, for the
+# width of one transaction, once every four months. Closing it means
+# teaching the mint path to re-read once before rejecting, which is a
+# change to a route body and belongs to whoever owns that route.
+_PC_EDITION_ROLLOVER_SQL = """
+    WITH cur AS (
+        SELECT id, ends_at_planned
+          FROM pc_editions
+         WHERE ended_at IS NULL
+           AND ends_at_planned IS NOT NULL
+           AND ends_at_planned <= now()
+    ), nxt AS (
+        SELECT COALESCE(MAX(id), 0) + 1 AS id FROM pc_editions
+    ), closed AS (
+        -- The schedule predicates are repeated here against the LIVE row e,
+        -- not carried from cur. cur is materialized from this statement's
+        -- snapshot, so if an operator clears or postpones a due edition and
+        -- commits while this UPDATE is waiting on their lock, cur still holds
+        -- the old due timestamp. Under READ COMMITTED the UPDATE re-evaluates
+        -- its OWN WHERE against the new row version after the wait, so naming
+        -- e.ends_at_planned here is what lets the operator's edit win: the row
+        -- stops qualifying, closed is empty, and ins -- which selects FROM
+        -- closed -- inserts nothing. Matching on e.id = cur.id alone would
+        -- close the edition anyway and mint a successor from the stale anchor.
+        UPDATE pc_editions e
+           SET ended_at = now()
+          FROM cur
+         WHERE e.id = cur.id
+           AND e.ended_at IS NULL
+           AND e.ends_at_planned IS NOT NULL
+           AND e.ends_at_planned <= now()
+        RETURNING e.id AS prev_id, e.ends_at_planned AS prev_planned
+    ), ins AS (
+        -- The successor's anchor comes from closed.prev_planned -- the value
+        -- on the row this statement actually closed, re-read under its lock --
+        -- and never from cur.ends_at_planned, which is the snapshot value the
+        -- comment above explains can be stale.
+        INSERT INTO pc_editions (id, name, started_at, ends_at_planned)
+        SELECT nxt.id,
+               'Edition ' || nxt.id,
+               now(),
+               (SELECT ((closed.prev_planned AT TIME ZONE 'UTC')
+                        + make_interval(months => 4 * n)) AT TIME ZONE 'UTC'
+                  FROM generate_series(1, 1000) AS n
+                 WHERE ((closed.prev_planned AT TIME ZONE 'UTC')
+                        + make_interval(months => 4 * n)) AT TIME ZONE 'UTC' > now()
+                 ORDER BY n
+                 LIMIT 1)
+          FROM closed, cur, nxt
+        RETURNING id, ends_at_planned
+    ), post AS (
+        INSERT INTO pending_channel_posts (channel_id, content)
+        SELECT CAST(:ch AS text),
+               'Edition ' || ins.id || ' begins. Edition ' || closed.prev_id
+                          || ' prints are out of print.'
+          FROM ins, closed
+    )
+    SELECT ins.id AS id,
+           ins.ends_at_planned AS ends_at_planned,
+           setval(pg_get_serial_sequence('pc_editions', 'id'), ins.id) AS seq
+      FROM ins
+"""
+
+
+async def _pc_edition_rollover(db: AsyncSession) -> dict | None:
+    """Close the scheduled-out edition and open its successor, or do
+    nothing. One statement, so the close, the insert and the Discord notice
+    commit together or not at all; see _PC_EDITION_ROLLOVER_SQL for why that
+    is also what makes it safe to run on every janitor pass. The caller
+    commits.
+
+    setval keeps pc_editions' SERIAL aligned with the explicit id: the id
+    is explicit so the row's name and its id can never disagree.
+
+    Neither `name` nor anything else written here reaches a CARD. The face
+    footer is built at render time from the print's edition_id and the
+    'pc.edition' label (a key in pc_face.LABEL_IDS and assets/pc/
+    catalogue.json, projected per locale by _pc_labels), so an edition
+    number is translated wherever it is drawn and no English literal from
+    this function can leak into a locale. The Discord notice the statement
+    queues IS player-visible and IS English -- like every other
+    pending_channel_posts row; that outbox has no locale.
+    """
+    row = (await db.execute(text(_PC_EDITION_ROLLOVER_SQL),
+                            {"ch": _PC_EDITION_DISCORD_CHANNEL})).mappings().first()
+    if row is None:
+        return None
+    print(f"[PC-EDITION] rolled over to edition {int(row['id'])}; "
+          f"next planned end {row['ends_at_planned']}")
+    return {"edition_id": int(row["id"]), "ends_at_planned": row["ends_at_planned"]}
+
+
 async def _pc_snapshot_janitor_step() -> None:
-    """Janitor: event retention on every step, then a pool snapshot when
+    """Janitor: event retention on every step, then the edition rollover
+    when pc_editions says the season is over, then a pool snapshot when
     none exists (first boot after the migration), when the latest one was
     taken under an older pool rule than this build carries (`_pc_snapshot_due`'s
     'rule' -- the members scan that term used to be is gone since the
@@ -24741,6 +24966,21 @@ async def _pc_snapshot_janitor_step() -> None:
         # ten unreferenced minutes, each under its P lock.
         await _pc_portrait_blob_janitor(db)
         await db.commit()
+        # The edition schedule: four-month seasons, the boundary carried by
+        # pc_editions.ends_at_planned. Deliberately placed BEFORE the
+        # snapshot's due gate below and not inside it -- the gate returns
+        # None for the rest of a day whose snapshot has already been taken
+        # (by an older build mid-deploy, or by the admin route), and a
+        # rollover behind it would then wait until tomorrow. Its own commit
+        # and its own try: a rollover that fails must not cost the pool its
+        # snapshot, and the retry is the next pass a minute later.
+        try:
+            await _pc_edition_rollover(db)
+            await db.commit()
+        except Exception as e:
+            await db.rollback()
+            print(f"[PC-EDITION] rollover skipped ({type(e).__name__}: {e}) -- "
+                  "the janitor retries on its next pass")
         # Derived faces age out in _pc_face_cache_expire_loop, on BOTH roles
         # (v4 §4): this step runs on the primary alone, and the standby owns
         # a cache of its own.
@@ -25741,7 +25981,7 @@ _PC_EVENTS_PENDING_SQL = """
     SELECT e.id, e.kind, e.created_at, e.print_id,
            pl.display_name AS puller_name, pl.id AS puller_ref,
            su.display_name AS subject_name, su.id AS subject_ref, e.dup_at_pull,
-           pr.rarity, pr.foil, pr.signed, pr.pool_rank, pr.rating, pr.title,
+           pr.rarity, pr.foil, pr.signed, pr.pool_rank, pr.rating, pr.title, pr.top_card,
            """ + _PC_EVENTS_RESOLVED_SQL + """ AS face_ready
       FROM pc_events e
       JOIN players pl ON pl.id = e.player_id
@@ -25790,9 +26030,13 @@ async def internal_pc_events_pending(
         "subject_ref": str(r["subject_ref"]),
         "dup_at_pull": int(r["dup_at_pull"]) if r["dup_at_pull"] is not None else None,
         "face_ready": bool(r["face_ready"]),
+        # top_card is the print's own column, carried so the relay line can
+        # name it the way /card and the binder line do. A print minted with
+        # no top card sends null and the bot's line drops the segment.
         "print": ({"print_id": str(r["print_id"]), "rarity": r["rarity"], "foil": bool(r["foil"]),
                    "signed": bool(r["signed"]), "pool_rank": int(r["pool_rank"]),
-                   "rating": _pc_num(r["rating"]), "title": r["title"]} if r["rarity"] is not None else None),
+                   "rating": _pc_num(r["rating"]), "title": r["title"],
+                   "top_card": r["top_card"]} if r["rarity"] is not None else None),
     } for r in rows], "page_size": _PC_EVENTS_PAGE}
 
 
@@ -26040,6 +26284,52 @@ def _pc_hex_rgb(hex_color):
         return None
 
 
+# The ROUNDS card -> ink colour map the top-card badge draws its name in,
+# seeded by migration 333 from the game's own assets.
+_PC_CARD_THEMES: dict = {}
+
+
+async def _pc_load_card_themes(db: AsyncSession) -> None:
+    """Once, at startup. Deliberately NOT a TTL cache like `_rank_colors`
+    (:369): that one serves an empty map on failure because a rank title
+    without its colour is cosmetic. This value is a cache KEY. An empty map
+    does not dim a colour -- it re-keys every top-card face onto the band
+    colour, re-renders that whole generation under fresh one-year immutable
+    URLs, and re-keys it back when the read next succeeds. Two full
+    re-renders out of one transient failure, logged as nothing worse than a
+    colour refresh. So it is loaded once and the face routes refuse while it
+    is empty (`_pc_renderer_unavailable`)."""
+    rows = (await db.execute(text("SELECT card_name, hex FROM pc_card_themes"))).mappings().all()
+    loaded = {}
+    for row in rows:
+        rgb = _pc_hex_rgb(row["hex"])
+        if rgb is not None:
+            loaded[row["card_name"]] = rgb
+    _PC_CARD_THEMES.clear()
+    _PC_CARD_THEMES.update(loaded)
+    # The JOIN count, not just the row count. A table seeded on the asset
+    # names ("Poison bullets") instead of the canonical ones ("Poison") loads
+    # 67 rows and matches nothing, and every face then falls back to the band
+    # -- which is indistinguishable from this feature never having shipped.
+    # This one line is where that failure is visible.
+    joined = 0
+    distinct = 0
+    try:
+        stats = (await db.execute(text(
+            "SELECT count(*) AS n,"
+            " count(*) FILTER (WHERE EXISTS (SELECT 1 FROM pc_card_themes t"
+            "                                WHERE t.card_name = p.top_card)) AS hit"
+            " FROM (SELECT DISTINCT top_card FROM pc_prints"
+            "        WHERE top_card IS NOT NULL AND top_card <> '') p"))).mappings().first()
+        if stats is not None:
+            distinct = int(stats["n"] or 0)
+            joined = int(stats["hit"] or 0)
+    except Exception as ex:                                   # pragma: no cover
+        print(f"[PC-THEME] live join count unavailable: {ex}")
+    print(f"[PC-THEME] {len(_PC_CARD_THEMES)} card themes loaded; "
+          f"{joined} of {distinct} distinct pc_prints.top_card values mapped")
+
+
 async def _pc_labels(db: AsyncSession, locale: str) -> dict:
     """The effective pc.* projection of one locale: the identifier's English
     unless a client-namespace entry under the COMPOSITE msgctxt
@@ -26110,6 +26400,11 @@ def _pc_renderer_unavailable():
         return "renderer_fingerprint_unavailable"
     if _pcp.coverage_ready() is not None:
         return "name_coverage_unavailable"
+    if not _PC_CARD_THEMES:
+        # The top card's colour is part of `face_rev`. A box that could not
+        # load the map would key its faces differently from the box that
+        # could, which is the half-deploy failure with no error anywhere.
+        return "card_themes_unavailable"
     if not _pc_raqm():
         # The coverage projection admits Arabic, Hebrew, Thai, Devanagari,
         # Bengali, Tamil, Georgian and Armenian because the renderer carries
@@ -26179,6 +26474,11 @@ def _pc_face_inputs(row, ctx):
     # (no `unranked` local: the spec's `rating` is None for exactly that case,
     # and the rev is now derived from the spec)
     minted = row["minted_at"]
+    # The NAME, projected before it enters the spec so a modded card carrying
+    # an undrawable cluster cannot become a tofu box under a `face_rev` that
+    # promises the pixels are right. "" and None tokenise differently in
+    # `spec_records`, so the empty case is spelled once, here, as "".
+    top_name = _pcp.coverage_strip(row["top_card"] or "")
     spec = {
         "band": band, "name": name or "", "title": title, "title_rgb": _pc_hex_rgb(title_hex),
         "subtitle": subtitle,
@@ -26190,7 +26490,8 @@ def _pc_face_inputs(row, ctx):
         "edition_label": f"{labels.get('pc.edition', 'Edition')} {int(row['edition_id'])}",
         "minted_on": minted.strftime("%Y-%m-%d") if minted is not None else "",
         "print_short": "#" + str(row["print_id"]).replace("-", "")[:6],
-        "top_card": bool(row["top_card"]),
+        "top_card": top_name,
+        "top_card_rgb": _PC_CARD_THEMES.get(top_name),
     }
     # AFTER the spec, and over the spec: the key is derived from the argument
     # the renderer draws from, so a field added above is in the key with it.
@@ -26936,7 +27237,12 @@ async def _pc_steam_render_probe() -> str:
     spec = {"band": "common", "name": _pcp.public_render_name(sub["display_name"]) or "", "title": None,
             "subtitle": None, "title_rgb": None, "rating": None, "pool_rank": 1, "board_rank": None,
             "wins": 0, "losses": 0, "foil": False, "signed": False, "sign": None, "edition_label": "Probe",
-            "minted_on": "", "print_short": "", "top_card": False}
+            "minted_on": "", "print_short": "",
+            # A real name, not False: this probe is the ONLY always-on render
+            # on either box, and with a falsy top card it never entered the
+            # badge at all -- a check that could not fail for the one part of
+            # the face this release rewrites.
+            "top_card": "Poison", "top_card_rgb": _PC_CARD_THEMES.get("Poison")}
     data = await _pcp.in_pool(_pcf.render_face, spec, labels, pbytes, "card")
     if not data or bytes(data[:8]) != b"\x89PNG\r\n\x1a\n":
         return "failed:bytes"
@@ -27684,7 +27990,8 @@ async def internal_pc_face_preview(
         "wins": int(member["series_wins"] or 0), "losses": int(member["series_losses"] or 0),
         "foil": False, "signed": False, "sign": None,
         "edition_label": labels.get("pc.preview_footer", "Preview"), "minted_on": "", "print_short": "",
-        "top_card": bool(member["top_card"]),
+        "top_card": _pcp.coverage_strip(member["top_card"] or ""),
+        "top_card_rgb": _PC_CARD_THEMES.get(_pcp.coverage_strip(member["top_card"] or "")),
     }
     rev = _pcp.preview_rev(ctx["renderer_fp"], ctx["cat_rev"], spec, kind, phash)
     bucket = int(time.time() // _pcp.PREVIEW_TTL_S)
@@ -29141,7 +29448,11 @@ async def _set_active_cosmetic(db: AsyncSession, steam_id: str, kind: str, prefi
     item = (await db.execute(select(ShopItem).where(ShopItem.id == item_id))).scalar_one_or_none()
     if item is None or item.kind != kind:
         raise HTTPException(status_code=400, detail=f"Not a valid {kind}")
-    if not _is_shop_owner(steam_id):
+    # `_auto_owned`, not `_is_shop_owner`: the exemption covers every cosmetic
+    # EXCEPT a granted-only title-ladder rung, which has to be in player_items
+    # like anyone else's. The listing applies the same predicate; a carve-out
+    # on only one of the two leaves the other reachable by naming a sku.
+    if not _auto_owned(steam_id, item.sku):
         owned = (await db.execute(
             select(PlayerItem).where(PlayerItem.player_id == player.id, PlayerItem.item_id == item_id)
         )).scalar_one_or_none()
@@ -34668,13 +34979,23 @@ async def _check_twins_achievement(db: AsyncSession, report, p1_id, p2_id) -> No
         print(f"[ACHIEVEMENT] twins check failed: {e}")
 
 
-async def _grant_title_item(db: AsyncSession, player_id, sku: str) -> None:
-    """Idempotently grant a shop title item (used for achievement titles)."""
+async def _grant_title_item(db: AsyncSession, player_id, sku: str) -> bool:
+    """Idempotently grant a shop title item. True if the player now holds it.
+
+    The return value exists because a MISSING shop row is indistinguishable
+    from success to a caller that ignores it, and one caller must not ignore
+    it: the title-ladder hook grants a run of consecutive rungs and then
+    advances the player's tier past all of them. Told nothing, it advances
+    past a rung the player never received, and that hole is permanent -- the
+    threshold is already behind them. Every other caller may keep ignoring it;
+    for them a cosmetic title that did not land is not worth failing a match
+    report over.
+    """
     item_id = (await db.execute(
         select(ShopItem.id).where(ShopItem.sku == sku))).scalar_one_or_none()
     if item_id is None:
         print(f"[ACHIEVEMENT] title sku {sku} missing from shop_items — run the titles migration")
-        return
+        return False
     owned = (await db.execute(
         select(PlayerItem).where(PlayerItem.player_id == player_id,
                                  PlayerItem.item_id == item_id))).scalar_one_or_none()
@@ -34688,6 +35009,7 @@ async def _grant_title_item(db: AsyncSession, player_id, sku: str) -> None:
             "ON CONFLICT (player_id, item_id) DO NOTHING"
         ), {"pid": player_id, "iid": item_id})
         print(f"[ACHIEVEMENT] granted title item {sku} to {player_id}")
+    return True
 
 
 async def _achievement_payment_eligible(db: AsyncSession, player_id, achievement_key: str) -> bool:
@@ -35291,7 +35613,13 @@ async def submit_bug_report(req: BugReportRequest, request: Request, db: AsyncSe
     if not admin_exempt:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
         recent = await db.execute(
-            text("SELECT COUNT(*) FROM bug_reports WHERE steam_id = :sid AND created_at >= :cutoff"),
+            # kind = 'report' is what keeps the two budgets apart: automatic
+            # post-match uploads (kind='auto', migration 336) live in their
+            # own 12-per-24h bucket in auto_logs.py and must not consume a
+            # player's ten reports a day. Without this predicate a player who
+            # turned the setting on would silently lose the ability to file.
+            text("SELECT COUNT(*) FROM bug_reports "
+                 "WHERE steam_id = :sid AND kind = 'report' AND created_at >= :cutoff"),
             {"sid": req.steam_id, "cutoff": cutoff},
         )
         if (recent.scalar() or 0) >= BUG_REPORT_PER_STEAM_PER_DAY:
@@ -35376,10 +35704,16 @@ async def list_bug_reports(
         filters.append("severity = :severity")
         params["severity"] = severity.lower()
     where = " WHERE " + " AND ".join(filters) if filters else ""
+    # `kind` is SELECTed and carried out: an automatic post-match upload
+    # (migration 336) and a player-filed ticket are otherwise the same row in
+    # this list, and the triage actions beside them -- status, comment -- mean
+    # completely different things for the two. The list is deliberately NOT
+    # filtered to kind='report': an admin should be able to see automatic
+    # uploads, just not mistake one for a ticket somebody is waiting on.
     rows = await db.execute(
         text(f"""SELECT id, bug_number, created_at, steam_id, display_name, mod_version,
                         severity, category, status, description,
-                        log_filename, log_bytes
+                        log_filename, log_bytes, kind
                    FROM bug_reports{where}
                   ORDER BY created_at DESC
                   LIMIT :limit OFFSET :offset"""),
@@ -35400,6 +35734,7 @@ async def list_bug_reports(
                 description=r["description"],
                 has_log=r["log_filename"] is not None,
                 log_bytes=r["log_bytes"],
+                kind=r["kind"] or "report",
             ).model_dump()
             for r in rows.mappings().all()
         ],
@@ -35423,11 +35758,23 @@ async def recent_bug_report_events(
     while the bot was restarting/deploying — which is exactly when comment
     sweeps happen — so DMs looked 'inconsistent'. Ack-based delivery makes
     them at-least-once."""
+    # kind = 'report' on BOTH arms, for the same reason recent_bug_reports
+    # filters it -- and this one matters more. An automatic post-match log
+    # upload (kind='auto', migration 336) is not a ticket the player filed:
+    # it creates no initial event, so it never appears here on its own. But
+    # the moment an admin comments on one or changes its status, THAT writes
+    # a bug_report_events row, and this feed hands it to the bot with the
+    # linked player's discord_id attached -- which DMs them that staff acted
+    # on 'your report' for something they never filed and cannot see.
+    # Filtering the feed is the fix rather than filtering in the bot: the
+    # reporter_discord_id join above is what makes the row deliverable, and
+    # it should not be built for a row that is not a player's ticket.
     if unnotified:
-        where = "bre.notified_at IS NULL AND bre.created_at >= NOW() - INTERVAL '7 days'"
+        where = ("br.kind = 'report' AND bre.notified_at IS NULL "
+                 "AND bre.created_at >= NOW() - INTERVAL '7 days'")
         params = {}
     else:
-        where = "bre.created_at >= :cutoff"
+        where = "br.kind = 'report' AND bre.created_at >= :cutoff"
         params = {"cutoff": datetime.now(timezone.utc) - timedelta(seconds=seconds)}
     rows = (await db.execute(
         text(f"""SELECT bre.id              AS event_id,
@@ -35534,10 +35881,18 @@ async def recent_bug_reports(
     unposted=true (v1.29): ack-based variant — reports not yet posted to the
     feed channel (up to 7 days back), so a bot restart can't drop one."""
     if unposted:
-        where = "channel_posted_at IS NULL AND created_at >= NOW() - INTERVAL '7 days'"
+        # kind = 'report' on BOTH arms. This is the feed the bot turns into
+        # #bug-reports posts, and an automatic log upload is not something to
+        # announce -- it is not a report, nobody wrote it, and a player with
+        # the setting on would spam the channel after every match. The gate
+        # lives here rather than in the bot because the bot is a separate
+        # deployable and a server-side feed should not hand out rows whose
+        # only correct handling is to drop them.
+        where = ("kind = 'report' AND channel_posted_at IS NULL "
+                 "AND created_at >= NOW() - INTERVAL '7 days'")
         params = {}
     else:
-        where = "created_at >= :cutoff"
+        where = "kind = 'report' AND created_at >= :cutoff"
         params = {"cutoff": datetime.now(timezone.utc) - timedelta(seconds=seconds)}
     rows = (await db.execute(
         text(f"""SELECT id, bug_number, created_at, steam_id, display_name, mod_version,
@@ -35584,10 +35939,14 @@ async def get_bug_report(
         rid = UUID(report_id)
     except (ValueError, TypeError):
         raise HTTPException(400, "Invalid report_id")
+    # `kind` rides out here too (migration 336). The detail pane is where an
+    # admin decides to comment or change a status, and both of those reach the
+    # reporter for a kind='report' row and nobody for a kind='auto' one. The
+    # pane cannot make that distinction from a field it is not sent.
     row = (await db.execute(
         text("""SELECT id, bug_number, player_id, steam_id, display_name, mod_version, game_version,
                        severity, category, description, repro_steps, log_filename, log_bytes,
-                       status, triage_notes, created_at, updated_at
+                       status, triage_notes, created_at, updated_at, kind
                   FROM bug_reports WHERE id = :rid"""),
         {"rid": rid},
     )).mappings().first()
@@ -35905,6 +36264,30 @@ async def user_comment_on_bug_report(
         select(BugReport).where(BugReport.bug_number == bug_number)
     )).scalar_one_or_none()
     if not report:
+        raise HTTPException(404, "Bug report not found")
+    # AUTOMATIC UPLOADS ARE NOT TICKETS, and this is the door that would let
+    # one become one. An automatic post-match log upload (kind='auto',
+    # migration 336) carries the uploader's steam_id, so the ownership test
+    # below PASSES for it: the player's own Discord id matches, and a comment
+    # relayed from a DM lands on a row the player never filed, cannot see, and
+    # did not ask anyone to read. That comment then writes a bug_report_events
+    # row, which is the feed the bot answers from.
+    #
+    # Refused as a 404 rather than a 403: a number that names no ticket of
+    # theirs is, from the reporter surface's point of view, not a ticket.
+    #
+    # The column is read in raw SQL because models.BugReport deliberately does
+    # not map `kind` (see the class). The statement is exactly
+    # `SELECT kind FROM bug_reports WHERE id = :rid`: it filters on the id and
+    # on nothing else, and the kind is judged underneath it, in Python. That
+    # split is deliberate -- it is what lets a row that is missing and a row
+    # whose kind is not 'report' arrive at the same refusal without the query
+    # having to carry the decision as well. A NULL kind, which is what a row
+    # predating any backfill has, refuses along with them.
+    row_kind = (await db.execute(
+        text("SELECT kind FROM bug_reports WHERE id = :rid"), {"rid": report.id},
+    )).scalar_one_or_none()
+    if row_kind is None or row_kind != "report":
         raise HTTPException(404, "Bug report not found")
     # Ownership: the report's reporter (matched by steam_id) must have THIS
     # Discord account linked. No link or a mismatch → not their ticket.

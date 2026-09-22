@@ -609,6 +609,17 @@ def test_the_face_surface_refuses_when_the_box_cannot_shape_or_project(monkeypat
 
     monkeypatch.setattr(main._pcp, "coverage_ready", lambda: "manifest gone")
     assert main._pc_renderer_unavailable() == "name_coverage_unavailable"
+    monkeypatch.setattr(main._pcp, "coverage_ready", lambda: None)
+
+    # ...and the card -> ink map, for the same reason one step further on.
+    # That colour is part of `face_rev`, so a box that could not read it does
+    # not draw a duller badge -- it keys every top-card face differently from
+    # the box that could, and both answer 200. Refusing is the only way that
+    # disagreement is visible.
+    monkeypatch.setattr(main, "_PC_CARD_THEMES", {})
+    assert main._pc_renderer_unavailable() == "card_themes_unavailable"
+    monkeypatch.setattr(main, "_PC_CARD_THEMES", {"Poison": (0, 147, 76)})
+    assert main._pc_renderer_unavailable() is None
     monkeypatch.setattr(main, "_pcf", None)
     assert main._pc_renderer_unavailable() == "image_processing_unavailable"
 
@@ -1146,7 +1157,7 @@ def _face_row(**over):
     row = {"subject_deleted": False, "subject_banned": False,
            "portrait_hash": None, "subject_name": "Sid", "rating": None, "title": None, "rarity": "rare",
            "foil": False, "signed": False, "minted_at": NOW, "pool_rank": 12, "board_rank": None,
-           "series_wins": 3, "series_losses": 1, "edition_id": 1, "print_id": PID, "top_card": False,
+           "series_wins": 3, "series_losses": 1, "edition_id": 1, "print_id": PID, "top_card": "Leach",
            "discarded_at": None}
     row.update(over)
     return row
@@ -1736,3 +1747,64 @@ def test_the_audit_rows_carry_the_whole_actor(monkeypatch):
     src = inspect.getsource(main)
     assert re.search(r'"a": admin_steam_id\[:', src) is None
     assert re.search(r"admin_steam_id=\w+\[:\d*\]", src) is None
+
+
+
+def test_every_face_spec_carries_the_theme_colour():
+    """Three places in main.py build a face spec, and they are 1500 lines
+    apart: the print builder, the Discord preview route and the always-on
+    Steam render probe. Updating one and missing another is invisible --
+    the missed surface keeps drawing the band colour and every test stays
+    green, because no test renders a Discord preview.
+
+    So this asserts the CLASS rather than the three lines: every dict literal
+    in main.py that is a face spec carries the colour beside the name.
+
+    A face spec is identified by the fields only a face has -- `band` and
+    `print_short` -- which separates the three from the four JSON wire dicts
+    that also carry `top_card` and must NOT grow a colour."""
+    import ast
+    from pathlib import Path
+
+    source = Path(main.__file__).read_text(encoding="utf-8")
+    offenders, seen = [], []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Dict):
+            continue
+        keys = {k.value for k in node.keys
+                if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+        if not {"band", "print_short"} <= keys:
+            continue
+        seen.append(node.lineno)
+        if "top_card" in keys and "top_card_rgb" not in keys:
+            offenders.append(node.lineno)
+    assert len(seen) == 3, f"expected exactly 3 face specs, found {len(seen)} at {seen}"
+    assert not offenders, f"face specs without top_card_rgb at lines {offenders}"
+
+
+def test_the_spec_builder_feeds_the_real_renderer():
+    """The seam nothing else covers. Every builder test substitutes `_Face`
+    and every renderer test hands in a hand-built literal, so `pc_face` can
+    ship the new badge while `main` still ships a boolean: full suite green,
+    health ok, every face drawn with an empty column.
+
+    This takes the spec the production builder actually produces and hands
+    that exact dict to the real renderer."""
+    import io as _io
+    import pc_face as _real
+    from PIL import Image as _Image
+    from pc_themes_data import rgb_map as _map
+
+    themes = _map()
+    spec = main._pc_face_inputs(_face_row(rarity="common", top_card="Poison"), _ctx())[0]
+    assert spec["top_card"] == "Poison"
+    assert spec["top_card_rgb"] == themes["Poison"]
+
+    png = _real.render_face(spec, _real._effective_labels({}), None, "card")
+    with _Image.open(_io.BytesIO(png)) as image:
+        box = tuple(_real.LAYOUT["rects"]["badge_name"])
+        crop = image.convert("RGBA").crop(box)
+        px = [p for p in crop.getdata() if p[3] > 128]
+        assert px, "the builder's own spec drew no name"
+        core = max(px, key=lambda p: sum((p[i] - (18, 20, 26)[i]) ** 2 for i in range(3)))[:3]
+        assert core == themes["Poison"]

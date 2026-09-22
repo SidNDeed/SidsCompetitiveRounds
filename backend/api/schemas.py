@@ -1022,6 +1022,27 @@ class BugReportSummary(BaseModel):
     description: str
     has_log: bool
     log_bytes: int | None
+    # WHAT PUT THE ROW HERE: 'report' = a player filed it from the F5 form,
+    # 'auto' = the automatic post-match log upload wrote it (migration 336).
+    # Carried so admin triage can tell the two apart. Without it they are
+    # indistinguishable in the list, while every triage affordance the pane
+    # offers -- a status change, a comment -- reads as acting on a ticket a
+    # player filed and is waiting on an answer to.
+    #
+    # Appended last and defaulted, and the default buys exactly ONE thing: an
+    # older admin CLIENT ignores the extra key. It buys nothing against a
+    # database without the column. `list_bug_reports` names `kind` in its raw
+    # SELECT, so on a box whose 336 has not run that statement fails and the
+    # list does not render at all -- a default on the response model cannot
+    # supply a column the query never got back. MIGRATION 336 GOES FIRST AND
+    # THAT IS MANDATORY; 336's own header carries the order and the full
+    # reader/writer inventory. An earlier version of this comment offered the
+    # reverse order as survivable, which reads as permission to deploy the api
+    # first. It is not restated here in its own words on purpose: the standing
+    # check that keeps this sentence honest reads the whole block and does not
+    # model retraction, so a quoted wrong claim is indistinguishable from a
+    # made one (#666).
+    kind: str = "report"
 
 
 class BugReportEventEntry(BaseModel):
