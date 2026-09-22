@@ -29,6 +29,24 @@
 # not itself green, are each VOID with exit 3 rather than a pass: a control that
 # measured nothing has not passed. A filter must never discard the line it
 # measures (#441), so every refusal the binder printed is echoed here, indented.
+#
+# WHAT CHANGED AFTER THE ROUND-4 LENS
+# -----------------------------------
+# This baseline used to write `output=(synthetic)` into both provenance lines -
+# a value that is not a path at all - and it bound. That was not a flaw in the
+# baseline; it was the demonstration that `output` was stated and never read.
+# The binder now declares a FIELD LEDGER (P2c), requires the recorded output to
+# RESOLVE to the artifact the run was asked to bind (P2d), and hashes that
+# artifact against the last proven capture (P8). So the baseline names a real
+# synthetic artifact, the run is pointed at it with -Root and -Output, and four
+# new pairs exercise the three new rules.
+#
+# Two of those pairs cannot be expressed as an edit to the log, because what
+# they move is the ARTIFACT rather than the record. A control may therefore
+# carry OutputBytes, written to the artifact before the binder runs; the
+# canonical bytes are restored before EVERY control, so each pair measures only
+# its own change. A control may also carry no text edit at all, and the line
+# printed beside it says so rather than implying an edit that did not happen.
 
 param(
     [string]$Root = (Resolve-Path -LiteralPath (Join-Path (Join-Path $PSScriptRoot '..') '..')).Path,
@@ -101,6 +119,20 @@ $cap3  = New-Capture 'CompetitiveRounds.rebuild2-alt.dll' $wrote2
 $copy1 = New-Capture 'CompetitiveRounds.copy-of-rebuild1.dll' $wrote1
 $twin2 = New-Capture 'CompetitiveRounds.rebuild2-identical-bytes.dll' $wrote2
 
+# The artifact the synthetic rebuilds claim to have produced. The binder is
+# pointed at it by -Root and -Output, so the baseline states a real subject
+# instead of the unread placeholder this file used to carry.
+$outName  = 'synthetic-output.dll'
+$outFile  = Join-Path $WorkDir $outName
+Copy-Item -LiteralPath $Donor -Destination $outFile -Force
+$canonicalBytes = [System.IO.File]::ReadAllBytes($outFile)
+$outRecorded = [System.IO.Path]::GetFullPath($outFile)
+
+# A second real artifact, for the pair that repoints the recorded output at a
+# path that is not the one under test.
+$otherOut = Join-Path $WorkDir 'another-output.dll'
+Copy-Item -LiteralPath $Donor -Destination $otherOut -Force
+
 $bytes = (Get-Item -LiteralPath $cap1).Length
 $id1 = '1111111111111111111111111111aaaa'
 $id2 = '2222222222222222222222222222bbbb'
@@ -121,8 +153,8 @@ $baseline = @(
     '    0 Error(s)',
     '',
     'exit=0',
-    ("provenance(1): buildId={0} startUtc={1} endUtc={2} exit=0 output=(synthetic) capture={3} captureBytes={4} captureWriteUtc={5}" -f `
-        $id1, (Utc $start1), (Utc $end1), $cap1, $bytes, (Utc $wrote1)),
+    ("provenance(1): buildId={0} startUtc={1} endUtc={2} exit=0 output={6} capture={3} captureBytes={4} captureWriteUtc={5}" -f `
+        $id1, (Utc $start1), (Utc $end1), $cap1, $bytes, (Utc $wrote1), $outRecorded),
     '',
     ('--- invocation (rebuild 2 of 2) ---'),
     ('$ ' + $buildCommand),
@@ -135,8 +167,8 @@ $baseline = @(
     '    0 Error(s)',
     '',
     'exit=0',
-    ("provenance(2): buildId={0} startUtc={1} endUtc={2} exit=0 output=(synthetic) capture={3} captureBytes={4} captureWriteUtc={5}" -f `
-        $id2, (Utc $start2), (Utc $end2), $cap2, $bytes, (Utc $wrote2))
+    ("provenance(2): buildId={0} startUtc={1} endUtc={2} exit=0 output={6} capture={3} captureBytes={4} captureWriteUtc={5}" -f `
+        $id2, (Utc $start2), (Utc $end2), $cap2, $bytes, (Utc $wrote2), $outRecorded)
 )
 
 $basePath = Join-Path $WorkDir 'baseline-build.log'
@@ -146,14 +178,19 @@ $psExe = (Get-Process -Id $PID).Path
 
 function Invoke-Binder {
     param([string]$LogPath)
-    $out = & $psExe -NoProfile -ExecutionPolicy Bypass -File $Binder -Mode Verify -BuildLog $LogPath -Head $head 2>&1
+    $out = & $psExe -NoProfile -ExecutionPolicy Bypass -File $Binder -Mode Verify -BuildLog $LogPath `
+        -Root $WorkDir -Output $outName -Head $head 2>&1
     $code = $LASTEXITCODE
     return [pscustomobject]@{ Code = $code; Lines = @($out | ForEach-Object { [string]$_ }) }
 }
 
+function Reset-Artifact {
+    [System.IO.File]::WriteAllBytes($outFile, $canonicalBytes)
+}
+
 Write-Output ''
 Write-Output '--- the synthetic baseline: two distinct invocations, two distinct captures ---'
-Write-Output ('     $ ' + $psExe + ' -NoProfile -ExecutionPolicy Bypass -File ' + $Binder + ' -Mode Verify -BuildLog ' + $basePath + ' -Head ' + $head)
+Write-Output ('     $ ' + $psExe + ' -NoProfile -ExecutionPolicy Bypass -File ' + $Binder + ' -Mode Verify -BuildLog ' + $basePath + ' -Root ' + $WorkDir + ' -Output ' + $outName + ' -Head ' + $head)
 $base = Invoke-Binder -LogPath $basePath
 foreach ($l in $base.Lines) { Write-Output ('     | ' + $l) }
 if ($base.Code -ne 0) {
@@ -183,9 +220,9 @@ $controls = @(
     @{ Name = 'A3-removes-rebuild-2s-provenance-line'; Expect = 'REFUSE'
        From = 'provenance(2): buildId=' + $id2; To = '(rebuild 2 completed)'
        Why = 'absent distinct-invocation evidence is a refusal, never a skipped row' },
-    @{ Name = 'A3-twin-adds-an-unrecognised-field-to-the-same-provenance-line'; Expect = 'BIND'
-       From = 'provenance(2): buildId=' + $id2; To = 'provenance(2): recapture=no buildId=' + $id2
-       Why = 'inert twin: the same record with a field the reader does not know; the required fields are all still there' },
+    @{ Name = 'A3-twin-replaces-a-line-nothing-binds-in-the-same-section'; Expect = 'BIND'
+       From = 'Build succeeded.'; To = '(rebuild 2 completed)'; Occurrence = 2
+       Why = 'inert twin: a replacement of the same kind in the same section, of a line no rule reads' },
 
     @{ Name = 'A4-records-the-same-buildId-for-both-rebuilds'; Expect = 'REFUSE'
        From = 'buildId=' + $id2; To = 'buildId=' + $id1
@@ -215,7 +252,41 @@ $controls = @(
     @{ Name = 'A7-twin-rewrites-the-same-size-field-with-a-leading-zero'; Expect = 'BIND'
        From = 'captureBytes=' + $bytes + ' captureWriteUtc=' + (Utc $wrote2)
        To = 'captureBytes=0' + $bytes + ' captureWriteUtc=' + (Utc $wrote2)
-       Why = 'inert twin: the same field, the same value, spelled differently' }
+       Why = 'inert twin: the same field, the same value, spelled differently' },
+
+    # ---- the round-4 lens: the subject of the evidence, P2c, P2d and P8 ------
+    # O1 and O2 are the same rule read from both ends: a section that names a
+    # different artifact, and a section that names the value this baseline used
+    # to carry when nothing read the field at all.
+    @{ Name = 'O1-repoints-rebuild-2s-output-at-a-different-artifact'; Expect = 'REFUSE'
+       From = 'output=' + $outRecorded; To = 'output=' + ([System.IO.Path]::GetFullPath($otherOut)); Occurrence = 2
+       Why = 'a section that built something else is evidence about something else; the sections must name the artifact under test' },
+    @{ Name = 'O1-twin-respells-the-same-output-path-at-the-same-site'; Expect = 'BIND'
+       From = 'output=' + $outRecorded; To = 'output=' + $outRecorded.Replace('\', '/'); Occurrence = 2
+       Why = 'inert twin: the same artifact, the separators written the other way - the rule is about the path, not its spelling' },
+
+    @{ Name = 'O2-restores-the-unread-placeholder-this-baseline-used-to-carry'; Expect = 'REFUSE'
+       From = 'output=' + $outRecorded; To = 'output=(synthetic)'; Occurrence = 1
+       Why = 'the round-4 lens: this exact value bound while nothing read the field, so it must now red' },
+    @{ Name = 'O2-twin-writes-the-same-path-through-a-redundant-segment'; Expect = 'BIND'
+       From = 'output=' + $outRecorded
+       To = 'output=' + (Join-Path (Split-Path -Parent $outRecorded) ('.\' + $outName)); Occurrence = 1
+       Why = 'inert twin: the same artifact reached by a path that resolves to it' },
+
+    @{ Name = 'O3-states-a-field-no-rule-reads-and-the-ledger-does-not-declare'; Expect = 'REFUSE'
+       From = 'provenance(2): buildId=' + $id2; To = 'provenance(2): recapture=no buildId=' + $id2
+       Why = 'the class behind the lens finding: a field in the record that nothing exercises must not be able to exist' },
+    @{ Name = 'O3-twin-rewrites-the-field-the-ledger-declares-informational'; Expect = 'BIND'
+       From = 'captureWriteUtc=' + (Utc $wrote2); To = 'captureWriteUtc=' + (Utc $t0.AddSeconds(-999))
+       Why = 'inert twin: the ledger says P6 reads the write time from DISK, so rewriting the recorded one changes nothing' },
+
+    # O4 moves the ARTIFACT, not the record: the log is handed over unedited.
+    @{ Name = 'O4-replaces-the-artifact-at-the-recorded-output-path'; Expect = 'REFUSE'
+       OutputBytes = ($canonicalBytes + [byte]0)
+       Why = 'captures that agree with each other but not with the artifact the recorded command produces must not bind' },
+    @{ Name = 'O4-twin-rewrites-that-artifact-with-byte-identical-content'; Expect = 'BIND'
+       OutputBytes = $canonicalBytes
+       Why = 'inert twin: the same file rewritten at the same site; P8 measures the content, not when it was written' }
 )
 
 $failures = 0
@@ -226,30 +297,55 @@ foreach ($c in $controls) {
     $occurrence = 1
     if ($c.ContainsKey('Occurrence')) { $occurrence = [int]$c.Occurrence }
 
-    $at = -1
-    $from = 0
-    for ($k = 0; $k -lt $occurrence; $k++) {
-        $at = $text.IndexOf($c.From, $from, [System.StringComparison]::Ordinal)
-        if ($at -lt 0) { break }
-        $from = $at + 1
+    # Every control starts from the canonical artifact, so a pair that moves the
+    # file cannot leak into the next one.
+    Reset-Artifact
+    $edited = ''
+
+    if ($c.ContainsKey('From')) {
+        $at = -1
+        $from = 0
+        for ($k = 0; $k -lt $occurrence; $k++) {
+            $at = $text.IndexOf($c.From, $from, [System.StringComparison]::Ordinal)
+            if ($at -lt 0) { break }
+            $from = $at + 1
+        }
+        if ($at -lt 0) {
+            Write-Output ('VOID | control={0} | occurrence {1} of its target text is not in the baseline - the control would measure nothing' -f $c.Name, $occurrence)
+            Write-Output 'ARTIFACT-BIND CONTROLS VOID'
+            exit 3
+        }
+        $mutated = $text.Substring(0, $at) + $c.To + $text.Substring($at + $c.From.Length)
+        if ([string]::Equals($mutated, $text, [System.StringComparison]::Ordinal)) {
+            Write-Output ('VOID | control={0} | the edit changed no bytes' -f $c.Name)
+            Write-Output 'ARTIFACT-BIND CONTROLS VOID'
+            exit 3
+        }
+        $edited = 'edited: ' + $c.From + '   ->   ' + $c.To
+    } else {
+        # An artifact-only control: the record is handed over exactly as the
+        # baseline wrote it, and the line below says so rather than implying an
+        # edit that did not happen (#441).
+        $mutated = $text
+        $edited = 'edited: nothing in the build log - this pair moves the ARTIFACT at the recorded output path'
     }
-    if ($at -lt 0) {
-        Write-Output ('VOID | control={0} | occurrence {1} of its target text is not in the baseline - the control would measure nothing' -f $c.Name, $occurrence)
-        Write-Output 'ARTIFACT-BIND CONTROLS VOID'
-        exit 3
-    }
-    $mutated = $text.Substring(0, $at) + $c.To + $text.Substring($at + $c.From.Length)
-    if ([string]::Equals($mutated, $text, [System.StringComparison]::Ordinal)) {
-        Write-Output ('VOID | control={0} | the edit changed no bytes' -f $c.Name)
-        Write-Output 'ARTIFACT-BIND CONTROLS VOID'
-        exit 3
+
+    if ($c.ContainsKey('OutputBytes')) {
+        $wanted = [byte[]]$c.OutputBytes
+        [System.IO.File]::WriteAllBytes($outFile, $wanted)
+        $same = ($wanted.Length -eq $canonicalBytes.Length)
+        if ($same) {
+            for ($b = 0; $b -lt $wanted.Length; $b++) { if ($wanted[$b] -ne $canonicalBytes[$b]) { $same = $false; break } }
+        }
+        $edited = $edited + '   |   artifact: ' + $wanted.Length + ' bytes, ' +
+            $(if ($same) { 'byte-identical to the canonical one' } else { 'different from the canonical one' })
     }
 
     $p = Join-Path $WorkDir ('case{0}-build.log' -f $n)
     [System.IO.File]::WriteAllText($p, $mutated)
 
     Write-Output ''
-    Write-Output ('     $ ' + $psExe + ' -NoProfile -ExecutionPolicy Bypass -File ' + $Binder + ' -Mode Verify -BuildLog ' + $p + ' -Head ' + $head)
+    Write-Output ('     $ ' + $psExe + ' -NoProfile -ExecutionPolicy Bypass -File ' + $Binder + ' -Mode Verify -BuildLog ' + $p + ' -Root ' + $WorkDir + ' -Output ' + $outName + ' -Head ' + $head)
     $r = Invoke-Binder -LogPath $p
     $got = if ($r.Code -eq 0) { 'BIND' } else { 'REFUSE' }
     $ok = ($got -eq $c.Expect)
@@ -257,7 +353,7 @@ foreach ($c in $controls) {
 
     Write-Output ('{0,-4} | control={1,-72} | expected={2,-6} got={3,-6} exit={4} | {5}' -f `
         $(if ($ok) { 'ok' } else { 'BAD' }), $c.Name, $c.Expect, $got, $r.Code, $c.Why)
-    Write-Output ('     | edited: ' + $c.From + '   ->   ' + $c.To)
+    Write-Output ('     | ' + $edited)
     foreach ($l in $r.Lines) {
         if ($l -like 'REFUSED*' -or $l -like '        | observed:*') { Write-Output ('     | ' + $l) }
     }

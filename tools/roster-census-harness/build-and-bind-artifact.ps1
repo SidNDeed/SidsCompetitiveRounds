@@ -58,6 +58,46 @@
 # * Two hash lines cannot outnumber the rebuild sections, because the hashes are
 #   computed HERE, one per section, from that section's own capture.
 #
+# THE SUBJECT OF THE EVIDENCE - P2c, P2d and P8, added after the round-4 lens
+# ---------------------------------------------------------------------------
+# Everything above proves that TWO INVOCATIONS happened and that the two files
+# hashed are two files. None of it said WHICH ARTIFACT those invocations were
+# supposed to produce. `output` was required to be present and non-empty, was
+# named in the per-section ok line as though it had been checked, and no rule
+# compared it to anything - so the control baseline could write
+# `output=(synthetic)`, which is not a path at all, and bind. A field a tool
+# prints as evidence and never reads is a claim about the evidence rather than
+# a property of it: the same shape as the argument-counting guard this file
+# replaced, one dimension over (#342 / #391).
+#
+# The instance is `output`; the class is "a field the record states that no
+# rule exercises". So the closure is a FIELD LEDGER rather than one more rule.
+# Every field the record may carry is declared below beside the rule that
+# READS it, or declared INFORMATIONAL with the reason no rule reads it. A field
+# in the record the ledger does not name is a refusal; a ledger field the
+# record omits is a refusal; and the ledger is PRINTED, so a reader is told
+# which fields are checked instead of inferring it from an ok line (#432/#302).
+#
+# With the ledger in place, `output` gets the rule it lacked, in two halves:
+#
+# * P2d - the path each section records must RESOLVE to the artifact this run
+#   was asked to bind. A log kept from a run against a different -Output, or a
+#   record whose value is not that artifact, refuses and prints both the value
+#   read and the path this run resolved. Because every section is measured
+#   against that one resolved path, two sections naming different outputs
+#   cannot both pass either.
+# * P8 - the artifact standing at that path is hashed HERE and must equal the
+#   hash the proven captures produced. That is what ties the bound hash to the
+#   tree: captures agreeing with each other but not with the artifact the
+#   recorded command produces no longer bind.
+#
+# WHAT THAT MAKES IMPOSSIBLE: binding a hash whose stated origin nothing
+# verified. Verifying a build log against a different output path, binding a
+# record whose `output` is not a path, binding captures that no longer
+# correspond to the artifact in the tree, and adding a field to the record
+# without either giving it a rule or declaring it unread, are each refusals
+# that print the line they read.
+#
 # BYTE-IDENTICAL CONTENT IS THE EXPECTED OUTCOME, NOT THE DEFECT. Deterministic
 # builds are meant to agree. What must be proven is that two invocations
 # happened, not that their outputs differ - so two distinct invocations whose
@@ -100,6 +140,23 @@ if ($Root -eq '') {
     $Root = (Resolve-Path -LiteralPath (Join-Path (Join-Path $PSScriptRoot '..') '..')).Path
 }
 
+# THE FIELD LEDGER. Each field a provenance record may carry, beside the rule
+# that reads it - or an explicit statement that no rule reads it and why. The
+# record and this ledger must name the SAME set of fields: an undeclared field
+# and a missing field are both refusals. This is what keeps "a field stated and
+# never checked" from recurring at a sibling (#432): a new field cannot be
+# added to the record without being given a rule here or declared unread here.
+$script:FieldLedger = [ordered]@{
+    'buildId'         = 'READ by P3 - pairwise distinct across sections, so one invocation cannot be counted twice'
+    'startUtc'        = 'READ by P5 and P6 - the lower bound of the window its own capture must fall inside'
+    'endUtc'          = 'READ by P5 and P6 - the upper bound of that window'
+    'exit'            = 'READ by P2 - required to be 0 before anything else is measured'
+    'output'          = 'READ by P2d and P8 - must resolve to the artifact THIS run was asked to bind, and that artifact is hashed'
+    'capture'         = 'READ by P4, P6 and P7 - distinct per section, on disk, and the file whose sha256 is computed'
+    'captureBytes'    = 'READ by P6 - reconciled against the length the file has on disk'
+    'captureWriteUtc' = 'INFORMATIONAL - P6 reads the write time from DISK, never from this field, so rewriting it cannot hide a replaced file'
+}
+
 $script:RebuildHeaderRe = '^--- invocation \(rebuild (\d+) of (\d+)\) ---$'
 $script:AnyHeaderRe     = '^--- invocation'
 $script:ProvenanceRe    = '^provenance\((\d+)\):\s+(.+)$'
@@ -135,7 +192,10 @@ function Invoke-BuildPhase {
     if (Test-Path -LiteralPath $captures) { Remove-Item -LiteralPath $captures -Recurse -Force }
     [void](New-Item -ItemType Directory -Path $captures -Force)
 
-    $outAbs = Join-Path $Root $Output
+    # Recorded in canonical form, so the value a later Verify reads is the same
+    # shape as the one it resolves for itself (P2d compares resolved paths, so
+    # this is a courtesy to the reader rather than a load-bearing step).
+    $outAbs = [System.IO.Path]::GetFullPath((Join-Path $Root $Output))
 
     for ($i = 1; $i -le $Rebuilds; $i++) {
         $lines.Add('')
@@ -301,10 +361,24 @@ function Invoke-VerifyPhase {
         $out.Add(("ok   | P2 | rebuild {0} | build-log line {1}: exit=0" -f $r.Index, ($r.Exits[0][0] + 1)))
     }
 
-    # ---- P2b: the provenance record -----------------------------------------
+    # ---- P2b, P2c, P2d: the provenance record -------------------------------
     # ABSENCE IS A REFUSAL, never a skipped row: a section with no provenance
-    # line is a rebuild nothing can be bound to.
-    $fields = @('buildId', 'startUtc', 'endUtc', 'exit', 'output', 'capture', 'captureBytes', 'captureWriteUtc')
+    # line is a rebuild nothing can be bound to. The field set is the LEDGER's
+    # (P2c), and the one field that used to be printed without being read now
+    # has to name the artifact this run binds (P2d).
+    $fields = @($script:FieldLedger.Keys)
+
+    # The artifact this run was asked to bind, resolved ONCE. A run that cannot
+    # say what it is verifying cannot verify anything, so that is a refusal
+    # rather than a skipped rule (#276 / #430).
+    $expectedOut = ''
+    try { $expectedOut = [System.IO.Path]::GetFullPath((Join-Path $Root $Output)) } catch { $expectedOut = '' }
+    if ($expectedOut -eq '') {
+        $out.Add("REFUSED | the artifact this run was asked to bind does not resolve to a path: -Root '" + $Root + "' -Output '" + $Output + "'")
+        return [pscustomobject]@{ Lines = $out; Failures = ($failures + 1); Refused = $true; Rebuilds = $n }
+    }
+    $out.Add('     | the artifact this run binds, resolved from -Root and -Output: ' + $expectedOut)
+
     $prov = @{}
     foreach ($r in $records) {
         if ($r.Provs.Count -ne 1) {
@@ -331,9 +405,33 @@ function Invoke-VerifyPhase {
             $failures++
             continue
         }
+
+        # P2c: no field may be stated that the ledger does not account for. A
+        # field nothing reads is exactly the defect this stage exists to make
+        # impossible, so an unknown key refuses rather than being ignored.
+        $unknown = @(@($bag.Keys) | Where-Object { -not $script:FieldLedger.Contains($_) } | Sort-Object)
+        if ($unknown.Count -gt 0) {
+            Add-Refusal -Why ("rebuild {0}: its provenance line states {1}, which no rule reads and the field ledger does not declare" -f `
+                $r.Index, ($unknown -join ', ')) -Observed @($p[3])
+            $failures++
+            continue
+        }
+
+        # P2d: the artifact the section says it built must be the artifact this
+        # run binds. Presence was never a rule about the value (#342).
+        $recorded = $bag['output']
+        $resolved = ''
+        try { $resolved = [System.IO.Path]::GetFullPath($recorded) } catch { $resolved = '' }
+        if ($resolved -eq '' -or -not [string]::Equals($resolved, $expectedOut, [System.StringComparison]::OrdinalIgnoreCase)) {
+            Add-Refusal -Why ("rebuild {0}: it records output={1}, which is not the artifact this run was asked to bind ({2})" -f `
+                $r.Index, $recorded, $expectedOut) -Observed @($p[3])
+            $failures++
+            continue
+        }
+
         $bag['__line'] = $p[3]
         $prov[$r.Index] = $bag
-        $out.Add(("ok   | P2 | rebuild {0} | build-log line {1} records buildId, window, output and a section-tagged capture" -f `
+        $out.Add(("ok   | P2 | rebuild {0} | build-log line {1} records every ledger field, and its output is the artifact this run binds" -f `
             $r.Index, ($p[0] + 1)))
     }
 
@@ -463,6 +561,26 @@ function Invoke-VerifyPhase {
     }
     $distinct = @($hashes | Sort-Object -Unique)
 
+    # ---- P8: the captures are the artifact this run binds -------------------
+    # The captures could agree with each other and with nothing else. The
+    # artifact standing at the recorded output path is hashed HERE and compared
+    # with the LAST rebuild's capture, because that is the one the last build
+    # left behind. A build log kept from another run, or over another output,
+    # cannot reach this line with a matching hash.
+    $out.Add('')
+    if (-not (Test-Path -LiteralPath $expectedOut)) {
+        $out.Add("REFUSED | P8 | no artifact stands at " + $expectedOut + ", so the hashes above are bound to nothing in this tree")
+        return [pscustomobject]@{ Lines = $out; Failures = ($failures + 1); Refused = $true; Rebuilds = $n }
+    }
+    $liveHash = (Get-FileHash -LiteralPath $expectedOut -Algorithm SHA256).Hash.ToLowerInvariant()
+    $lastHash = $hashes[$hashes.Count - 1]
+    if ($liveHash -ne $lastHash) {
+        $out.Add("REFUSED | P8 | the artifact at " + $expectedOut + " hashes " + $liveHash +
+            ", and rebuild " + $n + "'s capture hashes " + $lastHash + " - the captures are not the artifact the recorded command produces")
+        return [pscustomobject]@{ Lines = $out; Failures = ($failures + 1); Refused = $true; Rebuilds = $n }
+    }
+    $out.Add(("ok   | P8 | the artifact at the recorded output path hashes {0}, the same value rebuild {1}'s capture carries" -f $liveHash, $n))
+
     $reference = $prov[$n]['capture']
     $product = ''
     try { $product = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($reference).ProductVersion } catch { $product = '' }
@@ -511,12 +629,21 @@ Write-Output ''
 Write-Output '--- what must hold before a hash is bound to anything ---'
 Write-Output 'P1  at least two rebuild SECTIONS, indexed 1..n, each announcing the exact build command once'
 Write-Output 'P2  each section records exit=0 and its own provenance line; an absent record is a refusal'
+Write-Output 'P2c the record states the ledger''s fields and no others - a field no rule reads is a refusal'
+Write-Output 'P2d the output each section records resolves to the artifact THIS run was asked to bind'
 Write-Output 'P3  the buildIds are pairwise distinct, so one invocation cannot be counted twice'
 Write-Output 'P4  the capture paths are pairwise distinct, so one file cannot be read twice'
 Write-Output 'P5  the build windows do not overlap'
 Write-Output 'P6  each capture is on disk at its recorded size, and its own LastWriteTimeUtc falls inside its'
 Write-Output '    OWN window and no other - which is what a copy of another rebuild output cannot do'
 Write-Output 'P7  only then: one sha256 per proven invocation, MATCH over them, and BOUND against the head'
+Write-Output 'P8  the artifact standing at that output path hashes to the last proven capture''s value, so the'
+Write-Output '    bound hash is the artifact the recorded command produces and not merely two agreeing files'
+Write-Output ''
+Write-Output '--- the field ledger: every field the record may carry, and the rule that reads it ---'
+foreach ($k in $script:FieldLedger.Keys) {
+    Write-Output ("     | {0,-16} | {1}" -f $k, $script:FieldLedger[$k])
+}
 Write-Output ''
 
 $r = Invoke-VerifyPhase
