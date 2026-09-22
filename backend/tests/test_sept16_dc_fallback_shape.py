@@ -503,9 +503,10 @@ def _stable_deferral_names(sources, attempts=3):
     While the two lanes are apart this reads a tree whose OWN builder is
     editing it, and a read that lands mid-write returns a file that is short a
     field -- which at the assertion below is indistinguishable from the two
-    lanes genuinely disagreeing about a name. It has happened once already, on
-    the other lane, whose controls run reported a missing field that the same
-    file carried minutes later. A difference is evidence only when the thing
+    lanes genuinely disagreeing about a name. The other lane reported exactly
+    that while these two rounds ran: a controls run naming a field as missing
+    which the same file carried minutes later. Taken here as a report from
+    that lane, not as something measured on this one. A difference is evidence only when the thing
     read was COMPLETE (#304), so two consecutive identical reads are required
     before anything is asserted on them. This says nothing about behaviour; it
     is about the READ, and an unstable one is reported as an unstable read
@@ -533,8 +534,12 @@ def test_every_deferral_field_the_client_reads_is_one_this_route_emits():
 
     WHAT A FAILURE HERE MEANS, in the three shapes it takes. "not checked" --
     no reachable tree calls this route, and the message says which candidates
-    were tried; that is a real finding, because on the merged artifact this
-    repository is itself a candidate and the case cannot arise there. "not
+    were tried; that is a real finding wherever the tree under test carries
+    a `plugin/` directory at all, because on the merged artifact this
+    repository is itself a candidate. A checkout of `backend/` alone has no
+    client half to find and would report this for a reason that is not a
+    defect -- which is the one place this message needs reading before it
+    is believed. "not
     read whole" -- the tree changed under two consecutive reads, which while
     the lanes are apart means its own builder was mid-write. "checked and
     disagreed" -- a name lives on one lane only. All three are failures on
@@ -704,8 +709,9 @@ def test_an_unstable_read_of_the_other_lane_is_reported_as_unstable(tmp_path):
 
     While the two lanes are apart this binding reads a tree whose own builder
     is editing it, and a truncated read is short a name -- the same shape, at
-    the assertion, as the two lanes disagreeing. The other lane hit exactly
-    that and reported a red for a field its own file carried minutes later.
+    the assertion, as the two lanes disagreeing. The other lane REPORTED
+    exactly that: a red naming a field its own file carried minutes later.
+    That is its report, not a measurement taken here.
     The guard is two consecutive identical reads, and it is tested here rather
     than trusted, because on a workstation it would otherwise only ever be
     exercised by a race nobody can schedule.

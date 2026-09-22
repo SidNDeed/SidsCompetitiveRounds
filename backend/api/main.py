@@ -862,8 +862,8 @@ def _group_game_in_progress(group_id) -> bool:
     (fresh process) -- too soon after boot there is no way to tell "idle" from
     "we have not listened yet", so it answers as though a game were live and
     that caller's destructive action is vetoed. That is what the code below
-    does, and the opposite of what this line said before the qualifier was
-    added.
+    does. The sentence this replaces said the same thing without the
+    qualifier; the one before that said the opposite.
 
     THE QUALIFIER IS LOAD-BEARING, and the ORDER below is why. An absent or
     empty group id is answered FALSE first, before process age is consulted at
