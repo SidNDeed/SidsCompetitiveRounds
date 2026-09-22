@@ -129,6 +129,33 @@ using CompetitiveRounds;
 //     W25 inert twin must stay green). Changes ONE finding body's SEVERITY
 //     marker and leaves the declared census line alone, so the derived census
 //     MOVES and the declared one no longer matches.
+//   wiring   wire-stagemember: W25 must FAIL; W1 control must PASS (and the W23
+//     inert twin must stay green). MOVES the FFA queue poll out of the tab
+//     refresher R5 pins to the gated tick and into NativeUI.Open, which menu
+//     construction reaches. Same file, same count, same link totals - the
+//     round-7 route walk placed calls only in Plugin.cs and stayed green.
+//   wiring   wire-stageapimember: W25 must FAIL; W1 control must PASS (and the
+//     W23 inert twin must stay green). Calls the FFA queue poll from
+//     ApiClient.Initialize itself, inside a file the caller set already
+//     permits, so nothing the FILE-grain clause reads moves at all.
+//   wiring   wire-stageunbound: W25 must FAIL; W1 control must PASS (and the
+//     W23 inert twin must stay green). Lifts the 1v2 merge out of its response
+//     callback to just after it - still AFTER the member's baseUrl request, so
+//     the ordering clause passes, but running on entry rather than on a reply.
+//   wiring   wire-urlwriter: W25 must FAIL; W1 control must PASS (and the W23
+//     inert twin must stay green). Gives the request prefix a third writer, in
+//     a member the FFA tab reaches on first open, so a reply can come back from
+//     a prefix initialisation never set.
+//   wiring   wire-qualifiedgateflag: W25 must FAIL; W1 control must PASS (and
+//     the W22 inert twin must stay green). Gives the gate flag assembly
+//     visibility, has a second file declare one of its own, and writes the HOME
+//     flag from it through the qualified spelling. The whole-file exclusion
+//     dropped that file - for this one field with no line in any log.
+//   wiring   wire-qualifieddeconstruct: W25 AND W23 must both FAIL; W1 control
+//     must PASS (and the W22 inert twin must stay green). The QUALIFIED
+//     deconstruction - "(ProximityVictimGate._attached,
+//     ProximityVictimGate._withdrawn) = (0, true);" - which the bare-name
+//     recogniser filed as a read because the character before the name is '.'.
 //   wiring   wire-pathswap:   D6 must FAIL;  D4 and D5 controls must PASS
 //   wiring   wire-paththrew:  D6 must FAIL;  D4 and D5 controls must PASS
 //   prior-r2            : N1 N2 N3 N4 N5 N6 must all FAIL; W1 control must PASS
@@ -314,6 +341,7 @@ internal static class Program
         internal string Kind;       // "= (simple assignment)", "++ (increment)", ...
         internal string Rhs;        // for = and compound forms: the value, trimmed
         internal bool Declaration;  // the write is a field declaration's initialiser
+        internal bool Qualified;    // the occurrence carries a qualifier: `Type.field`
         internal string Text;       // the whole source line, whitespace-collapsed
         internal string Rel;        // the file it was found in, when scanned over many
     }
@@ -334,6 +362,51 @@ internal static class Program
     {
         while (i >= 0 && (text[i] == ' ' || text[i] == '\t' || text[i] == '\r' || text[i] == (char)10)) i--;
         return i;
+    }
+
+    /// <summary>True when this occurrence is written with a QUALIFIER in front of
+    /// it - `Plugin.modDisabled`, `ProximityVictimGate._attached` - rather than
+    /// bare. Which field a BARE name binds to depends on what the file itself
+    /// declares; a qualified one names its owner outright, and that is the
+    /// difference a surface scan needs in a file that declares its own field of
+    /// the same name.</summary>
+    private static bool QualifiedAt(string text, int at)
+    {
+        int b = SkipWsBack(text, at - 1);
+        return b >= 0 && text[b] == '.';
+    }
+
+    /// <summary>The last non-whitespace character BEFORE an occurrence and before
+    /// any qualifier standing in front of it, or -1.
+    ///
+    /// WHY THIS EXISTS. The deconstruction recogniser asks what the previous
+    /// non-whitespace character is, and it read that off the BARE name - so
+    /// `(ProximityVictimGate._attached, _advertised) = (0, true);`, a legal
+    /// deconstruction and legal for a private static field from inside its own
+    /// class, found '.' there, returned null, and was filed as a READ by the
+    /// pass whose case is called "every write in ANY spelling". Every OTHER form
+    /// this classifier knows is recognised qualified already, because an
+    /// operator FOLLOWS the name and nothing looks at what precedes it; the
+    /// deconstruction form is the one that reads backwards, so it was the one
+    /// form where the qualifier decided the answer (#342/#431/#432).
+    ///
+    /// A qualifier is a '.'-separated chain of identifiers, so `A.B._attached`
+    /// and `this._attached` both skip back to whatever stands before the chain.
+    /// A '.' that is NOT preceded by an identifier - `?.`, or a numeric literal -
+    /// stops the walk at the '.' itself, which keeps the answer "not a
+    /// deconstruction" rather than guessing past a form this rule has not
+    /// read.</summary>
+    private static int SkipQualifierBack(string text, int at)
+    {
+        int b = SkipWsBack(text, at - 1);
+        while (b >= 0 && text[b] == '.')
+        {
+            int q = SkipWsBack(text, b - 1);
+            if (q < 0 || !IsIdentChar(text[q])) return b;
+            while (q >= 0 && IsIdentChar(text[q])) q--;
+            b = SkipWsBack(text, q);
+        }
+        return b;
     }
 
     private static int LineStartAt(string text, int index)
@@ -557,7 +630,8 @@ internal static class Program
     /// spelling" was a claim about the spellings that happen to put an operator
     /// next to the name (#342/#431/#432).
     ///
-    /// THE RULE. An occurrence whose previous non-whitespace character is '(' or
+    /// THE RULE. An occurrence whose previous non-whitespace character - taken
+    /// BEFORE any qualifier chain in front of it - is '(' or
     /// ',' and whose next non-whitespace character is ',' or ')' is a candidate;
     /// it is a target when the enclosing parenthesis group - found by scanning
     /// out through nested closes - is followed by a single '=' that is neither
@@ -572,12 +646,19 @@ internal static class Program
     /// nothing here can prove writes true. Over-reporting reddens, which is the
     /// safe direction for a bound.
     ///
+    /// THE SPELLINGS IT NOW SEES, said rather than implied: the bare name, and
+    /// the name behind a '.'-separated qualifier chain - `ProximityVictimGate.
+    /// _attached`, `this._attached`, `A.B._attached`. The qualified form was the
+    /// round-7 hole: the previous rule read the character before the BARE name,
+    /// found the '.', and filed the occurrence as a read.
+    ///
     /// What it still does not see is unchanged and stays disclosed: a write
     /// through a property setter, through an alias the scan does not know the
-    /// name of, or through reflection.</summary>
+    /// name of, through reflection, or behind a '.' this rule refuses to walk
+    /// past because no identifier precedes it (`?.`).</summary>
     private static string DeconstructionRhs(string text, int at, int after)
     {
-        int back = SkipWsBack(text, at - 1);
+        int back = SkipQualifierBack(text, at);
         if (back < 0) return null;
         if (text[back] != '(' && text[back] != ',') return null;
         int f = SkipWs(text, after);
@@ -656,16 +737,20 @@ internal static class Program
     /// carries its own `_attached`, a List&lt;Attachment&gt;, and the round-6
     /// scan kept it out by NAME - which holds exactly until the next file does
     /// the same and nobody remembers to add it, and which cannot be re-derived
-    /// by a reader who does not already know why the name is there. Excluding by
+    /// by a reader who does not already know why the name is there. Deciding by
     /// the property means the scan is right about WHICH field it is reading for
-    /// any file at all, and every exclusion it makes is NAMED in the output
-    /// rather than assumed. Pass text that has already been comment-blanked.
+    /// any file at all. Pass text that has already been comment-blanked.
     ///
-    /// What this does NOT cover, said rather than implied: a file that declares
-    /// its own field of the name AND also writes the home field through a
-    /// qualified spelling is excluded and its write is not seen. For a private
-    /// field that cannot arise; for an internal one the declarer count is
-    /// reported so the case is visible.</summary>
+    /// WHAT THE ANSWER IS USED FOR HAS CHANGED, and the old use is the reason.
+    /// A true answer used to DROP the file from the surface; it now NARROWS the
+    /// file to its QUALIFIED occurrences, because a bare name there binds to the
+    /// local field while `Home.field` names the home one and is legal wherever
+    /// the home field is visible. Dropping missed exactly that write - and for
+    /// plugin/CustomCosmetics.cs, which declares its own `initialized`, the drop
+    /// was reported in no line of any run log at all, so the gate flag's
+    /// "exactly one write across the shipped files" was counted over a surface
+    /// a reader could not reconstruct (#302/#342). ScanField prints every
+    /// narrowing it makes, for every field, on every run.</summary>
     private static bool DeclaresFieldIn(string blanked, string field)
     {
         if (string.IsNullOrEmpty(blanked) || string.IsNullOrEmpty(field)) return false;
@@ -718,6 +803,7 @@ internal static class Program
             if (kind == null) continue;
             var w = new FieldWrite();
             w.Index = at;
+            w.Qualified = QualifiedAt(blanked, at);
             w.Line = LineOf(blanked, at);
             w.Kind = kind;
             w.Rhs = rhs;
@@ -728,33 +814,67 @@ internal static class Program
     }
 
     /// <summary>What one field's writes look like across a whole surface of
-    /// files: the real writes with the file each was found in, the files
-    /// excluded because they declare a field of that name themselves, and
-    /// whether the home file declares it at all.</summary>
+    /// files: the real writes with the file each was found in, the files whose
+    /// reading was NARROWED because they declare a field of that name
+    /// themselves, how many files were actually read, and whether the home file
+    /// declares it at all.</summary>
     private sealed class SurfaceScan
     {
+        internal string Field;
         internal List<FieldWrite> Real = new List<FieldWrite>();
-        internal List<string> Excluded = new List<string>();
+        internal List<string> Narrowed = new List<string>();
         internal List<string> DeclProblems = new List<string>();
+        internal int Scanned;
         internal bool HomeDeclares;
     }
 
+    /// <summary>One line a reader can reconstruct the SURFACE from: how many
+    /// files this field's scan actually read and which of them were narrowed.
+    /// Printed for EVERY field scanned, clean run or not. The round-6 build
+    /// printed it for two of its three scans and the round-7 build added a
+    /// fourth without a line at all, so the one field the round's gate-flag
+    /// argument newly rested on had a surface nobody could see (#302/#351).</summary>
+    private static string ScanNote(string what, SurfaceScan scan)
+    {
+        return what + " '" + scan.Field + "' read " + scan.Scanned + " file(s), "
+            + (scan.Narrowed.Count == 0
+                ? "none narrowed"
+                : scan.Narrowed.Count + " narrowed to qualified writes (declares its own field of that name): "
+                  + string.Join(", ", scan.Narrowed.ToArray()));
+    }
+
+    /// <summary>Every write to one field across a surface of files.
+    ///
+    /// A FILE THAT DECLARES ITS OWN FIELD OF THE NAME IS NARROWED, NOT DROPPED.
+    /// The round-6 rule removed such a file from the surface entirely, which is
+    /// correct about the BARE occurrences in it - those bind to the local field -
+    /// and wrong about the qualified ones, which name the home field outright
+    /// and are legal wherever the home field is visible. So the count that says
+    /// "exactly one write across the shipped files" was taken over a surface
+    /// smaller than the one its own message named, and for one of the four
+    /// fields the drop was not reported anywhere (#302/#342). Narrowing keeps
+    /// every file in the scan and reads only what is unambiguous in it, and the
+    /// narrowing itself is printed.</summary>
     private static SurfaceScan ScanField(string[] surface,
                                          Dictionary<string, string> texts,
                                          Dictionary<string, string> blanks,
                                          string field, string home, string wantDeclInit)
     {
         var scan = new SurfaceScan();
+        scan.Field = field;
         foreach (string rel in surface)
         {
             string text;
             if (!texts.TryGetValue(rel, out text)) continue;
             string blanked = blanks[rel];
+            scan.Scanned++;
             bool declares = DeclaresFieldIn(blanked, field);
+            bool narrowed = false;
             if (rel == home) scan.HomeDeclares = declares;
-            else if (declares) { scan.Excluded.Add(rel); continue; }
+            else if (declares) { scan.Narrowed.Add(rel); narrowed = true; }
             foreach (FieldWrite w in WritesToBlanked(text, blanked, field))
             {
+                if (narrowed && !w.Qualified) continue;
                 w.Rel = rel;
                 if (w.Declaration)
                 {
@@ -930,6 +1050,99 @@ internal static class Program
         int close = text.IndexOf(closer, open, StringComparison.Ordinal);
         if (close < 0) return -1;
         return close + closer.Length - 1;
+    }
+
+    /// <summary>The MEMBER that encloses an offset, named by its declaration
+    /// line, or null when no member above it bounds it.
+    ///
+    /// WHY THIS EXISTS. W25's route clauses pinned WHERE a staging call sits in
+    /// plugin/Plugin.cs and nowhere else: the per-file loop skipped every file
+    /// that was not Plugin.cs, so seven of the ten entry-point call sites the
+    /// run's own map printed were counted and never placed. "Only these files
+    /// may call it" does not say WHICH MEMBER of those files, and a member is
+    /// what a route is made of (#342/#431).
+    ///
+    /// The rule is the one MemberEnd already uses: a declaration is a line at a
+    /// member's own indentation that opens with an access modifier and carries a
+    /// parameter list, and its body runs to a brace alone on a line at that same
+    /// indentation. The nearest such declaration above the offset whose span
+    /// CONTAINS the offset is the answer, so a member inside a nested class -
+    /// ApiClient.HostLobbyClient holds one of the five - is found at its own
+    /// indentation rather than attributed to the class around it. A line whose
+    /// text before the '(' carries a brace, an '=' or the word `class` is a
+    /// property, an expression-bodied member or a type and is not one of these.
+    /// Pass the CODE view: a signature quoted in a comment declares nothing.</summary>
+    private static string EnclosingMemberOf(string blanked, int at)
+    {
+        if (string.IsNullOrEmpty(blanked) || at < 0 || at >= blanked.Length) return null;
+        char nl = (char)10;
+        int ls = LineStartAt(blanked, at);
+        while (ls > 0)
+        {
+            ls = LineStartAt(blanked, ls - 1);
+            int ind = 0;
+            while (ls + ind < blanked.Length && blanked[ls + ind] == ' ') ind++;
+            if (ind >= 8 && ind <= 16 && ind % 4 == 0)
+            {
+                int eol = blanked.IndexOf(nl, ls);
+                if (eol < 0) eol = blanked.Length;
+                string line = blanked.Substring(ls + ind, eol - ls - ind).TrimEnd();
+                if (StartsWithModifier(line) && line.IndexOf('(') > 0 && !line.EndsWith(";", StringComparison.Ordinal))
+                {
+                    string head = line.Substring(0, line.IndexOf('('));
+                    bool typeOrProperty = head.IndexOf('{') >= 0 || head.IndexOf('=') >= 0
+                        || (" " + head + " ").IndexOf(" class ", StringComparison.Ordinal) >= 0;
+                    if (!typeOrProperty)
+                    {
+                        int open = blanked.IndexOf('{', ls);
+                        int close = open < 0 ? -1 : MemberEnd(blanked, ls, open);
+                        if (open >= 0 && close >= open && at >= open && at <= close) return line.Trim();
+                    }
+                }
+            }
+            if (ls == 0) break;
+        }
+        return null;
+    }
+
+    private static bool StartsWithModifier(string line)
+    {
+        return line.StartsWith("public ", StringComparison.Ordinal)
+            || line.StartsWith("private ", StringComparison.Ordinal)
+            || line.StartsWith("internal ", StringComparison.Ordinal)
+            || line.StartsWith("protected ", StringComparison.Ordinal);
+    }
+
+    /// <summary>The body span of the first LAMBDA opened at or after an offset:
+    /// its '{' and the matching brace alone on a line at the lambda's own
+    /// indentation, or null.
+    ///
+    /// This is how a merge is tied to a RESPONSE rather than to a position. The
+    /// round-7 clause asked only that the merge sit at a larger offset than the
+    /// member's baseUrl request, which is also true of a statement written after
+    /// the whole StartCoroutine call - it would then run on ENTRY, on whatever
+    /// tick reached the member, with no response involved at all. Inside the
+    /// callback it runs only when a request this client built has come back.
+    /// Braces are not counted: ApiClient.cs is full of JSON in string literals
+    /// and a count never returns to zero there, which is the same reason
+    /// MemberEnd bounds by indentation.</summary>
+    private static bool TryLambdaSpanAfter(string blanked, int from, out int open, out int close)
+    {
+        open = -1; close = -1;
+        if (string.IsNullOrEmpty(blanked) || from < 0 || from >= blanked.Length) return false;
+        int arrow = blanked.IndexOf("=>", from, StringComparison.Ordinal);
+        if (arrow < 0) return false;
+        char nl = (char)10;
+        int ls = LineStartAt(blanked, arrow);
+        int indent = 0;
+        while (ls + indent < blanked.Length && blanked[ls + indent] == ' ') indent++;
+        open = blanked.IndexOf('{', arrow);
+        if (open < 0) return false;
+        string closer = nl + new string(' ', indent) + "}";
+        int at = blanked.IndexOf(closer, open, StringComparison.Ordinal);
+        if (at < 0) { open = -1; return false; }
+        close = at + closer.Length - 1;
+        return true;
     }
 
     /// <summary>The text of ONE member's body, or null when the file cannot be
@@ -2689,10 +2902,16 @@ internal static class Program
         //
         // EmojiSprites.cs used to be kept out BY NAME, because it declares an
         // unrelated `_attached` of its own. The name is gone too, replaced by
-        // the rule that produced it: a file that declares a field of that
-        // name declares a DIFFERENT field, so it is excluded and NAMED in the
-        // output. A reader sees which files were excluded and why, instead of
-        // taking a maintainer's word for a list.
+        // the rule that produced it: a BARE name in a file that declares a
+        // field of that name binds to the file's OWN field. Round 6 turned that
+        // rule into a whole-file exclusion and printed it for two of the three
+        // scans it ran; round 7 added a fourth scan, of `initialized`, and
+        // plugin/CustomCosmetics.cs declares one of those too - so that file
+        // left the surface with no line in any log, under a count whose message
+        // named all 91 files. The rule is now a NARROWING to the qualified
+        // spelling, it applies to every field scanned, and ScanNote prints what
+        // each scan actually read.
+        var scanNotes = new List<string>();
         string surfaceProblem;
         string[] shippedCs = ShippedCsFiles(out surfaceProblem);
         if (surfaceProblem != null)
@@ -2743,14 +2962,13 @@ internal static class Program
             if (!withdrawScan.HomeDeclares)
                 reachProblems.Add("the withdrawal latch must be DECLARED in " + attachHome
                     + " - same reason");
-            // The exclusions are part of the result and are printed on every run,
-            // clean or not: an exclusion nobody can see is how a surface narrows
-            // without anybody deciding to narrow it.
-            Console.WriteLine("NOTE  W25 surface: " + shippedCs.Length + " shipped .cs file(s)"
-                + "; excluded from the attachment-count scan (declares its own field): "
-                + (attachScan.Excluded.Count == 0 ? "none" : string.Join(", ", attachScan.Excluded.ToArray()))
-                + "; from the withdrawal-latch scan: "
-                + (withdrawScan.Excluded.Count == 0 ? "none" : string.Join(", ", withdrawScan.Excluded.ToArray())));
+            // The narrowings are part of the result and are printed on every
+            // run, clean or not, for EVERY field this case scans: a surface a
+            // reader cannot reconstruct is how one narrows without anybody
+            // deciding to narrow it. The line itself is emitted once, after the
+            // last scan is built, so no scan can be added without one.
+            scanNotes.Add(ScanNote("attachment count", attachScan));
+            scanNotes.Add(ScanNote("withdrawal latch", withdrawScan));
 
             List<FieldWrite> realAttach = RealIn(attachScan, attachHome);
             List<string> attachElsewhere = RealOutside(attachScan, attachHome);
@@ -2765,9 +2983,9 @@ internal static class Program
                 reachProblems.Add("only " + attachHome + " may write the attachment count; found "
                     + string.Join(" | ", attachElsewhere.ToArray()));
             if (realAttach.Count != 1)
-                reachProblems.Add("the attachment count must have exactly one write across the " + shippedCs.Length
-                    + " shipped file(s), in ANY spelling; found " + realAttach.Count + " in " + attachHome
-                    + ": " + Describe(realAttach));
+                reachProblems.Add("the attachment count must have exactly one write across the "
+                    + attachScan.Scanned + " shipped file(s) READ by this scan, in ANY spelling; found "
+                    + realAttach.Count + " in " + attachHome + ": " + Describe(realAttach));
             else
             {
                 FieldWrite w = realAttach[0];
@@ -2865,13 +3083,23 @@ internal static class Program
         // Scanning its declaring file alone asserted nothing about the premise.
         SurfaceScan disabledScan = ScanField(shippedCs, surfaceText, surfaceBlank,
             "modDisabled", "plugin/Plugin.cs", "false");
+        scanNotes.Add(ScanNote("disabled flag", disabledScan));
         reachProblems.AddRange(disabledScan.DeclProblems);
         if (shippedCs.Length != 0 && !disabledScan.HomeDeclares)
             reachProblems.Add("the disabled flag must be DECLARED in plugin/Plugin.cs");
-        if (disabledScan.Excluded.Count != 0)
-            reachProblems.Add("no shipped file may declare a second flag named modDisabled - the scan cannot "
-                + "then tell a write to the assembly's flag from a write to that one; found "
-                + string.Join(", ", disabledScan.Excluded.ToArray()));
+        // THIS ONE STAYS FATAL, and the narrowing is why it has to be said
+        // rather than left to the general rule. For the other three fields a
+        // second declarer costs the scan nothing: they are private, so only the
+        // qualified spelling could reach the home field and that is exactly what
+        // the narrowing keeps reading. This flag is `internal static` and six
+        // shipped files already reference it, so the BARE spelling is a legal
+        // write to it from anywhere - and in a file that declared its own
+        // modDisabled the narrowing would stop reading precisely that spelling.
+        // A second declarer of this name is therefore refused outright.
+        if (disabledScan.Narrowed.Count != 0)
+            reachProblems.Add("no shipped file may declare a second flag named modDisabled - this one is "
+                + "internal, so a BARE write to it is legal from any file, and a file declaring its own is "
+                + "read for qualified writes only; found " + string.Join(", ", disabledScan.Narrowed.ToArray()));
         foreach (FieldWrite w in disabledScan.Real)
             if (w.Kind != "= (simple assignment)" || w.Rhs != "true")
                 reachProblems.Add("every write to the disabled flag must write true, or a seat that reached "
@@ -2896,13 +3124,34 @@ internal static class Program
         // (#342/#431), and the shipped paragraphs in both files rest on this
         // relation being true.
         //
-        // WHAT THE RELATION IS, derived by reading the source and written down
-        // before this code was: every route that can reach StageInto passes
-        // through the persistent tick BELOW `if (!initialized) return;`, and
-        // `initialized` can only become true inside DoInitialize AFTER
-        // ApiClient.Initialize has been called. The clauses below assert exactly
-        // that chain, link by link, each one a position or a count over the CODE
-        // view:
+        // WHAT THE RELATION IS, DERIVED BY READING THE SOURCE - AND CORRECTED.
+        // The round-7 build wrote here that "every route that can reach
+        // StageInto passes through the persistent tick BELOW `if (!initialized)
+        // return;`". That is FALSE of the assembly it describes, and its own
+        // NOTE line printed the counter-evidence: of the ten staging entry-point
+        // call sites, five are inside plugin/ApiClient.cs, reached from a
+        // response callback, a coroutine and a delegate the menu stores - none
+        // of them the tick. A route walk cannot reach those, because a call made
+        // through a delegate names no member and no text scan sees it; writing
+        // more route clauses against a model the source contradicts is patching
+        // where the model is what is wrong (#310/#389/#473). What replaces it is
+        // a BOUND each clause can actually carry:
+        //
+        //   THE MERGE IS RESPONSE-BOUND. StageInto runs only inside the callback
+        //   of a request this client built from `baseUrl`, and `baseUrl` starts
+        //   empty and is written only inside ApiClient. So WHO calls a staging
+        //   entry point does not decide when a merge runs - a reply does.
+        //
+        //   THE CALLER SET IS CLOSED AT MEMBER GRAIN. Every entry-point call
+        //   site in the assembly is inside one of a named set of members: the
+        //   persistent tick below its gate, the two menu tab refreshers R5 pins
+        //   to that tick, and five members of ApiClient.cs. A new caller
+        //   anywhere - including in a file already permitted - reddens and is
+        //   named, which is the condition round 6 asked for and the file-grain
+        //   clause could not carry.
+        //
+        // The clauses below assert that, link by link, each one a position or a
+        // count over the CODE view:
         //
         //   R1  every StageInto call in the assembly is in ApiClient.cs (3 of
         //       them), and each sits at a LARGER offset than a baseUrl-built
@@ -2922,14 +3171,36 @@ internal static class Program
         //       MaybeRefreshOvtTab/MaybeRefreshFfaTab are called only from
         //       inside NativeUI.Tick, NativeUI.Tick only from inside
         //       CompetitiveUI.Tick, and CompetitiveUI.Tick only from the tick
-        //       below the gate.
+        //       below the gate;
+        //   R6  the CALLER SET AT MEMBER GRAIN, over every file: each staging
+        //       entry-point call site is resolved to the member that encloses it
+        //       and that member must be one of the seven named below - so a call
+        //       lifted out of a tab refresher into another NativeUI member, or
+        //       added to an eighth ApiClient member, reddens and is named. This
+        //       is what R3/R4 could not do: R3 skipped every file that was not
+        //       Plugin.cs and R4 closed only the FILE set, leaving seven of the
+        //       ten sites the map prints with no position constraint at all;
+        //   R7  the merge is RESPONSE-BOUND: each of the three merges lies
+        //       INSIDE the lambda body opened after its member's own
+        //       baseUrl-built request - or, for the parser, its one call site
+        //       lies inside its host's - so it runs on a reply and never on
+        //       entry;
+        //   R8  the request prefix those replies come from: `baseUrl` is
+        //       declared in ApiClient.cs with the empty initialiser, no other
+        //       shipped file writes it, and its writer members are a closed set
+        //       containing ApiClient.Initialize.
         //
         // WHAT IT STILL DOES NOT PROVE, said plainly rather than left to be
-        // found: a call made through a delegate, an event or reflection names no
-        // member and no text scan can see it; and the step that Awake runs
-        // before the first tick reaching DoInitialize is Unity's lifecycle
-        // contract, not a fact about this text. That step is the round's carried
-        // OPEN PREMISE and is disclosed in both shipped files (W26).
+        // found. A call made through a delegate, an event or reflection names no
+        // member and no text scan can see it - the FFA lobby kick is exactly
+        // that, and R6 places the member it lands in rather than claiming to
+        // have walked to it. The step that Awake runs before the first tick
+        // reaching DoInitialize is Unity's lifecycle contract, not a fact about
+        // this text. And R7/R8 bound the merge to a reply to a request built
+        // from a prefix only initialisation sets; that an EMPTY prefix yields no
+        // such reply is a property of the transport, not of this source. Those
+        // three are the round's carried OPEN PREMISES; the lifecycle one is
+        // disclosed in both shipped files (W26).
         const string stageCall = "ProximityVictimGate.StageInto";
         string[] stageEntries = new[] { "ParseTeamQueuePoll", "UpdateTeamQueuePoll",
                                         "UpdateOvtQueuePoll", "UpdateFfaQueuePoll" };
@@ -2991,9 +3262,26 @@ internal static class Program
                 if (host == null)
                 {
                     if (url < 0 || url > site)
+                    {
                         reachProblems.Add("the merge in '" + sig + "' must sit AFTER the request built from "
                             + "baseUrl in that member - a merge that runs on entry rather than on a response "
                             + "is not downstream of anything; baseUrl at " + url + ", merge at " + site);
+                        continue;
+                    }
+                    // R7 - and AFTER is not the property. A statement written
+                    // below the whole StartCoroutine call is also "after
+                    // baseUrl" and runs on entry, on whatever tick reached the
+                    // member. The merge has to be INSIDE the callback opened for
+                    // that request, which is what makes it run on a reply.
+                    int lo, lc;
+                    if (!TryLambdaSpanAfter(body, url, out lo, out lc))
+                        reachProblems.Add("the request in '" + sig + "' must open a response callback for the "
+                            + "merge to live in; none found after its baseUrl request");
+                    else if (site < lo || site > lc)
+                        reachProblems.Add("the merge in '" + sig + "' must sit INSIDE that request's response "
+                            + "callback, not merely after it in the file - outside it the merge runs on entry "
+                            + "and no reply is involved at all; callback spans " + lo + ".." + lc
+                            + ", merge at " + site);
                     continue;
                 }
                 // The parser's own entry: called exactly once in the assembly,
@@ -3016,21 +3304,82 @@ internal static class Program
                     {
                         if (at < ho || at > hc) continue;
                         int hostUrl = apiBlank.IndexOf("baseUrl", ho, StringComparison.Ordinal);
-                        if (hostUrl >= 0 && hostUrl < hc && hostUrl < at) inHost++;
+                        if (hostUrl < 0 || hostUrl >= hc || hostUrl >= at) continue;
+                        // R7 for the borrowed request: the parser's call site
+                        // has to be inside the host's response callback, not
+                        // merely below the host's request.
+                        int lo, lc;
+                        if (!TryLambdaSpanAfter(apiBlank, hostUrl, out lo, out lc)) continue;
+                        if (at >= lo && at <= lc) inHost++;
                     }
                 }
                 if (callers.Count != 1 || inHost != 1)
                     reachProblems.Add("'" + name + "' carries a merge but builds no request, so its own entry "
                         + "is what makes it downstream: it must be called exactly once in the assembly, from "
-                        + "inside '" + host + "', after that member's baseUrl request; found "
+                        + "INSIDE the response callback of '" + host + "'s baseUrl request; found "
                         + (callers.Count == 0 ? "no caller" : string.Join(" | ", callers.ToArray()))
                         + ", " + inHost + " of them in place");
             }
         }
 
+        // R8 - the prefix every one of those replies comes back from.
+        //
+        // R7 says a merge runs inside the callback of a request built from
+        // `baseUrl`. That is only a downstream relation if `baseUrl` is the
+        // thing initialisation sets, so this reads the field the same way the
+        // guard terms are read: declared in ApiClient.cs with the EMPTY
+        // initialiser, written by no other shipped file, and written only from a
+        // closed set of members one of which is ApiClient.Initialize. The TLS
+        // probe re-targets it for the session and is named here rather than
+        // waved past, because a writer this case cannot name is a writer nobody
+        // reading the run can account for.
+        SurfaceScan urlScan = ScanField(shippedCs, surfaceText, surfaceBlank,
+            "baseUrl", apiRel, "\"\"");
+        scanNotes.Add(ScanNote("request prefix", urlScan));
+        reachProblems.AddRange(urlScan.DeclProblems);
+        if (shippedCs.Length != 0 && !urlScan.HomeDeclares)
+            reachProblems.Add("the request prefix must be DECLARED in " + apiRel);
+        List<string> urlElsewhere = RealOutside(urlScan, apiRel);
+        if (urlElsewhere.Count != 0)
+            reachProblems.Add("only " + apiRel + " may write the request prefix every staging merge's reply "
+                + "comes back from; found " + string.Join(" | ", urlElsewhere.ToArray()));
+        if (apiBlank != null)
+        {
+            string[] urlWriters = new[]
+            {
+                "public static void Initialize(string url)",
+                "private static IEnumerator ProbeEndpointThenStart()"
+            };
+            var urlWhere = new List<string>();
+            bool initWrites = false;
+            foreach (FieldWrite w in RealIn(urlScan, apiRel))
+            {
+                string owner = EnclosingMemberOf(apiBlank, w.Index);
+                urlWhere.Add("line " + w.Line + " in " + (owner ?? "(no enclosing member)"));
+                if (owner != null && owner == urlWriters[0]) initWrites = true;
+                if (owner == null || Array.IndexOf(urlWriters, owner) < 0)
+                    reachProblems.Add("the request prefix may be written only from " + urlWriters[0]
+                        + " or the TLS fallback that runs from it; found a write at " + apiRel + " line "
+                        + w.Line + " inside '" + (owner ?? "no member") + "'");
+            }
+            if (!initWrites)
+                reachProblems.Add("ApiClient.Initialize must be one of the request prefix's writers - it is "
+                    + "what makes a reply downstream of initialisation at all; writers found: "
+                    + (urlWhere.Count == 0 ? "none" : string.Join(" | ", urlWhere.ToArray())));
+        }
+
         // R2 - the gate flag.
         SurfaceScan initScan = ScanField(shippedCs, surfaceText, surfaceBlank,
             "initialized", pluginRel, "false");
+        scanNotes.Add(ScanNote("gate flag", initScan));
+        // EVERY scan this case runs, in one line, after the last of them is
+        // built. plugin/CustomCosmetics.cs declares `private static bool
+        // initialized;` of its own, and under the round-7 build that dropped it
+        // from this very scan with no output anywhere - the string
+        // "CustomCosmetics" appeared nowhere in the run log - while the failure
+        // text named all 91 shipped files.
+        Console.WriteLine("NOTE  W25 surface: " + shippedCs.Length + " shipped .cs file(s); "
+            + string.Join("; ", scanNotes.ToArray()));
         reachProblems.AddRange(initScan.DeclProblems);
         if (shippedCs.Length != 0 && !initScan.HomeDeclares)
             reachProblems.Add("the initialisation gate flag must be DECLARED in " + pluginRel);
@@ -3046,7 +3395,7 @@ internal static class Program
         List<FieldWrite> initHere = RealIn(initScan, pluginRel);
         if (initHere.Count != 1)
             reachProblems.Add("the initialisation gate flag must have exactly one write across the "
-                + shippedCs.Length + " shipped file(s), in ANY spelling; found " + initHere.Count
+                + initScan.Scanned + " shipped file(s) READ by this scan, in ANY spelling; found " + initHere.Count
                 + ": " + Describe(initHere));
 
         string pluginBlank = LoadBlanked(pluginRel);
@@ -3106,9 +3455,41 @@ internal static class Program
             }
         }
 
-        // R3, second half, and R4 - where the staging entry points are called
-        // from, across the whole assembly.
+        // R3, second half, R4 and R6 - where the staging entry points are called
+        // from, across the whole assembly, at FILE grain AND at MEMBER grain.
+        //
+        // THE MEMBER SET IS WHAT ROUND 6 ASKED FOR. The file set says which
+        // files may hold a caller; it says nothing about WHERE in them, and the
+        // per-file loop below used to skip every file that was not Plugin.cs
+        // before it looked at a position at all. So of the ten sites this case's
+        // own NOTE prints, seven carried no position constraint: the FFA and 1v2
+        // tab refreshers in NativeUI.cs, and five members of ApiClient.cs. A
+        // staging call moved out of a tab refresher into a menu member, or added
+        // to a sixth ApiClient member, changed no count and no file and stayed
+        // green. The set below is written out because it is the CLAIM: these
+        // seven members, and no others, reach a staging entry point. Its price
+        // is that it must be edited when a caller legitimately moves; that is
+        // the point - the edit is where a reader is told the route changed.
+        //
+        // The two ApiClient members that are neither the tick nor a tab
+        // refresher are exactly the routes no scan can walk: FfaKickFromLobby is
+        // reached through a delegate the menu stores, FfaEnrollResult and
+        // HandleResolveProbe from response callbacks. R7 and R8 are what bound
+        // those, and the set here is what stops a NEW one appearing unremarked.
         var entryWhere = new List<string>();
+        var entryMembers = new List<string>();
+        var permittedMembers = new Dictionary<string, string[]>(StringComparer.Ordinal);
+        permittedMembers[pluginRel] = new[] { "private void Update()" };
+        permittedMembers[uiRel] = new[] { "private static void MaybeRefreshOvtTab()",
+                                          "private static void MaybeRefreshFfaTab()" };
+        permittedMembers[apiRel] = new[]
+        {
+            "public static void UpdateTeamQueuePoll(string steamId)",
+            "private static void FfaEnrollResult(bool ok, string resp, string intendedLobbyId, bool wasRecovery)",
+            "public static void FfaProbeServerState()",
+            "private void HandleResolveProbe(string status, string resp, string sid)",
+            "public static void FfaKickFromLobby(string targetSteamId)"
+        };
         foreach (string rel in shippedCs)
         {
             string blanked;
@@ -3125,6 +3506,20 @@ internal static class Program
                 reachProblems.Add("only " + apiRel + ", " + uiRel + " and " + pluginRel + " may reach a "
                     + "staging entry point - every other caller is a route this argument has not shown to "
                     + "run after initialisation; found " + sites.Count + " in " + rel);
+            string[] allowedHere;
+            bool known = permittedMembers.TryGetValue(rel, out allowedHere);
+            foreach (int at in sites)
+            {
+                string owner = EnclosingMemberOf(blanked, at);
+                entryMembers.Add(rel + ":" + LineOf(blanked, at) + " in "
+                    + (owner ?? "(no enclosing member)"));
+                if (!known) continue;   // the file clause above already reported it
+                if (owner == null || Array.IndexOf(allowedHere, owner) < 0)
+                    reachProblems.Add("every staging entry-point call must sit inside a member this argument "
+                        + "has placed; the one at " + rel + " line " + LineOf(blanked, at) + " is inside '"
+                        + (owner ?? "no member") + "', which is not one of: "
+                        + string.Join(" / ", allowedHere));
+            }
             if (rel != pluginRel) continue;
             foreach (int at in sites)
             {
@@ -3141,6 +3536,8 @@ internal static class Program
         }
         Console.WriteLine("NOTE  W25 staging routes: merges " + stageMap + "; entry-point callers "
             + (entryWhere.Count == 0 ? "nowhere" : string.Join(" | ", entryWhere.ToArray())));
+        Console.WriteLine("NOTE  W25 entry-point call sites, by enclosing member: "
+            + (entryMembers.Count == 0 ? "none" : string.Join("; ", entryMembers.ToArray())));
 
         // R5 - the one route that leaves ApiClient.cs, pinned link by link to
         // the same gate. Each link is "exactly this many call sites, in exactly

@@ -13,9 +13,12 @@ ones is the one a reader cannot tell apart. `H1` in `Program.cs` reads the
 cannot drift from the bodies it summarises.
 
 One marker per finding. The total is derived too, so a body added without a
-marker changes the total rather than quietly not counting.
+marker changes the total rather than quietly not counting. The round-7 COLD LENS
+bodies are in this file for the same reason the gate's are: a finding answered
+without a body here would leave the census describing a smaller round than the
+one that ran.
 
-CENSUS: 7 findings: 0 HIGH, 1 MEDIUM, 6 LOW
+CENSUS: 10 findings: 0 HIGH, 2 MEDIUM, 8 LOW
 
 ### F1 - the staging merges' downstream relation is asserted by a count
 
@@ -90,3 +93,57 @@ seam stated the ordering and said `W25` pins the premises, which `W25` expressly
 does not do for that step. Closed by stating the same disclosure in both shipped
 files in the same words, and by `W26`, whose negative control removes it from
 one of them.
+
+## The round-7 cold lens
+
+The three bodies below are the round-7 COLD LENS findings, read on the build tip
+of this same round rather than on the round-6 gate. They are findings this round
+answers, so they carry markers and count in the census above exactly as F1-F7 do.
+
+### F8 - the route walk placed three of ten call sites
+
+SEVERITY: MEDIUM
+
+`W25`'s new route walk position-checked a staging entry-point call only in
+`Plugin.cs`: the per-file loop skipped every other file before it looked at a
+position, and the closed CALLER SET was closed at FILE grain. The run's own NOTE
+printed ten entry-point call sites - five in `ApiClient.cs`, two in `NativeUI.cs`,
+three in `Plugin.cs` - so seven of them carried no position constraint at all,
+and the round-6 condition ("must fail when something other than the
+initialisation path is the caller") was met for one file of the three. Worse,
+the model the comment stated - every route passes through the persistent tick
+below its gate - is FALSE of those five `ApiClient.cs` sites, which are reached
+from a response callback, a coroutine and a delegate the menu stores. Closed by
+DELETING that model and asserting the bound that holds: `R6` closes the caller
+set at MEMBER grain over every file, `R7` requires each merge to sit INSIDE the
+response callback of its own (or its host's) `baseUrl` request, and `R8` holds
+that request prefix to one declaring file, the empty initialiser and a closed
+set of writer members containing `ApiClient.Initialize`.
+
+### F9 - one field scan narrowed its surface with no line in the log
+
+SEVERITY: LOW
+
+`ScanField` dropped any file that declared its own field of the scanned name.
+For the attachment count and the withdrawal latch the drop was printed; for the
+disabled flag a second declarer was a hard failure; for `initialized` - the
+field the round-7 gate-flag argument newly rested on - it was neither printed
+nor asserted, and `plugin/CustomCosmetics.cs` declares one. The failure text
+named "the 91 shipped file(s)" over a surface of 90, and the string
+"CustomCosmetics" appeared nowhere in the run log. Closed by NARROWING instead
+of dropping - a file that declares its own field is read for QUALIFIED writes,
+which name the home field outright - by deriving the count message from the
+files actually read, and by one `ScanNote` line per field on every run.
+
+### F10 - a qualified deconstruction target read as a read
+
+SEVERITY: LOW
+
+The deconstruction recogniser asked what the previous non-whitespace character
+was and read it off the BARE name, so `(ProximityVictimGate._attached,
+_advertised) = (0, true);` - legal C#, and legal for a private static field from
+inside its own class - found '.' there and was filed as a READ by the pass whose
+case is called "every write in ANY spelling". Every other form the classifier
+knows is recognised qualified already, because an operator FOLLOWS the name.
+Closed by `SkipQualifierBack`, which walks a '.'-separated identifier chain
+backwards before the test.

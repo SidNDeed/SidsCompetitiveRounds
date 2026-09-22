@@ -259,6 +259,30 @@ function New-WireRootEdits([string]$name, [string]$file, [object[]]$edits) {
 
 # The round-2 files, recovered from git rather than copied by hand, so the
 # comparison cannot drift and needs no absolute path.
+# The same again, for a mutation that is only honest across TWO files. A file
+# that declares its own field of a monitored name AND writes the home one
+# through a qualified spelling needs the home field to be VISIBLE to it, and
+# that visibility lives in the other file; writing only half of it would be a
+# mutant that could not compile, which is a different thing from a change a
+# maintainer might really make. Each edit is @('file','member','find','replace')
+# and is resolved inside the named member of the named file, under the same
+# exactly-one-site rule as every other anchor here.
+function New-WireRootMulti([string]$name, [object[]]$edits) {
+    $dir = Join-Path $work ('wire-' + $name)
+    if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+    Copy-WireFiles $dir
+    if ($edits.Count -eq 4 -and ($edits[0] -is [string])) { $edits = @(, $edits) }
+    $files = @($edits | ForEach-Object { [string]$_[0] } | Sort-Object -Unique)
+    Say ('--- wiring mutant ' + $name + ': ' + $edits.Count + ' edit(s) across ' + $files.Count + ' file(s): ' + ($files -join ', '))
+    foreach ($edit in $edits) {
+        $target = Join-Path $dir ([string]$edit[0])
+        $text = [System.IO.File]::ReadAllText($target)
+        $text = Edit-InMember ('wire-' + $name) $text ([string]$edit[1]) ([string]$edit[2]) ([string]$edit[3]) ''
+        [System.IO.File]::WriteAllText($target, $text)
+    }
+    return $dir
+}
+
 function New-PriorRoot([string]$name, [string]$tip) {
     $dir = Join-Path $work ('prior-' + $name)
     if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
@@ -1137,6 +1161,153 @@ $wireLifecycleDrop = New-WireRoot 'lifecycledrop' 'plugin/ProximityVictimSeam.cs
 $runWireLifecycleDrop = Invoke-Suite 'wire-lifecycledrop' $seam $wireLifecycleDrop
 if (-not (Assert-Mutation 'the untested lifecycle step dropped from one shipped file' $runWireLifecycleDrop 'W26' 'W1')) { $overall = 1 }
 if (-not (Assert-Mutation 'lifecycle disclosure dropped, W25 inert twin' $runWireLifecycleDrop 'W26' 'W25')) { $overall = 1 }
+Say ''
+
+# ============ round-7 COLD LENS: the six rows that close its findings ========
+
+# ---------- move a staging call OUT of the member the route walk pins --------
+# THE ROUTE WALK PLACED THREE OF TEN CALL SITES. R3's per-file loop skipped every
+# file that was not Plugin.cs before it looked at a position, and R4 closed only
+# the FILE set - so the two NativeUI calls and the five ApiClient ones were
+# counted, printed in the NOTE, and never placed. This moves the FFA queue poll
+# out of the tab refresher R5 pins to the gated tick and into NativeUI.Open,
+# which menu construction reaches and the persistent tick does not. Nothing else
+# moves: three StageInto merges, the gate flag, the caller FILE set and R5's
+# three link counts are all exactly as they were, which is why the round-7 W25
+# stayed green on it. R6 places the call by its enclosing member and reddens.
+#
+# W23 is the inert twin and must stay GREEN: the patches file does not move.
+$wireStageMember = New-WireRootEdits 'stagemember' 'plugin/NativeUI.cs' @(
+    @('private static void MaybeRefreshFfaTab()',
+      '            ApiClient.UpdateFfaQueuePoll(false);   // internally 2s-throttled; no-op when not polling',
+      '            // (mutant) the staging call has left this member'),
+    @('public static void Open()',
+      '            if(!UIFactory.Ready){UIFactory.InitTypes();UIFactory.InitFont();}if(!UIFactory.Ready)return;',
+      '            if(!UIFactory.Ready){UIFactory.InitTypes();UIFactory.InitFont();}if(!UIFactory.Ready)return;
+            ApiClient.UpdateFfaQueuePoll(false);')
+)
+$runWireStageMember = Invoke-Suite 'wire-stagemember' $seam $wireStageMember
+if (-not (Assert-Mutation 'a staging call moved out of the member the route pins' $runWireStageMember 'W25' 'W1')) { $overall = 1 }
+if (-not (Assert-Mutation 'staging call moved within a permitted file, W23 inert twin' $runWireStageMember 'W25' 'W23')) { $overall = 1 }
+Say ''
+
+# ---------- reach a staging entry point from ApiClient.Initialize ITSELF ------
+# THE SAME GAP, IN THE OTHER UNPLACED FILE. wire-stagecaller planted its call in
+# PerfPatches.cs, a FOURTH file, so it reddened on the file-set clause and said
+# nothing about a caller inside a file already permitted. This plants one in the
+# initialisation member the whole relation is measured against: a staging entry
+# point reached from ApiClient.Initialize runs BEFORE initialisation has
+# finished, which is the exact state the permanence argument forbids, and under
+# the round-7 W25 it changed no count, no file and no link.
+#
+# W23 is the inert twin and must stay GREEN.
+$wireStageApiMember = New-WireRoot 'stageapimember' 'plugin/ApiClient.cs' `
+    'public static void Initialize(string url)' `
+    '            baseUrl = url.TrimEnd(''/'');' `
+    '            baseUrl = url.TrimEnd(''/'');
+            UpdateFfaQueuePoll(force: true);' ''
+$runWireStageApiMember = Invoke-Suite 'wire-stageapimember' $seam $wireStageApiMember
+if (-not (Assert-Mutation 'a staging entry point reached from the initialisation member' $runWireStageApiMember 'W25' 'W1')) { $overall = 1 }
+if (-not (Assert-Mutation 'staging call inside Initialize, W23 inert twin' $runWireStageApiMember 'W25' 'W23')) { $overall = 1 }
+Say ''
+
+# ---------- lift a merge OUT of the response callback it runs in -------------
+# "AFTER baseUrl" WAS NOT THE PROPERTY. The round-7 clause asked only that a
+# merge sit at a larger offset than its member's baseUrl request, and a
+# statement written below the whole StartCoroutine call satisfies that while
+# running on ENTRY - on whatever tick reached the member, with no reply
+# involved at all. This moves the 1v2 merge from inside the callback to just
+# after it, inside the same member: R1's ordering clause still passes and R7
+# reddens.
+#
+# W23 is the inert twin and must stay GREEN.
+$wireStageUnbound = New-WireRootEdits 'stageunbound' 'plugin/ApiClient.cs' @(
+    @('public static void UpdateOvtQueuePoll(bool force)',
+      '                            ProximityVictimGate.StageInto(prejoin);',
+      '                            // (mutant) the merge has left the response callback'),
+    @('public static void UpdateOvtQueuePoll(bool force)',
+      '            }));',
+      '            }));
+            ProximityVictimGate.StageInto(new ExitGames.Client.Photon.Hashtable());')
+)
+$runWireStageUnbound = Invoke-Suite 'wire-stageunbound' $seam $wireStageUnbound
+if (-not (Assert-Mutation 'a merge lifted out of its response callback' $runWireStageUnbound 'W25' 'W1')) { $overall = 1 }
+if (-not (Assert-Mutation 'merge outside the callback, W23 inert twin' $runWireStageUnbound 'W25' 'W23')) { $overall = 1 }
+Say ''
+
+# ---------- give the request prefix a writer outside its closed set ----------
+# R7 ties a merge to a REPLY; R8 is what makes a reply downstream of
+# initialisation, because the prefix that reply came back from starts empty and
+# is written by ApiClient.Initialize and the TLS fallback that runs from it.
+# A third writer, in a member the tab refresher reaches on first open, is a
+# prefix that can be set without initialisation ever having run - and nothing in
+# the round-7 harness read that field at all.
+#
+# W23 is the inert twin and must stay GREEN.
+$wireUrlWriter = New-WireRoot 'urlwriter' 'plugin/ApiClient.cs' `
+    'public static void FfaProbeServerState()' `
+    '            IsFfaQueuePolling = true;' `
+    '            baseUrl = "http://127.0.0.1:1";
+            IsFfaQueuePolling = true;' ''
+$runWireUrlWriter = Invoke-Suite 'wire-urlwriter' $seam $wireUrlWriter
+if (-not (Assert-Mutation 'a request-prefix writer outside the closed set' $runWireUrlWriter 'W25' 'W1')) { $overall = 1 }
+if (-not (Assert-Mutation 'third prefix writer, W23 inert twin' $runWireUrlWriter 'W25' 'W23')) { $overall = 1 }
+Say ''
+
+# ---------- write the gate flag from a file that declares its own ------------
+# THE SURFACE THAT NARROWED WITH NO LINE IN THE LOG. ScanField used to DROP any
+# file declaring its own field of the scanned name. plugin/CustomCosmetics.cs
+# declares `private static bool initialized;`, so it left the gate flag's scan
+# with no output anywhere - the attachment count printed its exclusion, the
+# disabled flag made a second declarer fatal, and this one said nothing while
+# its failure text named all 91 shipped files. This is the change that hole
+# admitted: the flag is given assembly visibility, a second file declares one of
+# its own, and writes the HOME flag through the qualified spelling that names it
+# outright. Narrowing reads that write; dropping never saw it.
+#
+# W22 is the inert twin and must stay GREEN: it reads the census member.
+$wireQualifiedGateFlag = New-WireRootMulti 'qualifiedgateflag' @(
+    @('plugin/Plugin.cs',
+      'public class CompetitiveRoundsBehaviour : MonoBehaviour',
+      '        private bool initialized = false;',
+      '        internal static bool initialized = false;'),
+    @('plugin/PerfPatches.cs',
+      'internal static class PerfGate',
+      '        private static readonly HashSet<string> _firstFireLogged = new HashSet<string>();',
+      '        private static readonly HashSet<string> _firstFireLogged = new HashSet<string>();
+        private static bool initialized;'),
+    @('plugin/PerfPatches.cs',
+      'public static void Hit(string patch)',
+      '                if (_firstFireLogged.Add(patch))',
+      '                Plugin.initialized = true;
+                if (_firstFireLogged.Add(patch))')
+)
+$runWireQualifiedGateFlag = Invoke-Suite 'wire-qualifiedgateflag' $seam $wireQualifiedGateFlag
+if (-not (Assert-Mutation 'the gate flag written from a file that declares its own' $runWireQualifiedGateFlag 'W25' 'W1')) { $overall = 1 }
+if (-not (Assert-Mutation 'qualified gate-flag write, W22 inert twin' $runWireQualifiedGateFlag 'W25' 'W22')) { $overall = 1 }
+Say ''
+
+# ---------- deconstruct into the guard terms through their OWNER -------------
+# wire-deconstructwrite plants the BARE form; this plants the QUALIFIED one.
+# "(ProximityVictimGate._attached, ProximityVictimGate._withdrawn) = (0, true);"
+# is legal from inside the class that owns both, and the recogniser read the
+# character before the BARE name - found '.', and filed both as READS. Every
+# other form this classifier knows is recognised qualified already, because an
+# operator FOLLOWS the name; the deconstruction form is the one that reads
+# backwards, so it was the one form where the qualifier decided the answer.
+# Planted on the DECLINING branch, where it does the damage: the count falls to
+# zero after a staging attempt has declined, and the withdrawal latch is set by
+# the member whose one property is that it sets no latch.
+#
+# W22 is the inert twin and must stay GREEN.
+$wireQualifiedDeconstruct = New-WireRoot 'qualifieddeconstruct' 'plugin/ProximityVictimPatches.cs' `
+    'internal static void StageInto(ExitGames.Client.Photon.Hashtable prejoin)' `
+    '                    _stageFailedPermanently = true;' `
+    '                    _stageFailedPermanently = true; (ProximityVictimGate._attached, ProximityVictimGate._withdrawn) = (0, true);' ''
+$runWireQualifiedDeconstruct = Invoke-Suite 'wire-qualifieddeconstruct' $seam $wireQualifiedDeconstruct
+if (-not (Assert-Mutation 'qualified deconstruction write to the attachment count' $runWireQualifiedDeconstruct 'W25' 'W1')) { $overall = 1 }
+if (-not (Assert-Mutation 'qualified deconstruction write to the withdrawal latch' $runWireQualifiedDeconstruct 'W23' 'W1')) { $overall = 1 }
+if (-not (Assert-Mutation 'qualified deconstruction write, W22 inert twin' $runWireQualifiedDeconstruct 'W25' 'W22')) { $overall = 1 }
 Say ''
 
 # ---------- change ONE finding body's severity and leave the census line ------
