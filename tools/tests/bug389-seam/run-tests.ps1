@@ -795,6 +795,27 @@ if (-not (Assert-Mutation 'advertisement-latched-through-the-withdrawal-flag wir
 if (-not (Assert-Mutation 'withdrawal-flag latch, W25 inert twin' $runWireStageWithdraw 'W23' 'W25')) { $overall = 1 }
 Say ''
 
+# ---------- the SAME latch, spelled without spaces ----------
+# THE ROW ABOVE IS THE DRIFT; THIS ONE IS THE PROPERTY. Round 5 closed the
+# withdrawal-flag latch with an assertion that counted the text "_withdrawn = ",
+# so it recognised the spaced spelling above and nothing else: "_withdrawn=true;"
+# installed exactly the same latch and left W23 green. A case that recognises one
+# spelling of an operation is a check that cannot fail for the operation it names
+# (#342/#431), and a flag names a line while the defect is a class (#432). W23 now
+# classifies writes by what follows the identifier, so both spellings - and
+# "_withdrawn  =  true;", and the operator on the next line - reach the same bound.
+#
+# W25 is the inert twin again and must stay GREEN for the same reason as above:
+# the write writes true, so the one-way premise is untouched.
+$wireStageWithdrawTight = New-WireRoot 'stagewithdrawtight' 'plugin/ProximityVictimPatches.cs' `
+    'internal static void StageInto(ExitGames.Client.Photon.Hashtable prejoin)' `
+    '                    _stageFailedPermanently = true;' `
+    '                    _stageFailedPermanently = true; _withdrawn=true;' ''
+$runWireStageWithdrawTight = Invoke-Suite 'wire-stagewithdrawtight' $seam $wireStageWithdrawTight
+if (-not (Assert-Mutation 'withdrawal-flag latch spelled with no spaces' $runWireStageWithdrawTight 'W23' 'W1')) { $overall = 1 }
+if (-not (Assert-Mutation 'no-space withdrawal latch, W25 inert twin' $runWireStageWithdrawTight 'W23' 'W25')) { $overall = 1 }
+Say ''
+
 # ---------- put the retracted latch sentence back in a SHIPPED file ----------
 # The eighth deletion's absence bound. Until W24 there was none: the latch
 # language was recorded as deleted in the notes and held only by W23, which
@@ -817,7 +838,7 @@ if (-not (Assert-Mutation 'retracted-latch-sentence wiring' $runWireLatchProse '
 if (-not (Assert-Mutation 'retracted-latch-sentence, W23 inert twin' $runWireLatchProse 'W24' 'W23')) { $overall = 1 }
 Say ''
 
-# ---------- make the attachment count two-way ----------
+# ---------- make the attachment count two-way, ON A PATH THAT RUNS ----------
 # The premise W25 exists for. The reachability argument that replaced the latch
 # says a seat which declined once cannot become Capable later, and its first
 # clause is that the attachment count can only rise. A direct assignment is how
@@ -826,13 +847,53 @@ Say ''
 # the shortfall message - which W19 pins and the TeleportToOpponent doc tells a
 # maintainer to grep for - would be asserting something about the session that
 # the state space no longer allows (#438/#443).
+#
+# THE ROUND-5 FORM OF THIS MUTANT WAS UNREACHABLE AND IS DELETED, not patched.
+# It reset the count behind `which == null`, and the writer's only three callers
+# are the Harmony cleanup callbacks at ProximityVictimPatches.cs:664, :726 and
+# :773, each passing a string LITERAL. No call can be null, so that mutant made
+# the source text two-way and left the program one-way: it advertised a failure
+# it could not produce, and the only thing its red line proved was that the case
+# recognised the spelling "_attached = " (#342/#431).
+#
+# THIS FORM KEYS ON THE LITERAL THE StunPlayer CLEANUP ACTUALLY PASSES, so on a
+# seat where that patch attaches the count really does fall back to zero after
+# having risen. It is spelled "_attached=0;" with no spaces on purpose: the same
+# mutant then also shows the case is bound to the OPERATION and not to one
+# spelling, and it is why the round-5 harness stays green on it in the blind run.
 $wireReach = New-WireRoot 'reach' 'plugin/ProximityVictimPatches.cs' `
     'internal static void MarkAttached(string which)' `
     '            _attached++;' `
-    '            _attached++; if (which == null) _attached = 0;' ''
+    '            _attached++; if (which == "StunPlayer.Go") _attached=0;' ''
 $runWireReach = Invoke-Suite 'wire-reach' $seam $wireReach
 if (-not (Assert-Mutation 'two-way-attachment-count wiring' $runWireReach 'W25' 'W1')) { $overall = 1 }
 if (-not (Assert-Mutation 'two-way attachment count, W23 inert twin' $runWireReach 'W25' 'W23')) { $overall = 1 }
+Say ''
+
+# ---------- the reviewer's own scenario: satisfy the count on the DECLINE ----
+# The other half of the same property, and the shape the round-5 case could not
+# see at all. Writing the attachment count to RequiredAttachments on the branch
+# that has just declined makes the first attempt decline and a LATER pre-join
+# attempt advertise, with no patch ever having attached - which is precisely the
+# seat the whole-room gate exists to keep out: it carries the key, its peers'
+# census returns true, and it runs vanilla while they repair.
+#
+# Two of W25's clauses move at once here and either alone would be enough: the
+# write is not monotone, and it is outside MarkAttached. It is spelled
+# "_attached=RequiredAttachments;" with no spaces, as the finding spelled it.
+#
+# W23 is the inert twin and must stay GREEN: the planted write shares its line
+# with the shortfall flag's own write, so the flag still occurs on exactly two
+# code lines, is still written exactly once, still writes true, still sits after
+# the staging write, and no _withdrawn is assigned. That is what says the two
+# cases measure different things rather than one thing twice.
+$wireReachDecline = New-WireRoot 'reachdecline' 'plugin/ProximityVictimPatches.cs' `
+    'internal static void StageInto(ExitGames.Client.Photon.Hashtable prejoin)' `
+    '                    _stageFailedPermanently = true;' `
+    '                    _stageFailedPermanently = true; _attached=RequiredAttachments;' ''
+$runWireReachDecline = Invoke-Suite 'wire-reachdecline' $seam $wireReachDecline
+if (-not (Assert-Mutation 'attachment count written on the declining branch' $runWireReachDecline 'W25' 'W1')) { $overall = 1 }
+if (-not (Assert-Mutation 'decline-branch attachment write, W23 inert twin' $runWireReachDecline 'W25' 'W23')) { $overall = 1 }
 Say ''
 
 # ---------- put the deleted compat claim back in the HARNESS'S own text ----------

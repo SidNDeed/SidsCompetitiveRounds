@@ -57,10 +57,25 @@ using CompetitiveRounds;
 //   wiring   wire-stagewithdraw: W23 must FAIL; W1 control must PASS (and the
 //     W25 inert twin must stay green - that mutant's write is one-way, so the
 //     premise W25 pins is untouched and only W23's own assertion moves)
+//   wiring   wire-stagewithdrawtight: W23 must FAIL; W1 control must PASS (and
+//     the W25 inert twin must stay green). The SAME latch as the row above,
+//     spelled "_withdrawn=true;" with no spaces. It is a separate row because
+//     the round-5 W23 recognised only the spaced form and stayed green on this
+//     one - the property and the spelling are different claims.
 //   wiring   wire-latchprose: W24 must FAIL; W1 control must PASS (and the W23
 //     inert twin must stay green - it plants prose and no code)
 //   wiring   wire-reach   :   W25 must FAIL; W1 control must PASS (and the W23
-//     inert twin must stay green)
+//     inert twin must stay green). Resets the attachment count when the
+//     argument is the literal the StunPlayer cleanup passes, so the reset is on
+//     a path this assembly actually walks; spelled "_attached=0;". The round-5
+//     form keyed on `which == null`, which no caller can produce, so it changed
+//     the text and not the program (#342).
+//   wiring   wire-reachdecline: W25 must FAIL; W1 control must PASS (and the
+//     W23 inert twin must stay green - the planted write shares a line with the
+//     shortfall flag's own write, so none of W23's counts move). Writes the
+//     attachment count to RequiredAttachments on the DECLINING branch of
+//     StageInto: the write is outside MarkAttached and is not monotone, which
+//     is two of W25's clauses at once.
 //   wiring   wire-pathswap:   D6 must FAIL;  D4 and D5 controls must PASS
 //   wiring   wire-paththrew:  D6 must FAIL;  D4 and D5 controls must PASS
 //   prior-r2            : N1 N2 N3 N4 N5 N6 must all FAIL; W1 control must PASS
@@ -164,6 +179,286 @@ internal static class Program
             n++;
             i = at + needle.Length;
         }
+    }
+
+    // ----------------------------------------------------------------------
+    // A WRITE IS AN OPERATION, NOT A SPELLING.
+    //
+    // Round 5 held "the attachment count is one-way" with
+    // CountOnCodeLines(text, "_attached = ") and "StageInto installs no latch"
+    // with CountOnCodeLines(stageBody, "_withdrawn = "). Both count ONE
+    // whitespace form of one operator. `_attached=0;`, `_attached  =  0;`,
+    // `_attached--`, `_attached -= 1`, `--_attached` and `out _attached` are all
+    // writes those counts cannot see, so the cases could be evaded by typing,
+    // and the mutant written to prove one of them could only ever prove that
+    // the recognised spelling was present. A flag names a line; the defect is a
+    // class (#432), and a check that cannot fail for the defect it names is
+    // worse than no check (#342/#431).
+    //
+    // What follows classifies every occurrence of an identifier as a WRITE or a
+    // READ by what follows it, with whitespace - including a line break -
+    // skipped, so every spelling above reaches the same assertion. Two bounds
+    // are stated rather than hidden: an occurrence inside a string literal is
+    // counted (over-counting reddens, which is the safe direction), and a
+    // right-hand side is read only as far as the statement's own ';' or the end
+    // of its line, so an assignment whose value spans lines reports a
+    // right-hand side that will not match a required literal - again red.
+    // ----------------------------------------------------------------------
+
+    /// <summary>One write to one field, as the source spells it.</summary>
+    private sealed class FieldWrite
+    {
+        internal int Line;          // 1-based, within the text that was scanned
+        internal int Index;         // character offset of the identifier
+        internal string Kind;       // "= (simple assignment)", "++ (increment)", ...
+        internal string Rhs;        // for = and compound forms: the value, trimmed
+        internal bool Declaration;  // the write is a field declaration's initialiser
+        internal string Text;       // the whole source line, whitespace-collapsed
+    }
+
+    private static bool IsIdentChar(char c)
+    {
+        return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+    }
+
+    private static int SkipWs(string text, int i)
+    {
+        while (i < text.Length && (text[i] == ' ' || text[i] == '\t' || text[i] == '\r' || text[i] == (char)10)) i++;
+        return i;
+    }
+
+    /// <summary>Index of the last non-whitespace character at or before i, or -1.</summary>
+    private static int SkipWsBack(string text, int i)
+    {
+        while (i >= 0 && (text[i] == ' ' || text[i] == '\t' || text[i] == '\r' || text[i] == (char)10)) i--;
+        return i;
+    }
+
+    private static int LineStartAt(string text, int index)
+    {
+        if (index <= 0) return 0;
+        return text.LastIndexOf((char)10, index - 1) + 1;
+    }
+
+    private static int LineOf(string text, int index)
+    {
+        int n = 1;
+        for (int i = 0; i < index && i < text.Length; i++) if (text[i] == (char)10) n++;
+        return n;
+    }
+
+    /// <summary>The whole line the offset sits on, trimmed and with runs of
+    /// whitespace collapsed to one space, so a failure message shows what was
+    /// actually written rather than only a line number.</summary>
+    private static string LineTextAt(string text, int index)
+    {
+        int s = LineStartAt(text, index);
+        int e = text.IndexOf((char)10, index);
+        if (e < 0) e = text.Length;
+        string raw = text.Substring(s, e - s);
+        var sb = new System.Text.StringBuilder();
+        bool pendingSpace = false;
+        foreach (char c in raw)
+        {
+            if (c == ' ' || c == '\t' || c == '\r') { pendingSpace = true; continue; }
+            if (pendingSpace && sb.Length > 0) sb.Append(' ');
+            pendingSpace = false;
+            sb.Append(c);
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>True when the offset sits on a line whose first non-space
+    /// characters are "//" - the same rule CountOnCodeLines uses, so prose and
+    /// doc comments naming a field are never read as writes to it.</summary>
+    private static bool OnCommentLine(string text, int index)
+    {
+        int i = LineStartAt(text, index);
+        while (i < text.Length && (text[i] == ' ' || text[i] == '\t')) i++;
+        return i + 1 < text.Length && text[i] == '/' && text[i + 1] == '/';
+    }
+
+    /// <summary>The value written, read from just after the operator to the
+    /// statement's own ';' or the end of its line, whichever comes first.</summary>
+    private static string RhsTo(string text, int i)
+    {
+        int end = text.IndexOf(';', i);
+        if (end < 0) end = text.Length;
+        int nl = text.IndexOf((char)10, i);
+        if (nl >= 0 && nl < end) end = nl;
+        if (end < i) return "";
+        return text.Substring(i, end - i).Trim();
+    }
+
+    /// <summary>What this occurrence DOES to the field, or null when it reads
+    /// it. Comparisons are the trap: ==, =>, !=, &lt;= and &gt;= all put an '='
+    /// next to the name and none of them writes anything.</summary>
+    private static string ClassifyWrite(string text, int at, int after, out string rhs)
+    {
+        rhs = null;
+        int f = SkipWs(text, after);
+        if (f < text.Length)
+        {
+            char c0 = text[f];
+            char c1 = (f + 1 < text.Length) ? text[f + 1] : '\0';
+            char c2 = (f + 2 < text.Length) ? text[f + 2] : '\0';
+            if (c0 == '+' && c1 == '+') return "++ (increment)";
+            if (c0 == '-' && c1 == '-') return "-- (decrement)";
+            if (c0 == '<' && c1 == '<' && c2 == '=') { rhs = RhsTo(text, f + 3); return "<<= (compound assignment)"; }
+            if (c0 == '>' && c1 == '>' && c2 == '=') { rhs = RhsTo(text, f + 3); return ">>= (compound assignment)"; }
+            if (c1 == '=' && (c0 == '+' || c0 == '-' || c0 == '*' || c0 == '/' || c0 == '%'
+                              || c0 == '&' || c0 == '|' || c0 == '^'))
+            {
+                rhs = RhsTo(text, f + 2);
+                return c0 + "= (compound assignment)";
+            }
+            if (c0 == '=' && c1 != '=' && c1 != '>')
+            {
+                rhs = RhsTo(text, f + 1);
+                return "= (simple assignment)";
+            }
+        }
+        int b = SkipWsBack(text, at - 1);
+        if (b >= 1)
+        {
+            if (text[b] == '+' && text[b - 1] == '+') return "++ (pre-increment)";
+            if (text[b] == '-' && text[b - 1] == '-') return "-- (pre-decrement)";
+        }
+        if (b >= 0 && IsIdentChar(text[b]))
+        {
+            int w = b;
+            while (w >= 0 && IsIdentChar(text[w])) w--;
+            string word = text.Substring(w + 1, b - w);
+            if (word == "out" || word == "ref") return word + " (indirect write)";
+        }
+        return null;
+    }
+
+    /// <summary>True when this occurrence is a FIELD DECLARATION's initialiser
+    /// rather than a later write. A one-way latch's declaration carries its
+    /// starting value, so the two have to be told apart rather than counted
+    /// together - and telling them apart by whether the name happens to be
+    /// written Plugin.modDisabled or bare, which is how the round-5 count did
+    /// it, is an accident rather than a rule.</summary>
+    private static bool IsDeclarationSite(string text, int at)
+    {
+        int start = LineStartAt(text, at);
+        string prefix = text.Substring(start, at - start).Trim();
+        if (prefix.Length == 0) return false;
+        string[] words = prefix.Split(new char[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+        if (words.Length == 0) return false;
+        bool modifier = false;
+        foreach (string w in words)
+            if (w == "private" || w == "internal" || w == "public" || w == "protected"
+                || w == "static" || w == "readonly" || w == "const" || w == "volatile") modifier = true;
+        string last = words[words.Length - 1];
+        bool typeLast = last == "int" || last == "bool" || last == "string" || last == "long"
+            || last == "float" || last == "double" || last == "byte" || last == "short"
+            || last == "uint" || last == "ulong" || last == "char" || last == "object" || last == "var";
+        return modifier && typeLast;
+    }
+
+    /// <summary>Every WRITE to one field in one text, in any spelling.</summary>
+    private static List<FieldWrite> WritesTo(string text, string field)
+    {
+        var found = new List<FieldWrite>();
+        if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(field)) return found;
+        int i = 0;
+        while (true)
+        {
+            int at = text.IndexOf(field, i, StringComparison.Ordinal);
+            if (at < 0) return found;
+            i = at + field.Length;
+            if (at > 0 && IsIdentChar(text[at - 1])) continue;
+            int after = at + field.Length;
+            if (after < text.Length && IsIdentChar(text[after])) continue;
+            if (OnCommentLine(text, at)) continue;
+            string rhs;
+            string kind = ClassifyWrite(text, at, after, out rhs);
+            if (kind == null) continue;
+            var w = new FieldWrite();
+            w.Index = at;
+            w.Line = LineOf(text, at);
+            w.Kind = kind;
+            w.Rhs = rhs;
+            w.Declaration = IsDeclarationSite(text, at);
+            w.Text = LineTextAt(text, at);
+            found.Add(w);
+        }
+    }
+
+    /// <summary>A write that can only ever make the value larger.</summary>
+    private static bool IsMonotoneWrite(FieldWrite w)
+    {
+        if (w.Kind == "++ (increment)" || w.Kind == "++ (pre-increment)") return true;
+        if (w.Kind != "+= (compound assignment)") return false;
+        if (string.IsNullOrEmpty(w.Rhs)) return false;
+        foreach (char c in w.Rhs) if (c < '0' || c > '9') return false;
+        return true;
+    }
+
+    private static string Describe(List<FieldWrite> writes)
+    {
+        if (writes.Count == 0) return "(none)";
+        var parts = new List<string>();
+        foreach (FieldWrite w in writes) parts.Add("line " + w.Line + " " + w.Kind + " [" + w.Text + "]");
+        return string.Join(" | ", parts.ToArray());
+    }
+
+    /// <summary>Calls to one (optionally qualified) name, whitespace-tolerant:
+    /// "Foo.Bar (x)" is the same call as "Foo.Bar(x)" and a count that reads one
+    /// and not the other is the same class of defect as a spelling-bound
+    /// assignment count.</summary>
+    private static int CallsTo(string text, string name)
+    {
+        if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(name)) return 0;
+        int n = 0, i = 0;
+        while (true)
+        {
+            int at = text.IndexOf(name, i, StringComparison.Ordinal);
+            if (at < 0) return n;
+            i = at + name.Length;
+            if (at > 0 && IsIdentChar(text[at - 1])) continue;
+            if (OnCommentLine(text, at)) continue;
+            int f = SkipWs(text, at + name.Length);
+            if (f < text.Length && text[f] == '(') n++;
+        }
+    }
+
+    /// <summary>Attribute applications [Name] or [Name(...)], likewise
+    /// whitespace-tolerant.</summary>
+    private static int AttributesOf(string text, string name)
+    {
+        if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(name)) return 0;
+        int n = 0, i = 0;
+        while (true)
+        {
+            int at = text.IndexOf(name, i, StringComparison.Ordinal);
+            if (at < 0) return n;
+            i = at + name.Length;
+            if (at > 0 && IsIdentChar(text[at - 1])) continue;
+            int after = at + name.Length;
+            if (after < text.Length && IsIdentChar(text[after])) continue;
+            if (OnCommentLine(text, at)) continue;
+            int b = SkipWsBack(text, at - 1);
+            if (b < 0 || text[b] != '[') continue;
+            int f = SkipWs(text, after);
+            if (f < text.Length && (text[f] == ']' || text[f] == '(')) n++;
+        }
+    }
+
+    /// <summary>The offsets of one member's body, for a case that has to ask
+    /// WHERE a site is rather than only how many there are.</summary>
+    private static bool TryMemberSpan(string text, string signature, out int open, out int close, out string problem)
+    {
+        open = -1; close = -1; problem = null;
+        int sigs = CountOf(text, signature);
+        if (sigs != 1) { problem = "member signature found " + sigs + " time(s) (want 1): " + signature; return false; }
+        int sig = text.IndexOf(signature, StringComparison.Ordinal);
+        open = text.IndexOf('{', sig);
+        close = open < 0 ? -1 : MemberEnd(text, sig, open);
+        if (open < 0 || close < 0) { problem = "could not bound the member span: " + signature; return false; }
+        return true;
     }
 
     /// <summary>Bound a C# member by INDENTATION, not by counting braces.
@@ -1646,11 +1941,29 @@ internal static class Program
             if (writeAt < 0 || flagAt < 0 || writeAt > flagAt)
                 stageProblems.Add("the key must be staged BEFORE this member reads the flag at all "
                     + "(staged at " + writeAt + ", first flag read at " + flagAt + ")");
-            int withdrawWrites = CountOnCodeLines(stageBody, "_withdrawn = ");
-            if (withdrawWrites != 0)
-                stageProblems.Add("this member must ASSIGN no _withdrawn - its one writer is "
+            // THE PROPERTY, NOT THE SPELLING. This assertion used to be
+            // CountOnCodeLines(stageBody, "_withdrawn = "), which recognises one
+            // whitespace form of one operator: "_withdrawn=true;" installed the
+            // very latch the assertion exists to forbid and left the case green.
+            // WritesTo classifies by OPERATION, so every spelling of every
+            // assignment reaches the same bound (#432/#342). Line numbers in the
+            // message are counted from the start of this member, not the file.
+            var stageWithdrawWrites = WritesTo(stageBody, "_withdrawn");
+            if (stageWithdrawWrites.Count != 0)
+                stageProblems.Add("this member must ASSIGN no _withdrawn in ANY spelling - its one writer is "
                     + "RepublishCapability, and a latch installed through that flag instead would "
-                    + "leave every other assertion here green; found " + withdrawWrites);
+                    + "leave every other assertion here green; found " + Describe(stageWithdrawWrites));
+            // And the flag this case is named for: written exactly once here,
+            // writing true. "Occurs on two code lines" counts occurrences and
+            // cannot tell the set from a second read; this says which of the two
+            // is the write and what it writes, so a flag that started gating a
+            // capability by being cleared somewhere would redden.
+            var stageFlagWrites = WritesTo(stageBody, "_stageFailedPermanently");
+            if (stageFlagWrites.Count != 1 || stageFlagWrites[0].Kind != "= (simple assignment)"
+                || stageFlagWrites[0].Rhs != "true")
+                stageProblems.Add("the shortfall flag must be written exactly once in this member and write true - "
+                    + "that is what makes it a bound on a log line rather than a latch on a capability; found "
+                    + Describe(stageFlagWrites));
         }
         Check("W23 Wiring_TheAdvertisementIsNotLatchedByTheShortfallFlag",
             stageProblems.Count == 0,
@@ -1724,22 +2037,35 @@ internal static class Program
             string.Join("; ", latchProblems.ToArray()));
 
         // W25 - THE TERMS OF THE ADVERTISING GUARD ARE SETTLED BEFORE THE FIRST
-        // STAGING ATTEMPT. RED under "wire-reach"; green under "wire-logquote",
-        // which edits the same file on a line this case makes no claim about.
+        // STAGING ATTEMPT. RED under "wire-reach" and under "wire-reachdecline";
+        // green under "wire-logquote", which edits the same file on a line this
+        // case makes no claim about, and green under "wire-stagewithdraw" and
+        // "wire-stagewithdrawtight", whose writes are one-way.
         //
         // This is what makes the corrected paragraphs checkable rather than merely
         // plausible. Both shipped files now say a decline is final because the
         // guard's inputs cannot move afterwards, and StageInto says so out loud in
         // a line W19 pins and the TeleportToOpponent doc tells a maintainer to grep
         // a session log for. A sentence about the whole session is a claim about
-        // the whole state space and needs a pin, not a re-reading (#351/#434). The
-        // premises, each one a count here:
-        //   - the attachment count has one writer and no direct assignment, so it
-        //     can only ever rise;
+        // the whole state space and needs a pin, not a re-reading (#351/#434).
+        //
+        // EVERY PREMISE BELOW IS ASSERTED AS A PROPERTY OF AN OPERATION, not as a
+        // count of a spelling. The round-5 version of this case counted the texts
+        // "_attached++", "_attached = ", "_withdrawn = " and "Plugin.modDisabled = ".
+        // Each recognised one whitespace form of one operator, so "_attached=0;",
+        // "_attached--" and an unqualified "modDisabled = true;" all passed it,
+        // and the mutant written to prove it could only ever prove that the
+        // recognised spelling was present. WritesTo classifies by what follows the
+        // identifier and sees every spelling; CallsTo and AttributesOf do the same
+        // for the call and attribute counts (#432/#342/#431). The premises:
+        //   - the attachment count has exactly ONE write in the shipped files, in
+        //     any spelling; that write is MONOTONE; and it lives inside
+        //     MarkAttached, so it can only ever rise and only the patch loop's
+        //     callbacks can make it rise;
         //   - that writer is called from exactly three sites, and there are
         //     exactly three Harmony cleanup callbacks for them to be;
-        //   - the assembly has exactly one patch site, inside Awake's Harmony
-        //     bootstrap block (W25b);
+        //   - the assembly has exactly one patch site and no PatchAll beside it,
+        //     and that site is inside Awake's Harmony bootstrap block (W25b);
         //   - ApiClient.Initialize - which the three pre-join merges that can
         //     stage this key are all downstream of - is inside the deferred
         //     initialisation, not inside Awake (W25c);
@@ -1747,7 +2073,9 @@ internal static class Program
         //     back - the ONE-WAY direction is the premise, and it is deliberately
         //     not "exactly one writer": a second write that also writes true would
         //     leave the reachability argument intact. Whether StageInto itself may
-        //     write one is a different question, and W23 owns it.
+        //     write one is a different question, and W23 owns it. A declaration
+        //     INITIALISER is the starting value and is checked separately: false
+        //     for a latch that only ever goes true.
         //
         // WHAT THIS CASE DOES NOT PROVE, said plainly so the next reader does not
         // take more from it than it gives: that Awake runs before the first tick
@@ -1757,46 +2085,121 @@ internal static class Program
         string apiText = LoadSource("plugin/ApiClient.cs");
         var reachProblems = new List<string>();
         if (patchesText == null) reachProblems.Add("cannot read plugin/ProximityVictimPatches.cs");
-        else
+        if (seamText == null) reachProblems.Add("cannot read plugin/ProximityVictimSeam.cs");
+        if (patchesText != null && seamText != null)
         {
-            int bump = CountOnCodeLines(patchesText, "_attached++");
-            if (bump != 1)
-                reachProblems.Add("the attachment count must have exactly one writer; found " + bump);
-            int assign = CountOnCodeLines(patchesText, "_attached = ");
-            if (assign != 0)
-                reachProblems.Add("nothing may assign the attachment count directly - a direct write is "
-                    + "how it would stop being one-way; found " + assign);
-            int callers = CountOnCodeLines(patchesText, "ProximityVictimGate.MarkAttached(");
+            // --- the attachment count: ONE write, MONOTONE, inside MarkAttached ---
+            //
+            // Every clause here is a property of the OPERATION. The round-5
+            // version asked whether the text "_attached++" occurred once and the
+            // text "_attached = " occurred never, which is true of a file that
+            // writes "_attached=0;" or "_attached--" and false of one that
+            // harmlessly writes "_attached += 1". Both directions were wrong, and
+            // the mutant written against it could only ever prove that the one
+            // recognised spelling was present.
+            var attachWrites = new List<FieldWrite>();
+            attachWrites.AddRange(WritesTo(patchesText, "_attached"));
+            var seamAttach = WritesTo(seamText, "_attached");
+            if (seamAttach.Count != 0)
+                reachProblems.Add("the seam must not write the attachment count at all; found " + Describe(seamAttach));
+            var realAttach = new List<FieldWrite>();
+            foreach (FieldWrite w in attachWrites)
+            {
+                if (!w.Declaration) { realAttach.Add(w); continue; }
+                if (w.Rhs != "0")
+                    reachProblems.Add("a declaration initialiser for the attachment count must start it at 0; found '"
+                        + w.Rhs + "' at line " + w.Line);
+            }
+            if (realAttach.Count != 1)
+                reachProblems.Add("the attachment count must have exactly one write in the shipped files, in ANY "
+                    + "spelling; found " + realAttach.Count + ": " + Describe(realAttach));
+            else
+            {
+                FieldWrite w = realAttach[0];
+                if (!IsMonotoneWrite(w))
+                    reachProblems.Add("that write must be MONOTONE - an increment, or += a non-negative integer "
+                        + "literal - or the count can fall back below the required three after a staging attempt "
+                        + "has already declined; found " + w.Kind + " at line " + w.Line + " [" + w.Text + "]");
+                int mOpen, mClose; string mProblem;
+                if (!TryMemberSpan(patchesText, "internal static void MarkAttached(string which)",
+                        out mOpen, out mClose, out mProblem))
+                    reachProblems.Add(mProblem);
+                else if (w.Index < mOpen || w.Index > mClose)
+                    reachProblems.Add("the one write must live inside MarkAttached - a write anywhere else is how "
+                        + "the count stops being the patch loop's alone, and a decline stops being final; found it "
+                        + "at line " + w.Line + " [" + w.Text + "]");
+            }
+
+            // --- and the withdrawal latch: every write writes true ---
+            var withdrawWrites = new List<FieldWrite>();
+            withdrawWrites.AddRange(WritesTo(patchesText, "_withdrawn"));
+            withdrawWrites.AddRange(WritesTo(seamText, "_withdrawn"));
+            int realWithdraw = 0;
+            foreach (FieldWrite w in withdrawWrites)
+            {
+                if (w.Declaration)
+                {
+                    if (w.Rhs != "false")
+                        reachProblems.Add("a declaration initialiser for the withdrawal latch must start it false; "
+                            + "found '" + w.Rhs + "' at line " + w.Line);
+                    continue;
+                }
+                realWithdraw++;
+                if (w.Kind != "= (simple assignment)" || w.Rhs != "true")
+                    reachProblems.Add("every write to the withdrawal latch must write true - ONE-WAY is the "
+                        + "premise here, not the number of writers, and W23 owns the separate question of "
+                        + "whether StageInto makes one; found " + w.Kind + " with right-hand side '" + w.Rhs
+                        + "' at line " + w.Line);
+            }
+            if (realWithdraw < 1)
+                reachProblems.Add("the withdrawal latch must have at least one write, or this premise is vacuous");
+
+            int callers = CallsTo(patchesText, "ProximityVictimGate.MarkAttached");
             if (callers != 3)
                 reachProblems.Add("MarkAttached must be called from exactly three sites; found " + callers);
-            int cleanups = CountOnCodeLines(patchesText, "[HarmonyCleanup]");
+            int cleanups = AttributesOf(patchesText, "HarmonyCleanup");
             if (cleanups != 3)
                 reachProblems.Add("and those sites must be Harmony cleanup callbacks, which run inside the "
                     + "patch loop; found " + cleanups + " cleanup attribute(s)");
-            int wWrites = CountOnCodeLines(patchesText, "_withdrawn = ");
-            int wTrue = CountOnCodeLines(patchesText, "_withdrawn = true;");
-            if (wWrites < 1 || wWrites != wTrue)
-                reachProblems.Add("every write to the withdrawal latch must write true - ONE-WAY is the "
-                    + "premise here, not the number of writers, and W23 owns the separate question of "
-                    + "whether StageInto makes one; found " + wWrites + " write(s), " + wTrue + " true");
         }
         if (pluginText == null) reachProblems.Add("cannot read plugin/Plugin.cs");
         else
         {
-            int patchSites = CountOnCodeLines(pluginText, "CreateClassProcessor(type).Patch();");
+            int patchSites = CallsTo(pluginText, "CreateClassProcessor");
             if (patchSites != 1)
                 reachProblems.Add("the assembly must have exactly one Harmony patch site, or the attachment "
                     + "count can still move after this one has run; found " + patchSites);
-            int mWrites = CountOnCodeLines(pluginText, "Plugin.modDisabled = ");
-            int mTrue = CountOnCodeLines(pluginText, "Plugin.modDisabled = true;");
-            if (mWrites < 1 || mWrites != mTrue)
-                reachProblems.Add("every write to the disabled flag must write true, for the same reason; "
-                    + "found " + mWrites + " write(s), " + mTrue + " true");
+            // PatchAll is the OTHER way this assembly could attach a patch, and
+            // it would attach it outside the one loop the premise names. It is
+            // named in three comments here and called nowhere; a call is what
+            // this counts.
+            int patchAll = CallsTo(pluginText, "PatchAll");
+            if (patchAll != 0)
+                reachProblems.Add("and no PatchAll call may stand beside it, or patches attach from a second "
+                    + "site the reachability argument does not bound; found " + patchAll);
+            var disabledWrites = WritesTo(pluginText, "modDisabled");
+            int realDisabled = 0;
+            foreach (FieldWrite w in disabledWrites)
+            {
+                if (w.Declaration)
+                {
+                    if (w.Rhs != "false")
+                        reachProblems.Add("the disabled flag's declaration must start it false; found '"
+                            + w.Rhs + "' at line " + w.Line);
+                    continue;
+                }
+                realDisabled++;
+                if (w.Kind != "= (simple assignment)" || w.Rhs != "true")
+                    reachProblems.Add("every write to the disabled flag must write true, for the same reason; "
+                        + "found " + w.Kind + " with right-hand side '" + w.Rhs + "' at line " + w.Line);
+            }
+            if (realDisabled < 1)
+                reachProblems.Add("the disabled flag must have at least one write, or this premise is vacuous");
         }
         if (apiText == null) reachProblems.Add("cannot read plugin/ApiClient.cs");
         else
         {
-            int stageSites = CountOnCodeLines(apiText, "ProximityVictimGate.StageInto(prejoin);");
+            int stageSites = CallsTo(apiText, "ProximityVictimGate.StageInto");
             if (stageSites != 3)
                 reachProblems.Add("the three pre-join merges are the only places this key is staged, and all "
                     + "three are downstream of ApiClient.Initialize; found " + stageSites);
