@@ -210,6 +210,28 @@ using CompetitiveRounds;
 //     writers' owner a second name in a shipped file, which is the premise
 //     the bare-name half of the caller bound rests on.
 //   wiring   wire-aliasinert: W25 and W1 must both stay green.
+//   wiring   wire-splitcall: W25 must FAIL; W1 control must PASS. Calls the
+//     allowed writer a second time from a member outside the bound set, written
+//     as a member-access CONTINUATION - the owner ending one line and
+//     ".Initialize(...)" opening the next. Under a contiguous substring match
+//     that call is invisible and every clause built on it stays green.
+//   wiring   wire-splitentry: W25 must FAIL; W1 control must PASS. The same
+//     spelling on a staging entry point, so the FILE-grain clause is the one
+//     that has to see it.
+//   wiring   wire-splitinert: W25 and W1 must both stay green.
+//   wiring   wire-secondsurface: W29 must FAIL; W25 control must PASS. Builds
+//     the surface pair a second time outside its loader, which is the shape in
+//     which the two views become two memberships again.
+//   wiring   wire-surfaceinert: W29 and W25 must both stay green.
+//   wiring   wire-viewbyname: W30 must FAIL; W25 control must PASS. Puts a call
+//     to the retired view-in-the-name counter back, handed the PROSE text of a
+//     file - the state in which a count called "on code lines" is comment
+//     -sensitive with the blanking-site count unmoved.
+//   wiring   wire-viewbynameinert: W30 and W25 must both stay green.
+//   wiring   wire-closurenobody: H4 must FAIL; W25 control must PASS. Closes a
+//     finding the findings file carries no body for, which is the state in
+//     which the round's own census describes a different round.
+//   wiring   wire-closurebodyinert: H4 and W25 must both stay green.
 //   wiring   wire-pathswap:   D6 must FAIL;  D4 and D5 controls must PASS
 //   wiring   wire-paththrew:  D6 must FAIL;  D4 and D5 controls must PASS
 //   prior-r2            : N1 N2 N3 N4 N5 N6 must all FAIL; W1 control must PASS
@@ -345,23 +367,67 @@ internal static class Program
         return view == SourceView.Code ? LoadBlanked(relative) : LoadSource(relative);
     }
 
-    /// <summary>CountOf over the CODE view: a needle that survives only inside a
-    /// comment is not counted, in any comment form. This used to drop whole-line
-    /// "//" lines and nothing else, so a block comment was code to it.
+    /// <summary>BOTH VIEWS OF ONE SHIPPED FILE, CARRIED TOGETHER, so the scan
+    /// surface has exactly ONE membership.
     ///
-    /// IT IS HANDED THE CODE VIEW; IT DOES NOT BUILD ONE. The deletion register
-    /// named "one cached CODE view read by every code counter" as the
-    /// replacement for the three-views defect, and this counter - with CallsTo,
-    /// AttributesOf and WritesTo - went on blanking raw text itself, so the
-    /// shipped files were blanked in seven places and cached in one. The
-    /// semantics agreed, because blanking is deterministic and every caller held
-    /// a .cs file; the CLAIM did not, and a register entry nobody can check is
-    /// the next false mechanism a reader will build on (#302/#351). The single
-    /// place a file is blanked is now LoadBlanked, and W27 is what holds it
-    /// there. Callers pass LoadBlanked(rel), or a member body, which came from
-    /// it.</summary>
-    private static int CountOnCodeLines(string text, string needle)
+    /// The round-8 build held the surface in two dictionaries populated side by
+    /// side, and every reach scan read the CODE one through a TryGetValue whose
+    /// miss was a silent `continue`. What made that safe was a null check a
+    /// hundred lines above on the OTHER dictionary, so the guarantee lived
+    /// nowhere near the reader who depended on it. The build's own fix for that
+    /// was a second null guard and a clause requiring the two dictionaries to
+    /// hold the same count - and NEITHER CAN FIRE ON ANY INPUT: LoadBlanked
+    /// answers null for exactly the files LoadSource answers null for, and both
+    /// dictionaries are written in the same iteration after both guards, so the
+    /// counts are equal by construction. A check that cannot fail is worse than
+    /// no check, and one added to CLOSE a finding is the finding again
+    /// (#342/#431). Both are deleted. What replaces them is not another clause
+    /// but the removal of the question: one read decides both views, one
+    /// dictionary carries them, and a file the surface does not hold is a file
+    /// no scan can hold half of. W29 is what keeps it that way.</summary>
+    private sealed class SurfaceFile
     {
+        internal readonly string Prose;   // raw text: absence bounds, deleted sentences
+        internal readonly string Code;    // comment-blanked, offsets preserved
+
+        private SurfaceFile(string prose, string code) { Prose = prose; Code = code; }
+
+        /// <summary>Both views, or null when the file cannot be read - an
+        /// unreadable file stays a FAILURE for the caller to record, never a
+        /// skip. ONE guard, because LoadBlanked's null and LoadSource's null are
+        /// the same null.</summary>
+        internal static SurfaceFile Load(string relative)
+        {
+            string prose = LoadSource(relative);
+            if (prose == null) return null;
+            return new SurfaceFile(prose, LoadBlanked(relative));
+        }
+    }
+
+    /// <summary>CountOf over a NAMED view of a shipped file, addressed by its
+    /// relative PATH. The view is an ARGUMENT here, never a word in the name.
+    ///
+    /// This replaces CountOnCodeLines, which round 8 left as a forward to
+    /// CountOf with no blanking of its own once LoadBlanked became the single
+    /// blanking site. Byte for byte it WAS CountOf, and its name went on
+    /// asserting the guarantee it had stopped providing: nothing held a caller
+    /// to the cached CODE view, so passing the PROSE text of the same file - one
+    /// identifier apart, and the spelling that stood there a round earlier - made
+    /// a count comment-sensitive again while the case reading it was still called
+    /// "on code lines". Two names for one operation is two answers waiting to
+    /// disagree, and a name that states a guarantee is a claim about the whole
+    /// state space written from the one state the author had in mind
+    /// (#342/#351/#434). A caller cannot hand this one the wrong view: it is
+    /// given a path and a view and fetches the text itself. W30 is what holds
+    /// the harness to that - the old name has no call site left, and every call
+    /// here names its view.
+    ///
+    /// A counter over a MEMBER BODY keeps using CountOf directly and needs no
+    /// name to promise anything: MemberBody has one view and no way to ask it
+    /// for the other.</summary>
+    private static int CountIn(string relative, SourceView view, string needle)
+    {
+        string text = LoadView(relative, view);
         if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(needle)) return 0;
         return CountOf(text, needle);
     }
@@ -490,6 +556,26 @@ internal static class Program
         int n = 1;
         for (int i = 0; i < index && i < text.Length; i++) if (text[i] == (char)10) n++;
         return n;
+    }
+
+    /// <summary>One key, spelled the same way whoever typed it spaced it:
+    /// trimmed, with runs of whitespace collapsed to a single space. Two
+    /// documents naming the same finding must produce the same key, or the case
+    /// that holds them to each other fails on the spacing rather than on the
+    /// lists (#342: two readings of one thing is two answers).</summary>
+    private static string Collapse(string raw)
+    {
+        if (raw == null) return "";
+        var sb = new System.Text.StringBuilder();
+        bool pendingSpace = false;
+        foreach (char c in raw)
+        {
+            if (c == ' ' || c == '\t' || c == '\r' || c == (char)10) { pendingSpace = true; continue; }
+            if (pendingSpace && sb.Length > 0) sb.Append(' ');
+            pendingSpace = false;
+            sb.Append(c);
+        }
+        return sb.ToString();
     }
 
     /// <summary>The whole line the offset sits on, trimmed and with runs of
@@ -961,18 +1047,20 @@ internal static class Program
     /// fields the drop was not reported anywhere (#302/#342). Narrowing keeps
     /// every file in the scan and reads only what is unambiguous in it, and the
     /// narrowing itself is printed.</summary>
-    private static SurfaceScan ScanField(string[] surface,
-                                         Dictionary<string, string> texts,
-                                         Dictionary<string, string> blanks,
+    private static SurfaceScan ScanField(string[] files,
+                                         Dictionary<string, SurfaceFile> surface,
                                          string field, string home, string wantDeclInit)
     {
         var scan = new SurfaceScan();
         scan.Field = field;
-        foreach (string rel in surface)
+        foreach (string rel in files)
         {
-            string text;
-            if (!texts.TryGetValue(rel, out text)) continue;
-            string blanked = blanks[rel];
+            SurfaceFile f;
+            // ONE membership: a file the surface does not carry was already
+            // recorded as a failure where the surface was built, so there is no
+            // second answer here about which view is missing.
+            if (!surface.TryGetValue(rel, out f)) continue;
+            string text = f.Prose, blanked = f.Code;
             scan.Scanned++;
             bool declares = DeclaresFieldIn(blanked, field);
             bool narrowed = false;
@@ -1028,10 +1116,14 @@ internal static class Program
         return string.Join(" | ", parts.ToArray());
     }
 
-    /// <summary>Calls to one (optionally qualified) name, whitespace-tolerant:
-    /// "Foo.Bar (x)" is the same call as "Foo.Bar(x)" and a count that reads one
-    /// and not the other is the same class of defect as a spelling-bound
-    /// assignment count. It is handed the CODE view, like every other counter of
+    /// <summary>Calls to one (optionally qualified) name, whitespace-tolerant on
+    /// BOTH sides of the name and not only in front of the '(': "Foo.Bar (x)",
+    /// "Foo . Bar(x)" and a "Foo" ending one line with ".Bar(x)" opening the next
+    /// are one call, and a count that reads one spelling and not another is the
+    /// same class of defect as a spelling-bound assignment count. The round-8
+    /// wording of this line claimed the tolerance and CallSitesIn implemented
+    /// half of it; both halves are implemented now and the summary there says
+    /// which spellings remain outside. It is handed the CODE view, like every other counter of
     /// code here; CallsTo, which blanked raw text of its own, is DELETED and its
     /// two callers pass LoadBlanked's answer to this one instead.
     ///
@@ -1051,20 +1143,79 @@ internal static class Program
     /// declared once. The declaration is told apart by the same positional rule
     /// IsDeclarationSite applies to a field: a modifier on the line and a
     /// type-shaped token immediately before the name. `return Foo();` has
-    /// neither and stays a call.</summary>
+    /// neither and stays a call.
+    ///
+    /// A QUALIFIED NAME IS MATCHED SEGMENT BY SEGMENT, NEVER AS ONE STRING. The
+    /// round-8 version searched "ApiClient.Initialize" as a contiguous substring
+    /// while the summary above it called the counter whitespace-tolerant; it was
+    /// tolerant between the name and its '(' and nowhere else, so the ordinary
+    /// member-access continuation
+    ///     ApiClient
+    ///         .Initialize(url);
+    /// was INVISIBLE to it and to every case built on it - the staging surface,
+    /// the route links, the file-grain and member-grain placement, and the
+    /// caller bound. A second call written that way left all of them green, and
+    /// this is not a hypothetical spelling here: the shipped plugin files
+    /// already carry that continuation shape in the hundreds. A bound that holds
+    /// for one of the two spellings a codebase already uses is a spelling bound,
+    /// which is the defect this counter exists to avoid (#432/#342/#431). The
+    /// LAST segment is found first, then the qualifier is walked BACKWARD across
+    /// whitespace - a line break included, and a comment with it, because the
+    /// CODE view blanks comments to spaces and preserves every offset.
+    ///
+    /// WHAT IT STILL DOES NOT SEE, stated rather than left to be discovered: a
+    /// call reached through a `using` alias or a static import, which the clause
+    /// beside R9 reddens on instead; a generic call spelled `Foo.Bar&lt;T&gt;(x)`,
+    /// because skipping a type-argument list means telling it apart from a
+    /// comparison and no member this harness binds is generic; and any call whose
+    /// target is named at run time. A null-conditional `?.` IS seen - it cannot
+    /// occur for a static type, and accepting it widens a call count, which is
+    /// the direction that reddens rather than the one that passes.</summary>
     private static List<int> CallSitesIn(string blanked, string name)
     {
         var found = new List<int>();
         if (string.IsNullOrEmpty(blanked) || string.IsNullOrEmpty(name)) return found;
+        string[] parts = name.Split('.');
+        string last = parts[parts.Length - 1];
+        if (last.Length == 0) return found;
         int i = 0;
         while (true)
         {
-            int at = blanked.IndexOf(name, i, StringComparison.Ordinal);
+            int at = blanked.IndexOf(last, i, StringComparison.Ordinal);
             if (at < 0) return found;
-            i = at + name.Length;
-            if (at > 0 && IsIdentChar(blanked[at - 1])) continue;
-            int f = SkipWs(blanked, at + name.Length);
-            if (f < blanked.Length && blanked[f] == '(' && !IsDeclarationSite(blanked, at)) found.Add(at);
+            i = at + last.Length;
+            int after = at + last.Length;
+            if (after < blanked.Length && IsIdentChar(blanked[after])) continue;
+            int start = at;
+            bool matched = true;
+            for (int p = parts.Length - 2; p >= 0; p--)
+            {
+                int dot = SkipWsBack(blanked, start - 1);
+                if (dot < 0 || blanked[dot] != '.') { matched = false; break; }
+                int end = SkipWsBack(blanked, dot - 1);
+                // A NULL-CONDITIONAL DOT IS STILL THAT DOT. `a?.Foo(x)` calls
+                // Foo, and a counter that cannot see it under-counts, which is
+                // the direction that leaves an extra caller invisible. It cannot
+                // arise for the names this harness binds - `?.` on a static type
+                // does not compile - and the walk accepts it anyway, because the
+                // counter is general and the next name it is handed may not be a
+                // type. Widening a call count is the safe direction; narrowing it
+                // is the one that passes green.
+                if (end >= 0 && blanked[end] == '?') end = SkipWsBack(blanked, end - 1);
+                string seg = parts[p];
+                int segAt = end - seg.Length + 1;
+                if (end < 0 || segAt < 0
+                    || string.CompareOrdinal(blanked, segAt, seg, 0, seg.Length) != 0)
+                { matched = false; break; }
+                start = segAt;
+            }
+            if (!matched) continue;
+            // The boundary rule is applied at the FIRST segment, so a type called
+            // `MyApiClient` cannot satisfy a search for `ApiClient.Initialize` by
+            // ending in the name the search opens with.
+            if (start > 0 && IsIdentChar(blanked[start - 1])) continue;
+            int f = SkipWs(blanked, after);
+            if (f < blanked.Length && blanked[f] == '(' && !IsDeclarationSite(blanked, start)) found.Add(start);
         }
     }
 
@@ -2695,11 +2846,17 @@ internal static class Program
         // round-3 HIGH was about. Two code lines is the whole budget: the property's
         // own declaration, and the single read inside LocalCapability that W14
         // anchors.
+        // THE VIEW IS NAMED IN THE CALL, not in the counter's name. This read
+        // used to go through a counter called "on code lines" that had become
+        // CountOf with no blanking of its own, so handing it the PROSE text of
+        // the same file - one identifier apart - would have made the count
+        // comment-sensitive with the case still reading "code lines" (#342/#351).
+        int patchesLiveReads = CountIn("plugin/ProximityVictimPatches.cs", SourceView.Code, "PatchesLive");
         Check("W14c Wiring_TheAttachmentAnswerIsReadNowhereElseInTheFile",
-            patchesCode != null && CountOnCodeLines(patchesCode, "PatchesLive") == 2,
+            patchesCode != null && patchesLiveReads == 2,
             "PatchesLive must occur on exactly two code lines - its own declaration and the read "
             + "inside LocalCapability; found "
-            + (patchesCode == null ? -1 : CountOnCodeLines(patchesCode, "PatchesLive")));
+            + (patchesCode == null ? -1 : patchesLiveReads));
 
         // W15 - the advertiser and the gate BOTH ask it, and neither re-derives
         // it. The advert used to be staged on the attachment count alone while the
@@ -2926,7 +3083,9 @@ internal static class Program
             if (guards != 1)
                 stageProblems.Add("the advertising guard must be exactly '" + advertGuard
                     + "' and occur once - two terms, neither of them the shortfall flag; found " + guards);
-            int flagReads = CountOnCodeLines(stageBody, "_stageFailedPermanently");
+            // CountOf over a MEMBER BODY, which needs no name to promise a view:
+            // MemberBody has one view and no way to ask it for the other.
+            int flagReads = CountOf(stageBody, "_stageFailedPermanently");
             if (flagReads != 2)
                 stageProblems.Add("_stageFailedPermanently must occur on exactly two code lines here - "
                     + "the test and the set, both on the declining branch; found " + flagReads);
@@ -3118,38 +3277,31 @@ internal static class Program
                 reachProblems.Add("the shipped-source enumeration must contain " + need
                     + "; it found " + shippedCs.Length + " file(s) and not that one");
 
-        var surfaceText = new Dictionary<string, string>();
-        var surfaceBlank = new Dictionary<string, string>();
+        // ONE MEMBERSHIP, CARRIED BY ONE DICTIONARY. The two views used to be two
+        // dictionaries populated side by side, with every scan below reading the
+        // CODE one through a TryGetValue whose miss was a silent `continue`, and
+        // what made that safe was a null check a hundred lines above on the
+        // OTHER dictionary - a guarantee kept by a mechanism nowhere near the
+        // reader who depended on it (#351/#434). The build's own fix for that
+        // added a second null guard and a clause requiring the two dictionaries
+        // to hold the same count, and NEITHER CAN FIRE ON ANY INPUT - SurfaceFile
+        // says why, and the clean run, all 81 mutant variants and the sparse
+        // prior-r2 root all left the clause silent. A check that cannot fail is
+        // worse than no check (#342/#431), so both are deleted and the question
+        // with them: one read decides both views, one dictionary carries them,
+        // and a file the surface does not hold is a recorded FAILURE rather than
+        // half a membership. W29 is what keeps it one.
+        var surface = new Dictionary<string, SurfaceFile>(StringComparer.Ordinal);
         foreach (string rel in shippedCs)
         {
-            string text = LoadSource(rel);
-            if (text == null)
+            SurfaceFile got = SurfaceFile.Load(rel);
+            if (got == null)
             {
                 reachProblems.Add("cannot read " + rel + " - an unread file is a failure, not a skip");
                 continue;
             }
-            string blank = LoadBlanked(rel);
-            if (blank == null)
-            {
-                reachProblems.Add("cannot build the code view of " + rel
-                    + " - an unread file is a failure, not a skip");
-                continue;
-            }
-            surfaceText[rel] = text;
-            surfaceBlank[rel] = blank;
+            surface[rel] = got;
         }
-        // THE TWO VIEWS ARE ONE MEMBERSHIP. Every scan below reads the code
-        // view through "if (!surfaceBlank.TryGetValue(rel, out blanked)) continue;"
-        // - a SKIP - and what made that safe was a null check a hundred lines
-        // above, on the OTHER dictionary. Nothing said so and nothing would
-        // have caught the two drifting apart: the same shape as the register
-        // entry N5 closed, a guarantee kept by a mechanism that is not where
-        // the reader is (#351/#434). The sparse prior-tip root is where this
-        // clause can actually fire.
-        if (surfaceText.Count != surfaceBlank.Count)
-            reachProblems.Add("the prose view and the code view must cover the same files - one present "
-                + "in either and absent from the other is skipped silently by every scan below; "
-                + surfaceText.Count + " prose, " + surfaceBlank.Count + " code");
 
         if (patchesText == null) reachProblems.Add("cannot read plugin/ProximityVictimPatches.cs");
         if (seamText == null) reachProblems.Add("cannot read plugin/ProximityVictimSeam.cs");
@@ -3165,8 +3317,8 @@ internal static class Program
             // the mutant written against it could only ever prove that the one
             // recognised spelling was present.
             const string attachHome = "plugin/ProximityVictimPatches.cs";
-            SurfaceScan attachScan = ScanField(shippedCs, surfaceText, surfaceBlank, "_attached", attachHome, "0");
-            SurfaceScan withdrawScan = ScanField(shippedCs, surfaceText, surfaceBlank, "_withdrawn", attachHome, "false");
+            SurfaceScan attachScan = ScanField(shippedCs, surface, "_attached", attachHome, "0");
+            SurfaceScan withdrawScan = ScanField(shippedCs, surface, "_withdrawn", attachHome, "false");
             reachProblems.AddRange(attachScan.DeclProblems);
             reachProblems.AddRange(withdrawScan.DeclProblems);
             if (!attachScan.HomeDeclares)
@@ -3266,8 +3418,9 @@ internal static class Program
         var patchWhere = new List<string>();
         foreach (string rel in shippedCs)
         {
-            string blanked;
-            if (!surfaceBlank.TryGetValue(rel, out blanked)) continue;
+            SurfaceFile blankedPair;
+            if (!surface.TryGetValue(rel, out blankedPair)) continue;
+            string blanked = blankedPair.Code;
             int cp = CallsToIn(blanked, "CreateClassProcessor");
             int pa = CallsToIn(blanked, "PatchAll");
             int hc = CountOf(blanked, "new Harmony(");
@@ -3294,7 +3447,7 @@ internal static class Program
         // Plugin.modDisabled is `internal static`, and six other shipped files
         // already reference it, so any file in the assembly may legally write it.
         // Scanning its declaring file alone asserted nothing about the premise.
-        SurfaceScan disabledScan = ScanField(shippedCs, surfaceText, surfaceBlank,
+        SurfaceScan disabledScan = ScanField(shippedCs, surface,
             "modDisabled", "plugin/Plugin.cs", "false");
         scanNotes.Add(ScanNote("disabled flag", disabledScan));
         reachProblems.AddRange(disabledScan.DeclProblems);
@@ -3427,8 +3580,9 @@ internal static class Program
         int stageTotal = 0;
         foreach (string rel in shippedCs)
         {
-            string blanked;
-            if (!surfaceBlank.TryGetValue(rel, out blanked)) continue;
+            SurfaceFile blankedPair;
+            if (!surface.TryGetValue(rel, out blankedPair)) continue;
+            string blanked = blankedPair.Code;
             int n = CallsToIn(blanked, stageCall);
             stageTotal += n;
             if (n != 0) stageWhere.Add(rel + " x" + n);
@@ -3465,7 +3619,13 @@ internal static class Program
                 int mo, mc; string mp;
                 if (!TryMemberSpan(apiBlank, sig, out mo, out mc, out mp)) { reachProblems.Add(mp); continue; }
                 string body = apiBlank.Substring(mo, mc - mo + 1);
-                int site = body.IndexOf(stageCall, StringComparison.Ordinal);
+                // THE SAME SPELLING RULE AS THE COUNT ABOVE. A raw IndexOf of the
+                // qualified name reads a member-access continuation as no call at
+                // all, so this clause would report "must stage this key" for a
+                // merge R1 had already counted - two counters of one thing giving
+                // two answers (#342). Both go through CallSitesIn.
+                var mergeSites = CallSitesIn(body, stageCall);
+                int site = mergeSites.Count == 0 ? -1 : mergeSites[0];
                 if (site < 0)
                 {
                     reachProblems.Add("the pre-join merge in '" + sig + "' must stage this key");
@@ -3506,8 +3666,9 @@ internal static class Program
                 int inHost = 0;
                 foreach (string rel in shippedCs)
                 {
-                    string b2;
-                    if (!surfaceBlank.TryGetValue(rel, out b2)) continue;
+                    SurfaceFile b2Pair;
+                    if (!surface.TryGetValue(rel, out b2Pair)) continue;
+                    string b2 = b2Pair.Code;
                     var sites = CallSitesIn(b2, name);
                     if (rel != apiRel) sites.AddRange(CallSitesIn(b2, "ApiClient." + name));
                     if (sites.Count == 0) continue;
@@ -3546,7 +3707,7 @@ internal static class Program
         // probe re-targets it for the session and is named here rather than
         // waved past, because a writer this case cannot name is a writer nobody
         // reading the run can account for.
-        SurfaceScan urlScan = ScanField(shippedCs, surfaceText, surfaceBlank,
+        SurfaceScan urlScan = ScanField(shippedCs, surface,
             "baseUrl", apiRel, "\"\"");
         scanNotes.Add(ScanNote("request prefix", urlScan));
         reachProblems.AddRange(urlScan.DeclProblems);
@@ -3643,8 +3804,9 @@ internal static class Program
             var resolved = new List<string>();
             foreach (string rel in shippedCs)
             {
-                string blanked;
-                if (!surfaceBlank.TryGetValue(rel, out blanked)) continue;
+                SurfaceFile blankedPair;
+                if (!surface.TryGetValue(rel, out blankedPair)) continue;
+                string blanked = blankedPair.Code;
                 var sites = CallSitesIn(blanked, key);
                 if (rel == home) sites.AddRange(BareCallSitesIn(blanked, bare));
                 foreach (int at in sites)
@@ -3683,8 +3845,9 @@ internal static class Program
         const string apiType = "ApiClient";
         foreach (string rel in shippedCs)
         {
-            string usingView;
-            if (!surfaceBlank.TryGetValue(rel, out usingView)) continue;
+            SurfaceFile usingViewPair;
+            if (!surface.TryGetValue(rel, out usingViewPair)) continue;
+            string usingView = usingViewPair.Code;
             foreach (string raw in usingView.Split((char)10))
             {
                 string t = raw.Trim();
@@ -3700,7 +3863,7 @@ internal static class Program
         }
 
         // R2 - the gate flag.
-        SurfaceScan initScan = ScanField(shippedCs, surfaceText, surfaceBlank,
+        SurfaceScan initScan = ScanField(shippedCs, surface,
             "initialized", pluginRel, "false");
         scanNotes.Add(ScanNote("gate flag", initScan));
         // EVERY scan this case runs, in one line, after the last of them is
@@ -3754,7 +3917,12 @@ internal static class Program
             else
             {
                 string initBody = pluginBlank.Substring(io, ic - io + 1);
-                int callAt = initBody.IndexOf("ApiClient.Initialize(", StringComparison.Ordinal);
+                // Through CallSitesIn for the same reason the merge site is: an
+                // IndexOf of the qualified spelling cannot see the member-access
+                // continuation, so an initialisation written that way would read
+                // here as "DoInitialize never initialises" while R9 placed it.
+                var initCalls = CallSitesIn(initBody, "ApiClient.Initialize");
+                int callAt = initCalls.Count == 0 ? -1 : initCalls[0];
                 if (callAt < 0)
                     reachProblems.Add("DoInitialize must call ApiClient.Initialize - it is the point every "
                         + "staging route has to be downstream of");
@@ -3829,8 +3997,9 @@ internal static class Program
         };
         foreach (string rel in shippedCs)
         {
-            string blanked;
-            if (!surfaceBlank.TryGetValue(rel, out blanked)) continue;
+            SurfaceFile blankedPair;
+            if (!surface.TryGetValue(rel, out blankedPair)) continue;
+            string blanked = blankedPair.Code;
             var sites = new List<int>();
             foreach (string entry in stageEntries)
             {
@@ -3899,8 +4068,9 @@ internal static class Program
                             + sites.Count + " site(s)");
                     foreach (string rel in shippedCs)
                     {
-                        string b2;
-                        if (rel == uiRel || !surfaceBlank.TryGetValue(rel, out b2)) continue;
+                        SurfaceFile b2Pair;
+                        if (rel == uiRel || !surface.TryGetValue(rel, out b2Pair)) continue;
+                        string b2 = b2Pair.Code;
                         if (CallsToIn(b2, tab) + CallsToIn(b2, "NativeUI." + tab) != 0)
                             reachProblems.Add(tab + " is reached from " + rel + " as well, which is a route "
                                 + "outside the one this argument walks");
@@ -3916,8 +4086,9 @@ internal static class Program
                 int inComp = 0;
                 foreach (string rel in shippedCs)
                 {
-                    string b2;
-                    if (!surfaceBlank.TryGetValue(rel, out b2)) continue;
+                    SurfaceFile b2Pair;
+                    if (!surface.TryGetValue(rel, out b2Pair)) continue;
+                    string b2 = b2Pair.Code;
                     var sites = CallSitesIn(b2, "NativeUI.Tick");
                     if (sites.Count == 0) continue;
                     uiTickSites.Add(rel + " x" + sites.Count);
@@ -3933,8 +4104,9 @@ internal static class Program
             int compInTick = 0;
             foreach (string rel in shippedCs)
             {
-                string b2;
-                if (!surfaceBlank.TryGetValue(rel, out b2)) continue;
+                SurfaceFile b2Pair;
+                if (!surface.TryGetValue(rel, out b2Pair)) continue;
+                string b2 = b2Pair.Code;
                 var sites = CallSitesIn(b2, "CompetitiveUI.Tick");
                 if (sites.Count == 0) continue;
                 compTickSites.Add(rel + " x" + sites.Count);
@@ -4092,8 +4264,11 @@ internal static class Program
 
         // W27 - A SHIPPED FILE IS BLANKED IN EXACTLY ONE PLACE, AND THAT PLACE
         // IS THE CACHE. RED under "wire-uncachedview", which puts a re-blank
-        // back inside CountOnCodeLines; GREEN under "wire-viewinert", an edit of
-        // comparable size in this same file that touches no blanking call.
+        // back beside a cached read in this method; GREEN under "wire-viewinert",
+        // an edit of comparable size in this same file that touches no blanking
+        // call. The mutant used to land inside the counter whose NAME carried a
+        // view, and that counter is gone with the name (W30), so it lands where
+        // a re-blank would really be written instead.
         //
         // The deletion register named "one cached CODE view read by every code
         // counter" as the replacement for the three-views defect. LoadBlanked
@@ -4143,6 +4318,113 @@ internal static class Program
         Check("W27 Report_TheCodeViewIsBuiltInExactlyOnePlace",
             viewProblems.Count == 0,
             string.Join("; ", viewProblems.ToArray()));
+
+        // W29 - THE SCAN SURFACE IS ONE MEMBERSHIP, AND ONE TYPE CARRIES BOTH
+        // VIEWS OF A FILE. RED under "wire-secondsurface", which builds a second
+        // pair outside the loader; GREEN under "wire-surfaceinert".
+        //
+        // The build held the surface in two dictionaries and closed the risk of
+        // their drifting apart with a second null guard and a clause requiring
+        // the two to hold the same count. NEITHER COULD FIRE ON ANY INPUT:
+        // LoadBlanked answers null for exactly the files LoadSource answers null
+        // for, and both dictionaries were written in one iteration after both
+        // guards, so the counts were equal by construction. A clause added to
+        // CLOSE a finding and unable to fail is the finding again (#342/#431),
+        // and the clean run, every mutant variant and the sparse prior-r2 root
+        // all left it silent. What replaces it is not a better clause but the
+        // removal of the question - one read decides both views, one pair type
+        // carries them, one dictionary holds the pairs - and this is what keeps
+        // the structure, in the shape W27 already uses for blanking.
+        //
+        // ITS NEEDLES ARE BUILT IN HALVES, like W27's and W28's, because this
+        // case is written in the file it counts.
+        var oneSurfaceProblems = new List<string>();
+        if (progCode == null)
+            oneSurfaceProblems.Add("cannot read " + progRel + " in the code view - an unread file is a "
+                + "failure, not a skip");
+        else
+        {
+            string pairCtor = "new Surface" + "File(";
+            string pairMap = "new Dictionary<string, Surface" + "File>";
+            string loadSig = "internal static SurfaceFile " + "Load(string relative)";
+            int ctors = CountOf(progCode, pairCtor);
+            int maps = CountOf(progCode, pairMap);
+            int so, sc; string sp;
+            if (!TryMemberSpan(progCode, loadSig, out so, out sc, out sp)) oneSurfaceProblems.Add(sp);
+            else
+            {
+                int at = progCode.IndexOf(pairCtor, StringComparison.Ordinal);
+                if (ctors != 1 || at < so || at > sc)
+                    oneSurfaceProblems.Add("both views of a shipped file must be built in exactly one place - "
+                        + "the loader in '" + loadSig + "' - or the surface has two memberships again and the "
+                        + "guarantee is back to being a clause that cannot fire; found " + ctors
+                        + " construction(s), first at line " + (ctors == 0 ? -1 : LineOf(progCode, at)));
+            }
+            if (maps != 1)
+                oneSurfaceProblems.Add("exactly one dictionary may carry the scan surface, or the membership "
+                    + "every scan skips on is two memberships again; found " + maps);
+            Console.WriteLine("NOTE  W29 surface pair: " + ctors + " construction(s), " + maps + " map(s)");
+        }
+        Check("W29 Report_TheScanSurfaceIsOneMembership",
+            oneSurfaceProblems.Count == 0,
+            string.Join("; ", oneSurfaceProblems.ToArray()));
+
+        // W30 - EVERY COUNTER OF A SHIPPED FILE NAMES THE VIEW IT READS, AND NO
+        // NAME CARRIES ONE. RED under "wire-viewbyname", which puts a call to the
+        // retired counter back; GREEN under "wire-viewbynameinert".
+        //
+        // Once LoadBlanked became the single blanking site, CountOnCodeLines was
+        // byte for byte CountOf - it forwarded to it with no blanking - and its
+        // NAME went on asserting the guarantee it had stopped providing, with
+        // nothing holding a caller to the cached CODE view. Handing it the PROSE
+        // text of the same file, one identifier apart and the spelling that stood
+        // there a round earlier, would have made a count comment-sensitive again
+        // under a case still called "read nowhere else on code lines", with W27
+        // green throughout because the number of blanking sites had not moved.
+        // Two names for one operation is two answers waiting to disagree, and a
+        // name stating a guarantee is a claim about the whole state space written
+        // from the one state the author had in mind (#342/#351/#434).
+        //
+        // IT READS THE CODE VIEW AND IT COUNTS CALLS, so the history written in
+        // the comments above declares nothing and a declaration is not a call.
+        var namedViewProblems = new List<string>();
+        if (progCode == null)
+            namedViewProblems.Add("cannot read " + progRel + " in the code view - an unread file is a "
+                + "failure, not a skip");
+        else
+        {
+            string retired = "CountOn" + "CodeLines";
+            var retiredSites = CallSitesIn(progCode, retired);
+            if (retiredSites.Count != 0)
+            {
+                var where = new List<string>();
+                foreach (int at in retiredSites) where.Add("line " + LineOf(progCode, at));
+                namedViewProblems.Add("the counter whose NAME carried its view is retired and may have no call "
+                    + "site left - it forwarded to CountOf and promised a blanking it no longer did; found "
+                    + string.Join(", ", where.ToArray()));
+            }
+            var viewTakers = CallSitesIn(progCode, "CountIn");
+            foreach (int at in viewTakers)
+            {
+                int open = SkipWs(progCode, at + "CountIn".Length);
+                int depth = 0, end = -1;
+                for (int k = open; k < progCode.Length; k++)
+                {
+                    if (progCode[k] == '(') depth++;
+                    else if (progCode[k] == ')') { depth--; if (depth == 0) { end = k; break; } }
+                }
+                string args = end < 0 ? "" : progCode.Substring(open, end - open + 1);
+                if (CountOf(args, "SourceView.") != 1)
+                    namedViewProblems.Add("every call to the view-taking counter must NAME its view in the "
+                        + "call, which is where the guarantee lives now that no name carries it; the one at "
+                        + "line " + LineOf(progCode, at) + " does not");
+            }
+            Console.WriteLine("NOTE  W30 view counters: " + retiredSites.Count + " retired call site(s), "
+                + viewTakers.Count + " view-naming call(s)");
+        }
+        Check("W30 Report_EveryCodeCounterNamesItsViewInTheCall",
+            namedViewProblems.Count == 0,
+            string.Join("; ", namedViewProblems.ToArray()));
 
         // W28 - THE SEVERITY MARKER IS SPELLED IN EXACTLY ONE PLACE. RED
         // under "wire-secondmarker", which plants a second spelling of it;
@@ -4320,6 +4602,79 @@ internal static class Program
         Check("H3 Report_TheClosureTableTravelsWithTheTipItDescribes",
             closProblems.Count == 0,
             string.Join("; ", closProblems.ToArray()));
+
+        // H4 - EVERY FINDING THE ROUND CLOSES HAS A BODY IN THE FINDINGS FILE,
+        // AND EVERY BODY IS A FINDING THE ROUND CLOSES. RED under
+        // "wire-closurenobody", which closes a finding the findings file does not
+        // carry; GREEN under "wire-closurebodyinert".
+        //
+        // round-findings.md calls itself the ONE place the round's findings are
+        // written down, and the census H1 derives is a census of what is in it.
+        // The round-8 build closed FOURTEEN findings - ten from the gate and four
+        // from its own cold lens - and only the ten had bodies, so the derived
+        // census read "0 HIGH, 1 MEDIUM, 9 LOW" for a round that had two MEDIUM,
+        // and the log header printed it with no scope qualifier. N4 made an
+        // unmarked body a red failure so a finding could not quietly not count; a
+        // finding written outside the file entirely still quietly did not, which
+        // is N4's defect at FILE scope. Nothing in the harness could see it,
+        // because the census and the bodies were two readings of one file.
+        //
+        // THE CLOSURE TABLE IS THE INDEPENDENT ARTIFACT. It names, by number,
+        // every finding the round closes - one CLOSES: line per closure, several
+        // numbers on it when one closure answers several - and the two lists must
+        // be the same list. That is the shape H1 and H2 already use: the number a
+        // reader sees is read out of the thing it describes, and a count that
+        // cannot disagree with its own source is not evidence (#431/#342).
+        var scopeProblems = new List<string>();
+        if (closText == null)
+            scopeProblems.Add("cannot read " + closRel + " - it is one of the two lists this case holds to "
+                + "each other, so an unread file is a failure, not a skip");
+        if (findText == null)
+            scopeProblems.Add("cannot read " + findRel + " - same reason");
+        if (closText != null && findText != null)
+        {
+            var closed = new List<string>();
+            foreach (string raw in closText.Split((char)10))
+            {
+                string t = raw.Trim();
+                if (!t.StartsWith("CLOSES:", StringComparison.Ordinal)) continue;
+                foreach (string piece in t.Substring("CLOSES:".Length).Split(','))
+                {
+                    string key = Collapse(piece);
+                    if (key.Length != 0 && !closed.Contains(key)) closed.Add(key);
+                }
+            }
+            var bodies = new List<string>();
+            foreach (string raw in findText.Split((char)10))
+            {
+                string t = raw.Trim();
+                if (!t.StartsWith("### ", StringComparison.Ordinal)) continue;
+                string head = t.Substring(4);
+                int cut = head.IndexOf(" -", StringComparison.Ordinal);
+                string key = Collapse(cut < 0 ? head : head.Substring(0, cut));
+                if (key.Length != 0 && !bodies.Contains(key)) bodies.Add(key);
+            }
+            var noBody = new List<string>();
+            foreach (string key in closed) if (!bodies.Contains(key)) noBody.Add(key);
+            var noClosure = new List<string>();
+            foreach (string key in bodies) if (!closed.Contains(key)) noClosure.Add(key);
+            if (closed.Count == 0)
+                scopeProblems.Add(closRel + " must name every finding it closes on a 'CLOSES:' line - the two "
+                    + "lists cannot be held to each other while one of them is empty");
+            if (noBody.Count != 0)
+                scopeProblems.Add("every finding the round closes must have a body in " + findRel
+                    + ", or it counts in no census and the round's own header describes a different round; "
+                    + "closed with no body: " + string.Join(", ", noBody.ToArray()));
+            if (noClosure.Count != 0)
+                scopeProblems.Add("every body in " + findRel + " must be a finding the closure table names, "
+                    + "or the census counts a finding the round never closed; body with no closure: "
+                    + string.Join(", ", noClosure.ToArray()));
+            Console.WriteLine("NOTE  H4 findings, from the closure table and the bodies: "
+                + closed.Count + " closed, " + bodies.Count + " body/bodies");
+        }
+        Check("H4 Report_TheFindingsFileHoldsEveryFindingTheRoundCloses",
+            scopeProblems.Count == 0,
+            string.Join("; ", scopeProblems.ToArray()));
 
         Console.WriteLine("=== passed=" + _passed + " failed=" + _failed + " ===");
         return _failed == 0 ? 0 : 1;

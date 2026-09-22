@@ -1,8 +1,20 @@
 # Bug 389 client, round 8 - the findings this round answers
 
-The round-7 gate returned a NO-GO: 0 HIGH, 1 MEDIUM, 9 LOW. This file is the ONE
-place the round's findings are written down, and it exists so the severity census
-in the test log can be COMPUTED from the bodies instead of typed beside them.
+The round-7 gate returned a NO-GO: 0 HIGH, 1 MEDIUM, 9 LOW. This file holds a
+body for EVERY finding the round closes - the ten from that gate and the ten its
+own two cold lenses found on its own build tips - and it exists so the severity
+census in the test log can be COMPUTED from the bodies instead of typed beside
+them.
+
+**The scope is the whole round, and that is CHECKED rather than promised.** The
+round-8 build closed fourteen findings and wrote bodies for ten, so the derived
+census read "0 HIGH, 1 MEDIUM, 9 LOW" for a round that had two MEDIUM and the log
+header printed it with no scope qualifier. Nothing in the harness could see it:
+the census and the bodies were two readings of ONE file. `H4` now holds this file
+against the closure table `R8-CLOSURES.md`, which names by number every finding
+the round closes - each closure carries a `CLOSES:` line - and requires the two
+lists to be the same list. A finding closed without a body here reddens, and so
+does a body naming a finding the round never closed.
 
 The round-6 log's header said "two MEDIUM, five LOW" while its own seven bodies
 read three MEDIUM and four LOW. Every other number in that header was counted
@@ -21,7 +33,7 @@ now counts the bodies a SECOND time, by their own `###` heading, by a counter
 that knows nothing about markers, requires the two counts to agree, and NAMES any
 body that carries none.
 
-CENSUS: 10 findings: 0 HIGH, 1 MEDIUM, 9 LOW
+CENSUS: 20 findings: 1 HIGH, 4 MEDIUM, 15 LOW
 
 ## The selection-method streak
 
@@ -156,3 +168,164 @@ canonical copy a TRACKED file beside the harness - `tools/tests/bug389-seam/R8-C
 so every clone and every pin built from the tip carries it by construction, and by
 `H3`, which holds it to naming each published copy. `wire-closuresmissing`
 reddens; `wire-closuresinert` stays green.
+
+### LENS 1 - `H2` read the permitted-member size off PART of the set
+
+SEVERITY: MEDIUM
+
+Read on the build tip. `H2`'s span opened at the first assignment to
+`permittedMembers` and closed at the next brace-shaped line, which belongs to the
+last block only because the other two assignments happen to be one-liners and
+that one happens to come last. Reorder them, or add a fourth file's entries after
+that block, and the size the two route sentences are held to is read out of a
+span that no longer holds the set - while the sentences still agree with it, so
+the case stays GREEN over a set it did not read. Closed by opening the span at
+the DECLARATION, closing it at the first statement after the assignments, and
+requiring the assignment count inside the span to equal the count in the whole
+file. `wire-prosemember` reddens `H2`; `wire-proseinert` is the twin.
+
+### LENS 2 - two counters of one thing inside the case built to hold two counts apart
+
+SEVERITY: LOW
+
+`H1` holds a marker count and a body count against each other, which is evidence
+only while the two are taken off DIFFERENT evidence. Its first cut counted the
+markers a second time, from a second copy of the rule for what a marker looks
+like. Closed by one `SeverityMarker` constant, by the census returning the marker
+total it has already computed, and by the BODY count staying independent because
+that is the half that must be. `W28` holds the literal to one spelling;
+`wire-secondmarker` reddens it, `wire-markerinert` is the twin.
+
+### LENS 3 - the premise the bare-name rule rests on was written down, not checked
+
+SEVERITY: LOW
+
+`R9` admits a bare member name only in the file that declares the target, which
+is complete only while no shipped file imports those members statically and none
+aliases their owner. Both were true and both were stated in a comment. Closed by
+a clause in the same group that reads the enumerated surface and reddens on
+either construct, naming file and line. `wire-aliasusing` reddens `W25`;
+`wire-aliasinert` is the twin. Its price - a legitimate static import anywhere
+under `plugin/` now has to be answered - is stated in the residuals.
+
+### LENS 4 - the two source views were one membership by accident
+
+SEVERITY: LOW
+
+Every reach scan read the CODE view through a `TryGetValue` whose miss was a
+silent `continue`, and what made that safe was a null check a hundred lines above
+on the OTHER dictionary - a guarantee kept by a mechanism nowhere near the reader
+who depended on it. The closure written for it in the same pass was a second null
+guard and a clause requiring the two dictionaries to hold the same count, and
+NEITHER COULD FIRE; that is `LENS 6` and `LENS 9`, and the structural closure
+recorded there is what actually answers this one.
+
+### LENS 5 - a call site spelled across a line break was invisible to every call-site scan
+
+SEVERITY: HIGH
+
+Read on the round-8 build tip. `CallSitesIn` matched a qualified name as one
+contiguous substring, so it was whitespace-tolerant between the name and its `(`
+and nowhere else. The ordinary member-access continuation - the owner ending one
+line and `.Member(...)` opening the next - was invisible to it and therefore to
+every scan built on it: the staging surface, the route links, the file-grain and
+member-grain placement of entry-point callers, and the `R9` caller bound added
+this round. A second `ApiClient.Initialize` written that way inside
+`CompetitiveUI.Tick` left the caller bound GREEN and absent from the printed map,
+while the one-line spelling reddened; the same held for a staging entry point.
+This is not a hypothetical spelling: the shipped plugin files already carry that
+continuation shape in the hundreds, so the caller bound held for one of the two
+spellings the codebase uses - a spelling bound of the class `#432`/`#342`/`#431`
+name. Closed at the root: the last segment is found first and the qualifier is
+walked BACKWARD across whitespace and its dots, so both spellings reach the same
+answer, and the two remaining `IndexOf` searches of a qualified call go through
+the same counter. The summary now names what it still cannot see - an alias, a
+static import, a generic call, a null-conditional dot, a target named at run
+time. `wire-splitcall` and `wire-splitentry` redden `W25`; `wire-splitinert`
+leaves it green.
+
+### LENS 6 - the clause added to close LENS 4 could not fail
+
+SEVERITY: MEDIUM
+
+`if (surfaceText.Count != surfaceBlank.Count)` cannot be true for any input: both
+dictionaries are assigned in the same iteration after both null guards, so their
+counts are equal by construction. A sparse source root narrows the enumeration
+itself, so both narrow together. A check that cannot fail is worse than no check,
+and one added to CLOSE a finding is the finding again (`#342`/`#431`). Closed by
+deleting it and removing the question instead of restating it: one read decides
+both views, one pair type carries them, one dictionary holds the pairs, and `W29`
+holds the structure - the pair is constructed in exactly one place and that place
+is its own loader. `wire-secondsurface` reddens `W29`; `wire-surfaceinert` is the
+twin.
+
+### LENS 7 - a counter whose NAME carried a view it no longer took
+
+SEVERITY: LOW
+
+After the single-blanking-site change, `CountOnCodeLines` forwarded to `CountOf`
+with no blanking - byte for byte the same operation under a name that asserted
+otherwise, with nothing holding its callers to the cached CODE view. Passing the
+PROSE text of the same file, one identifier apart and the spelling that stood
+there a round earlier, would have made a count comment-sensitive again under a
+case still called "read nowhere else on code lines", with the blanking-site count
+unmoved and `W27` green throughout. Closed by retiring the name: the counter takes
+a relative PATH and a named `SourceView` and fetches the text itself, so no caller
+can hand it the wrong view, and the one caller that counts over a member BODY uses
+`CountOf` directly because `MemberBody` has one view and no way to ask for the
+other. `W30` requires the retired name to have no call site left and every call to
+the view-taking counter to name its view. `wire-viewbyname` reddens `W30`;
+`wire-viewbynameinert` is the twin.
+
+### LENS 8 - the blind control's header claimed a sameness nobody had checked
+
+SEVERITY: LOW
+
+The BUILD blind control's header said the run differed from the deliverable run
+only in `Program.cs`. It also used a different driver - 77 per-variant commands
+and 109 result rows against 82 and 114 - because one mutant's anchor did not
+exist at the tip the harness was swapped to, so the control could not have been
+run with the final driver at all. The notes reconciled the gap in prose, and
+109 + 3 is not 114. Every number in that header was computed and the SAMENESS was
+typed, which is the one claim a reader has no way to tell apart from the derived
+ones (`#302`/`#431`). Closed in two places: the offending anchor is moved to a line
+that exists at the swapped-to tip, as the driver's own rule requires, so the
+control runs with the SAME driver; and the assembler now computes the
+substitution sentence from the sha256 of both driver copies and of both harness
+copies, refuses a blind header that does not carry the rendered clause, and
+refuses one whose claim disagrees with the hashes. The refusal is exercised on a
+doctored invocation rather than assumed.
+
+### LENS 9 - the guard LENS 4 added was unreachable, and the reason given for its having no mutant was refuted by the run
+
+SEVERITY: MEDIUM
+
+The same clause as `LENS 6`, read one step deeper. `LoadBlanked` returns null
+exactly when `LoadSource` does, so the second null guard is unreachable whenever
+the first has passed; and the notes justified giving the clause no mutant with
+"it fires on a SPARSE source root, and the suite already runs one" - which the
+suite's own log refutes, the failure string occurring zero times across the clean
+run, every mutant variant and the prior-tip root. A mechanism claim that the
+evidence contradicts is how the next reader builds on a mechanism that does not
+exist (`#302`/`#391`). Closed by the same structural change as `LENS 6` - the
+unreachable guard is deleted with the clause - and by `W29`, so the finding that
+was closed without a mutant is closed with one. The refuted sentence is corrected
+in the notes rather than quietly dropped.
+
+### LENS 10 - the census was scoped to the gate's findings and said so nowhere
+
+SEVERITY: LOW
+
+`round-findings.md` claimed to be the one place the round's findings are written
+down and declared ten findings, while four the round had found and closed in the
+same pass had no body in it and were counted by neither census. The log header
+printed "10 findings: 0 HIGH, 1 MEDIUM, 9 LOW" with no scope qualifier for a
+round that had two MEDIUM. `N4` made an UNMARKED body a red failure so a finding
+could not quietly not count; a finding written outside the file entirely still
+quietly did not, which is `N4`'s defect at file scope, and nothing could see it
+because the census and the bodies were two readings of one file. Closed by `H4`,
+which reads the closure table's `CLOSES:` lines - an independent artifact that
+names every finding the round closes - and requires that list and the bodies here
+to be the same list, in both directions. Every finding of this round now has a
+body above and the declared census is the twenty they produce.
+`wire-closurenobody` reddens `H4`; `wire-closurebodyinert` is the twin.

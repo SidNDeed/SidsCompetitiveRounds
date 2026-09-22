@@ -373,6 +373,25 @@ function New-WireRootSpans([string]$name, [string]$file, [object[]]$edits) {
     return $dir
 }
 
+# The same again, across SEVERAL files. Each edit is
+# @('file','start','find','replace','end') and is resolved inside that file's own
+# span under the same exactly-one-site rule.
+function New-WireRootSpansMulti([string]$name, [object[]]$edits) {
+    $dir = Join-Path $work ('wire-' + $name)
+    if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+    Copy-WireFiles $dir
+    if ($edits.Count -eq 5 -and ($edits[0] -is [string])) { $edits = @(, $edits) }
+    $files = @($edits | ForEach-Object { [string]$_[0] } | Sort-Object -Unique)
+    Say ('--- wiring mutant ' + $name + ': ' + $edits.Count + ' edit(s) across ' + $files.Count + ' file(s): ' + ($files -join ', '))
+    foreach ($edit in $edits) {
+        $target = Join-Path $dir ([string]$edit[0])
+        $text = [System.IO.File]::ReadAllText($target)
+        $text = Edit-InMember ('wire-' + $name) $text ([string]$edit[1]) ([string]$edit[2]) ([string]$edit[3]) ([string]$edit[4])
+        [System.IO.File]::WriteAllText($target, $text)
+    }
+    return $dir
+}
+
 # AN INERT TWIN AS ITS OWN ROOT, not as a second test inside the reddening run.
 # The reddening mutant proves the case CAN fail; this proves it does not fail for
 # an edit of comparable size in the same file that touches nothing the case
@@ -1561,29 +1580,46 @@ Say ''
 # different evidence, and requires the two counts to agree.
 #
 # W25 is the inert twin and stays GREEN: it reads no findings file.
-$wireBodyNoMarker = New-WireRootSpans 'bodynomarker' 'tools/tests/bug389-seam/round-findings.md' `
-    @(, @('### N9 - the untouched-selection streak was called both sixth and fifth',
-          'SEVERITY: LOW',
-          ('SEVERITY: LOW' + $nl + $nl + '### N11 - a body added without its severity marker' + $nl + $nl + 'This body carries no marker at all.'),
-          '### N10 '))
+# THE CLOSURE TRAVELS WITH THE BODY. H4 holds the closure table's CLOSES: lines
+# and the finding bodies to each other, so a body planted alone reddens H4 as
+# well and this mutant would stop measuring H1 alone.
+$wireBodyNoMarker = New-WireRootSpansMulti 'bodynomarker' `
+    @(@('tools/tests/bug389-seam/round-findings.md',
+        '### N9 - the untouched-selection streak was called both sixth and fifth',
+        'SEVERITY: LOW',
+        ('SEVERITY: LOW' + $nl + $nl + '### N11 - a body added without its severity marker' + $nl + $nl + 'This body carries no marker at all.'),
+        '### N10 '),
+      @('tools/tests/bug389-seam/R8-CLOSURES.md',
+        'N10 LOW - THE PROMISED REPOSITORY COPY NEVER REACHED THE PIN.',
+        'CLOSES: N10',
+        'CLOSES: N10, N11',
+        "THIS PASS'S COLD LENS, read on the build tip ed3b1e5."))
 $runWireBodyNoMarker = Invoke-Suite 'wire-bodynomarker' $seam $wireBodyNoMarker
-if (-not (Assert-Mutation 'a finding body written with no severity marker' $runWireBodyNoMarker 'H1' 'W25')) { $overall = 1 }
+if (-not (Assert-Mutation 'a finding body written with no severity marker' $runWireBodyNoMarker 'H1' 'H4')) { $overall = 1 }
+if (-not (Assert-Mutation 'an unmarked body, W25 inert twin' $runWireBodyNoMarker 'H1' 'W25')) { $overall = 1 }
 Say ''
 
 # The same body, WITH its marker and with the declared census moved to match:
 # the case must pass, or it would be failing on "the file changed" rather than on
 # the property it names.
-$wireBodyMarked = New-WireRootSpans 'bodymarked' 'tools/tests/bug389-seam/round-findings.md' `
-    @(@('### N9 - the untouched-selection streak was called both sixth and fifth',
+$wireBodyMarked = New-WireRootSpansMulti 'bodymarked' `
+    @(@('tools/tests/bug389-seam/round-findings.md',
+        '### N9 - the untouched-selection streak was called both sixth and fifth',
         'SEVERITY: LOW',
         ('SEVERITY: LOW' + $nl + $nl + '### N11 - a body added with its severity marker' + $nl + $nl + 'SEVERITY: LOW' + $nl + $nl + 'This one is counted by both.'),
         '### N10 '),
-      @('CENSUS: ',
-        'CENSUS: 10 findings: 0 HIGH, 1 MEDIUM, 9 LOW',
-        'CENSUS: 11 findings: 0 HIGH, 1 MEDIUM, 10 LOW',
-        '## The selection-method streak'))
+      @('tools/tests/bug389-seam/round-findings.md',
+        'CENSUS: ',
+        'CENSUS: 20 findings: 1 HIGH, 4 MEDIUM, 15 LOW',
+        'CENSUS: 21 findings: 1 HIGH, 4 MEDIUM, 16 LOW',
+        '## The selection-method streak'),
+      @('tools/tests/bug389-seam/R8-CLOSURES.md',
+        'N10 LOW - THE PROMISED REPOSITORY COPY NEVER REACHED THE PIN.',
+        'CLOSES: N10',
+        'CLOSES: N10, N11',
+        "THIS PASS'S COLD LENS, read on the build tip ed3b1e5."))
 $runWireBodyMarked = Invoke-Suite 'wire-bodymarked' $seam $wireBodyMarked
-if (-not (Assert-Inert 'a finding body added with its marker' $runWireBodyMarked @('H1', 'W25'))) { $overall = 1 }
+if (-not (Assert-Inert 'a finding body added with its marker' $runWireBodyMarked @('H1', 'H4', 'W25'))) { $overall = 1 }
 Say ''
 
 # ---------- N5: a counter that blanks raw text of its own ----------------------
@@ -1594,10 +1630,15 @@ Say ''
 # replacement is not present is one a reader cannot use.
 #
 # W25 is the inert twin and stays GREEN.
+# RE-SITED. This mutant used to land inside the counter whose NAME carried a
+# view; that counter is retired (LENS 7), so a blanking site planted there could
+# not exist at all. It lands beside a cached read instead - which is where a
+# re-blank would really be written - and still puts a second blanking site in the
+# file while the register names one cached view.
 $wireUncachedView = New-WireRoot 'uncachedview' 'tools/tests/bug389-seam/Program.cs' `
-    'private static int CountOnCodeLines(string text, string needle)' `
-    '        if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(needle)) return 0;' `
-    '        if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(needle)) return 0; text = BlankComments(text);' ''
+    'private static int Main()' `
+    '        string apiBlank = LoadBlanked(apiRel);' `
+    '        string apiBlank = LoadBlanked(apiRel); string apiRaw = BlankComments(LoadSource(apiRel));' ''
 $runWireUncachedView = Invoke-Suite 'wire-uncachedview' $seam $wireUncachedView
 if (-not (Assert-Mutation 'a counter that blanks raw text of its own' $runWireUncachedView 'W27' 'W25')) { $overall = 1 }
 Say ''
@@ -1696,10 +1737,15 @@ $runWireSecondMarker = Invoke-Suite 'wire-secondmarker' $seam $wireSecondMarker
 if (-not (Assert-Mutation 'a second literal spelling of the severity marker' $runWireSecondMarker 'W28' 'W25')) { $overall = 1 }
 Say ''
 
+# RE-SITED. Its anchor was a line this round's harness introduced, so the whole
+# driver could not run against the round-7 harness and the BUILD blind control had
+# to use an older copy of this file - which is the mechanism behind LENS 8. The
+# rule at the head of this section already required an anchor present at the
+# previous tip; this now keeps it.
 $wireMarkerInert = New-WireRoot 'markerinert' 'tools/tests/bug389-seam/Program.cs' `
     'private static int Main()' `
-    '                    + "no census and leaves the round unrecorded; these carry none: "' `
-    '                    + "no census and leaves the round unrecorded; these carry none - "' ''
+    '        // ---- V2: NEGATIVE CONTROL for "once", and for every V mutation. -------' `
+    '        // ---- V2: NEGATIVE CONTROL for "once", and for every V mutant. ---------' ''
 $runWireMarkerInert = Invoke-Suite 'wire-markerinert' $seam $wireMarkerInert
 if (-not (Assert-Inert 'the single marker spelling, inert edit' $runWireMarkerInert @('W28', 'W25'))) { $overall = 1 }
 Say ''
@@ -1725,6 +1771,109 @@ $wireAliasInert = New-WireRootSpans 'aliasinert' 'plugin/NativeUI.cs' `
           'namespace CompetitiveRounds'))
 $runWireAliasInert = Invoke-Suite 'wire-aliasinert' $seam $wireAliasInert
 if (-not (Assert-Inert 'an ordinary using added, inert edit' $runWireAliasInert @('W25', 'W1'))) { $overall = 1 }
+Say ''
+
+# ============== THE COLD LENS ON THE ROUND-8 BUILD TIP ed3b1e5 ===============
+# Six findings, read on the tip the build stage returned: one HIGH, two MEDIUM
+# and three LOW. Five of the six are checkable and carry a mutant here; LENS 4's
+# successor pair (LENS 6 and LENS 9) is ONE defect read twice and carries ONE
+# mutant, which is stated rather than counted twice.
+
+# ---------- lens 5: a call site spelled across a line break -------------------
+# CallSitesIn matched a qualified name as one contiguous substring, so the
+# ordinary member-access continuation was invisible to every scan built on it.
+# This plants exactly that spelling of a SECOND call to the allowed writer, in a
+# member outside the bound caller set: under the round-8 counter it left W25
+# green and the printed map unchanged.
+$wireSplitCall = New-WireRoot 'splitcall' 'plugin/CompetitiveUI.cs' `
+    'public static void Tick()' `
+    '            NativeUI.Tick();' `
+    ('            ApiClient' + $nl + '                .Initialize(Plugin.ApiBaseUrl.Value);' + $nl + '            NativeUI.Tick();') ''
+$runWireSplitCall = Invoke-Suite 'wire-splitcall' $seam $wireSplitCall
+if (-not (Assert-Mutation 'an allowed writer called across a line break' $runWireSplitCall 'W25' 'W1')) { $overall = 1 }
+Say ''
+
+# ---------- lens 5: the same spelling, on a staging entry point ---------------
+# The other half of the same hole: the file-grain clause that says which files
+# may reach a staging entry point reads the same counter.
+$wireSplitEntry = New-WireRoot 'splitentry' 'plugin/CompetitiveUI.cs' `
+    'public static void Tick()' `
+    '            NativeUI.Tick();' `
+    ('            ApiClient' + $nl + '                .UpdateFfaQueuePoll(false);' + $nl + '            NativeUI.Tick();') ''
+$runWireSplitEntry = Invoke-Suite 'wire-splitentry' $seam $wireSplitEntry
+if (-not (Assert-Mutation 'a staging entry point reached across a line break' $runWireSplitEntry 'W25' 'W1')) { $overall = 1 }
+Say ''
+
+$wireSplitInert = New-WireRoot 'splitinert' 'plugin/CompetitiveUI.cs' `
+    'public static void Tick()' `
+    '            // Bug 213: keep the published chat-mute marker in step with the' `
+    '            // Bug 213: keep the published chat-mute marker aligned with the' ''
+$runWireSplitInert = Invoke-Suite 'wire-splitinert' $seam $wireSplitInert
+if (-not (Assert-Inert 'the segment-wise call matcher, inert edit' $runWireSplitInert @('W25', 'W1'))) { $overall = 1 }
+Say ''
+
+# ---------- lens 6 / lens 9: a second membership for the scan surface ---------
+# The clause that closed LENS 4 could not fire on any input, and the reason given
+# for its having no mutant was refuted by the suite's own log. The closure is
+# structural - one read, one pair, one dictionary - and W29 is what holds it.
+# This builds the pair a second time, outside its loader.
+$wireSecondSurface = New-WireRoot 'secondsurface' 'tools/tests/bug389-seam/Program.cs' `
+    'private static int Main()' `
+    '        var answerOwner = new Dictionary<string, string>();' `
+    '        var answerOwner = new Dictionary<string, string>(); var surfaceAgain = new SurfaceFile(LoadSource(apiRel), LoadBlanked(apiRel));' ''
+$runWireSecondSurface = Invoke-Suite 'wire-secondsurface' $seam $wireSecondSurface
+if (-not (Assert-Mutation 'a second membership for the scan surface' $runWireSecondSurface 'W29' 'W25')) { $overall = 1 }
+Say ''
+
+$wireSurfaceInert = New-WireRoot 'surfaceinert' 'tools/tests/bug389-seam/Program.cs' `
+    'private static int Main()' `
+    '        // of it: four facts in, one action out, and no selector anywhere.' `
+    '        // of it: four facts in, one action out, and no selector at all.' ''
+$runWireSurfaceInert = Invoke-Suite 'wire-surfaceinert' $seam $wireSurfaceInert
+if (-not (Assert-Inert 'the one-membership surface, inert edit' $runWireSurfaceInert @('W29', 'W25'))) { $overall = 1 }
+Say ''
+
+# ---------- lens 7: a counter whose NAME carries the view --------------------
+# After the single-blanking-site change the old counter was CountOf under a name
+# that still promised a blanking, with nothing holding a caller to the cached
+# CODE view. This puts a call to it back, handed the PROSE text of a file.
+$wireViewByName = New-WireRoot 'viewbyname' 'tools/tests/bug389-seam/Program.cs' `
+    'private static int Main()' `
+    '            string stated = ProximityVictim.VanillaAnswerReason(answer);' `
+    '            string stated = ProximityVictim.VanillaAnswerReason(answer); int live = CountOnCodeLines(LoadSource(apiRel), "baseUrl");' ''
+$runWireViewByName = Invoke-Suite 'wire-viewbyname' $seam $wireViewByName
+if (-not (Assert-Mutation 'a counter whose name carries the view it does not take' $runWireViewByName 'W30' 'W25')) { $overall = 1 }
+Say ''
+
+$wireViewByNameInert = New-WireRoot 'viewbynameinert' 'tools/tests/bug389-seam/Program.cs' `
+    'private static int Main()' `
+    '        // V - THE REPAIR DECISION. ProximityVictim.VictimAction is the whole' `
+    '        // V - THE REPAIR DECISION. ProximityVictim.VictimAction is the sum' ''
+$runWireViewByNameInert = Invoke-Suite 'wire-viewbynameinert' $seam $wireViewByNameInert
+if (-not (Assert-Inert 'the view-taking counter, inert edit' $runWireViewByNameInert @('W30', 'W25'))) { $overall = 1 }
+Say ''
+
+# ---------- lens 10: a finding closed with no body in the findings file ------
+# The findings file called itself the one place the round's findings are written
+# down and the census counted only what was in it, so four findings closed in the
+# same pass counted nowhere. H4 holds the closure table's CLOSES: lines and the
+# bodies to each other; this closes a finding that has no body.
+$wireClosureNoBody = New-WireRootSpans 'closurenobody' 'tools/tests/bug389-seam/R8-CLOSURES.md' `
+    @(, @('N10 LOW - THE PROMISED REPOSITORY COPY NEVER REACHED THE PIN.',
+          'CLOSES: N10',
+          'CLOSES: N10, N11',
+          "THIS PASS'S COLD LENS, read on the build tip ed3b1e5."))
+$runWireClosureNoBody = Invoke-Suite 'wire-closurenobody' $seam $wireClosureNoBody
+if (-not (Assert-Mutation 'a finding closed with no body in the findings file' $runWireClosureNoBody 'H4' 'W25')) { $overall = 1 }
+Say ''
+
+$wireClosureBodyInert = New-WireRootSpans 'closurebodyinert' 'tools/tests/bug389-seam/R8-CLOSURES.md' `
+    @(, @('N10 LOW - THE PROMISED REPOSITORY COPY NEVER REACHED THE PIN.',
+          'naming all three paths. See the head of this file.',
+          'naming all three paths. See the head of this table.',
+          "THIS PASS'S COLD LENS, read on the build tip ed3b1e5."))
+$runWireClosureBodyInert = Invoke-Suite 'wire-closurebodyinert' $seam $wireClosureBodyInert
+if (-not (Assert-Inert 'the closed-set of findings, inert edit' $runWireClosureBodyInert @('H4', 'W25'))) { $overall = 1 }
 Say ''
 
 # ---------- 22. the prior mechanism ----------
