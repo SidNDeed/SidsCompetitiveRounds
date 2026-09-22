@@ -82,10 +82,15 @@ namespace CompetitiveRounds
         /// The server lane resolved it toward the CONSUMER and pinned its
         /// canonical name to this constant, transcribed byte-for-byte
         /// (`backend/api/main.py`, `_INVOLUNTARY_CAUSE_CAPABILITY_FIELD`), so
-        /// the value here is unchanged and is the name to keep. The server's
-        /// other spelling survives only as a transitional ALIAS that its own
-        /// notes schedule for removal once the lanes merge — so this constant
-        /// must never be moved onto it.
+        /// the value here is unchanged and is the name to keep. While the two
+        /// lanes were apart the server carried the retired spelling
+        /// `"involuntary_leave_cause"` beside it as a transitional ALIAS, both
+        /// keys bound from one expression so they could not drift. The removal
+        /// condition written at that constant was that the lanes be merged and
+        /// this literal be read off the merged tree; the merge that put this
+        /// file on the server's tree met it, and the alias is gone. One
+        /// boolean, one name — so this constant must never be moved onto the
+        /// retired one.
         ///
         /// What changed is that the agreement is now CHECKED: the harness
         /// reads the server's declared canonical out of its source and pins

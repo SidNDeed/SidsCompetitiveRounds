@@ -444,6 +444,102 @@ def test_the_transitional_alias_is_gone_from_the_wire():
         "the mod-version handler names the old spelling")
 
 
+# The words this project's prose uses when it talks about a SECOND spelling of
+# the capability key. The census below is keyed on them and not on the retired
+# literal, because that is precisely how the stale claim survived: the removal
+# swept every file carrying `involuntary_leave_cause`, and the one sentence
+# that said the alias was still alive named no literal at all, so the sweep
+# could not see it (#432 — a flag names a LINE, the defect is a CLASS).
+_SECOND_SPELLING_WORDS = (
+    "alias", "transitional", "other spelling", "second spelling",
+    "old spelling", "retired spelling",
+)
+_RETIRED_CAPABILITY_SPELLING = "involuntary_leave_cause"
+
+
+def _doc_paragraphs(src: str) -> list[tuple[int, str]]:
+    """Every `///` doc-comment paragraph in C# source, as (first line, text).
+
+    A paragraph is a run of `///` lines carrying content, ended by a bare `///`
+    or by any line that is not a doc comment. That is the unit a claim is
+    written in, and the unit a reader takes a claim from.
+    """
+    out: list[tuple[int, str]] = []
+    start, buf = 0, []
+    for lineno, raw in enumerate(src.splitlines(), 1):
+        stripped = raw.strip()
+        body = stripped[3:].strip() if stripped.startswith("///") else None
+        if body:
+            if not buf:
+                start = lineno
+            buf.append(body)
+            continue
+        if buf:
+            out.append((start, " ".join(buf)))
+            buf = []
+    if buf:
+        out.append((start, " ".join(buf)))
+    return out
+
+
+def test_every_second_spelling_claim_in_the_client_note_carries_the_literal():
+    """A claim about the alias, in the file that declares the wire name, must
+    name the retired spelling — and the retired spelling must be off the wire.
+
+    The pairing is the check. Naming `involuntary_leave_cause` in this file's
+    prose is allowed exactly because the route no longer advertises it, and
+    both halves are asserted here, so neither can quietly stop being true.
+
+    Scope is `plugin/TransportExit.cs` and stated rather than assumed: it is
+    the file whose whole subject is the client side of this wire contract.
+    `plugin/ApiClient.cs` uses the word "alias" in several unrelated senses
+    (chart series, a public method alias, room-name collisions), so the
+    vocabulary has no discriminating power there and a census over it would be
+    noise on its first run.
+
+    What this does NOT cover is stated too: a survival claim written without
+    any of these words would pass. The words are the ones this project's own
+    prose reaches for, and at least one paragraph must match, so the census
+    cannot go quietly empty (#342).
+    """
+    assert CLIENT_CONSTANT_PATH.exists(), (
+        f"{CLIENT_CONSTANT_PATH.name} is not on this tree — the client half of "
+        "bug #392 is merged into this branch and this census reads its prose")
+    paragraphs = _doc_paragraphs(CLIENT_CONSTANT_PATH.read_text(encoding="utf-8"))
+    assert len(paragraphs) >= 4, (
+        f"only {len(paragraphs)} doc paragraphs parsed out of "
+        f"{CLIENT_CONSTANT_PATH.name} — the paragraph reader is not reading it")
+
+    matched = []
+    for lineno, text in paragraphs:
+        low = text.lower()
+        words = [w for w in _SECOND_SPELLING_WORDS if w in low]
+        if not words:
+            continue
+        matched.append((lineno, words))
+        assert _RETIRED_CAPABILITY_SPELLING in text, (
+            f"{CLIENT_CONSTANT_PATH.name}, doc paragraph at line {lineno}, "
+            f"talks about a second spelling ({words}) without naming it. A "
+            "claim about the alias that carries no literal is invisible to a "
+            "literal sweep, which is how a sentence saying the alias was still "
+            "alive outlived the alias: " + text[:160])
+
+    assert matched, (
+        f"no doc paragraph in {CLIENT_CONSTANT_PATH.name} mentions a second "
+        "spelling at all — this census has nothing to be about, and a check "
+        "with no subject passes for the wrong reason (#342)")
+
+    # The other half of the pairing: the spelling that prose may name is the
+    # one the route does not advertise. Asserted against the live payload, with
+    # the canonical key as the control so an empty payload cannot satisfy it.
+    payload = asyncio.run(main.get_mod_version())
+    assert _RETIRED_CAPABILITY_SPELLING not in payload, (
+        f"{CLIENT_CONSTANT_PATH.name} names {_RETIRED_CAPABILITY_SPELLING!r} as "
+        "retired while the route still advertises it; keys advertised: "
+        f"{sorted(payload)}")
+    assert payload[main._INVOLUNTARY_CAUSE_CAPABILITY_FIELD] is True
+
+
 def test_the_capability_can_go_false(monkeypatch):
     """The negative control that makes the flag a CHECK rather than a decoration.
 
@@ -816,12 +912,24 @@ _MIGRATION_FILENAME_REF = re.compile(r"\b(\d{3})_ffa_departure_cause\b")
 _ROLE_WORDS = re.compile(r"departure[-_ ]cause migration", re.I)
 # The tokens that make a file this lane's OWN, matched against its PATH and
 # never against its text. A shared production module that merely mentions the
-# lane — `main.py` names the client branch `claude/bug392-client` in a comment
-# — is not a lane file, and promoting it on a text match would put the strict
-# bare-3xx rule over a module carrying a hundred and sixty unrelated 3xx
-# numbers (bug ids, other lanes' migrations, timeouts). That check would be
-# noise on its first run and would be switched off, which is the same as not
-# having it (#342). Files this lane owns carry the lane in their name.
+# lane is not a lane file: promoting it on a text match would put the strict
+# bare-3xx rule over a module carrying a hundred-odd unrelated 3xx numbers
+# (bug ids, other lanes' migrations, timeouts), and that check would be noise
+# on its first run and would be switched off, which is the same as not having
+# it (#342). Files this lane owns carry the lane in their name.
+#
+# That argument used to be carried by a worked example naming a production
+# module that mentioned this lane's client branch in a comment. The merge
+# dissolved the branch and deleted the mention, and the example outlived the
+# fact it rested on — a comment is a claim, and this one was about another
+# file's contents with nothing checking it. What stands here now is computed:
+# `test_the_lane_classifier_is_keyed_on_the_path_not_the_text` counts what the
+# strict rule would cost over `api/main.py` and reads this module's own
+# `is_lane` line, because on today's tree a loosening to a text match would
+# change nothing — no backend source outside this lane's paths carries a lane
+# token in its text — so the noise would arrive only with the first shared
+# module to mention the lane, and a check that cannot fail until then is not a
+# check.
 _LANE_PATH_TOKENS = ("ffa_departure_cause", "bug392")
 
 
@@ -949,6 +1057,62 @@ def test_no_stale_migration_number_survives_in_this_lane_s_files():
         f"{lane}, other backend sources {wide}. A bare 3xx number in this "
         "lane's files means this migration; a learning reference is written "
         "with a leading '#'; elsewhere, name the migration by its role.")
+
+
+_IS_LANE_ASSIGNMENT = re.compile(r"^[ \t]*is_lane[ \t]*=[ \t]*(.+)$", re.M)
+
+
+def test_the_lane_classifier_is_keyed_on_the_path_not_the_text():
+    """The premise under `_LANE_PATH_TOKENS`, computed — and the keying, read
+    off this module's own source.
+
+    Two assertions, because the design has two halves that fail differently.
+
+    The KEYING is pinned at the source line, which is the only place it can be
+    pinned on this tree: no backend source outside this lane's own paths
+    carries a lane token in its text today, so swapping `label` for `text`
+    would classify exactly the same files and every behavioural check would
+    stay green. The loosening becomes visible only when some shared module
+    first mentions the lane, which is the moment the noise starts — far too
+    late for the check to be the thing that refuses it.
+
+    The PREMISE is the cost that keying avoids: `api/main.py` under the strict
+    bare-3xx rule. A floor is asserted rather than the exact count, so an
+    unrelated 3xx number arriving in that module cannot redden this test for a
+    reason it is not about (#342). Under the rule main.py actually gets — the
+    wide one — it must be clean.
+    """
+    own_src = Path(__file__).read_text(encoding="utf-8")
+    assignments = _IS_LANE_ASSIGNMENT.findall(own_src)
+    assert len(assignments) == 1, (
+        "expected exactly one `is_lane =` line in this module, found "
+        f"{len(assignments)}: {assignments}")
+    expr = assignments[0]
+    assert "_LANE_PATH_TOKENS" in expr, (
+        f"the lane classifier no longer consults the lane tokens: {expr!r}")
+    assert "label" in expr, (
+        f"the lane classifier no longer reads the file's PATH: {expr!r}")
+    assert "text" not in expr, (
+        "the lane classifier was loosened to match the file's TEXT: "
+        f"{expr!r}. That promotes any shared module naming this lane under the "
+        "strict bare-3xx rule — see the count asserted below for what that "
+        "costs over api/main.py alone.")
+
+    sources = _backend_sources()
+    current = _MIGRATION_FILES[0].name.split("_", 1)[0]
+    main_label = "api/main.py"
+    assert main_label in sources, sorted(sources)
+    assert not any(tok in main_label for tok in _LANE_PATH_TOKENS), (
+        f"{main_label} is classified as one of this lane's own files")
+    main_text = sources[main_label].read_text(encoding="utf-8")
+    strict_hits = _stale_migration_numbers(main_text, current)
+    wide_hits = _migration_references(main_text, current)
+    assert len(strict_hits) >= 100, (
+        f"{main_label} yields only {len(strict_hits)} bare 3xx hits under the "
+        "strict rule, so the noise argument the comment at _LANE_PATH_TOKENS "
+        "makes for keying on the path is no longer true of this tree")
+    assert wide_hits == [], (
+        f"{main_label} names a 3xx migration that is not {current}: {wide_hits}")
 
 
 def test_the_migration_number_detector_can_fail():
