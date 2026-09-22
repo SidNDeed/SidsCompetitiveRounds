@@ -1,0 +1,90 @@
+The route manifest re-pin, RUN LAST, with the order as evidence
+===============================================================
+
+stdout: r12-repin-run.log
+
+Instrument: backend/tests/evidence/repin-last.py, which produces this
+file as its OUTPUT. Nothing here is typed and nothing is appended
+afterwards -- the r6 lens found the previous round's report edited
+after its own tool had run, which left the manifest result no longer
+last, and an instrument that writes the record is the only shape that
+cannot regress to that.
+
+== the ordering, as something a reader can check ==
+The wrapper refuses to run at all while `git status --porcelain` has
+any line in it. It was empty, so every other edit of this round --
+source, tests, instruments, the other evidence files -- was already
+committed before the re-pin ran, and nothing was left that could be
+edited after it.
+
+  HEAD at the re-pin     f3e804fce32f25ad594baf16ad7873d60dac5a73
+  tree of that commit    26c7e2ddc82ecc0a3744bdbfe62e5557b3a8e067
+  subject                A report the server did not keep comes back unchanged, under its own key
+  run at                 2026-09-22 12:17:30 UTC
+
+== which commit carries which file, from git rather than from me ==
+Round 11's report said the commit that added it added only it. That
+commit added two paths -- the report and the run log it quotes --
+because both were written together and staged together by hand, and
+a sentence about a commit written before that commit exists is a
+claim nothing checks. The wrapper makes both commits now, one path
+each, and the two listings below are git's own.
+
+The run log went FIRST, in a commit of its own. Immediately after
+making it the wrapper ran `git show --name-only --format= HEAD`,
+which printed:
+
+  backend/tests/evidence/r12-repin-run.log
+
+Then it wrote this file, staged it with `git add -- backend/tests/evidence/r12-repin.txt`,
+and ran `git diff --cached --name-only`, which printed:
+
+  backend/tests/evidence/r12-repin.txt
+
+That listing is what the last commit of this round contains: this
+report, and nothing else. The run log is in the commit before it,
+and the round's source, tests, instruments and other evidence are in
+the commit before that -- which is the HEAD named above, the tree
+the re-pin actually ran against.
+
+== what the wrapper checked before it wrote this ==
+A pytest run cannot cover the file that records it: the file is
+written after the run, by construction. So the closing check below
+covers every other report in this directory, and the rules this
+directory enforces are applied by the wrapper to THIS file before it
+is written -- the assembler's claim rules and the invocation rule,
+imported from evidence_rules.py and assemble-evidence.py rather than
+restated here, because a rule with two implementations drifts. If
+either refuses, nothing is written.
+
+== what a clean result means here ==
+`rows rewritten now : 0` is the result this round requires. The
+manifest already held every fingerprint the committed tree produces,
+so the tool changed nothing -- the positive statement that the
+committed manifest and the committed code agree. A non-zero count
+here would mean the tree moved after the suites certified it.
+
+------------------------------------------------------------------------------
+THE RUN, verbatim from here down
+------------------------------------------------------------------------------
+========== r12-repin-run.log ==========
+== closing evidence check, over this directory as committed ==
+cwd       <repo>/backend
+started   2026-09-22 12:17:30 UTC
+command   python -m pytest tests/test_ffa_game_number_anchor.py -q -p no:cacheprovider -k committed_evidence or assembled_from_its_run or round_eight_control or round_seven_control or production_file or runner_carries or control_tally or counts_the_checks or new_controls_a_report or residual_reach or negation_admits
+...........                                                              [100%]
+11 passed, 149 deselected in 5.31s
+closing rc=0
+
+== route manifest re-pin, by its own tool ==
+cwd       <repo>
+started   2026-09-22 12:17:37 UTC
+command   python backend\tests\repin_route_manifest.py
+manifest rows      : 362
+fingerprinted      : 361
+rows rewritten now : 0
+MOVED vs HEAD      : 0
+ENTRY POINTS moved vs HEAD: 0
+(dry run; pass --write)
+repin rc=0
+
