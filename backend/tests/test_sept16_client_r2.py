@@ -5929,3 +5929,102 @@ def test_r7_b16_the_claims_check_rejects_every_superseded_form():
         # INERT TWIN: an unrelated edit of the same shape leaves the row green
         assert row_holds(src + "\n// an unrelated comment line\n",
                          superseded, corrected), name
+
+
+# ── B18, RE-EXECUTED RATHER THAN INHERITED (#308) ──────────────────────────
+# Round 6 reported B18 MET on prose alone: two canonicals read as identical and
+# a configuration read as unchanged.  A row whose evidence is a careful reading
+# is the defect L1 named one row over, so the row now has a check that can go
+# red, on both lanes and on the build configuration.
+_R7_B18_DC_SKELETON = "{}:{}:{}:dc"
+
+
+def _r7_skeleton(expr):
+    """An interpolated string with every placeholder reduced to `{}`.
+
+    The two lanes spell the same four fields with different identifiers --
+    `reporterSteamId` here, `steam_id` there -- so comparing the raw strings
+    would compare naming conventions.  What the wire contract fixes is the
+    ORDER and the COUNT of the parts and the literal tail, and that is what
+    survives this reduction."""
+    return re.sub(r"\{[^{}]*\}", "{}", expr)
+
+
+def _r7_b18_client_canonicals(api):
+    return [m for m in re.findall(r'ComputeHmacHex\(\$"([^"]*)"\)', api)
+            if m.endswith(":dc")]
+
+
+def _r7_b18_server_canonicals(server):
+    return re.findall(r'f"([^"]*:dc)"\.encode\(\)', server)
+
+
+def test_r7_b18_the_dc_canonical_is_one_contract_on_both_lanes_and_the_build_gate_stands():
+    """B18: the frozen DC canonical, and the two csproj properties that keep a
+    workstation path out of the shipped assembly.
+
+    THREE CLAIMS, EACH WITH ITS OWN NEGATIVE CONTROL INSIDE THIS TEST:
+
+      * the client signs the DC report over the four-field canonical, in
+        EXACTLY ONE place -- a second signing site is how the two ends come to
+        disagree one release later;
+      * the SERVER LANE's own copy reduces to the same skeleton, read out of
+        that tree rather than described from this one (#341, #444, #635: two
+        halves of one contract are grepped for the same literals);
+      * the csproj still carries `DebugType=none` and `Deterministic`, which
+        are what keep the build from embedding a local path in every release
+        assembly.  Nothing in the pre-commit privacy guard validates them, so a
+        check is the only thing that would notice their removal.
+
+    The three controls below each remove ONE of the three and require the claim
+    to go False, so a pass here is a statement about all three rather than
+    about whichever one happened to hold."""
+    api = _src("ApiClient.cs")
+    server, how = _server_lane_main()
+    assert server, (
+        "the server lane's copy could not be located, so the cross-lane half of "
+        "this claim was not checked: " + how)
+    csproj = (PLUGIN / "CompetitiveRounds.csproj").read_text(encoding="utf-8")
+
+    def claim(api_text, server_text, csproj_text):
+        c = _r7_b18_client_canonicals(api_text)
+        if len(c) != 1 or _r7_skeleton(c[0]) != _R7_B18_DC_SKELETON:
+            return False
+        s = _r7_b18_server_canonicals(server_text)
+        if len(s) != 1 or _r7_skeleton(s[0]) != _R7_B18_DC_SKELETON:
+            return False
+        return ("<DebugType>none</DebugType>" in csproj_text
+                and "<Deterministic>true</Deterministic>" in csproj_text)
+
+    assert claim(api, server, csproj), (
+        "client canonicals: %r; server canonicals: %r"
+        % (_r7_b18_client_canonicals(api), _r7_b18_server_canonicals(server)))
+
+    # CONTROL 1 -- a fifth field on the client half
+    bad_api = api.replace(
+        'ComputeHmacHex($"{reporterSteamId}:{seriesId}:{dcPlayerSteamId}:dc")',
+        'ComputeHmacHex($"{reporterSteamId}:{seriesId}:{dcPlayerSteamId}:{roomId}:dc")',
+        1)
+    assert bad_api != api, "the client signing site's spelling moved"
+    assert not claim(bad_api, server, csproj), (
+        "the claim survives a fifth field on the client half")
+
+    # CONTROL 2 -- the same fifth field on the SERVER half.  This is the one a
+    # lane reading only its own source cannot see.
+    bad_server = re.sub(r'f"([^"]*):dc"\.encode\(\)',
+                        r'f"\1:{room_id}:dc".encode()', server, count=1)
+    assert bad_server != server, "the server signing site's spelling moved"
+    assert not claim(api, bad_server, csproj), (
+        "the claim survives a fifth field on the server half")
+
+    # CONTROL 3 -- the build gate
+    assert not claim(api, server,
+                     csproj.replace("<DebugType>none</DebugType>", "", 1)), (
+        "the claim survives the removal of DebugType=none")
+
+    # AND THE INERT TWIN: an edit of the same shape that changes none of the
+    # three leaves the claim true, so a red above is about the canonical and the
+    # gate rather than about any edit at all.
+    assert claim(api + LF + "// an unrelated comment line" + LF,
+                 server + LF + "# an unrelated comment line" + LF,
+                 csproj + LF + "<!-- an unrelated comment -->" + LF)
