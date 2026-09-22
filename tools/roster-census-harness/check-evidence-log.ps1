@@ -78,11 +78,18 @@ $resultPatterns = @(
     @{ Name = 'evidence-log-controls'; Pattern = '^EVIDENCE-LOG CONTROLS (PASS|FAIL)';  Token = 'run-evidence-log-controls.ps1' },
     @{ Name = 'notes-privacy';         Pattern = '^NOTES (PASS|FAIL|VOID)';             Token = 'check-notes-privacy.ps1' },
     @{ Name = 'notes-citations';       Pattern = '^CITATIONS (PASS|FAIL|VOID)';         Token = 'check-notes-citations.ps1' },
+    # The citation gate's controls-only half prints a DIFFERENT verdict, so a
+    # run that did not read the notes cannot be swept as one that did.
+    @{ Name = 'citation-controls';     Pattern = '^CITATION-CONTROLS (PASS|FAIL|VOID)'; Token = 'check-notes-citations.ps1' },
+    @{ Name = 'warning-baseline';      Pattern = '^WARNING-BASELINE (PASS|FAIL|VOID)';  Token = 'check-warning-baseline.ps1' },
+    @{ Name = 'harness-inventory';     Pattern = '^HARNESS-INVENTORY (PASS|FAIL|VOID)'; Token = 'check-harness-inventory.ps1' },
+    @{ Name = 'artifact-bind-controls';Pattern = '^ARTIFACT-BIND CONTROLS (PASS|FAIL|VOID)'; Token = 'run-artifact-bind-controls.ps1' },
     # The build log's own two verdicts. They are results here because a process
     # computes and prints them above its own invocation line - which is what
-    # made the build log sweepable at all.
-    @{ Name = 'artifact-hash-match';   Pattern = '^(MATCH|MISMATCH) \|';                Token = 'bind-artifact-hash.ps1' },
-    @{ Name = 'artifact-commit-bound'; Pattern = '^(BOUND|UNBOUND) \|';                 Token = 'bind-artifact-hash.ps1' }
+    # made the build log sweepable at all. The process that prints them is now
+    # the one that RAN the rebuilds, so the token names it.
+    @{ Name = 'artifact-hash-match';   Pattern = '^(MATCH|MISMATCH) \|';                Token = 'build-and-bind-artifact.ps1' },
+    @{ Name = 'artifact-commit-bound'; Pattern = '^(BOUND|UNBOUND) \|';                 Token = 'build-and-bind-artifact.ps1' }
 )
 
 $selfPrintedPattern = '^invocation:'

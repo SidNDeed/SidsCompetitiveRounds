@@ -125,10 +125,10 @@ $cases = @(
     # The build log put through the same rule as every other log.
     @{ Name = 'E6-removes-the-binders-self-printed-invocation'; Expect = 'FAIL'; Sweep = 'build';
        Why = 'lens finding 5: the build log''s own verdicts must be bound to the process that computed them';
-       Edits = @(@{ Log = 'build'; Anchor = '^invocation:\s+.*bind-artifact-hash'; Action = 'remove' }) },
+       Edits = @(@{ Log = 'build'; Anchor = '^invocation:\s+.*build-and-bind-artifact'; Action = 'remove' }) },
     @{ Name = 'E6-twin-respaces-the-binders-invocation'; Expect = 'PASS'; Sweep = 'build';
        Why = 'inert twin: the same line, respaced, still binds MATCH and BOUND to the process that computed them';
-       Edits = @(@{ Log = 'build'; Anchor = '^invocation:\s+.*bind-artifact-hash'; Action = 'respace-invocation' }) },
+       Edits = @(@{ Log = 'build'; Anchor = '^invocation:\s+.*build-and-bind-artifact'; Action = 'respace-invocation' }) },
 
     # An invocation line that names nothing binds nothing.
     @{ Name = 'E7-replaces-the-invocation-path-with-placeholder-text'; Expect = 'FAIL'; Sweep = 'tests';

@@ -63,11 +63,12 @@
 # live notes can only mutate what happens to be there today.
 
 param(
-    [Parameter(Mandatory = $true)][string]$Notes,
-    [Parameter(Mandatory = $true)][string]$Root,
-    [Parameter(Mandatory = $true)][string]$LogDir,
+    [string]$Notes = '',
+    [string]$Root = '',
+    [string]$LogDir = '',
     [string]$SectionPattern = '^#\s+Round 3\b',
-    [string]$WorkDir = (Join-Path ([System.IO.Path]::GetTempPath()) 'scr-r3-notes-citation-controls')
+    [switch]$ControlsOnly,
+    [string]$WorkDir = (Join-Path ([System.IO.Path]::GetTempPath()) 'scr-r4-notes-citation-controls')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -101,6 +102,7 @@ function Invoke-CitationScan {
     $out = New-Object System.Collections.Generic.List[string]
     $res = [pscustomobject]@{
         Found = 0; Checked = 0; Historical = 0; Failures = 0
+        CensusBlocks = 0; CensusHeadings = 0
         Void = $false; VoidWhy = ''; Lines = $out
     }
 
@@ -140,7 +142,10 @@ function Invoke-CitationScan {
         }
         if ($cites.Count -eq 0) { continue }
 
-        $isHistorical = $line.Contains('(r2 line)')
+        # The marker names a ROUND, not one particular round: "(r2 line)" was
+        # the only spelling that existed when this was written and the next
+        # round adds another. A flag names a line; the defect is a class (#432).
+        $isHistorical = [regex]::IsMatch($line, '\(r[0-9]+ line\)')
         $no = $i + 1
 
         $perCite = @(); $anchored = @()
@@ -200,8 +205,150 @@ function Invoke-CitationScan {
         }
     }
 
+    # ---- THE LENS CENSUS ----------------------------------------------------
+    #
+    # A census sentence is a claim about the headings beneath it, and round 3
+    # shipped one that disagreed with them - "three MEDIUM and four LOW" over
+    # headings carrying four MEDIUM and three LOW. Nothing reddened, because a
+    # summary of prose was prose. So the census is DERIVED from the headings
+    # (#431) rather than written beside them: a census block declares the
+    # region it summarises, the headings of that region are COUNTED, and the
+    # two must agree.
+    #
+    # The block is delimited by SCR-LENS-CENSUS BEGIN region=... and
+    # SCR-LENS-CENSUS END, markers that exist for no other purpose than to be
+    # found (#306). A block may summarise a region in an earlier section - that
+    # is how a superseded census is corrected without rewriting the section it
+    # came from - so headings are counted over the WHOLE file while blocks are
+    # read only from the policed section.
+    #
+    # ABSENCE IS A FAILURE, not a silent pass (#276 / #430): any severity-
+    # bearing heading INSIDE the policed section whose region no block in that
+    # section claims is reported, because a lens section that summarises itself
+    # nowhere is the case the round-3 sentence was one edit away from.
+    $headingRe = '^###\s+(?<region>\S+)-(?<num>\d+)\s+[—-]\s+(?<sev>HIGH|MEDIUM|LOW)\b'
+    $sevs = @('HIGH', 'MEDIUM', 'LOW')
+
+    $byRegion = @{}
+    $inSection = @{}
+    for ($i = 0; $i -lt $notesLines.Length; $i++) {
+        $hm = [regex]::Match($notesLines[$i], $headingRe)
+        if (-not $hm.Success) { continue }
+        $rg = $hm.Groups['region'].Value
+        $sv = $hm.Groups['sev'].Value.ToUpperInvariant()
+        if (-not $byRegion.ContainsKey($rg)) { $byRegion[$rg] = @{ 'HIGH' = 0; 'MEDIUM' = 0; 'LOW' = 0 } }
+        $byRegion[$rg][$sv] = $byRegion[$rg][$sv] + 1
+        $res.CensusHeadings++
+        if ($i -ge $start) { $inSection[$rg] = $true }
+    }
+
+    $claimedRegions = @{}
+    $openAt = -1; $openRegion = ''
+    for ($i = $start; $i -lt $notesLines.Length; $i++) {
+        $line = $notesLines[$i]
+        if ($line.Contains('SCR-LENS-CENSUS BEGIN')) {
+            if ($openAt -ge 0) {
+                $res.Failures++
+                $out.Add("FAIL | notes:" + ($i + 1) + " | a census block opens before the previous one closed")
+                continue
+            }
+            $rm = [regex]::Match($line, 'region=(?<r>\S+?)\s*(-->|$)')
+            if (-not $rm.Success) {
+                $res.Failures++
+                $out.Add("FAIL | notes:" + ($i + 1) + " | a census block names no region, so it summarises nothing checkable")
+                continue
+            }
+            $openAt = $i; $openRegion = $rm.Groups['r'].Value
+            continue
+        }
+        if ($line.Contains('SCR-LENS-CENSUS END')) {
+            if ($openAt -lt 0) {
+                $res.Failures++
+                $out.Add("FAIL | notes:" + ($i + 1) + " | a census block closes without having opened")
+                continue
+            }
+            $res.CensusBlocks++
+            if ($claimedRegions.ContainsKey($openRegion)) {
+                $res.Failures++
+                $out.Add("FAIL | notes:" + ($openAt + 1) + " | the region " + $openRegion + " is summarised by two census blocks")
+            }
+            $claimedRegions[$openRegion] = $true
+
+            $body = ''
+            for ($j = $openAt + 1; $j -lt $i; $j++) { $body = $body + $notesLines[$j] + "`n" }
+
+            $claimed = @{ 'HIGH' = 0; 'MEDIUM' = 0; 'LOW' = 0 }
+            $stated = @{}
+            foreach ($m in [regex]::Matches($body, '\*\*(?<n>\d+)\*\*\s*(?<s>HIGH|MEDIUM|LOW)\b')) {
+                $sv = $m.Groups['s'].Value.ToUpperInvariant()
+                if ($stated.ContainsKey($sv)) {
+                    $res.Failures++
+                    $out.Add("FAIL | notes:" + ($openAt + 1) + " | the census for " + $openRegion + " states " + $sv + " twice")
+                }
+                $stated[$sv] = $true
+                $claimed[$sv] = [int]$m.Groups['n'].Value
+            }
+            $totals = @([regex]::Matches($body, '\*\*(?<n>\d+)\*\*(?!\s*(HIGH|MEDIUM|LOW)\b)') | ForEach-Object { [int]$_.Groups['n'].Value })
+
+            $counted = if ($byRegion.ContainsKey($openRegion)) { $byRegion[$openRegion] } else { @{ 'HIGH' = 0; 'MEDIUM' = 0; 'LOW' = 0 } }
+            $sum = 0
+            foreach ($sv in $sevs) { $sum = $sum + $counted[$sv] }
+
+            if ($sum -eq 0) {
+                $res.Failures++
+                $out.Add("FAIL | notes:" + ($openAt + 1) + " | the census claims to summarise " + $openRegion +
+                    " and no heading of that region carries a severity, so the claim answers to nothing")
+            }
+            foreach ($sv in $sevs) {
+                if ($claimed[$sv] -ne $counted[$sv]) {
+                    $res.Failures++
+                    $out.Add("FAIL | notes:" + ($openAt + 1) + " | " + $openRegion + ": the census says " +
+                        $claimed[$sv] + " " + $sv + " and the headings beneath it carry " + $counted[$sv])
+                } else {
+                    $out.Add("ok   | notes:" + ($openAt + 1) + " | " + $openRegion + ": census " + $sv + "=" +
+                        $claimed[$sv] + " equals the headings counted")
+                }
+            }
+            if ($totals.Count -gt 1) {
+                $res.Failures++
+                $out.Add("FAIL | notes:" + ($openAt + 1) + " | the census for " + $openRegion + " states more than one total")
+            } elseif ($totals.Count -eq 1) {
+                if ($totals[0] -ne $sum) {
+                    $res.Failures++
+                    $out.Add("FAIL | notes:" + ($openAt + 1) + " | " + $openRegion + ": the census states a total of " +
+                        $totals[0] + " and the headings beneath it number " + $sum)
+                } else {
+                    $out.Add("ok   | notes:" + ($openAt + 1) + " | " + $openRegion + ": census total=" + $sum + " equals the headings counted")
+                }
+            }
+
+            $openAt = -1; $openRegion = ''
+            continue
+        }
+    }
+    if ($openAt -ge 0) {
+        $res.Failures++
+        $out.Add("FAIL | notes:" + ($openAt + 1) + " | a census block never closes")
+    }
+
+    foreach ($rg in (@($inSection.Keys) | Sort-Object)) {
+        if (-not $claimedRegions.ContainsKey($rg)) {
+            $res.Failures++
+            $out.Add("FAIL | the policed section carries severity headings for " + $rg +
+                " and no census block in it summarises them - an unsummarised lens region is a refusal, not a pass")
+        }
+    }
+
     if ($res.Found -eq 0) { $res.Void = $true; $res.VoidWhy = 'no citation found in the section - the rule would pass vacuously' }
     elseif ($res.Checked -ne $res.Found) { $res.Void = $true; $res.VoidWhy = "checked=" + $res.Checked + " does not equal found=" + $res.Found }
+    elseif ($res.CensusBlocks -eq 0 -and $inSection.Count -eq 0) {
+        # Neither a census block nor a severity heading in the policed section:
+        # the census rule had nothing to check, and a rule that checked nothing
+        # has not passed. With headings but no block the explicit FAIL above is
+        # the better answer, so this only catches the empty case.
+        $res.Void = $true
+        $res.VoidWhy = 'the policed section carries neither a census block nor a severity heading, so the census rule checked nothing'
+    }
     return $res
 }
 
@@ -215,14 +362,29 @@ Write-Output ("invocation-utc: " + (Get-Date).ToUniversalTime().ToString('yyyy-M
 Write-Output ''
 
 # ---- the live scan ----------------------------------------------------------
-$live = Invoke-CitationScan -NotesPath $Notes -RootPath $Root -LogPath $LogDir -Pattern $SectionPattern
-foreach ($l in $live.Lines) { Write-Output $l }
-if ($live.Void) {
-    Write-Output ("VOID | " + $live.VoidWhy)
-    Write-Output 'CITATIONS VOID'
-    exit 3
+# -ControlsOnly exists because the controls are the part of this gate that can
+# run before the section it polices has been written. The two halves print
+# DIFFERENT verdicts, so a controls-only run can never be mistaken downstream
+# for a run that read the notes (#342).
+$live = $null
+if (-not $ControlsOnly) {
+    if ($Notes -eq '' -or $Root -eq '' -or $LogDir -eq '') {
+        Write-Output 'VOID | -Notes, -Root and -LogDir are required unless -ControlsOnly is given'
+        Write-Output 'CITATIONS VOID'
+        exit 3
+    }
+    $live = Invoke-CitationScan -NotesPath $Notes -RootPath $Root -LogPath $LogDir -Pattern $SectionPattern
+    foreach ($l in $live.Lines) { Write-Output $l }
+    if ($live.Void) {
+        Write-Output ("VOID | " + $live.VoidWhy)
+        Write-Output 'CITATIONS VOID'
+        exit 3
+    }
+    Write-Output ''
+} else {
+    Write-Output 'mode: controls only - the notes are not read in this run, and the verdict says so'
+    Write-Output ''
 }
-Write-Output ''
 
 # ---- the controls, executed -------------------------------------------------
 Write-Output '--- controls (the mutation must FAIL, the inert twin must stay GREEN) ---'
@@ -250,7 +412,18 @@ $baseNotes = @(
     '# Round 3 - synthetic control baseline',
     '| seats | `" seats="` is emitted at `plugin/Demo.cs:6` |',
     '| fighters | `" fighters="` is emitted at `plugin/Demo.cs:5` |',
-    '| both | `" fighters="` at `plugin/Demo.cs:5` and `" seats="` at `plugin/Demo.cs:6` |'
+    '| both | `" fighters="` at `plugin/Demo.cs:5` and `" seats="` at `plugin/Demo.cs:6` |',
+    '',
+    '<!-- SCR-LENS-CENSUS BEGIN region=SYN-LENS -->',
+    'The synthetic lens pass returned **3** findings: **1** HIGH, **1** MEDIUM and **1** LOW.',
+    '<!-- SCR-LENS-CENSUS END -->',
+    '',
+    '### SYN-LENS-1 - HIGH - a synthetic finding',
+    'text',
+    '### SYN-LENS-2 - MEDIUM - a synthetic finding',
+    'text',
+    '### SYN-LENS-3 - LOW - a synthetic finding',
+    'text'
 )
 $basePath = Join-Path $WorkDir 'baseline.md'
 [System.IO.File]::WriteAllLines($basePath, $baseNotes)
@@ -296,6 +469,45 @@ $controls = @(
        From = '`" fighters="` at `plugin/Demo.cs:5` and `" seats="` at `plugin/Demo.cs:6`'
        To   = '`" seats="` at `plugin/Demo.cs:6` and `" fighters="` at `plugin/Demo.cs:5`'
        Why  = 'inert twin: the same two citations and anchors, their order exchanged' }
+
+    # THE LENS CENSUS. Round 3 shipped a census sentence saying three MEDIUM
+    # and four LOW over headings carrying four MEDIUM and three LOW, and
+    # nothing reddened. These four pairs are what reddens now.
+    @{ Name = 'C5-states-a-severity-count-the-headings-do-not-carry'; Expect = 'FAIL'
+       From = '**1** MEDIUM and **1** LOW'
+       To   = '**2** MEDIUM and **1** LOW'
+       Why  = 'round-3 finding L4: a census disagreeing with the headings it summarises must red' }
+    @{ Name = 'C5-twin-respells-the-same-count-at-the-same-site';     Expect = 'PASS'
+       From = '**1** MEDIUM and **1** LOW'
+       To   = '**01** MEDIUM and **1** LOW'
+       Why  = 'inert twin: the same field, the same value, spelled differently' }
+
+    @{ Name = 'C6-removes-the-census-block-from-a-section-that-has-headings'; Expect = 'FAIL'
+       From = '<!-- SCR-LENS-CENSUS BEGIN region=SYN-LENS -->'
+       To   = 'The synthetic lens pass is described below.'
+       Why  = 'an unsummarised lens region is a refusal, not a silent pass - absence must fail (#276 / #430)' }
+    @{ Name = 'C6-twin-rewords-the-prose-inside-the-same-block';      Expect = 'PASS'
+       From = 'The synthetic lens pass returned **3** findings'
+       To   = 'This synthetic lens pass filed **3** findings'
+       Why  = 'inert twin: the same block, its sentence rewritten around the same figures' }
+
+    @{ Name = 'C7-adds-a-finding-heading-without-updating-the-census'; Expect = 'FAIL'
+       From = '### SYN-LENS-3 - LOW - a synthetic finding'
+       To   = "### SYN-LENS-3 - LOW - a synthetic finding`r`ntext`r`n### SYN-LENS-4 - LOW - one more synthetic finding"
+       Why  = 'the census is DERIVED from the headings, so a heading added beneath it must move the count or red' }
+    @{ Name = 'C7-twin-adds-a-heading-that-carries-no-severity';       Expect = 'PASS'
+       From = '### SYN-LENS-3 - LOW - a synthetic finding'
+       To   = "### SYN-LENS-3 - LOW - a synthetic finding`r`ntext`r`n### SYN-SELF - found by running the gate, not by review"
+       Why  = 'inert twin: an insertion of the same kind at the same site, of a heading the census does not count' }
+
+    @{ Name = 'C8-states-a-total-the-severities-do-not-sum-to';        Expect = 'FAIL'
+       From = 'returned **3** findings'
+       To   = 'returned **4** findings'
+       Why  = 'a total is a second claim about the same headings and must agree with them' }
+    @{ Name = 'C8-twin-exchanges-the-two-severity-clauses';            Expect = 'PASS'
+       From = '**1** MEDIUM and **1** LOW'
+       To   = '**1** LOW and **1** MEDIUM'
+       Why  = 'inert twin: the same two figures, their order exchanged' }
 )
 
 $failures = 0
@@ -331,8 +543,19 @@ foreach ($c in $controls) {
 }
 
 Write-Output ''
+if ($ControlsOnly) {
+    Write-Output ("controls=" + $controls.Count `
+        + " reds=" + @($controls | Where-Object { $_.Expect -eq 'FAIL' }).Count `
+        + " twins=" + @($controls | Where-Object { $_.Expect -eq 'PASS' }).Count `
+        + " controlFailures=" + $failures)
+    if ($failures -gt 0) { Write-Output 'CITATION-CONTROLS FAIL'; exit 1 }
+    Write-Output 'CITATION-CONTROLS PASS'
+    exit 0
+}
+
 Write-Output ("citationsFound=" + $live.Found + " citationsChecked=" + $live.Checked `
-    + " historical=" + $live.Historical + " liveFailures=" + $live.Failures `
+    + " historical=" + $live.Historical + " censusBlocks=" + $live.CensusBlocks `
+    + " severityHeadings=" + $live.CensusHeadings + " liveFailures=" + $live.Failures `
     + " controls=" + $controls.Count + " controlFailures=" + $failures)
 
 if ($live.Failures -gt 0 -or $failures -gt 0) { Write-Output 'CITATIONS FAIL'; exit 1 }
