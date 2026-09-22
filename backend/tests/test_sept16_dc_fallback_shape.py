@@ -112,9 +112,13 @@ def test_the_marker_is_stamped_on_the_post_lock_clock():
 
 
 def test_the_deferred_return_is_distinguishable_from_an_old_servers_answer():
-    # An api that predates the flag answers 200 and ignores it, having already
-    # settled (bug #266, learning #422). The caller's only discriminator is the
-    # body, so the deferred status string must not be one the old code returns.
+    # An api that predates the flag answers 200 and IGNORES the flag (bug #266,
+    # learning #422). What that 200 proves is ONE thing: the answering box
+    # predates the field. It proves nothing about settlement -- the old build
+    # took whichever of its own branches the report matched, and on this build
+    # two of the five non-deferring exits settle while the other three decide
+    # nothing. The caller's only discriminator is the response body, so the
+    # deferred status string must not be one the old code returns.
     body = "\n".join(span("team_series_report_dc"))
     assert '"status": "deferred"' in body
     assert '"deferred": True' in body
@@ -334,6 +338,21 @@ def test_the_route_docstring_states_the_migration_dependency_it_created():
     assert "UndefinedColumn" in doc, doc
     # And the refusal is priced at what it actually costs, not at "the banner".
     assert "WHAT A REFUSAL COSTS" in doc, doc
+    # THE HEADING IS NOT THE CLAIM. A heading survives any rewrite underneath
+    # it, so the superseded banner-only pricing could return with this check
+    # still green -- a check keyed on something merely correlated with the
+    # property it is named for (#732, #342). What is bound is the CONTENT: the
+    # three things the tab refreshes from this answer, the latch, the explicit
+    # statement that pricing the refusal at the banner alone understates it,
+    # and the half that says what a refusal does NOT cost. A rewording that
+    # keeps those meanings keeps this green; the banner-only claim carries
+    # none of them.
+    tail = re.sub(r"\s+", " ", doc[doc.upper().index("WHAT A REFUSAL COSTS"):])
+    for needed in ("series status", "series score", "colour", "dark",
+                   "understates", "banner"):
+        assert needed in tail, (needed, tail)
+    assert re.search(r"does NOT cost", tail), tail
+    assert re.search(r"nothing here writes", tail), tail
 
 
 # ── The cross-lane binding: one field list, read off BOTH trees ──────────
@@ -377,12 +396,48 @@ _STATUS_ROUTE_CALL = re.compile(r'/api/v1/team/series/[^\r\n]{0,60}/status')
 _CLIENT_LANE_BRANCH = "claude/sept16-client-r2"
 
 
-def _carries_the_client_half(root):
-    """(sources, carries) for one candidate tree: does its plugin call the route."""
+# The two sources a supplied client representation must contain. A candidate
+# the caller NAMED is answered about itself: if one of these is absent the
+# resolver refuses by name instead of trying the next tree, because a
+# fall-through answers about a checkout the caller never chose (#342, #447).
+NAMED_CLIENT_SOURCES = ("ApiClient.cs", "NativeUI.cs")
+
+
+def _client_sources_in(root):
+    """(sources, layout) for one candidate tree, in either layout it can have.
+
+    TWO LAYOUTS, because the two things this resolver is ever pointed at do
+    not share one. A CHECKOUT carries the client half under `plugin/`. A
+    frozen REVIEW COPY is a directory of .cs files and nothing else -- it has
+    no repository around it and never had one. Round 6 knew only the first, so
+    the frozen copy the review supplied resolved to zero sources, the binding
+    fell through to the next candidate, and the check answered about a tree
+    nobody had chosen while reading as a resolution error (#342).
+    """
+    root = pathlib.Path(root)
     try:
-        sources = sorted((pathlib.Path(root) / "plugin").glob("*.cs"))
+        nested = sorted((root / "plugin").glob("*.cs"))
     except OSError:
-        return [], False
+        nested = []
+    if nested:
+        return nested, "a checkout carrying plugin/"
+    try:
+        direct = sorted(root.glob("*.cs"))
+    except OSError:
+        direct = []
+    if direct:
+        return direct, "a directory of .cs sources, taken as itself"
+    return [], "no .cs sources"
+
+
+def _missing_named_sources(sources):
+    have = {p.name for p in sources}
+    return [n for n in NAMED_CLIENT_SOURCES if n not in have]
+
+
+def _carries_the_client_half(root):
+    """(sources, carries) for one candidate tree: do its sources call the route."""
+    sources, _layout = _client_sources_in(root)
     for p in sources:
         try:
             txt = p.read_text(encoding="utf-8", errors="replace")
@@ -456,31 +511,68 @@ def _client_lane_sources():
     this bundle may print is the production pin.
     """
     cands = []
+    scan = False
     env = os.environ.get("SCR_CROSS_LANE_CLIENT_ROOT")
     if env:
         cands.append((pathlib.Path(env),
-                      "the tree $SCR_CROSS_LANE_CLIENT_ROOT names"))
+                      "the tree $SCR_CROSS_LANE_CLIENT_ROOT names", True))
     else:
         cands.append((REPO_ROOT / "REVIEW-INPUT" / "client-lane",
-                      "the review pin's client-lane copy"))
-        cands.append((REPO_ROOT, "this repository itself -- the merged tree"))
-        try:
-            proc = subprocess.run(
-                ["git", "-C", str(REPO_ROOT), "worktree", "list"],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            for path in _worktrees_on_branch(
-                    proc.stdout.decode("utf-8", "replace"),
-                    _CLIENT_LANE_BRANCH):
-                cands.append((pathlib.Path(path),
-                              "the client lane's worktree"))
-        except Exception:
-            pass
-    tried = []
-    for root, how in cands:
+                      "the review pin's client-lane copy", True))
+        cands.append((REPO_ROOT, "this repository itself -- the merged tree",
+                      False))
+        # THE SIBLING SCAN, AND THE ONE STATE IN WHICH IT DOES NOT RUN. While
+        # the two lanes are under separate review rounds, the other lane's
+        # WORKING tree is being written by its own builder: reading it answers
+        # about a tree that is mid-edit, and the review supplies a frozen
+        # representation as candidate 1 for exactly that reason. A review run
+        # sets SCR_CROSS_LANE_NO_SIBLING_SCAN and names the frozen copy. The
+        # switch removes candidate 4 ONLY -- 1 to 3 are untouched, so the
+        # binding still executes and still fails rather than skipping -- and
+        # the resolution SAYS which candidate list produced it, because a run
+        # that does not name its own candidates cannot be read back (#438).
+        scan = not os.environ.get("SCR_CROSS_LANE_NO_SIBLING_SCAN")
+        if scan:
+            try:
+                proc = subprocess.run(
+                    ["git", "-C", str(REPO_ROOT), "worktree", "list"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                for path in _worktrees_on_branch(
+                        proc.stdout.decode("utf-8", "replace"),
+                        _CLIENT_LANE_BRANCH):
+                    cands.append((pathlib.Path(path),
+                                  "the client lane's worktree", False))
+            except Exception:
+                pass
+    tried = [] if env or scan else [
+        "the sibling-worktree scan (NOT RUN -- SCR_CROSS_LANE_NO_SIBLING_SCAN "
+        "is set, so no worktree of the other lane was read)"]
+    for root, how, binding in cands:
+        # A SUPPLIED representation -- candidates 1 and 2 -- is BINDING: the
+        # caller named it, so it is the tree this check answers about and a
+        # miss on it is a refusal, never a reason to measure the next one. The
+        # discovered candidates are not binding, because a repository that
+        # simply has no client half yet is the ordinary pre-merge state and
+        # not a defect.
+        if binding and pathlib.Path(root).is_dir():
+            sources, _layout = _client_sources_in(root)
+            missing = _missing_named_sources(sources)
+            if missing:
+                return [], ("REFUSED -- " + how + " is the representation this "
+                            "check was pointed at, and "
+                            + ", ".join(how + "/" + m for m in missing)
+                            + " is absent. Nothing else is tried: falling "
+                            "through here would answer about a tree the caller "
+                            "never chose.")
+            if not _carries_the_client_half(root)[1]:
+                return [], ("REFUSED -- " + how + " carries "
+                            + ", ".join(NAMED_CLIENT_SOURCES)
+                            + " and none of them calls the status route, so it "
+                            "is not the client half it was offered as.")
         sources, carries = _carries_the_client_half(root)
         if carries:
             return sources, how
-        tried.append(how + (" (no plugin sources)" if not sources
+        tried.append(how + (" (no client sources)" if not sources
                             else " (does not call the route)"))
     return [], "no candidate tree called the status route: " + "; ".join(tried)
 
@@ -1432,3 +1524,313 @@ def test_the_deferred_definition_is_single_and_its_arithmetic_matches_the_exits(
                  "false on each settling exit",
                  "present and false, it means this build settled the report"):
         assert gone not in SRC, gone
+
+
+# ── The comment-claim surface, held as a class ───────────────────────────
+#
+# Round 6 corrected seven claims and shipped four more. A claim is corrected
+# HERE, with its superseded form named, so a revert reddens instead of reading
+# like prose nobody measures (#302, #351, #459).
+
+
+def _collapsed(text_):
+    """Comment markers and wrapping removed, so a claim is one string."""
+    return re.sub(r"\s+", " ", re.sub(r"(?m)^\s*(--|#)\s?", " ", text_))
+
+
+_CLAIM_TABLE_NAMES = ("SUPERSEDED_CLAIMS", "CORRECTED_CLAIMS",
+                      "PRE_FIELD_MISREADINGS", "PRE_FIELD_SENTENCE")
+
+
+def _without_claim_tables(text_):
+    """A claim checker must not read its own evidence table.
+
+    This file QUOTES every superseded sentence, so a scan that included the
+    tables below would find each one in the file that hunts for it and redden
+    for ever -- a check that cannot pass, which is the same defect as one that
+    cannot fail (#342). The two spans are removed by AST line range rather
+    than by a marker comment, so a table that moves or grows stays excluded
+    with nothing re-typed.
+    """
+    if not any(n in text_ for n in _CLAIM_TABLE_NAMES):
+        return text_
+    try:
+        tree = ast.parse(text_)
+    except SyntaxError:
+        return text_
+    drop = set()
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id in _CLAIM_TABLE_NAMES
+                for t in node.targets):
+            drop |= set(range(node.lineno, node.end_lineno + 1))
+    assert drop, _CLAIM_TABLE_NAMES
+    return "\n".join(ln for i, ln in enumerate(text_.splitlines(), 1)
+                      if i not in drop)
+
+
+def _dc_claim_sources():
+    here = pathlib.Path(__file__).resolve().parent
+    sql = (here.parents[0] / "sql" / "326_team_series_dc_fallback_at.sql")
+    return {
+        "main.py": SRC,
+        "326_team_series_dc_fallback_at.sql": sql.read_text(encoding="utf-8"),
+        "test_sept16_dc_fallback_shape.py":
+            (here / "test_sept16_dc_fallback_shape.py").read_text(encoding="utf-8"),
+        "test_sept16_dc_fallback_orderings.py":
+            (here / "test_sept16_dc_fallback_orderings.py").read_text(encoding="utf-8"),
+    }
+
+
+# Every superseded sentence this round replaced, and the file it lived in. A
+# form that returns anywhere in the batch reddens, not only at the line it was
+# found on: the defect is the CLAIM, and a claim moves between files (#432).
+SUPERSEDED_CLAIMS = (
+    "the only thing it guarantees is the thing it does",
+    "after it runs, that row carries no marker, whatever the marker's age was",
+    "The deferred-fallback sweep is the only thing that ever settles a series",
+    "only the state-poll's expiry sweep still reads it",
+    "Nothing has to run for the deferral to end",
+    "EXPIRES BY DEFAULT. Nothing has to run",
+    "zero-total disconnect fallback",
+    "answers 200 and ignores it, having already settled",
+)
+
+# ...and the sentence that replaced each one, which must be present exactly
+# once. A correction that is merely a deletion leaves the next reader with no
+# statement at all, which is how the first of these got written twice in
+# opposite directions.
+CORRECTED_CLAIMS = (
+    ("main.py",
+     "it ATTEMPTS the clear inside its own savepoint and swallows every "
+     "exception the attempt raises"),
+    ("main.py",
+     "a swallowed database error"),
+    ("main.py",
+     "The deferred-fallback sweep is the only UNATTENDED writer that settles a "
+     "series a fallback report declined to settle"),
+    ("main.py",
+     "legacy in its WRITER -- no statement in this api sets that status any "
+     "more"),
+    # A separate row, because _collapsed strips a LINE-LEADING "--" (it has to:
+    # the migration's prose is a SQL comment) and this sentence wraps straight
+    # onto one. Two rows say the same thing about the same paragraph without
+    # the check depending on where the line happens to break.
+    ("main.py", "and it has many READERS still"),
+    ("326_team_series_dc_fallback_at.sql",
+     "THE MARKER PERSISTS; THE DEFERRAL IS ENDED BY A WRITER, NEVER BY THE "
+     "CLOCK."),
+    ("326_team_series_dc_fallback_at.sql",
+     "its point totals are whatever the client sent and are NOT read on this "
+     "path"),
+    ("test_sept16_dc_fallback_shape.py",
+     "What that 200 proves is ONE thing: the answering box predates the field. "
+     "It proves nothing about settlement"),
+)
+
+
+def test_no_dc_file_carries_a_superseded_claim():
+    """Every claim this round corrected, named by its superseded form.
+
+    The correction and the check are written together on purpose: a comment
+    corrected without one is a sentence the next pass can revert with nothing
+    anywhere to notice (#302, #351). Each string below was in the tree at the
+    round-6 tip and is not in it now.
+    """
+    for name, text_ in _dc_claim_sources().items():
+        flat = _collapsed(_without_claim_tables(text_))
+        for gone in SUPERSEDED_CLAIMS:
+            assert gone not in flat, (name, gone)
+    # ...and the exclusion is not a hole: with the tables left in, this same
+    # scan MUST find them. A filter that discarded the line it measures would
+    # make the check above unfailable (#441, #342).
+    own = _collapsed(_dc_claim_sources()["test_sept16_dc_fallback_shape.py"])
+    assert all(g in own for g in SUPERSEDED_CLAIMS), [
+        g for g in SUPERSEDED_CLAIMS if g not in own]
+
+
+def test_every_correction_this_round_made_is_stated_once():
+    """The other direction: the replacement exists, in the file it belongs to.
+
+    A superseded claim can be satisfied by deleting the paragraph, which
+    leaves the reader of the code with no statement about the case at all --
+    and the two revival-age absolutes are what happens next (#351).
+    """
+    sources = _dc_claim_sources()
+    for name, sentence in CORRECTED_CLAIMS:
+        flat = _collapsed(_without_claim_tables(sources[name]))
+        assert flat.count(sentence) >= 1, (name, sentence)
+
+
+def test_the_marker_clear_states_what_a_swallowed_error_leaves():
+    """L6. The helper catches every exception; its doc must price that.
+
+    The implementation is `try: ... except Exception: pass`, so "after it runs
+    that row carries no marker" is a claim about a state space the code does
+    not cover. What the doc may say is what the call does: it attempts the
+    clear under a savepoint, and a swallowed error leaves the revived row
+    carrying its marker -- runtime residual 2, recorded rather than implied.
+    """
+    doc = ast.get_docstring(node_named("_team_clear_dc_fallback_marker"))
+    flat = _collapsed(doc)
+    assert "ATTEMPTS the clear inside its own savepoint" in flat, doc
+    assert "leaves the revived row still carrying its marker" in flat, doc
+    # And the implementation this doc describes is still the swallowing one:
+    # a doc that described a re-raise would be equally wrong the other way.
+    code = code_lines_of(node_named("_team_clear_dc_fallback_marker"))
+    assert any("except Exception:" in ln for ln in code), code
+    assert any(ln.strip() == "pass" for ln in code), code
+
+
+# Every reading of an absent `deferred` that contract item 6 forbids. A
+# module-level table because the checker excludes its own tables by NAME: an
+# inline tuple inside the test body is evidence the scan would then find in
+# the file that hunts for it.
+PRE_FIELD_MISREADINGS = (
+    "having already settled",
+    "absent means the series settled",
+    "an absent deferred field means it settled",
+)
+
+# ...and the reading that replaced them, counted rather than merely found: a
+# claim stated twice is a claim that can be corrected once (#660). The string
+# is a table entry, never an inline literal in the assertion, because the
+# checker excludes its own tables by name and an inline copy would be counted.
+PRE_FIELD_SENTENCE = (
+    "What that 200 proves is ONE thing: the answering box predates the field. "
+    "It proves nothing about settlement")
+
+
+def test_no_dc_file_reads_an_absent_deferred_field_as_a_settlement():
+    """Contract item 6, the server lane's half.
+
+    A 200 from a box that predates the field proves that the box predates the
+    field. It is not evidence about the row: of the five non-deferring exits
+    on this build two settle and three decide nothing, and the old build's
+    behaviour was its own. A reader who priced an absent field as settlement
+    would stop waiting for real totals on a series still expecting them.
+    """
+    for name, text_ in _dc_claim_sources().items():
+        flat = _collapsed(_without_claim_tables(text_))
+        for gone in PRE_FIELD_MISREADINGS:
+            assert gone not in flat, (name, gone)
+    flat = _collapsed(_without_claim_tables(
+        _dc_claim_sources()["test_sept16_dc_fallback_shape.py"]))
+    assert flat.count(PRE_FIELD_SENTENCE) == 1, flat.count(PRE_FIELD_SENTENCE)
+
+
+# ── L11: the supplied client representation is bound, or refused ─────────
+
+
+def test_a_flat_directory_of_client_sources_is_taken_as_itself(tmp_path):
+    """The frozen review copy's layout, which round 6 could not read.
+
+    A review pin hands this check a DIRECTORY OF .cs FILES -- no repository
+    around it, no `plugin/` under it. Round 6 globbed `<root>/plugin/*.cs`
+    only, so that directory resolved to zero sources and the binding moved on
+    to another tree while reporting a resolution error. Both layouts are
+    answered here, and the nested one still wins where both exist, so a
+    checkout is never read as a flat directory of strays.
+    """
+    flat = tmp_path / "frozen"
+    flat.mkdir()
+    (flat / "ApiClient.cs").write_text(
+        'string url = $"{baseUrl}/api/v1/team/series/{seriesId}/status";\n',
+        encoding="utf-8")
+    sources, layout = _client_sources_in(flat)
+    assert [p.name for p in sources] == ["ApiClient.cs"], sources
+    assert "taken as itself" in layout, layout
+    assert _carries_the_client_half(flat)[1] is True
+
+    # Both layouts present: the checkout's plugin/ wins, so a tree that also
+    # has stray .cs files at its root is still read as a checkout.
+    both = tmp_path / "both"
+    (both / "plugin").mkdir(parents=True)
+    (both / "stray.cs").write_text("// not the client half\n", encoding="utf-8")
+    (both / "plugin" / "ApiClient.cs").write_text(
+        'string url = $"{baseUrl}/api/v1/team/series/{seriesId}/status";\n',
+        encoding="utf-8")
+    sources, layout = _client_sources_in(both)
+    assert [p.name for p in sources] == ["ApiClient.cs"], sources
+    assert "plugin/" in layout, layout
+
+
+def test_a_supplied_representation_missing_a_named_source_is_refused(
+        monkeypatch, tmp_path):
+    """A named candidate that is short a source REFUSES; it never falls through.
+
+    The failure this closes: the resolver was handed the frozen client copy,
+    read nothing in it, and quietly measured the next tree on the list. The
+    answer then describes a checkout nobody chose, and on this workstation
+    that is a tree another builder is editing. Two things are required of the
+    refusal -- that it happens at all, and that it NAMES the missing source,
+    so the reader is not left guessing which half of the representation was
+    short (#447).
+    """
+    root = tmp_path / "short"
+    root.mkdir()
+    (root / "ApiClient.cs").write_text(
+        'string url = $"{baseUrl}/api/v1/team/series/{seriesId}/status";\n'
+        'HasJsonKey(resp, "dc_deferred");\n', encoding="utf-8")
+    monkeypatch.setenv("SCR_CROSS_LANE_CLIENT_ROOT", str(root))
+    sources, how = _client_lane_sources()
+    assert sources == [], sources
+    assert how.startswith("REFUSED"), how
+    assert "NativeUI.cs" in how, how
+    # The named source that IS present is not reported missing.
+    assert "/ApiClient.cs is absent" not in how, how
+
+    # ...and with both named sources present the same call resolves, so the
+    # refusal is specific and not simply this function's only answer (#391).
+    (root / "NativeUI.cs").write_text(
+        'HasJsonKey(resp, "dc_deferred_seconds_remaining");\n'
+        'HasJsonKey(resp, "dc_deferred_bound_seconds");\n', encoding="utf-8")
+    sources, how = _client_lane_sources()
+    assert [p.name for p in sources] == ["ApiClient.cs", "NativeUI.cs"], sources
+    assert not how.startswith("REFUSED"), how
+
+
+def test_a_supplied_representation_that_never_calls_the_route_is_refused(
+        monkeypatch, tmp_path):
+    """The second refusal: both sources present, neither calls the route.
+
+    That is a representation offered as the client half which is not one, and
+    trying the next candidate would answer about a different tree with nothing
+    in the message to say so.
+    """
+    root = tmp_path / "wrongtree"
+    root.mkdir()
+    (root / "ApiClient.cs").write_text(
+        'string url = $"{baseUrl}/api/v1/team/series/{seriesId}/state";\n',
+        encoding="utf-8")
+    (root / "NativeUI.cs").write_text("// nothing\n", encoding="utf-8")
+    monkeypatch.setenv("SCR_CROSS_LANE_CLIENT_ROOT", str(root))
+    sources, how = _client_lane_sources()
+    assert sources == [], sources
+    assert how.startswith("REFUSED"), how
+    assert "calls the status route" in how, how
+
+
+def test_the_sibling_scan_switch_removes_only_that_candidate(monkeypatch):
+    """The switch takes out candidate 4 and leaves 1 to 3 standing.
+
+    A switch that could take the whole binding out of the run would be the
+    skipif this file deleted, under a new name (#715, #664). What it removes
+    is one candidate, and the resolution says so in words a log carries: a run
+    that did not scan may never read as a run that scanned and found nothing.
+    """
+    monkeypatch.delenv("SCR_CROSS_LANE_CLIENT_ROOT", raising=False)
+    monkeypatch.setenv("SCR_CROSS_LANE_NO_SIBLING_SCAN", "1")
+    _sources, how = _client_lane_sources()
+    assert "NOT RUN" in how, how
+    assert "sibling-worktree scan" in how, how
+    # The other three are still tried, by name, in the same message.
+    assert "the review pin's client-lane copy" in how, how
+    assert "this repository itself" in how, how
+    # And the resolver's source still carries all four candidates: the switch
+    # is a run-time state, not a deletion.
+    resolver = ast.unparse(next(n for n in ast.parse(
+        pathlib.Path(__file__).resolve().read_text(encoding="utf-8")).body
+        if isinstance(n, ast.FunctionDef) and n.name == "_client_lane_sources"))
+    assert resolver.count("cands.append") == 4, resolver
+    assert "_worktrees_on_branch(" in resolver, resolver
