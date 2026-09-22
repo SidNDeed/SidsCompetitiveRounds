@@ -76,9 +76,39 @@ using CompetitiveRounds;
 //     attachment count to RequiredAttachments on the DECLINING branch of
 //     StageInto: the write is outside MarkAttached and is not monotone, which
 //     is two of W25's clauses at once.
+//   wiring   wire-commentwrite: W25 must FAIL; W1 control must PASS (and the
+//     W23 inert twin must stay green). The SAME two-way write as wire-reach,
+//     spelled "_attached /* n */ = 0;". A separate row because the round-6
+//     classifier reached the operator with SkipWs, which skips space, tab, CR
+//     and LF and NOT a comment, so this spelling classified as "not a write"
+//     and left the count two-way with W25 green.
+//   wiring   wire-disabledelsewhere: W25 must FAIL; W1 control must PASS (and
+//     the W23 inert twin must stay green). Writes Plugin.modDisabled from
+//     PerfPatches, a file the round-6 scan never opened for it: that flag is
+//     `internal`, not private, so the privateness that mitigated the narrow
+//     surface never covered it.
+//   wiring   wire-secondpatchsite: W25 must FAIL; W1 control must PASS (and
+//     the W23 inert twin must stay green). Adds a second Harmony instance and
+//     a PatchAll beside the one the premise names, in a file that is not
+//     Plugin.cs - which is the only file the two patch-site clauses read.
+//   wiring   wire-cleanuptag: W25 must FAIL; W1 control must PASS (and the W23
+//     inert twin must stay green). Renames the cleanup tag wire-reach keys on.
+//     It is the mutant that guards a MUTANT: without it a renamed tag makes
+//     wire-reach unreachable again while W25 goes on reddening for the write
+//     count, so the RESULT row keeps printing OK (#342/#431).
+//   wiring   wire-ffarank : N1b must FAIL; W1 control must PASS (and the N1
+//     inert twin must stay green - N1 reads the seam and the patches, which
+//     this mutant does not touch). Authors a third distance comparison in
+//     FfaMode, whose two are INHERITED by the seam's single vanilla call.
 //   wiring   wire-pathswap:   D6 must FAIL;  D4 and D5 controls must PASS
 //   wiring   wire-paththrew:  D6 must FAIL;  D4 and D5 controls must PASS
 //   prior-r2            : N1 N2 N3 N4 N5 N6 must all FAIL; W1 control must PASS
+//     N1b is DELIBERATELY NOT on that list and its absence is not an omission:
+//     it pins FfaMode's two comparisons as INHERITED, and FfaMode carries the
+//     same two at the round-2 tip, so N1b is green there and green here. It
+//     asserts nothing round 3 deleted, which is the whole of what prior-r2
+//     measures. Said here because a case sitting outside a list while the list
+//     claims to be complete is how V6 went a round unnoticed.
 // Every OTHER case here has NO mutant of its own, and this is the whole list
 // with the reason each one is on it:
 //   G3, G5, C3, D1, D2, D3, S2, S3, K2, P1, P2  - controls and companion
@@ -214,6 +244,7 @@ internal static class Program
         internal string Rhs;        // for = and compound forms: the value, trimmed
         internal bool Declaration;  // the write is a field declaration's initialiser
         internal string Text;       // the whole source line, whitespace-collapsed
+        internal string Rel;        // the file it was found in, when scanned over many
     }
 
     private static bool IsIdentChar(char c)
@@ -276,6 +307,115 @@ internal static class Program
         int i = LineStartAt(text, index);
         while (i < text.Length && (text[i] == ' ' || text[i] == '\t')) i++;
         return i + 1 < text.Length && text[i] == '/' && text[i + 1] == '/';
+    }
+
+    /// <summary>A copy of the text with every COMMENT's content replaced by
+    /// spaces. Newlines are kept, so every offset and every line number is
+    /// unchanged and a failure message still prints the real line.
+    ///
+    /// WHY THIS EXISTS. ClassifyWrite decides what an occurrence DOES from the
+    /// characters around it, and it reached them with SkipWs, which skips space,
+    /// tab, CR and LF. A comment is none of those. So `_attached /* n */ = 0;`
+    /// named the field in a recognised spelling, reached the classifier, matched
+    /// no operator, and came back as "not a write" - a write missed on
+    /// WHITESPACE grounds by the very pass that removed the SPELLING bound. Same
+    /// class of defect, one typing further on (#342/#431).
+    ///
+    /// Blanking, not deleting: a deletion would move every offset after it.
+    /// String and character literals are tracked so a "//" or "/*" inside one is
+    /// not read as a comment start, and "//" is matched before "/*" so a doc
+    /// comment that happens to contain "/*" is consumed as the line comment it
+    /// is. Verbatim strings carry their own doubled-quote escape.</summary>
+    private static string BlankComments(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+        var sb = new System.Text.StringBuilder(text);
+        char nl = (char)10;
+        int i = 0;
+        while (i < text.Length)
+        {
+            char c = text[i];
+            char n = (i + 1 < text.Length) ? text[i + 1] : '\0';
+            if (c == '/' && n == '/')
+            {
+                while (i < text.Length && text[i] != nl) { sb[i] = ' '; i++; }
+                continue;
+            }
+            if (c == '/' && n == '*')
+            {
+                while (i < text.Length && !(text[i] == '*' && i + 1 < text.Length && text[i + 1] == '/'))
+                {
+                    if (text[i] != nl) sb[i] = ' ';
+                    i++;
+                }
+                if (i < text.Length) { sb[i] = ' '; sb[i + 1] = ' '; i += 2; }
+                continue;
+            }
+            if (c == '@' && n == '"')
+            {
+                i += 2;
+                while (i < text.Length)
+                {
+                    if (text[i] == '"' && i + 1 < text.Length && text[i + 1] == '"') { i += 2; continue; }
+                    if (text[i] == '"') { i++; break; }
+                    i++;
+                }
+                continue;
+            }
+            if (c == '"' || c == '\'')
+            {
+                char quote = c;
+                i++;
+                while (i < text.Length && text[i] != quote)
+                {
+                    if (text[i] == '\\') i++;
+                    i++;
+                }
+                i++;
+                continue;
+            }
+            i++;
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>Every shipped C# file of the plugin project, ENUMERATED from the
+    /// source root rather than listed in this file.
+    ///
+    /// The round-6 build widened W25's write scan from two files to a list of
+    /// seven. That was right about the direction and wrong about the kind: a
+    /// list written here is a surface guessed from where the fields happen to
+    /// live today, and a hardcoded target is the check that cannot fail
+    /// (#342/#431) - the same shape as the spelling bound the same round removed.
+    /// The compiler's own rule for this project is "every .cs under plugin/ that
+    /// is not build output", so that is the rule here and the scan surface IS
+    /// the compilation unit set, by construction rather than by maintenance.
+    ///
+    /// The count is reported by the cases that use it, so a root that resolves
+    /// to a sparse tree is visible in the log rather than a silent narrowing.</summary>
+    private static string[] ShippedCsFiles(out string problem)
+    {
+        problem = null;
+        if (string.IsNullOrEmpty(SourceRoot))
+        {
+            problem = "BUG389_SOURCE_ROOT is unset, so the shipped-source surface cannot be enumerated";
+            return new string[0];
+        }
+        string dir = System.IO.Path.Combine(SourceRoot, "plugin");
+        if (!System.IO.Directory.Exists(dir))
+        {
+            problem = "no plugin directory under source root '" + SourceRoot + "'";
+            return new string[0];
+        }
+        var found = new List<string>();
+        foreach (string full in System.IO.Directory.GetFiles(dir, "*.cs", System.IO.SearchOption.AllDirectories))
+        {
+            string rel = full.Substring(SourceRoot.Length).Replace('\\', '/').TrimStart('/');
+            if (rel.Contains("/bin/") || rel.Contains("/obj/")) continue;
+            found.Add(rel);
+        }
+        found.Sort(StringComparer.Ordinal);
+        return found.ToArray();
     }
 
     /// <summary>The value written, read from just after the operator to the
@@ -351,40 +491,166 @@ internal static class Program
         foreach (string w in words)
             if (w == "private" || w == "internal" || w == "public" || w == "protected"
                 || w == "static" || w == "readonly" || w == "const" || w == "volatile") modifier = true;
-        string last = words[words.Length - 1];
-        bool typeLast = last == "int" || last == "bool" || last == "string" || last == "long"
-            || last == "float" || last == "double" || last == "byte" || last == "short"
-            || last == "uint" || last == "ulong" || last == "char" || last == "object" || last == "var";
-        return modifier && typeLast;
+        return modifier && IsTypeShaped(words[words.Length - 1]);
+    }
+
+    /// <summary>A token that can be the TYPE in a field declaration: an
+    /// identifier, possibly generic, arrayed, qualified or nullable.
+    ///
+    /// The previous rule listed the primitive names and nothing else, so
+    /// `private static readonly List&lt;Attachment&gt; _attached = new
+    /// List&lt;Attachment&gt;();` did not read as a declaration at all and came
+    /// back as an ordinary write to a field it has nothing to do with. That is
+    /// the whole reason one file had to be kept out of the scan BY NAME, and a
+    /// named exclusion is a hardcoded target wearing a different coat.</summary>
+    private static bool IsTypeShaped(string token)
+    {
+        if (string.IsNullOrEmpty(token)) return false;
+        char c0 = token[0];
+        if (!(c0 == '_' || (c0 >= 'a' && c0 <= 'z') || (c0 >= 'A' && c0 <= 'Z'))) return false;
+        foreach (char c in token)
+            if (!(IsIdentChar(c) || c == '<' || c == '>' || c == '[' || c == ']'
+                  || c == ',' || c == '.' || c == '?')) return false;
+        // Keywords that can stand last before an identifier without being a type.
+        return token != "private" && token != "internal" && token != "public"
+            && token != "protected" && token != "static" && token != "readonly"
+            && token != "const" && token != "volatile" && token != "return"
+            && token != "else" && token != "new" && token != "case";
+    }
+
+    /// <summary>True when this text DECLARES a field of that name itself - so a
+    /// write to the name here is a write to a DIFFERENT field.
+    ///
+    /// This is the RULE that replaced a hardcoded exclusion. EmojiSprites.cs
+    /// carries its own `_attached`, a List&lt;Attachment&gt;, and the round-6
+    /// scan kept it out by NAME - which holds exactly until the next file does
+    /// the same and nobody remembers to add it, and which cannot be re-derived
+    /// by a reader who does not already know why the name is there. Excluding by
+    /// the property means the scan is right about WHICH field it is reading for
+    /// any file at all, and every exclusion it makes is NAMED in the output
+    /// rather than assumed. Pass text that has already been comment-blanked.
+    ///
+    /// What this does NOT cover, said rather than implied: a file that declares
+    /// its own field of the name AND also writes the home field through a
+    /// qualified spelling is excluded and its write is not seen. For a private
+    /// field that cannot arise; for an internal one the declarer count is
+    /// reported so the case is visible.</summary>
+    private static bool DeclaresFieldIn(string blanked, string field)
+    {
+        if (string.IsNullOrEmpty(blanked) || string.IsNullOrEmpty(field)) return false;
+        int i = 0;
+        while (true)
+        {
+            int at = blanked.IndexOf(field, i, StringComparison.Ordinal);
+            if (at < 0) return false;
+            i = at + field.Length;
+            if (at > 0 && IsIdentChar(blanked[at - 1])) continue;
+            int after = at + field.Length;
+            if (after < blanked.Length && IsIdentChar(blanked[after])) continue;
+            // A declaration either ends there or runs on into an initialiser.
+            int f = SkipWs(blanked, after);
+            if (f >= blanked.Length) continue;
+            if (blanked[f] != ';' && blanked[f] != '=') continue;
+            if (blanked[f] == '=' && f + 1 < blanked.Length
+                && (blanked[f + 1] == '=' || blanked[f + 1] == '>')) continue;
+            if (IsDeclarationSite(blanked, at)) return true;
+        }
     }
 
     /// <summary>Every WRITE to one field in one text, in any spelling.</summary>
     private static List<FieldWrite> WritesTo(string text, string field)
     {
+        return WritesToBlanked(text, BlankComments(text), field);
+    }
+
+    /// <summary>The same, over a text whose comments have ALREADY been blanked -
+    /// so a caller scanning ninety-one files for three fields blanks each once
+    /// instead of three times. Classification reads the blanked copy; the line
+    /// TEXT a failure message prints is read from the original, because blanking
+    /// preserves every offset and a message quoting a row of spaces would be
+    /// worse than no message.</summary>
+    private static List<FieldWrite> WritesToBlanked(string original, string blanked, string field)
+    {
         var found = new List<FieldWrite>();
-        if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(field)) return found;
+        if (string.IsNullOrEmpty(blanked) || string.IsNullOrEmpty(field)) return found;
         int i = 0;
         while (true)
         {
-            int at = text.IndexOf(field, i, StringComparison.Ordinal);
+            int at = blanked.IndexOf(field, i, StringComparison.Ordinal);
             if (at < 0) return found;
             i = at + field.Length;
-            if (at > 0 && IsIdentChar(text[at - 1])) continue;
+            if (at > 0 && IsIdentChar(blanked[at - 1])) continue;
             int after = at + field.Length;
-            if (after < text.Length && IsIdentChar(text[after])) continue;
-            if (OnCommentLine(text, at)) continue;
+            if (after < blanked.Length && IsIdentChar(blanked[after])) continue;
             string rhs;
-            string kind = ClassifyWrite(text, at, after, out rhs);
+            string kind = ClassifyWrite(blanked, at, after, out rhs);
             if (kind == null) continue;
             var w = new FieldWrite();
             w.Index = at;
-            w.Line = LineOf(text, at);
+            w.Line = LineOf(blanked, at);
             w.Kind = kind;
             w.Rhs = rhs;
-            w.Declaration = IsDeclarationSite(text, at);
-            w.Text = LineTextAt(text, at);
+            w.Declaration = IsDeclarationSite(blanked, at);
+            w.Text = LineTextAt(original, at);
             found.Add(w);
         }
+    }
+
+    /// <summary>What one field's writes look like across a whole surface of
+    /// files: the real writes with the file each was found in, the files
+    /// excluded because they declare a field of that name themselves, and
+    /// whether the home file declares it at all.</summary>
+    private sealed class SurfaceScan
+    {
+        internal List<FieldWrite> Real = new List<FieldWrite>();
+        internal List<string> Excluded = new List<string>();
+        internal List<string> DeclProblems = new List<string>();
+        internal bool HomeDeclares;
+    }
+
+    private static SurfaceScan ScanField(string[] surface,
+                                         Dictionary<string, string> texts,
+                                         Dictionary<string, string> blanks,
+                                         string field, string home, string wantDeclInit)
+    {
+        var scan = new SurfaceScan();
+        foreach (string rel in surface)
+        {
+            string text;
+            if (!texts.TryGetValue(rel, out text)) continue;
+            string blanked = blanks[rel];
+            bool declares = DeclaresFieldIn(blanked, field);
+            if (rel == home) scan.HomeDeclares = declares;
+            else if (declares) { scan.Excluded.Add(rel); continue; }
+            foreach (FieldWrite w in WritesToBlanked(text, blanked, field))
+            {
+                w.Rel = rel;
+                if (w.Declaration)
+                {
+                    if (wantDeclInit != null && w.Rhs != wantDeclInit)
+                        scan.DeclProblems.Add("the declaration initialiser for " + field + " must be '"
+                            + wantDeclInit + "'; found '" + w.Rhs + "' in " + rel + " line " + w.Line);
+                    continue;
+                }
+                scan.Real.Add(w);
+            }
+        }
+        return scan;
+    }
+
+    private static List<FieldWrite> RealIn(SurfaceScan scan, string rel)
+    {
+        var got = new List<FieldWrite>();
+        foreach (FieldWrite w in scan.Real) if (w.Rel == rel) got.Add(w);
+        return got;
+    }
+
+    private static List<string> RealOutside(SurfaceScan scan, string rel)
+    {
+        var got = new List<string>();
+        foreach (FieldWrite w in scan.Real)
+            if (w.Rel != rel) got.Add(w.Rel + " line " + w.Line + " " + w.Kind + " [" + w.Text + "]");
+        return got;
     }
 
     /// <summary>A write that can only ever make the value larger.</summary>
@@ -1478,6 +1744,61 @@ internal static class Program
             new[] { "Distance(", "sqrMagnitude", "magnitude" },
             "the repair must author no ranking of its own; the game's own selector does the ranking");
 
+        // ---- N1b: FFA'S RANKING IS INHERITED, AND PINNED AS INHERITED --------
+        //
+        // A CORRECTION TO THE ACCEPTANCE SENTENCE, not a new requirement. Round
+        // 3's bar was written as "no authored distance, squared distance or
+        // angle comparison exists in the seam, the patches or FfaMode". N1's
+        // surface is the first two. The third was never true and was never
+        // tested: FfaTargeting.NearestOpponent ranks candidates with
+        // Vector2.Distance, and the ring sampler measures a signed separation
+        // the same way. Both PRE-DATE this branch - the count is the same at the
+        // round-2 tip - so neither is a regression; but a sentence that reads as
+        // an assertion about a file nothing scans is a claim the code does not
+        // back (#351/#434), and a reviewer ruling the bar literally would
+        // re-open a sub-mechanism rounds 3, 4 and 5 settled, on wording.
+        //
+        // WHAT IS TRUE, and what this case asserts: the seam and the patches
+        // author no ranking (N1), and FfaMode's own ranking is INHERITED through
+        // the single vanilla call the seam makes - FfaMode prefixes
+        // PlayerManager.GetOtherPlayer, so one call picks the substitution up
+        // whole, which is the reason round 3 chose inheriting over authoring
+        // (N3's paragraph reasons about the same prefix). Inherited is a claim
+        // about a COUNT, so it is pinned as one: two comparisons, no more, one
+        // of them the selector's own. A third appearing here would be a ranking
+        // this branch did not inherit, and no other case would see it, because
+        // no other case reads this file.
+        string ffaText = LoadSource("plugin/FfaMode.cs");
+        var ffaProblems = new List<string>();
+        if (ffaText == null)
+            ffaProblems.Add("cannot read plugin/FfaMode.cs - an unread file is a failure, not a skip");
+        else
+        {
+            string ffaBlank = BlankComments(ffaText);
+            int dist = CountOf(ffaBlank, "Vector2.Distance(") + CountOf(ffaBlank, "Vector3.Distance(");
+            if (dist != 2)
+                ffaProblems.Add("FfaMode.cs must carry exactly the two distance comparisons this branch "
+                    + "INHERITED - the targeting selector's and the ring sampler's; found " + dist);
+            int sqr = CountOf(ffaBlank, "sqrMagnitude");
+            if (sqr != 0)
+                ffaProblems.Add("and no squared ranking anywhere in it; found " + sqr + " sqrMagnitude");
+            int fOpen, fClose; string fProblem;
+            if (!TryMemberSpan(ffaText, "public static Player NearestOpponent(PlayerManager pm, Vector3 position,",
+                    out fOpen, out fClose, out fProblem))
+                ffaProblems.Add(fProblem);
+            else
+            {
+                int inSelector = CountOf(BlankComments(ffaText.Substring(fOpen, fClose - fOpen + 1)),
+                    "Vector2.Distance(");
+                if (inSelector != 1)
+                    ffaProblems.Add("and exactly one of them is the selector's own, inside NearestOpponent - "
+                        + "the one the seam's single vanilla call inherits; found " + inSelector);
+            }
+        }
+        Check("N1b Method_FfaRankingIsInheritedNotAuthored",
+            ffaProblems.Count == 0,
+            string.Join("; ", ffaProblems.ToArray()));
+
         // ---- N2: THE PATCHES BUILD NO ROSTER OF THEIR OWN. RED under ----------
         // "wire-roster" and on the round-2 files.
         //
@@ -2086,6 +2407,52 @@ internal static class Program
         // rather than claiming a test for it.
         string apiText = LoadSource("plugin/ApiClient.cs");
         var reachProblems = new List<string>();
+        // THE SURFACE IS THE COMPILATION UNIT SET, ENUMERATED - not a list
+        // written here. "The count has one writer" is a statement about the
+        // ASSEMBLY. The round-6 build got the direction right and the kind
+        // wrong: it replaced two files with SEVEN, which is still a surface
+        // guessed from where the fields live today, and it defended the gap
+        // with "the fields are private, so today no unlisted file can write
+        // them". That defence is true of _attached and _withdrawn and FALSE
+        // of the third term this case also reads - Plugin.modDisabled is
+        // internal and already referenced from six other shipped files - and
+        // it is no defence at all for the patch-site clauses below, which
+        // need no field access. A hardcoded target is the check that cannot
+        // fail (#342/#431), so the list is gone: ShippedCsFiles enumerates
+        // every .cs the project compiles and the scan surface is that set.
+        //
+        // EmojiSprites.cs used to be kept out BY NAME, because it declares an
+        // unrelated `_attached` of its own. The name is gone too, replaced by
+        // the rule that produced it: a file that declares a field of that
+        // name declares a DIFFERENT field, so it is excluded and NAMED in the
+        // output. A reader sees which files were excluded and why, instead of
+        // taking a maintainer's word for a list.
+        string surfaceProblem;
+        string[] shippedCs = ShippedCsFiles(out surfaceProblem);
+        if (surfaceProblem != null)
+            reachProblems.Add(surfaceProblem + " - the scan surface is a failure, not a skip");
+        // A root resolving to a sparse tree must FAIL for the files this
+        // argument names, rather than quietly pass by scanning fewer.
+        foreach (string need in new[] { "plugin/ProximityVictimPatches.cs", "plugin/ProximityVictimSeam.cs",
+                                        "plugin/Plugin.cs", "plugin/ApiClient.cs" })
+            if (Array.IndexOf(shippedCs, need) < 0)
+                reachProblems.Add("the shipped-source enumeration must contain " + need
+                    + "; it found " + shippedCs.Length + " file(s) and not that one");
+
+        var surfaceText = new Dictionary<string, string>();
+        var surfaceBlank = new Dictionary<string, string>();
+        foreach (string rel in shippedCs)
+        {
+            string text = LoadSource(rel);
+            if (text == null)
+            {
+                reachProblems.Add("cannot read " + rel + " - an unread file is a failure, not a skip");
+                continue;
+            }
+            surfaceText[rel] = text;
+            surfaceBlank[rel] = BlankComments(text);
+        }
+
         if (patchesText == null) reachProblems.Add("cannot read plugin/ProximityVictimPatches.cs");
         if (seamText == null) reachProblems.Add("cannot read plugin/ProximityVictimSeam.cs");
         if (patchesText != null && seamText != null)
@@ -2099,77 +2466,42 @@ internal static class Program
             // harmlessly writes "_attached += 1". Both directions were wrong, and
             // the mutant written against it could only ever prove that the one
             // recognised spelling was present.
-            // THE SURFACE IS EVERY SHIPPED C# FILE THIS HARNESS READS, not the two
-            // that happen to carry the fields today. "The count has one writer" is a
-            // statement about the ASSEMBLY: both fields are private now, but nothing
-            // here asserts they stay private, and an accessibility widened by one
-            // word would put a second writer in a file a two-file scan never opens -
-            // the same shape as the spelling bound this case is being fixed for
-            // (#432). Only ProximityVictimPatches.cs may carry the one write, so a
-            // hit anywhere else is reported with its file. An unread file is a
-            // FAILURE, never a skip.
-            //
-            // EmojiSprites.cs is deliberately NOT on this list and must not be added
-            // without re-reading it: it declares an unrelated `_attached` of its own,
-            // a List<Attachment>, whose initialiser would be counted as a write to a
-            // field it has nothing to do with. A scan that is wrong about WHICH field
-            // it is reading is the same class of defect as one bound to a spelling.
-            string[] shippedCs = new string[] {
-                "plugin/ProximityVictimPatches.cs",
-                "plugin/ProximityVictimSeam.cs",
-                "plugin/Plugin.cs",
-                "plugin/ApiClient.cs",
-                "plugin/PerfPatches.cs",
-                "plugin/SpectatorSession.cs",
-                "plugin/RoomActors.cs",
-            };
             const string attachHome = "plugin/ProximityVictimPatches.cs";
-            var realAttach = new List<FieldWrite>();
-            var attachElsewhere = new List<string>();
-            int realWithdraw = 0;
-            foreach (string rel in shippedCs)
-            {
-                string text = LoadSource(rel);
-                if (text == null)
-                {
-                    reachProblems.Add("cannot read " + rel + " - an unread file is a failure, not a skip");
-                    continue;
-                }
-                foreach (FieldWrite w in WritesTo(text, "_attached"))
-                {
-                    if (w.Declaration)
-                    {
-                        if (w.Rhs != "0")
-                            reachProblems.Add("a declaration initialiser for the attachment count must start it "
-                                + "at 0; found '" + w.Rhs + "' in " + rel + " line " + w.Line);
-                        continue;
-                    }
-                    if (rel == attachHome) realAttach.Add(w);
-                    else attachElsewhere.Add(rel + " line " + w.Line + " " + w.Kind + " [" + w.Text + "]");
-                }
-                foreach (FieldWrite w in WritesTo(text, "_withdrawn"))
-                {
-                    if (w.Declaration)
-                    {
-                        if (w.Rhs != "false")
-                            reachProblems.Add("a declaration initialiser for the withdrawal latch must start it "
-                                + "false; found '" + w.Rhs + "' in " + rel + " line " + w.Line);
-                        continue;
-                    }
-                    realWithdraw++;
-                    if (w.Kind != "= (simple assignment)" || w.Rhs != "true")
-                        reachProblems.Add("every write to the withdrawal latch must write true - ONE-WAY is the "
-                            + "premise here, not the number of writers, and W23 owns the separate question of "
-                            + "whether StageInto makes one; found " + w.Kind + " with right-hand side '" + w.Rhs
-                            + "' in " + rel + " line " + w.Line);
-                }
-            }
+            SurfaceScan attachScan = ScanField(shippedCs, surfaceText, surfaceBlank, "_attached", attachHome, "0");
+            SurfaceScan withdrawScan = ScanField(shippedCs, surfaceText, surfaceBlank, "_withdrawn", attachHome, "false");
+            reachProblems.AddRange(attachScan.DeclProblems);
+            reachProblems.AddRange(withdrawScan.DeclProblems);
+            if (!attachScan.HomeDeclares)
+                reachProblems.Add("the attachment count must be DECLARED in " + attachHome
+                    + " - the home is derived from the declaration, not assumed by name");
+            if (!withdrawScan.HomeDeclares)
+                reachProblems.Add("the withdrawal latch must be DECLARED in " + attachHome
+                    + " - same reason");
+            // The exclusions are part of the result and are printed on every run,
+            // clean or not: an exclusion nobody can see is how a surface narrows
+            // without anybody deciding to narrow it.
+            Console.WriteLine("NOTE  W25 surface: " + shippedCs.Length + " shipped .cs file(s)"
+                + "; excluded from the attachment-count scan (declares its own field): "
+                + (attachScan.Excluded.Count == 0 ? "none" : string.Join(", ", attachScan.Excluded.ToArray()))
+                + "; from the withdrawal-latch scan: "
+                + (withdrawScan.Excluded.Count == 0 ? "none" : string.Join(", ", withdrawScan.Excluded.ToArray())));
+
+            List<FieldWrite> realAttach = RealIn(attachScan, attachHome);
+            List<string> attachElsewhere = RealOutside(attachScan, attachHome);
+            foreach (FieldWrite w in withdrawScan.Real)
+                if (w.Kind != "= (simple assignment)" || w.Rhs != "true")
+                    reachProblems.Add("every write to the withdrawal latch must write true - ONE-WAY is the "
+                        + "premise here, not the number of writers, and W23 owns the separate question of "
+                        + "whether StageInto makes one; found " + w.Kind + " with right-hand side '" + w.Rhs
+                        + "' in " + w.Rel + " line " + w.Line);
+            int realWithdraw = withdrawScan.Real.Count;
             if (attachElsewhere.Count != 0)
                 reachProblems.Add("only " + attachHome + " may write the attachment count; found "
                     + string.Join(" | ", attachElsewhere.ToArray()));
             if (realAttach.Count != 1)
-                reachProblems.Add("the attachment count must have exactly one write in the shipped files, in ANY "
-                    + "spelling; found " + realAttach.Count + " in " + attachHome + ": " + Describe(realAttach));
+                reachProblems.Add("the attachment count must have exactly one write across the " + shippedCs.Length
+                    + " shipped file(s), in ANY spelling; found " + realAttach.Count + " in " + attachHome
+                    + ": " + Describe(realAttach));
             else
             {
                 FieldWrite w = realAttach[0];
@@ -2196,41 +2528,92 @@ internal static class Program
             if (cleanups != 3)
                 reachProblems.Add("and those sites must be Harmony cleanup callbacks, which run inside the "
                     + "patch loop; found " + cleanups + " cleanup attribute(s)");
-        }
-        if (pluginText == null) reachProblems.Add("cannot read plugin/Plugin.cs");
-        else
-        {
-            int patchSites = CallsTo(pluginText, "CreateClassProcessor");
-            if (patchSites != 1)
-                reachProblems.Add("the assembly must have exactly one Harmony patch site, or the attachment "
-                    + "count can still move after this one has run; found " + patchSites);
-            // PatchAll is the OTHER way this assembly could attach a patch, and
-            // it would attach it outside the one loop the premise names. It is
-            // named in three comments here and called nowhere; a call is what
-            // this counts.
-            int patchAll = CallsTo(pluginText, "PatchAll");
-            if (patchAll != 0)
-                reachProblems.Add("and no PatchAll call may stand beside it, or patches attach from a second "
-                    + "site the reachability argument does not bound; found " + patchAll);
-            var disabledWrites = WritesTo(pluginText, "modDisabled");
-            int realDisabled = 0;
-            foreach (FieldWrite w in disabledWrites)
+
+            // THE THREE CALLERS PASS THREE DISTINCT LITERALS, AND THAT IS PINNED.
+            // The wiring mutant that proves the count CAN be made two-way keys on
+            // one of them ("StunPlayer.Go"). Rename the tag and that mutant stops
+            // reaching any call - the round-5 defect exactly - while the clause it
+            // reddens goes on passing for the write count, so the RESULT row still
+            // prints OK and the reachability claim silently reverts to the refuted
+            // one. A mutant's reachability is a property of the source, so it is
+            // checked here rather than read once and trusted (#342/#431).
+            foreach (string tag in new[] { "DealDamageToPlayer.Go", "StunPlayer.Go", "TeleportToOpponent.Go" })
             {
-                if (w.Declaration)
-                {
-                    if (w.Rhs != "false")
-                        reachProblems.Add("the disabled flag's declaration must start it false; found '"
-                            + w.Rhs + "' at line " + w.Line);
-                    continue;
-                }
-                realDisabled++;
-                if (w.Kind != "= (simple assignment)" || w.Rhs != "true")
-                    reachProblems.Add("every write to the disabled flag must write true, for the same reason; "
-                        + "found " + w.Kind + " with right-hand side '" + w.Rhs + "' at line " + w.Line);
+                int tagged = CountOf(BlankComments(patchesText),
+                    "ProximityVictimGate.MarkAttached(\"" + tag + "\")");
+                if (tagged != 1)
+                    reachProblems.Add("MarkAttached must be called exactly once with the literal \"" + tag
+                        + "\" - the wiring mutant that makes the attachment count two-way keys on one of these "
+                        + "three, and a renamed tag makes that mutant unreachable while this case stays green; "
+                        + "found " + tagged);
             }
-            if (realDisabled < 1)
-                reachProblems.Add("the disabled flag must have at least one write, or this premise is vacuous");
         }
+
+        // --- the patch sites: A STATEMENT ABOUT THE ASSEMBLY, SCANNED AS ONE ---
+        //
+        // These two clauses used to read plugin/Plugin.cs alone while their own
+        // failure text said "the assembly", and the privateness that mitigates
+        // the write scan does not reach them at all: nothing restricts a Harmony
+        // patch site to one file. A later file adding `new Harmony(id).PatchAll()`
+        // from a deferred init would attach the three cleanup callbacks a SECOND
+        // time, after ApiClient.Initialize and so after a pre-join merge may
+        // already have staged - a seat whose first pass left the count short
+        // declines, prints the shortfall line that says it stays on vanilla for
+        // the session, and then reaches three on the late pass. Every clause here
+        // stayed green on that, because Plugin.cs was unchanged.
+        //
+        // `new Harmony(` is counted as well as the two call names: it is the
+        // constructor every other attachment route has to go through, so it
+        // bounds routes this suite has not thought of.
+        int patchSites = 0, patchAll = 0, harmonyCtors = 0;
+        var patchWhere = new List<string>();
+        foreach (string rel in shippedCs)
+        {
+            string blanked;
+            if (!surfaceBlank.TryGetValue(rel, out blanked)) continue;
+            int cp = CallsTo(blanked, "CreateClassProcessor");
+            int pa = CallsTo(blanked, "PatchAll");
+            int hc = CountOf(blanked, "new Harmony(");
+            patchSites += cp; patchAll += pa; harmonyCtors += hc;
+            if (cp + pa + hc != 0)
+                patchWhere.Add(rel + " CreateClassProcessor=" + cp + " PatchAll=" + pa + " newHarmony=" + hc);
+        }
+        string patchMap = patchWhere.Count == 0 ? "nowhere" : string.Join(" | ", patchWhere.ToArray());
+        if (patchSites != 1)
+            reachProblems.Add("the ASSEMBLY must have exactly one Harmony patch site, or the attachment count "
+                + "can still move after this one has run; found " + patchSites + " across " + shippedCs.Length
+                + " shipped file(s): " + patchMap);
+        if (patchAll != 0)
+            reachProblems.Add("and no PatchAll call may stand beside it anywhere in the assembly, or patches "
+                + "attach from a second site the reachability argument does not bound; found " + patchAll
+                + ": " + patchMap);
+        if (harmonyCtors != 1)
+            reachProblems.Add("and exactly one Harmony instance may be constructed in the assembly, since every "
+                + "other attachment route goes through one; found " + harmonyCtors + ": " + patchMap);
+
+        // --- the disabled flag: ONE-WAY, over the same enumerated surface -----
+        //
+        // This is the term the privateness mitigation never covered.
+        // Plugin.modDisabled is `internal static`, and six other shipped files
+        // already reference it, so any file in the assembly may legally write it.
+        // Scanning its declaring file alone asserted nothing about the premise.
+        SurfaceScan disabledScan = ScanField(shippedCs, surfaceText, surfaceBlank,
+            "modDisabled", "plugin/Plugin.cs", "false");
+        reachProblems.AddRange(disabledScan.DeclProblems);
+        if (shippedCs.Length != 0 && !disabledScan.HomeDeclares)
+            reachProblems.Add("the disabled flag must be DECLARED in plugin/Plugin.cs");
+        if (disabledScan.Excluded.Count != 0)
+            reachProblems.Add("no shipped file may declare a second flag named modDisabled - the scan cannot "
+                + "then tell a write to the assembly's flag from a write to that one; found "
+                + string.Join(", ", disabledScan.Excluded.ToArray()));
+        foreach (FieldWrite w in disabledScan.Real)
+            if (w.Kind != "= (simple assignment)" || w.Rhs != "true")
+                reachProblems.Add("every write to the disabled flag must write true, or a seat that reached "
+                    + "ModDisabled can return to Capable after a staging attempt has already declined; found "
+                    + w.Kind + " with right-hand side '" + w.Rhs + "' in " + w.Rel + " line " + w.Line);
+        if (shippedCs.Length != 0 && disabledScan.Real.Count < 1)
+            reachProblems.Add("the disabled flag must have at least one write, or this premise is vacuous");
+        if (pluginText == null) reachProblems.Add("cannot read plugin/Plugin.cs");
         if (apiText == null) reachProblems.Add("cannot read plugin/ApiClient.cs");
         else
         {

@@ -61,6 +61,13 @@ $wireFiles = @(
     'plugin/ProximityVictimSeam.cs',
     'plugin/PerfPatches.cs',
     'plugin/ApiClient.cs',
+    # N1b reads this one. Round 3's acceptance sentence named FfaMode.cs beside
+    # the seam and the patches, and nothing ever scanned it - the file authors
+    # two distance comparisons that PRE-DATE this branch and that the seam
+    # INHERITS through its single vanilla call. N1b pins them as inherited, so
+    # the file has to be in every mutant root or that case reports "cannot read"
+    # instead of a count.
+    'plugin/FfaMode.cs',
     'plugin/CompetitiveRounds.csproj',
     'tools/tests/bug389-seam/Program.cs',
     # W24 searches this file too. A deletion is not bounded by a search that
@@ -894,6 +901,97 @@ $wireReachDecline = New-WireRoot 'reachdecline' 'plugin/ProximityVictimPatches.c
 $runWireReachDecline = Invoke-Suite 'wire-reachdecline' $seam $wireReachDecline
 if (-not (Assert-Mutation 'attachment count written on the declining branch' $runWireReachDecline 'W25' 'W1')) { $overall = 1 }
 if (-not (Assert-Mutation 'decline-branch attachment write, W23 inert twin' $runWireReachDecline 'W25' 'W23')) { $overall = 1 }
+Say ''
+
+# ---------- the same two-way write, SPLIT BY A COMMENT ----------
+# The round-6 case stopped being bound to a spelling of the OPERATOR and stayed
+# bound to a spelling of the WHITESPACE. ClassifyWrite reached the operator with
+# SkipWs, which skips space, tab, CR and LF and not a comment, so this line
+# named the field in a fully recognised spelling, matched no operator, and came
+# back as "not a write": the count was two-way again and W25 reported exactly
+# one monotone write inside MarkAttached and passed. The classifier now reads a
+# comment-blanked copy, which is why this reddens; it is the same defect class
+# as the spelling bound, reached by a different typing (#342/#431).
+$wireCommentWrite = New-WireRoot 'commentwrite' 'plugin/ProximityVictimPatches.cs' `
+    'internal static void MarkAttached(string which)' `
+    '            _attached++;' `
+    '            _attached++; _attached /* reset on re-attach */ = 0;' ''
+$runWireCommentWrite = Invoke-Suite 'wire-commentwrite' $seam $wireCommentWrite
+if (-not (Assert-Mutation 'comment-split attachment write' $runWireCommentWrite 'W25' 'W1')) { $overall = 1 }
+if (-not (Assert-Mutation 'comment-split write, W23 inert twin' $runWireCommentWrite 'W25' 'W23')) { $overall = 1 }
+Say ''
+
+# ---------- re-enable the mod from a file the old scan never opened ----------
+# The disabled flag's one-way premise was scanned over plugin/Plugin.cs alone,
+# and the residual that disclosed the narrow surface mitigated it with "the
+# fields are private, so today no unlisted file can write them". True of the two
+# counters; FALSE of this one. Plugin.modDisabled is `internal static` and six
+# other shipped files already reference it, so any file in the assembly may
+# write it. A compat re-enable path spelled here makes the flag two-way: a seat
+# that reached ModDisabled can return to Capable after a staging attempt has
+# already declined - the state "the guard's terms are settled before the first
+# staging attempt" forbids, and the state the whole agreement rests on.
+$wireDisabledElsewhere = New-WireRoot 'disabledelsewhere' 'plugin/PerfPatches.cs' `
+    'public static void Hit(string patch)' `
+    '                _counts.TryGetValue(patch, out long c); _counts[patch] = c + 1;' `
+    '                _counts.TryGetValue(patch, out long c); _counts[patch] = c + 1; Plugin.modDisabled = false;' ''
+$runWireDisabledElsewhere = Invoke-Suite 'wire-disabledelsewhere' $seam $wireDisabledElsewhere
+if (-not (Assert-Mutation 'disabled flag written outside its declaring file' $runWireDisabledElsewhere 'W25' 'W1')) { $overall = 1 }
+if (-not (Assert-Mutation 'off-file disabled write, W23 inert twin' $runWireDisabledElsewhere 'W25' 'W23')) { $overall = 1 }
+Say ''
+
+# ---------- attach the patches a SECOND time, from a second patch site ----------
+# The load-bearing limb of the permanence argument, and the one the privateness
+# mitigation never touched: nothing restricts a Harmony patch site to one file.
+# The two clauses that bound it counted CreateClassProcessor and PatchAll in
+# plugin/Plugin.cs while their own failure text said "the assembly". A second
+# site driven from a deferred init runs the three cleanup callbacks again AFTER
+# ApiClient.Initialize, so a seat whose first pass left the count short declines,
+# prints the shortfall line whose closing clause says it stays on vanilla for the
+# session, and then reaches three on the late pass - advertising cr_prox1 while
+# its peers repair and it runs vanilla. Every clause stayed green on that.
+$wireSecondPatchSite = New-WireRoot 'secondpatchsite' 'plugin/PerfPatches.cs' `
+    'public static void Hit(string patch)' `
+    '                _lifetime.TryGetValue(patch, out long l); _lifetime[patch] = l + 1;' `
+    '                _lifetime.TryGetValue(patch, out long l); _lifetime[patch] = l + 1; new Harmony("scr.perf.late").PatchAll();' ''
+$runWireSecondPatchSite = Invoke-Suite 'wire-secondpatchsite' $seam $wireSecondPatchSite
+if (-not (Assert-Mutation 'a second Harmony patch site in the assembly' $runWireSecondPatchSite 'W25' 'W1')) { $overall = 1 }
+if (-not (Assert-Mutation 'second patch site, W23 inert twin' $runWireSecondPatchSite 'W25' 'W23')) { $overall = 1 }
+Say ''
+
+# ---------- rename the cleanup tag the reachability mutant keys on ----------
+# THE MUTANT'S OWN REACHABILITY, MADE A CHECKED PROPERTY. wire-reach is only a
+# real test because "StunPlayer.Go" is the literal that cleanup actually passes;
+# rename the tag and that mutant matches no call, makes the source two-way and
+# leaves the program one-way - the round-5 defect exactly - while W25 goes on
+# reddening for the write count, so the RESULT row still prints OK and nothing
+# says the reachability claim has reverted. W25 now pins all three literals, so
+# the rename itself reddens and the staleness is visible the day it happens.
+$wireCleanupTag = New-WireRoot 'cleanuptag' 'plugin/ProximityVictimPatches.cs' `
+    'internal static class StunPlayerFreshVictimPatch' `
+    '            if (exception == null) ProximityVictimGate.MarkAttached("StunPlayer.Go");' `
+    '            if (exception == null) ProximityVictimGate.MarkAttached("StunPlayer.Go (perf)");' ''
+$runWireCleanupTag = Invoke-Suite 'wire-cleanuptag' $seam $wireCleanupTag
+if (-not (Assert-Mutation 'renamed cleanup tag the reach mutant keys on' $runWireCleanupTag 'W25' 'W1')) { $overall = 1 }
+if (-not (Assert-Mutation 'renamed cleanup tag, W23 inert twin' $runWireCleanupTag 'W25' 'W23')) { $overall = 1 }
+Say ''
+
+# ---------- author a THIRD ranking in the file whose two are inherited ----------
+# Round 3's acceptance sentence said no authored comparison exists "in the seam,
+# the patches or FfaMode". N1's surface is the first two, and the third was never
+# true: FfaMode ranks with Vector2.Distance in its targeting selector and its
+# ring sampler, both pre-dating this branch, both INHERITED through the one
+# vanilla call the seam makes. N1b pins the count so inherited stays a claim
+# about something. Without it a comparison added here is a ranking the branch did
+# not inherit and no case in the suite reads the file.
+$wireFfaRank = New-WireRoot 'ffarank' 'plugin/FfaMode.cs' `
+    'public static Player NearestOpponent(PlayerManager pm, Vector3 position,' `
+    '                float d = Vector2.Distance(position, p.transform.position);' `
+    '                float d = Vector2.Distance(position, p.transform.position);
+                if (Vector2.Distance(position, pm.transform.position) < d) continue;' ''
+$runWireFfaRank = Invoke-Suite 'wire-ffarank' $seam $wireFfaRank
+if (-not (Assert-Mutation 'a third authored ranking in FfaMode' $runWireFfaRank 'N1b' 'W1')) { $overall = 1 }
+if (-not (Assert-Mutation 'third FFA ranking, N1 inert twin' $runWireFfaRank 'N1b' 'N1')) { $overall = 1 }
 Say ''
 
 # ---------- put the deleted compat claim back in the HARNESS'S own text ----------
