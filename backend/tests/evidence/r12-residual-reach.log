@@ -4,7 +4,7 @@ rule      <repo>/backend/tests/evidence/residual_rules.py
 document  <the lane's contract, under the gitignored scratch>
 python    3.12.10
 capture   <repo>/backend/tests/evidence/<round>-residual-reach.log
-started   2026-09-22 11:57:28 UTC
+started   2026-09-22 13:48:43 UTC
 
 LIVE   the document as it stands
   command   python backend/tests/evidence/residual_rules.py <the lane's contract, under the gitignored scratch>
@@ -18,7 +18,7 @@ MUTANT A  the superseded prose count, put back where it stood
 MUTANT B  one item's tag removed, the count left as it was
   command   python backend/tests/evidence/residual_rules.py <a copy of it, in a temporary directory>
   mutant B REFUSED: 2 problem(s) in the residual list:
-  mutant B the item at line 810 carries 0 integrity-reach tags and the rule needs exactly one: - **Two seats whose last advertisement at the game-over edge
+  mutant B the item at line 817 carries 0 integrity-reach tags and the rule needs exactly one: - **Two seats whose last advertisement at the game-over edge
   mutant B the tally says 2 of 5 and the tags say 1 of 5
 
 INERT  a wording change beside a tag, no claim touched
@@ -29,4 +29,4 @@ RESULT: live CLEAN, mutant A REFUSED, mutant B REFUSED, inert
         CLEAN. The rule reds on a second statement of the reach
         and on an item that states none, and stays quiet on a
         reword beside them. The document was read, never written.
-finished  2026-09-22 11:57:28 UTC
+finished  2026-09-22 13:48:43 UTC

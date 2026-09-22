@@ -63,9 +63,13 @@ ASSEMBLER = os.path.join(HERE, "assemble-evidence.py")
 # the primary), and outside every glob round 8's shipped-file rule read.
 DOCKERFILE_BOT = os.path.join(BACKEND, "Dockerfile.bot")
 # The repository ignore file, whose evidence-log negation admits one pattern
-# per producer, and the assembly producer whose capture one of them names.
+# per producer; the assembly producer whose capture one of them names; and the
+# re-pin wrapper, which is the one producer that OPENS its own capture, so the
+# name that pattern is paired against is a value it computes rather than a
+# line it prints.
 GITIGNORE = os.path.join(ROOT, ".gitignore")
 RUN_ASSEMBLY = os.path.join(HERE, "run-assembly.sh")
+REPIN = os.path.join(HERE, "repin-last.py")
 
 
 def _load(name, path):
@@ -99,16 +103,23 @@ def _newest_report(suffix):
     return None if best is None else os.path.join(HERE, best[1])
 
 
-# The suites report of the round this runner is being run FOR. Two controls
-# mutate it -- the invocation rule and the assembler's -- so it has to exist
-# before the runner starts, which is why the suite pair runs first and the
-# runner after it.
+# THE NEWEST suites report in this directory, which is what two controls
+# mutate -- the invocation rule and the assembler's. WHICH round's report that
+# is depends on when the runner runs, and saying so is the correction of a
+# sentence that called it "the report of the round this runner is being run
+# for": on a first pass over a round, that round's suites report does not exist
+# yet and this is the PREVIOUS round's; on a second pass over the same round it
+# is that round's own, as the earlier pass left it. Either way the two controls
+# are about the RULE a report is held to and not about the numbers in it, so
+# the target is a real artifact rather than a stand-in -- and it has to EXIST,
+# which is why the suite pair runs before the runner.
 SUITES = _newest_report("-suites.txt")
-# ...and the newest mutation-controls report, which is the PREVIOUS round's:
-# this round's is assembled from this runner's own output and cannot exist
-# while the runner runs. The control over it is about the claim a report makes
-# regarding its own round, and every report carrying that heading is checked,
-# so the previous round's is a real target rather than a stand-in.
+# ...and the newest mutation-controls report. On a first pass over a round that
+# is the PREVIOUS round's, because this round's is assembled from this runner's
+# own output and cannot exist while the runner runs; on a second pass it is
+# this round's, as the earlier pass left it. The control over it is about the
+# claim a report makes regarding its own round, and every report carrying that
+# heading is checked, so either is a real target rather than a stand-in.
 MUTATION_REPORT = _newest_report("-mutation-controls.txt")
 DSN = os.environ.get("FFA_TEST_PG_DSN")
 
@@ -822,6 +833,63 @@ CONTROLS = [
      'echo "capture   (this producer no longer names its own capture)"\n',
      'echo "capture    <repo>/backend/tests/evidence/r${ROUND}-suites-assembly-run.log"\n',
      "test_the_evidence_log_negation_admits_only_produced_logs"),
+
+    # ── round 12, the apply pass ─────────────────────────────────────────
+    # The one producer that OPENS its own capture, renaming what it writes.
+    # Seven instruments here are redirected into their capture by a caller and
+    # print its name; this one computes the name, opens the file and writes
+    # the header from the same value. The pairing test CALLS that function, so
+    # a rename it makes is a capture no pattern in .gitignore re-includes --
+    # which is a round whose re-pin record cannot be committed at all. The
+    # inert twin parenthesises the operand: the same value, a different shape.
+    ("repin-names-a-capture-no-pattern-admits", REPIN,
+     '    return "r%d-repin-run.log" % number\n',
+     '    return "r%d-repin.log" % number\n',
+     '    return "r%d-repin-run.log" % (number)\n',
+     "test_the_evidence_log_negation_admits_only_produced_logs"),
+
+    # A SECOND terminal exit below the re-derivation, answering exactly what
+    # the single one answers. The responses are unchanged and that is the
+    # point: what this reds is the SHAPE the disjointness rests on -- one exit
+    # above the re-derivation carrying no progress, one below carrying it --
+    # and the shape is what a later round reads when it adds an arm. The inert
+    # twin builds the same detail string across two lines.
+    ("terminal-arm-splits-into-two-exits", MAIN,
+     '    if _kept == "variant":\n'
+     '        detail = f"{detail} - a different account of this room is already on file"\n'
+     '    raise FfaReportRefusal(status, detail, progress)\n',
+     '    if _kept == "variant":\n'
+     '        raise FfaReportRefusal(\n'
+     '            status, f"{detail} - a different account of this room is "\n'
+     '                    f"already on file", progress)\n'
+     '    raise FfaReportRefusal(status, detail, progress)\n',
+     '    if _kept == "variant":\n'
+     '        detail = (f"{detail} - a different account of this room is "\n'
+     '                  f"already on file")\n'
+     '    raise FfaReportRefusal(status, detail, progress)\n',
+     "test_the_two_503_arms_are_disjoint_on_the_answers_the_endpoint_builds"),
+
+    # The re-keying recovery in the shape that does NOT crash on the next
+    # lookup: the entry the seat holds stays reachable and a second key is
+    # added beside it. Every leg of the walk then runs, and what sees it is
+    # the key-set comparison rather than an incidental KeyError (#391). The
+    # inert twin is a comment at the same site.
+    ("recovery-mints-a-second-parked-key", TESTS,
+     '    advertised = int(refusal.progress["expected_game"])\n'
+     '    entry = outbox[key]\n'
+     '    entry["advertised"] = advertised\n'
+     '    return entry\n',
+     '    advertised = int(refusal.progress["expected_game"])\n'
+     '    entry = outbox[key]\n'
+     '    entry["advertised"] = advertised\n'
+     '    outbox["%s#r%d" % (key, advertised)] = dict(entry)\n'
+     '    return entry\n',
+     '    advertised = int(refusal.progress["expected_game"])\n'
+     '    entry = outbox[key]\n'
+     '    # (inert: a comment at the same site)\n'
+     '    entry["advertised"] = advertised\n'
+     '    return entry\n',
+     "test_pg_a_seat_that_missed_an_update_recovers_in_one_submission"),
 ]
 
 

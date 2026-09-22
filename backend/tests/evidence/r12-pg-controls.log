@@ -81,7 +81,7 @@ tests/test_ffa_game_number_anchor.py::test_every_round_eight_control_names_a_tes
 tests/test_ffa_game_number_anchor.py::test_pg_the_relock_retries_once_and_answers_from_the_lobby_not_the_snapshot PASSED [ 98%]
 tests/test_ffa_game_number_anchor.py::test_pg_an_exhausted_progress_read_answers_503_with_no_progress_fields PASSED [100%]
 
-===================== 57 passed, 103 deselected in 9.96s ======================
+===================== 57 passed, 103 deselected in 16.11s =====================
 run 1 rc=0
 
 ------------------------------------------------------------------------------
@@ -151,5 +151,5 @@ tests/test_ffa_game_number_anchor.py::test_every_round_eight_control_names_a_tes
 tests/test_ffa_game_number_anchor.py::test_pg_the_relock_retries_once_and_answers_from_the_lobby_not_the_snapshot PASSED [ 98%]
 tests/test_ffa_game_number_anchor.py::test_pg_an_exhausted_progress_read_answers_503_with_no_progress_fields PASSED [100%]
 
-===================== 57 passed, 103 deselected in 9.86s ======================
+===================== 57 passed, 103 deselected in 16.41s =====================
 run 2 rc=0

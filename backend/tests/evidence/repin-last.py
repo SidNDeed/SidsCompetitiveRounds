@@ -50,6 +50,7 @@ and the answer is written into the report before it is staged again and
 committed: one path, named by git, in the commit that carries this file.
 """
 import datetime
+import fnmatch
 import importlib.util
 import io
 import os
@@ -68,13 +69,22 @@ CLOSING_K = ("committed_evidence or assembled_from_its_run or "
 # the wrapper's own account and not a hand-written one. The run log goes in
 # its own commit FIRST, and the report -- which quotes git's listing of that
 # commit -- goes last, alone.
+#
+# THE TRAILER IS STILL A LITERAL, and that is a known residual rather than a
+# thing this file pretends to have solved: it names the author of the sitting
+# that runs the wrapper, and a sitting with a different author has to change
+# it here. It is the same shape as the defects this round closes -- a
+# declaration standing beside the thing it describes -- and the honest
+# statement is that it is carried, not derived. Deriving it from the commit
+# the wrapper runs on top of would be the fix, and that needs a control of its
+# own.
 LOG_COMMIT_MESSAGE = """The re-pin run's own capture, committed before the record of it
 
 %s is the stdout the re-pin report is assembled from. It goes in a
 commit of its own so the commit that carries the report adds exactly one path,
 which is what that report asserts about itself.
 
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"""
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"""
 
 REPORT_COMMIT_MESSAGE = """The route-manifest re-pin, run last, as its own record
 
@@ -89,7 +99,7 @@ staged, and wrote that listing into the report before staging it again -- so
 the claim the report makes about this commit is git's answer rather than a
 sentence written beside it.
 
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"""
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"""
 
 
 def load(name, filename):
@@ -103,6 +113,47 @@ def load(name, filename):
 def git(*args):
     return subprocess.run(["git", *args], cwd=ROOT, capture_output=True,
                           text=True, timeout=120)
+
+
+def capture_name(number):
+    """The capture this wrapper OPENS, for round `number`.
+
+    THE ONE PLACE THAT NAME IS DECIDED. It used to exist twice -- in the
+    expression that opened the file, and in a comment above it that said what
+    the expression produced -- and nothing compared the two. Every other
+    producer in this directory is redirected into its capture by its caller
+    and prints the name in its own stdout header, so the `.gitignore` pattern
+    paired with it is paired with something a run emits; this one writes the
+    file itself and offered the pairing a sentence instead. A declaration that
+    can be left behind when the code moves is prose (#351).
+
+    So everything that needs the name calls this: the path opened below, the
+    `capture` header written INTO that log, the admission check that runs
+    before anything is written, and the pairing check in
+    test_the_evidence_log_negation_admits_only_produced_logs, which loads this
+    module and CALLS this function rather than reading the source around it.
+    """
+    return "r%d-repin-run.log" % number
+
+
+def capture_is_admitted(name, gitignore_text):
+    """True when `.gitignore` re-includes `name` under this directory.
+
+    `*.log` is ignored repository-wide and this directory re-includes one
+    pattern per producer. A capture written under a name no pattern admits
+    cannot be committed: `git add` refuses it at the LAST step of the round,
+    with the run it was supposed to record already spent. This is that
+    question asked before the file is opened, so the answer can be a refusal
+    that says why.
+    """
+    prefix = "!backend/tests/evidence/"
+    for line in gitignore_text.splitlines():
+        line = line.strip()
+        if not line.startswith(prefix):
+            continue
+        if fnmatch.fnmatch(name, line[len(prefix):]):
+            return True
+    return False
 
 
 def main():
@@ -124,13 +175,22 @@ def main():
               "the round this re-pin belongs to cannot be derived")
         return 2
     report = os.path.join(HERE, "r%d-repin.txt" % number)
-    # The capture this wrapper writes, named by the producer:
-    #   capture   backend/tests/evidence/r%d-repin-run.log
-    # The .gitignore block for this directory admits one pattern per
-    # producer, matched against the names the producers print, both
-    # ways, by test_the_evidence_log_negation_admits_only_produced_logs.
-    log_name = "r%d-repin-run.log" % number
+    log_name = capture_name(number)
     log_path = os.path.join(HERE, log_name)
+
+    # THE CAPTURE HAS TO BE ONE THIS REPOSITORY CAN CARRY, and that is asked
+    # here rather than discovered at the end. The .gitignore block for this
+    # directory re-includes one pattern per producer; a name no pattern admits
+    # is refused by `git add` after the run, which is the worst moment to find
+    # out. The check runs against the same value the file is opened under.
+    with io.open(os.path.join(ROOT, ".gitignore"), "r",
+                 encoding="utf-8") as fh:
+        ignores = fh.read()
+    if not capture_is_admitted(log_name, ignores):
+        print("REFUSED: %s is the capture this wrapper opens and no negation "
+              "in .gitignore re-includes it, so this round's re-pin record "
+              "could not be committed" % log_name)
+        return 2
 
     problems = rules.selftest()
     if problems:
@@ -161,6 +221,16 @@ def main():
 
     # ── the run first, because the report quotes it ──────────────────────
     log = io.StringIO()
+    # THE CAPTURE THIS WRAPPER OPENS, named by the producer -- from the one
+    # function that decided it, which is also the value the file was opened
+    # under and the value the admission check ran against. The other seven
+    # instruments here print this header because a caller redirects them into
+    # a file; this one prints it because it writes the file. The pairing in
+    # .gitignore is checked against that function, never against this line.
+    log.write("script    backend/tests/evidence/repin-last.py\n")
+    log.write("cwd       <repo>\n")
+    log.write("capture   backend/tests/evidence/%s\n" % log_name)
+    log.write("\n")
 
     def run_block(tag, title, argv, cwd):
         # The command line goes LAST of the three header lines, immediately
@@ -285,6 +355,17 @@ def main():
         say("and the round's source, tests, instruments and other evidence are in")
         say("the commit before that -- which is the HEAD named above, the tree")
         say("the re-pin actually ran against.")
+        say()
+        say("== the capture this report is assembled from, and who names it ==")
+        say("The log named in the header above is OPENED by this wrapper rather")
+        say("than redirected into it by a caller, so its name is decided in one")
+        say("function and used in three places: the file that is opened, the")
+        say("`capture` header written into that file, and the check that this")
+        say("repository's ignore rules re-include it. That check runs before")
+        say("anything is written, so a name this tree could not carry stops the")
+        say("round here instead of at the `git add` that ends it. The test that")
+        say("pairs producers with patterns reads the name by CALLING that")
+        say("function, which is why the pairing cannot drift from the file.")
         say()
         say("== what the wrapper checked before it wrote this ==")
         say("A pytest run cannot cover the file that records it: the file is")

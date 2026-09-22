@@ -160,7 +160,7 @@ in the suite rather than in a log nobody re-reads.
 cwd       <repo>/backend
 command   python -m pytest tests/test_ffa_game_number_anchor.py -q -p no:cacheprovider -k "committed_evidence or assembled_from_its_run"
 ..                                                                       [100%]
-2 passed, 158 deselected in 13.29s
+2 passed, 158 deselected in 4.57s
 closing rc=0
 
 == done ==

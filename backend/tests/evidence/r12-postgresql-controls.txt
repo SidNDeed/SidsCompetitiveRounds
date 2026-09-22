@@ -58,6 +58,12 @@ A third change of this round needed no new clause, and saying so is part of the
 record rather than an omission: the live missed-update walk was REWRITTEN in
 place, not added, so the clause that already selects it selects the new one.
 
+The apply pass that answers the r8 lens needed no new clause either, for the
+same reason one clause over: it added three mutation controls and no new test,
+and each of the three targets a test this expression already carries -- the
+missed-update walk through `pg_`, the 503 arms through `arms_are_disjoint`, and
+the evidence-log pairing through `negation_admits`.
+
 == the two lines this instrument rewrites, and why it does it HERE ==
 pytest's own header names the interpreter and the rootdir by ABSOLUTE path,
 which is this seat's checkout, and this report is committed. A log edited to be
@@ -170,7 +176,7 @@ tests/test_ffa_game_number_anchor.py::test_every_round_eight_control_names_a_tes
 tests/test_ffa_game_number_anchor.py::test_pg_the_relock_retries_once_and_answers_from_the_lobby_not_the_snapshot PASSED [ 98%]
 tests/test_ffa_game_number_anchor.py::test_pg_an_exhausted_progress_read_answers_503_with_no_progress_fields PASSED [100%]
 
-===================== 57 passed, 103 deselected in 9.96s ======================
+===================== 57 passed, 103 deselected in 16.11s =====================
 run 1 rc=0
 
 ------------------------------------------------------------------------------
@@ -240,5 +246,5 @@ tests/test_ffa_game_number_anchor.py::test_every_round_eight_control_names_a_tes
 tests/test_ffa_game_number_anchor.py::test_pg_the_relock_retries_once_and_answers_from_the_lobby_not_the_snapshot PASSED [ 98%]
 tests/test_ffa_game_number_anchor.py::test_pg_an_exhausted_progress_read_answers_503_with_no_progress_fields PASSED [100%]
 
-===================== 57 passed, 103 deselected in 9.86s ======================
+===================== 57 passed, 103 deselected in 16.41s =====================
 run 2 rc=0

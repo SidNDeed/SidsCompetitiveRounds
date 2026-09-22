@@ -31,6 +31,20 @@ blanket rule as a LOW on bar item B12 -- a rule that admits anything cannot
 refuse anything (#342) -- and this line is this instrument's half of the
 closure.
 
+THE APPLY PASS SHARPENED WHAT "NAMES" MEANS, and this report is re-assembled
+under the same name because it is the same round read a second time. Seven
+producers here are REDIRECTED into their capture by a caller and print the
+name they were given. The eighth, repin-last.py, OPENS its own capture, and
+its only declaration was a comment beside the expression that built that name
+-- prose, which the derivation admits by design and which can be left standing
+when the expression moves. The name is now a value one function returns: the
+wrapper opens the file under it, writes it into that file's own `capture`
+header, and REFUSES to run at all when this repository's ignore rules do not
+re-include it, so a name the tree could not carry stops the round before the
+run rather than at the `git add` that ends it. The pairing test LOADS that
+module and CALLS the function, so for all eight the pattern is paired with
+something a run produces rather than with a sentence written beside it.
+
 THE CAPTURE ITSELF IS STILL WRITTEN OUTSIDE THE REPOSITORY, and this round
 that stopped being only about the per-half pytest logs. The re-inclusion above
 means a capture sitting in this directory is UNTRACKED-AND-NOT-IGNORED, which
@@ -67,14 +81,29 @@ even when every surviving file is untouched, and an unreadable path prints an
 EMPTY hash rather than being skipped. The script refuses to run at all if the
 fingerprint comes back empty.
 
-This round the instrument printed 12 paths, and the closing UNCHANGED
-line below is the fence's verdict over the paths listed at the top -- this
-round's whole working set: the endpoint, the test module, the ignore rules, the
-route manifest, the seven instruments this round edited and the one it adds --
-each byte-identical at the end to its hash at the start.
+This pair ran LAST, and the instrument printed 13 paths. The closing UNCHANGED
+line below is the fence's verdict over the paths listed at the top -- the
+endpoint, the test module, the ignore rules, the route manifest, the two
+instruments this pass edited, and this round's own control logs and reports --
+each byte-identical at the end to its hash at the start, and each still
+byte-identical in the commit that carries it.
 
-THE FENCE IS ALSO WHY THIS IS THE ONLY PAIR QUOTED, and this round discarded
-three before it. The FIRST redirected its captures into this directory: the
+THE ORDER IS WHY THE SET IS THIS ONE. The build pass ran its pair FIRST, when
+none of this round's evidence existed and the fence could not have covered it.
+The apply pass inherited that evidence COMMITTED, so it sits inside the fence,
+and running the controls after the pair would have left fingerprinted paths
+rewritten once the fence had closed. So every control, the mutation run and
+the PostgreSQL selection ran BEFORE this pair and their reports were assembled
+before it started. Nothing the fence lists is written afterwards. What is
+written afterwards is this report and the assembly record, and neither can
+exist before the run it quotes -- which is why the directory is checked again,
+as committed, by the re-pin wrapper that runs last of all.
+
+THE FENCE IS ALSO WHY THIS IS THE ONLY PAIR QUOTED. This one is the apply
+pass's and it REPLACES the build pass's, whose tree moved under it when the
+lens findings were closed. Before that one the round discarded three more, and
+their reasons are kept here because they are the round's and not one
+sitting's. The FIRST redirected its captures into this directory: the
 re-inclusion makes such a file untracked-and-not-ignored, so the fence walked
 its own growing log, compared it with itself and reported MOVED. It said so,
 and the pair went. The SECOND was green on both halves and went anyway,
@@ -86,7 +115,7 @@ the closing evidence rule refused this round's assembly report because the
 producer's log carried no EXECUTED result, and the fix is a closing check
 inside that producer.
 
-None of the three is in this file, and the rule is the same each time: a pair
+None of them is in this file, and the rule is the same each time: a pair
 that predates an edit to its own tree certifies a tree that no longer exists,
 whatever its summary line says. Each pair costs about twenty minutes, which is
 the price of the rule and not an argument against it.
@@ -179,30 +208,31 @@ cwd       <repo>/backend
 python    Python 3.12.10
 capture   <repo>/backend/tests/evidence/r12-suite-run.log
 command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
-tree      12 paths differ from HEAD or are untracked; fingerprinted before and after
-  97feb3a3cd29232127a681670290f6f0  .gitignore
-  1f4f026751af08d63d886c719ad360ab  backend/api/main.py
-  f3b18c1771026d191ac326319c0b76bd  backend/tests/evidence/citation-pin-control.sh
-  3f392deb852679e691b076ee1baedc64  backend/tests/evidence/freeze-guard-control.sh
-  2526f04d97fd77d6e6d82f917dda817d  backend/tests/evidence/mutation-runner.py
-  ddb55a43873b1f532ba91b630dd86fbc  backend/tests/evidence/repin-last.py
-  9fedcab8309bc7d17779973b9e83250a  backend/tests/evidence/residual-reach-control.py
-  bce8117190ec75cbd0e025ec914fa6ac  backend/tests/evidence/run-assembly.sh
-  725eb3da2df0a510c133d03cd6d14342  backend/tests/evidence/run-both-suites.sh
-  fee1cc6591aed7ed3079b2d106addc55  backend/tests/evidence/run-pg-controls.sh
-  f826857cc7c8c7794a723086b32b48ac  backend/tests/route_manifest_net_seat.json
-  3446bde8f2ae69db6006a0483b7cdad7  backend/tests/test_ffa_game_number_anchor.py
-=== opt-out started 11:37:27 ===
+tree      13 paths differ from HEAD or are untracked; fingerprinted before and after
+  4653ade08b8b4f4e38abe79e2c1e74d5  .gitignore
+  4c402f7520803603518fab9ccf7af46d  backend/api/main.py
+  9e8c09b7cdbd39b85be395ebf0e1cf62  backend/tests/evidence/mutation-runner.py
+  5e11b77cedf58185edc37976665fc2df  backend/tests/evidence/r12-citation-pin.log
+  c7b73ec37a3a425ab9c2bff466c42a71  backend/tests/evidence/r12-freeze-guard.log
+  9ee0193e3e5740ff14dc39cddcd4bc3d  backend/tests/evidence/r12-mutation-controls.txt
+  4bfda9eb00646ab6d4f1d7fa87577037  backend/tests/evidence/r12-mutation-run.log
+  d61385199f719252106f38c8dcbeeb72  backend/tests/evidence/r12-pg-controls.log
+  019d129c2a6c2b46c0ad11f164c352b5  backend/tests/evidence/r12-postgresql-controls.txt
+  6d0a4448fd9da84168dc5761184bfe86  backend/tests/evidence/r12-residual-reach.log
+  65268cd1f59fc4d9d78faa3ff11ed93d  backend/tests/evidence/repin-last.py
+  a67065827b001e370b0e87ee4da48f64  backend/tests/route_manifest_net_seat.json
+  6283e790f0037b631bddc1d657bd0408  backend/tests/test_ffa_game_number_anchor.py
+=== opt-out started 14:07:19 ===
 command   env -u FFA_TEST_PG_DSN FFA_TEST_PG_OPTOUT=1 python -m pytest tests/ -q -p no:cacheprovider
 opt-out rc=0
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-1742 passed, 44 skipped, 1 xfailed, 2 warnings in 560.27s (0:09:20)
-=== live DSN started 11:46:50 ===
+1742 passed, 44 skipped, 1 xfailed, 2 warnings in 587.27s (0:09:47)
+=== live DSN started 14:17:10 ===
 command   FFA_TEST_PG_DSN=postgresql+asyncpg://<user>@<host>:<port>/<db> python -m pytest tests/ -q -p no:cacheprovider
 dsn rc=0
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-1771 passed, 15 skipped, 1 xfailed, 2 warnings in 597.82s (0:09:57)
-=== tree re-fingerprinted 11:56:52 ===
+1771 passed, 15 skipped, 1 xfailed, 2 warnings in 588.20s (0:09:48)
+=== tree re-fingerprinted 14:27:03 ===
 command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
-UNCHANGED: the same 12 paths, each byte-identical to the pre-run fingerprint
-=== done 11:56:53 ===
+UNCHANGED: the same 13 paths, each byte-identical to the pre-run fingerprint
+=== done 14:27:05 ===

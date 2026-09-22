@@ -48129,11 +48129,25 @@ async def _ffa_record_and_refuse(db: AsyncSession, *, report, lobby_uuid, id_by_
     the reporter is told that its account is not the one that was there.
 
     EVERY ANSWER GETS EXACTLY ONE DISPOSITION, AND THE TWO ARMS ARE DISJOINT BY
-    CONSTRUCTION. The TERMINAL answers — the two below the capture check — carry
-    `progress`: the lobby's own games_played/expected_game, and settled_game
+    CONSTRUCTION. This helper has exactly two `raise` statements, and the side
+    of the re-derivation each one sits on IS the rule: the capture-failure arm
+    above it, and ONE terminal arm below it.
+
+    THE TERMINAL ARM IS ONE STATEMENT ANSWERING TWO STATUSES — 409 for a
+    lifecycle refusal, 403 for the signature downgrade — so "the two terminal
+    answers" counts values of `status`, never exits. Said this way because the
+    earlier wording counted them positionally, which reads as two raise sites
+    below the capture check and is not what the function holds; a count stated
+    in prose beside a count the code decides is the shape that drifts (#351).
+    test_the_two_503_arms_are_disjoint_on_the_answers_the_endpoint_builds
+    asserts the split — one exit above, one below — and its message is where a
+    later reader is told which reading is authoritative.
+
+    That terminal answer carries `progress`: the lobby's own
+    games_played/expected_game, and settled_game
     where the caller knows the named game is already settled, so a refused
     client can resynchronise instead of naming a number one further out on
-    every later game of the sitting. Their two counters are RE-READ under a
+    every later game of the sitting. Those counters are RE-READ under a
     fresh lobby lock after the capture, because the capture ends this request's
     transaction and the caller's copy predates that;
     `_ffa_progress_after_capture` is where that is written down.
@@ -48170,8 +48184,9 @@ async def _ffa_record_and_refuse(db: AsyncSession, *, report, lobby_uuid, id_by_
         raise FfaReportRefusal(503, "Could not record this report for review - "
                                     "retry this report unchanged", {})
     # THE CAPTURE ABOVE ENDED THIS REQUEST'S TRANSACTION AND RELEASED THE LOBBY
-    # LOCK, so `progress` is a reading of a sitting that may have moved. Both
-    # terminal exits below answer from the re-derivation instead. See
+    # LOCK, so `progress` is a reading of a sitting that may have moved. The
+    # ONE terminal raise below answers from the re-derivation instead, for
+    # whichever of the two statuses it carries. See
     # _ffa_progress_after_capture for why settled_game is carried rather than
     # re-derived, and for the direction a failed re-read takes.
     progress = await _ffa_progress_after_capture(db, lobby_uuid, progress)

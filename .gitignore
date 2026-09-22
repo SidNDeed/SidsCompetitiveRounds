@@ -40,8 +40,15 @@ logs-snapshot/
 # anything (#342): a file nothing in this tree writes was admitted by the same
 # line as a capture, and an `add -A` over a working directory would carry it.
 # Each pattern below is the capture of ONE committed instrument beside it, and
-# the instrument prints that name in its own stdout header, so the set is
-# derivable rather than remembered.
+# the name it is paired against is a VALUE that instrument produces rather
+# than a sentence written beside it. Seven of the eight are redirected into
+# their capture by their caller and print its name in their own stdout header.
+# The eighth, repin-last.py, OPENS its capture itself: one function decides
+# that name, the wrapper writes the same value into the log's own header, and
+# it REFUSES to run when the name it is about to write is not re-included
+# below. So the set stays derivable rather than remembered, and a producer
+# whose capture this block cannot carry stops before the run instead of at the
+# `git add` after it.
 # test_the_evidence_log_negation_admits_only_produced_logs compares the two
 # sets in BOTH directions: a pattern no instrument produces reds, and a capture
 # an instrument names that no pattern admits reds.

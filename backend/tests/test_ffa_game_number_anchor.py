@@ -86,7 +86,7 @@ code does not supply, so the numbers here are the ones in the list, counted off
 it: 22 unmarked and still live (rounds 1 and 2), 1 unmarked and RETIRED because
 round 4 deleted the code it mutated (prior-tail-only, annotated in place), 16
 marked (r3), 15 marked (r4), 10 marked (r5), 7 marked (r6), 7 marked (r7), 8
-marked (r8), 3 marked (r9), 8 marked (r10), 6 marked (r11), 5 marked (r12),
+marked (r8), 3 marked (r9), 8 marked (r10), 6 marked (r11), 8 marked (r12),
 and
 one more that is a committed test rather than a hand-run control
 (backfill-neutered, at the end). The rounds in that sentence are read off the
@@ -423,7 +423,30 @@ All KILLED:
                            which the producer names the capture it is
                            redirected into, leaving a pattern in .gitignore
                            that no committed instrument produces. Its inert
-                           twin is that line reflowed.
+                           twin is a DOUBLED SPACE inside that line -- not the
+                           line reflowed, which removes the declaration as
+                           surely as the mutant does, because a declaration
+                           has to OPEN its line.
+  repin-names-a-capture-no-pattern-admits (r12)  repin-last.py: change the
+                           name its capture_name returns, which is the value
+                           that wrapper opens its log under. No pattern in
+                           .gitignore re-includes the new name, so the round's
+                           re-pin record could not be committed. Its inert
+                           twin is the same return with the operand
+                           parenthesised.
+  terminal-arm-splits-into-two-exits (r12)  _ffa_record_and_refuse: give the
+                           variant case its own raise, so there are TWO
+                           terminal exits below the re-derivation instead of
+                           one. The answers are unchanged, which is the point
+                           -- what reds is the SHAPE the disjointness rests
+                           on. Its inert twin is the same detail string built
+                           across two lines.
+  recovery-mints-a-second-parked-key (r12)  the missed-update walk's recovery
+                           rule again, in the shape that does NOT crash: the
+                           original entry is left reachable and a second key
+                           is added beside it, so every leg runs and the key
+                           set is what sees it. Its inert twin is the same
+                           statement reflowed.
 ...and one more that is a COMMITTED TEST rather than a hand-run control:
   backfill-neutered        327's room_tail backfill: WHERE FALSE. See
                            test_pg_migration_327_post_check_fails_when_the_
@@ -1571,6 +1594,31 @@ def test_the_two_503_arms_are_disjoint_on_the_answers_the_endpoint_builds():
     # dict in scope again.
     tree = ast.parse(inspect.getsource(main._ffa_record_and_refuse))
     raises = [n for n in ast.walk(tree) if isinstance(n, ast.Raise)]
+    # WHICH SIDE OF THE RE-DERIVATION EACH EXIT SITS ON, asserted before the
+    # total, because the total on its own is ambiguous and the helper's
+    # docstring was read against it. "The two terminal answers" are two values
+    # of `status` carried by ONE raise; a reader who took them for two raise
+    # SITES would add a second terminal exit and meet a bare count with
+    # nothing in the function saying which reading is authoritative (#351).
+    # The message below is where that is said, so a later round reads it at
+    # the moment it matters instead of re-deriving it from prose.
+    rederive = [n for n in ast.walk(tree)
+                if isinstance(n, ast.Assign)
+                and any(getattr(t, "id", None) == "progress"
+                        for t in n.targets)
+                and "_ffa_progress_after_capture" in ast.unparse(n.value)]
+    assert len(rederive) == 1, [ast.unparse(n) for n in rederive]
+    split = rederive[0].lineno
+    above = [n for n in raises if n.lineno < split]
+    below = [n for n in raises if n.lineno > split]
+    assert (len(above), len(below)) == (1, 1), (
+        "this helper has ONE exit above the re-derivation -- the "
+        "capture-failure arm, which carries no progress fields -- and ONE "
+        "below it, the terminal arm, which answers 409 or 403 from the "
+        "re-derived progress. A second exit below would be a second place "
+        "the caller's resolved settled_game can reach a response. "
+        "above=%s below=%s"
+        % ([ast.unparse(n) for n in above], [ast.unparse(n) for n in below]))
     assert len(raises) == 2, [ast.unparse(r) for r in raises]
     by_status = {}
     for node in raises:
@@ -5688,10 +5736,23 @@ def test_pg_a_seat_that_missed_an_update_recovers_in_one_submission():
     the absence step 3 and 4 state together: an answer that advertised the
     number it had just settled would leave a derived key exactly where it was,
     so every later submission is refused for the same reason and the seat never
-    files again. The r12 control is the other half: a recovery that RE-KEYED
+    files again. The r12 controls are the other half: a recovery that RE-KEYED
     the parked delivery -- filing it as a second entry rather than re-signing
-    the one it holds -- is what mints a second delivery for one physical
-    game."""
+    the one it holds -- is what mints a second delivery for one physical game.
+
+    THE KEY-SET CHECK IS MADE WHERE THE RECOVERY HAPPENS, and that is this
+    round's correction to it. The comparison used to sit at the very end,
+    against a hardcoded pair of names, and the mutation credited to it never
+    reached it: a recovery that pops the entry and re-files it is met by a
+    KeyError on the very next lookup, three legs earlier, so the red came from
+    an incidental crash rather than from the check the inventory named (#391).
+    Now the set is read immediately after each recovery step and compared with
+    the set CAPTURED at the start -- not with a literal, which is a second
+    statement of the same thing -- and the walk stops there, so the assertion
+    that names the defect is the assertion that reds. The additive shape is
+    covered too: a recovery that leaves the original entry reachable and adds
+    a second key walks every leg without raising, and the same comparison sees
+    it."""
     require_pg()
 
     async def go():
@@ -5715,13 +5776,20 @@ def test_pg_a_seat_that_missed_an_update_recovers_in_one_submission():
             except main.FfaReportRefusal as ex:
                 ahead = ex
             if ahead is None:
-                # SEVEN values on every path, for the reason the sibling test
+                # EIGHT values on every path, for the reason the sibling test
                 # records: a short return meets the caller's unpack with a
                 # ValueError about a count, and the assertion written to name
                 # the fact that failed never runs.
-                return None, None, None, None, None, [], []
+                return None, None, None, None, None, [], [], keys_before
             advertised = int(ahead.progress["expected_game"])
             _recover_parked(outbox, "game-A", ahead)
+            # THE KEY SET, READ WHERE THE RECOVERY HAPPENED. A recovery that
+            # re-keyed this entry is met by a KeyError on the next line, and
+            # an assertion written to name the moved key never runs. So the
+            # set is compared here and the walk stops with both sets in hand.
+            if sorted(outbox) != keys_before:
+                return (advertised, None, None, None, None, [],
+                        sorted(outbox), keys_before)
             # 1. another elector settles the parked game there; this seat sees
             #    nothing of it.
             await _settle_directly(sm, pids, ROW_A, advertised)
@@ -5735,11 +5803,15 @@ def test_pg_a_seat_that_missed_an_update_recovers_in_one_submission():
             except main.FfaReportRefusal as ex:
                 latched = ex
             if latched is None:
-                return advertised, echo, None, None, None, [], keys_before
+                return (advertised, echo, None, None, None, [], keys_before,
+                        keys_before)
             # 4. RECOVERY, driven rather than described: the SAME entry,
             #    re-signed with the number the server just advertised, and
             #    submitted. No row is written behind the endpoint here.
             entry = _recover_parked(outbox, "game-B", latched)
+            if sorted(outbox) != keys_before:
+                return (advertised, echo, latched, None, None, [],
+                        sorted(outbox), keys_before)
             accepted = await _call_endpoint(sm, _delivery_of(entry))
             # 5. ...and the same key again, which must settle nothing more.
             again = await _call_endpoint(sm, _delivery_of(entry))
@@ -5748,15 +5820,24 @@ def test_pg_a_seat_that_missed_an_update_recovers_in_one_submission():
                     "SELECT game_number FROM ffa_matches WHERE lobby_id = :l"
                     " ORDER BY game_number"), {"l": LOBBY})).scalars().all()]
             return (advertised, echo, latched, accepted, again, numbers,
-                    sorted(outbox))
+                    sorted(outbox), keys_before)
         finally:
             await engine.dispose()
 
-    advertised, echo, latched, accepted, again, numbers, keys = run(go())
+    (advertised, echo, latched, accepted, again, numbers, keys,
+     keys_before) = run(go())
     assert advertised is not None, (
         "the ahead tail was not refused, so no advertisement was ever made "
         "and nothing below this line was exercised")
     assert advertised == 3, advertised
+    # THE KEY DID NOT MOVE, and this is asserted FIRST because every step
+    # below is a step taken on the entries this set names. The seat holds the
+    # same entries it started with -- recovery re-signed one of them, it did
+    # not mint a third and it did not re-identify the one it holds. Compared
+    # with the set captured before the walk rather than with a written-out
+    # pair: a literal here is a second statement of the same set, and the two
+    # drift (#432).
+    assert keys == keys_before, (keys, keys_before)
     # 2. the identical body is ECHOED, and the echo advertises the next number
     #    -- an accepted answer re-aligns the seat exactly as a refusal does.
     assert echo is not None
@@ -5785,11 +5866,6 @@ def test_pg_a_seat_that_missed_an_update_recovers_in_one_submission():
     assert again.message == "Already recorded", again.message
     assert again.settled_game == advertised + 1, again.settled_game
     assert again.expected_game == advertised + 2, again.expected_game
-    # THE KEY DID NOT MOVE. The seat holds the same two entries it started
-    # with -- recovery re-signed one of them, it did not mint a third and it
-    # did not re-identify the one it holds. A recovery that re-keyed would
-    # leave a set this assertion can see.
-    assert keys == ["game-A", "game-B"], keys
     # One row per physical game, at distinct numbers: the pre-seeded 1, the
     # game recovered at 3, the next physical game at 4 -- written by the
     # ENDPOINT, from the parked body, not by this test. The seat that missed an
@@ -5892,8 +5968,14 @@ def test_the_evidence_log_negation_admits_only_produced_logs():
     So the negation is PER PRODUCER, and both halves of the pairing are
     derived rather than listed:
 
-      * each producer under this directory prints the name of the capture it
-        is redirected into, in a `capture` header line of its own stdout;
+      * each producer under this directory NAMES the capture it writes, and
+        the name is a value that producer produces. Seven of them are
+        redirected into their capture by a caller and print its name in a
+        `capture` header line of their own stdout; the eighth, repin-last.py,
+        opens its own capture, so the name is read by LOADING that module and
+        CALLING the function that decides it -- the same value it opens the
+        file under, writes into that file's header, and checks against this
+        block before writing anything;
       * `.gitignore` carries one pattern per producer.
 
     Compared in BOTH directions here. A pattern no producer names reds -- that
@@ -5950,6 +6032,29 @@ def test_the_evidence_log_negation_admits_only_produced_logs():
             produced.setdefault("rX" + name[name.index("-"):], set()).add(path.name)
     assert produced, "no instrument under this directory names its own capture"
 
+    # THE PRODUCER THAT OPENS ITS OWN CAPTURE, read by calling it rather than
+    # by reading the source around it. Round 12's first pass paired the
+    # `*-repin-run.log` pattern with a COMMENT in that wrapper, which the
+    # regex above admits by design. A comment is not what the tool writes: the
+    # expression that opens the file could be changed with the comment left
+    # where it was, both directions below would still pass, and the wrapper
+    # would write a capture this repository cannot carry -- failing at the
+    # `git add` that ends the round, after the run it records has been spent.
+    # Loaded and CALLED, the pairing is against the value itself.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "_scr_repin_last", str(evidence / "repin-last.py"))
+    repin = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(repin)
+    # Two sample rounds, because what the pattern matches is the SUFFIX: a
+    # name whose round part is not the leading token would normalise to
+    # something no pattern means, and that reds here rather than in a commit.
+    one, two = repin.capture_name(0), repin.capture_name(9)
+    assert "-" in one and one.endswith(".log"), one
+    assert one[one.index("-"):] == two[two.index("-"):], (one, two)
+    produced.setdefault("rX" + one[one.index("-"):], set()).add(
+        "repin-last.py")
+
     # DIRECTION 1: every pattern is some producer's capture.
     for pat in sorted(patterns):
         hits = [n for n in produced if fnmatch.fnmatch(n, pat)]
@@ -5968,6 +6073,16 @@ def test_the_evidence_log_negation_admits_only_produced_logs():
     assert on_disk, "this directory carries no capture at all"
     for name in on_disk:
         assert any(fnmatch.fnmatch(name, pat) for pat in patterns), name
+
+    # ...and the wrapper's OWN admission check, exercised in both directions
+    # from here. It is what turns a capture this tree cannot carry into a
+    # refusal before the run instead of a failed `git add` after it, and a
+    # guard nothing ever runs is a guard nobody knows the polarity of.
+    ignores = (root / ".gitignore").read_text(encoding="utf-8")
+    assert repin.capture_is_admitted(repin.capture_name(0), ignores), (
+        "the wrapper would refuse to write the capture this block admits")
+    assert not repin.capture_is_admitted("r0-repin.log", ignores), (
+        "the wrapper's admission check accepts a name no pattern re-includes")
 
     # THE REFUSAL, on names no producer writes. A check that only ever admits
     # is a check that cannot fail.
