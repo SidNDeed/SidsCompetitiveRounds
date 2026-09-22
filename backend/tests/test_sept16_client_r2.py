@@ -4249,25 +4249,101 @@ def _server_lane_candidates(root, env, worktree_lines):
     test is deleted or turned into a skip by the next reader.  That would lose
     the binding at exactly the moment the two halves become one artifact.
 
-    THE WORKTREE CANDIDATE IS MATCHED BY BRANCH, NOT BY SUBSTRING.  `git
-    worktree list` prints `<path> <sha> [branch]`, and a substring match for
-    the lane's name also matches every read-only review pin checked out from
-    that lane at an older sha -- a stale tree answering for the live one with
-    nothing in the output to say so."""
+    NO CANDIDATE IS EVER ANOTHER LANE'S WORKING TREE -- the round-7 cold-lens
+    correction, and the reason `worktree_lines` is still a parameter while
+    nothing reads it.  Rounds 6 and 7 kept a candidate built from `git worktree
+    list`, matched on the lane's exact branch bracket.  The intent was a
+    fallback; the effect, in THIS worktree, was the primary resolution: there
+    is no `REVIEW-INPUT` beside this branch, and its own `backend/api/main.py`
+    carries no status route, so the worktree candidate was the only one that
+    could fire.  A plain `python -m pytest` -- the invocation the bundle itself
+    publishes -- therefore opened the other lane's LIVE tree, while that lane
+    carried a round in flight.  Two things were wrong with that at once: the
+    contract requires this equality be proven against the frozen server
+    representation and against nothing else, and a tree being written to is not
+    a tree a difference can be read from (#304; `_stable_text`'s own docstring
+    records the run where that happened).
+
+    A binding whose only real anchor is an environment variable is a binding no
+    reader can re-derive.  So the frozen representation SHIPS with this lane --
+    see `_frozen_route_text` -- and with nothing naming a tree the candidates
+    below are TWO: the pin's own server-lane copy and this repository.  Neither
+    is a tree this lane does not own, and a third answer, the frozen extract,
+    is the caller's terminal fallback rather than a candidate here.  The one
+    exception is the exception by construction: when $SCR_SERVER_LANE names a
+    tree the list is that tree and nothing else, and it reaches whatever was
+    named -- which is why the published invocation carries no such variable and
+    reads the extract instead.  The parameter is kept so the rule "a worktree
+    listing contributes no candidate" is a property something can assert rather
+    than an absence nobody checks (#342).
+
+    THE ORDER IS THE POINT.  A tree that is NAMED wins outright; then a review
+    pin's own copy, when the harness is being run from inside a pin; then the
+    repository itself, which is what the merged tree will be.  The frozen
+    extract is the terminal fallback, applied by the caller when no tree
+    answered."""
     if env:
         return [(pathlib.Path(env), "the tree $SCR_SERVER_LANE names", True)]
-    cands = [
+    return [
         (root / "REVIEW-INPUT" / "server-lane",
          "the review pin's server-lane copy", False),
         (root, "this repository itself -- the merged tree", False),
     ]
-    for ln in worktree_lines:
-        m = re.search(r"\[([^\]]+)\]\s*$", ln.strip())
-        if not m or m.group(1).strip() != "claude/sept16-dc-server":
-            continue
-        cands.append((pathlib.Path(ln.split()[0]),
-                      "the server lane's worktree", False))
-    return cands
+
+
+# The frozen server-lane extract this lane carries, beside this file.  Not a
+# module: it is read as TEXT and never imported.
+_FROZEN_SERVER_EXTRACT = pathlib.Path(__file__).resolve().parent / \
+    "sept16_dc_server_status_route.frozen.txt"
+_ROUTE_ANCHOR = '@app.get("/api/v1/team/series/{series_id}/status"'
+
+
+def _frozen_route_text(raw=None):
+    """(text, None) for the frozen server-lane extract, or (None, why).
+
+    THE CONTRACT NAMES ONE SERVER REPRESENTATION and says the field-name
+    equality is proven against it and against nothing else.  That representation
+    is the round-6 client review pin's immutable `server-lane/main.py`, which
+    lives outside this repository; writing its path into this file would put a
+    workstation path in the tree and would still leave the binding unverifiable
+    from the bundle.  So the region of it the harness reads travels WITH the
+    lane, cut by `886bed8-r7-freeze-server-route.py`, which records the source
+    line range, the sha256 of the whole pin file, and a sha256 of the extract's
+    own body.
+
+    THE HASH IS RECOMPUTED HERE, on every run.  An extract nobody re-hashes is a
+    frozen copy only by assertion: a truncation, a stray edit or a line-ending
+    rewrite would hand the harness a text that still parses and still yields a
+    key set, and a partial key set reads at the assertion as the two lanes
+    disagreeing.  A mismatch refuses instead, with both hashes named.
+
+    The body is everything from the status route's own decorator onward; the
+    provenance header above it is deliberately outside the hash, so a reader may
+    annotate the provenance without invalidating the bytes.
+
+    `raw` is a test hook, the same one `_stable_text` takes for the same reason:
+    a refusal rule that can only be exercised by corrupting the shipped file is
+    a rule nobody exercises."""
+    if raw is None:
+        try:
+            raw = _FROZEN_SERVER_EXTRACT.read_text(encoding="utf-8")
+        except OSError:
+            return None, ("the frozen server-lane extract is not beside this file: "
+                          + _FROZEN_SERVER_EXTRACT.name)
+    m = re.search(r"^# sha256-of-body\s*:\s*([0-9a-f]{64})\s*$", raw, re.M)
+    if not m:
+        return None, "the frozen extract records no sha256 of its own body"
+    i = raw.find(_ROUTE_ANCHOR)
+    if i < 0:
+        return None, "the frozen extract carries no status route decorator"
+    body = raw[i:]
+    import hashlib
+    got = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    if got != m.group(1):
+        return None, ("the frozen extract's body does not match the sha256 it "
+                      "records (" + got[:16] + "... vs " + m.group(1)[:16]
+                      + "...), so it is not the frozen representation any more")
+    return body, None
 
 
 def _stable_text(read, attempts=3, complete=None):
@@ -4333,23 +4409,30 @@ def _route_dict_is_complete(text):
 
 def _server_lane_main():
     """(text, how) for the server lane's main.py, resolved at RUN TIME through
-    _server_lane_candidates.
+    _server_lane_candidates, falling back to the FROZEN extract this lane
+    carries.
 
-    Returns ("", reason) when no candidate carries the route; the caller FAILS
-    rather than skipping.  A cross-lane test that quietly skips is the check
-    that cannot fail."""
+    Returns ("", reason) when neither a candidate tree nor the frozen extract
+    carries the route; the caller FAILS rather than skipping.  A cross-lane test
+    that quietly skips is the check that cannot fail.
+
+    THE FROZEN EXTRACT IS THE FLOOR, NOT THE PREFERENCE.  A real tree that
+    carries the route is read first, because on the merged tree that IS the
+    contract's other half and the extract is a stale review artifact.  When no
+    tree answers -- which is this worktree's case and every reviewer's -- the
+    extract answers, and `how` says so, so a log that records `how` records
+    which representation the equality was proven against.  This resolver reaches
+    for no tree of its own any more: the only path to a tree outside this
+    repository and its pin is one that something NAMES in $SCR_SERVER_LANE, and
+    `how` reports that by name when it is taken."""
     import os
-    import subprocess
-    route = '@app.get("/api/v1/team/series/{series_id}/status"'
-    lines = []
-    try:
-        proc = subprocess.run(["git", "-C", str(ROOT), "worktree", "list"],
-                              stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        lines = proc.stdout.decode("utf-8", "replace").splitlines()
-    except Exception:
-        lines = []
+    route = _ROUTE_ANCHOR
+    # NO LISTING IS ASKED FOR.  Round 7 enumerated the machine's worktrees here
+    # and handed them to the resolver as candidates; the empty list is what says
+    # that door is shut, and `test_r7cl_f5_...` asserts this body never asks git
+    # for one -- an absence nothing checks is not a property (#342).
     for cand, how, exclusive in _server_lane_candidates(
-            ROOT, os.environ.get("SCR_SERVER_LANE"), lines):
+            ROOT, os.environ.get("SCR_SERVER_LANE"), []):
         for rel in ("backend/api/main.py", "main.py"):
             p = cand / rel
 
@@ -4379,7 +4462,14 @@ def _server_lane_main():
         if exclusive:
             return "", ("the tree $SCR_SERVER_LANE names carries no status route, "
                         "and a named tree is never silently replaced by another")
-    return "", "no candidate tree carried the status route"
+    frozen, why = _frozen_route_text()
+    if frozen is not None:
+        return frozen, ("the FROZEN server-lane extract this lane carries, "
+                        + _FROZEN_SERVER_EXTRACT.name
+                        + " -- a verbatim slice of the round-6 review pin's "
+                          "immutable server-lane copy, hash-verified on this read")
+    return "", ("no candidate tree carried the status route, and the frozen "
+                "extract could not answer for it: " + why)
 
 
 def _status_route_keys(server_main):
@@ -4901,6 +4991,13 @@ def test_r6lens_h2_an_answer_that_changes_the_banner_asks_for_the_repaint():
                   "LastSeriesDcDeferredFieldsPresent",
                   "LastSeriesT1Wins", "LastSeriesT2Wins"):
         assert field in key, field
+    # AND EACH AS ITS OWN TERM.  The dark latch joined this key in round 7 and
+    # spells `activeTeamSeriesId` as its argument, so the loop above went green
+    # with the id's own term deleted -- the one input whose absence turns an id
+    # CHANGE into no change, read from a name that another term supplied
+    # (#342).  Terms, not names.
+    for term in _R7_KEY_TERMS:
+        assert term in key, "the render key does not carry the term " + term
 
     def claim(s):
         p = _method_body(s, "private static void ApplySeriesStateResponse")
@@ -4909,6 +5006,7 @@ def test_r6lens_h2_an_answer_that_changes_the_banner_asks_for_the_repaint():
             return False
         return ("string bannerBefore = BannerRenderKey();" in p
                 and "RequestBannerRepaintIfChanged(bannerBefore);" in p
+                and 'return (activeTeamSeriesId ?? "-")' in k
                 and "LastSeriesDcDeferredSecondsRemaining" in k
                 and "LastSeriesStateForId" in k)
 
@@ -4933,6 +5031,19 @@ def test_r6lens_h2_an_answer_that_changes_the_banner_asks_for_the_repaint():
                 '                   + "|"',
                 "R6lens the countdown leaves the render key"),
         "R6lens the render key carries the countdown")
+
+    # MUTATION 3: the series id leaves the key as its own term.  The name
+    # survives inside the dark latch's argument, so every name-level assertion
+    # stays green while an id change reads as no change and the banner keeps
+    # the previous series' numbers on screen.
+    _assert_discriminating(
+        claim, api,
+        _mutate(api,
+                """            return (activeTeamSeriesId ?? "-")
+                   + "|" + (LastSeriesStateForId ?? "-")""",
+                '            return (LastSeriesStateForId ?? "-")',
+                "R6lens the series id leaves the render key"),
+        "R6lens the render key carries the series id as its own term")
 
 
 def test_r6lens_m3_m5_the_banner_off_line_separates_absent_from_false():
@@ -5116,9 +5227,11 @@ def test_r6lens_m1_l6_the_cross_lane_resolver_finds_a_merged_tree():
     (L6) And the worktree candidate was a SUBSTRING match against each `git
     worktree list` line, which on this machine also matches read-only review
     pins checked out from that lane at older shas.  Matching the bracketed
-    BRANCH is exact.  A tree named by $SCR_SERVER_LANE is now exclusive, so a
-    mutation control pointed at a copy can never be answered by a different,
-    unmutated tree."""
+    BRANCH was exact -- and the round-7 cold lens then showed that being exact
+    about WHICH live tree to open was the wrong repair: no live tree is opened
+    at all any more.  That case is `test_r7cl_f5_...` below; what survives here
+    is the half this case was really about, that the repository itself is a
+    candidate and that a NAMED tree is exclusive."""
     # drive-less on purpose: see the note above about the bundle sweep
     here = pathlib.Path("/lane/root")
     lines = [
@@ -5131,9 +5244,8 @@ def test_r6lens_m1_l6_the_cross_lane_resolver_finds_a_merged_tree():
     cands = _server_lane_candidates(here, None, lines)
     assert here in [c for c, _, _ in cands], [str(c) for c, _, _ in cands]
 
-    # L6: the detached pin is NOT a candidate; the branch's worktree is
+    # neither the pin nor this lane's own worktree is a candidate
     paths = [c for c, _, _ in cands]
-    assert pathlib.Path("/lane/scr-wt-sept16-dc-server") in paths, paths
     assert not any("1dc473e" in str(p) for p in paths), paths
     assert not any("client-r2" in str(p) for p in paths), paths
 
@@ -5146,6 +5258,100 @@ def test_r6lens_m1_l6_the_cross_lane_resolver_finds_a_merged_tree():
     text, how = _server_lane_main()
     assert text, how
     assert '@app.get("/api/v1/team/series/{series_id}/status"' in text
+
+
+def test_r7cl_f5_the_cross_lane_binding_reads_the_frozen_extract_and_no_live_tree():
+    """THE EQUALITY IS PROVEN AGAINST THE FROZEN REPRESENTATION AND NOTHING ELSE.
+
+    WHAT WAS WRONG.  Rounds 6 and 7 resolved the server lane through an ordered
+    list whose last entry was built from `git worktree list`, matched on the
+    lane's exact branch bracket.  Read as a design that is a fallback; read as
+    an EXECUTION on this branch it was the only candidate that could ever fire.
+    There is no `REVIEW-INPUT` beside this worktree, and its own
+    `backend/api/main.py` carries no status route -- so `python -m pytest
+    backend/tests/test_sept16_client_r2.py -q`, the invocation the round-7
+    bundle publishes in its own log, opened the OTHER lane's live working tree.
+    The contract forbids reading that tree, and the round it was read during
+    carried a build in flight, which is the condition `_stable_text` exists
+    because of.  Everything that made the binding true rested on one environment
+    variable a wrapper set and no log recorded.
+
+    WHAT IS ASSERTED, AND WHY EACH PART IS SEPARATE.  That no listing line
+    becomes a candidate is about the RULE and is exercised on a synthetic
+    listing, so it holds on any machine.  That the resolver does not even ASK
+    for a listing is about this body, because a rule whose enforcement is an
+    empty argument can be undone by one line that fills the argument.  That the
+    frozen extract is WIRED is the #342 lesson the sibling case above already
+    learned once: a defined-and-unused guard is a guard nobody runs.  And the
+    hash rule is exercised through the same `raw` hook `_stable_text` takes,
+    both directions -- a tampered body is refused, an annotated PROVENANCE is
+    not, which is the whole reason the header sits outside the hash."""
+    import inspect
+
+    here = pathlib.Path("/lane/root")
+    listing = [
+        "/lane/root                       aaaaaaa [claude/sept16-client-r2]",
+        "/lane/scr-wt-sept16-dc-server    bbbbbbb [claude/sept16-dc-server]",
+        "/pins/scr-codex-dc-server-1dc473e  1dc473e (detached HEAD)",
+    ]
+
+    # 1. NO LISTING LINE BECOMES A CANDIDATE -- not even the exact branch.
+    cands = _server_lane_candidates(here, None, listing)
+    assert not any("sept16-dc-server" in str(c) for c, _, _ in cands), \
+        [str(c) for c, _, _ in cands]
+    assert [c for c, _, _ in cands] == [here / "REVIEW-INPUT" / "server-lane", here], \
+        [str(c) for c, _, _ in cands]
+    # a NAMED tree is still exclusive, and is still the only thing that wins
+    named = _server_lane_candidates(here, "/lane/copy", listing)
+    assert len(named) == 1 and named[0][2] is True
+
+    # 2. ...AND THE RESOLVER DOES NOT ASK FOR A LISTING.  Read off the body,
+    #    with the docstring and the comments removed: both of those TALK about
+    #    worktrees, and a check that a word is absent from prose is a check
+    #    about prose.
+    src = inspect.getsource(_server_lane_main)
+    after_doc = src[src.index('"""', src.index('"""') + 3) + 3:]
+    code = "\n".join(ln for ln in after_doc.split("\n")
+                     if not ln.strip().startswith("#"))
+    assert "worktree" not in code, code[:500]
+    assert "subprocess" not in code, code[:500]
+
+    # 3. THE FROZEN EXTRACT IS WIRED, not merely present (#342).
+    assert "_frozen_route_text()" in code
+
+    # 4. It answers, and it carries the three names the contract fixes.
+    frozen, why = _frozen_route_text()
+    assert frozen is not None, why
+    assert _ROUTE_ANCHOR in frozen
+    fkeys = _status_route_keys(frozen)
+    for n in ("dc_deferred", "dc_deferred_seconds_remaining",
+              "dc_deferred_bound_seconds"):
+        assert n in fkeys, (n, sorted(fkeys))
+
+    # 5. THE HASH REFUSES A TAMPERED BODY...
+    raw = _FROZEN_SERVER_EXTRACT.read_text(encoding="utf-8")
+    i = raw.find(_ROUTE_ANCHOR)
+    assert i > 0, "the extract has no provenance header above its body"
+    tampered = raw[:i] + raw[i:].replace("dc_deferred_bound_seconds",
+                                         "dc_deferred_bound_secs", 1)
+    assert tampered != raw, "the tamper changed nothing"
+    out, why2 = _frozen_route_text(tampered)
+    assert out is None and "sha256" in why2, (out is None, why2)
+
+    # ...AND ACCEPTS AN ANNOTATED PROVENANCE, which is the inert twin of that
+    # tamper: the same kind of edit, above the body instead of inside it.
+    out2, why3 = _frozen_route_text("# a reader's note" + LF + raw)
+    assert out2 is not None, why3
+    assert out2 == frozen
+
+    # 6. AND THE LIVE RESOLUTION AGREES.  On this branch only the extract can
+    #    answer; on the merged tree the repository answers and this is the
+    #    comparison that matters.  Either way the resolved text is the one the
+    #    field-list assertions above read.
+    server, how = _server_lane_main()
+    assert server, how
+    assert {"dc_deferred", "dc_deferred_seconds_remaining",
+            "dc_deferred_bound_seconds"} <= _status_route_keys(server), how
 
 
 def test_r6lens_l6_a_tree_being_written_is_not_read_as_a_disagreement():
@@ -5247,9 +5453,9 @@ def _bound_sentence_or_no_constant(block):
 
 # ── M1 / B3 / B19: every path that changes a banner input asks for a repaint ──
 
-# The banner's inputs, as the render key spells them.  A WRITER is an assignment
-# to one of these; the census below is a grep of that OPERATION rather than of
-# the one line the review flagged (#432, #330, #279).
+# The banner's inputs, as the render key spells them.  A WRITER is anything that
+# changes one of them; the census below is a grep of that OPERATION rather than
+# of the one line the review flagged (#432, #330, #279).
 _R7_BANNER_INPUTS = (
     "LastSeriesDcDeferred",
     "LastSeriesDcDeferredSecondsRemaining",
@@ -5261,21 +5467,85 @@ _R7_BANNER_INPUTS = (
     "activeTeamSeriesId",
 )
 
+# EACH INPUT'S OWN TERM IN THE KEY, because a name is not a term.  The dark
+# latch's term SPELLS `activeTeamSeriesId` as its argument, so from the moment
+# the latch joined the key `"activeTeamSeriesId" in key` was satisfied by the
+# latch alone: the id could leave the key as its own term with every
+# name-level assertion still green, and an id change would then read as no
+# change.  These are the TERMS; the names above are what the census greps for,
+# which is a different question (#342, #431).
+_R7_KEY_TERMS = (
+    'return (activeTeamSeriesId ?? "-")',
+    '+ "|" + (LastSeriesStateForId ?? "-")',
+    '+ "|" + (LastSeriesDcDeferred ? "1" : "0")',
+    '+ "|" + LastSeriesDcDeferredSecondsRemaining',
+    '+ "|" + LastSeriesDcDeferredBoundSeconds',
+    '+ "|" + (LastSeriesDcDeferredFieldsPresent ? "p" : "-")',
+    '+ "|" + (SeriesStatusLatchedDark(activeTeamSeriesId) ? "d" : "-")',
+    '+ "|" + LastSeriesT1Wins',
+    '+ "|" + LastSeriesT2Wins',
+)
+
+# THE NINTH INPUT IS NOT A FIELD.  The render predicate is
+# `cacheIsThisSeries && !latchedDark && dc_deferred`, and the latch is a SET.
+# It was missed by the first census for exactly that reason: a grep for
+# assignments cannot see a set, which is written by a method call.  So the
+# census asks about the OPERATION in both of its spellings (#432).
+_R7_BANNER_LATCH = "_statusPollDarkSeries"
+
+# Every way C# changes a value, not just `=`: compound assignment and
+# increment/decrement are writes, and the round-7 census matched neither.  `=`
+# is guarded against `==` and, because the name must sit immediately before the
+# operator, `<=`, `>=` and `!=` cannot reach it.
 _R7_ASSIGN = re.compile(
-    r"^\s*(?:ApiClient\.)?(" + "|".join(_R7_BANNER_INPUTS) + r")\s*=(?!=)", re.M)
+    r"(?:ApiClient\.)?(?:" + "|".join(_R7_BANNER_INPUTS) + r")\s*"
+    r"(?:(?:\+|-|\*|/|%|\||&|\^|<<|>>|\?\?)?=(?!=)|\+\+|--)")
+_R7_PRE_INCDEC = re.compile(
+    r"(?:\+\+|--)\s*(?:ApiClient\.)?(?:" + "|".join(_R7_BANNER_INPUTS) + r")\b")
+_R7_SET_WRITE = re.compile(
+    r"(?:ApiClient\.)?" + _R7_BANNER_LATCH +
+    r"\s*\.\s*(?:Add|Remove|Clear|UnionWith|IntersectWith|ExceptWith|"
+    r"SymmetricExceptWith|RemoveWhere)\s*\(")
 
 
-def _r7_writer_lines(src):
-    """Every line of `src` that ASSIGNS a banner input, excluding the field
-    declarations themselves (which carry a `static` on the same line)."""
+def _r7_plugin_sources():
+    """{name: text} for EVERY C# source in the plugin, resolved at run time.
+
+    The round-7 census read ApiClient.cs alone while the banner's inputs are
+    `public static`, so a writer in NativeUI.cs, Plugin.cs or any file added
+    later was outside the scan and the check would have stayed green on the
+    case it exists to catch.  Globbing rather than listing the files means a
+    NEW file joins the census by existing (#330: sweep the siblings)."""
+    return {p.name: p.read_text(encoding="utf-8")
+            for p in sorted(PLUGIN.glob("*.cs"))}
+
+
+def _r7_writer_lines(sources):
+    """Every (file, line, text) in `sources` that CHANGES a banner input.
+
+    Declarations are excluded -- a field's own declaration is not a writer, and
+    it is recognised by the `static` that every one of these carries.  `sources`
+    is a {name: text} map so a control can put a writer in another file without
+    touching the tree."""
+    if not isinstance(sources, dict):
+        sources = {"ApiClient.cs": sources}
     out = []
-    for i, line in enumerate(src.split("\n"), 1):
-        if not _R7_ASSIGN.match(line):
-            continue
-        if " static " in line or line.strip().startswith("private ") \
-                or line.strip().startswith("public "):
-            continue
-        out.append((i, line.strip()))
+    for fname in sorted(sources):
+        for i, line in enumerate(sources[fname].split("\n"), 1):
+            # cheap pre-filter: three substring tests over ~100 000 lines, so
+            # the three regexes below run on the handful that could match
+            if ("LastSeries" not in line and "activeTeamSeriesId" not in line
+                    and _R7_BANNER_LATCH not in line):
+                continue
+            if not (_R7_ASSIGN.search(line) or _R7_PRE_INCDEC.search(line)
+                    or _R7_SET_WRITE.search(line)):
+                continue
+            s = line.strip()
+            if " static " in line or s.startswith("private ") \
+                    or s.startswith("public ") or s.startswith("///") \
+                    or s.startswith("//"):
+                continue
+            out.append((fname, i, s))
     return out
 
 
@@ -5328,12 +5598,21 @@ def test_r7_m1_b19_every_path_that_changes_a_banner_input_asks_for_the_repaint()
     until something unrelated marked the tab dirty -- during an outage, for as
     long as the tab stayed open.  A flag names a LINE; the defect was a CLASS.
 
-    WHAT IS ASSERTED HERE.  First the CENSUS: every assignment to a banner input
-    in this file, found by grepping the operation, falls inside one of the paths
-    below -- so a new writer somewhere else reddens this rather than slipping in
-    beside it.  Then, for each path, the request is present EXACTLY ONCE within
-    that path's own span, never counted file-wide, where four copies would let
-    any one of them go missing unnoticed.
+    WHAT IS ASSERTED HERE.  First the CENSUS: every write of a banner input
+    ANYWHERE IN THE PLUGIN, found by grepping the operation in all of its
+    spellings, falls inside one of the paths below -- so a new writer somewhere
+    else reddens this rather than slipping in beside it.  Then, for each path,
+    the request is present EXACTLY ONCE within that path's own span, never
+    counted file-wide, where four copies would let any one of them go missing
+    unnoticed.
+
+    THE CENSUS IS WIDER THAN IT WAS, TWICE OVER.  Its first cut anchored on
+    `^\\s*Name =` in ApiClient.cs alone, so a compound write (`+=`, `??=`, `++`)
+    matched nothing and a writer in any other file -- the fields are
+    `public static` -- was outside the scan entirely.  Neither existed on the
+    tree, which is precisely the shape of a check that certifies a class while
+    being unable to see it (#342).  And the latch is now one of the inputs, so
+    the census asks about a SET as well as about fields.
 
     The dispatch-throw path writes none of the inputs and therefore asks for
     nothing at run time.  It carries the call all the same: a rule with an
@@ -5345,17 +5624,43 @@ def test_r7_m1_b19_every_path_that_changes_a_banner_input_asks_for_the_repaint()
     for name, span in paths.items():
         assert span, "the span for " + name + " could not be delimited"
 
+    # THE RENDER KEY IS THE WHOLE INPUT SET.  The census is a census OF a list,
+    # so the list has to be the render's own; a name that the render reads and
+    # the key omits is the defect the latch was (#342).
+    keyfn = _method_body(api, "private static string BannerRenderKey")
+    assert keyfn, "the render key could not be delimited"
+    for name in _R7_BANNER_INPUTS:
+        assert name in keyfn, "the render key does not read " + name
+    # AND EACH AS ITS OWN TERM.  The loop above stays green with the id's
+    # own term deleted, because the latch term spells the id (#342).
+    for term in _R7_KEY_TERMS:
+        assert term in keyfn, "the render key does not carry the term " + term
+    assert "SeriesStatusLatchedDark(activeTeamSeriesId)" in keyfn, (
+        "the render key does not ask the dark latch about the ACTIVE series, "
+        "which is the one term the render predicate reads beside the fields")
+    ui = _src("NativeUI.cs")
+    assert "ApiClient.SeriesStatusLatchedDark(dcSeries)" in ui, (
+        "the render predicate no longer reads the latch -- the key's term and "
+        "the render's term must be the same question")
+
     # THE CENSUS -- the sweep of siblings, recorded.  Every writer of a banner
-    # input is inside one of the paths above.
-    writers = _r7_writer_lines(api)
+    # input, in EVERY plugin source, is inside one of the paths above.
+    sources = _r7_plugin_sources()
+    assert "ApiClient.cs" in sources and len(sources) > 3, sorted(sources)
+    writers = _r7_writer_lines(sources)
     assert writers, "the writer grep found nothing -- the census cannot be empty"
     outside = []
-    for lineno, text in writers:
-        if not any(text in span for span in paths.values()):
-            outside.append((lineno, text))
+    for fname, lineno, text in writers:
+        if fname != "ApiClient.cs" or not any(text in span
+                                              for span in paths.values()):
+            outside.append((fname, lineno, text))
     assert not outside, (
         "these writers of a banner input sit outside every repaint path: "
         + repr(outside))
+
+    # THAT THE CENSUS CAN SEE each write form and each source file is its own
+    # named case: test_r7cl_c4_... below.  A census is only as wide as its grep,
+    # and the grep's reach is a separate claim from this one's result.
 
     # THE OCCURRENCE ASSERTION, WITHIN EACH PATH'S SPAN.
     for name, span in paths.items():
@@ -5874,6 +6179,20 @@ _R7_CLAIMS = (
     ("RoomActors.cs",
      "the deployed endpoint can only record as",
      "WHAT THAT FORM IS RECORDED AS depends on the box"),
+    # ── the round-7 cold-lens rows ──────────────────────────────────────────
+    # W8 said the reviewed route PARKS a zero-total fallback, full stop.  Three
+    # exits on that route are reached before any total is read and park nothing
+    # (contract item 6), so the arming line named a disposition the route does
+    # not guarantee -- the mirror of the three rows this round already closed,
+    # written by the same hand in the same pass.
+    ("RoomActors.cs",
+     "client is built against PARKS it",
+     "the park is ONE ANSWER AMONG SEVERAL, not a property "),
+    # The latch comment counted the banner's inputs as three while the render
+    # predicate beside it read the presence bit and the latch as well.
+    ("ApiClient.cs",
+     "does not repaint it (#342). These three fields are the",
+     "THREE NUMBERS, THE PRESENCE BIT AND THIS LATCH"),
     # SPLIT ON PURPOSE: this row's own source line must not contain the literal
     # it forbids, or the file would always fail its own check.
     ("test",
@@ -5929,6 +6248,249 @@ def test_r7_b16_the_claims_check_rejects_every_superseded_form():
         # INERT TWIN: an unrelated edit of the same shape leaves the row green
         assert row_holds(src + "\n// an unrelated comment line\n",
                          superseded, corrected), name
+
+
+# ── ROUND 7, COLD LENS: four cases the round-7 pass itself introduced ───────
+# Three of these are the same defect the round closed elsewhere, reappearing in
+# the prose and the checks the round WROTE: a sentence that reads one exit of a
+# route as a property of the route, a key that omits the one input that is not
+# a field, and a census whose grep cannot match the operation it is quoted for.
+# That is the expected place to find them (#351 -- re-read the comments your own
+# fix authored), not a sign the method is wrong.
+
+
+def test_r7cl_c1_w8_names_the_three_exits_that_precede_the_park():
+    """C1: the arming line states what the route GUARANTEES, not one of its exits.
+
+    W8's round-7 wording said "the route this client is built against PARKS it
+    -- it marks the row and answers deferred=true before any total is read",
+    as a flat property of that route.  On the frozen server representation the
+    park is reached only past three earlier exits, none of which reads a total
+    and none of which parks anything: a row already settled, a report naming a
+    room the series does not own, and a roomless report inside the post-resume
+    window.  Contract item 6 names exactly those three as exits that decide
+    nothing and say so with `ignored` true beside `deferred` false.
+
+    WHY IT MATTERS TO A READER OF A BUNDLE.  A survivor's fallback arms, this
+    line is written, and the report then meets the settled-row exit: nothing is
+    stamped, no window opens, and the status route answers `dc_deferred=false`
+    for the rest of the series' life.  Triage that believes the arming line
+    looks for a deferral marker and a sweep tick that never existed and
+    attributes the outcome to the sweep.
+
+    THE SERVER HALF IS READ, NOT ASSERTED: the three exits are located in the
+    frozen representation and each is required to precede the park."""
+    ra = _src("RoomActors.cs")
+    assert "the park is ONE ANSWER AMONG SEVERAL, not a property " in ra
+    assert "client is built against PARKS it" not in ra
+    # the line names all three, and names what they answer
+    for phrase in ("a row already settled",
+                   "a report naming a room this ",
+                   "a roomless report inside the post-resume window",
+                   "ignored=true beside deferred=false"):
+        assert phrase in ra, phrase
+
+    # CROSS-LANE: the three exits exist on the reviewed route and every one of
+    # them is reached BEFORE the park.
+    server, how = _server_lane_main()
+    assert server, how
+    i = server.find("async def report_team_dc")
+    if i < 0:
+        i = server.find('@app.post("/api/v1/team/series/{series_id}/report-dc"')
+    assert i > 0, "the report-dc handler could not be found on the server lane"
+    handler = server[i:]
+    park = handler.find("if is_fallback:")
+    assert park > 0, "the handler carries no is_fallback park"
+    for exit_text in ('"ignored": True, "deferred": False',
+                      '"reason": "dc_room_mismatch"',
+                      '"reason": "dc_after_resume"'):
+        k = handler.find(exit_text)
+        assert 0 < k < park, (
+            exit_text + " is not an exit reached before the park")
+
+    def claim(s):
+        return ("the park is ONE ANSWER AMONG SEVERAL, not a property " in s
+                and "client is built against PARKS it" not in s)
+
+    _assert_discriminating(
+        claim, ra,
+        _mutate(ra, "the park is ONE ANSWER AMONG SEVERAL, not a property ",
+                "client is built against PARKS it, and that is a property ",
+                "R7CL-C1 W8 reclaims the park as a property of the route"),
+        "R7CL-C1 W8 names the three exits that precede the park")
+    # INERT TWIN: the sentence around it reworded, the claim intact
+    assert claim(_mutate(ra, "and is read out of the answer, never assumed",
+                         "and is read out of that answer, never assumed",
+                         "R7CL-C1 inert twin"))
+
+
+def test_r7cl_c2_the_render_key_carries_the_dark_latch():
+    """C2: the key is the WHOLE input set, and the latch is part of it.
+
+    The render predicate is `cacheIsThisSeries && !latchedDark && dc_deferred`.
+    The round-7 key read the fields and not the latch, because the latch is the
+    one input that is a SET: a census of assignments cannot see it, so nothing
+    put it on the list.  The two halves of the refusal branch then came apart --
+    the latch add is unconditional, the clear beneath it is confined to the
+    cached series -- so a refusal for a series the cache does not describe
+    changed what the banner reads while no keyed field moved, and the repaint
+    the same branch asks for was asked for on an unchanged key.
+
+    THE FAILING SEQUENCE IS ORDINARY, not contrived: a slow status answer for a
+    previous series stamps the cache with that series' id, the seat adopts a new
+    one, and the new series' read is then refused during an outage.  The off
+    witness keeps printing the cache-mismatch reason and never records that the
+    read was latched -- and the witness line is the acceptance signal this
+    feature emits (#438).
+
+    WHAT IS ASSERTED: the key asks the latch about the ACTIVE series, which is
+    the same question the render asks; the latch add really is unconditional,
+    which is what makes the omission reachable; and the clear really is
+    confined, which is what makes the two come apart."""
+    api = _src("ApiClient.cs")
+    key = _method_body(api, "private static string BannerRenderKey")
+    assert key, "the render key could not be delimited"
+    assert "SeriesStatusLatchedDark(activeTeamSeriesId)" in key
+
+    poller = _method_body(api, "public static void PollTeamSeriesStatusReadOnly")
+    add = poller.find("_statusPollDarkSeries.Add(seriesId);")
+    clear = poller.find("if (LastSeriesStateForId == seriesId)")
+    assert 0 < add < clear, (
+        "the latch add and the confined clear are not in the order this case "
+        "is about")
+    # the add is NOT inside the confined block -- that asymmetry is the defect
+    assert "if (LastSeriesStateForId == seriesId)" not in poller[:add]
+
+    def claim(s):
+        b = _method_body(s, "private static string BannerRenderKey")
+        return bool(b) and "SeriesStatusLatchedDark(activeTeamSeriesId)" in b
+
+    _assert_discriminating(
+        claim, api,
+        _mutate(api,
+                '+ "|" + (SeriesStatusLatchedDark(activeTeamSeriesId) ? "d" : "-")',
+                '+ "|" + "-"',
+                "R7CL-C2 the key drops the latch"),
+        "R7CL-C2 the render key carries the dark latch")
+    # INERT TWIN: the key's separator prose changes, the latch term stays
+    assert claim(_mutate(api,
+                         '+ "|" + (LastSeriesDcDeferredFieldsPresent ? "p" : "-")',
+                         '+ "|" + (LastSeriesDcDeferredFieldsPresent ? "P" : "-")',
+                         "R7CL-C2 inert twin"))
+
+
+def test_r7cl_c3_the_refusal_clears_the_presence_bit_with_the_numbers():
+    """C3: no cache state that no answer can produce.
+
+    The id setter clears the presence bit beside the three numbers, under the
+    stated reason that leaving it set says the previous series' answer carried
+    the deferral state about a series whose numbers were just cleared.  The
+    refusal path cleared the same three numbers for the same series and left the
+    bit standing, so after a refusal the cache read deferred=false /
+    remaining=0 / bound=0 with present=true -- a combination no answer produces.
+
+    It is masked today, and that is the point: the witness tests its
+    latched-dark arm before its presence arm, so the false bit never reaches the
+    off text.  Reorder those arms, or give the per-series latch a reset -- the
+    tree has no writer that removes from the set -- and the witness prints "the
+    last answer for this series carried dc_deferred=false" about a series whose
+    last answer was not an answer at all.  That is the denial-nobody-made the L6
+    to L11 group exists to remove, so it is closed at the writer rather than
+    left standing behind the arm order."""
+    api = _src("ApiClient.cs")
+    poller = _method_body(api, "public static void PollTeamSeriesStatusReadOnly")
+    i = poller.find("if (LastSeriesStateForId == seriesId)")
+    assert i > 0
+    block = poller[i:poller.index("}", poller.index("{", i)) + 1]
+    for name in ("LastSeriesDcDeferred = false;",
+                 "LastSeriesDcDeferredSecondsRemaining = 0;",
+                 "LastSeriesDcDeferredBoundSeconds = 0;",
+                 "LastSeriesDcDeferredFieldsPresent = false;"):
+        assert name in block, name
+
+    # the id setter -- the other writer of the same cache -- clears the same
+    # four, so the two writers agree about what the cache means
+    setter = _r7_setter_span(api)
+    for name in ("LastSeriesDcDeferred = false;",
+                 "LastSeriesDcDeferredFieldsPresent = false;"):
+        assert name in setter, name
+
+    def claim(s):
+        b = _method_body(s, "public static void PollTeamSeriesStatusReadOnly")
+        j = b.find("if (LastSeriesStateForId == seriesId)")
+        if j < 0:
+            return False
+        blk = b[j:b.index("}", b.index("{", j)) + 1]
+        return "LastSeriesDcDeferredFieldsPresent = false;" in blk
+
+    _assert_discriminating(
+        claim, api,
+        _mutate(api,
+                "                            LastSeriesDcDeferredFieldsPresent = false;" + LF
+                + "                        }",
+                "                        }",
+                "R7CL-C3 the refusal leaves the presence bit standing"),
+        "R7CL-C3 the refusal clears the presence bit with the numbers")
+    # INERT TWIN: the bound field's clear is respelled, the presence clear stays
+    assert claim(_mutate(api,
+                         "                            LastSeriesDcDeferredBoundSeconds = 0;",
+                         "                            LastSeriesDcDeferredBoundSeconds = 0;  // bound",
+                         "R7CL-C3 inert twin"))
+
+
+def test_r7cl_c4_the_banner_input_census_sees_every_write_form_and_every_source():
+    """C4: the census is as wide as the claim it is quoted for.
+
+    The round-7 census is described as "a grep census of the OPERATION" and as
+    covering "every assignment to a banner input".  Its regex anchored on
+    `^\\s*Name =` and it scanned ApiClient.cs alone, so a compound write, a
+    null-coalescing write, an increment, and any writer in another plugin source
+    -- the fields are `public static` -- all fell outside it.  None existed on
+    the tree, which is exactly how a check certifies a class it cannot see
+    (#342, #441).
+
+    EACH SHAPE IS PLANTED AND THE CENSUS MUST FIND IT, and four comparisons are
+    planted and it must NOT: a grep widened until it matches everything is the
+    same failure from the other side."""
+    sources = _r7_plugin_sources()
+    assert len(sources) > 3, sorted(sources)
+    base = len(_r7_writer_lines(sources))
+    assert base, "the census cannot be empty"
+
+    for label, fname, line in (
+            ("a compound write", "ApiClient.cs",
+             "                LastSeriesT1Wins += 1;"),
+            ("a null-coalescing write", "ApiClient.cs",
+             "                LastSeriesStateForId ??= seriesId;"),
+            ("a post-increment", "ApiClient.cs",
+             "                LastSeriesT2Wins++;"),
+            ("a pre-increment", "ApiClient.cs",
+             "                ++LastSeriesT2Wins;"),
+            ("a writer in another source", "NativeUI.cs",
+             "                ApiClient.LastSeriesT1Wins = 0;"),
+            ("a writer in a third source", "Plugin.cs",
+             "                ApiClient.LastSeriesDcDeferred = true;"),
+            ("a write of the latch set", "ApiClient.cs",
+             "                _statusPollDarkSeries.Remove(seriesId);")):
+        planted = dict(sources)
+        planted[fname] = planted[fname] + LF + line + LF
+        assert len(_r7_writer_lines(planted)) == base + 1, (
+            "the census did not see " + label)
+
+    for line in ("                if (LastSeriesT1Wins == 0) return;",
+                 "                if (LastSeriesT1Wins >= 3) return;",
+                 "                if (LastSeriesT2Wins != 0) return;",
+                 "                if (LastSeriesT1Wins <= 0) return;",
+                 "                int n = LastSeriesT1Wins;",
+                 "                bool d = _statusPollDarkSeries.Contains(s);"):
+        planted = dict(sources)
+        planted["ApiClient.cs"] = planted["ApiClient.cs"] + LF + line + LF
+        assert len(_r7_writer_lines(planted)) == base, (
+            "the census read a read as a write: " + line.strip())
+
+    # AND THE FILE SET IS RESOLVED, not listed: a new source joins by existing.
+    import inspect
+    assert 'PLUGIN.glob("*.cs")' in inspect.getsource(_r7_plugin_sources)
 
 
 # ── B18, RE-EXECUTED RATHER THAN INHERITED (#308) ──────────────────────────
