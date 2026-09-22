@@ -40,7 +40,7 @@ namespace CompetitiveRounds
     /// roster". CORRECTED — the inertness claim that used to stand here said
     /// nothing calls FreezeFighterRoster, so RosterFrozen was false everywhere.
     /// That is no longer true and has not been for some time: GameStateWatcher
-    /// freezes the roster at :1564, :4965 and :6351, so RosterFrozen IS true in
+    /// freezes the roster at :1562, :5107 and :6507, so RosterFrozen IS true in
     /// real queue and code rooms and these helpers DO diverge from raw
     /// PlayerList there. The divergence is the point of freezing and is
     /// deliberate — but it is a live behaviour, not a dormant one, and any
@@ -60,6 +60,10 @@ namespace CompetitiveRounds
     /// each says so at its own declaration (#302 / #432). An earlier revision
     /// stated the guarantee across all of them without qualification, which
     /// was never true of the spectator three.
+    ///
+    /// A consumer that must see the RAW roster - the bug-391 roster census
+    /// is one - reads PhotonNetwork.PlayerList itself rather than relying on
+    /// these helpers being inert.
     ///
     /// Classification is CACHED BY ActorNumber at first sight and is
     /// immutable for the lifetime of the room (design §3.2): an actor that
@@ -461,7 +465,7 @@ namespace CompetitiveRounds
         /// the roster is not frozen. This line used to promise that identity
         /// whenever no spectator was in the room, which is false for every
         /// competitive match: FreezeFighterRoster runs from
-        /// GameStateWatcher.cs:1564, :4965 and :6351, and a frozen roster takes
+        /// GameStateWatcher.cs:1562, :5107 and :6507, and a frozen roster takes
         /// the filtering path below, which allocates and can return fewer
         /// actors than PlayerList holds (#302/#351).</summary>
         // Per-frame result cache (Codex r2 find 10): with a roster frozen —
@@ -517,7 +521,7 @@ namespace CompetitiveRounds
                 // fighter, defeating the freeze in exactly the case it exists
                 // for. CORRECTED: this used to add "still fully inert in the
                 // shipped build: nothing calls FreezeFighterRoster". It is
-                // called — GameStateWatcher.cs:1564, :4965, :6351 — so in a real
+                // called — GameStateWatcher.cs:1562, :5107, :6507 — so in a real
                 // queue or code room this fast path is NOT taken and the
                 // filtering below is what runs (#302).
                 if (!AnySpectatorPresent() && !RosterFrozen) return list;   // same instance when neither applies

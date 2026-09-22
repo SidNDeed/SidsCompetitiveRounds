@@ -281,7 +281,7 @@ namespace CompetitiveRounds
         /// So both channels are handled the same way - the flags are untouched and
         /// the next tick tries again - and the success line is printed only where
         /// the room was actually told. The same polarity the room half of this API
-        /// is already read with at GameStateWatcher.cs:4706 (#276/#430).
+        /// is already read with at GameStateWatcher.cs:4843 (#276/#430).
         ///
         /// The refusal is stated through the BOUNDED sink, not Plugin.Log: the
         /// retry is per tick by design and a line per tick would bury it. Its
@@ -390,7 +390,7 @@ namespace CompetitiveRounds
         /// THE DENOMINATOR IS EVERY ACTOR THAT CAN SIMULATE THE EFFECT, which is
         /// NOT RoomActors.ActiveFighters(). That helper is the rating-bearing
         /// roster, and it is deliberately fail-CLOSED: once FreezeFighterRoster has
-        /// run - and it does run, from GameStateWatcher.cs:1564, :4965 and :6351 -
+        /// run - and it does run, from GameStateWatcher.cs:1562, :5107 and :6507 -
         /// it drops any actor that is off the frozen steam-id roster, whose u_id
         /// cannot be read, or that was ever cached as rejected. Dropping an actor
         /// from a ROSTER is the safe direction. Dropping it from a CAPABILITY
