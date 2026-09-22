@@ -1822,8 +1822,11 @@ async def _supervised(name: str, coro_factory):
 _JANITOR_SELFTEST_ROOTS = (
     ("main", "queue_cleanup_loop"),
     ("main", "team_queue_cleanup_loop"),
-    # The deferred-fallback sweep is the only thing that ever settles a series
-    # a fallback report declined to settle, so it is janitor SQL in exactly the
+    # The deferred-fallback sweep is the only UNATTENDED writer that settles a
+    # series a fallback report declined to settle -- a real-totals report
+    # inside the bound settles it too, at the lead-forfeit completion or at the
+    # dc_incomplete exit, and either revival funnel clears the marker so that
+    # nothing settles it at all -- so it is janitor SQL in exactly the
     # sense this self-test exists for: it runs unattended every minute and its
     # failure is silent. It also names a column migration 326 adds, which makes
     # the boot banner the loud half of the migration-before-api deploy order.
@@ -3700,9 +3703,16 @@ async def _team_clear_dc_fallback_marker(db, series_id) -> None:
     revival leaves one OLDER. This comment and the header of migration 326
     each used to assert one of those as if it were the only case, in opposite
     directions, and neither followed from the revival. Both cases need the
-    same clear, so the clear is age-independent, and the only thing it
-    guarantees is the thing it does: after it runs, that row carries no
-    marker, whatever the marker's age was. That is also why the clear belongs
+    same clear, so the clear is age-independent. WHAT THIS CALL GUARANTEES,
+    precisely, because a guarantee in a comment is a claim about the whole
+    state space (#351): it ATTEMPTS the clear inside its own savepoint and
+    swallows every exception the attempt raises. On a clean return the row
+    carries no marker ONLY when that UPDATE actually ran; a swallowed database
+    error -- the pre-326 missing column, a lock timeout, a connection the
+    driver has already given up on -- leaves the revived row still carrying
+    its marker, and a later tick past the bound can settle a series that has
+    resumed. That is a recorded residual of this design and not a case a
+    caller may reason away. That is also why the clear belongs
     in the funnel and not in a freshness test in the sweep -- a freshness test
     would have to pick one of those two cases to be right about.
 
@@ -40218,7 +40228,12 @@ async def team_series_report_dc(
     minutes, in which case the matcher's sticky resume / same-four dedupe
     re-locks them onto THIS series (original partition, scores kept) and
     clears the pending flag (bug 245). The old dc_paused-with-grace flow is
-    legacy; only the state-poll's expiry sweep still reads it."""
+    legacy in its WRITER -- no statement in this api sets that status any more
+    -- and it has many READERS still: the state GET's expiry sweep resolves an
+    overdue one, this handler's own status gate and the deferred-fallback
+    sweep both admit it, the relock and adoption family picks admit it, and
+    the admin bet panel and the history listings show it. A guard derived from
+    "one reader" would miss every one of them."""
     if not _verify_team_dc_hmac(reporter_steam_id, series_id, dc_player_steam_id, hmac_sig):
         raise HTTPException(403, "Invalid DC report signature")
     try:

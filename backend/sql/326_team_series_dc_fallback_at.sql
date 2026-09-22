@@ -89,10 +89,15 @@
 -- _team_clear_dc_fallback_marker, and the structural suite counts the revival
 -- operation across the whole of main.py rather than inside one function.
 --
--- EXPIRES BY DEFAULT. Nothing has to run for the deferral to end. If the api is
--- restarted mid-window the marker waits on disk for the next tick, and the
--- sweep's live-game veto refuses to act on restart-blinded evidence
--- (learnings #276, #430).
+-- THE MARKER PERSISTS; THE DEFERRAL IS ENDED BY A WRITER, NEVER BY THE CLOCK.
+-- Three writers end it: a real-totals report inside the bound, a revival funnel
+-- clearing the marker, or a sweep tick after the bound. The clock alone ends
+-- nothing -- with no sweep ticking, a marked row stays deferred for as long as
+-- the api is up. That is the direction the unhandled case fails in (#276, #430)
+-- and it is why the sweep is a janitor self-test root rather than a loop nobody
+-- watches. If the api is restarted mid-window the marker waits on disk for the
+-- next tick, and the sweep's live-game veto refuses to act on restart-blinded
+-- evidence.
 --
 -- APPLY THIS BEFORE THE API. Both columns are nullable with no default, so
 -- every existing row reads as "no fallback filed" and no current writer touches
@@ -107,7 +112,7 @@ ALTER TABLE team_series ADD COLUMN IF NOT EXISTS dc_fallback_at TIMESTAMPTZ;
 ALTER TABLE team_series ADD COLUMN IF NOT EXISTS dc_fallback_player_id UUID;
 
 COMMENT ON COLUMN team_series.dc_fallback_at IS
-    'First moment a survivor filed a zero-total disconnect fallback for this series, stamped with clock_timestamp() after the row lock. NULL = none filed. A fallback defers instead of settling; the scheduled sweep settles the row only once this stamp is older than the deferral bound and no live game is in evidence.';
+    'First moment a survivor filed a disconnect fallback for this series -- the report carries is_fallback, and its point totals are whatever the client sent and are NOT read on this path, so the marker is not necessarily a zero-total one -- stamped with clock_timestamp() after the row lock. NULL = none filed. A fallback defers instead of settling; the scheduled sweep settles the row only once this stamp is older than the deferral bound and no live game is in evidence.';
 COMMENT ON COLUMN team_series.dc_fallback_player_id IS
     'Player the deferred fallback named as disconnected. Parked here rather than in dc_player_id so an active series does not read as one with a recorded disconnect; the sweep copies it across when it settles.';
 

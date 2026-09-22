@@ -1213,7 +1213,7 @@
           ],
           "main",
           "team_series_report_dc",
-          "fdca5baf92dd64ca4f40881356fad29a1346e393"
+          "e47640a7bab7d5866b5f1eef39224096d06a917e"
         ],
         [
           "/api/v1/team/series/{series_id}/spawn-confirm",
@@ -2695,7 +2695,7 @@
           ],
           "main",
           "team_lobby_start",
-          "2bb0ed1e469e80023764b4a69bb0d4ccb644bfc7"
+          "d793c468e6372184198e1793cf1a95f07f525cf6"
         ],
         [
           "/api/v1/team/lobby/state",
@@ -2758,7 +2758,7 @@
           ],
           "main",
           "team_queue_poll",
-          "2d6e8a4a7e302cfaec15238e3c372ee58b093f4e"
+          "cf2e3c6e34cc5d65ddc56a9556b46bf70f3ec8dc"
         ],
         [
           "/api/v1/team/queue/preferred-team",
@@ -3326,7 +3326,7 @@
       [
         "main",
         "lifespan",
-        "86b31a0fcd94c4eab8dfaeeda53cb0e498f090ff"
+        "1e71d0cda6c8d7a76b32639d13a31f2636accd60"
       ]
     ]
   },
