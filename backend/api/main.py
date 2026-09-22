@@ -3469,6 +3469,10 @@ async def lifespan(app: FastAPI):
         # Awaited, before anything can render: a face keyed off a colour
         # this box has not read yet is a promise about pixels it cannot make.
         if _pcf is not None:
+            # Local import, as every other session site in this module does:
+            # the boot read ran on the primary with this name undefined and
+            # the api never came up (2026-09-22 rollback).
+            from database import async_session
             async with async_session() as _theme_db:
                 await _pc_load_card_themes(_theme_db)
         # The Steam-render probe (v3 §9) runs on BOTH roles: each box
