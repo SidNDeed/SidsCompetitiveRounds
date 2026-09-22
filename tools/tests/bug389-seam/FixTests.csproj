@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Bug 389 - console harness for the pure victim-choice seam.
+
+       It compiles the REAL plugin/ProximityVictimSeam.cs, not a copy, so the
+       shipped path is the tested path. run-tests.ps1 overrides SeamSource to
+       point at a generated mutant; the default below is the clean seam.
+
+       The path is deliberately RELATIVE to this file. An absolute path would
+       carry a local user directory into a tracked file and would only build on
+       one machine. -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>FixTests</AssemblyName>
+    <RootNamespace>FixTests</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <NoWarn>$(NoWarn);CS0162</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(SeamSource)' == ''">
+    <SeamSource>$(MSBuildThisFileDirectory)..\..\..\plugin\ProximityVictimSeam.cs</SeamSource>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(ProgramSource)' == ''">
+    <ProgramSource>$(MSBuildThisFileDirectory)Program.cs</ProgramSource>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(SeamSource)" />
+    <Compile Include="$(ProgramSource)" />
+  </ItemGroup>
+
+</Project>

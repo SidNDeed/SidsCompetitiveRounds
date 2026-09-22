@@ -32,12 +32,22 @@ namespace CompetitiveRounds
     /// design doc BEFORE the spectator seat itself exists.
     ///
     /// PRECISION (Codex round 2): the fast path is "no spectator AND no frozen
-    /// roster". Nothing calls FreezeFighterRoster in the shipped build, so
-    /// RosterFrozen is false everywhere and the guarantee holds exactly as
-    /// stated. Once Phase 2 freezes a roster, these helpers additionally
-    /// exclude actors that are not ON it — which is the point of freezing, and
-    /// is a deliberate divergence from raw PlayerList, not a violation of the
-    /// inertness claim.
+    /// roster". CORRECTED — the inertness claim that used to stand here said
+    /// nothing calls FreezeFighterRoster, so RosterFrozen was false everywhere.
+    /// That is no longer true and has not been for some time: GameStateWatcher
+    /// freezes the roster at :1564, :4965 and :6351, so RosterFrozen IS true in
+    /// real queue and code rooms and these helpers DO diverge from raw
+    /// PlayerList there. The divergence is the point of freezing and is
+    /// deliberate — but it is a live behaviour, not a dormant one, and any
+    /// caller reasoning about what these helpers return must assume a frozen
+    /// roster rather than the inert case (#302/#351).
+    ///
+    /// The divergence is fail-CLOSED: an actor off the roster, or one whose
+    /// identity cannot be read, is dropped. That is the safe direction for a
+    /// rating-bearing roster and the UNSAFE direction for anything that needs
+    /// "every actor that could be running X" — such a caller must walk
+    /// PlayerList itself rather than reuse this helper under the opposite
+    /// polarity (#412).
     ///
     /// Classification is CACHED BY ActorNumber at first sight and is
     /// immutable for the lifetime of the room (design §3.2): an actor that
@@ -110,6 +120,12 @@ namespace CompetitiveRounds
                 _rejectedActors.Clear();
                 _hasUidByActor.Clear();
                 _cacheRoom = room;
+                // A new room is the largest roster change there is - every
+                // actor is replaced - so it moves the generation like any
+                // other. A consumer that keys a cached answer on this counter
+                // would otherwise be able to carry a previous room's answer
+                // across the boundary.
+                _rosterGeneration++;
                 // Deliberately NOT clearing _fighterSteamIds here: the roster
                 // is frozen by the match-assembly path, which owns its own
                 // lifetime (a room change without a re-freeze must not
@@ -127,6 +143,11 @@ namespace CompetitiveRounds
             _fighterSteamIds.Clear();
             _fighterCacheFrame = -1;
             _fighterCache = null;
+            // The roster is GONE, which is a change consumers keyed on this
+            // counter have to see. Clearing a cache tells the next reader to
+            // read again; moving the counter is what tells a reader that
+            // CACHED an answer against it that the answer is void.
+            NoteRosterIdentityChange();
         }
 
         /// <summary>Record an actor this room has rejected (unauthorized
@@ -407,8 +428,15 @@ namespace CompetitiveRounds
         // ── fighter views ────────────────────────────────────────────────
 
         /// <summary>Every actor that is playing, ActorNumber-ascending.
-        /// Identical to PhotonNetwork.PlayerList when no spectator is in the
-        /// room (including the SAME array instance, so no allocation).</summary>
+        ///
+        /// The raw PhotonNetwork.PlayerList array comes back unchanged — the
+        /// SAME instance, no allocation — only when no spectator is present AND
+        /// the roster is not frozen. This line used to promise that identity
+        /// whenever no spectator was in the room, which is false for every
+        /// competitive match: FreezeFighterRoster runs from
+        /// GameStateWatcher.cs:1564, :4965 and :6351, and a frozen roster takes
+        /// the filtering path below, which allocates and can return fewer
+        /// actors than PlayerList holds (#302/#351).</summary>
         // Per-frame result cache (Codex r2 find 10): with a roster frozen —
         // every competitive match — the fast path is off, and the 10 Hz
         // pollers would otherwise allocate a PlayerList + filtered array per
@@ -460,9 +488,12 @@ namespace CompetitiveRounds
                 // roster — otherwise freezing {A,B} and then admitting a late
                 // actor C with no spectator in the room returned C as a
                 // fighter, defeating the freeze in exactly the case it exists
-                // for. Still fully inert in the shipped build: nothing calls
-                // FreezeFighterRoster, so RosterFrozen is false everywhere.
-                if (!AnySpectatorPresent() && !RosterFrozen) return list;   // inert: same instance
+                // for. CORRECTED: this used to add "still fully inert in the
+                // shipped build: nothing calls FreezeFighterRoster". It is
+                // called — GameStateWatcher.cs:1564, :4965, :6351 — so in a real
+                // queue or code room this fast path is NOT taken and the
+                // filtering below is what runs (#302).
+                if (!AnySpectatorPresent() && !RosterFrozen) return list;   // same instance when neither applies
                 var keep = new List<PhotonPlayer>(list.Length);
                 for (int i = 0; i < list.Length; i++)
                 {

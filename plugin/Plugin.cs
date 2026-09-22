@@ -2750,6 +2750,22 @@ namespace CompetitiveRounds
             TickUnfocusedFpsCap();
             TickBroadcastWindowPin();
 
+            // Bug 389: the proximity-victim capability withdrawal runs here for
+            // the same reason the fps tick does - ABOVE the modDisabled return.
+            // A guard keyed on a feature's enable-condition and then placed
+            // inside a tick that returns on that same condition inherits the
+            // feature's dead zone, and this withdrawal exists for exactly the
+            // state the return covers: a seat that staged the key and has since
+            // been disabled. Below the return it could never run on the only seat
+            // that needs it (#272/#98).
+            //
+            // Safe above it on the same rule the comment above states: a disabled
+            // mod may only ever RESTORE. This call returns on its first line
+            // unless this seat actually advertised, and it can only ever write
+            // the NOT-capable value - it moves the room toward vanilla and can
+            // apply nothing (#276/#430).
+            try { ProximityVictimGate.RepublishCapability(); } catch { }
+
             if (Plugin.modDisabled) return;
 
             // Menu injection runs independently
@@ -2963,6 +2979,26 @@ namespace CompetitiveRounds
                         // this client will never publish.
                         try { PoisonSync.RevokeCapability(); } catch { }
                         try { GrowNormalize.RevokeCapability(); } catch { }
+                        // Bug 389: NOT the same shape as the two above.
+                        // This call is a no-op on a first initialisation.
+                        // cr_prox1 is
+                        // staged PRE-JOIN from the queue poll, which cannot run
+                        // before ApiClient.Initialize below - and this branch
+                        // returns above that call - so nothing has been advertised
+                        // yet and RepublishCapability returns on its first line.
+                        // (PoisonSync stages at Awake and GrowNormalize from the
+                        // tick, so their latches ARE set here; W18 holds this
+                        // ordering.) It can only withdraw on a SECOND DoInitialize,
+                        // after a persistent-host respawn whose compat read differs
+                        // from the first, and it is kept for that case: a seat that
+                        // advertises a repair its own gate now refuses leaves every
+                        // peer re-resolving the victim while this seat drains the
+                        // stale one - the same damage tick debiting different
+                        // players on different screens. The transition that covers
+                        // a seat already in a room is the persistent tick, not this
+                        // site; "[PROX-CAP] withdrew" is not a line a plain compat
+                        // disable produces.
+                        try { ProximityVictimGate.RepublishCapability(); } catch { }
                         // r3 find 4: same shape for the base-game locale
                         // injector. It has been inert (activation is gated on
                         // the compat clear below), but Shutdown is idempotent
@@ -4100,12 +4136,21 @@ namespace CompetitiveRounds
             // the key itself, so the generation counter is the trace. Only the
             // properties that participate in that key — bumping on every card
             // or cosmetic property would discard usable windows for nothing.
+            //
+            // cr_prox1 joins that set (bug 389). The proximity-victim census
+            // asks whether EVERY fighter advertises it, caches the answer, and
+            // keys that cache on this counter; a seat whose key arrives after
+            // the census ran would otherwise leave one seat re-resolving the
+            // victim while another drains a stale one on the same damage tick.
+            // The two spectator keys above already move the counter, and they
+            // are the other half of that census's denominator.
             try
             {
                 if (changedProps == null) return;
                 if (changedProps.ContainsKey("u_id")
                     || changedProps.ContainsKey(RoomActors.SPEC_PROP)
-                    || changedProps.ContainsKey(RoomActors.SPEC_LEASE_PROP))
+                    || changedProps.ContainsKey(RoomActors.SPEC_LEASE_PROP)
+                    || changedProps.ContainsKey(ProximityVictim.CapabilityProp))
                     RoomActors.NoteRosterIdentityChange();
             }
             catch { }

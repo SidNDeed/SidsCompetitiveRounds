@@ -210,7 +210,16 @@
     <MusicPreviewsToCopy Include="music\*_preview.ogg" />
     <MusicPreviewsToCopy Include="music\*.png" />
     <MusicFullToCopy Include="music\*.ogg" Exclude="music\*_preview.ogg" />
-    <MusicManifestToCopy Include="music\manifest.json" />
+    <!-- Existence-conditioned, unlike the three above, because this Include is a
+         LITERAL path rather than a wildcard: a wildcard yields no items on a
+         checkout without the music tree, while a literal Include yields one
+         whether or not the file exists. The Copy that consumes it then fails
+         MSB3030 and the whole build reports FAILED - on any seat whose checkout
+         has no music/ directory, which includes every clone of this repo, and
+         after the assembly has already been written and installed. A red exit
+         code on an otherwise-clean Release build is the state in which a real
+         compile error gets waved through. -->
+    <MusicManifestToCopy Include="music\manifest.json" Condition="Exists('music\manifest.json')" />
   </ItemGroup>
 
   <!-- Home-tab logo: EMBEDDED in the DLL (not a loose file) because the
