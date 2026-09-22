@@ -501,41 +501,22 @@ def _worktrees_on_branch(listing, branch):
     return out
 
 
-def _client_lane_sources():
-    """(sources, how) for a client tree carrying the banner, resolved at run time.
+def _client_lane_candidates():
+    """([(root, how, binding)], already_tried) -- the candidate list itself.
 
-    NEVER a hardcoded path: a hardcoded target is a check that cannot fail
-    where it matters (#342), and a workstation path written into the
-    repository is a privacy defect besides. The order is the cross-lane
-    contract's (§7.4.1c), spelled the same on both lanes, and the first
-    candidate that actually CALLS the route wins:
+    EXTRACTED SO EXCLUSIVITY IS OBSERVABLE. The list used to be built inside
+    the resolver, and the only way a check could see it was the resolution
+    message -- which, when a binding candidate refuses, returns before any
+    other candidate is ever named. So a change that put candidates 2 to 4 back
+    on the list while $SCR_CROSS_LANE_CLIENT_ROOT was set moved nothing any
+    check could read: the control aimed at that change could not turn red, and
+    a check that cannot fail is worse than no check (#342, #391). The list is
+    returned here and counted by a test, so the exclusivity is asserted on the
+    thing itself rather than on a consequence of it.
 
-      1. $SCR_CROSS_LANE_CLIENT_ROOT -- what a control runner points at a COPY
-         of a client tree, so a control can be exercised without ever writing
-         to the other lane's checkout. EXCLUSIVE: when it is set nothing else
-         is tried, because a runner that names a tree is measuring THAT tree
-         and falling through on a miss would report a result about a checkout
-         the control never chose;
-      2. <root>/REVIEW-INPUT/client-lane -- the review pin's own layout. An
-         explicitly supplied copy beats an implicit one, which is why it sits
-         above the next candidate rather than below it;
-      3. THIS repository -- once both halves are merged the tree under test IS
-         the client tree, and this is the candidate that makes the check live
-         on merged main, in a fresh clone, on another machine and on CI, where
-         no review pin and no sibling worktree ever existed;
-      4. `git worktree list` -- a sibling worktree whose branch is EXACTLY the
-         client lane's, which is how this runs while the two lanes are apart.
-
-    Candidate 4 matches the branch exactly and never as a substring: the
-    listing prints `<path> <sha> [branch]`, and a substring match also matches
-    every read-only review pin checked out from that lane at an older sha -- a
-    stale tree answering for the live one with nothing in the output to say
-    so. A DETACHED worktree prints no bracket at all and is therefore never a
-    candidate, which is the same rule a second way.
-
-    Returns ([], how) when nothing qualifies, and the caller FAILS. `how`
-    names the candidate and never a path: the only absolute path any file in
-    this bundle may print is the production pin.
+    `already_tried` is the one line a resolution must carry when the sibling
+    scan did not run, so that a run which did not scan can never read as a run
+    that scanned and found nothing (#438).
     """
     cands = []
     scan = False
@@ -574,6 +555,46 @@ def _client_lane_sources():
     tried = [] if env or scan else [
         "the sibling-worktree scan (NOT RUN -- SCR_CROSS_LANE_NO_SIBLING_SCAN "
         "is set, so no worktree of the other lane was read)"]
+    return cands, tried
+
+
+def _client_lane_sources():
+    """(sources, how) for a client tree carrying the banner, resolved at run time.
+
+    NEVER a hardcoded path: a hardcoded target is a check that cannot fail
+    where it matters (#342), and a workstation path written into the
+    repository is a privacy defect besides. The order is the cross-lane
+    contract's (§7.4.1c), spelled the same on both lanes, and the first
+    candidate that actually CALLS the route wins:
+
+      1. $SCR_CROSS_LANE_CLIENT_ROOT -- what a control runner points at a COPY
+         of a client tree, so a control can be exercised without ever writing
+         to the other lane's checkout. EXCLUSIVE: when it is set nothing else
+         is tried, because a runner that names a tree is measuring THAT tree
+         and falling through on a miss would report a result about a checkout
+         the control never chose;
+      2. <root>/REVIEW-INPUT/client-lane -- the review pin's own layout. An
+         explicitly supplied copy beats an implicit one, which is why it sits
+         above the next candidate rather than below it;
+      3. THIS repository -- once both halves are merged the tree under test IS
+         the client tree, and this is the candidate that makes the check live
+         on merged main, in a fresh clone, on another machine and on CI, where
+         no review pin and no sibling worktree ever existed;
+      4. `git worktree list` -- a sibling worktree whose branch is EXACTLY the
+         client lane's, which is how this runs while the two lanes are apart.
+
+    Candidate 4 matches the branch exactly and never as a substring: the
+    listing prints `<path> <sha> [branch]`, and a substring match also matches
+    every read-only review pin checked out from that lane at an older sha -- a
+    stale tree answering for the live one with nothing in the output to say
+    so. A DETACHED worktree prints no bracket at all and is therefore never a
+    candidate, which is the same rule a second way.
+
+    Returns ([], how) when nothing qualifies, and the caller FAILS. `how`
+    names the candidate and never a path: the only absolute path any file in
+    this bundle may print is the production pin.
+    """
+    cands, tried = _client_lane_candidates()
     for root, how, binding in cands:
         # A SUPPLIED representation -- candidates 1 and 2 -- is BINDING: the
         # caller named it, so it is the tree this check answers about and a
@@ -640,6 +661,63 @@ def _stable_deferral_names(sources, attempts=3):
     return prev, False
 
 
+def _field_disagreement(how, unknown, unread):
+    """The ONE message both directions of a name disagreement print.
+
+    A rename is two facts, and round 6's message carried one of them. Renaming
+    `dc_deferred_bound_seconds` to `dc_deferred_bound_secs` on the client makes
+    the new spelling a name this route does not emit AND makes the contract's
+    name one the client no longer reads; the assertion that fired first printed
+    `['dc_deferred_bound_secs']` and nothing else, so the reader was told a
+    name they had never seen and left to work out which field it displaced.
+    A refusal that does not name what is missing is not a report (#447).
+
+    Both sets are therefore computed before either is asserted and both are
+    named here whichever direction fires, together with the statement that this
+    is a disagreement about FIELD NAMES. That last part is not decoration: the
+    other way this check goes red is a representation it could not resolve, and
+    the two need different work -- one is a cross-lane finding, the other is a
+    runner pointed at the wrong directory (L11).
+
+    An empty direction prints `(none)` rather than nothing at all, so the
+    reader can tell "this side agreed" from "this side was not computed".
+    """
+    return (
+        "CROSS-LANE FIELD DISAGREEMENT on " + how
+        + " -- read by the client and NOT emitted by this route: "
+        + (", ".join(sorted(unknown)) if unknown else "(none)")
+        + "; fixed by the contract and NOT read by the client: "
+        + (", ".join(sorted(unread)) if unread else "(none)")
+        + ". Both directions are stated because a rename produces one of each. "
+        "This is a disagreement about FIELD NAMES between two trees that were "
+        "both read whole; it is not a representation this check failed to "
+        "resolve.")
+
+
+def test_a_field_disagreement_names_both_directions_and_says_which_it_is():
+    """L11's second half: the RED has to be readable, not merely red.
+
+    Bound as a unit on the message builder rather than through the cross-lane
+    test, because reaching that assertion needs two trees and this needs none:
+    a check that can only be exercised by arranging a whole environment is one
+    nobody re-runs (#391 wants the negative control to be cheap enough to keep).
+    """
+    msg = _field_disagreement("a copy of the frozen client representation",
+                              ["dc_deferred_bound_secs"],
+                              ["dc_deferred_bound_seconds"])
+    # The spelling the client carries, and the contract name it displaced.
+    assert "dc_deferred_bound_secs" in msg, msg
+    assert "dc_deferred_bound_seconds" in msg, msg
+    # ...and the reader is told which of this check's two failure kinds it is.
+    assert "FIELD DISAGREEMENT" in msg, msg
+    assert "not a representation this check failed to resolve" in msg, msg
+    # An agreeing direction says so. The negative control for the sentence
+    # above: with one side empty the message must still name the other.
+    only_one = _field_disagreement("a copy", [], ["dc_deferred"])
+    assert "(none)" in only_one, only_one
+    assert "dc_deferred" in only_one, only_one
+
+
 def test_every_deferral_field_the_client_reads_is_one_this_route_emits():
     """CROSS-LANE, AND IT FAILS RATHER THAN SKIPPING.
 
@@ -685,14 +763,18 @@ def test_every_deferral_field_the_client_reads_is_one_this_route_emits():
     # nothing anywhere that errors (#438).
     assert read, ("this tree calls the read-only status route and reads no "
                   "dc_deferred* field out of the answer -- " + how)
-    # Every name it reads is one this route emits. The rename in the failure
-    # this test was written for lands exactly here.
-    assert read <= emitted, sorted(read - emitted)
-    # ...and all three names the contract fixes are read, not merely a subset
-    # of them. This is the other direction of the same disagreement: a field
-    # the route emits and the client quietly stops reading leaves no name
-    # mismatched anywhere, so nothing else in either tree would notice it.
-    assert set(BANNER_FIELDS) <= read, sorted(set(BANNER_FIELDS) - read)
+    # Every name it reads is one this route emits, and all three names the
+    # contract fixes are read -- not merely a subset of them. The second is the
+    # other direction of the same disagreement: a field the route emits and the
+    # client quietly stops reading leaves no name mismatched anywhere, so
+    # nothing else in either tree would notice it. BOTH are computed before
+    # either is asserted so that whichever fires prints the whole picture; the
+    # rename this test was written for lands in both sets at once.
+    unknown = read - emitted
+    unread = set(BANNER_FIELDS) - read
+    disagreement = _field_disagreement(how, unknown, unread)
+    assert not unknown, disagreement
+    assert not unread, disagreement
 
 
 def test_the_cross_lane_binding_is_not_gated_on_an_unset_environment_variable():
@@ -726,7 +808,7 @@ def test_the_cross_lane_binding_is_not_gated_on_an_unset_environment_variable():
     # same variable under a new spelling.
     resolver = ast.unparse(next(n for n in tree.body
                                 if isinstance(n, ast.FunctionDef)
-                                and n.name == "_client_lane_sources"))
+                                and n.name == "_client_lane_candidates"))
     assert resolver.count("cands.append") >= 3, resolver
     # The branch is matched EXACTLY. `in` would also match every read-only
     # review pin checked out from that lane at an older sha, and a stale tree
@@ -773,11 +855,25 @@ def test_the_environment_candidate_is_exclusive(monkeypatch, tmp_path):
     sources, how = _client_lane_sources()
     assert sources == [], how
     assert "SCR_CROSS_LANE_CLIENT_ROOT" in how, how
+    # THE EXCLUSIVITY ITSELF, read off the candidate list rather than off a
+    # consequence of it. The two assertions above pass on this workstation
+    # whether the list holds one entry or four: the binding candidate refuses
+    # before any other is reached, and no other candidate here carries a client
+    # half that calls this route anyway. So a change that put candidates 2 to 4
+    # back on the list while the variable is set would move neither of them,
+    # and the control aimed at that change could not turn red -- which is the
+    # same defect as a check that cannot fail (#342, #391). What follows is the
+    # property, not a symptom of it.
+    cands, _tried = _client_lane_candidates()
+    assert [h for _r, h, _b in cands] == [
+        "the tree $SCR_CROSS_LANE_CLIENT_ROOT names"], cands
+    assert cands[0][2] is True, cands
     # With it unset the same call consults more than that one tree, so the
     # emptiness above is the exclusivity and not simply this machine.
     monkeypatch.delenv("SCR_CROSS_LANE_CLIENT_ROOT", raising=False)
     _, how_unset = _client_lane_sources()
     assert how_unset != how, (how, how_unset)
+    assert len(_client_lane_candidates()[0]) > 1, _client_lane_candidates()[0]
 
 
 def test_the_client_half_discriminator_answers_its_three_cases(tmp_path):
@@ -861,7 +957,12 @@ def test_an_unstable_read_of_the_other_lane_is_reported_as_unstable(tmp_path):
                              .read_text(encoding="utf-8")).body
         if isinstance(n, ast.FunctionDef)
         and n.name == "test_every_deferral_field_the_client_reads_is_one_this_route_emits"))
-    assert body.index("NOT READ WHOLE") < body.index("read <= emitted"), body
+    # The needle is the first line of the field comparison as it is SPELLED
+    # now. It was `read <= emitted` until the disagreement message was made to
+    # name both directions; an ordering assertion keyed on a spelling that no
+    # longer exists raises instead of judging, which is how this one announced
+    # the rename rather than passing through it (#469).
+    assert body.index("NOT READ WHOLE") < body.index("unknown = read - emitted"), body
 
 
 def test_the_state_endpoint_has_no_lifecycle_parameter_left():
@@ -1863,7 +1964,8 @@ def test_the_sibling_scan_switch_removes_only_that_candidate(monkeypatch):
     # is a run-time state, not a deletion.
     resolver = ast.unparse(next(n for n in ast.parse(
         pathlib.Path(__file__).resolve().read_text(encoding="utf-8")).body
-        if isinstance(n, ast.FunctionDef) and n.name == "_client_lane_sources"))
+        if isinstance(n, ast.FunctionDef)
+        and n.name == "_client_lane_candidates"))
     assert resolver.count("cands.append") == 4, resolver
     assert "_worktrees_on_branch(" in resolver, resolver
 
