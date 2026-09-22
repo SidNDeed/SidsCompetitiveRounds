@@ -60,6 +60,33 @@ def first_index(lines, needle):
     return -1
 
 
+def absent_at(needle, haystack, where=""):
+    """An `x not in <whole file>` check whose FAILURE is bounded.
+
+    pytest explains a failed `x not in y` for two strings by diffing y against
+    y with x cut out (`_notin_text` -> `_diff_text` -> difflib). The haystacks
+    here are whole source files, and several are collapsed onto ONE line
+    first, so that diff is a character-level pass over a pair of 2.5 MB lines:
+    quadratic. The round-7 control that reddens the marker-clear claim spent
+    24 minutes at 100% of a core inside that diff and printed nothing before
+    it was stopped -- red, eventually, is not evidence anyone can run.
+
+    So the comparison is reduced to an INDEX: the failing assertion compares
+    two integers, and the excerpt a reader needs is supplied here instead of
+    being reconstructed by a diff. Use it in pairs:
+
+        at, why = absent_at(needle, haystack, "main.py")
+        assert at < 0, why
+
+    Returns (index, detail); index is -1 when the needle is absent, which is
+    the passing case.
+    """
+    at = haystack.find(needle)
+    if at < 0:
+        return -1, (where, needle, "")
+    return at, (where, needle, haystack[max(0, at - 70):at + len(needle) + 70])
+
+
 # ── The report endpoint ──────────────────────────────────────────────────
 
 
@@ -1285,8 +1312,10 @@ def test_the_bound_sentence_is_one_sentence_in_every_copy():
            / "326_team_series_dc_fallback_at.sql").read_text(encoding="utf-8")
     assert sentence_words in normalized(sql)
     # And the claim it replaced is gone from both.
-    assert "at ANY later moment still finds" not in SRC
-    assert "at ANY later moment still finds" not in sql
+    for where, text_ in (("main.py", SRC),
+                         ("326_team_series_dc_fallback_at.sql", sql)):
+        at, why = absent_at("at ANY later moment still finds", text_, where)
+        assert at < 0, why
 
 
 # ── The lock, the veto and the attribution ───────────────────────────────
@@ -1523,7 +1552,8 @@ def test_the_deferred_definition_is_single_and_its_arithmetic_matches_the_exits(
                  "knows this build settled its report",
                  "false on each settling exit",
                  "present and false, it means this build settled the report"):
-        assert gone not in SRC, gone
+        at, why = absent_at(gone, SRC, "main.py")
+        assert at < 0, why
 
 
 # ── The comment-claim surface, held as a class ───────────────────────────
@@ -1640,7 +1670,8 @@ def test_no_dc_file_carries_a_superseded_claim():
     for name, text_ in _dc_claim_sources().items():
         flat = _collapsed(_without_claim_tables(text_))
         for gone in SUPERSEDED_CLAIMS:
-            assert gone not in flat, (name, gone)
+            at, why = absent_at(gone, flat, name)
+            assert at < 0, why
     # ...and the exclusion is not a hole: with the tables left in, this same
     # scan MUST find them. A filter that discarded the line it measures would
     # make the check above unfailable (#441, #342).
@@ -1713,7 +1744,8 @@ def test_no_dc_file_reads_an_absent_deferred_field_as_a_settlement():
     for name, text_ in _dc_claim_sources().items():
         flat = _collapsed(_without_claim_tables(text_))
         for gone in PRE_FIELD_MISREADINGS:
-            assert gone not in flat, (name, gone)
+            at, why = absent_at(gone, flat, name)
+            assert at < 0, why
     flat = _collapsed(_without_claim_tables(
         _dc_claim_sources()["test_sept16_dc_fallback_shape.py"]))
     assert flat.count(PRE_FIELD_SENTENCE) == 1, flat.count(PRE_FIELD_SENTENCE)
@@ -1834,3 +1866,47 @@ def test_the_sibling_scan_switch_removes_only_that_candidate(monkeypatch):
         if isinstance(n, ast.FunctionDef) and n.name == "_client_lane_sources"))
     assert resolver.count("cands.append") == 4, resolver
     assert "_worktrees_on_branch(" in resolver, resolver
+
+
+# Names bound to a WHOLE SOURCE FILE in this module, or to one collapsed onto a
+# single line. A `not in` against one of them is the shape that made a control
+# unusable, and it is refused here rather than remembered: the flag named one
+# line, the defect is the class (#432).
+WHOLE_FILE_NAMES = ("SRC", "flat", "sql", "own", "text_")
+
+
+def test_no_check_here_asks_pytest_to_diff_a_whole_file():
+    """The failure path of a check is part of the check.
+
+    A check that reddens only after 24 minutes of quadratic diffing is not
+    evidence a reviewer can run, and that is what `assert needle not in SRC`
+    costs when it fires (see absent_at). Every such site compares an index
+    instead. The shape is refused through the AST rather than by grepping for
+    a spelling, and the scan is shown to see the shape at all -- a guard whose
+    walk silently matched nothing would pass for ever (#342, #441).
+    """
+    own_src = pathlib.Path(__file__).read_text(encoding="utf-8")
+
+    def offenders_in(tree_):
+        out = []
+        for node in ast.walk(tree_):
+            if not isinstance(node, ast.Assert):
+                continue
+            t = node.test
+            if not isinstance(t, ast.Compare) or len(t.ops) != 1:
+                continue
+            if not isinstance(t.ops[0], ast.NotIn):
+                continue
+            right = t.comparators[0]
+            if isinstance(right, ast.Name) and right.id in WHOLE_FILE_NAMES:
+                out.append((node.lineno, right.id))
+        return out
+
+    assert offenders_in(ast.parse(own_src)) == [], offenders_in(
+        ast.parse(own_src))
+    # The negative control: the same walk over a sample that HAS the shape
+    # must find exactly it, so a pass above means "absent" and not "not
+    # looked for".
+    planted = offenders_in(ast.parse(
+        "def f():\n    assert 'x' not in " + WHOLE_FILE_NAMES[0] + "\n"))
+    assert planted == [(2, WHOLE_FILE_NAMES[0])], planted
