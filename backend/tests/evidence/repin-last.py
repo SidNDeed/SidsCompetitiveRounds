@@ -22,17 +22,32 @@ OUTPUT rather than a file anybody writes:
   5. it writes the report in one shot, and applies this directory's own rules
      to what it is about to write BEFORE writing it: the assembler's claim
      rules, and the invocation rule, both imported from where they live
-     rather than restated here.
+     rather than restated here;
+  6. it MAKES THE TWO COMMITS ITSELF, run log first and report last, each
+     adding exactly ONE path, and it quotes git's own listing of what each
+     one contains.
 
 Step 5 is what ends the regress. A pytest run cannot cover the file that
 records it, because that file is written afterwards by construction; the
 answer is not a second pytest run (which needs a third) but a check the
 generator applies to itself. Nothing is written unless it passes.
 
+STEP 6 IS ROUND 12'S CORRECTION, and it is the same shape as step 5. Round 11
+said "the commit that adds this file adds only this file" while the commit it
+described added two -- the report AND the run log it quotes -- because the two
+files were written together and staged together by hand. A sentence about a
+commit, written before the commit exists and by somebody other than the thing
+that makes it, is a claim nothing checks. So the wrapper makes them: the run
+log goes in its OWN EARLIER commit, the report goes in the last one alone, and
+both listings below are git's output rather than a description of it.
+
     python backend/tests/evidence/repin-last.py
 
-The commit that follows adds exactly this one file, so `git log` shows the
-order the wrapper asserts: the work, then the record of the run made over it.
+Nothing is committed unless the report passes the checks of step 5 first, and
+the run log's commit is made before the report is written because the report
+QUOTES the listing of it. The report is staged, git is asked what is staged,
+and the answer is written into the report before it is staged again and
+committed: one path, named by git, in the commit that carries this file.
 """
 import datetime
 import importlib.util
@@ -47,7 +62,34 @@ ROOT = os.path.dirname(BACKEND)
 CLOSING_K = ("committed_evidence or assembled_from_its_run or "
              "round_eight_control or round_seven_control or production_file "
              "or runner_carries or control_tally or counts_the_checks or "
-             "new_controls_a_report or residual_reach")
+             "new_controls_a_report or residual_reach or negation_admits")
+
+# The two commit messages this wrapper makes, so that what `git log` shows is
+# the wrapper's own account and not a hand-written one. The run log goes in
+# its own commit FIRST, and the report -- which quotes git's listing of that
+# commit -- goes last, alone.
+LOG_COMMIT_MESSAGE = """The re-pin run's own capture, committed before the record of it
+
+%s is the stdout the re-pin report is assembled from. It goes in a
+commit of its own so the commit that carries the report adds exactly one path,
+which is what that report asserts about itself.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"""
+
+REPORT_COMMIT_MESSAGE = """The route-manifest re-pin, run last, as its own record
+
+The wrapper that produced %s refuses to run while anything is
+uncommitted, so the tree it read is the tree its grandparent commit holds. It
+recorded that commit and its tree hash, ran the closing evidence check over the
+directory as committed, ran the re-pin tool, and applied this directory's own
+claim and invocation rules to the report before writing it.
+
+This commit adds exactly one path. The wrapper staged it, asked git what was
+staged, and wrote that listing into the report before staging it again -- so
+the claim the report makes about this commit is git's answer rather than a
+sentence written beside it.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"""
 
 
 def load(name, filename):
@@ -82,6 +124,11 @@ def main():
               "the round this re-pin belongs to cannot be derived")
         return 2
     report = os.path.join(HERE, "r%d-repin.txt" % number)
+    # The capture this wrapper writes, named by the producer:
+    #   capture   backend/tests/evidence/r%d-repin-run.log
+    # The .gitignore block for this directory admits one pattern per
+    # producer, matched against the names the producers print, both
+    # ways, by test_the_evidence_log_negation_admits_only_produced_logs.
     log_name = "r%d-repin-run.log" % number
     log_path = os.path.join(HERE, log_name)
 
@@ -112,62 +159,7 @@ def main():
     now = (datetime.datetime.now(datetime.timezone.utc)
            .strftime("%Y-%m-%d %H:%M:%S"))
 
-    out = io.StringIO()
-
-    def say(line=""):
-        out.write(line + "\n")
-
-    say("The route manifest re-pin, RUN LAST, with the order as evidence")
-    say("===============================================================")
-    say()
-    say("stdout: %s" % log_name)
-    say()
-    say("Instrument: backend/tests/evidence/repin-last.py, which produces this")
-    say("file as its OUTPUT. Nothing here is typed and nothing is appended")
-    say("afterwards -- the r6 lens found the previous round's report edited")
-    say("after its own tool had run, which left the manifest result no longer")
-    say("last, and an instrument that writes the record is the only shape that")
-    say("cannot regress to that.")
-    say()
-    say("== the ordering, as something a reader can check ==")
-    say("The wrapper refuses to run at all while `git status --porcelain` has")
-    say("any line in it. It was empty, so every other edit of this round --")
-    say("source, tests, instruments, the other evidence files -- was already")
-    say("committed before the re-pin ran, and nothing was left that could be")
-    say("edited after it. The commit that adds this file adds only this file,")
-    say("so `git log` shows the same order from the other side.")
-    say()
-    say("  HEAD at the re-pin     %s" % head)
-    say("  tree of that commit    %s" % tree)
-    say("  subject                %s" % subject)
-    say("  run at                 %s UTC" % now)
-    say()
-    say("`git rev-parse HEAD~1^{tree}` from the commit that adds this file is")
-    say("the tree hash above. That is the check: the re-pin ran against the")
-    say("tree its parent commit holds, and the only difference between that")
-    say("tree and the committed one is this record.")
-    say()
-    say("== what the wrapper checked before it wrote this ==")
-    say("A pytest run cannot cover the file that records it: the file is")
-    say("written after the run, by construction. So the closing check below")
-    say("covers every other report in this directory, and the rules this")
-    say("directory enforces are applied by the wrapper to THIS file before it")
-    say("is written -- the assembler's claim rules and the invocation rule,")
-    say("imported from evidence_rules.py and assemble-evidence.py rather than")
-    say("restated here, because a rule with two implementations drifts. If")
-    say("either refuses, nothing is written.")
-    say()
-    say("== what a clean result means here ==")
-    say("`rows rewritten now : 0` is the result this round requires. The")
-    say("manifest already held every fingerprint the committed tree produces,")
-    say("so the tool changed nothing -- the positive statement that the")
-    say("committed manifest and the committed code agree. A non-zero count")
-    say("here would mean the tree moved after the suites certified it.")
-    say()
-    say("-" * 78)
-    say("THE RUN, verbatim from here down")
-    say("-" * 78)
-
+    # ── the run first, because the report quotes it ──────────────────────
     log = io.StringIO()
 
     def run_block(tag, title, argv, cwd):
@@ -213,31 +205,168 @@ def main():
     with io.open(log_path, "w", encoding="utf-8", newline="") as fh:
         fh.write(body)
 
-    text = out.getvalue()
-    # The directory's own rules, applied to what is about to be written.
-    rebuilt = text + ("========== %s ==========\n" % log_name) + body
-    bad = assembler.undrivable(text, body)
-    if bad:
-        os.remove(log_path)
-        print("REFUSED: %d claim(s) in this report are absent from its own "
-              "run:" % len(bad))
-        for kind, claim in bad:
-            print("  %-7s %s" % (kind, claim))
-        return 1
-    missing = rules.results_without_an_invocation(rebuilt)
-    if missing:
-        os.remove(log_path)
-        print("REFUSED: %d result line(s) in this report have no invocation "
-              "above them:" % len(missing))
-        for n, line in missing:
-            print("  line %d: %s" % (n, line))
-        return 1
+    # ── the run log's OWN commit, made here so the report can quote it ────
+    # Round 11's report said "the commit that adds this file adds only this
+    # file" about a commit that added two, because both files were written
+    # together and staged together by hand. The wrapper stages them, one
+    # commit each, and asks git what each one contains.
+    log_rel = "backend/tests/evidence/" + log_name
+    report_rel = "backend/tests/evidence/" + os.path.basename(report)
+    staged = git("add", "--", log_rel)
+    if staged.returncode != 0:
+        print("REFUSED: could not stage %s: %s" % (log_rel, staged.stderr.strip()))
+        return 2
+    made = git("commit", "-m", LOG_COMMIT_MESSAGE % log_name)
+    if made.returncode != 0:
+        print("REFUSED: the run log's commit failed: %s"
+              % (made.stderr.strip() or made.stdout.strip()))
+        return 2
+    log_listing = [ln for ln in git("show", "--name-only", "--format=",
+                                    "HEAD").stdout.splitlines() if ln.strip()]
 
+    # ── the report, built around what git said ───────────────────────────
+    def build(staged_listing):
+        out = io.StringIO()
+
+        def say(line=""):
+            out.write(line + "\n")
+
+        say("The route manifest re-pin, RUN LAST, with the order as evidence")
+        say("===============================================================")
+        say()
+        say("stdout: %s" % log_name)
+        say()
+        say("Instrument: backend/tests/evidence/repin-last.py, which produces this")
+        say("file as its OUTPUT. Nothing here is typed and nothing is appended")
+        say("afterwards -- the r6 lens found the previous round's report edited")
+        say("after its own tool had run, which left the manifest result no longer")
+        say("last, and an instrument that writes the record is the only shape that")
+        say("cannot regress to that.")
+        say()
+        say("== the ordering, as something a reader can check ==")
+        say("The wrapper refuses to run at all while `git status --porcelain` has")
+        say("any line in it. It was empty, so every other edit of this round --")
+        say("source, tests, instruments, the other evidence files -- was already")
+        say("committed before the re-pin ran, and nothing was left that could be")
+        say("edited after it.")
+        say()
+        say("  HEAD at the re-pin     %s" % head)
+        say("  tree of that commit    %s" % tree)
+        say("  subject                %s" % subject)
+        say("  run at                 %s UTC" % now)
+        say()
+        say("== which commit carries which file, from git rather than from me ==")
+        say("Round 11's report said the commit that added it added only it. That")
+        say("commit added two paths -- the report and the run log it quotes --")
+        say("because both were written together and staged together by hand, and")
+        say("a sentence about a commit written before that commit exists is a")
+        say("claim nothing checks. The wrapper makes both commits now, one path")
+        say("each, and the two listings below are git's own.")
+        say()
+        say("The run log went FIRST, in a commit of its own. Immediately after")
+        say("making it the wrapper ran `git show --name-only --format= HEAD`,")
+        say("which printed:")
+        say()
+        for line in log_listing:
+            say("  " + line)
+        say()
+        say("Then it wrote this file, staged it with `git add -- %s`," % report_rel)
+        say("and ran `git diff --cached --name-only`, which printed:")
+        say()
+        if staged_listing is None:
+            say("  (this file is being staged; the listing is written in below")
+            say("  before it is staged again and committed)")
+        else:
+            for line in staged_listing:
+                say("  " + line)
+        say()
+        say("That listing is what the last commit of this round contains: this")
+        say("report, and nothing else. The run log is in the commit before it,")
+        say("and the round's source, tests, instruments and other evidence are in")
+        say("the commit before that -- which is the HEAD named above, the tree")
+        say("the re-pin actually ran against.")
+        say()
+        say("== what the wrapper checked before it wrote this ==")
+        say("A pytest run cannot cover the file that records it: the file is")
+        say("written after the run, by construction. So the closing check below")
+        say("covers every other report in this directory, and the rules this")
+        say("directory enforces are applied by the wrapper to THIS file before it")
+        say("is written -- the assembler's claim rules and the invocation rule,")
+        say("imported from evidence_rules.py and assemble-evidence.py rather than")
+        say("restated here, because a rule with two implementations drifts. If")
+        say("either refuses, nothing is written.")
+        say()
+        say("== what a clean result means here ==")
+        say("`rows rewritten now : 0` is the result this round requires. The")
+        say("manifest already held every fingerprint the committed tree produces,")
+        say("so the tool changed nothing -- the positive statement that the")
+        say("committed manifest and the committed code agree. A non-zero count")
+        say("here would mean the tree moved after the suites certified it.")
+        say()
+        say("-" * 78)
+        say("THE RUN, verbatim from here down")
+        say("-" * 78)
+        return out.getvalue()
+
+    def vet(text):
+        """This directory's own rules, applied to what is about to be written."""
+        rebuilt = text + ("========== %s ==========\n" % log_name) + body
+        bad = assembler.undrivable(text, body)
+        if bad:
+            print("REFUSED: %d claim(s) in this report are absent from its own "
+                  "run:" % len(bad))
+            for kind, claim in bad:
+                print("  %-7s %s" % (kind, claim))
+            return None
+        missing = rules.results_without_an_invocation(rebuilt)
+        if missing:
+            print("REFUSED: %d result line(s) in this report have no invocation "
+                  "above them:" % len(missing))
+            for n, line in missing:
+                print("  line %d: %s" % (n, line))
+            return None
+        return rebuilt
+
+    # PASS 1: write the report, stage it, and ask git what is staged. The
+    # answer is a fact about the commit that is about to be made, and the only
+    # way to have it INSIDE that commit is to write it in and stage again.
+    first = vet(build(None))
+    if first is None:
+        return 1
     with io.open(report, "w", encoding="utf-8", newline="") as fh:
-        fh.write(rebuilt)
-    print("written backend/tests/evidence/r%d-repin.txt "
+        fh.write(first)
+    staged = git("add", "--", report_rel)
+    if staged.returncode != 0:
+        print("REFUSED: could not stage %s: %s"
+              % (report_rel, staged.stderr.strip()))
+        return 2
+    staged_listing = [ln for ln in git("diff", "--cached", "--name-only")
+                      .stdout.splitlines() if ln.strip()]
+
+    # PASS 2: the same report with git's listing in it. The listing does not
+    # change between the passes -- the same one path is staged either way --
+    # so what is written is true of the commit that carries it.
+    final = vet(build(staged_listing))
+    if final is None:
+        return 1
+    with io.open(report, "w", encoding="utf-8", newline="") as fh:
+        fh.write(final)
+    staged = git("add", "--", report_rel)
+    if staged.returncode != 0:
+        print("REFUSED: could not re-stage %s: %s"
+              % (report_rel, staged.stderr.strip()))
+        return 2
+    made = git("commit", "-m", REPORT_COMMIT_MESSAGE % os.path.basename(report))
+    if made.returncode != 0:
+        print("REFUSED: the report's commit failed: %s"
+              % (made.stderr.strip() or made.stdout.strip()))
+        return 2
+    print("written and committed %s "
           "(closing check rc=%d, re-pin rc=%d)"
-          % (number, closing_rc, repin_rc))
+          % (report_rel, closing_rc, repin_rc))
+    for line in git("show", "--name-only", "--format=", "HEAD").stdout.splitlines():
+        if line.strip():
+            print("  last commit adds: " + line)
     return 0 if (closing_rc == 0 and repin_rc == 0) else 1
 
 

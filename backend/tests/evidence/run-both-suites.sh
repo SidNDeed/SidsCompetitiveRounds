@@ -71,6 +71,13 @@ cd "${BACKEND}" || exit 1
 echo "script    <repo>/backend/tests/evidence/run-both-suites.sh"
 echo "cwd       <repo>/backend"
 echo "python    $(python -V 2>&1)"
+# THE CAPTURE THIS SCRIPT IS REDIRECTED INTO, named by the producer.
+# The .gitignore negation for this directory admits one pattern per
+# producer, and the pattern is checked against the name the producer
+# itself prints -- so a capture nothing here writes is not admitted, and
+# a producer whose capture is not admitted reds (both directions in
+# test_the_evidence_log_negation_admits_only_produced_logs).
+echo "capture   <repo>/backend/tests/evidence/${TAG}-suite-run.log"
 
 # THE TREE THIS RUN CERTIFIES, fingerprinted by the instrument rather than
 # asserted afterwards in prose. A suite that overlaps an edit to its own tree

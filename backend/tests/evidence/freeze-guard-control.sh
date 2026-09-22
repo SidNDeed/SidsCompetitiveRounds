@@ -27,6 +27,9 @@ REPO="$(cd "${HERE}/../../.." && pwd)"
 FP="${HERE}/tree-fingerprint.sh"
 
 echo "script    <repo>/backend/tests/evidence/freeze-guard-control.sh"
+# The capture this script is redirected into, named by the producer --
+# see the .gitignore block for this directory.
+echo "capture   <repo>/backend/tests/evidence/<round>-freeze-guard.log"
 echo "cwd       <repo>"
 echo "command   bash <repo>/backend/tests/evidence/freeze-guard-control.sh"
 echo "guard     bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>"

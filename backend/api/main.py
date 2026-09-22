@@ -48128,14 +48128,28 @@ async def _ffa_record_and_refuse(db: AsyncSession, *, report, lobby_uuid, id_by_
     held a captured payload and this one differs, so both are now on file and
     the reporter is told that its account is not the one that was there.
 
-    Every one of the three answers carries `progress` — the lobby's own
-    games_played/expected_game, and settled_game where the caller knows the
-    named game is already settled — so a refused client can resynchronise
-    instead of naming a number one further out on every later game of the
-    sitting. The two counters in it are RE-READ under a fresh lobby lock after
-    the capture, because the capture ends this request's transaction and the
-    caller's copy predates that; `_ffa_progress_after_capture` is where that is
-    written down. This function always raises."""
+    EVERY ANSWER GETS EXACTLY ONE DISPOSITION, AND THE TWO ARMS ARE DISJOINT BY
+    CONSTRUCTION. The TERMINAL answers — the two below the capture check — carry
+    `progress`: the lobby's own games_played/expected_game, and settled_game
+    where the caller knows the named game is already settled, so a refused
+    client can resynchronise instead of naming a number one further out on
+    every later game of the sitting. Their two counters are RE-READ under a
+    fresh lobby lock after the capture, because the capture ends this request's
+    transaction and the caller's copy predates that;
+    `_ffa_progress_after_capture` is where that is written down.
+
+    The CAPTURE-FAILURE answer is the other arm, and it carries NO progress
+    fields at all — not the counters, and not `settled_game`. It is an answer
+    about THIS DELIVERY and not about the game: nothing was kept, so the body
+    has to come back unchanged, and a body that comes back unchanged needs no
+    number. Carrying one would put a single response into two dispositions at
+    once — `settled_game` means "this game is finished, stop sending it" and a
+    503 means "keep this and send it again", and no consumer can obey both. So
+    this arm RAISES BEFORE the re-derivation runs: the caller's `settled_game`
+    is not merely dropped on the way out, it is never reachable from the
+    response this arm builds, which is what makes the two arms disjoint by the
+    shape of the code rather than by a rule somebody has to keep obeying.
+    This function always raises."""
     _kept = await _quarantine_report(
         db, mode="ffa", reason=reason, status_code=status,
         payload=report.model_dump(), group_id=lobby_uuid,
@@ -48145,15 +48159,22 @@ async def _ffa_record_and_refuse(db: AsyncSession, *, report, lobby_uuid, id_by_
     print(f"[FFA] lobby {lobby_uuid} report of room {report.photon_room_id} "
           f"refused ({reason}: {why}) — capture={_kept} "
           f"(reporter {report.reported_by_steam_id})")
+    # THE CAPTURE-FAILURE ARM FIRST, AND ABOVE THE RE-DERIVATION. Nothing was
+    # kept, so this answer is about the delivery and not about the game: the
+    # body comes back unchanged and needs no number. It carries no progress
+    # fields at all, and it is raised here — above the line that would compute
+    # them — so no response built on this arm can carry `settled_game` even if
+    # the caller resolved one. That disjointness is what keeps a 503 in ONE
+    # disposition: retryable, keep the body, change nothing.
+    if _kept not in ("recorded", "already", "variant"):
+        raise FfaReportRefusal(503, "Could not record this report for review - "
+                                    "retry this report unchanged", {})
     # THE CAPTURE ABOVE ENDED THIS REQUEST'S TRANSACTION AND RELEASED THE LOBBY
     # LOCK, so `progress` is a reading of a sitting that may have moved. Both
-    # exits below answer from the re-derivation instead. See
+    # terminal exits below answer from the re-derivation instead. See
     # _ffa_progress_after_capture for why settled_game is carried rather than
     # re-derived, and for the direction a failed re-read takes.
     progress = await _ffa_progress_after_capture(db, lobby_uuid, progress)
-    if _kept not in ("recorded", "already", "variant"):
-        raise FfaReportRefusal(503, "Could not record this report for review - retry",
-                               progress)
     if _kept == "variant":
         detail = f"{detail} - a different account of this room is already on file"
     raise FfaReportRefusal(status, detail, progress)

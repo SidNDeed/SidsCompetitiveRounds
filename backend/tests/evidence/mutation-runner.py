@@ -62,6 +62,10 @@ ASSEMBLER = os.path.join(HERE, "assemble-evidence.py")
 # Shipped by the same deploy as the api (docs/deploy-reference.md maps it to
 # the primary), and outside every glob round 8's shipped-file rule read.
 DOCKERFILE_BOT = os.path.join(BACKEND, "Dockerfile.bot")
+# The repository ignore file, whose evidence-log negation admits one pattern
+# per producer, and the assembly producer whose capture one of them names.
+GITIGNORE = os.path.join(ROOT, ".gitignore")
+RUN_ASSEMBLY = os.path.join(HERE, "run-assembly.sh")
 
 
 def _load(name, path):
@@ -740,6 +744,84 @@ CONTROLS = [
      '    rest = [lines[i] for i in range(start, end)\n'
      '            if i not in exempt and not TAG.match(lines[i])]\n',
      "test_the_residual_reach_rule_holds_in_both_directions"),
+    # ── round 12 ─────────────────────────────────────────────────────────
+    # The capture-failure 503 back under the re-derivation, answering with it.
+    # That is one response in two dispositions at once: TERMINAL by the
+    # `settled_game` field the caller resolved, RETRYABLE by its status. The
+    # inert twin is the same detail string reflowed across its two lines, so
+    # what reds is the VALUE the arm carries and not the shape of the raise.
+    ("capture-failure-503-carries-the-settled-game", MAIN,
+     '    if _kept not in ("recorded", "already", "variant"):\n'
+     '        raise FfaReportRefusal(503, "Could not record this report for review - "\n'
+     '                                    "retry this report unchanged", {})\n',
+     '    if _kept not in ("recorded", "already", "variant"):\n'
+     '        raise FfaReportRefusal(503, "Could not record this report for review - "\n'
+     '                                    "retry this report unchanged",\n'
+     '                               await _ffa_progress_after_capture(\n'
+     '                                   db, lobby_uuid, progress))\n',
+     '    if _kept not in ("recorded", "already", "variant"):\n'
+     '        raise FfaReportRefusal(503, "Could not record this report for "\n'
+     '                                    "review - retry this report unchanged", {})\n',
+     "test_the_two_503_arms_are_disjoint_on_the_answers_the_endpoint_builds"),
+
+    # The recovery rule of the missed-update walk, re-keying instead of
+    # re-signing: the parked body is filed as a SECOND entry under a new key
+    # rather than the one the seat froze for that physical game. The inert
+    # twin is the same statement reflowed.
+    ("recovery-re-keys-the-parked-delivery", TESTS,
+     '    advertised = int(refusal.progress["expected_game"])\n'
+     '    entry = outbox[key]\n'
+     '    entry["advertised"] = advertised\n'
+     '    return entry\n',
+     '    advertised = int(refusal.progress["expected_game"])\n'
+     '    entry = outbox.pop(key)\n'
+     '    entry["advertised"] = advertised\n'
+     '    outbox["%s#r%d" % (key, advertised)] = entry\n'
+     '    return entry\n',
+     '    advertised = int(\n'
+     '        refusal.progress["expected_game"])\n'
+     '    entry = outbox[key]\n'
+     '    entry["advertised"] = advertised\n'
+     '    return entry\n',
+     "test_pg_a_seat_that_missed_an_update_recovers_in_one_submission"),
+
+    # A third parameter back on the relock's signature, which is what made the
+    # caller's pre-rollback copy reachable from that span. The inert twin is
+    # the same signature reflowed across two lines, so what reds is the
+    # parameter list and not the line's shape.
+    ("relock-takes-a-fallback-again", MAIN,
+     'async def _ffa_progress_relocked(db: AsyncSession, lobby_uuid) -> dict:\n',
+     'async def _ffa_progress_relocked(db: AsyncSession, lobby_uuid,\n'
+     '                                 fallback=None) -> dict:\n',
+     'async def _ffa_progress_relocked(db: AsyncSession,\n'
+     '                                 lobby_uuid) -> dict:\n',
+     "test_every_progress_the_endpoint_builds_comes_from_a_locked_slot"),
+
+    # The per-producer negations back to the blanket `*.log`, which re-includes
+    # any file landing in the evidence directory with that extension whether a
+    # committed instrument writes it or not. The inert twin is two of the
+    # patterns swapped: the same set, a different order.
+    ("evidence-log-negation-admits-any-log", GITIGNORE,
+     '!backend/tests/evidence/*-suite-run.log\n'
+     '!backend/tests/evidence/*-pg-controls.log\n',
+     '!backend/tests/evidence/*.log\n',
+     '!backend/tests/evidence/*-pg-controls.log\n'
+     '!backend/tests/evidence/*-suite-run.log\n',
+     "test_the_evidence_log_negation_admits_only_produced_logs"),
+
+    # A producer that stops naming the capture it is redirected into, which
+    # leaves a pattern in .gitignore that nothing in this tree produces.
+    #
+    # THE INERT TWIN IS A DOUBLED SPACE inside the same line, and it used to
+    # be that line reflowed across two. The reflow is not an inert edit here:
+    # the declaration has to OPEN its line for a producer to be NAMING rather
+    # than mentioning its capture, so splitting it removes the name as surely
+    # as the mutant does. A twin that reds is not a twin.
+    ("producer-stops-naming-its-capture", RUN_ASSEMBLY,
+     'echo "capture   <repo>/backend/tests/evidence/r${ROUND}-suites-assembly-run.log"\n',
+     'echo "capture   (this producer no longer names its own capture)"\n',
+     'echo "capture    <repo>/backend/tests/evidence/r${ROUND}-suites-assembly-run.log"\n',
+     "test_the_evidence_log_negation_admits_only_produced_logs"),
 ]
 
 
@@ -899,6 +981,12 @@ def main():
     print("  command   FFA_TEST_PG_DSN=%s python %s"
           % (redacted(DSN), " ".join(argv[0:])))
     print("  cwd       %s" % rel(os.getcwd()))
+    # The capture this run is redirected into, named by the producer. The
+    # .gitignore negation for this directory admits one pattern per
+    # producer and is compared against the names the producers print, in
+    # both directions, by
+    # test_the_evidence_log_negation_admits_only_produced_logs.
+    print("  capture   backend/tests/evidence/<round>-mutation-run.log")
     print("  pytest    run with cwd=%s, one invocation per half of each"
           % rel(BACKEND))
     print("            control, printed in full beside it below")

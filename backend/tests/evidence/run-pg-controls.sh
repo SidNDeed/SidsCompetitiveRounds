@@ -31,7 +31,7 @@ if [ -z "${DSN}" ]; then
   exit 2
 fi
 
-SELECT_K="pg_ or opt_out or missing_dsn_alone or one_transaction or locked_slot or weakest_mode or wager_cannot_be_inserted or relock_leaves or committed_evidence or round_seven_control or round_eight_control or production_file or counts_the_checks or new_controls_a_report or residual_reach"
+SELECT_K="pg_ or opt_out or missing_dsn_alone or one_transaction or locked_slot or weakest_mode or wager_cannot_be_inserted or relock_leaves or committed_evidence or round_seven_control or round_eight_control or production_file or counts_the_checks or new_controls_a_report or residual_reach or negation_admits or arms_are_disjoint"
 
 cd "${BACKEND}" || exit 1
 
@@ -39,6 +39,10 @@ echo "script    <repo>/backend/tests/evidence/run-pg-controls.sh"
 echo "cwd       <repo>/backend"
 echo "python    $(python -V 2>&1)"
 echo "dsn       postgresql+asyncpg://<user>@<host>:<port>/<db>"
+# The capture this script is redirected into, named by the producer --
+# see the .gitignore block for this directory and the both-directions
+# check that compares the two sets.
+echo "capture   <repo>/backend/tests/evidence/<round>-pg-controls.log"
 echo "command   FFA_TEST_PG_DSN=... python -m pytest tests/test_ffa_game_number_anchor.py -v -p no:cacheprovider -k \"<selection>\""
 echo ""
 echo "selection (the expression is part of the evidence; a set nobody can"

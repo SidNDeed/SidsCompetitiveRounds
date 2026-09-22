@@ -1,0 +1,58 @@
+== the producer of this log ==
+script    <repo>/backend/tests/evidence/run-assembly.sh
+cwd       <repo>
+python    Python 3.12.10
+capture   <repo>/backend/tests/evidence/r12-suites-assembly-run.log
+round     r12, derived from the newest -suites.txt beside this script
+
+== the assembler's own self-test, both directions on every rule ==
+cwd       <repo>
+command   python backend/tests/evidence/assemble-evidence.py --selftest
+selftest: 34 rule checks, all as stated
+selftest rc=0
+
+== r12-mutation-controls.txt, re-derived from the stdout it names ==
+cwd       <repo>
+command   python backend/tests/evidence/assemble-evidence.py --check backend/tests/evidence/r12-mutation-controls.txt
+selftest: 34 rule checks, all as stated
+OK: backend/tests/evidence/r12-mutation-controls.txt -- 1 claim(s) all derived from r12-mutation-run.log r12-freeze-guard.log r12-citation-pin.log r12-residual-reach.log; the verbatim block is the named stdout, byte for byte
+check rc=0
+
+== r12-postgresql-controls.txt, re-derived from the stdout it names ==
+cwd       <repo>
+command   python backend/tests/evidence/assemble-evidence.py --check backend/tests/evidence/r12-postgresql-controls.txt
+selftest: 34 rule checks, all as stated
+OK: backend/tests/evidence/r12-postgresql-controls.txt -- 6 claim(s) all derived from r12-pg-controls.log; the verbatim block is the named stdout, byte for byte
+check rc=0
+
+== r12-suites.txt, re-derived from the stdout it names ==
+cwd       <repo>
+command   python backend/tests/evidence/assemble-evidence.py --check backend/tests/evidence/r12-suites.txt
+selftest: 34 rule checks, all as stated
+OK: backend/tests/evidence/r12-suites.txt -- 9 claim(s) all derived from r12-suite-run.log; the verbatim block is the named stdout, byte for byte
+check rc=0
+
+== the REFUSAL, executed rather than described ==
+cwd       <repo>
+command   python -c "import sys; sys.stdout.reconfigure(newline=chr(10)); import importlib.util as u; s=u.spec_from_file_location("a","backend/tests/evidence/assemble-evidence.py"); m=u.module_from_spec(s); s.loader.exec_module(m); print("undrivable  ->", m.undrivable("the run hashed 12 paths", "9 paths"))"
+undrivable  -> [('count', '12 paths')]
+refusal rc=0
+
+== ...and the same rule stays quiet on a claim the run DID print ==
+cwd       <repo>
+command   python -c "import sys; sys.stdout.reconfigure(newline=chr(10)); import importlib.util as u; s=u.spec_from_file_location("a","backend/tests/evidence/assemble-evidence.py"); m=u.module_from_spec(s); s.loader.exec_module(m); print("derivable   ->", m.undrivable("the run hashed 9 paths", "9 paths"))"
+derivable   -> []
+clean rc=0
+
+== the closing evidence check, which RUNS the assembler ==
+The assembler is not a step somebody remembers to take: the committed
+check below runs its self-test and re-checks every assembled report of
+the newest round, so a report that stopped matching its own stdout reds
+in the suite rather than in a log nobody re-reads.
+cwd       <repo>/backend
+command   python -m pytest tests/test_ffa_game_number_anchor.py -q -p no:cacheprovider -k "committed_evidence or assembled_from_its_run"
+..                                                                       [100%]
+2 passed, 158 deselected in 13.29s
+closing rc=0
+
+== done ==

@@ -79,6 +79,9 @@ def main(argv):
     print("rule      <repo>/%s" % SHOWN_RULES)
     print("document  %s" % SHOWN_DOC)
     print("python    %s" % sys.version.split()[0])
+    # The capture this run is redirected into, named by the producer --
+    # see the .gitignore block for this directory.
+    print("capture   <repo>/backend/tests/evidence/<round>-residual-reach.log")
     print("started   %s UTC"
           % datetime.datetime.now(datetime.timezone.utc)
                     .strftime("%Y-%m-%d %H:%M:%S"))

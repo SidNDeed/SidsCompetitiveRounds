@@ -1,0 +1,23 @@
+script    <repo>/backend/tests/evidence/citation-pin-control.sh
+capture   <repo>/backend/tests/evidence/<round>-citation-pin.log
+command   bash <repo>/backend/tests/evidence/citation-pin-control.sh <citing-doc> <cited-doc>
+citing    <the lane's contract, under the gitignored scratch>
+cited     <the client lane's method design, under the gitignored scratch>
+bash      5.3.15(1)-release
+started   2026-09-22T11:57:17Z
+
+cited document declares: revision 3
+
+LIVE   the committed state of the two documents
+  live    : cites revision 3, cited document declares revision 3 -> MATCH
+
+MUTANT the citation is rolled back one revision (the r8 defect, restored)
+  mutant  : cites revision 2, cited document declares revision 3 -> STALE
+
+INERT  a wording change at the same site, the revision left alone
+  inert   : cites revision 3, cited document declares revision 3 -> MATCH
+
+RESULT: live MATCH, mutant STALE (red), inert MATCH (green). The check
+        reds on the edit that actually happens -- a revision moving
+        under a citation -- and not on a reword beside it.
+finished  2026-09-22T11:57:18Z

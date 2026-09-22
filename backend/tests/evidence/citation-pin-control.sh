@@ -30,6 +30,9 @@ CITING="${1:?usage: citation-pin-control.sh <citing-doc> <cited-doc>}"
 CITED="${2:?usage: citation-pin-control.sh <citing-doc> <cited-doc>}"
 
 echo "script    <repo>/backend/tests/evidence/citation-pin-control.sh"
+# The capture this script is redirected into, named by the producer --
+# see the .gitignore block for this directory.
+echo "capture   <repo>/backend/tests/evidence/<round>-citation-pin.log"
 echo "command   bash <repo>/backend/tests/evidence/citation-pin-control.sh <citing-doc> <cited-doc>"
 echo "citing    <the lane's contract, under the gitignored scratch>"
 echo "cited     <the client lane's method design, under the gitignored scratch>"

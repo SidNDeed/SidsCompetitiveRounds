@@ -1,0 +1,32 @@
+script    <repo>/backend/tests/evidence/run-both-suites.sh
+cwd       <repo>/backend
+python    Python 3.12.10
+capture   <repo>/backend/tests/evidence/r12-suite-run.log
+command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
+tree      12 paths differ from HEAD or are untracked; fingerprinted before and after
+  97feb3a3cd29232127a681670290f6f0  .gitignore
+  1f4f026751af08d63d886c719ad360ab  backend/api/main.py
+  f3b18c1771026d191ac326319c0b76bd  backend/tests/evidence/citation-pin-control.sh
+  3f392deb852679e691b076ee1baedc64  backend/tests/evidence/freeze-guard-control.sh
+  2526f04d97fd77d6e6d82f917dda817d  backend/tests/evidence/mutation-runner.py
+  ddb55a43873b1f532ba91b630dd86fbc  backend/tests/evidence/repin-last.py
+  9fedcab8309bc7d17779973b9e83250a  backend/tests/evidence/residual-reach-control.py
+  bce8117190ec75cbd0e025ec914fa6ac  backend/tests/evidence/run-assembly.sh
+  725eb3da2df0a510c133d03cd6d14342  backend/tests/evidence/run-both-suites.sh
+  fee1cc6591aed7ed3079b2d106addc55  backend/tests/evidence/run-pg-controls.sh
+  f826857cc7c8c7794a723086b32b48ac  backend/tests/route_manifest_net_seat.json
+  3446bde8f2ae69db6006a0483b7cdad7  backend/tests/test_ffa_game_number_anchor.py
+=== opt-out started 11:37:27 ===
+command   env -u FFA_TEST_PG_DSN FFA_TEST_PG_OPTOUT=1 python -m pytest tests/ -q -p no:cacheprovider
+opt-out rc=0
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1742 passed, 44 skipped, 1 xfailed, 2 warnings in 560.27s (0:09:20)
+=== live DSN started 11:46:50 ===
+command   FFA_TEST_PG_DSN=postgresql+asyncpg://<user>@<host>:<port>/<db> python -m pytest tests/ -q -p no:cacheprovider
+dsn rc=0
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1771 passed, 15 skipped, 1 xfailed, 2 warnings in 597.82s (0:09:57)
+=== tree re-fingerprinted 11:56:52 ===
+command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
+UNCHANGED: the same 12 paths, each byte-identical to the pre-run fingerprint
+=== done 11:56:53 ===

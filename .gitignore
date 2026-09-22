@@ -34,7 +34,25 @@ logs-snapshot/
 # fresh clone can re-derive (#302). These captures are produced by the committed
 # instruments beside them, print repository-relative paths only, and carry no
 # connection string.
-!backend/tests/evidence/*.log
+#
+# PER PRODUCER, NOT `*.log`. The negation used to re-include every `.log` that
+# landed in this directory, produced or not, which is a rule that cannot refuse
+# anything (#342): a file nothing in this tree writes was admitted by the same
+# line as a capture, and an `add -A` over a working directory would carry it.
+# Each pattern below is the capture of ONE committed instrument beside it, and
+# the instrument prints that name in its own stdout header, so the set is
+# derivable rather than remembered.
+# test_the_evidence_log_negation_admits_only_produced_logs compares the two
+# sets in BOTH directions: a pattern no instrument produces reds, and a capture
+# an instrument names that no pattern admits reds.
+!backend/tests/evidence/*-suite-run.log
+!backend/tests/evidence/*-pg-controls.log
+!backend/tests/evidence/*-mutation-run.log
+!backend/tests/evidence/*-citation-pin.log
+!backend/tests/evidence/*-freeze-guard.log
+!backend/tests/evidence/*-repin-run.log
+!backend/tests/evidence/*-suites-assembly-run.log
+!backend/tests/evidence/*-residual-reach.log
 
 # Tool caches
 .vs/
