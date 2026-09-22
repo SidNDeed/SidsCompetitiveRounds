@@ -1,0 +1,71 @@
+The route manifest re-pin, RUN LAST, with the order as evidence
+===============================================================
+
+stdout: r11-repin-run.log
+
+Instrument: backend/tests/evidence/repin-last.py, which produces this
+file as its OUTPUT. Nothing here is typed and nothing is appended
+afterwards -- the r6 lens found the previous round's report edited
+after its own tool had run, which left the manifest result no longer
+last, and an instrument that writes the record is the only shape that
+cannot regress to that.
+
+== the ordering, as something a reader can check ==
+The wrapper refuses to run at all while `git status --porcelain` has
+any line in it. It was empty, so every other edit of this round --
+source, tests, instruments, the other evidence files -- was already
+committed before the re-pin ran, and nothing was left that could be
+edited after it. The commit that adds this file adds only this file,
+so `git log` shows the same order from the other side.
+
+  HEAD at the re-pin     b3c78fba301bc464008ec0bfa6d570d0d2a4d94a
+  tree of that commit    771496b0502a280e602272619bf734780de11f9b
+  subject                A claim about a set is derived from that set, never written beside it
+  run at                 2026-09-22 03:31:07 UTC
+
+`git rev-parse HEAD~1^{tree}` from the commit that adds this file is
+the tree hash above. That is the check: the re-pin ran against the
+tree its parent commit holds, and the only difference between that
+tree and the committed one is this record.
+
+== what the wrapper checked before it wrote this ==
+A pytest run cannot cover the file that records it: the file is
+written after the run, by construction. So the closing check below
+covers every other report in this directory, and the rules this
+directory enforces are applied by the wrapper to THIS file before it
+is written -- the assembler's claim rules and the invocation rule,
+imported from evidence_rules.py and assemble-evidence.py rather than
+restated here, because a rule with two implementations drifts. If
+either refuses, nothing is written.
+
+== what a clean result means here ==
+`rows rewritten now : 0` is the result this round requires. The
+manifest already held every fingerprint the committed tree produces,
+so the tool changed nothing -- the positive statement that the
+committed manifest and the committed code agree. A non-zero count
+here would mean the tree moved after the suites certified it.
+
+------------------------------------------------------------------------------
+THE RUN, verbatim from here down
+------------------------------------------------------------------------------
+========== r11-repin-run.log ==========
+== closing evidence check, over this directory as committed ==
+cwd       <repo>/backend
+started   2026-09-22 03:31:07 UTC
+command   python -m pytest tests/test_ffa_game_number_anchor.py -q -p no:cacheprovider -k committed_evidence or assembled_from_its_run or round_eight_control or round_seven_control or production_file or runner_carries or control_tally or counts_the_checks or new_controls_a_report or residual_reach
+..........                                                               [100%]
+10 passed, 148 deselected in 3.71s
+closing rc=0
+
+== route manifest re-pin, by its own tool ==
+cwd       <repo>
+started   2026-09-22 03:31:12 UTC
+command   python backend\tests\repin_route_manifest.py
+manifest rows      : 362
+fingerprinted      : 361
+rows rewritten now : 0
+MOVED vs HEAD      : 0
+ENTRY POINTS moved vs HEAD: 0
+(dry run; pass --write)
+repin rc=0
+
