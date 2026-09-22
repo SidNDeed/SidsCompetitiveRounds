@@ -1,0 +1,20 @@
+== closing evidence check, over this directory as committed ==
+cwd       <repo>/backend
+started   2026-09-22 12:17:30 UTC
+command   python -m pytest tests/test_ffa_game_number_anchor.py -q -p no:cacheprovider -k committed_evidence or assembled_from_its_run or round_eight_control or round_seven_control or production_file or runner_carries or control_tally or counts_the_checks or new_controls_a_report or residual_reach or negation_admits
+...........                                                              [100%]
+11 passed, 149 deselected in 5.31s
+closing rc=0
+
+== route manifest re-pin, by its own tool ==
+cwd       <repo>
+started   2026-09-22 12:17:37 UTC
+command   python backend\tests\repin_route_manifest.py
+manifest rows      : 362
+fingerprinted      : 361
+rows rewritten now : 0
+MOVED vs HEAD      : 0
+ENTRY POINTS moved vs HEAD: 0
+(dry run; pass --write)
+repin rc=0
+
