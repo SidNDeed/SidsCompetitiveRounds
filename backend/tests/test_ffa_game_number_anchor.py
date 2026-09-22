@@ -87,6 +87,7 @@ it: 22 unmarked and still live (rounds 1 and 2), 1 unmarked and RETIRED because
 round 4 deleted the code it mutated (prior-tail-only, annotated in place), 16
 marked (r3), 15 marked (r4), 10 marked (r5), 7 marked (r6), 7 marked (r7), 8
 marked (r8), 3 marked (r9), 8 marked (r10), 6 marked (r11), 8 marked (r12),
+5 marked (r13),
 and
 one more that is a committed test rather than a hand-run control
 (backfill-neutered, at the end). The rounds in that sentence are read off the
@@ -414,11 +415,14 @@ All KILLED:
                            caller's pre-rollback copy is reachable from the
                            span again. Its inert twin is the same signature
                            reflowed across two lines.
-  evidence-log-negation-admits-any-log (r12)  .gitignore: the per-producer
-                           patterns back to the blanket `*.log`, which admits
-                           a capture no instrument here writes. Its inert twin
-                           is two of the patterns swapped, which is the same
-                           set in a different order.
+  evidence-log-negation-admits-any-log (r12)  .gitignore: two of the
+                           per-producer names back to the blanket `*.log`,
+                           which admits a capture no instrument here writes.
+                           Re-anchored in r13 on the exact names that replaced
+                           the suffix patterns; the mutation is the one it
+                           always was. Its inert twin is two of the names
+                           swapped, which is the same set in a different
+                           order.
   producer-stops-naming-its-capture (r12)  run-assembly.sh: drop the line in
                            which the producer names the capture it is
                            redirected into, leaving a pattern in .gitignore
@@ -445,8 +449,38 @@ All KILLED:
                            rule again, in the shape that does NOT crash: the
                            original entry is left reachable and a second key
                            is added beside it, so every leg runs and the key
-                           set is what sees it. Its inert twin is the same
-                           statement reflowed.
+                           set is what sees it. Its inert twin is a comment
+                           at the same site.
+  recovery-resubmits-the-stale-number (r13)  _recover_parked: drop the line
+                           that writes the advertised number into the body,
+                           so the REDIRECT the contract's arm table states is
+                           never taken and the seat resubmits the number it
+                           was just refused for. Its inert twin is the same
+                           assignment with a doubled space.
+  terminal-walk-redirects-a-second-time (r13)  _settled_game_disposition:
+                           answer EVERY settled-game refusal with a redirect,
+                           so the bound the contract states -- once per
+                           entry, terminal the second time -- is not one and
+                           the entry is re-signed for ever. Its inert twin is
+                           a comment at the same site.
+  evidence-log-negation-takes-a-suffix-wildcard (r13)  .gitignore: one exact
+                           capture name back to the producer-suffix wildcard
+                           it replaced, which re-admits every name shaped like
+                           a capture under a round nothing here has run. Its
+                           inert twin is two of the exact names swapped, which
+                           is the same set in a different order.
+  inventory-mislabels-an-inert-twin (r13)  this inventory: say the twin above
+                           is a reflow, which is what it said before this
+                           round -- while the runner holds a comment. The
+                           executed RED and GREEN are unaffected, which is the
+                           point: what reds is the LABEL an auditor reads.
+                           Its inert twin is a doubled space in the same
+                           sentence.
+  repin-types-its-commit-trailer (r13)  repin-last.py: make derive_trailer
+                           return a typed constant instead of the form the
+                           branch's most recent commits carry, so a sitting
+                           commits under whatever the last sitting wrote down.
+                           Its inert twin is a comment at the same site.
 ...and one more that is a COMMITTED TEST rather than a hand-run control:
   backfill-neutered        327's room_tail backfill: WHERE FALSE. See
                            test_pg_migration_327_post_check_fails_when_the_
@@ -496,6 +530,12 @@ S1, S2, S3 = "90000000000000101", "90000000000000102", "90000000000000103"
 # steam -> (rounds_won, points_total, kills)
 ROW_A = {S1: (4, 11, 6), S2: (1, 6, 2), S3: (5, 15, 9)}      # winner S3
 ROW_B = {S1: (5, 11, 6), S2: (1, 5, 2), S3: (3, 12, 9)}      # winner S1
+# A THIRD scoreboard, added in round 13 for the terminal half of the
+# missed-update walk. It needs a winner neither of the other two has, because
+# what that leg exercises is a body the lobby's row at the delivered number
+# disagrees with -- twice, at two different numbers -- and a body that agreed
+# with either row would reach the identical-body echo instead.
+ROW_C = {S1: (2, 8, 3), S2: (5, 14, 7), S3: (1, 4, 1)}       # winner S2
 
 
 # steam -> (left_early, absent, game_points_at_leave) for the seats that left.
@@ -5503,9 +5543,14 @@ def _park(key, room_base, vec, winner, reporter):
     `key` is the seat's identity for that game, frozen at the first write for
     it. The room id is a FIELD of the body, and the number the server
     advertises lives in that field's `_rN` tail -- so a number that changes is
-    a field that changes, never an entry that moves."""
+    a field that changes, never an entry that moves.
+
+    `redirects` counts the times THIS entry has been redirected by a refusal
+    carrying `settled_game`, because the contract bounds that at one: the
+    second such refusal of one entry is terminal for it."""
     return {"key": key, "room_base": room_base, "vec": vec, "winner": winner,
-            "reporter": reporter, "advertised": None, "deliveries": 0}
+            "reporter": reporter, "advertised": None, "deliveries": 0,
+            "redirects": 0}
 
 
 def _recover_parked(outbox, key, refusal):
@@ -5526,6 +5571,41 @@ def _recover_parked(outbox, key, refusal):
     entry = outbox[key]
     entry["advertised"] = advertised
     return entry
+
+
+def _settled_game_disposition(entry, refusal):
+    """What the seat does with THIS entry when this refusal answers it.
+
+    The contract's arm table gives a refusal carrying `settled_game` exactly
+    one disposition, and it is not "drop": the field says the NUMBER this
+    delivery named is finished, and says nothing about the physical game the
+    body describes. A behind seat's later game is refused there precisely
+    because the seat is behind, so dropping it would throw a real game away
+    and its result, rating and gold would never settle.
+
+    So the answer is REDIRECT -- re-sign the same entry at the advertised
+    `expected_game` and submit it -- and the redirect is taken at most ONCE
+    per entry. The contract's own bound is that no seat can be refused for the
+    same reason twice, because the number the second attempt carries came from
+    the server rather than from anything the seat counted; a second
+    `settled_game` refusal of one entry therefore means that entry cannot be
+    filed by this route at all, and it is TERMINAL for it. Counted on the
+    entry, so a third submission of it is not a thing this rule permits.
+
+    A refusal carrying no `settled_game` is terminal for the payload on the
+    first answer, which is the row beside it in the same table."""
+    if refusal.progress.get("settled_game") is None:
+        return "terminal"
+    entry["redirects"] += 1
+    return "redirect" if entry["redirects"] == 1 else "terminal"
+
+
+def _drop_parked(outbox, key):
+    """The terminal disposition, executed: the entry leaves the outbox.
+
+    Returned rather than discarded, because "kept for review" is part of the
+    rule and a caller has to be able to say what was dropped."""
+    return outbox.pop(key)
 
 
 def _delivery_of(entry):
@@ -5690,7 +5770,10 @@ def test_pg_a_realigned_sitting_issues_each_game_its_own_number():
 
 def test_pg_a_seat_that_missed_an_update_recovers_in_one_submission():
     """Controls: refusal-advertises-the-number-it-just-settled (r10),
-    recovery-re-keys-the-parked-delivery (r12).
+    recovery-re-keys-the-parked-delivery (r12),
+    recovery-mints-a-second-parked-key (r12),
+    recovery-resubmits-the-stale-number (r13),
+    terminal-walk-redirects-a-second-time (r13).
 
     The SERVER is the sole allocator of the game number, and this is the
     property that makes a seat which missed a room update recoverable rather
@@ -5729,7 +5812,15 @@ def test_pg_a_seat_that_missed_an_update_recovers_in_one_submission():
          one row, at the number the server named;
       5. the same key delivered a second time settles nothing more. It meets
          the row it wrote and is echoed, so a redelivery can never become a
-         second settlement of one physical game.
+         second settlement of one physical game;
+      6. ROUND 13, THE TERMINAL HALF. The redirect is bounded at one. A third
+         entry is refused at a settled number, redirected to the advertised
+         one -- and refused there too, because another elector settled that
+         number as well while this seat was between deliveries. That second
+         `settled_game` refusal of ONE entry is the state the contract says
+         does not arise, so the entry is not re-signed again: it is DROPPED
+         and kept for review, the outbox shrinks by exactly that key, and no
+         third submission of it is made.
 
     So the cost of having missed the update is exactly ONE refused submission,
     at step 3, and the seat files normally from there on. The r10 control is
@@ -5740,8 +5831,18 @@ def test_pg_a_seat_that_missed_an_update_recovers_in_one_submission():
     the parked delivery -- filing it as a second entry rather than re-signing
     the one it holds -- is what mints a second delivery for one physical game.
 
-    THE KEY-SET CHECK IS MADE WHERE THE RECOVERY HAPPENS, and that is this
-    round's correction to it. The comparison used to sit at the very end,
+    THE DISPOSITION IS ASKED OF A RULE, NEVER WRITTEN INTO THE WALK. Round
+    12's walk knew what each answer meant because the steps were written in
+    the order the answers arrive, so the rule the contract states was nowhere
+    a mutation could reach it. Each refusal below is now handed to
+    `_settled_game_disposition`, which returns `redirect` or `terminal` and
+    counts the redirect on the entry; the walk does what it is told. The r13
+    controls are the two halves of that: a redirect that does not carry the
+    advertised number into the body, and a second refusal answered by another
+    redirect instead of by the drop.
+
+    THE KEY-SET CHECK IS MADE WHERE THE RECOVERY HAPPENS, and that is round
+    12's correction to it. The comparison used to sit at the very end,
     against a hardcoded pair of names, and the mutation credited to it never
     reached it: a recovery that pops the entry and re-files it is met by a
     KeyError on the very next lookup, three legs earlier, so the red came from
@@ -5758,6 +5859,15 @@ def test_pg_a_seat_that_missed_an_update_recovers_in_one_submission():
     async def go():
         engine, sm, pids, _mid = await _settling_fixture(
             games_played=2, recorded_number=1, recorded_room="rm_211531_r1")
+        # EVERY LEG WRITES ITS OWN KEY INTO ONE RESULT, and the caller asserts
+        # presence before it asserts a value. Round 12 returned an eight-value
+        # tuple from six places with a comment on each early return telling
+        # the next reader to keep the count -- a rule a reader has to remember,
+        # standing beside the thing it describes, which is the shape three of
+        # this ladder's findings are about. A mapping cannot be unpacked
+        # short: a leg that did not run leaves its key absent, and the
+        # assertion that names it says which leg stopped (#342).
+        out = {}
         try:
             # The seat's outbox: ONE parked delivery per physical game, each
             # under the key it was frozen with at that game's over-edge.
@@ -5766,6 +5876,8 @@ def test_pg_a_seat_that_missed_an_update_recovers_in_one_submission():
                 "game-B": _park("game-B", "rm_211531", ROW_B, S1, S1),
             }
             keys_before = sorted(outbox)
+            out["keys_before"] = keys_before
+            out["keys"] = keys_before
             # The advertisement this seat holds, taken from a real answer
             # rather than assumed: a hardcoded number here would be a test of
             # arithmetic rather than of what the endpoint says (#342).
@@ -5776,25 +5888,23 @@ def test_pg_a_seat_that_missed_an_update_recovers_in_one_submission():
             except main.FfaReportRefusal as ex:
                 ahead = ex
             if ahead is None:
-                # EIGHT values on every path, for the reason the sibling test
-                # records: a short return meets the caller's unpack with a
-                # ValueError about a count, and the assertion written to name
-                # the fact that failed never runs.
-                return None, None, None, None, None, [], [], keys_before
+                return out
             advertised = int(ahead.progress["expected_game"])
+            out["advertised"] = advertised
             _recover_parked(outbox, "game-A", ahead)
             # THE KEY SET, READ WHERE THE RECOVERY HAPPENED. A recovery that
             # re-keyed this entry is met by a KeyError on the next line, and
             # an assertion written to name the moved key never runs. So the
             # set is compared here and the walk stops with both sets in hand.
-            if sorted(outbox) != keys_before:
-                return (advertised, None, None, None, None, [],
-                        sorted(outbox), keys_before)
+            out["keys"] = sorted(outbox)
+            if out["keys"] != keys_before:
+                return out
             # 1. another elector settles the parked game there; this seat sees
             #    nothing of it.
             await _settle_directly(sm, pids, ROW_A, advertised)
             # 2. the same body, under the number this seat still holds.
-            echo = await _call_endpoint(sm, _delivery_of(outbox["game-A"]))
+            out["echo"] = await _call_endpoint(
+                sm, _delivery_of(outbox["game-A"]))
             # 3. the NEXT physical game, keyed at the latched number.
             outbox["game-B"]["advertised"] = advertised
             latched = None
@@ -5803,29 +5913,92 @@ def test_pg_a_seat_that_missed_an_update_recovers_in_one_submission():
             except main.FfaReportRefusal as ex:
                 latched = ex
             if latched is None:
-                return (advertised, echo, None, None, None, [], keys_before,
-                        keys_before)
+                return out
+            out["latched"] = latched
             # 4. RECOVERY, driven rather than described: the SAME entry,
             #    re-signed with the number the server just advertised, and
-            #    submitted. No row is written behind the endpoint here.
+            #    submitted. No row is written behind the endpoint here. WHAT
+            #    to do with the entry is asked of the rule, not decided here.
+            out["latched_disposition"] = _settled_game_disposition(
+                outbox["game-B"], latched)
+            if out["latched_disposition"] != "redirect":
+                return out
             entry = _recover_parked(outbox, "game-B", latched)
-            if sorted(outbox) != keys_before:
-                return (advertised, echo, latched, None, None, [],
-                        sorted(outbox), keys_before)
-            accepted = await _call_endpoint(sm, _delivery_of(entry))
+            out["keys"] = sorted(outbox)
+            if out["keys"] != keys_before:
+                return out
+            # CAUGHT rather than allowed to escape: a redirect that did not
+            # carry the advertised number is refused here, and an exception
+            # leaving this coroutine would red the test on a traceback three
+            # legs from the assertion that names the fact (#391).
+            try:
+                out["accepted"] = await _call_endpoint(sm, _delivery_of(entry))
+            except main.FfaReportRefusal as ex:
+                out["accepted_refusal"] = ex
+                return out
             # 5. ...and the same key again, which must settle nothing more.
-            again = await _call_endpoint(sm, _delivery_of(entry))
+            out["again"] = await _call_endpoint(sm, _delivery_of(entry))
+
+            # 6. THE TERMINAL HALF. A third physical game, parked under its
+            #    own key, delivered at a number another elector has settled.
+            third = _park("game-C", "rm_211531", ROW_C, S2, S2)
+            outbox["game-C"] = third
+            keys_with_c = sorted(outbox)
+            out["keys_with_c"] = keys_with_c
+            third["advertised"] = advertised
+            first_refusal = None
+            try:
+                await _call_endpoint(sm, _delivery_of(third))
+            except main.FfaReportRefusal as ex:
+                first_refusal = ex
+            if first_refusal is None:
+                return out
+            out["c_first"] = first_refusal
+            out["c_first_disposition"] = _settled_game_disposition(
+                third, first_refusal)
+            if out["c_first_disposition"] != "redirect":
+                return out
+            _recover_parked(outbox, "game-C", first_refusal)
+            out["keys"] = sorted(outbox)
+            if out["keys"] != keys_with_c:
+                return out
+            # ...and while this seat was between deliveries, another elector
+            # settled the advertised number too. The redirected delivery is
+            # refused for the SAME reason as the first one.
+            await _settle_directly(sm, pids, ROW_A,
+                                   int(third["advertised"]))
+            second_refusal = None
+            try:
+                await _call_endpoint(sm, _delivery_of(third))
+            except main.FfaReportRefusal as ex:
+                second_refusal = ex
+            if second_refusal is None:
+                return out
+            out["c_second"] = second_refusal
+            # THE BOUND, asked of the rule rather than asserted by the walk.
+            out["c_second_disposition"] = _settled_game_disposition(
+                third, second_refusal)
+            if out["c_second_disposition"] == "terminal":
+                out["dropped"] = _drop_parked(outbox, "game-C")
+            out["keys"] = sorted(outbox)
+            out["c_deliveries"] = third["deliveries"]
             async with sm() as db:
-                numbers = [int(n) for n in (await db.execute(text(
+                out["numbers"] = [int(n) for n in (await db.execute(text(
                     "SELECT game_number FROM ffa_matches WHERE lobby_id = :l"
                     " ORDER BY game_number"), {"l": LOBBY})).scalars().all()]
-            return (advertised, echo, latched, accepted, again, numbers,
-                    sorted(outbox), keys_before)
+            return out
         finally:
             await engine.dispose()
 
-    (advertised, echo, latched, accepted, again, numbers, keys,
-     keys_before) = run(go())
+    out = run(go())
+    advertised = out.get("advertised")
+    echo = out.get("echo")
+    latched = out.get("latched")
+    accepted = out.get("accepted")
+    again = out.get("again")
+    numbers = out.get("numbers", [])
+    keys = out.get("keys", [])
+    keys_before = out.get("keys_before", [])
     assert advertised is not None, (
         "the ahead tail was not refused, so no advertisement was ever made "
         "and nothing below this line was exercised")
@@ -5852,10 +6025,18 @@ def test_pg_a_seat_that_missed_an_update_recovers_in_one_submission():
     assert latched.status_code in (403, 409), latched.status_code
     assert latched.progress.get("settled_game") == advertised, latched.progress
     assert latched.progress["expected_game"] == advertised + 1, latched.progress
+    # ...and the disposition the RULE returns for that refusal is REDIRECT.
+    # The walk did not decide it; it asked, and every step below happened
+    # because the answer was this one.
+    assert out.get("latched_disposition") == "redirect", (
+        "the first settled-game refusal of an entry is the REDIRECT arm: keep "
+        "the entry, re-sign it once at the advertised number, submit")
     # 4. THE TRANSITION, not a claim about it: the re-signed parked delivery is
     #    ACCEPTED by the endpoint, and the answer is a settlement -- a match id,
     #    the number the server named, and the next one after it.
-    assert accepted is not None, "the re-signed parked delivery was not accepted"
+    assert accepted is not None, (
+        "the re-signed parked delivery was not accepted: %s"
+        % (getattr(out.get("accepted_refusal"), "progress", None),))
     assert accepted.message == "FFA match recorded", accepted.message
     assert accepted.match_id is not None
     assert accepted.settled_game == advertised + 1, accepted.settled_game
@@ -5870,7 +6051,44 @@ def test_pg_a_seat_that_missed_an_update_recovers_in_one_submission():
     # game recovered at 3, the next physical game at 4 -- written by the
     # ENDPOINT, from the parked body, not by this test. The seat that missed an
     # update lost no game, moved no key and was excluded from nothing.
-    assert numbers == [1, advertised, advertised + 1], numbers
+    # ...plus the two the terminal half settles behind the endpoint, at the
+    # advertised number and at the one it redirected to. Those two are the
+    # OTHER elector's rows, which is what makes this seat's third entry
+    # unfilable by this route.
+    assert numbers == [1, advertised, advertised + 1, advertised + 2], numbers
+
+    # 6. THE TERMINAL HALF, by number rather than by narrative.
+    c_first = out.get("c_first")
+    c_second = out.get("c_second")
+    assert c_first is not None, (
+        "the third entry was not refused at the settled number, so the "
+        "terminal walk never started")
+    assert c_first.progress.get("settled_game") == advertised, c_first.progress
+    assert out.get("c_first_disposition") == "redirect", out.get(
+        "c_first_disposition")
+    assert c_second is not None, (
+        "the redirected delivery was not refused a second time, so the bound "
+        "this leg exists for was never reached")
+    assert c_second.progress.get("settled_game") == advertised + 2, (
+        c_second.progress)
+    # THE BOUND: a second refusal for the same reason, on the same entry, is
+    # TERMINAL for it. The rule said so; the walk obeyed.
+    assert out.get("c_second_disposition") == "terminal", out.get(
+        "c_second_disposition")
+    dropped = out.get("dropped")
+    assert dropped is not None and dropped["key"] == "game-C", dropped
+    # The outbox shrank by EXACTLY that key -- compared with the set the walk
+    # captured with it in, so nothing else left and nothing was minted beside
+    # it. No retain-by-fiat and no drop-by-fiat: the entry is gone because the
+    # rule the walk asked returned terminal.
+    keys_with_c = out.get("keys_with_c", [])
+    assert keys_with_c == sorted(keys_before + ["game-C"]), keys_with_c
+    assert keys == sorted(set(keys_with_c) - {"game-C"}), (keys, keys_with_c)
+    # ...and it was submitted exactly TWICE. A third submission is what the
+    # bound forbids, and counting the deliveries is how the walk says it did
+    # not make one.
+    assert out.get("c_deliveries") == 2, out.get("c_deliveries")
+    assert dropped["redirects"] == 2, dropped["redirects"]
 
 
 def test_pg_a_catch_up_on_a_refusing_path_logs_a_claim_its_transaction_can_keep(capsys):
@@ -5954,7 +6172,9 @@ def test_pg_a_catch_up_on_a_refusing_path_logs_a_claim_its_transaction_can_keep(
 
 def test_the_evidence_log_negation_admits_only_produced_logs():
     """Controls: evidence-log-negation-admits-any-log (r12),
-    producer-stops-naming-its-capture (r12).
+    producer-stops-naming-its-capture (r12),
+    repin-names-a-capture-no-pattern-admits (r12),
+    evidence-log-negation-takes-a-suffix-wildcard (r13).
 
     The r7 LOW on B12. `*.log` is ignored repository-wide and this directory's
     captures are re-included, because a report whose numbers come from a log
@@ -5965,8 +6185,18 @@ def test_the_evidence_log_negation_admits_only_produced_logs():
     nothing in this tree writes being carried by the same line that carries the
     evidence.
 
-    So the negation is PER PRODUCER, and both halves of the pairing are
-    derived rather than listed:
+    ROUND 13 TAKES THE WILDCARD OUT OF IT. Per-producer suffix patterns are
+    narrower than `*.log` and still cannot refuse a name nobody produced: any
+    file that lands here ending `-suite-run.log`, under any round or none, was
+    re-included by the same line as the evidence and would ride an `add -A`
+    in. A negation is a promise that this repository carries one file on
+    purpose, so each line is now the WHOLE NAME of one capture of one round.
+    The suffixes are still read off the instruments; what stops being a
+    pattern is the name. The planted `zz-suite-run.log` below is the class
+    that used to be admitted and now is not.
+
+    So the negation is PER PRODUCER AND PER ROUND, and both halves of the
+    pairing are derived rather than listed:
 
       * each producer under this directory NAMES the capture it writes, and
         the name is a value that producer produces. Seven of them are
@@ -6001,6 +6231,17 @@ def test_the_evidence_log_negation_admits_only_produced_logs():
         "the blanket re-inclusion is back: any .log in this directory is "
         "admitted, produced or not")
     assert len(set(patterns)) == len(patterns), patterns
+    # NOT A PATTERN AT ALL. A negation carrying a glob metacharacter admits a
+    # set rather than a file, and every member of that set this tree does not
+    # write is admitted for nothing. The round-12 block's suffix wildcards are
+    # exactly that class one step narrower than `*.log`.
+    for pat in patterns:
+        assert not set(pat) & set("*?["), (
+            "%s is a pattern rather than a name, so it admits captures no "
+            "instrument here writes" % pat)
+        assert re.match(r"^r\d+-\S+\.log$", pat), (
+            "%s is re-included and is not <round>-<producer suffix>.log, so "
+            "no producer and no round owns it" % pat)
 
     # THE PRODUCERS' OWN NAMES FOR THEIR CAPTURES, read off the instruments.
     #
@@ -6055,41 +6296,279 @@ def test_the_evidence_log_negation_admits_only_produced_logs():
     produced.setdefault("rX" + one[one.index("-"):], set()).add(
         "repin-last.py")
 
-    # DIRECTION 1: every pattern is some producer's capture.
-    for pat in sorted(patterns):
-        hits = [n for n in produced if fnmatch.fnmatch(n, pat)]
-        assert hits, (
-            "%s admits a capture no committed instrument writes; the "
-            "producers name %s" % (pat, sorted(produced)))
-    # DIRECTION 2: every capture a producer names is admitted.
-    for name, writers in sorted(produced.items()):
-        assert any(fnmatch.fnmatch(name, pat) for pat in patterns), (
-            "%s is written by %s and no pattern admits it, so a fresh clone "
-            "would not carry it" % (name, sorted(writers)))
+    # The SUFFIXES, which is the half the instruments own. The round part of
+    # every declaration is a variable, so what an instrument decides is the
+    # text from the first hyphen on.
+    suffixes = {name[name.index("-"):]: writers
+                for name, writers in produced.items()}
 
-    # ...and every capture this directory ALREADY carries is admitted, so the
-    # narrowing did not orphan a committed file.
+    # DIRECTION 1: every re-included NAME is one a producer here could have
+    # written -- its suffix is some instrument's, and its round part is a
+    # round. Nothing is a pattern, so nothing admits a set.
+    for pat in sorted(patterns):
+        tail = pat[pat.index("-"):]
+        assert tail in suffixes, (
+            "%s is re-included and no committed instrument writes a capture "
+            "ending %s; the producers write %s"
+            % (pat, tail, sorted(suffixes)))
+    # DIRECTION 2a: every capture a producer names is admitted for some round,
+    # so an instrument added with no line at all reds -- the round-11 shape.
+    for tail, writers in sorted(suffixes.items()):
+        assert any(p.endswith(tail) for p in patterns), (
+            "captures ending %s are written by %s and no line re-includes "
+            "one, so a fresh clone would not carry them"
+            % (tail, sorted(writers)))
+    # DIRECTION 2b: every capture this directory ALREADY carries is named
+    # EXACTLY, so narrowing from a wildcard to a name orphaned nothing.
     on_disk = sorted(p.name for p in evidence.glob("*.log"))
     assert on_disk, "this directory carries no capture at all"
     for name in on_disk:
-        assert any(fnmatch.fnmatch(name, pat) for pat in patterns), name
+        assert name in patterns, (
+            "%s is committed here and no line re-includes it by name" % name)
 
     # ...and the wrapper's OWN admission check, exercised in both directions
     # from here. It is what turns a capture this tree cannot carry into a
     # refusal before the run instead of a failed `git add` after it, and a
-    # guard nothing ever runs is a guard nobody knows the polarity of.
+    # guard nothing ever runs is a guard nobody knows the polarity of. The
+    # round is the one the wrapper itself derives -- the newest a report in
+    # this directory carries -- because under exact names the answer is a
+    # question about THIS round rather than about the shape of a name.
+    rules_path = evidence / "evidence_rules.py"
+    rules_spec = importlib.util.spec_from_file_location(
+        "_scr_evidence_rules_for_negation", str(rules_path))
+    ev_rules = importlib.util.module_from_spec(rules_spec)
+    rules_spec.loader.exec_module(ev_rules)
+    latest = ev_rules.newest_round(
+        [p.name for p in evidence.iterdir() if p.name.endswith(".txt")])
+    assert latest is not None, "this directory carries no numbered report"
     ignores = (root / ".gitignore").read_text(encoding="utf-8")
-    assert repin.capture_is_admitted(repin.capture_name(0), ignores), (
-        "the wrapper would refuse to write the capture this block admits")
+    assert repin.capture_is_admitted(repin.capture_name(latest), ignores), (
+        "the wrapper would refuse to write the capture of the round this "
+        "directory is on (r%d)" % latest)
     assert not repin.capture_is_admitted("r0-repin.log", ignores), (
-        "the wrapper's admission check accepts a name no pattern re-includes")
+        "the wrapper's admission check accepts a name no line re-includes")
 
     # THE REFUSAL, on names no producer writes. A check that only ever admits
-    # is a check that cannot fail.
-    for outside in (".env.local.log", "id_rsa.log", "debug.log", "scratch.log",
+    # is a check that cannot fail. The first two carry a PRODUCER'S SUFFIX and
+    # are the class the round-12 wildcards admitted: a name shaped like a
+    # capture, under a round nothing here has run.
+    for outside in ("zz-suite-run.log", "zz-repin-run.log",
+                    ".env.local.log", "id_rsa.log", "debug.log", "scratch.log",
                     "r12-notes.log", "suite.log", "api.log"):
-        assert not any(fnmatch.fnmatch(outside, pat) for pat in patterns), (
+        assert outside not in patterns, (
             "%s is admitted by the evidence negation" % outside)
+        assert not repin.capture_is_admitted(outside, ignores), (
+            "%s is admitted by the wrapper's own check" % outside)
+
+
+def _inventory_entries():
+    """{control name: the whole of its inventory entry, lines joined}.
+
+    Parsed the way the tally check parses it -- an entry OPENS a line, its
+    continuation lines are indented past it -- so the two cannot disagree
+    about what an entry is."""
+    doc = sys.modules[__name__].__doc__
+    entries = {}
+    current = None
+    for line in doc.splitlines():
+        head = re.match(r"^  ([a-z0-9-]+)( \((?:r\d+|retired)\))? +(\S.*)$",
+                        line)
+        if head:
+            current = head.group(1)
+            entries[current] = head.group(3)
+        elif current is not None and line.startswith("    "):
+            entries[current] = entries[current] + " " + line.strip()
+        elif not line.strip():
+            continue
+        else:
+            current = None
+    return entries
+
+
+def _inert_twin_kind(anchor, inert):
+    """`comment` when the inert edit's only addition is a comment line.
+
+    Read off the runner's own two strings rather than off a description of
+    them, because the description is the thing under test."""
+    before = [ln.strip() for ln in anchor.splitlines()]
+    added = [ln.strip() for ln in inert.splitlines() if ln.strip() not in before]
+    if added and all(ln.startswith("#") for ln in added):
+        return "comment"
+    return "not a comment"
+
+
+def test_every_inert_twin_is_labelled_as_the_kind_the_runner_holds():
+    """Control: inventory-mislabels-an-inert-twin (r13).
+
+    The r8 lens LOW. `recovery-mints-a-second-parked-key`'s inventory entry
+    said "Its inert twin is the same statement reflowed" and the runner holds
+    a COMMENT at that site. The executed RED and GREEN were sound either way,
+    so nothing in the run could notice: what was wrong is the sentence an
+    auditor reads to decide WHICH twin was executed, and an auditor who went
+    looking for a reflow at that site would not find one.
+
+    That is the shape this ladder keeps closing -- a description standing
+    beside the thing it describes with nothing comparing the two -- so it is
+    closed the same way. The KIND is derived from the runner's own anchor and
+    inert strings; the LABEL is read out of the entry; a control whose entry
+    states a label has to state the kind the runner holds.
+
+    Both directions on the derivation itself, because a classifier that
+    answered `comment` for everything would pass the sweep above on a tree
+    where every label said comment (#391)."""
+    import importlib.util
+
+    evidence = pathlib.Path(__file__).resolve().parent / "evidence"
+    spec = importlib.util.spec_from_file_location(
+        "_scr_mutation_runner_twins", str(evidence / "mutation-runner.py"))
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+
+    # The classifier, both directions on fabricated pairs.
+    assert _inert_twin_kind("x = 1\n", "# note\nx = 1\n") == "comment"
+    assert _inert_twin_kind("x = 1\n", "x  = 1\n") == "not a comment"
+    assert _inert_twin_kind("a\nb\n", "b\na\n") == "not a comment"
+
+    entries = _inventory_entries()
+    assert len(entries) >= 60, len(entries)
+
+    labelled = 0
+    for control in runner.CONTROLS:
+        # (name, file, anchor, mutant, inert, test) -- the INERT is the fifth,
+        # and reading the fourth would have compared the label with the
+        # MUTATION, which is a different edit at the same site.
+        name, anchor, inert = control[0], control[2], control[4]
+        entry = entries.get(name)
+        assert entry is not None, (
+            "%s is a control the runner carries and this module's inventory "
+            "does not name" % name)
+        if "inert twin" not in entry:
+            continue
+        labelled += 1
+        tail = entry.split("inert twin", 1)[1]
+        sentence = tail.split(".", 1)[0]
+        kind = _inert_twin_kind(anchor, inert)
+        says_comment = "comment" in sentence
+        assert says_comment == (kind == "comment"), (
+            "%s: the inventory says %r and the runner holds %s"
+            % (name, sentence.strip(), kind))
+    # A check over an empty set passes for ever (#342), and this one names a
+    # growing set, so the number of entries that state a label is asserted.
+    assert labelled >= 10, labelled
+
+
+def test_the_repin_trailer_is_derived_and_the_sweep_exempts_only_it():
+    """Control: repin-types-its-commit-trailer (r13).
+
+    The r8 lens LOW on R4-17. The re-pin wrapper writes both of its commit
+    messages itself, and the attribution trailer in them was a constant in
+    that file. Nothing compared the constant with the sitting that ran the
+    wrapper, so a sitting that forgot to change it committed under the
+    previous sitting's attribution and no check reddened -- and it had
+    already gone stale once by the time the lens read it. Round 12 recorded
+    that as a residual and named deriving it as the fix; this is the fix.
+
+    THE TRAILER IS DERIVED FROM ONE SOURCE: the form the branch's most recent
+    commits carry, read from `git log`. The wrapper types none, and it
+    REFUSES when none can be derived -- an attribution nobody can derive is
+    exactly the thing that used to be typed.
+
+    THE SWEEP EXEMPTS EXACTLY THAT LINE AND NOTHING ELSE. A rule that exempted
+    "anything beginning Co-Authored-By" would exempt the stale attribution it
+    exists to catch, so the exemption is the whole derived line, compared
+    whole. Everything else that claims an author -- a second trailer, a stale
+    one, an address or a handle in prose -- is a refusal before any commit is
+    made.
+
+    Run in both directions on HARNESS COPIES: fabricated messages the real
+    functions are called on, so what is proved is the rule rather than
+    whatever this branch happens to hold. The live branch is then swept too,
+    because a rule nobody has run against the real thing is a rule nobody has
+    run."""
+    import importlib.util
+
+    evidence = pathlib.Path(__file__).resolve().parent / "evidence"
+    spec = importlib.util.spec_from_file_location(
+        "_scr_repin_trailer", str(evidence / "repin-last.py"))
+    repin = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(repin)
+
+    # NOTHING TYPED. The wrapper's own source carries no full attribution --
+    # tested with the wrapper's own pattern, so the two cannot drift.
+    source = (evidence / "repin-last.py").read_text(encoding="utf-8")
+    typed = [ln.strip() for ln in source.splitlines()
+             if repin.TRAILER_LINE.match(ln.strip())]
+    assert not typed, (
+        "repin-last.py carries a typed attribution: %r" % (typed,))
+
+    # ── the harness, both directions ────────────────────────────────────
+    good = "Co-Authored-By: A Reviewer <nobody@example.invalid>"
+    stale = "Co-Authored-By: An Earlier Sitting <nobody@example.invalid>"
+    body = "A subject line\n\nOne paragraph about what this commit does.\n"
+    bodies = [body + "\n" + good + "\n"] * 3
+    trailer, why = repin.derive_trailer(bodies)
+    assert why is None and trailer == good, (trailer, why)
+
+    # DERIVED -> GREEN. The message the wrapper would build carries exactly
+    # the derived line and nothing else that claims an author.
+    built = repin.commit_message("A subject\n\nSome prose.", trailer)
+    assert built.rstrip("\n").endswith(good), built
+    assert repin.foreign_attributions(built, trailer) == [], (
+        repin.foreign_attributions(built, trailer))
+
+    # A TYPED STALE TRAILER, PLANTED -> RED. This is the defect itself: the
+    # message carries an attribution from an earlier sitting.
+    planted = repin.commit_message("A subject\n\nSome prose.", stale)
+    hits = repin.foreign_attributions(planted, trailer)
+    assert [line for _n, line in hits] == [stale], hits
+    # ...and a SECOND trailer beside the right one, which an exemption keyed
+    # on the prefix rather than on the whole line would have let through.
+    doubled = built.rstrip("\n") + "\n" + stale + "\n"
+    assert [line for _n, line in repin.foreign_attributions(doubled, trailer)] \
+        == [stale]
+    # ...and an address in prose, which is not a trailer at all.
+    prose = repin.commit_message(
+        "A subject\n\nAsk <someone@example.invalid> about it.", trailer)
+    assert repin.foreign_attributions(prose, trailer), prose
+
+    # THE DERIVATION REFUSES rather than guessing. A newest commit with no
+    # trailer, and a newest pair that disagree, are the two ways the branch
+    # can fail to state a form.
+    none_at_head = [body] + bodies
+    got, why = repin.derive_trailer(none_at_head)
+    assert got is None and why, (got, why)
+    disagree = [body + "\n" + good + "\n", body + "\n" + stale + "\n"]
+    got, why = repin.derive_trailer(disagree)
+    assert got is None and why, (got, why)
+    got, why = repin.derive_trailer([])
+    assert got is None and why, (got, why)
+
+    # ── THE LIVE BRANCH, swept at the tip it is at now ──────────────────
+    root = pathlib.Path(__file__).resolve().parent.parent.parent
+    shown = subprocess.run(["git", "log", "-n", "8", "--format=%B%x00"],
+                           cwd=str(root), capture_output=True, text=True,
+                           timeout=60)
+    assert shown.returncode == 0, shown.stderr
+    live_bodies = [b for b in shown.stdout.split("\0") if b.strip()]
+    assert live_bodies, "git log printed no commit message"
+    live, why = repin.derive_trailer(live_bodies)
+    assert live is not None, (
+        "this branch states no current attribution form, so the wrapper would "
+        "refuse rather than type one: %s" % why)
+    # The WINDOW is where the form changes, derived rather than counted. An
+    # earlier sitting of this branch committed under a different attribution,
+    # and that history is not a finding -- what the sweep is about is the tip
+    # this round leaves.
+    window = repin.tip_messages(live_bodies, live)
+    assert window, "the derived form is carried by no commit, which cannot be"
+    for number, text_of in enumerate(window):
+        assert repin.foreign_attributions(text_of, live) == [], (
+            "HEAD~%d carries an attribution that is not the branch's derived "
+            "trailer: %r" % (number,
+                             repin.foreign_attributions(text_of, live)))
+    # ...and the window really is bounded by the trailer rather than by the
+    # length of the log: a form no commit carries selects nothing.
+    assert repin.tip_messages(live_bodies, stale) == []
 
 
 def test_no_production_file_cites_the_gitignored_scratch():

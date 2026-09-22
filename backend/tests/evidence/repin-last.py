@@ -54,6 +54,7 @@ import fnmatch
 import importlib.util
 import io
 import os
+import re
 import subprocess
 import sys
 
@@ -63,30 +64,34 @@ ROOT = os.path.dirname(BACKEND)
 CLOSING_K = ("committed_evidence or assembled_from_its_run or "
              "round_eight_control or round_seven_control or production_file "
              "or runner_carries or control_tally or counts_the_checks or "
-             "new_controls_a_report or residual_reach or negation_admits")
+             "new_controls_a_report or residual_reach or negation_admits or "
+             "repin_trailer or inert_twin")
 
 # The two commit messages this wrapper makes, so that what `git log` shows is
 # the wrapper's own account and not a hand-written one. The run log goes in
 # its own commit FIRST, and the report -- which quotes git's listing of that
 # commit -- goes last, alone.
 #
-# THE TRAILER IS STILL A LITERAL, and that is a known residual rather than a
-# thing this file pretends to have solved: it names the author of the sitting
-# that runs the wrapper, and a sitting with a different author has to change
-# it here. It is the same shape as the defects this round closes -- a
-# declaration standing beside the thing it describes -- and the honest
-# statement is that it is carried, not derived. Deriving it from the commit
-# the wrapper runs on top of would be the fix, and that needs a control of its
-# own.
-LOG_COMMIT_MESSAGE = """The re-pin run's own capture, committed before the record of it
+# ROUND 13: THE TRAILER IS NO LONGER A LITERAL HERE. It used to be typed into
+# both messages below, and round 12 recorded that as a residual rather than
+# fixing it: nothing compared the constant with the sitting that ran the
+# wrapper, so a sitting that forgot it committed under the previous sitting's
+# attribution and no check reddened. That is the same shape as every defect
+# this ladder has closed -- a declaration standing beside the thing it
+# describes -- and it had already gone stale once, which is how the lens found
+# it. The trailer is now DERIVED from the branch's most recent commits, by
+# `derive_trailer` below, and appended by `commit_message`; the two bodies
+# carry no attribution at all. The sweep beside it exempts exactly that one
+# derived line and nothing else, so a stale or foreign attribution in a
+# message this wrapper is about to write stops the round instead of entering
+# the record.
+LOG_COMMIT_BODY = """The re-pin run's own capture, committed before the record of it
 
 %s is the stdout the re-pin report is assembled from. It goes in a
 commit of its own so the commit that carries the report adds exactly one path,
-which is what that report asserts about itself.
+which is what that report asserts about itself."""
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"""
-
-REPORT_COMMIT_MESSAGE = """The route-manifest re-pin, run last, as its own record
+REPORT_COMMIT_BODY = """The route-manifest re-pin, run last, as its own record
 
 The wrapper that produced %s refuses to run while anything is
 uncommitted, so the tree it read is the tree its grandparent commit holds. It
@@ -97,9 +102,114 @@ claim and invocation rules to the report before writing it.
 This commit adds exactly one path. The wrapper staged it, asked git what was
 staged, and wrote that listing into the report before staging it again -- so
 the claim the report makes about this commit is git's answer rather than a
-sentence written beside it.
+sentence written beside it."""
 
-Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"""
+# The ONE attribution form this repository's commits carry. The pattern names
+# the KEY and the shape, never a person: what fills it is read off the branch.
+TRAILER_LINE = re.compile(r"^Co-Authored-By: \S.*<[^<>@\s]+@[^<>\s]+>$")
+# Anything that CLAIMS an author. Every git trailer key that names one, plus
+# the bare shapes an address or a handle takes when somebody pastes one into a
+# message. The sweep exempts the derived trailer and nothing else, so a second
+# `Co-Authored-By:` line, a stale one, or an address in prose all red.
+ATTRIBUTION = re.compile(
+    r"^\s*(?:Co-Authored-By|Co-authored-by|Signed-off-by|Signed-Off-By"
+    r"|Author|Authored-by|Reported-by|Reviewed-by|Acked-by|Tested-by"
+    r"|Helped-by|Suggested-by|On-behalf-of)\s*:"
+    r"|<[^<>@\s]+@[^<>\s]+>"
+    r"|(?:^|\s)@[A-Za-z0-9][A-Za-z0-9._-]{2,}")
+# How many of the most recent commits have to AGREE before a trailer is taken
+# as the branch's form. One is a sample; two is the smallest set in which a
+# one-off typo is visible as a disagreement rather than adopted as the rule.
+TRAILER_AGREE = 2
+
+
+def trailer_of(body):
+    """The attribution trailer one commit message carries, or None."""
+    for line in reversed(body.strip().splitlines()):
+        line = line.strip()
+        if TRAILER_LINE.match(line):
+            return line
+    return None
+
+
+def derive_trailer(bodies):
+    """(trailer, why) for the form the branch's most recent commits carry.
+
+    THE ONE SOURCE. `bodies` is the commit messages of the branch, newest
+    first, exactly as `git log --format=%B` prints them. The newest one's
+    trailer is the answer, and the next `TRAILER_AGREE - 1` that carry one
+    have to agree with it -- a sitting that changes the attribution changes it
+    on the commits it makes, so what this reads is the form in force right
+    now rather than the form some earlier sitting typed into this file.
+
+    `why` names the one fact that is wrong when nothing can be derived, and
+    the caller REFUSES on it: an attribution nobody can derive is exactly the
+    thing that used to be typed."""
+    if not bodies:
+        return None, "the branch carries no commit to read a trailer from"
+    carried = [(i, trailer_of(b)) for i, b in enumerate(bodies)]
+    have = [(i, t) for i, t in carried if t is not None]
+    if not have:
+        return None, ("none of the %d most recent commits carries a "
+                      "Co-Authored-By trailer" % len(bodies))
+    if have[0][0] != 0:
+        return None, ("the most recent commit carries no Co-Authored-By "
+                      "trailer, so there is no current form to derive")
+    newest = have[0][1]
+    agreeing = 1
+    for _i, t in have[1:]:
+        if t != newest:
+            return None, ("the two most recent commits that carry a trailer "
+                          "disagree: %r and %r" % (newest, t))
+        agreeing += 1
+        if agreeing >= TRAILER_AGREE:
+            break
+    if agreeing < TRAILER_AGREE:
+        return None, ("only %d of the most recent commits carries a trailer, "
+                      "and %d have to agree" % (agreeing, TRAILER_AGREE))
+    return newest, None
+
+
+def tip_messages(bodies, trailer):
+    """The most recent commits that carry the derived form, newest first.
+
+    THE SWEEP'S WINDOW. An earlier sitting of this branch legitimately
+    committed under a different attribution, and a sweep that ran back past
+    the form in force would report that history as a finding. What the sweep
+    is about is the tip this round leaves: the commits under the current form,
+    plus the two about to be made. The window is where the form CHANGES, and
+    it is derived from the same trailers the form was derived from rather than
+    from a count written down here."""
+    out = []
+    for body in bodies:
+        if trailer_of(body) != trailer:
+            break
+        out.append(body)
+    return out
+
+
+def foreign_attributions(text, trailer):
+    """[(line number, line)] for every attribution in `text` that is not the
+    derived trailer.
+
+    THE EXEMPTION IS EXACTLY ONE LINE, compared whole. A rule that exempted
+    "anything beginning Co-Authored-By" would exempt the stale attribution
+    this sweep exists to catch, which is a check that cannot fail on its own
+    class (#342)."""
+    bad = []
+    for number, line in enumerate(text.splitlines(), 1):
+        if trailer is not None and line.strip() == trailer:
+            continue
+        if ATTRIBUTION.search(line):
+            bad.append((number, line.strip()))
+    return bad
+
+
+def commit_message(body, trailer):
+    """A message this wrapper commits: its own prose, then the derived
+    trailer. The two are joined here so there is one place where an
+    attribution is attached to anything."""
+    return body.rstrip("\n") + "\n\n" + trailer + "\n"
 
 
 def load(name, filename):
@@ -216,6 +326,39 @@ def main():
     head = git("rev-parse", "HEAD").stdout.strip()
     tree = git("rev-parse", "HEAD^{tree}").stdout.strip()
     subject = git("log", "-1", "--format=%s").stdout.strip()
+
+    # THE ATTRIBUTION THIS SITTING COMMITS UNDER, derived before anything is
+    # written. `%x00` separates the messages, because a commit body contains
+    # blank lines and any newline-based split would cut one in half.
+    log_bodies = git("log", "-n", "8", "--format=%B%x00").stdout
+    bodies = [b for b in log_bodies.split("\0") if b.strip()]
+    trailer, why = derive_trailer(bodies)
+    if trailer is None:
+        print("REFUSED: the commit trailer could not be derived from the "
+              "branch, and this wrapper does not type one: %s" % why)
+        return 2
+    log_message = commit_message(LOG_COMMIT_BODY % log_name, trailer)
+    report_message = commit_message(
+        REPORT_COMMIT_BODY % os.path.basename(report), trailer)
+    # THE FINAL-TIP NAME SWEEP, over the messages this tip will carry: the
+    # branch's most recent commits and the two about to be made. Exactly the
+    # derived trailer is exempt; a stale one, a second one, an address or a
+    # handle anywhere else is a finding, and the round stops here rather than
+    # recording it.
+    swept = []
+    for label, text_of in ([("about to commit (run log)", log_message),
+                            ("about to commit (report)", report_message)]
+                           + [("HEAD~%d" % i, b) for i, b in
+                              enumerate(tip_messages(bodies, trailer))]):
+        swept.append((label, foreign_attributions(text_of, trailer)))
+    offenders = [(label, hits) for label, hits in swept if hits]
+    if offenders:
+        print("REFUSED: an attribution that is not the derived trailer is "
+              "present in %d message(s):" % len(offenders))
+        for label, hits in offenders:
+            for number, line in hits:
+                print("  %-26s line %d: %s" % (label, number, line))
+        return 2
     now = (datetime.datetime.now(datetime.timezone.utc)
            .strftime("%Y-%m-%d %H:%M:%S"))
 
@@ -271,6 +414,20 @@ def main():
                                       "repin_route_manifest.py")],
         ROOT)
 
+    # THE SWEEP, recorded where the rest of the run is. It ran above, before
+    # anything was written; this is its result under its own invocation line.
+    log.write("== the final-tip attribution sweep ==\n")
+    log.write("cwd       <repo>\n")
+    log.write("command   python backend/tests/evidence/repin-last.py"
+              " (derive_trailer, then foreign_attributions over every message"
+              " this tip carries)\n")
+    log.write("trailer   %s  (derived from the branch, not typed)\n" % trailer)
+    for label, hits in swept:
+        log.write("  %-26s %s\n"
+                  % (label, "clean" if not hits
+                     else "FOREIGN: %s" % (hits,)))
+    log.write("sweep rc=0\n\n")
+
     body = log.getvalue()
     with io.open(log_path, "w", encoding="utf-8", newline="") as fh:
         fh.write(body)
@@ -286,7 +443,7 @@ def main():
     if staged.returncode != 0:
         print("REFUSED: could not stage %s: %s" % (log_rel, staged.stderr.strip()))
         return 2
-    made = git("commit", "-m", LOG_COMMIT_MESSAGE % log_name)
+    made = git("commit", "-m", log_message)
     if made.returncode != 0:
         print("REFUSED: the run log's commit failed: %s"
               % (made.stderr.strip() or made.stdout.strip()))
@@ -367,6 +524,19 @@ def main():
         say("pairs producers with patterns reads the name by CALLING that")
         say("function, which is why the pairing cannot drift from the file.")
         say()
+        say("== the attribution these two commits carry, and where it came from ==")
+        say("The trailer is DERIVED from the branch's most recent commits and")
+        say("appended by one function, rather than typed into this file. The")
+        say("previous round left it as a literal here and recorded that as a")
+        say("residual: nothing compared the constant with the sitting running")
+        say("the wrapper, so a sitting that forgot it committed under the")
+        say("previous sitting's attribution and no check reddened. The run")
+        say("below names what was derived, and the sweep beside it reads every")
+        say("message this tip carries -- the two about to be committed and the")
+        say("branch's most recent -- exempting exactly that one derived line.")
+        say("An attribution anywhere else refuses the round before a commit is")
+        say("made rather than entering the record.")
+        say()
         say("== what the wrapper checked before it wrote this ==")
         say("A pytest run cannot cover the file that records it: the file is")
         say("written after the run, by construction. So the closing check below")
@@ -437,7 +607,7 @@ def main():
         print("REFUSED: could not re-stage %s: %s"
               % (report_rel, staged.stderr.strip()))
         return 2
-    made = git("commit", "-m", REPORT_COMMIT_MESSAGE % os.path.basename(report))
+    made = git("commit", "-m", report_message)
     if made.returncode != 0:
         print("REFUSED: the report's commit failed: %s"
               % (made.stderr.strip() or made.stdout.strip()))

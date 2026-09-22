@@ -52,14 +52,62 @@ logs-snapshot/
 # test_the_evidence_log_negation_admits_only_produced_logs compares the two
 # sets in BOTH directions: a pattern no instrument produces reds, and a capture
 # an instrument names that no pattern admits reds.
-!backend/tests/evidence/*-suite-run.log
-!backend/tests/evidence/*-pg-controls.log
-!backend/tests/evidence/*-mutation-run.log
-!backend/tests/evidence/*-citation-pin.log
-!backend/tests/evidence/*-freeze-guard.log
-!backend/tests/evidence/*-repin-run.log
-!backend/tests/evidence/*-suites-assembly-run.log
-!backend/tests/evidence/*-residual-reach.log
+#
+# ROUND 13: EXACT NAMES, NOT SUFFIX WILDCARDS. The per-producer patterns were
+# `*-suite-run.log` and seven siblings, which is narrower than `*.log` and
+# still admits any file that lands here with a producer's SUFFIX -- a name no
+# instrument in this tree writes, under a round that does not exist, carried
+# into an `add -A` by the same line as the evidence. A negation is a promise
+# that the repository carries this file on purpose, so each line below is the
+# whole name of ONE capture of ONE round: the producer's own suffix, behind
+# the round it belongs to. Nothing here is a pattern, so nothing here can
+# admit a name nobody produced.
+#
+# The suffixes are still DERIVED rather than remembered. Every instrument
+# beside this directory names the capture it writes -- seven print it in their
+# stdout header because a caller redirects them into it, and repin-last.py
+# returns it from `capture_name()` because it opens the file itself -- and the
+# check reads the suffix off the instrument and the round off this list. A
+# round that adds a capture and not its line refuses before the run: the
+# wrapper asks `capture_is_admitted()` first, and the both-directions test
+# requires the NEWEST round's line to exist for every producer.
+#
+# round 10
+!backend/tests/evidence/r10-suite-run.log
+!backend/tests/evidence/r10-pg-controls.log
+!backend/tests/evidence/r10-mutation-run.log
+!backend/tests/evidence/r10-citation-pin.log
+!backend/tests/evidence/r10-freeze-guard.log
+!backend/tests/evidence/r10-repin-run.log
+!backend/tests/evidence/r10-suites-assembly-run.log
+# round 11
+!backend/tests/evidence/r11-suite-run.log
+!backend/tests/evidence/r11-pg-controls.log
+!backend/tests/evidence/r11-mutation-run.log
+!backend/tests/evidence/r11-citation-pin.log
+!backend/tests/evidence/r11-freeze-guard.log
+!backend/tests/evidence/r11-repin-run.log
+!backend/tests/evidence/r11-suites-assembly-run.log
+!backend/tests/evidence/r11-residual-reach.log
+# round 12
+!backend/tests/evidence/r12-suite-run.log
+!backend/tests/evidence/r12-pg-controls.log
+!backend/tests/evidence/r12-mutation-run.log
+!backend/tests/evidence/r12-citation-pin.log
+!backend/tests/evidence/r12-freeze-guard.log
+!backend/tests/evidence/r12-repin-run.log
+!backend/tests/evidence/r12-suites-assembly-run.log
+!backend/tests/evidence/r12-residual-reach.log
+# round 13
+!backend/tests/evidence/r13-suite-run.log
+!backend/tests/evidence/r13-pg-controls.log
+!backend/tests/evidence/r13-mutation-run.log
+!backend/tests/evidence/r13-citation-pin.log
+!backend/tests/evidence/r13-freeze-guard.log
+!backend/tests/evidence/r13-repin-run.log
+!backend/tests/evidence/r13-suites-assembly-run.log
+!backend/tests/evidence/r13-residual-reach.log
+!backend/tests/evidence/r13-contract-arms.log
 
 # Tool caches
 .vs/

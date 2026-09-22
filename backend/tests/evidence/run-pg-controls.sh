@@ -31,7 +31,7 @@ if [ -z "${DSN}" ]; then
   exit 2
 fi
 
-SELECT_K="pg_ or opt_out or missing_dsn_alone or one_transaction or locked_slot or weakest_mode or wager_cannot_be_inserted or relock_leaves or committed_evidence or round_seven_control or round_eight_control or production_file or counts_the_checks or new_controls_a_report or residual_reach or negation_admits or arms_are_disjoint"
+SELECT_K="pg_ or opt_out or missing_dsn_alone or one_transaction or locked_slot or weakest_mode or wager_cannot_be_inserted or relock_leaves or committed_evidence or round_seven_control or round_eight_control or production_file or counts_the_checks or new_controls_a_report or residual_reach or negation_admits or arms_are_disjoint or repin_trailer or inert_twin"
 
 cd "${BACKEND}" || exit 1
 

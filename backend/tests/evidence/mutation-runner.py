@@ -812,12 +812,18 @@ CONTROLS = [
     # any file landing in the evidence directory with that extension whether a
     # committed instrument writes it or not. The inert twin is two of the
     # patterns swapped: the same set, a different order.
+    # RE-ANCHORED IN ROUND 13, because round 13 replaced the suffix wildcards
+    # this used to mutate with exact names and a control that is not re-run on
+    # the tree it certifies is an assertion about a different tree. The
+    # MUTATION is unchanged -- the blanket `*.log` back, which re-includes
+    # every file that lands in this directory -- and it now replaces two of
+    # the exact names instead of two of the patterns.
     ("evidence-log-negation-admits-any-log", GITIGNORE,
-     '!backend/tests/evidence/*-suite-run.log\n'
-     '!backend/tests/evidence/*-pg-controls.log\n',
+     '!backend/tests/evidence/r10-suite-run.log\n'
+     '!backend/tests/evidence/r10-pg-controls.log\n',
      '!backend/tests/evidence/*.log\n',
-     '!backend/tests/evidence/*-pg-controls.log\n'
-     '!backend/tests/evidence/*-suite-run.log\n',
+     '!backend/tests/evidence/r10-pg-controls.log\n'
+     '!backend/tests/evidence/r10-suite-run.log\n',
      "test_the_evidence_log_negation_admits_only_produced_logs"),
 
     # A producer that stops naming the capture it is redirected into, which
@@ -890,6 +896,100 @@ CONTROLS = [
      '    entry["advertised"] = advertised\n'
      '    return entry\n',
      "test_pg_a_seat_that_missed_an_update_recovers_in_one_submission"),
+
+    # ── round 13 ─────────────────────────────────────────────────────────
+    # THE REDIRECT, NOT TAKEN. The contract's arm table gives a refusal
+    # carrying `settled_game` one disposition -- keep the entry, re-sign it
+    # ONCE at the advertised number, submit -- and this is that rule with the
+    # re-sign removed: the entry keeps the number it was just refused for and
+    # goes back out unchanged. What reds is the acceptance leg, because the
+    # endpoint refuses the stale number again. The inert twin is the same
+    # assignment with a doubled space, so what reds is the VALUE written into
+    # the body and not the shape of the line.
+    ("recovery-resubmits-the-stale-number", TESTS,
+     '    advertised = int(refusal.progress["expected_game"])\n'
+     '    entry = outbox[key]\n'
+     '    entry["advertised"] = advertised\n'
+     '    return entry\n',
+     '    advertised = int(refusal.progress["expected_game"])\n'
+     '    entry = outbox[key]\n'
+     '    entry["advertised"] = entry["advertised"] or advertised\n'
+     '    return entry\n',
+     '    advertised = int(refusal.progress["expected_game"])\n'
+     '    entry = outbox[key]\n'
+     '    entry["advertised"] =  advertised\n'
+     '    return entry\n',
+     "test_pg_a_seat_that_missed_an_update_recovers_in_one_submission"),
+
+    # THE BOUND, REMOVED. The redirect is taken at most once per entry and a
+    # second `settled_game` refusal of that entry is terminal for it, which is
+    # what stops one delivery looping on this arm for ever. Answer every such
+    # refusal with a redirect and the rule the contract states is not a bound
+    # at all. The inert twin is a comment at the same site.
+    ("terminal-walk-redirects-a-second-time", TESTS,
+     '    if refusal.progress.get("settled_game") is None:\n'
+     '        return "terminal"\n'
+     '    entry["redirects"] += 1\n'
+     '    return "redirect" if entry["redirects"] == 1 else "terminal"\n',
+     '    if refusal.progress.get("settled_game") is None:\n'
+     '        return "terminal"\n'
+     '    entry["redirects"] += 1\n'
+     '    return "redirect"\n',
+     '    if refusal.progress.get("settled_game") is None:\n'
+     '        return "terminal"\n'
+     '    entry["redirects"] += 1\n'
+     '    # (inert: a comment at the same site)\n'
+     '    return "redirect" if entry["redirects"] == 1 else "terminal"\n',
+     "test_pg_a_seat_that_missed_an_update_recovers_in_one_submission"),
+
+    # ONE EXACT NAME back to the producer-suffix wildcard it replaced. That
+    # pattern is narrower than `*.log` and still admits every file shaped like
+    # a capture, under a round nothing here has run -- which is the class the
+    # lens raised. The inert twin swaps two of the exact names: the same set,
+    # a different order, so what reds is what the block ADMITS.
+    ("evidence-log-negation-takes-a-suffix-wildcard", GITIGNORE,
+     '!backend/tests/evidence/r13-suite-run.log\n'
+     '!backend/tests/evidence/r13-pg-controls.log\n',
+     '!backend/tests/evidence/*-suite-run.log\n'
+     '!backend/tests/evidence/r13-pg-controls.log\n',
+     '!backend/tests/evidence/r13-pg-controls.log\n'
+     '!backend/tests/evidence/r13-suite-run.log\n',
+     "test_the_evidence_log_negation_admits_only_produced_logs"),
+
+    # A LABEL THAT DISAGREES WITH THE TWIN IT NAMES, which is the lens LOW
+    # restored: the entry said "the same statement reflowed" and the runner
+    # holds a comment. The executed RED and GREEN are unaffected, which is why
+    # nothing else could see it. The inert twin is a doubled space in the same
+    # sentence, so what reds is the LABEL and not the spacing.
+    ("inventory-mislabels-an-inert-twin", TESTS,
+     '                           set is what sees it. Its inert twin is a comment\n'
+     '                           at the same site.\n',
+     '                           set is what sees it. Its inert twin is the same\n'
+     '                           statement reflowed.\n',
+     '                           set is what sees it.  Its inert twin is a comment\n'
+     '                           at the same site.\n',
+     "test_every_inert_twin_is_labelled_as_the_kind_the_runner_holds"),
+
+    # THE TRAILER TYPED AGAIN. `derive_trailer` reads the form the branch's
+    # most recent commits carry; this makes it return a constant instead, so
+    # a sitting commits under whatever the last one wrote down -- the R4-17
+    # defect, which had already gone stale once by the time the lens read it.
+    # The inert twin is a comment at the same site.
+    ("repin-types-its-commit-trailer", REPIN,
+     '    if agreeing < TRAILER_AGREE:\n'
+     '        return None, ("only %d of the most recent commits carries a trailer, "\n'
+     '                      "and %d have to agree" % (agreeing, TRAILER_AGREE))\n'
+     '    return newest, None\n',
+     '    if agreeing < TRAILER_AGREE:\n'
+     '        return None, ("only %d of the most recent commits carries a trailer, "\n'
+     '                      "and %d have to agree" % (agreeing, TRAILER_AGREE))\n'
+     '    return "Co-Authored-By: An Earlier Sitting <nobody@example.invalid>", None\n',
+     '    if agreeing < TRAILER_AGREE:\n'
+     '        return None, ("only %d of the most recent commits carries a trailer, "\n'
+     '                      "and %d have to agree" % (agreeing, TRAILER_AGREE))\n'
+     '    # (inert: a comment at the same site)\n'
+     '    return newest, None\n',
+     "test_the_repin_trailer_is_derived_and_the_sweep_exempts_only_it"),
 ]
 
 
