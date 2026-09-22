@@ -61,15 +61,26 @@ $wireFiles = @(
     'plugin/ProximityVictimSeam.cs',
     'plugin/PerfPatches.cs',
     'plugin/ApiClient.cs',
-    # N1b reads this one. Round 3's acceptance sentence named FfaMode.cs beside
-    # the seam and the patches, and nothing ever scanned it - the file authors
-    # two distance comparisons that PRE-DATE this branch and that the seam
-    # INHERITS through its single vanilla call. N1b pins them as inherited, so
-    # the file has to be in every mutant root or that case reports "cannot read"
-    # instead of a count.
+    # N1b reads this one. Round 3's acceptance bar was the seam and the patches
+    # and named no third file; what nothing ever scanned was FfaMode.cs, which
+    # authors two distance comparisons that PRE-DATE this branch and that the
+    # seam INHERITS through its single vanilla call. N1b pins them as inherited,
+    # so the file has to be in every mutant root or that case reports "cannot
+    # read" instead of a count.
     'plugin/FfaMode.cs',
+    # W25's downstream-relation clauses walk the one route that leaves
+    # ApiClient.cs: the two tab refreshers are called from NativeUI.Tick,
+    # NativeUI.Tick from CompetitiveUI.Tick, and CompetitiveUI.Tick from the
+    # persistent tick below its gate. Both files have to be in every mutant root
+    # or W25 reports "cannot read" on every wiring run and stops being anyone's
+    # inert twin.
+    'plugin/NativeUI.cs',
+    'plugin/CompetitiveUI.cs',
     'plugin/CompetitiveRounds.csproj',
     'tools/tests/bug389-seam/Program.cs',
+    # H1 reads this one: the round's finding bodies, from which the severity
+    # census is derived rather than typed.
+    'tools/tests/bug389-seam/round-findings.md',
     # W24 searches this file too. A deletion is not bounded by a search that
     # stops short of a document still making the claim, and the driver's own
     # comments are such a document - the previous deletion survived a round
@@ -251,12 +262,32 @@ function New-WireRootEdits([string]$name, [string]$file, [object[]]$edits) {
 function New-PriorRoot([string]$name, [string]$tip) {
     $dir = Join-Path $work ('prior-' + $name)
     if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+    $missing = @()
     foreach ($rel in $wireFiles) {
-        $blob = & git -C $repo show ($tip + ':' + $rel) 2>&1
-        if ($LASTEXITCODE -ne 0) { throw ('could not read ' + $rel + ' at ' + $tip) }
+        # While $ErrorActionPreference is 'Stop', a native command writing to
+        # stderr raises a TERMINATING error, so the exit-code test below is
+        # never reached and the whole run dies on the first absent file. The
+        # preference is lowered for exactly this call and restored on the next
+        # line; the decision is still the exit code, never the text.
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $blob = & git -C $repo show ($tip + ':' + $rel) 2>$null
+        $showCode = $LASTEXITCODE
+        $ErrorActionPreference = $prevEap
+        if ($showCode -ne 0) {
+            # A file this round ADDED does not exist at the round-2 tip. That is
+            # not a reason to abort the one run that proves the N cases can fail;
+            # it is omitted and NAMED, and any case that reads it reports "cannot
+            # read", which this suite treats as a FAILURE and never as a skip.
+            $missing += $rel
+            continue
+        }
         $dst = Join-Path $dir $rel
         New-Item -ItemType Directory -Path (Split-Path -Parent $dst) -Force | Out-Null
         [System.IO.File]::WriteAllText($dst, (($blob | ForEach-Object { [string]$_ }) -join [Environment]::NewLine))
+    }
+    if ($missing.Count -ne 0) {
+        Say ('---   absent at ' + $tip.Substring(0, 7) + ', omitted and reported by the case that reads it: ' + ($missing -join ', '))
     }
     Say ('--- prior-mechanism root ' + $name + ': ' + $wireFiles.Count + ' files at ' + $tip.Substring(0, 7))
     return $dir
@@ -977,13 +1008,17 @@ if (-not (Assert-Mutation 'renamed cleanup tag, W23 inert twin' $runWireCleanupT
 Say ''
 
 # ---------- author a THIRD ranking in the file whose two are inherited ----------
-# Round 3's acceptance sentence said no authored comparison exists "in the seam,
-# the patches or FfaMode". N1's surface is the first two, and the third was never
-# true: FfaMode ranks with Vector2.Distance in its targeting selector and its
-# ring sampler, both pre-dating this branch, both INHERITED through the one
-# vanilla call the seam makes. N1b pins the count so inherited stays a claim
-# about something. Without it a comparison added here is a ranking the branch did
-# not inherit and no case in the suite reads the file.
+# THE PROVENANCE, CORRECTED. Round 3's acceptance bar was "zero authored
+# distance or sqrMagnitude comparisons in the seam and the patches" - the
+# round-5 brief, the round-5 report and every place the notes carry the clause
+# say the seam and the patches, or "either file", and none names a third file.
+# N1's surface IS that bar. What this row answers is a LATER observation: FfaMode
+# ranks with Vector2.Distance in its targeting selector and its ring sampler,
+# both pre-dating this branch, both INHERITED through the one vanilla call the
+# seam makes, and no case in the suite read that file - so "inherited, not
+# authored" was a claim with nothing behind it. N1b pins the count so inherited
+# stays a claim about something; without it a comparison added here is a ranking
+# the branch did not inherit and nothing sees it.
 $wireFfaRank = New-WireRoot 'ffarank' 'plugin/FfaMode.cs' `
     'public static Player NearestOpponent(PlayerManager pm, Vector3 position,' `
     '                float d = Vector2.Distance(position, p.transform.position);' `
@@ -992,6 +1027,135 @@ $wireFfaRank = New-WireRoot 'ffarank' 'plugin/FfaMode.cs' `
 $runWireFfaRank = Invoke-Suite 'wire-ffarank' $seam $wireFfaRank
 if (-not (Assert-Mutation 'a third authored ranking in FfaMode' $runWireFfaRank 'N1b' 'W1')) { $overall = 1 }
 if (-not (Assert-Mutation 'third FFA ranking, N1 inert twin' $runWireFfaRank 'N1b' 'N1')) { $overall = 1 }
+Say ''
+
+# ---------- MOVE A STAGING MERGE ABOVE THE INITIALISATION GATE ----------
+# THE FIRST OF THE TWO CONDITIONS W25's downstream relation has to reject. The
+# clause it replaces counted three StageInto calls and its failure text said
+# "and all three are downstream of ApiClient.Initialize" - a count that is true
+# of any ORDER, so the check could not reject the change its own message
+# forbade. This is that change, made honestly as a MOVE and not a duplication:
+# the FFA queue poll is lifted out of its place below "if (!initialized)
+# return;" and planted above it, so it can run on a tick before DoInitialize has
+# called ApiClient.Initialize. A seat could then stage cr_prox1 while its
+# patches were still attaching - the state the whole permanence argument
+# forbids. Every clause of the round-6 W25 stayed green on this.
+#
+# W23 is the inert twin and must stay GREEN: nothing in the patches file moves.
+$wireStageAbove = New-WireRootEdits 'stageabove' 'plugin/Plugin.cs' @(
+    @('public class CompetitiveRoundsBehaviour : MonoBehaviour',
+      '            if (!initialized) return;',
+      '            if (ApiClient.IsFfaQueuePolling) { try { ApiClient.UpdateFfaQueuePoll(false); } catch { } }
+            if (!initialized) return;'),
+    @('public class CompetitiveRoundsBehaviour : MonoBehaviour',
+      '                try { ApiClient.UpdateFfaQueuePoll(false); }',
+      '                try { /* moved above the gate */ }')
+)
+$runWireStageAbove = Invoke-Suite 'wire-stageabove' $seam $wireStageAbove
+if (-not (Assert-Mutation 'a staging merge moved above the initialisation gate' $runWireStageAbove 'W25' 'W1')) { $overall = 1 }
+if (-not (Assert-Mutation 'merge above the gate, W23 inert twin' $runWireStageAbove 'W25' 'W23')) { $overall = 1 }
+Say ''
+
+# ---------- REACH A STAGING MERGE FROM SOMETHING THAT IS NOT THE INIT PATH ----
+# THE SECOND CONDITION. PerfPatches.Hit is a Harmony postfix driven by patched
+# game code, not by the persistent tick, so a call to the FFA queue poll planted
+# here is a route into the pre-join merge that the initialisation gate does not
+# stand in front of at all. The round-6 W25 counted the same three StageInto
+# calls and stayed green, because the number of merges does not change when a
+# new way of reaching them appears. W25 now closes the caller FILE set - only
+# ApiClient.cs, NativeUI.cs and Plugin.cs may reach a staging entry point, with
+# the per-file map printed - so this reddens and names the file it found.
+#
+# W23 is the inert twin and must stay GREEN.
+$wireStageCaller = New-WireRoot 'stagecaller' 'plugin/PerfPatches.cs' `
+    'public static void Hit(string patch)' `
+    '                if (_firstFireLogged.Add(patch))' `
+    '                ApiClient.UpdateFfaQueuePoll(true);
+                if (_firstFireLogged.Add(patch))' ''
+$runWireStageCaller = Invoke-Suite 'wire-stagecaller' $seam $wireStageCaller
+if (-not (Assert-Mutation 'a staging entry point reached from outside the init path' $runWireStageCaller 'W25' 'W1')) { $overall = 1 }
+if (-not (Assert-Mutation 'off-path staging caller, W23 inert twin' $runWireStageCaller 'W25' 'W23')) { $overall = 1 }
+Say ''
+
+# ---------- write both guard terms by DECONSTRUCTION, on the decline branch ----
+# The classifier removed the SPELLING bound and then the WHITESPACE bound, and
+# both times the remaining hole was a form that puts no operator next to the
+# name. A deconstruction target is followed by ',' or ')', so
+# "(_attached, _withdrawn) = (0, true);" named both monitored fields in full,
+# matched no operator, and was filed as a READ by the very pass whose case is
+# called "every write in ANY spelling". The csproj sets LangVersion `latest`, so
+# the form compiles in this project today.
+#
+# Planted on the DECLINING branch, which is where it would do the damage: the
+# count falls to zero after a staging attempt has declined and the withdrawal
+# latch is set from the member whose one property is that it sets no latch. Both
+# W25 and W23 must see it - that is correct, not a blunt mutant - so W22, which
+# reads the census member and nothing here, is the inert twin.
+$wireDeconstructWrite = New-WireRoot 'deconstructwrite' 'plugin/ProximityVictimPatches.cs' `
+    'internal static void StageInto(ExitGames.Client.Photon.Hashtable prejoin)' `
+    '                    _stageFailedPermanently = true;' `
+    '                    _stageFailedPermanently = true; (_attached, _withdrawn) = (0, true);' ''
+$runWireDeconstructWrite = Invoke-Suite 'wire-deconstructwrite' $seam $wireDeconstructWrite
+if (-not (Assert-Mutation 'deconstruction write to the attachment count' $runWireDeconstructWrite 'W25' 'W1')) { $overall = 1 }
+if (-not (Assert-Mutation 'deconstruction write to the withdrawal latch' $runWireDeconstructWrite 'W23' 'W1')) { $overall = 1 }
+if (-not (Assert-Mutation 'deconstruction write, W22 inert twin' $runWireDeconstructWrite 'W25' 'W22')) { $overall = 1 }
+Say ''
+
+# ---------- leave a staging call alive ONLY inside a block comment ----------
+# THREE VIEWS OF ONE SOURCE, and this is the line where they disagreed. The
+# member anchors counted raw text and CallsTo skipped only a hit on a whole-line
+# "//", so a call wrapped in /* ... */ was dead to the compiler and live to both
+# of them: the FFA pre-join merge would stage nothing, W7c would report its
+# anchor present and W25 would report three staging sites. Every counter of code
+# now reads the one comment-blanked view, so both reddens.
+#
+# W23 is the inert twin and must stay GREEN - the patches file does not move.
+$wireBlockCommentCall = New-WireRoot 'blockcommentcall' 'plugin/ApiClient.cs' `
+    'public static void UpdateFfaQueuePoll(bool force)' `
+    '                            ProximityVictimGate.StageInto(prejoin);' `
+    '                            /* ProximityVictimGate.StageInto(prejoin); */' ''
+$runWireBlockCommentCall = Invoke-Suite 'wire-blockcommentcall' $seam $wireBlockCommentCall
+if (-not (Assert-Mutation 'a staging call left only inside a block comment' $runWireBlockCommentCall 'W25' 'W1')) { $overall = 1 }
+if (-not (Assert-Mutation 'block-commented staging call, the member anchor sees it too' $runWireBlockCommentCall 'W7c' 'W1')) { $overall = 1 }
+if (-not (Assert-Mutation 'block-commented staging call, W23 inert twin' $runWireBlockCommentCall 'W25' 'W23')) { $overall = 1 }
+Say ''
+
+# ---------- stop disclosing the untested lifecycle step in the seam ----------
+# The reachability argument has one link no test holds, and until this round only
+# the patches file said so; the seam stated the ordering and then said W25 pinned
+# the premises. A shipped comment that presents an untested step as pinned tells
+# the next reader to stop looking for the thing that would falsify it. Both files
+# now carry the same disclosure in the same words; this removes it from one of
+# them.
+#
+# W25 is the inert twin and must stay GREEN: it makes no claim about this
+# sentence, which is the whole point of the sentence.
+$wireLifecycleDrop = New-WireRoot 'lifecycledrop' 'plugin/ProximityVictimSeam.cs' `
+    'internal static class ProximityVictim' `
+    '        /// Awake runs before the first tick that can reach DoInitialize.' `
+    '        /// (mutant) the lifecycle step is no longer disclosed here.' ''
+$runWireLifecycleDrop = Invoke-Suite 'wire-lifecycledrop' $seam $wireLifecycleDrop
+if (-not (Assert-Mutation 'the untested lifecycle step dropped from one shipped file' $runWireLifecycleDrop 'W26' 'W1')) { $overall = 1 }
+if (-not (Assert-Mutation 'lifecycle disclosure dropped, W25 inert twin' $runWireLifecycleDrop 'W26' 'W25')) { $overall = 1 }
+Say ''
+
+# ---------- change ONE finding body's severity and leave the census line ------
+# The round-6 log's header said "two MEDIUM, five LOW" while its own bodies read
+# three MEDIUM and four LOW. Every other number in that header was counted from
+# the run; that one was typed. H1 derives the census from the SEVERITY markers on
+# the bodies and fails when the declared line disagrees, so this mutation MOVES
+# the printed census - the run's own NOTE line shows the moved value - and the
+# declared line can no longer be the thing a reader has to trust.
+#
+# W25 is the inert twin and must stay GREEN: it reads no findings file.
+$wireSeverityCensus = New-WireRoot 'severitycensus' 'tools/tests/bug389-seam/round-findings.md' `
+    '### F6 - the severity line was typed' `
+    'SEVERITY: LOW' `
+    'SEVERITY: MEDIUM' `
+    '### F7 '
+$runWireSeverityCensus = Invoke-Suite 'wire-severitycensus' $seam $wireSeverityCensus
+if (-not (Assert-Mutation 'a finding body severity changed under the declared census' $runWireSeverityCensus 'H1' 'W1')) { $overall = 1 }
+if (-not (Assert-Mutation 'moved severity census, W25 inert twin' $runWireSeverityCensus 'H1' 'W25')) { $overall = 1 }
 Say ''
 
 # ---------- put the deleted compat claim back in the HARNESS'S own text ----------

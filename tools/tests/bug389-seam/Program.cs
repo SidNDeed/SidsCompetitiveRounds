@@ -100,6 +100,35 @@ using CompetitiveRounds;
 //     inert twin must stay green - N1 reads the seam and the patches, which
 //     this mutant does not touch). Authors a third distance comparison in
 //     FfaMode, whose two are INHERITED by the seam's single vanilla call.
+//   wiring   wire-stageabove: W25 must FAIL; W1 control must PASS (and the W23
+//     inert twin must stay green). MOVES the FFA queue poll from below the
+//     tick's "if (!initialized) return;" to above it - a staging merge that can
+//     run before DoInitialize has called ApiClient.Initialize. The round-6 W25
+//     counted three StageInto calls and said they were downstream; a count is
+//     true of any order, so it stayed green on exactly this (#342/#431).
+//   wiring   wire-stagecaller: W25 must FAIL; W1 control must PASS (and the W23
+//     inert twin must stay green). Calls the FFA queue poll from
+//     PerfPatches.Hit - a Harmony postfix driven by patched game code, so a
+//     route into the pre-join merge with no initialisation gate in front of it.
+//     The number of merges does not move when a new way of reaching one appears.
+//   wiring   wire-deconstructwrite: W25 AND W23 must both FAIL; W1 control must
+//     PASS (and the W22 inert twin must stay green). Writes both guard terms by
+//     DECONSTRUCTION on the declining branch - "(_attached, _withdrawn) = (0,
+//     true);" - the one legal assignment form that puts no operator next to the
+//     name, so it was filed as a READ by the case named "every write in ANY
+//     spelling". Both cases seeing it is correct: it is two drifts in one line.
+//   wiring   wire-blockcommentcall: W25 AND W7c must both FAIL; W1 control must
+//     PASS (and the W23 inert twin must stay green). Leaves the FFA pre-join
+//     merge alive only inside a /* ... */ comment: dead to the compiler, live
+//     to a counter that skips whole-line "//" and to a raw anchor count.
+//   wiring   wire-lifecycledrop: W26 must FAIL; W1 control must PASS (and the
+//     W25 inert twin must stay green - it makes no claim about that sentence,
+//     which is the point of it). Removes the untested-lifecycle-step disclosure
+//     from the seam, leaving the two shipped accounts disagreeing again.
+//   wiring   wire-severitycensus: H1 must FAIL; W1 control must PASS (and the
+//     W25 inert twin must stay green). Changes ONE finding body's SEVERITY
+//     marker and leaves the declared census line alone, so the derived census
+//     MOVES and the declared one no longer matches.
 //   wiring   wire-pathswap:   D6 must FAIL;  D4 and D5 controls must PASS
 //   wiring   wire-paththrew:  D6 must FAIL;  D4 and D5 controls must PASS
 //   prior-r2            : N1 N2 N3 N4 N5 N6 must all FAIL; W1 control must PASS
@@ -117,8 +146,10 @@ using CompetitiveRounds;
 //     group: wire-blindwrite holds the branch that emits its line, and the
 //     distinctness it asserts is the same property D4 and S1 already carry a
 //     mutant for.
-//   W4, W6, W7a-c, W9a-c, W12                   - wiring anchors whose finding
-//     is carried by a sibling wiring mutant.
+//   W4, W6, W7a, W7b, W9a-c, W12                - wiring anchors whose finding
+//     is carried by a sibling wiring mutant. W7c is NO LONGER on this list:
+//     wire-blockcommentcall reddens it directly, because the view its anchor is
+//     counted in is the thing that case now measures.
 //   W14, W15a, W16a, W16b, W16c                 - the same, for the capability
 //     advertisement: wire-advertise is this group's mutant and reddens W14b and
 //     W15b; these five are the companions it does not move.
@@ -177,25 +208,65 @@ internal static class Program
         return System.IO.File.ReadAllText(path);
     }
 
-    /// <summary>CountOf, restricted to lines that are not whole-line comments.
-    ///
-    /// "This global is read in exactly one place" is a statement about CODE, and
-    /// the prose around the member names the same identifier several times, so a
-    /// raw count can neither be 1 nor be made 1 without deleting the explanation.
-    /// Both files here comment by whole line, so dropping lines whose first
-    /// non-space characters are "//" is the whole rule; a needle inside a string
-    /// literal would still count, which is the safe direction for a bound.</summary>
+    // ---------------------------------------------------------------------
+    // ONE VIEW OF THE SOURCE PER QUESTION, AND EVERY COUNTER SAYS WHICH.
+    //
+    // The same file used to be read through THREE incompatible views. CountOf
+    // saw everything. CountOnCodeLines dropped lines whose first non-space
+    // characters were "//" and nothing else. CallsTo and AttributesOf skipped a
+    // hit on such a line. The member anchors used raw CountOf. So a call left
+    // only inside a /* ... */ block was DEAD to the compiler, LIVE to CallsTo
+    // and LIVE to every anchor - the spelling survived while the call did not,
+    // and the checks that count it went on printing the same number. A counter
+    // that cannot tell a live call from its own spelling is a check that cannot
+    // fail for the thing it names (#342/#431), and three views of one source is
+    // three different answers to one question (#342: two numbers from the same
+    // expression means two different inputs).
+    //
+    // There are now TWO views, named, and each counter declares the one it
+    // reads:
+    //   * CODE  - the comment-blanked, offset-preserving copy, built once per
+    //             file and cached. Every counter of CODE reads it.
+    //   * PROSE - the raw text. An ABSENCE bound reads it on purpose, because
+    //             over-counting an absence REDDENS, which is the safe
+    //             direction; and the cases that assert a deleted SENTENCE have
+    //             to see comments or they could never find one.
+    // BlankComments returns the text unchanged for a file that is not C#: "//"
+    // is not a comment in an MSBuild project, and a C# blanker would eat the
+    // line W10 reads.
+    // ---------------------------------------------------------------------
+    private enum SourceView { Code, Prose }
+
+    private static readonly Dictionary<string, string> _blankCache =
+        new Dictionary<string, string>(StringComparer.Ordinal);
+
+    /// <summary>The CODE view of a shipped file: comments blanked, offsets and
+    /// line numbers preserved. Null when the file cannot be read, exactly as
+    /// LoadSource is - an unreadable file is a failure, not a skip.</summary>
+    private static string LoadBlanked(string relative)
+    {
+        string got;
+        if (_blankCache.TryGetValue(relative, out got)) return got;
+        string text = LoadSource(relative);
+        got = (text == null) ? null
+            : (relative.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) ? BlankComments(text) : text);
+        _blankCache[relative] = got;
+        return got;
+    }
+
+    /// <summary>The view a case asked for, by name.</summary>
+    private static string LoadView(string relative, SourceView view)
+    {
+        return view == SourceView.Code ? LoadBlanked(relative) : LoadSource(relative);
+    }
+
+    /// <summary>CountOf over the CODE view: a needle that survives only inside a
+    /// comment is not counted, in any comment form. This used to drop whole-line
+    /// "//" lines and nothing else, so a block comment was code to it.</summary>
     private static int CountOnCodeLines(string text, string needle)
     {
         if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(needle)) return 0;
-        int n = 0;
-        foreach (string line in text.Split((char)10))
-        {
-            string t = line.TrimStart();
-            if (t.StartsWith("//", StringComparison.Ordinal)) continue;
-            n += CountOf(line, needle);
-        }
-        return n;
+        return CountOf(BlankComments(text), needle);
     }
 
     private static int CountOf(string text, string needle)
@@ -299,15 +370,13 @@ internal static class Program
         return sb.ToString();
     }
 
-    /// <summary>True when the offset sits on a line whose first non-space
-    /// characters are "//" - the same rule CountOnCodeLines uses, so prose and
-    /// doc comments naming a field are never read as writes to it.</summary>
-    private static bool OnCommentLine(string text, int index)
-    {
-        int i = LineStartAt(text, index);
-        while (i < text.Length && (text[i] == ' ' || text[i] == '\t')) i++;
-        return i + 1 < text.Length && text[i] == '/' && text[i + 1] == '/';
-    }
+    // OnCommentLine is DELETED, not kept beside its replacement. It was the
+    // third view of the source: "the first non-space characters of this line
+    // are //". It answered a question about a LINE while the thing being asked
+    // about is a REGION, so a call inside /* ... */ passed it as live. The
+    // replacement is the single comment-blanked CODE view above, which every
+    // counter of code now reads - so there is one answer to "is this spelling
+    // live", not three (#342/#431/#432).
 
     /// <summary>A copy of the text with every COMMENT's content replaced by
     /// spaces. Newlines are kept, so every offset and every line number is
@@ -470,6 +539,68 @@ internal static class Program
             while (w >= 0 && IsIdentChar(text[w])) w--;
             string word = text.Substring(w + 1, b - w);
             if (word == "out" || word == "ref") return word + " (indirect write)";
+        }
+        string dec = DeconstructionRhs(text, at, after);
+        if (dec != null) { rhs = dec; return "deconstruction assignment"; }
+        return null;
+    }
+
+    /// <summary>The value a DECONSTRUCTION assignment writes to this occurrence's
+    /// tuple, or null when the occurrence is not a deconstruction target.
+    ///
+    /// WHY THIS EXISTS. `ClassifyWrite` decides what an occurrence DOES from the
+    /// operator that follows it, and a deconstruction target is followed by ','
+    /// or ')' and never by an operator at all: `(_attached, _advertised) = (0,
+    /// true);` and `(_withdrawn, _advertised) = (true, false);` both name the
+    /// field in full, in a form the project compiles today - the csproj sets
+    /// LangVersion `latest` - and both came back as READS. So "every write in ANY
+    /// spelling" was a claim about the spellings that happen to put an operator
+    /// next to the name (#342/#431/#432).
+    ///
+    /// THE RULE. An occurrence whose previous non-whitespace character is '(' or
+    /// ',' and whose next non-whitespace character is ',' or ')' is a candidate;
+    /// it is a target when the enclosing parenthesis group - found by scanning
+    /// out through nested closes - is followed by a single '=' that is neither
+    /// '==' nor '=>'. The scan stops at the statement's own ';' or at a brace, so
+    /// it cannot run away down the file, and an argument list (`Foo(a, x);`), a
+    /// comparison (`if (a == x)`) and a lambda parameter list (`(a, x) => ...`)
+    /// all fall out at the character after the close.
+    ///
+    /// The right-hand side is the whole tuple, deliberately: an element-wise
+    /// answer would be a second claim about which element this name is, and a
+    /// one-way latch's premise ("every write writes true") must REDDEN on a form
+    /// nothing here can prove writes true. Over-reporting reddens, which is the
+    /// safe direction for a bound.
+    ///
+    /// What it still does not see is unchanged and stays disclosed: a write
+    /// through a property setter, through an alias the scan does not know the
+    /// name of, or through reflection.</summary>
+    private static string DeconstructionRhs(string text, int at, int after)
+    {
+        int back = SkipWsBack(text, at - 1);
+        if (back < 0) return null;
+        if (text[back] != '(' && text[back] != ',') return null;
+        int f = SkipWs(text, after);
+        if (f >= text.Length) return null;
+        if (text[f] != ',' && text[f] != ')') return null;
+
+        int depth = 0;
+        int limit = Math.Min(text.Length, after + 4000);
+        for (int i = f; i < limit; i++)
+        {
+            char c = text[i];
+            if (c == ';' || c == '{' || c == '}') return null;
+            if (c == '(') { depth++; continue; }
+            if (c != ')') continue;
+            if (depth > 0) { depth--; continue; }
+            // A close of the group this occurrence sits in.
+            int g = SkipWs(text, i + 1);
+            if (g >= text.Length) return null;
+            if (text[g] == ')' || text[g] == ',') { i = g - 1; continue; }
+            if (text[g] != '=') return null;
+            char h = (g + 1 < text.Length) ? text[g + 1] : '\0';
+            if (h == '=' || h == '>') return null;
+            return RhsTo(text, g + 1);
         }
         return null;
     }
@@ -677,17 +808,41 @@ internal static class Program
     /// assignment count.</summary>
     private static int CallsTo(string text, string name)
     {
-        if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(name)) return 0;
-        int n = 0, i = 0;
+        return CallsToIn(BlankComments(text), name);
+    }
+
+    /// <summary>The same, over a text already in the CODE view, so a caller that
+    /// holds a blanked copy does not blank it again. It is the COUNT of
+    /// CallSitesIn and never a second rule - two counters of one thing is two
+    /// answers waiting to disagree (#342).</summary>
+    private static int CallsToIn(string blanked, string name)
+    {
+        return CallSitesIn(blanked, name).Count;
+    }
+
+    /// <summary>Every call site of one name in the CODE view, as offsets - for a
+    /// case that has to ask WHERE a call is and not only how many there are.
+    ///
+    /// A DECLARATION IS NOT A CALL. `private static void MaybeRefreshFfaTab()`
+    /// puts the name in front of a '(' exactly as a call does, so a route check
+    /// that counted it would read "two call sites" for a member called once and
+    /// declared once. The declaration is told apart by the same positional rule
+    /// IsDeclarationSite applies to a field: a modifier on the line and a
+    /// type-shaped token immediately before the name. `return Foo();` has
+    /// neither and stays a call.</summary>
+    private static List<int> CallSitesIn(string blanked, string name)
+    {
+        var found = new List<int>();
+        if (string.IsNullOrEmpty(blanked) || string.IsNullOrEmpty(name)) return found;
+        int i = 0;
         while (true)
         {
-            int at = text.IndexOf(name, i, StringComparison.Ordinal);
-            if (at < 0) return n;
+            int at = blanked.IndexOf(name, i, StringComparison.Ordinal);
+            if (at < 0) return found;
             i = at + name.Length;
-            if (at > 0 && IsIdentChar(text[at - 1])) continue;
-            if (OnCommentLine(text, at)) continue;
-            int f = SkipWs(text, at + name.Length);
-            if (f < text.Length && text[f] == '(') n++;
+            if (at > 0 && IsIdentChar(blanked[at - 1])) continue;
+            int f = SkipWs(blanked, at + name.Length);
+            if (f < blanked.Length && blanked[f] == '(' && !IsDeclarationSite(blanked, at)) found.Add(at);
         }
     }
 
@@ -695,26 +850,29 @@ internal static class Program
     /// whitespace-tolerant.</summary>
     private static int AttributesOf(string text, string name)
     {
-        if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(name)) return 0;
+        string blanked = BlankComments(text);
+        if (string.IsNullOrEmpty(blanked) || string.IsNullOrEmpty(name)) return 0;
         int n = 0, i = 0;
         while (true)
         {
-            int at = text.IndexOf(name, i, StringComparison.Ordinal);
+            int at = blanked.IndexOf(name, i, StringComparison.Ordinal);
             if (at < 0) return n;
             i = at + name.Length;
-            if (at > 0 && IsIdentChar(text[at - 1])) continue;
+            if (at > 0 && IsIdentChar(blanked[at - 1])) continue;
             int after = at + name.Length;
-            if (after < text.Length && IsIdentChar(text[after])) continue;
-            if (OnCommentLine(text, at)) continue;
-            int b = SkipWsBack(text, at - 1);
-            if (b < 0 || text[b] != '[') continue;
-            int f = SkipWs(text, after);
-            if (f < text.Length && (text[f] == ']' || text[f] == '(')) n++;
+            if (after < blanked.Length && IsIdentChar(blanked[after])) continue;
+            int b = SkipWsBack(blanked, at - 1);
+            if (b < 0 || blanked[b] != '[') continue;
+            int f = SkipWs(blanked, after);
+            if (f < blanked.Length && (blanked[f] == ']' || blanked[f] == '(')) n++;
         }
     }
 
     /// <summary>The offsets of one member's body, for a case that has to ask
-    /// WHERE a site is rather than only how many there are.</summary>
+    /// WHERE a site is rather than only how many there are. Pass the CODE view:
+    /// a signature quoted in a comment is not a second declaration of it, and
+    /// blanking preserves every offset so the answer indexes the real file
+    /// either way.</summary>
     private static bool TryMemberSpan(string text, string signature, out int open, out int close, out string problem)
     {
         open = -1; close = -1; problem = null;
@@ -724,6 +882,33 @@ internal static class Program
         open = text.IndexOf('{', sig);
         close = open < 0 ? -1 : MemberEnd(text, sig, open);
         if (open < 0 || close < 0) { problem = "could not bound the member span: " + signature; return false; }
+        return true;
+    }
+
+    /// <summary>The member span that CONTAINS a given offset, for a signature
+    /// the file repeats - plugin/Plugin.cs declares three `private void Update()`
+    /// across three MonoBehaviours, so "the persistent tick" cannot be named by
+    /// its signature alone. The caller supplies an offset it has already proved
+    /// unique (the tick's own gate line), and the span is taken from the nearest
+    /// declaration above it; the offset is then re-checked to be inside the span
+    /// it produced, so a signature that does not actually enclose it FAILS
+    /// rather than bounding the wrong member.</summary>
+    private static bool TryMemberSpanAround(string text, string signature, int inside,
+                                            out int open, out int close, out string problem)
+    {
+        open = -1; close = -1; problem = null;
+        if (string.IsNullOrEmpty(text) || inside < 0 || inside >= text.Length)
+        { problem = "no text to bound '" + signature + "' in"; return false; }
+        int sig = text.LastIndexOf(signature, inside, StringComparison.Ordinal);
+        if (sig < 0) { problem = "no declaration '" + signature + "' above offset " + inside; return false; }
+        open = text.IndexOf('{', sig);
+        close = open < 0 ? -1 : MemberEnd(text, sig, open);
+        if (open < 0 || close < 0) { problem = "could not bound the member span: " + signature; return false; }
+        if (inside < open || inside > close)
+        {
+            problem = "the member bounded by '" + signature + "' does not contain offset " + inside;
+            return false;
+        }
         return true;
     }
 
@@ -760,7 +945,11 @@ internal static class Program
     private static string MemberBody(string relative, string signature, out string problem)
     {
         problem = null;
-        string text = LoadSource(relative);
+        // THE CODE VIEW. The body a case reasons about is code: a commented-out
+        // assignment is not an assignment, and a signature named in prose is not
+        // a second member. Offsets and line numbers are preserved by blanking,
+        // so a failure message still quotes the real line number.
+        string text = LoadBlanked(relative);
         if (text == null)
         {
             problem = "cannot read " + relative + " under BUG389_SOURCE_ROOT='"
@@ -791,7 +980,16 @@ internal static class Program
     /// names it stays green.</summary>
     private static void CheckAnchorInMember(string name, string relative, string signature, string anchor)
     {
-        string text = LoadSource(relative);
+        CheckAnchorInMember(name, relative, signature, anchor, SourceView.Code);
+    }
+
+    /// <summary>The same, with the view named. Every anchor here is code except
+    /// W8's, which IS a comment - the reasoning that has to sit on the member
+    /// that implements it - so that one case declares PROSE at its call site
+    /// rather than being handed a blanked copy it could never match.</summary>
+    private static void CheckAnchorInMember(string name, string relative, string signature, string anchor, SourceView view)
+    {
+        string text = LoadView(relative, view);
         if (text == null)
         {
             Check(name, false, "cannot read " + relative + " under BUG389_SOURCE_ROOT='"
@@ -822,7 +1020,10 @@ internal static class Program
     private static void CheckMemberAnchors(string name, string relative, string signature,
         string[] requiredOnce, string[] forbidden)
     {
-        string text = LoadSource(relative);
+        // THE CODE VIEW, both halves. A required anchor that survives only in a
+        // comment is not the wiring the case certifies, and a forbidden one
+        // named in a comment is not a second copy of the conjunction.
+        string text = LoadBlanked(relative);
         if (text == null)
         {
             Check(name, false, "cannot read " + relative + " under BUG389_SOURCE_ROOT='"
@@ -856,7 +1057,11 @@ internal static class Program
     /// unique opening marker and the first closing marker after it.</summary>
     private static void CheckAnchorInSpan(string name, string relative, string startMarker, string endMarker, string anchor)
     {
-        string text = LoadSource(relative);
+        // THE CODE VIEW - which for plugin/CompetitiveRounds.csproj is the raw
+        // text, because "//" is not a comment in an MSBuild project and a C#
+        // blanker would eat the line this case reads. LoadBlanked states that
+        // rule in one place rather than leaving each caller to remember it.
+        string text = LoadBlanked(relative);
         if (text == null)
         {
             Check(name, false, "cannot read " + relative + " under BUG389_SOURCE_ROOT='"
@@ -874,10 +1079,56 @@ internal static class Program
             "anchor occurs " + inSpan + " time(s) inside the span in " + relative + " (want 1): " + anchor);
     }
 
+    /// <summary>The severity census a set of finding bodies produces, counted
+    /// from their own `SEVERITY:` markers and never typed. One marker per body,
+    /// so the total is also derived: a body added without a marker changes the
+    /// total and is visible, rather than silently not counting.</summary>
+    private static string DerivedCensus(string findings)
+    {
+        int high = 0, medium = 0, low = 0, other = 0, total = 0;
+        if (findings != null)
+            foreach (string line in findings.Split((char)10))
+            {
+                string t = line.Trim();
+                // The marker must OPEN its line. Prose that NAMES the marker -
+                // including the paragraph in that file explaining what this
+                // counts - would otherwise be counted as a body, which is a
+                // reading that finds its own needle (#342).
+                if (!t.StartsWith("SEVERITY:", StringComparison.Ordinal)) continue;
+                total++;
+                string v = t.Substring("SEVERITY:".Length).Trim();
+                if (v == "HIGH") high++;
+                else if (v == "MEDIUM") medium++;
+                else if (v == "LOW") low++;
+                else other++;
+            }
+        return total + " findings: " + high + " HIGH, " + medium + " MEDIUM, " + low + " LOW"
+            + (other == 0 ? "" : ", " + other + " UNRECOGNISED");
+    }
+
+    /// <summary>The name a member signature declares: the identifier that stands
+    /// immediately before its parameter list.</summary>
+    private static string MemberName(string signature)
+    {
+        int paren = signature.IndexOf('(');
+        if (paren <= 0) return signature;
+        int end = paren - 1;
+        while (end >= 0 && !IsIdentChar(signature[end])) end--;
+        int start = end;
+        while (start >= 0 && IsIdentChar(signature[start])) start--;
+        return signature.Substring(start + 1, end - start);
+    }
+
     /// <summary>Assert a needle is ABSENT from a file. Used only where the file
     /// itself is the unit - "no selector of our own lives anywhere in here" is a
     /// statement about the file, not about one member, and scoping it to a member
-    /// would let the thing move next door and stay green.</summary>
+    /// would let the thing move next door and stay green.
+    ///
+    /// THE PROSE VIEW, DELIBERATELY. This is the one place raw text is the right
+    /// reading: for an ABSENCE bound, counting a needle that survives only in a
+    /// comment REDDENS, and a bound that errs toward reddening is the safe
+    /// direction. Blanking here would let a ranking be commented out and still
+    /// satisfy "no ranking is authored in this file".</summary>
     private static void CheckAbsentFromFiles(string name, string[] relatives, string[] needles, string why)
     {
         var found = new List<string>();
@@ -1746,17 +1997,26 @@ internal static class Program
 
         // ---- N1b: FFA'S RANKING IS INHERITED, AND PINNED AS INHERITED --------
         //
-        // A CORRECTION TO THE ACCEPTANCE SENTENCE, not a new requirement. Round
-        // 3's bar was written as "no authored distance, squared distance or
-        // angle comparison exists in the seam, the patches or FfaMode". N1's
-        // surface is the first two. The third was never true and was never
-        // tested: FfaTargeting.NearestOpponent ranks candidates with
-        // Vector2.Distance, and the ring sampler measures a signed separation
-        // the same way. Both PRE-DATE this branch - the count is the same at the
-        // round-2 tip - so neither is a regression; but a sentence that reads as
-        // an assertion about a file nothing scans is a claim the code does not
-        // back (#351/#434), and a reviewer ruling the bar literally would
-        // re-open a sub-mechanism rounds 3, 4 and 5 settled, on wording.
+        // A LATER HAZARD OBSERVATION, not a restatement of the acceptance bar.
+        // The provenance matters and the earlier wording of this comment had it
+        // wrong, so it is corrected here against the sources rather than left to
+        // be re-derived: round 3's bar named THE SEAM AND THE PATCHES and no
+        // third file. Every historical artifact says so - the round-5 brief's B1
+        // ("ZERO authored distance or sqrMagnitude comparisons", of the seam and
+        // the patches), the round-5 report's B1 row (no mention of FfaMode at
+        // all), and the five places the notes carry the clause, each of which
+        // reads "in the seam and the patches" or "in either file". N1 is that
+        // bar, and its surface is exactly those two files.
+        //
+        // WHAT THIS CASE IS FOR is a hazard the round-6 cold lens raised
+        // afterwards: FfaTargeting.NearestOpponent ranks candidates with
+        // Vector2.Distance and the ring sampler measures a signed separation the
+        // same way, the seam's single vanilla call routes through the first in
+        // FFA, and NO case in the suite read that file. Both comparisons
+        // PRE-DATE this branch - the count is the same at the round-2 tip - so
+        // neither is a regression; but "inherited, not authored" was a claim
+        // with nothing behind it (#351/#434), and a reader could re-open a
+        // sub-mechanism rounds 3, 4 and 5 settled on the strength of it.
         //
         // WHAT IS TRUE, and what this case asserts: the seam and the patches
         // author no ranking (N1), and FfaMode's own ranking is INHERITED through
@@ -1783,12 +2043,12 @@ internal static class Program
             if (sqr != 0)
                 ffaProblems.Add("and no squared ranking anywhere in it; found " + sqr + " sqrMagnitude");
             int fOpen, fClose; string fProblem;
-            if (!TryMemberSpan(ffaText, "public static Player NearestOpponent(PlayerManager pm, Vector3 position,",
+            if (!TryMemberSpan(ffaBlank, "public static Player NearestOpponent(PlayerManager pm, Vector3 position,",
                     out fOpen, out fClose, out fProblem))
                 ffaProblems.Add(fProblem);
             else
             {
-                int inSelector = CountOf(BlankComments(ffaText.Substring(fOpen, fClose - fOpen + 1)),
+                int inSelector = CountOf(ffaBlank.Substring(fOpen, fClose - fOpen + 1),
                     "Vector2.Distance(");
                 if (inSelector != 1)
                     ffaProblems.Add("and exactly one of them is the selector's own, inside NearestOpponent - "
@@ -1931,10 +2191,16 @@ internal static class Program
 
         // W8 - the no-owning-ring reasoning sits on the member that implements
         // it, not on the diagnostic sink it once drifted onto.
+        // THE ONE ANCHOR THAT IS ITSELF A COMMENT, so this case declares the
+        // PROSE view. Every other anchor in the suite is code and reads the
+        // CODE view; handing this one a comment-blanked copy would leave it
+        // counting zero on a correct tree - a check that cannot pass is no
+        // better than one that cannot fail.
         CheckAnchorInMember("W8 Wiring_TheNoRingReasoningSitsOnTheWalkThatSettlesIt",
             "plugin/ProximityVictimPatches.cs",
             "internal static PlayerInRangeTrigger OwningTrigger(Transform start)",
-            "This is the ONLY thing the walk is asked.");
+            "This is the ONLY thing the walk is asked.",
+            SourceView.Prose);
 
         // W9a-c - all three victim prefixes answer Harmony through the one seam
         // function, each asserted inside its own prefix body.
@@ -2510,7 +2776,7 @@ internal static class Program
                         + "literal - or the count can fall back below the required three after a staging attempt "
                         + "has already declined; found " + w.Kind + " at line " + w.Line + " [" + w.Text + "]");
                 int mOpen, mClose; string mProblem;
-                if (!TryMemberSpan(patchesText, "internal static void MarkAttached(string which)",
+                if (!TryMemberSpan(LoadBlanked(attachHome), "internal static void MarkAttached(string which)",
                         out mOpen, out mClose, out mProblem))
                     reachProblems.Add(mProblem);
                 else if (w.Index < mOpen || w.Index > mClose)
@@ -2571,8 +2837,8 @@ internal static class Program
         {
             string blanked;
             if (!surfaceBlank.TryGetValue(rel, out blanked)) continue;
-            int cp = CallsTo(blanked, "CreateClassProcessor");
-            int pa = CallsTo(blanked, "PatchAll");
+            int cp = CallsToIn(blanked, "CreateClassProcessor");
+            int pa = CallsToIn(blanked, "PatchAll");
             int hc = CountOf(blanked, "new Harmony(");
             patchSites += cp; patchAll += pa; harmonyCtors += hc;
             if (cp + pa + hc != 0)
@@ -2615,13 +2881,339 @@ internal static class Program
             reachProblems.Add("the disabled flag must have at least one write, or this premise is vacuous");
         if (pluginText == null) reachProblems.Add("cannot read plugin/Plugin.cs");
         if (apiText == null) reachProblems.Add("cannot read plugin/ApiClient.cs");
+
+        // --- THE DOWNSTREAM RELATION ITSELF, and not a count of its sites -----
+        //
+        // This clause used to be `CallsTo(apiText, "...StageInto") == 3`, with a
+        // failure message that said "and all three are downstream of
+        // ApiClient.Initialize". The count proves the number of sites; it proves
+        // nothing whatever about the ORDER, so the check did not reject the
+        // change its own message claimed to forbid - a source edit that makes a
+        // staging member reachable before initialisation left it at three and
+        // green. W25c sits beside it and only LOCATES ApiClient.Initialize
+        // inside DoInitialize; where a thing IS is not when it RUNS. A check
+        // that cannot fail for the property it names is worse than no check
+        // (#342/#431), and the shipped paragraphs in both files rest on this
+        // relation being true.
+        //
+        // WHAT THE RELATION IS, derived by reading the source and written down
+        // before this code was: every route that can reach StageInto passes
+        // through the persistent tick BELOW `if (!initialized) return;`, and
+        // `initialized` can only become true inside DoInitialize AFTER
+        // ApiClient.Initialize has been called. The clauses below assert exactly
+        // that chain, link by link, each one a position or a count over the CODE
+        // view:
+        //
+        //   R1  every StageInto call in the assembly is in ApiClient.cs (3 of
+        //       them), and each sits at a LARGER offset than a baseUrl-built
+        //       request inside its own member - the local half;
+        //   R2  the flag: exactly one non-declaration write to `initialized`
+        //       across the surface, writing true, inside DoInitialize, at a
+        //       larger offset than ApiClient.Initialize, with the declaration
+        //       initialiser false;
+        //   R3  in Plugin.cs every call to a staging entry point lives INSIDE
+        //       the persistent tick's own member span and BELOW the gate - so a
+        //       merge moved above the gate, planted in an Awake, or planted in
+        //       DoInitialize is rejected by position, not by a count;
+        //   R4  the caller FILE set is closed: across all 91 shipped files only
+        //       ApiClient.cs, NativeUI.cs and Plugin.cs may call a staging entry
+        //       point, and the per-file map is printed on failure;
+        //   R5  the NativeUI route is anchored to the same gate by counts:
+        //       MaybeRefreshOvtTab/MaybeRefreshFfaTab are called only from
+        //       inside NativeUI.Tick, NativeUI.Tick only from inside
+        //       CompetitiveUI.Tick, and CompetitiveUI.Tick only from the tick
+        //       below the gate.
+        //
+        // WHAT IT STILL DOES NOT PROVE, said plainly rather than left to be
+        // found: a call made through a delegate, an event or reflection names no
+        // member and no text scan can see it; and the step that Awake runs
+        // before the first tick reaching DoInitialize is Unity's lifecycle
+        // contract, not a fact about this text. That step is the round's carried
+        // OPEN PREMISE and is disclosed in both shipped files (W26).
+        const string stageCall = "ProximityVictimGate.StageInto";
+        string[] stageEntries = new[] { "ParseTeamQueuePoll", "UpdateTeamQueuePoll",
+                                        "UpdateOvtQueuePoll", "UpdateFfaQueuePoll" };
+        const string apiRel = "plugin/ApiClient.cs";
+        const string uiRel = "plugin/NativeUI.cs";
+        const string pluginRel = "plugin/Plugin.cs";
+        const string compRel = "plugin/CompetitiveUI.cs";
+
+        // R1 - the staging surface, over the whole assembly and not one file.
+        var stageWhere = new List<string>();
+        int stageTotal = 0;
+        foreach (string rel in shippedCs)
+        {
+            string blanked;
+            if (!surfaceBlank.TryGetValue(rel, out blanked)) continue;
+            int n = CallsToIn(blanked, stageCall);
+            stageTotal += n;
+            if (n != 0) stageWhere.Add(rel + " x" + n);
+        }
+        string stageMap = stageWhere.Count == 0 ? "nowhere" : string.Join(" | ", stageWhere.ToArray());
+        if (stageTotal != 3 || stageWhere.Count != 1 || !stageWhere[0].StartsWith(apiRel, StringComparison.Ordinal))
+            reachProblems.Add("this key may be staged from exactly three sites and all three must live in "
+                + apiRel + ", the file whose merges are downstream of initialisation; found " + stageTotal
+                + " across the assembly: " + stageMap);
+
+        string apiBlank = LoadBlanked(apiRel);
+        if (apiBlank != null)
+        {
+            // ...and each one sits after a request URL built from baseUrl. A
+            // merge lifted to the top of its member would run on ENTRY rather
+            // than on a response, which is the local form of the same drift.
+            //
+            // Two of the three build their own request and carry the merge in
+            // its callback. The third does not and must not be forced to: the
+            // 2v2 parser is handed a response body, so the request that reaches
+            // it is its CALLER's, and the pairing says which member that is
+            // rather than accepting "no baseUrl here" as a pass. A member whose
+            // merge cannot be tied to a request either way FAILS.
+            string[][] stageMembers = new[]
+            {
+                new[] { "private static void ParseTeamQueuePoll(string response)",
+                        "public static void UpdateTeamQueuePoll(string steamId)" },
+                new[] { "public static void UpdateOvtQueuePoll(bool force)", null },
+                new[] { "public static void UpdateFfaQueuePoll(bool force)", null }
+            };
+            foreach (string[] pair in stageMembers)
+            {
+                string sig = pair[0], host = pair[1];
+                int mo, mc; string mp;
+                if (!TryMemberSpan(apiBlank, sig, out mo, out mc, out mp)) { reachProblems.Add(mp); continue; }
+                string body = apiBlank.Substring(mo, mc - mo + 1);
+                int site = body.IndexOf(stageCall, StringComparison.Ordinal);
+                if (site < 0)
+                {
+                    reachProblems.Add("the pre-join merge in '" + sig + "' must stage this key");
+                    continue;
+                }
+                int url = body.IndexOf("baseUrl", StringComparison.Ordinal);
+                if (host == null)
+                {
+                    if (url < 0 || url > site)
+                        reachProblems.Add("the merge in '" + sig + "' must sit AFTER the request built from "
+                            + "baseUrl in that member - a merge that runs on entry rather than on a response "
+                            + "is not downstream of anything; baseUrl at " + url + ", merge at " + site);
+                    continue;
+                }
+                // The parser's own entry: called exactly once in the assembly,
+                // from inside the named host, after that host's request.
+                int ho, hc; string hp;
+                if (!TryMemberSpan(apiBlank, host, out ho, out hc, out hp)) { reachProblems.Add(hp); continue; }
+                string name = MemberName(sig);
+                var callers = new List<string>();
+                int inHost = 0;
+                foreach (string rel in shippedCs)
+                {
+                    string b2;
+                    if (!surfaceBlank.TryGetValue(rel, out b2)) continue;
+                    var sites = CallSitesIn(b2, name);
+                    if (rel != apiRel) sites.AddRange(CallSitesIn(b2, "ApiClient." + name));
+                    if (sites.Count == 0) continue;
+                    callers.Add(rel + " x" + sites.Count);
+                    if (rel != apiRel) continue;
+                    foreach (int at in sites)
+                    {
+                        if (at < ho || at > hc) continue;
+                        int hostUrl = apiBlank.IndexOf("baseUrl", ho, StringComparison.Ordinal);
+                        if (hostUrl >= 0 && hostUrl < hc && hostUrl < at) inHost++;
+                    }
+                }
+                if (callers.Count != 1 || inHost != 1)
+                    reachProblems.Add("'" + name + "' carries a merge but builds no request, so its own entry "
+                        + "is what makes it downstream: it must be called exactly once in the assembly, from "
+                        + "inside '" + host + "', after that member's baseUrl request; found "
+                        + (callers.Count == 0 ? "no caller" : string.Join(" | ", callers.ToArray()))
+                        + ", " + inHost + " of them in place");
+            }
+        }
+
+        // R2 - the gate flag.
+        SurfaceScan initScan = ScanField(shippedCs, surfaceText, surfaceBlank,
+            "initialized", pluginRel, "false");
+        reachProblems.AddRange(initScan.DeclProblems);
+        if (shippedCs.Length != 0 && !initScan.HomeDeclares)
+            reachProblems.Add("the initialisation gate flag must be DECLARED in " + pluginRel);
+        foreach (FieldWrite w in initScan.Real)
+            if (w.Kind != "= (simple assignment)" || w.Rhs != "true")
+                reachProblems.Add("every write to the initialisation gate flag must write true, or the tick "
+                    + "can fall back below its own gate after a staging attempt; found " + w.Kind
+                    + " with right-hand side '" + w.Rhs + "' in " + w.Rel + " line " + w.Line);
+        List<string> initElsewhere = RealOutside(initScan, pluginRel);
+        if (initElsewhere.Count != 0)
+            reachProblems.Add("only " + pluginRel + " may write the initialisation gate flag; found "
+                + string.Join(" | ", initElsewhere.ToArray()));
+        List<FieldWrite> initHere = RealIn(initScan, pluginRel);
+        if (initHere.Count != 1)
+            reachProblems.Add("the initialisation gate flag must have exactly one write across the "
+                + shippedCs.Length + " shipped file(s), in ANY spelling; found " + initHere.Count
+                + ": " + Describe(initHere));
+
+        string pluginBlank = LoadBlanked(pluginRel);
+        int gateAt = -1, tickOpen = -1, tickClose = -1;
+        if (pluginBlank == null) reachProblems.Add("cannot read " + pluginRel + " in the code view");
         else
         {
-            int stageSites = CallsTo(apiText, "ProximityVictimGate.StageInto");
-            if (stageSites != 3)
-                reachProblems.Add("the three pre-join merges are the only places this key is staged, and all "
-                    + "three are downstream of ApiClient.Initialize; found " + stageSites);
+            const string gateLine = "if (!initialized) return;";
+            int gates = CountOf(pluginBlank, gateLine);
+            if (gates != 1)
+                reachProblems.Add("the persistent tick must carry exactly one '" + gateLine
+                    + "' - it is the position every staging route is measured against; found " + gates);
+            else
+            {
+                gateAt = pluginBlank.IndexOf(gateLine, StringComparison.Ordinal);
+                string tickProblem;
+                if (!TryMemberSpanAround(pluginBlank, "private void Update()", gateAt,
+                        out tickOpen, out tickClose, out tickProblem))
+                    reachProblems.Add(tickProblem);
+            }
+
+            int io, ic; string ip;
+            if (!TryMemberSpan(pluginBlank, "private void DoInitialize()", out io, out ic, out ip))
+                reachProblems.Add(ip);
+            else
+            {
+                string initBody = pluginBlank.Substring(io, ic - io + 1);
+                int callAt = initBody.IndexOf("ApiClient.Initialize(", StringComparison.Ordinal);
+                if (callAt < 0)
+                    reachProblems.Add("DoInitialize must call ApiClient.Initialize - it is the point every "
+                        + "staging route has to be downstream of");
+                if (initHere.Count == 1)
+                {
+                    int flagAt = initHere[0].Index;
+                    if (flagAt < io || flagAt > ic)
+                        reachProblems.Add("the gate flag's one write must live inside DoInitialize, or the tick "
+                            + "opens on something other than a completed initialisation; found it at line "
+                            + initHere[0].Line);
+                    else if (callAt < 0 || (io + callAt) > flagAt)
+                        reachProblems.Add("the gate flag must be set AFTER ApiClient.Initialize in DoInitialize, "
+                            + "or the tick opens before the thing it is waiting for; ApiClient.Initialize at "
+                            + (io + callAt) + ", flag written at " + flagAt);
+                }
+                // R3, first half: no staging route may be reached from
+                // DoInitialize at all - above that call it would precede
+                // initialisation, and below it the tick is the route.
+                foreach (string entry in stageEntries)
+                {
+                    int here = CallsToIn(initBody, entry) + CallsToIn(initBody, "ApiClient." + entry);
+                    if (here != 0)
+                        reachProblems.Add("DoInitialize must not reach a staging entry point (" + entry
+                            + "); the route is the persistent tick below its gate, and a call here would run "
+                            + "on the initialisation path itself; found " + here);
+                }
+                if (CallsToIn(initBody, stageCall) != 0)
+                    reachProblems.Add("DoInitialize must not stage this key directly");
+            }
         }
+
+        // R3, second half, and R4 - where the staging entry points are called
+        // from, across the whole assembly.
+        var entryWhere = new List<string>();
+        foreach (string rel in shippedCs)
+        {
+            string blanked;
+            if (!surfaceBlank.TryGetValue(rel, out blanked)) continue;
+            var sites = new List<int>();
+            foreach (string entry in stageEntries)
+            {
+                sites.AddRange(CallSitesIn(blanked, "ApiClient." + entry));
+                if (rel == apiRel) sites.AddRange(CallSitesIn(blanked, entry));
+            }
+            if (sites.Count == 0) continue;
+            entryWhere.Add(rel + " x" + sites.Count);
+            if (rel != apiRel && rel != uiRel && rel != pluginRel)
+                reachProblems.Add("only " + apiRel + ", " + uiRel + " and " + pluginRel + " may reach a "
+                    + "staging entry point - every other caller is a route this argument has not shown to "
+                    + "run after initialisation; found " + sites.Count + " in " + rel);
+            if (rel != pluginRel) continue;
+            foreach (int at in sites)
+            {
+                if (gateAt < 0 || tickOpen < 0) break;
+                if (at < tickOpen || at > tickClose)
+                    reachProblems.Add("every staging call in " + pluginRel + " must live inside the persistent "
+                        + "tick; one at line " + LineOf(blanked, at) + " does not, so it is reached by a route "
+                        + "the gate does not stand in front of");
+                else if (at < gateAt)
+                    reachProblems.Add("every staging call in the persistent tick must sit BELOW "
+                        + "'if (!initialized) return;'; one at line " + LineOf(blanked, at)
+                        + " sits above it, so it can run before DoInitialize has called ApiClient.Initialize");
+            }
+        }
+        Console.WriteLine("NOTE  W25 staging routes: merges " + stageMap + "; entry-point callers "
+            + (entryWhere.Count == 0 ? "nowhere" : string.Join(" | ", entryWhere.ToArray())));
+
+        // R5 - the one route that leaves ApiClient.cs, pinned link by link to
+        // the same gate. Each link is "exactly this many call sites, in exactly
+        // this file, inside exactly this member", so a new caller anywhere else
+        // reddens rather than quietly extending the route.
+        string uiBlank = LoadBlanked(uiRel);
+        string compBlank = LoadBlanked(compRel);
+        if (uiBlank == null) reachProblems.Add("cannot read " + uiRel + " in the code view");
+        if (compBlank == null) reachProblems.Add("cannot read " + compRel + " in the code view");
+        if (uiBlank != null && compBlank != null && pluginBlank != null)
+        {
+            int to, tc; string tp;
+            if (!TryMemberSpan(uiBlank, "public static void Tick()", out to, out tc, out tp))
+                reachProblems.Add(uiRel + ": " + tp);
+            else
+                foreach (string tab in new[] { "MaybeRefreshOvtTab", "MaybeRefreshFfaTab" })
+                {
+                    var sites = CallSitesIn(uiBlank, tab);
+                    if (sites.Count != 1 || sites[0] < to || sites[0] > tc)
+                        reachProblems.Add(tab + " must be called exactly once, from inside " + uiRel
+                            + "'s Tick - that is what puts the menu's queue polling behind the same gate; found "
+                            + sites.Count + " site(s)");
+                    foreach (string rel in shippedCs)
+                    {
+                        string b2;
+                        if (rel == uiRel || !surfaceBlank.TryGetValue(rel, out b2)) continue;
+                        if (CallsToIn(b2, tab) + CallsToIn(b2, "NativeUI." + tab) != 0)
+                            reachProblems.Add(tab + " is reached from " + rel + " as well, which is a route "
+                                + "outside the one this argument walks");
+                    }
+                }
+
+            int co, cc; string cp2;
+            if (!TryMemberSpan(compBlank, "public static void Tick()", out co, out cc, out cp2))
+                reachProblems.Add(compRel + ": " + cp2);
+            else
+            {
+                var uiTickSites = new List<string>();
+                int inComp = 0;
+                foreach (string rel in shippedCs)
+                {
+                    string b2;
+                    if (!surfaceBlank.TryGetValue(rel, out b2)) continue;
+                    var sites = CallSitesIn(b2, "NativeUI.Tick");
+                    if (sites.Count == 0) continue;
+                    uiTickSites.Add(rel + " x" + sites.Count);
+                    if (rel != compRel) continue;
+                    foreach (int at in sites) if (at >= co && at <= cc) inComp++;
+                }
+                if (uiTickSites.Count != 1 || inComp != 1)
+                    reachProblems.Add("NativeUI.Tick must be called exactly once in the assembly, from inside "
+                        + compRel + "'s Tick; found " + string.Join(" | ", uiTickSites.ToArray()));
+            }
+
+            var compTickSites = new List<string>();
+            int compInTick = 0;
+            foreach (string rel in shippedCs)
+            {
+                string b2;
+                if (!surfaceBlank.TryGetValue(rel, out b2)) continue;
+                var sites = CallSitesIn(b2, "CompetitiveUI.Tick");
+                if (sites.Count == 0) continue;
+                compTickSites.Add(rel + " x" + sites.Count);
+                if (rel != pluginRel || gateAt < 0 || tickOpen < 0) continue;
+                foreach (int at in sites)
+                    if (at > gateAt && at >= tickOpen && at <= tickClose) compInTick++;
+            }
+            if (compTickSites.Count != 1 || compInTick != 1)
+                reachProblems.Add("CompetitiveUI.Tick must be called exactly once in the assembly, from the "
+                    + "persistent tick below its gate - that is the last link that puts the menu route "
+                    + "downstream of initialisation; found " + string.Join(" | ", compTickSites.ToArray()));
+        }
+
         Check("W25 Wiring_TheGuardsTermsAreSettledBeforeTheFirstStagingAttempt",
             reachProblems.Count == 0,
             string.Join("; ", reachProblems.ToArray()));
@@ -2642,6 +3234,97 @@ internal static class Program
             "plugin/Plugin.cs",
             "private void DoInitialize()",
             "ApiClient.Initialize(Plugin.ApiBaseUrl.Value);");
+
+        // W26 - THE ONE UNTESTED STEP IS DISCLOSED IN BOTH SHIPPED FILES, IN THE
+        // SAME WORDS. RED under "wire-lifecycledrop", which removes it from the
+        // seam; green under "wire-logquote", which moves another line entirely.
+        //
+        // The reachability argument has one link no test holds: Awake runs
+        // before the first tick that can reach DoInitialize. That is Unity's
+        // lifecycle contract, not a fact about this text. The patches file
+        // recorded it as a premise; the seam stated the same ordering and then
+        // said W25 pinned the premises, which W25 expressly does not do for this
+        // one. A shipped comment that presents an untested step as pinned is a
+        // claim about the whole state space written from the one state the
+        // author had in mind (#351/#434) - and a reader who takes it at face
+        // value stops looking for the thing that would falsify it.
+        //
+        // The sentences are pinned rather than paraphrased, and both files carry
+        // them EXACTLY ONCE each: a disclosure in one file and not the other is
+        // how the two accounts drifted apart in the first place.
+        string[] premiseNeedles = new[]
+        {
+            "Awake runs before the first tick that can reach DoInitialize.",
+            "W25 pins the greppable premises and not this one."
+        };
+        var premiseProblems = new List<string>();
+        foreach (string rel in new[] { "plugin/ProximityVictimPatches.cs", "plugin/ProximityVictimSeam.cs" })
+        {
+            // The PROSE view: the sentence being asserted IS a comment.
+            string text = LoadSource(rel);
+            if (text == null)
+            {
+                premiseProblems.Add("cannot read " + rel + " - an unread file in this surface is a failure, "
+                    + "not a skip");
+                continue;
+            }
+            foreach (string needle in premiseNeedles)
+            {
+                int n = CountOf(text, needle);
+                if (n != 1)
+                    premiseProblems.Add(rel + " must carry the untested-step disclosure exactly once ('"
+                        + needle + "'); found " + n);
+            }
+        }
+        Check("W26 Wiring_TheUntestedLifecycleStepIsDisclosedInBothShippedFiles",
+            premiseProblems.Count == 0,
+            string.Join("; ", premiseProblems.ToArray()));
+
+        // H1 - THE ROUND'S SEVERITY CENSUS IS DERIVED FROM THE FINDING BODIES.
+        // RED under "wire-severitycensus", which changes ONE body's SEVERITY
+        // marker and leaves the declared line alone - the NOTE line below then
+        // prints the MOVED census, which is the demonstration itself. W25 is the
+        // inert twin and stays green: it reads no findings file, so the row
+        // cannot be read as "anything in the tree moved".
+        //
+        // The round-6 log's header said "two MEDIUM, five LOW" while its own
+        // seven bodies read three MEDIUM and four LOW. Every NUMBER in that
+        // header was counted from the run; the severity line was typed, and a
+        // typed number beside derived ones is the one a reader has no way to
+        // tell apart (#431). The fix is not a more careful typist: the bodies
+        // live in round-findings.md with an explicit SEVERITY: marker each, the
+        // census line is COMPUTED from those markers, and the log's header
+        // quotes the computed line. This case is what makes the declared line
+        // unable to disagree with the bodies.
+        const string findRel = "tools/tests/bug389-seam/round-findings.md";
+        string findText = LoadSource(findRel);
+        var censusProblems = new List<string>();
+        if (findText == null)
+            censusProblems.Add("cannot read " + findRel + " - the finding bodies are the census's only source, "
+                + "so an unread file is a failure, not a skip");
+        else
+        {
+            string derived = DerivedCensus(findText);
+            int declared = CountOf(findText, "CENSUS: ");
+            if (declared != 1)
+                censusProblems.Add(findRel + " must declare the census exactly once on a 'CENSUS: ' line; found "
+                    + declared);
+            else
+            {
+                int at = findText.IndexOf("CENSUS: ", StringComparison.Ordinal) + "CENSUS: ".Length;
+                int end = findText.IndexOf((char)10, at);
+                if (end < 0) end = findText.Length;
+                string printed = findText.Substring(at, end - at).Trim();
+                if (printed != derived)
+                    censusProblems.Add("the declared census must be the one the bodies produce - the header "
+                        + "line a reader sees is computed, never typed; bodies say '" + derived
+                        + "', the file declares '" + printed + "'");
+            }
+            Console.WriteLine("NOTE  H1 severity census, derived from the bodies: " + derived);
+        }
+        Check("H1 Report_TheSeverityCensusIsDerivedFromTheFindingBodies",
+            censusProblems.Count == 0,
+            string.Join("; ", censusProblems.ToArray()));
 
         Console.WriteLine("=== passed=" + _passed + " failed=" + _failed + " ===");
         return _failed == 0 ? 0 : 1;

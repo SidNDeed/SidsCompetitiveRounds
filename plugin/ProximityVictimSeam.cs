@@ -328,8 +328,19 @@ namespace CompetitiveRounds
         /// callbacks, inside Plugin.Awake's single patch loop, which finishes
         /// before DoInitialize reaches ApiClient.Initialize - and every pre-join
         /// merge that can stage this key is downstream of that call; and every
-        /// write to either of the other two terms writes true. W25 pins
-        /// those premises. #287 above is why the FIRST advertisement is safe;
+        /// write to either of the other two terms writes true. W25 pins those
+        /// GREPPABLE premises, the downstream relation included: it walks each
+        /// route into the merges rather than counting them.
+        ///
+        /// ONE STEP IN THAT CHAIN IS NOT GREPPABLE. It is recorded as a premise
+        /// rather than asserted as a test:
+        /// Awake runs before the first tick that can reach DoInitialize.
+        /// That is Unity's lifecycle contract, which this mod's polling
+        /// architecture already rests on everywhere. No case in this suite
+        /// proves that step -
+        /// W25 pins the greppable premises and not this one.
+        ///
+        /// #287 above is why the FIRST advertisement is safe;
         /// reachability is why there is never a later one to reason about. An
         /// earlier wording of this paragraph said the opposite - that a seat
         /// whose patches complete after a declined attempt goes on to advertise -

@@ -160,15 +160,19 @@ namespace CompetitiveRounds
         /// So the shortfall message's closing clause - that this seat is on
         /// vanilla for the rest of the session - is true when it prints, and the
         /// TeleportToOpponent doc below may keep telling a maintainer to grep a
-        /// session log for it. W25 pins each premise above; W23 holds the
-        /// advertising branch clear of this flag AND of any second latch; W24
-        /// keeps the retracted wording out of every file that certifies the
-        /// deletion (#351/#434).
+        /// session log for it. W25 pins each GREPPABLE premise above - including
+        /// the downstream relation itself, route by route, rather than by
+        /// counting the merges; W23 holds the advertising branch clear of this
+        /// flag AND of any second latch; W24 keeps the retracted wording out of
+        /// every file that certifies the deletion (#351/#434).
         ///
-        /// One step in that chain is not greppable, and is recorded here as a
-        /// premise rather than asserted as a test: Awake runs before the first
-        /// tick that can call DoInitialize. That is Unity's lifecycle contract,
-        /// which this mod's polling architecture already rests on everywhere.
+        /// ONE STEP IN THAT CHAIN IS NOT GREPPABLE. It is recorded as a premise
+        /// rather than asserted as a test:
+        /// Awake runs before the first tick that can reach DoInitialize.
+        /// That is Unity's lifecycle contract, which this mod's polling
+        /// architecture already rests on everywhere. No case in this suite
+        /// proves that step -
+        /// W25 pins the greppable premises and not this one.
         ///
         /// What the flag does buy is the one thing its name is about: the
         /// shortfall message states itself once per session rather than on every
