@@ -26956,14 +26956,29 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
         /// the first measured the row. The other two are the same fail-to-OFF and
         /// this line says so, because a witness that spells "nothing answered this"
         /// as "the route said false" hands a triage a denial nobody made (#342,
-        /// #351).</para></summary>
+        /// #351).</para>
+        ///
+        /// <para>AND THE CACHE-MISMATCH CASE IS TWO STATES, NOT ONE — the round-7
+        /// correction. A cache whose ForId names ANOTHER series and a cache with no
+        /// ForId at all both fail the same gate, and the previous wording reported
+        /// both as "a different series". The second is what the id setter leaves
+        /// behind: for a newly adopted series, before its first answer, ForId is
+        /// null and there is no other series. The line names each state, and the
+        /// change key holds them apart so the second does not suppress the first
+        /// (#342: a witness is judged by what it can tell apart).</para></summary>
         private static string _dcBannerWitnessKey = null;
 
         private static void LogDcBannerWitness(string seriesId, bool shown,
                                                bool cacheIsThisSeries, bool latchedDark)
         {
+            // "No cached series at all" and "a cache describing another series" are
+            // two different states that both make cacheIsThisSeries false, and the
+            // off line names them apart — so the key has to hold them apart too, or
+            // the second would be suppressed by the first (#342).
+            bool noCachedSeries = string.IsNullOrEmpty(ApiClient.LastSeriesStateForId);
             string key = (seriesId ?? "-") + "|" + (shown ? "on" : "off")
                          + "|" + (cacheIsThisSeries ? "c" : "-")
+                         + (noCachedSeries ? "0" : "s")
                          + (latchedDark ? "d" : "-")
                          + (ApiClient.LastSeriesDcDeferred ? "f" : "-")
                          + (ApiClient.LastSeriesDcDeferredFieldsPresent ? "p" : "-");
@@ -26985,8 +27000,14 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
                         ? "the status read for this series is latched dark, so there is no "
                           + "current deferral state to draw and the last one is not kept"
                         : !cacheIsThisSeries
-                            ? "the status cache describes a different series, so nothing in "
-                              + "it describes this one"
+                            ? (noCachedSeries
+                                ? "the status cache describes NO series — no answer has been "
+                                  + "applied since this one was adopted, and the id change "
+                                  + "cleared what the previous answer left. This is the state "
+                                  + "before the first answer, not a denial about this series"
+                                : "the status cache describes a DIFFERENT series ("
+                                  + ApiClient.LastSeriesStateForId + "), so nothing in "
+                                  + "it describes this one")
                             : ApiClient.LastSeriesDcDeferredFieldsPresent
                                 ? "the last answer for this series carried dc_deferred=false, "
                                   + "so as of that answer the series held no deferral marker "
@@ -27093,8 +27114,12 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             // it; dc_grace_until is only ever written NULL; and the primary holds
             // no team_series row in that status at all. For three rounds the
             // else-branch was the only branch that ran, for every series on every
-            // box, while a 2v2 survivor sat inside a 420 s deferral window and was
-            // told nothing. A deleted mechanism beats a patched one (#310, #389),
+            // box, while a 2v2 survivor sat inside the deferral window the status
+            // route reports and was told nothing. THE BOUND IS NOT RESTATED HERE AS
+            // A NUMBER: this file renders the bound the answer carried and keeps no
+            // copy of it, in the prose no more than in the code, so there is no
+            // second place for the constant to drift out of step with the server's
+            // (#342). A deleted mechanism beats a patched one (#310, #389),
             // and the test that used to REQUIRE this predicate now rejects it.
             //
             // WHAT IT RENDERS FROM NOW: the three fields the read-only status

@@ -2660,10 +2660,9 @@ def test_r5_h1_no_cell_of_the_box_matrix_dispatches_the_lifecycle_route():
     _assert_discriminating(
         claim, api,
         _mutate(api,
-                '                            + "is no second route to try, and nothing is parsed '
-                'out of this answer");\n                        return;',
-                '                            + "is no second route to try, and nothing is parsed '
-                'out of this answer");\n'
+                '                        RequestBannerRepaintIfChanged(bannerBefore);\n'
+                '                        return;',
+                '                        RequestBannerRepaintIfChanged(bannerBefore);\n'
                 '                        PollTeamSeriesStateAssemblyOnly(seriesId, onResponse);\n'
                 '                        return;',
                 "R5 H1 a fallback to the lifecycle route"),
@@ -3047,8 +3046,13 @@ def test_r4_h3_a_fallback_report_carries_is_fallback_and_a_prompt_report_does_no
     A server carrying the deferral rule does not settle on a zero-total fallback:
     it records that a survivor believes the series abandoned, answers
     {"deferred": true}, and leaves the row active so a real-totals prompt report
-    arriving at ANY later time still reaches its normal branches including the
-    rated lead-forfeit.  The round-3 note claimed "client coupling: none
+    can still reach its normal branches -- WITHIN THE BOUND, which is the
+    contract's sentence and not "at any later time":
+
+    A real-totals report wins while the deferred marker is younger than 420
+    seconds, and after that only until a sweep tick finds no live-game evidence
+    for the series and settles the row; once a row is settled, a later report is
+    refused at the settled-row exit and is not rated.  The round-3 note claimed "client coupling: none
     required" while the reviewed URL sent no such flag -- which would have left
     every fallback on the immediate-settlement path with a complete server half
     deployed (#635: a field on one side of a wire contract and not the other
@@ -3554,8 +3558,9 @@ def test_r5lens_f2_at_most_one_status_read_is_outstanding():
     # read leaves the route unable to dispatch for the session
     assert not claim(_mutate(
         api,
-        "                    _statusReadInFlight = false;\n                    // GATE 2",
-        "                    // GATE 2",
+        "                    _statusReadInFlight = false;\n"
+        "                    // The banner's inputs as of this ANSWER.",
+        "                    // The banner's inputs as of this ANSWER.",
         "R5-lens F2 clear moved after the early return"))
 
     # NEGATIVE CONTROL: rewording the dispatch-failure log leaves the claim true
@@ -3939,7 +3944,7 @@ def test_r5lens_the_latch_darkens_what_the_banner_actually_renders_from():
         "R6 the clear is confined to the cached series")
 
     # NEGATIVE CONTROL: rewording the comment above the clear changes nothing
-    assert claim(_mutate(api, "DARK HAS TO MEAN DARK.", "DARK MUST MEAN DARK.",
+    assert claim(_mutate(api, "DARK HAS TO MEAN DARK,", "DARK MUST MEAN DARK,",
                          "R6 latch negative control"))
 
 
@@ -4121,11 +4126,20 @@ def test_r6_item7_the_dead_banner_predicate_is_deleted_not_preserved():
     assert "ApiClient.LastSeriesDcDeferred" in block
     assert "ApiClient.LastSeriesDcDeferredSecondsRemaining" in block
     assert "ApiClient.LastSeriesDcDeferredBoundSeconds" in block
-    # no local copy of the bound: 420 may be named in the prose that explains the
-    # window, never in a line of code that renders or computes with it
+    # NO LOCAL COPY OF THE BOUND, AND ROUND 7 BINDS THE CONTENT.  Round 6 read
+    # this as "420 may sit in prose, never in code", and the prose then carried
+    # "a 420 s deferral window" -- a restatement of the server's constant in a
+    # file whose whole claim is that it keeps no copy of it, and a check that
+    # accepted exactly the wording B3 asks it to reject.  The rule is now about
+    # CONTENT: the constant appears in this block only inside the contract's
+    # bound sentence, verbatim, or it does not appear at all.
     for line in block.split("\n"):
         if "420" in line:
             assert line.strip().startswith("//"), line
+    assert _bound_sentence_or_no_constant(block), (
+        "the DC banner block restates 420 outside the contract's bound sentence")
+    # and the specific superseded wording is rejected by name
+    assert "420 s deferral window" not in block
 
     # THE SHOW PREDICATE IS dc_deferred ALONE
     assert "&& ApiClient.LastSeriesDcDeferred;" in block
@@ -4696,9 +4710,14 @@ def test_r6_an_id_change_clears_the_banners_three_inputs():
     assert a in api
     setter = api[api.index(a):api.index("activeTeamSeriesId = value;", api.index(a))]
 
+    # ROUND 7 adds the fourth: the PRESENCE bit is a banner input too -- it is in
+    # the render key and the off-witness reads it -- so leaving it set said the
+    # previous series' answer carried the deferral state, about a series whose
+    # numbers had just been cleared.
     for f in ("LastSeriesDcDeferred = false;",
               "LastSeriesDcDeferredSecondsRemaining = 0;",
-              "LastSeriesDcDeferredBoundSeconds = 0;"):
+              "LastSeriesDcDeferredBoundSeconds = 0;",
+              "LastSeriesDcDeferredFieldsPresent = false;"):
         assert f in setter, f
 
     def claim(s):
@@ -4707,7 +4726,8 @@ def test_r6_an_id_change_clears_the_banners_three_inputs():
         b = s[s.index(a):s.index("activeTeamSeriesId = value;", s.index(a))]
         return all(f in b for f in ("LastSeriesDcDeferred = false;",
                                     "LastSeriesDcDeferredSecondsRemaining = 0;",
-                                    "LastSeriesDcDeferredBoundSeconds = 0;"))
+                                    "LastSeriesDcDeferredBoundSeconds = 0;",
+                                    "LastSeriesDcDeferredFieldsPresent = false;"))
 
     # MUTATION: the id change stops clearing the deferral state
     _assert_discriminating(
@@ -4868,14 +4888,14 @@ def test_r6lens_h2_an_answer_that_changes_the_banner_asks_for_the_repaint():
     assert parse, "the shared parse could not be delimited"
 
     assert "string bannerBefore = BannerRenderKey();" in parse
-    assert "if (BannerRenderKey() != bannerBefore) NativeUI.MarkDirty();" in parse
+    assert "RequestBannerRepaintIfChanged(bannerBefore);" in parse
     # the key is taken BEFORE the fields are written and compared after
     assert parse.index("string bannerBefore = BannerRenderKey();") < parse.index(
-        "if (BannerRenderKey() != bannerBefore) NativeUI.MarkDirty();")
+        "RequestBannerRepaintIfChanged(bannerBefore);")
 
     key = _method_body(api, "private static string BannerRenderKey()")
     assert key, "the render key could not be delimited"
-    for field in ("LastSeriesStateForId", "LastSeriesDcDeferred",
+    for field in ("activeTeamSeriesId", "LastSeriesStateForId", "LastSeriesDcDeferred",
                   "LastSeriesDcDeferredSecondsRemaining",
                   "LastSeriesDcDeferredBoundSeconds",
                   "LastSeriesDcDeferredFieldsPresent",
@@ -4888,7 +4908,7 @@ def test_r6lens_h2_an_answer_that_changes_the_banner_asks_for_the_repaint():
         if not p or not k:
             return False
         return ("string bannerBefore = BannerRenderKey();" in p
-                and "if (BannerRenderKey() != bannerBefore) NativeUI.MarkDirty();" in p
+                and "RequestBannerRepaintIfChanged(bannerBefore);" in p
                 and "LastSeriesDcDeferredSecondsRemaining" in k
                 and "LastSeriesStateForId" in k)
 
@@ -4897,7 +4917,9 @@ def test_r6lens_h2_an_answer_that_changes_the_banner_asks_for_the_repaint():
     _assert_discriminating(
         claim, api,
         _mutate(api,
-                "            if (BannerRenderKey() != bannerBefore) NativeUI.MarkDirty();",
+                "one before/after key (#432).\n"
+                "            RequestBannerRepaintIfChanged(bannerBefore);",
+                "one before/after key (#432).\n"
                 "            // no repaint",
                 "R6lens the repaint request is removed"),
         "R6lens an answer that changes the banner asks for a repaint")
@@ -4995,7 +5017,9 @@ def test_r6lens_m3_m5_the_banner_off_line_separates_absent_from_false():
     _assert_discriminating(
         parsed, api,
         _mutate(api,
+                "                LastSeriesDcDeferredBoundSeconds = 0;\n"
                 "                LastSeriesDcDeferredFieldsPresent = false;",
+                "                LastSeriesDcDeferredBoundSeconds = 0;\n"
                 "                LastSeriesDcDeferredFieldsPresent = true;",
                 "R6lens absence is recorded as presence"),
         "R6lens the parse records absence as absence")
@@ -5174,3 +5198,734 @@ def test_r6lens_l6_a_tree_being_written_is_not_read_as_a_disagreement():
     # and the live resolver still resolves through all of it
     text, how = _server_lane_main()
     assert text, how
+
+
+# ── ROUND 7: the repaint rule at the class, and eleven claims ────────────────
+# The round-6 review raised one MEDIUM and eleven LOWs.  The MEDIUM was an
+# implementation error inside round 6's own closure of H -- the repaint request
+# was added at ONE exit while the defect was the CLASS -- so nothing below
+# replaces a mechanism.  Each case closes one finding by number.
+
+
+# The contract's bound sentence, reflowed-tolerant, shared by the round-7 cases
+# that bind it.  One copy in this file, because a rule described twice is a rule
+# that drifts (#341, #444).
+_R7_BOUND_SENTENCE = (
+    "A real-totals report wins while the deferred marker is younger than 420 "
+    "seconds, and after that only until a sweep tick finds no live-game evidence "
+    "for the series and settles the row; once a row is settled, a later report is "
+    "refused at the settled-row exit and is not rated.")
+
+
+def _r7_flatten(s):
+    """Comment/string text as WORDS, so a sentence can be compared across line
+    breaks, comment markers and C# string concatenation."""
+    out = []
+    for line in s.split("\n"):
+        t = line.strip()
+        if t.startswith("///"):
+            t = t[3:]
+        elif t.startswith("//"):
+            t = t[2:]
+        elif t.startswith("#"):
+            t = t[1:]
+        t = t.replace('+ "', " ").replace('"', " ")
+        out.append(t)
+    return " ".join(" ".join(out).split())
+
+
+def _bound_sentence_or_no_constant(block):
+    """The CONTENT rule B3 asks for: the bound constant appears in this text only
+    inside the contract's sentence, verbatim, or it does not appear at all.
+
+    A rewording that keeps the meaning and drops the number stays true; restating
+    "420" in prose of this file's own does not."""
+    if "420" not in block:
+        return True
+    return " ".join(_R7_BOUND_SENTENCE.split()) in _r7_flatten(block)
+
+
+# ── M1 / B3 / B19: every path that changes a banner input asks for a repaint ──
+
+# The banner's inputs, as the render key spells them.  A WRITER is an assignment
+# to one of these; the census below is a grep of that OPERATION rather than of
+# the one line the review flagged (#432, #330, #279).
+_R7_BANNER_INPUTS = (
+    "LastSeriesDcDeferred",
+    "LastSeriesDcDeferredSecondsRemaining",
+    "LastSeriesDcDeferredBoundSeconds",
+    "LastSeriesDcDeferredFieldsPresent",
+    "LastSeriesStateForId",
+    "LastSeriesT1Wins",
+    "LastSeriesT2Wins",
+    "activeTeamSeriesId",
+)
+
+_R7_ASSIGN = re.compile(
+    r"^\s*(?:ApiClient\.)?(" + "|".join(_R7_BANNER_INPUTS) + r")\s*=(?!=)", re.M)
+
+
+def _r7_writer_lines(src):
+    """Every line of `src` that ASSIGNS a banner input, excluding the field
+    declarations themselves (which carry a `static` on the same line)."""
+    out = []
+    for i, line in enumerate(src.split("\n"), 1):
+        if not _R7_ASSIGN.match(line):
+            continue
+        if " static " in line or line.strip().startswith("private ") \
+                or line.strip().startswith("public "):
+            continue
+        out.append((i, line.strip()))
+    return out
+
+
+def _r7_setter_span(api):
+    a = api.find("        public static string ActiveTeamSeriesId")
+    b = api.find("        public static bool IsTeamQueuePolling", a)
+    if a < 0 or b < 0:
+        return ""
+    return api[a:b]
+
+
+def _r7_refusal_span(poller):
+    """The refusal path inside the read-only poller: from the `!affirmed` gate to
+    the `return;` that ends it.  This is also the TIMEOUT path and the
+    transport-refusal path -- GetRequest invokes this one callback on every exit,
+    and the three are distinguished only by the code in `answeredWith`."""
+    a = poller.find("if (!affirmed)")
+    if a < 0:
+        return ""
+    b = poller.find("return;", a)
+    if b < 0:
+        return ""
+    return poller[a:b + len("return;")]
+
+
+def _r7_dispatch_throw_span(poller):
+    a = poller.find("catch (Exception ex)")
+    return poller[a:] if a >= 0 else ""
+
+
+def _r7_repaint_paths(src):
+    """{name: span} for every path that must hold the repaint rule."""
+    poller = _method_body(src, "public static void PollTeamSeriesStatusReadOnly")
+    return {
+        "the id setter": _r7_setter_span(src),
+        "the refusal path (and the timeout)": _r7_refusal_span(poller),
+        "the dispatch-throw path": _r7_dispatch_throw_span(poller),
+        "the shared parse": _method_body(
+            src, "private static void ApplySeriesStateResponse"),
+    }
+
+
+def test_r7_m1_b19_every_path_that_changes_a_banner_input_asks_for_the_repaint():
+    """THE RULE BELONGS TO THE OPERATION, NOT TO ONE EXIT (#432, #330, #279).
+
+    Round 6 closed H by adding the repaint request at the end of the affirmative
+    parse.  The refusal branch clears the same three fields and returns without
+    it, so once the banner had rendered, a later 404, 500 or unanswered read
+    changed the state the banner reads while the visible object stayed active
+    until something unrelated marked the tab dirty -- during an outage, for as
+    long as the tab stayed open.  A flag names a LINE; the defect was a CLASS.
+
+    WHAT IS ASSERTED HERE.  First the CENSUS: every assignment to a banner input
+    in this file, found by grepping the operation, falls inside one of the paths
+    below -- so a new writer somewhere else reddens this rather than slipping in
+    beside it.  Then, for each path, the request is present EXACTLY ONCE within
+    that path's own span, never counted file-wide, where four copies would let
+    any one of them go missing unnoticed.
+
+    The dispatch-throw path writes none of the inputs and therefore asks for
+    nothing at run time.  It carries the call all the same: a rule with an
+    exempt path is a rule nobody can check, and a path that gains a write later
+    gains the request with it."""
+    api = _src("ApiClient.cs")
+
+    paths = _r7_repaint_paths(api)
+    for name, span in paths.items():
+        assert span, "the span for " + name + " could not be delimited"
+
+    # THE CENSUS -- the sweep of siblings, recorded.  Every writer of a banner
+    # input is inside one of the paths above.
+    writers = _r7_writer_lines(api)
+    assert writers, "the writer grep found nothing -- the census cannot be empty"
+    outside = []
+    for lineno, text in writers:
+        if not any(text in span for span in paths.values()):
+            outside.append((lineno, text))
+    assert not outside, (
+        "these writers of a banner input sit outside every repaint path: "
+        + repr(outside))
+
+    # THE OCCURRENCE ASSERTION, WITHIN EACH PATH'S SPAN.
+    for name, span in paths.items():
+        n = span.count("RequestBannerRepaintIfChanged(")
+        assert n == 1, "%s carries %d repaint requests, not 1" % (name, n)
+
+    # the callback takes ONE key for every answer, so the refusal, the transport
+    # failure and the 20 s timeout are one path and are covered together
+    poller = _method_body(api, "public static void PollTeamSeriesStatusReadOnly")
+    assert "_statusReadInFlight = false;" in poller
+    assert "string bannerBefore = BannerRenderKey();" in poller
+    assert poller.index("_statusReadInFlight = false;") < poller.index(
+        "string bannerBefore = BannerRenderKey();")
+    assert poller.index("string bannerBefore = BannerRenderKey();") < poller.index(
+        "if (!affirmed)")
+
+    # the helper exists and is the only thing that marks the tab dirty for this
+    # banner -- one rule, one implementation (#330)
+    helper = _method_body(api, "private static void RequestBannerRepaintIfChanged")
+    assert helper, "the repaint helper could not be delimited"
+    assert "if (BannerRenderKey() != keyBefore) NativeUI.MarkDirty();" in helper
+
+    def claim(s):
+        try:
+            ps = _r7_repaint_paths(s)
+        except Exception:
+            return False
+        if not all(ps.values()):
+            return False
+        return all(span.count("RequestBannerRepaintIfChanged(") == 1
+                   for span in ps.values())
+
+    # ONE MUTATION PER PATH, each removing that path's own request.  Each anchor
+    # is unique in the file -- by indentation, or by the argument name -- so a
+    # first-occurrence replace removes exactly the one named.
+    # EACH ANCHOR CARRIES THE UNIQUE LINE ABOVE ITS CALL.  The call text at one
+    # indentation is a SUBSTRING of the same call at a deeper one, so a bare
+    # call line would mutate whichever copy came first -- a control that reports
+    # on a path it never touched (#342).
+    removals = (
+        ("the id setter",
+         "                activeTeamSeriesId = value;\n"
+         "                RequestBannerRepaintIfChanged(bannerBefore);",
+         "R7-M1-a the id setter stops asking for the repaint"),
+        ("the refusal path",
+         "// OPERATION's rather than one exit's (#432, #330).\n"
+         "                        RequestBannerRepaintIfChanged(bannerBefore);",
+         "R7-M1-b the refusal path stops asking for the repaint"),
+        ("the dispatch-throw path",
+         "RequestBannerRepaintIfChanged(dispatchBannerBefore);",
+         "R7-M1-c the dispatch-throw path stops asking for the repaint"),
+        ("the shared parse",
+         "one before/after key (#432).\n"
+         "            RequestBannerRepaintIfChanged(bannerBefore);",
+         "R7-M1-d the shared parse stops asking for the repaint"),
+    )
+    for _name, anchor, label in removals:
+        assert api.count(anchor) == 1, "ambiguous anchor: " + label
+        _assert_discriminating(
+            claim, api, _mutate(api, anchor, "// no repaint", label), label)
+
+    # AND ONE INERT TWIN PER PATH: a change of the SAME SHAPE at the SAME SITE
+    # that leaves the request in place.  A check that reddens on any edit at all
+    # proves nothing about this one (#391).
+    twins = (
+        ("the id setter",
+         "// RequestBannerRepaintIfChanged for the repaint after — the same rule",
+         "// RequestBannerRepaintIfChanged for the redraw after — the same rule"),
+        ("the refusal path",
+         "// THE REPAINT RULE ON THE REFUSAL PATH. The branch above may",
+         "// THE REPAINT RULE ON THE REFUSAL PATH. That branch above may"),
+        ("the dispatch-throw path",
+         "// THE REPAINT RULE ON THE DISPATCH-THROW PATH, and it is inert on",
+         "// THE REPAINT RULE ON THE DISPATCH-THROW PATH, and it stays inert on"),
+        ("the shared parse",
+         "// IT IS THE SHARED CALL AND NOT A LOCAL COMPARISON, because round 6's",
+         "// IT IS THE SHARED CALL AND NOT A LOCAL COMPARISON, since round 6's"),
+    )
+    for name, old, new in twins:
+        twin = _mutate(api, old, new, "R7-M1 inert twin at " + name)
+        assert twin != api, "the inert twin for " + name + " changed nothing"
+        assert claim(twin), "the inert twin at " + name + " reddened the check"
+
+
+def test_r7_b16_the_refusal_branch_says_what_it_now_does_to_the_screen():
+    """B16: THE AUTHORED CLAIM AT THE LATCH.
+
+    The round-6 comment said latching stops the poll and, on its own, does not
+    change what the banner renders FROM -- two facts.  There is a third: changing
+    what it renders from does not repaint it.  The off-witness's own wording,
+    "the last one is not kept", is a claim about the SCREEN, and the clear alone
+    made it true only of the STATE."""
+    api = _src("ApiClient.cs")
+    poller = _method_body(api, "public static void PollTeamSeriesStatusReadOnly")
+    assert poller
+    assert "DARK HAS TO MEAN DARK, AND THAT IS THREE FACTS, NOT TWO." in poller
+    assert "changing what it renders from" in poller
+    assert "does not repaint it" in poller
+    # the superseded two-fact wording is gone
+    assert "are two different facts (#342). These three fields are the" not in poller
+
+    def claim(s):
+        b = _method_body(s, "public static void PollTeamSeriesStatusReadOnly")
+        return bool(b) and "DARK HAS TO MEAN DARK, AND THAT IS THREE FACTS, NOT TWO." in b \
+            and "does not repaint it" in b
+
+    _assert_discriminating(
+        claim, api,
+        _mutate(api, "DARK HAS TO MEAN DARK, AND THAT IS THREE FACTS, NOT TWO.",
+                "DARK HAS TO MEAN DARK. Latching stops the POLL; on its own",
+                "R7-B16 the latch comment returns to two facts"),
+        "R7-B16 the latch comment states the third fact")
+    # inert twin: the sentence around it is reworded, the claim stands
+    assert claim(_mutate(api, "Latching stops the POLL; on its own it does not change what",
+                         "Latching stops the POLL; by itself it does not change what",
+                         "R7-B16 inert twin"))
+
+
+# ── L2: the bound constant is not restated in the banner block ───────────────
+
+
+def test_r7_l2_the_banner_block_restates_no_bound_constant():
+    """L2, carrying B3.
+
+    A local "420 s deferral window" sat in the prose of the one file whose whole
+    claim is that it keeps no copy of the bound, and `test:4124` explicitly
+    accepted it -- the check admitted exactly the wording B3 asks it to reject.
+    The rule is now about CONTENT: the constant appears in that block only inside
+    the contract's bound sentence, verbatim, or not at all."""
+    ui = _src("NativeUI.cs")
+    block = _dc_banner_block(ui)
+    assert block, "the DC banner block could not be delimited"
+
+    assert _bound_sentence_or_no_constant(block)
+    assert "420 s deferral window" not in block
+    assert "THE BOUND IS NOT RESTATED HERE AS" in block
+
+    def claim(s):
+        b = _dc_banner_block(s)
+        return bool(b) and _bound_sentence_or_no_constant(b) \
+            and "420 s deferral window" not in b
+
+    # MUTATION: the superseded prose comes back
+    _assert_discriminating(
+        claim, ui,
+        _mutate(ui, "sat inside the deferral window the status\n            // route reports",
+                "sat inside a 420 s deferral window\n            // and was told",
+                "R7-L2 the banner block restates the bound as a number"),
+        "R7-L2 the banner block restates no bound constant")
+
+    # INERT TWIN: a rewording that keeps the meaning and names no number
+    assert claim(_mutate(
+        ui, "sat inside the deferral window the status",
+        "sat inside the deferral window that the status",
+        "R7-L2 inert twin"))
+
+
+# ── L3 / B11: the ABSENT branch says only what an absent key proves ──────────
+
+
+def test_r7_l3_b11_the_absent_branch_says_only_what_absence_proves():
+    """L3, carrying B11.
+
+    The branch carried the contract's sentence and then added that "nothing
+    parked this report" -- an event-level conclusion an absent key did not
+    measure.  Under contract item 6 an absent `deferred` proves only that the
+    answering box predates the field, and says nothing about whether that box
+    settled, ignored or fenced the report."""
+    api = _src("ApiClient.cs")
+    assert "That the answering box predates the field is the whole of " in api
+    assert "what this absence proves; it says nothing about whether that " in api
+    assert "box settled, ignored or fenced this report" in api
+    # THE SUPERSEDED WORDING IS REJECTED BY NAME
+    assert "What is certain is that nothing parked this report" not in api
+
+    def claim(s):
+        return ("That the answering box predates the field is the whole of " in s
+                and "box settled, ignored or fenced this report" in s
+                and "What is certain is that nothing parked this report" not in s)
+
+    _assert_discriminating(
+        claim, api,
+        _mutate(api,
+                '                                + ". That the answering box predates the field '
+                'is the whole of "',
+                '                                + ". What is certain is that nothing parked '
+                'this report, so the "',
+                "R7-L3 the absent branch reclaims that nothing parked the report"),
+        "R7-L3 the absent branch says only what absence proves")
+
+    # INERT TWIN: the explanatory comment above the line is reworded
+    assert claim(_mutate(api, "AN ABSENT FIELD IS A FACT ABOUT THE BOX, NOT ABOUT THE ROW,",
+                         "AN ABSENT FIELD IS A FACT ABOUT THE BOX AND NOT ABOUT THE ROW,",
+                         "R7-L3 inert twin"))
+
+
+# ── L6: the off line splits "no cached series" from "a different series" ─────
+
+
+def test_r7_l6_the_off_line_splits_no_cached_series_from_a_different_one():
+    """L6.
+
+    `ApiClient.cs` produces the cache-mismatch state two ways: a cache whose
+    ForId names ANOTHER series, and a cache with no ForId at all, which is what
+    the id setter leaves for a newly adopted series before its first answer.
+    The witness reported both as "a different series", so the state BEFORE the
+    first answer was logged as an answer about another series."""
+    ui = _src("NativeUI.cs")
+    api = _src("ApiClient.cs")
+    body = _witness_body(ui)
+    assert body, "the witness body could not be delimited"
+
+    # the state exists on the other side: the setter nulls the cache id
+    assert "LastSeriesStateForId = null;" in api
+
+    assert "bool noCachedSeries = string.IsNullOrEmpty(ApiClient.LastSeriesStateForId);" in body
+    assert "the status cache describes NO series" in body
+    assert "the status cache describes a DIFFERENT series (" in body
+    # and the change key holds them apart, or the second suppresses the first
+    assert '+ (noCachedSeries ? "0" : "s")' in body
+
+    def claim(s):
+        b = _witness_body(s)
+        return bool(b) and "the status cache describes NO series" in b \
+            and "the status cache describes a DIFFERENT series (" in b \
+            and '+ (noCachedSeries ? "0" : "s")' in b
+
+    # MUTATION 1: the two states collapse back into one sentence
+    _assert_discriminating(
+        claim, ui,
+        _mutate(ui, "the status cache describes NO series",
+                "the status cache describes a different series",
+                "R7-L6 the two cache states collapse into one"),
+        "R7-L6 the off line names each cache state")
+
+    # MUTATION 2: the key stops holding them apart, so one suppresses the other
+    _assert_discriminating(
+        claim, ui,
+        _mutate(ui, '                         + (noCachedSeries ? "0" : "s")\n', "",
+                "R7-L6 the change key stops separating the two cache states"),
+        "R7-L6 the change key separates the two cache states")
+
+    # INERT TWIN: the explanatory comment is reworded
+    assert claim(_mutate(
+        ui, '// "No cached series at all" and "a cache describing another series" are',
+        '// "No cached series at all" and "a cache naming another series" are',
+        "R7-L6 inert twin"))
+
+
+# ── L7: the three suppressors state the cardinality they actually have ───────
+
+_R7_SUPPRESSORS = ("_statusPollRefusedForSeries",
+                   "_statusPollProvenForSeries",
+                   "_statusPollNoDeferralForSeries")
+
+
+def test_r7_l7_the_three_suppressors_state_their_real_cardinality():
+    """L7.
+
+    Three comments promised "one line per series" while all three suppressors
+    are a single remembered string, so an A -> B -> A sequence emits A's line
+    again -- which `:14916-14920` already admitted correctly for W28.  Each
+    comment now states the cardinality the field has."""
+    api = _src("ApiClient.cs")
+
+    # all three ARE single remembered strings, not sets -- the fact the comments
+    # have to match
+    for f in _R7_SUPPRESSORS:
+        assert ("private static string " + f + " = null;") in api, f
+
+    def _decl_comment(src, field):
+        """The CONTIGUOUS run of // lines immediately above that declaration.
+
+        Walking back to the nearest blank line is what the first cut did, and it
+        swept in the PREVIOUS field's comment -- so a mutation of one field's
+        wording was answered by a neighbour's text and the control stayed green
+        (#342, and the same shape as this file's own _method_body lesson)."""
+        decl = "private static string " + field + " = null;"
+        i = src.find(decl)
+        if i < 0:
+            return ""
+        lines = src[:i].split("\n")
+        out = []
+        for ln in reversed(lines[:-1] if lines and not lines[-1].strip() else lines):
+            if ln.strip().startswith("//"):
+                out.append(ln)
+                continue
+            break
+        return "\n".join(reversed(out))
+
+    # the wording is reflowed across comment lines, so it is compared as WORDS
+    for f in _R7_SUPPRESSORS:
+        c = _r7_flatten(_decl_comment(api, f))
+        assert c, f
+        assert "ONE REMEMBERED SERIES ID" in c, f
+        assert "A -> B -> A" in c, f
+        # the superseded promise is rejected by name
+        assert "One line per series id:" not in c, f
+
+    def claim(s):
+        return all("ONE REMEMBERED SERIES ID" in _r7_flatten(_decl_comment(s, f))
+                   for f in _R7_SUPPRESSORS)
+
+    # ONE MUTATION PER FIELD: each comment's own opening line is reworded back
+    # to the superseded promise, and the claim must go False each time.
+    openers = (
+        ("_statusPollRefusedForSeries",
+         "        // ONE REMEMBERED SERIES ID, NOT A SET, so the cardinality this thins the"),
+        ("_statusPollProvenForSeries",
+         "        // The other half of the same rule, and the same cardinality: ONE REMEMBERED"),
+        ("_statusPollNoDeferralForSeries",
+         "        // The third suppressor, and the third of the same shape: ONE REMEMBERED"),
+    )
+    for f, opener in openers:
+        assert api.count(opener) == 1, f
+        _assert_discriminating(
+            claim, api,
+            _mutate(api, opener, opener.replace("ONE REMEMBERED", "One line per series id:"),
+                    "R7-L7 " + f + " reclaims one line per series"),
+            "R7-L7 the suppressors state their real cardinality")
+
+    # INERT TWIN: rewording a neighbouring sentence keeps every claim
+    assert claim(_mutate(api, "and it is not evidence of how many series were refused",
+                         "and it is no evidence of how many series were refused",
+                         "R7-L7 inert twin"))
+
+
+# ── L9 + SERVER-L7: the refusal's cost, and who can settle a marked row ──────
+
+
+def test_r7_l9_serverl7_the_refusal_cost_and_the_rows_settlers_are_stated_as_the_tree_has_them():
+    """L9 (client half of server-report L7) and SERVER-L7's first passage.
+
+    Two comments described a tree that has moved.  The refusal-cost paragraph
+    said a countdown "cannot appear on current data" -- written when the banner
+    hung off a predicate no box satisfied; the banner now renders from the three
+    fields this very route carries, so a refusal darkens a live countdown.  And
+    the deferral paragraph named the sweep as the only other writer of the row,
+    while a later real-totals report settles it at the lead-forfeit completion or
+    the dc_incomplete settle inside the bound."""
+    api = _src("ApiClient.cs")
+
+    # L9 -- the refusal cost
+    assert "the DC-grace banner for that series as" in api
+    assert "repaint that takes an already-rendered banner off the screen" in api
+    assert "not a countdown, which cannot appear on current data" not in api
+
+    # SERVER-L7 -- who settles a marked row
+    assert "the sweep is not the only thing that can close" in api
+    assert "the lead-forfeit completion or" in api
+    assert "the dc_incomplete settle while the bound still holds" in api
+    assert "The only other writer of that row is the server's" not in api
+
+    def claim(s):
+        return ("repaint that takes an already-rendered banner off the screen" in s
+                and "not a countdown, which cannot appear on current data" not in s
+                and "the sweep is not the only thing that can close" in s
+                and "The only other writer of that row is the server's" not in s)
+
+    _assert_discriminating(
+        claim, api,
+        _mutate(api, "repaint that takes an already-rendered banner off the screen",
+                "countdown, which cannot appear on current data",
+                "R7-L9 the refusal cost reclaims that no countdown can be current"),
+        "R7-L9 the refusal cost names the banner it darkens")
+
+    _assert_discriminating(
+        claim, api,
+        _mutate(api, "the sweep is not the only thing that can close",
+                "The only other writer of that row is the server's",
+                "R7-SERVER-L7 the sweep is named the only settler again"),
+        "R7-SERVER-L7 the row's settlers are named as the tree has them")
+
+    # INERT TWIN, one per corrected passage
+    assert claim(_mutate(api, "is the round-7 correction of a sentence",
+                         "is the round-7 correction to a sentence",
+                         "R7-L9 inert twin"))
+    assert claim(_mutate(api, "// the whole point of leaving it open. So a series",
+                         "// the entire point of leaving it open. So a series",
+                         "R7-SERVER-L7 inert twin"))
+
+
+# ── L11: W8 states the disposition the reviewed route produces ───────────────
+
+
+def test_r7_l11_w8_states_the_disposition_the_reviewed_route_produces():
+    """L11.
+
+    W8 said a zero-total fallback is one "which the deployed endpoint can only
+    record as dc_incomplete".  The route this client is built against marks the
+    row and answers `deferred=true` BEFORE any total is read, so the witness
+    named a disposition the reviewed server does not produce.  It now reports
+    what each generation of box actually answers, and says the disposition is
+    read out of the answer rather than assumed.
+
+    THE SERVER SIDE OF THIS CLAIM IS CHECKED ACROSS THE LANES, not asserted from
+    here: the resolver reads the other tree's report-dc handler and requires the
+    fallback branch to answer `deferred` before it reads totals."""
+    ra = _src("RoomActors.cs")
+    assert "WHAT THAT FORM IS RECORDED AS depends on the box" in ra
+    assert "before any total is read, leaving the series open for a real-totals report" in ra
+    assert "the deployed endpoint can only record as" not in ra
+
+    # cross-lane: the reviewed route really does answer deferred before totals
+    server, how = _server_lane_main()
+    assert server, how
+    i = server.find("if is_fallback:")
+    assert i > 0, "the fallback branch could not be found on the server lane"
+    branch = server[i:i + 4000]
+    j = branch.find('"deferred": True')
+    assert j > 0, "the fallback branch does not answer deferred=true"
+    # and it does so before any total is read in that branch
+    for total in ("t1_points_total", "t2_points_total"):
+        k = branch.find(total)
+        assert k < 0 or k > j, (
+            "the fallback branch reads " + total + " before it answers deferred")
+
+    def claim(s):
+        return ("WHAT THAT FORM IS RECORDED AS depends on the box" in s
+                and "the deployed endpoint can only record as" not in s)
+
+    _assert_discriminating(
+        claim, ra,
+        _mutate(ra, "WHAT THAT FORM IS RECORDED AS depends on the box",
+                "which the deployed endpoint can only record as dc_incomplete, the box",
+                "R7-L11 W8 reclaims a single deployed disposition"),
+        "R7-L11 W8 states the disposition the reviewed route produces")
+
+    assert claim(_mutate(ra, "and is read out of the answer, never assumed",
+                         "and is read out of the answer, never presumed",
+                         "R7-L11 inert twin"))
+
+
+# ── SERVER-L3: no comment reads a pre-field 200 as a settlement ──────────────
+
+_R7_PRE_FIELD_SETTLEMENT_FORMS = (
+    "the report settles immediately exactly",
+    "is_fallback parameter and settled the series on it",
+)
+
+
+def test_r7_serverl3_no_comment_reads_a_pre_field_200_as_settlement():
+    """SERVER-L3, routed to this lane, and the answer SERVER-B0c takes.
+
+    Two passages described a 200 from a box that predates the field as a
+    settlement.  Contract item 6 splits the five false exits two ways -- two
+    settle, three decide nothing and say so with `ignored: true` -- and an ABSENT
+    key proves only the box's age.  SERVER-B0c's executable handling was already
+    correct; it was NOT MET because of these two passages, so this check is that
+    row's answer as well."""
+    api = _src("ApiClient.cs")
+
+    for form in _R7_PRE_FIELD_SETTLEMENT_FORMS:
+        assert form not in api, "a superseded settlement claim survives: " + form
+
+    assert "only that the box which answered" in api
+    assert "predates the field. It is not proof that the report settled" in api
+    assert "a box that predates the" in api
+    assert "it cannot say what that older box DID with the report" in api
+
+    def claim(s):
+        return (all(f not in s for f in _R7_PRE_FIELD_SETTLEMENT_FORMS)
+                and "predates the field. It is not proof that the report settled" in s
+                and "it cannot say what that older box DID with the report" in s)
+
+    _assert_discriminating(
+        claim, api,
+        _mutate(api, "predates the field. It is not proof that the report settled",
+                "the report settles immediately exactly as it does today, so it settled",
+                "R7-SERVER-L3a the older-server passage reclaims settlement"),
+        "R7-SERVER-L3a a pre-field 200 is not read as settlement")
+
+    _assert_discriminating(
+        claim, api,
+        _mutate(api, "it cannot say what that older box DID with the report",
+                "the is_fallback parameter and settled the series on it is what it says",
+                "R7-SERVER-L3b the three-value passage reclaims settlement"),
+        "R7-SERVER-L3b the three-value passage names no settlement")
+
+    assert claim(_mutate(api, "AGAINST AN OLDER SERVER (#266). An unknown query parameter",
+                         "AGAINST AN OLDER SERVER (#266). Any unknown query parameter",
+                         "R7-SERVER-L3 inert twin"))
+
+
+# ── B16: one claims check over every sentence this round corrected ───────────
+
+# (file, must-be-ABSENT superseded form, must-be-PRESENT corrected form).  One
+# table, so a superseded wording cannot return to any of them quietly and a
+# corrected one cannot be dropped.  `test` is this harness itself: the L8
+# docstring is a claim like any other.
+_R7_CLAIMS = (
+    ("ApiClient.cs",
+     "What is certain is that nothing parked this report",
+     "box settled, ignored or fenced this report"),
+    ("ApiClient.cs",
+     "the report settles immediately exactly",
+     "predates the field. It is not proof that the report settled"),
+    ("ApiClient.cs",
+     "is_fallback parameter and settled the series on it",
+     "it cannot say what that older box DID with the report"),
+    ("ApiClient.cs",
+     "The only other writer of that row is the server's",
+     "the sweep is not the only thing that can close"),
+    ("ApiClient.cs",
+     "not a countdown, which cannot appear on current data",
+     "repaint that takes an already-rendered banner off the screen"),
+    ("ApiClient.cs",
+     "One line per series id:",
+     "ONE REMEMBERED SERIES ID"),
+    ("NativeUI.cs",
+     "420 s deferral window",
+     "THE BOUND IS NOT RESTATED HERE AS"),
+    ("NativeUI.cs",
+     "the status cache describes a different series, so nothing in ",
+     "the status cache describes NO series"),
+    ("RoomActors.cs",
+     "the deployed endpoint can only record as",
+     "WHAT THAT FORM IS RECORDED AS depends on the box"),
+    # SPLIT ON PURPOSE: this row's own source line must not contain the literal
+    # it forbids, or the file would always fail its own check.
+    ("test",
+     "arriving at ANY later time still " + "reaches its normal branches",
+     "WITHIN THE BOUND, " + "which is the"),
+)
+
+
+def _r7_claim_source(name):
+    if name == "test":
+        return pathlib.Path(__file__).read_text(encoding="utf-8")
+    return _src(name)
+
+
+def test_r7_b16_the_claims_check_rejects_every_superseded_form():
+    """B16: NO LINE CLAIMS MORE THAN IT MEASURED, held as a SURFACE.
+
+    Every sentence this round corrected is bound here in one table: its
+    superseded form must be absent and its corrected form present.  Round 6 fell
+    on six separate comments, one at a time; a per-sentence check would have to
+    be remembered six more times.  This one reddens if any of them regresses."""
+    for name, superseded, corrected in _R7_CLAIMS:
+        src = _r7_claim_source(name)
+        assert superseded not in src, (
+            "%s: the superseded claim returned: %r" % (name, superseded))
+        assert corrected in src, (
+            "%s: the corrected claim is missing: %r" % (name, corrected))
+
+    # L8 also carries the contract's bound sentence verbatim in that docstring
+    harness = _r7_claim_source("test")
+    i = harness.find("def test_r4_h3_a_fallback_report_carries_is_fallback")
+    doc = harness[i:i + 2400]
+    assert " ".join(_R7_BOUND_SENTENCE.split()) in " ".join(doc.split())
+
+    # THE CONTROL: the check must be able to fail on EACH row, not merely exist.
+    # Re-running the table against a source with one superseded form reinstated
+    # has to reject that row.
+    def row_holds(src, superseded, corrected):
+        return superseded not in src and corrected in src
+
+    for name, superseded, corrected in _R7_CLAIMS:
+        src = _r7_claim_source(name)
+        assert row_holds(src, superseded, corrected), name
+        # negate: put the superseded form back
+        assert not row_holds(src + "\n// " + superseded + "\n", superseded, corrected), (
+            "%s: the check accepts the superseded form" % name)
+        # negate: drop the corrected form
+        # EVERY occurrence: this harness carries the corrected form twice -- once
+        # in the claim it makes and once in this table -- and removing only the
+        # first leaves the row green for a reason that is not the claim (#342).
+        assert not row_holds(src.replace(corrected, ""), superseded, corrected), (
+            "%s: the check accepts the corrected form's removal" % name)
+        # INERT TWIN: an unrelated edit of the same shape leaves the row green
+        assert row_holds(src + "\n// an unrelated comment line\n",
+                         superseded, corrected), name

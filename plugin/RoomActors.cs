@@ -1237,9 +1237,14 @@ namespace CompetitiveRounds
                     + _watchActor.ToString(CultureInfo.InvariantCulture) + " — no timer: it fires on ONE "
                     + "signal only, " + OutcomeProp + "=" + OutcomeFailed + " (every attempt of that "
                     + "seat's report answered and refused, or nothing ever left its process), and then "
-                    + "only in the zero-total form, which the deployed endpoint can only record as "
-                    + "dc_incomplete. " + OutcomeProp + "=" + OutcomeUnknown + ", that seat leaving, and "
-                    + "that seat staying silent all post NOTHING");
+                    + "only in the zero-total form. WHAT THAT FORM IS RECORDED AS depends on the box "
+                    + "that answers and is read out of the answer, never assumed: the route this "
+                    + "client is built against PARKS it — it marks the row and answers deferred=true "
+                    + "before any total is read, leaving the series open for a real-totals report — "
+                    + "while a box predating that field answers a 200 with no deferred key, and what "
+                    + "it did with the report is not carried in a missing key. " + OutcomeProp + "="
+                    + OutcomeUnknown + ", that seat leaving, and that seat staying silent all post "
+                    + "NOTHING");
                 Evaluate("armed");
             }
             catch (Exception ex) { Plugin.Log.LogWarning("[2v2-DC] arming the fallback failed: " + ex.Message); }

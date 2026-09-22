@@ -13319,6 +13319,12 @@ namespace CompetitiveRounds
             get => activeTeamSeriesId;
             set
             {
+                // THE REPAINT RULE (#432): this setter is one of the three writers of
+                // the banner's inputs, so it takes the key before it writes and asks
+                // RequestBannerRepaintIfChanged for the repaint after — the same rule
+                // the refusal branch and the shared parse hold, applied to the
+                // operation rather than to whichever exit someone remembered.
+                string bannerBefore = BannerRenderKey();
                 if (!string.Equals(value, activeTeamSeriesId, StringComparison.Ordinal))
                 {
                     SeriesTeam1ColorName = ""; SeriesTeam1ColorHex = "";
@@ -13342,8 +13348,14 @@ namespace CompetitiveRounds
                     LastSeriesDcDeferred = false;
                     LastSeriesDcDeferredSecondsRemaining = 0;
                     LastSeriesDcDeferredBoundSeconds = 0;
+                    // And the PRESENCE bit beside them, which the witness and the
+                    // render key both read: leaving it set says the previous
+                    // series' answer carried the deferral state, about a series
+                    // whose numbers have just been cleared (#342).
+                    LastSeriesDcDeferredFieldsPresent = false;
                 }
                 activeTeamSeriesId = value;
+                RequestBannerRepaintIfChanged(bannerBefore);
             }
         }
         public static bool IsTeamQueuePolling { get; private set; } = false;
@@ -13968,10 +13980,13 @@ namespace CompetitiveRounds
         // and not a sum is in UpdateTeamSeriesStatePoll's own gate.
         private static float teamSeriesStateNextAt = 0f;
         private const float TEAM_SERIES_STATE_INTERVAL = 2f;
-        // One line per series id: the refusal below speaks ONCE instead of at
-        // the tab's frame rate, and it speaks at all rather than falling
-        // through in silence — an unpolled banner and a banner whose poll was
-        // refused are different facts (#342).
+        // ONE REMEMBERED SERIES ID, NOT A SET, so the cardinality this thins the
+        // refusal line to is ONE LINE PER CHANGE OF SERIES and not one line per
+        // series: a tab moving A -> B -> A emits A's line again. That is enough to
+        // stop the line repeating at the tab's frame rate, which is what it is for,
+        // and it is not evidence of how many series were refused. It speaks at all
+        // rather than falling through in silence — an unpolled banner and a banner
+        // whose poll was refused are different facts (#342).
         private static string _statusPollRefusedForSeries = null;
         // THE LATCH, and it is per SERIES because that is the scope the evidence
         // has. One entry per series id whose status read came back as something
@@ -13992,10 +14007,11 @@ namespace CompetitiveRounds
         // triage grep must never read the first off a cell that was the second
         // (#342, #430).
         private static readonly HashSet<string> _statusPollDarkNoAnswer = new HashSet<string>();
-        // The other half of the same rule: one line per series for the answer that
-        // DID prove itself. Both directions speak, because "the banner is dark" and
-        // "the banner is live" are different facts and a bundle has to be able to
-        // tell them apart (#342, #438).
+        // The other half of the same rule, and the same cardinality: ONE REMEMBERED
+        // SERIES ID, so this is one line per CHANGE of series for the answer that DID
+        // prove itself, and A -> B -> A emits A's line twice. Both directions speak,
+        // because "the banner is dark" and "the banner is live" are different facts
+        // and a bundle has to be able to tell them apart (#342, #438).
         private static string _statusPollProvenForSeries = null;
 
         /// <summary>True while this session has been refused a status read for
@@ -14038,10 +14054,12 @@ namespace CompetitiveRounds
                    && HasJsonKey(resp, "dc_deferred_bound_seconds");
         }
 
-        // One line per series for the answer that proved itself as a read but did
-        // not carry the deferral state. A banner that is off because a field was
-        // missing and a banner that is off because the series is not deferred are
-        // different facts, and a bundle has to be able to tell them apart (#342).
+        // The third suppressor, and the third of the same shape: ONE REMEMBERED
+        // SERIES ID, so one line per CHANGE of series for the answer that proved
+        // itself as a read but did not carry the deferral state, and A -> B -> A
+        // emits A's line twice. A banner that is off because a field was missing and
+        // a banner that is off because the series is not deferred are different
+        // facts, and a bundle has to be able to tell them apart (#342).
         private static string _statusPollNoDeferralForSeries = null;
 
         /// <summary>The team tab's DC-grace banner refresh.
@@ -14398,12 +14416,18 @@ namespace CompetitiveRounds
             // window and not outside it, and setting the flag is the client's whole
             // part in it.
             //
-            // AGAINST AN OLDER SERVER (#266). An unknown query parameter is IGNORED,
-            // the request is answered 200, and the report settles immediately exactly
-            // as it does today: the flag buys nothing and costs nothing there, the
-            // displacement residual stands unchanged, and no behaviour depends on the
-            // parameter having been understood. Nothing here reads the 200 as proof
-            // it was — that is what the `deferred` field below is for.
+            // AGAINST AN OLDER SERVER (#266). An unknown query parameter is IGNORED
+            // and the request is answered 200. WHAT THAT 200 PROVES, and it is less
+            // than the previous wording claimed: only that the box which answered
+            // predates the field. It is not proof that the report settled — a box of
+            // that generation still has the exits that write NOTHING and answer
+            // {"ignored": true}, so "settled" and "discarded without a write" are not
+            // distinguishable from a missing key, and the disposition, if the body
+            // carries one, is in `status` and `ignored`. What IS true of that
+            // generation either way is that nothing there parks a report, so the flag
+            // buys nothing and costs nothing against it and the displacement residual
+            // stands unchanged. Nothing here reads the 200 as proof the parameter was
+            // understood — that is what the `deferred` field below is for.
             //
             // DIRECTION (#283). Setting it moves the server away from settling and
             // toward deferral, and the deferral branch sits before the lead-forfeit
@@ -14465,10 +14489,13 @@ namespace CompetitiveRounds
                 {
                     // WHICH BOX ANSWERED, said positively rather than assumed, and
                     // now in THREE values rather than two. A 200 alone cannot tell a
-                    // box that deferred this fallback from one that ignored the
-                    // is_fallback parameter and settled the series on it (#266 — an
-                    // unknown query parameter is dropped silently and the answer is a
-                    // healthy 200). The cross-lane contract closes that by making
+                    // box that deferred this fallback from one that predates the
+                    // field and dropped the is_fallback parameter (#266 — an unknown
+                    // query parameter is dropped silently and the answer is a healthy
+                    // 200), and it cannot say what that older box DID with the report
+                    // either: a 200 with no `deferred` key carries no disposition, so
+                    // a settle and a no-write refusal read the same from here. The
+                    // cross-lane contract closes the first question by making
                     // `deferred` PRESENT on every 200 that endpoint returns, so
                     // presence is tracked separately from value (#604):
                     //
@@ -14516,13 +14543,19 @@ namespace CompetitiveRounds
                     // not emit either (#342).
                     //
                     // WHAT THE DEFERRED LINE DOES NOT PROMISE. A deferral is not a
-                    // disposition. The only other writer of that row is the server's
-                    // sweep, which settles a marked series on a tick that finds no
-                    // live-game evidence for it — so a series whose evidence keeps
-                    // being refreshed, or whose row is skipped by every tick, stays
-                    // open, and nothing in this process observes either. The line
-                    // below therefore reports the deferral it was told about and
-                    // states the window; it does not claim the row will close.
+                    // disposition, and the sweep is not the only thing that can close
+                    // the row it left open — the round-7 correction, because the
+                    // previous wording named one writer where the tree has several.
+                    // A marked row is settled by the sweep, on a tick that finds no
+                    // live-game evidence for the series; and it is settled by a LATER
+                    // REAL-TOTALS REPORT that reaches the lead-forfeit completion or
+                    // the dc_incomplete settle while the bound still holds, which is
+                    // the whole point of leaving it open. So a series whose evidence
+                    // keeps being refreshed, or whose row is skipped by every tick,
+                    // stays open until a report closes it or a tick does, and nothing
+                    // in this process observes any of that. The line below therefore
+                    // reports the deferral it was told about and states the window; it
+                    // does not claim the row will close, or by which writer.
                     if (ok)
                     {
                         bool present = !string.IsNullOrEmpty(resp)
@@ -14614,8 +14647,9 @@ namespace CompetitiveRounds
                                     : "This body carries no ignored flag, so that box took a settling "
                                       + "exit or one this client does not model; which of them is not "
                                       + "readable from here")
-                                + ". What is certain is that nothing parked this report, so the "
-                                + "displacement residual stands unchanged against that generation");
+                                + ". That the answering box predates the field is the whole of "
+                                + "what this absence proves; it says nothing about whether that "
+                                + "box settled, ignored or fenced this report");
                         }
                     }
                     return;
@@ -14792,8 +14826,14 @@ namespace CompetitiveRounds
         /// the status in the line says which case it was: 0 is no answer at all — a
         /// refusal before the wire, a transport failure, or the 20 s timeout. What
         /// it costs is one series' 2 s refresh of the team-colour stamp and of the
-        /// status cache -- not a countdown, which cannot appear on current data (see
-        /// the tick's own summary above and residual 1) -- for that series (#430);
+        /// status cache -- and, since the banner now derives from the three deferral
+        /// fields this very route carries, the DC-grace banner for that series as
+        /// well: the branch below clears the cached deferral state and asks for the
+        /// repaint that takes an already-rendered banner off the screen, so a refusal
+        /// DOES darken a live countdown rather than being unable to reach one. That
+        /// is the round-7 correction of a sentence written when the banner still hung
+        /// off a predicate no box satisfied (#351: the comment stated a rule the tree
+        /// had stopped keeping) -- for that series (#430);
         /// what it buys is that the rule has no cell in which it keeps trying. The one
         /// outcome that does NOT latch is a dispatch that never became a request
         /// (the catch below): nothing was asked of any box, so there is no answer to
@@ -14832,11 +14872,25 @@ namespace CompetitiveRounds
             // the callback below, and a field would be shared with every other
             // request in flight. 0 is "no answer reached this process".
             long answeredWith = 0;
+            // THE REPAINT RULE, TAKEN ONCE FOR THE WHOLE DISPATCH (#432). The
+            // callback below takes its own key, because it runs later and the state
+            // it compares is the state as of the ANSWER; this one covers the
+            // dispatch path itself, which writes none of the banner's inputs and
+            // therefore asks for nothing. It is here so that the rule is a property
+            // of every path out of this method rather than of the two that happen to
+            // write today: a path that gains a write later gains the request with it.
+            string dispatchBannerBefore = BannerRenderKey();
             try
             {
                 Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
                 {
                     _statusReadInFlight = false;
+                    // The banner's inputs as of this ANSWER. GetRequest invokes this
+                    // callback on EVERY exit — success, a non-2xx, a transport
+                    // refusal and the 20 s timeout alike — so this one capture covers
+                    // the refusal path and the timeout path, which are the same path
+                    // here and are distinguished only by the code in `answeredWith`.
+                    string bannerBefore = BannerRenderKey();
                     // GATE 2 — the answering box proves the read, in this answer.
                     bool present = !string.IsNullOrEmpty(resp)
                                    && resp.IndexOf("\"readonly\"", StringComparison.Ordinal) >= 0;
@@ -14849,14 +14903,25 @@ namespace CompetitiveRounds
                     {
                         _statusPollDarkSeries.Add(seriesId);
                         if (answeredWith <= 0) _statusPollDarkNoAnswer.Add(seriesId);
-                        // DARK HAS TO MEAN DARK. Latching stops the POLL; on its own
-                        // it does not change what the banner renders FROM, and those
-                        // are two different facts (#342). These three fields are the
+                        // DARK HAS TO MEAN DARK, AND THAT IS THREE FACTS, NOT TWO.
+                        // Latching stops the POLL; on its own it does not change what
+                        // the banner renders FROM; and changing what it renders from
+                        // does not repaint it (#342). These three fields are the
                         // banner's whole input, and their only other writer is the
                         // ActiveTeamSeriesId setter, which fires on an id CHANGE --
-                        // so without this the last good answer stays on screen,
+                        // so without the clear the last good answer stays on screen,
                         // frozen, counting down from a number nothing will ever
                         // refresh, for as long as the tab is open.
+                        //
+                        // THE THIRD FACT IS THE ROUND-7 CORRECTION. The clear alone
+                        // left the round-6 claim below true of the STATE and false of
+                        // the SCREEN: this tab re-renders on a dirty flip (#62), so a
+                        // cleared cache is drawn only when something flips that bit,
+                        // and during an outage nothing may. The request is made at
+                        // the end of this branch, by the same rule the id setter and
+                        // the shared parse hold, so "the last one is not kept" is a
+                        // statement about what is rendered and not only about what is
+                        // stored.
                         //
                         // THE CLEAR IS CONFINED TO THE SERIES THE CACHE DESCRIBES,
                         // and to nothing else. The round-5 guard carried a second
@@ -14892,6 +14957,13 @@ namespace CompetitiveRounds
                             + ". Latching the DC-grace banner dark for this series: the read is proved "
                             + "by the box that answers it, in that answer, and this one did not. There "
                             + "is no second route to try, and nothing is parsed out of this answer");
+                        // THE REPAINT RULE ON THE REFUSAL PATH. The branch above may
+                        // have changed the banner's inputs; this asks for the redraw
+                        // that takes an already-rendered banner off the screen. It is
+                        // the same call the id setter and the shared parse make, on
+                        // the same before/after key, which is what makes the rule the
+                        // OPERATION's rather than one exit's (#432, #330).
+                        RequestBannerRepaintIfChanged(bannerBefore);
                         return;
                     }
                     // AND THE POSITIVE ONE. A feature that works in silence and a
@@ -14957,21 +15029,61 @@ namespace CompetitiveRounds
                 // NOT latch — nothing was asked of any box.
                 _statusReadInFlight = false;
                 Plugin.Log.LogWarning("[2v2] series status read could not be dispatched: " + ex.Message);
+                // THE REPAINT RULE ON THE DISPATCH-THROW PATH, and it is inert on
+                // purpose. Nothing above this line writes a banner input, so the key
+                // is unchanged and no repaint is requested. The call is here because
+                // the rule is "every path out of this method holds it", and a rule
+                // with an exempt path is a rule nobody can check (#432).
+                RequestBannerRepaintIfChanged(dispatchBannerBefore);
             }
         }
 
         /// <summary>Everything the DC banner renders from, in one string, so an
         /// answer that changed it can ask for the repaint that draws it. It is not
         /// a claim about what is on screen — the banner reports itself — only about
-        /// the inputs.</summary>
+        /// the inputs.
+        ///
+        /// <para>THE SERIES ID IS ONE OF THOSE INPUTS. The render predicate reads
+        /// ActiveTeamSeriesId beside the cache, so a key built from the cache alone
+        /// would call an id change "no change" in the one case where the banner has
+        /// to stop drawing. The key is the WHOLE input set or it is a key to
+        /// something else (#342).</para></summary>
         private static string BannerRenderKey()
         {
-            return (LastSeriesStateForId ?? "-")
+            return (activeTeamSeriesId ?? "-")
+                   + "|" + (LastSeriesStateForId ?? "-")
                    + "|" + (LastSeriesDcDeferred ? "1" : "0")
                    + "|" + LastSeriesDcDeferredSecondsRemaining
                    + "|" + LastSeriesDcDeferredBoundSeconds
                    + "|" + (LastSeriesDcDeferredFieldsPresent ? "p" : "-")
                    + "|" + LastSeriesT1Wins + "|" + LastSeriesT2Wins;
+        }
+
+        /// <summary>THE REPAINT RULE, AND IT BELONGS TO THE OPERATION RATHER THAN TO
+        /// ONE EXIT (#432). Every path that can change what the banner renders from
+        /// takes this key BEFORE it writes and calls this AFTER, so the repaint is
+        /// requested by the RULE and not by whichever branch someone remembered.
+        ///
+        /// <para>WHY IT IS A RULE AND NOT A LINE. Round 6 put the request at the end
+        /// of the affirmative parse only. The refusal branch cleared the same three
+        /// fields and returned without it, so after the banner had rendered a later
+        /// 404, 500 or unanswered read changed the state the banner reads while the
+        /// visible object stayed active until something unrelated marked the tab
+        /// dirty — during an outage, for as long as the tab stayed open. A flag names
+        /// a LINE; the defect was the CLASS (#330, #279). The writers of those inputs
+        /// are the three this file has — the id setter, the refusal branch and the
+        /// shared parse — and each of them now holds this rule, as does the
+        /// dispatch-throw path, which writes none of them and therefore asks for
+        /// nothing: a path that is inert under the rule is still under it, which is
+        /// what makes the rule checkable rather than a habit.</para>
+        ///
+        /// <para>AN ANSWER THAT CHANGES NOTHING ASKS FOR NOTHING. The tab re-renders
+        /// on a dirty flip (#62), so requesting a repaint on every answer would make
+        /// a 2 s poll a 2 s redraw of the whole tab. The comparison is what keeps the
+        /// request proportional to the change.</para></summary>
+        private static void RequestBannerRepaintIfChanged(string keyBefore)
+        {
+            if (BannerRenderKey() != keyBefore) NativeUI.MarkDirty();
         }
 
         /// <summary>The shared response parse for the two routes above. Extracted so
@@ -15075,7 +15187,11 @@ namespace CompetitiveRounds
             // banner reads asks for that repaint here — the shape every other fetch
             // on this tab already uses (#62: the ticker polls, the answer marks
             // dirty). An answer that changes nothing asks for nothing.
-            if (BannerRenderKey() != bannerBefore) NativeUI.MarkDirty();
+            //
+            // IT IS THE SHARED CALL AND NOT A LOCAL COMPARISON, because round 6's
+            // local one WAS the whole of the rule and the refusal branch sat outside
+            // it. One helper, three writers, one before/after key (#432).
+            RequestBannerRepaintIfChanged(bannerBefore);
             onResponse?.Invoke(status, reason, conf);
         }
 
