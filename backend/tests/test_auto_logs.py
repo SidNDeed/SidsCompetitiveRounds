@@ -4156,7 +4156,8 @@ def test_a_marker_that_cannot_be_made_durable_refuses_the_upload(logdir, verifie
     # then its directory entry. A `write_bytes` here would leave the marker in
     # the page cache, which is exactly the state a host incident loses.
     src = _normalise(inspect.getsource(auto_logs._stamp_marker))
-    assert "os.fsync(fd)" in src and "_fsync_dir(blob_path.parent)" in src, (
+    assert ("os.fsync(fd)" in src
+            and "_fsync_dir(pathlib.Path(blob_path).parent)" in src), (
         "the stamp no longer makes the marker durable: %r" % (src,))
     assert "_fsync_dir" in _normalise(inspect.getsource(auto_logs._stamp_marker))
     dirsrc = _normalise(inspect.getsource(auto_logs._fsync_dir))
@@ -5218,43 +5219,56 @@ def test_every_durability_barrier_reds_the_crash_simulation_when_it_is_removed(
         "the inert twin reds, so the mutation above is reacting to the site "
         "being edited rather than to the barrier: %r" % (bad[:3],))
 
+    # THE INERT TWINS ON THE THREE DIRECTORY BARRIERS re-spell the argument
+    # rather than the call, because the call is what the barrier IS. Every one
+    # of the three sites now reads `_fsync_dir(pathlib.Path(x).parent)`, so a
+    # twin that merely added the coercion would be the live line and would
+    # prove nothing (#342); `pathlib.Path(str(x))` is the same location
+    # reached by a different spelling.
+
     # -- BARRIER: the blob's directory ENTRY --------------------------------
-    site = "    _fsync_dir(path.parent)\n"
+    site = "    _fsync_dir(pathlib.Path(path).parent)\n"
     bad, _ = _upload_violations(
         write_blob=_exec_mutant(real_write, site, "    pass\n"), logdir=logdir)
     assert any(kind == "INV-B" for kind, *_ in bad), (
         "with the blob's directory entry never flushed, a crash after the "
         "commit still recovered the file every time: %r" % (bad[:3],))
     bad, _ = _upload_violations(
-        write_blob=_exec_mutant(real_write, site,
-                                "    _fsync_dir(pathlib.Path(path).parent)\n"),
+        write_blob=_exec_mutant(
+            real_write, site,
+            "    _fsync_dir(pathlib.Path(str(path)).parent)\n"),
         logdir=logdir)
     assert bad == [], (
         "the inert twin reds at the blob's directory barrier: %r" % (bad[:3],))
 
     # -- BARRIER: the marker's directory ENTRY, before the blob exists ------
-    site = "    _fsync_dir(blob_path.parent)\n"
+    site = "    _fsync_dir(pathlib.Path(blob_path).parent)\n"
     bad, _ = _upload_violations(
         stamp=_exec_mutant(real_stamp, site, "    pass\n"), logdir=logdir)
     assert any(kind == "INV-A" for kind, *_ in bad), (
         "with the marker's entry never flushed, the blob's own entry could "
         "still not outlive it: %r" % (bad[:3],))
     bad, _ = _upload_violations(
-        stamp=_exec_mutant(real_stamp, site,
-                           "    _fsync_dir(pathlib.Path(blob_path).parent)\n"),
+        stamp=_exec_mutant(
+            real_stamp, site,
+            "    _fsync_dir(pathlib.Path(str(blob_path)).parent)\n"),
         logdir=logdir)
     assert bad == [], (
         "the inert twin reds at the marker's directory barrier: %r" % (bad[:3],))
 
     # -- BARRIER: between the two unlinks -----------------------------------
+    # The same anchor: the deletion helper spells its barrier exactly as the
+    # stamp does, and `_exec_mutant_pairs` asserts it occurs once inside THIS
+    # function's span, so the two mutations cannot reach each other's site.
     bad, _ = _delete_violations(
         delete=_exec_mutant(real_delete, site, "    pass\n"), logdir=logdir)
     assert any(kind == "INV-A" for kind, *_ in bad), (
         "with no flush between the two unlinks the simulation still could not "
         "persist the marker's removal ahead of the blob's: %r" % (bad[:3],))
     bad, _ = _delete_violations(
-        delete=_exec_mutant(real_delete, site,
-                            "    _fsync_dir(pathlib.Path(blob_path).parent)\n"),
+        delete=_exec_mutant(
+            real_delete, site,
+            "    _fsync_dir(pathlib.Path(str(blob_path)).parent)\n"),
         logdir=logdir)
     assert bad == [], (
         "the inert twin reds at the deletion barrier: %r" % (bad[:3],))
@@ -5293,6 +5307,19 @@ def test_one_site_performs_the_blob_before_marker_deletion():
         "a directory flush is performed at %d site(s); the three that own one "
         "are the marker's stamp, the blob's write and the deletion helper: %r"
         % (len(call_sites), call_sites))
+
+    # AND ALL THREE SPELL THE ARGUMENT THE SAME WAY. The coercion was applied
+    # to one site first and the other two left alone, which is the half-applied
+    # shape #432 names: the barrier that matters is whichever one a later
+    # reader copies. Counting the spelling rather than naming a line means a
+    # fourth site, or a third spelling, reds here instead of being inherited.
+    coerced = [ln for ln in call_sites
+               if ln.strip().startswith("_fsync_dir(pathlib.Path(")
+               and ln.strip().endswith(").parent)")]
+    assert len(coerced) == 3, (
+        "%d of the 3 directory-flush sites coerce their argument to a Path; a "
+        "site that does not is one whose barrier depends on what its caller "
+        "happened to hold: %r" % (len(coerced), call_sites))
 
 
 def test_the_durability_barrier_is_charged_to_the_marked_span(logdir, verified,

@@ -693,6 +693,19 @@ def _fsync_dir(directory) -> None:
     this marker cannot be made durable, and the caller's answer to that is to
     refuse the upload -- never to write a blob and hope, and never to fall
     back to walking the heap.
+
+    EVERY CALL SITE SPELLS ITS ARGUMENT THE SAME WAY: `pathlib.Path(x).parent`
+    at all three of them. Reading the callers proves each is passed a `Path`
+    today, so the coercion changes no behaviour now; what it removes is the
+    dependency. `x.parent` is an attribute of `Path` and not of `str`, so a
+    caller that later held the same location as a string would fail on the
+    ATTRIBUTE rather than on the flush -- an error raised beside a durability
+    barrier, reported as neither the refusal `_stamp_marker` and `_write_blob`
+    raise for an unflushable volume nor as the barrier it replaced. The
+    coercion is applied at all three sites rather than at the one that
+    prompted it, because one site spelled differently from its two siblings is
+    what a later reader copies from the wrong one: the defect is the class and
+    not the line (#432).
     """
     flag = getattr(os, "O_DIRECTORY", None)
     if flag is None:
@@ -728,7 +741,7 @@ def _stamp_marker(blob_path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
-    _fsync_dir(blob_path.parent)
+    _fsync_dir(pathlib.Path(blob_path).parent)
 
 
 def _delete_blob_then_marker(blob_path) -> tuple[str, bool]:
@@ -764,7 +777,7 @@ def _delete_blob_then_marker(blob_path) -> tuple[str, bool]:
     state = _unlink_existing(blob_path)
     if state == "failed":
         return state, False
-    _fsync_dir(blob_path.parent)
+    _fsync_dir(pathlib.Path(blob_path).parent)
     return state, _unlink_if_present(_marker_path(blob_path))
 
 
@@ -977,10 +990,11 @@ def _write_blob(path, data: bytes) -> None:
     TWO BARRIERS, IN THIS ORDER, AND BOTH BEFORE THE INSERT:
 
       * `os.fsync(fd)` commits the CONTENTS of the file;
-      * `_fsync_dir(path.parent)` commits the directory ENTRY that names
-        them. On Linux -- which is what the api container runs -- `fsync` on
-        the file's own descriptor says nothing about the entry, so without
-        this a crash can recover fully written bytes under no name at all.
+      * `_fsync_dir(pathlib.Path(path).parent)` commits the directory ENTRY
+        that names them. On Linux -- which is what the api container runs --
+        `fsync` on the file's own descriptor says nothing about the entry, so
+        without this a crash can recover fully written bytes under no name at
+        all.
 
     WHERE THE COST IS CHARGED, because a barrier outside the budget is a
     barrier that lengthens the span the sweep's age gate is derived from.
@@ -1016,7 +1030,7 @@ def _write_blob(path, data: bytes) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
-    _fsync_dir(path.parent)
+    _fsync_dir(pathlib.Path(path).parent)
 
 
 def _guarded_stamp(own: "_MarkedBlob") -> None:
