@@ -824,6 +824,19 @@ class HealthResponse(BaseModel):
     # it has no runtime signal of its own to read (#441: a postcondition that
     # cannot fail is worse than none). Absent on any build before Phase A.
     ffa_hold_fences: int | None = None
+    # pc_card_themes: whether this box loaded the ROUNDS card -> ink colour map
+    # that the Top card badge draws its name in (main._PC_CARD_THEMES, seeded
+    # by migration 333). `ready` once the map is non-empty, `empty` when the
+    # startup read found nothing.
+    #
+    # It is the release train's build discriminator for this batch, and it is
+    # the batch's OWN positive signal rather than a version stamp: the map is
+    # loaded once at startup from a table 333 creates, so `ready` says the new
+    # code is running AND its migration landed. `empty` says the code is there
+    # and the data is not, which must read as neither build and stop the train
+    # (#441: the value a broken feature reports must not look like success).
+    # Absent on any build before this batch, which is how the old build reads.
+    pc_card_themes: str | None = None
     # Which ROLE answered. Before this, /health was byte-identical on the
     # primary and on the read standby -- same status, same version, same
     # database -- so nothing on the network could tell a box that SKIPS writes

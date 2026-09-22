@@ -5769,7 +5769,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               pc_steam_sweep=_pc_steam_sweep_word(),
                               pc_steam_render=_pc_steam_render_word(),
                               pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE),
-                              ffa_hold_fences=_FFA_HOLD_FENCES)
+                              ffa_hold_fences=_FFA_HOLD_FENCES,
+                              pc_card_themes=_pc_card_themes_word())
     except Exception:
         # Report the role even when the database is unreachable: "which box is
         # this" is exactly the question being asked when things are degraded --
@@ -5777,7 +5778,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         # Both are code constants, so they answer with no database.
         return HealthResponse(status="degraded", database="disconnected", replica=IS_REPLICA,
                               pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE),
-                              ffa_hold_fences=_FFA_HOLD_FENCES)
+                              ffa_hold_fences=_FFA_HOLD_FENCES,
+                              pc_card_themes=_pc_card_themes_word())
 
 
 LATEST_MOD_VERSION = "1.40.3"
@@ -26328,6 +26330,23 @@ async def _pc_load_card_themes(db: AsyncSession) -> None:
         print(f"[PC-THEME] live join count unavailable: {ex}")
     print(f"[PC-THEME] {len(_PC_CARD_THEMES)} card themes loaded; "
           f"{joined} of {distinct} distinct pc_prints.top_card values mapped")
+
+
+def _pc_card_themes_word() -> str:
+    """The /health word for the card ink map: `ready` or `empty`.
+
+    THREE STATES, NOT TWO, and the third is the absence of the key itself on a
+    build that predates this batch -- which is what makes this the release
+    train's discriminator. `ready` is the new build with migration 333 applied;
+    the key missing is the old build; `empty` is the new code against a
+    database that has not got the table's rows yet, and it must read as NEITHER
+    so a half-landed deploy stops the train instead of passing it.
+
+    Deliberately a WORD and not the row count. A count invites a reviewer to
+    pin the expected number, and the number is a property of the seed rather
+    than of the build; the question this answers is whether the map the face
+    routes refuse without is populated at all."""
+    return "ready" if _PC_CARD_THEMES else "empty"
 
 
 async def _pc_labels(db: AsyncSession, locale: str) -> dict:
