@@ -1,4 +1,15 @@
-FROM python:3.11-slim
+# PINNED BY DIGEST, not by tag. `python:3.11-slim` is a moving tag, and this
+# container is a SINGLETON in production that is rebuilt (`up -d --build`) on
+# every backend deploy -- so a release that changes nothing in discord_bot.py
+# can still swap the interpreter under it, with no line in any diff saying so.
+# The failure that costs most is not a crash at boot, which is visible; it is
+# one command behaving differently, found by a player.
+#
+# Resolved 2026-09-18 from the registry: the OCI index for 3.11-slim, which
+# carries linux/amd64. The tag is kept beside the digest for readability only
+# -- Docker resolves the digest. To move it deliberately, re-resolve and
+# change it here in its own commit.
+FROM python:3.11-slim@sha256:9534e5a8e315485d4061ed659af0fd78a284c015f9b73661b41d6bab25604534
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1
 # Writable matplotlib config/cache dir — without it every import warns and
@@ -9,7 +20,20 @@ ENV MPLCONFIGDIR=/tmp
 # in ai-collab/streaming-design-addendum-chat.md). The bridge now polls the
 # official YouTube Data API over aiohttp instead; the scraper mechanism is
 # deleted, not bypassed (#310). Do not reintroduce it.
-RUN pip install --no-cache-dir discord.py aiohttp matplotlib
+# PINNED, for the same reason as the base image and with one extra: this file
+# builds `discord.ui.View` / `Button` components and a raw `on_interaction`
+# component router, and those are library surfaces, not ours. An unpinned
+# rebuild is a library upgrade nobody asked for, arriving in a release whose
+# diff mentions something else entirely.
+#
+# Resolved 2026-09-18 against PyPI; all three declare support for 3.11
+# (discord.py >=3.8, aiohttp >=3.10, matplotlib >=3.11), and 2.7.1 is also
+# the version this repo's tests run against locally. To move one, change it
+# here deliberately and rebuild the bot on its own.
+RUN pip install --no-cache-dir \
+      discord.py==2.7.1 \
+      aiohttp==3.14.3 \
+      matplotlib==3.11.2
 COPY discord_bot.py .
 # The boot line comes from this shell, before python starts (r9 M4): the deploy
 # train binds the bot's ready line to the generation the boot line names, and a

@@ -43,7 +43,6 @@ namespace CompetitiveRounds
             { "pc.foil", "FOIL" },
             { "pc.foil_short", "FOIL" },
             { "pc.signed", "SIGNED" },
-            { "pc.top_card", "TOP CARD" },
             { "pc.stat.rank", "RANK" },
             { "pc.stat.rating", "RATING" },
             { "pc.stat.pool", "POOL" },
@@ -75,7 +74,6 @@ namespace CompetitiveRounds
                 case "pc.foil": return I18n.TrC("pc.foil", "FOIL");
                 case "pc.foil_short": return I18n.TrC("pc.foil_short", "FOIL");
                 case "pc.signed": return I18n.TrC("pc.signed", "SIGNED");
-                case "pc.top_card": return I18n.TrC("pc.top_card", "TOP CARD");
                 case "pc.stat.rank": return I18n.TrC("pc.stat.rank", "RANK");
                 case "pc.stat.rating": return I18n.TrC("pc.stat.rating", "RATING");
                 case "pc.stat.pool": return I18n.TrC("pc.stat.pool", "POOL");

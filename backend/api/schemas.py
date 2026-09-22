@@ -824,6 +824,19 @@ class HealthResponse(BaseModel):
     # it has no runtime signal of its own to read (#441: a postcondition that
     # cannot fail is worse than none). Absent on any build before Phase A.
     ffa_hold_fences: int | None = None
+    # pc_card_themes: whether this box loaded the ROUNDS card -> ink colour map
+    # that the Top card badge draws its name in (main._PC_CARD_THEMES, seeded
+    # by migration 333). `ready` once the map is non-empty, `empty` when the
+    # startup read found nothing.
+    #
+    # It is the release train's build discriminator for this batch, and it is
+    # the batch's OWN positive signal rather than a version stamp: the map is
+    # loaded once at startup from a table 333 creates, so `ready` says the new
+    # code is running AND its migration landed. `empty` says the code is there
+    # and the data is not, which must read as neither build and stop the train
+    # (#441: the value a broken feature reports must not look like success).
+    # Absent on any build before this batch, which is how the old build reads.
+    pc_card_themes: str | None = None
     # Which ROLE answered. Before this, /health was byte-identical on the
     # primary and on the read standby -- same status, same version, same
     # database -- so nothing on the network could tell a box that SKIPS writes
@@ -1022,6 +1035,27 @@ class BugReportSummary(BaseModel):
     description: str
     has_log: bool
     log_bytes: int | None
+    # WHAT PUT THE ROW HERE: 'report' = a player filed it from the F5 form,
+    # 'auto' = the automatic post-match log upload wrote it (migration 336).
+    # Carried so admin triage can tell the two apart. Without it they are
+    # indistinguishable in the list, while every triage affordance the pane
+    # offers -- a status change, a comment -- reads as acting on a ticket a
+    # player filed and is waiting on an answer to.
+    #
+    # Appended last and defaulted, and the default buys exactly ONE thing: an
+    # older admin CLIENT ignores the extra key. It buys nothing against a
+    # database without the column. `list_bug_reports` names `kind` in its raw
+    # SELECT, so on a box whose 336 has not run that statement fails and the
+    # list does not render at all -- a default on the response model cannot
+    # supply a column the query never got back. MIGRATION 336 GOES FIRST AND
+    # THAT IS MANDATORY; 336's own header carries the order and the full
+    # reader/writer inventory. An earlier version of this comment offered the
+    # reverse order as survivable, which reads as permission to deploy the api
+    # first. It is not restated here in its own words on purpose: the standing
+    # check that keeps this sentence honest reads the whole block and does not
+    # model retraction, so a quoted wrong claim is indistinguishable from a
+    # made one (#666).
+    kind: str = "report"
 
 
 class BugReportEventEntry(BaseModel):

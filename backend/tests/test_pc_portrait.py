@@ -302,7 +302,7 @@ def test_cat_rev_and_face_rev_depend_on_every_input():
     spec = {"band": "legendary", "name": "Sid", "title": "Grand Master I", "title_rgb": (255, 215, 0),
             "rating": 1800, "pool_rank": 3, "board_rank": 7, "wins": 40, "losses": 12,
             "foil": True, "signed": False, "edition_label": "Edition 1", "minted_on": "2026-09-11",
-            "print_short": "#ab12cd", "top_card": True}
+            "print_short": "#ab12cd", "top_card": "Poison", "top_card_rgb": (0, 147, 76)}
     base = dict(renderer_fp="f" * 16, cat_rev_=r1, spec=spec, portrait_kind="game", portrait_hash="h" * 64)
     fr = P.face_rev(**base)
     # EVERY field of the spec, derived from the spec — a field added to it and

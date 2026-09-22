@@ -516,11 +516,26 @@ def _background_entry_points():
     `merged_lifespan` closing over ours. A one-level `__closure__` read finds
     nothing at all, which is a recovery that silently fingerprints an empty
     set. The walk below descends through nested closures and through
-    `__wrapped__`/`func` wrappers, bounded by identity and depth."""
+    `__wrapped__`/`func` wrappers, bounded by identity and depth.
+
+    THE DEPTH IS NOT A COST CONTROL AND MUST NOT BE TUNED LIKE ONE. `seen` is
+    what bounds the work -- every object is visited once -- so depth only
+    decides how deep the chain may be before the recovery gives up. The chain
+    grows by ONE LEVEL PER `include_router`, and `lifespan` itself is behind a
+    `@asynccontextmanager` wrapper, so the real function sits one hop below the
+    level that carries its name. At a bound of 8 it sat exactly at the edge:
+    mounting one more router pushed it past, `_is_ours` refused the contextlib
+    helper that was left, and this returned [] -- the empty set this docstring
+    warns about, arrived at by a number rather than by a missing lifespan.
+    (Measured on the wave B/C tree: four routers, the wrapper at depth 8 and
+    the function at 9.) The bound is now far above any plausible router count,
+    and `test_the_manifest_covers_every_non_route_entry_point` asserts the
+    recovery is NON-EMPTY, so a future chain that outgrows even this fails
+    loudly instead of fingerprinting nothing."""
     found, seen = [], set()
 
     def descend(obj, depth):
-        if depth > 8 or id(obj) in seen or not callable(obj):
+        if depth > 64 or id(obj) in seen or not callable(obj):
             return
         seen.add(id(obj))
         key = _binding_key(obj)
@@ -1035,6 +1050,29 @@ def _load_entry_points():
     return {name: [tuple(row) for row in rows] for name, rows in sections.items()}
 
 
+def _entry_point_drift(manifest, sha_of=_entry_point_sha):
+    """EVERY pinned entry point whose fingerprint has moved, not the first.
+
+    This used to be an `assert` inside the loop, which stops at the first
+    mismatch it meets. The sections are walked in a fixed order and middleware
+    comes first, so a drift in the background entry point sat behind a
+    middleware drift owned by another lane and was reported by nothing: the
+    failure line named one function, and a reader had no way to tell whether
+    it was the only one. A gate that reports a subset of what it found is a
+    gate that certifies the rest by silence.
+
+    `sha_of` is a seam, so a control can hand this a scripted oracle and check
+    that a SECOND drifted entry is actually named.
+    """
+    drifted = []
+    for section in sorted(manifest):
+        for module, name, sha in manifest[section]:
+            live = sha_of(module, name)
+            if live != sha:
+                drifted.append((section, module, name, sha, live))
+    return drifted
+
+
 def test_the_manifest_covers_every_non_route_entry_point():
     """r14 M7, GATE C. A route table is not the whole app.
 
@@ -1075,15 +1113,53 @@ def test_the_manifest_covers_every_non_route_entry_point():
     for section, entries in live.items():
         recorded = [(m, n) for (m, n, _sha) in manifest[section]]
         assert recorded == entries, f"{section}: manifest {recorded} vs live {entries}"
-        for module, name, sha in manifest[section]:
-            assert _entry_point_sha(module, name) == sha, (
-                f"{module}.{name} source fingerprint changed; re-review it"
-            )
+
+    # Reported TOGETHER. One drifted fingerprint used to hide every later one,
+    # and the sections are walked in a fixed order, so whichever came first
+    # decided what a reader was told (#342: a check whose report is a subset of
+    # what it found).
+    drifted = _entry_point_drift(manifest)
+    assert not drifted, (
+        "%d pinned entry point(s) have moved; every one of them needs "
+        "re-reviewing and re-pinning:\n%s"
+        % (len(drifted), "\n".join(
+            "  %-24s %s.%s  %s -> %s" % (section, module, name, sha[:12], now[:12])
+            for section, module, name, sha, now in drifted)))
 
     before = _entry_point_sha("main", "rate_limit_gate")
     with _mutated_segment("main", "rate_limit_gate"):
         after = _entry_point_sha("main", "rate_limit_gate")
     assert after != before, "editing the rate-limit gate moved no fingerprint"
+
+
+def test_a_drifted_entry_point_does_not_hide_the_ones_behind_it():
+    """The gate above reports EVERY moved fingerprint, not the first.
+
+    Why it needs its own test: on this tree one middleware entry has already
+    drifted, and the sections are walked in a fixed order with middleware
+    first. A `main.lifespan` drift therefore sat behind it and was named by
+    nothing -- so "one function is listed" carried no information about the
+    others, and a background entry point could ship stale behind a failure
+    somebody else was expected to clear.
+
+    The oracle is scripted rather than taken from the live tree: a test that
+    depends on which entry points happen to be drifting today stops testing
+    this the moment somebody re-pins.
+    """
+    manifest = {
+        "middleware": [("main", "rate_limit_gate", "aaaa")],
+        "background_entry_points": [("main", "lifespan", "bbbb")],
+    }
+    both = _entry_point_drift(manifest, sha_of=lambda m, n: "cccc")
+    named = {(module, name) for _section, module, name, _sha, _now in both}
+    assert named == {("main", "rate_limit_gate"), ("main", "lifespan")}, (
+        "two entry points drifted and the gate reported %r -- the ones it "
+        "does not name are certified by its silence" % (sorted(named),))
+
+    # ...and it still says nothing when nothing moved, or the assertion above
+    # would be reporting drift that is not there.
+    assert _entry_point_drift(
+        manifest, sha_of=lambda m, n: "aaaa" if n == "rate_limit_gate" else "bbbb") == []
 
 
 def test_the_admission_rule_is_computed_for_every_module_not_just_main():

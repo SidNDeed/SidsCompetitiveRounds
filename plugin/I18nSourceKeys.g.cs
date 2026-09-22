@@ -2241,8 +2241,6 @@ namespace CompetitiveRounds
             "THE DUO",
             "THE ROAD TO LEVEL 100",
             "THE SOLO",
-            "TOP CARD",
-            "TOP CARD\u0004pc.top_card",
             "TOURNAMENT MATCH",
             "TOURNAMENT MATCH vs {0} - connecting automatically, hold tight...{1}",
             "TOURNAMENT MATCH vs {0} IS WAITING - LEAVE THIS GAME NOW!{1}",
