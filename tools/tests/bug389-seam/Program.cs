@@ -2058,10 +2058,12 @@ internal static class Program
         // recognised spelling was present. WritesTo classifies by what follows the
         // identifier and sees every spelling; CallsTo and AttributesOf do the same
         // for the call and attribute counts (#432/#342/#431). The premises:
-        //   - the attachment count has exactly ONE write in the shipped files, in
-        //     any spelling; that write is MONOTONE; and it lives inside
-        //     MarkAttached, so it can only ever rise and only the patch loop's
-        //     callbacks can make it rise;
+        //   - the attachment count has exactly ONE write across every shipped C#
+        //     file this harness reads, in any spelling; that write is MONOTONE; and
+        //     it lives inside MarkAttached, so the count can only ever rise and only
+        //     the patch loop's callbacks can make it rise. The surface is the whole
+        //     read set and not just the file declaring the field, because the field
+        //     being private is not something this case asserts;
         //   - that writer is called from exactly three sites, and there are
         //     exactly three Harmony cleanup callbacks for them to be;
         //   - the assembly has exactly one patch site and no PatchAll beside it,
@@ -2097,22 +2099,77 @@ internal static class Program
             // harmlessly writes "_attached += 1". Both directions were wrong, and
             // the mutant written against it could only ever prove that the one
             // recognised spelling was present.
-            var attachWrites = new List<FieldWrite>();
-            attachWrites.AddRange(WritesTo(patchesText, "_attached"));
-            var seamAttach = WritesTo(seamText, "_attached");
-            if (seamAttach.Count != 0)
-                reachProblems.Add("the seam must not write the attachment count at all; found " + Describe(seamAttach));
+            // THE SURFACE IS EVERY SHIPPED C# FILE THIS HARNESS READS, not the two
+            // that happen to carry the fields today. "The count has one writer" is a
+            // statement about the ASSEMBLY: both fields are private now, but nothing
+            // here asserts they stay private, and an accessibility widened by one
+            // word would put a second writer in a file a two-file scan never opens -
+            // the same shape as the spelling bound this case is being fixed for
+            // (#432). Only ProximityVictimPatches.cs may carry the one write, so a
+            // hit anywhere else is reported with its file. An unread file is a
+            // FAILURE, never a skip.
+            //
+            // EmojiSprites.cs is deliberately NOT on this list and must not be added
+            // without re-reading it: it declares an unrelated `_attached` of its own,
+            // a List<Attachment>, whose initialiser would be counted as a write to a
+            // field it has nothing to do with. A scan that is wrong about WHICH field
+            // it is reading is the same class of defect as one bound to a spelling.
+            string[] shippedCs = new string[] {
+                "plugin/ProximityVictimPatches.cs",
+                "plugin/ProximityVictimSeam.cs",
+                "plugin/Plugin.cs",
+                "plugin/ApiClient.cs",
+                "plugin/PerfPatches.cs",
+                "plugin/SpectatorSession.cs",
+                "plugin/RoomActors.cs",
+            };
+            const string attachHome = "plugin/ProximityVictimPatches.cs";
             var realAttach = new List<FieldWrite>();
-            foreach (FieldWrite w in attachWrites)
+            var attachElsewhere = new List<string>();
+            int realWithdraw = 0;
+            foreach (string rel in shippedCs)
             {
-                if (!w.Declaration) { realAttach.Add(w); continue; }
-                if (w.Rhs != "0")
-                    reachProblems.Add("a declaration initialiser for the attachment count must start it at 0; found '"
-                        + w.Rhs + "' at line " + w.Line);
+                string text = LoadSource(rel);
+                if (text == null)
+                {
+                    reachProblems.Add("cannot read " + rel + " - an unread file is a failure, not a skip");
+                    continue;
+                }
+                foreach (FieldWrite w in WritesTo(text, "_attached"))
+                {
+                    if (w.Declaration)
+                    {
+                        if (w.Rhs != "0")
+                            reachProblems.Add("a declaration initialiser for the attachment count must start it "
+                                + "at 0; found '" + w.Rhs + "' in " + rel + " line " + w.Line);
+                        continue;
+                    }
+                    if (rel == attachHome) realAttach.Add(w);
+                    else attachElsewhere.Add(rel + " line " + w.Line + " " + w.Kind + " [" + w.Text + "]");
+                }
+                foreach (FieldWrite w in WritesTo(text, "_withdrawn"))
+                {
+                    if (w.Declaration)
+                    {
+                        if (w.Rhs != "false")
+                            reachProblems.Add("a declaration initialiser for the withdrawal latch must start it "
+                                + "false; found '" + w.Rhs + "' in " + rel + " line " + w.Line);
+                        continue;
+                    }
+                    realWithdraw++;
+                    if (w.Kind != "= (simple assignment)" || w.Rhs != "true")
+                        reachProblems.Add("every write to the withdrawal latch must write true - ONE-WAY is the "
+                            + "premise here, not the number of writers, and W23 owns the separate question of "
+                            + "whether StageInto makes one; found " + w.Kind + " with right-hand side '" + w.Rhs
+                            + "' in " + rel + " line " + w.Line);
+                }
             }
+            if (attachElsewhere.Count != 0)
+                reachProblems.Add("only " + attachHome + " may write the attachment count; found "
+                    + string.Join(" | ", attachElsewhere.ToArray()));
             if (realAttach.Count != 1)
                 reachProblems.Add("the attachment count must have exactly one write in the shipped files, in ANY "
-                    + "spelling; found " + realAttach.Count + ": " + Describe(realAttach));
+                    + "spelling; found " + realAttach.Count + " in " + attachHome + ": " + Describe(realAttach));
             else
             {
                 FieldWrite w = realAttach[0];
@@ -2128,28 +2185,6 @@ internal static class Program
                     reachProblems.Add("the one write must live inside MarkAttached - a write anywhere else is how "
                         + "the count stops being the patch loop's alone, and a decline stops being final; found it "
                         + "at line " + w.Line + " [" + w.Text + "]");
-            }
-
-            // --- and the withdrawal latch: every write writes true ---
-            var withdrawWrites = new List<FieldWrite>();
-            withdrawWrites.AddRange(WritesTo(patchesText, "_withdrawn"));
-            withdrawWrites.AddRange(WritesTo(seamText, "_withdrawn"));
-            int realWithdraw = 0;
-            foreach (FieldWrite w in withdrawWrites)
-            {
-                if (w.Declaration)
-                {
-                    if (w.Rhs != "false")
-                        reachProblems.Add("a declaration initialiser for the withdrawal latch must start it false; "
-                            + "found '" + w.Rhs + "' at line " + w.Line);
-                    continue;
-                }
-                realWithdraw++;
-                if (w.Kind != "= (simple assignment)" || w.Rhs != "true")
-                    reachProblems.Add("every write to the withdrawal latch must write true - ONE-WAY is the "
-                        + "premise here, not the number of writers, and W23 owns the separate question of "
-                        + "whether StageInto makes one; found " + w.Kind + " with right-hand side '" + w.Rhs
-                        + "' at line " + w.Line);
             }
             if (realWithdraw < 1)
                 reachProblems.Add("the withdrawal latch must have at least one write, or this premise is vacuous");
