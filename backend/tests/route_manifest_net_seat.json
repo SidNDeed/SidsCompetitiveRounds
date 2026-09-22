@@ -2164,7 +2164,7 @@
           ],
           "main",
           "get_mod_version",
-          "43b03242ed864ae41a390b25446dc11a17415fcc"
+          "98831f2798f175961db88ece45d2485320d86f3c"
         ],
         [
           "/api/v1/mod/check/{steam_id}",

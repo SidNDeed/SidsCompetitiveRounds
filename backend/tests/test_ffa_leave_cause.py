@@ -34,6 +34,35 @@ MAIN_PATH = (Path(__file__).parents[1] / "api" / "main.py").resolve()
 MAIN_SRC = MAIN_PATH.read_text(encoding="utf-8")
 MAIN_TREE = ast.parse(MAIN_SRC)
 
+REPO = MAIN_PATH.parents[2]
+
+# The client half of bug #392 sits on this tree now, so the wire name is no
+# longer transcribed here from a branch this checkout cannot see — it is read
+# out of the client's own source. These two files are the whole of the wire
+# contract's client side: one DECLARES the name, the other CONSUMES it.
+CLIENT_CONSTANT_PATH = REPO / "plugin" / "TransportExit.cs"
+CLIENT_READER_PATH = REPO / "plugin" / "ApiClient.cs"
+
+_CLIENT_CAPABILITY_CONST = re.compile(
+    r'\bconst\s+string\s+CapabilityField\s*=\s*"([^"]*)"\s*;')
+
+
+def _client_capability_field(src: str) -> str:
+    """The client's `CapabilityField` literal, read out of C# source text.
+
+    Raises unless the source DECLARES it exactly once. A reader that matched
+    nothing and returned a default, or that silently took the first of
+    several declarations, would make the comparison it feeds a check that
+    cannot fail (#342) — the server constant would be compared against a
+    value this helper invented rather than one the client ships.
+    """
+    hits = _CLIENT_CAPABILITY_CONST.findall(src)
+    if len(hits) != 1:
+        raise AssertionError(
+            'expected exactly one `const string CapabilityField = "..."` '
+            f"declaration in the client source, found {len(hits)}: {hits}")
+    return hits[0]
+
 
 # ── helpers ──────────────────────────────────────────────────────────────
 
@@ -330,31 +359,38 @@ def test_both_renderers_emit_the_qualifier(renderer):
 # ── (4) the capability ───────────────────────────────────────────────────
 
 def test_the_capability_field_is_spelled_the_way_the_client_reads_it():
-    """The wire NAME, pinned byte-for-byte. This is the whole of the contract
-    the first build of this lane got wrong.
+    """The wire NAME — no longer transcribed here, but READ across the two
+    files that have to agree. This is the whole of the contract the first
+    build of this lane got wrong.
 
     The server advertised `involuntary_leave_cause`; the client asks for
-    `ffa_involuntary_cause` — client lane, branch `claude/bug392-client`,
-    `plugin/TransportExit.cs:95`, `CapabilityField`, read into ExtractJsonBool
-    at the startup version check (`plugin/ApiClient.cs:1864` on that same
-    branch). The qualification matters: this tree's own `plugin/` folder is
-    the PRODUCTION client and has no `TransportExit.cs`, so an unqualified
-    path here would point a reader at a file that does not exist where they
-    would look for it. Both lanes were green
-    — each asserted its OWN key — and the gate could never open, so every
-    column, writer and renderer this bug added was live and completely inert.
-    The only thing that can catch that is a test that states the literal the
-    OTHER side reads, which is what this line is. Changing either side's
-    spelling without changing the other must redden here.
+    `ffa_involuntary_cause`. Both lanes were green — each asserted its OWN key
+    — and the gate could never open, so every column, writer and renderer this
+    bug added was live and completely inert.
 
-    A hardcoded literal is normally the shape of a check that cannot fail
-    (#342). For a WIRE name it is the opposite: the literal IS the contract,
-    it is not derived from anything, and an assertion against the constant
-    that feeds the route is the only thing standing between a one-character
-    rename and a silent re-run of #438/#443.
+    While the two halves sat on trees that could not see each other, the only
+    check available was this side STATING the literal the other side reads.
+    Both halves are on one tree now, so the pin is a CROSS-FILE READ: the
+    client's own `CapabilityField` is parsed out of `plugin/TransportExit.cs`
+    and compared with the constant the route is bound to. A rename on either
+    side alone reddens here as a disagreement naming both values — which is
+    exactly the case that used to pass on both sides at once.
+
+    There is no skip-when-missing arm and no fallback to a literal. If the
+    client source is not on this tree the first assertion fails, because a
+    test that stands down when its subject disappears is a check that cannot
+    fail (#342).
     """
-    assert main._INVOLUNTARY_CAUSE_CAPABILITY_FIELD == "ffa_involuntary_cause"
-    assert main._INVOLUNTARY_CAUSE_CAPABILITY_ALIAS == "involuntary_leave_cause"
+    assert CLIENT_CONSTANT_PATH.exists(), (
+        f"{CLIENT_CONSTANT_PATH.name} is not on this tree — the client half of "
+        "bug #392 is merged into this branch and its constant is what this "
+        "assertion reads; without it nothing pins the wire name at all")
+    client_value = _client_capability_field(
+        CLIENT_CONSTANT_PATH.read_text(encoding="utf-8"))
+    assert main._INVOLUNTARY_CAUSE_CAPABILITY_FIELD == client_value, (
+        "the two sides of the wire disagree: the server advertises "
+        f"{main._INVOLUNTARY_CAUSE_CAPABILITY_FIELD!r} and the client reads "
+        f"{client_value!r}")
 
 
 def test_mod_version_advertises_the_capability():
@@ -380,17 +416,32 @@ def test_the_route_takes_its_field_name_from_the_pinned_constant(monkeypatch):
     assert "ffa_involuntary_cause" not in payload
 
 
-def test_the_alias_can_never_carry_a_different_value(monkeypatch):
-    """Two keys for one boolean is a transitional state, not a second source
-    of truth. They are bound from one expression, so they cannot drift — in
-    either direction, which is why the false case is asserted too."""
-    for vocab, expected in ((main._INVOLUNTARY_EXIT_CAUSES, True),
-                            (frozenset(), False)):
-        monkeypatch.setattr(main, "_INVOLUNTARY_EXIT_CAUSES", vocab)
-        payload = asyncio.run(main.get_mod_version())
-        canonical = payload[main._INVOLUNTARY_CAUSE_CAPABILITY_FIELD]
-        alias = payload[main._INVOLUNTARY_CAUSE_CAPABILITY_ALIAS]
-        assert canonical is expected and alias is expected
+def test_the_transitional_alias_is_gone_from_the_wire():
+    """The first spelling was carried as a SECOND key while the lanes were
+    apart. The removal condition written at the constant was that the lanes be
+    merged and the client literal be read off the merged tree; this branch is
+    that merge and the test above is that read, so the route advertises one
+    name for one boolean.
+
+    An absence assertion passes trivially against a route that returned
+    nothing, so the canonical key is asserted PRESENT in the same payload as
+    its control. The handler's source is checked too, scoped to the function
+    span rather than file-wide (#432): the paragraph at the capability
+    constant still narrates the original disagreement and names the old
+    spelling there as history, which is prose and not an emission.
+    """
+    payload = asyncio.run(main.get_mod_version())
+    assert "involuntary_leave_cause" not in payload, (
+        "the transitional alias is back on the wire; keys advertised: "
+        f"{sorted(payload)}")
+    # The control for that absence: the canonical key IS advertised, so the
+    # assertion above cannot be satisfied by an empty or broken payload.
+    assert payload[main._INVOLUNTARY_CAUSE_CAPABILITY_FIELD] is True
+    assert not hasattr(main, "_INVOLUNTARY_CAUSE_CAPABILITY_ALIAS"), (
+        "the alias CONSTANT is back in main.py")
+    handler_src = ast.get_source_segment(MAIN_SRC, _function("get_mod_version"))
+    assert "involuntary_leave_cause" not in handler_src, (
+        "the mod-version handler names the old spelling")
 
 
 def test_the_capability_can_go_false(monkeypatch):
@@ -687,72 +738,71 @@ def test_the_site_counter_can_fail():
     assert valued["ternaries"] and valued["ternaries"][0][2] is False
 
 
-# ── (7) the wire name's traceability (r1 row LOW-3) ──────────────────────
-
-REPO = MAIN_PATH.parents[2]
-SELF_SRC = Path(__file__).read_text(encoding="utf-8")
-_CLIENT_LANE_BRANCH = "claude/bug392-client"
-
-
-def _unqualified_client_source_mentions(src: str, window: int = 12) -> list[int]:
-    """Line numbers where the client's constant file is named WITHOUT the lane
-    it is authoritative on being named within `window` lines either side."""
-    lines = src.splitlines()
-    out = []
-    for i, line in enumerate(lines):
-        if "TransportExit.cs" not in line:
-            continue
-        near = "\n".join(lines[max(0, i - window):i + window + 1])
-        if _CLIENT_LANE_BRANCH not in near:
-            out.append(i + 1)
-    return out
+# ── (7) the client side of the wire, read on this tree (r1 row LOW-3) ────
+#
+# This section used to hold a traceability DETECTOR. While `TransportExit.cs`
+# lived only on the client lane, every mention of it here and in main.py had
+# to name that branch within a few lines, or a reader following the citation
+# resolved it against this checkout and found nothing. The merge dissolved
+# that premise — the file resolves here now — and keeping the detector would
+# mean requiring a qualifier that is no longer true.
+#
+# What replaced it is strictly stronger rather than merely quieter. The
+# detector could only tell whether prose happened to name a branch; the checks
+# below RESOLVE the file, parse the constant out of it, and compare it with
+# the server's. The pin in section (4) does the same for the declaration. A
+# file that moves, is renamed, or stops declaring the constant fails them, and
+# it fails them by name.
 
 
-def test_the_wire_name_note_points_at_the_tree_that_owns_the_constant():
-    """A comment that names a file the reader cannot find is not traceable.
+def test_the_client_reads_the_capability_through_that_constant():
+    """The declaration is only a contract if the client's probe goes THROUGH
+    it. `CapabilityField` pinned in one file and the literal typed again at
+    the call site would be the same defect one file over: the cross-file pin
+    would guard a name the probe does not actually use, and a rename would
+    have to be made in two places with only one of them watched.
 
-    `CapabilityField` is authoritative on ONE tree — the client lane, branch
-    `claude/bug392-client`. This branch's own `plugin/` folder is the
-    production client and has no `TransportExit.cs` at all, so an unqualified
-    `plugin/TransportExit.cs` resolved against this checkout finds nothing,
-    and the next person to touch the wire name re-derives it from whatever the
-    shipped client does. That is the route back to the defect this lane
-    already had once: a spelling chosen on one side and read on neither.
-
-    The second assertion is the merge tripwire. When the lanes meet, that file
-    APPEARS on this tree and this test reddens — which is the moment the
-    hardcoded literal pin (against `claude/bug392-client`'s
-    `plugin/TransportExit.cs:95`) is supposed to become a cross-file read of
-    the constant, the transitional alias is supposed to go, and this note is
-    supposed to lose its "not in this tree" half. The owed action is therefore
-    enforced rather than remembered.
+    So the reader is required to name the constant, and required not to carry
+    the literal itself.
     """
-    assert _unqualified_client_source_mentions(MAIN_SRC) == [], (
-        "main.py names TransportExit.cs without naming the lane it lives on, at "
-        f"lines {_unqualified_client_source_mentions(MAIN_SRC)}")
-    assert _unqualified_client_source_mentions(SELF_SRC) == [], (
-        "this file names TransportExit.cs without naming the lane it lives on, at "
-        f"lines {_unqualified_client_source_mentions(SELF_SRC)}")
-
-    client_constant = REPO / "plugin" / "TransportExit.cs"
-    assert not client_constant.exists(), (
-        "plugin/TransportExit.cs now exists on this tree — the two lanes have "
-        "met. Replace the hardcoded literal in "
-        "test_the_capability_field_is_spelled_the_way_the_client_reads_it with a "
-        "cross-file read of CapabilityField from that file, drop the "
-        "transitional alias, and delete the 'not in this tree' half of the note "
-        "at the capability constants in main.py.")
+    assert CLIENT_READER_PATH.exists(), (
+        f"{CLIENT_READER_PATH.name} is not on this tree — the client's version "
+        "check is what consumes the capability this route advertises")
+    reader = CLIENT_READER_PATH.read_text(encoding="utf-8")
+    assert "TransportExit.CapabilityField" in reader, (
+        "the client's version check no longer probes through "
+        "TransportExit.CapabilityField — the cross-file pin would then be "
+        "guarding a name nothing reads")
+    literal = f'"{main._INVOLUNTARY_CAUSE_CAPABILITY_FIELD}"'
+    assert literal not in reader, (
+        f"the client repeats the wire literal {literal} instead of naming the "
+        "constant; the pin reads the declaration, so a second copy here is a "
+        "spelling nothing is watching")
 
 
-def test_the_traceability_detector_can_fail():
-    """The negative control: an unqualified mention is reported."""
-    # This comment names the lane `claude/bug392-client`, which is what
-    # qualifies the probe strings below for the file-level scan above — they
-    # have to contain the bare file name to exercise the detector at all.
-    bad = "# transcribed from plugin/TransportExit.cs, `CapabilityField`\n"
-    assert _unqualified_client_source_mentions(bad) == [1]
-    good = f"# on branch {_CLIENT_LANE_BRANCH}:\n# plugin/TransportExit.cs:95\n"
-    assert _unqualified_client_source_mentions(good) == []
+def test_the_client_constant_reader_can_fail():
+    """The negative control for the extractor the whole pin rests on.
+
+    An extractor that matched nothing and returned a default, or that took the
+    first of several declarations, would let
+    test_the_capability_field_is_spelled_the_way_the_client_reads_it compare
+    the server constant against a value this file invented — green on a tree
+    where the two sides disagree.
+    """
+    one = 'internal const string CapabilityField = "zz_probe_name";'
+    assert _client_capability_field(one) == "zz_probe_name"
+
+    with pytest.raises(AssertionError):
+        _client_capability_field("// no declaration here at all\n")
+    with pytest.raises(AssertionError):
+        _client_capability_field(one + "\n" + one)
+
+    # A doc comment that merely QUOTES the name is not a declaration. The
+    # client source carries exactly such a line above its constant, so an
+    # extractor loose enough to accept prose would find two values in the real
+    # file and have to guess between them.
+    with pytest.raises(AssertionError):
+        _client_capability_field('/// the client read "ffa_involuntary_cause"\n')
 
 
 # ── (8) the migration is named by the number it actually has (row LOW-4) ─
@@ -1000,23 +1050,16 @@ def test_the_residual_detector_can_fail():
                          r"CAST\(:cause AS text\)\)", stamped[0])
 
 
-# ── (10) the alias is transitional, and says so (r1 row B13 / LOW-5) ─────
-
-def test_the_alias_states_the_condition_that_removes_it():
-    """A second wire key for one boolean is a deviation from the contract this
-    lane is supposed to leave behind, and a deviation with no removal
-    condition is how a transitional thing becomes permanent.
-
-    The condition is stated at the constant itself, not only in the notes,
-    because the notes are not on the deploy path and the constant is.
-    """
-    src = MAIN_SRC.splitlines()
-    idx = next(i for i, ln in enumerate(src)
-               if ln.startswith("_INVOLUNTARY_CAUSE_CAPABILITY_ALIAS"))
-    note = "\n".join(src[max(0, idx - 14):idx])
-    assert "transitional" in note.lower(), note
-    # The whole phrase, not the word "merged": the paragraph above already
-    # contains "unmerged", so a substring check on it would be a check that
-    # cannot fail (#342).
-    assert "Drop the alias once both lanes are merged and the client literal is read off" in note, note
-    assert main._INVOLUNTARY_CAUSE_CAPABILITY_ALIAS != main._INVOLUNTARY_CAUSE_CAPABILITY_FIELD
+# ── (10) the alias's removal condition, now met (r1 row B13 / LOW-5) ─────
+#
+# This section held the check that the transitional alias STATED the condition
+# that would remove it — "drop it once both lanes are merged and the client
+# literal is read off the merged tree" — because a deviation with no removal
+# condition is how a transitional thing becomes permanent.
+#
+# That condition is met. This branch is the merge, and the literal is read off
+# it by test_the_capability_field_is_spelled_the_way_the_client_reads_it, so
+# the alias is gone and a check that its promise was well worded has nothing
+# left to read. What stands in its place is
+# test_the_transitional_alias_is_gone_from_the_wire in section (4), which
+# asserts the removal itself rather than the promise of one.
