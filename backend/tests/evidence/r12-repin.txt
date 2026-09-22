@@ -17,10 +17,10 @@ source, tests, instruments, the other evidence files -- was already
 committed before the re-pin ran, and nothing was left that could be
 edited after it.
 
-  HEAD at the re-pin     f3e804fce32f25ad594baf16ad7873d60dac5a73
-  tree of that commit    26c7e2ddc82ecc0a3744bdbfe62e5557b3a8e067
-  subject                A report the server did not keep comes back unchanged, under its own key
-  run at                 2026-09-22 12:17:30 UTC
+  HEAD at the re-pin     1604255027bc1b6edb6d36d81b66884a28850c2a
+  tree of that commit    fa3144f3965fb7de47b1243002a8989221af7cf4
+  subject                A capture this repository could not carry is refused before the run it records
+  run at                 2026-09-22 14:35:55 UTC
 
 == which commit carries which file, from git rather than from me ==
 Round 11's report said the commit that added it added only it. That
@@ -47,6 +47,17 @@ and the round's source, tests, instruments and other evidence are in
 the commit before that -- which is the HEAD named above, the tree
 the re-pin actually ran against.
 
+== the capture this report is assembled from, and who names it ==
+The log named in the header above is OPENED by this wrapper rather
+than redirected into it by a caller, so its name is decided in one
+function and used in three places: the file that is opened, the
+`capture` header written into that file, and the check that this
+repository's ignore rules re-include it. That check runs before
+anything is written, so a name this tree could not carry stops the
+round here instead of at the `git add` that ends it. The test that
+pairs producers with patterns reads the name by CALLING that
+function, which is why the pairing cannot drift from the file.
+
 == what the wrapper checked before it wrote this ==
 A pytest run cannot cover the file that records it: the file is
 written after the run, by construction. So the closing check below
@@ -68,17 +79,21 @@ here would mean the tree moved after the suites certified it.
 THE RUN, verbatim from here down
 ------------------------------------------------------------------------------
 ========== r12-repin-run.log ==========
+script    backend/tests/evidence/repin-last.py
+cwd       <repo>
+capture   backend/tests/evidence/r12-repin-run.log
+
 == closing evidence check, over this directory as committed ==
 cwd       <repo>/backend
-started   2026-09-22 12:17:30 UTC
+started   2026-09-22 14:35:55 UTC
 command   python -m pytest tests/test_ffa_game_number_anchor.py -q -p no:cacheprovider -k committed_evidence or assembled_from_its_run or round_eight_control or round_seven_control or production_file or runner_carries or control_tally or counts_the_checks or new_controls_a_report or residual_reach or negation_admits
 ...........                                                              [100%]
-11 passed, 149 deselected in 5.31s
+11 passed, 149 deselected in 5.19s
 closing rc=0
 
 == route manifest re-pin, by its own tool ==
 cwd       <repo>
-started   2026-09-22 12:17:37 UTC
+started   2026-09-22 14:36:01 UTC
 command   python backend\tests\repin_route_manifest.py
 manifest rows      : 362
 fingerprinted      : 361
