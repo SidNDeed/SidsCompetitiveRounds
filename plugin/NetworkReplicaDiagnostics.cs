@@ -204,6 +204,22 @@ namespace CompetitiveRounds
             catch { return false; }
         }
 
+        /// <summary>Cumulative view batches observed for one actor inside the
+        /// CURRENT game window, or -1 when this actor is not tracked. Read-only
+        /// and additive: the roster census (bug 391 §4.1) differences it across
+        /// boundaries so its line can carry a per-boundary count, and -1 is what
+        /// makes that line say "?" instead of inventing a zero.</summary>
+        internal static long GameViewBatches(int actorNumber)
+        {
+            try
+            {
+                ActorStats actor;
+                if (!Actors.TryGetValue(actorNumber, out actor)) return -1;
+                return actor.Game.Batches;
+            }
+            catch { return -1; }
+        }
+
         // ── lag-332 v6 §1.2: accepted lifecycle transitions ──────────────
 
         /// <summary>An ACCEPTED active→inactive transition on a remote view
