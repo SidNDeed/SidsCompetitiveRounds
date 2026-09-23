@@ -1392,14 +1392,19 @@ def functions_touching_the_room_clock():
 
 
 def test_every_room_issue_clears_the_deferral_marker():
-    """What makes the deletion above safe, asked of the FILE.
+    """What the room-issue operation OWES, asked of the FILE.
 
-    With no room term in the sweep, the property the sweep relies on is that a
-    marker is never older than the room it would be settled against. That is
-    an invariant about the room-ISSUE operation, not about the sweep: whoever
-    stamps room_issued_at must clear the marker in the same breath. Counted
-    file-wide, because the defect is a class and a span-local count could not
-    see a third funnel (#432, #330).
+    What this test requires is that whoever stamps room_issued_at attempts the
+    marker clear in the same breath. It is NOT what this docstring used to
+    open with: an age relation between the marker and the room, held out as
+    the property the sweep leans on now that its room term is gone. The clear
+    is attempted under a savepoint that swallows what it raises, so no such
+    relation is available to lean on, and the sweep's deletion of the room
+    term is carried by the live-game veto instead. The requirement stands on
+    its own without it: a funnel that stamps the clock without even attempting
+    the clear is a funnel nothing would clear after. Counted file-wide,
+    because the defect is a class and a span-local count could not see a third
+    funnel (#432, #330, #351).
 
     Keyed on the COLUMN, not on one spelling of the statement that writes it.
     The first cut matched the literal line `room_issued_at = NOW()`, so a
@@ -1424,6 +1429,97 @@ def test_every_room_issue_clears_the_deferral_marker():
     # resume funnels dropping the dead room. A third value would be a new
     # shape this reasoning has not been done for.
     assert clearers == ["_team_relock_existing_series", "team_lobby_start"], writers
+
+
+def comment_block_above(func_name, needle):
+    """The comment lines immediately ABOVE a line inside one def.
+
+    A file-wide grep answers "does this sentence exist somewhere", which is a
+    different question from "is this the sentence standing over that call".
+    Walking up from the call establishes the adjacency by construction, so a
+    paragraph that drifts to the other end of the function stops satisfying
+    the check rather than continuing to (#432).
+    """
+    lines = span(func_name)
+    hits = [i for i, ln in enumerate(lines) if needle in ln]
+    assert len(hits) == 1, (func_name, needle, hits)
+    out, j = [], hits[0] - 1
+    while j >= 0 and lines[j].lstrip().startswith("#"):
+        out.append(lines[j])
+        j -= 1
+    assert out, (func_name, needle, "no comment block above the call")
+    return list(reversed(out))
+
+
+def test_the_room_issue_clear_is_introduced_as_an_attempt_not_an_invariant():
+    """The sentence standing over the room-issue clear, priced to the code.
+
+    The block used to open with an absolute -- issuing a room clears the
+    marker, therefore an age relation holds between marker and room -- and
+    then contradict itself nine lines down with "expected", not "guaranteed".
+    The helper attempts its UPDATE inside a savepoint and swallows what that
+    raises, so the opening was the same defect the marker-clear doc had to be
+    narrowed for, one screen away and in the file the claim check scans
+    (#351, #432). What the block may say is what the call does, and what the
+    sweep's room-term deletion actually rests on.
+    """
+    block = _collapsed("\n".join(comment_block_above(
+        "team_queue_poll", "_team_clear_dc_fallback_marker(")))
+    assert "ISSUING A ROOM ATTEMPTS THE DEFERRAL-MARKER CLEAR" in block, block
+    assert ("NO READER MAY TREAT A MARKER AS NECESSARILY YOUNGER THAN THE "
+            "ROOM") in block, block
+    # The positive half is not enough on its own: the block has to say what
+    # DOES carry the sweep's deleted room term, or the next reader is left
+    # with a refusal and no replacement (#331).
+    assert "LIVE-GAME VETO" in block, block
+    assert "swallows every exception" in block, block
+
+
+# Which role in migration 326's writer enumeration each caller of the clearing
+# helper plays. The two revival funnels are ONE role in that list; the
+# room-issue write is its own. A caller that is not in this map is a role
+# nobody has written the sentence for, which is the state the check refuses.
+ROLE_OF_CLEARING_CALLER = {
+    "_team_relock_existing_series": "a revival funnel clearing the marker",
+    "team_lobby_start": "a revival funnel clearing the marker",
+    "team_queue_poll": "the room-issue write in the queue poll",
+}
+# The two writers that end a deferral WITHOUT going through the helper: the
+# in-bound real-totals report, which overwrites the attribution, and the sweep
+# tick, which settles the row.
+WRITERS_NOT_THROUGH_THE_HELPER = 2
+_COUNT_WORD = {2: "Two", 3: "Three", 4: "Four", 5: "Five", 6: "Six"}
+
+
+def test_the_migration_enumerates_every_writer_that_ends_a_deferral():
+    """326's writer list, counted from the tree instead of remembered.
+
+    The header enumerated three -- report, revival funnel, sweep tick -- and
+    left out the room-issue write, which calls the same helper on the
+    statement that stamps room_issued_at. A guard, test or runbook step
+    derived from the short list would treat that path as one that cannot end
+    a deferral, and a marker it cleared would leave a reader with no fourth
+    candidate to look at.
+
+    The COUNT WORD is derived here rather than typed: the helper's callers are
+    read out of main.py, mapped to the roles the sentence names, and the total
+    is those roles plus the two writers that never touch the helper. A fifth
+    caller reddens this test instead of being quietly missing from the prose.
+    """
+    callers = [n for n in functions_performing("_team_clear_dc_fallback_marker(")
+               if n != "_team_clear_dc_fallback_marker"]
+    assert set(callers) == set(ROLE_OF_CLEARING_CALLER), (
+        callers, sorted(ROLE_OF_CLEARING_CALLER))
+    flat = _collapsed(_dc_claim_sources()["326_team_series_dc_fallback_at.sql"])
+    roles = sorted({ROLE_OF_CLEARING_CALLER[c] for c in callers})
+    want = _COUNT_WORD[len(roles) + WRITERS_NOT_THROUGH_THE_HELPER]
+    assert ("%s writers end it" % want) in flat, (want, callers, roles)
+    for phrase in roles + ["a real-totals report inside the bound",
+                           "a sweep tick after the bound"]:
+        assert flat.count(phrase) >= 1, phrase
+    # And the header prices the fourth honestly: it is a writer that sometimes
+    # ends a deferral, not one guaranteed to run its UPDATE.
+    assert "is not guaranteed to run its UPDATE" in flat, flat[:600]
 
 
 def test_the_bound_sentence_is_one_sentence_in_every_copy():
@@ -1767,6 +1863,16 @@ SUPERSEDED_CLAIMS = (
     "is the one line a resolution must carry when the sibling scan did not run",
     "THE SIBLING SCAN, AND THE ONE STATE IN WHICH IT DOES NOT RUN",
     "Only a scan that ran to completion leaves the line out",
+    # The room-age absolute, in BOTH files it stood in. It is the L6 defect
+    # wearing a different subject: an unconditional guarantee resting on a
+    # call that attempts its UPDATE and swallows what that raises.
+    # Each of these is ONE source line on purpose: the negative control below
+    # looks for every superseded form in this file's own RAW text, and an
+    # implicit concatenation across two lines is not the string it names.
+    "a marker can never be older than the room",
+    "is that a marker is never older than the room",
+    # ...and the writer enumeration that counted three of the four.
+    "Three writers end it",
 )
 
 # ...and the sentence that replaced each one, which must be present exactly
@@ -1809,6 +1915,20 @@ CORRECTED_CLAIMS = (
      "line and is not an exception"),
     ("test_sept16_dc_fallback_shape.py",
      "THE SIBLING SCAN, AND THE TWO STATES IN WHICH IT LISTS NOTHING"),
+    ("main.py", "ISSUING A ROOM ATTEMPTS THE DEFERRAL-MARKER CLEAR"),
+    ("main.py",
+     "NO READER MAY TREAT A MARKER AS NECESSARILY YOUNGER THAN THE ROOM it "
+     "would be settled against"),
+    ("main.py",
+     "What carries that deletion is the sweep's LIVE-GAME VETO -- the last "
+     "read before the write -- and not this call"),
+    ("326_team_series_dc_fallback_at.sql",
+     "Four writers end it: a real-totals report inside the bound, a revival "
+     "funnel clearing the marker, a sweep tick after the bound, and the "
+     "room-issue write in the queue poll"),
+    ("test_sept16_dc_fallback_shape.py",
+     "the sweep's deletion of the room term is carried by the live-game veto "
+     "instead"),
 )
 
 

@@ -38010,20 +38010,33 @@ async def team_queue_poll(steam_id: str, request: Request,
                     {"rn": room_name, "rr": chosen_region, "sid": me["series_id"],
                      "has_rules": me["rules"] is not None, "rules": _rules_json(rules)},
                 )
-                # ISSUING A ROOM CLEARS THE DEFERRAL MARKER, so a marker can
-                # never be older than the room it would be settled against.
+                # ISSUING A ROOM ATTEMPTS THE DEFERRAL-MARKER CLEAR, on the one
+                # statement in this file that stamps room_issued_at. What that
+                # buys is an ATTEMPT and not an invariant: the helper clears
+                # inside its own savepoint and swallows every exception the
+                # attempt raises, so a swallowed error here leaves a marker
+                # standing on a row whose room was just re-issued. NO READER
+                # MAY TREAT A MARKER AS NECESSARILY YOUNGER THAN THE ROOM it
+                # would be settled against; that is the same guarantee the
+                # helper's own doc had to be narrowed to an attempt, and it is
+                # no truer one screen away (#351).
                 # The deferred-fallback sweep no longer consults the room clock
-                # at all (the 214 s term it used could not refuse a row), and
-                # this is what makes that deletion safe: the only way a stale
-                # marker could reach a NEW sitting is a funnel that re-issues a
-                # room without clearing it, and this is the one statement in
-                # the file that stamps room_issued_at. The two funnels that
-                # revive a series call the helper on their own path, so on
+                # at all (the 214 s term it used could not refuse a row). What
+                # carries that deletion is the sweep's LIVE-GAME VETO -- the
+                # last read before the write -- and not this call: a marker
+                # this call failed to clear still meets a veto that refuses to
+                # settle a row with a live game in evidence. The two funnels
+                # that revive a series call the helper on their own path, so on
                 # today's flows this is expected to find nothing to clear --
                 # "expected", not "guaranteed": the ordering between a revival
                 # and the poll that issues the room is a matter of two
                 # requests, and that is exactly the kind of reasoning this
                 # call exists to stop anyone having to do (#432, #330).
+                # This call is also the FOURTH writer that ends a deferral,
+                # beside the in-bound real-totals report, the revival funnels
+                # and the sweep tick; migration 326's header enumerates the
+                # four, and a marker that vanished with no tick, no report and
+                # no funnel in the log was cleared here.
                 # test_sept16_dc_fallback_shape.py counts the room-issue
                 # OPERATION file-wide and requires this call beside it.
                 await _team_clear_dc_fallback_marker(db, me["series_id"])

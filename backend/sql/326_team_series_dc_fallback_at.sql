@@ -90,8 +90,15 @@
 -- operation across the whole of main.py rather than inside one function.
 --
 -- THE MARKER PERSISTS; THE DEFERRAL IS ENDED BY A WRITER, NEVER BY THE CLOCK.
--- Three writers end it: a real-totals report inside the bound, a revival funnel
--- clearing the marker, or a sweep tick after the bound. The clock alone ends
+-- Four writers end it: a real-totals report inside the bound, a revival funnel
+-- clearing the marker, a sweep tick after the bound, and the room-issue write
+-- in the queue poll, which calls the same clearing helper on the statement
+-- that stamps room_issued_at. An earlier draft of this line enumerated three
+-- and left the fourth out, so a marker that vanished with no tick, no report
+-- and no funnel in the log had no place left to look; the room-issue clear is
+-- expected to find nothing on today's flows and is not guaranteed to run its
+-- UPDATE -- the helper swallows what the attempt raises -- but a writer that
+-- sometimes ends a deferral is a writer that ends one. The clock alone ends
 -- nothing -- with no sweep ticking, a marked row stays deferred for as long as
 -- the api is up. That is the direction the unhandled case fails in (#276, #430)
 -- and it is why the sweep is a janitor self-test root rather than a loop nobody
