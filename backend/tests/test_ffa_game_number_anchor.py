@@ -87,13 +87,19 @@ it: 22 unmarked and still live (rounds 1 and 2), 1 unmarked and RETIRED because
 round 4 deleted the code it mutated (prior-tail-only, annotated in place), 16
 marked (r3), 15 marked (r4), 10 marked (r5), 7 marked (r6), 7 marked (r7), 8
 marked (r8), 3 marked (r9), 8 marked (r10), 6 marked (r11), 8 marked (r12),
-5 marked (r13),
+5 marked (r13), 3 marked (r14),
 and
 one more that is a committed test rather than a hand-run control
 (backfill-neutered, at the end). The rounds in that sentence are read off the
 sentence and compared with the rounds the list carries, both ways: a round
 whose controls are here and whose count is not stated reds as loudly as a
 count that disagrees, which is what stops the sentence going one round stale.
+Those numbers count LIST ENTRIES, which is not the same set as the controls the
+runner carries: one r13 entry is RETIRED IN PLACE
+(terminal-walk-redirects-a-second-time, whose rule round 14 removed), so it is
+still listed, still counted here, and no longer in the runner. Retiring an
+entry by deleting it would leave nothing to read about a control the evidence
+of two earlier rounds names.
 Rounds 4 through 8's are the ones with a
 NEGATIVE control — an inert edit at the same site that must leave the same
 test GREEN — so each test is shown to redden for the mutation and not for any
@@ -453,16 +459,22 @@ All KILLED:
                            at the same site.
   recovery-resubmits-the-stale-number (r13)  _recover_parked: drop the line
                            that writes the advertised number into the body,
-                           so the REDIRECT the contract's arm table states is
-                           never taken and the seat resubmits the number it
-                           was just refused for. Its inert twin is the same
-                           assignment with a doubled space.
-  terminal-walk-redirects-a-second-time (r13)  _settled_game_disposition:
-                           answer EVERY settled-game refusal with a redirect,
-                           so the bound the contract states -- once per
-                           entry, terminal the second time -- is not one and
-                           the entry is re-signed for ever. Its inert twin is
-                           a comment at the same site.
+                           so the advertisement is never taken up and the seat
+                           keys its NEXT game at the number it was just refused
+                           for. The leg it reds moved in round 14 -- it was the
+                           redirected entry's acceptance, it is now the seat's
+                           next game -- and the mutation is the one it always
+                           was. Its inert twin is the same assignment with a
+                           doubled space.
+  terminal-walk-redirects-a-second-time (r13)  RETIRED IN ROUND 14, and named
+                           here rather than deleted. It mutated the BOUND on a
+                           redirect -- once per entry, terminal the second time
+                           -- and the ruling removes the redirect itself, so
+                           the rule it guarded no longer exists and a control
+                           that cannot be re-run on the tree it certifies is an
+                           assertion about a different tree. Its site is now
+                           held by terminal-arm-redirects-the-refused-entry,
+                           which reds on the redirect happening at all.
   evidence-log-negation-takes-a-suffix-wildcard (r13)  .gitignore: one exact
                            capture name back to the producer-suffix wildcard
                            it replaced, which re-admits every name shaped like
@@ -481,6 +493,29 @@ All KILLED:
                            branch's most recent commits carry, so a sitting
                            commits under whatever the last sitting wrote down.
                            Its inert twin is a comment at the same site.
+  terminal-arm-redirects-the-refused-entry (r14)  _settled_game_disposition:
+                           answer a settled-game refusal with a REDIRECT, which
+                           is the rule rounds 12 and 13 stated and the ruling
+                           removed. The conflicting-account walk then re-signs
+                           that entry at the free number, the endpoint settles
+                           it, and a SECOND row for one physical game is what
+                           reds -- a second rating and a second payout. Its
+                           inert twin is a comment at the same site.
+  terminal-walk-keeps-the-dropped-entry (r14)  _drop_parked: return a copy of
+                           the entry instead of popping it, so the terminal
+                           disposition is announced and not taken. The walk
+                           reports the drop it never made and the outbox still
+                           holds a delivery the server has refused. Its inert
+                           twin is a comment at the same site.
+  refusal-keeps-nothing-for-review (r14)  the endpoint's contradiction arm:
+                           raise the terminal refusal directly instead of
+                           through _ffa_record_and_refuse, so the answer is
+                           unchanged and NOTHING is kept. That is the whole
+                           cost of the terminal disposition -- it is
+                           conservative only because the payload survives for
+                           an operator -- and what reds is the quarantine
+                           record the walk reads back. Its inert twin is a
+                           comment at the same site.
 ...and one more that is a COMMITTED TEST rather than a hand-run control:
   backfill-neutered        327's room_tail backfill: WHERE FALSE. See
                            test_pg_migration_327_post_check_fails_when_the_
@@ -5545,28 +5580,38 @@ def _park(key, room_base, vec, winner, reporter):
     advertises lives in that field's `_rN` tail -- so a number that changes is
     a field that changes, never an entry that moves.
 
-    `redirects` counts the times THIS entry has been redirected by a refusal
-    carrying `settled_game`, because the contract bounds that at one: the
-    second such refusal of one entry is terminal for it."""
+    `refusals` counts the times THIS entry has been answered with a refusal,
+    which is at most once: a refusal carrying `settled_game` is terminal for
+    the entry, so there is no second answer to count."""
     return {"key": key, "room_base": room_base, "vec": vec, "winner": winner,
             "reporter": reporter, "advertised": None, "deliveries": 0,
-            "redirects": 0}
+            "refusals": 0}
 
 
 def _recover_parked(outbox, key, refusal):
-    """Re-sign THE SAME parked delivery with the number the server advertised.
+    """Write the number the server advertised into a parked entry's room-id
+    FIELD -- the seat taking up the last advertisement it holds.
 
     THE KEY DOES NOT MOVE, and that is the whole rule. A refusal advertises
     `expected_game`; the seat writes that number into the room-id FIELD of the
-    body it already has and sends that same entry again. It does not mint a
-    second entry for the game, and it does not re-identify the one it holds --
-    first-write-wins says one delivery per physical game, and a recovery that
+    body it holds for the physical game it is keying. It does not mint a second
+    entry for that game, and it does not re-identify the one it holds --
+    first-write-wins says one delivery per physical game, and a keying that
     opened a second one would be exactly the second settlement of one game that
     the freeze exists to prevent.
 
+    ROUND 14: WHICH ENTRY THIS IS APPLIED TO IS THE RULING. It is the entry the
+    seat is about to deliver for the FIRST time -- a game it has keyed but not
+    yet filed. It is never an entry the server has already refused with
+    `settled_game`: that entry is terminal and is dropped, because the server
+    cannot tell a behind seat's later game from a conflicting second account of
+    the game already settled at the number it named, and re-keying it at the
+    free number would settle that conflicting account as a game of its own
+    (#283, #378). What the advertisement moves is the NEXT game's field.
+
     Nothing else about the body changes: same roster, same tallies, same
-    winner, same reporter. A redelivery is a RESEND, not an edit of the
-    evidence."""
+    winner, same reporter. A delivery is a RESEND of what the seat froze, not
+    an edit of the evidence."""
     advertised = int(refusal.progress["expected_game"])
     entry = outbox[key]
     entry["advertised"] = advertised
@@ -5574,37 +5619,43 @@ def _recover_parked(outbox, key, refusal):
 
 
 def _settled_game_disposition(entry, refusal):
-    """What the seat does with THIS entry when this refusal answers it.
+    """What the seat does with THIS entry when this refusal answers it, and
+    which number its NEXT key derives from: `(disposition, number)`.
 
     The contract's arm table gives a refusal carrying `settled_game` exactly
-    one disposition, and it is not "drop": the field says the NUMBER this
-    delivery named is finished, and says nothing about the physical game the
-    body describes. A behind seat's later game is refused there precisely
-    because the seat is behind, so dropping it would throw a real game away
-    and its result, rating and gold would never settle.
+    one disposition, and round 14 is where it stopped being a redirect. The
+    field says the NUMBER this delivery named is finished and says nothing
+    about the physical game the body describes -- and TWO deliveries produce
+    that answer, which the server cannot tell apart. One is a behind seat's
+    LATER physical game, refused there because the seat is behind. The other is
+    a CONFLICTING second account of the game already settled at that number.
+    They arrive as the same bytes under the same key, no fact the server holds
+    separates them, and a delay is under a client's own control, so nothing the
+    client carries separates them either (#283, #378).
 
-    So the answer is REDIRECT -- re-sign the same entry at the advertised
-    `expected_game` and submit it -- and the redirect is taken at most ONCE
-    per entry. The contract's own bound is that no seat can be refused for the
-    same reason twice, because the number the second attempt carries came from
-    the server rather than from anything the seat counted; a second
-    `settled_game` refusal of one entry therefore means that entry cannot be
-    filed by this route at all, and it is TERMINAL for it. Counted on the
-    entry, so a third submission of it is not a thing this rule permits.
+    So the entry is TERMINAL. Re-keying it at the free number would settle a
+    conflicting account as a second physical game -- a second row, a second
+    rating, a second payout -- while dropping it costs at most one real game's
+    automatic settlement, and the server has already quarantined that payload
+    for an operator (`_ffa_record_and_refuse`). One of those costs is
+    recoverable and the other is not.
 
+    The NUMBER returned beside the disposition is what the refusal advertises,
+    and it is the seat's next KEY rather than this entry's: the entry is gone.
     A refusal carrying no `settled_game` is terminal for the payload on the
-    first answer, which is the row beside it in the same table."""
-    if refusal.progress.get("settled_game") is None:
-        return "terminal"
-    entry["redirects"] += 1
-    return "redirect" if entry["redirects"] == 1 else "terminal"
+    same answer, which is the row beside it in the same table -- both 409 arms
+    agree here, and saying so is the finding rather than a simplification."""
+    entry["refusals"] += 1
+    advertised = refusal.progress.get("expected_game")
+    return "terminal", None if advertised is None else int(advertised)
 
 
 def _drop_parked(outbox, key):
     """The terminal disposition, executed: the entry leaves the outbox.
 
     Returned rather than discarded, because "kept for review" is part of the
-    rule and a caller has to be able to say what was dropped."""
+    rule and a caller has to be able to say what was dropped -- how often it
+    was delivered, and that it was never delivered again."""
     return outbox.pop(key)
 
 
@@ -5773,7 +5824,7 @@ def test_pg_a_seat_that_missed_an_update_recovers_in_one_submission():
     recovery-re-keys-the-parked-delivery (r12),
     recovery-mints-a-second-parked-key (r12),
     recovery-resubmits-the-stale-number (r13),
-    terminal-walk-redirects-a-second-time (r13).
+    terminal-walk-keeps-the-dropped-entry (r14).
 
     The SERVER is the sole allocator of the game number, and this is the
     property that makes a seat which missed a room update recoverable rather
@@ -5782,13 +5833,19 @@ def test_pg_a_seat_that_missed_an_update_recovers_in_one_submission():
     also the answer that tells it what to use. Nothing is counted locally and
     nothing is realigned between seats.
 
-    ROUND 12 WALKS THE CLIENT TRANSITION INSTEAD OF ASSERTING IT. Round 11's
-    step 4 read the advertised number, asked the number rule whether it would
-    be accepted, and then wrote the settlement behind the endpoint -- so the
-    one step the rule is about, a parked delivery RE-SIGNED and ACCEPTED, was
-    never driven. Every leg below goes through the endpoint, and the only row
-    written behind it is the one another elector writes while this seat is not
-    looking, which is the precondition rather than a step.
+    IT IS THE SEAT THAT RECOVERS IN ONE SUBMISSION, AND ROUND 14 IS WHERE THE
+    ENTRY STOPPED DOING SO. Rounds 12 and 13 had the refused entry re-signed at
+    the advertised number and settled, which is a REDIRECT, and the redirect is
+    ruled out: a refusal carrying `settled_game` is given by two deliveries the
+    server cannot tell apart -- this seat's later physical game, and a
+    conflicting second account of the game already settled at that number --
+    so re-keying such a delivery at the free number can settle the conflicting
+    account as a game of its own. The conservative disposition is the only one
+    the integrity bar admits. The entry is dropped, the server has already
+    quarantined its payload for an operator, and the seat derives its NEXT
+    key from the advertised number. The cost -- a real later game that now
+    waits on a human -- is the residual this walk makes visible rather than
+    hides: it asserts that the dropped body settles at NO number.
 
     The sequence such a seat actually walks:
 
@@ -5801,57 +5858,59 @@ def test_pg_a_seat_that_missed_an_update_recovers_in_one_submission():
          one the server had named;
       3. the next physical game is a DIFFERENT body, so it is a new report. A
          seat that LATCHED the old number instead of deriving from the last
-         advertisement keys it there and is refused terminally -- and that
-         refusal names the settled number and advertises the next one. The
-         body is PARKED: the server kept it, and this seat still holds it;
-      4. RECOVERY. The seat re-signs THE SAME parked delivery -- one entry per
-         physical game, the identity frozen at the first write for that game --
-         putting the advertised number into the room-id FIELD of the body it
-         already has. It does not open a second entry and it does not move the
-         one it holds. That delivery is submitted, and the endpoint SETTLES it:
-         one row, at the number the server named;
-      5. the same key delivered a second time settles nothing more. It meets
+         advertisement keys it there and is refused -- and that refusal names
+         the settled number and advertises the next one;
+      4. THE TERMINAL DISPOSITION. The rule is asked what to do with that
+         entry and answers `terminal`: it is DROPPED, the outbox shrinks by
+         exactly that key, and it was delivered exactly once. No second
+         submission of it is made under any number;
+      5. the seat's NEXT physical game is keyed from the number that refusal
+         advertised -- not from the number it was refused for -- and the
+         endpoint SETTLES it. That is the one submission the seat's recovery
+         costs;
+      6. the same key delivered a second time settles nothing more. It meets
          the row it wrote and is echoed, so a redelivery can never become a
          second settlement of one physical game;
-      6. ROUND 13, THE TERMINAL HALF. The redirect is bounded at one. A third
-         entry is refused at a settled number, redirected to the advertised
-         one -- and refused there too, because another elector settled that
-         number as well while this seat was between deliveries. That second
-         `settled_game` refusal of ONE entry is the state the contract says
-         does not arise, so the entry is not re-signed again: it is DROPPED
-         and kept for review, the outbox shrinks by exactly that key, and no
-         third submission of it is made.
+      7. the lobby ends holding one row per physical game at distinct numbers,
+         and NO row for the dropped body -- checked by winner, because the
+         dropped game's winner is a player no surviving row names. Its payload
+         is on the quarantine record instead, with the reason the capture
+         wrote.
 
     So the cost of having missed the update is exactly ONE refused submission,
     at step 3, and the seat files normally from there on. The r10 control is
-    the absence step 3 and 4 state together: an answer that advertised the
+    the absence steps 3 and 5 state together: an answer that advertised the
     number it had just settled would leave a derived key exactly where it was,
     so every later submission is refused for the same reason and the seat never
-    files again. The r12 controls are the other half: a recovery that RE-KEYED
-    the parked delivery -- filing it as a second entry rather than re-signing
-    the one it holds -- is what mints a second delivery for one physical game.
+    files again. The r12 controls are the identity half: a keying that RE-KEYED
+    a parked delivery -- filing it as a second entry rather than writing the
+    number into the one it holds -- is what mints a second delivery for one
+    physical game. The r13 control is the adoption: leave the advertised number
+    out and the seat keys its next game where it was just refused. The r14
+    control is the drop itself.
 
     THE DISPOSITION IS ASKED OF A RULE, NEVER WRITTEN INTO THE WALK. Round
     12's walk knew what each answer meant because the steps were written in
     the order the answers arrive, so the rule the contract states was nowhere
-    a mutation could reach it. Each refusal below is now handed to
-    `_settled_game_disposition`, which returns `redirect` or `terminal` and
-    counts the redirect on the entry; the walk does what it is told. The r13
-    controls are the two halves of that: a redirect that does not carry the
-    advertised number into the body, and a second refusal answered by another
-    redirect instead of by the drop.
+    a mutation could reach it. Each refusal below is handed to
+    `_settled_game_disposition`, which returns the disposition and the number
+    the seat's next key derives from; the walk does what it is told, AND IT
+    IMPLEMENTS BOTH ANSWERS. The redirect branch is written out even though the
+    rule never returns it, because a branch that does not exist makes the
+    mutation that returns `redirect` red on a KeyError three legs away instead
+    of on the assertion that names the fact (#391).
 
-    THE KEY-SET CHECK IS MADE WHERE THE RECOVERY HAPPENS, and that is round
+    THE KEY-SET CHECK IS MADE WHERE THE KEYING HAPPENS, and that is round
     12's correction to it. The comparison used to sit at the very end,
     against a hardcoded pair of names, and the mutation credited to it never
-    reached it: a recovery that pops the entry and re-files it is met by a
+    reached it: a keying that pops the entry and re-files it is met by a
     KeyError on the very next lookup, three legs earlier, so the red came from
     an incidental crash rather than from the check the inventory named (#391).
-    Now the set is read immediately after each recovery step and compared with
-    the set CAPTURED at the start -- not with a literal, which is a second
+    Now the set is read immediately after each keying step and compared with
+    the set CAPTURED before it -- not with a literal, which is a second
     statement of the same thing -- and the walk stops there, so the assertion
     that names the defect is the assertion that reds. The additive shape is
-    covered too: a recovery that leaves the original entry reachable and adds
+    covered too: a keying that leaves the original entry reachable and adds
     a second key walks every leg without raising, and the same comparison sees
     it."""
     require_pg()
@@ -5877,7 +5936,6 @@ def test_pg_a_seat_that_missed_an_update_recovers_in_one_submission():
             }
             keys_before = sorted(outbox)
             out["keys_before"] = keys_before
-            out["keys"] = keys_before
             # The advertisement this seat holds, taken from a real answer
             # rather than assumed: a hardcoded number here would be a test of
             # arithmetic rather than of what the endpoint says (#342).
@@ -5892,12 +5950,12 @@ def test_pg_a_seat_that_missed_an_update_recovers_in_one_submission():
             advertised = int(ahead.progress["expected_game"])
             out["advertised"] = advertised
             _recover_parked(outbox, "game-A", ahead)
-            # THE KEY SET, READ WHERE THE RECOVERY HAPPENED. A recovery that
+            # THE KEY SET, READ WHERE THE KEYING HAPPENED. A keying that
             # re-keyed this entry is met by a KeyError on the next line, and
             # an assertion written to name the moved key never runs. So the
             # set is compared here and the walk stops with both sets in hand.
-            out["keys"] = sorted(outbox)
-            if out["keys"] != keys_before:
+            out["keys_after_a"] = sorted(outbox)
+            if out["keys_after_a"] != keys_before:
                 return out
             # 1. another elector settles the parked game there; this seat sees
             #    nothing of it.
@@ -5915,77 +5973,70 @@ def test_pg_a_seat_that_missed_an_update_recovers_in_one_submission():
             if latched is None:
                 return out
             out["latched"] = latched
-            # 4. RECOVERY, driven rather than described: the SAME entry,
-            #    re-signed with the number the server just advertised, and
-            #    submitted. No row is written behind the endpoint here. WHAT
-            #    to do with the entry is asked of the rule, not decided here.
-            out["latched_disposition"] = _settled_game_disposition(
+            # 4. THE DISPOSITION, asked of the rule rather than decided here,
+            #    and BOTH answers implemented so that a mutation returning the
+            #    other one is executed instead of crashing (#391).
+            disposition, next_number = _settled_game_disposition(
                 outbox["game-B"], latched)
-            if out["latched_disposition"] != "redirect":
-                return out
-            entry = _recover_parked(outbox, "game-B", latched)
-            out["keys"] = sorted(outbox)
-            if out["keys"] != keys_before:
-                return out
-            # CAUGHT rather than allowed to escape: a redirect that did not
-            # carry the advertised number is refused here, and an exception
-            # leaving this coroutine would red the test on a traceback three
-            # legs from the assertion that names the fact (#391).
-            try:
-                out["accepted"] = await _call_endpoint(sm, _delivery_of(entry))
-            except main.FfaReportRefusal as ex:
-                out["accepted_refusal"] = ex
-                return out
-            # 5. ...and the same key again, which must settle nothing more.
-            out["again"] = await _call_endpoint(sm, _delivery_of(entry))
-
-            # 6. THE TERMINAL HALF. A third physical game, parked under its
-            #    own key, delivered at a number another elector has settled.
+            out["latched_disposition"] = disposition
+            out["next_number"] = next_number
+            if disposition == "redirect":
+                entry = _recover_parked(outbox, "game-B", latched)
+                try:
+                    out["redirected"] = await _call_endpoint(
+                        sm, _delivery_of(entry))
+                except main.FfaReportRefusal as ex:
+                    out["redirected_refusal"] = ex
+            else:
+                out["dropped"] = _drop_parked(outbox, "game-B")
+            out["keys_after_drop"] = sorted(outbox)
+            # 5. THE SEAT'S NEXT KEY, derived from the number that refusal
+            #    advertised. The entry is parked holding the number the seat
+            #    was LAST refused for, which is the state the r13 control
+            #    restores by leaving the adoption out; taking up the
+            #    advertisement is what moves it off that number.
             third = _park("game-C", "rm_211531", ROW_C, S2, S2)
+            third["advertised"] = advertised
             outbox["game-C"] = third
             keys_with_c = sorted(outbox)
             out["keys_with_c"] = keys_with_c
-            third["advertised"] = advertised
-            first_refusal = None
+            _recover_parked(outbox, "game-C", latched)
+            out["keys_after_c"] = sorted(outbox)
+            if out["keys_after_c"] != keys_with_c:
+                return out
+            # CAUGHT rather than allowed to escape: a next key that did not
+            # take up the advertised number is refused here, and an exception
+            # leaving this coroutine would red the test on a traceback three
+            # legs from the assertion that names the fact (#391).
             try:
-                await _call_endpoint(sm, _delivery_of(third))
+                out["accepted"] = await _call_endpoint(sm, _delivery_of(third))
             except main.FfaReportRefusal as ex:
-                first_refusal = ex
-            if first_refusal is None:
+                out["accepted_refusal"] = ex
                 return out
-            out["c_first"] = first_refusal
-            out["c_first_disposition"] = _settled_game_disposition(
-                third, first_refusal)
-            if out["c_first_disposition"] != "redirect":
-                return out
-            _recover_parked(outbox, "game-C", first_refusal)
-            out["keys"] = sorted(outbox)
-            if out["keys"] != keys_with_c:
-                return out
-            # ...and while this seat was between deliveries, another elector
-            # settled the advertised number too. The redirected delivery is
-            # refused for the SAME reason as the first one.
-            await _settle_directly(sm, pids, ROW_A,
-                                   int(third["advertised"]))
-            second_refusal = None
-            try:
-                await _call_endpoint(sm, _delivery_of(third))
-            except main.FfaReportRefusal as ex:
-                second_refusal = ex
-            if second_refusal is None:
-                return out
-            out["c_second"] = second_refusal
-            # THE BOUND, asked of the rule rather than asserted by the walk.
-            out["c_second_disposition"] = _settled_game_disposition(
-                third, second_refusal)
-            if out["c_second_disposition"] == "terminal":
-                out["dropped"] = _drop_parked(outbox, "game-C")
-            out["keys"] = sorted(outbox)
-            out["c_deliveries"] = third["deliveries"]
+            # 6. ...and the same key again, which must settle nothing more.
+            out["again"] = await _call_endpoint(sm, _delivery_of(third))
+            out["keys_final"] = sorted(outbox)
             async with sm() as db:
-                out["numbers"] = [int(n) for n in (await db.execute(text(
-                    "SELECT game_number FROM ffa_matches WHERE lobby_id = :l"
-                    " ORDER BY game_number"), {"l": LOBBY})).scalars().all()]
+                rows = (await db.execute(text(
+                    "SELECT game_number, winner_id FROM ffa_matches"
+                    " WHERE lobby_id = :l ORDER BY game_number"),
+                    {"l": LOBBY})).mappings().all()
+                steam_of = {str(v): k for k, v in pids.items()}
+                out["numbers"] = [int(r["game_number"]) for r in rows]
+                out["winners"] = [steam_of.get(str(r["winner_id"]))
+                                  for r in rows]
+                # 7. WHAT THE SERVER KEPT. Sorted by room id rather than by
+                #    insertion time: two captures written inside the same
+                #    clock tick order arbitrarily, and an arbitrary order
+                #    compared against a written-out list is a check that reds
+                #    on the weather.
+                out["captured"] = sorted(
+                    (r["photon_room_id"], r["reason"], r["status"],
+                     r["payload"].get("winner_steam_id"))
+                    for r in (await db.execute(text(
+                        "SELECT photon_room_id, reason, status, payload"
+                        "  FROM match_report_quarantine WHERE mode = 'ffa'"
+                    ))).mappings().all())
             return out
         finally:
             await engine.dispose()
@@ -5997,20 +6048,20 @@ def test_pg_a_seat_that_missed_an_update_recovers_in_one_submission():
     accepted = out.get("accepted")
     again = out.get("again")
     numbers = out.get("numbers", [])
-    keys = out.get("keys", [])
+    winners = out.get("winners", [])
     keys_before = out.get("keys_before", [])
+    keys_with_c = out.get("keys_with_c", [])
     assert advertised is not None, (
         "the ahead tail was not refused, so no advertisement was ever made "
         "and nothing below this line was exercised")
     assert advertised == 3, advertised
     # THE KEY DID NOT MOVE, and this is asserted FIRST because every step
-    # below is a step taken on the entries this set names. The seat holds the
-    # same entries it started with -- recovery re-signed one of them, it did
-    # not mint a third and it did not re-identify the one it holds. Compared
-    # with the set captured before the walk rather than with a written-out
-    # pair: a literal here is a second statement of the same set, and the two
-    # drift (#432).
-    assert keys == keys_before, (keys, keys_before)
+    # below is a step taken on the entries this set names. Compared with the
+    # set captured before the keying rather than with a written-out pair: a
+    # literal here is a second statement of the same set, and the two drift
+    # (#432).
+    assert out.get("keys_after_a") == keys_before, (
+        out.get("keys_after_a"), keys_before)
     # 2. the identical body is ECHOED, and the echo advertises the next number
     #    -- an accepted answer re-aligns the seat exactly as a refusal does.
     assert echo is not None
@@ -6018,77 +6069,260 @@ def test_pg_a_seat_that_missed_an_update_recovers_in_one_submission():
     assert echo.settled_game == advertised
     assert echo.expected_game == advertised + 1, echo.expected_game
     assert echo.settled_game < echo.expected_game
-    # 3. the latched key is refused terminally, ONCE, and the refusal carries
-    #    both numbers: which one is finished, and which one to use.
+    # 3. the latched key is refused, ONCE, and the refusal carries both
+    #    numbers: which one is finished, and which one to use.
     assert latched is not None, (
         "a different physical game at the latched number was not refused")
     assert latched.status_code in (403, 409), latched.status_code
     assert latched.progress.get("settled_game") == advertised, latched.progress
     assert latched.progress["expected_game"] == advertised + 1, latched.progress
-    # ...and the disposition the RULE returns for that refusal is REDIRECT.
-    # The walk did not decide it; it asked, and every step below happened
-    # because the answer was this one.
-    assert out.get("latched_disposition") == "redirect", (
-        "the first settled-game refusal of an entry is the REDIRECT arm: keep "
-        "the entry, re-sign it once at the advertised number, submit")
-    # 4. THE TRANSITION, not a claim about it: the re-signed parked delivery is
-    #    ACCEPTED by the endpoint, and the answer is a settlement -- a match id,
-    #    the number the server named, and the next one after it.
+    # 4. THE DISPOSITION THE RULE RETURNS for that refusal is TERMINAL, and
+    #    the number beside it is the one the seat's NEXT key derives from --
+    #    not a number this entry will ever carry. The walk did not decide it;
+    #    it asked, and every step below happened because the answer was this
+    #    one.
+    assert out.get("latched_disposition") == "terminal", (
+        "the first settled-game refusal of an entry is the TERMINAL arm: the "
+        "server cannot tell this delivery from a conflicting account of the "
+        "game already settled at that number, so the entry is dropped")
+    assert out.get("next_number") == advertised + 1, out.get("next_number")
+    # ...and the entry left the outbox because the rule said so. The set is
+    # compared with the one captured BEFORE the drop, so nothing else left
+    # and nothing was minted beside it.
+    dropped = out.get("dropped")
+    assert dropped is not None and dropped["key"] == "game-B", dropped
+    assert out.get("keys_after_drop") == sorted(
+        set(keys_before) - {"game-B"}), (out.get("keys_after_drop"),
+                                         keys_before)
+    # ...and it was delivered exactly ONCE. A second submission of it, under
+    # any number, is what the terminal arm forbids, and counting the
+    # deliveries is how the walk says it made none.
+    assert dropped["deliveries"] == 1, dropped["deliveries"]
+    assert dropped["refusals"] == 1, dropped["refusals"]
+    # 5. THE SEAT'S RECOVERY, not a claim about it: the next physical game,
+    #    keyed from the advertised number, is ACCEPTED by the endpoint -- a
+    #    match id, the number the server named, and the next one after it.
+    assert out.get("keys_after_c") == keys_with_c, (
+        out.get("keys_after_c"), keys_with_c)
     assert accepted is not None, (
-        "the re-signed parked delivery was not accepted: %s"
+        "the seat's next physical game was not accepted at the advertised "
+        "number: %s"
         % (getattr(out.get("accepted_refusal"), "progress", None),))
     assert accepted.message == "FFA match recorded", accepted.message
     assert accepted.match_id is not None
     assert accepted.settled_game == advertised + 1, accepted.settled_game
     assert accepted.expected_game == advertised + 2, accepted.expected_game
     assert accepted.settled_game < accepted.expected_game
-    # 5. ...EXACTLY once. The same key again meets the row it wrote.
+    # 6. ...EXACTLY once. The same key again meets the row it wrote.
     assert again is not None
     assert again.message == "Already recorded", again.message
     assert again.settled_game == advertised + 1, again.settled_game
     assert again.expected_game == advertised + 2, again.expected_game
-    # One row per physical game, at distinct numbers: the pre-seeded 1, the
-    # game recovered at 3, the next physical game at 4 -- written by the
-    # ENDPOINT, from the parked body, not by this test. The seat that missed an
-    # update lost no game, moved no key and was excluded from nothing.
-    # ...plus the two the terminal half settles behind the endpoint, at the
-    # advertised number and at the one it redirected to. Those two are the
-    # OTHER elector's rows, which is what makes this seat's third entry
-    # unfilable by this route.
-    assert numbers == [1, advertised, advertised + 1, advertised + 2], numbers
+    assert out.get("keys_final") == keys_with_c, (
+        out.get("keys_final"), keys_with_c)
+    # 7. One row per physical game, at distinct numbers: the pre-seeded 1, the
+    #    game the other elector settled at 3, and this seat's next game at 4 --
+    #    written by the ENDPOINT, from the parked body, not by this test.
+    assert numbers == [1, advertised, advertised + 1], numbers
+    # ...and the DROPPED body settled at NO number. Checked by winner, because
+    # the number is what the walk is about and a row count cannot say WHICH
+    # game is missing: ROW_B's winner is a player no surviving row names,
+    # so a redirect that filed it anywhere at all shows up here.
+    assert winners == [S3, S3, S2], winners
+    assert S1 not in winners, (
+        "the dropped body settled after all, which is the second settlement "
+        "the terminal arm exists to prevent")
+    # ...and it is not lost either: the server kept the whole payload before
+    # it refused, which is what makes the drop a conservative disposition
+    # rather than a destroyed game. Both refused deliveries of this walk are
+    # on the record -- the ahead probe and the dropped entry.
+    assert out.get("captured") == [
+        ("rm_211531_r3", "ffa_game_contradiction", "pending", S1),
+        ("rm_211531_r7", "ffa_game_number_mismatch", "pending", S3),
+    ], out.get("captured")
 
-    # 6. THE TERMINAL HALF, by number rather than by narrative.
-    c_first = out.get("c_first")
-    c_second = out.get("c_second")
-    assert c_first is not None, (
-        "the third entry was not refused at the settled number, so the "
-        "terminal walk never started")
-    assert c_first.progress.get("settled_game") == advertised, c_first.progress
-    assert out.get("c_first_disposition") == "redirect", out.get(
-        "c_first_disposition")
-    assert c_second is not None, (
-        "the redirected delivery was not refused a second time, so the bound "
-        "this leg exists for was never reached")
-    assert c_second.progress.get("settled_game") == advertised + 2, (
-        c_second.progress)
-    # THE BOUND: a second refusal for the same reason, on the same entry, is
-    # TERMINAL for it. The rule said so; the walk obeyed.
-    assert out.get("c_second_disposition") == "terminal", out.get(
-        "c_second_disposition")
-    dropped = out.get("dropped")
-    assert dropped is not None and dropped["key"] == "game-C", dropped
-    # The outbox shrank by EXACTLY that key -- compared with the set the walk
-    # captured with it in, so nothing else left and nothing was minted beside
-    # it. No retain-by-fiat and no drop-by-fiat: the entry is gone because the
-    # rule the walk asked returned terminal.
-    keys_with_c = out.get("keys_with_c", [])
-    assert keys_with_c == sorted(keys_before + ["game-C"]), keys_with_c
-    assert keys == sorted(set(keys_with_c) - {"game-C"}), (keys, keys_with_c)
-    # ...and it was submitted exactly TWICE. A third submission is what the
-    # bound forbids, and counting the deliveries is how the walk says it did
-    # not make one.
-    assert out.get("c_deliveries") == 2, out.get("c_deliveries")
-    assert dropped["redirects"] == 2, dropped["redirects"]
+
+def test_pg_a_conflicting_account_of_the_settled_game_is_dropped_and_kept():
+    """Controls: terminal-arm-redirects-the-refused-entry (r14),
+    refusal-keeps-nothing-for-review (r14).
+
+    THE WITNESS THE ROUND-9 LENS ASKED FOR, and the reason the redirect was
+    ruled out. The walk above frames its refused entry as a LATER physical
+    game of a behind seat. This one frames the SAME delivery as what it can
+    equally be: a second, DIFFERING account of the physical game another
+    elector has already settled at that number. Two electors of one game
+    compose the same key from the same advertisement, so the two framings
+    reach the endpoint as the same bytes -- which is the whole point. No fact
+    the server holds separates them, and a delay is under a client's own
+    control, so nothing the client carries separates them either (#283,
+    #378).
+
+    So the disposition has to be the one that is safe for BOTH readings, and
+    only one of them is. Dropping a later game costs that game's automatic
+    settlement, and the payload is kept for an operator. Redirecting a
+    conflicting account to the free number settles it as a physical game of
+    its own: a second `ffa_matches` row for one sitting, a second rating
+    change and a second payout, and nothing undoes those.
+
+    WHAT THIS ASSERTS, and why each one is here:
+
+      * the differing account is refused with `settled_game` naming the number
+        the other elector settled -- the same answer the walk above gets;
+      * the rule returns `terminal` and the entry is dropped, delivered once;
+      * the lobby holds NO second settlement AT ANY NUMBER. The count is read
+        over the whole lobby rather than at the settled number, because the
+        defect this exists for puts the second row at a DIFFERENT number --
+        asserting only at N would pass on exactly the failure;
+      * the payload is on the quarantine record, under the reason the capture
+        writes, so what the conservative disposition costs is recoverable by
+        hand.
+
+    The redirect branch is implemented rather than omitted, so the mutation
+    that restores the round-9 rule is EXECUTED: it re-signs the dropped entry
+    at the advertised number, the endpoint settles it, and the second row is
+    what reds."""
+    require_pg()
+
+    async def go():
+        engine, sm, pids, _mid = await _settling_fixture(
+            games_played=2, recorded_number=1, recorded_room="rm_211531_r1")
+        out = {}
+        try:
+            # This seat's own account of the physical game the lobby is on.
+            # It differs from the other elector's in winner and in tallies,
+            # which is what makes it a CONFLICT rather than a retry.
+            outbox = {"game-X": _park("game-X", "rm_211531", ROW_B, S1, S1)}
+            keys_before = sorted(outbox)
+            out["keys_before"] = keys_before
+            ahead = None
+            try:
+                await _call_endpoint(sm, _endpoint_report(
+                    ROW_A, S3, "rm_211531_r7", with_slots=True))
+            except main.FfaReportRefusal as ex:
+                ahead = ex
+            if ahead is None:
+                return out
+            advertised = int(ahead.progress["expected_game"])
+            out["advertised"] = advertised
+            # The OTHER elector's account of THAT SAME physical game settles
+            # at the advertised number while this seat is not looking. Written
+            # behind the endpoint because it is this walk's precondition and
+            # not one of its steps -- what a real settlement does with the
+            # slot is pinned by
+            # test_pg_a_settlement_commits_the_catch_up_and_lands_on_the_free_number.
+            await _settle_directly(sm, pids, ROW_A, advertised)
+            # This seat keys ITS account of that same game from the same
+            # advertisement, so the two compose the same room id.
+            _recover_parked(outbox, "game-X", ahead)
+            out["keys_after_keying"] = sorted(outbox)
+            if out["keys_after_keying"] != keys_before:
+                return out
+            refusal = None
+            try:
+                await _call_endpoint(sm, _delivery_of(outbox["game-X"]))
+            except main.FfaReportRefusal as ex:
+                refusal = ex
+            if refusal is None:
+                return out
+            out["refusal"] = refusal
+            disposition, next_number = _settled_game_disposition(
+                outbox["game-X"], refusal)
+            out["disposition"] = disposition
+            out["next_number"] = next_number
+            if disposition == "redirect":
+                entry = _recover_parked(outbox, "game-X", refusal)
+                try:
+                    out["redirected"] = await _call_endpoint(
+                        sm, _delivery_of(entry))
+                except main.FfaReportRefusal as ex:
+                    out["redirected_refusal"] = ex
+                out["entry"] = dict(entry)
+            else:
+                out["entry"] = _drop_parked(outbox, "game-X")
+                out["dropped"] = True
+            out["keys_after"] = sorted(outbox)
+            async with sm() as db:
+                rows = (await db.execute(text(
+                    "SELECT game_number, winner_id FROM ffa_matches"
+                    " WHERE lobby_id = :l ORDER BY game_number"),
+                    {"l": LOBBY})).mappings().all()
+                steam_of = {str(v): k for k, v in pids.items()}
+                out["numbers"] = [int(r["game_number"]) for r in rows]
+                out["winners"] = [steam_of.get(str(r["winner_id"]))
+                                  for r in rows]
+                out["captured"] = sorted(
+                    (r["photon_room_id"], r["reason"], r["status"],
+                     r["payload"].get("winner_steam_id"))
+                    for r in (await db.execute(text(
+                        "SELECT photon_room_id, reason, status, payload"
+                        "  FROM match_report_quarantine WHERE mode = 'ffa'"
+                    ))).mappings().all())
+            return out
+        finally:
+            await engine.dispose()
+
+    out = run(go())
+    advertised = out.get("advertised")
+    refusal = out.get("refusal")
+    numbers = out.get("numbers", [])
+    winners = out.get("winners", [])
+    keys_before = out.get("keys_before", [])
+    assert advertised is not None, (
+        "the ahead tail was not refused, so no advertisement was ever made "
+        "and nothing below this line was exercised")
+    assert advertised == 3, advertised
+    assert out.get("keys_after_keying") == keys_before, (
+        out.get("keys_after_keying"), keys_before)
+    # The conflicting account is refused, and the refusal names the number the
+    # OTHER elector settled -- the same answer a later physical game gets,
+    # which is the fact this walk exists to show.
+    assert refusal is not None, (
+        "a differing account of the settled game was not refused, so this "
+        "walk never reached the arm it is about")
+    assert refusal.status_code in (403, 409), refusal.status_code
+    assert refusal.progress.get("settled_game") == advertised, refusal.progress
+    assert refusal.progress["expected_game"] == advertised + 1, refusal.progress
+    # THE HARM IS ASSERTED BEFORE THE BOOKKEEPING, and the order is the check
+    # rather than a matter of taste. A redirect on this arm is not wrong
+    # because a helper returned a different word; it is wrong because the
+    # conflicting account SETTLES under its own number and rates and pays that
+    # sitting a second time. The walk drives that whole path -- the redirect
+    # branch above re-signs the entry and submits it to the endpoint -- so the
+    # assertion that reads the lobby's rows has something real to fail on.
+    # With `disposition` asserted first it never got the chance: the control
+    # that makes the rule redirect reddened on the WORD, three legs before the
+    # row, which is a check reporting the first symptom it reached instead of
+    # the one it exists for (#391).
+    #
+    # NO SECOND SETTLEMENT, AT ANY NUMBER. Read over the whole lobby: a
+    # redirect puts the second row at the FREE number, so a check made only at
+    # the settled one passes on exactly the failure it is for.
+    assert numbers == [1, advertised], numbers
+    assert winners == [S3, S3], winners
+    assert S1 not in winners, (
+        "a second account of one physical game settled under its own number, "
+        "which rates and pays that sitting twice")
+    # ...and the refused payload is on the record, with the reason the capture
+    # wrote, so an operator can read the two accounts side by side. The ahead
+    # probe's capture is the second row: both refusals of this walk kept what
+    # they refused.
+    assert out.get("captured") == [
+        ("rm_211531_r3", "ffa_game_contradiction", "pending", S1),
+        ("rm_211531_r7", "ffa_game_number_mismatch", "pending", S3),
+    ], out.get("captured")
+    # ...and only THEN how the seat got there: the disposition the rule
+    # returned, the number it named, and the entry leaving the outbox. These
+    # are the walk's account of its own steps, and an account is checked after
+    # the thing it is an account of.
+    assert out.get("disposition") == "terminal", out.get("disposition")
+    assert out.get("next_number") == advertised + 1, out.get("next_number")
+    assert out.get("dropped") is True, (
+        "the conflicting account was not dropped, so the outbox still holds a "
+        "delivery the server has already refused")
+    assert out.get("keys_after") == [], out.get("keys_after")
+    entry = out.get("entry")
+    assert entry is not None and entry["key"] == "game-X", entry
+    assert entry["deliveries"] == 1, entry["deliveries"]
 
 
 def test_pg_a_catch_up_on_a_refusing_path_logs_a_claim_its_transaction_can_keep(capsys):

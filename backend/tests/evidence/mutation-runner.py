@@ -190,6 +190,58 @@ def _report_claim_swap():
 
 _SWAP_ANCHOR, _SWAP_MUTANT, _SWAP_INERT, _SWAP_WHY = _report_claim_swap()
 
+
+def _underived_number_edit():
+    """(anchor, mutant, inert, why) for the underived-number control.
+
+    ROUND 14 REPLACES A HAND-WRITTEN ANCHOR HERE, and the comment above the
+    swap said why before it happened. This control used to quote a slice of
+    the suites report's NARRATIVE, which is an anchor on one round's wording:
+    round 13 reworded that sentence, nothing in round 13 read it -- the
+    controls run before the suite pair, so a round's runner reads the PREVIOUS
+    round's report -- and round 14's pre-check refused with `anchor resolves 0
+    times`. Loud rather than silent, which is the shape a stale anchor is
+    supposed to have; but still an anchor somebody re-quotes by hand every
+    time the prose moves, which is what the method says not to leave standing.
+
+    So the anchor is the one line every assembled report is REQUIRED to carry:
+    the marker that separates the narrative from the verbatim run, which
+    `evidence_rules` matches in every report it checks and which no round can
+    reword without the assembler refusing first. The mutation inserts a line
+    ABOVE it -- at the end of the narrative, the region the assembler holds to
+    its log -- stating a figure no run in this directory prints. The inert
+    twin inserts a sentence at the same place with no figure in it, so what
+    reds is the number and not the insertion.
+
+    `why` is None when the anchor resolved, and names the one fact that is
+    wrong otherwise."""
+    line = "THE RUN, verbatim from here down\n"
+    if SUITES is None or not os.path.isfile(SUITES):
+        return UNDERIVED, UNDERIVED, UNDERIVED, (
+            "there is no suites report in this directory to derive the "
+            "narrative's end from")
+    with io.open(SUITES, "r", encoding="utf-8", errors="replace") as fh:
+        body = fh.read()
+    if body.count(line) != 1:
+        return UNDERIVED, UNDERIVED, UNDERIVED, (
+            "%s carries the verbatim marker %d times and the anchor needs "
+            "exactly one"
+            % (os.path.basename(SUITES), body.count(line)))
+    if _RULES.MARKER.search(body) is None:
+        return UNDERIVED, UNDERIVED, UNDERIVED, (
+            "%s carries that line but the rule that matches the marker does "
+            "not, so the two would be anchored on different things"
+            % os.path.basename(SUITES))
+    return (line,
+            "The fence walked 777 paths, a figure no run here prints.\n"
+            + line,
+            "The fence walked the paths listed at the top of this report.\n"
+            + line,
+            None)
+
+
+_NUM_ANCHOR, _NUM_MUTANT, _NUM_INERT, _NUM_WHY = _underived_number_edit()
+
 # name -> (file, anchor, mutant, inert, test)
 CONTROLS = [
     # ── round 6 ──────────────────────────────────────────────────────────
@@ -640,10 +692,10 @@ CONTROLS = [
     # ...and the second puts a number into the report's prose that its run
     # never printed, which is the round-9 finding itself. The number is one no
     # run here can produce, so this control cannot be satisfied by coincidence.
+    # Its anchor is DERIVED -- see `_underived_number_edit` for the round-13
+    # rewording that retired the hand-quoted one.
     ("suites-report-carries-an-underived-number", SUITES,
-     "the fence's verdict over the paths listed at the top",
-     "the fence's verdict over the 777 paths listed at the top",
-     "the fence's own verdict over the paths listed at the top",
+     _NUM_ANCHOR, _NUM_MUTANT, _NUM_INERT,
      "test_the_committed_evidence_is_assembled_from_its_run_stdout"),
 
     # H1, at the site that decides what a behind seat is told. The server is
@@ -921,26 +973,14 @@ CONTROLS = [
      '    return entry\n',
      "test_pg_a_seat_that_missed_an_update_recovers_in_one_submission"),
 
-    # THE BOUND, REMOVED. The redirect is taken at most once per entry and a
-    # second `settled_game` refusal of that entry is terminal for it, which is
-    # what stops one delivery looping on this arm for ever. Answer every such
-    # refusal with a redirect and the rule the contract states is not a bound
-    # at all. The inert twin is a comment at the same site.
-    ("terminal-walk-redirects-a-second-time", TESTS,
-     '    if refusal.progress.get("settled_game") is None:\n'
-     '        return "terminal"\n'
-     '    entry["redirects"] += 1\n'
-     '    return "redirect" if entry["redirects"] == 1 else "terminal"\n',
-     '    if refusal.progress.get("settled_game") is None:\n'
-     '        return "terminal"\n'
-     '    entry["redirects"] += 1\n'
-     '    return "redirect"\n',
-     '    if refusal.progress.get("settled_game") is None:\n'
-     '        return "terminal"\n'
-     '    entry["redirects"] += 1\n'
-     '    # (inert: a comment at the same site)\n'
-     '    return "redirect" if entry["redirects"] == 1 else "terminal"\n',
-     "test_pg_a_seat_that_missed_an_update_recovers_in_one_submission"),
+    # THE BOUND on a redirect was this round's control at that site, and ROUND
+    # 14 RETIRED IT: the ruling removes the redirect itself, so a bound on how
+    # often it may be taken is a rule the tree no longer carries, and a control
+    # that cannot be re-run on the tree it certifies is an assertion about a
+    # different tree. Its site is held by `terminal-arm-redirects-the-refused
+    # -entry` below, which reds on the redirect happening at all. The inventory
+    # entry stays, tagged RETIRED in place, because the evidence of rounds 13
+    # and 14 names it.
 
     # ONE EXACT NAME back to the producer-suffix wildcard it replaced. That
     # pattern is narrower than `*.log` and still admits every file shaped like
@@ -990,6 +1030,72 @@ CONTROLS = [
      '    # (inert: a comment at the same site)\n'
      '    return newest, None\n',
      "test_the_repin_trailer_is_derived_and_the_sweep_exempts_only_it"),
+
+    # ── round 14 ─────────────────────────────────────────────────────────
+    # THE REDIRECT, RESTORED. Rounds 12 and 13 answered a refusal carrying
+    # `settled_game` by re-signing that entry at the advertised number, and the
+    # ruling removes it: the server cannot tell a behind seat's LATER physical
+    # game from a CONFLICTING second account of the game already settled at
+    # that number, so re-keying such a delivery at the free number settles the
+    # conflicting account as a game of its own. This makes the rule return
+    # `redirect` again; the conflicting-account walk then re-signs and
+    # resubmits, the endpoint settles it, and what reds is the SECOND row for
+    # one physical game -- a second rating and a second payout. The inert twin
+    # is a comment at the same site.
+    ("terminal-arm-redirects-the-refused-entry", TESTS,
+     '    entry["refusals"] += 1\n'
+     '    advertised = refusal.progress.get("expected_game")\n'
+     '    return "terminal", None if advertised is None else int(advertised)\n',
+     '    entry["refusals"] += 1\n'
+     '    advertised = refusal.progress.get("expected_game")\n'
+     '    if refusal.progress.get("settled_game") is not None:\n'
+     '        return "redirect", int(advertised)\n'
+     '    return "terminal", None if advertised is None else int(advertised)\n',
+     '    entry["refusals"] += 1\n'
+     '    advertised = refusal.progress.get("expected_game")\n'
+     '    # (inert: a comment at the same site)\n'
+     '    return "terminal", None if advertised is None else int(advertised)\n',
+     "test_pg_a_conflicting_account_of_the_settled_game_is_dropped_and_kept"),
+
+    # THE DROP, ANNOUNCED AND NOT TAKEN. The terminal disposition is only worth
+    # what the outbox does with it: a helper that reports the entry it removed
+    # while leaving it in place reads identically at every call site and leaves
+    # a delivery the server has already refused sitting in the queue. What reds
+    # is the outbox size, compared with the set captured before the drop. The
+    # inert twin is a comment at the same site.
+    ("terminal-walk-keeps-the-dropped-entry", TESTS,
+     '    was delivered, and that it was never delivered again."""\n'
+     '    return outbox.pop(key)\n',
+     '    was delivered, and that it was never delivered again."""\n'
+     '    return dict(outbox[key])\n',
+     '    was delivered, and that it was never delivered again."""\n'
+     '    # (inert: a comment at the same site)\n'
+     '    return outbox.pop(key)\n',
+     "test_pg_a_seat_that_missed_an_update_recovers_in_one_submission"),
+
+    # A TERMINAL ANSWER OVER NOTHING KEPT. The drop is conservative only
+    # because the payload survives it: the server quarantines the whole body
+    # before it refuses, so a real game refused on this arm can be accepted by
+    # hand. Raise the same refusal directly and the ANSWER is byte-identical
+    # while nothing is kept -- the July-30 class, one arm down. What reds is
+    # the quarantine record the walk reads back, not the response. The inert
+    # twin is a comment at the same site.
+    ("refusal-keeps-nothing-for-review", MAIN,
+     '        await _ffa_record_and_refuse(\n'
+     '            db, report=report, lobby_uuid=lobby_uuid, id_by_steam=id_by_steam,\n'
+     '            reason="ffa_game_contradiction", why=why,\n'
+     '            detail="This game is already recorded",\n'
+     '            progress=_ffa_with_settled(progress, prior, _named))\n',
+     '        raise FfaReportRefusal(\n'
+     '            409, "This game is already recorded",\n'
+     '            _ffa_with_settled(progress, prior, _named))\n',
+     '        # (inert: a comment at the same site)\n'
+     '        await _ffa_record_and_refuse(\n'
+     '            db, report=report, lobby_uuid=lobby_uuid, id_by_steam=id_by_steam,\n'
+     '            reason="ffa_game_contradiction", why=why,\n'
+     '            detail="This game is already recorded",\n'
+     '            progress=_ffa_with_settled(progress, prior, _named))\n',
+     "test_pg_a_conflicting_account_of_the_settled_game_is_dropped_and_kept"),
 ]
 
 
@@ -1115,6 +1221,10 @@ def main():
     if _SWAP_WHY is not None:
         print("REFUSED: the new-controls control has no swap to make -- %s"
               % _SWAP_WHY)
+        return 2
+    if _NUM_WHY is not None:
+        print("REFUSED: the underived-number control has nowhere to put its "
+              "figure -- %s" % _NUM_WHY)
         return 2
 
     originals = {}

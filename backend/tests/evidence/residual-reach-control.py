@@ -113,15 +113,25 @@ def main(argv):
         print("")
 
         print("MUTANT A  the superseded prose count, put back where it stood")
-        # The fourth item's closing sentence carries the claim again, wrapped.
-        anchor = ("  settles a quarantine row is an operator, and the "
-                  "settlement that operator\n")
-        if anchor not in text:
-            print("  REFUSED: the anchor for mutation A does not resolve, so "
-                  "the mutation would change nothing")
+        # THE ANCHOR IS DERIVED, and round 14 is why. It used to be a quoted
+        # slice of the item's closing sentence, which made it an anchor on the
+        # line BREAKS as much as on the words: this round reflowed that
+        # paragraph without touching a claim in it, and the control refused
+        # with "the anchor for mutation A does not resolve". The refusal was
+        # correct and it was about the wrap.
+        #
+        # What the mutation actually needs is the END of the item that carries
+        # the "can move a rating" tag -- the place a second statement of the
+        # reach would sit -- and that is exactly where the tag itself begins.
+        # So the insertion point is found from the tag, which the rule under
+        # test already requires to be there, and no prose is quoted at all.
+        pos = text.find(TAG_CAN)
+        if pos < 0:
+            print("  REFUSED: no item carries the can-move tag, so there is "
+                  "no item for mutation A to state the reach in twice")
             rc = 1
         else:
-            mutant = text.replace(anchor, anchor + STALE_CLAIM, 1)
+            mutant = text[:pos] + STALE_CLAIM + text[pos:]
             if mutant == text:
                 print("  REFUSED: mutation A changed nothing")
                 rc = 1
