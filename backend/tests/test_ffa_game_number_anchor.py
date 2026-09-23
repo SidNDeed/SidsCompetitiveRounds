@@ -87,7 +87,7 @@ it: 22 unmarked and still live (rounds 1 and 2), 1 unmarked and RETIRED because
 round 4 deleted the code it mutated (prior-tail-only, annotated in place), 16
 marked (r3), 15 marked (r4), 10 marked (r5), 7 marked (r6), 7 marked (r7), 8
 marked (r8), 3 marked (r9), 8 marked (r10), 6 marked (r11), 8 marked (r12),
-5 marked (r13), 3 marked (r14),
+5 marked (r13), 3 marked (r14), 3 marked (r15),
 and
 one more that is a committed test rather than a hand-run control
 (backfill-neutered, at the end). The rounds in that sentence are read off the
@@ -516,6 +516,33 @@ All KILLED:
                            an operator -- and what reds is the quarantine
                            record the walk reads back. Its inert twin is a
                            comment at the same site.
+  retry-re-keys-the-parked-entry (r15)  _retryable_redelivery: write the
+                           number a retryable answer advertised into the
+                           entry before it goes out again, which is the rule
+                           the round-10 lens found in the contract. The
+                           witness walk fails the entry's INSERT at N once,
+                           a second elector settles N inside the rollback
+                           window, and the 503 advertises N+1; the moved
+                           retry passes the settled row by and settles the
+                           same physical game a second time, and that second
+                           row is what reds. Its inert twin is a comment at
+                           the same site.
+  retryable-answer-spends-the-parked-entry (r15)  _retryable_redelivery:
+                           return no entry, so a retryable answer is spent as
+                           if it were terminal. The walk where nothing settled
+                           N meanwhile then never settles the game at all --
+                           a result lost that nobody refused -- and the
+                           missing row is what reds. Its inert twin is the
+                           same return with a doubled space.
+  class-scan-reads-only-the-arm-table (r15)  contract_arm_rules.py: stop
+                           emitting paragraphs and list items as units, so the
+                           class scan reads the tables and headings and
+                           nothing else -- the reach of the round-14
+                           instrument, which let the refuted redirect survive
+                           in the precedent passage and the last hundred
+                           lines. The redirects planted in those two sections
+                           go unseen, and that is what reds. Its inert twin
+                           is a comment at the same site.
 ...and one more that is a COMMITTED TEST rather than a hand-run control:
   backfill-neutered        327's room_tail backfill: WHERE FALSE. See
                            test_pg_migration_327_post_check_fails_when_the_
@@ -5248,6 +5275,110 @@ def test_the_residual_reach_rule_holds_in_both_directions():
     assert len(stale) == 1 and "one item in this list" in stale[0], stale
 
 
+# A miniature of the client contract, in the shapes the class scan reads: an
+# arm table, the redelivery table, the precedent passage with its code fence,
+# and a last section. Written HERE rather than in the rules module, so a
+# fixture quietly edited to agree with a broken rule is an edit to this file.
+_CLASS_SCAN_FIXTURE = """# A contract, in miniature
+
+## 3. The arm table
+
+| answer | disposition | what the number is for |
+|---|---|---|
+| **409 with `settled_game`** | TERMINAL for the entry — drop it; the server has already kept it for review | The entry is not re-signed at any number and is not sent again. |
+| **503 with `expected_game`** | RETRYABLE — keep the entry exactly as it is | The number in the answer is the one the NEXT game keys from. |
+
+Re-keying such a delivery at the free number would settle a conflicting
+account as a second physical game.
+
+### 3a.5 What each seat does
+
+| the seat | on any answer carrying `expected_game` | at the next game-over edge |
+|---|---|---|
+| **a seat holding a parked body** | on a RETRYABLE answer, redeliver THAT SAME ENTRY as the same body, unchanged. | unchanged |
+
+## 4. The precedent
+
+```
+if (permanent && entry.rewriteOnRefusal != null && !entry.rewrote)
+```
+
+A 409 marks a live-points entry permanent and then, if it carries a
+`rewriteOnRefusal` and has not already used it, gets exactly ONE re-signed
+resend before the permanence takes effect. **The report path never uses it.**
+
+## 10. The last section
+
+Round 8's reading reached that state by a seat redelivering its own refused
+game under a new number.
+
+The control `terminal-arm-redirects-the-refused-entry` re-signs the entry at
+the free number, which is what reds.
+"""
+
+
+def test_the_contract_class_scan_reads_every_section():
+    """Control: class-scan-reads-only-the-arm-table (r15).
+
+    The round-10 lens found the refuted redirect still written into the client
+    contract, in sections the round-14 instrument never read: it compared the
+    arm table's row with two sentences and nothing else, so a precedent
+    passage calling the client's one-shot re-signed resend the report path's
+    shape, and a redelivery rule re-signing a retryable entry at its advertised
+    number, survived a control that could not fail on them (#432, #342).
+
+    `contract_arm_rules.py` reads every section outside a code fence and
+    requires each re-signing, re-keying, redirecting or moved-number
+    occurrence to be admitted by its own clause. This holds that rule on a
+    committed miniature of the document, in both directions and in the order
+    the defect needs:
+
+      * a redirect sentence PLANTED at each of the three sites the round-11
+        brief names -- the precedent passage, the redelivery table, the last
+        section -- is found, and found AT THE PLANTED LINE and nowhere else;
+      * its twin at the same site, stating the unchanged resend in the same
+        vocabulary, is not;
+      * the miniature itself is clean, every admission rule is exercised on
+        it, and the code fence is not read.
+
+    The plants come first because they are the fact this exists for: a scan
+    that stops reading paragraphs loses its view of two of the three sites,
+    and that -- not a smaller count -- is what should red (#391). The real
+    document lives under the gitignored scratch and is not named or read
+    here; the executed run over it, with the same plants, is in this round's
+    report."""
+    rules = _load_evidence_module("contract_arm_rules.py",
+                                  "_scr_contract_arm_rules")
+    for site in ("A", "B", "C"):
+        planted, line, _where, _heading = rules.plant(
+            _CLASS_SCAN_FIXTURE, site, "redirect")
+        red = [(ln, kind) for ln, kind, how, _clause in rules.scan(planted)
+               if how is None]
+        # A planted sentence can carry two operations (a re-key AND a send at
+        # the moved number), so the LINES are compared as a set: something
+        # was refused, and everything refused is on the planted line.
+        assert red and {ln for ln, _kind in red} == {line}, (
+            "site %s: the redirect planted at line %d was not refused there "
+            "and only there: %r" % (site, line, red))
+        twin, twin_line, _where, _heading = rules.plant(
+            _CLASS_SCAN_FIXTURE, site, "unchanged")
+        loud = [f for f in rules.scan(twin) if f[2] is None]
+        assert loud == [], (
+            "site %s: the unchanged-resend twin at line %d was refused, so "
+            "the scan reds on the vocabulary and not on the rule: %r"
+            % (site, twin_line, loud))
+    found = rules.scan(_CLASS_SCAN_FIXTURE)
+    assert [f for f in found if f[2] is None] == [], found
+    kinds = {how for _ln, _kind, how, _clause in found}
+    assert {"NEGATED", "HARM", "CHANNEL", "HISTORICAL", "CONTROL"} <= kinds, (
+        kinds)
+    assert len(found) >= 6, found
+    # The fence holds the client line verbatim, `rewriteOnRefusal` and all;
+    # a scan that read it would have to admit a line of C# as prose.
+    assert all("!entry.rewrote" not in clause
+               for _ln, _kind, _how, clause in found), found
+
+
 def test_every_round_seven_control_names_a_test_that_exists():
     """The same pairing for round 7."""
     mod = sys.modules[__name__]
@@ -5609,6 +5740,11 @@ def _recover_parked(outbox, key, refusal):
     free number would settle that conflicting account as a game of its own
     (#283, #378). What the advertisement moves is the NEXT game's field.
 
+    ROUND 15: nor is it an entry a RETRYABLE answer came back for. That entry
+    goes out again as the same body, at the number it was first written with,
+    whatever the answer advertised -- `_retryable_redelivery` below -- because
+    that number is what ties the retry to the server's own record of the game.
+
     Nothing else about the body changes: same roster, same tallies, same
     winner, same reporter. A delivery is a RESEND of what the seat froze, not
     an edit of the evidence."""
@@ -5657,6 +5793,33 @@ def _drop_parked(outbox, key):
     rule and a caller has to be able to say what was dropped -- how often it
     was delivered, and that it was never delivered again."""
     return outbox.pop(key)
+
+
+def _retryable_redelivery(entry, answer):
+    """What the seat does with THIS entry when a RETRYABLE answer comes back
+    for it -- a 503 of either arm, or a 500 -- and which number its NEXT game
+    keys from: `(entry, held)`.
+
+    ROUND 15: THE REDELIVERY IS THE SAME BODY, UNCHANGED, WHATEVER THE ANSWER
+    ADVERTISED. A retryable answer is given when the server could not judge
+    the delivery, and the game it describes can be settled by another elector
+    before the retry goes out: the INSERT at N fails, the other elector
+    settles N inside the rollback, and the answer -- re-read under a fresh
+    lock, as it has to be -- advertises N+1. The retry at N then meets the
+    settled row and is answered by the arm built for it: the replay echo for
+    the same account, the terminal `settled_game` refusal, with the payload
+    quarantined, for a differing one. The same entry moved to N+1 would pass
+    that row by and settle one physical game a second time -- a second row, a
+    second rating, a second payout -- which is the round-10 finding against
+    the rule this replaces.
+
+    So the advertisement is returned as the number the seat HOLDS, the one its
+    NEXT game keys from, and the entry comes back exactly as it went in. A 503
+    with no progress fields advertises nothing, and `held` is None: the seat
+    keeps what it had."""
+    advertised = answer.progress.get("expected_game")
+    held = None if advertised is None else int(advertised)
+    return entry, held
 
 
 def _delivery_of(entry):
@@ -6325,6 +6488,365 @@ def test_pg_a_conflicting_account_of_the_settled_game_is_dropped_and_kept():
     assert entry["deliveries"] == 1, entry["deliveries"]
 
 
+_INSERT_FAULT_DROP = (
+    "DROP TRIGGER IF EXISTS rj_insert_fault_once ON ffa_matches",
+    "DROP FUNCTION IF EXISTS rj_insert_fault_once()",
+    "DROP SEQUENCE IF EXISTS rj_insert_fault_shots",
+)
+
+
+async def _arm_insert_fault(engine, number):
+    """Make the FIRST settlement attempt at `number` fail, once, as a
+    statement-level database error.
+
+    A plpgsql RAISE reaches SQLAlchemy as DBAPIError and not as
+    IntegrityError -- test_pg_an_exhausted_number_space_reaches_the_arm_that_answers_it
+    proves that on migration 327's own trigger -- so the endpoint answers it
+    on the arm a statement timeout or a lost connection takes: roll back,
+    re-read the lobby under a fresh lock, answer 503 with that progress.
+
+    ONCE, and the count lives in a SEQUENCE because a sequence is the one
+    counter a rollback does not undo. A flag row the trigger cleared would be
+    restored by the very rollback its RAISE causes, and every later attempt
+    at that number would fail the same way."""
+    async with engine.begin() as conn:
+        for stmt in _INSERT_FAULT_DROP:
+            await conn.execute(text(stmt))
+        await conn.execute(text("CREATE SEQUENCE rj_insert_fault_shots"))
+        await conn.execute(text(
+            "CREATE FUNCTION rj_insert_fault_once() RETURNS trigger"
+            " LANGUAGE plpgsql AS $$"
+            " BEGIN"
+            "   IF NEW.game_number = %d THEN"
+            "     IF nextval('rj_insert_fault_shots') = 1 THEN"
+            "       RAISE EXCEPTION 'the first settlement attempt at this"
+            " number fails once, before anything is written';"
+            "     END IF;"
+            "   END IF;"
+            "   RETURN NEW;"
+            " END $$" % int(number)))
+        await conn.execute(text(
+            "CREATE TRIGGER rj_insert_fault_once BEFORE INSERT ON ffa_matches"
+            " FOR EACH ROW EXECUTE FUNCTION rj_insert_fault_once()"))
+
+
+async def _disarm_insert_fault(engine):
+    async with engine.begin() as conn:
+        for stmt in _INSERT_FAULT_DROP:
+            await conn.execute(text(stmt))
+
+
+async def _lobby_record(sm, pids):
+    """The lobby's settled rows and the quarantine record, as a walk reads
+    them back: numbers, winners by Steam id, and every capture sorted by room
+    id (two captures inside one clock tick order arbitrarily)."""
+    async with sm() as db:
+        rows = (await db.execute(text(
+            "SELECT game_number, winner_id FROM ffa_matches"
+            " WHERE lobby_id = :l ORDER BY game_number"),
+            {"l": LOBBY})).mappings().all()
+        steam_of = {str(v): k for k, v in pids.items()}
+        captured = sorted(
+            (r["photon_room_id"], r["reason"], r["status"],
+             r["payload"].get("winner_steam_id"))
+            for r in (await db.execute(text(
+                "SELECT photon_room_id, reason, status, payload"
+                "  FROM match_report_quarantine WHERE mode = 'ffa'"
+            ))).mappings().all())
+    return ([int(r["game_number"]) for r in rows],
+            [steam_of.get(str(r["winner_id"])) for r in rows],
+            captured)
+
+
+def test_pg_a_retried_entry_meets_the_settlement_made_while_it_waited():
+    """Control: retry-re-keys-the-parked-entry (r15).
+
+    THE WITNESS FOR THE ROUND-10 HIGH ON THE RETRYABLE ARM. The rule this
+    replaces redelivered a retryable entry RE-SIGNED at the number its answer
+    advertised. That answer is given when the server could not judge the
+    delivery, and the game can be settled by another elector before the retry
+    goes out: the INSERT at N fails, the other elector settles N inside the
+    rollback, and the 503 -- re-read under a fresh lock, as it must be --
+    advertises N+1. An entry moved to N+1 passes the settled row by and
+    settles the same physical game a second time: a second row, a second
+    rating, a second payout.
+
+    Driven through the endpoint against a real PostgreSQL:
+
+      * the seat keys ITS account of the game the lobby is on at N, from an
+        advertisement, at the entry's first write;
+      * that delivery's INSERT fails once, as a statement-level database
+        error -- a trigger standing in for a statement timeout or a lost
+        connection, which the endpoint answers on the same arm;
+      * inside the window the rollback opens, before the endpoint reads the
+        lobby again, a second elector's DIFFERING account of the same game
+        settles N;
+      * the answer is a 503 whose progress advertises N+1 and names no
+        settled game;
+      * `_retryable_redelivery` decides what goes out again: the SAME body,
+        at N;
+      * the retry meets the settled row, is refused with `settled_game` = N,
+        and the entry is dropped with its payload on the quarantine record.
+
+    WHAT REDS, in the order it is asserted: that the window was reached at all
+    (#286); then NO SECOND SETTLEMENT AT ANY NUMBER, read over the whole lobby
+    because the defect puts its row at N+1 and a check at N alone would pass
+    on exactly the failure; then the retry being the first delivery's bytes,
+    the refusal and its numbers, the quarantine record, and last the walk's
+    account of its own steps. The harm comes before the bookkeeping so the
+    control reds on the second settlement it exists for (#391)."""
+    require_pg()
+
+    async def go():
+        engine, sm, pids, _mid = await _settling_fixture(
+            games_played=2, recorded_number=1, recorded_room="rm_211531_r1")
+        out = {}
+        real_relock = main._ffa_progress_relocked
+        try:
+            # This seat's account of the physical game the lobby is on. It
+            # differs from the other elector's in winner and in tallies, so
+            # the retry's answer is a CONFLICT rather than an echo.
+            outbox = {"game-X": _park("game-X", "rm_211531", ROW_B, S1, S1)}
+            out["keys_before"] = sorted(outbox)
+            ahead = None
+            try:
+                await _call_endpoint(sm, _endpoint_report(
+                    ROW_A, S3, "rm_211531_r7", with_slots=True))
+            except main.FfaReportRefusal as ex:
+                ahead = ex
+            if ahead is None:
+                return out
+            # The entry's FIRST write: the one place it takes an
+            # advertisement.
+            _recover_parked(outbox, "game-X", ahead)
+            number = int(outbox["game-X"]["advertised"])
+            out["number"] = number
+            await _arm_insert_fault(engine, number)
+            relocks = []
+
+            async def _relock_after_the_other_elector(db, lobby_uuid):
+                # The endpoint's first re-read after the failed INSERT. The
+                # other elector's account settles N in the window the
+                # rollback opened, and only then is the lobby read again --
+                # which is the order a live sitting can produce.
+                relocks.append(str(lobby_uuid))
+                if len(relocks) == 1:
+                    await _settle_directly(sm, pids, ROW_A, number)
+                return await real_relock(db, lobby_uuid)
+
+            first = _delivery_of(outbox["game-X"])
+            out["first_body"] = first.model_dump()
+            main._ffa_progress_relocked = _relock_after_the_other_elector
+            retryable = None
+            try:
+                out["first_answer"] = await _call_endpoint(sm, first)
+            except main.FfaReportRefusal as ex:
+                retryable = ex
+            finally:
+                main._ffa_progress_relocked = real_relock
+            out["relocks"] = relocks
+            out["retryable"] = retryable
+            if retryable is None:
+                return out
+            # THE RULE UNDER TEST: what goes out again after a retryable
+            # answer that advertised N+1.
+            entry, held = _retryable_redelivery(outbox["game-X"], retryable)
+            out["held"] = held
+            if entry is not None:
+                retry = _delivery_of(entry)
+                out["retry_body"] = retry.model_dump()
+                refusal = None
+                try:
+                    out["retry_answer"] = await _call_endpoint(sm, retry)
+                except main.FfaReportRefusal as ex:
+                    refusal = ex
+                out["refusal"] = refusal
+                if refusal is not None:
+                    disposition, next_number = _settled_game_disposition(
+                        entry, refusal)
+                    out["disposition"] = disposition
+                    out["next_number"] = next_number
+                    if disposition == "terminal":
+                        out["entry"] = _drop_parked(outbox, "game-X")
+            out["keys_after"] = sorted(outbox)
+            out["numbers"], out["winners"], out["captured"] = (
+                await _lobby_record(sm, pids))
+            return out
+        finally:
+            main._ffa_progress_relocked = real_relock
+            await _disarm_insert_fault(engine)
+            await engine.dispose()
+
+    out = run(go())
+    number = out.get("number")
+    retryable = out.get("retryable")
+    numbers = out.get("numbers", [])
+    winners = out.get("winners", [])
+    assert number == 3, (
+        "the ahead probe was not refused with an advertisement, so the entry "
+        "was never keyed and nothing below this line was exercised: %r"
+        % (number,))
+    # THE WINDOW WAS REACHED. The other elector settled N between the failed
+    # INSERT and the endpoint's re-read, and the answer is the retryable arm
+    # advertising the number AFTER N, with no settled game named -- the answer
+    # the replaced rule re-signed the entry against.
+    assert out.get("relocks") == [str(LOBBY)], out.get("relocks")
+    assert retryable is not None, (
+        "the failed INSERT was not answered with a refusal: %r"
+        % (out.get("first_answer"),))
+    assert retryable.status_code == 503, retryable.status_code
+    assert retryable.progress.get("expected_game") == number + 1, (
+        retryable.progress)
+    assert retryable.progress.get("games_played") == number, retryable.progress
+    assert "settled_game" not in retryable.progress, retryable.progress
+    # NO SECOND SETTLEMENT, AT ANY NUMBER. Read over the whole lobby: a retry
+    # moved to the advertised number puts its row at N+1, so a check made
+    # only at N passes on exactly the failure it is for.
+    assert numbers == [1, number], numbers
+    assert winners == [S3, S3], winners
+    assert S1 not in winners, (
+        "the retried account settled under a second number, which rates and "
+        "pays that sitting twice")
+    # The retry is the first delivery's bytes: the same body, at N.
+    assert out.get("retry_body") is not None, (
+        "nothing went out again after a retryable answer")
+    assert out["retry_body"] == out["first_body"], (
+        "the retry was not the body the entry first went out as")
+    assert out["retry_body"]["photon_room_id"] == "rm_211531_r%d" % number
+    # ...and it met the settled row: refused, naming N as settled and the
+    # number after it as the one to derive from.
+    refusal = out.get("refusal")
+    assert refusal is not None, (
+        "the retry at N was not refused: %r" % (out.get("retry_answer"),))
+    assert refusal.status_code in (403, 409), refusal.status_code
+    assert refusal.progress.get("settled_game") == number, refusal.progress
+    assert refusal.progress["expected_game"] == number + 1, refusal.progress
+    # ...and the differing account is on the record, so the conservative
+    # disposition costs a human's attention and not a game.
+    assert out.get("captured") == [
+        ("rm_211531_r3", "ffa_game_contradiction", "pending", S1),
+        ("rm_211531_r7", "ffa_game_number_mismatch", "pending", S3),
+    ], out.get("captured")
+    # ...and only THEN the walk's account of its own steps: the advertisement
+    # went to the NEXT game, the entry ended terminal, left the outbox, went
+    # out twice, and never carried any number but the one it was keyed at.
+    assert out.get("held") == number + 1, out.get("held")
+    assert out.get("disposition") == "terminal", out.get("disposition")
+    assert out.get("next_number") == number + 1, out.get("next_number")
+    assert out.get("keys_after") == [], out.get("keys_after")
+    entry = out.get("entry")
+    assert entry is not None and entry["key"] == "game-X", entry
+    assert entry["deliveries"] == 2, entry["deliveries"]
+    assert entry["refusals"] == 1, entry["refusals"]
+    assert entry["advertised"] == number, entry["advertised"]
+
+
+def test_pg_a_retried_entry_settles_its_own_number_when_nothing_settled_it():
+    """Control: retryable-answer-spends-the-parked-entry (r15).
+
+    THE OTHER HALF OF THE SAME RULE. The INSERT at N fails once and nothing
+    settles N meanwhile: the 503 advertises N itself, the retry goes out as
+    the same body at N, and it is ACCEPTED there -- one row, this seat's
+    account, at the number it was keyed at. A retryable answer is one the
+    server could not judge, so the entry it answered is still owed a
+    settlement; a rule that spent it would lose a game nobody refused.
+
+    What reds first is the lobby's record: the game settled exactly once, at
+    N, as this seat's account. Then the answer that parked it, the retry's
+    bytes, the acceptance and the entry leaving the outbox."""
+    require_pg()
+
+    async def go():
+        engine, sm, pids, _mid = await _settling_fixture(
+            games_played=2, recorded_number=1, recorded_room="rm_211531_r1")
+        out = {}
+        try:
+            outbox = {"game-X": _park("game-X", "rm_211531", ROW_B, S1, S1)}
+            ahead = None
+            try:
+                await _call_endpoint(sm, _endpoint_report(
+                    ROW_A, S3, "rm_211531_r7", with_slots=True))
+            except main.FfaReportRefusal as ex:
+                ahead = ex
+            if ahead is None:
+                return out
+            _recover_parked(outbox, "game-X", ahead)
+            number = int(outbox["game-X"]["advertised"])
+            out["number"] = number
+            await _arm_insert_fault(engine, number)
+            first = _delivery_of(outbox["game-X"])
+            out["first_body"] = first.model_dump()
+            retryable = None
+            try:
+                out["first_answer"] = await _call_endpoint(sm, first)
+            except main.FfaReportRefusal as ex:
+                retryable = ex
+            out["retryable"] = retryable
+            if retryable is None:
+                return out
+            entry, held = _retryable_redelivery(outbox["game-X"], retryable)
+            out["held"] = held
+            if entry is not None:
+                retry = _delivery_of(entry)
+                out["retry_body"] = retry.model_dump()
+                try:
+                    out["accepted"] = await _call_endpoint(sm, retry)
+                except main.FfaReportRefusal as ex:
+                    out["retry_refusal"] = ex
+                if out.get("accepted") is not None:
+                    # An accepted entry is done: it leaves the outbox.
+                    out["entry"] = outbox.pop("game-X")
+            out["keys_after"] = sorted(outbox)
+            out["numbers"], out["winners"], out["captured"] = (
+                await _lobby_record(sm, pids))
+            return out
+        finally:
+            await _disarm_insert_fault(engine)
+            await engine.dispose()
+
+    out = run(go())
+    number = out.get("number")
+    retryable = out.get("retryable")
+    numbers = out.get("numbers", [])
+    winners = out.get("winners", [])
+    assert number == 3, number
+    # THE GAME SETTLED, ONCE, AT N, AS THIS SEAT'S ACCOUNT. A retryable
+    # answer spent as terminal leaves this list at [1]: a result lost that
+    # nobody refused.
+    assert numbers == [1, number], (
+        "the game the retryable answer came back for was never settled: %s"
+        % (numbers,))
+    assert winners == [S3, S1], winners
+    # The answer that parked it: retryable, advertising N itself because
+    # nothing moved, and naming no settled game.
+    assert retryable is not None, (
+        "the failed INSERT was not answered with a refusal: %r"
+        % (out.get("first_answer"),))
+    assert retryable.status_code == 503, retryable.status_code
+    assert retryable.progress.get("expected_game") == number, retryable.progress
+    assert "settled_game" not in retryable.progress, retryable.progress
+    assert out.get("held") == number, out.get("held")
+    # The retry is the first delivery's bytes, and it was accepted at N.
+    assert out.get("retry_body") == out.get("first_body"), (
+        "the retry was not the body the entry first went out as")
+    accepted = out.get("accepted")
+    assert accepted is not None, (
+        "the retry at N was refused: %r"
+        % (getattr(out.get("retry_refusal"), "progress", None),))
+    assert accepted.message == "FFA match recorded", accepted.message
+    assert accepted.settled_game == number, accepted.settled_game
+    assert accepted.expected_game == number + 1, accepted.expected_game
+    # Only the ahead probe is on the quarantine record: nothing about this
+    # game was refused.
+    assert out.get("captured") == [
+        ("rm_211531_r7", "ffa_game_number_mismatch", "pending", S3),
+    ], out.get("captured")
+    assert out.get("keys_after") == [], out.get("keys_after")
+    entry = out.get("entry")
+    assert entry is not None and entry["deliveries"] == 2, entry
+    assert entry["advertised"] == number, entry["advertised"]
+
+
 def test_pg_a_catch_up_on_a_refusing_path_logs_a_claim_its_transaction_can_keep(capsys):
     """Control: catch-up-log-claims-a-persisted-repair (r9).
 
@@ -6803,6 +7325,65 @@ def test_the_repin_trailer_is_derived_and_the_sweep_exempts_only_it():
     # ...and the window really is bounded by the trailer rather than by the
     # length of the log: a form no commit carries selects nothing.
     assert repin.tip_messages(live_bodies, stale) == []
+
+
+def test_the_repin_record_carries_the_untracked_contract_by_digest(tmp_path):
+    """The round-11 brief's commit shape: the client contract is untracked,
+    so its edit is no commit, and its md5 before and after goes into the notes
+    AND into the re-pin record. That record is the wrapper's OUTPUT -- nothing
+    is typed into it afterwards -- so the wrapper computes the digests itself,
+    from documents the environment names, prints them in its run log under
+    their own invocation line and in the report, and refuses before it writes
+    or commits anything when the two copies the round leaves differ.
+
+    Both directions on the function that decides it, on fabricated files, so a
+    rule that never refused, or refused everything, reds here (#391)."""
+    import hashlib
+    import importlib.util
+
+    evidence = pathlib.Path(__file__).resolve().parent / "evidence"
+    spec = importlib.util.spec_from_file_location(
+        "_scr_repin_contract", str(evidence / "repin-last.py"))
+    repin = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(repin)
+
+    before = tmp_path / "before.md"
+    after = tmp_path / "after.md"
+    copy = tmp_path / "copy.md"
+    before.write_bytes(b"the contract, as the review read it\n")
+    after.write_bytes(b"the contract, as this round leaves it\n")
+    copy.write_bytes(b"the contract, as this round leaves it\n")
+    env = {"REPIN_CONTRACT_BEFORE": str(before), "REPIN_CONTRACT": str(after),
+           "REPIN_CONTRACT_COPY": str(copy)}
+
+    # ONE CONTRACT LEFT -> three rows, no refusal, each digest the file's own.
+    rows, problem = repin.contract_digests(env)
+    assert problem is None, problem
+    assert [r[0] for r in rows] == ["before", "after", "copy"], rows
+    assert rows[1][2] == hashlib.md5(after.read_bytes()).hexdigest(), rows
+    assert rows[1][3] == hashlib.sha256(after.read_bytes()).hexdigest(), rows
+    assert rows[0][2] != rows[1][2] and rows[1][2:] == rows[2][2:], rows
+    # ...and nothing in what the record prints is a path.
+    assert not any(str(tmp_path) in str(field) for r in rows for field in r)
+
+    # TWO CONTRACTS LEFT -> refused, and the refusal names both digests.
+    copy.write_bytes(b"the contract, edited in one copy only\n")
+    rows, problem = repin.contract_digests(env)
+    assert problem and "differ" in problem, problem
+    assert hashlib.md5(copy.read_bytes()).hexdigest() in problem, problem
+
+    # SOME BUT NOT ALL NAMED -> refused, naming the one that is missing; a
+    # name that is not a file -> refused; NONE named -> no rows, no refusal.
+    partial = dict(env)
+    del partial["REPIN_CONTRACT_BEFORE"]
+    rows, problem = repin.contract_digests(partial)
+    assert rows == [] and problem and "REPIN_CONTRACT_BEFORE" in problem, (
+        rows, problem)
+    absent = dict(env, REPIN_CONTRACT=str(tmp_path / "absent.md"))
+    rows, problem = repin.contract_digests(absent)
+    assert rows == [] and problem and "does not name a file" in problem, (
+        rows, problem)
+    assert repin.contract_digests({}) == ([], None)
 
 
 def test_no_production_file_cites_the_gitignored_scratch():

@@ -43,6 +43,18 @@ both listings below are git's output rather than a description of it.
 
     python backend/tests/evidence/repin-last.py
 
+ROUND 15: THE CLIENT CONTRACT, BY DIGEST. The lane specifies the client half in
+a document that lives under the gitignored scratch, so no commit of a round
+carries its edit, and the round's record has to carry its state instead. The
+wrapper computes the md5 and sha256 of three documents the environment names --
+the contract as the previous round's review read it, and the two copies this
+round leaves -- prints them in the run log under their own invocation line and
+in the report, never prints a path, and REFUSES before anything is written when
+the two copies differ:
+
+    python backend/tests/evidence/repin-last.py    (with REPIN_CONTRACT_BEFORE,
+        REPIN_CONTRACT and REPIN_CONTRACT_COPY each naming one file)
+
 Nothing is committed unless the report passes the checks of step 5 first, and
 the run log's commit is made before the report is written because the report
 QUOTES the listing of it. The report is staged, git is asked what is staged,
@@ -51,6 +63,7 @@ committed: one path, named by git, in the commit that carries this file.
 """
 import datetime
 import fnmatch
+import hashlib
 import importlib.util
 import io
 import os
@@ -246,6 +259,61 @@ def capture_name(number):
     return "r%d-repin-run.log" % number
 
 
+# THE CLIENT CONTRACT, WHICH NO COMMIT CARRIES (round 15). The documents are
+# named by the environment, because this repository may not name a path it
+# does not contain, and what is printed is the ROLE each one plays, never its
+# path.
+CONTRACT_ROLES = (
+    ("before", "REPIN_CONTRACT_BEFORE",
+     "the contract as the previous round's review read it"),
+    ("after", "REPIN_CONTRACT",
+     "the contract as this round leaves it, the worktree's copy"),
+    ("copy", "REPIN_CONTRACT_COPY",
+     "the same contract, the main checkout's copy"),
+)
+
+
+def contract_digests(environ):
+    """`(rows, problem)` for the contract documents the environment names:
+    rows of `(role, what, md5, sha256)`, and the reason to refuse, or None.
+
+    ALL THREE OR NONE. A record carrying the state a round left without the
+    state it started from says what the round left and not what it changed,
+    so one or two of the three named is a refusal. None named is not: the
+    rows are empty and the record says in so many words that it carries no
+    digest.
+
+    THE TWO COPIES THE ROUND LEAVES MUST BE ONE DOCUMENT. The contract exists
+    twice -- the worktree's copy, which the round edits, and the main
+    checkout's, which is what a review is handed -- and a round that left
+    them different would be recording two contracts under one name. That is
+    a refusal before anything is written or committed."""
+    named = [(role, env, what, environ.get(env, ""))
+             for role, env, what in CONTRACT_ROLES]
+    given = [n for n in named if n[3]]
+    if not given:
+        return [], None
+    if len(given) != len(named):
+        return [], ("the environment names %s and not %s, and a digest record "
+                    "needs all three"
+                    % (", ".join(n[1] for n in given),
+                       ", ".join(n[1] for n in named if not n[3])))
+    rows = []
+    for role, env, what, path in named:
+        if not os.path.isfile(path):
+            return [], "%s does not name a file" % env
+        with io.open(path, "rb") as fh:
+            data = fh.read()
+        rows.append((role, what, hashlib.md5(data).hexdigest(),
+                     hashlib.sha256(data).hexdigest()))
+    left = {role: (md5, sha) for role, _what, md5, sha in rows}
+    if left["after"] != left["copy"]:
+        return rows, ("the two copies of the contract this round leaves "
+                      "differ (md5 %s and %s)"
+                      % (left["after"][0], left["copy"][0]))
+    return rows, None
+
+
 def capture_is_admitted(name, gitignore_text):
     """True when `.gitignore` re-includes `name` under this directory.
 
@@ -300,6 +368,13 @@ def main():
         print("REFUSED: %s is the capture this wrapper opens and no negation "
               "in .gitignore re-includes it, so this round's re-pin record "
               "could not be committed" % log_name)
+        return 2
+
+    # THE CONTRACT'S DIGESTS, asked for before anything is written: a round
+    # that left two different copies stops here rather than recording both.
+    contract_rows, contract_problem = contract_digests(os.environ)
+    if contract_problem:
+        print("REFUSED: %s" % contract_problem)
         return 2
 
     problems = rules.selftest()
@@ -428,6 +503,23 @@ def main():
                      else "FOREIGN: %s" % (hits,)))
     log.write("sweep rc=0\n\n")
 
+    # THE CONTRACT, BY DIGEST, under its own invocation line. Computed above,
+    # before anything was written; recorded here with the rest of the run.
+    log.write("== the untracked client contract, by digest ==\n")
+    log.write("cwd       <repo>\n")
+    log.write("command   python backend/tests/evidence/repin-last.py"
+              " (contract_digests over the documents REPIN_CONTRACT_BEFORE,"
+              " REPIN_CONTRACT and REPIN_CONTRACT_COPY name; no path is"
+              " printed)\n")
+    if contract_rows:
+        for role, what, md5, sha in contract_rows:
+            log.write("  %-7s md5    %s  (%s)\n" % (role, md5, what))
+            log.write("          sha256 %s\n" % sha)
+        log.write("  after and copy: EQUAL\n")
+    else:
+        log.write("  (the environment named no contract document)\n")
+    log.write("contract rc=0\n\n")
+
     body = log.getvalue()
     with io.open(log_path, "w", encoding="utf-8", newline="") as fh:
         fh.write(body)
@@ -523,6 +615,29 @@ def main():
         say("round here instead of at the `git add` that ends it. The test that")
         say("pairs producers with patterns reads the name by CALLING that")
         say("function, which is why the pairing cannot drift from the file.")
+        say()
+        say("== the client contract, which no commit carries ==")
+        if contract_rows:
+            say("The lane's client resync contract is an untracked document, so")
+            say("no commit of this round carries its edit, and this record")
+            say("carries its state instead. The wrapper computed these from the")
+            say("three documents the environment named -- by role, never by")
+            say("path, because all three are outside this repository -- and they")
+            say("are in the run log below under their own invocation line:")
+            say()
+            for role, what, md5, sha in contract_rows:
+                say("  %-7s md5    %s" % (role, md5))
+                say("          sha256 %s" % sha)
+            say()
+            say("`before` is the contract as the previous round's review read it,")
+            say("`after` the worktree's copy this round leaves, and `copy` the")
+            say("main checkout's. The wrapper refuses before it writes anything")
+            say("when `after` and `copy` differ, so this record exists only for a")
+            say("round that left one contract.")
+        else:
+            say("No contract document was named in the environment, so this")
+            say("record carries no digest of one. A round that edited the")
+            say("contract and reached this line has not recorded that edit.")
         say()
         say("== the attribution these two commits carry, and where it came from ==")
         say("The trailer is DERIVED from the branch's most recent commits and")

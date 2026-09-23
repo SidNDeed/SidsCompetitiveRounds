@@ -58,6 +58,10 @@ MAIN = os.path.join(BACKEND, "api", "main.py")
 TESTS = os.path.join(BACKEND, "tests", "test_ffa_game_number_anchor.py")
 EVIDENCE_RULES = os.path.join(HERE, "evidence_rules.py")
 RESIDUAL_RULES = os.path.join(HERE, "residual_rules.py")
+# The class scan over the client contract (round 15): the instrument the arm
+# consistency capture runs, so a control on its reach is a control on the
+# capture's claim.
+ARM_RULES = os.path.join(HERE, "contract_arm_rules.py")
 ASSEMBLER = os.path.join(HERE, "assemble-evidence.py")
 # Shipped by the same deploy as the api (docs/deploy-reference.md maps it to
 # the primary), and outside every glob round 8's shipped-file rule read.
@@ -1096,6 +1100,57 @@ CONTROLS = [
      '            detail="This game is already recorded",\n'
      '            progress=_ffa_with_settled(progress, prior, _named))\n',
      "test_pg_a_conflicting_account_of_the_settled_game_is_dropped_and_kept"),
+
+    # ── round 15 ─────────────────────────────────────────────────────────
+    # THE RETRY, RE-KEYED. The rule the round-10 lens found still written in
+    # the contract: a RETRYABLE answer that advertised a number redelivers the
+    # entry re-signed at that number. A retryable answer is one the server
+    # could not judge, and the game can be settled by another elector before
+    # the retry goes out -- the INSERT at N fails, the other elector settles N
+    # inside the rollback, and the answer advertises N+1. This writes the
+    # advertised number into the entry before it goes out again; the witness
+    # walk's retry then passes the settled row by and settles the same
+    # physical game at N+1, and that SECOND row is what reds. The inert twin
+    # is a comment at the same site.
+    ("retry-re-keys-the-parked-entry", TESTS,
+     '    advertised = answer.progress.get("expected_game")\n'
+     '    held = None if advertised is None else int(advertised)\n'
+     '    return entry, held\n',
+     '    advertised = answer.progress.get("expected_game")\n'
+     '    held = None if advertised is None else int(advertised)\n'
+     '    if held is not None:\n'
+     '        entry["advertised"] = held\n'
+     '    return entry, held\n',
+     '    advertised = answer.progress.get("expected_game")\n'
+     '    held = None if advertised is None else int(advertised)\n'
+     '    # (inert: a comment at the same site)\n'
+     '    return entry, held\n',
+     "test_pg_a_retried_entry_meets_the_settlement_made_while_it_waited"),
+
+    # THE RETRYABLE ANSWER, SPENT. The opposite drift: a retryable answer
+    # treated as terminal, so the entry is never sent again. Where nothing
+    # settled the game meanwhile, that game is then never settled at all -- a
+    # result lost that nobody refused -- and the missing row is what reds.
+    # The inert twin is the same return with a doubled space.
+    ("retryable-answer-spends-the-parked-entry", TESTS,
+     '    return entry, held\n',
+     '    return None, held\n',
+     '    return entry,  held\n',
+     "test_pg_a_retried_entry_settles_its_own_number_when_nothing_settled_it"),
+
+    # THE CLASS SCAN, NARROWED TO THE TABLES. The round-14 instrument read the
+    # arm table's row and two sentences, and the refuted redirect survived in
+    # the sections it never read. This stops the scan emitting paragraphs and
+    # list items, so it reads the tables and headings and nothing else; the
+    # redirects planted in the precedent passage and the last section then go
+    # unseen, and that is what reds. The inert twin is a comment at the same
+    # site.
+    ("class-scan-reads-only-the-arm-table", ARM_RULES,
+     '            out.append((starts[0], joined, offsets))\n',
+     '            pass\n',
+     '            # (inert: a comment at the same site)\n'
+     '            out.append((starts[0], joined, offsets))\n',
+     "test_the_contract_class_scan_reads_every_section"),
 ]
 
 
@@ -1126,6 +1181,11 @@ def write(path, text):
 def md5(path):
     with io.open(path, "rb") as fh:
         return hashlib.md5(fh.read()).hexdigest()
+
+
+def sha256(path):
+    with io.open(path, "rb") as fh:
+        return hashlib.sha256(fh.read()).hexdigest()
 
 
 ANCHOR_TESTS = os.path.join("tests", "test_ffa_game_number_anchor.py")
@@ -1230,7 +1290,7 @@ def main():
     originals = {}
     for _, path, _, _, _, _ in CONTROLS:
         originals.setdefault(path, read(path))
-    before = {p: md5(p) for p in originals}
+    before = {p: (md5(p), sha256(p)) for p in originals}
 
     # Anchor pre-check: every anchor, every mutant target, exactly once.
     problems = []
@@ -1323,12 +1383,21 @@ def main():
         for path, text in originals.items():
             write(path, text)
 
-    after = {p: md5(p) for p in originals}
+    after = {p: (md5(p), sha256(p)) for p in originals}
     print("=" * 70)
+    # Both digests, before and after, printed rather than compared silently:
+    # the line is the evidence that the file every control edited is the file
+    # the run started from, and a reader checks it by reading it.
     for p in originals:
         same = before[p] == after[p]
-        print("restored %s: %s"
-              % (os.path.basename(p), "byte-identical" if same else "CHANGED"))
+        print("restored %s: %s" % (os.path.basename(p),
+                                   "byte-identical" if same else "CHANGED"))
+        print("  md5     %s -> %s  %s" % (before[p][0], after[p][0],
+                                          "EQUAL" if before[p][0] == after[p][0]
+                                          else "DIFFERENT"))
+        print("  sha256  %s -> %s  %s" % (before[p][1], after[p][1],
+                                          "EQUAL" if before[p][1] == after[p][1]
+                                          else "DIFFERENT"))
         if not same:
             failures.append("%s was not restored" % p)
 
