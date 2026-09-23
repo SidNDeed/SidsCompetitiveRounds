@@ -4426,11 +4426,23 @@ def _frozen_provenance_binds(extract_text, record=None):
         m = re.search(r"^" + re.escape(name) + r"\s*:\s*(.+?)\s*$", record, re.M)
         return m.group(1) if m else None
 
+    # L9 (round 9): THE COVERAGE IS ASSERTED, NOT DESCRIBED.  The record's own
+    # field set must equal the set this function verifies; an extra, missing or
+    # repeated field is a refusal naming it.
+    uncovered = _r9_provenance_coverage(record)
+    if uncovered:
+        return False, uncovered
+    if not _FROZEN_SOURCE_LINES.endswith(" of " + _FROZEN_SOURCE_SPLIT_ELEMENTS):
+        return False, "the recorded range and element count disagree"
+
     for name, want in (("extract-path", _FROZEN_SERVER_EXTRACT_REL),
                        ("extract-sha256", _FROZEN_SERVER_EXTRACT_SHA256),
                        ("body-sha256", _FROZEN_BODY_SHA256),
+                       ("source", _FROZEN_SOURCE),
+                       ("source-bytes", _FROZEN_SOURCE_BYTES),
                        ("source-sha256-bytes", _FROZEN_SOURCE_SHA256_BYTES),
                        ("source-sha256-lf", _FROZEN_SOURCE_SHA256_LF),
+                       ("source-split-elements", _FROZEN_SOURCE_SPLIT_ELEMENTS),
                        ("source-lines", _FROZEN_SOURCE_LINES)):
         got = fld(name)
         if got != want:
@@ -8290,4 +8302,108 @@ def test_r9_l10_writers_are_classified_by_source_location():
                  "            Log(" + chr(34) + "(LastSeriesT1Wins, x) = (0, 0)" + chr(34) + ");"):
         m = planted(body)
         assert not _r9_writers_outside_paths(_r7_writer_lines(m), m["ApiClient.cs"]), body
+
+
+# ── L9 (B16): every provenance field is verified, and the coverage asserted ──
+#
+# WHAT WAS WRONG.  The record's header said every field below it was
+# re-derived, but `source` was checked by neither verifier, and each verifier
+# omitted fields the other checked.  A record header is a claim about its
+# verifiers, and it is true only when their coverage is ASSERTED.
+#
+# THE SOURCE FIELD NOW CARRIES A RESOLVABLE IDENTITY: the pin's directory name,
+# its HEAD, and the file inside it -- no workstation path.  The freeze tool
+# resolves it under a pins root it is handed and requires the bytes to hash to
+# source-sha256-bytes; this harness compares it with the constant below.
+_FROZEN_SOURCE = ("pin scr-codex-886bed8-r6-client-5aa2607 at HEAD "
+                  "5aa260793065eac58aebe83f86629b64232ce552, file "
+                  "REVIEW-INPUT/server-lane/main.py")
+_FROZEN_SOURCE_BYTES = "3086099"
+_FROZEN_SOURCE_SPLIT_ELEMENTS = "56062"
+
+# A field is a line that starts at column 0 with a lower-case name of letters,
+# digits and hyphens, then spaces, a colon and a space.
+_R9_PROVENANCE_FIELD = re.compile(r"^([a-z][a-z0-9-]*)[ \t]*:[ \t]", re.M)
+
+# THE FIELDS THIS HARNESS VERIFIES, each by a constant it records or by
+# re-derivation from the body in hand.  No field is exempt here, and the
+# coverage assertion in `_frozen_provenance_binds` refuses a record whose field
+# set differs from this one in either direction.
+_R9_PROVENANCE_VERIFIED = (
+    "extract-path", "extract-sha256", "body-sha256", "body-split-elements",
+    "source", "source-bytes", "source-sha256-bytes", "source-sha256-lf",
+    "source-split-elements", "source-lines")
+_R9_PROVENANCE_EXEMPT = {}
+
+
+def _r9_provenance_fields(record):
+    """The field names the record carries, in order, duplicates kept."""
+    return [m.group(1) for m in _R9_PROVENANCE_FIELD.finditer(record)]
+
+
+def _r9_provenance_coverage(record):
+    """None when every field is verified exactly once, else the refusal."""
+    fields = _r9_provenance_fields(record)
+    dup = sorted(set(f for f in fields if fields.count(f) > 1))
+    at = "the provenance record at " + _FROZEN_PROVENANCE_REL
+    if dup:
+        return at + " carries a field more than once: " + ", ".join(dup)
+    have = set(fields)
+    covered = set(_R9_PROVENANCE_VERIFIED) | set(_R9_PROVENANCE_EXEMPT)
+    extra = sorted(have - covered)
+    if extra:
+        return (at + " carries a field no verifier checks: "
+                + ", ".join(extra))
+    missing = sorted(set(_R9_PROVENANCE_VERIFIED) - have)
+    if missing:
+        return (at + " lacks a field this harness verifies: "
+                + ", ".join(missing))
+    return None
+
+
+def test_r9_l9_every_provenance_field_is_verified():
+    """L9 (B16): THE RECORD'S HEADER IS TRUE BY COVERAGE, NOT BY PROSE.
+
+    The record's field set is enumerated and asserted EQUAL to the set this
+    harness verifies; an extra field, a missing one and a repeated one are each
+    a refusal naming it.  The `source` field is compared with a recorded
+    constant, so pointing it at another pin reddens this -- and the freeze
+    tool, which resolves the same field against the pin itself, refuses the
+    same edit in its own log."""
+    record = _FROZEN_PROVENANCE.read_text(encoding="utf-8")
+    raw = _FROZEN_SERVER_EXTRACT.read_bytes().decode("utf-8")
+    fields = _r9_provenance_fields(record)
+    print("L9 PROVENANCE FIELDS: %d -- %s" % (len(fields), ", ".join(fields)))
+    print("L9 VERIFIED BY THIS HARNESS: %d; EXEMPTIONS: %s"
+          % (len(_R9_PROVENANCE_VERIFIED),
+             ", ".join(sorted(_R9_PROVENANCE_EXEMPT)) or "none"))
+    assert _r9_provenance_coverage(record) is None, _r9_provenance_coverage(record)
+    ok, why = _frozen_provenance_binds(raw)
+    assert ok, why
+
+    src_line = [ln for ln in record.split(LF) if ln.startswith("source ")]
+    assert len(src_line) == 1, src_line
+    other = record.replace("scr-codex-886bed8-r6-client-5aa2607",
+                           "scr-codex-886bed8-r7-client-0c57c4e", 1)
+    bad, why_bad = _frozen_provenance_binds(raw, record=other)
+    assert not bad and "source" in why_bad, why_bad
+    extra = record.replace("source-lines          :",
+                           "reviewed-by           : nobody" + LF
+                           + "source-lines          :", 1)
+    bad, why_bad = _frozen_provenance_binds(raw, record=extra)
+    assert not bad and "reviewed-by" in why_bad, why_bad
+    twice = record.replace("source-lines          :",
+                           "source-bytes          : 3086099" + LF
+                           + "source-lines          :", 1)
+    bad, why_bad = _frozen_provenance_binds(raw, record=twice)
+    assert not bad and "more than once" in why_bad, why_bad
+    # TWIN: a comment line reworded binds nothing.  The line is one that no
+    # tree control edits: the round-8 tree twin rewords the digest heading, and
+    # an in-test twin on that same heading finds nothing to replace while that
+    # tree twin is applied, which reddens this test for a reason that is not L9.
+    twin = record.replace("# WHAT source-lines COUNTS.",
+                          "# WHAT source-lines MEASURES.", 1)
+    assert twin != record
+    ok2, why2 = _frozen_provenance_binds(raw, record=twin)
+    assert ok2, why2
 

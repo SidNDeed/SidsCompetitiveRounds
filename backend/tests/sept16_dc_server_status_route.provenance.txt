@@ -17,15 +17,20 @@
 # the two together.  Re-freezing the extract with a corrected header is the
 # integrator's decision and is carried as an open item, not taken by this lane.
 #
-# EVERY FIELD BELOW IS MEASURED.  886bed8-r8-freeze-server-route.py --verify
-# re-derives all of them from the pin and this pair of files and refuses when
-# one does not reproduce; 886bed8-r8-freeze-verify.log is that run.
+# EVERY FIELD BELOW IS VERIFIED, AND THAT IS ASSERTED RATHER THAN SAID.  Both
+# verifiers enumerate this record's fields and refuse unless the set they
+# verify equals the set it carries: 886bed8-r9-freeze-server-route.py --verify
+# re-derives each field from the pin the `source` field identifies, and the
+# harness beside this file checks each one, against a constant it records or
+# by re-deriving it from the extract.  A field either of them does not verify
+# is a refusal naming it, and an exemption would be printed by name;
+# 886bed8-r9-freeze-verify.log is the tool's run.
 
 extract-path          : backend/tests/sept16_dc_server_status_route.frozen.txt
 extract-sha256        : 69ac1970c409c232bd41396d7d767ee567e8bdf7832bf3423ff193b92663c98d
 body-sha256           : 397e4fc4200365415fc8e5ec3128f3fdf54e38b111deb415bc403a1c211313a6
 body-split-elements   : 1875
-source                : the round-6 client review pin, REVIEW-INPUT/server-lane/main.py
+source                : pin scr-codex-886bed8-r6-client-5aa2607 at HEAD 5aa260793065eac58aebe83f86629b64232ce552, file REVIEW-INPUT/server-lane/main.py
 source-bytes          : 3086099
 source-sha256-bytes   : f8a640c8ec5a641966ee8de5795e882061dfe43d21fc199af8be1eb69bed15c8
 source-sha256-lf      : f025a8b4e21d33768737c740443253f2441ca18094cad1514b33f4b5e67dc1ad
