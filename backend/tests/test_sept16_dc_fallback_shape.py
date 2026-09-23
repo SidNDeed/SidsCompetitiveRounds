@@ -1399,12 +1399,17 @@ def test_every_room_issue_clears_the_deferral_marker():
     open with: an age relation between the marker and the room, held out as
     the property the sweep leans on now that its room term is gone. The clear
     is attempted under a savepoint that swallows what it raises, so no such
-    relation is available to lean on, and the sweep's deletion of the room
-    term is carried by the live-game veto instead. The requirement stands on
-    its own without it: a funnel that stamps the clock without even attempting
-    the clear is a funnel nothing would clear after. Counted file-wide,
-    because the defect is a class and a span-local count could not see a third
-    funnel (#432, #330, #351).
+    relation is available to lean on. Nor does the sweep's deleted room term
+    need a replacement: the 214 s term could not refuse a row, which
+    test_the_sweep_does_not_consult_the_room_clock sets out, so the deletion
+    took nothing away. What stands between a marker this clear did not reach
+    and a settled row is the sweep's live-game veto, a bound and not a
+    guarantee. This docstring said the veto CARRIED that deletion until the
+    account was read off the code (#405, #351). The requirement stands on its
+    own without any of it: a funnel that stamps the clock without even
+    attempting the clear is a funnel nothing would clear after. Counted
+    file-wide, because the defect is a class and a span-local count could not
+    see a third funnel (#432, #330, #351).
 
     Keyed on the COLUMN, not on one spelling of the statement that writes it.
     The first cut matched the literal line `room_issued_at = NOW()`, so a
@@ -1896,6 +1901,12 @@ SUPERSEDED_CLAIMS = (
     "What carries that deletion is the sweep's LIVE-GAME VETO",
     # ...and the writer enumeration that counted three of the four.
     "Three writers end it",
+    # ...and the SIBLING of the live-game-veto account, one screen away in
+    # this file's own docstring, which the commit that wrote it also listed
+    # below as a correction to be KEPT PRESENT -- so the two tables held
+    # opposite polarities of one claim. A claim moves between files (#432);
+    # so does its refutation, and that is what this entry sweeps.
+    "is carried by the live-game veto",
 )
 
 # ...and the sentence that replaced each one, which must be present exactly
@@ -1952,8 +1963,8 @@ CORRECTED_CLAIMS = (
      "funnel clearing the marker, a sweep tick after the bound, and the "
      "room-issue write in the queue poll"),
     ("test_sept16_dc_fallback_shape.py",
-     "the sweep's deletion of the room term is carried by the live-game veto "
-     "instead"),
+     "the 214 s term could not refuse a row, which "
+     "test_the_sweep_does_not_consult_the_room_clock sets out"),
 )
 
 
