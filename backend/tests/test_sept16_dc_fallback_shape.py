@@ -515,15 +515,25 @@ def _client_lane_candidates():
     thing itself rather than on a consequence of it.
 
     `already_tried` carries one line for EVERY state in which the sibling scan
-    produced no listing, and those states are two rather than one. The switch
-    is the first: the scan was never started, and the line says NOT RUN. The
-    second is a scan that WAS started and did not finish -- git exits nonzero,
-    or the child cannot be started at all and the exit is whatever the
-    platform reports for that -- and there the line says ATTEMPTED AND FAILED
-    and names the condition it observed. Only a scan that ran to completion
-    leaves the line out. The distinction is the whole point: a run that did
-    not scan may never read as a run that scanned and found nothing (#438),
-    and a child that never ran is not a measurement of anything (#304).
+    was on the candidate list and produced no listing, and those states are
+    two rather than one. The switch is the first: the scan was never started,
+    and the line says NOT RUN. The second is a scan that WAS started and did
+    not finish -- git exits nonzero, or the child cannot be started at all and
+    the exit is whatever the platform reports for that -- and there the line
+    says ATTEMPTED AND FAILED and names the condition it observed. Of the
+    resolutions that had the scan on their list at all, only one whose scan
+    ran to completion leaves the line out. The distinction is the whole point:
+    a run that did not scan may never read as a run that scanned and found
+    nothing (#438), and a child that never ran is not a measurement of
+    anything (#304).
+
+    A resolution taken with $SCR_CROSS_LANE_CLIENT_ROOT set carries no such
+    line and is not an exception to any of that: the scan was never on its
+    candidate list, and what that resolution names instead is the one tree it
+    was pointed at. The scoping is spelled out because the sentence without it
+    would be a guarantee about the whole state space written from the branch
+    its author had in mind -- which is the defect this round spent three
+    sittings on, and it was in this docstring on the first attempt.
     """
     cands = []
     scan = False
@@ -1756,6 +1766,7 @@ SUPERSEDED_CLAIMS = (
     "answers 200 and ignores it, having already settled",
     "is the one line a resolution must carry when the sibling scan did not run",
     "THE SIBLING SCAN, AND THE ONE STATE IN WHICH IT DOES NOT RUN",
+    "Only a scan that ran to completion leaves the line out",
 )
 
 # ...and the sentence that replaced each one, which must be present exactly
@@ -1789,10 +1800,13 @@ CORRECTED_CLAIMS = (
      "What that 200 proves is ONE thing: the answering box predates the field. "
      "It proves nothing about settlement"),
     ("test_sept16_dc_fallback_shape.py",
-     "carries one line for EVERY state in which the sibling scan produced no "
-     "listing"),
+     "carries one line for EVERY state in which the sibling scan was on the "
+     "candidate list and produced no listing"),
     ("test_sept16_dc_fallback_shape.py",
-     "Only a scan that ran to completion leaves the line out"),
+     "only one whose scan ran to completion leaves the line out"),
+    ("test_sept16_dc_fallback_shape.py",
+     "A resolution taken with $SCR_CROSS_LANE_CLIENT_ROOT set carries no such "
+     "line and is not an exception"),
     ("test_sept16_dc_fallback_shape.py",
      "THE SIBLING SCAN, AND THE TWO STATES IN WHICH IT LISTS NOTHING"),
 )
@@ -1803,8 +1817,12 @@ def test_no_dc_file_carries_a_superseded_claim():
 
     The correction and the check are written together on purpose: a comment
     corrected without one is a sentence the next pass can revert with nothing
-    anywhere to notice (#302, #351). Each string below was in the tree at the
-    round-6 tip and is not in it now.
+    anywhere to notice (#302, #351). Each string below was in the tree at a
+    tip this round READ -- the round-6 one for all but the last, and this
+    round's own first commit for that one -- and is not in it now. A
+    sentence this round wrote and then had to narrow is corrected under the
+    same guard as one it inherited; the table is not a record of whose
+    claim it was.
     """
     for name, text_ in _dc_claim_sources().items():
         flat = _collapsed(_without_claim_tables(text_))
@@ -2009,7 +2027,7 @@ def test_the_sibling_scan_switch_removes_only_that_candidate(monkeypatch):
 
 
 def test_a_sibling_scan_that_did_not_complete_is_not_a_scan_that_found_nothing(
-        monkeypatch):
+        monkeypatch, tmp_path):
     """The other state in which the scan produces no listing.
 
     The switch above is the state everyone remembers. The one that actually
@@ -2020,13 +2038,20 @@ def test_a_sibling_scan_that_did_not_complete_is_not_a_scan_that_found_nothing(
     that ran and listed nothing. An unrun child is not a measurement (#304),
     and the resolution has to say which of the two it is holding.
 
-    All four arms drive the same site. The first three are the controls -- git
+    All five arms drive the same site. The first three are the controls -- git
     refusing, the child exiting with a launch status and no output, and the
     child raising before it starts -- and each must be named. The fourth is
     the INERT TWIN: a scan that RAN and listed no client-lane worktree leaves
     the line out, because that one IS a measurement. A resolver that cried
     ATTEMPTED AND FAILED on every run would be this same defect inverted, and
     it would fail this test just as surely.
+
+    The fifth is the branch the resolver's docstring has to scope itself
+    against: with the tree named in the environment the scan is never on the
+    candidate list, so no line is carried and none is owed. It is driven here
+    rather than left to the prose, because the first version of that
+    docstring made completion the only way the line is left out and this
+    branch falsifies it.
     """
     monkeypatch.delenv("SCR_CROSS_LANE_CLIENT_ROOT", raising=False)
     monkeypatch.delenv("SCR_CROSS_LANE_NO_SIBLING_SCAN", raising=False)
@@ -2063,6 +2088,21 @@ def test_a_sibling_scan_that_did_not_complete_is_not_a_scan_that_found_nothing(
         lambda *a, **k: _Result(0, b"/somewhere abcdef0 [some-other-branch]\n"))
     _cands, tried = _client_lane_candidates()
     assert tried == [], tried
+
+    # ...and the branch the docstring has to SCOPE itself against, asserted
+    # rather than taken on the prose's word: with the tree named in the
+    # environment the scan is never on the candidate list, so there is no
+    # line about it and none is owed. The first version of that docstring
+    # made completion the ONLY way the line is left out, which is false
+    # here -- no scan ran and the line is still out. A guarantee is a
+    # claim about the whole state space (#351), so the state it excludes is
+    # named in the sentence AND driven here.
+    monkeypatch.setattr(subprocess, "run", _cannot_start)
+    monkeypatch.setenv("SCR_CROSS_LANE_CLIENT_ROOT", str(tmp_path))
+    cands, tried = _client_lane_candidates()
+    assert tried == [], tried
+    assert len(cands) == 1, cands
+    assert cands[0][2] is True, cands
 
 
 # Names bound to a WHOLE SOURCE FILE in this module, or to one collapsed onto a
