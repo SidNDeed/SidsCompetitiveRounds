@@ -8444,15 +8444,35 @@ def test_r9_l9_every_provenance_field_is_verified():
 # mentions the merge (form 1) or a fallback (form 2).  It is REJECTED when one
 # of its clauses has a source-tree noun as the subject of a supply verb, or as
 # the object of a consult verb, with no negation governing either and no
-# extract noun standing between them as the actual subject.  A sentence that
-# describes the MANUAL operation -- deleting the extract, re-pointing the
-# harness by hand -- is the correct disposition and is not a candidate.
+# extract noun standing between them as the actual subject.
+#
+# THE MANUAL EXEMPTION IS PER CLAUSE, NOT PER SENTENCE (round-9 cold lens).  A
+# clause that describes the MANUAL operation -- deleting the extract,
+# re-pointing the harness by hand -- is the correct disposition, and a hit
+# inside THAT clause is not a claim.  The exemption used to be read once per
+# sentence, so the removed ordering passed whenever the same sentence also
+# mentioned a deletion in another clause.  Now every hit is judged by the
+# clause it sits in: the words between the nearest clause boundaries around
+# it (punctuation, a comma, or a joining word such as `and`, `which` or
+# `once`), and only a manual word inside that span exempts it.  The merge
+# vocabulary is likewise a class of forms rather than three stems: the
+# sentence that joins the lanes, lands them or unifies them is a merge
+# sentence too.  Because a clause is now judged on its own, a Markdown table
+# row, list item or heading is a sentence of its own and a table cell a
+# clause of its own: a row carries no terminal stop, and gluing a whole table
+# into one sentence let one row's merge word pair with another row's tree.
 def _r9_w(*words):
     return frozenset(words)
 
 
 _R9_MERGE_STEMS = ("merg", "combin", "integrat")
-_R9_MERGE = re.compile(r"\b(?:" + "|".join(_R9_MERGE_STEMS) + r")\w*", re.I)
+_R9_MERGE_FORMS = (r"join(?:s|ed|ing)?", r"rejoin\w*",
+                   r"unif(?:y|ies|ied|ying|ication)", r"consolidat\w*",
+                   r"rebas\w*", r"reunit\w*", r"amalgamat\w*", r"absorb\w*",
+                   r"fus(?:e|es|ed|ing|ion)",
+                   r"land(?:s|ed|ing)?", r"unit(?:e|es|ed|ing)")
+_R9_MERGE = re.compile(r"\b(?:" + "|".join(
+    [s + r"\w*" for s in _R9_MERGE_STEMS] + list(_R9_MERGE_FORMS)) + r")\b", re.I)
 _R9_TREE = _r9_w("tree", "trees", "worktree", "worktrees", "repository",
                  "repositories", "repo", "repos", "checkout", "checkouts",
                  "checked-out", "codebase", "module", "modules", "main.py",
@@ -8478,22 +8498,35 @@ _R9_BIGRAMS = (("working copy", "working_copy"), ("takes over", "takes_over"),
                ("take over", "take_over"), ("is read", "is_read"),
                ("is consulted", "is_consulted"), ("is preferred", "is_preferred"),
                ("is used", "is_used"), ("no longer", "no_longer"))
-_R9_TOKEN = re.compile(r"[a-z0-9_][a-z0-9_'./-]*|;|--|—|:|[()\[\]]")
+_R9_TOKEN = re.compile(r"[a-z0-9_][a-z0-9_'./-]*|;|--|—|:|,|[()\[\]]")
 _R9_BREAKS = frozenset((";", "--", "—", ":", "(", ")", "[", "]"))
 _R9_SENTENCE = re.compile(r"(?<=[.!?])\s+")
+# Where a clause ends, for the manual exemption: the grammar's own breaks, a
+# comma, and the words that join one clause to the next.
+_R9_CLAUSE_EDGES = _R9_BREAKS | frozenset((",",)) | _r9_w(
+    "and", "but", "or", "nor", "so", "then", "which", "who", "whom", "whose",
+    "while", "whereas", "where", "when", "whenever", "once", "after",
+    "before", "until", "unless", "if", "because", "since", "though",
+    "although")
 
 
-def _r9_words(sentence):
+def _r9_words(sentence, commas=False):
+    """The sentence's words, bigrams joined.  Commas are kept only on request:
+    the claim windows below were measured without them, and only the clause
+    edges of the manual exemption read them."""
     s = sentence.lower()
     for a, b in _R9_BIGRAMS:
         s = s.replace(a, b)
-    return [w for w in (x.strip("'.") for x in _R9_TOKEN.findall(s)) if w]
+    out = [w for w in (x.strip("'.") for x in _R9_TOKEN.findall(s)) if w]
+    return out if commas else [w for w in out if w != ","]
 
 
-def _r9_clause_hit(words):
-    """True when a clause has a tree supplying, or being consulted, unnegated
-    and with no extract noun as the real subject between them."""
+def _r9_clause_hits(words):
+    """Every (first, last) word index pair where a clause has a tree supplying,
+    or being consulted, unnegated and with no extract noun as the real subject
+    between them."""
     n = len(words)
+    hits = []
     for v, w in enumerate(words):
         if w in _R9_SUBJ:
             for t in range(v - 1, max(-1, v - 9), -1):
@@ -8510,7 +8543,7 @@ def _r9_clause_hit(words):
                                          for x in words[max(t + 1, e - 2):e])
                              for e in range(t + 1, v))
                     if not neg and not ex:
-                        return True
+                        hits.append((t, v))
                     break
         if w in _R9_OBJ:
             lo = v
@@ -8522,22 +8555,62 @@ def _r9_clause_hit(words):
                 if words[t] in _R9_BREAKS or words[t] in _R9_EXTRACT:
                     break
                 if words[t] in _R9_TREE:
-                    return True
-    return False
+                    hits.append((v, t))
+                    break
+    return hits
+
+
+def _r9_clause_hit(words):
+    """True when any clause of `words` has the rejected form."""
+    return bool(_r9_clause_hits(words))
+
+
+def _r9_hit_clause(wc, a, b):
+    """The clause of the comma-bearing word list `wc` that holds the hit
+    spanning wc[a]..wc[b]: out to the nearest clause edge on each side."""
+    lo = a
+    while lo > 0 and wc[lo - 1] not in _R9_CLAUSE_EDGES:
+        lo -= 1
+    hi = b + 1
+    while hi < len(wc) and wc[hi] not in _R9_CLAUSE_EDGES:
+        hi += 1
+    return " ".join(wc[lo:hi])
+
+
+def _r9_unexempted_hits(sent):
+    """The clauses of one sentence that carry the rejected form and do not
+    themselves describe the manual operation."""
+    wc = _r9_words(sent, commas=True)
+    at = [i for i, w in enumerate(wc) if w != ","]
+    words = [wc[i] for i in at]
+    out = []
+    for a, b in _r9_clause_hits(words):
+        clause = _r9_hit_clause(wc, at[a], at[b])
+        if not _R9_MANUAL.search(clause):
+            out.append(clause)
+    return out
+
+
+# A line that opens a Markdown block -- a table row, a heading, a quotation,
+# a list item -- starts a unit of its own, and a table cell is a unit.
+_R9_UNIT_START = re.compile(r"\n[ \t]*(?=[|#>]|[-*+][ \t]|\d+[.)][ \t])")
 
 
 def _r9_merged_tree_claims(prose):
-    """Every sentence of `prose` that has the rejected form."""
+    """Every sentence of `prose` that has the rejected form in a clause the
+    manual operation does not govern."""
     found = []
     for para in re.split(r"\n[ \t]*\n", prose):
-        flat = " ".join(para.split())
-        for sent in _R9_SENTENCE.split(flat):
-            if not sent or _R9_MANUAL.search(sent):
-                continue
-            if not (_R9_MERGE.search(sent) or _R9_FALLBACK.search(sent)):
-                continue
-            if _r9_clause_hit(_r9_words(sent)):
-                found.append(sent)
+        for unit in _R9_UNIT_START.split(para):
+            for cell in unit.split("|"):
+                flat = " ".join(cell.split())
+                for sent in _R9_SENTENCE.split(flat):
+                    if not sent:
+                        continue
+                    if not (_R9_MERGE.search(sent) or _R9_FALLBACK.search(sent)):
+                        continue
+                    if _r9_unexempted_hits(sent):
+                        found.append(sent)
     return found
 
 
@@ -8627,7 +8700,9 @@ def test_r9_cl2_no_delivered_claim_restores_the_removed_resolution():
     Markdown file under docs/, the extract's header and the provenance record
     -- and prints how many texts of each kind it read; the grammar is
     proven to reject the sealed passage itself, and to leave a correct
-    statement of the manual merge operation alone."""
+    statement of the manual merge operation alone.  A manual word exempts only
+    the clause it sits in, so the removed ordering beside a deletion mentioned
+    in another clause is still rejected."""
     scope = _r9_cl2_scope()
     found = []
     for name in sorted(scope):
@@ -8660,5 +8735,28 @@ def test_r9_cl2_no_delivered_claim_restores_the_removed_resolution():
                "On this branch, and on any tree it is " + _R9_MERGE_STEMS[0]
                + "ed into, the hash-verified extract is the only text the "
                "resolver reads."):
+        assert not _r9_merged_tree_claims(ok), ok
+
+    # ROUND-9 COLD LENS (R9CL5): THE MANUAL EXEMPTION GOVERNS ITS OWN CLAUSE
+    # ONLY.  The removed ordering with a deletion mentioned in ANOTHER clause
+    # of the same sentence is still the removed ordering; and a merge sentence
+    # spelled with a word outside the three stems is still a merge sentence.
+    m0 = _R9_MERGE_STEMS[0]
+    for bad in ("When the lanes " + m0 + "e, the resolver prefers the " + m0
+                + "ed repository and falls back to this extract, which is "
+                "deleted later.",
+                "Once " + m0 + "ed, the repository answers for the route; the "
+                "extract is deleted afterwards.",
+                "Once the lanes are joined, the repository answers for the "
+                "status route.",
+                "After the lanes land, the checked-out tree supplies the "
+                "deferral fields and the extract is deleted by hand."):
+        assert _r9_merged_tree_claims(bad), "the grammar did not reject: " + bad
+    # TWINS: a hit INSIDE the clause that describes the manual operation is
+    # exempt, and so is a joined-lanes sentence that states the manual step.
+    for ok in ("At merge the integrator re-points the harness by hand to read "
+               "the " + m0 + "ed main.py.",
+               "Once the lanes are joined, the integrator deletes the extract "
+               "and re-points the harness by hand."):
         assert not _r9_merged_tree_claims(ok), ok
 
