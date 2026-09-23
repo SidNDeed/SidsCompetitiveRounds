@@ -253,6 +253,19 @@ CREATE SEQUENCE IF NOT EXISTS bug_reports_auto_number_seq
 -- stops four billion rows early, and a start outside its own range all behave
 -- the same way: the migration reports success and the feature cannot write.
 --
+-- AND A START INSIDE THE RANGE IS NOT THE SAME FACT AS THE CONFIGURED START.
+-- `IN RANGE` was the whole of the start question here until round 6, and it
+-- admits `START WITH -9223372036854775806` -- one above MINVALUE, inside the
+-- range, internally consistent, and every other attribute exact. That
+-- sequence survives `OWNED BY`, and the two draws the post-check spends are
+-- the last two values it holds: the first real upload after this file reports
+-- success answers 503 and stays that way. The range test
+-- and the identity test are two different questions, so this block asks
+-- both, in that order -- the range one first, because it is the one whose
+-- message can name the range, and the identity one after it, so that an
+-- out-of-range start still gets the refusal written for it rather than the
+-- generic one.
+--
 -- WHY HERE AND NOT IN THE POST-CHECK, where these six lines were first
 -- written: `ALTER SEQUENCE ... OWNED BY` below re-validates the whole
 -- sequence, so a catalogue row whose START sits outside its own range is
@@ -279,6 +292,7 @@ DECLARE
     c_auto_increment CONSTANT bigint := -1;
     c_auto_max       CONSTANT bigint := -1;
     c_auto_min       CONSTANT bigint := -9223372036854775807;
+    c_auto_start     CONSTANT bigint := -1;
     -- SCOPED LIKE THE GUARD ABOVE, for the same reason (R3-M1).
     v_autoseq CONSTANT regclass :=
         to_regclass(quote_ident(current_schema()) || '.bug_reports_auto_number_seq');
@@ -309,6 +323,18 @@ BEGIN
     END IF;
     IF v_start < v_min OR v_start > v_max THEN
         RAISE EXCEPTION '350: bug_reports_auto_number_seq exists in schema % starting at %, which is outside its own range % .. %; a restart would put it there and the next draw would fail', current_schema(), v_start, v_min, v_max;
+    END IF;
+    -- THE START, BY IDENTITY AND NOT BY RANGE. The test above answers "could
+    -- this sequence be restarted at all"; this one answers "is this the
+    -- sequence this file configures". They differ over every value strictly
+    -- inside the range, and the ones near MINVALUE are the expensive half:
+    -- exact in type, increment, ceiling, floor and cycle, in range, and two
+    -- draws from the end of a counter this file exists to make nobody think
+    -- about. Kept BELOW the range test so that test keeps the case it was
+    -- written for and this one is reached only by a start that is usable and
+    -- still not ours (#342).
+    IF v_start IS DISTINCT FROM c_auto_start THEN
+        RAISE EXCEPTION '350: bug_reports_auto_number_seq exists in schema % starting at %, not %; it is inside its own range, so it draws, but a sequence configured to begin somewhere else was set up by something other than this file and its remaining run is whatever that left -- a restart, or the run from % onward, puts automatic numbering a short distance from exhaustion and every upload past it answers 503', current_schema(), v_start, c_auto_start, v_start;
     END IF;
 END $m350s$;
 
@@ -371,20 +397,23 @@ DECLARE
     v_a         bigint;
     v_b         bigint;
     v_autos     bigint;
-    -- The sequence's catalogue row, read once and asserted attribute by
-    -- attribute below.
+    -- The sequence's catalogue row, re-read here FOR THE CLOSING NOTICE.
+    -- Block 1b is where it is asserted attribute by attribute; this block
+    -- reads the same row so the line an operator sees states the shape this
+    -- file ran against.
     v_typid     oid;
     v_start     bigint;
     v_increment bigint;
     v_max       bigint;
     v_min       bigint;
     v_cycle     boolean;
-    -- THE CONFIGURED SHAPE, restating the CREATE SEQUENCE above. These are
-    -- the values this file installs, so they are also the values it must
-    -- refuse to adopt a different sequence over.
-    c_auto_increment CONSTANT bigint := -1;
-    c_auto_max       CONSTANT bigint := -1;
-    c_auto_min       CONSTANT bigint := -9223372036854775807;
+    -- NO c_auto_* CONSTANTS HERE. They were declared in this block when the
+    -- shape assertions lived in it, and round 5 moved those assertions to
+    -- block 1b without taking the declarations with them. What was left was
+    -- three named values carrying a comment that said this block refuses a
+    -- sequence over them, which it does not do and must not start doing: 1b
+    -- runs before anything touches the sequence, and a second copy of the
+    -- same literals here would be a specification in two places (#351).
     -- SCOPED LIKE THE GUARDS, for the same reason: a post-check that offers
     -- rows to one schema's constraint while the ALTER above installed it on
     -- another proves nothing about the database this file just changed
@@ -490,8 +519,15 @@ BEGIN
     EXECUTE format('SELECT COUNT(*) FROM %s WHERE kind = ''auto''',
                    v_target::regclass::text)
        INTO v_autos;
-    RAISE NOTICE '350: in schema %, bug_reports_auto_number_seq is bigint, increment %, range % .. %, NO CYCLE, starting at %, and descends (% then %); the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at %; % automatic row(s) present, all negative by construction',
-        current_schema(), v_increment, v_min, v_max, v_start, v_a, v_b, v_human_after, v_autos;
+    -- EVERY ATTRIBUTE IN THIS LINE IS THE ONE THAT WAS READ, not a literal
+    -- beside a variable. The type and the cycle flag used to be spelled out
+    -- as `bigint` and `NO CYCLE` while `v_typid` and `v_cycle` were selected
+    -- and never used; block 1b does refuse anything else, so the sentence was
+    -- true -- but a line an operator reads as a measurement has to be one
+    -- (#732), and a variable read into and never used is where the next
+    -- untrue one starts.
+    RAISE NOTICE '350: in schema %, bug_reports_auto_number_seq is %, increment %, range % .. %, cycle %, starting at %, and descends (% then %); the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at %; % automatic row(s) present, all negative by construction',
+        current_schema(), format_type(v_typid, NULL), v_increment, v_min, v_max, v_cycle, v_start, v_a, v_b, v_human_after, v_autos;
 END $m350p$;
 
 COMMIT;
