@@ -13942,8 +13942,21 @@ namespace CompetitiveRounds
         public static string LastSeriesStateStatus = null;
         public static string LastSeriesStateReason = null;
         public static int LastSeriesStateConfirmations = 0;
-        public static int LastSeriesT1Wins = 0;
-        public static int LastSeriesT2Wins = 0;
+        // THE BANNER'S INPUTS ARE WRITABLE ONLY HERE (per the round-7 review).
+        // Every one of them is read from other sources — NativeUI renders them,
+        // Plugin.cs gates on the cached id — and none of them is written from
+        // any source but this one. Declared as public fields they were writable
+        // by every spelling C# has, which is why the repaint census had to
+        // recognise compound assignment, increment, null-coalescing assignment,
+        // ref/out arguments and API-mediated writers such as Interlocked before
+        // it could claim to see every writer. A private setter removes that
+        // surface instead of watching it: a property cannot be passed by
+        // reference at all, so the ref/out and Interlocked forms stop compiling
+        // rather than stop being visible, and any new writer outside this class
+        // is a compile error rather than a census miss. The census stays wide —
+        // this narrows what it has to find, it does not replace it.
+        public static int LastSeriesT1Wins { get; private set; } = 0;
+        public static int LastSeriesT2Wins { get; private set; } = 0;
         /// <summary>THE DC-GRACE BANNER'S WHOLE INPUT, and the names are the
         /// cross-lane contract's own: `dc_deferred`,
         /// `dc_deferred_seconds_remaining` and `dc_deferred_bound_seconds`, which
@@ -13958,9 +13971,9 @@ namespace CompetitiveRounds
         /// dc_grace_until is only ever written NULL) and nothing read the second
         /// field at all, so the pair were a cache nothing could render. Deleted
         /// rather than left for the next reader to believe (#310, #389).</para></summary>
-        public static bool LastSeriesDcDeferred = false;
-        public static int LastSeriesDcDeferredSecondsRemaining = 0;
-        public static int LastSeriesDcDeferredBoundSeconds = 0;
+        public static bool LastSeriesDcDeferred { get; private set; } = false;
+        public static int LastSeriesDcDeferredSecondsRemaining { get; private set; } = 0;
+        public static int LastSeriesDcDeferredBoundSeconds { get; private set; } = 0;
         /// <summary>Whether the answer that last wrote the three fields above
         /// CARRIED them. Absent and false are different facts and only one of them
         /// is about the row (#342, #604): the lifecycle state read carries none of
@@ -13969,12 +13982,12 @@ namespace CompetitiveRounds
         /// way — that is the direction an unknown costs least in (#276) — but its
         /// witness must not spell "nothing answered this" as "the route said
         /// false". This flag is what lets that line say which one it holds.</summary>
-        public static bool LastSeriesDcDeferredFieldsPresent = false;
+        public static bool LastSeriesDcDeferredFieldsPresent { get; private set; } = false;
         // Codex r2 f8: WHICH series the LastSeriesState* fields describe. Set
         // ONLY in ApplySeriesStateResponse (to the id that response was for)
         // and reset by the ActiveTeamSeriesId setter, so a consumer can require
         // ForId == current before trusting the cache.
-        public static string LastSeriesStateForId = null;
+        public static string LastSeriesStateForId { get; private set; } = null;
         // The next UNSCALED WALL-CLOCK time the team-series status read may be
         // dispatched at — not an accumulator of frame time. Why it is a deadline
         // and not a sum is in UpdateTeamSeriesStatePoll's own gate.
