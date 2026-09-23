@@ -92,6 +92,17 @@ cases -- never 500 -- and can try again after the next match.
   cannot be made durable REFUSES the upload rather than writing the blob
   anyway.
 
+  AND SO DOES THE PLAYER-FILED ATTACHMENT, SINCE ROUND 6. ``submit_bug_report``
+  stamps the same marker before its own ``open()`` and clears it after the row
+  that names the file has committed. That path has no sweep of its own and its
+  row is written in the same transaction as the report, so before round 6 a
+  stop between its first byte and its cleanup arm left a prefix nothing in this
+  tree could name. The marker set is therefore no longer "the automatic
+  uploads in flight" but "the blobs in flight", and the sweep's protection of a
+  referenced file has to carry the difference: it does, because the lookup that
+  decides is ``log_filename`` over the WHOLE ``bug_reports`` table with no kind
+  predicate, which is the property ``prune_orphan_blobs`` documents at length.
+
   AND EVERY ORDER THIS MODULE RELIES ON IS A PERSISTENCE ORDER, NOT A CALL
   ORDER. An ordering that survives the PROCESS does not survive the HOST: a
   power loss recovers whatever was flushed and discards the rest, in no
@@ -212,6 +223,7 @@ not touch it; this note is here so that stays deliberate.
 import asyncio
 import gzip
 import hashlib
+import heapq
 import json
 import os
 import pathlib
@@ -258,13 +270,13 @@ AUTO_LOG_MAX_BODY_BYTES = 14 * 1024 * 1024
 
 # THE 401 DETAIL LITERAL, AND IT IS LOAD-BEARING ACROSS THE WIRE.
 #
-# `ApiClient.HandleSessionReject` (plugin/ApiClient.cs:20916) tests the
+# `ApiClient.HandleSessionReject` (client lane, ApiClient.cs:20916) tests the
 # response body with `body.Contains("session_required")` and, only on a match,
 # calls `SteamAuth.InvalidateSessionIf` to drop the stale token so the next
 # heartbeat mints a fresh one. Production spells it with an UNDERSCORE at
 # every strict-session refusal it has, and three of those sites carry a
 # comment saying the literal is load-bearing for exactly this reason
-# (main.py:15572, :16175, :17388).
+# (main.py's `queue_poll`, `queue_ready` and `generate_link_code`).
 #
 # THIS MODULE SPELLED IT "session required", WITH A SPACE, AT ALL THREE OF ITS
 # REFUSALS. The client's test would have been false, the token would have been
@@ -486,6 +498,16 @@ AUTO_LOG_SWEEP_BOOT_DELAY_S = 120.0
 # and what remains for the gate is a marker left behind by a process life that
 # has ended -- or one this process's own request left deliberately.
 #
+# THERE IS A SECOND WRITER OF MARKERS SINCE ROUND 6, and T does not bound its
+# span: `submit_bug_report` stamps one before a player-filed attachment's
+# first byte, and that handler has no marked-span deadline -- what bounds it
+# is the request. So the FIRST line is what covers it: the handler registers
+# the blob in `_MARKERS_IN_FLIGHT` from the stamp until the commit has
+# decided, in a `finally`, and the sweep runs in the same process. The gate
+# is a second line there too, wide enough that the only way past both is a
+# request that outlived the process -- in which case the file is genuinely
+# unreferenced and collecting it is the right answer.
+#
 # The sweep exists because ONE arm of the upload deliberately keeps a blob it
 # cannot prove has a row -- the indeterminate commit. Without a collector that
 # arm is a slow leak on a volume shared with player-filed attachments, which
@@ -502,37 +524,75 @@ _ORPHAN_MIN_AGE_S = AUTO_LOG_SWEEP_EVERY_S + 2.0 * AUTO_LOG_MARKED_SPAN_DEADLINE
 # pass is REQUIRED to keep: past that many older referenced attachments, a
 # newer orphan was never offered to the database at all. A cap over the heap
 # is a starvation class, so the heap stopped being the population and the cap
-# was deleted rather than raised (#310).
+# was deleted rather than raised.
 #
 # The population is now the MARKER SET. Enumerating all of it is what keeps
 # the pass honest, because a marker is created only by an upload that is about
 # to write a blob, so a referenced attachment never appears in it at all.
 #
-# WHAT THIS NUMBER BOUNDS IS THE PASS'S WORK, and it used to bound only the
-# half of it that reclaims bytes. Every candidate this pass acts on costs a
-# synchronous unlink -- and, on the removal arm, a directory flush measured at
-# 60-200 ms on this seat. Spending the budget on removals ALONE left the
-# other three arms unbounded: a backlog of markers whose blobs are already
-# gone, or of markers that will not unlink, is walked whole on every tick, at
-# one or two filesystem calls each, on the api's single worker. So the budget
-# is now spent by EVERY arm that touches the volume -- the clear over a
-# committed row, the removal, the marker-only clear and the candidate that
-# would not move -- and the pass's cost per tick is bounded by it.
+# THIS NUMBER BUYS REMOVALS AND NOTHING ELSE. A slot is spent when a blob
+# comes off the volume; a marker cleared over a committed row, a marker with
+# no blob left to reclaim and a candidate that will not move all cost a
+# filesystem call and none of them spends one.
 #
-# THE LINE STILL SEPARATES THE ARMS, which is what the budget's old meaning
-# was protecting (#304). "Removed" still counts blobs actually taken off the
-# volume and nothing else, so the drain rate an operator reads is unchanged;
-# it is the BUDGET, not the reporting, that stopped being about removals.
+# ROUND 5 SPENT IT ON EVERY ARM AND ROUND 6 TOOK THAT BACK. The problem round
+# 5 was solving is real -- a cohort that cannot be resolved must not be walked
+# whole on every tick -- but the budget is the wrong instrument for it, and
+# using it that way costs the property it exists for: two hundred marker
+# clears over committed rows can spend a whole pass while a real orphan
+# behind them waits for the next one. A bound on DESTRUCTION and a bound on
+# COST are two different questions and each gets its own number
+# (`_ORPHAN_SCAN_BOUND` below is the second one).
 #
-# Candidates are ordered OLDEST FIRST, so a backlog larger than one batch
-# drains across ticks -- but only for the arms that CONSUME their candidate. A
-# marker that would not unlink is still there on the next tick, so ordering
-# alone would let one stuck cohort at the head of the list spend the whole
-# budget for ever and never reach a real orphan behind it. That is the
-# starvation class the heap cap had, described a screen up, arriving by
-# another road, and the answer is the one the retention pass already
-# uses: park it.
+# Candidates are ordered OLDEST FIRST within a pass, so a backlog larger than
+# one batch drains across ticks rather than being re-picked at random.
 _ORPHAN_BATCH = _PRUNE_BATCH
+
+# CANDIDATE NAMES EXAMINED PER PASS -- the pass's COST bound, and the only
+# bound that is independent of the backlog.
+#
+# WHAT "EXAMINED" MEANS HERE: a name that is `stat`ed for its age, offered to
+# the database in a `log_filename = ANY(...)` chunk, and possibly acted on.
+# Before round 6 every one of those grew with the marker population: the whole
+# set was stat-ed, sorted, and queried in 500-name chunks BEFORE the removal
+# budget was applied to the tail of it, so a backlog of any size cost that
+# many stats and that many rows of database work on every tick, on the api's
+# single worker. The budget bounded what the pass could DESTROY and nothing
+# bounded what it could COST.
+#
+# GREATER THAN `_ORPHAN_BATCH`, and it has to be: a scan bound below the
+# removal budget would make the removal budget unreachable, which is a bound
+# that can never fire (#342). Four times it, so a pass can still spend its
+# whole removal budget after skipping three batches' worth of candidates it
+# may not act on.
+#
+# WHAT IT DOES NOT BOUND, said plainly: the directory's own enumeration. A
+# directory offers no keyed access, so finding the window means walking the
+# entries once -- one `readdir` stream, a suffix test per name, no `stat`, no
+# query and no unlink. That walk is the floor of the operation rather than a
+# choice this file makes, and every per-candidate cost above it is bounded by
+# this number.
+_ORPHAN_SCAN_BOUND = 4 * _ORPHAN_BATCH
+
+# WHERE THE NEXT PASS RESUMES: the last candidate name the previous pass
+# examined, in NAME order, wrapping at the end.
+#
+# The scan bound alone would be a starvation class rather than a fix. A pass
+# that always examines the FIRST `_ORPHAN_SCAN_BOUND` names re-walks the same
+# window for ever, so a cohort that will not resolve -- a subtree the
+# container lost write permission on -- hides every candidate behind it
+# permanently, which is precisely the defect the attachment heap's cap had,
+# described a screen up, arriving by another road. With the cursor the window
+# advances whatever the
+# window contained, so an orphan anywhere in a population of N is reached
+# within ceil(N / _ORPHAN_SCAN_BOUND) + 1 passes and the bound on the wait is
+# arithmetic rather than a hope about which names sort first.
+#
+# NAME ORDER AND NOT AGE ORDER, because the cursor has to be stable: mtimes
+# are the resolution order WITHIN a window, and a position in an order that
+# re-shuffles as markers are created and removed is not a position. The
+# per-process reset costs one window.
+_ORPHAN_CURSOR = [""]
 
 # Markers this pass could not resolve, held out of the next few passes.
 #
@@ -540,11 +600,22 @@ _ORPHAN_BATCH = _PRUNE_BATCH
 # keeping a candidate and re-reading it on every tick are two different
 # decisions and only the first one is wanted. A marker whose unlink raises --
 # a read-only volume after a host incident, a subtree the container lost write
-# permission on -- is parked until a deadline, so the next pass looks PAST it
-# and reaches the candidates behind it. The hold is a cooldown and not a
-# blacklist: it expires, so a transient fault is retried rather than written
+# permission on -- is parked until a deadline. The hold is a cooldown and not
+# a blacklist: it expires, so a transient fault is retried rather than written
 # off, and an id is dropped the moment a pass resolves it. The dict is
 # per-process and bounded; losing it on restart costs one pass.
+#
+# WHAT IT BUYS, STATED AGAINST THE CODE AS IT NOW STANDS. It is NOT eventual
+# reach: `_ORPHAN_CURSOR` is what guarantees that, and it guarantees it
+# whether or not anything is held. What the hold buys is WINDOW SPACE. The
+# park is read during the ENUMERATION, before the window is chosen, so a
+# parked candidate costs no slot -- a cohort of four hundred that will not
+# unlink does not fill a four-hundred-name window on every tick while
+# candidates that CAN be resolved wait behind it. It also stops the pass
+# re-issuing an unlink it already knows raises, on a volume that is by
+# hypothesis already faulty. Round 5's version of this comment claimed the
+# reach, which was true when the budget was spent by every arm and is not
+# true now.
 _ORPHAN_HOLD_S = 6 * 3600.0
 _ORPHAN_HELD_MAX = 5 * _ORPHAN_BATCH
 _ORPHAN_HELD: dict[str, float] = {}
@@ -741,10 +812,13 @@ def _fsync_dir(directory) -> None:
     refuse the upload -- never to write a blob and hope, and never to fall
     back to walking the heap.
 
-    EVERY CALL SITE COERCES ITS ARGUMENT, at all FOUR of them. Three name a
-    file and spell it `pathlib.Path(x).parent`; the fourth, retention's, is
-    handed the blob DIRECTORY itself and spells it `pathlib.Path(base)`. The
-    coercion is the invariant and `.parent` is not, because what the three
+    EVERY CALL SITE COERCES ITS ARGUMENT, at all FOUR of them in this module
+    and at both of `submit_bug_report`'s in `main.py` (the blob's own entry,
+    and the cleanup arm's removal), which spell it through that module's
+    `_pathlib` alias. In this module three name a file and spell it
+    `pathlib.Path(x).parent`; the fourth, retention's, is handed the blob
+    DIRECTORY itself and spells it `pathlib.Path(base)`. The coercion is the
+    invariant and `.parent` is not, because what the three
     file sites are doing is deriving a directory from a file and the fourth
     one already has it.
 
@@ -812,17 +886,29 @@ def _write_all(fd, body) -> None:
 def _stamp_marker(blob_path) -> None:
     """Create this blob's marker, DURABLY, before the blob has any bytes.
 
-    Off the event loop, like every other filesystem call on this path: two
-    fsyncs on a contended volume are not something to do on the loop.
+    TWO CALLERS, AND ONLY ONE OF THEM IS OFF THE EVENT LOOP. The automatic
+    upload reaches this through `_guarded_stamp` on a worker thread, because
+    two fsyncs on a contended volume are not something to do on the loop.
+    Since round 6 `submit_bug_report` stamps a player-filed attachment too,
+    and it calls this INLINE, beside the blob write that handler has always
+    performed on the loop. Round 6 makes that request's volume work durable
+    end to end -- this stamp's two flushes, and the blob's own two before its
+    row commits -- and leaves it where it was; moving the whole handler's
+    filesystem work off the loop is a change of its own.
 
     The content is the blob's own name plus a newline, ALL of it: the write
     goes through `_write_all`, so a short `os.write` cannot leave the fsync
-    below making a truncated name durable. The sweep reads the marker's NAME
-    and never its contents, so that is not a safety property -- what it is is
-    the property this docstring and the failure table both claim, which is
-    reason enough for it to be true (#351). A zero-byte file is also
-    indistinguishable from a failed create when an operator looks at the
-    directory, and one whole line costs nothing.
+    below making a truncated name durable.
+
+    NOTHING IN THIS TREE READS THAT CONTENT. The sweep reads a marker's NAME
+    and never opens the file, so a whole marker is not what keeps a blob
+    collectable. What the contents flush does promise is narrower, and it is
+    the contract the crash simulation holds it to (INV-M): once this function
+    has RETURNED, the marker on any recovered volume is the whole line --
+    never an accepted upload standing behind a marker whose bytes were not
+    made durable. A zero-byte file is also indistinguishable from a failed
+    create when an operator looks at the directory, and one whole line costs
+    nothing.
     """
     marker = _marker_path(blob_path)
     # O_BINARY for the same reason `_write_blob` takes it: `os.open` is TEXT
@@ -2014,12 +2100,23 @@ def _unlink_due_blobs(base, plan) -> tuple[list, str | None]:
     lose which rows had already been unlinked, and the conservative direction
     here is the one that keeps a name on every file (#276/#430).
 
-    An `unlink` that reports the file already absent is not a removal of this
-    pass's, so it needs no barrier of its own and the caller may delete that
-    row whatever the flush does.
+    AN `absent` OBSERVATION TAKES THE BARRIER TOO, and that is round 6's
+    correction. "The file is not there" is not a fact about this pass; it is
+    usually a fact about an EARLIER one -- a pass that unlinked and did not
+    reach its commit -- and that earlier unlink may still be sitting in the
+    directory cache. Letting `absent` through with no flush puts the deletion
+    of the row back in front of a removal nothing has promised: the volume
+    recovers the entry, the row is durably gone, and the blob is outside both
+    collectors exactly as if this pass had unlinked it itself. A flush issued
+    AFTER observing the absence is what makes that earlier unlink durable,
+    because `_fsync_dir` promises every entry change issued in that directory
+    and not only the ones this process issued. So the barrier is charged once
+    per pass when the pass removed anything OR saw anything already gone, and
+    the caller treats the two arms identically (#507).
     """
     outcomes = []
     unlinked = 0
+    observed_absent = 0
     for row_id, name in plan:
         if not name:
             outcomes.append((row_id, "no-blob", "the row names no blob"))
@@ -2035,12 +2132,13 @@ def _unlink_due_blobs(base, plan) -> tuple[list, str | None]:
             outcomes.append((row_id, "failed", name))
             continue
         if state == "absent":
+            observed_absent += 1
             outcomes.append((row_id, "absent", name))
             continue
         unlinked += 1
         outcomes.append((row_id, "removed", name))
     barrier = None
-    if unlinked:
+    if unlinked or observed_absent:
         try:
             _fsync_dir(pathlib.Path(base))
         except OSError as ex:
@@ -2077,9 +2175,39 @@ async def prune_auto_logs(db: AsyncSession, *, days: int = AUTO_LOG_RETENTION_DA
     the api is a single worker; the pass takes one thread hop and the loop
     stays free, the same choice `_release_marked_blob_off_loop` makes.
 
-    An `unlink` that reports the file already absent is SUCCESS, not an error:
-    that is the expected state after a pass that unlinked and then failed to
-    commit, and treating it as a failure would pin such a row for ever.
+    AN `absent` OBSERVATION IS NOT A FAILURE AND IS NOT A FREE PASS EITHER.
+    It is the expected state after a pass that unlinked and then failed to
+    commit, so treating it as an error would pin such a row for ever. But the
+    unlink it is evidence of may be a removal NOTHING HAS PROMISED yet, so the
+    row is collectable only once this pass's directory flush has succeeded --
+    the same barrier, read the same way, `_PRUNE_HELD` included. The two arms
+    are one branch below for that reason: "the blob is not on the volume" and
+    "the blob is durably not on the volume" are two different facts and the
+    DELETE is entitled to the second one (#430).
+
+    TWO PASSES NEVER HOLD THE SAME ROW. The due rows are selected `FOR NO KEY
+    UPDATE SKIP LOCKED`, so an overlapping pass takes the rows this one did
+    not and the window above closes from the other side as well: a pass
+    cannot read `absent` off a removal another pass is in the middle of and
+    has not flushed. The MODE is the weakest one that still conflicts with
+    this pass's own later write (#202): the DELETE below needs it, `FOR NO KEY
+    UPDATE` self-conflicts so two passes serialize, and it is KEY-SHARE
+    compatible, so it does not enrol every foreign-key insert that references
+    a `bug_reports` row in this sweep's lock graph the way `FOR UPDATE` would.
+    `SKIP LOCKED` rather than a wait, because the rows are interchangeable
+    work and the pass behind should take the next `_PRUNE_BATCH` rather than
+    block on a volume that is already slow; the LockRows node sits under the
+    LIMIT, so a pass still gets up to a full batch of rows nobody else holds.
+    The lock is held from the SELECT through the thread hop to the DELETE and
+    the commit, because that whole span is the window it exists to close, and
+    #208's rule is kept by the DELETE re-checking the age predicate the SELECT
+    chose on rather than trusting the id list alone.
+
+    Gating on the ROW is deliberate (#203): every due row exists by
+    construction -- it is what the SELECT returned -- so there is no
+    lock-nothing window of the kind a lazily created table has, and no
+    advisory lock is needed to stand in for a row that may not be there
+    (#207).
 
     A row kept this way is also HELD OUT of the next few selections
     (`_PRUNE_HELD`). Keeping it and re-selecting it are two different
@@ -2121,7 +2249,8 @@ async def prune_auto_logs(db: AsyncSession, *, days: int = AUTO_LOG_RETENTION_DA
                    AND created_at < NOW() - make_interval(days => CAST(:days AS integer))
                    AND NOT (id = ANY(CAST(:held AS uuid[])))
                  ORDER BY created_at
-                 LIMIT :lim"""),
+                 LIMIT :lim
+                   FOR NO KEY UPDATE SKIP LOCKED"""),
         {"days": int(days), "lim": _PRUNE_BATCH, "held": held},
     )).mappings().all()
     if not due:
@@ -2159,16 +2288,24 @@ async def prune_auto_logs(db: AsyncSession, *, days: int = AUTO_LOG_RETENTION_DA
     undurable: list[str] = []
     unlinked = 0
     for row_id, state, detail in outcomes:
-        if state == "no-blob" or state == "absent":
-            # Nothing of ours is on the volume for this row. "absent" is a
-            # previous pass that unlinked and did not get to commit, or an
-            # operator who cleared the directory; either way the row is
-            # collectable for the reason it would have been anyway, and no
-            # removal of THIS pass has to be made durable for it.
+        if state == "no-blob":
+            # THE ROW NAMES NOTHING, so no removal of anybody's has to be made
+            # durable for it. This is the one arm the barrier has no bearing
+            # on, and it is separated from `absent` for exactly that reason:
+            # "there is no file to speak of" and "the file is not there" are
+            # different readings, and only the first is free.
             _PRUNE_HELD.pop(row_id, None)
             collectable.append(row_id)
-        elif state == "removed":
-            unlinked += 1
+        elif state == "absent" or state == "removed":
+            # ONE BRANCH FOR BOTH, and that is round 6's correction. `absent`
+            # is usually the trace of an EARLIER pass's unlink, which may be
+            # a removal the filesystem has not promised; this pass's flush is
+            # what promises it, because a directory flush covers every entry
+            # change issued in that directory and not only this process's. So
+            # the row becomes collectable on the same condition in both arms,
+            # and stays held on the same condition in both.
+            if state == "removed":
+                unlinked += 1
             if barrier is None:
                 _PRUNE_HELD.pop(row_id, None)
                 collectable.append(row_id)
@@ -2193,11 +2330,14 @@ async def prune_auto_logs(db: AsyncSession, *, days: int = AUTO_LOG_RETENTION_DA
                   f"{detail} is still on the volume and the unlink raised; "
                   f"held out of the next {int(_PRUNE_HOLD_S)}s of sweeps")
     if barrier is not None:
-        print(f"[AUTO-LOG] retention: {unlinked} blob(s) were unlinked and the "
-              f"directory would NOT flush ({barrier}), so their removals are "
-              f"not durable and NONE of those rows is deleted this pass; they "
-              f"are held out of the next {int(_PRUNE_HOLD_S)}s of sweeps and "
-              f"the next pass re-unlinks whatever the volume kept")
+        print(f"[AUTO-LOG] retention: the directory would NOT flush "
+              f"({barrier}), so no removal this pass can name is durable -- "
+              f"{unlinked} blob(s) it unlinked and "
+              f"{len(undurable) - unlinked} it found already gone, whose "
+              f"removal an earlier pass may still owe the volume. NONE of "
+              f"those rows is deleted this pass; they are held out of the "
+              f"next {int(_PRUNE_HOLD_S)}s of sweeps and the next pass "
+              f"re-unlinks whatever the volume kept")
 
     deleted = 0
     if collectable:
@@ -2241,9 +2381,9 @@ def _hold_marker(blob_name: str, clock: float) -> None:
     The eviction rule is `_hold`'s, for `_hold`'s reason: at the ceiling the
     entry closest to expiring is dropped rather than the new one, because the
     evicted name is the one whose fault is oldest and so the one most worth
-    retrying, and refusing to record the new failure would put that candidate
-    straight back at the head of the next pass -- which is the state the hold
-    exists to leave.
+    retrying, and refusing to record the new failure would leave the newest
+    known-stuck candidate taking a window slot on every pass -- which is the
+    state the hold exists to leave.
     """
     if blob_name not in _ORPHAN_HELD and len(_ORPHAN_HELD) >= _ORPHAN_HELD_MAX:
         _ORPHAN_HELD.pop(min(_ORPHAN_HELD, key=_ORPHAN_HELD.get), None)
@@ -2251,11 +2391,40 @@ def _hold_marker(blob_name: str, clock: float) -> None:
 
 
 def _marker_candidates(base, cutoff: float, live: set,
-                       held: set | None = None) -> tuple[list[str], int, int, int, int]:
-    """The blobs this pass may act on, OLDEST MARKER FIRST.
+                       held: set | None = None, scan_bound: int | None = None,
+                       cursor: str = "") -> tuple:
+    """The blobs this pass may act on, OLDEST MARKER FIRST, out of a WINDOW of
+    at most `scan_bound` names taken in name order after `cursor`.
 
     Returns `(blob_names_oldest_first, markers_total, owned_by_a_live_upload,
-    younger_than_the_gate, held_out_of_this_pass)`.
+    younger_than_the_gate, held_out_of_this_pass, examined, next_cursor,
+    unreadable)`.
+
+    THE WINDOW IS THE PASS'S COST BOUND (`_ORPHAN_SCAN_BOUND`). Every cost
+    above one `readdir` stream is paid per WINDOWED name and not per marker on
+    the volume: the `stat` that answers the age question, the chunked
+    `log_filename = ANY(...)` lookup the caller then runs, the sort, and the
+    resolution. Before round 6 the whole population paid all four on every
+    tick, so a backlog of any size grew the pass's duration and its database
+    work without bound while the removal budget capped only the last of them.
+
+    THE CURSOR IS WHAT KEEPS THE WINDOW FROM BEING A STARVATION CLASS. It is
+    the last name this pass examined; the next pass takes the names after it
+    and wraps, so the window sweeps the whole population over
+    ceil(N / scan_bound) passes whatever any individual window contained. A
+    fixed window over an unchanging order is the attachment heap's cap again
+    with a different number -- the same starvation class the `_ORPHAN_BATCH`
+    paragraph above this function describes.
+
+    NAME ORDER FOR THE CURSOR, AGE ORDER FOR THE RESOLUTION. They answer
+    different questions: the cursor needs a position that survives creations
+    and removals, and only the name space offers one; the resolution wants the
+    oldest candidate first, and that is a sort WITHIN the window.
+
+    A BOUNDED SELECTION, not a sort of everything. `heapq.nsmallest` keeps a
+    heap of `scan_bound` entries over the stream, so the memory this pass
+    spends is the window's and not the population's -- which is the same
+    property as the time bound and would be worth nothing without it.
 
     THE POPULATION IS THE MARKER SET AND NEVER THE DIRECTORY. This used to
     enumerate every file under `base`, keep the oldest `_ORPHAN_SCAN_MAX` aged
@@ -2266,7 +2435,7 @@ def _marker_candidates(base, cutoff: float, live: set,
     past that many older referenced attachments a newer orphan was never
     offered to the database at all -- a starvation class rather than a corner
     case. A cap over the heap cannot be fixed by raising it, so the heap
-    stopped being the population (#310).
+    stopped being the population.
 
     A blob carries a marker only between the instant before its bytes exist
     and the instant its row commits, so a referenced file does not appear here
@@ -2275,116 +2444,171 @@ def _marker_candidates(base, cutoff: float, live: set,
     blob -- which is what makes a full enumeration finite in the way a heap
     walk never was.
 
-    THREE EXCLUSIONS, and they are different questions:
+    SINCE ROUND 6 THERE ARE TWO WRITERS OF MARKERS, not one:
+    `upload_auto_log` and `submit_bug_report`. So "a marker means an automatic
+    blob" is no longer true and nothing here may rest on it. What the pass
+    rests on instead is the caller's reference lookup, which spans the whole
+    `bug_reports` table with no kind predicate -- the same property that
+    protected a player-filed attachment before, now load-bearing rather than
+    belt-and-braces.
+
+    FOUR EXCLUSIONS, and they are different questions. TWO OF THEM ARE ASKED
+    BEFORE THE WINDOW IS CHOSEN and two inside it, which is not an
+    implementation detail: an exclusion that costs nothing to evaluate must
+    not consume a window slot, or the bound becomes a bound on how many
+    SKIPS the pass performs rather than on how much work it does.
 
     * `live` is the set of markers a request in THIS process still owns. Those
       are skipped whatever their age, because the answer to "is somebody still
-      writing this" is one this process knows exactly rather than infers.
+      writing this" is one this process knows exactly rather than infers. A
+      set membership test, so it is asked during the enumeration.
+    * `held` excludes a marker an earlier pass could not resolve and parked
+      (`_ORPHAN_HELD`). Also a set test, also asked during the enumeration --
+      and that placement is the whole of what the hold now buys. It is not
+      about eventual reach any more, which is the cursor's job: it is that a
+      cohort known to be stuck does not fill this pass's window while
+      candidates that CAN be resolved wait behind it.
     * `cutoff` excludes a marker younger than the age gate. That covers the
       case the set cannot see -- a marker left by a process life that has
       ended -- and it is derived from the handler's own deadline, so a stalled
-      write cannot outlive it.
-    * `held` excludes a marker an earlier pass could not resolve and parked
-      (`_ORPHAN_HELD`). That one is not about whether the candidate is
-      collectable -- it is, and it will be -- but about this pass reaching
-      the ones behind it: a cohort that will not unlink sits at the head of
-      an oldest-first list for ever, and now that every arm spends the
-      budget it would otherwise take the whole of it on every tick.
+      write cannot outlive it. It needs the marker's mtime, so it is asked
+      INSIDE the window and it costs a `stat`.
+    * the WINDOW itself excludes a marker this pass did not reach. That is
+      not a judgement about the candidate either -- it is the cost bound, and
+      the cursor is what guarantees the next pass or the one after reaches it.
 
-    On the worker thread: a directory scan plus one `stat` per marker, on a
-    volume that may be contended.
+    On the worker thread: one directory stream, a string test and two set
+    tests per name, and one `stat` per WINDOWED name -- at most `scan_bound`
+    of those -- on a volume that may be contended.
 
     A marker whose `stat` raises is SKIPPED rather than reported: the only
     thing this pass does with it is act on its blob, and a name that will not
-    answer about its own age is not one to act on. Nothing is lost -- the next
-    tick asks again.
+    answer about its own age is not one to act on. Nothing is lost -- the pass
+    whose window next holds it asks again. It is COUNTED, as `unreadable`,
+    because the window's three terms have to sum to `examined` for the
+    caller's line to close (#304).
     """
     parked = held or set()
+    bound = int(_ORPHAN_SCAN_BOUND if scan_bound is None else scan_bound)
     aged: list[tuple[float, str]] = []
-    markers_total = 0
+    counted = [0]
     owned = 0
     young = 0
     held_now = 0
+    unreadable = 0
     try:
         entries = os.scandir(str(base))
     except OSError:
-        return [], 0, 0, 0, 0
-    with entries:
-        for e in entries:
+        return [], 0, 0, 0, 0, 0, cursor, 0
+
+    def _keys(stream):
+        """One sort key per MARKER on the volume, and no `stat` per name.
+
+        `(0, blob, ...)` for a name after the cursor and `(1, blob, ...)` for
+        one at or before it, so the smallest `bound` keys are exactly the
+        window: the names following the cursor in order, and then -- only if
+        there are fewer than `bound` of those -- the wrap back to the start.
+
+        THE THIRD FIELD IS A SERIAL AND THE FOURTH IS THE DIRECTORY ENTRY.
+        The entry is carried so the window can read the age off the object
+        `scandir` already produced rather than re-deriving a path and paying a
+        second lookup; the serial is unique per entry, so the tuple ordering
+        is decided before it ever reaches the entry -- which has no ordering.
+        """
+        nonlocal owned, held_now
+        for e in stream:
             if not e.name.endswith(_ORPHAN_MARKER_SUFFIX):
                 continue
             try:
                 if not e.is_file():
                     continue
-                mtime = e.stat().st_mtime
             except OSError:
                 continue
-            markers_total += 1
+            counted[0] += 1
             blob = e.name[:-len(_ORPHAN_MARKER_SUFFIX)]
             if blob in live:
                 owned += 1
                 continue
-            if mtime >= cutoff:
-                young += 1
-                continue
             if blob in parked:
                 held_now += 1
                 continue
-            aged.append((mtime, blob))
+            yield ((0, blob, counted[0], e) if blob > cursor
+                   else (1, blob, counted[0], e))
+
+    with entries:
+        window = heapq.nsmallest(bound, _keys(entries))
+    markers_total = counted[0]
+
+    next_cursor = window[-1][1] if window else cursor
+    for _wrapped, blob, _serial, entry in window:
+        try:
+            mtime = entry.stat().st_mtime
+        except OSError:
+            unreadable += 1
+            continue
+        if mtime >= cutoff:
+            young += 1
+            continue
+        aged.append((mtime, blob))
     aged.sort()
-    return [name for _, name in aged], markers_total, owned, young, held_now
+    return ([name for _, name in aged], markers_total, owned, young, held_now,
+            len(window), next_cursor, unreadable)
 
 
 def _resolve_marker_candidates(base, names, known, limit):
     """Resolve this pass's marker candidates ON A WORKER THREAD, spending one
-    slot of `limit` per candidate ACTED ON.
+    slot of `limit` per blob REMOVED.
 
-    Answers `(outcomes, cleared, uncleared, deferred_referenced, unlinked,
-    marker_only, unremovable, markers_kept, deferred)`, where `outcomes` is
-    one `(blob_name, arm, detail)` per candidate this pass touched, in the
-    order it touched them. Nothing here prints, holds or mutates module
-    state: a thread is a poor place to decide what an operator reads, and the
-    caller owns `_ORPHAN_HELD`.
+    Answers `(outcomes, cleared, uncleared, unlinked, marker_only,
+    unremovable, markers_kept, deferred)`, where `outcomes` is one
+    `(blob_name, arm, detail)` per candidate this pass touched, in the order
+    it touched them. Nothing here prints, holds or mutates module state: a
+    thread is a poor place to decide what an operator reads, and the caller
+    owns `_ORPHAN_HELD`.
 
-    THE TWO DEFERRAL COUNTS ARE KEPT APART, because the closing line's two
-    sums are over two populations: the referenced candidates account as
-    cleared + uncleared + deferred_referenced, and the unreferenced ones as
-    removed + marker-only + unremovable + deferred. One shared term would
-    close neither sum, which is the arithmetic hole #304 is about.
+    THE BUDGET BUYS REMOVALS ONLY, which is where round 3 left it and where
+    round 6 puts it back. Round 5 spent a slot on every arm, on the reasoning
+    that every arm costs a filesystem call -- true, and the wrong lever: with
+    the budget spent by marker clears, two hundred markers over committed
+    rows consume a pass while an unreferenced blob behind them waits for the
+    next one, and the number an operator reads as the drain rate stops being
+    the number that bounds the drain. The pass's COST is bounded instead by
+    how many candidates reach this function at all (`_ORPHAN_SCAN_BOUND`
+    upstream), which is the bound that question actually wanted.
 
-    EVERY ARM COSTS A FILESYSTEM CALL, so every arm spends the budget. The
-    clear over a committed row is an unlink; the marker-only clear is an
-    unlink; a candidate that will not move is one or two unlinks that raised;
-    a removal is an unlink, a directory flush and a second unlink. Bounding
-    only the last of those bounded the pass's DESTRUCTION and not its COST,
-    and the cost is what stalls a single-worker api on a slow volume.
+    SO THERE IS ONE DEFERRAL TERM, not two. A referenced candidate is never
+    deferred here -- it costs no slot, so it is always resolved -- and the
+    two sums the caller's line has to close are `cleared + uncleared` over
+    the referenced candidates and `removed + marker-only + unremovable +
+    deferred` over the unreferenced ones. Round 5's `deferred_referenced`
+    went with the every-arm budget: a term that can no longer be non-zero is
+    a term that cannot fail (#342), so it is gone rather than printed as a
+    standing zero.
 
     DISPOSITION 2 FIRST, because it is the arm that removes nothing: a marker
     over a blob the table names is a commit that landed, the file is
-    referenced and must never be touched. It also consumes its candidate, so
-    it cannot hold the budget across ticks.
+    referenced and must never be touched. It consumes its candidate whichever
+    way it goes, so it does not come back in a later window except in the one
+    case where the marker would not unlink -- which the caller holds.
 
     THE BLOB FIRST, THEN ITS MARKER, AND THE FIRST REMOVAL MADE DURABLE
     BEFORE THE SECOND IS ISSUED. A crash between the two then leaves a marker
-    whose blob is absent, which the next pass reads as disposition 5; the
-    other order -- or this order with no barrier between, which a filesystem
-    may persist either way round -- leaves an unreferenced blob with nothing
-    naming it, the state this mechanism exists to make unreachable.
+    whose blob is absent, which the pass whose window next holds it reads as
+    disposition 5; the other order -- or this order with no barrier between,
+    which a filesystem may persist either way round -- leaves an unreferenced
+    blob with nothing naming it, the state this mechanism exists to make
+    unreachable.
     `_delete_blob_then_marker` is the one site that performs it, and the
     determinate cleanup calls the same function (#432).
     """
     outcomes = []
-    cleared = uncleared = deferred_referenced = 0
+    cleared = uncleared = 0
     unlinked = marker_only = unremovable = markers_kept = 0
     deferred = 0
-    spent = 0
+    removed = 0
     budget = int(limit)
 
     for name in (n for n in names if n in known):
-        if spent >= budget:
-            deferred_referenced += 1
-            continue
-        spent += 1
         if _unlink_if_present(base / (name + _ORPHAN_MARKER_SUFFIX)):
             cleared += 1
             outcomes.append((name, "cleared", ""))
@@ -2393,10 +2617,9 @@ def _resolve_marker_candidates(base, names, known, limit):
             outcomes.append((name, "uncleared", ""))
 
     for name in (n for n in names if n not in known):
-        if spent >= budget:
+        if removed >= budget:
             deferred += 1
             continue
-        spent += 1
         state, marker_gone = _delete_blob_then_marker(base / name)
         stuck = (state == "failed") or (state == "absent" and not marker_gone)
         if stuck:
@@ -2412,20 +2635,23 @@ def _resolve_marker_candidates(base, names, known, limit):
             outcomes.append((name, "marker_only", ""))
             continue
         unlinked += 1
+        removed += 1
         if not marker_gone:
             markers_kept += 1
         outcomes.append((name, "removed",
                          "its marker is cleared" if marker_gone else
                          "its marker could NOT be removed and SURVIVES, so "
-                         "the next tick reads it as a marker with no blob"))
-    return (outcomes, cleared, uncleared, deferred_referenced, unlinked,
+                         "the pass whose window next holds it reads it as a "
+                         "marker with no blob"))
+    return (outcomes, cleared, uncleared, unlinked,
             marker_only, unremovable, markers_kept, deferred)
 
 
 async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None,
                              limit: int = _ORPHAN_BATCH) -> dict:
-    """Resolve every orphan-candidate MARKER: clear it over a committed row,
-    or take its blob once the database refuses to name it.
+    """Resolve the orphan-candidate MARKERS in this pass's window: clear one
+    over a committed row, or take its blob once the database refuses to name
+    it.
 
     WHY THIS EXISTS. `upload_auto_log` has one arm that leaves a file behind
     it cannot account for: a commit whose outcome is UNKNOWN. That arm keeps
@@ -2444,6 +2670,18 @@ async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None
     over the WHOLE table, and the control that reds when someone adds
     `kind = 'auto'` to it executes this function against a database holding
     rows of every kind rather than asserting on the statement's text.
+
+    THAT PREDICATE IS NOW THE WHOLE OF THE PROTECTION AND NOT HALF OF IT.
+    Before round 6 a player-filed attachment never carried a marker, so it
+    could not enter this pass's population whatever the lookup said; since
+    `submit_bug_report` stamps one before its first byte, it can -- for the
+    span between that byte and its commit, and no longer. Two further things
+    keep the pass off it inside that span: the handler registers the blob in
+    `_MARKERS_IN_FLIGHT` for exactly that span, in a `finally`, and the age
+    gate is wider than any request this process can still be serving. Said
+    plainly because it is a change of kind: a property that was structural is
+    now one three mechanisms hold, and that belongs in the residuals rather
+    than in a reassurance.
 
     FIVE DISPOSITIONS, one per state a marker can be in:
 
@@ -2472,25 +2710,26 @@ async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None
        work. It is reported as `marker-only` and NOT as a removal, because
        nothing was reclaimed; see the budget below.
 
-    BOUNDED ON THE WORK, WHICH IS EVERY ARM THAT TOUCHES THE VOLUME. `limit`
-    counts CANDIDATES ACTED ON -- a disposition-2 clear, a removal, a
-    marker-only clear and a candidate that would not move all spend one --
-    because every one of them costs a synchronous unlink and the removal arm
-    a directory flush besides. Spent on removals alone it bounded the arm that
-    reclaims bytes and left the other three to walk a backlog of any size, at
-    one or two filesystem calls each, on the api's single worker: the pass was
-    bounded in what it could DESTROY and unbounded in what it could COST.
+    TWO BOUNDS, BECAUSE THERE ARE TWO QUESTIONS. `limit` bounds what the pass
+    may DESTROY and is spent by REMOVALS ONLY -- LENS-3's property, which
+    round 5 revised away and round 6 restores. `_ORPHAN_SCAN_BOUND` bounds
+    what the pass may COST: the number of candidate names examined, stat-ed,
+    offered to the database and resolved, whatever the backlog. Round 5 tried
+    to make one number do both jobs and lost the first one: with a clear over
+    a committed row spending a slot, `_ORPHAN_BATCH` referenced markers can
+    consume a pass while an unreferenced blob behind them waits, and the
+    number printed as the drain rate stops being the number that bounds the
+    drain.
 
-    THAT IS A REVISION OF LENS-3 AND NOT AN OVERSIGHT OF IT. LENS-3's point
-    was that a budget spent on candidates which reclaim nothing lets the line
-    read "200 removed" over a pass that reclaimed nothing (#304). What that
-    argument is really about is the REPORTING, and the reporting is unchanged:
-    `unlinked` still counts blobs actually taken off the volume and the
-    closing line still separates the four arms, so the drain rate is still
-    checkable. What LENS-3 also bought, without saying so, was that a stuck
-    cohort could not consume the budget -- and that is now bought explicitly
-    by `_ORPHAN_HELD` instead, which is the mechanism rather than a
-    side-effect of one.
+    AND A CURSOR, because a fixed window is a starvation class. The window
+    starts after the last name the previous pass examined and wraps, so a
+    cohort that will not resolve is walked past rather than sat on, and an
+    orphan anywhere in a population of N is reached within
+    ceil(N / _ORPHAN_SCAN_BOUND) + 1 passes. `_ORPHAN_HELD` is the second,
+    finer answer to the same question -- it takes a candidate out of the next
+    few passes' windows entirely -- and the two are kept apart because one is
+    about REACHING everything and the other about not re-trying a known
+    fault every tick.
 
     AND THE PASS'S FILESYSTEM WORK RUNS OFF THE EVENT LOOP. Up to `limit`
     unlinks and flushes are synchronous calls on a volume that may be
@@ -2499,24 +2738,28 @@ async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None
     resolution, the same choice `_release_marked_blob_off_loop` and the
     retention pass make.
 
-    AND THE CLOSING LINE'S ARITHMETIC CLOSES, over BOTH of its populations.
-    Every unreferenced candidate is removed, marker-only, unremovable or
-    deferred, and the line prints all four; every referenced one is cleared,
-    uncleared or deferred, and the line prints those three. The two deferral
-    terms are separate, because one term shared between two sums closes
-    neither of them and the number an operator reads as the drain rate has to
-    be checkable against the population it came out of (#304).
+    AND THE CLOSING LINE'S ARITHMETIC CLOSES, over ALL FOUR of its
+    populations. The VOLUME: markers = owned + held + eligible. The WINDOW:
+    examined = young + unreadable + offered. The REFERENCED candidates in it:
+    cleared + uncleared. The UNREFERENCED ones: removed + marker-only +
+    unremovable + deferred. Each sum is over one population and no term is
+    shared between two of them, because a term that closes neither sum is how
+    a drain rate gets read off a line whose own arithmetic does not close
+    (#304). `eligible` minus `examined` is what this pass did not reach, and
+    the line names the cursor so the next window is predictable rather than
+    inferred.
 
     A DISPOSITION IS REPORTED ONLY WHEN THE UNLINK THAT PERFORMS IT
     SUCCEEDED. Every arm that removes a marker reads the result: a marker a
     permission or I/O fault leaves on the volume is reported as NOT cleared
-    and named for the next tick, never as `cleared` under a line an operator
-    reads as work that was done. `unremovable` is the one term for "this
-    candidate is unchanged on the volume and the next tick retries it",
+    and named as left for a later pass, never as `cleared` under a line an
+    operator reads as work that was done. `unremovable` is the one term for
+    "this candidate is unchanged on the volume and a later pass retries it",
     whichever of the two unlinks could not be taken -- one term, one meaning
     (#430). A removed blob whose marker survived is still `removed`, because
     the byte reclaim is what that term counts; the surviving marker is
-    reported beside it and comes back next tick as disposition 5.
+    reported beside it and comes back as disposition 5 in the pass whose
+    window next holds it.
 
     THE TWO UNLINKS GO THROUGH `_delete_blob_then_marker`, which is also
     what the determinate cleanup calls: the blob-before-marker order, and
@@ -2541,8 +2784,15 @@ async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None
     clock = time.monotonic()
     for name in [k for k, until in _ORPHAN_HELD.items() if until <= clock]:
         _ORPHAN_HELD.pop(name, None)
-    names, markers_total, owned, young, held = await asyncio.to_thread(
-        _marker_candidates, base, cutoff, live, set(_ORPHAN_HELD))
+    names, markers_total, owned, young, held, examined, next_cursor, unreadable = \
+        await asyncio.to_thread(_marker_candidates, base, cutoff, live,
+                                set(_ORPHAN_HELD), _ORPHAN_SCAN_BOUND,
+                                _ORPHAN_CURSOR[0])
+    # THE CURSOR ADVANCES WHATEVER THE WINDOW HELD, and before the early
+    # return below: a window that was entirely live, young, held or
+    # unreadable is exactly the window a pass must not sit on, and leaving
+    # the cursor where it was would re-take it for ever.
+    _ORPHAN_CURSOR[0] = next_cursor
     if not names:
         if held:
             # Not "nothing to collect": there are candidates this pass
@@ -2552,8 +2802,9 @@ async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None
             print(f"[AUTO-LOG] orphan sweep: nothing past the gate outside the "
                   f"{held} marker(s) held back after a failed unlink")
         return {"candidates": 0, "markers": markers_total, "in_flight": owned,
-                "young": young, "held": held, "orphans": 0, "unlinked": 0,
-                "cleared": 0, "uncleared": 0, "deferred_referenced": 0,
+                "young": young, "held": held, "examined": examined,
+                "unreadable": unreadable, "orphans": 0, "unlinked": 0,
+                "cleared": 0, "uncleared": 0,
                 "markers_kept": 0, "marker_only": 0, "unremovable": 0,
                 "deferred": 0, "refused": False}
 
@@ -2568,12 +2819,17 @@ async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None
               f"full of orphans -- nothing removed")
         return {"candidates": len(names), "markers": markers_total,
                 "in_flight": owned, "young": young, "held": held,
+                "examined": examined, "unreadable": unreadable,
                 "orphans": 0, "unlinked": 0, "cleared": 0, "uncleared": 0,
-                "deferred_referenced": 0, "markers_kept": 0, "marker_only": 0,
+                "markers_kept": 0, "marker_only": 0,
                 "unremovable": 0, "deferred": 0, "refused": True}
 
     # CHUNKED, and the predicate is the same one in every chunk. A name absent
     # from its own chunk's answer is unreferenced -- union, never intersect.
+    # `names` is the WINDOW, so this loop runs at most
+    # ceil(_ORPHAN_SCAN_BOUND / _ORPHAN_NAME_CHUNK) times whatever the backlog
+    # is -- the database work per pass is a constant and not a function of how
+    # far behind the sweep has fallen.
     known: set[str] = set()
     for start in range(0, len(names), _ORPHAN_NAME_CHUNK):
         chunk = names[start:start + _ORPHAN_NAME_CHUNK]
@@ -2584,18 +2840,21 @@ async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None
         )).mappings().all()}
     await db.rollback()
 
-    # `names` is oldest-first, so `all_orphans` is too and the resolution
-    # below reaches the oldest unreferenced blobs first rather than whichever
-    # the filesystem listed first. That ordering is what makes the deferred
-    # remainder a BACKLOG -- the candidates resolved here are gone by the next
-    # tick -- instead of a set that keeps being skipped.
+    # `names` is oldest-first WITHIN THE WINDOW, so `all_orphans` is too and
+    # the resolution below reaches the window's oldest unreferenced blobs
+    # first rather than whichever the filesystem listed first. The deferred
+    # remainder is the youngest part of the window, and the cursor has
+    # already moved past it: it is reached again when the window next wraps
+    # round to it. That is what makes it a BACKLOG that shrinks -- the
+    # candidates resolved here are gone by then -- instead of a set that
+    # keeps being skipped.
     all_orphans = [n for n in names if n not in known]
 
     # ONE THREAD HOP FOR THE WHOLE RESOLUTION. Every unlink and every flush
     # this pass performs happens inside it, so none of them runs on the event
     # loop; the counting and the printing happen back here, where the module's
     # state lives.
-    outcomes, cleared, uncleared, deferred_referenced, unlinked, \
+    outcomes, cleared, uncleared, unlinked, \
         marker_only, unremovable, markers_kept, deferred = \
         await asyncio.to_thread(
             _resolve_marker_candidates, base, names, known, int(limit))
@@ -2610,8 +2869,11 @@ async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None
             # NOT cleared, and the line says so. The blob is referenced and
             # safe either way; what a `cleared` here would cost is an
             # operator's reading of a marker that keeps coming back. HELD, for
-            # the same reason an unremovable candidate is: it will be at the
-            # head of the next pass's list and it spends a slot every time.
+            # the same reason an unremovable candidate is: it cannot resolve
+            # until whatever refused the unlink changes, and until then it
+            # would spend a WINDOW slot every time the cursor reached it. The
+            # hold excludes it before the window is chosen, so it costs
+            # nothing until the hold expires.
             _hold_marker(name, clock)
             print(f"[AUTO-LOG] orphan sweep: {_ORPHAN_MARKER}={name} is over a "
                   f"blob a bug_reports row names, and the marker could NOT be "
@@ -2651,22 +2913,28 @@ async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None
     # one level down -- it lets an operator read a drain rate off a line whose
     # own arithmetic does not close (#304).
     print(f"[AUTO-LOG] orphan sweep: {markers_total} marker(s) on the volume, "
-          f"{owned} owned by a live upload, {young} younger than the "
+          f"{owned} owned by a live upload and {held} held after an earlier "
+          f"failed unlink, leaving {markers_total - owned - held} eligible; "
+          f"{examined} of those examined this pass (bound "
+          f"{_ORPHAN_SCAN_BOUND}, the next pass resumes after "
+          f"{_ORPHAN_CURSOR[0] or 'the start'}), of which {young} younger "
+          f"than the "
           f"{int(_ORPHAN_MIN_AGE_S if min_age_s is None else min_age_s)}s gate, "
-          f"{held} held after an earlier failed unlink, "
-          f"{len(names)} offered to the database, {cleared} cleared over a "
+          f"{unreadable} whose marker would not stat, and "
+          f"{len(names)} offered to the database; {cleared} cleared over a "
           f"committed row ({uncleared} over a committed row that would not "
-          f"clear, {deferred_referenced} of them left for the next tick), "
+          f"clear), "
           f"{len(all_orphans)} unreferenced, {unlinked} removed "
           f"({markers_kept} of them leaving a marker behind), "
           f"{marker_only} marker-only with no blob to reclaim, "
           f"{unremovable} that could not be removed, "
-          f"{deferred} left for the next tick")
+          f"{deferred} deferred past the removal budget until the window "
+          f"next reaches them")
     return {"candidates": len(names), "markers": markers_total,
             "in_flight": owned, "young": young, "held": held,
+            "examined": examined, "unreadable": unreadable,
             "orphans": len(all_orphans),
             "unlinked": unlinked, "cleared": cleared, "uncleared": uncleared,
-            "deferred_referenced": deferred_referenced,
             "markers_kept": markers_kept,
             "marker_only": marker_only, "unremovable": unremovable,
             "deferred": deferred, "refused": False}

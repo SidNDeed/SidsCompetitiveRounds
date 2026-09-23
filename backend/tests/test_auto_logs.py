@@ -313,6 +313,16 @@ def no_markers_held_over(monkeypatch):
     monkeypatch.setattr(auto_logs, "_ORPHAN_HELD", {})
 
 
+@pytest.fixture(autouse=True)
+def no_cursor_carried_over(monkeypatch):
+    """`_ORPHAN_CURSOR` is the third piece of that same process state, and it
+    leaks worse than the other two: it decides which NAMES the next pass's
+    window starts at, so without this a case would inherit a position in a
+    name space that belongs to a different directory entirely and read an
+    empty window as a correct one."""
+    monkeypatch.setattr(auto_logs, "_ORPHAN_CURSOR", [""])
+
+
 def _ok_db(auto_count=0, player=True):
     return Scripted({
         COUNT_KEY: [[_bucket(auto_count)]],
@@ -2264,7 +2274,7 @@ def test_the_reporter_door_mutation_reddens_the_refusal_itself(monkeypatch):
 def _client_drops_its_token(body: str) -> bool:
     """`ApiClient.HandleSessionReject`, as it is actually written.
 
-    plugin/ApiClient.cs:20916 is `if (body == null ||
+    The client lane's plugin/ApiClient.cs:20916 is `if (body == null ||
     !body.Contains("session_required")) return;` -- a substring test on the
     raw response body, and the only gate in front of
     `SteamAuth.InvalidateSessionIf`. Modelled here rather than described,
@@ -3114,7 +3124,7 @@ def test_the_sweep_population_is_the_marker_set_and_not_the_attachment_heap(logd
     # MUTATION FIRST, so the control runs on a directory the mutant has
     # demonstrably not touched: the population becomes the heap again.
     mutant = _exec_mutant_pairs(auto_logs._marker_candidates, _HEAP_POPULATION)
-    names, markers_total, owned, young, held = mutant(
+    names, markers_total, owned, young, held, _ex, _cur, _un = mutant(
         logdir, time.time() - 3600, set(), set())
     assert len(names) > auto_logs._ORPHAN_BATCH, (
         "the heap-population mutant examined %d name(s); it is supposed to "
@@ -3124,7 +3134,7 @@ def test_the_sweep_population_is_the_marker_set_and_not_the_attachment_heap(logd
     # below must stay GREEN under it, or it is reacting to the site being
     # edited rather than to the population changing (#342/#431).
     twin = _exec_mutant_pairs(auto_logs._marker_candidates, _INERT_TWIN)
-    t_names, t_total, t_owned, t_young, t_held = twin(
+    t_names, t_total, t_owned, t_young, t_held, _tex, _tcur, _tun = twin(
         logdir, time.time() - 3600, set(), set())
     assert t_names == [orphan] and t_total == 1, (
         "the inert twin changed the population (%r); it is supposed to be the "
@@ -4715,18 +4725,19 @@ def test_a_marker_with_no_blob_is_never_reported_as_a_removal(logdir,
     operator reads as the drain rate was the number of candidates seen (#304).
     `_unlink_existing`'s three-way answer is what separates them.
 
-    WHAT ROUND 5 CHANGED, AND WHAT IT DID NOT. LENS-3 also spent the pass's
-    budget on removals alone, which as a side-effect kept a marker-only cohort
-    from consuming the slots a real orphan needed. That side-effect is now
-    bought explicitly -- the budget bounds the pass's WORK, because every arm
-    costs an unlink, and `_ORPHAN_HELD` is what stops a cohort that cannot be
-    resolved from taking the budget for ever
-    (`test_a_stuck_cohort_is_held_so_the_orphans_behind_it_are_reached`).
-    LENS-3's own half, the one this case holds, is untouched: the counting.
+    WHAT ROUND 6 PUT BACK. LENS-3 also spent the pass's budget on removals
+    alone, which kept a marker-only cohort from consuming the slots a real
+    orphan needed. Round 5 replaced that with a budget every arm spent; round
+    6 restores it (`test_the_removal_budget_is_spent_by_removals_only`) and
+    bounds the pass's WORK with a separate scan bound. This case holds
+    LENS-3's other half, the counting -- and with the budget back to removals
+    only it can hold it at the budget the real orphans need and no more.
 
-    Here: eight marker-only leftovers, older than four real orphans, and a
-    budget large enough for all twelve -- so what is under test is which term
-    each candidate lands in, not which of them the pass reaches.
+    Here: eight marker-only leftovers, OLDER than four real orphans, and a
+    budget of FOUR. The leftovers are reached first; if clearing one spent a
+    slot, or counted as a removal, the four real orphans behind them would be
+    deferred. So what is under test is which term each candidate lands in,
+    and that landing in `marker_only` costs nothing.
     """
     blanks = ["aaaaaaaa-0000-4000-8000-%012d.log.gz" % i for i in range(8)]
     reals = ["bbbbbbbb-0000-4000-8000-%012d.log.gz" % i for i in range(4)]
@@ -4743,12 +4754,14 @@ def test_a_marker_with_no_blob_is_never_reported_as_a_removal(logdir,
                          "SELECT log_filename FROM bug_reports": [[]]})
 
     _plant()
-    out = _run(auto_logs.prune_orphan_blobs(_db(), min_age_s=3600, limit=12))
+    out = _run(auto_logs.prune_orphan_blobs(_db(), min_age_s=3600, limit=4))
     assert out["unlinked"] == 4 and out["marker_only"] == 8, (
         "the marker-only leftovers were counted as removals: %r" % (out,))
-    assert out["deferred"] == 0, out
+    assert out["deferred"] == 0, (
+        "a pass with budget for exactly its four real orphans deferred some "
+        "of them, so clearing a leftover spent a slot: %r" % (out,))
     assert sorted(_blobs(logdir)) == [], (
-        "a real orphan survived a pass with budget for every candidate: %r"
+        "a real orphan survived a pass whose budget covered every removal: %r"
         % (_blobs(logdir),))
     assert _marker_names(logdir) == [], _marker_names(logdir)
 
@@ -4768,8 +4781,11 @@ def test_a_marker_with_no_blob_is_never_reported_as_a_removal(logdir,
         '                               else "failed"), _unlink_if_present(\n'
         '                                   base / (name + _ORPHAN_MARKER_SUFFIX))\n')
     monkeypatch.setattr(auto_logs, "_resolve_marker_candidates", mutant)
-    out = _run(auto_logs.prune_orphan_blobs(_db(), min_age_s=3600, limit=12))
-    assert out["unlinked"] == 12 and out["marker_only"] == 0, (
+    out = _run(auto_logs.prune_orphan_blobs(_db(), min_age_s=3600, limit=4))
+    # The leftovers are oldest, so under the collapsed answer the first four
+    # of them read as removals, spend the whole budget, and the four real
+    # orphans are deferred behind them.
+    assert out["marker_only"] == 0 and out["deferred"] == 8 and _blobs(logdir), (
         "the mutant still separated the two answers, so the live assertion "
         "above proves nothing: %r" % (out,))
 
@@ -4780,62 +4796,371 @@ def test_a_marker_with_no_blob_is_never_reported_as_a_removal(logdir,
         "        state, marker_gone = _delete_blob_then_marker(\n"
         "            pathlib.Path(base) / name)\n")
     monkeypatch.setattr(auto_logs, "_resolve_marker_candidates", twin)
-    out = _run(auto_logs.prune_orphan_blobs(_db(), min_age_s=3600, limit=12))
+    out = _run(auto_logs.prune_orphan_blobs(_db(), min_age_s=3600, limit=4))
     assert out["unlinked"] == 4 and out["marker_only"] == 8 and _blobs(logdir) == [], (
         "the inert twin changed the outcome, so the mutant above is reacting "
         "to the site being edited rather than to the collapsed answer: %r"
         % (out,))
 
 
-def test_every_arm_of_the_sweep_spends_the_pass_budget(logdir):
-    """THE PASS IS BOUNDED IN WHAT IT COSTS, not only in what it destroys.
+def _due_lock_findings(sql):
+    """What is WRONG with a due-selection statement, as a list.
 
-    Every arm of this sweep issues a synchronous unlink -- the clear over a
-    committed row, the marker-only clear, the candidate that will not move,
-    and the removal, which issues two and a directory flush between them. A
-    budget spent on removals alone bounded the arm that reclaims bytes and
-    left the other three to walk a backlog of any size on the api's single
-    worker.
-
-    Here the whole population reclaims nothing: twelve marker-only leftovers
-    and a budget of five. Five candidates are acted on and seven are deferred
-    for the next tick, and the line says so.
+    The assertions live here rather than in the case so the mutants below can
+    be measured by the same sentence the live code is measured by. A control
+    whose red is produced by a differently worded check is a control that
+    proves the wording (#342/#441).
     """
-    blanks = ["cccccccc-0000-4000-8000-%012d.log.gz" % i for i in range(12)]
-    for i, nm in enumerate(blanks):
+    bad = []
+    if "FOR NO KEY UPDATE" not in sql:
+        bad.append("no row lock, so two overlapping passes read the same rows "
+                   "and the second reads the first's pending unlink as absent")
+    if "SKIP LOCKED" not in sql:
+        bad.append("waits on a locked row instead of taking the next")
+    # `FOR UPDATE` is the stronger mode and a different sentence: it conflicts
+    # with the `FOR KEY SHARE` that every foreign-key insert referencing a
+    # bug_reports row takes, so it enrols writers with no part in retention.
+    # Spelled as a word test, because "FOR NO KEY UPDATE" contains neither
+    # " FOR UPDATE" nor "FOR UPDATE SKIP".
+    if " FOR UPDATE" in sql or "FOR UPDATE SKIP" in sql:
+        bad.append("takes FOR UPDATE, which conflicts with FOR KEY SHARE")
+    return bad
+
+
+#: M1(a). The lock clause deleted at its own site -- the state round 5 left,
+#: where two passes select the same rows.
+_NO_ROW_LOCK = (
+    '                 LIMIT :lim\n'
+    '                   FOR NO KEY UPDATE SKIP LOCKED"""),\n',
+    '                 LIMIT :lim"""),\n')
+#: THE INERT TWIN at the same site: the same clause, wrapped differently. SQL
+#: does not care where the line breaks fall, so a control that reds here is
+#: reacting to the site being edited rather than to the lock going.
+_ROW_LOCK_REWRAPPED = (
+    '                 LIMIT :lim\n'
+    '                   FOR NO KEY UPDATE SKIP LOCKED"""),\n',
+    '                 LIMIT :lim\n'
+    '                   FOR NO KEY UPDATE\n'
+    '                   SKIP LOCKED"""),\n')
+
+
+def _due_sql_of(fn, logdir):
+    """Run `fn` over one due row and hand back the statement it selected with."""
+    (logdir / "a.log.gz").write_bytes(b"x")
+    db = Scripted({DUE_KEY: [[{"id": str(R1), "log_filename": "a.log.gz"}]],
+                   "DELETE FROM bug_reports": [[{"id": str(R1)}]]})
+    _run(fn(db))
+    return db.sql_for(DUE_KEY)[0]
+
+
+def test_the_due_selection_takes_the_row_lock_that_conflicts_with_its_own_delete(
+        logdir):
+    """M1(a): TWO RETENTION PASSES MUST NOT HOLD THE SAME ROW.
+
+    The pass selects its due rows, hands them to a worker thread that unlinks
+    up to two hundred blobs, and only then DELETEs. Between the SELECT and
+    the DELETE a second pass -- the hourly loop and an upload's opportunistic
+    call, in this process or in another worker -- could select the same rows,
+    see the first pass's unlink as `absent`, and commit the DELETE over a
+    removal that is still only in the directory cache.
+
+    `FOR NO KEY UPDATE SKIP LOCKED` closes that from the other side: the
+    second pass takes the rows the first one did not.
+
+    THE MODE IS THE WEAKEST ONE THAT STILL CONFLICTS WITH THIS PASS'S OWN
+    LATER WRITE (#202). `FOR UPDATE` conflicts with the `FOR KEY SHARE` that
+    every foreign-key insert referencing a `bug_reports` row takes, which
+    enrols writers that have nothing to do with retention in this sweep's
+    lock graph; `FOR NO KEY UPDATE` self-conflicts, so two passes still
+    serialize, and is KEY-SHARE compatible. `SKIP LOCKED` rather than a wait,
+    because the rows are interchangeable work and a pass behind a slow volume
+    should drain the rest rather than queue.
+
+    It gates on rows that EXIST by construction (#203/#207): they are the
+    SELECT's own answer, so there is no lock-nothing window and no advisory
+    key standing in for a row that may not be there.
+    """
+    (logdir / "a.log.gz").write_bytes(b"x")
+    db = Scripted({DUE_KEY: [[{"id": str(R1), "log_filename": "a.log.gz"}]],
+                   "DELETE FROM bug_reports": [[{"id": str(R1)}]]})
+    _run(auto_logs.prune_auto_logs(db))
+
+    due_sql = db.sql_for(DUE_KEY)[0]
+    assert _due_lock_findings(due_sql) == [], (
+        "the due selection %s: %s" % (_due_lock_findings(due_sql), due_sql))
+    # AND THE SECOND STATEMENT RE-CHECKS THE PREDICATE THE FIRST CHOSE ON
+    # (#208), so the lock is not carrying a decision the DELETE should be
+    # making for itself.
+    assert "kind = 'auto'" in db.sql_for("DELETE FROM bug_reports")[0]
+
+    # -- MUTANT (a): the lock clause deleted -------------------------------
+    auto_logs._PRUNE_HELD.clear()
+    mutant = _exec_mutant(auto_logs.prune_auto_logs, *_NO_ROW_LOCK)
+    found = _due_lock_findings(_due_sql_of(mutant, logdir))
+    assert found, (
+        "the due selection with its lock clause removed produced no finding, "
+        "so this case cannot tell a locked selection from an unlocked one")
+
+    # -- THE INERT TWIN at the same site -----------------------------------
+    auto_logs._PRUNE_HELD.clear()
+    twin = _exec_mutant(auto_logs.prune_auto_logs, *_ROW_LOCK_REWRAPPED)
+    assert _due_lock_findings(_due_sql_of(twin, logdir)) == [], (
+        "the inert twin reds, so the mutation above is reacting to the site "
+        "being edited rather than to the lock clause")
+    auto_logs._PRUNE_HELD.clear()
+
+
+def test_an_absent_blob_is_collectable_only_once_the_pass_barrier_has_succeeded(
+        logdir, capsys):
+    """M1(b): `absent` IS USUALLY ANOTHER PASS'S UNLINK, NOT A FACT.
+
+    A row whose blob is observed absent used to be collectable with no
+    barrier at all, on the reading that "nothing of ours is on the volume".
+    That reading is wrong about WHOSE removal it is. The state is produced by
+    a pass that unlinked and did not reach its commit, and that pass's entry
+    change may still be only in the directory cache -- so a second pass that
+    deletes the row over it leaves a volume which, after a host stop, carries
+    an unmarked blob whose only reference is durably gone. `prune_auto_logs`
+    selects ROWS and the orphan sweep walks MARKERS, so nothing collects it.
+
+    The flush this pass issues is what makes the earlier unlink durable: a
+    directory flush promises every entry change issued in that directory, not
+    only the ones this process issued. So `absent` takes the `removed` arm's
+    barrier, and when the barrier refuses the row is retained and held in
+    exactly the same way.
+    """
+    # NO blob on the volume for either row, so `_unlink_existing` answers
+    # `absent` for both -- the state a previous pass leaves behind.
+    db = Scripted({DUE_KEY: [[{"id": str(R1), "log_filename": "gone-a.log.gz"},
+                              {"id": str(R2), "log_filename": "gone-b.log.gz"}]],
+                   "DELETE FROM bug_reports": [[]]})
+
+    def _refuse(directory):
+        raise OSError("the directory would not flush")
+
+    capsys.readouterr()
+    real_fsync_dir = auto_logs._fsync_dir
+    auto_logs._fsync_dir = _refuse
+    try:
+        out = _run(auto_logs.prune_auto_logs(db))
+    finally:
+        auto_logs._fsync_dir = real_fsync_dir
+    printed = capsys.readouterr().out
+
+    assert out["undurable"] == 2 and out["rows"] == 0, (
+        "the rows whose blobs were observed absent were collected over a "
+        "flush that refused: %r" % (out,))
+    assert db.sql_for("DELETE FROM bug_reports") == [], (
+        "a DELETE ran although no removal on this volume can be proved")
+    assert out["held"] == 2, (
+        "an `absent` row kept over an unprovable removal was not held out of "
+        "the next selection, so the same pass repeats immediately: %r" % (out,))
+    assert "found already gone" in printed, printed
+
+    # CONTROL: the same two rows and the same absent blobs, with a directory
+    # that flushes. Without it the refusal above is equally well explained by
+    # a pass that never collects an `absent` row at all (#391).
+    auto_logs._PRUNE_HELD.clear()
+    db2 = Scripted({DUE_KEY: [[{"id": str(R1), "log_filename": "gone-a.log.gz"},
+                               {"id": str(R2), "log_filename": "gone-b.log.gz"}]],
+                    "DELETE FROM bug_reports": [[{"id": str(R1)},
+                                                 {"id": str(R2)}]]})
+    ok = _run(auto_logs.prune_auto_logs(db2))
+    assert ok["undurable"] == 0 and ok["rows"] == 2, (
+        "the control pass did not collect its absent rows, so the refusal "
+        "above is not about the flush: %r" % (ok,))
+
+    # -- MUTANT (b): `absent` collected without the barrier -----------------
+    #
+    # Round 5's reading, put back at its own site: the row becomes collectable
+    # because nothing of ours is on the volume, without asking whether the
+    # removal that made that true was ever promised.
+    auto_logs._PRUNE_HELD.clear()
+    mutant = _exec_mutant(
+        auto_logs.prune_auto_logs,
+        "            if barrier is None:\n",
+        "            if barrier is None or state == \"absent\":\n")
+    assert _absent_rows_deleted(mutant) == 2, (
+        "with `absent` collected regardless of the barrier the pass still "
+        "kept its rows, so this case is not measuring the barrier")
+
+    # -- THE INERT TWIN at the same site -----------------------------------
+    auto_logs._PRUNE_HELD.clear()
+    twin = _exec_mutant(
+        auto_logs.prune_auto_logs,
+        "            if barrier is None:\n",
+        "            if not (barrier is not None):\n")
+    assert _absent_rows_deleted(twin) == 0, (
+        "the inert twin reds, so the mutation above is reacting to the "
+        "predicate being rewritten rather than to the barrier being dropped")
+    auto_logs._PRUNE_HELD.clear()
+
+
+def _absent_rows_deleted(fn):
+    """`fn` over two absent blobs and a directory that REFUSES to flush; the
+    number of rows it deleted anyway."""
+    def _refuse(directory):
+        raise OSError("the directory would not flush")
+
+    db = Scripted({DUE_KEY: [[{"id": str(R1), "log_filename": "gone-a.log.gz"},
+                              {"id": str(R2), "log_filename": "gone-b.log.gz"}]],
+                   "DELETE FROM bug_reports": [[{"id": str(R1)},
+                                                {"id": str(R2)}]]})
+    real = auto_logs._fsync_dir
+    auto_logs._fsync_dir = _refuse
+    try:
+        return _run(fn(db))["rows"]
+    finally:
+        auto_logs._fsync_dir = real
+
+
+def test_the_pass_takes_its_barrier_for_an_absent_observation_as_well(logdir):
+    """The half of M1(b) one level down, asserted where the charge is made.
+
+    `_unlink_due_blobs` takes the barrier when the pass removed anything OR
+    saw anything already gone. A pass that only observed absences used to
+    issue no flush at all, so `barrier is None` meant "nothing was attempted"
+    on one path and "everything was promised" on another -- one value for two
+    facts, which is the shape #430 is about.
+    """
+    flushed = []
+    real = auto_logs._fsync_dir
+    auto_logs._fsync_dir = lambda d: flushed.append(str(d))
+    try:
+        outcomes, barrier = auto_logs._unlink_due_blobs(
+            logdir, [(str(R1), "not-there.log.gz")])
+    finally:
+        auto_logs._fsync_dir = real
+    assert [s for _i, s, _d in outcomes] == ["absent"], outcomes
+    assert flushed == [str(logdir)], (
+        "a pass that observed an absence issued no flush, so an earlier "
+        "pass's unlink is still unpromised when this one drops the row: %r"
+        % (flushed,))
+    assert barrier is None
+
+    # AND THE ROW THAT NAMES NOTHING IS STILL FREE. `no-blob` is the one arm
+    # with no removal behind it anywhere, so charging it a barrier would be a
+    # directory flush per empty pass.
+    flushed.clear()
+    auto_logs._fsync_dir = lambda d: flushed.append(str(d))
+    try:
+        outcomes, barrier = auto_logs._unlink_due_blobs(
+            logdir, [(str(R1), None)])
+    finally:
+        auto_logs._fsync_dir = real
+    assert [s for _i, s, _d in outcomes] == ["no-blob"], outcomes
+    assert flushed == [], (
+        "a row naming no blob charged the pass a directory flush: %r"
+        % (flushed,))
+
+
+def test_the_removal_budget_is_spent_by_removals_only(logdir):
+    """B0f / LENS-3, RESTORED. `_ORPHAN_BATCH` buys REMOVALS and nothing else.
+
+    Round 5 spent a slot of this budget on every arm that touches the volume,
+    on the reasoning that every arm costs a filesystem call. The reasoning is
+    right about the cost and wrong about the instrument: with a clear over a
+    committed row spending a slot, a cohort of referenced markers consumes the
+    pass while an unreferenced blob behind them waits, and the number an
+    operator reads as the drain rate stops bounding the drain. The pass's COST
+    is bounded by `_ORPHAN_SCAN_BOUND` instead, which is the question that was
+    actually being asked.
+
+    The population here is exactly the shape that tells the two apart: as many
+    referenced markers as the whole budget, and one unreferenced blob behind
+    them. Removals-only takes the orphan in this pass; every-arm defers it.
+    """
+    referenced = ["aaaaaaaa-0000-4000-8000-%012d.log.gz" % i for i in range(2)]
+    orphan = "bbbbbbbb-0000-4000-8000-0000000000ff.log.gz"
+    for i, nm in enumerate(referenced):
+        (logdir / nm).write_bytes(b"x" * 8)
         _mark(logdir, nm, age_s=90_000 - i)
+    (logdir / orphan).write_bytes(b"x" * 8)
+    _mark(logdir, orphan, age_s=50_000)
 
     db = Scripted({"COUNT(*) AS n FROM bug_reports": [[{"n": 7}]],
-                   "SELECT log_filename FROM bug_reports": [[]]})
-    out = _run(auto_logs.prune_orphan_blobs(db, min_age_s=3600, limit=5))
+                   "SELECT log_filename FROM bug_reports":
+                       [[{"log_filename": n} for n in referenced]]})
+    out = _run(auto_logs.prune_orphan_blobs(db, min_age_s=3600, limit=2))
 
-    assert out["marker_only"] == 5 and out["deferred"] == 7, (
-        "a pass that reclaims nothing walked more than its budget: %r" % (out,))
-    assert out["unlinked"] == 0, out
-    assert len(_marker_names(logdir)) == 7, (
-        "the pass resolved %d marker(s), not the 5 its budget allows: %r"
-        % (12 - len(_marker_names(logdir)), _marker_names(logdir)))
-    # AND THE ARITHMETIC STILL CLOSES over the unreferenced population.
+    assert out["cleared"] == 2, out
+    assert out["unlinked"] == 1 and out["deferred"] == 0, (
+        "two referenced-marker clears spent a removal budget of two, so the "
+        "orphan behind them waited for a later tick: %r" % (out,))
+    assert not (logdir / orphan).exists(), (
+        "the unreferenced blob is still on the volume: %r" % (out,))
+    assert all((logdir / n).exists() for n in referenced), (
+        "a blob a bug_reports row names was removed")
+    # AND BOTH SUMS CLOSE, each over its own population.
+    assert out["cleared"] + out["uncleared"] == 2, out
     assert (out["unlinked"] + out["marker_only"] + out["unremovable"]
             + out["deferred"]) == out["orphans"], out
 
 
-def test_a_stuck_cohort_is_held_so_the_orphans_behind_it_are_reached(logdir):
-    """THE STUCK HEAD, ON THE SWEEP THIS TIME. The retention pass met this
-    first and `_PRUNE_HELD` is its answer; now that every arm of the orphan
-    sweep spends the budget, the sweep has the same exposure and takes the
-    same answer.
+def test_the_sweeps_work_is_bounded_by_the_scan_bound_and_not_by_the_backlog(
+        logdir, monkeypatch):
+    """R5-LOW at `auto_logs.py:2578`: the WHOLE pass is bounded, not only its
+    resolver.
+
+    Before round 6 the listing, the `stat` per marker, the sort and the
+    500-name reference queries all ran over the ENTIRE marker population
+    before the removal budget was applied to the tail of it. So a backlog of
+    any size cost that many `stat` calls and that many rows of database work
+    on every tick, on the api's single worker, however little the pass was
+    allowed to remove.
+
+    Here the population is well above the bound, and what is measured is the
+    three things that used to grow with it: names examined, `stat` calls
+    issued, and names offered to the database. The `stat` calls are counted
+    at the directory entries `scandir` hands back, which is where the window
+    reads each candidate's age.
+
+    Its mutant and inert twin are in
+    `test_every_round_six_sweep_and_lock_bound_reds_when_it_is_removed`.
+    """
+    monkeypatch.setattr(auto_logs, "_ORPHAN_SCAN_BOUND", 8)
+    monkeypatch.setattr(auto_logs, "_ORPHAN_CURSOR", [""])
+    out, stats, db = _scan_pass(logdir)
+
+    assert out["markers"] == 40, out
+    assert out["examined"] == 8, (
+        "the pass examined %d of 40 markers with a scan bound of 8, so the "
+        "listing is still the population: %r" % (out["examined"], out))
+    assert stats == 8, (
+        "the pass issued %d stat call(s) over 40 markers with a scan bound of "
+        "8, so the age question is still asked of the population" % stats)
+    assert out["candidates"] == 8, out
+    offered = db.params_for("SELECT log_filename FROM bug_reports")
+    assert len(offered) == 1 and len(offered[0]["names"]) == 8, (
+        "the reference lookup was asked about %r name(s), not the window's 8"
+        % ([len(p["names"]) for p in offered],))
+    assert len(_marker_names(logdir)) == 32, (
+        "the pass resolved more than its window: %r" % (out,))
+
+
+def test_a_stuck_cohort_is_held_so_the_orphans_behind_it_are_reached(logdir,
+                                                                     monkeypatch):
+    """THE STUCK HEAD, ON THE SWEEP THIS TIME -- AND RE-SCOPED IN ROUND 6.
 
     A cohort whose unlink raises is NOT consumed by being worked: it is on the
-    volume again on the next tick, at the head of an oldest-first list. With
-    no hold it would take the whole budget every pass, for as long as the
-    fault lasts, and a real orphan behind it would never be reached -- the
-    starvation class the deleted heap cap had, arriving by a different road.
+    volume again on the next tick. What it can therefore occupy has changed
+    with the budget. When every arm spent the removal budget, a stuck cohort
+    took the whole of it and a real orphan behind it was never reached. With
+    the budget back to removals only, a stuck candidate costs no slot -- so
+    what it can still occupy is a WINDOW slot, and that is what the hold is
+    measured against here.
 
-    Four stuck markers, two real orphans behind them, a budget of two. Pass
+    THE CURSOR IS HELD STILL FOR THIS CASE, deliberately. It is the other
+    progress mechanism and it would reach the orphans on its own, which would
+    make the mutant below green for a reason that has nothing to do with the
+    hold. Pinned at the start of every pass, the window is the same window
+    each time and the only thing that can move it is the park.
+
+    Four stuck markers, two real orphans behind them, a window of two. Pass
     one meets two stuck candidates and parks them; pass two meets the other
     two and parks them; pass three reaches the orphans.
     """
+    monkeypatch.setattr(auto_logs, "_ORPHAN_SCAN_BOUND", 2)
     stuck = ["dddddddd-0000-4000-8000-%012d.log.gz" % i for i in range(4)]
     reals = ["eeeeeeee-0000-4000-8000-%012d.log.gz" % i for i in range(2)]
     for i, nm in enumerate(stuck):
@@ -4856,17 +5181,23 @@ def test_a_stuck_cohort_is_held_so_the_orphans_behind_it_are_reached(logdir):
         return Scripted({"COUNT(*) AS n FROM bug_reports": [[{"n": 7}]],
                          "SELECT log_filename FROM bug_reports": [[]]})
 
+    def _pinned():
+        """One pass with the cursor put back where it started."""
+        auto_logs._ORPHAN_CURSOR[0] = ""
+        return _run(auto_logs.prune_orphan_blobs(_db(), min_age_s=3600,
+                                                 limit=2))
+
     proxy = _OsProxy(unlink=_boom)
     saved = auto_logs.os
+    saved_cursor = auto_logs._ORPHAN_CURSOR[0]
     auto_logs.os = proxy
     try:
-        passes = [_run(auto_logs.prune_orphan_blobs(_db(), min_age_s=3600,
-                                                    limit=2))
-                  for _ in range(3)]
+        passes = [_pinned() for _ in range(3)]
     finally:
         auto_logs.os = saved
+        auto_logs._ORPHAN_CURSOR[0] = saved_cursor
 
-    assert passes[0]["unremovable"] == 2 and passes[0]["deferred"] == 4, passes[0]
+    assert passes[0]["unremovable"] == 2 and passes[0]["examined"] == 2, passes[0]
     assert passes[1]["held"] == 2 and passes[1]["unremovable"] == 2, (
         "the first pass's stuck pair was offered to the second pass again: %r"
         % (passes[1],))
@@ -4890,17 +5221,313 @@ def test_a_stuck_cohort_is_held_so_the_orphans_behind_it_are_reached(logdir):
     try:
         auto_logs._hold_marker = lambda name, clock: None
         auto_logs.os = proxy
-        blind = [_run(auto_logs.prune_orphan_blobs(_db(), min_age_s=3600,
-                                                   limit=2))
-                 for _ in range(3)]
+        blind = [_pinned() for _ in range(3)]
     finally:
         auto_logs.os = saved
         auto_logs._hold_marker = live_hold
+        auto_logs._ORPHAN_CURSOR[0] = saved_cursor
     assert all(p["unlinked"] == 0 for p in blind), (
         "the mutant still reached the orphans, so the live assertion above "
         "proves nothing: %r" % (blind,))
     assert sorted(_blobs(logdir)) == sorted(stuck + reals), (
         "the mutant reclaimed a blob: %r" % (_blobs(logdir),))
+
+
+def test_the_cursor_reaches_an_orphan_behind_a_backlog_larger_than_the_window(
+        logdir, monkeypatch):
+    """THE OTHER HALF OF L2, and the hold is held still for it.
+
+    A scan bound with no cursor is the attachment heap's cap with a new
+    number: a pass that always takes the FIRST `_ORPHAN_SCAN_BOUND` names
+    re-walks the same window for ever, so a cohort that will not resolve hides
+    everything behind it permanently. The cursor makes the window advance
+    whatever the window contained, so the wait is arithmetic --
+    ceil(N / bound) + 1 passes -- rather than a hope about which names sort
+    first.
+
+    THE HOLD IS NEUTRALISED HERE (`_ORPHAN_HOLD_S = 0`, so every park has
+    expired by the time the next pass reads it) for the reason the case above
+    pins the cursor: two mechanisms answer nearby questions and a case that
+    leaves both live measures neither.
+
+    A backlog of six markers that will not unlink, a window of two, and one
+    real orphan sorting LAST. Four passes at most: three to walk past the
+    backlog and one to take the orphan.
+    """
+    monkeypatch.setattr(auto_logs, "_ORPHAN_SCAN_BOUND", 2)
+    monkeypatch.setattr(auto_logs, "_ORPHAN_HOLD_S", 0.0)
+    monkeypatch.setattr(auto_logs, "_ORPHAN_CURSOR", [""])
+    stuck = ["11111111-0000-4000-8000-%012d.log.gz" % i for i in range(6)]
+    orphan = "99999999-0000-4000-8000-0000000000ff.log.gz"
+    for i, nm in enumerate(stuck):
+        (logdir / nm).write_bytes(b"x" * 16)
+        _mark(logdir, nm, age_s=90_000 - i)
+    (logdir / orphan).write_bytes(b"x" * 16)
+    _mark(logdir, orphan, age_s=50_000)
+
+    real_unlink = os.unlink
+
+    def _boom(path, *a, **kw):
+        if os.path.basename(str(path)).split(".orphan")[0] in stuck:
+            raise PermissionError("read-only file system")
+        return real_unlink(path, *a, **kw)
+
+    def _db():
+        return Scripted({"COUNT(*) AS n FROM bug_reports": [[{"n": 7}]],
+                         "SELECT log_filename FROM bug_reports": [[]]})
+
+    proxy = _OsProxy(unlink=_boom)
+    saved = auto_logs.os
+    auto_logs.os = proxy
+    try:
+        passes = [_run(auto_logs.prune_orphan_blobs(_db(), min_age_s=3600,
+                                                    limit=2))
+                  for _ in range(4)]
+    finally:
+        auto_logs.os = saved
+
+    assert sum(p["unlinked"] for p in passes) == 1, (
+        "the orphan behind a backlog larger than the window was not reached "
+        "in four passes: %r" % (passes,))
+    assert not (logdir / orphan).exists()
+    assert all(p["examined"] <= 2 for p in passes), (
+        "a pass examined more than the window: %r" % (passes,))
+    assert sorted(_blobs(logdir)) == sorted(stuck), (
+        "a stuck blob was reclaimed: %r" % (_blobs(logdir),))
+
+    # MUTANT: the cursor never advances. Every pass takes the same first two
+    # names, both of which are stuck, and the orphan is unreachable however
+    # many ticks run.
+    (logdir / orphan).write_bytes(b"x" * 16)
+    _mark(logdir, orphan, age_s=50_000)
+    live = auto_logs._marker_candidates
+
+    def _blind(base, cutoff, live_set, held=None, scan_bound=None, cursor=""):
+        """The same selection with the cursor never applied: every pass takes
+        the window from the start of the name space."""
+        return live(base, cutoff, live_set, held, scan_bound, "")
+
+    auto_logs.os = proxy
+    auto_logs._marker_candidates = _blind
+    try:
+        blind = [_run(auto_logs.prune_orphan_blobs(_db(), min_age_s=3600,
+                                                   limit=2))
+                 for _ in range(4)]
+    finally:
+        auto_logs.os = saved
+        auto_logs._marker_candidates = live
+
+    assert all(p["unlinked"] == 0 for p in blind), (
+        "the mutant still reached the orphan, so the live assertion above "
+        "proves nothing: %r" % (blind,))
+    assert (logdir / orphan).exists(), (
+        "the mutant reclaimed the orphan: %r" % (_blobs(logdir),))
+
+
+
+class _CountingDir:
+    """`os.scandir` over the real directory, counting `stat` calls made on
+    the entries it hands back."""
+
+    def __init__(self, it, count):
+        self._it = it
+        self._count = count
+
+    def __enter__(self):
+        self._it.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._it.__exit__(*exc)
+
+    def __iter__(self):
+        for entry in self._it:
+            yield _CountingEntry(entry, self._count)
+
+
+class _CountingEntry:
+    def __init__(self, entry, count):
+        self._entry = entry
+        self._count = count
+        self.name = entry.name
+
+    def is_file(self, *a, **kw):
+        return self._entry.is_file(*a, **kw)
+
+    def stat(self, *a, **kw):
+        self._count[0] += 1
+        return self._entry.stat(*a, **kw)
+
+
+def _clean_dir(logdir):
+    for stale in list(logdir.iterdir()):
+        if stale.is_file():
+            stale.unlink()
+    auto_logs._ORPHAN_HELD.clear()
+
+
+def _scan_pass(logdir, candidates=None):
+    """L3's population -- forty aged markers with no blob and no row -- swept
+    once with `_ORPHAN_SCAN_BOUND` as the caller set it. Answers the pass's
+    dict, the number of `stat` calls, and the session."""
+    _clean_dir(logdir)
+    for i, nm in enumerate("cccccccc-0000-4000-8000-%012d.log.gz" % i
+                           for i in range(40)):
+        _mark(logdir, nm, age_s=90_000 - i)
+    count = [0]
+    proxy = _OsProxy(scandir=lambda p: _CountingDir(os.scandir(p), count))
+    db = Scripted({"COUNT(*) AS n FROM bug_reports": [[{"n": 7}]],
+                   "SELECT log_filename FROM bug_reports": [[]]})
+    saved_os, saved_mc = auto_logs.os, auto_logs._marker_candidates
+    auto_logs.os = proxy
+    if candidates is not None:
+        auto_logs._marker_candidates = _point_at(candidates, proxy)
+    try:
+        out = _run(auto_logs.prune_orphan_blobs(db, min_age_s=3600, limit=200))
+    finally:
+        auto_logs.os = saved_os
+        auto_logs._marker_candidates = saved_mc
+        auto_logs._ORPHAN_HELD.clear()
+    return out, count[0], db
+
+
+def _budget_pass(logdir, resolver=None):
+    """L2(i)'s population -- as many referenced markers as the whole removal
+    budget, and one orphan behind them -- swept once with a budget of two."""
+    _clean_dir(logdir)
+    referenced = ["aaaaaaaa-0000-4000-8000-%012d.log.gz" % i for i in range(2)]
+    orphan = "bbbbbbbb-0000-4000-8000-0000000000ff.log.gz"
+    for i, nm in enumerate(referenced):
+        (logdir / nm).write_bytes(b"x" * 8)
+        _mark(logdir, nm, age_s=90_000 - i)
+    (logdir / orphan).write_bytes(b"x" * 8)
+    _mark(logdir, orphan, age_s=50_000)
+    db = Scripted({"COUNT(*) AS n FROM bug_reports": [[{"n": 7}]],
+                   "SELECT log_filename FROM bug_reports":
+                       [[{"log_filename": n} for n in referenced]]})
+    saved = auto_logs._resolve_marker_candidates
+    if resolver is not None:
+        auto_logs._resolve_marker_candidates = resolver
+    try:
+        return _run(auto_logs.prune_orphan_blobs(db, min_age_s=3600, limit=2))
+    finally:
+        auto_logs._resolve_marker_candidates = saved
+        auto_logs._ORPHAN_HELD.clear()
+
+
+def _cursor_passes(logdir, prune):
+    """L2(ii)'s population -- six markers whose blobs will not unlink and one
+    real orphan sorting last -- swept four times by `prune`. Answers how
+    many blobs the four passes reclaimed."""
+    _clean_dir(logdir)
+    stuck = ["11111111-0000-4000-8000-%012d.log.gz" % i for i in range(6)]
+    orphan = "99999999-0000-4000-8000-0000000000ff.log.gz"
+    for i, nm in enumerate(stuck):
+        (logdir / nm).write_bytes(b"x" * 16)
+        _mark(logdir, nm, age_s=90_000 - i)
+    (logdir / orphan).write_bytes(b"x" * 16)
+    _mark(logdir, orphan, age_s=50_000)
+    real_unlink = os.unlink
+
+    def _boom(path, *a, **kw):
+        if os.path.basename(str(path)).split(".orphan")[0] in stuck:
+            raise PermissionError("read-only file system")
+        return real_unlink(path, *a, **kw)
+
+    proxy = _OsProxy(unlink=_boom)
+    saved = auto_logs.os
+    auto_logs.os = proxy
+    _point_at(prune, proxy)
+    try:
+        passes = [_run(prune(Scripted({"COUNT(*) AS n FROM bug_reports": [[{"n": 7}]],
+                                       "SELECT log_filename FROM bug_reports": [[]]}),
+                             min_age_s=3600, limit=2))
+                  for _ in range(4)]
+    finally:
+        auto_logs.os = saved
+        auto_logs._ORPHAN_HELD.clear()
+    return sum(p["unlinked"] for p in passes)
+
+
+def test_every_round_six_sweep_and_lock_bound_reds_when_it_is_removed(
+        logdir, monkeypatch):
+    """THE CONTROLS FOR M1(a)'s SPAN, L2 AND L3: one on-site mutation per
+    bound, each paired with an INERT TWIN at the same site (#391/#342).
+
+    Kept apart from the behaviour cases they control, so those cases carry
+    no mutation anchor and an on-disk inert twin can re-spell the very line
+    they guard without the case failing to find its own anchor.
+    """
+    # -- M1(a): the transaction ended between the SELECT and the DELETE ----
+    mutant = _exec_mutant(
+        auto_logs.prune_auto_logs, _LOCK_SPAN_SITE,
+        "    )).mappings().all()\n    await db.commit()\n    if not due:\n")
+    assert _lock_span_findings(_lock_span_events(mutant, logdir)), (
+        "a pass that commits between its SELECT and its DELETE produced no "
+        "finding, so the lock-span case cannot see the lock end early")
+    twin = _exec_mutant(
+        auto_logs.prune_auto_logs, _LOCK_SPAN_SITE,
+        "    )).mappings().all()\n    await asyncio.sleep(0)\n    if not due:\n")
+    assert _lock_span_findings(_lock_span_events(twin, logdir)) == [], (
+        "the inert twin reds at the lock span, so the mutant above is "
+        "reacting to the site being edited rather than to the transaction "
+        "ending")
+
+    # -- L2(i): a referenced marker's clear spends the removal budget ------
+    site = "            cleared += 1\n"
+    out = _budget_pass(logdir, _exec_mutant(
+        auto_logs._resolve_marker_candidates, site,
+        site + "            removed += 1\n"))
+    assert out["unlinked"] == 0 and out["deferred"] == 1, (
+        "with every clear spending a slot, the orphan behind two referenced "
+        "markers was still reached on a budget of two: %r" % (out,))
+    out = _budget_pass(logdir, _exec_mutant(
+        auto_logs._resolve_marker_candidates, site,
+        site + "            removed += 0\n"))
+    assert out["unlinked"] == 1 and out["deferred"] == 0, (
+        "the inert twin reds at the budget: %r" % (out,))
+
+    # -- L2(ii): the cursor never advances ---------------------------------
+    # COMPILED AFTER THE PATCHES, because the copy's globals are a snapshot:
+    # it has to carry this case's window and this case's cursor list.
+    monkeypatch.setattr(auto_logs, "_ORPHAN_SCAN_BOUND", 2)
+    monkeypatch.setattr(auto_logs, "_ORPHAN_HOLD_S", 0.0)
+    site = "    _ORPHAN_CURSOR[0] = next_cursor\n"
+    monkeypatch.setattr(auto_logs, "_ORPHAN_CURSOR", [""])
+    reclaimed = _cursor_passes(logdir, _exec_mutant(
+        auto_logs.prune_orphan_blobs, site, '    _ORPHAN_CURSOR[0] = ""\n'))
+    assert reclaimed == 0, (
+        "with a cursor that never advances, four passes over a window of two "
+        "still reached the orphan behind six stuck markers (%d)" % reclaimed)
+    monkeypatch.setattr(auto_logs, "_ORPHAN_CURSOR", [""])
+    reclaimed = _cursor_passes(logdir, _exec_mutant(
+        auto_logs.prune_orphan_blobs, site,
+        "    _ORPHAN_CURSOR[0] = str(next_cursor)\n"))
+    assert reclaimed == 1, (
+        "the inert twin reds at the cursor: %d reclaimed" % reclaimed)
+
+    # -- L3: the scan bound not applied to the listing ---------------------
+    monkeypatch.setattr(auto_logs, "_ORPHAN_SCAN_BOUND", 8)
+    monkeypatch.setattr(auto_logs, "_ORPHAN_CURSOR", [""])
+    site = "        window = heapq.nsmallest(bound, _keys(entries))\n"
+    out, stats, db = _scan_pass(logdir, _exec_mutant(
+        auto_logs._marker_candidates, site,
+        "        window = sorted(_keys(entries))\n"))
+    offered = [len(p["names"]) for p in
+               db.params_for("SELECT log_filename FROM bug_reports")]
+    assert out["examined"] == 40 and stats == 40 and sum(offered) == 40, (
+        "with the whole listing taken as the window, the pass still examined, "
+        "stat-ed and offered only the bound: %r stats=%d offered=%r"
+        % (out, stats, offered))
+    monkeypatch.setattr(auto_logs, "_ORPHAN_CURSOR", [""])
+    out, stats, db = _scan_pass(logdir, _exec_mutant(
+        auto_logs._marker_candidates, site,
+        "        window = heapq.nsmallest(int(bound), _keys(entries))\n"))
+    offered = [len(p["names"]) for p in
+               db.params_for("SELECT log_filename FROM bug_reports")]
+    assert out["examined"] == 8 and stats == 8 and offered == [8], (
+        "the inert twin reds at the listing bound: %r stats=%d offered=%r"
+        % (out, stats, offered))
 
 
 def test_the_sweep_line_does_not_report_bytes_it_never_reclaimed(logdir, capsys):
@@ -5097,6 +5724,16 @@ class CrashFS:
         self._next_fd = 17
         self.ops = []             # one label per intercepted call
         self.crash_before = None  # 1-based index of the op that never happens
+        # ONCE THE HOST HAS STOPPED, NOTHING ELSE HAPPENS. `_Crashed` unwinds
+        # through the code under test, and a `finally` on that path may reach
+        # for the filesystem again; without this flag the model would record
+        # effects that no stopped host can produce.
+        self.crashed = False
+        # FAULTS, which are not crashes: an operation that RAISES and leaves
+        # the model untouched, so an error arm can be driven through every
+        # crash point after it. Each is [predicate(label), nth, exception,
+        # seen]; the nth matching operation raises instead of happening.
+        self.faults = []
 
     # -- the model's own API ------------------------------------------------
     def preload(self, files):
@@ -5134,9 +5771,37 @@ class CrashFS:
         return out
 
     def _step(self, label):
+        if self.crashed:
+            raise _Crashed("after the crash: %s" % label)
         self.ops.append(label)
         if self.crash_before is not None and len(self.ops) == self.crash_before:
+            self.crashed = True
             raise _Crashed(label)
+        for fault in self.faults:
+            if fault[0](label):
+                fault[3] += 1
+                if fault[3] == fault[1]:
+                    raise fault[2]
+
+    def builtin_open(self, real_open, directory):
+        """The builtin `open`, for writes into `directory` only.
+
+        The player-attachment path writes its blob with `open(path, "wb")`
+        rather than `os.open`, so a model that did not see that write would
+        be checking a different order from the one the handler performs.
+        Everything else -- reads, and any file outside the blob directory --
+        goes to the real `open`.
+        """
+        home = os.path.normcase(os.path.abspath(str(directory)))
+        fs = self
+
+        def opener(file, mode="r", *a, **kw):
+            where = os.path.normcase(os.path.abspath(os.path.dirname(str(file))))
+            if where != home or "w" not in mode:
+                return real_open(file, mode, *a, **kw)
+            return _CrashFile(fs, fs.open(file, fs.O_WRONLY | fs.O_CREAT
+                                          | fs.O_TRUNC))
+        return opener
 
     # -- the `os` surface this module uses ----------------------------------
     def open(self, path, flags, mode=0o666):
@@ -5193,9 +5858,51 @@ class CrashFS:
         return getattr(os, item)
 
 
+class _CrashFile:
+    """What `open(path, "wb")` hands back, over a `CrashFS` descriptor.
+
+    `write` takes every byte or raises, as a buffered file does, so a
+    failure lands between two of the model's chunked writes. `flush`
+    promises nothing -- to a crash, a userspace buffer and the page cache
+    are the same thing -- and `fileno` hands out the descriptor, so an
+    `os.fsync` on it reaches the model.
+    """
+
+    def __init__(self, fs, fd):
+        self._fs = fs
+        self._fd = fd
+
+    def write(self, data):
+        view = bytes(data)
+        while view:
+            view = view[self._fs.write(self._fd, view):]
+        return len(data)
+
+    def flush(self):
+        return None
+
+    def fileno(self):
+        return self._fd
+
+    def close(self):
+        self._fs.close(self._fd)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+
 CRASH_BLOB = "eeeeeeee-0000-4000-8000-00000000cafe.log.gz"
 CRASH_MARK = CRASH_BLOB + auto_logs._ORPHAN_MARKER_SUFFIX
 CRASH_PAYLOAD = b"crash-simulation payload " * 9        # several write() calls
+#: WHAT A WHOLE MARKER HOLDS: the blob's own name and a newline, which
+#: is the content `_stamp_marker`'s own prose and the notes' disk bound
+#: both claim. INV-M below is the invariant that makes that claim
+#: falsifiable instead of decorative.
+CRASH_MARK_BODY = CRASH_BLOB.encode() + b"\n"
 
 
 def _point_at(fn, fs):
@@ -5226,6 +5933,7 @@ def _drive_upload(crash_before, *, stamp=None, write_blob=None, logdir=None):
     path = pathlib.Path(str(logdir)) / CRASH_BLOB
     own = auto_logs._MarkedBlob(path)
     committed = False
+    stamped = False
     real_os = auto_logs.os
     auto_logs.os = fs
     _point_at(stamp, fs)
@@ -5233,6 +5941,15 @@ def _drive_upload(crash_before, *, stamp=None, write_blob=None, logdir=None):
     try:
         try:
             (stamp or auto_logs._stamp_marker)(path)
+            # THE STAMP RETURNED, which is the condition INV-M is stated
+            # under. A crash INSIDE the stamp can leave a created-but-empty
+            # marker on the volume legitimately -- the entry reached the disk
+            # and the contents had not been promised yet -- so an invariant
+            # that demanded whole contents there would be demanding a bug.
+            # Once this line runs, both of the stamp's barriers have been
+            # taken and there is no crash after it that may produce a short
+            # marker.
+            stamped = True
             own.marked = True
             (write_blob or auto_logs._write_blob)(path, CRASH_PAYLOAD)
             own.written = True
@@ -5245,7 +5962,7 @@ def _drive_upload(crash_before, *, stamp=None, write_blob=None, logdir=None):
     finally:
         auto_logs.os = real_os
         auto_logs._MARKERS_IN_FLIGHT.discard(path.name)
-    return fs, committed
+    return fs, committed, stamped
 
 
 def _drive_delete(crash_before, *, delete=None, logdir=None):
@@ -5270,7 +5987,7 @@ def _drive_delete(crash_before, *, delete=None, logdir=None):
 
 def _upload_violations(stamp=None, write_blob=None, logdir=None):
     """Every (crash point, recovery) of the upload order that breaks one of
-    the two invariants.
+    the THREE invariants.
 
     INV-A  a blob on the recovered volume is named by a committed row, or
            carries a marker. Anything else is a file nothing in this tree will
@@ -5279,19 +5996,43 @@ def _upload_violations(stamp=None, write_blob=None, logdir=None):
            bytes. A row naming bytes the filesystem never promised is a
            download that answers a read error over a file the database says
            exists.
+    INV-M  once the stamp has RETURNED, a marker on the recovered volume holds
+           the whole of its content.
+
+    INV-M IS WHY BARRIER 1 IS NO LONGER DECLINED. Round 5 left the marker's
+    CONTENTS flush without a control, on the reading that no reader in this
+    tree opens a marker -- true, and not a reason. The flush is performed, the
+    function's prose states what it makes durable, and the notes derive a disk
+    bound from that content; an assertion nothing can falsify is the shape
+    #342 and #441 are about, and a barrier with no control is one refactor
+    away from being dropped as dead work.
+
+    So the property is stated where it is actually made rather than where it
+    would be convenient. INV-A asks only whether the marker EXISTS, and a
+    marker created without its contents flushed exists -- as a zero-byte file
+    -- so INV-A cannot see barrier 1 go. INV-M asks what is IN it, under the
+    one condition that makes the question answerable: the stamp returned, so
+    both of its barriers were taken, so no crash after that point may produce
+    a short marker. A crash INSIDE the stamp is excluded because a
+    created-but-unflushed file reaching the disk empty is the model behaving
+    correctly, not the code failing.
     """
     bad = []
-    probe, _ = _drive_upload(None, stamp=stamp, write_blob=write_blob,
-                             logdir=logdir)
+    probe, _, _ = _drive_upload(None, stamp=stamp, write_blob=write_blob,
+                                logdir=logdir)
     for point in range(1, len(probe.ops) + 2):
-        fs, committed = _drive_upload(point, stamp=stamp, write_blob=write_blob,
-                                      logdir=logdir)
+        fs, committed, stamped = _drive_upload(
+            point, stamp=stamp, write_blob=write_blob, logdir=logdir)
         for _persist, image in fs.every_recovery():
             if committed and image.get(CRASH_BLOB) != CRASH_PAYLOAD:
                 bad.append(("INV-B", point, fs.ops[-1], sorted(image)))
             if (CRASH_BLOB in image and CRASH_MARK not in image
                     and not committed):
                 bad.append(("INV-A", point, fs.ops[-1], sorted(image)))
+            if (stamped and CRASH_MARK in image
+                    and image[CRASH_MARK] != CRASH_MARK_BODY):
+                bad.append(("INV-M", point, fs.ops[-1],
+                            image[CRASH_MARK]))
     return bad, len(probe.ops)
 
 
@@ -5363,14 +6104,17 @@ def _retention_violations(unlink_due=None, logdir=None):
 
 
 def test_the_crash_simulation_finds_no_uncollectable_state_in_either_order(logdir):
-    """R3-M2 / R3-M3 / prior H2: THE TWO ORDERS, RE-DERIVED OVER CRASH POINTS.
+    """R3-M2 / R3-M3 / prior H2: THE THREE ORDERS, RE-DERIVED OVER CRASH POINTS.
 
-    Every point between two operations is taken as a crash, and every
+    The name keeps round 4's "either order"; round 5 added retention's as the
+    third. Every point between two operations is taken as a crash, and every
     resolution of the directory changes that had not been flushed is checked
     -- including the worst, where a later removal persists and an earlier one
     does not. What has to hold at each of them is small enough to state: no
-    blob that nothing names, and no committed row over bytes the filesystem
-    never promised.
+    blob that nothing names (INV-A), no committed row over bytes the
+    filesystem never promised (INV-B), no marker short of its whole content
+    once the stamp has returned (INV-M), and, in retention's order, no blob
+    left behind a row that is durably deleted (INV-R).
 
     The points the upload order enumerates, in the order they occur: before
     the marker's first byte; before its contents are flushed; before its
@@ -5383,20 +6127,27 @@ def test_the_crash_simulation_finds_no_uncollectable_state_in_either_order(logdi
     directory flush; after the flush and before the marker's unlink; and after
     both.
     """
+    # IN EACH ORDER THE INVARIANTS ARE JUDGED BEFORE THE STEP COUNT. The count
+    # guards against an enumeration that drove too little to mean anything,
+    # and it is still asserted; judged first, it answered the removal of the
+    # deletion order's and the retention order's barriers with "too few
+    # operations" -- which names the barrier, but not what its absence lets a
+    # crash leave on the volume, and that is the question this case asks.
     bad, steps = _upload_violations(logdir=logdir)
+    assert bad == [], (
+        "the upload order leaves a state nothing can collect, a row over "
+        "bytes that were never promised, or a marker whose content the stamp "
+        "claimed to have made durable: %r" % (bad[:4],))
     assert steps >= 14, (
         "the upload order produced only %d operations, so the crash points "
         "this case claims to enumerate are not the ones it drove" % steps)
-    assert bad == [], (
-        "the upload order leaves a state nothing can collect, or a row over "
-        "bytes that were never promised: %r" % (bad[:4],))
 
     bad, steps = _delete_violations(logdir=logdir)
+    assert bad == [], (
+        "the deletion order can leave a blob with no marker: %r" % (bad[:4],))
     assert steps >= 4, (
         "the deletion order produced only %d operations; the barrier between "
         "the two unlinks is one of them" % steps)
-    assert bad == [], (
-        "the deletion order can leave a blob with no marker: %r" % (bad[:4],))
 
     # THE THIRD ORDER, and the one round 4 did not enumerate: retention's.
     # The points it takes are the unlink, the directory flush that makes it
@@ -5404,12 +6155,12 @@ def test_the_crash_simulation_finds_no_uncollectable_state_in_either_order(logdi
     # blob has no marker, so a recovery that finds it after the row is durably
     # gone is outside BOTH collectors rather than merely untidy.
     bad, steps = _retention_violations(logdir=logdir)
-    assert steps >= 4, (
-        "the retention order produced only %d operations; the barrier between "
-        "the last unlink and the DELETE is one of them" % steps)
     assert bad == [], (
         "the retention order can strand a blob whose row is durably deleted: "
         "%r" % (bad[:4],))
+    assert steps >= 4, (
+        "the retention order produced only %d operations; the barrier between "
+        "the last unlink and the DELETE is one of them" % steps)
 
 
 def test_every_durability_barrier_reds_the_crash_simulation_when_it_is_removed(
@@ -5417,14 +6168,41 @@ def test_every_durability_barrier_reds_the_crash_simulation_when_it_is_removed(
     """THE CONTROL FOR THE CASE ABOVE, one mutation per barrier (#391/#342).
 
     A simulation that passes with a barrier deleted is decoration. Each of the
-    four barriers the two orders rest on is removed in turn -- at its own
-    site, in a compiled copy, so the module itself is untouched -- and each
-    removal has to produce a forbidden state. Each is then paired with an
-    INERT TWIN at the SAME site: the same barrier, spelled differently, which
-    must leave the simulation clean.
+    six barriers the upload, deletion and retention orders rest on is removed
+    in turn -- at its own site, in a compiled copy, so the module itself is
+    untouched -- and each removal has to produce a forbidden state. Each is
+    then paired with an INERT TWIN at the SAME site: the same barrier, spelled
+    differently, which must leave the simulation clean.
     """
     real_stamp, real_write = auto_logs._stamp_marker, auto_logs._write_blob
     real_delete = auto_logs._delete_blob_then_marker
+
+    # -- BARRIER 1: the MARKER's CONTENTS (_stamp_marker) -------------------
+    #
+    # The barrier round 5 declined, and the reason it was declinable was that
+    # the only invariants on the table asked whether the marker EXISTED. A
+    # marker created and never flushed exists -- empty -- so INV-A passed
+    # over the mutation and the barrier had no control at all. INV-M asks
+    # what is in it once the stamp has returned, which is the claim the
+    # function's own prose makes, and that claim is now falsifiable.
+    site = "        os.fsync(fd)\n"
+    bad, _ = _upload_violations(
+        stamp=_exec_mutant(real_stamp, site, "        pass\n"), logdir=logdir)
+    assert any(kind == "INV-M" for kind, *_ in bad), (
+        "with the marker's contents never flushed the simulation still "
+        "recovered a whole marker at every crash point, so barrier 1 is "
+        "being asserted by nothing: %r" % (bad[:3],))
+    assert all(kind == "INV-M" for kind, *_ in bad), (
+        "dropping the marker's CONTENTS flush also broke an invariant about "
+        "the blob or the row, which means the mutation is not isolated to "
+        "the barrier it names: %r" % (bad[:3],))
+    bad, _ = _upload_violations(
+        stamp=_exec_mutant(real_stamp, site, "        os.fsync(int(fd))\n"),
+        logdir=logdir)
+    assert bad == [], (
+        "the inert twin reds at the marker's contents barrier, so the "
+        "mutation above is reacting to the site being edited rather than to "
+        "the barrier: %r" % (bad[:3],))
 
     # -- BARRIER: the blob's CONTENTS (_write_blob) -------------------------
     site = "        os.fsync(fd)\n"
@@ -5517,6 +6295,628 @@ def test_every_durability_barrier_reds_the_crash_simulation_when_it_is_removed(
         "the inert twin reds at retention's barrier: %r" % (bad[:3],))
 
 
+# ── ROUND 6: THE LATER PASS, AND THE PLAYER ATTACHMENT ──────────────────────
+#
+# Two orders the round-5 simulation did not drive. M1's is retention's, one
+# pass later: a pass that unlinked and never reached its flush or its commit
+# leaves the removal ISSUED and unpromised -- its process ended, the host did
+# not -- and the next pass to select the row reads `absent` off it. L4's and
+# L5's are the player attachment's: the handler writes a player's log with
+# the builtin `open()` and commits the row that names it, and the model sees
+# that write through `CrashFS.builtin_open`.
+
+
+class _CrashRetentionDB(Scripted):
+    """Retention's session over a `CrashFS`. The DELETE and the COMMIT are
+    crash points of their own, and `deleted` becomes true only once a commit
+    has carried a DELETE -- which is the moment the blob's only reference is
+    durably gone."""
+
+    def __init__(self, fs):
+        super().__init__({DUE_KEY: [[{"id": CRASH_ROW,
+                                      "log_filename": CRASH_BLOB}]],
+                          "DELETE FROM bug_reports": [[{"id": CRASH_ROW}]]})
+        self._crash_fs = fs
+        self.deleting = False
+        self.deleted = False
+
+    async def execute(self, statement, params=None):
+        if " ".join(str(statement).split()).startswith("DELETE FROM bug_reports"):
+            self._crash_fs.mark("DELETE")
+            self.deleting = True
+        return await super().execute(statement, params)
+
+    async def commit(self):
+        self._crash_fs.mark("COMMIT")
+        await super().commit()
+        if self.deleting:
+            self.deleted = True
+
+
+def _faults(spec):
+    """Fresh fault records for one drive: `(predicate, nth, type, message)`
+    becomes `[predicate, nth, exception, seen]`, so no drive inherits another
+    one's count or traceback."""
+    return [[pred, nth, exc(msg), 0] for pred, nth, exc, msg in spec]
+
+
+def _is_dir_flush(label):
+    return label == "fsync-dir"
+
+
+def _is_blob_write(label):
+    return label.startswith("write ") and label.endswith(".log.gz")
+
+
+def _is_blob_unlink(label):
+    return label.startswith("unlink ") and label.endswith(".log.gz")
+
+
+#: The later pass's own barrier refuses. What the pass may do then is keep
+#: the row -- and nothing else.
+_LATER_REFUSES = ((_is_dir_flush, 1, OSError, "the directory would not flush"),)
+
+
+def _drive_later_pass(crash_before, *, prune=None, unlink_due=None, faults=(),
+                      logdir=None):
+    """M1's order, from a durable blob whose row is due.
+
+    The EARLIER pass is one unlink and nothing more: it issued the removal
+    and its process ended before the flush and before the commit, so the
+    entry change is in the directory cache and the row is still there. The
+    LATER pass is the real `prune_auto_logs` over the same row: it observes
+    `absent`, and what it may do about that is what this order measures.
+    """
+    fs = CrashFS()
+    fs.preload({CRASH_BLOB: CRASH_PAYLOAD})
+    fs.crash_before = crash_before
+    fs.faults = _faults(faults)
+    base = pathlib.Path(str(logdir))
+    db = _CrashRetentionDB(fs)
+    real_os = auto_logs.os
+    real_due = auto_logs._unlink_due_blobs
+    auto_logs.os = fs
+    if unlink_due is not None:
+        auto_logs._unlink_due_blobs = _point_at(unlink_due, fs)
+    auto_logs._PRUNE_HELD.clear()
+    try:
+        try:
+            auto_logs._unlink_existing(base / CRASH_BLOB)   # the earlier pass
+            _run((prune or auto_logs.prune_auto_logs)(db))
+        except _Crashed:
+            pass
+    finally:
+        auto_logs.os = real_os
+        auto_logs._unlink_due_blobs = real_due
+        auto_logs._PRUNE_HELD.clear()
+    return fs, db
+
+
+def _later_pass_violations(*, prune=None, unlink_due=None, faults=(),
+                           logdir=None):
+    """INV-R over every crash point of the later pass: once a commit has
+    carried the DELETE, the blob is on no recovered volume."""
+    bad = []
+    probe, probe_db = _drive_later_pass(None, prune=prune,
+                                        unlink_due=unlink_due, faults=faults,
+                                        logdir=logdir)
+    for point in range(1, len(probe.ops) + 2):
+        fs, db = _drive_later_pass(point, prune=prune, unlink_due=unlink_due,
+                                   faults=faults, logdir=logdir)
+        for _persist, image in fs.every_recovery():
+            if db.deleted and CRASH_BLOB in image:
+                bad.append(("INV-R", point, fs.ops[-1], sorted(image)))
+    return bad, probe, probe_db
+
+
+def test_a_later_retention_pass_keeps_the_row_until_the_earlier_unlink_is_durable(
+        logdir):
+    """M1, THE WITNESS SHAPE: the later `absent` pass keeps the row until the
+    earlier unlink is PROVEN durable.
+
+    "The file is not there" is usually a fact about an EARLIER pass -- one
+    that unlinked and did not reach its flush or its commit -- and that
+    pass's removal may still be only in the directory cache. The later pass
+    is entitled to drop the row only once a directory flush has promised the
+    removal, and a flush it issues itself is enough, because a directory
+    flush promises every entry change issued in that directory and not only
+    the ones this process issued (#507).
+
+    Two readings, over every crash point and every resolution of what was
+    pending. Where the later pass's flush succeeds it DELETES the row, after
+    the barrier -- so the case is not satisfied by a pass that never
+    collects an absent row. Where its flush refuses it keeps the row and
+    deletes nothing, so no crash anywhere can recover the blob after its
+    reference is durably gone.
+
+    The mutants that red this order live in
+    `test_every_round_six_crash_point_reds_when_its_mechanism_is_removed`:
+    this case carries no mutation anchor of its own, so an on-disk inert
+    twin can re-spell the line it guards and still leave it green.
+    """
+    bad, probe, db = _later_pass_violations(logdir=logdir)
+    assert bad == [], (
+        "a later pass dropped the row over an earlier unlink no flush had "
+        "promised: %r" % (bad[:3],))
+    assert db.deleted, (
+        "the later pass never collected the absent row, so the clean reading "
+        "above is the reading of a pass that does nothing: %r" % (probe.ops,))
+    assert probe.ops[:1] == ["unlink " + CRASH_BLOB], probe.ops
+    assert probe.ops.index("fsync-dir") < probe.ops.index("DELETE"), (
+        "the later pass deleted the row before its own directory flush: %r"
+        % (probe.ops,))
+    assert len(probe.ops) >= 5, (
+        "the later pass produced only %d operations -- the earlier unlink, "
+        "the barrier's open and flush, the DELETE and the COMMIT are five"
+        % len(probe.ops))
+
+    bad, probe, db = _later_pass_violations(faults=_LATER_REFUSES,
+                                            logdir=logdir)
+    assert bad == [], (
+        "a later pass whose own barrier REFUSED still dropped the row: %r"
+        % (bad[:3],))
+    assert not db.deleted and "DELETE" not in probe.ops, (
+        "the row was deleted although no removal on the volume could be "
+        "proved: %r" % (probe.ops,))
+
+
+#: What a player attaches in the crash simulation: short enough to drive
+#: quickly, and varied enough that its gzip stream still takes several of
+#: the model's 64-byte writes, so a failure and a crash can both land
+#: BETWEEN two of them.
+CRASH_REPORT_LOG = "".join(
+    "line %02d %08x %08x %08x %08x\n"
+    % (i, (i * 2654435761) & 0xFFFFFFFF, (i * 40503 + 7) ** 3 & 0xFFFFFFFF,
+       (i * 7919 + 3) ** 2 & 0xFFFFFFFF, (i * 97 + 13) ** 5 & 0xFFFFFFFF)
+    for i in range(12))
+
+
+class _CrashReportSession(_ReportSession):
+    """`_ReportSession` whose COMMIT is a crash point, remembering what the
+    row said and what the volume held for that name at the instant it
+    committed."""
+
+    def __init__(self, fs, *a, **kw):
+        super().__init__(*a, **kw)
+        self._crash_fs = fs
+        self.row_at_commit = None
+
+    async def commit(self):
+        self._crash_fs.mark("COMMIT")
+        await super().commit()
+        report = self.added[0]
+        name = report.log_filename
+        self.row_at_commit = (name, report.log_bytes,
+                              self._crash_fs.live.get(name) if name else None)
+
+
+#: THE PLAYER ATTACHMENT'S ORDERS: the stored attachment, and every arm the
+#: handler takes when the volume answers badly -- a write that fails partway,
+#: that failure's cleanup flush answering FileNotFoundError (L5's arm), the
+#: cleanup's unlink refusing, and a commit that raises.
+_PLAYER_ORDERS = (
+    ("stored", (), False),
+    ("write-fails",
+     ((_is_blob_write, 2, OSError, "no space left on device"),), False),
+    ("flush-vanishes",
+     ((_is_blob_write, 2, OSError, "no space left on device"),
+      (_is_dir_flush, 2, FileNotFoundError, "the directory went away")), False),
+    ("unlink-refuses",
+     ((_is_blob_write, 2, OSError, "no space left on device"),
+      (_is_blob_unlink, 1, PermissionError, "the file would not unlink")),
+     False),
+    ("commit-raises", (), True),
+)
+
+
+def _drive_report(crash_before, *, handler=None, faults=(), commit_fails=False,
+                  logdir=None):
+    """`submit_bug_report` with one attached log, over a fresh `CrashFS`.
+
+    The handler's OWN globals are pointed at the model -- the live module's
+    for the live handler, the private copy's for a mutant -- so a mutation
+    cannot quietly run against the real filesystem (#342). `auto_logs.os`
+    is pointed too, because the marker, the flushes and the marker clear
+    are that module's functions.
+    """
+    import builtins
+
+    fs = CrashFS()
+    fs.crash_before = crash_before
+    fs.faults = _faults(faults)
+    handler = handler or main.submit_bug_report
+    g = handler.__globals__
+    saved = {k: g[k] for k in ("os", "_is_admin", "_mark_mod_seen")}
+    real_open = builtins.open
+    real_auto_os = auto_logs.os
+    db = _CrashReportSession(fs, {"FROM bug_reports": [[{"count": 0}]]},
+                             fail_commit=commit_fails)
+    req = schemas.BugReportRequest(steam_id=STEAM, description="it broke",
+                                   log_text=CRASH_REPORT_LOG)
+    outcome = None
+    g["os"] = fs
+    g["_is_admin"] = _no_admin
+    g["_mark_mod_seen"] = _noop_mark
+    auto_logs.os = fs
+    builtins.open = fs.builtin_open(real_open, logdir)
+    try:
+        try:
+            outcome = _run(handler(req, _request(), db))
+        except _Crashed:
+            outcome = "crashed"
+        except Exception as ex:          # the request FAILED; not a crash
+            outcome = "raised %s" % type(ex).__name__
+    finally:
+        builtins.open = real_open
+        auto_logs.os = real_auto_os
+        g.update(saved)
+        for obj in db.added[:1]:
+            auto_logs._MARKERS_IN_FLIGHT.discard("%s.log.gz" % (obj.id,))
+    return fs, db, outcome
+
+
+def _report_violations(order, *, handler=None, logdir=None):
+    """Every (crash point, recovery) of one player-attachment order that
+    breaks an invariant.
+
+    INV-A  a blob on the recovered volume is named by the committed row or
+           carries a marker. Anything else is a file nothing in this tree
+           will ever collect.
+    INV-B  a committed row that claims a STORED attachment (log_bytes set)
+           names a blob the recovered volume holds whole. A row that keeps a
+           reference with log_bytes NULL claims no bytes -- the arm that
+           writes it says the file may be truncated -- so it is held to
+           INV-A only.
+    """
+    name, faults, commit_fails = order
+    bad = []
+    probe, probe_db, outcome = _drive_report(
+        None, handler=handler, faults=faults, commit_fails=commit_fails,
+        logdir=logdir)
+    suffix = auto_logs._ORPHAN_MARKER_SUFFIX
+    for point in range(1, len(probe.ops) + 2):
+        fs, db, _ = _drive_report(point, handler=handler, faults=faults,
+                                  commit_fails=commit_fails, logdir=logdir)
+        row = db.row_at_commit
+        where = fs.ops[-1] if fs.ops else None
+        for _persist, image in fs.every_recovery():
+            for blob in image:
+                if blob.endswith(suffix):
+                    continue
+                if row is not None and row[0] == blob:
+                    continue
+                if blob + suffix in image:
+                    continue
+                bad.append(("INV-A", name, point, where, sorted(image)))
+            if row is not None and row[1]:
+                if (image.get(row[0]) != row[2]
+                        or len(row[2] or b"") != row[1]):
+                    bad.append(("INV-B", name, point, where, sorted(image)))
+    return bad, probe, probe_db, outcome
+
+
+def test_the_player_attachment_order_leaves_nothing_uncollectable_at_any_crash_point(
+        logdir):
+    """L4 AND L5, RE-DERIVED OVER CRASH POINTS rather than argued.
+
+    The handler stamps a marker, durably, before the attachment's first
+    byte; writes the attachment and makes it durable; commits the row that
+    names it; and clears the marker. Every operation is a crash point, every
+    resolution of the directory changes still pending is a recovery, and
+    five orders are driven: the stored attachment, a write that fails
+    partway, that failure's cleanup flush answering FileNotFoundError, the
+    cleanup's unlink refusing, and a commit that raises.
+
+    What has to hold at each of them is INV-A and INV-B (see
+    `_report_violations`): no file that nothing names, and no stored
+    attachment whose bytes the filesystem never promised. The first is L4's
+    crash point -- between the first byte and the cleanup arm -- and L5's --
+    a removal that was never proved, disclaimed by the row; the second is
+    the durability of the stored attachment itself.
+
+    Like the later-pass case above, this carries no mutation anchor; the
+    matrix case below is where each mechanism is removed.
+    """
+    seen = {}
+    for order in _PLAYER_ORDERS:
+        bad, probe, db, outcome = _report_violations(order, logdir=logdir)
+        assert bad == [], (
+            "the player attachment's %r order leaves a state nothing can "
+            "collect, or a stored row over bytes never promised: %r"
+            % (order[0], bad[:3]))
+        seen[order[0]] = (probe, db, outcome)
+
+    # EACH ORDER DROVE THE ARM IT NAMES -- otherwise a clean reading could be
+    # the reading of five copies of the same path.
+    probe, db, outcome = seen["stored"]
+    assert outcome["log_persisted"] is True, outcome
+    writes = [op for op in probe.ops if _is_blob_write(op)]
+    assert len(writes) >= 2, (
+        "the attachment took %d write(s), so no crash point falls BETWEEN two "
+        "of them: %r" % (len(writes), probe.ops))
+    first_blob_op = next(i for i, op in enumerate(probe.ops)
+                         if op.endswith(".log.gz") and op.startswith("open "))
+    first_marker_flush = probe.ops.index("fsync-dir")
+    assert first_marker_flush < first_blob_op, (
+        "the attachment was opened before its marker's entry was flushed: %r"
+        % (probe.ops,))
+    assert db.row_at_commit[1] == len(db.row_at_commit[2]), db.row_at_commit
+
+    probe, db, _ = seen["write-fails"]
+    assert db.row_at_commit[0] is None and db.row_at_commit[1] == 0, (
+        "the failed write did not disclaim the attachment: %r"
+        % (db.row_at_commit,))
+    assert any(_is_blob_unlink(op) for op in probe.ops), probe.ops
+
+    for arm in ("flush-vanishes", "unlink-refuses"):
+        probe, db, _ = seen[arm]
+        assert db.row_at_commit[0] is not None and db.row_at_commit[1] is None, (
+            "the %r arm did not keep the reference: %r"
+            % (arm, db.row_at_commit))
+
+    probe, db, outcome = seen["commit-raises"]
+    assert outcome == "raised RuntimeError" and db.row_at_commit is None, (
+        outcome, db.row_at_commit)
+    assert any(n.endswith(auto_logs._ORPHAN_MARKER_SUFFIX)
+               for n in probe.live), (
+        "the commit that raised took the attachment's marker with it: %r"
+        % (sorted(probe.live),))
+
+
+class _OrderedRetentionDB(Scripted):
+    """`Scripted` keeping ONE ordered record of the due SELECT, the unlink
+    pass, the DELETE and every transaction boundary -- so what is asserted is
+    WHEN the row lock ends, rather than the words that take it (#732)."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.events = []
+
+    async def execute(self, statement, params=None):
+        sql = " ".join(str(statement).split())
+        self.events.append("SELECT-DUE" if DUE_KEY in sql else
+                           "DELETE" if sql.startswith("DELETE FROM bug_reports")
+                           else "SQL")
+        return await super().execute(statement, params)
+
+    async def commit(self):
+        self.events.append("COMMIT")
+        await super().commit()
+
+    async def rollback(self):
+        self.events.append("ROLLBACK")
+        await super().rollback()
+
+
+def _lock_span_events(prune, logdir):
+    """`prune` over one due row whose blob is present: the ordered events."""
+    (logdir / "a.log.gz").write_bytes(b"x")
+    db = _OrderedRetentionDB(
+        {DUE_KEY: [[{"id": str(R1), "log_filename": "a.log.gz"}]],
+         "DELETE FROM bug_reports": [[{"id": str(R1)}]]})
+    g = prune.__globals__
+    real = g["_unlink_due_blobs"]
+
+    def _recording(base, plan):
+        db.events.append("UNLINK-PASS")
+        return real(base, plan)
+
+    g["_unlink_due_blobs"] = _recording
+    auto_logs._PRUNE_HELD.clear()
+    try:
+        _run(prune(db))
+    finally:
+        g["_unlink_due_blobs"] = real
+        auto_logs._PRUNE_HELD.clear()
+    return db.events
+
+
+def _lock_span_findings(events):
+    """What is wrong with one retention pass's order, as a list."""
+    try:
+        s = events.index("SELECT-DUE")
+        u = events.index("UNLINK-PASS")
+        d = events.index("DELETE")
+    except ValueError:
+        return ["the pass did not select, unlink and delete: %r" % (events,)]
+    bad = []
+    if not s < u < d:
+        bad.append("out of order: %r" % (events,))
+    ends = [i for i, e in enumerate(events) if e in ("COMMIT", "ROLLBACK")]
+    if any(s < i < d for i in ends):
+        bad.append("a transaction ends between the SELECT and the DELETE, "
+                   "which releases the row lock before the DELETE it "
+                   "protects: %r" % (events,))
+    if not any(i > d and events[i] == "COMMIT" for i in ends):
+        bad.append("no COMMIT after the DELETE: %r" % (events,))
+    return bad
+
+
+#: M1(a)'s span, cut: a commit straight after the due SELECT ends the
+#: transaction -- and the row lock with it -- before the unlink pass runs.
+_LOCK_SPAN_SITE = "    )).mappings().all()\n    if not due:\n"
+
+
+def test_the_due_rows_stay_locked_from_the_select_through_the_delete_commit(
+        logdir):
+    """M1(a), MEASURED AS AN ORDER rather than as a clause.
+
+    `FOR NO KEY UPDATE SKIP LOCKED` keeps an overlapping pass off this pass's
+    rows only for as long as the transaction that took the lock is open. The
+    window the lock exists to close runs from the SELECT, through the unlink
+    pass on the worker thread, to the DELETE and its commit -- so the
+    property is that no transaction boundary falls inside that span. The
+    clause itself is asserted beside this
+    (`test_the_due_selection_takes_the_row_lock_that_conflicts_with_its_own_delete`)
+    and its behaviour against a real server is the lock harness in the
+    round-6 evidence; this is the half a statement's text cannot show.
+
+    Its mutant and inert twin are in
+    `test_every_round_six_sweep_and_lock_bound_reds_when_it_is_removed`, so
+    this case carries no mutation anchor of its own.
+    """
+    events = _lock_span_events(auto_logs.prune_auto_logs, logdir)
+    assert _lock_span_findings(events) == [], (
+        "the retention pass: %r" % (_lock_span_findings(events),))
+
+
+def _report_mutant_pairs(pairs):
+    """`_report_mutant` for an edit that MOVES a statement: every anchor is
+    asserted to be one site inside the handler's own span, applied in order,
+    and compiled without the route decorator (#432/#279)."""
+    src = textwrap.dedent(inspect.getsource(main.submit_bug_report))
+    head, _, rest = src.partition("\n")
+    assert head.startswith("@app.post("), (
+        "submit_bug_report no longer starts with its route decorator: %r"
+        % (head,))
+    for anchor, replacement in pairs:
+        assert rest.count(anchor) == 1, (
+            "the mutation anchor occurs %d time(s) in submit_bug_report, not "
+            "once: %r" % (rest.count(anchor), anchor))
+        rest = rest.replace(anchor, replacement)
+    namespace = dict(vars(main))
+    exec(compile(rest, "<mutant:submit_bug_report>", "exec"), namespace)
+    return namespace["submit_bug_report"]
+
+
+def _player_orders(*names):
+    return [o for o in _PLAYER_ORDERS if o[0] in names]
+
+
+def test_every_round_six_crash_point_reds_when_its_mechanism_is_removed(logdir):
+    """THE CONTROL FOR THE TWO ROUND-6 ORDERS, one mutation per mechanism.
+
+    Each is removed at its own site, in a compiled copy, and each removal
+    has to produce the forbidden state its crash point names; each is then
+    paired with an INERT TWIN at the SAME site that must leave every order
+    clean (#391/#342).
+    """
+    # -- M1(b), CALLEE: an absence charged no barrier ----------------------
+    real_due = auto_logs._unlink_due_blobs
+    site = "    if unlinked or observed_absent:\n"
+    bad, _, _ = _later_pass_violations(
+        unlink_due=_exec_mutant(real_due, site, "    if unlinked:\n"),
+        logdir=logdir)
+    assert any(kind == "INV-R" for kind, *_ in bad), (
+        "with an absence charged no barrier, a later pass still could not "
+        "drop the row over the earlier unlink: %r" % (bad[:3],))
+    twin = _exec_mutant(real_due, site, "    if observed_absent or unlinked:\n")
+    for faults in ((), _LATER_REFUSES):
+        bad, _, _ = _later_pass_violations(unlink_due=twin, faults=faults,
+                                           logdir=logdir)
+        assert bad == [], (
+            "the inert twin reds at the absence's barrier: %r" % (bad[:3],))
+
+    # -- M1(b), CALLER: an absent row collected over a refused barrier -----
+    real_prune = auto_logs.prune_auto_logs
+    site = "            if barrier is None:\n"
+    bad, _, _ = _later_pass_violations(
+        prune=_exec_mutant(real_prune, site,
+                           '            if barrier is None or state == "absent":\n'),
+        faults=_LATER_REFUSES, logdir=logdir)
+    assert any(kind == "INV-R" for kind, *_ in bad), (
+        "with `absent` collected whatever the barrier said, a later pass "
+        "whose flush refused still could not drop the row: %r" % (bad[:3],))
+    twin = _exec_mutant(real_prune, site, "            if not (barrier is not None):\n")
+    for faults in ((), _LATER_REFUSES):
+        bad, _, _ = _later_pass_violations(prune=twin, faults=faults,
+                                           logdir=logdir)
+        assert bad == [], (
+            "the inert twin reds at the caller's barrier test: %r" % (bad[:3],))
+
+    def _reds(handler, orders, kind):
+        found = []
+        for order in orders:
+            found += _report_violations(order, handler=handler,
+                                        logdir=logdir)[0]
+        return found, any(k == kind for k, *_ in found)
+
+    def _clean(handler):
+        found = []
+        for order in _PLAYER_ORDERS:
+            found += _report_violations(order, handler=handler,
+                                        logdir=logdir)[0]
+        return found
+
+    # -- L4: the marker stamped AFTER the attachment's bytes ---------------
+    stamp = ("            _auto_logs._stamp_marker(path)\n"
+             "            marker_stamped = True\n")
+    entry_then_name = ("            _auto_logs._fsync_dir(_pathlib.Path(path).parent)\n"
+                       "            log_filename = path.name\n")
+    mutant = _report_mutant_pairs([
+        (stamp, ""),
+        (entry_then_name,
+         "            _auto_logs._fsync_dir(_pathlib.Path(path).parent)\n"
+         + stamp + "            log_filename = path.name\n")])
+    found, red = _reds(mutant, _player_orders("stored", "write-fails"), "INV-A")
+    assert red, (
+        "with the marker stamped after the attachment's bytes, no crash "
+        "between the first byte and the cleanup arm left an unmarked file: "
+        "%r" % (found[:3],))
+    twin = _report_mutant_pairs([(stamp,
+        "            _auto_logs._stamp_marker(_pathlib.Path(str(path)))\n"
+        "            marker_stamped = True\n")])
+    assert _clean(twin) == [], "the inert twin reds at the marker's order"
+
+    # -- L5: the flush's FileNotFoundError read as the unlink's ------------
+    arms = ("                try:\n"
+            "                    os.unlink(str(attempted_path))\n"
+            "                except FileNotFoundError:\n")
+    mutant = _report_mutant_pairs([(arms,
+        "                try:\n"
+        "                    os.unlink(str(attempted_path))\n"
+        "                    _auto_logs._fsync_dir(\n"
+        "                        _pathlib.Path(attempted_path).parent)\n"
+        "                except FileNotFoundError:\n")])
+    found, red = _reds(mutant, _player_orders("flush-vanishes"), "INV-A")
+    assert red, (
+        "with the flush folded back under the unlink's own arm, a flush that "
+        "answered FileNotFoundError still did not leave an unreferenced, "
+        "unmarked file: %r" % (found[:3],))
+    twin = _report_mutant_pairs([(arms,
+        "                try:\n"
+        "                    os.unlink(\"%s\" % (attempted_path,))\n"
+        "                except FileNotFoundError:\n")])
+    assert _clean(twin) == [], "the inert twin reds at the two arms"
+
+    # -- the cleanup's removal, made durable (round 5's barrier) -----------
+    cleanup = ("                        _auto_logs._fsync_dir(\n"
+               "                            _pathlib.Path(attempted_path).parent)\n")
+    mutant = _report_mutant_pairs([(cleanup, "                        pass\n")])
+    found, red = _reds(mutant, _player_orders("write-fails"), "INV-A")
+    assert red, (
+        "with the cleanup's removal never flushed, the marker's clear still "
+        "could not persist ahead of the blob's removal: %r" % (found[:3],))
+    twin = _report_mutant_pairs([(cleanup,
+        "                        _auto_logs._fsync_dir(\n"
+        "                            _pathlib.Path(str(attempted_path)).parent)\n")])
+    assert _clean(twin) == [], "the inert twin reds at the cleanup's barrier"
+
+    # -- the stored attachment's CONTENTS ----------------------------------
+    contents = "                os.fsync(f.fileno())\n"
+    mutant = _report_mutant_pairs([(contents, "                pass\n")])
+    found, red = _reds(mutant, _player_orders("stored"), "INV-B")
+    assert red and all(k == "INV-B" for k, *_ in found), (
+        "with the attachment's contents never flushed, no committed row named "
+        "bytes the filesystem had not promised -- or the removal broke "
+        "something other than the barrier it names: %r" % (found[:3],))
+    twin = _report_mutant_pairs([(contents,
+                                  "                os.fsync(int(f.fileno()))\n")])
+    assert _clean(twin) == [], "the inert twin reds at the contents barrier"
+
+    # -- the stored attachment's directory ENTRY ---------------------------
+    entry = "            _auto_logs._fsync_dir(_pathlib.Path(path).parent)\n"
+    mutant = _report_mutant_pairs([(entry, "            pass\n")])
+    found, red = _reds(mutant, _player_orders("stored"), "INV-B")
+    assert red and all(k == "INV-B" for k, *_ in found), (
+        "with the attachment's entry never flushed, a crash after the commit "
+        "still recovered the file every time -- or the removal broke "
+        "something other than the barrier it names: %r" % (found[:3],))
+    twin = _report_mutant_pairs([(entry,
+        "            _auto_logs._fsync_dir(_pathlib.Path(str(path)).parent)\n")])
+    assert _clean(twin) == [], "the inert twin reds at the entry barrier"
+
+
 def test_one_site_performs_the_blob_before_marker_deletion():
     """#432: THE FLAG NAMED A LINE AND THE DEFECT IS A CLASS.
 
@@ -5590,6 +6990,21 @@ def test_one_site_performs_the_blob_before_marker_deletion():
         "are the marker's stamp, the blob's write and the deletion helper, "
         "and retention's is handed the directory: %r" % (len(parents),
                                                          call_sites))
+
+    # AND THE TWO SITES OUTSIDE THIS MODULE. `submit_bug_report` reaches the
+    # same barrier twice since round 6 -- the attachment's own entry before
+    # its row commits, and the cleanup arm's removal -- through `main.py`'s
+    # `_pathlib` alias. Both coerce, and a third would be a site this sweep
+    # has not read (#432). Comment lines are dropped first, so prose that
+    # names the call is not counted as a call.
+    handler = _code_of(main.submit_bug_report)
+    sites = handler.count("_auto_logs._fsync_dir(")
+    coerced = (handler.count("_auto_logs._fsync_dir(_pathlib.Path(")
+               + handler.count("_auto_logs._fsync_dir( _pathlib.Path("))
+    assert sites == 2 and coerced == 2, (
+        "submit_bug_report flushes the blob directory at %d site(s), %d of "
+        "them coerced; the two that own one are the attachment's entry and "
+        "the cleanup's removal" % (sites, coerced))
 
 
 def test_the_durability_barrier_is_charged_to_the_marked_span(logdir, verified,
@@ -5791,7 +7206,18 @@ def test_a_cancelled_sections_cleanup_does_not_block_the_event_loop(
             task = asyncio.ensure_future(fn(
                 own, b"payload", STEAM,
                 time.monotonic() + auto_logs.AUTO_LOG_MARKED_SPAN_DEADLINE_S))
-            for _ in range(400):
+            # THE WAIT FOR THE WORKER IS BOUNDED BY THE CLOCK, NOT BY A COUNT
+            # OF SLEEPS. Two thread hops lie between the task's start and the
+            # worker taking the blob's lock (the stubbed stamp, then the
+            # write), and a count of 400 five-millisecond sleeps ran out in 2
+            # of 4 full suite runs on this seat while other suites ran beside
+            # it, with the worker not yet at the lock -- and passed 3 of 3
+            # runs on its own. Nothing this case measures happens inside this
+            # wait: the heartbeat is sampled only after it, so a longer bound
+            # changes how long a loaded machine is given, never what is
+            # asserted. A section that refuses early still ends it at once.
+            reach_by = time.monotonic() + 30.0
+            while time.monotonic() < reach_by:
                 if inside.is_set() or task.done():
                     break
                 await asyncio.sleep(0.005)
@@ -5939,6 +7365,269 @@ def test_the_sweep_reports_cleared_only_when_the_marker_unlink_succeeded(
         % (out,))
 
 
+def test_a_player_attachment_is_marked_before_its_first_byte(logdir,
+                                                             monkeypatch):
+    """L4: THE PLAYER-FILED ATTACHMENT TAKES THE UPLOAD PATH'S OWN ORDER.
+
+    `open()` can succeed and the write fail, and a process or host stop
+    between the two leaves a prefix of the gzip stream on the volume. Before
+    round 6 that prefix carried no marker and no row named it, and the orphan
+    sweep -- which walks the marker set -- and `prune_auto_logs` -- which
+    walks kind='auto' rows -- were both blind to it. Permanent, on the volume
+    this route is most protective of.
+
+    What is measured is the ORDER: the marker's own file is on the volume
+    before the attachment is opened, and it is gone once the row naming the
+    file has committed.
+    """
+    import builtins
+    real_open = builtins.open
+    seen = {}
+
+    def watching_open(*a, **kw):
+        if len(a) > 1 and "w" in str(a[1]) and str(a[0]).endswith(".log.gz"):
+            seen["markers_at_open"] = _markers(logdir)
+            seen["blobs_at_open"] = _blobs(logdir)
+        return real_open(*a, **kw)
+
+    monkeypatch.setattr(main, "_is_admin", _no_admin)
+    monkeypatch.setattr(main, "_mark_mod_seen", _noop_mark)
+    monkeypatch.setattr(builtins, "open", watching_open)
+    db = _ReportSession({"FROM bug_reports": [[{"count": 0}]]})
+    req = schemas.BugReportRequest(steam_id=STEAM, description="it broke",
+                                   log_text="a log worth keeping")
+    out = _run(main.submit_bug_report(req, _request(), db))
+    monkeypatch.setattr(builtins, "open", real_open)
+
+    assert out["log_persisted"] is True
+    blob = db.added[0].log_filename
+    assert seen.get("blobs_at_open") == [], (
+        "the attachment already had bytes when the order was sampled, so "
+        "this case is not looking at the window it claims to: %r" % (seen,))
+    assert seen.get("markers_at_open") == [
+        blob + auto_logs._ORPHAN_MARKER_SUFFIX], (
+        "the attachment was opened before anything named it, so a stop "
+        "between the first byte and the cleanup arm leaves a file no sweep "
+        "in this tree can find: %r" % (seen,))
+    assert _markers(logdir) == [], (
+        "the marker outlived the committed row: %r" % (_markers(logdir),))
+    assert _blobs(logdir) == [blob]
+    # AND THE NAME IS NOT LEFT IN THE IN-FLIGHT SET. It is registered for the
+    # span between the stamp and the commit, in a `finally`, so a handler
+    # that raises cannot leave the sweep skipping the name for the life of
+    # the process.
+    assert blob not in auto_logs._MARKERS_IN_FLIGHT, (
+        "the attachment is still registered as in flight after the request "
+        "finished")
+
+
+def test_a_player_attachment_whose_commit_fails_keeps_its_marker(logdir,
+                                                                 monkeypatch):
+    """L4's other side: the marker is cleared AFTER the reference commits.
+
+    Clearing it before would reopen the window it exists to close. A commit
+    that raises leaves an attachment on the volume with no row naming it, and
+    the marker is the only thing that will ever offer it to a collector -- so
+    that path drops the in-flight registration and KEEPS the marker.
+    """
+    class _FailingCommit(_ReportSession):
+        async def commit(self):
+            raise RuntimeError("the transaction could not be committed")
+
+    monkeypatch.setattr(main, "_is_admin", _no_admin)
+    monkeypatch.setattr(main, "_mark_mod_seen", _noop_mark)
+    db = _FailingCommit({"FROM bug_reports": [[{"count": 0}]]})
+    req = schemas.BugReportRequest(steam_id=STEAM, description="it broke",
+                                   log_text="a log worth keeping")
+    with pytest.raises(RuntimeError):
+        _run(main.submit_bug_report(req, _request(), db))
+
+    blobs = _blobs(logdir)
+    assert len(blobs) == 1, blobs
+    assert _markers(logdir) == [blobs[0] + auto_logs._ORPHAN_MARKER_SUFFIX], (
+        "the attachment's marker was cleared although no row names the file, "
+        "so nothing will ever collect it: %r" % (_markers(logdir),))
+    assert blobs[0] not in auto_logs._MARKERS_IN_FLIGHT, (
+        "the blob is still owned by a request that is over, so the sweep "
+        "skips it for the life of the process")
+
+
+def _partial_write_open(real_open):
+    """An `open` whose blob handle takes eight bytes and then refuses.
+
+    The failure the cleanup arm exists for: `open()` returned, some of the
+    gzip stream is on the volume, and the write did not finish.
+    """
+    def opener(*a, **kw):
+        if len(a) > 1 and "w" in str(a[1]) and str(a[0]).endswith(".log.gz"):
+            fh = real_open(*a, **kw)
+
+            class _Partial:
+                def __enter__(self_inner):
+                    return self_inner
+
+                def __exit__(self_inner, *e):
+                    fh.close()
+                    return False
+
+                def write(self_inner, data):
+                    fh.write(data[:8])
+                    fh.flush()
+                    raise OSError("no space left on device")
+
+            return _Partial()
+        return real_open(*a, **kw)
+    return opener
+
+
+def test_a_flush_that_refuses_after_the_unlink_keeps_the_attachments_reference(
+        logdir, monkeypatch, capsys):
+    """L5: `FileNotFoundError` FROM THE FLUSH IS NOT `FileNotFoundError` FROM
+    THE UNLINK.
+
+    Both statements used to sit under one `except FileNotFoundError`, which
+    reads the first as "no file was created". `FileNotFoundError` is an
+    `OSError`, so a directory flush raising it AFTER a successful unlink --
+    the subtree replaced under a recovering mount, the container losing it --
+    landed in that arm and committed `log_bytes = 0`: the claim that nothing
+    is on the volume, made over a removal the filesystem never promised and a
+    recovery can undo.
+
+    Read separately the two say opposite things. The unlink's own
+    FileNotFoundError means the file never existed and the reference may
+    drop; a flush failure of ANY kind means the removal cannot be proved and
+    the reference STAYS (#430/#276).
+    """
+    import builtins
+    real_open = builtins.open
+    calls = []
+
+    def flush_vanishes(directory):
+        calls.append(str(directory))
+        if len(calls) > 1:          # the first is the marker's own stamp
+            raise FileNotFoundError(str(directory))
+
+    monkeypatch.setattr(main, "_is_admin", _no_admin)
+    monkeypatch.setattr(main, "_mark_mod_seen", _noop_mark)
+    monkeypatch.setattr(auto_logs, "_fsync_dir", flush_vanishes)
+    monkeypatch.setattr(builtins, "open", _partial_write_open(real_open))
+    db = _ReportSession({"FROM bug_reports": [[{"count": 0}]]})
+    req = schemas.BugReportRequest(steam_id=STEAM, description="it broke",
+                                   log_text="a log worth keeping")
+    capsys.readouterr()
+    out = _run(main.submit_bug_report(req, _request(), db))
+    printed = capsys.readouterr().out
+    monkeypatch.setattr(builtins, "open", real_open)
+    row = db.added[0]
+
+    assert out["log_persisted"] is False
+    assert row.log_filename is not None, (
+        "a FileNotFoundError from the DIRECTORY FLUSH was read as `no file "
+        "was created`, so the row disclaims a removal nothing promised")
+    assert row.log_bytes is None, (
+        "log_bytes = %r claims the volume is clean over a removal that could "
+        "not be proved" % (row.log_bytes,))
+    assert "would NOT flush" in printed, printed
+
+    # CONTROL: the same arm with a flush that SUCCEEDS. The reference drops
+    # and log_bytes is 0, which is the reading the case above must not give
+    # -- without this, a handler that never drops a reference at all would
+    # satisfy every assertion so far.
+    monkeypatch.setattr(auto_logs, "_fsync_dir", lambda d: None)
+    monkeypatch.setattr(builtins, "open", _partial_write_open(real_open))
+    db2 = _ReportSession({"FROM bug_reports": [[{"count": 0}]]})
+    _run(main.submit_bug_report(req, _request(), db2))
+    monkeypatch.setattr(builtins, "open", real_open)
+    row2 = db2.added[0]
+    assert row2.log_filename is None and row2.log_bytes == 0, (
+        "the control did not drop the reference, so the case above is not "
+        "about the flush: filename=%r bytes=%r"
+        % (row2.log_filename, row2.log_bytes))
+
+    # AND THE MUTANT THAT COLLAPSES THE TWO ARMS REDS. The `else:` is what
+    # separates them; folding the flush back under the unlink's own `try`
+    # puts its FileNotFoundError into the "no file was created" arm again.
+    src = inspect.getsource(main.submit_bug_report)
+    assert src.count("                except FileNotFoundError:\n") == 1, (
+        "the unlink's FileNotFoundError arm is not where this case thinks "
+        "it is")
+    assert "                except OSError as fx:\n" in src, (
+        "the flush no longer has an except arm of its own, so a flush that "
+        "refuses is being read as an unlink that found nothing")
+
+
+def _worker_wait_findings(doc):
+    """Which of the worker-wait facts the prose does NOT state.
+
+    A list rather than a bare assertion, so the case below can run it over a
+    PLANTED regression as well as over the live docstring: a prose control
+    that has never been shown to fail is decoration (#391).
+    """
+    # NORMALISED FIRST. Every phrase below is a sentence fragment and the
+    # prose wraps at seventy-odd columns, so a raw substring test would be
+    # asking where the line breaks fall rather than what the prose says --
+    # a check that fails on a reflow and passes on a deletion.
+    flat = " ".join(doc.split())
+    missing = []
+    if not ("wait_for" in flat and "to_thread" in flat
+            and "CANNOT CANCEL" in flat):
+        missing.append("wait_for cannot cancel to_thread")
+    if not ("_BLOB_WRITE_STALL_S" in flat and "refuses LATER" in flat):
+        missing.append("the stall ceiling refuses later arrivals only")
+    if "does not depend on a time bound" not in flat:
+        missing.append("the safety property needs no time bound")
+    if "bounds this wait" in flat or "bounds the wait" in flat:
+        missing.append("the prose claims a bound on the wait")
+    return missing
+
+
+def test_the_worker_wait_prose_states_its_facts_and_the_code_agrees():
+    """R4-L7, NAMED AT THE PROSE IT IS ABOUT.
+
+    Round 5 recorded this closure against a case that reads the retention
+    loop's signals, which is a different docstring; the prose in question is
+    `_release_marked_blob_off_loop`'s, where one sentence claiming a bound
+    that does not exist was replaced by three separate facts. Each is checked
+    against the prose AND against the code beneath it, because a docstring
+    that agrees with nothing is the claim #351 is about.
+    """
+    doc = inspect.getdoc(auto_logs._release_marked_blob_off_loop) or ""
+    assert _worker_wait_findings(doc) == [], (
+        "the worker-wait prose no longer states: %r"
+        % (_worker_wait_findings(doc),))
+
+    # THE REDDENING CONTROL: the sentence this prose replaced, planted back.
+    planted = " ".join(doc.split()).replace(
+        "does not depend on a time bound at all",
+        "is bounded by the stall ceiling, which bounds this wait")
+    assert planted != " ".join(doc.split()), (
+        "the planted regression changed nothing")
+    assert len(_worker_wait_findings(planted)) == 2, (
+        "the check does not see a docstring that claims the bound it exists "
+        "to deny, so it cannot fail: %r" % (_worker_wait_findings(planted),))
+
+    # AND THE CODE AGREES WITH EACH FACT. The function hops to a thread and
+    # does nothing else: no deadline of its own, and no reading of the stall
+    # ceiling, either of which would make one of the three facts a statement
+    # about somewhere else.
+    body = inspect.getsource(auto_logs._release_marked_blob_off_loop
+                             ).split('"""')[-1]
+    assert "to_thread(_release_marked_blob" in body, (
+        "the function no longer performs the cleanup on a worker thread, so "
+        "the prose is about a mechanism that is gone: %s" % body)
+    assert "wait_for" not in body, (
+        "the function wraps its own thread hop in a deadline, which its "
+        "prose says cannot cancel the thread: %s" % body)
+    assert "_BLOB_WRITE_STALL_S" not in body, (
+        "the stall ceiling is read here, so the prose's claim that it bounds "
+        "only LATER arrivals is about a different site: %s" % body)
+    # THE SAFETY PROPERTY THE PROSE RESTS ON, at the function that holds it.
+    inner = inspect.getsource(auto_logs._release_marked_blob)
+    assert "with own.lock:" in inner and "own.discarded = True" in inner, (
+        "the lock and the discarded flag are what make the wait's length a "
+        "cost rather than a state, and the cleanup no longer takes them")
+
+
 def _report_mutant(anchor, replacement):
     """`main.submit_bug_report`'s body with one edit, compiled WITHOUT its
     route decorator -- executing it would register a second copy of the route
@@ -5968,12 +7657,19 @@ def test_a_failed_player_attachment_write_leaves_nothing_on_the_volume(
     creating the file therefore left a prefix of the gzip stream on the volume
     under a name no row carries.
 
-    Nothing in this tree collects that. A player-filed attachment never
-    receives an orphan-candidate marker, which is what the automatic path's
+    Nothing in this tree collected that. A player-filed attachment used to
+    receive no orphan-candidate marker, which is what the automatic path's
     sweep takes as its population, and `prune_auto_logs` walks kind='auto'
     ROWS. So the file was permanent, on the volume this route is most
     protective of -- and the row still has to say a log was attached and lost,
     which is the other half this arm exists for.
+
+    SINCE ROUND 6 THE MARKER IS THE FLOOR UNDER THIS ARM and this arm is
+    still the plan: the marker makes a prefix DISCOVERABLE after an hour, the
+    arm removes it now and decides what the row claims. The marker assertion
+    below is therefore no longer "none was given" but "the one that was given
+    is cleared once the row has committed" -- if it survived, every sweep for
+    the next six hours would re-ask the database about a file that is gone.
     """
     import builtins
     real_open = builtins.open
@@ -6025,8 +7721,9 @@ def test_a_failed_player_attachment_write_leaves_nothing_on_the_volume(
         "carries no marker, so no sweep in this tree would ever name it: %r"
         % (_blobs(logdir),))
     assert _markers(logdir) == [], (
-        "a player-filed attachment was given a marker: %r"
-        % (_markers(logdir),))
+        "the attachment's marker outlived the committed row, so every sweep "
+        "for the next hours re-asks the database about a file that is gone: "
+        "%r" % (_markers(logdir),))
     assert "the partial file was removed" in printed, printed
 
     # MUTANT at the unlink's own site: dropped, which is the tree before this
@@ -6128,11 +7825,24 @@ def test_a_player_attachment_whose_partial_cannot_be_removed_keeps_the_reference
 
     # MUTANT at the decision's own site: the reference is dropped again, which
     # is the tree before this fix.
+    #
+    # THE ANCHOR CARRIES THE LINE UNDER IT. Since round 6 the flush arm has
+    # its own `keep_reference = True` one level deeper, and this one's twenty
+    # spaces are a SUBSTRING of that one's twenty-four -- so the bare
+    # assignment matches two sites and `_report_mutant` refuses it. The
+    # message line that follows is what makes it the unlink's arm and not the
+    # flush's (#432/#279).
     for stale in _blobs(logdir):
         real_unlink(str(logdir / stale))
     monkeypatch.setattr(builtins, "open", partial_then_fail)
-    site = "                    keep_reference = True\n"
-    mutant = _report_mutant(site, "                    keep_reference = False\n")
+    site = ("                    keep_reference = True\n"
+            "                    removed = (f\"the partial file "
+            "{attempted_path.name} could \"\n")
+    mutant = _report_mutant(
+        site,
+        "                    keep_reference = False\n"
+        "                    removed = (f\"the partial file "
+        "{attempted_path.name} could \"\n")
     db2 = _ReportSession({"FROM bug_reports": [[{"count": 0}]]})
     _run(mutant(req, _request(), db2))
     monkeypatch.setattr(builtins, "open", real_open)
@@ -6149,7 +7859,11 @@ def test_a_player_attachment_whose_partial_cannot_be_removed_keeps_the_reference
     for stale in _blobs(logdir):
         real_unlink(str(logdir / stale))
     monkeypatch.setattr(builtins, "open", partial_then_fail)
-    twin = _report_mutant(site, "                    keep_reference = bool(1)\n")
+    twin = _report_mutant(
+        site,
+        "                    keep_reference = bool(1)\n"
+        "                    removed = (f\"the partial file "
+        "{attempted_path.name} could \"\n")
     db3 = _ReportSession({"FROM bug_reports": [[{"count": 0}]]})
     _run(twin(req, _request(), db3))
     monkeypatch.setattr(builtins, "open", real_open)
@@ -6213,28 +7927,33 @@ def test_the_player_attachment_cleanup_makes_its_removal_durable(
 
     capsys.readouterr()
     _file()
-    assert flushed == [str(logdir)], (
+    # TWO FLUSHES SINCE ROUND 6, AND THEY ARE DIFFERENT BARRIERS. The first
+    # is the MARKER's directory entry, taken by `_stamp_marker` before the
+    # attachment's first byte (L4); the second is the cleanup's. Counting one
+    # would now pass with either of them missing, which is why the case reads
+    # the whole list.
+    assert flushed == [str(logdir), str(logdir)], (
         "the partial file's removal was never made durable before the row "
-        "committed: flushes=%r" % (flushed,))
+        "committed, or the marker's entry was not: flushes=%r" % (flushed,))
     assert "removed durably" in capsys.readouterr().out
 
     # MUTANT at the barrier's own site: dropped. Nothing flushes, so a crash
     # after the commit can recover the file the row says is gone.
     flushed.clear()
-    site = ("                    _auto_logs._fsync_dir("
-            "_pathlib.Path(attempted_path).parent)\n")
-    _file(_report_mutant(site, "                    pass\n"))
-    assert flushed == [], (
-        "the mutant still flushed, so the live assertion above proves nothing:"
-        " %r" % (flushed,))
+    site = ("                        _auto_logs._fsync_dir(\n"
+            "                            _pathlib.Path(attempted_path).parent)\n")
+    _file(_report_mutant(site, "                        pass\n"))
+    assert flushed == [str(logdir)], (
+        "the mutant still took the cleanup's flush, so the live assertion "
+        "above proves nothing: %r" % (flushed,))
 
     # INERT TWIN at the SAME site: the same flush, the path spelled out.
     flushed.clear()
     _file(_report_mutant(
         site,
-        "                    _auto_logs._fsync_dir(\n"
-        "                        _pathlib.Path(str(attempted_path)).parent)\n"))
-    assert flushed == [str(logdir)], (
+        "                        _auto_logs._fsync_dir(\n"
+        "                            _pathlib.Path(str(attempted_path)).parent)\n"))
+    assert flushed == [str(logdir), str(logdir)], (
         "the inert twin changed the outcome, so the mutant above is reacting "
         "to the site being edited rather than to the barrier: %r" % (flushed,))
 
@@ -6262,6 +7981,13 @@ def test_a_short_write_still_stamps_the_whole_marker(logdir):
     try:
         auto_logs._stamp_marker(logdir / name)
         whole = marker.read_bytes()
+        # THE LIVE PROPERTY IS JUDGED FIRST, before either compiled copy is
+        # built. Each copy is built from the source's own anchor, so a tree
+        # whose write loop is gone used to red on the missing anchor -- a
+        # fail-closed red that says nothing about the marker it wrote.
+        assert whole == name.encode("utf-8") + b"\n", (
+            "the marker a one-byte-per-call volume produced is not the whole "
+            "filename plus a newline: %r" % (whole,))
 
         # MUTANT at the loop's own site: one unchecked call, which is the
         # tree before this fix. The marker is one byte long and durable.
@@ -6287,9 +8013,6 @@ def test_a_short_write_still_stamps_the_whole_marker(logdir):
         auto_logs.os = saved
         auto_logs._MARKERS_IN_FLIGHT.discard(name)
 
-    assert whole == name.encode("utf-8") + b"\n", (
-        "the marker a one-byte-per-call volume produced is not the whole "
-        "filename plus a newline: %r" % (whole,))
     assert short == name.encode("utf-8")[:1], (
         "the mutant did not truncate the marker, so the live assertion above "
         "proves nothing: %r" % (short,))
@@ -6452,14 +8175,21 @@ def test_350_asserts_the_whole_shape_of_an_adopted_sequence():
     two draws spend -1 and -2, and then every real upload fails at `nextval`
     and answers 503 with nothing in the log naming this file.
 
-    AND WHERE IT SITS IS PART OF THE FACT. The round-5 draft put these six
+    IN RANGE IS NOT THE CONFIGURED START, which is round 6's addition. A
+    sequence that is exact in every other attribute and starts at
+    `MINVALUE + 1` is in range, survives `OWNED BY`, and spends the only two
+    values it holds on the post-check's two draws: it is exhausted the moment
+    this file reports success. So the start is asked twice: once for the
+    range, once by identity.
+
+    AND WHERE IT SITS IS PART OF THE FACT. The round-5 draft put these
     refusals in the post-check, and the rehearsal showed `ALTER SEQUENCE ...
     OWNED BY` re-validates the whole sequence: a catalogue row whose START is
     outside its own range was refused there, by PostgreSQL, naming neither the
-    file nor the repair, so that arm could not fire at all. The other five
-    were reached only after this file had added a CHECK constraint over a
+    file nor the repair, so that arm could not fire at all. The others were
+    reached only after this file had added a CHECK constraint over a
     sequence it was about to refuse. So the block is asserted to come BEFORE
-    the OWNED BY, which is what makes all six refusals this file's own.
+    the OWNED BY, which is what makes every refusal this file's own.
 
     The rehearsal drives one fixture per attribute against a real server;
     this case holds the file to the shape that makes that possible.
@@ -6493,13 +8223,26 @@ def test_350_asserts_the_whole_shape_of_an_adopted_sequence():
     # ONE REFUSAL PER ATTRIBUTE, each naming it. A single "the sequence is
     # wrong" is a refusal nobody can act on (#430).
     for phrase in ("data type", "increment", "MAXVALUE", "MINVALUE",
-                   "CYCLES", "outside its own range"):
+                   "CYCLES", "outside its own range", "starting at %, not %"):
         assert phrase in check, (
             "no refusal in the shape block names %r, so that attribute is "
             "read and not judged" % (phrase,))
-    assert check.count("RAISE EXCEPTION") == 7, (
-        "the shape block holds %d refusal(s): one per attribute plus the "
-        "missing-sequence arm" % check.count("RAISE EXCEPTION"))
+    assert check.count("RAISE EXCEPTION") == 8, (
+        "the shape block holds %d refusal(s): one per attribute, the START by "
+        "IDENTITY as well as by range, plus the missing-sequence arm"
+        % check.count("RAISE EXCEPTION"))
+
+    # THE START IS ASKED TWICE AND THE ORDER IS THE FACT. `IN RANGE` and `IS
+    # THE CONFIGURED START` differ over every value strictly inside the range,
+    # and the range test is the one whose message can name the range -- so it
+    # has to come first, or a start outside the range would be refused by the
+    # identity arm and the range refusal could never fire (#342).
+    assert check.index("outside its own range") < check.index("starting at %, not %"), (
+        "the identity test for the start runs before the range test, so the "
+        "range refusal is unreachable")
+    assert "c_auto_start     CONSTANT bigint := -1;" in check, (
+        "the start is judged against a literal rather than the constant that "
+        "restates the DDL")
 
     # AND THE CONFIGURED VALUES ARE THE ONES THE DDL INSTALLS. A check written
     # against a different literal is a check that refuses this file's own
