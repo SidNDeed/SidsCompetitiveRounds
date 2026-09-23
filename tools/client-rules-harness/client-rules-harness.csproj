@@ -38,6 +38,15 @@
                         comparator is the shape a source test can only ever
                         describe — so both are driven from here.
 
+      TitleLadderRules.cs   the animal title ladders in the Shop's Titles
+                        section: which ladders render (each exactly once),
+                        which listing rows they replace, which tier is held,
+                        and the Buy / Upgrade / Maxed button with every
+                        disabled reason. Its cases live in the harness-only
+                        TitleLadderRulesSelfTest.cs (the other half of the
+                        partial class), so the shipped DLL carries no ladder
+                        fixture.
+
     net10.0 because that is the runtime installed on the build seat, matching
     the h2h harness; RollForward keeps the next SDK rotation from turning this
     into a green-looking nothing.
@@ -64,6 +73,8 @@
     <Compile Include="../../plugin/FfaReportRules.cs" />
     <Compile Include="../../plugin/RosterCensusRules.cs" />
     <Compile Include="../../plugin/BinderSortRules.cs" />
+    <Compile Include="../../plugin/TitleLadderRules.cs" />
+    <Compile Include="TitleLadderRulesSelfTest.cs" />
   </ItemGroup>
 
 </Project>

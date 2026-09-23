@@ -169,6 +169,77 @@ def test_the_binder_sort_guarantees_each_have_a_case(harness_run, name):
         "the case printed no measurement: " + line)
 
 
+def test_the_ladder_shop_suite_ran_every_case_and_none_failed(harness_run):
+    """Item 12 follow-up: the animal title ladders as entries of the Shop's
+    Titles section. TitleLadderRules decides which lines render (each once),
+    which listing rows they replace, which tier is held and what the Buy /
+    Upgrade / Maxed button says and why; its cases live in the harness-only
+    TitleLadderRulesSelfTest.cs."""
+    suites = _suites(harness_run)
+    assert "laddershop" in suites, "the TitleLadderRules suite did not report"
+    run, fail, verdict = suites["laddershop"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[laddershop\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+    # The suite ran 38 cases on the commit that added it; the floor is that
+    # count, not one far below it (#342). Raise it when cases are added.
+    assert run >= 38, "the TitleLadderRules suite shrank to %d cases" % run
+
+
+@pytest.mark.parametrize("name", [
+    # the section plan: every ladder exactly once, and what it folds
+    "eight lines render eight entries, each once and in answer order",
+    "every rung of every rendered line is folded",
+    "a title outside every ladder is not folded",
+    "a repeated line id renders once",
+    "with no answer in hand nothing renders and nothing is folded",
+    "a line past the pool renders nowhere and keeps its listing rows",
+    "a pool the size of the answer renders and folds every line (control)",
+    # Buy
+    "nothing held, entry listed and affordable: Buy, enabled",
+    "one gold short: Buy, disabled, not enough gold (control)",
+    "a disabled button carries no target sku",
+    "the entry is not in the listing: Buy, disabled, not on sale",
+    "the listing has not answered: Buy, disabled, shop loading",
+    "the stats have not answered: Buy, disabled, shop loading",
+    "no account: Buy, disabled, no account",
+    "the listing's price decides the funds check, not the answer's",
+    "the same balance buys at the answer's price when the listing agrees (control)",
+    # Upgrade
+    "entry held, tier 2 granted by play: Upgrade, disabled, earned by play",
+    "funds and a listing never enable a tier the answer does not sell",
+    "seven series in: three to go",
+    "past the threshold before the grant lands: zero to go, never negative",
+    "a priced and listed next tier enables Upgrade (control)",
+    # Maxed
+    "top tier held: Maxed, disabled",
+    "Maxed does not depend on the account, the listing or the stats",
+    "the same line without its top rung is Upgrade toward tier 6 (control)",
+    # the held tier
+    "held is the highest OWNED tier, not the tier the games imply",
+    "an account that owns nothing holds no tier and reads Buy",
+    "owning only a tier-3 rung reads Upgrade toward tier 4",
+    "either of two tier-4 rungs holds tier 4",
+    "the worn rung names the held tier",
+    "with none worn, the first owned rung of the tier names it (control)",
+    "nothing held names no rung",
+    # the popup's tier rows and bar
+    "tier rows read Owned, Current, Next, then Locked",
+    "not started: the entry rung is Next and every other rung Locked",
+    "a line held at the top has one Current row and no Next row (control)",
+    "80 series held at tier 4 fills 5 of 75",
+    "not started draws an empty bar",
+    "the top draws a full bar",
+    "a line with no rungs: Buy, disabled, no rungs",
+])
+def test_the_ladder_shop_guarantees_each_have_a_case(harness_run, name):
+    line = _named_case(harness_run, name, "laddershop")
+    assert line.startswith("[laddershop] PASS"), line
+    assert " | got=" in line and not line.rstrip().endswith("| got="), (
+        "the case printed no measurement: " + line)
+
+
 def test_the_binder_order_is_total_under_every_mode_the_button_offers(harness_run):
     """The tail that makes the order total is reached from every branch, so a
     mode added later cannot quietly forget it.
@@ -517,6 +588,12 @@ def test_the_harness_compiles_only_the_rule_files():
     assert "Main.cs" in included
     for rule_file in ("plugin/LogScrub.cs", "plugin/TopStripBand.cs",
                       "plugin/FfaReportRules.cs", "plugin/RosterCensusRules.cs",
-                      "plugin/BinderSortRules.cs"):
+                      "plugin/BinderSortRules.cs", "plugin/TitleLadderRules.cs"):
         assert any(p.endswith(rule_file) for p in included), (
             "%s is not compiled into the harness" % rule_file)
+    # The ladder rules' cases are the harness's own half of the partial
+    # class: compiled here, and never shipped in the plugin.
+    assert "TitleLadderRulesSelfTest.cs" in included
+    plugin_proj = (REPO / "plugin" / "CompetitiveRounds.csproj").read_text(encoding="utf-8")
+    assert "TitleLadderRulesSelfTest" not in plugin_proj
+    assert not (REPO / "plugin" / "TitleLadderRulesSelfTest.cs").exists()
