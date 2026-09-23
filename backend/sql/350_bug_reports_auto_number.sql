@@ -252,6 +252,9 @@ CREATE SEQUENCE IF NOT EXISTS bug_reports_auto_number_seq
 -- would hand -1 out twice into a UNIQUE index, an `integer` sequence that
 -- stops four billion rows early, and a start outside its own range all behave
 -- the same way: the migration reports success and the feature cannot write.
+-- (Every attribute here is CONFIGURATION. Where the sequence currently IS --
+-- a RESTART or a setval moves that without touching any of them -- is block
+-- 1c's question, asked under the lock the ALTER SEQUENCE below takes.)
 --
 -- AND A START INSIDE THE RANGE IS NOT THE SAME FACT AS THE CONFIGURED START.
 -- `IN RANGE` was the whole of the start question here until round 6, and it
@@ -333,15 +336,145 @@ BEGIN
     -- about. Kept BELOW the range test so that test keeps the case it was
     -- written for and this one is reached only by a start that is usable and
     -- still not ours (#342).
+    --
+    -- SINCE ROUND 7 THE EXPENSIVE HALF HAS A SECOND GATE: a fresh sequence's
+    -- next value IS its start, so block 1c refuses a start near MINVALUE again
+    -- by POSITION. This line still decides the rest -- a start of -2, say,
+    -- which 1c's floor admits -- because a sequence configured to begin
+    -- anywhere but -1 is not the one this file configures, and a RESTART with
+    -- no value returns it to that start rather than to -1.
     IF v_start IS DISTINCT FROM c_auto_start THEN
-        RAISE EXCEPTION '350: bug_reports_auto_number_seq exists in schema % starting at %, not %; it is inside its own range, so it draws, but a sequence configured to begin somewhere else was set up by something other than this file and its remaining run is whatever that left -- a restart, or the run from % onward, puts automatic numbering a short distance from exhaustion and every upload past it answers 503', current_schema(), v_start, c_auto_start, v_start;
+        RAISE EXCEPTION '350: bug_reports_auto_number_seq exists in schema % starting at %, not %; it is inside its own range, so it draws, but a sequence configured to begin somewhere else was set up by something other than this file, and a RESTART with no value returns it to %, not to %. Near MINVALUE that start is also a short distance from exhaustion; anywhere else it is still not the sequence this file configures', current_schema(), v_start, c_auto_start, v_start, c_auto_start;
     END IF;
+
+    -- WHAT THIS BLOCK JUDGED, handed to block 1c. Everything above is about
+    -- how the sequence is CONFIGURED; where it currently IS is 1c's question,
+    -- asked under the lock the ALTER SEQUENCE below takes. 1c re-reads this
+    -- catalogue row under that lock and refuses unless it is this reading, so
+    -- the shape adopted and the position adopted are one reading of one
+    -- sequence. Transaction-local: nothing of it outlives COMMIT.
+    PERFORM set_config('m350.shape_1b',
+                       format('%s/%s/%s/%s/%s/%s', v_typid, v_start,
+                              v_increment, v_max, v_min, v_cycle),
+                       true);
 END $m350s$;
 
 -- Owned by the column, so DROP TABLE cleans it up -- the same relationship
 -- 086 set up for the human sequence. A column may own more than one sequence;
 -- this adds a second pg_depend edge and changes nothing about the first.
+--
+-- AND IT TAKES THE LOCK THE ADOPTION IS DECIDED UNDER. ALTER SEQUENCE locks
+-- the sequence in ShareRowExclusiveLock and holds it to COMMIT; `nextval`
+-- takes RowExclusiveLock, which conflicts with it. So from this statement to
+-- the end of the file no other session can draw from the sequence, and its
+-- position moves only by the post-check's own two draws. Block 1c reads the
+-- position under this lock and refuses unless it holds it.
 ALTER SEQUENCE bug_reports_auto_number_seq OWNED BY bug_reports.bug_number;
+
+-- ── 1c. the position this file is willing to adopt ──────────────────────────
+--
+-- 1b judges what the sequence is CONFIGURED to do and nothing in it reads
+-- where the sequence currently IS. `ALTER SEQUENCE ... RESTART` and `setval()`
+-- move the position without touching one attribute 1b asserts, so an exact
+-- `START -1` sequence restarted at MINVALUE + 1 passes every line of 1b, the
+-- post-check spends its last two values, the file commits, and the first real
+-- upload answers 503. So the position is read here -- `last_value` and
+-- `is_called`, from the sequence relation itself -- and judged BEFORE anything
+-- draws from it.
+--
+-- UNDER THE LOCK, AND PROVEN TO BE: the block refuses unless pg_locks shows
+-- this backend holding a granted mode on the sequence that blocks nextval.
+-- The shape is re-read under the same lock and must equal 1b's reading.
+--
+-- THE BOUND: the next value must be at or above -4611686018427387904 (-2^62),
+-- so that at least 2^62 values -- half the configured range -- remain.
+--   * Function: 2^62 values is the same order of guarantee a fresh sequence
+--     gives, which is the property that makes exhaustion something nobody has
+--     to think about (the MINVALUE assertion in 1b). A smaller floor is a
+--     number somebody would have to watch.
+--   * Provenance: at the published cap of 12 uploads per account per day, a
+--     million accounts all at the cap spend about 4.4e9 numbers a year, so
+--     reaching the midpoint BY USE takes about a billion years. A position
+--     past it was put there by a restart or a setval -- the same question
+--     1b's identity test asks of START, and refused for the same reason.
+--
+-- AND A POSITION THE WRITER CAN CONTINUE FROM. bug_number is UNIQUE (086), so
+-- a position whose next values are already held by rows -- a restart back to
+-- -1 over rows already numbered -1, -2, ... -- hands the writer a unique
+-- violation for each of them. That is refused by name as well.
+DO $m350n$
+DECLARE
+    v_typid     oid;
+    v_start     bigint;
+    v_increment bigint;
+    v_max       bigint;
+    v_min       bigint;
+    v_cycle     boolean;
+    v_shape     text;
+    v_last      bigint;
+    v_called    boolean;
+    v_next      bigint;
+    v_held      bigint;
+    -- THE ADOPTION FLOOR, -2^62. The block comment above says why this value.
+    c_floor CONSTANT bigint := -4611686018427387904;
+    -- SCOPED LIKE THE GUARDS, for the same reason (R3-M1).
+    v_autoseq CONSTANT regclass :=
+        to_regclass(quote_ident(current_schema()) || '.bug_reports_auto_number_seq');
+BEGIN
+    IF v_autoseq IS NULL THEN
+        RAISE EXCEPTION '350: schema % does not carry bug_reports_auto_number_seq, so there is no position to read', current_schema();
+    END IF;
+
+    -- A mode that conflicts with nextval's RowExclusiveLock, held by THIS
+    -- backend and granted. If an edit ever moves this block above the ALTER
+    -- SEQUENCE that takes it, this is what refuses.
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_locks
+         WHERE locktype = 'relation'
+           AND relation = v_autoseq::oid
+           AND pid = pg_backend_pid()
+           AND granted
+           AND mode IN ('ShareLock', 'ShareRowExclusiveLock',
+                        'ExclusiveLock', 'AccessExclusiveLock')
+    ) THEN
+        RAISE EXCEPTION '350: this transaction holds no lock on bug_reports_auto_number_seq in schema % that blocks nextval, so the position read below could move before COMMIT; ALTER SEQUENCE ... OWNED BY takes that lock and must run before this block', current_schema();
+    END IF;
+
+    SELECT seqtypid, seqstart, seqincrement, seqmax, seqmin, seqcycle
+      INTO v_typid, v_start, v_increment, v_max, v_min, v_cycle
+      FROM pg_sequence
+     WHERE seqrelid = v_autoseq;
+    v_shape := format('%s/%s/%s/%s/%s/%s', v_typid, v_start, v_increment,
+                      v_max, v_min, v_cycle);
+    IF v_shape IS DISTINCT FROM current_setting('m350.shape_1b', true) THEN
+        RAISE EXCEPTION '350: bug_reports_auto_number_seq in schema % reads as % under the lock, but block 1b judged %; the sequence this file would adopt is not the one it checked', current_schema(), v_shape, coalesce(current_setting('m350.shape_1b', true), '(no reading)');
+    END IF;
+
+    -- `is_called` false: the next draw returns `last_value` itself (a fresh
+    -- sequence, or one just restarted). True: it returns `last_value` plus
+    -- the increment. At MINVALUE with is_called true that is one below the
+    -- range -- still a bigint, because MINVALUE is one above the type floor.
+    EXECUTE format('SELECT last_value, is_called FROM %I.bug_reports_auto_number_seq',
+                   current_schema())
+       INTO v_last, v_called;
+    v_next := CASE WHEN v_called THEN v_last + v_increment ELSE v_last END;
+
+    IF v_next < c_floor THEN
+        RAISE EXCEPTION '350: bug_reports_auto_number_seq in schema % would hand out % next (last_value %, is_called %), below the adoption floor %: fewer than 2^62 of its % .. % range remain, and uploads cannot have spent that many, so a restart or a setval put it there and every upload past its end answers 503. Move it with ALTER SEQUENCE bug_reports_auto_number_seq RESTART WITH a value at or above the floor and below every negative bug_number in use, then apply this file again', current_schema(), v_next, v_last, v_called, c_floor, v_min, v_max;
+    END IF;
+
+    EXECUTE format('SELECT max(bug_number) FROM %I.bug_reports WHERE bug_number <= $1',
+                   current_schema())
+       INTO v_held
+      USING v_next;
+    IF v_held IS NOT NULL THEN
+        RAISE EXCEPTION '350: bug_reports_auto_number_seq in schema % would hand out % next, but bug_reports already holds bug number % at or below it; bug_number is UNIQUE, so the writer would draw into a number that is taken and that upload would fail. Move it with ALTER SEQUENCE bug_reports_auto_number_seq RESTART WITH a value below every negative bug_number in use, then apply this file again', current_schema(), v_next, v_held;
+    END IF;
+
+    -- Handed to the post-check, whose FIRST DRAW must return exactly this:
+    -- the reading is bound to the thing it describes (#732).
+    PERFORM set_config('m350.next_1c', v_next::text, true);
+END $m350n$;
 
 -- ── 2. the one-directional CHECK ─────────────────────────────────────────────
 --
@@ -466,6 +599,12 @@ BEGIN
     IF NOT (v_a < 0 AND v_b < v_a) THEN
         RAISE EXCEPTION '350: bug_reports_auto_number_seq yielded % then %, which is not a descending negative run', v_a, v_b;
     END IF;
+    -- AND THE FIRST DRAW IS THE POSITION 1c ADOPTED. 1c read it under the
+    -- lock this transaction still holds; any other first value means the
+    -- reading judged something other than what the sequence continues from.
+    IF v_a IS DISTINCT FROM current_setting('m350.next_1c', true)::bigint THEN
+        RAISE EXCEPTION '350: the first draw from bug_reports_auto_number_seq returned % but block 1c read the next value as %; the position this file judged is not the one the sequence continues from', v_a, coalesce(current_setting('m350.next_1c', true), '(no reading)');
+    END IF;
 
     -- FROM THE TARGET RELATION, named explicitly. `LIKE bug_reports` takes
     -- whichever one the search_path resolves, and the probe below would then
@@ -526,8 +665,8 @@ BEGIN
     -- true -- but a line an operator reads as a measurement has to be one
     -- (#732), and a variable read into and never used is where the next
     -- untrue one starts.
-    RAISE NOTICE '350: in schema %, bug_reports_auto_number_seq is %, increment %, range % .. %, cycle %, starting at %, and descends (% then %); the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at %; % automatic row(s) present, all negative by construction',
-        current_schema(), format_type(v_typid, NULL), v_increment, v_min, v_max, v_cycle, v_start, v_a, v_b, v_human_after, v_autos;
+    RAISE NOTICE '350: in schema %, bug_reports_auto_number_seq is %, increment %, range % .. %, cycle %, starting at %, adopted at next value % (read under the lock by block 1c), and descends (% then %); the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at %; % automatic row(s) present, all negative by construction',
+        current_schema(), format_type(v_typid, NULL), v_increment, v_min, v_max, v_cycle, v_start, current_setting('m350.next_1c', true), v_a, v_b, v_human_after, v_autos;
 END $m350p$;
 
 COMMIT;
