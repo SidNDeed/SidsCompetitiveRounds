@@ -3632,6 +3632,12 @@ def test_r4lens_f3_the_outcome_quorum_is_dominated_by_the_election_quorum():
             return False
         if "cr_dc4" not in head:        # cr_dc3 is spent; the next election key is 4
             return False
+        # L3 (round 9): the domination rests on today's single merge, and the
+        # comment names the three changes that would end it.  Each one is its
+        # own requirement, so deleting any one of them reddens this.
+        for clause in _R9_DOMINATION_ENDERS:
+            if clause not in head:
+                return False
         b = s[s.index("internal static class DcReportSync"):]
         if "internal static void ArmFallback(string seriesId" not in b:
             return False
@@ -3681,6 +3687,16 @@ def test_r4lens_f3_the_outcome_quorum_is_dominated_by_the_election_quorum():
     # NEGATIVE CONTROL: rewording the kept-anyway rationale leaves it true
     assert claim(_mutate(ra, "and not as belt-and-braces", "and not as belt and braces",
                          "R4-lens F3 negative control"))
+
+    # L3 (round 9): each domination-ending clause, deleted on its own, reddens
+    # the claim; rewording the sentence that joins them does not.
+    flat = _flat_comment(ra[:ra.index("internal static class DcReportSync")])
+    for clause in _R9_DOMINATION_ENDERS:
+        assert flat.count(clause) == 1, clause
+        assert not claim(_r9_drop_clause(ra, clause)), (
+            "the claim survives the deletion of: " + clause)
+    assert claim(_mutate(ra, "and on nothing stronger", "and on nothing firmer",
+                         "L3 twin: the joining sentence reworded"))
 
 
 def test_r4lens_f4_no_comment_certifies_a_deployed_cr_dcr_parser():
@@ -7939,6 +7955,28 @@ def _cs_span_at(spans, offset):
 
 def _cs_line(text, offset):
     return text.count(LF, 0, offset) + 1
+
+
+# ── L3 (B8): the three changes that would end the domination ───────────────
+#
+# The DcReportSync head comment says the outcome quorum is dominated by the
+# election quorum only while three things stay as they are, and names them.
+# `test_r4lens_f3_...` requires each as its own clause, so a reflow that drops
+# one reddens it rather than leaving a weaker comment standing.
+_R9_DOMINATION_ENDERS = (
+    "split the two writes",
+    "add a caller that arms outside the census arm",
+    "ship one key ahead of the other",
+)
+
+
+def _r9_drop_clause(src, clause):
+    """`src` with the first occurrence of `clause` deleted, wherever the
+    comment wraps it."""
+    pat = re.compile(r"\s+(?:///\s*)?".join(re.escape(w) for w in clause.split()))
+    m = pat.search(src)
+    assert m, "the clause is not in the source: " + clause
+    return src[:m.start()] + "(deleted)" + src[m.end():]
 
 
 # ── L4 (B10): the dead status value, rejected as a COMPLETE literal in code ─
