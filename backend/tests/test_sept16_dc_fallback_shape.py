@@ -1493,9 +1493,13 @@ ROLE_OF_CLEARING_CALLER = {
     "team_queue_poll": "the room-issue write in the queue poll",
 }
 # The two writers that end a deferral WITHOUT going through the helper: the
-# in-bound real-totals report, which overwrites the attribution, and the sweep
-# tick, which settles the row.
-WRITERS_NOT_THROUGH_THE_HELPER = 2
+# in-bound real-totals report, which settles the series on the real
+# attribution, and the sweep tick, which settles the row. NAMED rather than
+# counted, and each is required below to be a def in main.py that is NOT one
+# of the helper's callers -- so the number this check adds is bound to two
+# functions in the tree instead of being typed beside a comment (#342).
+WRITERS_NOT_THROUGH_THE_HELPER = ("team_series_report_dc",
+                                  "_team_dc_fallback_sweep_once")
 _COUNT_WORD = {2: "Two", 3: "Three", 4: "Four", 5: "Five", 6: "Six"}
 
 
@@ -1511,16 +1515,21 @@ def test_the_migration_enumerates_every_writer_that_ends_a_deferral():
 
     The COUNT WORD is derived here rather than typed: the helper's callers are
     read out of main.py, mapped to the roles the sentence names, and the total
-    is those roles plus the two writers that never touch the helper. A fifth
-    caller reddens this test instead of being quietly missing from the prose.
+    is those roles plus the two NAMED writers that never touch the helper,
+    each of which has to be a def in the file and not a caller. A fifth caller
+    reddens this test instead of being quietly missing from the prose, and a
+    named writer that is renamed or removed reddens it too.
     """
     callers = [n for n in functions_performing("_team_clear_dc_fallback_marker(")
                if n != "_team_clear_dc_fallback_marker"]
     assert set(callers) == set(ROLE_OF_CLEARING_CALLER), (
         callers, sorted(ROLE_OF_CLEARING_CALLER))
+    for name in WRITERS_NOT_THROUGH_THE_HELPER:
+        node_named(name)          # a def in main.py, or this raises by name
+        assert name not in callers, (name, callers)
     flat = _collapsed(_dc_claim_sources()["326_team_series_dc_fallback_at.sql"])
     roles = sorted({ROLE_OF_CLEARING_CALLER[c] for c in callers})
-    want = _COUNT_WORD[len(roles) + WRITERS_NOT_THROUGH_THE_HELPER]
+    want = _COUNT_WORD[len(roles) + len(WRITERS_NOT_THROUGH_THE_HELPER)]
     assert ("%s writers end it" % want) in flat, (want, callers, roles)
     for phrase in roles + ["a real-totals report inside the bound",
                            "a sweep tick after the bound"]:
