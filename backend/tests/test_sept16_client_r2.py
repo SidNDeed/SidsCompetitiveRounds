@@ -8153,9 +8153,51 @@ def test_r9_l4_the_dead_status_is_rejected_as_a_complete_literal_in_code():
 # THE RULE.  Each repaint path is located by its OFFSETS at run time and turned
 # into a line span; a writer is inside only when its (file, line) falls in one
 # of those spans.  Text equality decides nothing.
+#
+# WHICH GROUP IS A LEFT SIDE, BY TOKEN (round-9 cold lens).  A group before
+# `=` is the left side of an assignment when the TOKEN before its `(` lets an
+# expression begin there.  The round-8 rule looked at one CHARACTER and dropped
+# `() => (a, b) = ...` (a `>`), `else (a, b) = ...` and `do (a, b) = ...` (a
+# letter).  The token rule: nothing, or any punctuator other than `]` and a
+# lone `>`, or the arrow `=>`, or one of _R9_EXPR_KEYWORDS, begins an
+# expression.  Any other identifier makes the group a call (`f(a) = ...`) or a
+# declaration (`var (a, b) = ...`); `]` an indexer or attribute; a lone `>` a
+# generic argument list.  Comments between the token and the group are
+# skipped, so a comment that ends in a word decides nothing.
 _R9_TUPLE_WRITE = re.compile(
-    r"(?<![\w>\]])\(((?:[^();{}]|\([^();{}]*\))*)\)\s*=(?![=>])")
+    r"\(((?:[^();{}]|\([^();{}]*\))*)\)\s*=(?![=>])")
 _R9_TUPLE_END = re.compile(r"\)\s*=(?![=>])")
+_R9_EXPR_KEYWORDS = frozenset(("return", "else", "do", "yield", "await", "in"))
+
+
+def _r9_group_starts_expression(text, i, comments):
+    """True when the token before the `(` at offset `i` lets an expression
+    begin there (see the rule above)."""
+    j = i - 1
+    while j >= 0:
+        if text[j].isspace():
+            j -= 1
+            continue
+        c = _cs_span_at(comments, j)
+        if c is not None:
+            j = c[0] - 1
+            continue
+        break
+    if j < 0:
+        return True
+    ch = text[j]
+    if ch == ">":
+        return j >= 1 and text[j - 1] == "="
+    if ch == "]":
+        return False
+    if ch.isalnum() or ch == "_":
+        k = j
+        while k >= 0 and (text[k].isalnum() or text[k] == "_"):
+            k -= 1
+        if k >= 0 and text[k] == "@":
+            return False
+        return text[k + 1:j + 1] in _R9_EXPR_KEYWORDS
+    return True
 
 
 _R9_BANNER_NAMES = "|".join(_R7_BANNER_INPUTS + (_R7_BANNER_LATCH,))
@@ -8204,13 +8246,8 @@ def _r9_tuple_writers_in(fname, text):
         m = _R9_TUPLE_WRITE.match(text, i)
         if m is None or m.end(1) != close:
             continue
-        before = text[:i].rstrip()
-        # `f(a) = ...` is not an assignment of a group, and `var (a, b) = ...`
-        # declares new locals; a typed element (`int a`) declares one and
-        # simply fails the target match
-        if (before and (before[-1].isalnum() or before[-1] in "_>]")
-                and not before.endswith("return")) or before.endswith("var"):
-            continue
+        # a typed element (`int a`) declares a local and simply fails the
+        # target match
         inner = m.group(1)
         elems = [x.strip() for x in
                  inner.replace("(", " ").replace(")", " ").split(",")]
@@ -8218,6 +8255,8 @@ def _r9_tuple_writers_in(fname, text):
             continue
         comments, literals = _cs_lex(text)
         if _cs_span_at(comments, i) or _cs_span_at(literals, i):
+            continue
+        if not _r9_group_starts_expression(text, i, comments):
             continue
         name = _R9_BANNER_NAME.search(text, i, close)
         ln = _cs_line(text, name.start() if name else i)
@@ -8310,7 +8349,15 @@ def test_r9_l10_writers_are_classified_by_source_location():
                  "            (LastSeriesT1Wins, LastSeriesT2Wins) = ReadWins();",
                  "            (int zz, ApiClient.LastSeriesT2Wins) = ReadWins();",
                  "            (LastSeriesT1Wins, LastSeriesT2Wins)" + LF
-                 + "                = ReadWins();"):
+                 + "                = ReadWins();",
+                 # ROUND-9 COLD LENS (R9CL7): the token before the group, not
+                 # its last character, decides
+                 "            Action zz = () => (LastSeriesT1Wins, LastSeriesT2Wins) = (0, 0);",
+                 "            Action zz = () =>(LastSeriesT1Wins, LastSeriesT2Wins) = (0, 0);",
+                 "            if (zz) { } else (LastSeriesT1Wins, LastSeriesT2Wins) = (0, 0);",
+                 "            do (LastSeriesT1Wins, zz) = (0, 0); while (false);",
+                 "            zz = 1; // a comment that ends in a word" + LF
+                 + "            (LastSeriesT1Wins, zz) = (0, 0);"):
         m = planted(body)
         got = _r9_writers_outside_paths(_r7_writer_lines(m), m["ApiClient.cs"])
         assert len(got) == 1, (body.strip(), got)
@@ -8328,7 +8375,12 @@ def test_r9_l10_writers_are_classified_by_source_location():
                  "            if ((LastSeriesT1Wins, LastSeriesT2Wins) == (0, 0)) { }",
                  "            var (LastSeriesT1Wins, zz) = ReadWins();",
                  "            // (LastSeriesT1Wins, LastSeriesT2Wins) = (0, 0);",
-                 "            Log(" + chr(34) + "(LastSeriesT1Wins, x) = (0, 0)" + chr(34) + ");"):
+                 "            Log(" + chr(34) + "(LastSeriesT1Wins, x) = (0, 0)" + chr(34) + ");",
+                 # a call, a generic argument list and an escaped identifier
+                 # are not expression starts
+                 "            zz.Set(LastSeriesT1Wins, zz) = 0;",
+                 "            Wrap<int>(LastSeriesT1Wins, zz) = 0;",
+                 "            @else(LastSeriesT1Wins, zz) = 0;"):
         m = planted(body)
         assert not _r9_writers_outside_paths(_r7_writer_lines(m), m["ApiClient.cs"]), body
 
