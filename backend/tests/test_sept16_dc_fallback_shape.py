@@ -514,12 +514,20 @@ def _client_lane_candidates():
     returned here and counted by a test, so the exclusivity is asserted on the
     thing itself rather than on a consequence of it.
 
-    `already_tried` is the one line a resolution must carry when the sibling
-    scan did not run, so that a run which did not scan can never read as a run
-    that scanned and found nothing (#438).
+    `already_tried` carries one line for EVERY state in which the sibling scan
+    produced no listing, and those states are two rather than one. The switch
+    is the first: the scan was never started, and the line says NOT RUN. The
+    second is a scan that WAS started and did not finish -- git exits nonzero,
+    or the child cannot be started at all and the exit is whatever the
+    platform reports for that -- and there the line says ATTEMPTED AND FAILED
+    and names the condition it observed. Only a scan that ran to completion
+    leaves the line out. The distinction is the whole point: a run that did
+    not scan may never read as a run that scanned and found nothing (#438),
+    and a child that never ran is not a measurement of anything (#304).
     """
     cands = []
     scan = False
+    scan_failed = ""
     env = os.environ.get("SCR_CROSS_LANE_CLIENT_ROOT")
     if env:
         cands.append((pathlib.Path(env),
@@ -529,7 +537,7 @@ def _client_lane_candidates():
                       "the review pin's client-lane copy", True))
         cands.append((REPO_ROOT, "this repository itself -- the merged tree",
                       False))
-        # THE SIBLING SCAN, AND THE ONE STATE IN WHICH IT DOES NOT RUN. While
+        # THE SIBLING SCAN, AND THE TWO STATES IN WHICH IT LISTS NOTHING. While
         # the two lanes are under separate review rounds, the other lane's
         # WORKING tree is being written by its own builder: reading it answers
         # about a tree that is mid-edit, and the review supplies a frozen
@@ -541,20 +549,41 @@ def _client_lane_candidates():
         # that does not name its own candidates cannot be read back (#438).
         scan = not os.environ.get("SCR_CROSS_LANE_NO_SIBLING_SCAN")
         if scan:
+            # THE SCAN'S OWN OUTCOME IS TAKEN, not assumed. A blanket catch
+            # over an unchecked return code makes "git listed no client-lane
+            # worktree" and "git never produced a listing" the same empty
+            # result, and the second is not a result at all: this seat spent a
+            # run of the evidence bundle discovering that, when a burst of
+            # process-creation failures gave every child the platform's launch
+            # status and an empty stdout, and each one was scored as though it
+            # had been measured.
             try:
                 proc = subprocess.run(
                     ["git", "-C", str(REPO_ROOT), "worktree", "list"],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                for path in _worktrees_on_branch(
-                        proc.stdout.decode("utf-8", "replace"),
-                        _CLIENT_LANE_BRANCH):
-                    cands.append((pathlib.Path(path),
-                                  "the client lane's worktree", False))
-            except Exception:
-                pass
-    tried = [] if env or scan else [
-        "the sibling-worktree scan (NOT RUN -- SCR_CROSS_LANE_NO_SIBLING_SCAN "
-        "is set, so no worktree of the other lane was read)"]
+                if proc.returncode != 0:
+                    scan_failed = ("`git worktree list` exited %d"
+                                   % proc.returncode)
+                else:
+                    for path in _worktrees_on_branch(
+                            proc.stdout.decode("utf-8", "replace"),
+                            _CLIENT_LANE_BRANCH):
+                        cands.append((pathlib.Path(path),
+                                      "the client lane's worktree", False))
+            except Exception as exc:
+                scan_failed = ("`git worktree list` could not be started: "
+                               + type(exc).__name__)
+    if env or (scan and not scan_failed):
+        tried = []
+    elif scan_failed:
+        tried = ["the sibling-worktree scan (ATTEMPTED AND FAILED -- "
+                 + scan_failed + ", so this resolution is NOT a scan that ran "
+                 "and found no client-lane worktree)"]
+    else:
+        tried = [
+            "the sibling-worktree scan (NOT RUN -- "
+            "SCR_CROSS_LANE_NO_SIBLING_SCAN "
+            "is set, so no worktree of the other lane was read)"]
     return cands, tried
 
 
@@ -1725,6 +1754,8 @@ SUPERSEDED_CLAIMS = (
     "EXPIRES BY DEFAULT. Nothing has to run",
     "zero-total disconnect fallback",
     "answers 200 and ignores it, having already settled",
+    "is the one line a resolution must carry when the sibling scan did not run",
+    "THE SIBLING SCAN, AND THE ONE STATE IN WHICH IT DOES NOT RUN",
 )
 
 # ...and the sentence that replaced each one, which must be present exactly
@@ -1757,6 +1788,13 @@ CORRECTED_CLAIMS = (
     ("test_sept16_dc_fallback_shape.py",
      "What that 200 proves is ONE thing: the answering box predates the field. "
      "It proves nothing about settlement"),
+    ("test_sept16_dc_fallback_shape.py",
+     "carries one line for EVERY state in which the sibling scan produced no "
+     "listing"),
+    ("test_sept16_dc_fallback_shape.py",
+     "Only a scan that ran to completion leaves the line out"),
+    ("test_sept16_dc_fallback_shape.py",
+     "THE SIBLING SCAN, AND THE TWO STATES IN WHICH IT LISTS NOTHING"),
 )
 
 
@@ -1968,6 +2006,63 @@ def test_the_sibling_scan_switch_removes_only_that_candidate(monkeypatch):
         and n.name == "_client_lane_candidates"))
     assert resolver.count("cands.append") == 4, resolver
     assert "_worktrees_on_branch(" in resolver, resolver
+
+
+def test_a_sibling_scan_that_did_not_complete_is_not_a_scan_that_found_nothing(
+        monkeypatch):
+    """The other state in which the scan produces no listing.
+
+    The switch above is the state everyone remembers. The one that actually
+    cost this lane a run of its evidence bundle is the other one: the child
+    was started and did not finish -- or could not be started at all -- and
+    the blanket catch over an unchecked return code turned that into an empty
+    candidate list, which at the resolution message is the same text as a scan
+    that ran and listed nothing. An unrun child is not a measurement (#304),
+    and the resolution has to say which of the two it is holding.
+
+    All four arms drive the same site. The first three are the controls -- git
+    refusing, the child exiting with a launch status and no output, and the
+    child raising before it starts -- and each must be named. The fourth is
+    the INERT TWIN: a scan that RAN and listed no client-lane worktree leaves
+    the line out, because that one IS a measurement. A resolver that cried
+    ATTEMPTED AND FAILED on every run would be this same defect inverted, and
+    it would fail this test just as surely.
+    """
+    monkeypatch.delenv("SCR_CROSS_LANE_CLIENT_ROOT", raising=False)
+    monkeypatch.delenv("SCR_CROSS_LANE_NO_SIBLING_SCAN", raising=False)
+
+    class _Result(object):
+        def __init__(self, rc, out=b""):
+            self.returncode = rc
+            self.stdout = out
+            self.stderr = b""
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Result(128))
+    _cands, tried = _client_lane_candidates()
+    assert any("ATTEMPTED AND FAILED" in t for t in tried), tried
+    assert any("exited 128" in t for t in tried), tried
+    # ...and it reaches the resolution a log carries, not only the helper.
+    _sources, how = _client_lane_sources()
+    assert "ATTEMPTED AND FAILED" in how, how
+    assert "NOT a scan that ran" in how, how
+
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **k: _Result(3221225794))
+    _cands, tried = _client_lane_candidates()
+    assert any("exited 3221225794" in t for t in tried), tried
+
+    def _cannot_start(*_a, **_k):
+        raise OSError("the child could not be created")
+
+    monkeypatch.setattr(subprocess, "run", _cannot_start)
+    _cands, tried = _client_lane_candidates()
+    assert any("could not be started: OSError" in t for t in tried), tried
+
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **k: _Result(0, b"/somewhere abcdef0 [some-other-branch]\n"))
+    _cands, tried = _client_lane_candidates()
+    assert tried == [], tried
 
 
 # Names bound to a WHOLE SOURCE FILE in this module, or to one collapsed onto a
