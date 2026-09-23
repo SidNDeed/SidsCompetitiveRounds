@@ -5632,9 +5632,12 @@ def test_r7cl_f5_the_cross_lane_binding_reads_the_frozen_extract_and_no_live_tre
     assert out2 is not None, why3
     assert out2 == frozen
 
-    # 6. AND THE LIVE RESOLUTION AGREES.  On this branch only the extract can
-    #    answer; on the merged tree the repository answers and this is the
-    #    comparison that matters.  Either way the resolved text is the one the
+    # 6. AND THE LIVE RESOLUTION AGREES.  On this branch, and on any tree it is
+    #    merged into, only the hash-verified extract answers: the resolver reads
+    #    that one file.  At merge the integrator deletes the extract and its
+    #    digest constant and re-points this harness at the merged
+    #    backend/api/main.py by hand -- an open item for the integrator, not
+    #    something this resolver does.  The resolved text is the one the
     #    field-list assertions above read.
     server, how = _server_lane_main()
     assert server, how
@@ -5993,10 +5996,10 @@ def test_r8cl_cl1_the_frozen_extracts_provenance_re_derives_from_the_record():
 def test_r8cl_cl2_the_stale_header_passages_are_superseded_in_both_directions():
     """CL2 (B2, B11, B18): THE FALSE MERGE PARAGRAPH IS BOUND, NOT LEFT LOOSE.
 
-    WHAT WAS WRONG.  The sealed extract's header says, in the present tense,
-    that if the lanes merge the resolver prefers a real tree carrying the route
-    and falls back to the extract only when no such tree is present.  That is
-    the mechanism the round-7 finding was raised about and this round removed:
+    WHAT WAS WRONG.  The sealed extract's header carries a merge paragraph,
+    quoted under its supersession heading in the provenance record, that
+    describes, in the present tense, the candidate ordering the round-7 finding
+    was raised about and this round removed:
     `_server_lane_main` calls `_frozen_route_text` and nothing else, no tree can
     answer merged or not, and the merge disposition is to DELETE this file and
     re-run the harness against the merged `backend/api/main.py`.  Read at merge
@@ -7797,6 +7800,18 @@ def test_r8_l11_the_banner_inputs_are_not_publicly_writable():
 
 
 
+# ══ ROUND 9: the round-8 review's findings, by number ════════════════════════
+#
+# The round-8 harness findings were each about whether this harness tells the
+# truth about what it did, and the five closed here are five places where it
+# did not: a delivered comment stated a resolver this file does not have
+# (CL2), the domination check stopped short of the three changes that would
+# end it (L3), the dead-status rule was a list of comparison spellings (L4),
+# one provenance field was verified by nobody (L9), and writers were excused
+# by their TEXT rather than by where they sit (L10).  The tool-side findings
+# (H1, C6, CL3, L1, L2, L5-L8) are closed in the round-9 tools the notes name.
+
+
 # ── THE C# LEXER: comments and complete string literals, by position ───────
 #
 # Two round-9 rules need to know what a plugin byte IS -- comment, string
@@ -8406,4 +8421,244 @@ def test_r9_l9_every_provenance_field_is_verified():
     assert twin != record
     ok2, why2 = _frozen_provenance_binds(raw, record=twin)
     assert ok2, why2
+
+
+# ── CL2 (B16): no claim in the named scope restores the removed resolution ──
+#
+# WHAT WAS WRONG.  A comment in this harness stated, of the merge, a resolution
+# order this file does not have, and the round-8 check read only the sealed
+# extract's paragraph and its supersession.  The check now reads a NAMED
+# SCOPE, printed by the test: every comment and docstring of every Python file
+# under backend/ (this harness included), every comment in every plugin
+# source, every Markdown file under docs/, the extract's header and the
+# provenance record -- with exactly the sealed passage removed from the last
+# two, because that passage is quoted on purpose and its pairing is checked
+# both ways by the round-8 case.  The round-9 notes checker applies THIS
+# grammar, loaded from this file, to the round-9 tools and the round-9 notes.
+# The scope is found by glob at run time and its size is printed, so what it
+# covers is visible rather than asserted.
+#
+# THE FORM IS A GRAMMAR over vocabulary classes, not a list of sentences.  Its
+# pieces are single words kept in code below, so this file's own prose never
+# spells the form it rejects (R8-D6).  A sentence is a candidate when it
+# mentions the merge (form 1) or a fallback (form 2).  It is REJECTED when one
+# of its clauses has a source-tree noun as the subject of a supply verb, or as
+# the object of a consult verb, with no negation governing either and no
+# extract noun standing between them as the actual subject.  A sentence that
+# describes the MANUAL operation -- deleting the extract, re-pointing the
+# harness by hand -- is the correct disposition and is not a candidate.
+def _r9_w(*words):
+    return frozenset(words)
+
+
+_R9_MERGE_STEMS = ("merg", "combin", "integrat")
+_R9_MERGE = re.compile(r"\b(?:" + "|".join(_R9_MERGE_STEMS) + r")\w*", re.I)
+_R9_TREE = _r9_w("tree", "trees", "worktree", "worktrees", "repository",
+                 "repositories", "repo", "repos", "checkout", "checkouts",
+                 "checked-out", "codebase", "module", "modules", "main.py",
+                 "working_copy")
+_R9_SUBJ = _r9_w("answer", "answers", "answered", "answering", "supplies",
+                 "supply", "supplied", "provides", "provide", "provided",
+                 "serves", "serve", "served", "wins", "win", "decides", "decide",
+                 "takes_over", "take_over", "is_read", "is_consulted",
+                 "is_preferred", "is_used", "resolves", "resolve", "resolved")
+_R9_OBJ = _r9_w("reads", "read", "prefers", "prefer", "preferred", "consults",
+                "consult", "tries", "try", "uses", "use", "opens", "open",
+                "binds", "bind", "resolves", "resolve", "resolved")
+_R9_NEG = _r9_w("no", "not", "never", "cannot", "can't", "nothing", "none",
+                "neither", "nor", "without", "nobody", "isn't", "doesn't",
+                "don't", "won't", "no_longer")
+_R9_EXTRACT = _r9_w("extract", "extracts", "frozen", "sealed", "slice")
+_R9_MANUAL = re.compile(r"\b(?:" + "|".join((
+    "by hand", "manual", "manually", r"re-?points?", r"re-?pointed",
+    r"delet\w*")) + r")\b", re.I)
+_R9_FALLBACK = re.compile(r"\b(?:" + "|".join((
+    r"falls? back", "falling back", "fallback", "failing that")) + r")\b", re.I)
+_R9_BIGRAMS = (("working copy", "working_copy"), ("takes over", "takes_over"),
+               ("take over", "take_over"), ("is read", "is_read"),
+               ("is consulted", "is_consulted"), ("is preferred", "is_preferred"),
+               ("is used", "is_used"), ("no longer", "no_longer"))
+_R9_TOKEN = re.compile(r"[a-z0-9_][a-z0-9_'./-]*|;|--|—|:|[()\[\]]")
+_R9_BREAKS = frozenset((";", "--", "—", ":", "(", ")", "[", "]"))
+_R9_SENTENCE = re.compile(r"(?<=[.!?])\s+")
+
+
+def _r9_words(sentence):
+    s = sentence.lower()
+    for a, b in _R9_BIGRAMS:
+        s = s.replace(a, b)
+    return [w for w in (x.strip("'.") for x in _R9_TOKEN.findall(s)) if w]
+
+
+def _r9_clause_hit(words):
+    """True when a clause has a tree supplying, or being consulted, unnegated
+    and with no extract noun as the real subject between them."""
+    n = len(words)
+    for v, w in enumerate(words):
+        if w in _R9_SUBJ:
+            for t in range(v - 1, max(-1, v - 9), -1):
+                if words[t] in _R9_BREAKS:
+                    break
+                if words[t] in _R9_TREE:
+                    lo = t
+                    while lo > 0 and lo > t - 3 and words[lo - 1] not in _R9_BREAKS:
+                        lo -= 1
+                    neg = (any(x in _R9_NEG for x in words[lo:t])
+                           or any(x in _R9_NEG for x in words[max(t + 1, v - 2):v]))
+                    ex = any(words[e] in _R9_EXTRACT
+                             and not any(x in _R9_NEG
+                                         for x in words[max(t + 1, e - 2):e])
+                             for e in range(t + 1, v))
+                    if not neg and not ex:
+                        return True
+                    break
+        if w in _R9_OBJ:
+            lo = v
+            while lo > 0 and lo > v - 3 and words[lo - 1] not in _R9_BREAKS:
+                lo -= 1
+            if any(x in _R9_NEG for x in words[lo:v]):
+                continue
+            for t in range(v + 1, min(n, v + 7)):
+                if words[t] in _R9_BREAKS or words[t] in _R9_EXTRACT:
+                    break
+                if words[t] in _R9_TREE:
+                    return True
+    return False
+
+
+def _r9_merged_tree_claims(prose):
+    """Every sentence of `prose` that has the rejected form."""
+    found = []
+    for para in re.split(r"\n[ \t]*\n", prose):
+        flat = " ".join(para.split())
+        for sent in _R9_SENTENCE.split(flat):
+            if not sent or _R9_MANUAL.search(sent):
+                continue
+            if not (_R9_MERGE.search(sent) or _R9_FALLBACK.search(sent)):
+                continue
+            if _r9_clause_hit(_r9_words(sent)):
+                found.append(sent)
+    return found
+
+
+def _r9_py_prose(text):
+    """Every comment and docstring of a Python source, as paragraphs.  Comment
+    lines that are not consecutive are separate paragraphs, so two unrelated
+    comments never read as one sentence."""
+    import ast
+    import io
+    import tokenize
+    parts, last = [], None
+    for tok in tokenize.generate_tokens(io.StringIO(text).readline):
+        if tok.type == tokenize.COMMENT:
+            row = tok.start[0]
+            if last is not None and row != last + 1:
+                parts.append("")
+            parts.append(tok.string.lstrip("#"))
+            last = row
+    parts.append("")
+    for node in ast.walk(ast.parse(text)):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            d = ast.get_docstring(node, clean=True)
+            if d:
+                parts.extend(("", d, ""))
+    return LF.join(parts)
+
+
+def _r9_cs_prose(text):
+    """Every comment of a C# source, XML tags stripped, as paragraphs."""
+    comments, _ = _cs_lex(text)
+    parts, last = [], None
+    for a, b in comments:
+        c = re.sub(r"^\s*(?:///?|/\*+|\*+/?)", "", text[a:b], flags=re.M)
+        c = re.sub(r"</?[a-zA-Z][^>]*>", "", c.replace("*/", ""))
+        # code between two comments ends the paragraph
+        if last is not None and text[last:a].strip():
+            parts.append("")
+        parts.append(c)
+        last = b
+    return LF.join(parts)
+
+
+def _r9_sealed_removed(text):
+    """The text with EXACTLY the sealed merge passage removed, once."""
+    passage = _FROZEN_SUPERSEDED[2]
+    assert text.count(passage) <= 1, "the sealed passage occurs twice"
+    return text.replace(passage, "", 1)
+
+
+def _r9_hash_prose(text):
+    return LF.join(ln.lstrip("#") for ln in text.split(LF))
+
+
+def _r9_cl2_scope():
+    """{scope name: prose} for the named scope: every Python file under
+    backend/ (this harness included), every plugin source, every Markdown file
+    under docs/, the extract's header and the provenance record."""
+    scope = {}
+    here = pathlib.Path(__file__)
+    scope[here.name] = _r9_py_prose(here.read_text(encoding="utf-8"))
+    for p in sorted((ROOT / "backend").rglob("*.py")):
+        if p.resolve() == here.resolve():
+            continue
+        scope[p.relative_to(ROOT).as_posix()] = _r9_py_prose(
+            p.read_text(encoding="utf-8"))
+    for p in sorted((ROOT / "docs").rglob("*.md")):
+        scope[p.relative_to(ROOT).as_posix()] = p.read_text(encoding="utf-8")
+    for name, text in _r7_plugin_sources().items():
+        scope["plugin/" + name] = _r9_cs_prose(text)
+    raw = _FROZEN_SERVER_EXTRACT.read_bytes().decode("utf-8")
+    head = raw[:raw.find(_ROUTE_ANCHOR)]
+    scope[_FROZEN_SERVER_EXTRACT.name + " (header)"] = _r9_hash_prose(
+        _r9_sealed_removed(head))
+    record = _FROZEN_PROVENANCE.read_text(encoding="utf-8")
+    scope[_FROZEN_PROVENANCE.name] = _r9_hash_prose(_r9_sealed_removed(record))
+    return scope
+
+
+def test_r9_cl2_no_delivered_claim_restores_the_removed_resolution():
+    """CL2 (B16): THE CHECK READS A NAMED SCOPE, NOT ONE PARAGRAPH.
+
+    The round-8 CL2 check bound only the sealed paragraph and its supersession,
+    so a comment elsewhere in this harness stating the removed order passed.
+    This check applies one grammar to every comment and docstring in its named
+    scope -- every Python file under backend/, every plugin source, every
+    Markdown file under docs/, the extract's header and the provenance record
+    -- and prints how many texts of each kind it read; the grammar is
+    proven to reject the sealed passage itself, and to leave a correct
+    statement of the manual merge operation alone."""
+    scope = _r9_cl2_scope()
+    found = []
+    for name in sorted(scope):
+        for s in _r9_merged_tree_claims(scope[name]):
+            found.append((name, s[:200]))
+    n_py = len([k for k in scope if k.endswith(".py")])
+    n_cs = len([k for k in scope if k.startswith("plugin/")])
+    n_md = len([k for k in scope if k.startswith("docs/")])
+    print("CL2 SCOPE: %d delivered texts read -- %d Python files under backend/ "
+          "(this harness included), %d plugin sources, %d Markdown files under "
+          "docs/, the extract header and the provenance record"
+          % (len(scope), n_py, n_cs, n_md))
+    assert n_py > 1 and n_cs == len(_r7_plugin_sources()) and n_md >= 1, (
+        n_py, n_cs, n_md)
+    assert not found, ("a delivered claim restores the removed resolution: "
+                       + repr(found))
+
+    # THE GRAMMAR CAN FIRE: on the sealed passage, which is exactly the form ...
+    sealed = _r9_hash_prose(_FROZEN_SUPERSEDED[2])
+    assert _r9_merged_tree_claims(sealed), "the grammar does not see the sealed form"
+    # ... and on a wording no list ever carried, assembled from its pieces
+    w = ("Once the branches are " + _R9_MERGE_STEMS[1] + "ed, the checked-out "
+         "repository supplies the status route.")
+    assert _r9_merged_tree_claims(w), w
+    # TWINS: the correct disposition, in two different wordings
+    for ok in ("At merge the integrator deletes the extract and its constant and "
+               "points the harness at the merged backend/api/main.py.",
+               "Merging the branches does not change who answers: the extract "
+               "answers until the integrator removes it.",
+               "On this branch, and on any tree it is " + _R9_MERGE_STEMS[0]
+               + "ed into, the hash-verified extract is the only text the "
+               "resolver reads."):
+        assert not _r9_merged_tree_claims(ok), ok
 
