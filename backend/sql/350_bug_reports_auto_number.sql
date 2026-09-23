@@ -228,12 +228,28 @@ END $m350g$;
 -- Nothing turns on the difference: at the published cap of 12 uploads per
 -- account per day this range outlasts any plausible life of this table by a
 -- margin there is no point writing down.
+--
+-- CACHE 1 IS THE DEFAULT AND IS WRITTEN ANYWAY, because it is part of the
+-- shape block 1b asserts and a default is not a statement (R7-M2). A cache
+-- above one hands each session a run of values the RELATION has already
+-- moved past: the stored position jumps by the whole run at a session's first
+-- draw, so every reading of where the sequence stands -- this file's block 1c,
+-- its post-check, the release train's -- measures a position no writer has
+-- handed out, and the post-check's own two draws move it by the run rather
+-- than by two.
+--
+-- AND IT IS A LOGGED SEQUENCE, which is what CREATE SEQUENCE makes without
+-- UNLOGGED and what block 1b asserts of whatever this statement finds (R7-M3):
+-- an unlogged sequence's position is reset by crash recovery and is not
+-- carried to a standby, while the logged `bug_reports` rows keep the negative
+-- numbers it had already handed out.
 CREATE SEQUENCE IF NOT EXISTS bug_reports_auto_number_seq
     AS bigint
     INCREMENT BY -1
     START WITH -1
     MAXVALUE -1
     MINVALUE -9223372036854775807
+    CACHE 1
     NO CYCLE;
 
 -- ── 1b. the shape this file is willing to adopt ──────────────────────────────
@@ -281,6 +297,23 @@ CREATE SEQUENCE IF NOT EXISTS bug_reports_auto_number_seq
 -- refusals this file's own, and each one NAMES the attribute it is about --
 -- a single "the sequence is wrong" refusal is one an operator cannot act on.
 -- The literals restate the DDL above: that is the specification.
+--
+-- THE WHOLE SHAPE IS EVERY COLUMN OF `pg_sequence`, and since round 8 that is
+-- a counted fact rather than a word (R7-M2). The catalogue has EIGHT columns:
+-- `seqrelid`, the key this block reads by, and seven attributes, all of which
+-- are read and judged here. Round 7 read six of the eight and called it the
+-- whole shape; the one it skipped was `seqcache`, and a sequence cached above
+-- one passed every line while its stored position ran ahead of every value it
+-- handed out. So the column list is DECLARED below, the catalogue's own list
+-- is read against it, and a catalogue with a column this block does not
+-- judge -- or without one it does -- refuses by name before anything is read
+-- from it. The same declaration, and the same refusal, are repeated in block
+-- 1c, which reads the row again under the lock.
+--
+-- AND THE RELATION'S PERSISTENCE, which `pg_sequence` does not carry
+-- (R7-M3). `pg_class.relpersistence` is 'p' for a logged relation, 'u' for an
+-- unlogged one and 't' for a temporary one; only 'p' survives crash recovery
+-- with its position and reaches a standby, so only 'p' is adopted.
 DO $m350s$
 DECLARE
     v_typid     oid;
@@ -288,7 +321,14 @@ DECLARE
     v_increment bigint;
     v_max       bigint;
     v_min       bigint;
+    v_cache     bigint;
     v_cycle     boolean;
+    v_persistence "char";
+    v_columns   text[];
+    -- THE CATALOGUE THIS BLOCK JUDGES, column by column, in its own order.
+    -- Eight, and `cardinality` below is what the refusal states.
+    c_pg_sequence_columns CONSTANT text[] := ARRAY['seqrelid', 'seqtypid',
+        'seqstart', 'seqincrement', 'seqmax', 'seqmin', 'seqcache', 'seqcycle'];
     -- THE CONFIGURED SHAPE, restating the CREATE SEQUENCE above. These are
     -- the values this file installs, so they are also the values it must
     -- refuse to adopt a different sequence over.
@@ -296,6 +336,8 @@ DECLARE
     c_auto_max       CONSTANT bigint := -1;
     c_auto_min       CONSTANT bigint := -9223372036854775807;
     c_auto_start     CONSTANT bigint := -1;
+    c_auto_cache     CONSTANT bigint := 1;
+    c_logged         CONSTANT "char" := 'p';
     -- SCOPED LIKE THE GUARD ABOVE, for the same reason (R3-M1).
     v_autoseq CONSTANT regclass :=
         to_regclass(quote_ident(current_schema()) || '.bug_reports_auto_number_seq');
@@ -304,8 +346,23 @@ BEGIN
         RAISE EXCEPTION '350: schema % does not carry bug_reports_auto_number_seq after the CREATE above, so there is no shape to inspect', current_schema();
     END IF;
 
-    SELECT seqtypid, seqstart, seqincrement, seqmax, seqmin, seqcycle
-      INTO v_typid, v_start, v_increment, v_max, v_min, v_cycle
+    SELECT array_agg(attname::text ORDER BY attnum) INTO v_columns
+      FROM pg_attribute
+     WHERE attrelid = 'pg_catalog.pg_sequence'::regclass
+       AND attnum > 0 AND NOT attisdropped;
+    IF v_columns IS DISTINCT FROM c_pg_sequence_columns THEN
+        RAISE EXCEPTION '350: pg_catalog.pg_sequence has % column(s), %, and this file judges exactly the % it declares, %; unjudged: %, absent: %. A sequence attribute this block does not read is part of the shape nobody checked, so nothing is adopted over it', cardinality(v_columns), v_columns, cardinality(c_pg_sequence_columns), c_pg_sequence_columns, ARRAY(SELECT unnest(v_columns) EXCEPT SELECT unnest(c_pg_sequence_columns)), ARRAY(SELECT unnest(c_pg_sequence_columns) EXCEPT SELECT unnest(v_columns));
+    END IF;
+
+    SELECT relpersistence INTO v_persistence
+      FROM pg_class
+     WHERE oid = v_autoseq;
+    IF v_persistence IS DISTINCT FROM c_logged THEN
+        RAISE EXCEPTION '350: bug_reports_auto_number_seq exists in schema % with relpersistence %, not % (logged); an unlogged sequence is reset by crash recovery and is not carried to a standby, while the logged bug_reports rows keep every negative number it had handed out, so after a crash or a promotion the writer would draw into numbers that are taken. Make it logged with ALTER SEQUENCE bug_reports_auto_number_seq SET LOGGED, then apply this file again', current_schema(), coalesce(v_persistence::text, '(no row)'), c_logged;
+    END IF;
+
+    SELECT seqtypid, seqstart, seqincrement, seqmax, seqmin, seqcache, seqcycle
+      INTO v_typid, v_start, v_increment, v_max, v_min, v_cache, v_cycle
       FROM pg_sequence
      WHERE seqrelid = v_autoseq;
 
@@ -323,6 +380,9 @@ BEGIN
     END IF;
     IF v_cycle THEN
         RAISE EXCEPTION '350: bug_reports_auto_number_seq exists in schema % and CYCLES; on exhaustion it would hand out a number it has already given away, and bug_reports.bug_number is UNIQUE, so the upload would fail on the index instead of on the counter', current_schema();
+    END IF;
+    IF v_cache IS DISTINCT FROM c_auto_cache THEN
+        RAISE EXCEPTION '350: bug_reports_auto_number_seq exists in schema % with CACHE %, not %; a session''s first draw then moves the stored position past the whole run it caches, so every reading of where the sequence stands -- block 1c, the post-check, the release train -- judges a position no writer has handed out. Set it with ALTER SEQUENCE bug_reports_auto_number_seq CACHE %, then apply this file again', current_schema(), v_cache, c_auto_cache, c_auto_cache;
     END IF;
     IF v_start < v_min OR v_start > v_max THEN
         RAISE EXCEPTION '350: bug_reports_auto_number_seq exists in schema % starting at %, which is outside its own range % .. %; a restart would put it there and the next draw would fail', current_schema(), v_start, v_min, v_max;
@@ -353,9 +413,14 @@ BEGIN
     -- catalogue row under that lock and refuses unless it is this reading, so
     -- the shape adopted and the position adopted are one reading of one
     -- sequence. Transaction-local: nothing of it outlives COMMIT.
+    --
+    -- ALL SEVEN ATTRIBUTES AND THE PERSISTENCE, in the catalogue's column
+    -- order: a reading of fewer than every column 1b judged is a comparison
+    -- that cannot see a change to the ones it left out.
     PERFORM set_config('m350.shape_1b',
-                       format('%s/%s/%s/%s/%s/%s', v_typid, v_start,
-                              v_increment, v_max, v_min, v_cycle),
+                       format('%s/%s/%s/%s/%s/%s/%s/%s', v_typid, v_start,
+                              v_increment, v_max, v_min, v_cache, v_cycle,
+                              v_persistence),
                        true);
 END $m350s$;
 
@@ -367,7 +432,9 @@ END $m350s$;
 -- the sequence in ShareRowExclusiveLock and holds it to COMMIT; `nextval`
 -- takes RowExclusiveLock, which conflicts with it. So from this statement to
 -- the end of the file no other session can draw from the sequence, and its
--- position moves only by the post-check's own two draws. Block 1c reads the
+-- position moves only by the post-check's own two draws -- which block 1c
+-- ACCOUNTS for before either is taken -- and by the post-check's `setval`,
+-- which leaves it exactly where the second draw put it. Block 1c reads the
 -- position under this lock and refuses unless it holds it.
 ALTER SEQUENCE bug_reports_auto_number_seq OWNED BY bug_reports.bug_number;
 
@@ -384,10 +451,37 @@ ALTER SEQUENCE bug_reports_auto_number_seq OWNED BY bug_reports.bug_number;
 --
 -- UNDER THE LOCK, AND PROVEN TO BE: the block refuses unless pg_locks shows
 -- this backend holding a granted mode on the sequence that blocks nextval.
--- The shape is re-read under the same lock and must equal 1b's reading.
+-- The shape is re-read under the same lock -- every `pg_sequence` column the
+-- declared list names, and the relation's persistence -- and must equal 1b's
+-- reading; the column list and the persistence are refused by name here as
+-- well as there (R7-M2, R7-M3).
 --
--- THE BOUND: the next value must be at or above -4611686018427387904 (-2^62),
--- so that at least 2^62 values -- half the configured range -- remain.
+-- THE BOUND IS JUDGED ON THE POSITION THIS FILE WILL LEAVE, NOT THE ONE IT
+-- FINDS (R7-M1). Round 7 tested the next value it found against the floor and
+-- then spent two values in the post-check, so a sequence whose next value
+-- was exactly the floor was adopted, committed two below it, and refused by
+-- the release train's reading of the same floor straight after -- one policy
+-- read at two points of the sequence's consumption. The value judged now is
+-- the ACCOUNTED one: the next value the sequence hands out once this file has
+-- committed, which is the value found moved by every draw the post-check will
+-- make (`c_postcheck_draws`). The post-check then pins the position there
+-- with `setval` -- so the reading a standby replays and a promotion resumes
+-- from is that position and not one up to 32 values past it, which is how
+-- far `nextval` pre-logs to WAL -- and reads it back through the policy's own
+-- text and refuses unless it is this block's accounted value.
+--
+-- ONE POLICY, ONE COPY. `c_floor` and `c_accounted_sql` below are the whole
+-- policy: the floor, and the query that turns a sequence relation into the
+-- accounted next value. The post-check applies them through
+-- `m350.floor` / `m350.accounted_sql`, and the release train reads these two
+-- declarations out of THIS FILE at the reviewed commit, byte for byte, and
+-- applies them to each box; it restates neither. So a state this file has
+-- accepted and committed is one the train accepts: the same predicate, over
+-- the same accounted value, from the same bytes.
+--
+-- THE BOUND: the accounted value must be at or above -4611686018427387904
+-- (-2^62), so that at least 2^62 values -- half the configured range --
+-- remain once this file has committed.
 --   * Function: 2^62 values is the same order of guarantee a fresh sequence
 --     gives, which is the property that makes exhaustion something nobody has
 --     to think about (the MINVALUE assertion in 1b). A smaller floor is a
@@ -409,14 +503,31 @@ DECLARE
     v_increment bigint;
     v_max       bigint;
     v_min       bigint;
+    v_cache     bigint;
     v_cycle     boolean;
+    v_persistence "char";
+    v_columns   text[];
     v_shape     text;
     v_last      bigint;
     v_called    boolean;
     v_next      bigint;
+    v_accounted numeric;
     v_held      bigint;
-    -- THE ADOPTION FLOOR, -2^62. The block comment above says why this value.
+    -- THE SAME DECLARED CATALOGUE 1b judges, re-read under the lock.
+    c_pg_sequence_columns CONSTANT text[] := ARRAY['seqrelid', 'seqtypid',
+        'seqstart', 'seqincrement', 'seqmax', 'seqmin', 'seqcache', 'seqcycle'];
+    c_auto_cache CONSTANT bigint := 1;
+    c_logged     CONSTANT "char" := 'p';
+    -- THE ADOPTION-FLOOR POLICY. These two declarations are its only copy;
+    -- the block comment above says why this floor and how the train reads
+    -- them. Each stays on ONE line: the train reads each by its own line.
     c_floor CONSTANT bigint := -4611686018427387904;
+    c_accounted_sql CONSTANT text := 'SELECT (CASE WHEN is_called THEN last_value + (log_cnt + 1) * -1 ELSE last_value END)::text AS accounted_next FROM %s';
+    -- WHAT THE POST-CHECK SPENDS before this file commits: its two draws.
+    -- Accounted here, before either is taken, because a draw is not rolled
+    -- back by a refusal -- a check made after spending them would move the
+    -- sequence every time it refused.
+    c_postcheck_draws CONSTANT bigint := 2;
     -- SCOPED LIKE THE GUARDS, for the same reason (R3-M1).
     v_autoseq CONSTANT regclass :=
         to_regclass(quote_ident(current_schema()) || '.bug_reports_auto_number_seq');
@@ -440,12 +551,33 @@ BEGIN
         RAISE EXCEPTION '350: this transaction holds no lock on bug_reports_auto_number_seq in schema % that blocks nextval, so the position read below could move before COMMIT; ALTER SEQUENCE ... OWNED BY takes that lock and must run before this block', current_schema();
     END IF;
 
-    SELECT seqtypid, seqstart, seqincrement, seqmax, seqmin, seqcycle
-      INTO v_typid, v_start, v_increment, v_max, v_min, v_cycle
+    -- THE DECLARED COLUMN LIST AND THE PERSISTENCE, refused by name HERE as
+    -- well as in 1b: this is the reading the adoption is made on (R7-M2,
+    -- R7-M3), and a comparison with 1b's string is not a statement of what
+    -- either reading requires.
+    SELECT array_agg(attname::text ORDER BY attnum) INTO v_columns
+      FROM pg_attribute
+     WHERE attrelid = 'pg_catalog.pg_sequence'::regclass
+       AND attnum > 0 AND NOT attisdropped;
+    IF v_columns IS DISTINCT FROM c_pg_sequence_columns THEN
+        RAISE EXCEPTION '350: under the lock, pg_catalog.pg_sequence has % column(s), %, and this file judges exactly the % it declares, %; unjudged: %, absent: %', cardinality(v_columns), v_columns, cardinality(c_pg_sequence_columns), c_pg_sequence_columns, ARRAY(SELECT unnest(v_columns) EXCEPT SELECT unnest(c_pg_sequence_columns)), ARRAY(SELECT unnest(c_pg_sequence_columns) EXCEPT SELECT unnest(v_columns));
+    END IF;
+    SELECT relpersistence INTO v_persistence
+      FROM pg_class
+     WHERE oid = v_autoseq;
+    IF v_persistence IS DISTINCT FROM c_logged THEN
+        RAISE EXCEPTION '350: under the lock, bug_reports_auto_number_seq in schema % has relpersistence %, not % (logged); its position would not survive crash recovery or reach a standby, while the rows it numbered would', current_schema(), coalesce(v_persistence::text, '(no row)'), c_logged;
+    END IF;
+
+    SELECT seqtypid, seqstart, seqincrement, seqmax, seqmin, seqcache, seqcycle
+      INTO v_typid, v_start, v_increment, v_max, v_min, v_cache, v_cycle
       FROM pg_sequence
      WHERE seqrelid = v_autoseq;
-    v_shape := format('%s/%s/%s/%s/%s/%s', v_typid, v_start, v_increment,
-                      v_max, v_min, v_cycle);
+    IF v_cache IS DISTINCT FROM c_auto_cache THEN
+        RAISE EXCEPTION '350: under the lock, bug_reports_auto_number_seq in schema % has CACHE %, not %; the position read below would not be the one the writer continues from', current_schema(), v_cache, c_auto_cache;
+    END IF;
+    v_shape := format('%s/%s/%s/%s/%s/%s/%s/%s', v_typid, v_start, v_increment,
+                      v_max, v_min, v_cache, v_cycle, v_persistence);
     IF v_shape IS DISTINCT FROM current_setting('m350.shape_1b', true) THEN
         RAISE EXCEPTION '350: bug_reports_auto_number_seq in schema % reads as % under the lock, but block 1b judged %; the sequence this file would adopt is not the one it checked', current_schema(), v_shape, coalesce(current_setting('m350.shape_1b', true), '(no reading)');
     END IF;
@@ -459,8 +591,20 @@ BEGIN
        INTO v_last, v_called;
     v_next := CASE WHEN v_called THEN v_last + v_increment ELSE v_last END;
 
-    IF v_next < c_floor THEN
-        RAISE EXCEPTION '350: bug_reports_auto_number_seq in schema % would hand out % next (last_value %, is_called %), below the adoption floor %: fewer than 2^62 of its % .. % range remain, and uploads cannot have spent that many, so a restart or a setval put it there and every upload past its end answers 503. Move it with ALTER SEQUENCE bug_reports_auto_number_seq RESTART WITH a value at or above the floor and below every negative bug_number in use, then apply this file again', current_schema(), v_next, v_last, v_called, c_floor, v_min, v_max;
+    -- THE ACCOUNTED VALUE: the next value this sequence hands out once this
+    -- file has committed -- the value found, moved by every draw the
+    -- post-check makes before COMMIT. That is the position the release train
+    -- reads on each box after phase 3, and the post-check proves it is the
+    -- position it leaves. THE SUM IS NUMERIC (R8-X1): when the next value
+    -- is MINVALUE, or the one below the range that a sequence standing at
+    -- MINVALUE with is_called true reports, two draws further down is below
+    -- the bigint type's floor, and a bigint sum would stop this block with an
+    -- unnamed overflow before the floor below could name the refusal. A
+    -- value at or above the floor fits a bigint, as the post-check reads it.
+    v_accounted := v_next::numeric + c_postcheck_draws * v_increment;
+
+    IF v_accounted < c_floor THEN
+        RAISE EXCEPTION '350: bug_reports_auto_number_seq in schema % would stand at % once this file commits (next value % now, last_value %, is_called %, less the % value(s) its post-check draws), below the adoption floor %: fewer than 2^62 of its % .. % range would remain, and uploads cannot have spent that many, so a restart or a setval put it there and every upload past its end answers 503. Move it with ALTER SEQUENCE bug_reports_auto_number_seq RESTART WITH a value at or above % and below every negative bug_number in use, then apply this file again', current_schema(), v_accounted, v_next, v_last, v_called, c_postcheck_draws, c_floor, v_min, v_max, c_floor - c_postcheck_draws * v_increment;
     END IF;
 
     EXECUTE format('SELECT max(bug_number) FROM %I.bug_reports WHERE bug_number <= $1',
@@ -474,6 +618,13 @@ BEGIN
     -- Handed to the post-check, whose FIRST DRAW must return exactly this:
     -- the reading is bound to the thing it describes (#732).
     PERFORM set_config('m350.next_1c', v_next::text, true);
+    -- AND THE POLICY WITH IT: the accounted value this block judged, and the
+    -- two declarations it judged it by. The post-check reads the position it
+    -- leaves through `m350.accounted_sql` and applies `m350.floor` to it, so
+    -- the second application of the policy is this one's text, not a copy.
+    PERFORM set_config('m350.accounted_1c', v_accounted::text, true);
+    PERFORM set_config('m350.floor', c_floor::text, true);
+    PERFORM set_config('m350.accounted_sql', c_accounted_sql, true);
 END $m350n$;
 
 -- ── 2. the one-directional CHECK ─────────────────────────────────────────────
@@ -539,7 +690,11 @@ DECLARE
     v_increment bigint;
     v_max       bigint;
     v_min       bigint;
+    v_cache     bigint;
     v_cycle     boolean;
+    v_persistence "char";
+    -- The position this file leaves, read back through the policy's text.
+    v_left      text;
     -- NO c_auto_* CONSTANTS HERE. They were declared in this block when the
     -- shape assertions lived in it, and round 5 moved those assertions to
     -- block 1b without taking the declarations with them. What was left was
@@ -582,10 +737,13 @@ BEGIN
     -- is the same catalogue row, for the closing NOTICE only -- so that the
     -- line an operator sees states the shape this file ran against rather
     -- than the shape it configured and hoped for.
-    SELECT seqtypid, seqstart, seqincrement, seqmax, seqmin, seqcycle
-      INTO v_typid, v_start, v_increment, v_max, v_min, v_cycle
+    SELECT seqtypid, seqstart, seqincrement, seqmax, seqmin, seqcache, seqcycle
+      INTO v_typid, v_start, v_increment, v_max, v_min, v_cache, v_cycle
       FROM pg_sequence
      WHERE seqrelid = v_autoseq;
+    SELECT relpersistence INTO v_persistence
+      FROM pg_class
+     WHERE oid = v_autoseq;
 
 
     -- And that it actually yields descending negatives. Two draws, because a
@@ -604,6 +762,37 @@ BEGIN
     -- reading judged something other than what the sequence continues from.
     IF v_a IS DISTINCT FROM current_setting('m350.next_1c', true)::bigint THEN
         RAISE EXCEPTION '350: the first draw from bug_reports_auto_number_seq returned % but block 1c read the next value as %; the position this file judged is not the one the sequence continues from', v_a, coalesce(current_setting('m350.next_1c', true), '(no reading)');
+    END IF;
+
+    -- THE POSITION THIS FILE LEAVES, MADE EXACT (R7-M1). `nextval` pre-logs
+    -- up to 32 values to WAL ahead of the one it returns, so after the two
+    -- draws above the logged position -- the one a standby replays and a
+    -- crash or a promotion resumes from -- can stand up to 32 values past the
+    -- stored one, and which it is depends on when the last checkpoint fell.
+    -- `setval` to the second draw, called, writes the position as it stands
+    -- with nothing logged ahead: it hands out nothing and moves the sequence
+    -- nowhere a draw has not already been, and from here to COMMIT both
+    -- readings are the one block 1c accounted for. No value is handed out
+    -- twice by it: the cache is one, so no session holds a value past the
+    -- second draw, and the OWNED BY lock admits no other draw until COMMIT.
+    PERFORM setval(v_autoseq, v_b, true);
+
+    -- AND READ BACK THROUGH THE POLICY'S OWN TEXT, which is the text the
+    -- release train sends to each box after this file commits. Two checks,
+    -- in this order: the reading must be the value 1c accounted for -- the
+    -- binding of the accounting to the sequence (#732) -- and it must
+    -- satisfy the floor 1c judged it against. The second follows from the
+    -- first while 1c's own test stands; it is here so the train's predicate,
+    -- over the train's reading, is applied once before COMMIT and not first
+    -- after it.
+    EXECUTE format(current_setting('m350.accounted_sql', true),
+                   format('%I.%I', current_schema(), 'bug_reports_auto_number_seq'))
+       INTO v_left;
+    IF v_left IS DISTINCT FROM current_setting('m350.accounted_1c', true) THEN
+        RAISE EXCEPTION '350: bug_reports_auto_number_seq stands at % through the adoption policy after the post-check, but block 1c accounted for %; the position this file leaves is not the one it judged', coalesce(v_left, '(no reading)'), coalesce(current_setting('m350.accounted_1c', true), '(no reading)');
+    END IF;
+    IF v_left::bigint < current_setting('m350.floor', true)::bigint THEN
+        RAISE EXCEPTION '350: bug_reports_auto_number_seq stands at % after the post-check, below the adoption floor %', v_left, current_setting('m350.floor', true);
     END IF;
 
     -- FROM THE TARGET RELATION, named explicitly. `LIKE bug_reports` takes
@@ -665,8 +854,8 @@ BEGIN
     -- true -- but a line an operator reads as a measurement has to be one
     -- (#732), and a variable read into and never used is where the next
     -- untrue one starts.
-    RAISE NOTICE '350: in schema %, bug_reports_auto_number_seq is %, increment %, range % .. %, cycle %, starting at %, adopted at next value % (read under the lock by block 1c), and descends (% then %); the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at %; % automatic row(s) present, all negative by construction',
-        current_schema(), format_type(v_typid, NULL), v_increment, v_min, v_max, v_cycle, v_start, current_setting('m350.next_1c', true), v_a, v_b, v_human_after, v_autos;
+    RAISE NOTICE '350: in schema %, bug_reports_auto_number_seq is %, increment %, range % .. %, cache %, cycle %, relpersistence %, starting at %, adopted at next value % (read under the lock by block 1c), and descends (% then %); it is left at next value % through the adoption policy, at or above the floor %; the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at %; % automatic row(s) present, all negative by construction',
+        current_schema(), format_type(v_typid, NULL), v_increment, v_min, v_max, v_cache, v_cycle, v_persistence, v_start, current_setting('m350.next_1c', true), v_a, v_b, v_left, current_setting('m350.floor', true), v_human_after, v_autos;
 END $m350p$;
 
 COMMIT;
