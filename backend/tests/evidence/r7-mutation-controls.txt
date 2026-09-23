@@ -1,0 +1,148 @@
+The mutation controls, EXECUTED, 2026-09-20 (round 7)
+====================================================
+
+For every control: apply the MUTATION to the real source, run the named test,
+require it to FAIL and print the red line; restore; apply an INERT edit at the
+SAME site and require the same test to PASS. A test that reddens for any edit
+at all measures a line's shape rather than the behaviour, which is what the
+negative control exists to catch (#391).
+
+Runner: backend/tests/evidence/mutation-runner.py, committed beside this
+report, with its repository root derived from its own location and its DSN
+taken from the environment. Files are restored from byte-exact in-memory
+copies, never with `git checkout --` or `git restore` (#290/#401), and the
+md5 of every touched file is compared before and after -- the two `restored
+... byte-identical` lines at the end are that comparison.
+
+FOURTEEN controls: round 6's seven, RE-RUN rather than carried (round 7's
+edits moved code around several of their anchors, and a control that is not
+re-run on the tree it certifies is an assertion about a different tree), plus
+round 7's seven.
+
+Round 7's, and what each one is for:
+  refund-statement-never-executed   read the RETURNING as a VALUE rather than
+        as a row. Only a live server can tell those apart, and only on the
+        refund that lands on exactly 0 -- which is why this control's test is
+        one that RUNS the statement instead of asserting its text.
+  refund-refusal-kills-the-queue    put the flush's refusal arm back to
+        `break`, i.e. round 6's shape: one unpayable wager stops every other
+        player's refund, permanently.
+  refund-refusal-kills-the-sweep    put the prune's mode-2 call back to a bare
+        _refund_series_bets: one unpayable series ends the whole pass.
+  wager-lock-dropped-as-redundant   drop place_ffa_bet's own FOR NO KEY UPDATE
+        on the lobby row -- the change the deleted comment would have
+        licensed.
+  relock-leaves-a-poisoned-transaction  drop the rollback from
+        _ffa_progress_relocked's handler, so the fallback is returned into an
+        aborted transaction and the next read answers bare.
+  evidence-cites-a-gitignored-path  put a committed failure count back to a
+        grep over a path this repository does not contain. It mutates the
+        EVIDENCE, because the rule it guards is about the evidence; the
+        forbidden path is ASSEMBLED in the runner rather than written out,
+        since the rule applies to the runner too.
+  refusal-skips-without-ending-the-transaction  drop the rollback from
+        _refund_or_skip. The prune loops credit its skip as a way out of an
+        iteration that has ENDED the transaction; this is what stops that
+        credit becoming a hole. The only control whose test lives in another
+        file (test_report_disconnect_durability.py, which owns the prune
+        sweep's shape), which is why the runner takes a (file, name) pair.
+
+------------------------------------------------------------------------------
+anchor pre-check: 14 controls, every anchor resolves exactly once
+
+======================================================================
+CONTROL refund-clamps-the-delta -> test_a_refund_moves_the_exact_stake_and_never_a_clamped_one
+  mutant   rc=1  1 failed, 141 deselected in 19.68s
+    RED: E   AssertionError: assert 'COALESCE(gold_spent, 0) >= CAST(:amt AS integer)' in 'async def _return_stake_exactly(db: AsyncSession, player_id, amount,/n                                *, reason: str,...player_id=player_id, amount=int(amount),/n                           reason=reason, reference_id=str(reference_id)))/n'
+  inert    rc=0  1 passed, 141 deselected in 20.69s
+======================================================================
+CONTROL refund-class-swept -> test_no_refund_in_the_file_still_clamps_its_delta
+  mutant   rc=1  1 failed, 141 deselected in 38.82s
+    RED: E   AssertionError: assert 'GREATEST(0,...E(gold_spent' not in '/n    UPDAT...ked/nblocked'
+  inert    rc=0  1 passed, 141 deselected in 33.01s
+======================================================================
+CONTROL variant-scan-unbounded -> test_the_variant_scan_is_bounded_by_the_quota_it_claims
+  mutant   rc=1  1 failed, 141 deselected in 18.06s
+    RED: E   assert "status = 'pending'" in 'photon_room_id IS NULL"/n        ), {"m": mode, "g": group_id})).scalars().all():/n            if _quarantine_same_payload(prior, body):/n                return "variant", True/n    return None, True/n'
+  inert    rc=0  1 passed, 141 deselected in 16.77s
+======================================================================
+CONTROL settlement-takes-for-update -> test_the_lobby_lock_is_the_weakest_mode_that_still_conflicts_with_itself
+  mutant   rc=1  1 failed, 141 deselected in 18.87s
+    RED: E   AssertionError: assert 'FOR NO KEY UPDATE' in 'SELECT * FROM ffa_lobbies WHERE id = :lid FOR UPDATE'
+  inert    rc=0  1 passed, 141 deselected in 20.87s
+======================================================================
+CONTROL settled-game-without-a-named-number -> test_an_answer_names_a_settled_game_only_when_the_report_named_it
+  mutant   rc=1  1 failed, 141 deselected in 16.66s
+    RED: E   AssertionError: assert 'settled_game' not in {'games_played': 4, 'expected_game': 5, 'settled_game': 3}
+  inert    rc=0  1 passed, 141 deselected in 20.81s
+======================================================================
+CONTROL insert-failure-answers-bare -> test_every_reachable_insert_failure_answers_with_the_lobbys_progress
+  mutant   rc=1  1 failed, 141 deselected in 20.20s
+    RED: E   assert 'raise HTTPE...ert failed")' not in '@app.post("...ame_number))'
+  inert    rc=0  1 passed, 141 deselected in 33.32s
+======================================================================
+CONTROL binding-sweep-posonly -> test_every_call_in_main_binds_to_the_function_it_names
+  mutant   rc=1  1 failed, 141 deselected in 37.27s
+    RED: E   AssertionError: main.py:44699: _quarantine_on_file() missing=['mode', 'room', 'group_id', 'body'] unknown=['mode', 'room', 'group_id', 'body'] duplicated=[]
+  inert    rc=0  1 passed, 141 deselected in 36.22s
+======================================================================
+CONTROL refund-statement-never-executed -> test_pg_the_exact_refund_statement_runs_against_a_real_server
+  mutant   rc=1  1 failed, 141 deselected in 27.15s
+    RED: E   main.StakeRefundRefused: refund of 10 gold to player 59a72875-6c14-40a2-89f1-17a69fce5912 (ffa_bet_refund) was refused: the balance does not cover the stake the wager records, so no gold and no ledger row were written
+  inert    rc=0  1 passed, 141 deselected in 20.22s
+======================================================================
+CONTROL refund-refusal-kills-the-queue -> test_pg_one_unpayable_wager_does_not_block_the_rest_of_the_queue
+  mutant   rc=1  1 failed, 141 deselected in 17.40s
+    RED: E   AssertionError: the queue stopped at the row it could not pay: 0
+  inert    rc=0  1 passed, 141 deselected in 18.93s
+======================================================================
+CONTROL refund-refusal-kills-the-sweep -> test_pg_one_unpayable_series_does_not_stop_the_stale_series_sweep
+  mutant   rc=1  1 failed, 141 deselected in 20.79s
+    RED: E   main.StakeRefundRefused: refund of 10 gold to player 5518da4d-bf0c-4fb6-ac18-ad292c9ea09b (refund_abandoned) was refused: the balance does not cover the stake the wager records, so no gold and no ledger row were written
+  inert    rc=0  1 passed, 141 deselected in 26.60s
+======================================================================
+CONTROL wager-lock-dropped-as-redundant -> test_a_wager_cannot_be_inserted_while_its_game_settles
+  mutant   rc=1  1 failed, 141 deselected in 25.56s
+    RED: E   AssertionError: place_ffa_bet no longer takes its own lock on the lobby row
+  inert    rc=0  1 passed, 141 deselected in 17.68s
+======================================================================
+CONTROL relock-leaves-a-poisoned-transaction -> test_the_relock_leaves_a_transaction_the_next_read_can_run_in
+  mutant   rc=1  1 failed, 141 deselected in 24.72s
+    RED: E   AssertionError: the relock returns its fallback without clearing the failed statement
+  inert    rc=0  1 passed, 141 deselected in 27.76s
+======================================================================
+CONTROL evidence-cites-a-gitignored-path -> test_the_committed_evidence_re_derives_its_own_numbers
+  mutant   rc=1  1 failed, 141 deselected in 22.19s
+    RED: E   AssertionError: r7-suites.txt points at a gitignored path; evidence has to carry the output it is evidence of and name instruments a clone has
+  inert    rc=0  1 passed, 141 deselected in 9.56s
+======================================================================
+CONTROL refusal-skips-without-ending-the-transaction -> test_the_prune_batch_commits_per_series_so_it_cannot_hold_the_chain  [test_report_disconnect_durability.py]
+  mutant   rc=1  1 failed, 125 deselected in 23.73s
+    RED: E   AssertionError: _refund_or_skip returns its skip sentinel without ending the transaction, so the loop would take the next series still holding the locks it took for this one
+  inert    rc=0  1 passed, 125 deselected in 21.20s
+======================================================================
+restored main.py: byte-identical
+restored r7-suites.txt: byte-identical
+
+all 14 controls RED under mutation and GREEN under the inert edit
+
+------------------------------------------------------------------------------
+== closing selection, against the COMPLETE evidence directory ==
+The full suite pair necessarily ran before r7-suites.txt and this file
+existed, so the one test that reads what is in evidence/ was run once more
+afterwards, together with everything this round touched, against the directory
+as committed:
+
+  FFA_TEST_PG_DSN=... python -m pytest \
+    tests/test_ffa_game_number_anchor.py tests/test_report_disconnect_durability.py \
+    -q -p no:cacheprovider -k "<the PostgreSQL selection> or tally or prune"
+
+  47 passed, 221 deselected in 50.12s
+
+No `failed` term, and the selection includes
+test_the_committed_evidence_re_derives_its_own_numbers, the control tally, and
+both prune-sweep controls. The only bytes written after that run are this
+paragraph, which adds no path and removes no executed result -- the two
+properties that test checks -- and it was re-run once more on the final bytes:
+
+  1 passed, 267 deselected

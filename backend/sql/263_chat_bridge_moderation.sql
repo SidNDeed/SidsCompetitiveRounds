@@ -1,5 +1,5 @@
--- 263: cross-platform chat moderation (design: ai-collab/chat-moderation-design.md v3,
--- Codex design round D1 dispositions F1-F18).
+-- 263: cross-platform chat moderation (Codex design round D1, dispositions
+-- F1-F18; the shape decisions those settled are recorded below).
 --
 -- Adds: origin identity + author verification on chat_messages; platform-identity
 -- mutes (bridge_mutes); normalized spam patterns (bridge_spam_patterns); the

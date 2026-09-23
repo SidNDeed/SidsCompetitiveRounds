@@ -105,8 +105,8 @@
 -- nothing" attributed to the WHERE clause a property the WHERE clause does
 -- not have: the lock is requested on the relation before the predicate is
 -- evaluated, so a predicate that matches no row does not stop it being
--- acquired. Measured on PostgreSQL 16.9 rather than reasoned, and kept in
--- `ai-collab/lock-probe-zero-row-update.log`: an `UPDATE` with this file's
+-- acquired. Measured on PostgreSQL 16.9 rather than reasoned, by a probe
+-- whose log this repository does not carry: an `UPDATE` with this file's
 -- own WHERE plus `AND NOT true` reports `UPDATE 0` and leaves
 -- `RowExclusiveLock granted=True` on the relation. What makes that harmless
 -- is which locks CONFLICT, which is the framing 336's header uses for the

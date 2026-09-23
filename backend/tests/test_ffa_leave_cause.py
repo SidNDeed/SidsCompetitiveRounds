@@ -1158,11 +1158,11 @@ def test_the_cause_carries_no_time_and_the_read_applies_no_game_bound():
 
     The cause is recorded per LOBBY — per sitting — while the label it
     produces is stamped per MATCH ROW, and this read applies no time and no
-    game bound. It cannot: a match on this tree carries only its lobby, and
-    the stored cause is a bare string with no attestation time, so there is
-    nothing on either side to bound against. Accepted as a residual rather
-    than closed, because closing it needs a per-match game number that another
-    lane adds and this tree does not have.
+    game bound. The stored cause is a bare string with no attestation time
+    and no game index, so the cause side has nothing to bound against. A
+    match has carried `game_number` since migration 327, but the read does
+    not take it as a bound, so the residual this test pins still stands
+    and stays open until the read is bounded.
 
     This test is the residual's tripwire, not its fix. It reddens when EITHER
     fact stops being true — when the read gains a time or game predicate, or

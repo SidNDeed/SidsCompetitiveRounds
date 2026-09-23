@@ -1,0 +1,33 @@
+script    <repo>/backend/tests/evidence/run-both-suites.sh
+cwd       <repo>/backend
+python    Python 3.12.10
+capture   <repo>/backend/tests/evidence/r12-suite-run.log
+command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
+tree      13 paths differ from HEAD or are untracked; fingerprinted before and after
+  4653ade08b8b4f4e38abe79e2c1e74d5  .gitignore
+  4c402f7520803603518fab9ccf7af46d  backend/api/main.py
+  9e8c09b7cdbd39b85be395ebf0e1cf62  backend/tests/evidence/mutation-runner.py
+  5e11b77cedf58185edc37976665fc2df  backend/tests/evidence/r12-citation-pin.log
+  c7b73ec37a3a425ab9c2bff466c42a71  backend/tests/evidence/r12-freeze-guard.log
+  9ee0193e3e5740ff14dc39cddcd4bc3d  backend/tests/evidence/r12-mutation-controls.txt
+  4bfda9eb00646ab6d4f1d7fa87577037  backend/tests/evidence/r12-mutation-run.log
+  d61385199f719252106f38c8dcbeeb72  backend/tests/evidence/r12-pg-controls.log
+  019d129c2a6c2b46c0ad11f164c352b5  backend/tests/evidence/r12-postgresql-controls.txt
+  6d0a4448fd9da84168dc5761184bfe86  backend/tests/evidence/r12-residual-reach.log
+  65268cd1f59fc4d9d78faa3ff11ed93d  backend/tests/evidence/repin-last.py
+  a67065827b001e370b0e87ee4da48f64  backend/tests/route_manifest_net_seat.json
+  6283e790f0037b631bddc1d657bd0408  backend/tests/test_ffa_game_number_anchor.py
+=== opt-out started 14:07:19 ===
+command   env -u FFA_TEST_PG_DSN FFA_TEST_PG_OPTOUT=1 python -m pytest tests/ -q -p no:cacheprovider
+opt-out rc=0
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1742 passed, 44 skipped, 1 xfailed, 2 warnings in 587.27s (0:09:47)
+=== live DSN started 14:17:10 ===
+command   FFA_TEST_PG_DSN=postgresql+asyncpg://<user>@<host>:<port>/<db> python -m pytest tests/ -q -p no:cacheprovider
+dsn rc=0
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1771 passed, 15 skipped, 1 xfailed, 2 warnings in 588.20s (0:09:48)
+=== tree re-fingerprinted 14:27:03 ===
+command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
+UNCHANGED: the same 13 paths, each byte-identical to the pre-run fingerprint
+=== done 14:27:05 ===
