@@ -4317,6 +4317,146 @@ _FROZEN_SERVER_EXTRACT_SHA256 = (
 _FROZEN_SERVER_EXTRACT_REL = (
     "backend/tests/sept16_dc_server_status_route.frozen.txt")
 
+# ── THE PROVENANCE RECORD BESIDE THE EXTRACT ────────────────────────────────
+#
+# WHY THERE IS A SECOND FILE.  The extract's own header records a source line
+# range and a source digest that do not reproduce: the range is printed with a
+# 1-indexed start beside a 0-INDEXED EXCLUSIVE end, so it names one element
+# more than the body has, and the digest under the name `source-sha256` is the
+# pin's digest AFTER universal-newline translation rather than the digest of
+# its bytes, without saying so.  A reader who byte-hashes the pin, or who cuts
+# the stated range, gets a mismatch -- and a mismatch of that shape is exactly
+# what a drifted or fabricated extract would produce, so the header cannot be
+# used to establish what the body is a slice of.
+#
+# WHY THE HEADER IS NOT SIMPLY CORRECTED.  The round-6 contract names the
+# WHOLE-FILE sha256 of the extract, and that digest is recorded in the contract
+# text and in the round-8 build brief, both of which live in read-only pins.
+# Editing one header byte changes it.  Curing a provenance mismatch by breaking
+# the contract's own seal would put the same failure on a bigger surface, so
+# the extract is left sealed and the correction lives HERE, in a file delivered
+# in the same tree, which this harness REQUIRES before it will answer.
+#
+# WHAT THIS BUYS.  The record is not commentary: `_frozen_route_text` refuses
+# while it is missing, unreadable or no longer binding, so the correction
+# cannot be dropped without the cross-lane equality going dark.
+_FROZEN_PROVENANCE = pathlib.Path(__file__).resolve().parent / \
+    "sept16_dc_server_status_route.provenance.txt"
+_FROZEN_PROVENANCE_REL = (
+    "backend/tests/sept16_dc_server_status_route.provenance.txt")
+
+# The four measured facts the record must carry, recorded HERE as well so the
+# record cannot certify itself (#342): a reference value that travels only
+# inside the thing it checks is a check that cannot fail.
+_FROZEN_BODY_SHA256 = (
+    "397e4fc4200365415fc8e5ec3128f3fdf54e38b111deb415bc403a1c211313a6")
+_FROZEN_SOURCE_SHA256_BYTES = (
+    "f8a640c8ec5a641966ee8de5795e882061dfe43d21fc199af8be1eb69bed15c8")
+_FROZEN_SOURCE_SHA256_LF = (
+    "f025a8b4e21d33768737c740443253f2441ca18094cad1514b33f4b5e67dc1ad")
+_FROZEN_SOURCE_LINES = "38671-40545 of 56062"
+
+# THE PASSAGES OF THE SEALED EXTRACT THAT NO LONGER HOLD.  Each is quoted here
+# character for character.  The rule the record is held to is a PAIRING in both
+# directions: while a passage is still in the extract the record must quote it
+# under a supersession heading, and while the record quotes it the passage must
+# still be in the extract -- a supersession that outlives its text is a claim
+# about nothing, and a passage that outlives its supersession is the round-7
+# finding walking back in through the documentation.
+_FROZEN_SUPERSEDED = (
+    "# source-lines    : 38671-40546 of 56062",
+    "# source-sha256   : f025a8b4e21d33768737c740443253f2441ca18094cad1514b3"
+    "3f4b5e67dc1ad",
+    "# IF THE LANES MERGE this file stops being the binding: the resolver "
+    "prefers a" + LF
+    + "# real tree that carries the route -- the merged repository itself -- "
+    "and falls" + LF
+    + "# back here only when no such tree is present.",
+)
+
+# The sentences the record must STATE, not merely imply.  An absence alone
+# holds on an empty file, which is the check that cannot fail (#342).
+_FROZEN_PROVENANCE_REQUIRED = (
+    "1-INDEXED and INCLUSIVE",
+    "no tree can answer for the server representation",
+    "at merge this file is DELETED and the harness is re-run against the",
+)
+
+
+def _frozen_provenance_binds(extract_text, record=None):
+    """(True, None) when the record beside the extract re-derives it.
+
+    WHAT THIS REJECTS, each on its own: a missing or unreadable record; a
+    record that does not name the extract or carries a different whole-file or
+    body digest; a record whose stated source range is the superseded one, or
+    whose element count disagrees with the body actually present; a record that
+    names one source digest without distinguishing the bytes from the
+    translation; a record that stops superseding a passage the extract still
+    carries; and a supersession left standing over text the extract no longer
+    has.  `record` is a test hook so every one of those can be exercised
+    without editing the delivered file."""
+    if record is None:
+        try:
+            record = _FROZEN_PROVENANCE.read_text(encoding="utf-8")
+        except OSError as exc:
+            return False, ("the frozen extract's provenance record could not "
+                           "be read at " + _FROZEN_PROVENANCE_REL + " ("
+                           + exc.__class__.__name__ + "), so nothing "
+                           "re-derives the extract")
+
+    def fld(name):
+        m = re.search(r"^" + re.escape(name) + r"\s*:\s*(.+?)\s*$", record, re.M)
+        return m.group(1) if m else None
+
+    for name, want in (("extract-path", _FROZEN_SERVER_EXTRACT_REL),
+                       ("extract-sha256", _FROZEN_SERVER_EXTRACT_SHA256),
+                       ("body-sha256", _FROZEN_BODY_SHA256),
+                       ("source-sha256-bytes", _FROZEN_SOURCE_SHA256_BYTES),
+                       ("source-sha256-lf", _FROZEN_SOURCE_SHA256_LF),
+                       ("source-lines", _FROZEN_SOURCE_LINES)):
+        got = fld(name)
+        if got != want:
+            return False, ("the provenance record at " + _FROZEN_PROVENANCE_REL
+                           + " records " + name + " as " + repr(got)
+                           + " where this harness records " + repr(want))
+
+    # THE ELEMENT COUNT IS RE-DERIVED FROM THE BODY IN HAND, not copied: this
+    # is the assertion the extract's own header fails.
+    body = extract_text[extract_text.find(_ROUTE_ANCHOR):]
+    elements = len(body.split(LF))
+    stated = fld("body-split-elements")
+    if stated != str(elements):
+        return False, ("the provenance record says the body is " + repr(stated)
+                       + " newline-split elements while the extract's body is "
+                       + str(elements))
+    lo, hi = _FROZEN_SOURCE_LINES.split(" of ")[0].split("-")
+    if int(hi) - int(lo) + 1 != elements:
+        return False, ("the recorded source range " + _FROZEN_SOURCE_LINES
+                       + " spans " + str(int(hi) - int(lo) + 1)
+                       + " elements, not the " + str(elements) + " the body has")
+
+    for sentence in _FROZEN_PROVENANCE_REQUIRED:
+        if sentence not in record:
+            return False, ("the provenance record does not state: " + sentence)
+
+    for passage in _FROZEN_SUPERSEDED:
+        in_extract = passage in extract_text
+        at = record.find(passage)
+        if in_extract and at < 0:
+            return False, ("the extract still carries a passage the provenance "
+                           "record no longer supersedes: "
+                           + passage.split(LF)[0][:60])
+        if at >= 0 and not in_extract:
+            return False, ("the provenance record supersedes a passage the "
+                           "extract no longer carries: "
+                           + passage.split(LF)[0][:60])
+        if at >= 0 and "SUPERSEDED" not in record[max(0, at - 400):at]:
+            return False, ("a superseded passage is quoted in the provenance "
+                           "record outside a supersession heading: "
+                           + passage.split(LF)[0][:60])
+    return True, None
+
+
 # THE ANSWER SENTENCE IDENTIFIES THE REPRESENTATION.  `how` is not commentary
 # printed beside the equality: every caller asserts that this sentence names
 # the extract and carries the recorded digest, so a resolution that came from
@@ -4410,6 +4550,19 @@ def _frozen_route_text(raw=None):
                   "sha256 " + _FROZEN_SERVER_EXTRACT_SHA256
                 + ", got sha256 " + got_file)
         raw = data.decode("utf-8")
+        # THE PROVENANCE RECORD IS PART OF THE READ.  The digest above proves
+        # these are THE bytes; it says nothing about what they are a slice OF,
+        # and the extract's own header answers that question with a range and a
+        # digest that do not reproduce.  The record beside it is what does
+        # reproduce, so a resolution is refused while it is missing or no
+        # longer binding rather than answered from a file whose provenance
+        # nobody can establish.
+        bound, why_prov = _frozen_provenance_binds(raw)
+        if not bound:
+            return None, (
+                "the frozen server-lane extract at " + _FROZEN_SERVER_EXTRACT_REL
+                + " is sealed at sha256 " + got_file + " but its provenance no "
+                "longer re-derives: " + why_prov)
     m = re.search(r"^# sha256-of-body\s*:\s*([0-9a-f]{64})\s*$", raw, re.M)
     if not m:
         return None, "the frozen extract records no sha256 of its own body"
@@ -5711,6 +5864,216 @@ def test_r8_c5_the_named_tree_machinery_is_off_the_contract_path():
                                               "zz_listing_only_name"))
         text4, how4 = _named_tree_route_text(root, None, listing)
         assert "zz_listing_only_name" not in text4, how4
+
+
+def test_r8cl_cl1_the_frozen_extracts_provenance_re_derives_from_the_record():
+    """CL1 (B2, B6, B11, B18): THE PROVENANCE IS A MEASUREMENT, NOT A HEADER.
+
+    WHAT WAS WRONG.  The extract's header records `source-lines` with a
+    1-indexed start beside the 0-indexed EXCLUSIVE end the freeze held in a
+    variable, so the stated range names 1876 newline-split elements where the
+    body has 1875, and the text that range cuts hashes to b9573ad2... rather
+    than to the body digest the same header records.  The header's
+    `source-sha256` is the pin's digest after universal-newline translation --
+    the mode the freeze read it in -- while the pin's own bytes hash to
+    f8a640c8...; nothing in the header says which of the two it is.  Both
+    mismatches have the shape of a drifted or fabricated extract, and neither
+    can be told from one.
+
+    WHY THE HEADER IS STILL THERE.  The contract froze the extract's whole-file
+    digest and repeats it in a read-only pin, so the bytes are sealed.  The
+    correction is delivered beside the file and this harness REQUIRES it: the
+    resolver refuses while it is missing or no longer binding.
+
+    WHAT THIS REJECTS.  Each defect on its own, through the record hook: a
+    missing record, a wrong extract digest, a wrong body digest, the superseded
+    RANGE restored, a body-element count that disagrees with the body in hand,
+    one source digest offered without the two read modes distinguished, and a
+    required sentence removed."""
+    raw = _FROZEN_SERVER_EXTRACT.read_bytes().decode("utf-8")
+    record = _FROZEN_PROVENANCE.read_text(encoding="utf-8")
+
+    ok, why = _frozen_provenance_binds(raw)
+    assert ok, why
+    print("CL1 PROVENANCE RECORD : " + _FROZEN_PROVENANCE_REL
+          + " binds the extract at sha256 " + _FROZEN_SERVER_EXTRACT_SHA256)
+
+    # THE RANGE IS THE ONE THAT REPRODUCES, and the arithmetic is done here
+    # rather than trusted: this is the assertion the extract's header fails.
+    body = raw[raw.find(_ROUTE_ANCHOR):]
+    lo, hi = _FROZEN_SOURCE_LINES.split(" of ")[0].split("-")
+    assert int(hi) - int(lo) + 1 == len(body.split(LF)), (
+        "the recorded range does not span the body")
+    assert "38671-40546" not in _FROZEN_SOURCE_LINES
+    import hashlib
+    assert hashlib.sha256(body.encode("utf-8")).hexdigest() == \
+        _FROZEN_BODY_SHA256
+    assert hashlib.sha256(raw.encode("utf-8")).hexdigest() == \
+        _FROZEN_SERVER_EXTRACT_SHA256
+
+    # THE TWO SOURCE DIGESTS ARE DIFFERENT VALUES UNDER DIFFERENT NAMES.  One
+    # digest under one name is what produced the finding.
+    assert _FROZEN_SOURCE_SHA256_BYTES != _FROZEN_SOURCE_SHA256_LF
+    assert "CRLF throughout" in record
+    assert "universal-newline translation" in record
+
+    # ONE REJECTION PER DEFECT CLASS, planted through the hook.
+    for label, edit in (
+            ("the extract digest", lambda r: r.replace(
+                "extract-sha256        : " + _FROZEN_SERVER_EXTRACT_SHA256,
+                "extract-sha256        : " + "0" * 64)),
+            ("the body digest", lambda r: r.replace(
+                "body-sha256           : " + _FROZEN_BODY_SHA256,
+                "body-sha256           : " + "1" * 64)),
+            ("the superseded range restored", lambda r: r.replace(
+                "source-lines          : 38671-40545 of 56062",
+                "source-lines          : 38671-40546 of 56062")),
+            ("the body element count", lambda r: r.replace(
+                "body-split-elements   : 1875",
+                "body-split-elements   : 1874")),
+            ("the byte digest replaced by the translated one",
+             lambda r: r.replace(
+                 "source-sha256-bytes   : " + _FROZEN_SOURCE_SHA256_BYTES,
+                 "source-sha256-bytes   : " + _FROZEN_SOURCE_SHA256_LF)),
+            ("the index convention sentence", lambda r: r.replace(
+                "1-INDEXED and INCLUSIVE", "somewhere in that region")),
+            ("the no-tree sentence", lambda r: r.replace(
+                "no tree can answer for the server representation",
+                "a tree may answer when one is present")),
+    ):
+        bad, why_bad = _frozen_provenance_binds(raw, record=edit(record))
+        assert not bad, "the record check accepted " + label
+        assert why_bad, label
+
+    # AN EMPTY RECORD FAILS.  It does not skip and it does not fall through:
+    # a cross-lane claim that quietly stops being checked is the check that
+    # cannot fail (#342).
+    bad, why_bad = _frozen_provenance_binds(raw, record="")
+    assert not bad, "an empty provenance record was accepted"
+    assert _FROZEN_PROVENANCE_REL in (why_bad or ""), why_bad
+
+    # INERT TWIN: prose that binds nothing, reworded at the same site.
+    twin = record.replace("It is not a fallback behind a tree",
+                          "It is not a tree's fallback")
+    assert twin != record
+    ok2, why2 = _frozen_provenance_binds(raw, record=twin)
+    assert ok2, why2
+
+
+def test_r8cl_cl2_the_stale_header_passages_are_superseded_in_both_directions():
+    """CL2 (B2, B11, B18): THE FALSE MERGE PARAGRAPH IS BOUND, NOT LEFT LOOSE.
+
+    WHAT WAS WRONG.  The sealed extract's header says, in the present tense,
+    that if the lanes merge the resolver prefers a real tree carrying the route
+    and falls back to the extract only when no such tree is present.  That is
+    the mechanism the round-7 finding was raised about and this round removed:
+    `_server_lane_main` calls `_frozen_route_text` and nothing else, no tree can
+    answer merged or not, and the merge disposition is to DELETE this file and
+    re-run the harness against the merged `backend/api/main.py`.  Read at merge
+    time the paragraph is an instruction to restore the candidate ordering.
+
+    WHY IT IS STILL IN THE FILE.  The extract's bytes are sealed by the
+    contract digest.  The paragraph is therefore SUPERSEDED in a delivered file
+    beside it, and the pairing is checked BOTH WAYS so neither half can rot:
+    while the passage is in the extract the record must quote it under a
+    supersession heading, and while the record quotes it the passage must still
+    be there.
+
+    WHAT THIS REJECTS.  The supersession removed; the quotation moved out from
+    under its heading; the quotation altered so it no longer matches the sealed
+    text; and a supersession left standing over text the extract does not
+    carry."""
+    raw = _FROZEN_SERVER_EXTRACT.read_bytes().decode("utf-8")
+    record = _FROZEN_PROVENANCE.read_text(encoding="utf-8")
+
+    merge = _FROZEN_SUPERSEDED[2]
+    assert merge in raw, "the sealed extract no longer carries the passage"
+    assert merge in record, "the record no longer supersedes it"
+    print("CL2 SUPERSEDED PASSAGES : %d, each quoted under a heading"
+          % len(_FROZEN_SUPERSEDED))
+
+    # THE RESOLVER THE RECORD DESCRIBES IS THE ONE THIS FILE HAS.  The record
+    # is prose; this is the tree.  Docstring and comments are stripped first,
+    # because both TALK about trees and a word-absence check over prose is a
+    # check about prose.
+    import inspect
+    src = inspect.getsource(_server_lane_main)
+    code = src[src.index('"""', src.index('"""') + 3) + 3:]
+    code = LF.join(l for l in code.split(LF) if not l.strip().startswith("#"))
+    assert "_frozen_route_text()" in code
+    for banned in ("_server_lane_candidates", "_named_tree_route_text",
+                   "SCR_SERVER_LANE", "REVIEW-INPUT"):
+        assert banned not in code, (
+            "the record says no tree can answer while the resolver names "
+            + banned)
+
+    for label, edit in (
+            ("the supersession deleted",
+             lambda r: r.replace(merge, "(the merge paragraph)")),
+            ("the heading removed", lambda r: r.replace(
+                "SUPERSEDED -- the extract's merge paragraph, verbatim:",
+                "A note on the merge paragraph:")),
+            ("the quotation altered", lambda r: r.replace(
+                "# back here only when no such tree is present.",
+                "# back here only when no such tree exists.")),
+    ):
+        bad, why_bad = _frozen_provenance_binds(raw, record=edit(record))
+        assert not bad, "the pairing accepted " + label
+        assert why_bad, label
+
+    # THE OTHER DIRECTION: a supersession over text the extract does not carry
+    # is refused too, so the record cannot accumulate claims about nothing.
+    ghost = record + LF + "SUPERSEDED -- a passage nobody has, verbatim:" + LF
+    stale = _FROZEN_SUPERSEDED + ("# a line the extract has never carried",)
+    saved = globals()["_FROZEN_SUPERSEDED"]
+    try:
+        globals()["_FROZEN_SUPERSEDED"] = stale
+        bad, why_bad = _frozen_provenance_binds(
+            raw, record=ghost + "# a line the extract has never carried" + LF)
+        assert not bad, "a supersession over absent text was accepted"
+        assert "no longer carries" in (why_bad or ""), why_bad
+    finally:
+        globals()["_FROZEN_SUPERSEDED"] = saved
+
+    # INERT TWIN: the correction reworded where it explains rather than binds.
+    twin = record.replace("Read at merge time as an",
+                          "Read at merge time it would be an")
+    assert twin != record
+    ok2, why2 = _frozen_provenance_binds(raw, record=twin)
+    assert ok2, why2
+
+
+def test_r8cl_cl1b_the_sealed_extract_is_exempt_from_line_ending_conversion():
+    """CL1 (B2): THE CONTRACT'S SEAL IS OVER BYTES, SO THE BYTES ARE PINNED.
+
+    WHAT WAS FOUND WHILE RE-DERIVING THE PROVENANCE.  This repository is
+    checked out with end-of-line conversion ON.  The extract is stored with
+    line feeds and had never been re-checked-out since it was added, so the
+    copy on disk still hashed to the sealed digest -- but a FRESH checkout
+    rewrites it with carriage returns, 106143 bytes hashing to 7b8bd630..., and
+    every cross-lane assertion then refuses with a digest mismatch.  The
+    integrator's merge checkout is exactly that case.
+
+    THE FIX IS AT THE ROOT: `backend/tests/.gitattributes` marks the extract and
+    its provenance record as NOT text, so no checkout may rewrite them and the
+    working-tree bytes are the blob's bytes on every seat.
+
+    WHAT THIS REJECTS.  The attribute dropped for either file, and a carriage
+    return in either file on disk."""
+    attrs = (pathlib.Path(__file__).resolve().parent / ".gitattributes")
+    assert attrs.exists(), (
+        "backend/tests/.gitattributes is gone: a fresh checkout would rewrite "
+        "the sealed extract's line endings and the contract digest would fail")
+    text = attrs.read_text(encoding="utf-8")
+    print("CL1b EOL EXEMPTION : " + " / ".join(
+        l.strip() for l in text.split(LF) if l.strip()))
+    for name in (_FROZEN_SERVER_EXTRACT.name, _FROZEN_PROVENANCE.name):
+        assert re.search(r"^" + re.escape(name) + r"\s+-text\s*$", text, re.M), (
+            name + " is not marked -text; a checkout may rewrite its bytes")
+    for p in (_FROZEN_SERVER_EXTRACT, _FROZEN_PROVENANCE):
+        assert b"\r" not in p.read_bytes(), (
+            p.name + " carries a carriage return, so this working tree is "
+            "already the converted copy")
 
 
 def test_r6lens_l6_a_tree_being_written_is_not_read_as_a_disagreement():
@@ -7185,10 +7548,21 @@ def test_r8_l3_every_deleted_mechanism_class_is_rejected_across_the_whole_plugin
 # delivers is outside the worktree and is covered by the round-8 notes checker,
 # which reads the bundle; that split is recorded in the notes.
 def _r8_claim_scope():
-    """{name: text} for every source this harness can hold to the claim rule."""
+    """{name: text} for every file this lane delivers from the worktree.
+
+    THE ROUND-8 SCOPE SAID `every source this lane delivers` WHILE MEANING THE
+    PLUGIN SOURCES AND THIS FILE.  The two data files beside this harness --
+    the sealed server-lane extract and its provenance record -- are tracked,
+    are delivered, and carry prose a reader acts on; the extract's own header
+    is where the round-7 mechanism survived in words after the code dropped it.
+    A scope that names everything and reaches a subset is the gap the claim
+    check exists to close, so they are IN, and the docstring now says what the
+    dictionary holds."""
     out = dict(_r7_plugin_sources())
     out["test_sept16_client_r2.py"] = pathlib.Path(__file__).read_text(
         encoding="utf-8")
+    for p in (_FROZEN_SERVER_EXTRACT, _FROZEN_PROVENANCE):
+        out[p.name] = p.read_text(encoding="utf-8")
     return out
 
 

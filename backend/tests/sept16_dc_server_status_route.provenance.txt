@@ -1,0 +1,114 @@
+# FROZEN EXTRACT PROVENANCE -- the record that RE-DERIVES the extract beside it.
+#
+# THIS FILE IS DATA, NOT SOURCE, and it is never imported or executed.  The
+# harness reads it as text and REFUSES to answer the cross-lane equality while
+# it is missing, unreadable or no longer binding.
+#
+# WHY IT EXISTS.  The extract's own provenance header records a source line
+# range and a source digest that DO NOT REPRODUCE as they are written: the
+# range is one element too long, and the digest is of the source AFTER
+# universal-newline translation while the header calls it the source's sha256.
+# A reader who takes the pin, hashes its bytes and cuts the stated range gets
+# two mismatches, and neither one distinguishes an off-by-one and a read mode
+# from a drifted or fabricated extract.  The extract itself is SEALED -- the
+# round-6 contract names its whole-file sha256, so a correction inside the file
+# would break the one constant the contract froze -- so the correction is
+# recorded HERE, beside it, in the same delivered tree, and the harness binds
+# the two together.  Re-freezing the extract with a corrected header is the
+# integrator's decision and is carried as an open item, not taken by this lane.
+#
+# EVERY FIELD BELOW IS MEASURED.  886bed8-r8-freeze-server-route.py --verify
+# re-derives all of them from the pin and this pair of files and refuses when
+# one does not reproduce; 886bed8-r8-freeze-verify.log is that run.
+
+extract-path          : backend/tests/sept16_dc_server_status_route.frozen.txt
+extract-sha256        : 69ac1970c409c232bd41396d7d767ee567e8bdf7832bf3423ff193b92663c98d
+body-sha256           : 397e4fc4200365415fc8e5ec3128f3fdf54e38b111deb415bc403a1c211313a6
+body-split-elements   : 1875
+source                : the round-6 client review pin, REVIEW-INPUT/server-lane/main.py
+source-bytes          : 3086099
+source-sha256-bytes   : f8a640c8ec5a641966ee8de5795e882061dfe43d21fc199af8be1eb69bed15c8
+source-sha256-lf      : f025a8b4e21d33768737c740443253f2441ca18094cad1514b33f4b5e67dc1ad
+source-split-elements : 56062
+source-lines          : 38671-40545 of 56062
+
+# WHAT EACH DIGEST IS, SAID RATHER THAN IMPLIED.
+#
+#   source-sha256-bytes is the sha256 of the pin file AS IT SITS ON DISK.  That
+#   file is CRLF throughout -- 56061 carriage-return line feeds and no bare
+#   line feed -- so this is the digest a reader gets from any byte hash of it.
+#
+#   source-sha256-lf is the sha256 of the SAME file after universal-newline
+#   translation, re-encoded as UTF-8.  That is the form the freeze read, which
+#   is why it is the digest the extract's header carries; it is recorded here
+#   under a name that says so instead of under the name of the file's bytes.
+#
+# WHAT source-lines COUNTS.  The translated text is split on the line feed,
+# which yields source-split-elements elements for a file that ends in a
+# newline: the last element is the empty tail after the final separator.  The
+# range is 1-INDEXED and INCLUSIVE over those elements, so element 40545 is the
+# empty tail that carries the body's own trailing newline and the slice is
+# body-split-elements elements long.  The extract's header states the same
+# range with an exclusive 0-indexed end printed beside a 1-indexed start, which
+# is one element too many and is why it does not reproduce.
+
+# RE-DERIVATION, exactly -- three lines, no tools, and it reproduces both the
+# body and its digest:
+#
+#   text  = pin.read(mode="r", encoding="utf-8")        # universal newlines
+#   body  = chr(10).join(text.split(chr(10))[38670:40545])
+#   sha256(body.encode("utf-8")) == body-sha256
+#
+# and the extract's body is everything from the status route's own decorator
+# onward, so body == extract_text[extract_text.index('@app.get("/api/v1/team/'
+# 'series/{series_id}/status"'):].
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SUPERSEDED PASSAGES OF THE SEALED EXTRACT
+#
+# Each passage below is still present in the extract, character for character,
+# because the extract's bytes are sealed by the contract digest.  Each is
+# SUPERSEDED by the correction under it, and the harness asserts this pairing:
+# while a passage is in the extract it must be quoted here under this heading,
+# and while it is quoted here it must still be in the extract.  A supersession
+# that outlives the text it supersedes is a claim about nothing.
+# ─────────────────────────────────────────────────────────────────────────────
+
+SUPERSEDED -- the extract's source-lines field, verbatim:
+# source-lines    : 38671-40546 of 56062
+  WHY IT IS WRONG : 38671 is a 1-indexed start and 40546 is the 0-indexed
+    EXCLUSIVE end the freeze held in a variable; printed together they name
+    1876 elements where the body is 1875, and the slice they name hashes to
+    b9573ad25da116f099671adf094bda625f108af4f8b222d25459fac7a5a15f79 rather
+    than to the body digest the same header records.
+  CORRECT : 38671-40545 of 56062, 1-indexed inclusive over the newline split.
+
+SUPERSEDED -- the extract's source-sha256 field, verbatim:
+# source-sha256   : f025a8b4e21d33768737c740443253f2441ca18094cad1514b33f4b5e67dc1ad
+  WHY IT IS WRONG : that digest is not the pin's sha256.  It is the pin's
+    sha256 AFTER universal-newline translation, because the freeze read the
+    file in text mode; the header does not say so, so a reader who byte-hashes
+    the pin gets a mismatch and has no way to tell a read mode from a drift.
+  CORRECT : source-sha256-bytes above is the pin's own digest, and
+    source-sha256-lf is the translated one, each under a name that says which.
+
+SUPERSEDED -- the extract's merge paragraph, verbatim:
+# IF THE LANES MERGE this file stops being the binding: the resolver prefers a
+# real tree that carries the route -- the merged repository itself -- and falls
+# back here only when no such tree is present.  It is a review artifact with a
+# shelf life, not a second copy of the server to maintain.
+  WHY IT IS WRONG : it describes the resolver the round-7 review rejected.  On
+    this tree no tree can answer for the server representation at all, merged
+    or not: _server_lane_main calls _frozen_route_text and nothing else, the
+    candidate machinery is off the contract path and keeps only its own cases,
+    and a pin-shaped working root changes nothing.  Read at merge time as an
+    instruction, that paragraph would restore the very candidate ordering the
+    round removed.
+  CORRECT : at merge this file is DELETED and the harness is re-run against the
+    merged backend/api/main.py.  It is not a fallback behind a tree and it does
+    not stop binding on its own; the deletion is an OPEN ITEM for the
+    integrator, recorded in the round-8 notes, and until it happens this
+    extract is the only representation the contract assertions read.
+
+# The shelf-life sentence of that paragraph stands: this is round-6 data and it
+# is a review artifact, not a second copy of the server to maintain.
