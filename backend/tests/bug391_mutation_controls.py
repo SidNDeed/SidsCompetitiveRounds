@@ -11,11 +11,17 @@ Run it (the live half needs the DSN or the mutations have nothing to kill):
     BUG391_TEST_PG_DSN=postgresql+asyncpg://postgres@127.0.0.1:55432/scr_bug391 \\
         python backend/tests/bug391_mutation_controls.py
 
-It edits backend/api/main.py in place and restores it from an in-memory copy
-plus a backup file. It never runs `git checkout --` or `git restore`: the tree
-carries uncommitted work and those commands take the whole path with them
-(#290 / #401). The final line re-hashes main.py against the original and the
-run FAILS if the file did not come back byte-identical.
+It edits files in place and restores them from in-memory copies plus backup
+files. It never runs `git checkout --` or `git restore`: the tree carries
+uncommitted work and those commands take the whole path with them (#290 /
+#401).
+
+CERTIFICATION covers every file a run USED, not only the module under
+mutation (bug 391 r2 finding 6). Round 2 mutates the suite and this runner
+too — a defect can live in an assertion as easily as in a statement — so
+"main.py came back byte-identical" is no longer a receipt for the harness that
+produced the result. Every file in FILES is hashed before and after and every
+hash is printed; the run FAILS if any of them moved.
 """
 
 import hashlib
@@ -29,13 +35,30 @@ from pathlib import Path
 
 BACKEND = Path(__file__).resolve().parents[1]
 MAIN_PY = BACKEND / "api" / "main.py"
+TOURNAMENTS_PY = BACKEND / "api" / "tournaments.py"
 TESTS = "tests/test_ovt_abandoned_horizon.py"
+SUITE_PY = BACKEND / TESTS
+RUNNER_PY = Path(__file__).resolve()
+
+# Every file a run reads or edits. The keys are what a mutation edit names.
+FILES = {
+    "main": MAIN_PY,
+    "tournaments": TOURNAMENTS_PY,
+    "suite": SUITE_PY,
+    "runner": RUNNER_PY,
+}
 
 ALL_GREEN = "__ALL_GREEN__"
+# Hard wall-clock cap on ONE suite run. The baseline is about two minutes and
+# the slowest mutation about two and a half, so this is generous; its job is
+# not to be tight but to turn "the campaign stopped and nobody said why" into
+# a reported no-verdict that the caller retries.
+SUITE_TIMEOUT_S = 420
 # The only database this runner and the suite it drives may touch.
 EXPECTED_DB = "scr_bug391"
 
-# Each entry: (label, what defect it models, [(old, new), ...], [tests that must red])
+# Each entry: (label, what defect it models, edits, [tests that must red]).
+# An edit is ("<file key>", old, new), or (old, new) for main.py.
 MUTATIONS = [
     (
         "M1-horizon-off-by-one-day",
@@ -77,7 +100,9 @@ MUTATIONS = [
     (
         "M3-no-predicate-recheck-in-the-transaction",
         "the candidate list is trusted: no status re-check under the lock, "
-        "no status guard on the write",
+        "no status guard on the write. The live interleaving test belongs to "
+        "M31 now: round 2's under-lock completion term refuses that row on "
+        "its own, so removing the STATUS guard alone no longer changes it",
         [('''    if locked["status"] != "active":
         print(f"[OVT-HORIZON] Candidate already settled under the lock: "
               f"series {series_id} status={locked['status']}")
@@ -88,12 +113,12 @@ MUTATIONS = [
         RETURNING id""",
           """         WHERE id = CAST(:sid AS uuid)
         RETURNING id""")],
-        ["test_a_report_completing_the_series_before_the_lock_wins",
-         "test_the_predicate_is_re_checked_inside_the_transaction"],
+        ["test_the_predicate_is_re_checked_inside_the_transaction"],
     ),
     (
         "M3b-status-is-not-part-of-the-predicate",
-        "M3 plus a candidate read that no longer filters on status",
+        "M3 plus a candidate read that no longer filters on status. Same "
+        "note as M3: the live interleaving test is M31's",
         [('''    if locked["status"] != "active":
         print(f"[OVT-HORIZON] Candidate already settled under the lock: "
               f"series {series_id} status={locked['status']}")
@@ -108,8 +133,7 @@ MUTATIONS = [
            AND s.is_ranked = FALSE""",
           """         WHERE s.status IS NOT NULL
            AND s.is_ranked = FALSE""")],
-        ["test_sweeping_the_same_row_twice_is_a_no_op",
-         "test_a_report_completing_the_series_before_the_lock_wins"],
+        ["test_sweeping_the_same_row_twice_is_a_no_op"],
     ),
     (
         "M4-lock-mode-for-update",
@@ -159,7 +183,14 @@ MUTATIONS = [
                                         timeout=OVT_HORIZON_TICK_BUDGET_S)""",
           "    done, _pending = await asyncio.wait({task})")],
         ["test_the_tick_gives_the_janitor_loop_back_when_the_table_is_locked",
-         "test_the_tick_gives_the_loop_back_inside_a_bounded_budget"],
+         "test_the_tick_gives_the_loop_back_inside_a_bounded_budget",
+         # Round 2: the single-flight cases drive the tick against a sweep
+         # that never finishes, so they depend on this budget too. They carry
+         # their own wall-clock bound now, which is why removing the budget
+         # REDS them instead of hanging the run (a control that hangs gives no
+         # verdict at all).
+         "test_a_tick_declines_while_the_previous_one_is_still_in_flight",
+         "test_the_single_flight_decline_says_so_on_its_own_line"],
     ),
     (
         "M9-the-sweep-stops-distinguishing-ranked",
@@ -198,6 +229,509 @@ MUTATIONS = [
           """         WHERE os.invalidated_at IS NULL AND os.winner_side IN (1, 2)""")],
         ["test_the_ovt_earned_pack_paths_are_completion_gated"],
     ),
+    # ── round 2 ──────────────────────────────────────────────────────────
+    #
+    # Every entry below closes a round-1 finding and every one of them is
+    # PAIRED with an inert twin at the SAME site: an edit of the same shape
+    # that must stay green. A red with no green twin beside it proves only
+    # that something moved (#391).
+    (
+        "M13-no-row-lock-at-all",
+        "r2 finding 10 / B13: the concurrency experiment the diagnosis asked "
+        "for — the settler takes NO row lock, so it cannot decline and its "
+        "write waits on whoever holds the row",
+        [('        " FOR NO KEY UPDATE SKIP LOCKED"', '        ""')],
+        ["test_a_row_another_transaction_holds_is_declined_not_waited_for",
+         "test_the_row_lock_is_for_no_key_update"],
+    ),
+    (
+        "M13-TWIN-lock-clause-reflowed",
+        "inert twin at the M13 site: the same clause, spaced differently",
+        [('        " FOR NO KEY UPDATE SKIP LOCKED"',
+          '        "  FOR NO KEY UPDATE  SKIP LOCKED"')],
+        [ALL_GREEN],
+    ),
+    (
+        "M14-the-settled-arm-stops-paying-the-game",
+        "r2 finding 1 / B14: the report records the match and returns above "
+        "the per-game award, so all three seats lose a game they played",
+        [("            _res_a, _lbl_a = await _award_the_game()",
+          "            _res_a, _lbl_a = ({}, {})")],
+        ["test_a_report_landing_on_a_settled_series_still_pays_that_game"],
+    ),
+    (
+        "M14-TWIN-settled-arm-log-wording",
+        "inert twin at the M14 site: the same branch, different log wording",
+        [("{series_uuid} landed on a ", "{series_uuid} arrived at a ")],
+        [ALL_GREEN],
+    ),
+    (
+        "M15-the-report-lock-declines-instead-of-waiting",
+        "r2 finding 1: the report sink stops serialising with the janitor and "
+        "answers on a row version it did not wait to see",
+        [('"SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"',
+          '"SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE SKIP LOCKED"')],
+        ["test_the_report_sinks_series_lock_waits_so_the_void_cannot_be_missed",
+         "test_the_void_and_a_report_serialise_on_the_same_series_row"],
+    ),
+    (
+        "M15-TWIN-report-lock-reflowed",
+        "inert twin at the M15 site: the same statement, spaced differently",
+        [('"SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"',
+          '"SELECT *  FROM ovt_series  WHERE id = :sid  FOR NO KEY UPDATE"')],
+        [ALL_GREEN],
+    ),
+    (
+        "M16-a-completion-stamp-stops-being-refused",
+        "r2 finding 2 / B5: an `active` row carrying a recent completed_at is "
+        "voided, and the continuation then accepts it as a prior",
+        [("           AND s.completed_at IS NULL\n", "")],
+        ["test_both_halves_of_the_predicate_refuse_a_completion_stamp",
+         "test_an_active_row_carrying_a_completion_stamp_is_declined"],
+    ),
+    (
+        "M16-TWIN-completion-term-parenthesised",
+        "inert twin at the M16 site: the same term, written with brackets",
+        [("           AND s.completed_at IS NULL\n",
+          "           AND (s.completed_at IS NULL)\n")],
+        [ALL_GREEN],
+    ),
+    (
+        "M17-the-declined-rows-stop-being-counted",
+        "r2 finding 2: the refusal becomes a silent filter, so the set it "
+        "leaves behind is invisible",
+        [("""        stamped = await _ovt_horizon_stamped_backlog(
+            db, OVT_ABANDONED_HORIZON_DAYS)""", "        stamped = -1")],
+        ["test_the_declined_stamp_rows_are_counted_not_silently_filtered",
+         "test_an_active_row_carrying_a_completion_stamp_is_declined"],
+    ),
+    (
+        "M17-TWIN-declined-rows-log-wording",
+        "inert twin at the M17 site: the same count, different wording",
+        [("horizon left ACTIVE: they carry a completed_at while ",
+          "horizon still ACTIVE: they carry a completed_at while ")],
+        [ALL_GREEN],
+    ),
+    (
+        "M18-no-single-flight-guard",
+        "r2 finding 3: every tick starts another sweep behind a stalled one, "
+        "so pooled connections accumulate until database work starves",
+        [("""    global _ovt_horizon_tick_inflight
+    if _ovt_horizon_tick_inflight is not None:
+        print(f"[OVT-HORIZON] tick declined: the previous tick is still in "
+              f"flight (cancelled at {OVT_HORIZON_TICK_BUDGET_S}s and not yet "
+              f"unwound); one sweep per process, next tick retries")
+        return 0
+""", "    global _ovt_horizon_tick_inflight\n")],
+        ["test_a_tick_declines_while_the_previous_one_is_still_in_flight",
+         "test_the_single_flight_decline_says_so_on_its_own_line"],
+    ),
+    (
+        "M18-TWIN-single-flight-decline-wording",
+        "inert twin at the M18 site: the same decline, different tail",
+        [("unwound); one sweep per process, next tick retries",
+          "unwound); one sweep per process; the next tick retries")],
+        [ALL_GREEN],
+    ),
+    (
+        "M19-the-census-goes-blind-to-orm-locks",
+        "r2 finding 4 / B6: the lock census cannot see `.with_for_update(...)` "
+        "and certifies a wait count that omits a reachable unbounded waiter",
+        [('and node.func.attr == "with_for_update"):',
+          'and node.func.attr == "with_for_update_unreachable"):')],
+        ["test_the_janitor_lock_census_sees_orm_locks_and_not_only_sql",
+         "test_a_lock_taking_path_outside_the_counted_set_reds_the_census"],
+    ),
+    (
+        "M19-TWIN-orm-collector-local-rewritten",
+        "inert twin at the M19 site: the same collector, same behaviour",
+        [("            declines = False\n", "            declines = bool(0)\n")],
+        [ALL_GREEN],
+    ),
+    (
+        "M20-an-unprovable-lock-mode-is-certified-as-declining",
+        "r2 finding 4: a keyword the walk cannot evaluate is counted as a "
+        "decline, which is the one direction a lock census may not err in",
+        [("""                    if isinstance(kw.value, _ast.Constant) and kw.value.value:
+                        declines = True""",
+          "                    declines = True")],
+        ["test_a_lock_taking_path_outside_the_counted_set_reds_the_census"],
+    ),
+    (
+        "M20-TWIN-lock-keyword-set-rewritten",
+        "inert twin at the M20 site: the same two keywords, listed",
+        [('if kw.arg in ("skip_locked", "nowait"):',
+          'if kw.arg in ["skip_locked", "nowait"]:')],
+        [ALL_GREEN],
+    ),
+    (
+        "M21-the-ranked-backlog-ignores-recent-play",
+        "r2 finding 7 / B3: a 20-day-old ranked series played this morning is "
+        "counted past the idle horizon and warns about an unbuilt settlement",
+        [("""           AND s.is_ranked = TRUE
+           AND s.created_at < NOW() - make_interval(days => CAST(:days AS int))
+           AND NOT EXISTS (
+                 SELECT 1 FROM ovt_matches m
+                  WHERE m.series_id = s.id
+                    AND GREATEST(m.ended_at, m.created_at)
+                        >= NOW() - make_interval(days => CAST(:days AS int)))""",
+          """           AND s.is_ranked = TRUE
+           AND s.created_at < NOW() - make_interval(days => CAST(:days AS int))""")],
+        ["test_a_ranked_series_played_today_is_not_a_backlog_warning"],
+    ),
+    (
+        "M21-TWIN-ranked-term-parenthesised",
+        "inert twin at the M21 site: the same ranked term, with brackets",
+        [("           AND s.is_ranked = TRUE\n",
+          "           AND (s.is_ranked = TRUE)\n")],
+        [ALL_GREEN],
+    ),
+    (
+        "M22-the-suite-caller-loses-its-database-guard",
+        "r2 finding 5 / F4: the fixture terminates and DROPs without asking "
+        "which database it is pointed at; the helper's own test stays green",
+        [("suite", """        # Before the terminate, not after it: the refusal has to come first or
+        # it is documentation.
+        await _assert_dedicated_db(conn)
+""", """        # Before the terminate, not after it: the refusal has to come first or
+        # it is documentation.
+""")],
+        ["test_the_destructive_callers_are_guarded_not_only_the_helper"],
+    ),
+    (
+        "M22-TWIN-suite-guard-comment-reworded",
+        "inert twin at the M22 site: the guard stays, the comment changes",
+        [("suite",
+          "        # Before the terminate, not after it: the refusal has to come first or",
+          "        # Before the terminate, never after it: the refusal comes first or")],
+        [ALL_GREEN],
+    ),
+    (
+        "M23-the-runner-caller-loses-its-database-guard",
+        "r2 finding 5 / F4: this runner terminates every backend on whatever "
+        "database the DSN names without comparing the name",
+        [("runner", "                if dbname != EXPECTED_DB:",
+          "                if dbname is None:")],
+        ["test_the_destructive_callers_are_guarded_not_only_the_helper"],
+    ),
+    (
+        "M23-TWIN-runner-guard-message-reworded",
+        "inert twin at the M23 site: the refusal stays, its wording changes",
+        [("runner", "                        f\"this runner terminates every backend on it and the \"",
+          "                        f\"this runner terminates each backend on it and the \"")],
+        [ALL_GREEN],
+    ),
+    (
+        "M24-certification-narrows-back-to-one-file",
+        "r2 finding 6: the post-run receipt stops covering the harness, so a "
+        "changed assertion leaves a true main.py MATCH behind it",
+        [("runner", '    "suite": SUITE_PY,\n    "runner": RUNNER_PY,\n',
+          '    "suite": SUITE_PY,\n')],
+        ["test_the_mutation_runner_certifies_every_file_a_run_used"],
+    ),
+    (
+        "M24-TWIN-certification-map-reordered",
+        "inert twin at the M24 site: the same four files, listed in another "
+        "order",
+        [("runner", '    "main": MAIN_PY,\n    "tournaments": TOURNAMENTS_PY,\n',
+          '    "tournaments": TOURNAMENTS_PY,\n    "main": MAIN_PY,\n')],
+        [ALL_GREEN],
+    ),
+    (
+        "M32-the-receipt-names-a-file-instead-of-walking-the-map",
+        "r2 finding 6, second half: the post-run receipt stops iterating the "
+        "certified set, so the files it no longer visits are reported by "
+        "nobody while the one it kept still reads MATCH",
+        [("runner", "    for key in FILES:\n", "    for key in (\"main\",):\n")],
+        ["test_the_mutation_runner_certifies_every_file_a_run_used"],
+    ),
+    (
+        "M32-TWIN-receipt-comparison-reordered",
+        "inert twin at the M32 site: the same comparison, the two sides "
+        "swapped",
+        [("runner", "        ok = after == digests[key]",
+          "        ok = digests[key] == after")],
+        [ALL_GREEN],
+    ),
+    (
+        "M25-a-source-citation-goes-one-line-stale",
+        "r2 finding 11 / B7: a line pin reaches a neighbouring statement, so "
+        "following it conceals the regression it was written to catch",
+        [('PIN main.py:3844 "SELECT status FROM ovt_series '
+          'WHERE id = CAST(:sid AS uuid)"',
+          'PIN main.py:3845 "SELECT status FROM ovt_series '
+          'WHERE id = CAST(:sid AS uuid)"')],
+        ["test_every_bug391_source_citation_resolves_to_what_it_names"],
+    ),
+    (
+        "M25-TWIN-citation-prose-reworded",
+        "inert twin at the M25 site: the pin stands, the sentence around it "
+        "changes",
+        [("So the two can\n    # never both decide this row",
+          "So they can\n    # never both decide this row")],
+        [ALL_GREEN],
+    ),
+    (
+        "M26-a-status-reader-leaves-the-census",
+        "r2 finding 13 / F5: a reader of ovt_series.status disappears and the "
+        "corrected census still calls itself complete",
+        [("""        SELECT * FROM ovt_series
+         WHERE status = 'active'
+           AND (solo_id = :pid""",
+          """        SELECT * FROM ovt_series
+         WHERE (solo_id = :pid""")],
+        ["test_the_ovt_series_status_reader_census_stays_complete"],
+    ),
+    (
+        "M26-TWIN-status-reader-parenthesised",
+        "inert twin at the M26 site: the same reader, with brackets",
+        [("""        SELECT * FROM ovt_series
+         WHERE status = 'active'
+           AND (solo_id = :pid""",
+          """        SELECT * FROM ovt_series
+         WHERE (status = 'active')
+           AND (solo_id = :pid""")],
+        [ALL_GREEN],
+    ),
+    (
+        "M27-the-earned-pack-grant-moves-above-the-completion-write",
+        "r2 finding 9 / F7: the inline grant runs BEFORE the series is written "
+        "'completed', which the round-1 same-function text check cannot see",
+        [("""        await db.execute(text(
+            "UPDATE ovt_series SET status='completed', winner_side=:ws, completed_at=NOW() WHERE id=:sid"
+        ), {"ws": winner_side, "sid": series_uuid})
+        # Player Cards (WP-D): the earned-pack roll for the completed series""",
+          "        # Player Cards (WP-D): the earned-pack roll for the completed series"),
+         ("""        except Exception as pcex:
+            print(f"[PC-EARNED] ovt grant failed for {series_uuid}: {pcex}")""",
+          """        except Exception as pcex:
+            print(f"[PC-EARNED] ovt grant failed for {series_uuid}: {pcex}")
+        await db.execute(text(
+            "UPDATE ovt_series SET status='completed', winner_side=:ws, completed_at=NOW() WHERE id=:sid"
+        ), {"ws": winner_side, "sid": series_uuid})""")],
+        ["test_the_ovt_earned_pack_grant_is_dominated_by_the_completion_write"],
+    ),
+    (
+        "M27-TWIN-grant-failure-log-reworded",
+        "inert twin at the M27 site: the same two statements in the same "
+        "order, one log line reworded",
+        [('print(f"[PC-EARNED] ovt grant failed for {series_uuid}: {pcex}")',
+          'print(f"[PC-EARNED] ovt grant did not complete for {series_uuid}: {pcex}")')],
+        [ALL_GREEN],
+    ),
+    (
+        "M28-the-settled-arm-advances-the-series-tally",
+        "r2 finding 1: paying a late game also resurrects the score of a "
+        "series that was already settled",
+        [("""                UPDATE ovt_series SET
+                    solo_xp_earned = solo_xp_earned + :sx,""",
+          """                UPDATE ovt_series SET
+                    solo_series_wins = solo_series_wins + 1,
+                    solo_xp_earned = solo_xp_earned + :sx,""")],
+        ["test_the_settled_without_play_arm_never_moves_the_series_tally"],
+    ),
+    (
+        "M28-TWIN-settled-ledger-columns-reordered",
+        "inert twin at the M28 site: the same six columns, listed in another "
+        "order",
+        [("""                    solo_xp_earned = solo_xp_earned + :sx,
+                    duo_a_xp_earned = duo_a_xp_earned + :ax,""",
+          """                    duo_a_xp_earned = duo_a_xp_earned + :ax,
+                    solo_xp_earned = solo_xp_earned + :sx,""")],
+        [ALL_GREEN],
+    ),
+    (
+        "M29-the-seat-award-pays-in-slot-order",
+        "r2 finding 1: the three players-row tuple locks stop following one "
+        "global order across concurrent completions (#197)",
+        [("    for pid in sorted([solo_id, duo_a_id, duo_b_id], key=str):",
+          "    for pid in [solo_id, duo_a_id, duo_b_id]:")],
+        ["test_the_seat_award_pays_all_three_seats_in_canonical_order"],
+    ),
+    (
+        "M29-TWIN-canonical-key-rewritten",
+        "inert twin at the M29 site: the same order, a different spelling of "
+        "the key",
+        [("    for pid in sorted([solo_id, duo_a_id, duo_b_id], key=str):",
+          "    for pid in sorted([solo_id, duo_a_id, duo_b_id], key=lambda p: str(p)):")],
+        [ALL_GREEN],
+    ),
+    (
+        "M30-the-two-database-guards-stop-agreeing",
+        "r2 finding 5: the runner and the suite name different databases, so "
+        "one of the two guards protects nothing it is asked about",
+        [("runner", 'EXPECTED_DB = "scr_bug391"', 'EXPECTED_DB = "scr_bug391_elsewhere"')],
+        ["test_both_destructive_callers_name_the_same_dedicated_database"],
+    ),
+    (
+        "M30-TWIN-runner-database-constant-recommented",
+        "inert twin at the M30 site: the same constant, a different comment",
+        [("runner",
+          "# The only database this runner and the suite it drives may touch.",
+          "# The one database this runner and the suite it drives may touch.")],
+        [ALL_GREEN],
+    ),
+    (
+        "M31-the-candidate-list-is-trusted-on-both-terms",
+        "the under-lock re-check loses BOTH of its refusals at once - the "
+        "status guard and the round-2 completion term - which is what 'the "
+        "candidate list is trusted' has to mean now that the settle path "
+        "refuses a completed row twice over",
+        [('''    if locked["status"] != "active":
+        print(f"[OVT-HORIZON] Candidate already settled under the lock: "
+              f"series {series_id} status={locked['status']}")
+        return False
+''', ""),
+         ("""         WHERE id = CAST(:sid AS uuid)
+           AND status = 'active'
+        RETURNING id""",
+          """         WHERE id = CAST(:sid AS uuid)
+        RETURNING id"""),
+         ("""         WHERE s.id = CAST(:sid AS uuid)
+           AND s.is_ranked = FALSE
+           AND s.completed_at IS NULL""",
+          """         WHERE s.id = CAST(:sid AS uuid)
+           AND s.is_ranked = FALSE""")],
+        ["test_a_report_completing_the_series_before_the_lock_wins"],
+    ),
+    (
+        "M31-TWIN-under-lock-terms-reordered",
+        "inert twin at the M31 site: the same two terms of the under-lock "
+        "re-check, in the other order",
+        [("""         WHERE s.id = CAST(:sid AS uuid)
+           AND s.is_ranked = FALSE
+           AND s.completed_at IS NULL""",
+          """         WHERE s.id = CAST(:sid AS uuid)
+           AND s.completed_at IS NULL
+           AND s.is_ranked = FALSE""")],
+        [ALL_GREEN],
+    ),
+    (
+        "M33-the-settled-arm-drops-its-game-bound",
+        "r2 finding 1, third half: the arm that pays a late game carries no "
+        "bound on how many games one settled series may be paid for, while "
+        "the live arm is bounded by the tally that resolves the series",
+        [("""        if (series["status"] in _OVT_SETTLED_WITHOUT_PLAY
+                and _within_series_bound):
+""", """        if series["status"] in _OVT_SETTLED_WITHOUT_PLAY:
+""")],
+        ["test_the_settled_arm_pays_no_more_games_than_the_sitting_can_have"],
+    ),
+    (
+        "M33-TWIN-game-bound-operands-reordered",
+        "inert twin at the M33 site: the same two terms, other way round",
+        [("""        if (series["status"] in _OVT_SETTLED_WITHOUT_PLAY
+                and _within_series_bound):
+""", """        if (_within_series_bound
+                and series["status"] in _OVT_SETTLED_WITHOUT_PLAY):
+""")],
+        [ALL_GREEN],
+    ),
+    (
+        "M34-the-two-paying-arms-stop-sharing-one-constant",
+        "r2 finding 1, third half: the live arm goes back to a bare literal, "
+        "so the bound the settled arm reads and the bound the live arm "
+        "enforces are two numbers that must agree and nothing checks it",
+        [("""    series_done = (solo_wins >= OVT_SERIES_WINS_REQUIRED
+                   or duo_wins >= OVT_SERIES_WINS_REQUIRED)
+""", """    series_done = solo_wins >= 2 or duo_wins >= 2
+""")],
+        ["test_the_settled_arm_pays_no_more_games_than_the_sitting_can_have"],
+    ),
+    (
+        "M34-TWIN-live-bound-operands-reordered",
+        "inert twin at the M34 site: same constant, operands swapped",
+        [("""    series_done = (solo_wins >= OVT_SERIES_WINS_REQUIRED
+                   or duo_wins >= OVT_SERIES_WINS_REQUIRED)
+""", """    series_done = (duo_wins >= OVT_SERIES_WINS_REQUIRED
+                   or solo_wins >= OVT_SERIES_WINS_REQUIRED)
+""")],
+        [ALL_GREEN],
+    ),
+    (
+        "M35-the-bound-declines-an-award-in-silence",
+        "r2 finding 1, third half: the refusal stops naming its reason on the "
+        "log line, so a game that was played and not paid leaves no record "
+        "distinguishing it from a status this path never pays",
+        [('f"series resolved as status={series[\'status\']} ({_why_unpaid}), '
+          'which this path does "',
+          'f"series resolved as status={series[\'status\']}, '
+          'which this path does "')],
+        ["test_the_settled_arm_pays_no_more_games_than_the_sitting_can_have"],
+    ),
+    (
+        "M35-TWIN-refusal-reason-reworded",
+        "inert twin at the M35 site: the reason is still named, other wording",
+        [("f\"the series already carries {_games_recorded} recorded games, \"",
+          "f\"this series already carries {_games_recorded} recorded games, \"")],
+        [ALL_GREEN],
+    ),
+    (
+        "M36-a-citation-anchor-stops-being-unique",
+        "r2 finding 11: the pin names a line that really does carry the "
+        "anchor, but two other lines carry it too, so the citation can drift "
+        "onto either of them and still resolve",
+        [('PIN main.py:3844 "SELECT status FROM ovt_series '
+          'WHERE id = CAST(:sid AS uuid)"',
+          'PIN main.py:3845 " FOR NO KEY UPDATE SKIP LOCKED"')],
+        ["test_every_bug391_source_citation_resolves_to_what_it_names"],
+    ),
+    (
+        "M36-TWIN-citation-lead-in-reworded",
+        "inert twin at the M36 site: the pin stands, its lead-in changes",
+        [("# — its locking read is\n",
+          "# — the janitor's locking read is\n")],
+        [ALL_GREEN],
+    ),
+    (
+        "M37-an-award-input-is-bound-only-on-the-live-path",
+        "added row B16 (sibling sweep of finding 9, #432): a name the paying "
+        "arm reads is bound inside a branch the settled path skips, so the "
+        "arm raises NameError AFTER the match row is inserted and the game is "
+        "recorded but never paid — finding 1's outcome, reintroduced",
+        [("    _ovt_pod = set(await _ovt_podium_ids(db))",
+          "    if series[\"status\"] == \"active\":\n"
+          "        _ovt_pod = set(await _ovt_podium_ids(db))")],
+        ["test_the_settled_arm_pays_with_names_that_are_bound_before_it"],
+    ),
+    (
+        "M37-TWIN-award-input-expression-rewritten",
+        "inert twin at the M37 site: the same binding on the same path, the "
+        "set built by a comprehension instead of a call",
+        [("    _ovt_pod = set(await _ovt_podium_ids(db))",
+          "    _ovt_pod = {_p for _p in await _ovt_podium_ids(db)}")],
+        [ALL_GREEN],
+    ),
+    (
+        "M38-single-settlement-loses-BOTH-of-the-things-that-carry-it",
+        "r2 finding 10 / B13: the single-settlement property the diagnosis "
+        "named is carried JOINTLY by the declining row lock and the write's "
+        "own status guard. Removing either alone leaves it intact (which is "
+        "what the specified experiment actually measured - see the round-2 "
+        "notes deviation DEV-R2-5); removing BOTH lets two concurrent sweeps "
+        "settle one row twice",
+        [('        " FOR NO KEY UPDATE SKIP LOCKED"', '        ""'),
+         ("""         WHERE id = CAST(:sid AS uuid)
+           AND status = 'active'
+        RETURNING id""",
+          """         WHERE id = CAST(:sid AS uuid)
+        RETURNING id""")],
+        ["test_two_concurrent_sweeps_settle_the_row_exactly_once"],
+    ),
+    (
+        "M38-TWIN-both-carriers-rewritten-in-place",
+        "inert twin at the two M38 sites: the same lock clause spaced "
+        "differently and the same guard parenthesised - both still carry it",
+        [('        " FOR NO KEY UPDATE SKIP LOCKED"',
+          '        "  FOR NO KEY UPDATE  SKIP LOCKED"'),
+         ("""         WHERE id = CAST(:sid AS uuid)
+           AND status = 'active'
+        RETURNING id""",
+          """         WHERE id = CAST(:sid AS uuid)
+           AND (status = 'active')
+        RETURNING id""")],
+        [ALL_GREEN],
+    ),
     (
         "NC-unrelated-constant-in-the-same-file",
         "negative control: a 1v2 gold constant this sweep never reads",
@@ -207,13 +741,16 @@ MUTATIONS = [
 ]
 
 
-def apply_all(src: str, edits) -> str:
-    for old, new in edits:
-        n = src.count(old)
-        if n == 0:
-            raise SystemExit(f"anchor not found:\n{old[:200]}")
-        src = src.replace(old, new)
-    return src
+def apply_all(originals: dict, edits) -> dict:
+    """Apply every edit to a COPY of the source it names; returns {key: text}."""
+    out = dict(originals)
+    for edit in edits:
+        key, old, new = edit if len(edit) == 3 else ("main", edit[0], edit[1])
+        src = out[key]
+        if src.count(old) == 0:
+            raise SystemExit(f"anchor not found in {key}:\n{old[:200]}")
+        out[key] = src.replace(old, new)
+    return out
 
 
 SUMMARY = re.compile(
@@ -282,10 +819,24 @@ def run_suite() -> dict:
     (#441). They are separate outcomes now, and the caller retries them
     instead of scoring them.
     """
-    proc = subprocess.run(
-        [sys.executable, "-m", "pytest", TESTS, "-q", "--no-header",
-         "-p", "no:cacheprovider"],
-        cwd=str(BACKEND), capture_output=True, text=True)
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "pytest", TESTS, "-q", "--no-header",
+             "-p", "no:cacheprovider"],
+            cwd=str(BACKEND), capture_output=True, text=True,
+            timeout=SUITE_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        # A mutation that removes a BOUND can make a case wait forever instead
+        # of failing, and an unbounded wait here stalls the whole campaign
+        # with no line saying why. That is not a kill and not a survival: it
+        # is the absence of a measurement, so it is reported as one and the
+        # caller retries it (#441 — never score the run that did not happen).
+        return {"failed": set(), "errored": set(), "collect_errors": [],
+                "counts": {}, "ran": 0,
+                "tail": f"NO RESULT: the suite exceeded {SUITE_TIMEOUT_S}s and "
+                        f"was stopped; a mutation that removes a bound hangs "
+                        f"rather than reds unless the case bounds itself",
+                "rc": None, "timed_out": True}
     failed, errored, collect_errors = set(), set(), []
     for line in proc.stdout.splitlines():
         if line.startswith("FAILED ") or line.startswith("ERROR "):
@@ -316,6 +867,8 @@ def run_suite() -> dict:
 
 def not_a_verdict(res: dict, expected_total) -> str:
     """Empty when the run may be scored; else the reason it may not be."""
+    if res.get("timed_out"):
+        return res["tail"]
     if res["collect_errors"]:
         return f"module-level error, no test in it ran: {res['collect_errors']}"
     if res["errored"]:
@@ -338,12 +891,20 @@ def main() -> int:
         print("BUG391_TEST_PG_DSN unset — the live half would skip and most "
               "mutations would have nothing to kill. Refusing to run.")
         return 2
-    original = io.open(MAIN_PY, encoding="utf-8", newline="").read()
-    digest = hashlib.sha256(original.encode("utf-8")).hexdigest()
-    backup = MAIN_PY.with_suffix(".py.bug391-mutation-backup")
-    backup.write_text(original, encoding="utf-8", newline="")
-    print(f"main.py sha256 {digest}")
-    print(f"backup {backup}")
+    originals = {k: io.open(p, encoding="utf-8", newline="").read()
+                 for k, p in FILES.items()}
+    digests = {k: hashlib.sha256(v.encode("utf-8")).hexdigest()
+               for k, v in originals.items()}
+    backups = {}
+    for key, path in FILES.items():
+        backups[key] = path.with_suffix(path.suffix + ".bug391-mutation-backup")
+        backups[key].write_text(originals[key], encoding="utf-8", newline="")
+        print(f"{key:12s} {path.name} sha256 {digests[key]}")
+        print(f"{'':12s} backup {backups[key]}")
+
+    def restore():
+        for k, p in FILES.items():
+            p.write_text(originals[k], encoding="utf-8", newline="")
 
     rows = []
     try:
@@ -362,8 +923,10 @@ def main() -> int:
               f"{expected_total} tests or it is not a verdict")
         for label, defect, edits, expect in MUTATIONS:
             t0 = time.time()
-            MAIN_PY.write_text(apply_all(original, edits), encoding="utf-8",
-                               newline="")
+            mutated = apply_all(originals, edits)
+            for _k, _txt in mutated.items():
+                if _txt != originals[_k]:
+                    FILES[_k].write_text(_txt, encoding="utf-8", newline="")
             res, why = None, ""
             for attempt in (1, 2):
                 slate = clean_slate()
@@ -376,7 +939,7 @@ def main() -> int:
                 print(f"           [no verdict, attempt {attempt}] {why}")
                 print(f"           [no verdict, attempt {attempt}] "
                       f"{res['tail']}")
-            MAIN_PY.write_text(original, encoding="utf-8", newline="")
+            restore()
             if why:
                 # Never ALIVE and never KILL: the run did not measure the
                 # mutation, so it carries no information about it either way.
@@ -401,12 +964,22 @@ def main() -> int:
             print(f"           models: {defect}")
             print(f"           {res['tail']}")
     finally:
-        MAIN_PY.write_text(original, encoding="utf-8", newline="")
+        restore()
 
-    after = hashlib.sha256(
-        io.open(MAIN_PY, encoding="utf-8", newline="").read().encode("utf-8")).hexdigest()
-    print(f"restored sha256 {after} ({'MATCH' if after == digest else 'MISMATCH'})")
-    backup.unlink(missing_ok=True)
+    # Every file the run USED, not just the one it mutated most often: an
+    # assertion that changed between the run and the commit would leave the
+    # reported main.py MATCH true and the result meaningless (r2 finding 6).
+    moved = []
+    for key in FILES:
+        after = hashlib.sha256(
+            io.open(FILES[key], encoding="utf-8",
+                    newline="").read().encode("utf-8")).hexdigest()
+        ok = after == digests[key]
+        print(f"restored {key:12s} sha256 {after} "
+              f"({'MATCH' if ok else 'MISMATCH'})")
+        if not ok:
+            moved.append(key)
+        backups[key].unlink(missing_ok=True)
 
     good = [r for r in rows if r[1] is True]
     nover = [r for r in rows if r[1] is None]
@@ -422,8 +995,8 @@ def main() -> int:
         # than no check — one that silently did not run is the same defect).
         print(f"{len(nover)} control(s) produced NO VERDICT after a retry on a "
               f"clean slate: {[r[0] for r in nover]}")
-    if after != digest:
-        print("main.py DID NOT come back byte-identical — restore by hand")
+    if moved:
+        print(f"{moved} DID NOT come back byte-identical — restore by hand")
         return 3
     if nover:
         return 4
