@@ -4265,23 +4265,21 @@ def _server_lane_candidates(root, env, worktree_lines):
     records the run where that happened).
 
     A binding whose only real anchor is an environment variable is a binding no
-    reader can re-derive.  So the frozen representation SHIPS with this lane --
-    see `_frozen_route_text` -- and with nothing naming a tree the candidates
-    below are TWO: the pin's own server-lane copy and this repository.  Neither
-    is a tree this lane does not own, and a third answer, the frozen extract,
-    is the caller's terminal fallback rather than a candidate here.  The one
-    exception is the exception by construction: when $SCR_SERVER_LANE names a
-    tree the list is that tree and nothing else, and it reaches whatever was
-    named -- which is why the published invocation carries no such variable and
-    reads the extract instead.  The parameter is kept so the rule "a worktree
-    listing contributes no candidate" is a property something can assert rather
-    than an absence nobody checks (#342).
+    reader can re-derive.  ROUND 8 TOOK THE WHOLE QUESTION OFF THIS FUNCTION:
+    the contract's server half is the hash-verified extract that ships with this
+    lane, resolved by `_server_lane_main` through `_frozen_route_text`, and NO
+    CANDIDATE THIS FUNCTION RETURNS IS EVER READ BY A CONTRACT ASSERTION.  The
+    round-7 arrangement had the extract as a terminal fallback behind these
+    candidates, and the delivered review pin carries the route in its own
+    `REVIEW-INPUT/server-lane` copy, so from inside the pin a candidate answered
+    first and the equality was proven against an unhashed text.
 
-    THE ORDER IS THE POINT.  A tree that is NAMED wins outright; then a review
-    pin's own copy, when the harness is being run from inside a pin; then the
-    repository itself, which is what the merged tree will be.  The frozen
-    extract is the terminal fallback, applied by the caller when no tree
-    answered."""
+    WHAT THIS FUNCTION IS FOR NOW.  It is the rule, and only its own cases and
+    `_named_tree_route_text` call it: a worktree listing contributes NO
+    candidate however exactly its branch bracket matches, and a tree that is
+    NAMED in $SCR_SERVER_LANE is exclusive -- never silently replaced by
+    another.  Both are properties something asserts rather than absences nobody
+    checks (#342), which is why the list and the parameter are still here."""
     if env:
         return [(pathlib.Path(env), "the tree $SCR_SERVER_LANE names", True)]
     return [
@@ -4296,6 +4294,58 @@ def _server_lane_candidates(root, env, worktree_lines):
 _FROZEN_SERVER_EXTRACT = pathlib.Path(__file__).resolve().parent / \
     "sept16_dc_server_status_route.frozen.txt"
 _ROUTE_ANCHOR = '@app.get("/api/v1/team/series/{series_id}/status"'
+
+# THE RECORDED DIGEST OF THE WHOLE EXTRACT FILE.  The extract carries a sha256
+# of its own BODY in its provenance header, which is a self-consistent pair: an
+# editor that rewrites the body and the header together produces a file that
+# still passes that check.  So the digest the contract resolves against is
+# recorded HERE, in the harness, over the whole file, and it is repeated in the
+# round-8 notes -- two places outside the file itself.  A check whose reference
+# value travels inside the thing it checks is a check that cannot fail (#342).
+_FROZEN_SERVER_EXTRACT_SHA256 = (
+    "69ac1970c409c232bd41396d7d767ee567e8bdf7832bf3423ff193b92663c98d")
+
+# The path a refusal prints, repository-relative on purpose: a refusal has to
+# NAME the file it refused, and a workstation path in a delivered log is a
+# privacy defect.
+_FROZEN_SERVER_EXTRACT_REL = (
+    "backend/tests/sept16_dc_server_status_route.frozen.txt")
+
+# THE ANSWER SENTENCE IDENTIFIES THE REPRESENTATION.  `how` is not commentary
+# printed beside the equality: every caller asserts that this sentence names
+# the extract and carries the recorded digest, so a resolution that came from
+# anywhere else cannot be mistaken for this one.
+_FROZEN_SERVER_HOW = (
+    "the hash-verified frozen server-lane extract this lane carries beside this "
+    "harness, " + _FROZEN_SERVER_EXTRACT.name + " (" + _FROZEN_SERVER_EXTRACT_REL
+    + ", sha256 " + _FROZEN_SERVER_EXTRACT_SHA256 + ") -- resolved from that file "
+    "and from no tree")
+
+
+# THE MARKS THAT MAKE THE ANSWER SENTENCE AN IDENTIFICATION.  Each one is here
+# because it can fail ON ITS OWN: the relative path is the only place the
+# extract is located -- and it ends in the file's own name, so a separate name
+# clause could never fail independently of it (#441) -- the digest is the only
+# place its bytes are pinned, and the closing clause is the one thing a REFUSAL
+# sentence does not carry, which is how an answer is told from a refusal
+# without depending on a module global that a test may have repointed.
+_FROZEN_IDENTITY_MARKS = (
+    _FROZEN_SERVER_EXTRACT_REL,
+    _FROZEN_SERVER_EXTRACT_SHA256,
+    "resolved from that file and from no tree",
+)
+
+
+def _frozen_identity_holds(how):
+    """True only when `how` IDENTIFIES the hash-verified extract.
+
+    The round-7 cross-lane assertion compared FIELDS and let `how` say whatever
+    it liked, so a resolution that had opened a tree read exactly like one that
+    had read the extract.  Identity is therefore part of what is CHECKED: the
+    sentence must LOCATE the file, carry the digest this harness records, and
+    close with the clause only an answer carries.
+    """
+    return all(mark in how for mark in _FROZEN_IDENTITY_MARKS)
 
 
 def _frozen_route_text(raw=None):
@@ -4321,15 +4371,39 @@ def _frozen_route_text(raw=None):
     provenance header above it is deliberately outside the hash, so a reader may
     annotate the provenance without invalidating the bytes.
 
+    THE WHOLE-FILE DIGEST IS THE IDENTITY, and it is checked on the read of
+    the real file, before the body hash below: the body hash proves the extract
+    is internally consistent, the recorded digest proves it is THE extract.  A
+    missing file, an unreadable file or a digest mismatch REFUSES with the
+    repository-relative path and BOTH digests named.
+
     `raw` is a test hook, the same one `_stable_text` takes for the same reason:
     a refusal rule that can only be exercised by corrupting the shipped file is
-    a rule nobody exercises."""
+    a rule nobody exercises.  Text handed in through it is exercising the BODY
+    rule, so the whole-file identity above is not applied to it -- which is what
+    lets the annotated-provenance twin stay green."""
     if raw is None:
+        import hashlib as _hashlib
         try:
-            raw = _FROZEN_SERVER_EXTRACT.read_text(encoding="utf-8")
-        except OSError:
-            return None, ("the frozen server-lane extract is not beside this file: "
-                          + _FROZEN_SERVER_EXTRACT.name)
+            data = _FROZEN_SERVER_EXTRACT.read_bytes()
+        except OSError as exc:
+            # A MISSING OR UNREADABLE EXTRACT FAILS.  It does not skip, and it
+            # does not fall through to a tree: there is no tree to fall through
+            # to any more, and a cross-lane claim that quietly stops being
+            # checked is the check that cannot fail (#342).
+            return None, (
+                "the frozen server-lane extract could not be read at "
+                + _FROZEN_SERVER_EXTRACT_REL + " (" + exc.__class__.__name__
+                + "): expected sha256 " + _FROZEN_SERVER_EXTRACT_SHA256
+                + ", got sha256 none -- no file was read")
+        got_file = _hashlib.sha256(data).hexdigest()
+        if got_file != _FROZEN_SERVER_EXTRACT_SHA256:
+            return None, (
+                "the frozen server-lane extract at " + _FROZEN_SERVER_EXTRACT_REL
+                + " is not the representation this harness records: expected "
+                  "sha256 " + _FROZEN_SERVER_EXTRACT_SHA256
+                + ", got sha256 " + got_file)
+        raw = data.decode("utf-8")
     m = re.search(r"^# sha256-of-body\s*:\s*([0-9a-f]{64})\s*$", raw, re.M)
     if not m:
         return None, "the frozen extract records no sha256 of its own body"
@@ -4408,31 +4482,56 @@ def _route_dict_is_complete(text):
 
 
 def _server_lane_main():
-    """(text, how) for the server lane's main.py, resolved at RUN TIME through
-    _server_lane_candidates, falling back to the FROZEN extract this lane
-    carries.
+    """(text, how) for THE server representation the contract assertions read:
+    the hash-verified frozen extract this lane carries, and nothing else.
 
-    Returns ("", reason) when neither a candidate tree nor the frozen extract
-    carries the route; the caller FAILS rather than skipping.  A cross-lane test
-    that quietly skips is the check that cannot fail.
+    WHAT WAS WRONG.  Rounds 6 and 7 resolved this through an ordered list of
+    candidate TREES -- a tree named in $SCR_SERVER_LANE as an exclusive
+    candidate, then the review pin's own `REVIEW-INPUT/server-lane` copy, then
+    this repository -- and reached the extract only as the caller's terminal
+    fallback.  The delivered review pin CARRIES the route in that copy, so from
+    inside the pin a candidate answered before the extract was ever read, and
+    an inherited variable could redirect the equality to any tree at all.  The
+    assertion then compared field names without ever requiring the answer to
+    say WHICH representation it had compared, so drift could receive a green
+    cross-lane certificate from a text nobody had hashed.
 
-    THE FROZEN EXTRACT IS THE FLOOR, NOT THE PREFERENCE.  A real tree that
-    carries the route is read first, because on the merged tree that IS the
-    contract's other half and the extract is a stale review artifact.  When no
-    tree answers -- which is this worktree's case and every reviewer's -- the
-    extract answers, and `how` says so, so a log that records `how` records
-    which representation the equality was proven against.  This resolver reaches
-    for no tree of its own any more: the only path to a tree outside this
-    repository and its pin is one that something NAMES in $SCR_SERVER_LANE, and
-    `how` reports that by name when it is taken."""
-    import os
+    WHAT THIS DOES INSTEAD.  There is no candidate list on this path.  The
+    contract's server half is the extract beside this file, read through
+    `_frozen_route_text()`, which verifies the whole file against the digest
+    this harness records before returning a byte of it.  `how` is
+    `_FROZEN_SERVER_HOW`, which NAMES the file and carries that digest, and
+    every caller asserts `_frozen_identity_holds(how)` -- the representation is
+    part of what is checked.
+
+    FAILURE DIRECTION IS A REFUSAL.  A missing file, an unreadable file or a
+    digest mismatch returns an empty text with the reason, the path and both
+    digests; the callers fail on it.  Nothing here skips, and nothing falls
+    through to a tree, because no tree can answer this question any more.
+
+    The tree-reading machinery is not deleted -- `_server_lane_candidates` and
+    `_named_tree_route_text` keep the rule that a worktree listing contributes
+    no candidate, and that a named tree is never silently replaced -- but it is
+    off this path and only its own cases call it (#342: a property worth
+    keeping keeps its own test over its own function)."""
+    frozen, why = _frozen_route_text()
+    if frozen is None:
+        return "", why
+    return frozen, _FROZEN_SERVER_HOW
+
+
+def _named_tree_route_text(root, env, listing=()):
+    """(text, how) for a CANDIDATE TREE, or ("", why) -- NOT the contract path.
+
+    This is the round-7 resolver body, kept because two of its properties are
+    worth keeping and a property nobody can exercise is not a property (#342):
+    a tree that is NAMED is exclusive and is never silently replaced by another
+    one, and a candidate read mid-write is refused rather than reported as a
+    disagreement between the lanes.  Its own cases call it; the contract
+    assertions do not, and `test_r8_c5_the_named_tree_machinery_is_off_the_
+    contract_path` is what holds that separation."""
     route = _ROUTE_ANCHOR
-    # NO LISTING IS ASKED FOR.  Round 7 enumerated the machine's worktrees here
-    # and handed them to the resolver as candidates; the empty list is what says
-    # that door is shut, and `test_r7cl_f5_...` asserts this body never asks git
-    # for one -- an absence nothing checks is not a property (#342).
-    for cand, how, exclusive in _server_lane_candidates(
-            ROOT, os.environ.get("SCR_SERVER_LANE"), []):
+    for cand, how, exclusive in _server_lane_candidates(root, env, list(listing)):
         for rel in ("backend/api/main.py", "main.py"):
             p = cand / rel
 
@@ -4453,23 +4552,16 @@ def _server_lane_main():
                     # as one -- the caller fails with the reason, and the
                     # answer is to re-read, never to weaken the assertion.
                     return "", ("a candidate main.py could not be read in a stable, "
-                                "complete state -- the other lane's tree is being "
-                                "written; re-read before treating any difference as "
-                                "a disagreement")
+                                "complete state -- that tree is being written; "
+                                "re-read before treating any difference as a "
+                                "disagreement")
                 continue
             if route in text:
                 return text, how
         if exclusive:
             return "", ("the tree $SCR_SERVER_LANE names carries no status route, "
                         "and a named tree is never silently replaced by another")
-    frozen, why = _frozen_route_text()
-    if frozen is not None:
-        return frozen, ("the FROZEN server-lane extract this lane carries, "
-                        + _FROZEN_SERVER_EXTRACT.name
-                        + " -- a verbatim slice of the round-6 review pin's "
-                          "immutable server-lane copy, hash-verified on this read")
-    return "", ("no candidate tree carried the status route, and the frozen "
-                "extract could not answer for it: " + why)
+    return "", "no candidate tree carried the status route"
 
 
 def _status_route_keys(server_main):
@@ -4518,8 +4610,11 @@ def test_r6_item7_every_field_the_banner_reads_is_emitted_by_the_status_route():
     api = _src("ApiClient.cs")
     server, how = _server_lane_main()
     assert server, (
-        "the server lane's main.py could not be located, so this cross-lane claim "
+        "the server representation could not be resolved, so this cross-lane claim "
         "was not checked: " + how)
+    assert _frozen_identity_holds(how), (
+        "the cross-lane equality was resolved from something other than "
+        "the hash-verified extract: " + how)
     keys = _status_route_keys(server)
     assert keys, "the status route's own return keys could not be read"
 
@@ -5254,9 +5349,13 @@ def test_r6lens_m1_l6_the_cross_lane_resolver_finds_a_merged_tree():
     assert len(named) == 1 and named[0][2] is True
     assert named[0][0] == pathlib.Path("/lane/copy")
 
-    # ...and the resolver still resolves on the tree this run is against
+    # ...and the CONTRACT resolver answers from the extract, whatever this
+    # rule says about candidate trees: the two are on different paths now.
     text, how = _server_lane_main()
     assert text, how
+    assert _frozen_identity_holds(how), (
+        "the cross-lane equality was resolved from something other than "
+        "the hash-verified extract: " + how)
     assert '@app.get("/api/v1/team/series/{series_id}/status"' in text
 
 
@@ -5350,8 +5449,262 @@ def test_r7cl_f5_the_cross_lane_binding_reads_the_frozen_extract_and_no_live_tre
     #    field-list assertions above read.
     server, how = _server_lane_main()
     assert server, how
+    assert _frozen_identity_holds(how), (
+        "the cross-lane equality was resolved from something other than "
+        "the hash-verified extract: " + how)
     assert {"dc_deferred", "dc_deferred_seconds_remaining",
             "dc_deferred_bound_seconds"} <= _status_route_keys(server), how
+
+
+# ── ROUND 8, C5: the cross-lane equality resolves from the extract ONLY ──────
+
+_R8_STUB_ROUTE = (
+    'from fastapi import FastAPI' + LF
+    + 'app = FastAPI()' + LF + LF
+    + '@app.get("/api/v1/team/series/{series_id}/status")' + LF
+    + 'async def team_series_status(series_id: str):' + LF
+    + '    return {' + LF
+    + '        "readonly": True,' + LF
+    + '        "dc_deferred": False,' + LF
+    + '        "dc_deferred_seconds_remaining": 0,' + LF
+    + '        "zz_stub_only_name": 1,' + LF
+    + '    }' + LF)
+
+
+def _r8_write_tree(root, rel, text):
+    p = pathlib.Path(root) / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text, encoding="utf-8")
+    return p
+
+
+def test_r8_c5_the_cross_lane_equality_resolves_from_the_hash_verified_extract_only():
+    """C5: THE REPRESENTATION IS PART OF WHAT IS CHECKED.
+
+    WHAT WAS WRONG.  `_server_lane_main` returned the first CANDIDATE TREE that
+    carried the route -- a tree named in $SCR_SERVER_LANE as an exclusive
+    candidate, then the review pin's own `REVIEW-INPUT/server-lane` copy, then
+    this repository -- and read the frozen extract only when none of them
+    answered.  The delivered pin carries that copy, so a run from inside the
+    pin proved the equality against a text nobody had hashed; an inherited
+    variable could point it at any tree at all.  And the live assertion
+    compared field NAMES while letting `how` say whatever it liked, so a
+    resolution that had opened a tree was indistinguishable from one that had
+    read the extract.
+
+    THE FOUR NAMED CHECKS.  (a) the answer IDENTIFIES the extract by name and
+    by digest; (b) the resolved text hashes to the digest this harness records;
+    (c) with $SCR_SERVER_LANE pointed at a throwaway tree that carries a
+    COMPLETE status route, the resolution is UNCHANGED; (d) with a directory
+    shaped like the review pin as the working root, the resolution is still the
+    extract.
+
+    AND THE FAILURE DIRECTION IS A REFUSAL: a missing file, an unreadable file
+    and a digest mismatch each fail with the repository-relative path and BOTH
+    digests, rather than skipping or falling through to a tree."""
+    import hashlib
+    import os
+    import tempfile
+
+    # (a) THE ANSWER IDENTIFIES THE EXTRACT.
+    text, how = _server_lane_main()
+    assert text, how
+    assert _frozen_identity_holds(how), how
+    #     ...and EVERY mark is load-bearing: drop any one of them from the
+    #     sentence and the identity must stop holding.  Without this the marks
+    #     could be decorative and the rule would still read as if it checked
+    #     them (#441).
+    for mark in _FROZEN_IDENTITY_MARKS:
+        assert mark in how, (mark, how)
+        assert not _frozen_identity_holds(how.replace(mark, "(removed)")), mark
+    assert _ROUTE_ANCHOR in text
+    print("SERVER REPRESENTATION: " + how)
+
+    # (b) THE RESOLVED TEXT HASHES TO THE RECORDED DIGEST.  The digest is over
+    #     the whole file the text came out of, which is the thing the notes
+    #     repeat; the body the resolver returns is a suffix of it.
+    data = _FROZEN_SERVER_EXTRACT.read_bytes()
+    got = hashlib.sha256(data).hexdigest()
+    assert got == _FROZEN_SERVER_EXTRACT_SHA256, (
+        _FROZEN_SERVER_EXTRACT_REL, _FROZEN_SERVER_EXTRACT_SHA256, got)
+    assert data.decode("utf-8").endswith(text), (
+        "the resolved text is not the tail of the hashed file")
+    print("SERVER REPRESENTATION SHA256: " + got)
+    print("SERVER REPRESENTATION FILE: " + _FROZEN_SERVER_EXTRACT_REL)
+
+    keys = _status_route_keys(text)
+    for n in ("dc_deferred", "dc_deferred_seconds_remaining",
+              "dc_deferred_bound_seconds"):
+        assert n in keys, (n, sorted(keys))
+
+    prev = os.environ.get("SCR_SERVER_LANE")
+    cwd = os.getcwd()
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            # (c) A NAMED THROWAWAY TREE CARRYING A COMPLETE ROUTE CHANGES
+            #     NOTHING.  The stub emits a name the contract does not carry,
+            #     so if anything read it the key set would say so.
+            _r8_write_tree(td, "backend/api/main.py", _R8_STUB_ROUTE)
+            os.environ["SCR_SERVER_LANE"] = td
+            t2, how2 = _server_lane_main()
+            assert t2 == text, "a named tree changed the contract resolution"
+            assert how2 == how, how2
+            assert _frozen_identity_holds(how2), how2
+            assert "zz_stub_only_name" not in t2
+            assert "zz_stub_only_name" not in _status_route_keys(t2)
+
+            # and the stub really was a complete, readable route -- otherwise
+            # this control proves only that the stub was broken (#342)
+            stub = (pathlib.Path(td) / "backend/api/main.py").read_text(
+                encoding="utf-8")
+            assert _route_dict_is_complete(stub) is True
+            assert "zz_stub_only_name" in _status_route_keys(stub)
+
+            # (d) A DIRECTORY SHAPED LIKE THE REVIEW PIN, AS THE WORKING ROOT.
+            _r8_write_tree(td, "REVIEW-INPUT/server-lane/backend/api/main.py",
+                           _R8_STUB_ROUTE)
+            del os.environ["SCR_SERVER_LANE"]
+            try:
+                # the working root is left before the directory is removed:
+                # on this platform a directory that is the process's cwd
+                # cannot be deleted, and a teardown error would read as a
+                # failure of the check rather than of the fixture
+                os.chdir(td)
+                t3, how3 = _server_lane_main()
+            finally:
+                os.chdir(cwd)
+            assert t3 == text, "a pin-shaped working root changed the resolution"
+            assert how3 == how, how3
+            assert "zz_stub_only_name" not in t3
+    finally:
+        os.chdir(cwd)
+        if prev is None:
+            os.environ.pop("SCR_SERVER_LANE", None)
+        else:
+            os.environ["SCR_SERVER_LANE"] = prev
+
+    # THE RESOLVER READS NO TREE AT ALL.  A behavioural check on this machine
+    # passes for a body that would still open a tree somewhere else, so the
+    # body itself is asserted -- comments and docstring removed, because both
+    # TALK about trees and a check that a word is absent from prose is a check
+    # about prose.
+    import inspect
+    body = inspect.getsource(_server_lane_main)
+    code = body[body.index('"""', body.index('"""') + 3) + 3:]
+    code = LF.join(ln for ln in code.split(LF) if not ln.strip().startswith("#"))
+    for banned in ("_server_lane_candidates", "_named_tree_route_text",
+                   "SCR_SERVER_LANE", "REVIEW-INPUT", "worktree", "subprocess",
+                   "ROOT"):
+        assert banned not in code, (banned, code)
+    assert "_frozen_route_text()" in code
+    assert "_FROZEN_SERVER_HOW" in code
+
+    # THE REFUSAL DIRECTION, all three ways, each naming the path and BOTH
+    # digests.  The module constant is repointed rather than the file touched:
+    # a rule that can only be exercised by damaging the shipped extract is a
+    # rule nobody exercises.
+    g = globals()
+    real = g["_FROZEN_SERVER_EXTRACT"]
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            missing = pathlib.Path(td) / "not-here.frozen.txt"
+            g["_FROZEN_SERVER_EXTRACT"] = missing
+            out, why = _frozen_route_text()
+            assert out is None
+            assert _FROZEN_SERVER_EXTRACT_REL in why, why
+            assert _FROZEN_SERVER_EXTRACT_SHA256 in why, why
+            assert "got sha256 none" in why, why
+            t, h = _server_lane_main()
+            assert t == "", "a missing extract resolved to something"
+            assert not _frozen_identity_holds(h), h
+
+            flipped = pathlib.Path(td) / "flipped.frozen.txt"
+            b = bytearray(real.read_bytes())
+            b[-1] = b[-1] ^ 0x20
+            flipped.write_bytes(bytes(b))
+            g["_FROZEN_SERVER_EXTRACT"] = flipped
+            out2, why2 = _frozen_route_text()
+            assert out2 is None
+            assert _FROZEN_SERVER_EXTRACT_REL in why2, why2
+            assert _FROZEN_SERVER_EXTRACT_SHA256 in why2, why2
+            got2 = hashlib.sha256(bytes(b)).hexdigest()
+            assert got2 in why2, why2
+            assert got2 != _FROZEN_SERVER_EXTRACT_SHA256
+            t2, h2 = _server_lane_main()
+            assert t2 == "", "a digest mismatch resolved to something"
+            assert not _frozen_identity_holds(h2), h2
+
+            # an unreadable file is the directory case: read_bytes raises
+            g["_FROZEN_SERVER_EXTRACT"] = pathlib.Path(td)
+            out3, why3 = _frozen_route_text()
+            assert out3 is None
+            assert _FROZEN_SERVER_EXTRACT_REL in why3, why3
+            assert _FROZEN_SERVER_EXTRACT_SHA256 in why3, why3
+    finally:
+        g["_FROZEN_SERVER_EXTRACT"] = real
+
+    # restored, and still the representation
+    t4, how4 = _server_lane_main()
+    assert t4 == text and how4 == how
+
+
+def test_r8_c5_the_named_tree_machinery_is_off_the_contract_path():
+    """C5's other half: the tree-reading rule KEEPS ITS OWN TEST.
+
+    The brief's instruction is that if the property "a worktree listing
+    contributes no candidate" is worth keeping, it keeps its own test over its
+    own function and the contract path does not call that machinery.  So the
+    round-7 resolver body survives as `_named_tree_route_text`, exercised here
+    on trees this case builds, and the contract resolver does not name it.
+
+    THE NAMED-TREE MISS STILL FAILS RATHER THAN SKIPS -- the half the round-7
+    report ruled met, re-executed at this tip: a named tree that carries no
+    status route returns an EMPTY text with the reason, and a caller that
+    rejects an empty result is what turns that into a failure."""
+    import inspect
+    import tempfile
+
+    contract = inspect.getsource(_server_lane_main)
+    assert "_named_tree_route_text" not in contract.split('"""')[2], contract
+
+    with tempfile.TemporaryDirectory() as td:
+        root = pathlib.Path(td)
+
+        # a NAMED tree that carries no status route: empty text, stated reason
+        empty = root / "named-no-route"
+        _r8_write_tree(empty, "backend/api/main.py", "x = 1" + LF)
+        text, why = _named_tree_route_text(root, str(empty))
+        assert text == "", text[:120]
+        assert "carries no status route" in why, why
+        assert "never silently replaced" in why, why
+
+        # ...and the caller shape that makes that a failure rather than a skip
+        assert not text, ("an empty result is rejected by the caller: " + why)
+
+        # a NAMED tree that DOES carry the route answers, so the check above is
+        # not passing because the machinery is broken (#342)
+        full = root / "named-with-route"
+        _r8_write_tree(full, "backend/api/main.py", _R8_STUB_ROUTE)
+        text2, how2 = _named_tree_route_text(root, str(full))
+        assert _ROUTE_ANCHOR in text2
+        assert "$SCR_SERVER_LANE names" in how2, how2
+
+        # a NAMED tree is EXCLUSIVE: a repository that carries the route beside
+        # it is never read in its place
+        _r8_write_tree(root, "backend/api/main.py", _R8_STUB_ROUTE)
+        text3, why3 = _named_tree_route_text(root, str(empty))
+        assert text3 == "", "the named tree was silently replaced"
+
+        # with nothing named, the listing contributes no candidate however
+        # exactly its branch bracket matches
+        listing = [
+            str(root / "other-lane") + "  bbbbbbb [claude/sept16-dc-server]",
+        ]
+        _r8_write_tree(root / "other-lane", "backend/api/main.py",
+                       _R8_STUB_ROUTE.replace("zz_stub_only_name",
+                                              "zz_listing_only_name"))
+        text4, how4 = _named_tree_route_text(root, None, listing)
+        assert "zz_listing_only_name" not in text4, how4
 
 
 def test_r6lens_l6_a_tree_being_written_is_not_read_as_a_disagreement():
@@ -5398,12 +5751,20 @@ def test_r6lens_l6_a_tree_being_written_is_not_read_as_a_disagreement():
     # its own control caught: R6L-12 unwired the resolver and the case stayed
     # green.  The claim is about the RESOLVER's body, so it reads that body.
     import inspect
-    resolver = inspect.getsource(_server_lane_main)
+    # THE RULE LIVES WITH THE MACHINERY IT GUARDS.  The contract resolver no
+    # longer reads any tree (C5), so the claim "a tree being written is not
+    # read as a disagreement" is about `_named_tree_route_text`, which is the
+    # function that still reads one.  Asserting it against the contract
+    # resolver after C5 would be a check that cannot fail.
+    resolver = inspect.getsource(_named_tree_route_text)
     assert "_stable_text(_read, complete=_route_dict_is_complete)" in resolver
 
-    # and the live resolver still resolves through all of it
+    # and the contract resolver answers from the hash-verified extract
     text, how = _server_lane_main()
     assert text, how
+    assert _frozen_identity_holds(how), (
+        "the cross-lane equality was resolved from something other than "
+        "the hash-verified extract: " + how)
 
 
 # ── ROUND 7: the repaint rule at the class, and eleven claims ────────────────
@@ -6067,6 +6428,9 @@ def test_r7_l11_w8_states_the_disposition_the_reviewed_route_produces():
     # cross-lane: the reviewed route really does answer deferred before totals
     server, how = _server_lane_main()
     assert server, how
+    assert _frozen_identity_holds(how), (
+        "the cross-lane equality was resolved from something other than "
+        "the hash-verified extract: " + how)
     i = server.find("if is_fallback:")
     assert i > 0, "the fallback branch could not be found on the server lane"
     branch = server[i:i + 4000]
@@ -6294,6 +6658,9 @@ def test_r7cl_c1_w8_names_the_three_exits_that_precede_the_park():
     # them is reached BEFORE the park.
     server, how = _server_lane_main()
     assert server, how
+    assert _frozen_identity_holds(how), (
+        "the cross-lane equality was resolved from something other than "
+        "the hash-verified extract: " + how)
     i = server.find("async def report_team_dc")
     if i < 0:
         i = server.find('@app.post("/api/v1/team/series/{series_id}/report-dc"')
@@ -6544,8 +6911,11 @@ def test_r7_b18_the_dc_canonical_is_one_contract_on_both_lanes_and_the_build_gat
     api = _src("ApiClient.cs")
     server, how = _server_lane_main()
     assert server, (
-        "the server lane's copy could not be located, so the cross-lane half of "
-        "this claim was not checked: " + how)
+        "the server representation could not be resolved, so the cross-lane half "
+        "of this claim was not checked: " + how)
+    assert _frozen_identity_holds(how), (
+        "the cross-lane equality was resolved from something other than "
+        "the hash-verified extract: " + how)
     csproj = (PLUGIN / "CompetitiveRounds.csproj").read_text(encoding="utf-8")
 
     def claim(api_text, server_text, csproj_text):
