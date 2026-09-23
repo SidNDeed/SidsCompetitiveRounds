@@ -236,12 +236,24 @@ def test_every_composed_name_goes_through_the_translation_helper():
 
 
 def test_the_joined_next_names_are_translated_before_the_join():
-    body = code_of(_plugin("TitleLaddersUI.cs"),
-                   "private static void PaintLine(LineCard card, ApiClient.TitleLadderLine ln)")
-    assert 'string.Join(" / ", ln.next_names)' not in body, (
-        "the next-rung names are joined raw; the joined string is not a "
+    """Two rungs can share a tier (the rat line's fourth), so the popup's
+    caption and footer JOIN the names of the tier the button is about. Each
+    name must be translated BEFORE the join: the joined string is not a
+    catalogue key and can never match one.
+
+    Item 12 follow-up: the join left the retired tab's PaintLine for
+    TierNames, which reads the rungs AT a tier instead of the answer's
+    next_names -- the tier the button is about comes from ownership, and the
+    answer's next tier comes from games, so reading next_names would caption
+    a different tier than the button buys."""
+    src = _plugin("TitleLaddersUI.cs")
+    body = code_of(src, "private static string TierNames(ApiClient.TitleLadderLine ln, int tier)")
+    assert "string.Join(" not in body, (
+        "the tier names are joined raw; the joined string is not a "
         "catalogue key and can never be translated")
-    assert "LadderName(ln.next_names[" in body, body
+    assert re.search(r"\+\s*LadderName\(r\.name\)", body), body
+    assert "next_names" not in code_of(src), (
+        "a caller reads the answer's raw next_names again")
 
 
 def test_the_equip_comparison_value_stays_raw():
@@ -375,10 +387,12 @@ def test_the_parser_self_check_is_not_in_the_shipped_type_at_all():
     for literal in ("title_ladder_rat_4_queen", "active_line"):
         assert literal not in literals, (
             "the self-check's canned response is still in the source: %s" % literal)
-    entered = code_of(src, "internal static void OnTabEntered()")
+    # Item 12 follow-up: the Titles tab is gone; entering the Shop is what
+    # asks for a board now.
+    entered = code_of(src, "internal static void OnShopEntered()")
     for name in SELF_CHECK_NAMES:
         assert name not in entered, (
-            "opening the Titles tab still reaches %s" % name)
+            "entering the Shop still reaches %s" % name)
 
 
 def test_every_parsed_field_is_read_from_its_own_object_slice():

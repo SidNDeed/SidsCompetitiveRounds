@@ -323,6 +323,11 @@ namespace CompetitiveRounds
             // click that dismissed it ALSO reached the armed Discard on the
             // tile beneath, in the same click (#141/#200).
             || PlayerCardsUI.CardPopupOpen
+            // Sept 23 (item 12 follow-up): the ladder tier popup raises its own
+            // uGUI backdrop over the Shop. Without this term the Shop rows'
+            // raw-poll handlers under it stay live, and the press that closes
+            // the popup could also buy on the row beneath (#141/#200).
+            || TitleLaddersUI.PopupOpen
             || !Plugin.DataConsentAsked;
         private static bool AnyModalOwnsInput => OtherModalOwnsInput || NativeUI.UtilityPopupOpen;
 
@@ -343,6 +348,7 @@ namespace CompetitiveRounds
             || NativeUI.TournBetsPopupOpen || NativeUI.RecentTournPopupOpen
             || NativeUI.CardPreviewOpen
             || PlayerCardsUI.CardPopupOpen
+            || TitleLaddersUI.PopupOpen   // Sept 23 (item 12 follow-up): the Shop's IMGUI previews must not paint over the ladder popup
             // Sept 8 r1b L2: the language chooser is a backdrop modal too (Home has the
             // ranked-hint callout + caret as page IMGUI).
             || NativeUI.LangPromptOpen;

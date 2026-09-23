@@ -1660,7 +1660,7 @@ namespace CompetitiveRounds
         /// world-corner -> screen test as ClickHandler.ContainsScreenPoint (ROUNDS'
         /// ScreenSpaceCamera canvas needs WorldToScreenPoint). Used by a row-level
         /// raw-poll handler to yield to the button drawn on top of it.</summary>
-        private static bool PointerOverActive(GameObject go)
+        internal static bool PointerOverActive(GameObject go)
         {
             try
             {
@@ -1807,7 +1807,7 @@ namespace CompetitiveRounds
         /// bypassModalBlock and the IMGUI amount prompt renders independent
         /// of IsOpen — either surviving a close can stake real gold over
         /// live combat).</summary>
-        private static void TeardownOverlaySurfaces(){try{ProfileCard.Teardown();}catch{}try{PlayerCardsUI.OnOverlayClosed();}catch{}/* Sept 12 (Player Cards): the full-screen card view is a persistent overlay child — it closes on EVERY close path (#369), and the next open counts as a tab visit */try{PlayerCardFaces.Clear();}catch{}/* Sept 6 item a: the hover profile card, pinned or not, closes on every page close/recovery path (#369) */try{HideTournamentBetsPopup();}catch{}try{HideRecentTournamentsPopup();}catch{}try{CancelCustomBet();}catch{}try{TrailPreview.Stop();}catch{}try{PlayerEffectCosmetic.StopPreview();}catch{}try{DanceEmotes.StopPreview();}catch{}try{MusicEngine.StopPreviewAndRestore();}catch{}/* music preview restores the pre-preview owner (generation-fenced, safe always) — THE canonical call site, per the module contract */try{HideInfoPopup();}catch{}try{HideCardPreview();}catch{}/* Aug 6 review find 3: an Escape with the picker dropdown open left a full-screen raycast-blocking dim over live gameplay and PickerOpen stuck true forever. */try{HidePicker();}catch{}try{SessionReportView.Close();}catch{}/* Sept 6 item c: the session report closes on EVERY close path (#369) */try{CloseUtilityPopup();}catch{}/* Sept 7 item 1: the mail/music popup, its child prompts and the report modal close on EVERY close path (#369) */try{MailUI.OnOverlayClosed();}catch{}/* Sept 6 mail: composer text focus + report modal released on EVERY close path (design B-4) */SetClickBlocker(false);SetMenuFade(false);/* fade must never survive a close (Sid2 in-game bleed hunt) */try{EventSystemGuard.OnCaptureEnd();}catch{}/* nav-submit ownership released on EVERY close path (Aug 30 r2 HIGH) */}
+        private static void TeardownOverlaySurfaces(){try{ProfileCard.Teardown();}catch{}try{PlayerCardsUI.OnOverlayClosed();}catch{}/* Sept 12 (Player Cards): the full-screen card view is a persistent overlay child — it closes on EVERY close path (#369), and the next open counts as a tab visit */try{TitleLaddersUI.HidePopup();}catch{}/* Sept 23 (item 12 follow-up): the ladder tier popup is a persistent overlay child with a gold-bearing Buy — it closes on EVERY close path (#369) */try{PlayerCardFaces.Clear();}catch{}/* Sept 6 item a: the hover profile card, pinned or not, closes on every page close/recovery path (#369) */try{HideTournamentBetsPopup();}catch{}try{HideRecentTournamentsPopup();}catch{}try{CancelCustomBet();}catch{}try{TrailPreview.Stop();}catch{}try{PlayerEffectCosmetic.StopPreview();}catch{}try{DanceEmotes.StopPreview();}catch{}try{MusicEngine.StopPreviewAndRestore();}catch{}/* music preview restores the pre-preview owner (generation-fenced, safe always) — THE canonical call site, per the module contract */try{HideInfoPopup();}catch{}try{HideCardPreview();}catch{}/* Aug 6 review find 3: an Escape with the picker dropdown open left a full-screen raycast-blocking dim over live gameplay and PickerOpen stuck true forever. */try{HidePicker();}catch{}try{SessionReportView.Close();}catch{}/* Sept 6 item c: the session report closes on EVERY close path (#369) */try{CloseUtilityPopup();}catch{}/* Sept 7 item 1: the mail/music popup, its child prompts and the report modal close on EVERY close path (#369) */try{MailUI.OnOverlayClosed();}catch{}/* Sept 6 mail: composer text focus + report modal released on EVERY close path (design B-4) */SetClickBlocker(false);SetMenuFade(false);/* fade must never survive a close (Sid2 in-game bleed hunt) */try{EventSystemGuard.OnCaptureEnd();}catch{}/* nav-submit ownership released on EVERY close path (Aug 30 r2 HIGH) */}
 
         public static void Close(){showcaseOwned=false;pendingInfoScroll=-1f;PageGeneration++;/* any close — operator or automation — revokes showcase ownership (Aug 30) */if(pageGO!=null)pageGO.SetActive(false);isOpen=false;TeardownOverlaySurfaces();Plugin.Log.LogInfo("[NATIVE] Closed competitive page");}
 
@@ -2448,7 +2448,7 @@ namespace CompetitiveRounds
             tIndRow.SetActive(false);
             tournamentIndRow = tIndRow;
             BuildTabBar(content.transform);
-            tabPanels=new GameObject[NUM_TABS];tabPanels[0]=BuildMyStatsTab(content.transform);tabPanels[1]=BuildLeaderboardTab(content.transform);tabPanels[2]=BuildCardStatsTab(content.transform);tabPanels[3]=BuildAchievementsTab(content.transform);tabPanels[4]=BuildShopTab(content.transform);tabPanels[5]=BuildSettingsTab(content.transform);tabPanels[6]=BuildAdminTab(content.transform);tabPanels[7]=BuildTournamentsTab(content.transform);tabPanels[8]=BuildTeamTab(content.transform);tabPanels[9]=BuildCompareTab(content.transform);tabPanels[10]=BuildArtistTab(content.transform);tabPanels[11]=BuildOneVTwoTab(content.transform,11);tabPanels[12]=BuildFfaTab(content.transform,12);tabPanels[13]=BuildHomeTab(content.transform);tabPanels[14]=BuildBannedTab(content.transform);tabPanels[15]=BuildInfoTab(content.transform);tabPanels[TAB_COLLECTION]=BuildCollectionTab(content.transform);tabPanels[TAB_TITLES]=BuildTitlesTab(content.transform);BuildUtilityPopup(pageGO.transform);/* Sept 7 item 1: Music (16) and Mail (17) are popup bodies, not tabs — their slots stay null and SwitchTab null-skips them */
+            tabPanels=new GameObject[NUM_TABS];tabPanels[0]=BuildMyStatsTab(content.transform);tabPanels[1]=BuildLeaderboardTab(content.transform);tabPanels[2]=BuildCardStatsTab(content.transform);tabPanels[3]=BuildAchievementsTab(content.transform);tabPanels[4]=BuildShopTab(content.transform);tabPanels[5]=BuildSettingsTab(content.transform);tabPanels[6]=BuildAdminTab(content.transform);tabPanels[7]=BuildTournamentsTab(content.transform);tabPanels[8]=BuildTeamTab(content.transform);tabPanels[9]=BuildCompareTab(content.transform);tabPanels[10]=BuildArtistTab(content.transform);tabPanels[11]=BuildOneVTwoTab(content.transform,11);tabPanels[12]=BuildFfaTab(content.transform,12);tabPanels[13]=BuildHomeTab(content.transform);tabPanels[14]=BuildBannedTab(content.transform);tabPanels[15]=BuildInfoTab(content.transform);tabPanels[TAB_COLLECTION]=BuildCollectionTab(content.transform);BuildUtilityPopup(pageGO.transform);/* Sept 7 item 1: Music (16) and Mail (17) are popup bodies, not tabs — their slots stay null and SwitchTab null-skips them */
             // (The [ID] button's position is set in CreateHistoryRow itself, so
             // it cannot desync from tab-build ordering.)
 
@@ -2699,15 +2699,13 @@ namespace CompetitiveRounds
         // i18n: expression-bodied property (NOT a static readonly field) so the
         // I18n.Tr calls run at ACCESS time — after I18nCatalogues.Install() — and
         // re-evaluate after a language switch (which rebuilds the page).
-        private static string[] TAB_NAMES=>new[]{I18n.Tr("My Stats"),I18n.Tr("Leaderboard"),I18n.Tr("Card Stats"),I18n.Tr("Achievements"),I18n.Tr("Shop"),I18n.Tr("Settings"),I18n.Tr("Admin"),I18n.Tr("Tournaments"),I18n.Tr("2v2"),I18n.Tr("Compare"),I18n.Tr("Artist"),I18n.Tr("1v2"),I18n.Tr("FFA"),I18n.Tr("Home"),I18n.Tr("Banned"),I18n.Tr("Info"),I18n.Tr("Music"),I18n.Tr("Mail"),I18n.Tr("Collection"),I18n.Tr("Titles")};
-        private const int NUM_TABS=20;   // Sept 19: 19 = Titles (animal title ladders, Shop sub-tab). Sept 10: 18 = Collection (Player Cards, Shop sub-tab). Aug 7 item 7: 14 = Banned (Admin sub-tab); Aug 23: 15 = Info (Settings sub-tab); Sept 2: 16 = Music; Sept 6: 17 = Mail; Sept 7: 16 and 17 became header-icon popups (indices kept, panels null)
+        private static string[] TAB_NAMES=>new[]{I18n.Tr("My Stats"),I18n.Tr("Leaderboard"),I18n.Tr("Card Stats"),I18n.Tr("Achievements"),I18n.Tr("Shop"),I18n.Tr("Settings"),I18n.Tr("Admin"),I18n.Tr("Tournaments"),I18n.Tr("2v2"),I18n.Tr("Compare"),I18n.Tr("Artist"),I18n.Tr("1v2"),I18n.Tr("FFA"),I18n.Tr("Home"),I18n.Tr("Banned"),I18n.Tr("Info"),I18n.Tr("Music"),I18n.Tr("Mail"),I18n.Tr("Collection")};
+        private const int NUM_TABS=19;   // Sept 23 (item 12 follow-up): 19 = Titles is gone - the animal title ladders are entries of the Shop's Titles section (TitleLaddersUI.cs), and 19 was the LAST index, so no other tab moved. Sept 10: 18 = Collection (Player Cards, Shop sub-tab). Aug 7 item 7: 14 = Banned (Admin sub-tab); Aug 23: 15 = Info (Settings sub-tab); Sept 2: 16 = Music; Sept 6: 17 = Mail; Sept 7: 16 and 17 became header-icon popups (indices kept, panels null)
         private const int TAB_HOME=13;
         private const int TAB_BANNED=14;
         private const int TAB_INFO=15;   // Aug 23 (Sid): the explainer library — Settings group sub-tab
         internal const int TAB_SETTINGS=5;      // the picture/preset controls and the portrait preview live here, not on Collection
         internal const int TAB_COLLECTION=18;   // Sept 10 (Player Cards): the Collection tab - Shop group sub-tab, body in PlayerCardsUI.cs
-        internal const int TAB_TITLES=19;       // Sept 19 (item 12): animal title ladders - Shop group sub-tab, body in TitleLaddersUI.cs
-        internal const int TAB_SHOP=4;          // named so TitleLaddersUI's "buy it in the Shop" deep-link cannot drift from the index
         internal const int TAB_MAIL=17;  // Sept 6 (Sid): in-game mail (MailUI.cs). Sept 7 item 1: a header-icon popup with no tab slot — the index is kept so every other tab keeps its meaning
         // Top bar order per Sid's spec (July 12 round 2): Multiplayer right after
         // Tournaments; Settings last; Admin gated. Sub-tabs: Compare under
@@ -2719,7 +2717,7 @@ namespace CompetitiveRounds
         private static string[] GROUP_LABELS=>new[]{I18n.Tr("Home"),I18n.Tr("My Stats"),I18n.Tr("Leaderboard"),I18n.Tr("Tournaments"),I18n.Tr("Multiplayer"),I18n.Tr("Shop"),I18n.Tr("Admin"),I18n.Tr("Settings")};
         // Sept 7 item 1: Music (16) and Mail (17) left the bar — both open as
         // popups from the header icons (BuildUtilityStrip / OpenUtilityPopup).
-        private static readonly int[][] GROUP_MEMBERS={new[]{13},new[]{0,2,3},new[]{1,9},new[]{7},new[]{8,11,12},new[]{4,10,18,19},new[]{6,14},new[]{5,15}};
+        private static readonly int[][] GROUP_MEMBERS={new[]{13},new[]{0,2,3},new[]{1,9},new[]{7},new[]{8,11,12},new[]{4,10,18},new[]{6,14},new[]{5,15}};
         private const int GROUP_ADMIN=6;   // GROUP_LABELS index of the admin-gated slot (6 since the Music and Mail slots left the bar, Sept 7)
         private static int GroupOf(int tabIdx){for(int g=0;g<GROUP_MEMBERS.Length;g++)for(int m=0;m<GROUP_MEMBERS[g].Length;m++)if(GROUP_MEMBERS[g][m]==tabIdx)return g;return 0;}
         /* Aug 7 item 7: the Banned sub-tab is ADMIN-only (its only fetch is the
@@ -6513,7 +6511,7 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogWarning("[NATIVE] dev open tab threw: " + ex.Message); }
         }
 
-        private static void SwitchTab(int idx){if(idx!=currentTab){/* Music design F13: leaving a tab terminates any live shop music preview. Generation-fenced and safe always, so a stale/no-preview call is a no-op. */try{MusicEngine.StopPreviewAndRestore();}catch{}}currentTab=idx;PageGeneration++;CompetitiveUI.ClearCardHoverRegions();ProfileCard.ClearHoverTargets();/* Sept 6 item a (review a-M2): name targets die with the tab, not with every list refresh */for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();ApiClient.FetchActiveSeries();ApiClient.FetchRankTiers();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();ApiClient.FetchNewestCosmetics();/* Aug 7 item 10: the New chip needs the newest cache; Home used to be its only fetch site */}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchAdminRecentSeries(id);ApiClient.FetchAdminQuarantine(id);ApiClient.FetchAdminActions(id,25,0,"","",null);}}if(idx==TAB_BANNED){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin)ApiClient.FetchBannedUsers(id);}if(idx==7){/* Participant-first sub-tab (Aug 30, owner: "still no Forfeit button in
+        private static void SwitchTab(int idx){if(idx!=currentTab){/* Music design F13: leaving a tab terminates any live shop music preview. Generation-fenced and safe always, so a stale/no-preview call is a no-op. */try{MusicEngine.StopPreviewAndRestore();}catch{}try{TitleLaddersUI.HidePopup();}catch{}/* item 12 follow-up: the ladder tier popup belongs to the Shop page it was opened from */}currentTab=idx;PageGeneration++;CompetitiveUI.ClearCardHoverRegions();ProfileCard.ClearHoverTargets();/* Sept 6 item a (review a-M2): name targets die with the tab, not with every list refresh */for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();ApiClient.FetchActiveSeries();ApiClient.FetchRankTiers();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();ApiClient.FetchNewestCosmetics();/* Aug 7 item 10: the New chip needs the newest cache; Home used to be its only fetch site */TitleLaddersUI.OnShopEntered();/* item 12 follow-up: the ladder entries live in the Shop's Titles section */}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchAdminRecentSeries(id);ApiClient.FetchAdminQuarantine(id);ApiClient.FetchAdminActions(id,25,0,"","",null);}}if(idx==TAB_BANNED){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin)ApiClient.FetchBannedUsers(id);}if(idx==7){/* Participant-first sub-tab (Aug 30, owner: "still no Forfeit button in
 tournaments"): the My Match panel — Ready Up / Play Now / FORFEIT — is gated by the
 sub-tab kind fence, so a participant whose live match sits under the OTHER kind's
 sub-tab opened the tab and saw nothing concedable. On tab entry only (manual sub-tab
@@ -6522,7 +6520,7 @@ another kind does, land on that kind. Mirrors the sub-tab buttons' own switch
 statements; the branch's force fetch below is shared. Entries older than 45s are
 ignored (review MEDIUM: a failed refresh retains the previous list indefinitely,
 and switching on a stale snapshot lands on a completed match's kind — the 20s
-poll makes fresh data the norm, so staleness fails NEUTRAL). */try{var mine=ApiClient.CachedMyActiveTournamentMatches;if(mine!=null){bool currentHasLive=false;string otherKind=null;float nowRt=Time.realtimeSinceStartup;foreach(var am in mine){if(am==null)continue;if(nowRt-am.fetched_at_realtime>45f)continue;if(am.status!="ready"&&am.status!="active"&&am.status!="scheduled")continue;if(string.IsNullOrEmpty(am.kind))continue;if(am.kind==ApiClient.TournamentKind)currentHasLive=true;else otherKind=am.kind;}if(!currentHasLive&&otherKind!=null)ApiClient.TournamentKind=otherKind;}}catch{}ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();ApiClient.FetchActiveSeries();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown"){ApiClient.FetchPlayerTournaments(_msid);ApiClient.FetchMyBets(_msid);}}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}if(idx==9){if(ApiClient.CachedLeaderboard==null)ApiClient.FetchLeaderboard();}if(idx==10){var _asid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_asid)&&_asid!="unknown"&&ApiClient.IsArtist){ApiClient.FetchArtistItems(_asid);ApiClient.FetchMySubmissions(_asid);ApiClient.FetchArtistSales(_asid);}}if(idx==11){ovtTabRefreshAt=Time.unscaledTime+30f;ovtRecentRefreshAt=Time.unscaledTime+10f;ApiClient.FetchOvtLeaderboard();ApiClient.FetchOvtLeaderboard(200,"solo");ApiClient.FetchOvtLeaderboard(200,"duo");ApiClient.FetchOvtRecent(ovtRecentPageReq);}if(idx==12){ffaLbRefreshAt=Time.unscaledTime+30f;ffaRecentRefreshAt=Time.unscaledTime+10f;ffaBetRefreshAt=Time.unscaledTime+10f;ApiClient.FetchFfaLeaderboard(200,ffaLbSortReq);ApiClient.FetchFfaRecent(ffaRecentPageReq,5);ApiClient.FetchFfaRecent(ffaRecentCasPageReq,5,false);ApiClient.FetchFfaBettable(MatchTracker.LocalSteamId);ApiClient.UpdateFfaQueueList(force:true);}if(idx==TAB_COLLECTION)PlayerCardsUI.OnTabEntered();if(idx==TAB_TITLES)TitleLaddersUI.OnTabEntered();if(idx==TAB_HOME){homeTabRefreshAt=Time.unscaledTime+15f;ApiClient.FetchOnlinePlayers();ApiClient.FetchNewestCosmetics();ApiClient.FetchReleaseNotes();}dirty=true;}
+poll makes fresh data the norm, so staleness fails NEUTRAL). */try{var mine=ApiClient.CachedMyActiveTournamentMatches;if(mine!=null){bool currentHasLive=false;string otherKind=null;float nowRt=Time.realtimeSinceStartup;foreach(var am in mine){if(am==null)continue;if(nowRt-am.fetched_at_realtime>45f)continue;if(am.status!="ready"&&am.status!="active"&&am.status!="scheduled")continue;if(string.IsNullOrEmpty(am.kind))continue;if(am.kind==ApiClient.TournamentKind)currentHasLive=true;else otherKind=am.kind;}if(!currentHasLive&&otherKind!=null)ApiClient.TournamentKind=otherKind;}}catch{}ApiClient.FetchTournamentCurrent(MatchTracker.LocalSteamId,force:true);ApiClient.FetchSiteTournamentHistory();ApiClient.FetchActiveSeries();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown"){ApiClient.FetchPlayerTournaments(_msid);ApiClient.FetchMyBets(_msid);}}if(idx==8){if(ApiClient.CachedTeamLeaderboard==null||ApiClient.CachedTeamLeaderboard.Count==0)ApiClient.FetchTeamLeaderboard();var _msid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_msid)&&_msid!="unknown")ApiClient.FetchTeamMatchHistory(_msid);}if(idx==9){if(ApiClient.CachedLeaderboard==null)ApiClient.FetchLeaderboard();}if(idx==10){var _asid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(_asid)&&_asid!="unknown"&&ApiClient.IsArtist){ApiClient.FetchArtistItems(_asid);ApiClient.FetchMySubmissions(_asid);ApiClient.FetchArtistSales(_asid);}}if(idx==11){ovtTabRefreshAt=Time.unscaledTime+30f;ovtRecentRefreshAt=Time.unscaledTime+10f;ApiClient.FetchOvtLeaderboard();ApiClient.FetchOvtLeaderboard(200,"solo");ApiClient.FetchOvtLeaderboard(200,"duo");ApiClient.FetchOvtRecent(ovtRecentPageReq);}if(idx==12){ffaLbRefreshAt=Time.unscaledTime+30f;ffaRecentRefreshAt=Time.unscaledTime+10f;ffaBetRefreshAt=Time.unscaledTime+10f;ApiClient.FetchFfaLeaderboard(200,ffaLbSortReq);ApiClient.FetchFfaRecent(ffaRecentPageReq,5);ApiClient.FetchFfaRecent(ffaRecentCasPageReq,5,false);ApiClient.FetchFfaBettable(MatchTracker.LocalSteamId);ApiClient.UpdateFfaQueueList(force:true);}if(idx==TAB_COLLECTION)PlayerCardsUI.OnTabEntered();if(idx==TAB_HOME){homeTabRefreshAt=Time.unscaledTime+15f;ApiClient.FetchOnlinePlayers();ApiClient.FetchNewestCosmetics();ApiClient.FetchReleaseNotes();}dirty=true;}
 
         // ── Home tab (v1.33) — splash/landing page: big logo, latest release
         // notes (GitHub), newest cosmetics, online/recently-online players,
@@ -9686,7 +9684,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         }
 
         private static void RefreshData(){string id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchPlayerStats(id);ApiClient.FetchMatchHistory(id);ApiClient.FetchAchievements(id);ApiClient.FetchTeamStats(id);}if(currentTab==1){ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();}if(currentTab==8){ApiClient.FetchTeamLeaderboard(200,ApiClient.CachedTeamLeaderboardSort??"rating");/* 342 review M2 + r5 L1: manual refresh on the 2v2 board (tab 8) */}if(currentTab==2){ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);LoadCardTiersForCurrentFilter();}}
-        private static void RefreshCurrentTab(){RefreshQueueUI();RefreshVersionStatus();RefreshServerBanner();RefreshAlertBanner();RefreshTournamentGameIndicator();RefreshTopLeftName();/* Aug 31 r1 find 6: every tab keeps the header name current (change-guarded). *//* Admin/Artist button visibility - the async checks can flip on late. */UpdateTabBarVisual();switch(currentTab){case 0:RefreshMyStats();break;case 1:RefreshLeaderboard();RefreshRecentSeries();RefreshLiveSeries();break;case 2:RefreshCardStats();break;case 3:RefreshAchievements();break;case 4:RefreshShop();break;case 5:RefreshSettings();break;case 6:RefreshAdmin();break;case 7:RefreshTournaments();break;case 8:RefreshTeamTab();break;case 9:RefreshCompare();break;case 10:RefreshArtistTab();break;case 11:RefreshOneVTwoTab();break;case 12:RefreshFfaTab();break;case 13:RefreshHomeTab();break;case 14:RefreshBannedTab();break;case TAB_COLLECTION:PlayerCardsUI.Refresh();break;case TAB_TITLES:TitleLaddersUI.Refresh();break;}if(utilKind!=UtilKind.None)RefreshUtilityPopup();/* Sept 7 item 1: a dirty repaint reaches the open popup, not only the tab beneath */}
+        private static void RefreshCurrentTab(){RefreshQueueUI();RefreshVersionStatus();RefreshServerBanner();RefreshAlertBanner();RefreshTournamentGameIndicator();RefreshTopLeftName();/* Aug 31 r1 find 6: every tab keeps the header name current (change-guarded). *//* Admin/Artist button visibility - the async checks can flip on late. */UpdateTabBarVisual();switch(currentTab){case 0:RefreshMyStats();break;case 1:RefreshLeaderboard();RefreshRecentSeries();RefreshLiveSeries();break;case 2:RefreshCardStats();break;case 3:RefreshAchievements();break;case 4:RefreshShop();break;case 5:RefreshSettings();break;case 6:RefreshAdmin();break;case 7:RefreshTournaments();break;case 8:RefreshTeamTab();break;case 9:RefreshCompare();break;case 10:RefreshArtistTab();break;case 11:RefreshOneVTwoTab();break;case 12:RefreshFfaTab();break;case 13:RefreshHomeTab();break;case 14:RefreshBannedTab();break;case TAB_COLLECTION:PlayerCardsUI.Refresh();break;}if(utilKind!=UtilKind.None)RefreshUtilityPopup();/* Sept 7 item 1: a dirty repaint reaches the open popup, not only the tab beneath */}
 
         // Match IDs for which we've already auto-enabled ranked. Prevents the
         // every-refresh toggle from re-firing and re-posting /toggle-ranked
@@ -10913,25 +10911,11 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             return panel;
         }
 
-        // Sept 19 (item 12): the Titles tab. NativeUI owns the panel and the
-        // Shop-group sub-tab anchor; TitleLaddersUI builds the body.
-        private static GameObject BuildTitlesTab(Transform parent)
-        {
-            var panel = new GameObject("Titles");
-            panel.transform.SetParent(parent, false);
-            panel.AddComponent<RectTransform>();
-            UIFactory.AddVLG(panel, spacing: 6, padL: 20, padR: 20, padT: 10, padB: 10);
-            UIFactory.AddLE(panel, flexH: 1);
-            MakeSubTabAnchor(TAB_TITLES, panel.transform, true);
-            TitleLaddersUI.BuildInto(panel.transform);
-            return panel;
-        }
-
-        /// <summary>The one deep-link into the Shop tab from another tab's
-        /// body. SwitchTab is private, and the Titles screen deliberately has
-        /// no Buy of its own — an entry rung is bought on its ordinary Shop
-        /// row, so exactly one purchase path exists (#159/#325).</summary>
-        internal static void SwitchToShopTab() { SwitchTab(TAB_SHOP); }
+        /// <summary>Item 12 follow-up: the Titles section's ladder entries and
+        /// their tier popup report through the Shop's own status line, like
+        /// every Shop row. `s` arrives translated (or as server text), so it
+        /// is set raw.</summary>
+        internal static void SetShopStatus(string s) { UIFactory.SetTextRaw(txtShopStatus, s); }
 
         private static GameObject BuildShopTab(Transform parent)
         {
@@ -10961,9 +10945,6 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             UIFactory.SetBold(txtShopBalance, true);
             // Sept 10 (Player Cards): the Shop tile deep-links to the Collection tab.
             UIFactory.CreateButton("SHPcLink", header.transform, "Player Cards", 14f, C_WHITE, C_BTN, () => SwitchTab(TAB_COLLECTION), sizeDelta: new Vector2(150, 26));
-            // Sept 19 (item 12): the reverse of the Titles screen's "Open the
-            // Shop" — a ladder rung IS a shop row, so both directions exist.
-            UIFactory.CreateButton("SHTlLink", header.transform, I18n.Tr("Title Ladders"), 14f, C_WHITE, C_BTN, () => SwitchTab(TAB_TITLES), sizeDelta: new Vector2(150, 26));
 
             txtShopStatus = UIFactory.CreateText("SHStatus", panel.transform,
                 "", 14f, C_LABEL, sizeDelta: new Vector2(900, 22));
@@ -11048,6 +11029,10 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // player report about "missing" items).
             for (int i = 0; i < 320; i++)
                 shopRows.Add(CreateShopRow(shopRowsContainer.transform, i));
+            // Item 12 follow-up (Sept 23): the animal title ladders' entries
+            // (and their one note row) live in this container too; RefreshShop
+            // places them in the Titles section.
+            TitleLaddersUI.BuildShopEntries(shopRowsContainer.transform);
 
             // ── Music click-to-expand track panel (design §6) ──────────────
             // ONE shared panel parked in a stash OUTSIDE the scroll content;
@@ -11780,12 +11765,24 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 shopRows[rowIdx].root.transform.SetSiblingIndex(sibling++);
             }
 
-            if (titles.Count > 0 && shopTitlesHeader != null)
+            // Item 12 follow-up (Sept 23): the animal title ladders are entries
+            // of THIS section - one per line the ladder answer carries, ahead of
+            // the ordinary titles. Planned BEFORE the header decision: a line's
+            // rungs leave the ordinary list only when its entry renders
+            // (TitleLadderRules.PlanSection), so every rung shows exactly once
+            // (a row of its own with no board in hand, inside its entry with
+            // one), and a section holding only ladders still gets its header.
+            bool showLadders = shopCategoryFilter == 0 || shopCategoryFilter == 4;
+            var ladderFolded = TitleLaddersUI.PlanShopSection();
+            titles.RemoveAll(t => t != null && t.sku != null && ladderFolded.Contains(t.sku));
+            int ladderRows = showLadders ? TitleLaddersUI.ShopSectionRows : 0;
+            if ((titles.Count > 0 || ladderRows > 0) && shopTitlesHeader != null)
             {
                 shopTitlesHeader.SetActive(true);
                 shopTitlesHeader.transform.SetSiblingIndex(sibling++);
             }
             else if (shopTitlesHeader != null) shopTitlesHeader.SetActive(false);
+            sibling = TitleLaddersUI.PaintShopEntries(showLadders, sibling, s != null ? balance : (int?)null);
             for (int i = 0; i < titles.Count && rowIdx < shopRows.Count; i++, rowIdx++)
             {
                 ApplyShopRow(shopRows[rowIdx], titles[i], balance, s);
@@ -11943,7 +11940,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
 
         // Bug #63: shop-item NAME colors get a lightness floor so dark preview
         // colors (deep map-skin hues) stay readable on the dark panel.
-        private static string ReadableNameColor(string hex)
+        internal static string ReadableNameColor(string hex)
         {
             if (string.IsNullOrEmpty(hex)) return "#FFFFFF";
             Color c;
@@ -23097,7 +23094,7 @@ qSearchBtn.SetActive(ranked&&qs==ApiClient.QueueState.Idle&&!inRankedMatch);qCan
             return Trunc(sb.ToString().Trim(), max);
         }
 
-        private static void SetButtonInteractable(GameObject button, bool interactable)
+        internal static void SetButtonInteractable(GameObject button, bool interactable)
         {
             try
             {

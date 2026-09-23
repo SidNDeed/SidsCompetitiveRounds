@@ -1079,7 +1079,7 @@ namespace CompetitiveRounds
             );
             BroadcastTestOpenTab = Config.Bind(
                 "Broadcast", "TestOpenTab", "",
-                "Broadcast seat only: open the F5 overlay on a tab index (0 My Stats, 1 Leaderboard, 2 Cards, 3 Achievements, 4 Shop, 5 Settings, 7 Tournaments, 8 2v2, 11 1v2, 12 FFA, 13 Home, 15 Info, 16 Music), optionally ':fraction' to scroll the Shop list (0 top .. 1 bottom) or, for tab 15, ':article-key' to open an Info article (e.g. 15:rewards). Re-applied whenever the value changes; clear when done."
+                "Broadcast seat only: open the F5 overlay on a tab index (0 My Stats, 1 Leaderboard, 2 Cards, 3 Achievements, 4 Shop, 5 Settings, 7 Tournaments, 8 2v2, 11 1v2, 12 FFA, 13 Home, 15 Info, 16 Music), optionally ':fraction' to scroll the Shop list (0 top .. 1 bottom) or, for tab 15, ':article-key' to open an Info article (e.g. 15:rewards). '4:cat<N>' selects a Shop category; after it, 'fixture[:line]', 'ladder:<line>', 'close' or 'live' drives the Titles section's ladder popup (fixture = BepInEx/config/scr-ladder-fixture.json). Re-applied whenever the value changes; clear when done."
             );
             BroadcastTestQuit = Config.Bind(
                 "Broadcast", "TestQuit", "",
@@ -2369,7 +2369,7 @@ namespace CompetitiveRounds
             // Screenshots of specific articles need this lever since
             // synthetic clicks can't reach the overlay (#420). Other tabs
             // keep the float scroll meaning.
-            string compareMetric = null; int shopCat = -1;
+            string compareMetric = null; int shopCat = -1; string ladderDirective = null;
             if (parts.Length > 1)
             {
                 if (idx == 15) infoKey = raw.Substring(raw.IndexOf(':') + 1).Trim();
@@ -2381,7 +2381,13 @@ namespace CompetitiveRounds
                 // Sept 1: "4:cat<N>" selects a Shop category tab (e.g. 4:cat10
                 // = Dances); a bare float keeps the scroll meaning.
                 else if (idx == 4 && parts[1].Trim().StartsWith("cat", StringComparison.OrdinalIgnoreCase))
+                {
                     int.TryParse(parts[1].Trim().Substring(3), out shopCat);
+                    // Sept 23 (item 12 follow-up): anything after "4:catN:" drives the
+                    // Titles section's ladder entries and their tier popup, e.g.
+                    // "4:cat4:fixture:cat" (TitleLaddersUI.DevDirective owns the grammar).
+                    if (parts.Length > 2) ladderDirective = string.Join(":", parts, 2, parts.Length - 2);
+                }
                 else float.TryParse(parts[1].Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out scroll);
             }
             // A "16:click:..." value (the retired preparation-click directive)
@@ -2392,6 +2398,7 @@ namespace CompetitiveRounds
             NativeUI.DevOpenTab(idx, scroll, infoKey);
             if (!string.IsNullOrEmpty(compareMetric)) NativeUI.DevSetCompareMetricByName(compareMetric);
             if (shopCat >= 0) NativeUI.DevSetShopCategory(shopCat);
+            if (!string.IsNullOrEmpty(ladderDirective)) TitleLaddersUI.DevDirective(ladderDirective);
         }
 
         // ── [Broadcast] TestQuickChatWheel: wheel layout screenshots ──

@@ -2980,6 +2980,26 @@ namespace CompetitiveRounds
             // themselves; entries above are untouched.
             ["<color=#FFD94D><b>SORTING THE BINDER</b></color>\n\n- <b>Rating position</b> orders the binder by where each player stands on the leaderboard today - top 100 first. Players outside it, or not seen in 90 days, go to the back, ordered by rating.\n- The number printed on a card is the rank it was minted with, which can differ."] = "<color=#FFD94D><b>ORDENAR EL ÁLBUM</b></color>\n\n- <b>Posición por rating</b> ordena el álbum por la posición que cada jugador ocupa hoy en la clasificación: los 100 primeros van delante. Quienes quedan fuera, o llevan 90 días sin aparecer, van al final, ordenados por rating.\n- El número impreso en una carta es el puesto que tenía al acuñarse, y puede ser distinto.",
             ["Rating position"] = "Posición por rating",
+
+            // Added 2026-09-23: item 12 follow-up, the animal title ladders as
+            // entries of the Shop's Titles section and their tier popup
+            // (TitleLaddersUI.cs). Sorted among themselves; entries above are
+            // untouched.
+            ["Current tier"] = "Nivel actual",
+            ["Current tier: {0} - {1}"] = "Nivel actual: {0} - {1}",
+            ["Earned at {0} series"] = "Se gana con {0} series",
+            ["In use"] = "En uso",
+            ["Locked"] = "Bloqueado",
+            ["Maxed"] = "Al máximo",
+            ["Next tier"] = "Siguiente nivel",
+            ["No tiers listed"] = "No hay niveles",
+            ["Not enough gold"] = "No tienes suficiente oro",
+            ["Not on sale yet"] = "Aún no está a la venta",
+            ["Owned"] = "Obtenido",
+            ["Shop still loading"] = "La tienda aún está cargando",
+            ["Tier {0}"] = "Nivel {0}",
+            ["Upgrade"] = "Mejorar",
+            ["{0} tiers - click to see them all"] = "{0} niveles - haz clic para verlos todos",
         };
 
         private static readonly Dictionary<string, string> RU = new Dictionary<string, string>
@@ -5926,6 +5946,26 @@ namespace CompetitiveRounds
             // themselves; entries above are untouched.
             ["<color=#FFD94D><b>SORTING THE BINDER</b></color>\n\n- <b>Rating position</b> orders the binder by where each player stands on the leaderboard today - top 100 first. Players outside it, or not seen in 90 days, go to the back, ordered by rating.\n- The number printed on a card is the rank it was minted with, which can differ."] = "<color=#FFD94D><b>СОРТИРОВКА АЛЬБОМА</b></color>\n\n- <b>Позиция в топе</b> сортирует альбом по тому, какое место игрок занимает в таблице лидеров сегодня: первые 100 идут вперёд. Те, кто вне топа или не появлялся 90 дней, уходят в конец и сортируются по рейтингу.\n- Число, напечатанное на карте, — это место на момент её выпуска, и оно может отличаться.",
             ["Rating position"] = "Позиция в топе",
+
+            // Added 2026-09-23: item 12 follow-up, the animal title ladders as
+            // entries of the Shop's Titles section and their tier popup
+            // (TitleLaddersUI.cs). Sorted among themselves; entries above are
+            // untouched.
+            ["Current tier"] = "Текущий уровень",
+            ["Current tier: {0} - {1}"] = "Текущий уровень: {0} - {1}",
+            ["Earned at {0} series"] = "Даётся за {0} серий",
+            ["In use"] = "Используется",
+            ["Locked"] = "Закрыто",
+            ["Maxed"] = "Максимум",
+            ["Next tier"] = "Следующий уровень",
+            ["No tiers listed"] = "Уровни не указаны",
+            ["Not enough gold"] = "Недостаточно золота",
+            ["Not on sale yet"] = "Пока не продаётся",
+            ["Owned"] = "Получено",
+            ["Shop still loading"] = "Магазин ещё загружается",
+            ["Tier {0}"] = "Уровень {0}",
+            ["Upgrade"] = "Улучшить",
+            ["{0} tiers - click to see them all"] = "Уровней: {0} - нажмите, чтобы увидеть все",
         };
 
         private static readonly Dictionary<string, string> UK = new Dictionary<string, string>
@@ -8798,6 +8838,26 @@ namespace CompetitiveRounds
             // themselves; entries above are untouched.
             ["<color=#FFD94D><b>SORTING THE BINDER</b></color>\n\n- <b>Rating position</b> orders the binder by where each player stands on the leaderboard today - top 100 first. Players outside it, or not seen in 90 days, go to the back, ordered by rating.\n- The number printed on a card is the rank it was minted with, which can differ."] = "<color=#FFD94D><b>СОРТУВАННЯ АЛЬБОМУ</b></color>\n\n- <b>Позиція в топі</b> сортує альбом за тим, яке місце гравець посідає в таблиці лідерів сьогодні: перші 100 ідуть уперед. Ті, хто поза топом або не з’являвся 90 днів, ідуть у кінець і сортуються за рейтингом.\n- Число, надруковане на картці, — це місце на момент її випуску, і воно може відрізнятися.",
             ["Rating position"] = "Позиція в топі",
+
+            // Added 2026-09-23: item 12 follow-up, the animal title ladders as
+            // entries of the Shop's Titles section and their tier popup
+            // (TitleLaddersUI.cs). Sorted among themselves; entries above are
+            // untouched.
+            ["Current tier"] = "Поточний рівень",
+            ["Current tier: {0} - {1}"] = "Поточний рівень: {0} - {1}",
+            ["Earned at {0} series"] = "Дається за {0} серій",
+            ["In use"] = "Активний",
+            ["Locked"] = "Закрито",
+            ["Maxed"] = "Максимум",
+            ["Next tier"] = "Наступний рівень",
+            ["No tiers listed"] = "Рівні не вказано",
+            ["Not enough gold"] = "Недостатньо золота",
+            ["Not on sale yet"] = "Поки не продається",
+            ["Owned"] = "Отримано",
+            ["Shop still loading"] = "Магазин ще завантажується",
+            ["Tier {0}"] = "Рівень {0}",
+            ["Upgrade"] = "Покращити",
+            ["{0} tiers - click to see them all"] = "Рівнів: {0} - натисніть, щоб побачити всі",
         };
 
         private static readonly Dictionary<string, string> SV = new Dictionary<string, string>
@@ -11670,6 +11730,26 @@ namespace CompetitiveRounds
             // themselves; entries above are untouched.
             ["<color=#FFD94D><b>SORTING THE BINDER</b></color>\n\n- <b>Rating position</b> orders the binder by where each player stands on the leaderboard today - top 100 first. Players outside it, or not seen in 90 days, go to the back, ordered by rating.\n- The number printed on a card is the rank it was minted with, which can differ."] = "<color=#FFD94D><b>SORTERA PÄRMEN</b></color>\n\n- <b>Ratingposition</b> sorterar pärmen efter var varje spelare står på topplistan i dag - de 100 främsta först. De som hamnar utanför, eller inte synts på 90 dagar, hamnar sist och sorteras efter rating.\n- Numret som är tryckt på ett kort är placeringen det präglades med, och den kan skilja sig.",
             ["Rating position"] = "Ratingposition",
+
+            // Added 2026-09-23: item 12 follow-up, the animal title ladders as
+            // entries of the Shop's Titles section and their tier popup
+            // (TitleLaddersUI.cs). Sorted among themselves; entries above are
+            // untouched.
+            ["Current tier"] = "Nuvarande nivå",
+            ["Current tier: {0} - {1}"] = "Nuvarande nivå: {0} - {1}",
+            ["Earned at {0} series"] = "Tjänas in vid {0} serier",
+            ["In use"] = "Används",
+            ["Locked"] = "Låst",
+            ["Maxed"] = "Maxad",
+            ["Next tier"] = "Nästa nivå",
+            ["No tiers listed"] = "Inga nivåer listade",
+            ["Not enough gold"] = "Inte tillräckligt med guld",
+            ["Not on sale yet"] = "Säljs inte än",
+            ["Owned"] = "Ägs",
+            ["Shop still loading"] = "Butiken laddas fortfarande",
+            ["Tier {0}"] = "Nivå {0}",
+            ["Upgrade"] = "Uppgradera",
+            ["{0} tiers - click to see them all"] = "{0} nivåer - klicka för att se alla",
         };
     }
 }
