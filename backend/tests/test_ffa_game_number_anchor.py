@@ -379,12 +379,13 @@ All KILLED:
                            twin is the same expression REFLOWED, so the test
                            is shown to measure a number and not a line shape
                            (#441).
-  new-controls-list-credits-another-round (r11)  the previous round's
-                           mutation-controls report: swap one listed name for
-                           a control the inventory tags for an earlier round,
-                           which is round 10's own defect. It reds in both
-                           directions at once -- one name listed and not
-                           tagged, one tagged and not listed.
+  new-controls-list-credits-another-round (r11)  the newest mutation-controls
+                           report that LISTS a new control (a report listing
+                           none does not move it, round 18): swap one listed
+                           name for a control the inventory tags for an
+                           earlier round, which is round 10's own defect. It
+                           reds in both directions at once -- one name listed
+                           and not tagged, one tagged and not listed.
   residual-reach-rule-admits-a-prose-count (r11)  residual_rules.reach
                            _problems: search an EMPTY remainder for a second
                            statement of the reach, so a hand-counted summary

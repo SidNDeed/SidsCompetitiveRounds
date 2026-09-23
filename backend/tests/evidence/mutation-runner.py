@@ -121,9 +121,11 @@ SUITES = _newest_report("-suites.txt")
 # ...and the newest mutation-controls report. On a first pass over a round that
 # is the PREVIOUS round's, because this round's is assembled from this runner's
 # own output and cannot exist while the runner runs; on a second pass it is
-# this round's, as the earlier pass left it. The control over it is about the
-# claim a report makes regarding its own round, and every report carrying that
-# heading is checked, so either is a real target rather than a stand-in.
+# this round's, as the earlier pass left it. main() refuses while there is no
+# such report at all. It is NOT necessarily the report the new-controls
+# control edits: that one is SWAP_REPORT below, the newest report that LISTS
+# a new control. The control's test checks every report carrying the heading,
+# so whichever report that is, it is a real target rather than a stand-in.
 MUTATION_REPORT = _newest_report("-mutation-controls.txt")
 DSN = os.environ.get("FFA_TEST_PG_DSN")
 
@@ -146,53 +148,98 @@ DSN = os.environ.get("FFA_TEST_PG_DSN")
 # a control somebody has to hand-carry, which is what the method says not to do.
 UNDERIVED = "\x00 this control's anchor could not be derived \x00"
 
+# WHICH REPORT THE SWAP IS TAKEN FROM -- round 18's rule. It is the NEWEST
+# mutation-controls report that LISTS a new control. A report that lists none
+# -- a round that added no control writes "None." under the heading, as round
+# 16's does -- makes no claim this control could take out, so it does not move
+# the swap: the swap stays at the newest report that does list one, which is
+# the input every run made before the empty report existed had anyway. Taking
+# the newest report whatever it listed made this runner refuse from round 17
+# on, and it could not start again until some round added a control. Putting an
+# earlier round's control into the empty list instead would satisfy the gate
+# with a claim that round never made, which is a check that cannot fail
+# (#342). What still refuses, in main()'s gate: no report lists a new control
+# at all; none of the listing report's names appears exactly once; or the
+# inventory tags no earlier control absent from it.
 
-def _report_claim_swap():
-    """(anchor, mutant, inert, why) for the new-controls control.
 
-    The anchor is a control the report LISTS as new in its own round; the
+def _claim_swap_from(reports, doc):
+    """(source, anchor, mutant, inert, why) for the new-controls control.
+
+    `reports` is every mutation-controls report as (file name, body) pairs,
+    in any order; `doc` is the text carrying the control inventory. The
+    source is the newest report that lists a new control (the rule above).
+    The anchor is a control that report LISTS as new in its own round; the
     mutant is one the inventory tags for an EARLIER round and the report does
     not list, so the swap reds in both directions at once -- one name listed
     and not tagged, one tagged and not listed. The inert twin is the anchor
-    with a trailing space: still the same claim, so a rule keyed on the line's
-    shape rather than on the name it carries would red here (#391). `why` is
-    None when all three resolved, and names the one fact that is wrong
-    otherwise."""
-    if MUTATION_REPORT is None or not os.path.isfile(MUTATION_REPORT):
-        return UNDERIVED, UNDERIVED, UNDERIVED, (
+    with a trailing space: still the same claim, so a rule keyed on the
+    line's shape rather than on the name it carries would red here (#391).
+    `why` is None when the swap resolved, and names the one fact that is
+    wrong otherwise; `source` is None only when no report lists a new
+    control."""
+    numbered = []
+    for name, body in reports:
+        number = _RULES.round_of(name)
+        if number is not None:
+            numbered.append((number, name, body))
+    for number, name, body in sorted(numbered, reverse=True):
+        claimed = _RULES.controls_claimed_new(body) or []
+        if not claimed:
+            # A report that lists no new control does not move the swap.
+            continue
+        # Exactly once, or the mutation would edit two places and the control
+        # would be about something other than the one claim it names.
+        takeable = sorted(n for n in claimed
+                          if body.count("  %s\n" % n) == 1)
+        mine = _RULES.inventory_tags(doc, number)
+        earlier = set()
+        for other in range(1, number):
+            earlier |= _RULES.inventory_tags(doc, other)
+        puttable = sorted(n for n in (earlier - mine)
+                          if n not in claimed and ("  %s\n" % n) not in body)
+        if not takeable:
+            return name, UNDERIVED, UNDERIVED, UNDERIVED, (
+                "%s is the newest report that lists a new control, and none "
+                "of the names it lists appears exactly once, so there is no "
+                "one claim to take out of its list" % name)
+        if not puttable:
+            return name, UNDERIVED, UNDERIVED, UNDERIVED, (
+                "the inventory tags no control for a round before %s that is "
+                "absent from %s, so there is nothing to put in its place"
+                % (number, name))
+        return (name, "  %s\n" % takeable[0], "  %s\n" % puttable[0],
+                "  %s \n" % takeable[0], None)
+    return None, UNDERIVED, UNDERIVED, UNDERIVED, (
+        "no mutation-controls report in this directory lists a new control, "
+        "so there is no claim to take out of a list")
+
+
+def _report_claim_swap():
+    """The swap over this directory: every mutation-controls report in it,
+    and the inventory in the test module."""
+    reports = []
+    for name in sorted(os.listdir(HERE)):
+        if name.endswith("-mutation-controls.txt"):
+            with io.open(os.path.join(HERE, name), "r", encoding="utf-8",
+                         errors="replace") as fh:
+                reports.append((name, fh.read()))
+    if not reports:
+        return None, UNDERIVED, UNDERIVED, UNDERIVED, (
             "there is no mutation-controls report in this directory to "
             "derive the swap from")
-    with io.open(MUTATION_REPORT, "r", encoding="utf-8",
-                 errors="replace") as fh:
-        body = fh.read()
     with io.open(TESTS, "r", encoding="utf-8", errors="replace") as fh:
         doc = fh.read()
-    number = _RULES.round_of(os.path.basename(MUTATION_REPORT))
-    claimed = _RULES.controls_claimed_new(body) or []
-    # Exactly once, or the mutation would edit two places and the control
-    # would be about something other than the one claim it names.
-    takeable = sorted(n for n in claimed if body.count("  %s\n" % n) == 1)
-    mine = _RULES.inventory_tags(doc, number)
-    earlier = set()
-    for other in range(1, number):
-        earlier |= _RULES.inventory_tags(doc, other)
-    puttable = sorted(n for n in (earlier - mine)
-                      if n not in claimed and ("  %s\n" % n) not in body)
-    if not takeable:
-        return UNDERIVED, UNDERIVED, UNDERIVED, (
-            "%s lists no control as new in round %s that appears exactly "
-            "once, so there is nothing to take out of its list"
-            % (os.path.basename(MUTATION_REPORT), number))
-    if not puttable:
-        return UNDERIVED, UNDERIVED, UNDERIVED, (
-            "the inventory tags no control for a round before %s that is "
-            "absent from %s, so there is nothing to put in its place"
-            % (number, os.path.basename(MUTATION_REPORT)))
-    return ("  %s\n" % takeable[0], "  %s\n" % puttable[0],
-            "  %s \n" % takeable[0], None)
+    return _claim_swap_from(reports, doc)
 
 
-_SWAP_ANCHOR, _SWAP_MUTANT, _SWAP_INERT, _SWAP_WHY = _report_claim_swap()
+(_SWAP_SOURCE, _SWAP_ANCHOR, _SWAP_MUTANT, _SWAP_INERT,
+ _SWAP_WHY) = _report_claim_swap()
+# The file the new-controls control edits: the swap's source -- or, when there
+# is none and main() refuses on _SWAP_WHY before anything is read, the newest
+# report, so that every control still names a file.
+SWAP_REPORT = (os.path.join(HERE, _SWAP_SOURCE) if _SWAP_SOURCE is not None
+               else MUTATION_REPORT)
 
 
 def _underived_number_edit():
@@ -775,10 +822,11 @@ CONTROLS = [
     # The mutant is the defect reproduced on the committed report: one name
     # swapped for a name the inventory tags for an earlier round, which reds
     # in BOTH directions -- one listed and not tagged, one tagged and not
-    # listed. All three strings are DERIVED from the report and the inventory
-    # by _report_claim_swap above, so this control does not carry a round's
-    # control names into the round after it.
-    ("new-controls-list-credits-another-round", MUTATION_REPORT,
+    # listed. All three strings, and the report they edit, are DERIVED from
+    # the reports and the inventory by _claim_swap_from above -- from the
+    # newest report that lists a new control -- so this control does not
+    # carry a round's control names into the round after it.
+    ("new-controls-list-credits-another-round", SWAP_REPORT,
      _SWAP_ANCHOR, _SWAP_MUTANT, _SWAP_INERT,
      "test_the_new_controls_a_report_claims_are_the_ones_the_inventory_tags"),
 
@@ -1278,6 +1326,14 @@ def main():
     # ...and the swap this runner derives rather than holds, for the same
     # reason: "anchor resolves 0 times" names the symptom, and the fact that
     # is wrong is which report or which inventory tag is missing.
+    #
+    # THE RULE THIS GATE ENFORCES (round 18): the swap derives from the
+    # newest mutation-controls report that LISTS a new control, and a report
+    # that lists none does not move it -- so a round that added no control
+    # is never the reason this refuses. It refuses only when no report lists
+    # a new control, when none of the listing report's names appears exactly
+    # once, or when the inventory tags no earlier control absent from that
+    # report (_claim_swap_from).
     if _SWAP_WHY is not None:
         print("REFUSED: the new-controls control has no swap to make -- %s"
               % _SWAP_WHY)
@@ -1337,8 +1393,8 @@ def main():
     # The two targets this runner DERIVES rather than holds as literals, named
     # here so the log says which files the evidence-level controls ran against
     # instead of leaving a reader to work out which round they belonged to.
-    print("  reports   %s (suites), %s (mutation controls)"
-          % (rel(SUITES), rel(MUTATION_REPORT)))
+    print("  reports   %s (suites), %s (mutation controls, the newest that "
+          "lists a new control)" % (rel(SUITES), rel(SWAP_REPORT)))
     # ...and the swap derived from that report, named here so the log records
     # which claim was taken out and which name was put in its place, rather
     # than leaving a reader to re-derive it from the two files.
