@@ -35200,242 +35200,346 @@ async def submit_bug_report(req: BugReportRequest, request: Request, db: AsyncSe
 
     attempted_path = None
     marker_stamped = False
-    if log_blob:
-        try:
-            path = _bug_report_log_path(str(report.id))
-            attempted_path = path
-            data = _gzip.compress(log_blob.encode("utf-8", errors="replace"))
-            # THE MARKER GOES BEFORE THE FIRST BYTE, which is the upload
-            # path's own order applied here (#432: the defect is the class,
-            # not the line that was flagged).
-            #
-            # A process or host stop between `open()` and the cleanup arm
-            # below leaves a PREFIX of this gzip stream on the volume with no
-            # row naming it and nothing marking it -- and the player-report
-            # path has no sweep of its own, while the automatic path's sweep
-            # walks the MARKER SET and `prune_auto_logs` walks kind='auto'
-            # ROWS. Neither can see an unmarked, unreferenced file, so that
-            # prefix is permanent, on the volume this route is most
-            # protective of. Stamping first makes it discoverable from before
-            # it has any bytes: the sweep finds a marker whose blob no row
-            # names and takes both.
-            #
-            # AND THE MARKER IS CLEARED ONLY AFTER THE COMMIT, below. Between
-            # the two the file is marked and unreferenced, which is a state
-            # the sweep collects -- so the window is covered by the age gate
-            # and by the in-flight registration rather than by nothing.
-            #
-            # `_stamp_marker` is DURABLE and it RAISES rather than swallowing,
-            # so a volume that cannot carry the marker refuses the attachment
-            # through the same arm every other write failure uses, instead of
-            # writing a file nothing could ever find.
-            _auto_logs._stamp_marker(path)
-            marker_stamped = True
-            _auto_logs._MARKERS_IN_FLIGHT.add(path.name)
-            # AND THE BLOB IS MADE DURABLE BEFORE THE ROW NAMES IT, which is
-            # the rest of the upload path's order (`_write_blob`): the
-            # contents flushed, then the directory entry that names them.
-            # `write()` and `close()` promise nothing about either, so a host
-            # stop after the commit below could otherwise recover a row that
-            # names an attachment the volume holds empty, truncated or not at
-            # all -- a report whose log the database says it has (#507). A
-            # flush that refuses raises into the arm below, the same arm a
-            # failed write takes, so the row never claims bytes the
-            # filesystem did not promise.
-            with open(path, "wb") as f:
-                f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
-            _auto_logs._fsync_dir(_pathlib.Path(path).parent)
-            log_filename = path.name
-            log_bytes_stored = len(data)
-            report.log_filename = log_filename
-            report.log_bytes = log_bytes_stored
-        except Exception as ex:
-            # A LOG WAS ATTACHED AND IT WAS NOT STORED, and the row has to say
-            # so -- including which of the two ways it failed.
-            #
-            # Falling through leaves log_filename NULL, which is the SAME
-            # state as a report filed with no log at all. An admin opening the
-            # row a week later sees "no attachment" and has no way to know one
-            # was sent, so a player who attached their log and describes a
-            # crash looks like a player who did not bother. The api log line
-            # below is the only record, and it is thirty thousand lines away
-            # by the time anybody looks.
-            #
-            # THE ROW ENCODES THREE STATES, one per thing that can have
-            # happened to the attachment, and none of them needs a schema
-            # change:
-            #
-            #   filename NULL, bytes NULL -- nothing was attached;
-            #   filename NULL, bytes 0    -- attached, lost, and NOTHING of it
-            #                                is on the volume: the partial file
-            #                                was removed and the removal is
-            #                                DURABLE;
-            #   filename SET,  bytes NULL -- attached, the write failed, and
-            #                                the partial file could NOT be
-            #                                taken off the volume, so the row
-            #                                NAMES it.
-            #
-            # 0 is unreachable for a stored blob -- this arm only runs when a
-            # non-empty log_blob was sent, and gzip of anything is never zero
-            # bytes -- so it cannot be confused with a real attachment.
-            #
-            # The response carries `log_persisted: false` in all three cases:
-            # it is derived from the LOCAL `log_filename`, which this arm
-            # never sets, so the client is told the log was not persisted even
-            # in the third state, where the row names a truncated file. That
-            # is the truth from the client's side and from the row's side at
-            # the same time.
-            #
-            # AND THE PARTIAL FILE GOES BEFORE THE ROW COMMITS, DURABLY.
-            # `open()` can succeed and `write()`, `flush()` or either of the
-            # two durability barriers above fail, which leaves a prefix of
-            # the gzip stream on the volume -- or a whole one the filesystem
-            # never promised, which is no better. Since round 6
-            # that prefix is MARKED before it has any bytes, so the orphan
-            # sweep can find it even if this arm never runs -- but the arm is
-            # still what makes the ordinary case deterministic, and it is what
-            # decides whether the row names the file or disclaims it. The
-            # sweep is the floor, not the plan: it waits out the age gate,
-            # while this runs now.
-            #
-            # THREE THINGS MAKE THE UNREFERENCED PREFIX UNREACHABLE RATHER
-            # THAN UNLIKELY.
-            #
-            #   * The marker, stamped above before `open()`. Even a host stop
-            #     between the first byte and this arm leaves a file the sweep
-            #     can name.
-            #
-            #   * The unlink is followed by a DIRECTORY FLUSH before the row
-            #     commits. Issuing the unlink first is a call order; an entry
-            #     removal is not durable until the directory is flushed, so a
-            #     host that stops after the commit could otherwise recover the
-            #     file with the row already saying log_bytes=0 over it -- the
-            #     same unreferenced prefix, one step later (#507).
-            #   * An unlink that RAISES anything but FileNotFoundError leaves
-            #     the file where it is, so the row KEEPS THE REFERENCE instead
-            #     of dropping it. A named file is an ordinary attachment of
-            #     this report: an admin can see it, the report's own lifecycle
-            #     governs it, and it is not a residue class no tick can reach.
-            #     log_bytes is left NULL rather than set to 0, because 0 is
-            #     the claim that nothing is on the volume and this arm cannot
-            #     make it.
-            #
-            # A flush that itself refuses is treated exactly like a refused
-            # unlink: the removal cannot be proved, so the reference stays --
-            # and that is now a SEPARATE except arm rather than a shared one,
-            # because `FileNotFoundError` from the flush and `FileNotFoundError`
-            # from the unlink are opposite facts.
-            removed = "no file was created"
-            keep_reference = False
-            if attempted_path is not None:
-                # THE UNLINK AND THE FLUSH ARE TWO STATEMENTS WITH TWO
-                # ANSWERS, and round 6 separated them because one `except
-                # FileNotFoundError` over both read the WRONG failure as the
-                # harmless one. `FileNotFoundError` is an `OSError`, so a
-                # flush that raised it AFTER a successful unlink -- the
-                # directory replaced under a recovering mount, the container
-                # losing the subtree -- landed in the arm that means "no file
-                # was created" and committed `log_bytes = 0`: the claim that
-                # nothing is on the volume, made over a removal the
-                # filesystem never promised, which a recovery can undo.
-                #
-                # Read separately they say different things. The UNLINK's own
-                # FileNotFoundError means the file never existed, and the
-                # reference may drop. A FLUSH failure of any kind, including
-                # that one, means the removal cannot be proved, and the
-                # reference STAYS -- the same conservative direction the
-                # retention pass takes for the same reason (#430/#276).
-                try:
-                    os.unlink(str(attempted_path))
-                except FileNotFoundError:
-                    removed = "no file was created"
-                except OSError as rm:
-                    # THE REFERENCE STAYS. The file may still be on the volume
-                    # and the row is now the thing that names it, so it is
-                    # referenced rather than unreachable. The operator line
-                    # says so as well, because the file is a truncated gzip
-                    # and a download of it will fail.
-                    keep_reference = True
-                    removed = (f"the partial file {attempted_path.name} could "
-                               f"NOT be removed ({type(rm).__name__}), so the "
-                               f"row now NAMES it rather than leaving it "
-                               f"unreferenced; it is a truncated gzip and will "
-                               f"not download cleanly")
-                else:
-                    try:
-                        _auto_logs._fsync_dir(
-                            _pathlib.Path(attempted_path).parent)
-                        removed = "the partial file was removed durably"
-                    except OSError as fx:
-                        keep_reference = True
-                        removed = (f"the partial file {attempted_path.name} "
-                                   f"was unlinked and the directory would NOT "
-                                   f"flush ({type(fx).__name__}), so the "
-                                   f"removal is not durable and the row KEEPS "
-                                   f"the reference; if the volume recovers the "
-                                   f"entry it is a truncated gzip this report "
-                                   f"names, and if it does not the row names a "
-                                   f"file that is gone")
-            if keep_reference:
-                report.log_filename = attempted_path.name
-                print(f"[BUG-REPORT] log persistence FAILED for {report.id}: "
-                      f"{ex}; {removed}; the row is committed naming that file "
-                      f"with log_bytes NULL, because 0 would claim the volume "
-                      f"is clean and this arm cannot claim that")
-            else:
-                report.log_bytes = 0
-                print(f"[BUG-REPORT] log persistence FAILED for {report.id}: "
-                      f"{ex}; {removed}; the row is committed with log_bytes=0 "
-                      f"to record that a log was attached and could not be "
-                      f"stored")
-
-    # Seed the activity log with a "created" event so the timeline is complete.
-    db.add(BugReportEvent(
-        bug_report_id=report.id,
-        actor_steam_id=req.steam_id,
-        actor_name=req.display_name or req.steam_id or "Unknown",
-        event_type="created",
-        new_status="open",
-        comment=None,
-    ))
-
-    # THE MARKER IS REMOVED AFTER THE REFERENCE IS COMMITTED, AND ONLY THEN.
-    #
-    # A crash before the commit leaves a marked file no row names, which the
-    # orphan sweep collects. A crash after it leaves a marked file a row DOES
-    # name, which the sweep clears and does not touch. Clearing the marker
-    # before the commit would open the window this stamp exists to close, so
-    # the order is the upload path's: stamp, write, commit, clear.
-    #
-    # A `finally` rather than a plain statement, because a commit that RAISES
-    # must not take the in-flight registration with it -- the blob would then
-    # be owned by a request that is over, and the sweep would skip it for the
-    # life of the process. On that path the MARKER stays: it is what makes the
-    # unreferenced file collectable.
-    #
-    # WHAT THE `finally` SPANS, stated exactly, because a guarantee is a claim
-    # about every path and not the one in mind (#351): the commit, and only
-    # the commit. The stretch between the registration above and this `try`
-    # has no `await` in it, so a cancellation cannot land there, and the
-    # write that can fail in it raises into its own `except Exception` arm.
-    # What that arm's own statements or the event's `db.add` could still
-    # raise synchronously -- a `print` to a closed stream, say -- would end
-    # the request with the name registered until the process ends. The
-    # marker is on the volume, so the first sweep of the next process life
-    # collects the file: a collectable residue with a bounded life, never an
-    # unmarked one.
+    hop = None
     committed = False
+    # ONE `try` FROM THE REGISTRATION TO THE COMMIT, and its `finally` is the
+    # only place the attachment's in-flight registration is released.
+    #
+    # It used to be released by a `finally` around the commit alone, beside a
+    # comment arguing that the stretch before it could not raise. It could:
+    # the failure arm's own statements and the event's `db.add` run in that
+    # stretch, and any of them raising ended the request with the name still
+    # registered, so every sweep for the rest of the process skipped a marked,
+    # unreferenced attachment. Every statement from the registration to the
+    # commit is now inside this `try`, whatever it is (round-6 LOW 3).
+    #
+    # WHAT THE `finally` DOES, stated for every path (#351): after a commit
+    # that RETURNED it clears the marker, on a worker thread and awaited,
+    # and on no other path; and on every path it drops the name -- at once
+    # when no worker is still touching the attachment's files, and
+    # otherwise when the last worker this request started finishes (the
+    # store, the partial file's removal, or the marker's clear), because a
+    # request cancelled while a thread is still creating or removing one of
+    # those files must not unregister it. Wherever the marker stays, it is
+    # what makes the unreferenced file collectable.
     try:
+        if log_blob:
+            try:
+                # THE PATH IS RESOLVED ON A WORKER THREAD TOO.
+                # `_bug_report_log_path` creates the directory, and a
+                # `mkdir` on a contended volume blocks for as long as the
+                # volume does, like every other call on it (round-6 MEDIUM
+                # 3's class, swept in round 7). Nothing is registered or
+                # stamped yet, so a request cancelled here has nothing to
+                # release.
+                path = await asyncio.to_thread(
+                    _bug_report_log_path, str(report.id))
+                attempted_path = path
+                # REGISTERED BEFORE THE MARKER EXISTS, which is the upload
+                # path's order (`_reserve_stamp_and_write`). The sweep skips a
+                # registered name at any age, so there is no instant at which
+                # this request's marker is on the volume and its name is not
+                # protected -- including while the worker below is running.
+                _auto_logs._MARKERS_IN_FLIGHT.add(path.name)
+
+                def _store_attachment():
+                    """The attachment's durable sequence up to the commit, on
+                    a worker thread: the compression, the marker's stamp and
+                    its two flushes, the blob's bytes, its contents flush and
+                    its directory flush.
+
+                    The api runs one asynchronous worker (#125), and every
+                    step here can block for as long as a contended or
+                    recovering volume takes. Run on the loop, that was every
+                    other request in the process -- queue polls, match
+                    reports -- waiting behind one player's attachment
+                    (round-6 MEDIUM 3). The ORDER inside is unchanged: the
+                    stamp before the first byte, the contents, the entry;
+                    the row commits on the loop after this has returned, and
+                    the marker is cleared after that, on a worker of its own
+                    (the `finally` below)."""
+                    nonlocal marker_stamped
+                    data = _gzip.compress(
+                        log_blob.encode("utf-8", errors="replace"))
+                    # THE MARKER GOES BEFORE THE FIRST BYTE, which is the
+                    # upload path's own order applied here (#432: the defect
+                    # is the class, not the line that was flagged).
+                    #
+                    # A process or host stop between `open()` and the cleanup
+                    # arm below leaves a PREFIX of this gzip stream on the
+                    # volume with no row naming it -- and the player-report
+                    # path has no sweep of its own, while the automatic
+                    # path's sweep walks the MARKER SET and `prune_auto_logs`
+                    # walks kind='auto' ROWS. Neither can see an unmarked,
+                    # unreferenced file, so that prefix would be permanent,
+                    # on the volume this route is most protective of.
+                    # Stamping first makes it discoverable from before it has
+                    # any bytes: the sweep finds a marker whose blob no row
+                    # names and takes both.
+                    #
+                    # AND THE MARKER IS CLEARED ONLY AFTER THE COMMIT, below.
+                    # Between the two the file is marked and unreferenced,
+                    # which is a state the sweep collects -- so the window is
+                    # covered by the in-flight registration above and by the
+                    # sweep's age gate rather than by nothing.
+                    #
+                    # `_stamp_marker` is DURABLE and it RAISES rather than
+                    # swallowing, so a volume that cannot carry the marker
+                    # refuses the attachment through the same arm every other
+                    # write failure uses, instead of writing a file nothing
+                    # could ever find.
+                    _auto_logs._stamp_marker(path)
+                    marker_stamped = True
+                    # AND THE BLOB IS MADE DURABLE BEFORE THE ROW NAMES IT,
+                    # which is the rest of the upload path's order
+                    # (`_write_blob`): the contents flushed, then the
+                    # directory entry that names them. `write()` and `close()`
+                    # promise nothing about either, so a host stop after the
+                    # commit below could otherwise recover a row that names an
+                    # attachment the volume holds empty, truncated or not at
+                    # all -- a report whose log the database says it has
+                    # (#507). A flush that refuses raises into the arm below,
+                    # the same arm a failed write takes, so the row never
+                    # claims bytes the filesystem did not promise.
+                    with open(path, "wb") as f:
+                        f.write(data)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    _auto_logs._fsync_dir(_pathlib.Path(path).parent)
+                    return len(data)
+
+                # A SEPARATE TASK AWAITED THROUGH `asyncio.shield`, the upload
+                # path's own shape. Cancelling this request cannot stop a
+                # worker thread, so it does not pretend to: the task runs to
+                # its end, the `finally` below keeps the name registered until
+                # it has, and `_drain_section_error` consumes an exception
+                # nobody is left to read.
+                hop = asyncio.ensure_future(
+                    asyncio.to_thread(_store_attachment))
+                hop.add_done_callback(_auto_logs._drain_section_error)
+                log_bytes_stored = await asyncio.shield(hop)
+                log_filename = path.name
+                report.log_filename = log_filename
+                report.log_bytes = log_bytes_stored
+            except Exception as ex:
+                # A LOG WAS ATTACHED AND IT WAS NOT STORED, and the row has to
+                # say so -- including which of the two ways it failed.
+                #
+                # Falling through leaves log_filename NULL, which is the SAME
+                # state as a report filed with no log at all. An admin opening
+                # the row a week later sees "no attachment" and has no way to
+                # know one was sent, so a player who attached their log and
+                # describes a crash looks like a player who did not bother.
+                # The api log line below is the only record, and it is thirty
+                # thousand lines away by the time anybody looks.
+                #
+                # THE ROW ENCODES THREE STATES, one per thing that can have
+                # happened to the attachment, and none of them needs a schema
+                # change:
+                #
+                #   filename NULL, bytes NULL -- nothing was attached;
+                #   filename NULL, bytes 0    -- attached, lost, and NOTHING
+                #                                of it is on the volume: the
+                #                                partial file was removed and
+                #                                the removal is DURABLE;
+                #   filename SET,  bytes NULL -- attached, the write failed,
+                #                                and the partial file could
+                #                                NOT be taken off the volume,
+                #                                so the row NAMES it.
+                #
+                # 0 is unreachable for a stored blob -- this arm only runs
+                # when a non-empty log_blob was sent, and gzip of anything is
+                # never zero bytes -- so it cannot be confused with a real
+                # attachment.
+                #
+                # The response carries `log_persisted: false` in all three
+                # cases: it is derived from the LOCAL `log_filename`, which
+                # this arm never sets, so the client is told the log was not
+                # persisted even in the third state, where the row names a
+                # truncated file. That is the truth from the client's side and
+                # from the row's side at the same time.
+                #
+                # AND THE PARTIAL FILE GOES BEFORE THE ROW COMMITS, DURABLY.
+                # `open()` can succeed and `write()`, `flush()` or either of
+                # the two durability barriers above fail, which leaves a
+                # prefix of the gzip stream on the volume -- or a whole one
+                # the filesystem never promised, which is no better. That
+                # prefix is MARKED before it has any bytes, so the orphan
+                # sweep can find it even if this arm never runs -- but the arm
+                # is still what makes the ordinary case deterministic, and it
+                # is what decides whether the row names the file or disclaims
+                # it. The sweep is the floor, not the plan: it waits out the
+                # age gate, while this runs now.
+                #
+                # THREE THINGS MAKE THE UNREFERENCED PREFIX UNREACHABLE RATHER
+                # THAN UNLIKELY.
+                #
+                #   * The marker, stamped before `open()`. Even a host stop
+                #     between the first byte and this arm leaves a file the
+                #     sweep can name.
+                #
+                #   * The unlink is followed by a DIRECTORY FLUSH before the
+                #     row commits. Issuing the unlink first is a call order;
+                #     an entry removal is not durable until the directory is
+                #     flushed, so a host that stops after the commit could
+                #     otherwise recover the file with the row already saying
+                #     log_bytes=0 over it -- the same unreferenced prefix, one
+                #     step later (#507).
+                #   * An unlink that RAISES anything but FileNotFoundError
+                #     leaves the file where it is, so the row KEEPS THE
+                #     REFERENCE instead of dropping it. A named file is an
+                #     ordinary attachment of this report: an admin can see it,
+                #     the report's own lifecycle governs it, and it is not a
+                #     residue class no tick can reach. log_bytes is left NULL
+                #     rather than set to 0, because 0 is the claim that nothing
+                #     is on the volume and this arm cannot make it.
+                #
+                # A flush that itself refuses is treated exactly like a
+                # refused unlink: the removal cannot be proved, so the
+                # reference stays -- and that is a SEPARATE except arm rather
+                # than a shared one, because `FileNotFoundError` from the
+                # flush and `FileNotFoundError` from the unlink are opposite
+                # facts.
+                removed = "no file was created"
+                keep_reference = False
+                if attempted_path is not None:
+                    # THE UNLINK AND THE FLUSH ARE TWO STATEMENTS WITH TWO
+                    # ANSWERS, and round 6 separated them because one `except
+                    # FileNotFoundError` over both read the WRONG failure as
+                    # the harmless one. `FileNotFoundError` is an `OSError`,
+                    # so a flush that raised it AFTER a successful unlink --
+                    # the directory replaced under a recovering mount, the
+                    # container losing the subtree -- landed in the arm that
+                    # means "no file was created" and committed
+                    # `log_bytes = 0`: the claim that nothing is on the
+                    # volume, made over a removal the filesystem never
+                    # promised, which a recovery can undo.
+                    #
+                    # Read separately they say different things. The UNLINK's
+                    # own FileNotFoundError means the file never existed, and
+                    # the reference may drop. A FLUSH failure of any kind,
+                    # including that one, means the removal cannot be proved,
+                    # and the reference STAYS -- the same conservative
+                    # direction the retention pass takes for the same reason
+                    # (#430/#276).
+                    #
+                    # BOTH RUN ON A WORKER THREAD TOO: the cleanup's directory
+                    # flush is the same barrier on the same volume as the
+                    # stored path's, and it would stall the loop the same way.
+                    def _discard_partial():
+                        removed = "no file was created"
+                        keep_reference = False
+                        try:
+                            os.unlink(str(attempted_path))
+                        except FileNotFoundError:
+                            removed = "no file was created"
+                        except OSError as rm:
+                            # THE REFERENCE STAYS. The file may still be on the
+                            # volume and the row is now the thing that names
+                            # it, so it is referenced rather than unreachable.
+                            # The operator line says so as well, because the
+                            # file is a truncated gzip and a download of it
+                            # will fail.
+                            keep_reference = True
+                            removed = (f"the partial file {attempted_path.name} could "
+                                       f"NOT be removed ({type(rm).__name__}), so the "
+                                       f"row now NAMES it rather than leaving it "
+                                       f"unreferenced; it is a truncated gzip and will "
+                                       f"not download cleanly")
+                        else:
+                            try:
+                                _auto_logs._fsync_dir(
+                                    _pathlib.Path(attempted_path).parent)
+                                removed = "the partial file was removed durably"
+                            except OSError as fx:
+                                keep_reference = True
+                                removed = (f"the partial file {attempted_path.name} "
+                                           f"was unlinked and the directory would NOT "
+                                           f"flush ({type(fx).__name__}), so the "
+                                           f"removal is not durable and the row KEEPS "
+                                           f"the reference; if the volume recovers the "
+                                           f"entry it is a truncated gzip this report "
+                                           f"names, and if it does not the row names a "
+                                           f"file that is gone")
+                        return removed, keep_reference
+
+                    hop = asyncio.ensure_future(
+                        asyncio.to_thread(_discard_partial))
+                    hop.add_done_callback(_auto_logs._drain_section_error)
+                    removed, keep_reference = await asyncio.shield(hop)
+                if keep_reference:
+                    report.log_filename = attempted_path.name
+                    print(f"[BUG-REPORT] log persistence FAILED for {report.id}: "
+                          f"{ex}; {removed}; the row is committed naming that file "
+                          f"with log_bytes NULL, because 0 would claim the volume "
+                          f"is clean and this arm cannot claim that")
+                else:
+                    report.log_bytes = 0
+                    print(f"[BUG-REPORT] log persistence FAILED for {report.id}: "
+                          f"{ex}; {removed}; the row is committed with log_bytes=0 "
+                          f"to record that a log was attached and could not be "
+                          f"stored")
+
+        # Seed the activity log with a "created" event so the timeline is complete.
+        db.add(BugReportEvent(
+            bug_report_id=report.id,
+            actor_steam_id=req.steam_id,
+            actor_name=req.display_name or req.steam_id or "Unknown",
+            event_type="created",
+            new_status="open",
+            comment=None,
+        ))
+
+        # THE MARKER IS REMOVED AFTER THE REFERENCE IS COMMITTED, AND ONLY
+        # THEN, in the `finally` below.
+        #
+        # A crash before the commit leaves a marked file no row names, which
+        # the orphan sweep collects. A crash after it leaves a marked file a
+        # row DOES name, which the sweep clears and does not touch. Clearing
+        # the marker before the commit would open the window this stamp exists
+        # to close, so the order is the upload path's: stamp, write, commit,
+        # clear.
+        #
+        # WHEN THE SWEEP COLLECTS WHAT A FAILED REQUEST LEAVES, read off the
+        # sweep's own code (`prune_orphan_blobs`, `_marker_candidates`)
+        # rather than hoped for -- not "on the first sweep", and not
+        # necessarily in the next process life. A marker is a candidate only
+        # while no request of the running process holds its name and only
+        # once it is older than `_ORPHAN_MIN_AGE_S` (the sweep interval plus
+        # twice the marked-span deadline). Each pass then reaches a window of
+        # at most `_ORPHAN_SCAN_BOUND` marker names, taken in name order after
+        # a cursor that moves on across passes and resolved oldest first, and
+        # removes at most `_ORPHAN_BATCH` blobs. So a marked residue waits for
+        # the age gate, then for the window to reach it, then for removal
+        # budget in that window: delayed, never permanent.
         await db.commit()
         committed = True
     finally:
-        if marker_stamped and attempted_path is not None:
-            if committed:
-                _auto_logs._unlink_if_present(
-                    _auto_logs._marker_path(attempted_path))
-            _auto_logs._MARKERS_IN_FLIGHT.discard(attempted_path.name)
+        if attempted_path is not None:
+            if committed and marker_stamped:
+                # THE MARKER'S CLEAR RUNS ON A WORKER THREAD, like every
+                # other call this request makes on the volume: it is an
+                # unlink in the same directory, and the last step of the
+                # sequence. It becomes the worker the release below waits
+                # for, so the name stays registered until the last thread
+                # this request started has finished with the attachment's
+                # files -- a cancellation that ends the wait ends only the
+                # wait.
+                def _drop_marker():
+                    _auto_logs._unlink_if_present(
+                        _auto_logs._marker_path(attempted_path))
+
+                hop = asyncio.ensure_future(
+                    asyncio.to_thread(_drop_marker))
+                hop.add_done_callback(_auto_logs._drain_section_error)
+            _in_flight = attempted_path.name
+            if hop is not None and not hop.done():
+                hop.add_done_callback(
+                    lambda _t: _auto_logs._MARKERS_IN_FLIGHT.discard(_in_flight))
+            else:
+                _auto_logs._MARKERS_IN_FLIGHT.discard(_in_flight)
+            if committed and marker_stamped:
+                await asyncio.shield(hop)
     # Re-read so we have the DB-assigned bug_number.
     await db.refresh(report)
     print(f"[BUG-REPORT] #{report.bug_number} ({report.id}) {severity}/{category} from {req.steam_id} ({req.display_name}) " +

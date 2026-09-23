@@ -6521,12 +6521,26 @@ def _drive_report(crash_before, *, handler=None, faults=(), commit_fails=False,
     """
     import builtins
 
+    # THE WALK POINTS THE HANDLER AT THE DIRECTORY IT MODELS, ITSELF (round-6
+    # LOW 1). The attachment's path comes from `BUG_REPORT_LOG_DIR`, and the
+    # model sees a write only inside `logdir`. A walk driven without the
+    # `logdir` fixture -- the round-6 evidence script was one -- therefore
+    # wrote its blob to whatever directory that global named, and its record
+    # labelled "stored" never showed the blob's write, its flushes or its
+    # commit. Both names the lookup can resolve through are pointed: a mutant
+    # runs in a COPY of the module's globals, but `_bug_report_log_path`
+    # reads the live module's.
+    assert logdir is not None, (
+        "a player-attachment walk needs a directory to model; without one the "
+        "attachment is written wherever BUG_REPORT_LOG_DIR points")
     fs = CrashFS()
     fs.crash_before = crash_before
     fs.faults = _faults(faults)
     handler = handler or main.submit_bug_report
     g = handler.__globals__
-    saved = {k: g[k] for k in ("os", "_is_admin", "_mark_mod_seen")}
+    saved = {k: g[k] for k in ("os", "_is_admin", "_mark_mod_seen",
+                               "BUG_REPORT_LOG_DIR")}
+    saved_live_dir = main.BUG_REPORT_LOG_DIR
     real_open = builtins.open
     real_auto_os = auto_logs.os
     db = _CrashReportSession(fs, {"FROM bug_reports": [[{"count": 0}]]},
@@ -6537,6 +6551,7 @@ def _drive_report(crash_before, *, handler=None, faults=(), commit_fails=False,
     g["os"] = fs
     g["_is_admin"] = _no_admin
     g["_mark_mod_seen"] = _noop_mark
+    g["BUG_REPORT_LOG_DIR"] = main.BUG_REPORT_LOG_DIR = str(logdir)
     auto_logs.os = fs
     builtins.open = fs.builtin_open(real_open, logdir)
     try:
@@ -6550,6 +6565,7 @@ def _drive_report(crash_before, *, handler=None, faults=(), commit_fails=False,
         builtins.open = real_open
         auto_logs.os = real_auto_os
         g.update(saved)
+        main.BUG_REPORT_LOG_DIR = saved_live_dir
         for obj in db.added[:1]:
             auto_logs._MARKERS_IN_FLIGHT.discard("%s.log.gz" % (obj.id,))
     return fs, db, outcome
@@ -6839,81 +6855,87 @@ def test_every_round_six_crash_point_reds_when_its_mechanism_is_removed(logdir):
         return found
 
     # -- L4: the marker stamped AFTER the attachment's bytes ---------------
-    stamp = ("            _auto_logs._stamp_marker(path)\n"
-             "            marker_stamped = True\n")
-    entry_then_name = ("            _auto_logs._fsync_dir(_pathlib.Path(path).parent)\n"
-                       "            log_filename = path.name\n")
+    # Since round 7 the durable sequence is the body of `_store_attachment`,
+    # the worker the handler hands it to, so every anchor below sits eight
+    # columns deeper than it did and the stamp moves to the end of THAT
+    # function -- after the entry flush, before its `return` -- which is the
+    # same "after the attachment's bytes" it always meant.
+    stamp = ("                    _auto_logs._stamp_marker(path)\n"
+             "                    marker_stamped = True\n")
+    entry_then_return = (
+        "                    _auto_logs._fsync_dir(_pathlib.Path(path).parent)\n"
+        "                    return len(data)\n")
     mutant = _report_mutant_pairs([
         (stamp, ""),
-        (entry_then_name,
-         "            _auto_logs._fsync_dir(_pathlib.Path(path).parent)\n"
-         + stamp + "            log_filename = path.name\n")])
+        (entry_then_return,
+         "                    _auto_logs._fsync_dir(_pathlib.Path(path).parent)\n"
+         + stamp + "                    return len(data)\n")])
     found, red = _reds(mutant, _player_orders("stored", "write-fails"), "INV-A")
     assert red, (
         "with the marker stamped after the attachment's bytes, no crash "
         "between the first byte and the cleanup arm left an unmarked file: "
         "%r" % (found[:3],))
     twin = _report_mutant_pairs([(stamp,
-        "            _auto_logs._stamp_marker(_pathlib.Path(str(path)))\n"
-        "            marker_stamped = True\n")])
+        "                    _auto_logs._stamp_marker(_pathlib.Path(str(path)))\n"
+        "                    marker_stamped = True\n")])
     assert _clean(twin) == [], "the inert twin reds at the marker's order"
 
     # -- L5: the flush's FileNotFoundError read as the unlink's ------------
-    arms = ("                try:\n"
-            "                    os.unlink(str(attempted_path))\n"
-            "                except FileNotFoundError:\n")
+    arms = ("                        try:\n"
+            "                            os.unlink(str(attempted_path))\n"
+            "                        except FileNotFoundError:\n")
     mutant = _report_mutant_pairs([(arms,
-        "                try:\n"
-        "                    os.unlink(str(attempted_path))\n"
-        "                    _auto_logs._fsync_dir(\n"
-        "                        _pathlib.Path(attempted_path).parent)\n"
-        "                except FileNotFoundError:\n")])
+        "                        try:\n"
+        "                            os.unlink(str(attempted_path))\n"
+        "                            _auto_logs._fsync_dir(\n"
+        "                                _pathlib.Path(attempted_path).parent)\n"
+        "                        except FileNotFoundError:\n")])
     found, red = _reds(mutant, _player_orders("flush-vanishes"), "INV-A")
     assert red, (
         "with the flush folded back under the unlink's own arm, a flush that "
         "answered FileNotFoundError still did not leave an unreferenced, "
         "unmarked file: %r" % (found[:3],))
     twin = _report_mutant_pairs([(arms,
-        "                try:\n"
-        "                    os.unlink(\"%s\" % (attempted_path,))\n"
-        "                except FileNotFoundError:\n")])
+        "                        try:\n"
+        "                            os.unlink(\"%s\" % (attempted_path,))\n"
+        "                        except FileNotFoundError:\n")])
     assert _clean(twin) == [], "the inert twin reds at the two arms"
 
     # -- the cleanup's removal, made durable (round 5's barrier) -----------
-    cleanup = ("                        _auto_logs._fsync_dir(\n"
-               "                            _pathlib.Path(attempted_path).parent)\n")
-    mutant = _report_mutant_pairs([(cleanup, "                        pass\n")])
+    cleanup = ("                                _auto_logs._fsync_dir(\n"
+               "                                    _pathlib.Path(attempted_path).parent)\n")
+    mutant = _report_mutant_pairs([(cleanup, "                                pass\n")])
     found, red = _reds(mutant, _player_orders("write-fails"), "INV-A")
     assert red, (
         "with the cleanup's removal never flushed, the marker's clear still "
         "could not persist ahead of the blob's removal: %r" % (found[:3],))
     twin = _report_mutant_pairs([(cleanup,
-        "                        _auto_logs._fsync_dir(\n"
-        "                            _pathlib.Path(str(attempted_path)).parent)\n")])
+        "                                _auto_logs._fsync_dir(\n"
+        "                                    _pathlib.Path(str(attempted_path)).parent)\n")])
     assert _clean(twin) == [], "the inert twin reds at the cleanup's barrier"
 
     # -- the stored attachment's CONTENTS ----------------------------------
-    contents = "                os.fsync(f.fileno())\n"
-    mutant = _report_mutant_pairs([(contents, "                pass\n")])
+    contents = "                        os.fsync(f.fileno())\n"
+    mutant = _report_mutant_pairs([(contents, "                        pass\n")])
     found, red = _reds(mutant, _player_orders("stored"), "INV-B")
     assert red and all(k == "INV-B" for k, *_ in found), (
         "with the attachment's contents never flushed, no committed row named "
         "bytes the filesystem had not promised -- or the removal broke "
         "something other than the barrier it names: %r" % (found[:3],))
     twin = _report_mutant_pairs([(contents,
-                                  "                os.fsync(int(f.fileno()))\n")])
+                                  "                        os.fsync(int(f.fileno()))\n")])
     assert _clean(twin) == [], "the inert twin reds at the contents barrier"
 
     # -- the stored attachment's directory ENTRY ---------------------------
-    entry = "            _auto_logs._fsync_dir(_pathlib.Path(path).parent)\n"
-    mutant = _report_mutant_pairs([(entry, "            pass\n")])
+    entry = "                    _auto_logs._fsync_dir(_pathlib.Path(path).parent)\n"
+    mutant = _report_mutant_pairs([(entry, "                    pass\n")])
     found, red = _reds(mutant, _player_orders("stored"), "INV-B")
     assert red and all(k == "INV-B" for k, *_ in found), (
         "with the attachment's entry never flushed, a crash after the commit "
         "still recovered the file every time -- or the removal broke "
         "something other than the barrier it names: %r" % (found[:3],))
     twin = _report_mutant_pairs([(entry,
-        "            _auto_logs._fsync_dir(_pathlib.Path(str(path)).parent)\n")])
+        "                    _auto_logs._fsync_dir(_pathlib.Path(str(path)).parent)\n")])
     assert _clean(twin) == [], "the inert twin reds at the entry barrier"
 
 
@@ -7018,8 +7040,9 @@ def test_the_durability_barrier_is_charged_to_the_marked_span(logdir, verified,
 
     So both of `_write_blob`'s barriers run inside `_guarded_write`, inside
     the reserve section, and that section is awaited under the span's own
-    remaining budget; the section's two thread hops spend the same budget, so
-    a stalled flush ends the section's wait rather than outliving it.
+    remaining budget; the section's thread hops -- three since round 7, the
+    free-space reading being the third -- spend the same budget, so a
+    stalled flush ends the section's wait rather than outliving it.
 
     Here the blob's contents flush does not return inside T. The handler must
     REFUSE 503 inside T and commit nothing. The mutant takes the ceiling off
@@ -7032,13 +7055,16 @@ def test_the_durability_barrier_is_charged_to_the_marked_span(logdir, verified,
     # through the section's own budgeted hops. A flush performed anywhere else
     # would be outside the span whatever this case measures.
     section = _normalise(inspect.getsource(auto_logs._reserve_stamp_and_write))
-    for hop in ("_guarded_stamp", "_guarded_write"):
+    # THREE HOPS SINCE ROUND 7: the free-space reading joined the stamp and
+    # the write on a worker thread (M3's class), and it spends the span the
+    # same way, so the count is one per hop rather than the two barriers'.
+    hops = ("_free_bytes", "_guarded_stamp", "_guarded_write")
+    for hop in hops:
         assert ("asyncio.wait_for(asyncio.to_thread(%s" % hop) in section, (
-            "the %s hop is not awaited under a ceiling, so the barrier it "
-            "performs is not charged to the span" % hop)
-    assert section.count("_span_budget(span_deadline)") == 2, (
-        "the two hops that perform the write path's barriers do not both "
-        "spend the span's own deadline")
+            "the %s hop is not awaited under a ceiling, so the call it makes "
+            "on the volume is not charged to the span" % hop)
+    assert section.count("_span_budget(span_deadline)") == len(hops), (
+        "the section's hops do not each spend the span's own deadline")
     assert "_fsync_dir(" in inspect.getsource(auto_logs._write_blob), (
         "the blob's directory barrier is no longer inside the function the "
         "section's write hop calls")
@@ -7548,10 +7574,10 @@ def test_a_flush_that_refuses_after_the_unlink_keeps_the_attachments_reference(
     # separates them; folding the flush back under the unlink's own `try`
     # puts its FileNotFoundError into the "no file was created" arm again.
     src = inspect.getsource(main.submit_bug_report)
-    assert src.count("                except FileNotFoundError:\n") == 1, (
+    assert src.count("\n                        except FileNotFoundError:\n") == 1, (
         "the unlink's FileNotFoundError arm is not where this case thinks "
         "it is")
-    assert "                except OSError as fx:\n" in src, (
+    assert "\n                            except OSError as fx:\n" in src, (
         "the flush no longer has an except arm of its own, so a flush that "
         "refuses is being read as an unlink that found nothing")
 
@@ -7728,8 +7754,8 @@ def test_a_failed_player_attachment_write_leaves_nothing_on_the_volume(
 
     # MUTANT at the unlink's own site: dropped, which is the tree before this
     # fix. The prefix stays on the volume with nothing naming it.
-    site = "                    os.unlink(str(attempted_path))\n"
-    _file(_report_mutant(site, "                    pass\n"))
+    site = "\n                            os.unlink(str(attempted_path))\n"
+    _file(_report_mutant(site, "\n                            pass\n"))
     left = _blobs(logdir)
     assert left, (
         "the mutant left nothing behind, so the live assertion above proves "
@@ -7827,21 +7853,21 @@ def test_a_player_attachment_whose_partial_cannot_be_removed_keeps_the_reference
     # is the tree before this fix.
     #
     # THE ANCHOR CARRIES THE LINE UNDER IT. Since round 6 the flush arm has
-    # its own `keep_reference = True` one level deeper, and this one's twenty
-    # spaces are a SUBSTRING of that one's twenty-four -- so the bare
-    # assignment matches two sites and `_report_mutant` refuses it. The
-    # message line that follows is what makes it the unlink's arm and not the
-    # flush's (#432/#279).
+    # its own `keep_reference = True` one level deeper, and this one's
+    # twenty-eight spaces (inside `_discard_partial` since round 7) are a
+    # SUBSTRING of that one's thirty-two -- so the bare assignment matches two
+    # sites and `_report_mutant` refuses it. The message line that follows is
+    # what makes it the unlink's arm and not the flush's (#432/#279).
     for stale in _blobs(logdir):
         real_unlink(str(logdir / stale))
     monkeypatch.setattr(builtins, "open", partial_then_fail)
-    site = ("                    keep_reference = True\n"
-            "                    removed = (f\"the partial file "
+    site = ("                            keep_reference = True\n"
+            "                            removed = (f\"the partial file "
             "{attempted_path.name} could \"\n")
     mutant = _report_mutant(
         site,
-        "                    keep_reference = False\n"
-        "                    removed = (f\"the partial file "
+        "                            keep_reference = False\n"
+        "                            removed = (f\"the partial file "
         "{attempted_path.name} could \"\n")
     db2 = _ReportSession({"FROM bug_reports": [[{"count": 0}]]})
     _run(mutant(req, _request(), db2))
@@ -7861,8 +7887,8 @@ def test_a_player_attachment_whose_partial_cannot_be_removed_keeps_the_reference
     monkeypatch.setattr(builtins, "open", partial_then_fail)
     twin = _report_mutant(
         site,
-        "                    keep_reference = bool(1)\n"
-        "                    removed = (f\"the partial file "
+        "                            keep_reference = bool(1)\n"
+        "                            removed = (f\"the partial file "
         "{attempted_path.name} could \"\n")
     db3 = _ReportSession({"FROM bug_reports": [[{"count": 0}]]})
     _run(twin(req, _request(), db3))
@@ -7940,9 +7966,9 @@ def test_the_player_attachment_cleanup_makes_its_removal_durable(
     # MUTANT at the barrier's own site: dropped. Nothing flushes, so a crash
     # after the commit can recover the file the row says is gone.
     flushed.clear()
-    site = ("                        _auto_logs._fsync_dir(\n"
-            "                            _pathlib.Path(attempted_path).parent)\n")
-    _file(_report_mutant(site, "                        pass\n"))
+    site = ("                                _auto_logs._fsync_dir(\n"
+            "                                    _pathlib.Path(attempted_path).parent)\n")
+    _file(_report_mutant(site, "                                pass\n"))
     assert flushed == [str(logdir)], (
         "the mutant still took the cleanup's flush, so the live assertion "
         "above proves nothing: %r" % (flushed,))
@@ -7951,8 +7977,8 @@ def test_the_player_attachment_cleanup_makes_its_removal_durable(
     flushed.clear()
     _file(_report_mutant(
         site,
-        "                        _auto_logs._fsync_dir(\n"
-        "                            _pathlib.Path(str(attempted_path)).parent)\n"))
+        "                                _auto_logs._fsync_dir(\n"
+        "                                    _pathlib.Path(str(attempted_path)).parent)\n"))
     assert flushed == [str(logdir), str(logdir)], (
         "the inert twin changed the outcome, so the mutant above is reacting "
         "to the site being edited rather than to the barrier: %r" % (flushed,))
@@ -8303,3 +8329,831 @@ def test_350_scopes_every_guard_to_the_relation_it_alters():
     assert "CREATE TEMP TABLE m350_number_probe (LIKE bug_reports" not in sql, (
         "the post-check's probe table is still copied from whichever "
         "bug_reports the search_path resolves")
+
+
+# ── round 7: one control per finding ────────────────────────────────────────
+
+
+def _test_helper_mutant(fn, anchor, replacement):
+    """A helper of THIS module with one edit, compiled against a COPY of this
+    module's globals. The anchor is asserted to be one site inside the
+    helper's own span first (#432/#279)."""
+    src = textwrap.dedent(inspect.getsource(fn))
+    assert src.count(anchor) == 1, (
+        "the mutation anchor occurs %d time(s) in %s, not once: %r"
+        % (src.count(anchor), fn.__name__, anchor))
+    namespace = dict(globals())
+    exec(compile(src.replace(anchor, replacement),
+                 "<mutant:%s>" % fn.__name__, "exec"), namespace)
+    return namespace[fn.__name__]
+
+
+def test_the_stored_walk_models_its_attachment_whoever_drives_it(tmp_path,
+                                                                 monkeypatch):
+    """R6-L1: THE WALK LABELLED "stored" PERSISTS THE ATTACHMENT.
+
+    The round-6 evidence script drove `_drive_report` without the `logdir`
+    fixture, so `BUG_REPORT_LOG_DIR` still named a real directory: the model
+    saw the marker (the walk patches the auto module's `os`) and never saw
+    the blob, whose `open` went to that directory. The record it published
+    as the stored order returned `log_persisted: False` and went from the
+    marker's flushes straight to the cleanup arm. The helper now points the
+    handler at the directory it models, itself.
+
+    Driven here with the live global pointing SOMEWHERE ELSE on purpose --
+    the state the script was in -- the walk must still show the whole stored
+    order: the blob's open and first write, its contents flush, the entry
+    flush, the commit and the marker's clear, in that order, with nothing
+    landing in the other directory. THE CONTROL removes the helper's
+    pointing and must reproduce the round-6 record; the INERT TWIN spells it
+    differently and must not.
+    """
+    elsewhere = tmp_path / "elsewhere"
+    modelled = tmp_path / "modelled"
+    elsewhere.mkdir()
+    modelled.mkdir()
+    monkeypatch.setattr(main, "BUG_REPORT_LOG_DIR", str(elsewhere))
+    suffix = auto_logs._ORPHAN_MARKER_SUFFIX
+
+    def walk(drive):
+        fs, db, outcome = drive(None, logdir=modelled)
+        landed = sorted(os.listdir(str(elsewhere)))
+        for stray in landed:
+            os.unlink(str(elsewhere / stray))
+        return fs, db, outcome, landed
+
+    fs, db, outcome, landed = walk(_drive_report)
+    assert outcome["log_persisted"] is True, outcome
+    assert landed == [], (
+        "the walk wrote %r outside the directory it models" % (landed,))
+    blob = db.row_at_commit[0]
+    ops = fs.ops
+    order = [ops.index("open " + blob), ops.index("write " + blob),
+             ops.index("fsync " + blob)]
+    order.append(ops.index("fsync-dir", order[-1]))
+    order.append(ops.index("COMMIT"))
+    order.append(ops.index("unlink " + blob + suffix))
+    assert order == sorted(order) and len(set(order)) == len(order), (
+        "the stored walk does not run the blob's write, its contents flush, "
+        "its entry flush, the commit and the marker's clear in that order: "
+        "%r" % (ops,))
+    assert db.row_at_commit[1] == len(db.row_at_commit[2] or b""), (
+        db.row_at_commit)
+
+    # THE CONTROL: the pointing removed, which is the round-6 helper.
+    site = ('    g["BUG_REPORT_LOG_DIR"] = main.BUG_REPORT_LOG_DIR = '
+            'str(logdir)\n')
+    fs, db, outcome, landed = walk(
+        _test_helper_mutant(_drive_report, site, "    pass\n"))
+    assert landed, (
+        "with the pointing removed nothing landed outside the modelled "
+        "directory, so the GREEN above is not about the pointing: %r"
+        % (outcome,))
+    assert not any(_is_blob_write(op) for op in fs.ops), (
+        "with the pointing removed the model still saw the blob's writes: %r"
+        % (fs.ops,))
+
+    # THE INERT TWIN at the same site: the same directory, spelled otherwise.
+    fs, db, outcome, landed = walk(_test_helper_mutant(
+        _drive_report, site,
+        '    g["BUG_REPORT_LOG_DIR"] = main.BUG_REPORT_LOG_DIR = '
+        'os.fspath(logdir)\n'))
+    assert outcome["log_persisted"] is True and landed == [], (
+        "the inert twin changed the walk, so the control above is reacting "
+        "to the edit rather than to the pointing: %r %r" % (outcome, landed))
+
+
+def test_a_failed_automatic_cleanup_releases_its_name_when_the_barrier_refuses(
+        logdir, monkeypatch):
+    """R6-L2: THE CLEANUP RELEASES THE IN-FLIGHT NAME ON EVERY EXIT.
+
+    `_release_marked_blob` removes the blob, flushes the directory, then
+    removes the marker (`_delete_blob_then_marker`), and `_fsync_dir` raises
+    rather than swallowing. A volume that refuses that flush therefore ends
+    the function between its two unlinks -- with the marker still on the
+    volume, which is what keeps the blob collectable -- and before round 7 it
+    also ended it before the line that released the blob's name, so every
+    sweep of the process skipped that marker until a restart. The release is
+    now in a `finally`.
+
+    THE CONTROL puts the release back on the normal exit only and must leave
+    the name registered; the INERT TWIN spells the release differently and
+    must not.
+    """
+    name = "77777777-0000-4000-8000-0000000000c2.log.gz"
+    blob = logdir / name
+    marker = auto_logs._marker_path(blob)
+
+    def refuse(directory):
+        raise OSError("the directory would not flush")
+
+    def run(release):
+        blob.write_bytes(b"a partial gzip stream")
+        marker.write_bytes(name.encode("utf-8") + b"\n")
+        own = auto_logs._MarkedBlob(blob)
+        own.marked = own.written = True
+        auto_logs._MARKERS_IN_FLIGHT.add(name)
+        with monkeypatch.context() as m:
+            m.setattr(auto_logs, "_fsync_dir", refuse)
+            with pytest.raises(OSError):
+                release(own)
+        held = name in auto_logs._MARKERS_IN_FLIGHT
+        auto_logs._MARKERS_IN_FLIGHT.discard(name)
+        return held
+
+    assert not run(auto_logs._release_marked_blob), (
+        "the directory flush between the two unlinks refused, and the blob's "
+        "name is still registered as in flight: every sweep of this process "
+        "would skip its marker")
+    assert marker.exists() and not blob.exists(), (
+        "the refused flush did not stop the cleanup between its two unlinks, "
+        "so this case is not driving the arm it names: marker=%r blob=%r"
+        % (marker.exists(), blob.exists()))
+
+    mutant = _exec_mutant(
+        auto_logs._release_marked_blob, "    finally:\n",
+        "    except BaseException:\n"
+        "        raise\n"
+        "    else:\n"
+        "        pass\n"
+        "    if True:\n")
+    assert run(mutant), (
+        "with the release on the normal exit only, the refused flush still "
+        "released the name, so the GREEN above is not about the `finally`")
+
+    twin = _exec_mutant(
+        auto_logs._release_marked_blob,
+        "        _MARKERS_IN_FLIGHT.discard(own.path.name)\n",
+        "        _MARKERS_IN_FLIGHT.discard(str(own.path.name))\n")
+    assert not run(twin), (
+        "the inert twin left the name registered, so the control above is "
+        "reacting to the edit rather than to the release")
+
+
+@pytest.mark.parametrize("raise_at", ["event-add", "diagnostic"])
+def test_a_raise_before_the_commit_releases_the_attachments_in_flight_name(
+        logdir, monkeypatch, raise_at):
+    """R6-L3: ONE `finally` SPANS EVERY STATEMENT FROM THE REGISTRATION TO
+    THE COMMIT.
+
+    The attachment's name is registered in `_MARKERS_IN_FLIGHT` before its
+    marker is stamped, and the sweep skips a registered name at any age.
+    Round 6 released it in a `finally` around the commit alone, so a
+    statement between the two that raised -- the event row's `db.add`, or
+    the failure arm's own diagnostic line -- ended the request with the name
+    still registered, and every sweep of the process skipped a marked,
+    unreferenced attachment until a restart.
+
+    One raise point per kind the finding names. THE CONTROL narrows the
+    release back to requests that reached the commit, which is the round-6
+    span, and must leave the name registered; the INERT TWIN makes the same
+    three edits with the new condition always true and must not.
+    """
+    monkeypatch.setattr(main, "_is_admin", _no_admin)
+    monkeypatch.setattr(main, "_mark_mod_seen", _noop_mark)
+
+    class _Session(_ReportSession):
+        def add(self, obj):
+            if (raise_at == "event-add"
+                    and type(obj).__name__ == "BugReportEvent"):
+                raise RuntimeError("the event row could not be added")
+            return super().add(obj)
+
+    if raise_at == "diagnostic":
+        import builtins
+        real_open = builtins.open
+
+        def refusing_open(*a, **kw):
+            if (len(a) > 1 and "w" in str(a[1])
+                    and str(a[0]).endswith(".log.gz")):
+                raise OSError("no space left on device")
+            return real_open(*a, **kw)
+
+        def failing_line(*a, **kw):
+            raise RuntimeError("the diagnostic line could not be written")
+
+        monkeypatch.setattr(builtins, "open", refusing_open)
+        monkeypatch.setattr(main, "print", failing_line, raising=False)
+
+    req = schemas.BugReportRequest(steam_id=STEAM, description="it broke",
+                                   log_text="a log")
+    suffix = auto_logs._ORPHAN_MARKER_SUFFIX
+
+    def _file(handler):
+        db = _Session({"FROM bug_reports": [[{"count": 0}]]})
+        with pytest.raises(RuntimeError):
+            _run(handler(req, _request(), db))
+        name = "%s.log.gz" % (db.added[0].id,)
+        held = name in auto_logs._MARKERS_IN_FLIGHT
+        auto_logs._MARKERS_IN_FLIGHT.discard(name)
+        return name, held, db
+
+    name, held, db = _file(main.submit_bug_report)
+    assert (logdir / (name + suffix)).exists(), (
+        "no marker was stamped, so the request raised before it registered "
+        "anything and this case proves nothing about the release")
+    assert db.committed == 0, "the request committed; it was meant to raise first"
+    assert not held, (
+        "the request raised at the %s -- after the attachment's name was "
+        "registered, before the commit -- and the name is still registered: "
+        "every sweep of this process would skip its marker" % raise_at)
+
+    def _span(initial):
+        return _report_mutant_pairs([
+            ("    hop = None\n    committed = False\n",
+             "    hop = None\n    committed = False\n"
+             "    reached_commit = " + initial + "\n"),
+            ("        await db.commit()\n        committed = True\n",
+             "        reached_commit = True\n        await db.commit()\n"
+             "        committed = True\n"),
+            ("    finally:\n        if attempted_path is not None:\n",
+             "    finally:\n"
+             "        if attempted_path is not None and reached_commit:\n"),
+        ])
+
+    name, held, _ = _file(_span("False"))
+    assert held, (
+        "with the release narrowed to requests that reached the commit -- the "
+        "round-6 span -- the raise at the %s still released the name, so the "
+        "GREEN above is not about the span" % raise_at)
+    name, held, _ = _file(_span("True"))
+    assert not held, (
+        "the inert twin (the same three edits, the new condition always "
+        "true) left the name registered, so the control above is reacting to "
+        "the edit rather than to the span")
+
+
+def _slow_volume(monkeypatch, delay):
+    """Every call either writer makes on the volume, each held for `delay`
+    seconds IN THE THREAD THAT ISSUES IT: the directory's creation, the
+    automatic reserve's free-space reading, the marker's stamp, every
+    directory flush, the player blob's contents flush, and every unlink --
+    the partial file's and the marker's clear.
+
+    Blocking sleeps, on purpose. A volume that stalls a call stalls the
+    thread that made it, and whether that thread is the event loop's is the
+    whole question this fixture exists to ask.
+    """
+    def held(real):
+        def slow(*a, **kw):
+            time.sleep(delay)
+            return real(*a, **kw)
+        return slow
+
+    class _SlowOS:
+        """`os`, with a contents flush and an unlink that take `delay`."""
+
+        def __getattr__(self, item):
+            return getattr(os, item)
+
+        @staticmethod
+        def fsync(fd):
+            time.sleep(delay)
+            return os.fsync(fd)
+
+        @staticmethod
+        def unlink(path):
+            time.sleep(delay)
+            return os.unlink(path)
+
+    for name in ("_stamp_marker", "_fsync_dir", "_unlink_if_present",
+                 "_free_bytes"):
+        monkeypatch.setattr(auto_logs, name, held(getattr(auto_logs, name)))
+    monkeypatch.setattr(main, "_bug_report_log_path",
+                        held(main._bug_report_log_path))
+    monkeypatch.setattr(main, "os", _SlowOS())
+
+async def _unrelated_waits_while(filing, period=0.01):
+    """The worst lateness of an unrelated request while `filing` ran.
+
+    The unrelated request is `get_mod_version`, the route every client polls,
+    issued every `period` seconds on the same loop. Each issue records how
+    far past its `period` it finished; the worst of them is what one
+    player's attachment cost everyone else.
+    """
+    waits = []
+    done = asyncio.Event()
+
+    async def unrelated():
+        while not done.is_set():
+            t0 = time.perf_counter()
+            await asyncio.sleep(period)
+            await main.get_mod_version()
+            waits.append(time.perf_counter() - t0 - period)
+
+    probe = asyncio.create_task(unrelated())
+    await asyncio.sleep(0.05)
+    try:
+        out = await filing()
+    finally:
+        done.set()
+        await probe
+    return out, max(waits)
+
+
+# THE PLAYER ATTACHMENT'S CALLS ON THE VOLUME: each hop's site in
+# `submit_bug_report`, the edit that makes the same call ON the loop, and an
+# inert twin at the same site. The ORDER decides which arm runs; the
+# directory and the marker's clear run in both, so they ride the stored one.
+_PLAYER_HOPS = {
+    "stored": (
+        "stored",
+        "                    asyncio.to_thread(_store_attachment))\n",
+        "                    asyncio.sleep(0, _store_attachment()))\n",
+        "                    asyncio.to_thread(_store_attachment, *()))\n"),
+    "write-fails": (
+        "write-fails",
+        "                        asyncio.to_thread(_discard_partial))\n",
+        "                        asyncio.sleep(0, _discard_partial()))\n",
+        "                        asyncio.to_thread(_discard_partial, *()))\n"),
+    "directory": (
+        "stored",
+        "                path = await asyncio.to_thread(\n"
+        "                    _bug_report_log_path, str(report.id))\n",
+        "                path = _bug_report_log_path(\n"
+        "                    str(report.id))\n",
+        "                path = await asyncio.to_thread(\n"
+        "                    _bug_report_log_path, \"%s\" % (report.id,))\n"),
+    "marker-clear": (
+        "stored",
+        "                    asyncio.to_thread(_drop_marker))\n",
+        "                    asyncio.sleep(0, _drop_marker()))\n",
+        "                    asyncio.to_thread(_drop_marker, *()))\n"),
+}
+
+
+@pytest.mark.parametrize("hop", ["stored", "write-fails", "directory",
+                                 "marker-clear"])
+def test_a_player_attachment_on_a_slow_volume_does_not_stall_other_requests(
+        logdir, monkeypatch, hop):
+    """R6-M3: EVERY CALL THE PLAYER ATTACHMENT MAKES ON THE VOLUME RUNS OFF
+    THE EVENT LOOP.
+
+    The api runs one asynchronous worker (#125). Round 6 left the player
+    attachment's stamp, write, contents flush and directory flush -- and the
+    failure arm's unlink and flush -- inline in the handler, so a contended
+    volume held every other request in the process for as long as those
+    took. Both now run on worker threads (`_store_attachment`,
+    `_discard_partial`), and so do the two calls round 7's sweep of the
+    class found still on the loop: the directory's creation in
+    `_bug_report_log_path`, and the marker's clear after the commit
+    (`_drop_marker`).
+
+    THE WITNESS is an unrelated request issued every 10 ms on the same loop
+    while one attachment is filed over a volume whose every call takes
+    `DELAY`. THE BOUND is half of one such call: work on the loop blocks it
+    for at least one whole call, so it cannot pass, and work off the loop
+    costs the probe only scheduling noise. Each parameter is one hop: THE
+    CONTROL makes that hop's call on the loop at its own site and must break
+    the bound; the INERT TWIN at the same site must stay under it. Moving the
+    work is not a durability change, so what holds the ORDER is the crash
+    matrix above, whose controls are unchanged.
+    """
+    import builtins
+
+    DELAY, BOUND = 0.5, 0.25
+    order, site, on_loop, twin = _PLAYER_HOPS[hop]
+    monkeypatch.setattr(main, "_is_admin", _no_admin)
+    monkeypatch.setattr(main, "_mark_mod_seen", _noop_mark)
+    req = schemas.BugReportRequest(steam_id=STEAM, description="it broke",
+                                   log_text="a log")
+    if order == "write-fails":
+        monkeypatch.setattr(builtins, "open",
+                            _partial_write_open(builtins.open))
+    # THE SLOW VOLUME GOES IN FIRST. A mutant runs in a copy of the module's
+    # globals taken when it is built, so every handler below is built after
+    # the volume is slowed and sees the same volume the live one does.
+    _slow_volume(monkeypatch, DELAY)
+
+    def _file(handler):
+        db = _ReportSession({"FROM bug_reports": [[{"count": 0}]]})
+        return asyncio.run(_unrelated_waits_while(
+            lambda: handler(req, _request(), db)))
+
+    out, worst = _file(main.submit_bug_report)
+    live = worst
+    assert out["log_persisted"] is (order == "stored"), out
+    assert worst < BOUND, (
+        "an unrelated request finished %.3fs late while one player's "
+        "attachment was filed over a volume taking %.1fs per call; the bound "
+        "is %.2fs, so a call of the %s order is still on the event loop"
+        % (worst, DELAY, BOUND, order))
+
+    # THE CONTROL: this hop's call made on the loop, at its own site.
+    out, worst = _file(_report_mutant(site, on_loop))
+    control = worst
+    assert out["log_persisted"] is (order == "stored"), out
+    assert worst >= BOUND, (
+        "with the %s hop put back on the event loop the unrelated request "
+        "was only %.3fs late, inside the %.2fs bound although one call "
+        "takes %.1fs -- the witness cannot see a stall, so its GREEN above "
+        "means nothing" % (hop, worst, BOUND, DELAY))
+
+    # THE INERT TWIN at the same site: the same hop, spelled differently.
+    out, worst = _file(_report_mutant(site, twin))
+    assert out["log_persisted"] is (order == "stored"), out
+    assert worst < BOUND, (
+        "the inert twin of the %s hop stalled the unrelated request %.3fs, so "
+        "the control above is reacting to the edit rather than to the hop"
+        % (hop, worst))
+    print("WITNESS player %s: live %.3fs, on-loop control %.3fs, inert twin "
+          "%.3fs -- bound %.2fs, one call %.1fs"
+          % (hop, live, control, worst, BOUND, DELAY))
+
+def test_350_reads_where_the_sequence_is_under_the_lock_it_adopts_it_under():
+    """R6-M1: BLOCK 1c JUDGES THE POSITION, NOT ONLY THE CONFIGURATION.
+
+    Block 1b reads six attributes and every one of them is configuration: a
+    RESTART or a setval moves where the sequence IS without touching any of
+    them, so a sequence restarted one step above its MINVALUE passed every
+    check, was adopted, and would answer 503 within a few uploads. Block 1c
+    reads `last_value` and `is_called` under the lock the OWNED BY takes --
+    a lock nextval cannot pass -- and refuses a next value below the floor,
+    or at or below a bug number already held; the post-check then binds the
+    first draw to the value 1c read.
+
+    The rehearsal drives each refusal against a real server, one fixture per
+    arm and a mutant per mechanism; this case holds the file to the shape
+    that makes those readings mean what they say. Searched in the EXECUTABLE
+    text, because every needle below also appears in the prose (#342).
+    """
+    sql = _sql_350()
+    executable = "\n".join(ln for ln in sql.splitlines()
+                           if not ln.lstrip().startswith("--"))
+    assert executable.count("DO $m350n$") == 1, (
+        "350 carries %d position block(s), not one"
+        % executable.count("DO $m350n$"))
+    owned_by = executable.index(
+        "ALTER SEQUENCE bug_reports_auto_number_seq OWNED BY")
+    start = executable.index("DO $m350n$")
+    end = executable.index("END $m350n$;")
+    post = executable.index("DO $m350p$")
+    assert owned_by < start < end < post, (
+        "block 1c does not sit between the OWNED BY, whose lock it reads "
+        "under, and the post-check that draws")
+    block = executable[start:end]
+
+    # THE LOCK IS PROVEN, NOT ASSUMED: held by this backend, granted, and of
+    # a mode nextval's RowExclusiveLock conflicts with.
+    for needle in ("FROM pg_locks", "pid = pg_backend_pid()", "AND granted",
+                   "'ShareRowExclusiveLock'"):
+        assert needle in block, (
+            "block 1c does not prove the lock it reads under (%r)" % needle)
+    for mode in ("'RowExclusiveLock'", "'RowShareLock'", "'AccessShareLock'",
+                 "'ShareUpdateExclusiveLock'"):
+        assert mode not in block, (
+            "block 1c accepts %s, which nextval can pass" % mode)
+
+    # THE SEQUENCE IT JUDGES IS THE ONE 1b CHECKED.
+    assert "PERFORM set_config('m350.shape_1b'," in executable[:owned_by], (
+        "block 1b no longer records the shape it judged")
+    assert "current_setting('m350.shape_1b', true)" in block, (
+        "block 1c does not compare the shape under the lock with 1b's")
+
+    # THE POSITION, and the next value it implies.
+    assert ("SELECT last_value, is_called FROM %I.bug_reports_auto_number_seq"
+            in block), "block 1c does not read the sequence's position"
+    assert ("v_next := CASE WHEN v_called THEN v_last + v_increment "
+            "ELSE v_last END;" in block), (
+        "block 1c does not derive the next value from is_called")
+
+    # THE FLOOR: -2^62, so at least half the range remains.
+    assert "c_floor CONSTANT bigint := %d;" % (-(2 ** 62)) in block, (
+        "the adoption floor is not -2^62")
+    assert "IF v_next < c_floor THEN" in block, "the floor is never applied"
+
+    # A NUMBER ALREADY HELD, at or below the next value, on a descending
+    # sequence whose bug_number is UNIQUE.
+    assert ("SELECT max(bug_number) FROM %I.bug_reports WHERE bug_number <= $1"
+            in block), "block 1c does not ask whether the next value is taken"
+    assert "IF v_held IS NOT NULL THEN" in block
+
+    # ONE READING, CARRIED TO THE DRAW.
+    assert "PERFORM set_config('m350.next_1c', v_next::text, true);" in block
+    post_block = executable[post:executable.index("END $m350p$;")]
+    assert ("IF v_a IS DISTINCT FROM current_setting('m350.next_1c', "
+            "true)::bigint THEN" in post_block), (
+        "the post-check does not bind the first draw to 1c's reading")
+
+
+def _on_loop_release_calls(source):
+    """Every call of `_release_marked_blob` made directly by a coroutine of
+    `source` -- a nested plain function is a worker's body, run wherever its
+    caller sends it, so the walk does not descend into one."""
+    found = []
+
+    def visit(node, owner):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.Lambda)):
+                continue
+            if isinstance(child, ast.AsyncFunctionDef):
+                visit(child, child.name)
+                continue
+            if (owner and isinstance(child, ast.Call)
+                    and isinstance(child.func, ast.Name)
+                    and child.func.id == "_release_marked_blob"):
+                found.append((owner, child.lineno))
+            visit(child, owner)
+
+    visit(ast.parse(source), None)
+    return found
+
+
+def test_every_automatic_cleanup_waits_on_a_worker_thread():
+    """ROUND 7'S SIBLING SWEEP OF M3 (#432): A FLAG NAMES A LINE, THE DEFECT
+    IS A CLASS.
+
+    M3 moved the player attachment's durable sequence off the event loop.
+    The automatic path's cleanup is the same class: `_release_marked_blob`
+    takes the blob's own lock, which a write in progress holds, and then
+    unlinks and flushes the directory. Round 6 sent ONE of its four
+    coroutine call sites -- the cancelled section's -- through
+    `_release_marked_blob_off_loop`; the deadline arm, the cancellation arm
+    and the failed INSERT's arm in `upload_auto_log` still called it on the
+    loop. Every coroutine call site now goes through the worker-thread
+    helper, and the synchronous function is called by no coroutine at all.
+
+    Where the wait happens is proven BEHAVIOURALLY at the cancelled section's
+    site (`test_a_cancelled_sections_cleanup_does_not_block_the_event_loop`,
+    whose mutant stops the heartbeat); this is the class half, read from the
+    module's own syntax tree. THE CONTROL puts the failed INSERT's arm back
+    on the loop and must be found; the INERT TWIN parenthesises the same
+    await and must not.
+    """
+    src = inspect.getsource(auto_logs)
+    assert _on_loop_release_calls(src) == [], (
+        "a coroutine calls _release_marked_blob on the event loop: %r"
+        % (_on_loop_release_calls(src),))
+
+    awaited = {}
+    for fn in ast.walk(ast.parse(src)):
+        if isinstance(fn, ast.AsyncFunctionDef):
+            for node in ast.walk(fn):
+                if (isinstance(node, ast.Await)
+                        and isinstance(node.value, ast.Call)
+                        and isinstance(node.value.func, ast.Name)
+                        and node.value.func.id == "_release_marked_blob_off_loop"):
+                    awaited[fn.name] = awaited.get(fn.name, 0) + 1
+    assert awaited == {"_reserve_stamp_and_write": 1, "upload_auto_log": 3}, (
+        "the automatic cleanup's coroutine call sites moved: %r -- re-derive "
+        "the class before changing this count" % (awaited,))
+
+    site = "            discarded = await _release_marked_blob_off_loop(own)\n"
+    assert src.count(site) == 1, src.count(site)
+    mutant = src.replace(site, "            discarded = _release_marked_blob(own)\n")
+    assert [owner for owner, _line in _on_loop_release_calls(mutant)] == [
+        "upload_auto_log"], (
+        "the failed INSERT's arm taken on the loop was not found, so the "
+        "empty result above proves nothing")
+    twin = src.replace(
+        site, "            discarded = (await _release_marked_blob_off_loop(own))\n")
+    assert _on_loop_release_calls(twin) == [], (
+        "the inert twin was reported, so the control above is reacting to the "
+        "edit rather than to where the call runs")
+
+
+# THE AUTOMATIC UPLOAD'S HOPS THAT ROUND 7'S SWEEP MOVED: the coroutine each
+# is in, its site, the edit that makes the same call on the loop, and an
+# inert twin. The free-space reading is in the reserve section, which the
+# live handler calls by name; the other two are in the handler itself.
+_AUTO_HOPS = {
+    "directory": (
+        "upload_auto_log",
+        "        path = await asyncio.to_thread(_bug_report_log_path, str(report_id))\n",
+        "        path = _bug_report_log_path(str(report_id))\n",
+        "        path = await asyncio.to_thread(_bug_report_log_path, \"%s\" % (report_id,))\n"),
+    "free-space": (
+        "_reserve_stamp_and_write",
+        "        free = await asyncio.wait_for(asyncio.to_thread(_free_bytes, volume),\n",
+        "        free = await asyncio.wait_for(asyncio.sleep(0, _free_bytes(volume)),\n",
+        "        free = await asyncio.wait_for(asyncio.to_thread(_free_bytes, *(volume,)),\n"),
+    "marker-clear": (
+        "upload_auto_log",
+        "        await asyncio.to_thread(_clear_marker, own)\n",
+        "        _clear_marker(own)\n",
+        "        await asyncio.to_thread(_clear_marker, *(own,))\n"),
+}
+
+
+@pytest.mark.parametrize("hop", ["directory", "free-space", "marker-clear"])
+def test_an_automatic_upload_on_a_slow_volume_does_not_stall_other_requests(
+        logdir, verified, monkeypatch, hop):
+    """R6-M3'S CLASS IN THE AUTOMATIC PATH: EVERY CALL IT MAKES ON THE VOLUME
+    RUNS OFF THE EVENT LOOP.
+
+    The automatic upload's stamp, write and cleanups already ran on worker
+    threads. Round 7's sweep of the class found three calls that did not:
+    the directory's creation (`_bug_report_log_path`), the reserve's
+    free-space reading (`_free_bytes`, a `statvfs` on the volume) and the
+    marker's clear after the commit (`_clear_marker`). The free-space
+    reading was found only by the class test's derived reading below, which
+    follows the modules' own call graph rather than a list of names.
+
+    The player attachment's witness, over this path: an unrelated request
+    every 10 ms on the same loop, a volume whose every call takes `DELAY`,
+    and a bound of half of one call. THE CONTROL makes the hop's call on the
+    loop at its own site and must break the bound; the INERT TWIN must not.
+    """
+    DELAY, BOUND = 0.5, 0.25
+    owner, site, on_loop, twin = _AUTO_HOPS[hop]
+    # This case's own free-space figure rather than the seat's disk, and a
+    # reserve lock of its own, both BEFORE the volume is slowed: a mutant
+    # runs in a copy of the module's globals taken when it is built.
+    monkeypatch.setattr(auto_logs, "_free_bytes", lambda d: 10 ** 12)
+    monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", asyncio.Lock())
+    _slow_volume(monkeypatch, DELAY)
+    live_section = auto_logs._reserve_stamp_and_write
+
+    def _upload(handler):
+        return asyncio.run(_unrelated_waits_while(
+            lambda: handler(_request(), _ok_db())))
+
+    def _with(replacement):
+        """The handler with this hop's site replaced: in `upload_auto_log`
+        itself, or in the section the live handler calls by name."""
+        if owner == "upload_auto_log":
+            return _handler_mutant([(site, replacement)])
+        monkeypatch.setattr(auto_logs, owner,
+                            _exec_mutant(live_section, site, replacement))
+        return auto_logs.upload_auto_log
+
+    out, worst = _upload(auto_logs.upload_auto_log)
+    live = worst
+    assert out["log_persisted"] is True, out
+    assert worst < BOUND, (
+        "an unrelated request finished %.3fs late while one automatic upload "
+        "was stored over a volume taking %.1fs per call; the bound is %.2fs, "
+        "so a call of this path is still on the event loop"
+        % (worst, DELAY, BOUND))
+
+    out, worst = _upload(_with(on_loop))
+    control = worst
+    assert out["log_persisted"] is True, out
+    assert worst >= BOUND, (
+        "with the %s hop put back on the event loop the unrelated request "
+        "was only %.3fs late, inside the %.2fs bound although one call takes "
+        "%.1fs -- the witness cannot see a stall, so its GREEN above means "
+        "nothing" % (hop, worst, BOUND, DELAY))
+
+    out, worst = _upload(_with(twin))
+    assert out["log_persisted"] is True, out
+    assert worst < BOUND, (
+        "the inert twin of the %s hop stalled the unrelated request %.3fs, so "
+        "the control above is reacting to the edit rather than to the hop"
+        % (hop, worst))
+    print("WITNESS automatic %s: live %.3fs, on-loop control %.3fs, inert "
+          "twin %.3fs -- bound %.2fs, one call %.1fs"
+          % (hop, live, control, worst, BOUND, DELAY))
+
+
+# THE VOLUME, AS THE CLASS TEST BELOW READS IT. A call reaches the volume
+# when it is one of these primitives, or a call of a plain function -- of
+# either module, at any depth -- whose own body reaches it, followed through
+# the modules' call graph to a fixed point. DERIVED, not listed: a helper
+# added later that unlinks, flushes, measures or creates a directory joins
+# the class without this test being edited, which is how the reserve's
+# free-space reading was found after a list of names had missed it.
+_OS_ON_THE_VOLUME = frozenset({
+    "open", "fsync", "fdatasync", "unlink", "remove", "rename", "replace",
+    "mkdir", "makedirs", "rmdir", "removedirs", "stat", "lstat", "scandir",
+    "listdir", "walk", "statvfs", "chmod", "utime", "link", "symlink",
+    "truncate", "ftruncate"})
+_PATH_ON_THE_VOLUME = frozenset({
+    "mkdir", "unlink", "rmdir", "touch", "iterdir", "read_bytes",
+    "write_bytes", "read_text", "write_text", "is_file", "is_dir", "lstat"})
+
+
+def _calls_in(node):
+    """Every call `node` makes ITSELF. A nested function or lambda runs only
+    when something calls it, and the call graph follows that call."""
+    out, stack = [], list(ast.iter_child_nodes(node))
+    while stack:
+        n = stack.pop()
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        if isinstance(n, ast.Call):
+            out.append(n)
+        stack.extend(ast.iter_child_nodes(n))
+    return out
+
+
+def _is_volume_primitive(call):
+    f = call.func
+    if isinstance(f, ast.Name):
+        return f.id == "open"
+    if not isinstance(f, ast.Attribute):
+        return False
+    if isinstance(f.value, ast.Name) and f.value.id == "os":
+        return f.attr in _OS_ON_THE_VOLUME
+    if isinstance(f.value, ast.Name) and f.value.id == "shutil":
+        return True
+    return f.attr in _PATH_ON_THE_VOLUME
+
+
+def _callee_name(call):
+    f = call.func
+    if isinstance(f, ast.Name):
+        return f.id
+    if (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
+            and f.value.id in ("_auto_logs", "auto_logs")):
+        return f.attr
+    return None
+
+
+def _volume_functions(*trees):
+    """The name of every plain function, at any depth of these modules,
+    whose own body reaches the volume -- computed to a fixed point."""
+    defs = {}
+    for tree in trees:
+        for n in ast.walk(tree):
+            if isinstance(n, ast.FunctionDef):
+                defs.setdefault(n.name, []).append(n)
+    touching, grew = set(), True
+    while grew:
+        grew = False
+        for name, nodes in defs.items():
+            if name not in touching and any(
+                    _is_volume_primitive(c) or _callee_name(c) in touching
+                    for d in nodes for c in _calls_in(d)):
+                touching.add(name)
+                grew = True
+    return touching
+
+
+def _volume_calls_on_the_loop(source, touching):
+    """(coroutine, line, call) for every call a coroutine of `source` makes
+    ITSELF that reaches the volume."""
+    found = []
+    for n in ast.walk(ast.parse(source)):
+        if isinstance(n, ast.AsyncFunctionDef):
+            for c in _calls_in(n):
+                if _is_volume_primitive(c) or _callee_name(c) in touching:
+                    found.append((n.name, c.lineno, ast.unparse(c)))
+    return sorted(found)
+
+
+def test_no_writer_makes_a_call_on_the_volume_from_the_event_loop():
+    """ROUND 7: M3'S CLASS IN BOTH WRITERS, READ FROM THE SOURCE (#432).
+
+    The api runs one asynchronous worker (#125), so a call on the volume made
+    by a coroutine ITSELF blocks every other request for as long as the
+    volume takes. M3 flagged the player attachment's durable sequence; the
+    class is every call either writer makes on the volume. Round 7 moved
+    five more onto worker threads: the directory's creation and the marker's
+    clear after the commit, in both writers, and the automatic reserve's
+    free-space reading.
+
+    THE READING covers every coroutine in `auto_logs` -- the automatic
+    upload, its section, the cleanup helper, the retention pass and the
+    orphan sweep -- and the player handler, and it must find nothing. What
+    reaches the volume is DERIVED (`_volume_functions`), so the derivation
+    is checked first: every helper a hop hands to a thread must be in it,
+    or an empty reading could be an unread call. THE CONTROLS put each moved
+    call, and each earlier hop, back on the loop at its own site, and each
+    must be found in the coroutine it was put in; the INERT TWIN at every
+    site must not be found. The runtime witnesses above are the behavioural
+    half of the same claim.
+    """
+    main_src = inspect.getsource(main)
+    auto_src = inspect.getsource(auto_logs)
+    touching = _volume_functions(ast.parse(main_src), ast.parse(auto_src))
+    handler_src = textwrap.dedent(inspect.getsource(main.submit_bug_report))
+
+    must = {"_bug_report_log_path", "_free_bytes", "_clear_marker",
+            "_release_marked_blob", "_guarded_stamp", "_guarded_write",
+            "_unlink_if_present", "_store_attachment", "_discard_partial",
+            "_drop_marker"}
+    assert must <= touching, (
+        "the derived reading no longer knows that %r reach the volume, so an "
+        "empty result below could be an unread call" % sorted(must - touching))
+
+    for label, src in (("auto_logs", auto_src), ("submit_bug_report", handler_src)):
+        assert _volume_calls_on_the_loop(src, touching) == [], (
+            "a coroutine in %s makes a call on the volume itself, on the event "
+            "loop: %r" % (label, _volume_calls_on_the_loop(src, touching)))
+
+    controls = [(auto_src, owner, site, on_loop, twin)
+                for owner, site, on_loop, twin in _AUTO_HOPS.values()]
+    controls.append((
+        auto_src, "upload_auto_log",
+        "            discarded = await _release_marked_blob_off_loop(own)\n",
+        "            discarded = _release_marked_blob(own)\n",
+        "            discarded = (await _release_marked_blob_off_loop(own))\n"))
+    controls += [(handler_src, "submit_bug_report", site, on_loop, twin)
+                 for _order, site, on_loop, twin in _PLAYER_HOPS.values()]
+    assert len(controls) == 8, len(controls)
+    for src, owner, site, on_loop, twin in controls:
+        own_src = inspect.getsource(getattr(
+            auto_logs if src is auto_src else main, owner))
+        assert own_src.count(site) == 1 and src.count(site) == 1, (
+            "the site occurs %d time(s) in %s and %d in the source read, not "
+            "once each -- re-derive it: %r"
+            % (own_src.count(site), owner, src.count(site), site))
+        found = _volume_calls_on_the_loop(src.replace(site, on_loop), touching)
+        assert [f[0] for f in found] == [owner], (
+            "the call put back on the loop at %r was not found in %s (%r), so "
+            "the empty reading above proves nothing about that site"
+            % (site.strip(), owner, found))
+        assert _volume_calls_on_the_loop(src.replace(site, twin), touching) == [], (
+            "the inert twin at %r was reported, so the control is reacting to "
+            "the edit rather than to where the call runs" % (site.strip(),))

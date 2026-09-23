@@ -154,9 +154,16 @@ cases -- never 500 -- and can try again after the next match.
   directory holds every player-filed attachment permanently and nothing here
   deletes a referenced one, so the budget was spent on files the sweep is
   required to KEEP and an orphan behind enough of them was never offered to the
-  database at all. A referenced file does not carry a marker, so the marker set
-  has no such floor, no cap over it and no starvation class; the bound that
-  remains is on how many blobs one pass may REMOVE.
+  database at all. A marker is created by one of TWO writers --
+  ``upload_auto_log`` and ``submit_bug_report`` -- and lives from before its
+  blob's first byte until just after the row naming the blob commits, or longer
+  when that clear fails, which it is allowed to; so a referenced file carries
+  one only in that window, and the sweep clears such a marker over the row
+  that names it. The heap's floor is therefore gone, but the marker set is
+  still a population, and since round 6 one pass examines at most
+  ``_ORPHAN_SCAN_BOUND`` of its names -- a window that a cursor moves on across
+  passes, so the bound is on cost and never on reach -- and removes at most
+  ``_ORPHAN_BATCH`` blobs.
 
   An earlier version of this paragraph also claimed atomicity across both
   halves unconditionally. It was false of the write arm, which raised without
@@ -502,11 +509,15 @@ AUTO_LOG_SWEEP_BOOT_DELAY_S = 120.0
 # span: `submit_bug_report` stamps one before a player-filed attachment's
 # first byte, and that handler has no marked-span deadline -- what bounds it
 # is the request. So the FIRST line is what covers it: the handler registers
-# the blob in `_MARKERS_IN_FLIGHT` from the stamp until the commit has
-# decided, in a `finally`, and the sweep runs in the same process. The gate
-# is a second line there too, wide enough that the only way past both is a
-# request that outlived the process -- in which case the file is genuinely
-# unreferenced and collecting it is the right answer.
+# the name in `_MARKERS_IN_FLIGHT` BEFORE the stamp, and releases it in the
+# `finally` of one `try` that spans every statement from the registration to
+# the commit: at once when no worker thread of that request is still touching
+# the attachment's files, and otherwise when the last one it started finishes
+# -- the store, the partial file's removal, or the marker's clear after the
+# commit (round 7). The sweep runs in the same process. The gate is a second
+# line there too, wide enough that the only way past both is a request that
+# outlived the process -- in which case the file is genuinely unreferenced
+# and collecting it is the right answer.
 #
 # The sweep exists because ONE arm of the upload deliberately keeps a blob it
 # cannot prove has a row -- the indeterminate commit. Without a collector that
@@ -516,19 +527,24 @@ _ORPHAN_MIN_AGE_S = AUTO_LOG_SWEEP_EVERY_S + 2.0 * AUTO_LOG_MARKED_SPAN_DEADLINE
 
 # Blobs UNLINKED per pass.
 #
-# THERE IS NO EXAMINATION CEILING ANY MORE, AND ITS ABSENCE IS THE METHOD
-# CHANGE. An earlier version of this sweep took the ATTACHMENT HEAP as its
-# population and bounded the examination at `50 * _ORPHAN_BATCH` files. That
-# directory holds every player-filed attachment permanently and nothing in
-# this tree deletes a referenced one, so the budget was spent on files the
-# pass is REQUIRED to keep: past that many older referenced attachments, a
-# newer orphan was never offered to the database at all. A cap over the heap
-# is a starvation class, so the heap stopped being the population and the cap
-# was deleted rather than raised.
+# THE HEAP'S EXAMINATION CEILING WAS DELETED, NOT RAISED. An earlier version
+# of this sweep took the ATTACHMENT HEAP as its population and bounded the
+# examination at `50 * _ORPHAN_BATCH` files. That directory holds every
+# player-filed attachment permanently and nothing in this tree deletes a
+# referenced one, so the budget was spent on files the pass is REQUIRED to
+# keep: past that many older referenced attachments, a newer orphan was never
+# offered to the database at all. A cap over the heap is a starvation class,
+# so the heap stopped being the population.
 #
-# The population is now the MARKER SET. Enumerating all of it is what keeps
-# the pass honest, because a marker is created only by an upload that is about
-# to write a blob, so a referenced attachment never appears in it at all.
+# The population is now the MARKER SET, and it has TWO writers: an automatic
+# upload about to write its blob, and -- since round 6 -- `submit_bug_report`
+# about to write a player's attachment. A marker lives until just after the
+# row naming its blob commits, or longer when that clear fails (it is allowed
+# to), so a referenced file appears in the set only in that window; the pass
+# asks the WHOLE `bug_reports` table, every kind, and clears such a marker
+# without touching its file. What one pass examines IS bounded again, by
+# `_ORPHAN_SCAN_BOUND` below -- over a window a cursor moves on across passes,
+# so unlike the heap's cap it bounds the pass's cost and never its reach.
 #
 # THIS NUMBER BUYS REMOVALS AND NOTHING ELSE. A slot is spent when a blob
 # comes off the volume; a marker cleared over a committed row, a marker with
@@ -886,15 +902,14 @@ def _write_all(fd, body) -> None:
 def _stamp_marker(blob_path) -> None:
     """Create this blob's marker, DURABLY, before the blob has any bytes.
 
-    TWO CALLERS, AND ONLY ONE OF THEM IS OFF THE EVENT LOOP. The automatic
-    upload reaches this through `_guarded_stamp` on a worker thread, because
-    two fsyncs on a contended volume are not something to do on the loop.
-    Since round 6 `submit_bug_report` stamps a player-filed attachment too,
-    and it calls this INLINE, beside the blob write that handler has always
-    performed on the loop. Round 6 makes that request's volume work durable
-    end to end -- this stamp's two flushes, and the blob's own two before its
-    row commits -- and leaves it where it was; moving the whole handler's
-    filesystem work off the loop is a change of its own.
+    TWO CALLERS, BOTH ON A WORKER THREAD, because two fsyncs on a contended
+    volume are not something to do on the event loop. The automatic upload
+    reaches this through `_guarded_stamp`. `submit_bug_report` stamps a
+    player-filed attachment too (since round 6), and since round 7 it calls
+    this from `_store_attachment`, the worker that runs that attachment's
+    whole durable sequence -- this stamp's two flushes and the blob's own two
+    before its row commits. Round 6 had left that handler's volume work on
+    the loop, which was a finding of its own (round-6 MEDIUM 3).
 
     The content is the blob's own name plus a newline, ALL of it: the write
     goes through `_write_all`, so a short `os.write` cannot leave the fsync
@@ -999,13 +1014,14 @@ class _MarkedBlob:
     the cleanup then removes something that exists, or the cleanup goes first
     and the worker creates nothing.
 
-    THE CLEANUP MAY THEREFORE WAIT ON A WRITE IN PROGRESS. It is reached on
-    the event loop and the wait is as long as the write it is waiting for.
-    That wait happens only on a cancelled section -- every other caller runs
-    after the write has returned, where the lock is free -- and it fails in
-    the right direction: nothing has been removed while it waits, so a process
-    killed in that window leaves the marker beside the blob, which is the pair
-    the sweep collects.
+    THE CLEANUP MAY THEREFORE WAIT ON A WRITE IN PROGRESS, for as long as the
+    write it is waiting for. It waits on a worker thread and never on the
+    event loop: every caller reaches it through
+    `_release_marked_blob_off_loop`. That wait happens only on a cancelled
+    section -- every other caller runs after the write has returned, where
+    the lock is free -- and it fails in the right direction: nothing has been
+    removed while it waits, so a process killed in that window leaves the
+    marker beside the blob, which is the pair the sweep collects.
     """
 
     __slots__ = ("path", "marked", "written", "failed", "abandoned",
@@ -1069,15 +1085,25 @@ def _release_marked_blob(own: "_MarkedBlob") -> bool:
     the two got there first; it is also why this call can block while a write
     finishes, which is the price and is named in `_MarkedBlob`.
     """
-    with own.lock:
-        own.discarded = True
-        state, marker_gone = _delete_blob_then_marker(own.path)
-        blob_gone = state != "failed"
-        if blob_gone:
-            own.written = False
-            if own.marked and marker_gone:
-                own.marked = False
-    _MARKERS_IN_FLIGHT.discard(own.path.name)
+    try:
+        with own.lock:
+            own.discarded = True
+            state, marker_gone = _delete_blob_then_marker(own.path)
+            blob_gone = state != "failed"
+            if blob_gone:
+                own.written = False
+                if own.marked and marker_gone:
+                    own.marked = False
+    finally:
+        # THE NAME IS RELEASED ON EVERY EXIT, the directory barrier's raise
+        # included (round-6 LOW 2). `_delete_blob_then_marker` flushes the
+        # directory between its two unlinks and `_fsync_dir` does not swallow,
+        # so a volume that refuses that flush used to leave this function
+        # before its last line -- with the marker durable on disk and its name
+        # still registered, which made every sweep of this process skip it.
+        # Dropping the name is always safe: the marker FILE is what protects
+        # the blob, and it is still there.
+        _MARKERS_IN_FLIGHT.discard(own.path.name)
     return blob_gone
 
 
@@ -1308,10 +1334,17 @@ async def _release_marked_blob_off_loop(own: "_MarkedBlob") -> bool:
     being frozen, because what is queued behind it is every other seat's
     queue join, match report and chat poll.
 
-    So the WAIT happens in a thread and the loop stays free. Every other
-    caller of `_release_marked_blob` runs after the write has returned, where
-    the lock is uncontended and a direct call blocks nobody; those are left
-    as they are rather than routed through an executor hop they do not need.
+    So the WAIT happens in a thread and the loop stays free.
+
+    SINCE ROUND 7 EVERY CALLER GOES THROUGH HERE. The handler's own arms --
+    the deadline, the cancellation and the failed INSERT -- reach the cleanup
+    after the write has returned, where the lock is uncontended, and they
+    used to call it directly on that ground. But the cleanup itself is an
+    unlink, a DIRECTORY FLUSH and a second unlink (`_delete_blob_then_marker`),
+    and a directory flush on a contended volume is exactly what must not run
+    on the loop: the same class as the player attachment's durable sequence
+    (round-6 MEDIUM 3), swept here rather than fixed only at the line that
+    was flagged (#432).
 
     IT IS NOT MADE OPTIONAL OR GIVEN UP ON. What the lock buys is that a
     cleanup cannot leave behind a file a worker creates after it, and a
@@ -1391,12 +1424,13 @@ async def _reserve_stamp_and_write(own: "_MarkedBlob", data: bytes,
     so is the guarantee; only the thread that waits moved
     (`_release_marked_blob_off_loop`).
 
-    AND EVERY HOP INSIDE THIS SECTION SPENDS `span_deadline`. The stamp and
-    the write are each awaited for what is LEFT of the one deadline the
-    handler took, so the durability barriers they perform are charged to `T`
-    exactly as the INSERT and the commit are: a volume whose flush does not
-    return ENDS the span rather than extending the interval the sweep's age
-    gate is derived from.
+    AND EVERY HOP INSIDE THIS SECTION SPENDS `span_deadline`. The free-space
+    reading, the stamp and the write are each awaited for what is LEFT of
+    the one deadline the handler took, so the calls they make on the volume
+    are charged to `T` exactly as the INSERT and the commit are: a volume
+    whose flush -- or whose `statvfs` -- does not return ENDS the span
+    rather than extending the interval the sweep's age gate is derived
+    from.
     """
     hold_started = time.monotonic()
 
@@ -1441,7 +1475,18 @@ async def _reserve_stamp_and_write(own: "_MarkedBlob", data: bytes,
         # one that cannot retry. Refusing here rather than at ENOSPC also
         # means no partial file is written on a volume that is already out of
         # space.
-        free = _free_bytes(own.path.parent)
+        #
+        # THE READING IS A HOP LIKE THE OTHER TWO. `shutil.disk_usage` is a
+        # call on the volume, and a volume that is not answering holds it for
+        # as long as it holds a flush; on the loop that was every other
+        # request in the process waiting behind it (round-6 MEDIUM 3's class,
+        # swept in round 7). It spends what is left of the span's deadline
+        # like the stamp and the write, so a reading that does not return
+        # ends the span as a refusal -- the direction `_free_bytes` already
+        # takes for a volume it cannot read (#276).
+        volume = own.path.parent
+        free = await asyncio.wait_for(asyncio.to_thread(_free_bytes, volume),
+                                      _span_budget(span_deadline))
         if free < 0:
             # UNKNOWN IS A REFUSAL. This arm used to be the admitting one --
             # `free >= 0 and ...` skipped the whole guard when the volume
@@ -1804,8 +1849,14 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
     # -- the client half is a background retry loop, and 503 is the code that
     # says the same request will work later. Nothing exists yet for it to
     # clean up.
+    #
+    # AND IT RUNS ON A WORKER THREAD. Creating the directory is a call on the
+    # volume like every other one this path makes, and a contended volume
+    # holds a `mkdir` for as long as it holds a flush; on the loop that was
+    # every other request in the process waiting behind it (round-6 MEDIUM
+    # 3's class, swept in round 7).
     try:
-        path = _bug_report_log_path(str(report_id))
+        path = await asyncio.to_thread(_bug_report_log_path, str(report_id))
     except Exception as ex:
         print(f"[AUTO-LOG] refused 503: the blob directory could not be "
               f"resolved for {report_id} ({type(ex).__name__})")
@@ -1850,7 +1901,7 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
     except (asyncio.TimeoutError, TimeoutError):
         own.abandoned = True
         if section.done():
-            _release_marked_blob(own)
+            await _release_marked_blob_off_loop(own)
         print(f"[AUTO-LOG] refused 503: the measure-and-write for {report_id} "
               f"passed its {AUTO_LOG_MARKED_SPAN_DEADLINE_S}s deadline; the "
               f"write is left to finish and discard itself, and the client is "
@@ -1860,9 +1911,11 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
         # The request went away. Same disposition as the deadline: the section
         # keeps the lock until its write returns and then removes what it
         # wrote. Re-raised, because a cancelled request has no answer to give.
+        # The removal waits in a thread; a second cancellation delivered while
+        # it waits ends the wait and not the removal, which finishes there.
         own.abandoned = True
         if section.done():
-            _release_marked_blob(own)
+            await _release_marked_blob_off_loop(own)
         raise
     except Exception as ex:
         print(f"[AUTO-LOG] blob write failed for {report_id}: {type(ex).__name__}")
@@ -1935,7 +1988,7 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
             # file it describes is one nobody goes looking for. So the marker is
             # KEPT in that case and the line says the blob SURVIVES and names it
             # for the sweep, which is the mechanism that collects it.
-            discarded = _release_marked_blob(own)
+            discarded = await _release_marked_blob_off_loop(own)
             try:
                 await db.rollback()
             except Exception:
@@ -2013,7 +2066,14 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
         # its job. Clearing it is the ONLY way a marker is dropped while its blob
         # stays, and it is allowed to fail: the sweep's second disposition asks the
         # database, is told a row names the blob, and clears it then.
-        _clear_marker(own)
+        #
+        # ON A WORKER THREAD, like the rest of this path's calls on the
+        # volume: the clear is an unlink under the blob's own lock. A
+        # cancellation delivered while it waits ends the wait and not the
+        # unlink, and the `finally` below drops the name either way, which
+        # is safe for the reason given above the INSERT: the marker FILE is
+        # what protects the blob, and the row that names it is committed.
+        await asyncio.to_thread(_clear_marker, own)
 
         bug_number = (row or {}).get("bug_number") or 0
         print(f"[AUTO-LOG] #{bug_number} ({report_id}) steam={req.steam_id} "
@@ -2437,12 +2497,14 @@ def _marker_candidates(base, cutoff: float, live: set,
     case. A cap over the heap cannot be fixed by raising it, so the heap
     stopped being the population.
 
-    A blob carries a marker only between the instant before its bytes exist
-    and the instant its row commits, so a referenced file does not appear here
-    at all and there is nothing to cap. Every marker this returns is one the
-    pass then CONSUMES -- cleared over a committed row, or taken with its
-    blob -- which is what makes a full enumeration finite in the way a heap
-    walk never was.
+    A blob carries a marker from the instant before its bytes exist until
+    just after the row naming it commits -- longer only when that clear
+    fails, which `_clear_marker` is allowed to do -- so a referenced file
+    appears here only in that window, and the pass resolves it by the
+    caller's lookup (disposition 2 of `prune_orphan_blobs`: cleared over the
+    row, the file kept). Every marker the pass resolves it CONSUMES --
+    cleared over a committed row, or taken with its blob -- so the population
+    shrinks as it is worked, which the heap never did.
 
     SINCE ROUND 6 THERE ARE TWO WRITERS OF MARKERS, not one:
     `upload_auto_log` and `submit_bug_report`. So "a marker means an automatic
@@ -2480,6 +2542,18 @@ def _marker_candidates(base, cutoff: float, live: set,
     On the worker thread: one directory stream, a string test and two set
     tests per name, and one `stat` per WINDOWED name -- at most `scan_bound`
     of those -- on a volume that may be contended.
+
+    THE WALK ITSELF IS O(ENTRIES), and nothing here bounds it (round-6 LOW
+    5). Every entry in the blob directory -- each player-filed attachment,
+    each automatic blob, each marker -- passes through the one `readdir`
+    stream and the suffix test on every pass; only marker names go on to the
+    `is_file` read from the directory entry and the two set tests, and only
+    windowed ones pay a `stat`. The window bounds the per-candidate work, the
+    query and the removals; the walk grows with the directory, which keeps
+    every referenced attachment for good. A residual, and stated in the
+    notes' integrity account as one: it costs volume reads on the sweep's
+    worker thread, never the loop, and it moves no row, match result,
+    rating, gold or another player's game.
 
     A marker whose `stat` raises is SKIPPED rather than reported: the only
     thing this pass does with it is act on its blob, and a name that will not
@@ -2674,11 +2748,13 @@ async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None
     THAT PREDICATE IS NOW THE WHOLE OF THE PROTECTION AND NOT HALF OF IT.
     Before round 6 a player-filed attachment never carried a marker, so it
     could not enter this pass's population whatever the lookup said; since
-    `submit_bug_report` stamps one before its first byte, it can -- for the
-    span between that byte and its commit, and no longer. Two further things
-    keep the pass off it inside that span: the handler registers the blob in
-    `_MARKERS_IN_FLIGHT` for exactly that span, in a `finally`, and the age
-    gate is wider than any request this process can still be serving. Said
+    `submit_bug_report` stamps one before its first byte, it can -- from the
+    stamp until just after its row commits, and longer if that clear fails
+    (disposition 2 below then clears it over the row). Two further things
+    keep the pass off it before the commit: the handler registers the name
+    in `_MARKERS_IN_FLIGHT` before the stamp and holds it until the request
+    -- or the worker still writing for it -- has finished, and the age gate
+    is wider than any request this process can still be serving. Said
     plainly because it is a change of kind: a property that was structural is
     now one three mechanisms hold, and that belongs in the residuals rather
     than in a reassurance.
