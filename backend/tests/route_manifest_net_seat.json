@@ -376,7 +376,7 @@
           ],
           "main",
           "submit_bug_report",
-          "f12d129b7bff37f538b8d3ccf1aafa697e57d766"
+          "a62cfedf10c17f438c34ebccbe506ce4bfbe8619"
         ],
         [
           "/api/v1/bug-reports/events/recent",
@@ -3299,7 +3299,7 @@
           ],
           "auto_logs",
           "upload_auto_log",
-          "3f470fd9e6d6341f288b3363a5bef6f71f3f794b"
+          "8d8fbbc1692c7148b7cf41fb1b10a814b51bd362"
         ],
         [
           "/api/v1/internal/logs/auto/prune",
@@ -3308,7 +3308,7 @@
           ],
           "auto_logs",
           "run_auto_log_prune",
-          "abe81187f6910dc5bd67965f73f2f854c538f749"
+          "8a843fce4a8c02a47f356b8568d93020de66df15"
         ]
       ]
     }
@@ -3341,7 +3341,7 @@
       [
         "main",
         "lifespan",
-        "a25b92c7dc50e55a7bb1675bc57fc9444ce3a79b"
+        "b4f5f8d158bea8ee6fd75704442ce007e4d5d929"
       ]
     ]
   },
