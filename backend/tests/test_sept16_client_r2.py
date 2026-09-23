@@ -3072,11 +3072,17 @@ def test_r4_h3_a_fallback_report_carries_is_fallback_and_a_prompt_report_does_no
     ReportTeamSeriesDc's own normalisation -- and test_r4lens_f1_* is what pins
     that.
 
-    AGAINST AN OLDER SERVER (#266): an unknown query parameter is IGNORED, the
-    request is answered 200, and the report settles immediately exactly as it
-    does today.  The flag buys nothing there and costs nothing, and nothing in
-    the client reads that 200 as proof the parameter was understood -- the
-    `deferred` field is what says so."""
+    AGAINST AN OLDER SERVER (#266): an unknown query parameter is IGNORED and
+    the request is answered 200.  THAT 200 PROVES ONLY THAT THE BOX WHICH
+    ANSWERED PREDATES THE FIELD -- it is not proof that the report settled, and
+    this docstring said it was until the round-7 review found the claim here,
+    inside the harness that checks the same claim in the product (#351: the
+    highest-risk claim is the one your own fix authored).  Contract item 6 is
+    what the client may state: `deferred` says only whether THIS call parked
+    the report, and an ABSENT `deferred` says only that the answering box
+    predates the field, never what that box did with the report.  The flag
+    costs nothing against such a box, and nothing in the client reads that 200
+    as proof the parameter was understood."""
     assert dc_report_query(True) == ["reporter_steam_id", "dc_player_steam_id",
                                      "t1_points_total", "t2_points_total",
                                      "photon_room_id", "is_fallback", "hmac_sig"]
@@ -5868,6 +5874,30 @@ _R7_SET_WRITE = re.compile(
     r"\s*\.\s*(?:Add|Remove|Clear|UnionWith|IntersectWith|ExceptWith|"
     r"SymmetricExceptWith|RemoveWhere)\s*\(")
 
+# A FIELD PASSED BY REFERENCE IS A WRITER, and it was the form the round-7
+# census could not see at all.  `Interlocked.Increment(ref ApiClient.LastSeriesT1Wins)`
+# changes the value without the name ever sitting beside an assignment
+# operator, so every regex above misses it; the fields were `public static`,
+# which made it a writer anything in the assembly could use.  Round 8 narrows
+# that at the root as well -- the inputs are now `{ get; private set; }`, and a
+# property cannot be passed by reference -- but the census stays wide, because
+# a check that stopped looking for a form is a check that certifies a class it
+# cannot see (#342), and the narrowing is one edit away from being undone.
+#
+# The name must follow `ref`/`out` IMMEDIATELY, so a line that passes some
+# other variable by reference while merely READING a banner input is not a
+# writer here -- that is this rule's own inert twin.
+_R8_REF_OUT_WRITE = re.compile(
+    r"\b(?:ref|out)\s+(?:ApiClient\.)?(?:" + "|".join(_R7_BANNER_INPUTS) + r")\b")
+
+# The API-mediated writers, named as their own class so the rejection is
+# greppable rather than implied by the rule above.  Every one of them reaches
+# the value through `ref`, which is why the two overlap; a census may recognise
+# a form twice, and naming the class is what makes its absence checkable.
+_R8_API_WRITE = re.compile(
+    r"\b(?:Interlocked|Volatile)\s*\.\s*\w+\s*\(\s*ref\s+"
+    r"(?:ApiClient\.)?(?:" + "|".join(_R7_BANNER_INPUTS) + r")\b")
+
 
 def _r7_plugin_sources():
     """{name: text} for EVERY C# source in the plugin, resolved at run time.
@@ -5879,6 +5909,48 @@ def _r7_plugin_sources():
     NEW file joins the census by existing (#330: sweep the siblings)."""
     return {p.name: p.read_text(encoding="utf-8")
             for p in sorted(PLUGIN.glob("*.cs"))}
+
+
+_R8_DECL_HEAD = re.compile(
+    r"^\s*(?:(?:public|private|internal|protected|static|readonly|const|"
+    r"volatile|new|partial)\s+)+[A-Za-z_][A-Za-z0-9_<>\[\],.?]*\s+$")
+
+
+def _r8_declared_name_at(line):
+    """Where a banner-input identifier first appears on this line, or None."""
+    best = None
+    low = line.lower()
+    for tok in ("lastseries", "activeteamseriesid", _R7_BANNER_LATCH.lower()):
+        i = low.find(tok)
+        if i >= 0 and (best is None or i < best):
+            best = i
+    return best
+
+
+def _r8_is_declaration(line):
+    """True when this line DECLARES a banner input rather than WRITING one.
+
+    THE EXCLUSION THIS REPLACES DISCARDED THE LINE IT WAS MEASURING.  It
+    dropped any line containing the word `static`, which is true of a
+    declaration and equally true of a one-line static method, a static
+    constructor and a static initialiser -- so a write placed on such a line
+    was invisible to the census, and the control that plants exactly that
+    (R8-L11a) stayed GREEN.  A filter that throws away the line it is supposed
+    to judge is the defect class #441 names, and this is the second time this
+    round that a probe could not fire.
+
+    A declaration is recognised by SHAPE instead: modifiers, then a type, then
+    the name, with no call between the start of the line and the name.  An
+    auto-property declaration ends in an accessor block and an initialiser and
+    still matches, because everything before the NAME is still modifiers and a
+    type."""
+    at = _r8_declared_name_at(line)
+    if at is None:
+        return False
+    head = line[:at]
+    if "(" in head:
+        return False
+    return bool(_R8_DECL_HEAD.match(head))
 
 
 def _r7_writer_lines(sources):
@@ -5899,11 +5971,12 @@ def _r7_writer_lines(sources):
                     and _R7_BANNER_LATCH not in line):
                 continue
             if not (_R7_ASSIGN.search(line) or _R7_PRE_INCDEC.search(line)
-                    or _R7_SET_WRITE.search(line)):
+                    or _R7_SET_WRITE.search(line)
+                    or _R8_REF_OUT_WRITE.search(line)
+                    or _R8_API_WRITE.search(line)):
                 continue
             s = line.strip()
-            if " static " in line or s.startswith("private ") \
-                    or s.startswith("public ") or s.startswith("///") \
+            if _r8_is_declaration(line) or s.startswith("///") \
                     or s.startswith("//"):
                 continue
             out.append((fname, i, s))
@@ -6460,9 +6533,14 @@ def test_r7_l11_w8_states_the_disposition_the_reviewed_route_produces():
 
 # ── SERVER-L3: no comment reads a pre-field 200 as a settlement ──────────────
 
+# SPLIT ON PURPOSE, and this is L8's mechanism as much as its subject: the
+# round-8 scope below covers the HARNESS as well as the plugin sources, so a
+# file that spelled a forbidden form contiguously would reject itself forever.
+# Each form is assembled from two pieces; the value is identical and the source
+# line is not the form.  (`_R7_CLAIMS` already carried one row this way.)
 _R7_PRE_FIELD_SETTLEMENT_FORMS = (
-    "the report settles immediately exactly",
-    "is_fallback parameter and settled the series on it",
+    "the report settles " + "immediately exactly",
+    "is_fallback parameter " + "and settled the series on it",
 )
 
 
@@ -6493,14 +6571,14 @@ def test_r7_serverl3_no_comment_reads_a_pre_field_200_as_settlement():
     _assert_discriminating(
         claim, api,
         _mutate(api, "predates the field. It is not proof that the report settled",
-                "the report settles immediately exactly as it does today, so it settled",
+                "the report settles " + "immediately exactly as it does today, so it settled",
                 "R7-SERVER-L3a the older-server passage reclaims settlement"),
         "R7-SERVER-L3a a pre-field 200 is not read as settlement")
 
     _assert_discriminating(
         claim, api,
         _mutate(api, "it cannot say what that older box DID with the report",
-                "the is_fallback parameter and settled the series on it is what it says",
+                "the is_fallback parameter " + "and settled the series on it is what it says",
                 "R7-SERVER-L3b the three-value passage reclaims settlement"),
         "R7-SERVER-L3b the three-value passage names no settlement")
 
@@ -6520,10 +6598,10 @@ _R7_CLAIMS = (
      "What is certain is that nothing parked this report",
      "box settled, ignored or fenced this report"),
     ("ApiClient.cs",
-     "the report settles immediately exactly",
+     "the report settles " + "immediately exactly",
      "predates the field. It is not proof that the report settled"),
     ("ApiClient.cs",
-     "is_fallback parameter and settled the series on it",
+     "is_fallback parameter " + "and settled the series on it",
      "it cannot say what that older box DID with the report"),
     ("ApiClient.cs",
      "The only other writer of that row is the server's",
@@ -6960,3 +7038,343 @@ def test_r7_b18_the_dc_canonical_is_one_contract_on_both_lanes_and_the_build_gat
     assert claim(api + LF + "// an unrelated comment line" + LF,
                  server + LF + "# an unrelated comment line" + LF,
                  csproj + LF + "<!-- an unrelated comment -->" + LF)
+
+
+# ══ ROUND 8: the eleven LOW findings of the round-7 review, by number ════════
+
+
+# L3: THE FIVE DELETED MECHANISM CLASSES, plus the retired statics and the dead
+# predicate, as REJECTION CLASSES over the whole plugin source.  Round 7 swept
+# four capability tokens over every source but checked the retired statics in
+# two files and the dead predicate in one, so a re-introduction anywhere else
+# was not rejected.  Each row is (class name, kind, needles).
+_R8_DELETED_CLASSES = (
+    ("the lifecycle=false arm", "token", ("lifecycle=false",)),
+    ("the advertised capability field", "token",
+     ("ServerHasReadOnlySeriesStatus",)),
+    ("the client parse of the lifecycle key", "token", ('"lifecycle"',)),
+    ("the echoed capability key", "token", ("series_status_readonly",)),
+    # The W20/W24 latch is the client-side memory of that advertisement, and it
+    # is rejected under every name a re-introduction would carry rather than
+    # under the one spelling it happened to have -- a flag names a LINE, the
+    # defect is a CLASS (#432).  These are mechanism-specific identifiers, not
+    # common words, so the rule can still fail (#342, #431).
+    ("the W20/W24 capability latch", "token",
+     ("HasReadOnlySeriesStatus", "ReadOnlySeriesStatusAdvertised",
+      "SeriesStatusCapability")),
+    ("the retired dc-grace statics", "token",
+     ("LastSeriesDcGraceSeconds", "LastSeriesDcTeamRemaining")),
+    # The dead predicate is rejected as CODE, not as a word: `dc_paused` is a
+    # server status value this client still NAMES in prose and in one log line
+    # that lists the statuses the route accepts, and a rule that rejected the
+    # word would reject those too -- and would then be relaxed by the next
+    # reader.  What may not return is the COMPARISON.
+    ("the dead dc_paused predicate", "code",
+     ('== "dc_paused"', '!= "dc_paused"', '.Equals("dc_paused"',
+      '"dc_paused" ==', '"dc_paused".Equals')),
+)
+
+
+def _r8_is_comment(line):
+    t = line.strip()
+    return t.startswith("//") or t.startswith("/*") or t.startswith("*")
+
+
+def _r8_deleted_class_hits(sources):
+    """[(class, file, line no, text)] for every re-introduction in `sources`.
+
+    `sources` is a {name: text} map so a control can plant a re-introduction in
+    a file that does not exist on the tree without touching the tree -- and so
+    a control can hand in ONE file, which is what keeps a whole-suite mutation
+    run affordable.
+
+    ONE PASS OVER THE LINES, every class at once: the sweep covers every plugin
+    source and this suite is re-run once per mutation control."""
+    hits = []
+    for fname in sorted(sources):
+        for i, line in enumerate(sources[fname].split(LF), 1):
+            comment = _r8_is_comment(line)
+            for cls, kind, needles in _R8_DELETED_CLASSES:
+                if kind == "code" and comment:
+                    continue
+                for needle in needles:
+                    if needle in line:
+                        hits.append((cls, fname, i, line.strip()))
+                        break
+    return hits
+
+
+def test_r8_l3_every_deleted_mechanism_class_is_rejected_across_the_whole_plugin_source():
+    """L3 (B10): THE DELETIONS ARE A CLASS, AND THE SWEEP IS THE WHOLE SOURCE.
+
+    WHAT WAS WRONG.  `test_r5_the_advertised_capability_is_absent_from_every_source`
+    swept every plugin source, but for four capability/query tokens only; the
+    retired statics were checked in ApiClient.cs and NativeUI.cs, and the dead
+    `dc_paused` predicate in NativeUI.cs.  A retired static reappearing in
+    Plugin.cs, or the predicate reappearing in any third file, was outside every
+    check.  A flag names a LINE while the defect is a CLASS (#432, #330).
+
+    WHAT THIS DOES.  Seven named rejection classes -- the five the contract
+    deletes, plus the retired statics and the dead predicate -- swept over EVERY
+    `.cs` under the plugin, resolved by glob so a new file joins by existing.
+    The scanned COUNT and the file list are printed, because a sweep whose
+    listing could have been truncated proves nothing about what it did not
+    cover (#304, #205).
+
+    The predicate class rejects the COMPARISON rather than the word: this client
+    still names `dc_paused` in the prose that records why the predicate went and
+    in one log line that lists the statuses the route accepts, and a rule that
+    rejected those would be relaxed by the next reader rather than obeyed."""
+    sources = _r7_plugin_sources()
+    names = sorted(sources)
+    print("L3 DELETION SWEEP: %d plugin sources scanned" % len(names))
+    print("L3 DELETION SWEEP FILES: " + ", ".join(names))
+    print("L3 DELETION SWEEP CLASSES: %d" % len(_R8_DELETED_CLASSES))
+
+    # the file set is the glob's, not a list that could have gone stale
+    on_disk = sorted(p.name for p in PLUGIN.glob("*.cs"))
+    assert names == on_disk, (names, on_disk)
+    assert len(names) > 3, names
+
+    hits = _r8_deleted_class_hits(sources)
+    assert not hits, ("a deleted mechanism was found in plugin source: "
+                      + repr(hits))
+
+    # EVERY CLASS CAN FIRE, and it fires in a file neither round-7 check read.
+    # The scratch source is a THIRD file, handed in through the map rather than
+    # written to the tree, so nothing has to be restored afterwards.
+    for cls, kind, needles in _R8_DELETED_CLASSES:
+        for needle in needles:
+            if kind == "code":
+                if needle.startswith("==") or needle.startswith("!="):
+                    line = "                if (dcStatus " + needle + " true) { }"
+                else:
+                    line = "                if (dcStatus" + needle + ")) { }"
+            else:
+                line = "                // reintroduced: " + needle
+            # THE SCRATCH SOURCE ALONE.  The rule is a pure function of the map
+            # it is handed, and re-sweeping 94 unchanged files once per needle
+            # buys nothing the assertion above has not already bought -- while
+            # this suite is re-run once per mutation control.
+            planted = {"ZzScratchProbe.cs": ("class ZzScratchProbe {" + LF
+                                             + line + LF + "}" + LF)}
+            got = _r8_deleted_class_hits(planted)
+            assert any(h[0] == cls and h[1] == "ZzScratchProbe.cs" for h in got), (
+                "the sweep did not reject " + cls + " via " + repr(needle))
+
+    # AND THE PREDICATE CLASS DOES NOT FIRE ON PROSE OR ON THE STATUS LIST --
+    # the inert twin, in the same file, of a shape the rule permits.
+    for permitted in ('                // the old predicate compared == "dc_paused"',
+                      '                /// a cached status of dc_paused is a guess',
+                      '                Log("statuses (active, dc_paused) are accepted");'):
+        planted = {"ZzScratchProbe.cs": ("class ZzScratchProbe {" + LF
+                                         + permitted + LF + "}" + LF)}
+        assert not _r8_deleted_class_hits(planted), (
+            "the sweep rejected a permitted line: " + permitted.strip())
+
+    # and an identifier of a similar shape that the rule permits
+    planted = {"ZzScratchProbe.cs": (
+        "class ZzScratchProbe {" + LF
+        + "                public static int LastSeriesDcDeferredBoundSeconds2 = 0;" + LF
+        + "}" + LF)}
+    assert not _r8_deleted_class_hits(planted), "the sweep rejected a permitted identifier"
+
+
+# L8: the item-6 claim surface, over every source this lane delivers from the
+# worktree -- the plugin files AND this harness.  The tool prose the bundle
+# delivers is outside the worktree and is covered by the round-8 notes checker,
+# which reads the bundle; that split is recorded in the notes.
+def _r8_claim_scope():
+    """{name: text} for every source this harness can hold to the claim rule."""
+    out = dict(_r7_plugin_sources())
+    out["test_sept16_client_r2.py"] = pathlib.Path(__file__).read_text(
+        encoding="utf-8")
+    return out
+
+
+def test_r8_l8_no_delivered_source_claims_a_pre_field_200_settles():
+    """L8 (B16, B11): THE CHECK'S SOURCE SCOPE IS EVERY SOURCE IT SPEAKS FOR.
+
+    WHAT WAS WRONG.  The SERVER-L3 check scanned `ApiClient.cs`, and the
+    `_R7_CLAIMS` row that binds this form scoped it to `ApiClient.cs` as well --
+    while the harness's OWN docstring, at the `is_fallback` case, said an older
+    box answers 200 and that the report then settles at once.  The product
+    rejected the claim and the file checking the product made it.  The
+    superseded wording is not spelled out here either: this case's scope covers
+    this file, so a source carrying the form would reject itself.  That is the surviving class of SERVER-L3 and SERVER-B0c, and it is
+    exactly where #351 says to look: in the prose the fix itself authored.
+
+    WHAT CONTRACT ITEM 6 PERMITS.  `deferred` says only whether THIS call parked
+    the report.  A response that carries no `deferred` at all proves only that
+    the box which answered predates the field; it never proves settlement.
+
+    WHAT THIS REJECTS.  The superseded FORM, in every source this harness can
+    reach -- every plugin `.cs` and this file -- rather than a heading or a file
+    name.  The forms are assembled from pieces so this file does not carry them
+    contiguously and cannot reject itself."""
+    scope = _r8_claim_scope()
+    names = sorted(scope)
+    print("L8 CLAIM SCOPE: %d sources" % len(names))
+    print("L8 CLAIM SCOPE FILES: " + ", ".join(names))
+    assert "test_sept16_client_r2.py" in scope
+    assert "ApiClient.cs" in scope
+    assert len(names) > 3, names
+
+    def offenders(sources):
+        out = []
+        for fname in sorted(sources):
+            for form in _R7_PRE_FIELD_SETTLEMENT_FORMS:
+                if form in sources[fname]:
+                    out.append((fname, form))
+        return out
+
+    assert not offenders(scope), (
+        "a superseded item-6 settlement claim survives: " + repr(offenders(scope)))
+
+    # THE CORRECTED FORM IS PRESENT where the claim used to be made -- an
+    # absence alone holds on a stub, which is the check that cannot fail (#342).
+    assert ("THAT 200 PROVES ONLY THAT THE BOX WHICH" + LF
+            + "    ANSWERED PREDATES THE FIELD") in scope["test_sept16_client_r2.py"]
+    assert "predates the field. It is not proof that the report settled" in         scope["ApiClient.cs"]
+
+    # ONE RED PER SOURCE KIND, planted through the map so no file is touched:
+    # the harness itself, and a plugin file that is NOT ApiClient.cs -- the two
+    # places the round-7 scope could not see.
+    for fname in ("test_sept16_client_r2.py", "NativeUI.cs", "Plugin.cs"):
+        for form in _R7_PRE_FIELD_SETTLEMENT_FORMS:
+            planted = dict(scope)
+            planted[fname] = planted[fname] + LF + "// " + form + LF
+            got = offenders(planted)
+            assert (fname, form) in got, (
+                "the claim check does not reach " + fname)
+
+    # INERT TWIN: the contract meaning stated in different words, in the same
+    # files, leaves the check green.
+    twin = dict(scope)
+    for fname in ("test_sept16_client_r2.py", "NativeUI.cs", "Plugin.cs"):
+        twin[fname] = twin[fname] + LF + (
+            "// a 200 from a box with no deferral field tells this client the "
+            "box's age and nothing about the row" + LF)
+    assert not offenders(twin), "the check rejected a correct restatement"
+
+
+# L11: the census, and the root narrowing beneath it.
+def test_r8_l11_the_census_sees_every_csharp_write_form():
+    """L11 (B19, the surviving class of C4): A CENSUS IS AS WIDE AS ITS GREP.
+
+    WHAT WAS WRONG.  The census recognised plain and compound assignment,
+    `++`/`--`, `??=` and the latch's HashSet methods.  It did not recognise a
+    field passed by REFERENCE, so `Interlocked.Increment(ref ApiClient.LastSeriesT1Wins)`
+    -- a valid writer while the field was `public static`, which
+    `ApiClient.cs:13945` made it -- changed a banner input invisibly, and the
+    round-7 controls planted no such form.
+
+    WHAT THIS ASSERTS.  Every write form is planted at a real site that does NOT
+    request the repaint, and the census must see each one; the reads planted
+    beside them must not be counted, because a grep widened until it matches
+    everything fails the same way from the other side (#441)."""
+    sources = _r7_plugin_sources()
+    base = len(_r7_writer_lines(sources))
+    assert base, "the census cannot be empty"
+    print("L11 CENSUS: %d plugin sources, %d writer lines on the tree"
+          % (len(sources), base))
+
+    for label, fname, line in (
+            ("an API-mediated write through ref", "ApiClient.cs",
+             "                Interlocked.Increment(ref ApiClient.LastSeriesT1Wins);"),
+            ("a volatile write through ref", "NativeUI.cs",
+             "                Volatile.Write(ref ApiClient.LastSeriesT2Wins, 3);"),
+            ("a ref argument", "Plugin.cs",
+             "                Helper(ref ApiClient.LastSeriesDcDeferredBoundSeconds);"),
+            ("an out argument", "ApiClient.cs",
+             "                TryRead(out LastSeriesStateForId);"),
+            ("a null-coalescing write", "ApiClient.cs",
+             "                LastSeriesStateForId ??= seriesId;"),
+            ("a compound write", "ApiClient.cs",
+             "                LastSeriesT1Wins += 1;"),
+            ("a post-increment", "ApiClient.cs",
+             "                LastSeriesT2Wins++;"),
+            ("a pre-increment", "ApiClient.cs",
+             "                ++LastSeriesT2Wins;"),
+            ("a write of the latch set", "ApiClient.cs",
+             "                _statusPollDarkSeries.Remove(seriesId);")):
+        planted = dict(sources)
+        planted[fname] = planted[fname] + LF + line + LF
+        assert len(_r7_writer_lines(planted)) == base + 1, (
+            "the census did not see " + label)
+
+    # THE TWINS: a `ref`/`out` that passes some OTHER variable while reading a
+    # banner input is not a writer, and neither is any comparison.
+    for line in (
+            "                Interlocked.Exchange(ref copy, LastSeriesT1Wins);",
+            "                TryParse(s, out local) ; int n = LastSeriesT1Wins;",
+            "                if (LastSeriesT1Wins == 0) return;",
+            "                if (LastSeriesT1Wins >= 3) return;",
+            "                if (LastSeriesT2Wins != 0) return;",
+            "                if (LastSeriesT1Wins <= 0) return;",
+            "                int n = LastSeriesT1Wins;",
+            "                bool d = _statusPollDarkSeries.Contains(s);"):
+        planted = dict(sources)
+        planted["ApiClient.cs"] = planted["ApiClient.cs"] + LF + line + LF
+        assert len(_r7_writer_lines(planted)) == base, (
+            "the census read a read as a write: " + line.strip())
+
+    # AND A WRITE INSIDE A PATH THAT DOES REQUEST THE REPAINT is seen by the
+    # census and leaves the census RESULT green -- the twin at the level the
+    # result is judged on.
+    api = _src("ApiClient.cs")
+    paths = _r7_repaint_paths(api)
+    setter = paths["the ActiveTeamSeriesId setter"] if         "the ActiveTeamSeriesId setter" in paths else list(paths.values())[0]
+    anchor = "                    LastSeriesT1Wins = 0;"
+    assert anchor in setter, "the setter's own write could not be anchored"
+    twinned = dict(sources)
+    twinned["ApiClient.cs"] = api.replace(
+        anchor, anchor + LF + "                    LastSeriesT2Wins += 0;", 1)
+    writers = _r7_writer_lines(twinned)
+    assert len(writers) == base + 1
+    ps = _r7_repaint_paths(twinned["ApiClient.cs"])
+    outside = [w for w in writers
+               if w[0] != "ApiClient.cs"
+               or not any(w[2] in span for span in ps.values())]
+    assert not outside, ("a write inside a repaint path was counted outside it: "
+                         + repr(outside))
+
+    # the file set is resolved, not listed
+    import inspect
+    assert 'PLUGIN.glob("*.cs")' in inspect.getsource(_r7_plugin_sources)
+
+
+def test_r8_l11_the_banner_inputs_are_not_publicly_writable():
+    """L11's ROOT: the writable surface is narrowed, not only watched.
+
+    A `public static` field is writable by every form C# has, from every source
+    in the assembly, which is why the census had to be widened twice.  The
+    banner's inputs are read from other sources -- NativeUI renders them,
+    Plugin.cs gates on the cached id -- and written from none, so each is now
+    `{ get; private set; }`.  A property cannot be passed by reference, so the
+    `ref`/`out` and `Interlocked` forms stop COMPILING on these names rather
+    than stopping being visible, and a writer added in another source is a
+    compile error rather than a census miss.
+
+    The census stays as wide as it was made: this narrows what it has to find
+    and does not replace it, and one edit would undo the narrowing."""
+    api = _src("ApiClient.cs")
+    for name in ("LastSeriesT1Wins", "LastSeriesT2Wins", "LastSeriesDcDeferred",
+                 "LastSeriesDcDeferredSecondsRemaining",
+                 "LastSeriesDcDeferredBoundSeconds",
+                 "LastSeriesDcDeferredFieldsPresent", "LastSeriesStateForId"):
+        decl = [ln for ln in api.split(LF)
+                if ln.strip().startswith("public static") and (" " + name + " ") in ln]
+        assert len(decl) == 1, (name, decl)
+        assert "{ get; private set; }" in decl[0], (name, decl[0])
+    # the backing field of the id is private already
+    assert "private static string activeTeamSeriesId;" in api
+
+    # AND NO OTHER SOURCE WRITES ONE.  The census is the instrument; this is the
+    # claim the narrowing makes, held over every plugin source.
+    sources = _r7_plugin_sources()
+    foreign = [w for w in _r7_writer_lines(sources) if w[0] != "ApiClient.cs"]
+    assert not foreign, ("a banner input is written outside ApiClient.cs: "
+                         + repr(foreign))
+    print("L11 ROOT: 7 banner inputs declared with a private setter")
+
