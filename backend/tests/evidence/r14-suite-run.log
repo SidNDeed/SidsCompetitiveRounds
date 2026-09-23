@@ -1,0 +1,33 @@
+script    <repo>/backend/tests/evidence/run-both-suites.sh
+cwd       <repo>/backend
+python    Python 3.12.10
+capture   <repo>/backend/tests/evidence/r14-suite-run.log
+command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
+tree      13 paths differ from HEAD or are untracked; fingerprinted before and after
+  34cf322f8cde67d7449ae66cb1fc71cb  .gitignore
+  5bc02e1f032ff1c8ec31e62eba781b67  backend/tests/evidence/contract-arm-consistency.sh
+  39c507f0d4a7f63eaad119622a3925e0  backend/tests/evidence/mutation-runner.py
+  062e4239ccabfa7d7b20d0fbb2356360  backend/tests/evidence/r14-citation-pin.log
+  5d3bac129777e77c7f73731de7a49988  backend/tests/evidence/r14-contract-arms.log
+  04ef13558cbc3639de98179dfe87a33a  backend/tests/evidence/r14-freeze-guard.log
+  b3bbf3e7d4e9375c2bbbf7a82952662d  backend/tests/evidence/r14-mutation-controls.txt
+  0c62fabe2a572e96674f29e3b018a9d8  backend/tests/evidence/r14-mutation-run.log
+  02be826d9ff30e93ab0c0cedcd7ab36e  backend/tests/evidence/r14-pg-controls.log
+  6b26df666cf69b696a2c4c0e7a6b8166  backend/tests/evidence/r14-postgresql-controls.txt
+  1d3a002d6ed4323670492975196487ed  backend/tests/evidence/r14-residual-reach.log
+  94bc02baeb9241af7f004ad08f433f2f  backend/tests/evidence/residual-reach-control.py
+  bfd82f0e64cd2ae241a63dee9c1fdd54  backend/tests/test_ffa_game_number_anchor.py
+=== opt-out started 04:02:11 ===
+command   env -u FFA_TEST_PG_DSN FFA_TEST_PG_OPTOUT=1 python -m pytest tests/ -q -p no:cacheprovider
+opt-out rc=0
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1744 passed, 45 skipped, 1 xfailed, 2 warnings in 615.49s (0:10:15)
+=== live DSN started 04:12:33 ===
+command   FFA_TEST_PG_DSN=postgresql+asyncpg://<user>@<host>:<port>/<db> python -m pytest tests/ -q -p no:cacheprovider
+dsn rc=0
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1774 passed, 15 skipped, 1 xfailed, 2 warnings in 649.05s (0:10:49)
+=== tree re-fingerprinted 04:23:28 ===
+command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
+UNCHANGED: the same 13 paths, each byte-identical to the pre-run fingerprint
+=== done 04:23:29 ===
