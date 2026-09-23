@@ -70,10 +70,23 @@ BEFORE the row is inserted, under an id this module generates -- but only
 AFTER the cap has admitted the upload. Admission (the per-account advisory
 lock and the count that decides) comes first precisely so that a failure
 there, where the handler holds nothing but this request's own bytes, cannot
-leave a file behind. Every DETERMINATE failure after it leaves neither
-artifact: a failed write unlinks its own partial file, a failed INSERT
-unlinks the blob it just wrote. The client is told 503 in every one of these
-cases -- never 500 -- and can try again after the next match.
+leave a file behind. Every DETERMINATE failure after it -- the directory, the
+volume lock, the free-space reading, the stamp, the write, the re-check under
+the lock, the INSERT, and any of their waits passing its ceiling -- ends the
+same way: its cleanup TRIES to remove what this request wrote, the refusal's
+line says whether it did, and the client is told 503 -- never 500 -- and can
+try again after the next match. The one refusal after admission that is not
+a 503 is the cap itself, re-read under the lock immediately before the
+INSERT: that is a 429, with the same cleanup. A commit whose outcome is
+unknown is also a 503 (see below), and an upload whose row has committed is
+accepted whatever happens to its marker afterwards.
+
+  SINCE ROUND 8 NO CLEANUP CAN CHANGE THAT ANSWER (R7-L1). A cleanup ends in
+  one of four ways -- the blob removed, its unlink refused, the directory
+  flush between its two unlinks refused, or its wait past the ceiling every
+  wait here has (R7-M4) -- and ``_discard_for_refusal`` turns each into the
+  words of the refusal's line instead of raising past it. Round 7 let the
+  flush's raise out of the INSERT arm ahead of its rollback and its 503.
 
   AND AN UNLINK THAT RAISES IS NOT A DISCARD. ``_release_marked_blob`` answers
   whether the blob is GONE, and the INSERT arm says so either way: a file that
@@ -228,6 +241,7 @@ not touch it; this note is here so that stays deliberate.
 """
 
 import asyncio
+import contextlib
 import gzip
 import hashlib
 import heapq
@@ -238,6 +252,7 @@ import shutil
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 from typing import Annotated
@@ -351,31 +366,230 @@ _BLOB_RESERVE_LOCK_WAIT_S = 20.0
 
 # WHAT THE BOUNDED WAIT IS PAID WITH, AND WHY IT IS NOT PAID TWICE.
 #
-# The wait above is served inside this request's DATABASE TRANSACTION: the
-# per-account advisory lock is taken before it (that ordering is what keeps a
-# blob from existing before the cap admitted it) and the transaction is not
-# committed until after the INSERT.
+# NOT WITH A DATABASE CONNECTION, SINCE ROUND 8. Until round 7 this wait was
+# served inside the request's open transaction -- the per-account advisory
+# lock taken before it, the connection idle in that transaction for as long
+# as the volume took -- and thirty uploads queued behind one stalled volume
+# held all 20 + 10 of the main pool while every other endpoint on the box
+# waited for a connection (R7-M4). The handler now ENDS its transaction
+# before the section starts (see `upload_auto_log`), so the wait holds this
+# request's per-account turn and the request itself, and nothing any other
+# endpoint needs.
 #
-# The CONNECTION is not what this span introduced -- this handler has had one
-# checked out since its first statement, the session-token lookup, and held it
-# across the scrub and the gzip before that was ever true here. What this span
-# adds is time in which that connection is idle IN A TRANSACTION and the
-# per-account advisory lock is held with it, and the length of it is decided
-# by a volume rather than by this process. The pool is 20 + 10 with a 30 s
-# checkout timeout (`database.py`), so one request paying the full wait is the
-# design; EVERY arriving request paying it, because the holder is stuck on a
-# volume that is not answering, is a queue that consumes connections other
-# endpoints need -- and each of them ends in the same 503 it could have been
-# given immediately.
-#
-# So a pass records when it started its measure-and-write, and an arriving
-# request that finds one in flight PAST this ceiling refuses at once instead
-# of joining the queue. It is a refusal either way; the difference is whether
-# it costs a connection for twenty seconds first. The ceiling is generous
+# It is still paid in something: a request, a thread of the volume pool once
+# the lock is won, and the account's turn. So a pass records when it started
+# its measure-and-write, and an arriving request that finds one in flight PAST
+# this ceiling refuses at once instead of joining the queue: a volume that has
+# held a write that long is not one this route should be adding to, and the
+# answer after twenty seconds would be the same 503. The ceiling is generous
 # against an ordinary slow write -- an 8 MiB write that takes this long is not
-# a volume this route should be adding to.
+# a healthy volume.
 _BLOB_WRITE_STARTED = [0.0]
 _BLOB_WRITE_STALL_S = 5.0
+
+# ── THE THREADS THIS MODULE'S WORK RUNS ON, AND WHAT A WAIT FOR ONE HOLDS ──
+#
+# Every call this module makes on the blob volume, and the two CPU-bound
+# passes over a bundle (the scrub and the gzip), run on a worker thread -- and
+# since round 8 on a thread of THIS MODULE'S OWN POOLS, never the event loop's
+# default executor, and -- on both upload paths -- never while the request's
+# session holds a pooled connection (R7-M4). The one wait made WITH a
+# connection is retention's, by design and bounded (see the last paragraph
+# below).
+#
+# WHY ITS OWN POOLS. `asyncio.to_thread` and `run_in_executor(None, ...)`
+# share one default executor with everything else in the process -- main.py's
+# Steam ticket calls, its player-card fetches and face-cache expiry. A volume
+# that stops answering holds each thread that called into it until it
+# answers, and `asyncio.wait_for` cannot take a thread back: it ends the WAIT,
+# never the work. On the shared executor a stalled volume would therefore
+# spend threads those callers need; on these pools it spends only threads of
+# the callers that use the blob volume at all -- this module's uploads and
+# retention, the player-filed attachment, and main.py's two admin bug-log
+# readers, which read the same volume and were moved onto `_VOLUME_POOL` for
+# exactly this reason. That is what makes "a volume stall reaches the log
+# writers, retention and the log readers, and nothing else" a property of the
+# code rather than of the load. `_CPU_POOL` is shared the same way, and by
+# the same callers only: the automatic upload's scrub and gzip, the player
+# attachment's gzip, and the readers' two scrub passes (main.py's
+# `_scrub_bug_log`). A reader's scrub can therefore delay an upload's pass,
+# and the upload's ceiling turns that delay into a 503, never into a wait.
+#
+# WHY A CEILING ON EVERY WAIT. A wait with no ceiling is a request that never
+# answers, and on this route the answer is the client's cue to stop and try
+# after its next match. Every hop is awaited for at most its budget, and a
+# hop that does not return within it REFUSES 503 -- the direction every other
+# refusal on this path takes (#276/#430). Inside the marked span the budget is
+# what is left of `T` (`_span_budget`); outside it, the ceilings below. A
+# ceiling ends the wait, not the call. Through `_hop` a call that has not
+# started is cancelled; through `_hop_through` and `_start` -- the cleanups,
+# the clears, the player's store -- it is deliberately NOT, because that work
+# must run whether or not anybody still waits. Either way a call that has
+# started keeps its thread until it returns, which is why every call on the
+# write path checks `_MarkedBlob.discarded` under the blob's lock before it
+# creates anything.
+#
+# AND WHY NO CONNECTION IS HELD ACROSS ONE. A request that waits on a thread
+# while its session holds a pooled connection turns the pool into the queue
+# (#644/#646/#652). So each writer ENDS its transaction -- and with it
+# returns its connection and every transaction-scoped lock -- before every hop,
+# and opens a fresh transaction after the hop where it has more to ask the
+# database. The suite drives thirty concurrent uploads, automatic and player,
+# against a stalled volume and reads the pool empty while they wait. ONE WAIT
+# IS MADE WITH A CONNECTION ON PURPOSE: retention's unlink pass, whose row
+# locks live on its transaction (`prune_auto_logs`). No upload reaches it --
+# the opportunistic pass runs on its own session in a task of its own -- and
+# it is bounded by `AUTO_LOG_SWEEP_HOP_WAIT_S` and by who can start one: the
+# retention loop's pass, at most one opportunistic pass an hour, and the
+# operator's internal route, whose request session is the one it holds.
+_VOLUME_POOL = ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="autolog-volume")
+_CPU_POOL = ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="autolog-cpu")
+
+# The ceiling on a volume hop OUTSIDE the marked span: the blob directory's
+# creation, the marker's clear after the row has committed, a cleanup that
+# runs after the span has ended, and the player attachment's hops. Twenty
+# seconds is the reserve lock's own wait, so no wait on this path is longer
+# than the longest one it already had.
+AUTO_LOG_VOLUME_WAIT_S = 20.0
+
+# The ceiling on the scrub and on the gzip. main's own measurement puts the
+# scrub of the largest accepted bundle at about 2.4 s; thirty seconds leaves a
+# queue of bundles on the two CPU threads room to clear, and a pass that has
+# not finished by then is a process under load this upload should not add to.
+AUTO_LOG_CPU_WAIT_S = 30.0
+
+# Retention's unlink pass and the orphan sweep's two hops cover up to
+# `_PRUNE_BATCH` unlinks, or `_ORPHAN_SCAN_BOUND` names, plus a directory
+# flush each, so they get a longer ceiling than one call does. A pass that
+# does not return within it ends as a pass that collected nothing -- nothing
+# is deleted over a removal it could not see finish -- and the next tick
+# retries it.
+AUTO_LOG_SWEEP_HOP_WAIT_S = 120.0
+
+
+async def _hop(pool, budget: float, fn, *args):
+    """`fn(*args)` on `pool`, waited for at most `budget` seconds.
+
+    On expiry the WAIT ends with `TimeoutError` and the call is CANCELLED if
+    it has not started. A call that has started keeps its thread to the end:
+    that is why the write path's calls check `_MarkedBlob.discarded` under the
+    blob's lock before they create anything, and why every caller of this
+    decides, on a timeout, what the work may still do after it has stopped
+    waiting."""
+    loop = asyncio.get_running_loop()
+    return await asyncio.wait_for(
+        loop.run_in_executor(pool, fn, *args), budget)
+
+
+def _start(pool, fn, *args):
+    """Queue `fn(*args)` on `pool` and hand back its future, whose outcome is
+    consumed if nobody is left to read it. For a caller that has to know when
+    the work itself ENDS -- not only when its own wait did -- so it can chain
+    something to that moment: the reserve lock's hand-on, an in-flight name's
+    release."""
+    fut = asyncio.get_running_loop().run_in_executor(pool, fn, *args)
+    fut.add_done_callback(_drain_section_error)
+    return fut
+
+
+async def _hop_through(pool, budget: float, fn, *args):
+    """Like `_hop`, for work that must RUN whether or not anybody is still
+    waiting for it -- a cleanup, a marker's clear. The wait is shielded, so
+    its ceiling ends the wait and never cancels the queued call; an outcome
+    nobody reads is consumed rather than reported as never retrieved."""
+    return await asyncio.wait_for(asyncio.shield(_start(pool, fn, *args)),
+                                  budget)
+
+
+async def _end_transaction(db: AsyncSession) -> None:
+    """End the session's transaction so it holds NO pooled connection across
+    the wait that follows (R7-M4).
+
+    A rollback, because everything a writer asks the database before one of
+    its waits is a READ -- the session check, the counts, the player's row;
+    both writers keep their writes for the transaction after the volume work
+    -- so nothing is discarded by it, and every transaction-scoped lock goes
+    with it. That is why the per-account exclusion is carried across the wait
+    by `_account_turn`, and why the advisory lock is taken again, and the
+    count re-read under it, before the INSERT. A rollback that raises is
+    followed by `close()`, which returns the connection whatever state it is
+    in; neither is allowed to turn a request that has decided nothing yet
+    into a 500."""
+    try:
+        await db.rollback()
+    except Exception:
+        try:
+            await db.close()
+        except Exception:
+            pass
+
+
+# ── ONE UPLOAD PER ACCOUNT AT A TIME, HELD WITHOUT A CONNECTION ──────────────
+#
+# The per-account advisory lock (see `upload_auto_log`) is what the cap is
+# decided under, and a transaction-scoped lock lives on the connection whose
+# transaction holds it. Round 8 ends that transaction before every wait on the
+# volume (R7-M4), so the exclusion across the span -- from the deciding count
+# to the INSERT -- is carried by this instead: an asyncio lock per account,
+# taken BEFORE the deciding count and released after the request's decision.
+# Without it a second upload for the same account could be admitted between
+# this one's count and its reservation, which is the interleaving B0d rules
+# out. A request waiting for its turn holds nothing any other request needs --
+# no connection, no advisory lock, no thread -- so it QUEUES rather than being
+# refused (#646), for at most `AUTO_LOG_ACCOUNT_WAIT_S`, and then answers 503.
+#
+# PROCESS-WIDE IS BOX-WIDE HERE, for the reason the reserve lock above states:
+# one worker, pinned on the compose command (#125/#651). And the cap does not
+# rest on that pin: the advisory lock is taken again and the count re-read
+# under it immediately before the INSERT (#208), so a second process -- were
+# the pin ever lost -- would be refused 429 at the INSERT, not admitted past
+# the cap. An entry lives only while a request holds or awaits it.
+_ACCOUNT_TURNS: dict = {}
+AUTO_LOG_ACCOUNT_WAIT_S = 20.0
+
+
+class _AccountTurn:
+    __slots__ = ("lock", "users")
+
+    def __init__(self):
+        self.lock = asyncio.Lock()
+        self.users = 0
+
+
+@contextlib.asynccontextmanager
+async def _account_turn(steam_id: str):
+    """Hold `steam_id`'s turn for the body, waiting for it at most
+    `AUTO_LOG_ACCOUNT_WAIT_S` and REFUSING 503 past that -- the turn is held
+    by an upload of the same account that has not decided yet, and the answer
+    after its span would be the one this request can have now. Created on
+    first use inside the running loop and dropped when its last user leaves,
+    so no lock outlives the requests using it (and none is carried from one
+    event loop to the next)."""
+    turn = _ACCOUNT_TURNS.get(steam_id)
+    if turn is None:
+        turn = _ACCOUNT_TURNS[steam_id] = _AccountTurn()
+    turn.users += 1
+    try:
+        try:
+            await asyncio.wait_for(turn.lock.acquire(),
+                                   AUTO_LOG_ACCOUNT_WAIT_S)
+        except (asyncio.TimeoutError, TimeoutError):
+            print(f"[AUTO-LOG] refused 503: {steam_id} already has an upload "
+                  f"in flight that did not decide within "
+                  f"{AUTO_LOG_ACCOUNT_WAIT_S}s, so this one refuses rather "
+                  f"than wait on it")
+            raise HTTPException(status_code=503,
+                                detail="log storage unavailable")
+        try:
+            yield
+        finally:
+            turn.lock.release()
+    finally:
+        turn.users -= 1
+        if turn.users == 0 and _ACCOUNT_TURNS.get(steam_id) is turn:
+            del _ACCOUNT_TURNS[steam_id]
 
 # Above this, the hold is REPORTED. An unmeasured hold is the one nobody can
 # argue about afterwards: without this line "the volume was slow" and "the
@@ -997,8 +1211,9 @@ class _MarkedBlob:
     `marked` and `written` are what is on disk, so a cleanup knows whether
     there is anything to remove.
 
-    WHY THERE IS A LOCK ON IT AND NOT ONLY A FLAG. `asyncio.to_thread` does
-    not stop a worker thread. Cancelling the section's await raises in the
+    WHY THERE IS A LOCK ON IT AND NOT ONLY A FLAG. Nothing stops a worker
+    thread that has started -- not a cancellation, and not the ceiling every
+    wait on this path has had since round 8. Cancelling the section's await raises in the
     COROUTINE while the thread is still on its way to `open()`, so a cleanup
     that ran in that window unlinked a file that did not exist yet, removed
     the marker, and the thread created the blob afterwards -- an unreferenced
@@ -1037,7 +1252,7 @@ class _MarkedBlob:
         self.discarded = False
 
 
-def _clear_marker(own: "_MarkedBlob") -> bool:
+def _clear_marker(own: "_MarkedBlob", release_name: bool = True) -> bool:
     """Drop the marker and KEEP the blob -- the row is committed.
 
     A marker that will not unlink is not an error worth failing an accepted
@@ -1049,11 +1264,19 @@ def _clear_marker(own: "_MarkedBlob") -> bool:
     cannot interleave with a worker still creating the marker. It does NOT set
     `discarded`: that flag means "no file for this blob may exist", and the
     blob is exactly what this call keeps.
+
+    `release_name` IS FALSE FOR THE PLAYER ATTACHMENT (round 8). That request
+    drops the in-flight name itself, when the LAST worker it started has
+    ended: a store or a removal whose wait passed its ceiling may still be
+    running when this clear does, and the name stays registered until they
+    have (`submit_bug_report`'s `finally`). The automatic upload's clear runs
+    after its write has returned, so it releases the name here.
     """
     with own.lock:
         gone = True if not own.marked else _unlink_if_present(_marker_path(own.path))
         own.marked = not gone
-    _MARKERS_IN_FLIGHT.discard(own.path.name)
+    if release_name:
+        _MARKERS_IN_FLIGHT.discard(own.path.name)
     return gone
 
 
@@ -1129,6 +1352,23 @@ async def _auto_bucket(db: AsyncSession, steam_id: str):
     if row is None:
         return 0, None
     return int(row["n"] or 0), row["oldest"]
+
+
+async def _lock_and_count(db: AsyncSession, steam_id: str):
+    """THE LOCK, then the count it exists for, in the caller's transaction.
+
+    ONE LOCK, ONE STATEMENT, TWO CALLERS. The upload takes it twice since
+    round 8 (R7-M4): in T1, around the count that ADMITS the upload before
+    anything touches the volume, and in T2, around the re-read of that count
+    immediately before the INSERT (#208). Both are the same statement in the
+    same class on the same key, so there is one lock in this route and not
+    two, and neither transaction contains a call on the volume. It is
+    transaction-scoped and is released when the caller's transaction ends.
+    """
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(CAST(:cls AS integer), hashtext(CAST(:h AS text)))"),
+        {"cls": AUTO_LOG_LOCK_CLASS, "h": steam_id})
+    return await _auto_bucket(db, steam_id)
 
 
 def _bucket_full(steam_id: str, oldest, when: str) -> HTTPException:
@@ -1322,8 +1562,15 @@ def _span_budget(deadline: float) -> float:
     return left
 
 
-async def _release_marked_blob_off_loop(own: "_MarkedBlob") -> bool:
-    """`_release_marked_blob`, performed on a worker thread.
+async def _release_marked_blob_off_loop(own: "_MarkedBlob",
+                                        budget: float | None = None,
+                                        then=None) -> bool:
+    """`_release_marked_blob`, performed on a thread of the volume pool and
+    WAITED FOR AT MOST `budget` seconds (`AUTO_LOG_VOLUME_WAIT_S` when none
+    is given). `then`, when given, is called on the loop when the cleanup
+    itself has ENDED -- however long after this wait that is -- or at once if
+    the pool would not take the call; the reserve section chains the volume's
+    hand-on to it.
 
     IT TAKES THE BLOB'S LOCK, AND A WORKER MAY BE HOLDING THAT LOCK THROUGH
     AN 8 MiB WRITE AND TWO FSYNCS. Called on the event loop, this cleanup
@@ -1346,25 +1593,27 @@ async def _release_marked_blob_off_loop(own: "_MarkedBlob") -> bool:
     (round-6 MEDIUM 3), swept here rather than fixed only at the line that
     was flagged (#432).
 
-    IT IS NOT MADE OPTIONAL OR GIVEN UP ON. What the lock buys is that a
-    cleanup cannot leave behind a file a worker creates after it, and a
-    cleanup that abandoned the wait would put that state back (LENS-2).
+    THE CLEANUP IS NEVER GIVEN UP ON; SINCE ROUND 8 THE WAIT FOR IT IS
+    BOUNDED. What the lock buys is that a cleanup cannot leave behind a file
+    a worker creates after it, and a cleanup that was ABANDONED would put
+    that state back (LENS-2) -- so the call is shielded and runs to its end
+    whatever happens to the wait. The WAIT has a ceiling because a wait with
+    none is a request that never answers (R7-M4): past `budget` this raises
+    `TimeoutError`, and every caller reads that exactly as it reads a
+    cleanup that RAISED -- the removal cannot be proved, so the marker is
+    what offers the blob to the sweep, and the line says the blob may
+    survive rather than that it was discarded.
 
-    AND NOTHING HERE BOUNDS HOW LONG THAT WAIT LASTS. Said plainly, because
-    the sentence this replaced claimed a bound that does not exist:
-
-      * `asyncio.wait_for` CANNOT CANCEL `asyncio.to_thread`. It stops the
-        awaiting coroutine and the thread keeps running to completion, so a
-        deadline around this call bounds the WAITER and never the work.
-      * the volume's stall ceiling, `_BLOB_WRITE_STALL_S`, refuses LATER
-        arrivals: a request that finds a measure-and-write already in flight
-        past that ceiling answers 503 instead of queueing. It does not bound
-        the write already in flight, and it does not bound this cleanup's
-        wait for that write's lock either.
-      * `T` bounds the marked SPAN, which is the handler's own deadline. The
-        cancelled-section path this function exists for runs after the
-        handler has stopped awaiting, so `T` has already been spent or
-        abandoned by the time the wait starts.
+    WHAT THE CEILING DOES NOT DO, said plainly because an earlier sentence
+    here claimed a bound that did not exist: it bounds the WAITER and never
+    the work. `asyncio.wait_for` cannot take a thread back, so a cleanup
+    blocked on a volume that does not answer stays blocked. What bounds the
+    COST of that is the pool -- a stalled volume holds at most its threads,
+    none of the event loop's default executor and no upload's pooled
+    connection --
+    and what keeps the ORDER is that the reserve lock is handed on only
+    when the cleanup has actually run (`_reserve_stamp_and_write`), not
+    when somebody stopped waiting for it.
 
     What holds regardless is the SAFETY property, which does not depend on a
     time bound at all: the lock and the discarded flag decide, in-lock, which
@@ -1372,7 +1621,54 @@ async def _release_marked_blob_off_loop(own: "_MarkedBlob") -> bool:
     worker that finishes later cannot leave a blob the cleanup already
     decided to take. A wait that runs long costs a thread, not a state.
     """
-    return await asyncio.to_thread(_release_marked_blob, own)
+    try:
+        cleanup = _start(_VOLUME_POOL, _release_marked_blob, own)
+    except BaseException:
+        if then is not None:
+            then(None)
+        raise
+    if then is not None:
+        cleanup.add_done_callback(then)
+    return await asyncio.wait_for(
+        asyncio.shield(cleanup),
+        AUTO_LOG_VOLUME_WAIT_S if budget is None else budget)
+
+
+async def _discard_for_refusal(own: "_MarkedBlob") -> str:
+    """Remove a blob no row will ever name, on the way to a refusal, and
+    answer WHAT BECAME OF IT as the words for the refusal's line.
+
+    IT NEVER RAISES AN EXCEPTION, and that is its whole reason to exist
+    (R7-L1). The cleanup can end three ways besides the ordinary one -- the
+    blob's unlink refusing (it survives), the directory flush between the two
+    unlinks refusing (`_fsync_dir` does not swallow, so the removal cannot be
+    proved), or the wait passing its ceiling (the cleanup goes on in its
+    thread) -- and in round 7 the second of those raised out of the INSERT
+    arm ahead of its rollback, its line and its 503, so the client was told
+    500 over a state the sweep already covers. Here every one of them is a
+    SENTENCE: the refusal's own line says whether the blob is gone or may
+    survive, and names the marker that offers it to the sweep when it may.
+
+    A cancellation is not answered: it propagates, and the cleanup it
+    interrupts goes on in its thread (the wait is shielded)."""
+    try:
+        gone = await _release_marked_blob_off_loop(own)
+    except (asyncio.TimeoutError, TimeoutError):
+        return (f"the cleanup had not finished after "
+                f"{AUTO_LOG_VOLUME_WAIT_S}s and goes on in its thread, so the "
+                f"blob may SURVIVE as {own.path.name} -- "
+                f"{_ORPHAN_MARKER}={own.path.name}, kept for the retention "
+                f"loop's orphan sweep")
+    except Exception as ex:
+        return (f"the cleanup raised {type(ex).__name__}, so the removal "
+                f"cannot be proved and the blob may SURVIVE as "
+                f"{own.path.name} -- {_ORPHAN_MARKER}={own.path.name}, kept "
+                f"for the retention loop's orphan sweep")
+    if gone:
+        return "blob discarded"
+    return (f"the blob could NOT be removed and SURVIVES as {own.path.name} "
+            f"-- {_ORPHAN_MARKER}={own.path.name}, kept for the retention "
+            f"loop's orphan sweep")
 
 
 async def _reserve_stamp_and_write(own: "_MarkedBlob", data: bytes,
@@ -1424,29 +1720,40 @@ async def _reserve_stamp_and_write(own: "_MarkedBlob", data: bytes,
     so is the guarantee; only the thread that waits moved
     (`_release_marked_blob_off_loop`).
 
+    AND THE VOLUME IS HANDED ON WHEN THE CLEANUP HAS RUN, NOT WHEN THIS
+    COROUTINE STOPS WAITING FOR IT. Since round 8 every wait here has a
+    ceiling (R7-M4), including this section's wait for its own cleanup; a
+    ceiling that also released the reserve lock would hand the next upload a
+    volume this section may still be writing to -- the R2-M1 mistake made by
+    a timer instead of a cancellation. So the release is CHAINED to the
+    cleanup's own completion, and it happens then whether this coroutine is
+    still waiting, has given up waiting, or was cancelled while it waited.
+
     AND EVERY HOP INSIDE THIS SECTION SPENDS `span_deadline`. The free-space
     reading, the stamp and the write are each awaited for what is LEFT of
     the one deadline the handler took, so the calls they make on the volume
     are charged to `T` exactly as the INSERT and the commit are: a volume
     whose flush -- or whose `statvfs` -- does not return ENDS the span
     rather than extending the interval the sweep's age gate is derived
-    from.
+    from. They run on `_VOLUME_POOL`, never on the default executor.
     """
     hold_started = time.monotonic()
 
-    # BEFORE THE WAIT: IS THERE ANYTHING TO WAIT FOR? The wait is served
-    # inside this request's open transaction, so it is paid in pooled
-    # connections (see `_BLOB_WRITE_STALL_S`). A measure-and-write that has
-    # already been in flight past the stall ceiling is a volume that is not
-    # answering, and every request that queues behind it spends a connection
-    # for the full ceiling to be told the same 503 it could have had at once.
+    # BEFORE THE WAIT: IS THERE ANYTHING TO WAIT FOR? The wait no longer
+    # holds a pooled connection -- the handler ended its transaction before
+    # this section started -- but it still holds a request, the account's
+    # turn and, once the lock is won, a thread of the volume pool (see
+    # `_BLOB_WRITE_STALL_S`). A measure-and-write that has already been in
+    # flight past the stall ceiling is a volume that is not answering, and
+    # every request that queues behind it waits the full ceiling to be told
+    # the same 503 it could have had at once.
     in_flight = _BLOB_WRITE_STARTED[0]
     stalled_for = (time.monotonic() - in_flight) if in_flight else 0.0
     if stalled_for >= _BLOB_WRITE_STALL_S:
         print(f"[AUTO-LOG] refused 503: the blob volume has had a write in "
               f"flight for {stalled_for:.1f}s (ceiling {_BLOB_WRITE_STALL_S}s), "
-              f"so this upload refuses now rather than holding a database "
-              f"connection for {_BLOB_RESERVE_LOCK_WAIT_S}s to be refused then")
+              f"so this upload refuses now rather than waiting "
+              f"{_BLOB_RESERVE_LOCK_WAIT_S}s for the volume to be refused then")
         raise HTTPException(status_code=503, detail="log storage unavailable")
     try:
         await asyncio.wait_for(_BLOB_RESERVE_LOCK.acquire(),
@@ -1485,8 +1792,8 @@ async def _reserve_stamp_and_write(own: "_MarkedBlob", data: bytes,
         # ends the span as a refusal -- the direction `_free_bytes` already
         # takes for a volume it cannot read (#276).
         volume = own.path.parent
-        free = await asyncio.wait_for(asyncio.to_thread(_free_bytes, volume),
-                                      _span_budget(span_deadline))
+        free = await _hop(_VOLUME_POOL, _span_budget(span_deadline),
+                          _free_bytes, volume)
         if free < 0:
             # UNKNOWN IS A REFUSAL. This arm used to be the admitting one --
             # `free >= 0 and ...` skipped the whole guard when the volume
@@ -1519,12 +1826,12 @@ async def _reserve_stamp_and_write(own: "_MarkedBlob", data: bytes,
         # EACH HOP CARRIES WHAT IS LEFT OF THE ONE DEADLINE. The stamp is two
         # fsyncs and the write below is up to 8 MiB plus two more, and both
         # are inside the marked span -- so both spend `T` rather than sitting
-        # outside it. `asyncio.to_thread` cannot stop the worker, so what the
-        # ceiling ends is this coroutine's WAIT: the section stops waiting,
-        # runs its cleanup, and the cleanup's `discarded` flag is what stops
-        # the thread from creating anything afterwards.
-        await asyncio.wait_for(asyncio.to_thread(_guarded_stamp, own),
-                               _span_budget(span_deadline))
+        # outside it. Nothing can stop a worker thread that has started, so
+        # what the ceiling ends is this coroutine's WAIT: the section stops
+        # waiting, runs its cleanup, and the cleanup's `discarded` flag is
+        # what stops the thread from creating anything afterwards.
+        await _hop(_VOLUME_POOL, _span_budget(span_deadline),
+                   _guarded_stamp, own)
 
         # Off the event loop, like the compression in the handler: this is a
         # write of up to 8 MiB, and on a slow or contended volume it blocks
@@ -1535,8 +1842,8 @@ async def _reserve_stamp_and_write(own: "_MarkedBlob", data: bytes,
         # it; releasing between the two is the gap the lock exists to close --
         # and NOT releasing it on a cancellation is what makes that true when
         # the request goes away mid-write.
-        await asyncio.wait_for(asyncio.to_thread(_guarded_write, own, data),
-                               _span_budget(span_deadline))
+        await _hop(_VOLUME_POOL, _span_budget(span_deadline),
+                   _guarded_write, own, data)
     except BaseException:
         own.failed = True
         raise
@@ -1561,37 +1868,61 @@ async def _reserve_stamp_and_write(own: "_MarkedBlob", data: bytes,
         # container's SIGTERM -- and taking that lock on the loop froze every
         # other request on this worker for the length of the write. The
         # ordering above is unchanged; only the thread that waits is.
-        try:
-            if own.failed or own.abandoned:
-                if not await _release_marked_blob_off_loop(own):
-                    print(f"[AUTO-LOG] the blob for {own.path.name} could not "
-                          f"be removed after a failed or abandoned write; it "
-                          f"SURVIVES and its {_ORPHAN_MARKER} marker is kept "
-                          f"so the orphan sweep collects it")
-        finally:
-            # THE LOCK IS RELEASED WHATEVER HAPPENED TO THE CLEANUP ABOVE. A
-            # second cancellation delivered while this coroutine waits in its
-            # own `finally` must not leave the volume lock held for the life
-            # of the process: the cleanup goes on in its thread, and the only
-            # thing lost is the ordering guarantee, in a window where the
-            # process is already being torn down.
-            #
+        #
+        # AND THE HAND-ON IS CHAINED TO THE CLEANUP, NOT TO THIS WAIT (round
+        # 8). The wait below has a ceiling like every other one on this path
+        # (R7-M4), and a ceiling is not evidence that the cleanup ran. So the
+        # lock is released by the cleanup's own completion: when it ends --
+        # this coroutine still waiting, past its ceiling, or cancelled while
+        # it waited -- and never before. Round 7's `finally` released on a
+        # second cancellation and said the ordering was the price; there is no
+        # price now, because the release no longer depends on who is still
+        # waiting. The one case that releases at once is a cleanup that could
+        # not be STARTED (the pool refusing work while the process shuts
+        # down): nothing of this section can still be running then that the
+        # release could outrun, and the marker offers the blob to the sweep.
+        def _hand_on(_cleanup=None):
             # The in-flight stamp is cleared BEFORE the release, so the next
             # waiter can never read a stamp belonging to a pass that has
             # already handed the lock on.
             _BLOB_WRITE_STARTED[0] = 0.0
             _BLOB_RESERVE_LOCK.release()
 
+        if own.failed or own.abandoned:
+            try:
+                gone = await _release_marked_blob_off_loop(own, then=_hand_on)
+            except (asyncio.TimeoutError, TimeoutError):
+                print(f"[AUTO-LOG] the cleanup of {own.path.name} after a "
+                      f"failed or abandoned write had not finished after "
+                      f"{AUTO_LOG_VOLUME_WAIT_S}s; it goes on in its thread, "
+                      f"the volume is handed on when it ends, and until then "
+                      f"its {_ORPHAN_MARKER} marker is what offers the blob "
+                      f"to the orphan sweep")
+            except Exception as ex:
+                print(f"[AUTO-LOG] the cleanup of {own.path.name} after a "
+                      f"failed or abandoned write raised "
+                      f"{type(ex).__name__}; the blob may SURVIVE and its "
+                      f"{_ORPHAN_MARKER} marker is kept so the orphan sweep "
+                      f"collects it")
+            else:
+                if not gone:
+                    print(f"[AUTO-LOG] the blob for {own.path.name} could not "
+                          f"be removed after a failed or abandoned write; it "
+                          f"SURVIVES and its {_ORPHAN_MARKER} marker is kept "
+                          f"so the orphan sweep collects it")
+        else:
+            _hand_on()
+
         # MEASURED, whichever way this went. This span -- the wait for the
         # volume lock plus the measure-and-write under it -- is the part of
-        # the open transaction that this route added when admission moved
-        # ahead of the write, and it is the part a contended volume extends.
-        # Reported only past the ceiling, so an ordinary upload still prints
-        # exactly one landing line.
+        # the upload that a contended volume extends. Since round 8 it holds
+        # no database connection (R7-M4); what it holds is this account's turn
+        # and a thread of the volume pool. Reported only past the ceiling, so
+        # an ordinary upload still prints exactly one landing line.
         held = time.monotonic() - hold_started
         if held >= _BLOB_HOLD_REPORT_S:
-            print(f"[AUTO-LOG] slow blob volume: {held:.1f}s holding an open "
-                  f"transaction and the per-account lock for {steam_id} "
+            print(f"[AUTO-LOG] slow blob volume: {held:.1f}s holding the "
+                  f"upload turn for {steam_id} (and no database connection) "
                   f"across the volume lock and a {len(data)}-byte write "
                   f"(report ceiling {_BLOB_HOLD_REPORT_S}s)")
 
@@ -1613,6 +1944,29 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
     id that cannot be proven must not be able to write one. ``_strict_steam_session_ok``
     fails closed on every path — missing token, unknown/expired/unverified
     session, id mismatch, database error — and has no soft carve-out.
+
+    NO WAIT IN THIS HANDLER HOLDS A POOLED CONNECTION (R7-M4). The session
+    it is given is lazy: it takes a connection at its first statement and
+    returns it when its transaction ends. Until round 7 the handler kept one
+    transaction open from the token lookup to the commit, so every wait in
+    between -- the body read, the scrub, the gzip, the volume lock, the
+    directory, the write -- was paid in a connection, and thirty uploads
+    queued behind one stalled volume held the whole 20 + 10 pool. The
+    database work is now four short transactions AROUND the waits:
+
+      T0   the token's session, ended before the body is read;
+      T1a  the session check against the claimed id, the cheap count and the
+           player's row, ended before the scrub;
+      T1   inside this account's turn: the advisory lock and the count that
+           admits the upload, ended before anything touches the volume;
+      T2   inside the marked span: the advisory lock again, the count re-read
+           under it (#208), the INSERT and the commit -- no volume call
+           inside it.
+
+    Every wait outside the database has a ceiling and answers 503 past it
+    (`_hop`, `AUTO_LOG_*_WAIT_S`), none of them is made with a connection
+    checked out, and the account's turn (`_account_turn`) carries the
+    exclusion from T1's count to T2's INSERT that the transaction used to.
     """
     from main import (            # late import: main imports this module
         _strict_steam_session_ok,
@@ -1648,6 +2002,14 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
         print("[AUTO-LOG] refused 401: token is not a known, unexpired, "
               "verified session -- body not read")
         raise HTTPException(status_code=401, detail=_SESSION_REJECT)
+
+    # T0 ENDS HERE, BEFORE THE BODY IS READ (R7-M4). Both statements above
+    # were READS, and the body read is the one wait in this handler whose
+    # length the CLIENT decides: a sender that trickles fourteen MiB holds it
+    # for as long as the server's own timeouts allow. Returning the
+    # connection first means that sender holds a request and nothing the
+    # rest of the box needs.
+    await _end_transaction(db)
 
     raw = await _read_capped_body(request, AUTO_LOG_MAX_BODY_BYTES)
     try:
@@ -1720,6 +2082,20 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
     player_row = (await db.execute(
         text("SELECT id FROM players WHERE steam_id = :sid"), {"sid": req.steam_id},
     )).mappings().first()
+    # CARRIED AS A VALUE, because the transaction that read it ends on the
+    # next line. The player's row is not re-read before the INSERT (#208 asks
+    # for a re-read of what a CONCURRENT request can change, and the cap is
+    # re-read there for exactly that reason): the only thing that removes a
+    # players row is the account's deletion, and then the INSERT's foreign
+    # key refuses the stale id and the upload takes the INSERT arm's 503 --
+    # the conservative direction, retried after the next match with no row.
+    player_id = str(player_row["id"]) if player_row else None
+
+    # T1a ENDS HERE, BEFORE THE SCRUB AND THE GZIP (R7-M4). Everything this
+    # transaction asked was a READ, and the next two waits are seconds of CPU
+    # on a worker thread that no pooled connection has any business waiting
+    # through.
+    await _end_transaction(db)
 
     # Write-time scrub, in a worker thread. The counters it returns are the
     # positive signal that the scrub RAN, as opposed to matched nothing.
@@ -1733,21 +2109,37 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
     # had changed, which contradicted the module contract at the top of this
     # file and would have had an operator chasing a client defect every time
     # the client did its job.)
-    scrubbed, counts, _ids = await asyncio.to_thread(_scrub_pass_one, log_blob)
-
-    report_id = uuid.uuid4()
-    # In a worker thread for the same reason the scrub above is, and the two
-    # cost the same order of magnitude. gzip at its default level over a
-    # multi-megabyte bundle is hundreds of milliseconds of uninterruptible
-    # CPU, and the api runs ONE uvicorn worker by design: on the event loop
-    # that is time in which no queue join, match report, bet or chat poll on
-    # this box makes any progress at all. Sixteen seats leaving a tournament
-    # round inside the same second serialise into several seconds of it.
     #
-    # The encode is inside the same hop deliberately -- it is a pass over up
-    # to twelve million characters in its own right, and moving only the gzip
-    # would have left half the cost where it was.
-    data = await asyncio.to_thread(_compress_blob, scrubbed)
+    # BOTH PASSES RUN ON THIS MODULE'S CPU POOL AND ARE WAITED FOR AT MOST
+    # `AUTO_LOG_CPU_WAIT_S` EACH (R7-M4): a pass that has not finished by then
+    # is a process under a load this upload should not add to, and the answer
+    # is the 503 the client retries after its next match. Nothing exists on
+    # the volume yet, so a refusal here has nothing to clean up; a pass that
+    # has started finishes on its thread and its result is dropped.
+    try:
+        scrubbed, counts, _ids = await _hop(
+            _CPU_POOL, AUTO_LOG_CPU_WAIT_S, _scrub_pass_one, log_blob)
+
+        report_id = uuid.uuid4()
+        # In a worker thread for the same reason the scrub above is, and the
+        # two cost the same order of magnitude. gzip at its default level over
+        # a multi-megabyte bundle is hundreds of milliseconds of
+        # uninterruptible CPU, and the api runs ONE uvicorn worker by design:
+        # on the event loop that is time in which no queue join, match report,
+        # bet or chat poll on this box makes any progress at all. Sixteen seats
+        # leaving a tournament round inside the same second serialise into
+        # several seconds of it.
+        #
+        # The encode is inside the same hop deliberately -- it is a pass over
+        # up to twelve million characters in its own right, and moving only
+        # the gzip would have left half the cost where it was.
+        data = await _hop(_CPU_POOL, AUTO_LOG_CPU_WAIT_S, _compress_blob,
+                          scrubbed)
+    except (asyncio.TimeoutError, TimeoutError):
+        print(f"[AUTO-LOG] refused 503: the scrub and gzip of the bundle from "
+              f"{req.steam_id} did not finish within {AUTO_LOG_CPU_WAIT_S}s a "
+              f"pass; nothing was written")
+        raise HTTPException(status_code=503, detail="log storage unavailable")
 
     # Do not accept what the reader cannot serve. The body cap above is 14 MiB
     # of REQUEST; this is the ceiling the STORED blob has to satisfy, and a
@@ -1783,12 +2175,22 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
     # has admitted the upload, so the only blob that exists is one the cap
     # already said yes to.
     #
-    # WHAT MOVED INSIDE THE LOCK, AND WHAT DID NOT. The scrub (up to ~2.4 s by
-    # main's own measurement) and the gzip stay OUTSIDE it -- they were the
-    # expensive tenants the earlier round evicted and they are not coming back.
-    # What is inside now is the blob write, the INSERT and the commit. The
-    # exclusion is per ACCOUNT, so the seat that waits is the same seat that is
-    # uploading twice, and the client's own 300 s debounce makes that rare;
+    # WHAT IS INSIDE THE EXCLUSION, AND WHAT HOLDS IT. The scrub (up to ~2.4 s
+    # by main's own measurement) and the gzip stay OUTSIDE it -- they were the
+    # expensive tenants an earlier round evicted and they are not coming back.
+    # What is inside is the count that admits, the blob write, the INSERT and
+    # the commit. Until round 7 the advisory lock held all of that, inside one
+    # transaction whose connection waited through the write; since round 8
+    # (R7-M4) the lock is taken TWICE, each time in a short transaction with
+    # no volume call inside it -- here, around the count that admits, and
+    # again in T2 around the re-read count, the INSERT and the commit -- and
+    # between the two the exclusion is carried by this account's TURN
+    # (`_account_turn`), which is held from before this count to after the
+    # commit and costs no connection. So no second upload for one steam id can
+    # be admitted between this count and this upload's reservation (B0d), in
+    # this process by the turn and across processes by T2's re-check. The
+    # exclusion is per ACCOUNT, so the seat that waits is the same seat that
+    # is uploading twice, and the client's own 300 s debounce makes that rare;
     # nobody else's upload waits on it.
     #
     # AND IT IS CLASS-DISCRIMINATED, not the bare `hashtext(steam_id)` idiom.
@@ -1805,311 +2207,385 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
     # writer, and nothing else in the tree counts them (#707 -- the question to
     # ask is never "which keyspace" but "which other sites must exclude this
     # one").
-    try:
-        await db.execute(
-            text("SELECT pg_advisory_xact_lock(CAST(:cls AS integer), hashtext(CAST(:h AS text)))"),
-            {"cls": AUTO_LOG_LOCK_CLASS, "h": req.steam_id})
-
-        # The authoritative count. Re-read under the lock and re-checked,
-        # because the number the cheap arm saw was read without it and a
-        # concurrent upload may have landed since (#208). This is the read the
-        # cap is made of; the earlier one only saved work.
-        count, oldest = await _auto_bucket(db, req.steam_id)
-    except HTTPException:
-        # Nothing in this span raises one today. The arm is here so that if
-        # anything ever does, its own status code survives instead of being
-        # rewritten into the generic 503 below -- the same discipline the blob
-        # block uses, and the reason the reserve refusal still says WHY.
-        raise
-    except Exception as ex:
-        # 503 AND NOT 500. A lost connection, a lock wait killed by
-        # `idle_in_transaction_session_timeout`, a deadlock detector -- every
-        # one of them is "this exact request would work later", which is what
-        # 503 means to the client half and what 500 does not. Nothing has been
-        # written, so there is nothing to clean up; the rollback is explicit
-        # because under asyncpg a caught statement error leaves the whole
-        # transaction ABORTED and the next statement on this session would
-        # raise on that and not on its own fault.
+    async with _account_turn(req.steam_id):
         try:
-            await db.rollback()
-        except Exception:
-            pass
-        print(f"[AUTO-LOG] refused 503: admission failed for {req.steam_id} "
-              f"before anything was written ({type(ex).__name__})")
-        raise HTTPException(status_code=503, detail="log storage unavailable")
+            # The authoritative count, taken under the lock (`_lock_and_count`).
+            # Re-read and re-checked, because the number the cheap arm saw was
+            # read without it and a concurrent upload may have landed since
+            # (#208). This is the read admission is made of; the earlier one only
+            # saved work, and T2 reads it once more before the INSERT.
+            count, oldest = await _lock_and_count(db, req.steam_id)
+        except HTTPException:
+            # Nothing in this span raises one today. The arm is here so that if
+            # anything ever does, its own status code survives instead of being
+            # rewritten into the generic 503 below -- the same discipline the blob
+            # block uses, and the reason the reserve refusal still says WHY.
+            raise
+        except Exception as ex:
+            # 503 AND NOT 500. A lost connection, a lock wait killed by
+            # `idle_in_transaction_session_timeout`, a deadlock detector -- every
+            # one of them is "this exact request would work later", which is what
+            # 503 means to the client half and what 500 does not. Nothing has been
+            # written, so there is nothing to clean up; the rollback is explicit
+            # because under asyncpg a caught statement error leaves the whole
+            # transaction ABORTED and the next statement on this session would
+            # raise on that and not on its own fault.
+            await _end_transaction(db)
+            print(f"[AUTO-LOG] refused 503: admission failed for {req.steam_id} "
+                  f"before anything was written ({type(ex).__name__})")
+            raise HTTPException(status_code=503, detail="log storage unavailable")
 
-    if count >= AUTO_LOG_PER_STEAM_PER_DAY:
-        # Nothing to discard: this refusal now happens before the write, which
-        # is the whole point of moving the lock up.
-        raise _bucket_full(req.steam_id, oldest, "on the locked re-check")
+        # T1 ENDS HERE, WHICHEVER WAY THE COUNT WENT (R7-M4). The lock is
+        # released with it, and that is safe for the reason given above: this
+        # account's turn is still held, and T2 takes the lock again and re-reads
+        # the count before the INSERT. What must not happen is what used to: the
+        # directory, the volume lock and the write below all waited with this
+        # transaction's connection checked out.
+        await _end_transaction(db)
 
-    # The path resolution has its own arm: _bug_report_log_path creates the
-    # directory, so an unusable BUG_REPORT_LOG_DIR fails here and not at
-    # open(). Uncaught that becomes a 500, and 500 vs 503 is not cosmetic here
-    # -- the client half is a background retry loop, and 503 is the code that
-    # says the same request will work later. Nothing exists yet for it to
-    # clean up.
-    #
-    # AND IT RUNS ON A WORKER THREAD. Creating the directory is a call on the
-    # volume like every other one this path makes, and a contended volume
-    # holds a `mkdir` for as long as it holds a flush; on the loop that was
-    # every other request in the process waiting behind it (round-6 MEDIUM
-    # 3's class, swept in round 7).
-    try:
-        path = await asyncio.to_thread(_bug_report_log_path, str(report_id))
-    except Exception as ex:
-        print(f"[AUTO-LOG] refused 503: the blob directory could not be "
-              f"resolved for {report_id} ({type(ex).__name__})")
-        raise HTTPException(status_code=503, detail="log storage unavailable")
+        if count >= AUTO_LOG_PER_STEAM_PER_DAY:
+            # Nothing to discard: this refusal now happens before the write, which
+            # is the whole point of moving the lock up.
+            raise _bucket_full(req.steam_id, oldest, "on the locked re-check")
 
-    # THE MARKED SPAN: measure, stamp, write, INSERT, commit.
-    #
-    # The measure-stamp-write third of it is a SEPARATE TASK awaited through
-    # `asyncio.shield`, so that cancelling this handler cannot separate the
-    # measurement from the write it decides (see `_reserve_stamp_and_write`).
-    #
-    # ONE DEADLINE GOVERNS THE WHOLE OF IT, taken here and spent by every await
-    # inside the span. `_span_budget(span_deadline)` is what each of the three
-    # -- the section, the INSERT, the commit -- is given, so they cannot sum
-    # past T however the time is distributed between them. The previous
-    # version put `AUTO_LOG_MARKED_SPAN_DEADLINE_S` around the section alone
-    # and said in a comment that the whole span was bounded; the INSERT and
-    # the commit ran under no ceiling, so the sentence the sweep's age gate is
-    # derived from was not true of the code beneath it.
-    #
-    # ON TIMEOUT OR CANCELLATION the section is NOT cancelled -- it holds the
-    # volume lock and a worker thread, and neither stops on request. It is
-    # told it has been abandoned and cleans up its own blob and marker on its
-    # way out; if it has already finished by then, this half does it instead.
-    # A section still writing after T does not extend the bound: this half has
-    # already refused, so no INSERT for that blob will follow it.
-    span_started = time.monotonic()
-    span_deadline = span_started + AUTO_LOG_MARKED_SPAN_DEADLINE_S
-    own = _MarkedBlob(path)
-    section = asyncio.ensure_future(
-        _reserve_stamp_and_write(own, data, req.steam_id, span_deadline))
-    section.add_done_callback(_drain_section_error)
-    try:
-        await asyncio.wait_for(asyncio.shield(section),
-                               _span_budget(span_deadline))
-    except HTTPException:
-        # The reserve refusals inside the section are already the answer they
-        # want to give, and the section has cleaned up after itself. Re-raised
-        # as-is so it does not get rewritten into the generic storage failure
-        # below and lose the one line that says WHY.
-        raise
-    except (asyncio.TimeoutError, TimeoutError):
-        own.abandoned = True
-        if section.done():
-            await _release_marked_blob_off_loop(own)
-        print(f"[AUTO-LOG] refused 503: the measure-and-write for {report_id} "
-              f"passed its {AUTO_LOG_MARKED_SPAN_DEADLINE_S}s deadline; the "
-              f"write is left to finish and discard itself, and the client is "
-              f"told to try after the next match")
-        raise HTTPException(status_code=503, detail="log storage unavailable")
-    except asyncio.CancelledError:
-        # The request went away. Same disposition as the deadline: the section
-        # keeps the lock until its write returns and then removes what it
-        # wrote. Re-raised, because a cancelled request has no answer to give.
-        # The removal waits in a thread; a second cancellation delivered while
-        # it waits ends the wait and not the removal, which finishes there.
-        own.abandoned = True
-        if section.done():
-            await _release_marked_blob_off_loop(own)
-        raise
-    except Exception as ex:
-        print(f"[AUTO-LOG] blob write failed for {report_id}: {type(ex).__name__}")
-        raise HTTPException(status_code=503, detail="log storage unavailable")
-
-    # THE REGISTRY ENTRY IS RELEASED ON EVERY EXIT PATH, cancellation
-    # included. `_clear_marker` and `_release_marked_blob` each drop it on
-    # the arms they own, but a request cancelled between the write and the
-    # commit reaches neither -- and a name left in `_MARKERS_IN_FLIGHT`
-    # after its request is gone would make the sweep skip that marker for
-    # the life of the process, which is the one way this design could keep
-    # a blob nothing collects. Dropping the name is always safe: the marker
-    # FILE is what protects the blob, and it is still on disk.
-    try:
-        room = req.room_name or "an unnamed room"
-        description = f"auto-upload after {req.mode or 'a match'} in {room}"
+        # The path resolution has its own arm: _bug_report_log_path creates the
+        # directory, so an unusable BUG_REPORT_LOG_DIR fails here and not at
+        # open(). Uncaught that becomes a 500, and 500 vs 503 is not cosmetic here
+        # -- the client half is a background retry loop, and 503 is the code that
+        # says the same request will work later. Nothing exists yet for it to
+        # clean up.
+        #
+        # AND IT RUNS ON A WORKER THREAD. Creating the directory is a call on the
+        # volume like every other one this path makes, and a contended volume
+        # holds a `mkdir` for as long as it holds a flush; on the loop that was
+        # every other request in the process waiting behind it (round-6 MEDIUM
+        # 3's class, swept in round 7).
+        #
+        # ON THE VOLUME POOL, WAITED FOR AT MOST `AUTO_LOG_VOLUME_WAIT_S`, WITH NO
+        # CONNECTION HELD (R7-M4) -- the hop R7-M4 named. A `mkdir` that does not
+        # return in time is the same refusal as one that raises: nothing of this
+        # upload exists on the volume yet, and a directory the thread creates
+        # late is a directory, not an artifact.
         try:
-            left = _span_budget(span_deadline)
-            row = (await asyncio.wait_for(db.execute(
-                # bug_number IS SUPPLIED, from a sequence of this route's own
-                # (migration 350). The column's DEFAULT is nextval() on
-                # `bug_reports_number_seq` -- the counter that names a player's
-                # ticket in #bug-reports, in admin triage and in the ops
-                # `bug-log:N` verb. Left to the default, every automatic upload
-                # would spend one of those numbers and retention would then delete
-                # the row that held it, so a player filing a report a month later
-                # is told they are #1,247 with ~900 numbers behind them naming
-                # nothing. A sequence never rewinds; that gap is permanent and
-                # reads as data loss to whoever hits it.
+            path = await _hop(_VOLUME_POOL, AUTO_LOG_VOLUME_WAIT_S,
+                              _bug_report_log_path, str(report_id))
+        except Exception as ex:
+            via = (f" within {AUTO_LOG_VOLUME_WAIT_S}s"
+                   if isinstance(ex, TimeoutError) else "")
+            print(f"[AUTO-LOG] refused 503: the blob directory could not be "
+                  f"resolved{via} for {report_id} ({type(ex).__name__})")
+            raise HTTPException(status_code=503, detail="log storage unavailable")
+
+        # THE MARKED SPAN: measure, stamp, write, INSERT, commit.
+        #
+        # The measure-stamp-write third of it is a SEPARATE TASK awaited through
+        # `asyncio.shield`, so that cancelling this handler cannot separate the
+        # measurement from the write it decides (see `_reserve_stamp_and_write`).
+        #
+        # ONE DEADLINE GOVERNS THE WHOLE OF IT, taken here and spent by every await
+        # inside the span. `_span_budget(span_deadline)` is what each of the three
+        # -- the section, the INSERT, the commit -- is given, so they cannot sum
+        # past T however the time is distributed between them. The previous
+        # version put `AUTO_LOG_MARKED_SPAN_DEADLINE_S` around the section alone
+        # and said in a comment that the whole span was bounded; the INSERT and
+        # the commit ran under no ceiling, so the sentence the sweep's age gate is
+        # derived from was not true of the code beneath it.
+        #
+        # ON TIMEOUT OR CANCELLATION the section is NOT cancelled -- it holds the
+        # volume lock and a worker thread, and neither stops on request. It is
+        # told it has been abandoned and cleans up its own blob and marker on its
+        # way out; if it has already finished by then, this half does it instead.
+        # A section still writing after T does not extend the bound: this half has
+        # already refused, so no INSERT for that blob will follow it.
+        span_started = time.monotonic()
+        span_deadline = span_started + AUTO_LOG_MARKED_SPAN_DEADLINE_S
+        own = _MarkedBlob(path)
+        section = asyncio.ensure_future(
+            _reserve_stamp_and_write(own, data, req.steam_id, span_deadline))
+        section.add_done_callback(_drain_section_error)
+        try:
+            await asyncio.wait_for(asyncio.shield(section),
+                                   _span_budget(span_deadline))
+        except HTTPException:
+            # The reserve refusals inside the section are already the answer they
+            # want to give, and the section has cleaned up after itself. Re-raised
+            # as-is so it does not get rewritten into the generic storage failure
+            # below and lose the one line that says WHY.
+            raise
+        except (asyncio.TimeoutError, TimeoutError):
+            own.abandoned = True
+            # THE CLEANUP'S OWN OUTCOME CANNOT TURN THIS REFUSAL INTO A 500. When
+            # the section has already returned, this half removes the blob, and
+            # that removal has a ceiling and a directory flush that can refuse;
+            # `_discard_for_refusal` answers either as a sentence for the line
+            # below instead of raising past it -- the R7-L1 class, swept to every
+            # arm that cleans up before refusing (#432).
+            left_to = ("the write is left to finish and discard itself"
+                       if not section.done() else await _discard_for_refusal(own))
+            print(f"[AUTO-LOG] refused 503: the measure-and-write for {report_id} "
+                  f"passed its {AUTO_LOG_MARKED_SPAN_DEADLINE_S}s deadline; "
+                  f"{left_to}, and the client is told to try after the next match")
+            raise HTTPException(status_code=503, detail="log storage unavailable")
+        except asyncio.CancelledError:
+            # The request went away. Same disposition as the deadline: the section
+            # keeps the lock until its write returns and then removes what it
+            # wrote. Re-raised, because a cancelled request has no answer to give.
+            # The removal waits in a thread; a second cancellation delivered while
+            # it waits ends the wait and not the removal, which finishes there.
+            own.abandoned = True
+            if section.done():
+                await _discard_for_refusal(own)
+            raise
+        except Exception as ex:
+            print(f"[AUTO-LOG] blob write failed for {report_id}: {type(ex).__name__}")
+            raise HTTPException(status_code=503, detail="log storage unavailable")
+
+        # THE REGISTRY ENTRY IS RELEASED ON EVERY EXIT PATH, cancellation
+        # included. `_clear_marker` and `_release_marked_blob` each drop it on
+        # the arms they own, but a request cancelled between the write and the
+        # commit reaches neither -- and a name left in `_MARKERS_IN_FLIGHT`
+        # after its request is gone would make the sweep skip that marker for
+        # the life of the process, which is the one way this design could keep
+        # a blob nothing collects. Dropping the name is always safe: the marker
+        # FILE is what protects the blob, and it is still on disk.
+        try:
+            room = req.room_name or "an unnamed room"
+            description = f"auto-upload after {req.mode or 'a match'} in {room}"
+
+            # T2 OPENS WITH THE LOCK AGAIN AND THE COUNT RE-READ UNDER IT (round
+            # 8, #208). T1 released the lock when it ended, so this transaction
+            # takes it again before it writes, and the count that admitted the
+            # upload is read again under it: the cap is a property of what the
+            # database holds at the INSERT, not of what it held before the write.
+            # In this process the account's turn has been held since T1, so the
+            # number cannot have moved and this arm refuses nothing; what it holds
+            # is the cap across PROCESSES, were the one-worker pin (#125) ever
+            # lost and two uploads for one account both passed T1. Both
+            # statements spend what is left of T and neither is a call on the
+            # volume. A refusal here has a blob to discard, and discards it the
+            # way every refusal after the write does: transaction ended FIRST,
+            # then the cleanup, answered as a sentence and never raised.
+            try:
+                count, oldest = await asyncio.wait_for(
+                    _lock_and_count(db, req.steam_id), _span_budget(span_deadline))
+            except Exception as ex:
+                await _end_transaction(db)
+                outcome = await _discard_for_refusal(own)
+                via = (f" (the {AUTO_LOG_MARKED_SPAN_DEADLINE_S}s marked-span "
+                       f"deadline)" if isinstance(ex, TimeoutError) else "")
+                print(f"[AUTO-LOG] refused 503: the re-check under the lock "
+                      f"failed for {report_id}: {type(ex).__name__}{via}; "
+                      f"{outcome}")
+                raise HTTPException(status_code=503,
+                                    detail="log storage unavailable")
+            if count >= AUTO_LOG_PER_STEAM_PER_DAY:
+                await _end_transaction(db)
+                outcome = await _discard_for_refusal(own)
+                print(f"[AUTO-LOG] {req.steam_id} reached the cap between the "
+                      f"count that admitted {report_id} and its INSERT; {outcome}")
+                raise _bucket_full(req.steam_id, oldest,
+                                   "on the re-check before the INSERT")
+
+            try:
+                left = _span_budget(span_deadline)
+                row = (await asyncio.wait_for(db.execute(
+                    # bug_number IS SUPPLIED, from a sequence of this route's own
+                    # (migration 350). The column's DEFAULT is nextval() on
+                    # `bug_reports_number_seq` -- the counter that names a player's
+                    # ticket in #bug-reports, in admin triage and in the ops
+                    # `bug-log:N` verb. Left to the default, every automatic upload
+                    # would spend one of those numbers and retention would then delete
+                    # the row that held it, so a player filing a report a month later
+                    # is told they are #1,247 with ~900 numbers behind them naming
+                    # nothing. A sequence never rewinds; that gap is permanent and
+                    # reads as data loss to whoever hits it.
+                    #
+                    # `bug_reports_auto_number_seq` descends from -1, so an automatic
+                    # row's number cannot collide with a human one (the unique index
+                    # is satisfied) and cannot consume one. The CHECK added by 350
+                    # makes it a property of the schema rather than of this statement.
+                    text("""INSERT INTO bug_reports
+                                (id, player_id, steam_id, display_name, mod_version, game_version,
+                                 severity, category, kind, description, repro_steps,
+                                 log_filename, log_bytes, status, bug_number)
+                            VALUES
+                                (CAST(:id AS uuid), CAST(:pid AS uuid), :sid, :name, :mv, :gv,
+                                 'low', 'other', 'auto', :descr, :repro,
+                                 :fname, :fbytes, 'open',
+                                 nextval('bug_reports_auto_number_seq'))
+                         RETURNING bug_number"""),
+                    {
+                        "id": str(report_id),
+                        "pid": player_id,
+                        "sid": req.steam_id,
+                        "name": req.display_name,
+                        "mv": req.mod_version,
+                        "gv": req.game_version,
+                        "descr": description,
+                        "repro": _context_block(req),
+                        "fname": path.name,
+                        "fbytes": len(data),
+                    },
+                ), left)).mappings().first()
+            except Exception as ex:
+                # The INSERT raised, so there is DEFINITIVELY no row and the only thing
+                # that could ever find this blob again does not exist. Remove it, blob
+                # first and marker second.
                 #
-                # `bug_reports_auto_number_seq` descends from -1, so an automatic
-                # row's number cannot collide with a human one (the unique index
-                # is satisfied) and cannot consume one. The CHECK added by 350
-                # makes it a property of the schema rather than of this statement.
-                text("""INSERT INTO bug_reports
-                            (id, player_id, steam_id, display_name, mod_version, game_version,
-                             severity, category, kind, description, repro_steps,
-                             log_filename, log_bytes, status, bug_number)
-                        VALUES
-                            (CAST(:id AS uuid), CAST(:pid AS uuid), :sid, :name, :mv, :gv,
-                             'low', 'other', 'auto', :descr, :repro,
-                             :fname, :fbytes, 'open',
-                             nextval('bug_reports_auto_number_seq'))
-                     RETURNING bug_number"""),
-                {
-                    "id": str(report_id),
-                    "pid": str(player_row["id"]) if player_row else None,
-                    "sid": req.steam_id,
-                    "name": req.display_name,
-                    "mv": req.mod_version,
-                    "gv": req.game_version,
-                    "descr": description,
-                    "repro": _context_block(req),
-                    "fname": path.name,
-                    "fbytes": len(data),
-                },
-            ), left)).mappings().first()
-        except Exception as ex:
-            # The INSERT raised, so there is DEFINITIVELY no row and the only thing
-            # that could ever find this blob again does not exist. Remove it, blob
-            # first and marker second. The rollback is explicit because under
-            # asyncpg a caught statement error leaves the whole transaction
-            # ABORTED, and the next statement on this session -- the opportunistic
-            # prune, or anything a later dependency runs -- would raise on that and
-            # not on its own fault.
-            #
-            # AND THE RECORD SAYS WHICH OF THE TWO OUTCOMES HAPPENED. An unlink
-            # that raises leaves an unreferenced blob on the volume; a line saying
-            # "blob discarded" over that state is a false cleanup record, and the
-            # file it describes is one nobody goes looking for. So the marker is
-            # KEPT in that case and the line says the blob SURVIVES and names it
-            # for the sweep, which is the mechanism that collects it.
-            discarded = await _release_marked_blob_off_loop(own)
-            try:
-                await db.rollback()
-            except Exception:
-                pass
-            # ONE print statement, two outcomes. The branch is on the MESSAGE
-            # and not on the printing, because this module's own suite reads
-            # refusal paths structurally and a refusal whose only print sits
-            # inside a conditional reads as a silent one (#438/#443).
-            #
-            # THE DEADLINE LANDS IN THIS ARM TOO. `_span_budget` gives the
-            # statement only what is left of T, so a database that will not
-            # answer ENDS the span instead of extending it -- and the
-            # disposition is unchanged, because no COMMIT was issued for this
-            # row and an uncommitted INSERT cannot become visible. The line
-            # says which of the two happened rather than leaving it to be
-            # inferred from an exception name.
-            via = (f" (the {AUTO_LOG_MARKED_SPAN_DEADLINE_S}s marked-span "
-                   f"deadline)" if isinstance(ex, TimeoutError) else "")
-            outcome = ("blob discarded" if discarded else
-                       f"the blob could NOT be removed and SURVIVES as "
-                       f"{path.name} -- {_ORPHAN_MARKER}={path.name}, kept for "
-                       f"the retention loop's orphan sweep")
-            print(f"[AUTO-LOG] insert failed for {report_id}: "
-                  f"{type(ex).__name__}{via}; {outcome}")
-            raise HTTPException(status_code=503, detail="log storage unavailable")
+                # THE TRANSACTION IS ENDED FIRST, BEFORE THE CLEANUP (round 8). Under
+                # asyncpg a caught statement error leaves the whole transaction
+                # ABORTED, and ending it is also what returns the connection -- so
+                # it happens before the one wait left in this arm, the cleanup's,
+                # and not after it (R7-M4). And it is what R7-L1 found SKIPPED: the
+                # cleanup's directory flush does not swallow, and in round 7 its
+                # raise left this arm ahead of the rollback, the line and the 503,
+                # so the client was answered 500. Now nothing the cleanup does can
+                # come between this request and its answer: the rollback has
+                # already happened, and `_discard_for_refusal` returns every
+                # outcome -- including a flush that refused and a wait that passed
+                # its ceiling -- as a sentence for the line below instead of
+                # raising past it.
+                #
+                # AND THE RECORD SAYS WHICH OUTCOME HAPPENED. An unlink that raises
+                # leaves an unreferenced blob on the volume; a line saying "blob
+                # discarded" over that state is a false cleanup record, and the file
+                # it describes is one nobody goes looking for. So the marker is KEPT
+                # in that case and the line says the blob SURVIVES and names it for
+                # the sweep, which is the mechanism that collects it.
+                await _end_transaction(db)
+                outcome = await _discard_for_refusal(own)
+                # ONE print statement, every outcome. The branch is on the MESSAGE
+                # and not on the printing, because this module's own suite reads
+                # refusal paths structurally and a refusal whose only print sits
+                # inside a conditional reads as a silent one (#438/#443).
+                #
+                # THE DEADLINE LANDS IN THIS ARM TOO. `_span_budget` gives the
+                # statement only what is left of T, so a database that will not
+                # answer ENDS the span instead of extending it -- and the
+                # disposition is unchanged, because no COMMIT was issued for this
+                # row and an uncommitted INSERT cannot become visible. The line
+                # says which of the two happened rather than leaving it to be
+                # inferred from an exception name.
+                via = (f" (the {AUTO_LOG_MARKED_SPAN_DEADLINE_S}s marked-span "
+                       f"deadline)" if isinstance(ex, TimeoutError) else "")
+                print(f"[AUTO-LOG] insert failed for {report_id}: "
+                      f"{type(ex).__name__}{via}; {outcome}")
+                raise HTTPException(status_code=503, detail="log storage unavailable")
 
-        try:
-            left = _span_budget(span_deadline)
-            await asyncio.wait_for(db.commit(), left)
-        except Exception as ex:
-            # INDETERMINATE -- see FAILURE DIRECTION at the top. The blob STAYS,
-            # AND SO DOES ITS MARKER. This is the one arm that deliberately leaves
-            # an artifact behind: the row may have committed and the
-            # acknowledgement been lost, and deleting the file then destroys the
-            # only copy of a log a live row promises.
+            try:
+                left = _span_budget(span_deadline)
+                await asyncio.wait_for(db.commit(), left)
+            except Exception as ex:
+                # INDETERMINATE -- see FAILURE DIRECTION at the top. The blob STAYS,
+                # AND SO DOES ITS MARKER. This is the one arm that deliberately leaves
+                # an artifact behind: the row may have committed and the
+                # acknowledgement been lost, and deleting the file then destroys the
+                # only copy of a log a live row promises.
+                #
+                # The marker is what makes that safe rather than merely cheap. It was
+                # stamped before the bytes existed and it is left in place here, so the
+                # sweep has the file in its population either way: if the commit did
+                # land a row names the blob and the sweep CLEARS the marker, keeping
+                # the file for ever; if it did not, the file and its marker are
+                # collected once past the age gate. Nothing has to be remembered by
+                # anybody.
+                #
+                # THE MUTATION THIS ARM IS HELD BY -- and it is a mutation of code
+                # that EXISTS, not an instruction to add a cleanup this arm must
+                # never have -- is deleting the `_MARKERS_IN_FLIGHT.discard` below.
+                # That set means "a live request owns this marker" and the sweep
+                # skips every name in it, so a name held after its request has
+                # finished makes the marker permanent and the blob uncollectable for
+                # the life of the process. The suite's control removes that line and
+                # watches the sweep pass over a blob it should have taken.
+                #
+                # THE NAME IS DROPPED BEFORE THE ROLLBACK, not after. This request
+                # has decided -- blob and marker stay, the sweep resolves them by
+                # asking the database -- so nothing waits on the rollback to make
+                # that true. A rollback that never returns, on the database that
+                # has just stopped answering, would otherwise hold the name for
+                # the life of the process, and a held name is precisely what makes
+                # a marker permanent and its blob uncollectable.
+                _MARKERS_IN_FLIGHT.discard(path.name)
+                await _end_transaction(db)
+                via = (f" (the {AUTO_LOG_MARKED_SPAN_DEADLINE_S}s marked-span "
+                       f"deadline)" if isinstance(ex, TimeoutError) else "")
+                print(f"[AUTO-LOG] commit INDETERMINATE for {report_id}: "
+                      f"{type(ex).__name__}{via}; blob KEPT as {path.name} -- a row may or "
+                      f"may not exist for it; {_ORPHAN_MARKER}={path.name}, collected "
+                      f"by the retention loop's orphan sweep if no row names it")
+                raise HTTPException(status_code=503, detail="log storage unavailable")
+
+            # THE ROW IS COMMITTED, so the blob is referenced and the marker has done
+            # its job. Clearing it is the ONLY way a marker is dropped while its blob
+            # stays, and it is allowed to fail: the sweep's second disposition asks the
+            # database, is told a row names the blob, and clears it then.
             #
-            # The marker is what makes that safe rather than merely cheap. It was
-            # stamped before the bytes existed and it is left in place here, so the
-            # sweep has the file in its population either way: if the commit did
-            # land a row names the blob and the sweep CLEARS the marker, keeping
-            # the file for ever; if it did not, the file and its marker are
-            # collected once past the age gate. Nothing has to be remembered by
-            # anybody.
+            # ON A WORKER THREAD, like the rest of this path's calls on the
+            # volume: the clear is an unlink under the blob's own lock. A
+            # cancellation delivered while it waits ends the wait and not the
+            # unlink, and the `finally` below drops the name either way, which
+            # is safe for the reason given above the INSERT: the marker FILE is
+            # what protects the blob, and the row that names it is committed.
             #
-            # THE MUTATION THIS ARM IS HELD BY -- and it is a mutation of code
-            # that EXISTS, not an instruction to add a cleanup this arm must
-            # never have -- is deleting the `_MARKERS_IN_FLIGHT.discard` below.
-            # That set means "a live request owns this marker" and the sweep
-            # skips every name in it, so a name held after its request has
-            # finished makes the marker permanent and the blob uncollectable for
-            # the life of the process. The suite's control removes that line and
-            # watches the sweep pass over a blob it should have taken.
-            #
-            # THE NAME IS DROPPED BEFORE THE ROLLBACK, not after. This request
-            # has decided -- blob and marker stay, the sweep resolves them by
-            # asking the database -- so nothing waits on the rollback to make
-            # that true. A rollback that never returns, on the database that
-            # has just stopped answering, would otherwise hold the name for
-            # the life of the process, and a held name is precisely what makes
-            # a marker permanent and its blob uncollectable.
+            # AND ITS WAIT HAS A CEILING, WITH NO CONNECTION HELD (R7-M4). The
+            # commit above ended T2 and returned the connection. A clear that has
+            # not returned by `AUTO_LOG_VOLUME_WAIT_S` goes on in its thread, and
+            # the upload is still ACCEPTED: the row is committed, so the marker
+            # left behind is disposition 2 of the sweep -- a marker over a blob a
+            # row names, cleared on the next pass that reaches it. A 503 here
+            # would tell the client to send again a log that has already landed.
+            try:
+                await _hop_through(_VOLUME_POOL, AUTO_LOG_VOLUME_WAIT_S,
+                                   _clear_marker, own)
+            except Exception as ex:
+                print(f"[AUTO-LOG] the marker of the committed {report_id} was "
+                      f"not cleared ({type(ex).__name__}); the upload stands, and "
+                      f"{_ORPHAN_MARKER}={path.name} is cleared by the orphan "
+                      f"sweep, which finds a row naming the blob")
+
+            bug_number = (row or {}).get("bug_number") or 0
+            print(f"[AUTO-LOG] #{bug_number} ({report_id}) steam={req.steam_id} "
+                  f"mode={req.mode or '-'} raw_chars={len(log_blob)} stored_bytes={len(data)} "
+                  f"scrub os_user={counts.get('os_user', 0)} discord_id={counts.get('discord_id', 0)}")
+
+            # NOT AWAITED, AND NOT ON THIS REQUEST'S SESSION (R7-M4). The
+            # opportunistic retention pass holds its connection across its own
+            # unlink pass by design -- the row locks that keep two passes off one
+            # row live on it -- so run inside this request it made an accepted
+            # upload wait on a volume while holding a connection, the pattern
+            # this round removes. It is a task of its own with a session of its
+            # own (#607), and the upload answers without it.
+            _maybe_prune()
+
+            return {
+                "status": "received",
+                "id": str(report_id),
+                "bug_number": bug_number,
+                "log_persisted": True,
+                "log_bytes": len(data),
+                "scrubbed": {"os_user": counts.get("os_user", 0),
+                             "discord_id": counts.get("discord_id", 0)},
+            }
+        finally:
             _MARKERS_IN_FLIGHT.discard(path.name)
-            try:
-                await db.rollback()
-            except Exception:
-                pass
-            via = (f" (the {AUTO_LOG_MARKED_SPAN_DEADLINE_S}s marked-span "
-                   f"deadline)" if isinstance(ex, TimeoutError) else "")
-            print(f"[AUTO-LOG] commit INDETERMINATE for {report_id}: "
-                  f"{type(ex).__name__}{via}; blob KEPT as {path.name} -- a row may or "
-                  f"may not exist for it; {_ORPHAN_MARKER}={path.name}, collected "
-                  f"by the retention loop's orphan sweep if no row names it")
-            raise HTTPException(status_code=503, detail="log storage unavailable")
 
-        # THE ROW IS COMMITTED, so the blob is referenced and the marker has done
-        # its job. Clearing it is the ONLY way a marker is dropped while its blob
-        # stays, and it is allowed to fail: the sweep's second disposition asks the
-        # database, is told a row names the blob, and clears it then.
-        #
-        # ON A WORKER THREAD, like the rest of this path's calls on the
-        # volume: the clear is an unlink under the blob's own lock. A
-        # cancellation delivered while it waits ends the wait and not the
-        # unlink, and the `finally` below drops the name either way, which
-        # is safe for the reason given above the INSERT: the marker FILE is
-        # what protects the blob, and the row that names it is committed.
-        await asyncio.to_thread(_clear_marker, own)
-
-        bug_number = (row or {}).get("bug_number") or 0
-        print(f"[AUTO-LOG] #{bug_number} ({report_id}) steam={req.steam_id} "
-              f"mode={req.mode or '-'} raw_chars={len(log_blob)} stored_bytes={len(data)} "
-              f"scrub os_user={counts.get('os_user', 0)} discord_id={counts.get('discord_id', 0)}")
-
-        await _maybe_prune(db)
-
-        return {
-            "status": "received",
-            "id": str(report_id),
-            "bug_number": bug_number,
-            "log_persisted": True,
-            "log_bytes": len(data),
-            "scrubbed": {"os_user": counts.get("os_user", 0),
-                         "discord_id": counts.get("discord_id", 0)},
-        }
-    finally:
-        _MARKERS_IN_FLIGHT.discard(path.name)
-
-        # THE SPAN, MEASURED -- and this line is the bound's falsifier.
-        #
-        # The hold timer inside the section stops when the write returns, so
-        # it cannot see the INSERT or the commit; a residual whose falsifier
-        # reads only that line could not observe the half of the span that was
-        # unbounded (#342/#431). This one runs from before the marker existed
-        # to after the request has decided, so a span that outlived T on a
-        # path that did NOT refuse is a line in the log rather than a
-        # deduction from the code (#438/#443). Reported past the same ceiling
-        # as the volume hold, so an ordinary upload still prints one line.
-        span = time.monotonic() - span_started
-        if span >= _BLOB_HOLD_REPORT_S:
-            print(f"[AUTO-LOG] marked span for {report_id}: {span:.1f}s from "
-                  f"before the marker existed to this request's decision "
-                  f"(deadline {AUTO_LOG_MARKED_SPAN_DEADLINE_S}s, report "
-                  f"ceiling {_BLOB_HOLD_REPORT_S}s)")
+            # THE SPAN, MEASURED -- and this line is the bound's falsifier.
+            #
+            # The hold timer inside the section stops when the write returns, so
+            # it cannot see the INSERT or the commit; a residual whose falsifier
+            # reads only that line could not observe the half of the span that was
+            # unbounded (#342/#431). This one runs from before the marker existed
+            # to after the request has decided, so a span that outlived T on a
+            # path that did NOT refuse is a line in the log rather than a
+            # deduction from the code (#438/#443). Reported past the same ceiling
+            # as the volume hold, so an ordinary upload still prints one line.
+            span = time.monotonic() - span_started
+            if span >= _BLOB_HOLD_REPORT_S:
+                print(f"[AUTO-LOG] marked span for {report_id}: {span:.1f}s from "
+                      f"before the marker existed to this request's decision "
+                      f"(deadline {AUTO_LOG_MARKED_SPAN_DEADLINE_S}s, report "
+                      f"ceiling {_BLOB_HOLD_REPORT_S}s)")
 
 
 def _hold(row_id: str, clock: float) -> None:
@@ -2321,12 +2797,14 @@ async def prune_auto_logs(db: AsyncSession, *, days: int = AUTO_LOG_RETENTION_DA
             print(f"[AUTO-LOG] retention sweep: nothing due outside the "
                   f"{len(held)} row(s) held back after a failed unlink")
         # The SELECT above opened a transaction on this session and this path
-        # writes nothing, so it has to be ENDED rather than abandoned. On the
-        # loop's own session that would resolve itself when the context manager
-        # exits; on the opportunistic call it does not, because the session is
-        # the REQUEST's and it stays checked out until the request finishes --
-        # an idle-in-transaction connection holding back the vacuum horizon for
-        # that long, for a pass that decided to do nothing.
+        # writes nothing, so it has to be ENDED rather than abandoned. On a
+        # session of the pass's own -- the retention loop's, and since round 8
+        # the opportunistic pass's -- that would resolve itself when the
+        # context manager exits; on the operator route's it does not, because
+        # that session is the REQUEST's and it stays checked out until the
+        # request finishes -- an idle-in-transaction connection holding back
+        # the vacuum horizon for that long, for a pass that decided to do
+        # nothing.
         await db.rollback()
         return {"rows": 0, "blobs": 0, "retained": 0, "undurable": 0,
                 "due": 0, "held": len(held)}
@@ -2340,8 +2818,35 @@ async def prune_auto_logs(db: AsyncSession, *, days: int = AUTO_LOG_RETENTION_DA
     # worker for the length of the pass. One hop for the whole pass rather
     # than one per row: the loop is free either way and the thread does not
     # pay a handoff per candidate.
-    outcomes, barrier = await asyncio.to_thread(_unlink_due_blobs, base, [
-        (r["id"], r["log_filename"]) for r in due])
+    #
+    # ON THE VOLUME POOL, AND THE WAIT HAS A CEILING (R7-M4). This is the one
+    # wait in the module that is made WITH a connection checked out, and
+    # deliberately: the row locks above are what keep a second pass off
+    # these rows until the DELETE, and they live on this transaction. What
+    # bounds it is `AUTO_LOG_SWEEP_HOP_WAIT_S` and who can reach it -- the
+    # retention loop's pass, at most one opportunistic pass an hour on its own
+    # session, and the operator's internal route -- never an upload. A pass
+    # whose unlinks do not return in time cannot know which blobs went, so it
+    # deletes NOTHING: the transaction ends, every due row is kept and held
+    # out of the next passes, and the thread's unlinks, whenever they land,
+    # are what a later pass reads back as `absent` and makes durable before
+    # it deletes a row.
+    try:
+        outcomes, barrier = await _hop(
+            _VOLUME_POOL, AUTO_LOG_SWEEP_HOP_WAIT_S, _unlink_due_blobs, base,
+            [(r["id"], r["log_filename"]) for r in due])
+    except (asyncio.TimeoutError, TimeoutError):
+        await db.rollback()
+        for r in due:
+            _hold(r["id"], clock)
+        print(f"[AUTO-LOG] retention: the unlink pass over {len(due)} due "
+              f"row(s) did not return within {AUTO_LOG_SWEEP_HOP_WAIT_S}s, so "
+              f"no removal it made can be named -- NONE of those rows is "
+              f"deleted this pass; they are kept, held out of the next "
+              f"{int(_PRUNE_HOLD_S)}s of sweeps, and a later pass re-reads "
+              f"the volume")
+        return {"rows": 0, "blobs": 0, "retained": len(due), "undurable": 0,
+                "due": len(due), "held": len(_PRUNE_HELD)}
 
     collectable: list[str] = []
     retained: list[str] = []
@@ -2860,10 +3365,26 @@ async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None
     clock = time.monotonic()
     for name in [k for k, until in _ORPHAN_HELD.items() if until <= clock]:
         _ORPHAN_HELD.pop(name, None)
-    names, markers_total, owned, young, held, examined, next_cursor, unreadable = \
-        await asyncio.to_thread(_marker_candidates, base, cutoff, live,
-                                set(_ORPHAN_HELD), _ORPHAN_SCAN_BOUND,
-                                _ORPHAN_CURSOR[0])
+    # ON THE VOLUME POOL WITH A CEILING, AND WITH NO CONNECTION HELD (R7-M4):
+    # the pass has not asked the database anything yet. A walk that does not
+    # return in time ends the pass having examined nothing and removed
+    # nothing; the cursor stays where it was, and the next tick walks again.
+    try:
+        walked = await _hop(_VOLUME_POOL, AUTO_LOG_SWEEP_HOP_WAIT_S,
+                            _marker_candidates, base, cutoff, live,
+                            set(_ORPHAN_HELD), _ORPHAN_SCAN_BOUND,
+                            _ORPHAN_CURSOR[0])
+    except (asyncio.TimeoutError, TimeoutError):
+        print(f"[AUTO-LOG] orphan sweep: the directory walk did not return "
+              f"within {AUTO_LOG_SWEEP_HOP_WAIT_S}s; nothing was examined or "
+              f"removed this pass, and the next tick walks again")
+        return {"candidates": 0, "markers": 0, "in_flight": len(live),
+                "young": 0, "held": len(_ORPHAN_HELD), "examined": 0,
+                "unreadable": 0, "orphans": 0, "unlinked": 0,
+                "cleared": 0, "uncleared": 0,
+                "markers_kept": 0, "marker_only": 0, "unremovable": 0,
+                "deferred": 0, "refused": False}
+    names, markers_total, owned, young, held, examined, next_cursor, unreadable = walked
     # THE CURSOR ADVANCES WHATEVER THE WINDOW HELD, and before the early
     # return below: a window that was entirely live, young, held or
     # unreadable is exactly the window a pass must not sit on, and leaving
@@ -2930,10 +3451,30 @@ async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None
     # this pass performs happens inside it, so none of them runs on the event
     # loop; the counting and the printing happen back here, where the module's
     # state lives.
-    outcomes, cleared, uncleared, unlinked, \
-        marker_only, unremovable, markers_kept, deferred = \
-        await asyncio.to_thread(
-            _resolve_marker_candidates, base, names, known, int(limit))
+    #
+    # ON THE VOLUME POOL WITH A CEILING, AND WITH NO CONNECTION HELD (R7-M4):
+    # the lookup above ended its transaction. A resolution that does not
+    # return in time goes on in its thread -- every removal in it is the
+    # blob-then-marker order with its barrier, so wherever it stops is a
+    # state the next pass resolves -- and this pass reports that it cannot
+    # account for it rather than reporting a number it did not see.
+    try:
+        resolved = await _hop(_VOLUME_POOL, AUTO_LOG_SWEEP_HOP_WAIT_S,
+                              _resolve_marker_candidates, base, names, known,
+                              int(limit))
+    except (asyncio.TimeoutError, TimeoutError):
+        print(f"[AUTO-LOG] orphan sweep: the resolution of {len(names)} "
+              f"candidate(s), {len(all_orphans)} unreferenced, did not return "
+              f"within {AUTO_LOG_SWEEP_HOP_WAIT_S}s; what it removed is not "
+              f"known to this pass, and the next pass reads the volume again")
+        return {"candidates": len(names), "markers": markers_total,
+                "in_flight": owned, "young": young, "held": held,
+                "examined": examined, "unreadable": unreadable,
+                "orphans": len(all_orphans), "unlinked": 0, "cleared": 0,
+                "uncleared": 0, "markers_kept": 0, "marker_only": 0,
+                "unremovable": 0, "deferred": 0, "refused": False}
+    (outcomes, cleared, uncleared, unlinked,
+     marker_only, unremovable, markers_kept, deferred) = resolved
 
     for name, arm, detail in outcomes:
         if arm == "cleared":
@@ -3017,20 +3558,46 @@ async def prune_orphan_blobs(db: AsyncSession, *, min_age_s: float | None = None
 
 
 
-async def _maybe_prune(db: AsyncSession) -> None:
-    """Opportunistic retention, throttled per process. Never fails an upload."""
+# The opportunistic passes in flight. A task nothing references can be
+# collected before it finishes, so each one is held here until it ends.
+_BACKGROUND: set = set()
+
+
+def _maybe_prune() -> None:
+    """Opportunistic retention, throttled per process. Never fails an upload,
+    and since round 8 never DELAYS one either.
+
+    The pass holds a pooled connection across its unlink pass by design --
+    the `FOR NO KEY UPDATE SKIP LOCKED` row locks that keep two passes off one
+    row are held on it from the SELECT to the DELETE (see `prune_auto_logs`).
+    Run on the request's session, an accepted upload therefore waited on the
+    volume with a connection checked out, which is the pattern R7-M4 removes.
+    So the pass is its own task with its own session (#607: a writer the
+    request must not wait for gets a session of its own, never a nested
+    checkout under the request's), and the upload has answered before it
+    starts. The throttle still reads a monotonic clock, so it is at most one
+    pass an hour per process however many uploads arrive."""
     now = time.monotonic()
     if now - _LAST_PRUNE[0] < _PRUNE_MIN_INTERVAL_S:
         return
     _LAST_PRUNE[0] = now
+    task = asyncio.ensure_future(_opportunistic_prune())
+    _BACKGROUND.add(task)
+    task.add_done_callback(_BACKGROUND.discard)
+
+
+async def _opportunistic_prune() -> None:
+    """One retention pass on a session of its own; a failure is printed and
+    goes no further, because nobody is waiting on it."""
+    from database import async_session
+
     try:
-        await prune_auto_logs(db)
+        async with async_session() as db:
+            await prune_auto_logs(db)
+    except asyncio.CancelledError:
+        raise
     except Exception as ex:
         print(f"[AUTO-LOG] prune failed: {type(ex).__name__}")
-        try:
-            await db.rollback()
-        except Exception:
-            pass
 
 
 async def auto_log_retention_loop() -> None:

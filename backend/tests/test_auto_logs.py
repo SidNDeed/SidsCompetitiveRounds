@@ -140,6 +140,11 @@ class _Res:
     def mappings(self):
         return self
 
+    def scalars(self):
+        """`.scalars().all()`: the first column of every scripted row."""
+        return _Res([next(iter(r.values())) if isinstance(r, dict) else r
+                     for r in self._rows()])
+
     def all(self):
         return self._rows()
 
@@ -189,6 +194,11 @@ class Scripted:
         self.script.setdefault(SESSION_KEY, [[{"steam_id": STEAM}]])
         self.fail_on = fail_on
         self.log = []
+        # EVERY STATEMENT AND EVERY END OF A TRANSACTION, IN ORDER. `log` is
+        # statements only, and several cases pin it exactly; since round 8 a
+        # request is several short transactions (R7-M4), and whether one was
+        # ENDED before a wait is a question about the order of the two.
+        self.events = []
         self.added = []
         self.committed = 0
         self.rolled_back = 0
@@ -211,6 +221,7 @@ class Scripted:
     async def execute(self, statement, params=None):
         sql = " ".join(str(statement).split())
         self.log.append((sql, params))
+        self.events.append(sql)
         if self.fail_on and self.fail_on in sql:
             raise RuntimeError("scripted statement failure")
         for key, queue in self.script.items():
@@ -222,10 +233,13 @@ class Scripted:
 
     async def commit(self):
         if self.fail_commit:
+            self.events.append("COMMIT-FAILED")
             raise RuntimeError("scripted commit failure")
+        self.events.append("COMMIT")
         self.committed += 1
 
     async def rollback(self):
+        self.events.append("ROLLBACK")
         self.rolled_back += 1
 
     def sql_for(self, key):
@@ -705,7 +719,18 @@ def test_an_insert_that_fails_takes_its_blob_with_it(logdir, verified):
     assert list(logdir.iterdir()) == [], "a blob survived an insert that did not"
     # ...and the session is not left in an aborted transaction for whatever
     # runs next on it.
-    assert db.rolled_back == 1
+    #
+    # FOUR TRANSACTIONS SINCE ROUND 8 (R7-M4), EVERY ONE OF THEM ENDED. T0
+    # (the token), T1a (the session check and the cheap count) and T1 (the
+    # lock and the count that admits) each end in a rollback before the wait
+    # that follows them; T2 is the one this case fails, and the INSERT arm
+    # rolls it back itself -- BEFORE its cleanup, which is R7-L1's order. So
+    # four rollbacks, no commit, and the one thing done on the session after
+    # the failed INSERT is that rollback.
+    assert db.rolled_back == 4 and db.committed == 0, (
+        db.rolled_back, db.committed)
+    insert_at = max(i for i, e in enumerate(db.events) if INSERT_KEY in e)
+    assert db.events[insert_at + 1:] == ["ROLLBACK"], db.events[insert_at:]
 
 
 def test_a_body_with_no_steam_id_is_a_422_and_not_a_500(logdir, verified):
@@ -1054,9 +1079,37 @@ def test_the_opportunistic_prune_never_fails_an_upload(logdir, verified, monkeyp
     # this test passed its first assertion while exercising nothing at all
     # (#342). A NEGATIVE stamp is due regardless of uptime.
     monkeypatch.setattr(auto_logs, "_LAST_PRUNE", [-1e12])
+    # SINCE ROUND 8 THE PASS IS A TASK OF ITS OWN ON A SESSION OF ITS OWN
+    # (R7-M4, #607): it holds its connection across its unlink pass by
+    # design, so it must not run on -- or be awaited by -- the request. The
+    # session factory it reaches is replaced here by one whose due-row read
+    # fails, and a fresh task set keeps this case's pass apart from any other.
+    prune_db = Scripted({}, fail_on=DUE_KEY)
+
+    class _Session:
+        async def __aenter__(self):
+            return prune_db
+
+        async def __aexit__(self, *exc):
+            return False
+
+    import database
+    monkeypatch.setattr(database, "async_session", lambda: _Session())
+    monkeypatch.setattr(auto_logs, "_BACKGROUND", set())
     db = Scripted({COUNT_KEY: [[_bucket(0)]], PLAYER_KEY: [[{"id": PID}]],
-                   INSERT_KEY: [[{"bug_number": 11}]]}, fail_on=DUE_KEY)
-    out = _run(auto_logs.upload_auto_log(_request(), db))
+                   INSERT_KEY: [[{"bug_number": 11}]]})
+    seen = {}
+
+    async def go():
+        out = await auto_logs.upload_auto_log(_request(), db)
+        # WHAT THE PASS HAD ASKED WHEN THE UPLOAD ANSWERED: nothing. It is
+        # started by the upload and never waited for by it.
+        seen["asked"] = list(prune_db.log)
+        seen["tasks"] = len(auto_logs._BACKGROUND)
+        await asyncio.gather(*list(auto_logs._BACKGROUND))
+        return out
+
+    out = _run(go())
     assert out["bug_number"] == 11
     # The positive signal that the prune RAN, read before the count it implies:
     # a missing line here means the throttle swallowed the pass, which is the
@@ -1064,7 +1117,17 @@ def test_the_opportunistic_prune_never_fails_an_upload(logdir, verified, monkeyp
     assert "[AUTO-LOG] prune failed" in capsys.readouterr().out, (
         "the opportunistic prune did not run at all, so this test asserts "
         "nothing about what an upload does when it fails")
-    assert db.rolled_back == 1
+    assert seen["tasks"] == 1 and seen["asked"] == [], (
+        "the upload answered with %d pass(es) in flight, after the pass had "
+        "asked %r -- it waited on the pass instead of answering first"
+        % (seen["tasks"], seen["asked"]))
+    assert prune_db.sql_for(DUE_KEY) and db.sql_for(DUE_KEY) == [], (
+        "the pass did not run on a session of its own: its due-row read went "
+        "to %s" % ("the request's session" if db.sql_for(DUE_KEY) else "nowhere"))
+    # The upload's own session: three transactions ended before their waits
+    # (T0, T1a, T1) and T2 committed; the pass's failure touched none of it.
+    assert db.committed == 1 and db.rolled_back == 3, (
+        db.committed, db.rolled_back)
 
 
 # ── the published numbers ────────────────────────────────────────────────────
@@ -3212,15 +3275,19 @@ def test_the_marker_age_gate_is_bounded_by_the_handlers_own_deadline(logdir):
         "swept" % (auto_logs._ORPHAN_MIN_AGE_S, T, auto_logs.AUTO_LOG_SWEEP_EVERY_S))
 
     handler = _normalise(inspect.getsource(auto_logs.upload_auto_log))
-    assert handler.count("_span_budget(span_deadline)") == 3, (
+    assert handler.count("_span_budget(span_deadline)") == 4, (
         "the span's one deadline is spent at %d await(s) in the handler. The "
-        "span has three -- the shielded section, the INSERT and the commit -- "
-        "and an await that does not take the budget is outside the bound"
+        "span has four -- the shielded section, T2's re-check under the lock "
+        "(round 8), the INSERT and the commit -- and an await that does not "
+        "take the budget is outside the bound"
         % handler.count("_span_budget(span_deadline)"))
     assert "asyncio.wait_for(asyncio.shield(section)" in handler, (
         "the deadline is no longer the wait_for around the SHIELDED section. "
         "Anchored on the prefix rather than the whole call, so a respelling of "
         "the timeout argument is not read as the shield going away")
+    assert ("await asyncio.wait_for( _lock_and_count(db, req.steam_id), "
+            "_span_budget(span_deadline))") in handler, (
+        "T2's re-check under the lock is awaited outside the span's deadline")
     assert "row = (await asyncio.wait_for(db.execute(" in handler, (
         "the INSERT is awaited outside the span's deadline")
     assert "await asyncio.wait_for(db.commit(), left)" in handler, (
@@ -3578,18 +3645,25 @@ def test_a_volume_already_stalled_refuses_now_instead_of_queueing(logdir, verifi
                                                                   capsys):
     """WHAT THE BOUNDED WAIT IS PAID WITH.
 
-    The wait for the blob-volume lock is served inside this request's open
-    database transaction -- the per-account advisory lock is taken before it,
-    and the transaction is not committed until after the INSERT -- so every
-    second of it is a second a pooled connection is checked out and idle in a
-    transaction. One request paying that is the design. Every arriving request
-    paying it, because the holder is stuck on a volume that is not answering,
-    consumes connections other endpoints need and ends in the same 503 it
-    could have been given at once.
+    Until round 8 the wait for the blob-volume lock was served inside this
+    request's open database transaction, so every second of it was a pooled
+    connection checked out and idle. Since round 8 (R7-M4) the handler ends
+    its transaction before the section starts and the wait costs no
+    connection -- `test_thirty_concurrent_uploads_cannot_retain_the_pool`
+    holds that. What it still costs is the request and the seconds: every
+    arriving request, because the holder is stuck on a volume that is not
+    answering, sits out the whole lock wait and ends in the same 503 it could
+    have been given at once.
 
     So a pass STAMPS when its measure-and-write began, and an arriving request
     that finds one in flight past the ceiling refuses immediately. Both arms
     refuse; the test is about what the refusal COSTS (#430).
+
+    THE SECOND UPLOAD IS ANOTHER ACCOUNT'S. Since round 8 a second upload for
+    the SAME account waits for that account's turn (`_account_turn`) before
+    it reaches the volume at all, which is a different wait with its own
+    ceiling and its own test
+    (`test_a_second_upload_for_one_account_waits_its_turn_and_no_longer`).
 
     Driven by a real held write rather than by a stamp set from here, so both
     halves are under test: the stamp a pass takes, and the pre-check that
@@ -3630,7 +3704,8 @@ def test_a_volume_already_stalled_refuses_now_instead_of_queueing(logdir, verifi
         await asyncio.sleep(0.15)
         at = time.monotonic()
         second = await asyncio.gather(
-            auto_logs.upload_auto_log(_request(), _ok_db()),
+            auto_logs.upload_auto_log(_request(_body(steam_id=OTHER)),
+                                      _ok_db()),
             return_exceptions=True)
         waited = time.monotonic() - at
         release.set()
@@ -3656,10 +3731,9 @@ def test_a_volume_already_stalled_refuses_now_instead_of_queueing(logdir, verifi
     result, waited = run_drive()
     assert isinstance(result, HTTPException) and result.status_code == 503, result
     assert waited < auto_logs._BLOB_RESERVE_LOCK_WAIT_S / 2, (
-        "the second upload spent %.2fs holding its transaction open before "
-        "refusing, against a %.2fs lock wait -- it queued behind a volume "
-        "already known to be stalled"
-        % (waited, auto_logs._BLOB_RESERVE_LOCK_WAIT_S))
+        "the second upload spent %.2fs queued before refusing, against a "
+        "%.2fs lock wait -- it queued behind a volume already known to be "
+        "stalled" % (waited, auto_logs._BLOB_RESERVE_LOCK_WAIT_S))
     assert "write in flight" in capsys.readouterr().out, (
         "the refusal does not say the volume was already stalled, so an "
         "operator cannot tell it from the ordinary lock-wait refusal")
@@ -3684,10 +3758,16 @@ def test_the_hold_on_the_open_transaction_is_measured_and_reported(logdir, verif
     """AN UNMEASURED HOLD IS THE ONE NOBODY CAN ARGUE ABOUT AFTERWARDS.
 
     The span this route added when admission moved ahead of the write -- the
-    wait for the volume lock plus the measure-and-write under it, all of it
-    inside an open transaction holding the per-account advisory lock -- is
+    wait for the volume lock plus the measure-and-write under it -- is
     reported past a ceiling. Without the line, "the volume was slow" and "the
     route was slow" are the same log (#438/#443).
+
+    THE NAME IS ROUND 7'S. Until round 8 that span ran inside an open
+    transaction holding the per-account advisory lock, which is what the name
+    says; since R7-M4 the transaction is ended before the section starts and
+    the span holds the account's TURN and no connection, and the line says
+    that. The test is kept under its name because earlier rounds' records
+    cite it.
     """
     section = _normalise(inspect.getsource(auto_logs._reserve_stamp_and_write))
     assert section.count("if held >= _BLOB_HOLD_REPORT_S:") == 1, (
@@ -3709,8 +3789,12 @@ def test_the_hold_on_the_open_transaction_is_measured_and_reported(logdir, verif
     assert "slow blob volume" in out, (
         "an upload that held the volume lock past the report ceiling printed "
         "no measurement of it. Printed: %r" % (out,))
-    assert STEAM in out.split("slow blob volume")[1][:200], (
-        "the measurement does not name the account whose transaction was held")
+    measured = out.split("slow blob volume")[1][:200]
+    assert STEAM in measured, (
+        "the measurement does not name the account whose turn was held")
+    assert "no database connection" in measured, (
+        "the measurement no longer says the span held no connection, which "
+        "is the R7-M4 fact an operator reading it needs: %r" % (measured,))
 
     # CONTROL: the same upload under a ceiling it cannot reach prints no such
     # line, so the assertion above is about the span and not about a line this
@@ -4525,11 +4609,11 @@ def test_the_span_deadline_reds_when_an_await_inside_it_loses_the_budget(
     monkeypatch.setattr(auto_logs, "AUTO_LOG_MARKED_SPAN_DEADLINE_S", T)
     stall = 5.0
 
-    COMMIT_SITE = ("            left = _span_budget(span_deadline)\n"
-                   "            await asyncio.wait_for(db.commit(), left)\n")
-    INSERT_HEAD = ("            left = _span_budget(span_deadline)\n"
-                   "            row = (await asyncio.wait_for(db.execute(\n")
-    INSERT_TAIL = "            ), left)).mappings().first()\n"
+    COMMIT_SITE = ("                left = _span_budget(span_deadline)\n"
+                   "                await asyncio.wait_for(db.commit(), left)\n")
+    INSERT_HEAD = ("                left = _span_budget(span_deadline)\n"
+                   "                row = (await asyncio.wait_for(db.execute(\n")
+    INSERT_TAIL = "                ), left)).mappings().first()\n"
 
     def _refuses_in_time(handler, db):
         """Whether `handler` refused, and inside the deadline."""
@@ -4543,7 +4627,7 @@ def test_the_span_deadline_reds_when_an_await_inside_it_loses_the_budget(
 
     # MUTANT 1: the commit is awaited with no ceiling.
     assert not _refuses_in_time(
-        _handler_mutant([(COMMIT_SITE, "            await db.commit()\n")]),
+        _handler_mutant([(COMMIT_SITE, "                await db.commit()\n")]),
         _slow_commit_db(stall)), (
         "with the commit unwrapped the handler still refused inside the "
         "deadline, so this control says nothing about the bound")
@@ -4551,8 +4635,8 @@ def test_the_span_deadline_reds_when_an_await_inside_it_loses_the_budget(
     # INERT TWIN 1: the same call, the timeout passed by keyword.
     assert _refuses_in_time(
         _handler_mutant([(COMMIT_SITE,
-                          "            left = _span_budget(span_deadline)\n"
-                          "            await asyncio.wait_for(db.commit(), "
+                          "                left = _span_budget(span_deadline)\n"
+                          "                await asyncio.wait_for(db.commit(), "
                           "timeout=left)\n")]),
         _slow_commit_db(stall)), (
         "the inert twin reds, so the control above is reacting to the site "
@@ -4561,8 +4645,8 @@ def test_the_span_deadline_reds_when_an_await_inside_it_loses_the_budget(
     # MUTANT 2: the INSERT is awaited with no ceiling.
     assert not _refuses_in_time(
         _handler_mutant([
-            (INSERT_HEAD, "            row = (await (db.execute(\n"),
-            (INSERT_TAIL, "            ))).mappings().first()\n")]),
+            (INSERT_HEAD, "                row = (await (db.execute(\n"),
+            (INSERT_TAIL, "                ))).mappings().first()\n")]),
         _slow_insert_db(stall)), (
         "with the INSERT unwrapped the handler still refused inside the "
         "deadline, so this control says nothing about the bound")
@@ -4572,9 +4656,9 @@ def test_the_span_deadline_reds_when_an_await_inside_it_loses_the_budget(
     assert _refuses_in_time(
         _handler_mutant([
             (INSERT_HEAD,
-             "            budget = _span_budget(span_deadline)\n"
-             "            row = (await asyncio.wait_for(db.execute(\n"),
-            (INSERT_TAIL, "            ), budget)).mappings().first()\n")]),
+             "                budget = _span_budget(span_deadline)\n"
+             "                row = (await asyncio.wait_for(db.execute(\n"),
+            (INSERT_TAIL, "                ), budget)).mappings().first()\n")]),
         _slow_insert_db(stall)), (
         "the inert twin reds, so the control above is reacting to the site "
         "being edited rather than to the bound")
@@ -6856,86 +6940,88 @@ def test_every_round_six_crash_point_reds_when_its_mechanism_is_removed(logdir):
 
     # -- L4: the marker stamped AFTER the attachment's bytes ---------------
     # Since round 7 the durable sequence is the body of `_store_attachment`,
-    # the worker the handler hands it to, so every anchor below sits eight
-    # columns deeper than it did and the stamp moves to the end of THAT
-    # function -- after the entry flush, before its `return` -- which is the
-    # same "after the attachment's bytes" it always meant.
-    stamp = ("                    _auto_logs._stamp_marker(path)\n"
-             "                    marker_stamped = True\n")
-    entry_then_return = (
-        "                    _auto_logs._fsync_dir(_pathlib.Path(path).parent)\n"
-        "                    return len(data)\n")
+    # the worker the handler hands it to; since round 8 that body runs under
+    # the claim's lock (`with own.lock:`), so every anchor below sits four
+    # columns deeper again, and the stamp's flag is the claim's own
+    # `own.marked`. The stamp moves to the end of the durable sequence --
+    # after the entry flush, before the store records itself written --
+    # which is the same "after the attachment's bytes" it always meant.
+    stamp = ("                        _auto_logs._stamp_marker(path)\n"
+             "                        own.marked = True\n")
+    entry_then_written = (
+        "                        _auto_logs._fsync_dir(_pathlib.Path(path).parent)\n"
+        "                        own.written = True\n")
     mutant = _report_mutant_pairs([
         (stamp, ""),
-        (entry_then_return,
-         "                    _auto_logs._fsync_dir(_pathlib.Path(path).parent)\n"
-         + stamp + "                    return len(data)\n")])
+        (entry_then_written,
+         "                        _auto_logs._fsync_dir(_pathlib.Path(path).parent)\n"
+         + stamp + "                        own.written = True\n")])
     found, red = _reds(mutant, _player_orders("stored", "write-fails"), "INV-A")
     assert red, (
         "with the marker stamped after the attachment's bytes, no crash "
         "between the first byte and the cleanup arm left an unmarked file: "
         "%r" % (found[:3],))
     twin = _report_mutant_pairs([(stamp,
-        "                    _auto_logs._stamp_marker(_pathlib.Path(str(path)))\n"
-        "                    marker_stamped = True\n")])
+        "                        _auto_logs._stamp_marker(_pathlib.Path(str(path)))\n"
+        "                        own.marked = True\n")])
     assert _clean(twin) == [], "the inert twin reds at the marker's order"
 
     # -- L5: the flush's FileNotFoundError read as the unlink's ------------
-    arms = ("                        try:\n"
-            "                            os.unlink(str(attempted_path))\n"
-            "                        except FileNotFoundError:\n")
+    arms = ("                            try:\n"
+            "                                os.unlink(str(attempted_path))\n"
+            "                            except FileNotFoundError:\n")
     mutant = _report_mutant_pairs([(arms,
-        "                        try:\n"
-        "                            os.unlink(str(attempted_path))\n"
-        "                            _auto_logs._fsync_dir(\n"
-        "                                _pathlib.Path(attempted_path).parent)\n"
-        "                        except FileNotFoundError:\n")])
+        "                            try:\n"
+        "                                os.unlink(str(attempted_path))\n"
+        "                                _auto_logs._fsync_dir(\n"
+        "                                    _pathlib.Path(attempted_path).parent)\n"
+        "                            except FileNotFoundError:\n")])
     found, red = _reds(mutant, _player_orders("flush-vanishes"), "INV-A")
     assert red, (
         "with the flush folded back under the unlink's own arm, a flush that "
         "answered FileNotFoundError still did not leave an unreferenced, "
         "unmarked file: %r" % (found[:3],))
     twin = _report_mutant_pairs([(arms,
-        "                        try:\n"
-        "                            os.unlink(\"%s\" % (attempted_path,))\n"
-        "                        except FileNotFoundError:\n")])
+        "                            try:\n"
+        "                                os.unlink(\"%s\" % (attempted_path,))\n"
+        "                            except FileNotFoundError:\n")])
     assert _clean(twin) == [], "the inert twin reds at the two arms"
 
     # -- the cleanup's removal, made durable (round 5's barrier) -----------
-    cleanup = ("                                _auto_logs._fsync_dir(\n"
-               "                                    _pathlib.Path(attempted_path).parent)\n")
-    mutant = _report_mutant_pairs([(cleanup, "                                pass\n")])
+    cleanup = ("                                    _auto_logs._fsync_dir(\n"
+               "                                        _pathlib.Path(attempted_path).parent)\n")
+    mutant = _report_mutant_pairs([(cleanup, "                                    pass\n")])
     found, red = _reds(mutant, _player_orders("write-fails"), "INV-A")
     assert red, (
         "with the cleanup's removal never flushed, the marker's clear still "
         "could not persist ahead of the blob's removal: %r" % (found[:3],))
     twin = _report_mutant_pairs([(cleanup,
-        "                                _auto_logs._fsync_dir(\n"
-        "                                    _pathlib.Path(str(attempted_path)).parent)\n")])
+        "                                    _auto_logs._fsync_dir(\n"
+        "                                        _pathlib.Path(str(attempted_path)).parent)\n")])
     assert _clean(twin) == [], "the inert twin reds at the cleanup's barrier"
 
     # -- the stored attachment's CONTENTS ----------------------------------
-    contents = "                        os.fsync(f.fileno())\n"
-    mutant = _report_mutant_pairs([(contents, "                        pass\n")])
+    contents = "                            os.fsync(f.fileno())\n"
+    mutant = _report_mutant_pairs([(contents, "                            pass\n")])
     found, red = _reds(mutant, _player_orders("stored"), "INV-B")
     assert red and all(k == "INV-B" for k, *_ in found), (
         "with the attachment's contents never flushed, no committed row named "
         "bytes the filesystem had not promised -- or the removal broke "
         "something other than the barrier it names: %r" % (found[:3],))
     twin = _report_mutant_pairs([(contents,
-                                  "                        os.fsync(int(f.fileno()))\n")])
+                                  "                            os.fsync(int(f.fileno()))\n")])
     assert _clean(twin) == [], "the inert twin reds at the contents barrier"
 
     # -- the stored attachment's directory ENTRY ---------------------------
-    entry = "                    _auto_logs._fsync_dir(_pathlib.Path(path).parent)\n"
-    mutant = _report_mutant_pairs([(entry, "                    pass\n")])
+    entry = "                        _auto_logs._fsync_dir(_pathlib.Path(path).parent)\n"
+    mutant = _report_mutant_pairs([(entry, "                        pass\n")])
     found, red = _reds(mutant, _player_orders("stored"), "INV-B")
     assert red and all(k == "INV-B" for k, *_ in found), (
         "with the attachment's entry never flushed, a crash after the commit "
         "still recovered the file every time -- or the removal broke "
         "something other than the barrier it names: %r" % (found[:3],))
     twin = _report_mutant_pairs([(entry,
-        "                    _auto_logs._fsync_dir(_pathlib.Path(str(path)).parent)\n")])
+        "                        _auto_logs._fsync_dir(_pathlib.Path(str(path)).parent)\n")])
     assert _clean(twin) == [], "the inert twin reds at the entry barrier"
 
 
@@ -7058,11 +7144,15 @@ def test_the_durability_barrier_is_charged_to_the_marked_span(logdir, verified,
     # THREE HOPS SINCE ROUND 7: the free-space reading joined the stamp and
     # the write on a worker thread (M3's class), and it spends the span the
     # same way, so the count is one per hop rather than the two barriers'.
+    # Since round 8 each is a `_hop` on the module's volume pool (R7-M4), and
+    # the ceiling it is given is the span's own remaining budget.
     hops = ("_free_bytes", "_guarded_stamp", "_guarded_write")
     for hop in hops:
-        assert ("asyncio.wait_for(asyncio.to_thread(%s" % hop) in section, (
-            "the %s hop is not awaited under a ceiling, so the call it makes "
-            "on the volume is not charged to the span" % hop)
+        assert ("_hop(_VOLUME_POOL, _span_budget(span_deadline), %s," % hop
+                ) in section, (
+            "the %s hop is not awaited under the span's ceiling on the volume "
+            "pool, so the call it makes on the volume is not charged to the "
+            "span" % hop)
     assert section.count("_span_budget(span_deadline)") == len(hops), (
         "the section's hops do not each spend the span's own deadline")
     assert "_fsync_dir(" in inspect.getsource(auto_logs._write_blob), (
@@ -7097,12 +7187,15 @@ def test_the_durability_barrier_is_charged_to_the_marked_span(logdir, verified,
         """What the HANDLER took, not what the loop took to drain.
 
         A stalled flush leaves a worker thread running after the handler has
-        answered, and the future behind `asyncio.to_thread` cannot be
-        cancelled once the thread has picked the work up -- so `asyncio.run`
-        sits out the rest of the stall on its way to closing the loop. Timing
-        the run would measure that teardown and report a deadline as missed on
-        a request that met it. The clock therefore starts and stops inside the
-        loop, around the handler's own await.
+        answered, and nothing takes a thread back once it has picked the
+        work up. Round 7's hops ran on the loop's default executor, which
+        `asyncio.run` waits for on its way to closing the loop, so timing the
+        run measured that teardown and reported a deadline as missed on a
+        request that met it; since round 8 they run on the module's volume
+        pool, which the loop does not wait for, and the timing rule is kept
+        anyway. The clock starts and stops inside the loop, around the
+        handler's own await, so what it reads is the request's answer and
+        nothing else.
         """
         monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", asyncio.Lock())
         auto_logs._BLOB_WRITE_STARTED[0] = 0.0
@@ -7145,11 +7238,11 @@ def test_the_durability_barrier_is_charged_to_the_marked_span(logdir, verified,
     # the write path's barriers are performed -- is awaited with no ceiling,
     # so the flush's cost is no longer charged to T and the request outlives
     # the bound the sweep's age gate is derived from.
-    SPAN_SITE = ("        await asyncio.wait_for(asyncio.shield(section),\n"
-                 "                               _span_budget(span_deadline))\n")
+    SPAN_SITE = ("            await asyncio.wait_for(asyncio.shield(section),\n"
+                 "                                   _span_budget(span_deadline))\n")
     db = _ok_db()
     _refused, took = _attempt(db, _handler_mutant(
-        [(SPAN_SITE, "        await asyncio.shield(section)\n")]))
+        [(SPAN_SITE, "            await asyncio.shield(section)\n")]))
     assert took >= stall / 2.0, (
         "with the ceiling off the await that covers the barrier the handler "
         "still answered in %.2fs, so the case above says nothing about where "
@@ -7160,8 +7253,8 @@ def test_the_durability_barrier_is_charged_to_the_marked_span(logdir, verified,
     db = _ok_db()
     refused, took = _attempt(db, _handler_mutant([(
         SPAN_SITE,
-        "        await asyncio.wait_for(asyncio.shield(section),\n"
-        "                               _span_budget(float(span_deadline)))\n")]))
+        "            await asyncio.wait_for(asyncio.shield(section),\n"
+        "                                   _span_budget(float(span_deadline)))\n")]))
     assert refused and took < stall / 2.0, (
         "the inert twin changed the outcome (%.2fs), so the mutant above is "
         "reacting to the site being edited rather than to the ceiling"
@@ -7278,9 +7371,13 @@ def test_a_cancelled_sections_cleanup_does_not_block_the_event_loop(
         % (during, hold))
 
     # MUTANT at the cleanup's own site: taken on the loop, which is the tree
-    # before this fix. The heartbeat stops.
-    site = "                if not await _release_marked_blob_off_loop(own):\n"
-    during = drive((site, "                if not _release_marked_blob(own):\n"),
+    # before this fix, with the volume handed on straight after it -- the
+    # order the live code keeps by chaining the hand-on to the cleanup. The
+    # heartbeat stops.
+    site = ("                gone = await _release_marked_blob_off_loop("
+            "own, then=_hand_on)\n")
+    during = drive((site, "                gone = _release_marked_blob(own)\n"
+                          "                _hand_on()\n"),
                    label="mutant")
     assert during <= 2, (
         "the loop kept ticking (%d) with the cleanup taken synchronously, so "
@@ -7289,7 +7386,8 @@ def test_a_cancelled_sections_cleanup_does_not_block_the_event_loop(
     # INERT TWIN at the SAME site: the same await, parenthesised.
     during = drive(
         (site,
-         "                if not (await _release_marked_blob_off_loop(own)):\n"),
+         "                gone = (await _release_marked_blob_off_loop("
+         "own, then=_hand_on))\n"),
         label="inert twin")
     assert during >= 10, (
         "the inert twin blocked the loop, so the mutant above is reacting to "
@@ -7573,11 +7671,14 @@ def test_a_flush_that_refuses_after_the_unlink_keeps_the_attachments_reference(
     # AND THE MUTANT THAT COLLAPSES THE TWO ARMS REDS. The `else:` is what
     # separates them; folding the flush back under the unlink's own `try`
     # puts its FileNotFoundError into the "no file was created" arm again.
+    #
+    # Four columns deeper since round 8: the removal is the body of
+    # `_discard_partial`, under the claim's lock.
     src = inspect.getsource(main.submit_bug_report)
-    assert src.count("\n                        except FileNotFoundError:\n") == 1, (
+    assert src.count("\n                            except FileNotFoundError:\n") == 1, (
         "the unlink's FileNotFoundError arm is not where this case thinks "
         "it is")
-    assert "\n                            except OSError as fx:\n" in src, (
+    assert "\n                                except OSError as fx:\n" in src, (
         "the flush no longer has an except arm of its own, so a flush that "
         "refuses is being read as an unlink that found nothing")
 
@@ -7595,58 +7696,79 @@ def _worker_wait_findings(doc):
     # a check that fails on a reflow and passes on a deletion.
     flat = " ".join(doc.split())
     missing = []
-    if not ("wait_for" in flat and "to_thread" in flat
-            and "CANNOT CANCEL" in flat):
-        missing.append("wait_for cannot cancel to_thread")
-    if not ("_BLOB_WRITE_STALL_S" in flat and "refuses LATER" in flat):
-        missing.append("the stall ceiling refuses later arrivals only")
+    if not ("bounds the WAITER and never the work" in flat
+            and "cannot take a thread back" in flat):
+        missing.append("the ceiling bounds the waiter and never the work")
+    if "handed on only when the cleanup has actually run" not in flat:
+        missing.append("the volume is handed on when the cleanup has run")
     if "does not depend on a time bound" not in flat:
         missing.append("the safety property needs no time bound")
-    if "bounds this wait" in flat or "bounds the wait" in flat:
-        missing.append("the prose claims a bound on the wait")
+    lower = flat.lower()
+    if any(claim in lower for claim in ("bounds the work", "bounds the cleanup",
+                                        "stops the cleanup",
+                                        "cancels the cleanup")):
+        missing.append("the prose claims the ceiling bounds the work")
     return missing
 
 
 def test_the_worker_wait_prose_states_its_facts_and_the_code_agrees():
-    """R4-L7, NAMED AT THE PROSE IT IS ABOUT.
+    """R4-L7, NAMED AT THE PROSE IT IS ABOUT -- RE-DERIVED IN ROUND 8.
 
     Round 5 recorded this closure against a case that reads the retention
     loop's signals, which is a different docstring; the prose in question is
     `_release_marked_blob_off_loop`'s, where one sentence claiming a bound
-    that does not exist was replaced by three separate facts. Each is checked
+    that did not exist was replaced by separate facts. Each is checked
     against the prose AND against the code beneath it, because a docstring
     that agrees with nothing is the claim #351 is about.
+
+    ROUND 8 CHANGED ONE OF THE FACTS, SO THE CHECK CHANGED WITH IT. Until
+    R7-M4 the wait had no ceiling and the prose's facts were that nothing
+    bounded it and the stall ceiling refused only LATER arrivals. Since R7-M4
+    the WAIT has a ceiling of its own, and the facts the prose must now
+    state are the ones that stay true under it: the ceiling bounds the
+    waiter and never the work, the volume is handed on when the cleanup has
+    actually run and not when the wait gave up, and the safety property
+    needs no time bound at all. What it must never claim is the round-4
+    mistake in its new form -- that the ceiling bounds the WORK.
     """
     doc = inspect.getdoc(auto_logs._release_marked_blob_off_loop) or ""
     assert _worker_wait_findings(doc) == [], (
         "the worker-wait prose no longer states: %r"
         % (_worker_wait_findings(doc),))
 
-    # THE REDDENING CONTROL: the sentence this prose replaced, planted back.
+    # THE REDDENING CONTROL: the kind of sentence this prose replaced,
+    # planted back in its round-8 form -- a bound claimed for the work.
     planted = " ".join(doc.split()).replace(
         "does not depend on a time bound at all",
-        "is bounded by the stall ceiling, which bounds this wait")
+        "is held by the ceiling, which bounds the cleanup")
     assert planted != " ".join(doc.split()), (
         "the planted regression changed nothing")
     assert len(_worker_wait_findings(planted)) == 2, (
         "the check does not see a docstring that claims the bound it exists "
         "to deny, so it cannot fail: %r" % (_worker_wait_findings(planted),))
 
-    # AND THE CODE AGREES WITH EACH FACT. The function hops to a thread and
-    # does nothing else: no deadline of its own, and no reading of the stall
-    # ceiling, either of which would make one of the three facts a statement
-    # about somewhere else.
+    # AND THE CODE AGREES WITH EACH FACT. The cleanup runs on a thread of the
+    # volume pool; the wait for it is shielded, so its ceiling cannot cancel
+    # the work; the caller's `then` is chained to the cleanup's own end; and
+    # the stall ceiling is not read here, because it decides whether LATER
+    # arrivals queue, which is the section's question.
     body = inspect.getsource(auto_logs._release_marked_blob_off_loop
                              ).split('"""')[-1]
-    assert "to_thread(_release_marked_blob" in body, (
-        "the function no longer performs the cleanup on a worker thread, so "
-        "the prose is about a mechanism that is gone: %s" % body)
-    assert "wait_for" not in body, (
-        "the function wraps its own thread hop in a deadline, which its "
-        "prose says cannot cancel the thread: %s" % body)
+    assert "_start(_VOLUME_POOL, _release_marked_blob, own)" in body, (
+        "the function no longer performs the cleanup on a thread of the "
+        "volume pool, so the prose is about a mechanism that is gone: %s"
+        % body)
+    assert "asyncio.shield(cleanup)" in body and "wait_for" in body, (
+        "the wait is no longer a ceiling over the SHIELDED cleanup, so "
+        "either the wait is unbounded again or the ceiling can cancel the "
+        "work the prose says it never touches: %s" % body)
+    assert "cleanup.add_done_callback(then)" in body, (
+        "the caller's hand-on is no longer chained to the cleanup's own end: "
+        "%s" % body)
     assert "_BLOB_WRITE_STALL_S" not in body, (
-        "the stall ceiling is read here, so the prose's claim that it bounds "
-        "only LATER arrivals is about a different site: %s" % body)
+        "the stall ceiling is read here; it decides whether LATER arrivals "
+        "queue, which is the section's question and not this wait's: %s"
+        % body)
     # THE SAFETY PROPERTY THE PROSE RESTS ON, at the function that holds it.
     inner = inspect.getsource(auto_logs._release_marked_blob)
     assert "with own.lock:" in inner and "own.discarded = True" in inner, (
@@ -7754,8 +7876,11 @@ def test_a_failed_player_attachment_write_leaves_nothing_on_the_volume(
 
     # MUTANT at the unlink's own site: dropped, which is the tree before this
     # fix. The prefix stays on the volume with nothing naming it.
-    site = "\n                            os.unlink(str(attempted_path))\n"
-    _file(_report_mutant(site, "\n                            pass\n"))
+    #
+    # Four columns deeper since round 8: the removal is the body of
+    # `_discard_partial`, under the claim's lock.
+    site = "\n                                os.unlink(str(attempted_path))\n"
+    _file(_report_mutant(site, "\n                                pass\n"))
     left = _blobs(logdir)
     assert left, (
         "the mutant left nothing behind, so the live assertion above proves "
@@ -7765,7 +7890,7 @@ def test_a_failed_player_attachment_write_leaves_nothing_on_the_volume(
 
     # INERT TWIN at the SAME site: the same unlink, the path spelled out.
     _file(_report_mutant(site,
-                         '                    os.unlink("%s" % '
+                         '\n                                os.unlink("%s" % '
                          '(attempted_path,))\n'))
     assert _blobs(logdir) == [], (
         "the inert twin left the partial file behind, so the mutant above is "
@@ -7854,20 +7979,21 @@ def test_a_player_attachment_whose_partial_cannot_be_removed_keeps_the_reference
     #
     # THE ANCHOR CARRIES THE LINE UNDER IT. Since round 6 the flush arm has
     # its own `keep_reference = True` one level deeper, and this one's
-    # twenty-eight spaces (inside `_discard_partial` since round 7) are a
-    # SUBSTRING of that one's thirty-two -- so the bare assignment matches two
-    # sites and `_report_mutant` refuses it. The message line that follows is
-    # what makes it the unlink's arm and not the flush's (#432/#279).
+    # thirty-two spaces (inside `_discard_partial` since round 7, under
+    # its claim's lock since round 8) are a SUBSTRING of that one's
+    # thirty-six -- so the bare assignment matches two sites and
+    # `_report_mutant` refuses it. The message line that follows is what
+    # makes it the unlink's arm and not the flush's (#432/#279).
     for stale in _blobs(logdir):
         real_unlink(str(logdir / stale))
     monkeypatch.setattr(builtins, "open", partial_then_fail)
-    site = ("                            keep_reference = True\n"
-            "                            removed = (f\"the partial file "
+    site = ("                                keep_reference = True\n"
+            "                                removed = (f\"the partial file "
             "{attempted_path.name} could \"\n")
     mutant = _report_mutant(
         site,
-        "                            keep_reference = False\n"
-        "                            removed = (f\"the partial file "
+        "                                keep_reference = False\n"
+        "                                removed = (f\"the partial file "
         "{attempted_path.name} could \"\n")
     db2 = _ReportSession({"FROM bug_reports": [[{"count": 0}]]})
     _run(mutant(req, _request(), db2))
@@ -7887,8 +8013,8 @@ def test_a_player_attachment_whose_partial_cannot_be_removed_keeps_the_reference
     monkeypatch.setattr(builtins, "open", partial_then_fail)
     twin = _report_mutant(
         site,
-        "                            keep_reference = bool(1)\n"
-        "                            removed = (f\"the partial file "
+        "                                keep_reference = bool(1)\n"
+        "                                removed = (f\"the partial file "
         "{attempted_path.name} could \"\n")
     db3 = _ReportSession({"FROM bug_reports": [[{"count": 0}]]})
     _run(twin(req, _request(), db3))
@@ -7966,9 +8092,9 @@ def test_the_player_attachment_cleanup_makes_its_removal_durable(
     # MUTANT at the barrier's own site: dropped. Nothing flushes, so a crash
     # after the commit can recover the file the row says is gone.
     flushed.clear()
-    site = ("                                _auto_logs._fsync_dir(\n"
-            "                                    _pathlib.Path(attempted_path).parent)\n")
-    _file(_report_mutant(site, "                                pass\n"))
+    site = ("                                    _auto_logs._fsync_dir(\n"
+            "                                        _pathlib.Path(attempted_path).parent)\n")
+    _file(_report_mutant(site, "                                    pass\n"))
     assert flushed == [str(logdir)], (
         "the mutant still took the cleanup's flush, so the live assertion "
         "above proves nothing: %r" % (flushed,))
@@ -7977,8 +8103,8 @@ def test_the_player_attachment_cleanup_makes_its_removal_durable(
     flushed.clear()
     _file(_report_mutant(
         site,
-        "                                _auto_logs._fsync_dir(\n"
-        "                                    _pathlib.Path(str(attempted_path)).parent)\n"))
+        "                                    _auto_logs._fsync_dir(\n"
+        "                                        _pathlib.Path(str(attempted_path)).parent)\n"))
     assert flushed == [str(logdir), str(logdir)], (
         "the inert twin changed the outcome, so the mutant above is reacting "
         "to the site being edited rather than to the barrier: %r" % (flushed,))
@@ -8240,23 +8366,59 @@ def test_350_asserts_the_whole_shape_of_an_adopted_sequence():
         "the shape block runs after the CHECK is added, so this file writes "
         "against a sequence it is about to refuse")
 
-    for attribute in ("seqtypid", "seqstart", "seqincrement", "seqmax",
-                      "seqmin", "seqcycle"):
+    # EVERY COLUMN OF pg_sequence, AS A COUNTED DECLARATION (R7-M2). Round 7
+    # read six of the eight and called it the whole shape; the one it left
+    # out, `seqcache`, is what let a sequence whose stored position runs ahead
+    # of every value it hands out through. The list is declared, the
+    # catalogue's own list is read against it, and the SELECT reads every
+    # attribute the declaration names but the key it selects by.
+    declared = re.search(r"c_pg_sequence_columns CONSTANT text\[\] := ARRAY\[(.*?)\];",
+                         check, re.S)
+    assert declared, "the shape block declares no column list for pg_sequence"
+    names = re.findall(r"'([a-z]+)'", declared.group(1))
+    assert names == ["seqrelid", "seqtypid", "seqstart", "seqincrement",
+                     "seqmax", "seqmin", "seqcache", "seqcycle"], (
+        "the declared pg_sequence columns are %r, not the catalogue's eight "
+        "in its own order" % (names,))
+    assert "WHERE attrelid = 'pg_catalog.pg_sequence'::regclass" in check, (
+        "the shape block never reads the catalogue's column list against "
+        "its declaration")
+    assert "IF v_columns IS DISTINCT FROM c_pg_sequence_columns THEN" in check
+    select = re.search(r"SELECT (seqtypid[^\n]*)\n\s*INTO", check)
+    assert select, "the shape block's pg_sequence SELECT moved"
+    read = [c.strip() for c in select.group(1).split(",")]
+    assert read == names[1:], (
+        "the shape block reads %r from pg_sequence; the declaration names %r "
+        "after the key" % (read, names[1:]))
+    for attribute in names[1:]:
         assert attribute in check, (
             "the shape block never reads %s, so a sequence that differs in it "
             "is adopted silently" % attribute)
 
+    # AND THE RELATION'S PERSISTENCE, which pg_sequence does not carry
+    # (R7-M3): only a logged sequence keeps its position through crash
+    # recovery and reaches a standby.
+    assert "SELECT relpersistence INTO v_persistence" in check
+    assert "c_logged         CONSTANT \"char\" := 'p';" in check
+    assert "IF v_persistence IS DISTINCT FROM c_logged THEN" in check
+
     # ONE REFUSAL PER ATTRIBUTE, each naming it. A single "the sequence is
     # wrong" is a refusal nobody can act on (#430).
     for phrase in ("data type", "increment", "MAXVALUE", "MINVALUE",
-                   "CYCLES", "outside its own range", "starting at %, not %"):
+                   "CYCLES", "outside its own range", "starting at %, not %",
+                   "with CACHE %, not %", "with relpersistence %, not %",
+                   "column(s)"):
         assert phrase in check, (
             "no refusal in the shape block names %r, so that attribute is "
             "read and not judged" % (phrase,))
-    assert check.count("RAISE EXCEPTION") == 8, (
-        "the shape block holds %d refusal(s): one per attribute, the START by "
-        "IDENTITY as well as by range, plus the missing-sequence arm"
+    assert check.count("RAISE EXCEPTION") == 11, (
+        "the shape block holds %d refusal(s): one per attribute (the cache "
+        "included), the START by IDENTITY as well as by range, the "
+        "persistence, the column declaration, plus the missing-sequence arm"
         % check.count("RAISE EXCEPTION"))
+    assert "    CACHE 1\n" in sql, (
+        "the CREATE SEQUENCE does not state the cache the shape block "
+        "asserts")
 
     # THE START IS ASKED TWICE AND THE ORDER IS THE FACT. `IN RANGE` and `IS
     # THE CONFIGURED START` differ over every value strictly inside the range,
@@ -8540,10 +8702,19 @@ def test_a_raise_before_the_commit_releases_the_attachments_in_flight_name(
     suffix = auto_logs._ORPHAN_MARKER_SUFFIX
 
     def _file(handler):
+        # THE NAME IS READ OFF THE MARKER THIS REQUEST STAMPED. Since round
+        # 8 the row is added in T2, after the attachment, so a raise in the
+        # failure arm's diagnostic leaves no row to read the id from; the
+        # marker is stamped before the attachment's first byte either way,
+        # and exactly one new one is required.
+        before = set(_markers(logdir))
         db = _Session({"FROM bug_reports": [[{"count": 0}]]})
         with pytest.raises(RuntimeError):
             _run(handler(req, _request(), db))
-        name = "%s.log.gz" % (db.added[0].id,)
+        new = sorted(set(_markers(logdir)) - before)
+        assert len(new) == 1, (
+            "the request stamped %d marker(s), not one: %r" % (len(new), new))
+        name = new[0][:-len(suffix)]
         held = name in auto_logs._MARKERS_IN_FLIGHT
         auto_logs._MARKERS_IN_FLIGHT.discard(name)
         return name, held, db
@@ -8560,15 +8731,15 @@ def test_a_raise_before_the_commit_releases_the_attachments_in_flight_name(
 
     def _span(initial):
         return _report_mutant_pairs([
-            ("    hop = None\n    committed = False\n",
-             "    hop = None\n    committed = False\n"
+            ("    hops: list = []\n    committed = False\n",
+             "    hops: list = []\n    committed = False\n"
              "    reached_commit = " + initial + "\n"),
             ("        await db.commit()\n        committed = True\n",
              "        reached_commit = True\n        await db.commit()\n"
              "        committed = True\n"),
-            ("    finally:\n        if attempted_path is not None:\n",
+            ("    finally:\n        if own is not None:\n",
              "    finally:\n"
-             "        if attempted_path is not None and reached_commit:\n"),
+             "        if own is not None and reached_commit:\n"),
         ])
 
     name, held, _ = _file(_span("False"))
@@ -8655,30 +8826,49 @@ async def _unrelated_waits_while(filing, period=0.01):
 # `submit_bug_report`, the edit that makes the same call ON the loop, and an
 # inert twin at the same site. The ORDER decides which arm runs; the
 # directory and the marker's clear run in both, so they ride the stored one.
+# Since round 8 every site is a call on the auto-log module's volume pool
+# (`_hop`, or `_start` where the request must know when the WORK ends), and
+# the on-loop edit makes the same call synchronously inside a finished
+# future, so the code around the site is unchanged.
 _PLAYER_HOPS = {
     "stored": (
         "stored",
-        "                    asyncio.to_thread(_store_attachment))\n",
+        "                hop = _auto_logs._start(_auto_logs._VOLUME_POOL,\n"
+        "                                        _store_attachment)\n",
+        "                hop = asyncio.ensure_future(\n"
         "                    asyncio.sleep(0, _store_attachment()))\n",
-        "                    asyncio.to_thread(_store_attachment, *()))\n"),
+        "                hop = _auto_logs._start(_auto_logs._VOLUME_POOL,\n"
+        "                                        _store_attachment, *())\n"),
     "write-fails": (
         "write-fails",
-        "                        asyncio.to_thread(_discard_partial))\n",
+        "                    hop = _auto_logs._start(_auto_logs._VOLUME_POOL,\n"
+        "                                            _discard_partial)\n",
+        "                    hop = asyncio.ensure_future(\n"
         "                        asyncio.sleep(0, _discard_partial()))\n",
-        "                        asyncio.to_thread(_discard_partial, *()))\n"),
+        "                    hop = _auto_logs._start(_auto_logs._VOLUME_POOL,\n"
+        "                                            _discard_partial, *())\n"),
     "directory": (
         "stored",
-        "                path = await asyncio.to_thread(\n"
-        "                    _bug_report_log_path, str(report.id))\n",
+        "                path = await _auto_logs._hop(\n"
+        "                    _auto_logs._VOLUME_POOL,\n"
+        "                    _auto_logs._span_budget(attach_deadline),\n"
+        "                    _bug_report_log_path, str(report_id))\n",
         "                path = _bug_report_log_path(\n"
-        "                    str(report.id))\n",
-        "                path = await asyncio.to_thread(\n"
-        "                    _bug_report_log_path, \"%s\" % (report.id,))\n"),
+        "                    str(report_id))\n",
+        "                path = await _auto_logs._hop(\n"
+        "                    _auto_logs._VOLUME_POOL,\n"
+        "                    _auto_logs._span_budget(attach_deadline),\n"
+        "                    _bug_report_log_path, \"%s\" % (report_id,))\n"),
     "marker-clear": (
         "stored",
-        "                    asyncio.to_thread(_drop_marker))\n",
-        "                    asyncio.sleep(0, _drop_marker()))\n",
-        "                    asyncio.to_thread(_drop_marker, *()))\n"),
+        "                hops.append(_auto_logs._start(_auto_logs._VOLUME_POOL,\n"
+        "                                              _auto_logs._clear_marker, own,\n"
+        "                                              False))\n",
+        "                hops.append(asyncio.ensure_future(asyncio.sleep(\n"
+        "                    0, _auto_logs._clear_marker(own, False))))\n",
+        "                hops.append(_auto_logs._start(_auto_logs._VOLUME_POOL,\n"
+        "                                              _auto_logs._clear_marker,\n"
+        "                                              *(own, False)))\n"),
 }
 
 
@@ -8817,10 +9007,30 @@ def test_350_reads_where_the_sequence_is_under_the_lock_it_adopts_it_under():
             "ELSE v_last END;" in block), (
         "block 1c does not derive the next value from is_called")
 
-    # THE FLOOR: -2^62, so at least half the range remains.
+    # THE UNDER-LOCK READING IS THE WHOLE SHAPE TOO, refused by name here as
+    # well as in 1b (R7-M2, R7-M3): the declared column list, the cache and
+    # the persistence, and a shape string carrying all eight readings.
+    assert "IF v_columns IS DISTINCT FROM c_pg_sequence_columns THEN" in block
+    assert "IF v_persistence IS DISTINCT FROM c_logged THEN" in block
+    assert "IF v_cache IS DISTINCT FROM c_auto_cache THEN" in block
+    assert ("v_shape := format('%s/%s/%s/%s/%s/%s/%s/%s', v_typid, v_start, "
+            "v_increment," in block), (
+        "block 1c's shape string does not carry every column 1b judged")
+
+    # THE FLOOR: -2^62, so at least half the range remains -- judged on the
+    # ACCOUNTED value, the position this file leaves once its post-check has
+    # drawn (R7-M1), not on the one it finds.
     assert "c_floor CONSTANT bigint := %d;" % (-(2 ** 62)) in block, (
         "the adoption floor is not -2^62")
-    assert "IF v_next < c_floor THEN" in block, "the floor is never applied"
+    assert "c_postcheck_draws CONSTANT bigint := 2;" in block
+    assert ("v_accounted := v_next::numeric + c_postcheck_draws * v_increment;"
+            in block and "v_accounted numeric;" in block), (
+        "block 1c does not account for the post-check's draws in numeric (R8-X1)")
+    assert "IF v_accounted < c_floor THEN" in block, (
+        "the floor is not applied to the accounted value")
+    assert "IF v_next < c_floor THEN" not in block, (
+        "the floor is still applied to the value found, which the post-check "
+        "then moves two below it")
 
     # A NUMBER ALREADY HELD, at or below the next value, on a descending
     # sequence whose bug_number is UNIQUE.
@@ -8834,6 +9044,80 @@ def test_350_reads_where_the_sequence_is_under_the_lock_it_adopts_it_under():
     assert ("IF v_a IS DISTINCT FROM current_setting('m350.next_1c', "
             "true)::bigint THEN" in post_block), (
         "the post-check does not bind the first draw to 1c's reading")
+
+
+def test_350_leaves_the_position_it_accounted_for_and_states_its_policy_once():
+    """R7-M1: ONE ADOPTION-FLOOR POLICY, READ AT ONE POINT OF CONSUMPTION.
+
+    Round 7 applied the floor to the next value block 1c FOUND and then spent
+    two values in the post-check, so a next value exactly at the floor was
+    adopted, committed two below it, and refused by the release train's
+    reading of the same floor straight after. The value judged is now the
+    ACCOUNTED one -- the position once the post-check has drawn -- and three
+    things make that the value every later reader sees:
+
+      * the accounting counts the post-check's draws, and the post-check
+        makes exactly that many (a third draw added to the post-check, or a
+        count edited on its own, reds here);
+      * the post-check pins the position with `setval` to its second draw, so
+        the reading a standby replays is not up to 32 values past it (the
+        WAL pre-log), and reads it back through the policy's own text,
+        refusing unless it is 1c's accounted value;
+      * the policy -- the floor and the accounted-value query -- is stated
+        exactly ONCE, each declaration on one line, because the release train
+        reads those two lines out of this file at the reviewed commit and
+        applies them to each box. A second copy anywhere in the file would be
+        a second policy for the train to disagree with.
+    """
+    sql = _sql_350()
+    executable = "\n".join(ln for ln in sql.splitlines()
+                           if not ln.lstrip().startswith("--"))
+    floor_lines = [ln for ln in executable.splitlines()
+                   if re.match(r"^\s*c_floor CONSTANT bigint := (-?[0-9]+);\s*$", ln)]
+    assert floor_lines == ["    c_floor CONSTANT bigint := %d;" % (-(2 ** 62))], (
+        "the floor is declared %r -- the train reads exactly one such line"
+        % (floor_lines,))
+    policy_lines = [ln for ln in executable.splitlines()
+                    if re.match(r"^\s*c_accounted_sql CONSTANT text :=\s*'((?:[^']|'')*)';\s*$", ln)]
+    assert len(policy_lines) == 1, (
+        "the accounted-value query is declared %d time(s); the train reads "
+        "exactly one line" % len(policy_lines))
+    policy = re.match(r"^\s*c_accounted_sql CONSTANT text :=\s*'((?:[^']|'')*)';\s*$",
+                      policy_lines[0]).group(1).replace("''", "'")
+    assert policy == ("SELECT (CASE WHEN is_called THEN last_value + "
+                      "(log_cnt + 1) * -1 ELSE last_value END)::text AS "
+                      "accounted_next FROM %s"), (
+        "the accounted-value query changed: %r" % policy)
+    assert policy.count("%") == 1, (
+        "the query must carry exactly one placeholder, the relation")
+    for word in ("DROP", "TRUNCATE", "DELETE", "UPDATE", "INSERT", "ALTER",
+                 "GRANT", "REVOKE", "CREATE", "COPY"):
+        assert word not in policy.upper(), (
+            "the policy query carries %s, which the read-only wrapper the "
+            "train sends it through refuses" % word)
+
+    post = executable[executable.index("DO $m350p$"):executable.index("END $m350p$;")]
+    draws = post.count("nextval(v_autoseq)")
+    declared = int(re.search(r"c_postcheck_draws CONSTANT bigint := ([0-9]+);",
+                             executable).group(1))
+    assert draws == declared == 2, (
+        "the post-check draws %d value(s) and block 1c accounts for %d"
+        % (draws, declared))
+    pin = post.index("PERFORM setval(v_autoseq, v_b, true);")
+    assert pin > post.index("v_b := nextval(v_autoseq);"), (
+        "the position is pinned before the second draw, so the draw after it "
+        "logs ahead again")
+    back = post.index("EXECUTE format(current_setting('m350.accounted_sql', true),")
+    assert pin < back, "the policy reads the position before it is pinned"
+    assert ("IF v_left IS DISTINCT FROM current_setting('m350.accounted_1c', "
+            "true) THEN" in post), (
+        "the post-check does not refuse a position other than 1c's accounted "
+        "value")
+    assert ("IF v_left::bigint < current_setting('m350.floor', true)::bigint "
+            "THEN" in post), "the post-check never applies the floor it was handed"
+    assert back < post.index("CREATE TEMP TABLE m350_number_probe"), (
+        "the read-back runs after the probes, so a refusal there follows "
+        "writes this file then has to explain")
 
 
 def _on_loop_release_calls(source):
@@ -8873,12 +9157,20 @@ def test_every_automatic_cleanup_waits_on_a_worker_thread():
     loop. Every coroutine call site now goes through the worker-thread
     helper, and the synchronous function is called by no coroutine at all.
 
+    SINCE ROUND 8 THE HANDLER'S ARMS REACH IT THROUGH ONE MORE LAYER.
+    Every refusal that cleans up -- the deadline, the cancellation, the
+    re-check under the lock, the cap at the re-check, the failed INSERT --
+    calls `_discard_for_refusal`, which awaits the worker-thread helper
+    and answers every outcome as a sentence (R7-L1). So the helper's
+    coroutine call sites are the section's and that one's, and the
+    handler's five arms are counted at `_discard_for_refusal` instead.
+
     Where the wait happens is proven BEHAVIOURALLY at the cancelled section's
     site (`test_a_cancelled_sections_cleanup_does_not_block_the_event_loop`,
     whose mutant stops the heartbeat); this is the class half, read from the
-    module's own syntax tree. THE CONTROL puts the failed INSERT's arm back
-    on the loop and must be found; the INERT TWIN parenthesises the same
-    await and must not.
+    module's own syntax tree. THE CONTROL puts the refusals' cleanup back
+    on the loop -- at `_discard_for_refusal` since round 8 -- and must be
+    found; the INERT TWIN parenthesises the same await and must not.
     """
     src = inspect.getsource(auto_logs)
     assert _on_loop_release_calls(src) == [], (
@@ -8894,19 +9186,32 @@ def test_every_automatic_cleanup_waits_on_a_worker_thread():
                         and isinstance(node.value.func, ast.Name)
                         and node.value.func.id == "_release_marked_blob_off_loop"):
                     awaited[fn.name] = awaited.get(fn.name, 0) + 1
-    assert awaited == {"_reserve_stamp_and_write": 1, "upload_auto_log": 3}, (
+    assert awaited == {"_reserve_stamp_and_write": 1,
+                       "_discard_for_refusal": 1}, (
         "the automatic cleanup's coroutine call sites moved: %r -- re-derive "
         "the class before changing this count" % (awaited,))
+    refusals = {}
+    for fn in ast.walk(ast.parse(src)):
+        if isinstance(fn, ast.AsyncFunctionDef):
+            for node in ast.walk(fn):
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id == "_discard_for_refusal"):
+                    refusals[fn.name] = refusals.get(fn.name, 0) + 1
+    assert refusals == {"upload_auto_log": 5}, (
+        "the handler's refusal arms that clean up moved: %r -- the five are "
+        "the deadline, the cancellation, the re-check, the cap at the "
+        "re-check and the failed INSERT" % (refusals,))
 
-    site = "            discarded = await _release_marked_blob_off_loop(own)\n"
+    site = "        gone = await _release_marked_blob_off_loop(own)\n"
     assert src.count(site) == 1, src.count(site)
-    mutant = src.replace(site, "            discarded = _release_marked_blob(own)\n")
+    mutant = src.replace(site, "        gone = _release_marked_blob(own)\n")
     assert [owner for owner, _line in _on_loop_release_calls(mutant)] == [
-        "upload_auto_log"], (
-        "the failed INSERT's arm taken on the loop was not found, so the "
+        "_discard_for_refusal"], (
+        "the refusals' cleanup taken on the loop was not found, so the "
         "empty result above proves nothing")
     twin = src.replace(
-        site, "            discarded = (await _release_marked_blob_off_loop(own))\n")
+        site, "        gone = (await _release_marked_blob_off_loop(own))\n")
     assert _on_loop_release_calls(twin) == [], (
         "the inert twin was reported, so the control above is reacting to the "
         "edit rather than to where the call runs")
@@ -8915,23 +9220,31 @@ def test_every_automatic_cleanup_waits_on_a_worker_thread():
 # THE AUTOMATIC UPLOAD'S HOPS THAT ROUND 7'S SWEEP MOVED: the coroutine each
 # is in, its site, the edit that makes the same call on the loop, and an
 # inert twin. The free-space reading is in the reserve section, which the
-# live handler calls by name; the other two are in the handler itself.
+# live handler calls by name; the other two are in the handler itself --
+# inside the account's turn since round 8, so four columns deeper, and on
+# the module's volume pool with a ceiling (R7-M4).
 _AUTO_HOPS = {
     "directory": (
         "upload_auto_log",
-        "        path = await asyncio.to_thread(_bug_report_log_path, str(report_id))\n",
-        "        path = _bug_report_log_path(str(report_id))\n",
-        "        path = await asyncio.to_thread(_bug_report_log_path, \"%s\" % (report_id,))\n"),
+        "            path = await _hop(_VOLUME_POOL, AUTO_LOG_VOLUME_WAIT_S,\n"
+        "                              _bug_report_log_path, str(report_id))\n",
+        "            path = _bug_report_log_path(str(report_id))\n",
+        "            path = await _hop(_VOLUME_POOL, AUTO_LOG_VOLUME_WAIT_S,\n"
+        "                              _bug_report_log_path, \"%s\" % (report_id,))\n"),
     "free-space": (
         "_reserve_stamp_and_write",
-        "        free = await asyncio.wait_for(asyncio.to_thread(_free_bytes, volume),\n",
-        "        free = await asyncio.wait_for(asyncio.sleep(0, _free_bytes(volume)),\n",
-        "        free = await asyncio.wait_for(asyncio.to_thread(_free_bytes, *(volume,)),\n"),
+        "        free = await _hop(_VOLUME_POOL, _span_budget(span_deadline),\n"
+        "                          _free_bytes, volume)\n",
+        "        free = _free_bytes(volume)\n",
+        "        free = await _hop(_VOLUME_POOL, _span_budget(span_deadline),\n"
+        "                          _free_bytes, *(volume,))\n"),
     "marker-clear": (
         "upload_auto_log",
-        "        await asyncio.to_thread(_clear_marker, own)\n",
-        "        _clear_marker(own)\n",
-        "        await asyncio.to_thread(_clear_marker, *(own,))\n"),
+        "                await _hop_through(_VOLUME_POOL, AUTO_LOG_VOLUME_WAIT_S,\n"
+        "                                   _clear_marker, own)\n",
+        "                _clear_marker(own)\n",
+        "                await _hop_through(_VOLUME_POOL, AUTO_LOG_VOLUME_WAIT_S,\n"
+        "                                   _clear_marker, *(own,))\n"),
 }
 
 
@@ -9020,7 +9333,12 @@ _OS_ON_THE_VOLUME = frozenset({
     "truncate", "ftruncate"})
 _PATH_ON_THE_VOLUME = frozenset({
     "mkdir", "unlink", "rmdir", "touch", "iterdir", "read_bytes",
-    "write_bytes", "read_text", "write_text", "is_file", "is_dir", "lstat"})
+    "write_bytes", "read_text", "write_text", "is_file", "is_dir", "lstat",
+    # Round 8: the admin log readers' helper reaches the volume through
+    # these three, which the list above did not know -- `Path.exists`,
+    # `Path.stat` and `gzip.open` (any `X.open`) -- so the derivation could
+    # not see it. Each is a call on the volume wherever it appears.
+    "exists", "stat", "open"})
 
 
 def _calls_in(node):
@@ -9101,11 +9419,15 @@ def test_no_writer_makes_a_call_on_the_volume_from_the_event_loop():
     class is every call either writer makes on the volume. Round 7 moved
     five more onto worker threads: the directory's creation and the marker's
     clear after the commit, in both writers, and the automatic reserve's
-    free-space reading.
+    free-space reading. Round 8 swept the class once more (R7-M4, #432):
+    the two admin log readers, which read the same volume, and the three
+    primitives through which they reach it and the derivation had not
+    known.
 
     THE READING covers every coroutine in `auto_logs` -- the automatic
-    upload, its section, the cleanup helper, the retention pass and the
-    orphan sweep -- and the player handler, and it must find nothing. What
+    upload, its section, the cleanup helpers, the retention pass and the
+    orphan sweep -- the player handler and the two admin log readers, and
+    it must find nothing. What
     reaches the volume is DERIVED (`_volume_functions`), so the derivation
     is checked first: every helper a hop hands to a thread must be in it,
     or an empty reading could be an unread call. THE CONTROLS put each moved
@@ -9122,12 +9444,19 @@ def test_no_writer_makes_a_call_on_the_volume_from_the_event_loop():
     must = {"_bug_report_log_path", "_free_bytes", "_clear_marker",
             "_release_marked_blob", "_guarded_stamp", "_guarded_write",
             "_unlink_if_present", "_store_attachment", "_discard_partial",
-            "_drop_marker"}
+            "_read_bug_log_sync", "_unlink_due_blobs",
+            "_marker_candidates", "_resolve_marker_candidates"}
     assert must <= touching, (
         "the derived reading no longer knows that %r reach the volume, so an "
         "empty result below could be an unread call" % sorted(must - touching))
 
-    for label, src in (("auto_logs", auto_src), ("submit_bug_report", handler_src)):
+    # THE TWO ADMIN LOG READERS, SINCE ROUND 8. They read the same volume
+    # the writers write, so R7-M4's sweep moved them onto the volume pool
+    # (#432), and the reading covers them like the writers.
+    readers = {name: textwrap.dedent(inspect.getsource(getattr(main, name)))
+               for name in ("get_bug_report", "download_bug_report_log")}
+    for label, src in (("auto_logs", auto_src), ("submit_bug_report", handler_src),
+                       *readers.items()):
         assert _volume_calls_on_the_loop(src, touching) == [], (
             "a coroutine in %s makes a call on the volume itself, on the event "
             "loop: %r" % (label, _volume_calls_on_the_loop(src, touching)))
@@ -9135,13 +9464,23 @@ def test_no_writer_makes_a_call_on_the_volume_from_the_event_loop():
     controls = [(auto_src, owner, site, on_loop, twin)
                 for owner, site, on_loop, twin in _AUTO_HOPS.values()]
     controls.append((
-        auto_src, "upload_auto_log",
-        "            discarded = await _release_marked_blob_off_loop(own)\n",
-        "            discarded = _release_marked_blob(own)\n",
-        "            discarded = (await _release_marked_blob_off_loop(own))\n"))
+        auto_src, "_discard_for_refusal",
+        "        gone = await _release_marked_blob_off_loop(own)\n",
+        "        gone = _release_marked_blob(own)\n",
+        "        gone = (await _release_marked_blob_off_loop(own))\n"))
     controls += [(handler_src, "submit_bug_report", site, on_loop, twin)
                  for _order, site, on_loop, twin in _PLAYER_HOPS.values()]
-    assert len(controls) == 8, len(controls)
+    for reader, pad in (("get_bug_report", " " * 12),
+                        ("download_bug_report_log", " " * 8)):
+        site = (pad + "raw = await _auto_logs._hop(\n"
+                + pad + "    _auto_logs._VOLUME_POOL, "
+                "_auto_logs.AUTO_LOG_VOLUME_WAIT_S,\n"
+                + pad + "    _read_bug_log_sync, str(path))\n")
+        controls.append((
+            readers[reader], reader, site,
+            pad + "raw = _read_bug_log_sync(str(path))\n",
+            site.replace("str(path))", "\"%s\" % (path,))")))
+    assert len(controls) == 10, len(controls)
     for src, owner, site, on_loop, twin in controls:
         own_src = inspect.getsource(getattr(
             auto_logs if src is auto_src else main, owner))
@@ -9157,3 +9496,1514 @@ def test_no_writer_makes_a_call_on_the_volume_from_the_event_loop():
         assert _volume_calls_on_the_loop(src.replace(site, twin), touching) == [], (
             "the inert twin at %r was reported, so the control is reacting to "
             "the edit rather than to where the call runs" % (site.strip(),))
+
+
+# ── ROUND 8: NO WAIT HOLDS A POOLED CONNECTION, AND EVERY WAIT HAS A CEILING ──
+#
+# R7-M4 found that thirty legitimate concurrent uploads could retain all
+# 20 + 10 connections of the main pool: both writers kept one transaction open
+# across every wait on the volume, and none of those waits had a ceiling. The
+# tests below hold the three halves of the fix, each with a control that puts
+# the round-7 shape back at one site and an inert twin at the same site
+# (#342/#391): the session's transaction is ENDED before each wait (the pool
+# witness); every wait has a CEILING and answers the promised status past it;
+# and the exclusion the open transaction used to carry across the wait -- one
+# upload per account at a time -- is carried by the account's turn, which has
+# a ceiling of its own.
+#
+# THE POOL HERE IS A MODEL, AND WHAT IT MODELS IS STATED. `AsyncSession` takes
+# a connection at the first statement of a transaction and gives it back when
+# the transaction ends or the session closes; `_ModelPool` is a pool of the
+# production size whose checkout waits a bounded time and then raises. This
+# suite runs with no database, so that `_end_transaction` returns a REAL
+# session's connection to a REAL pool is witnessed separately, against the
+# local PostgreSQL, in the round's evidence log.
+
+
+class _ModelPool:
+    """The application's pool as the two writers meet it: `size` connections
+    (`pool_size=20` + `max_overflow=10` in database.py) and a checkout that
+    waits at most `timeout` seconds for one and then raises, which is what
+    QueuePool's `pool_timeout` does. `out` is how many are checked out now."""
+
+    def __init__(self, size=30, timeout=0.5):
+        self.size = size
+        self.timeout = timeout
+        self.out = 0
+        self._free = None
+
+    async def checkout(self):
+        if self._free is None:          # made inside the loop that uses it
+            self._free = asyncio.Semaphore(self.size)
+        try:
+            await asyncio.wait_for(self._free.acquire(), self.timeout)
+        except (asyncio.TimeoutError, TimeoutError):
+            raise TimeoutError("QueuePool limit of size %d reached, "
+                               "connection timed out" % self.size) from None
+        self.out += 1
+
+    def checkin(self):
+        self.out -= 1
+        self._free.release()
+
+
+class _Pooled:
+    """A session that holds a connection the way `AsyncSession` does: taken
+    by the first statement of a transaction, given back when the transaction
+    ends -- a commit, a rollback -- or the session closes. A commit that
+    raises keeps it until the rollback that follows, as the real one does."""
+
+    pool = None
+    held = False
+
+    async def _take(self):
+        if not self.held:
+            await self.pool.checkout()
+            self.held = True
+
+    def _give(self):
+        if self.held:
+            self.held = False
+            self.pool.checkin()
+
+    async def execute(self, statement, params=None):
+        await self._take()
+        return await super().execute(statement, params)
+
+    async def commit(self):
+        await super().commit()
+        self._give()
+
+    async def rollback(self):
+        try:
+            await super().rollback()
+        finally:
+            self._give()
+
+    async def close(self):
+        self._give()
+
+
+class _PooledScripted(_Pooled, Scripted):
+    """`Scripted`, holding one of `pool`'s connections while a transaction
+    is open."""
+
+
+class _PooledReportSession(_Pooled, _ReportSession):
+    """`_ReportSession`, holding one of `pool`'s connections while a
+    transaction is open; its flush and its refresh are statements too."""
+
+    async def flush(self):
+        await self._take()
+        return await super().flush()
+
+    async def refresh(self, obj):
+        await self._take()
+        return await super().refresh(obj)
+
+
+async def _until(predicate, cap_s=10.0, step=0.01):
+    """Poll `predicate` on the loop for at most `cap_s` seconds -- never a
+    bare wait (#361) -- and answer whether it came true."""
+    for _ in range(max(1, int(cap_s / step))):
+        if predicate():
+            return True
+        await asyncio.sleep(step)
+    return bool(predicate())
+
+
+class _Held:
+    """`fn`, held IN THE THREAD THAT CALLS IT until `release()`: a volume (or
+    a CPU) that is not answering, as the worker that made the call meets it.
+    With `first_only`, only the first call is held.
+
+    It counts the calls that entered and the ones that have finished, so a
+    test can let the held thread END before its event loop closes
+    (`drained`): a worker that finishes after its loop has closed cannot
+    hand its result back, and a ceiling that ended the WAIT never ended the
+    work. The hold itself is bounded, so a failing test cannot leave a
+    thread parked for ever."""
+
+    def __init__(self, fn, *, first_only=False):
+        import threading
+        self._threading = threading
+        self.fn = fn
+        self.first_only = first_only
+        self.reset()
+
+    def reset(self):
+        self.gate = self._threading.Event()
+        self.count_lock = self._threading.Lock()
+        self.entered = 0
+        self.finished = 0
+
+    def __call__(self, *a, **kw):
+        with self.count_lock:
+            self.entered += 1
+            nth = self.entered
+        try:
+            if nth == 1 or not self.first_only:
+                self.gate.wait(30.0)
+            return self.fn(*a, **kw)
+        finally:
+            with self.count_lock:
+                self.finished += 1
+
+    def release(self):
+        self.gate.set()
+
+    async def drained(self, cap_s=10.0):
+        self.release()
+        done = await _until(lambda: self.finished >= self.entered, cap_s)
+        await asyncio.sleep(0.05)       # the worker's hand-back to the loop
+        return done
+
+
+def _main_mutant(name, pairs):
+    """`main.<name>` with every (anchor, replacement) applied, compiled
+    WITHOUT its route decorator -- executing it would register a second copy
+    of the route on the live application -- against a COPY of main's
+    globals. Each anchor is asserted to be one site inside the function's own
+    span first (#432/#279)."""
+    src = textwrap.dedent(inspect.getsource(getattr(main, name)))
+    head, _, rest = src.partition("\n")
+    assert head.startswith("@app."), (
+        "%s no longer starts with its route decorator, so this harness is "
+        "stripping the wrong line: %r" % (name, head))
+    for anchor, replacement in pairs:
+        assert rest.count(anchor) == 1, (
+            "the mutation anchor occurs %d time(s) in %s, not once: %r"
+            % (rest.count(anchor), name, anchor))
+        rest = rest.replace(anchor, replacement)
+    namespace = dict(vars(main))
+    exec(compile(rest, "<mutant:%s>" % name, "exec"), namespace)
+    return namespace[name]
+
+
+# The line that ends T1 in each writer, with the line after it as context so
+# each anchor is one site.
+_AUTO_T1_END = ("        await _end_transaction(db)\n\n"
+                "        if count >= AUTO_LOG_PER_STEAM_PER_DAY:\n")
+_PLAYER_T1_END = ("    await _auto_logs._end_transaction(db)\n\n"
+                  "    log_filename: str | None = None\n")
+
+
+def test_thirty_concurrent_uploads_cannot_retain_the_pool(logdir, verified,
+                                                          monkeypatch):
+    """R7-M4 / B15: THIRTY UPLOADS WAITING ON THE VOLUME HOLD NO CONNECTION.
+
+    Fifteen automatic uploads and fifteen player reports, each for a
+    different account, arrive together while the volume does not answer:
+    the blob directory's resolution -- the first call either writer makes on
+    the volume, and the hop R7-M4 named -- is held in its worker thread until
+    this test lets it go. Thirty is the production pool's size exactly, so a
+    writer that kept its transaction open across that wait would hold every
+    connection the box has, and anything else that needs one -- a queue
+    join, a match report -- would wait out the pool's timeout and fail.
+
+    Read while all thirty are at the volume (its four threads inside the
+    held call, the other twenty-six queued behind them):
+      * the pool: how many connections are checked out -- none may be;
+      * each session's last event: its transaction was ENDED (all thirty),
+        not merely idle;
+      * an unrelated checkout: served at once.
+    Then the volume answers and all thirty land: the waits QUEUED, they were
+    not refused.
+
+    CONTROL: the two lines that end T1 -- the automatic upload's and the
+    player report's -- removed, which is the round-7 shape: the same thirty
+    then hold all thirty connections and the unrelated checkout times out.
+    TWIN: the same two lines spelled differently, which changes nothing.
+    """
+    monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", asyncio.Lock())
+    monkeypatch.setattr(auto_logs, "_BLOB_WRITE_STARTED", [0.0])
+    monkeypatch.setattr(auto_logs, "_free_bytes", lambda directory: 10 ** 12)
+    monkeypatch.setattr(main, "_is_admin", _no_admin)
+    monkeypatch.setattr(main, "_mark_mod_seen", _noop_mark)
+    held = _Held(main._bug_report_log_path)
+    monkeypatch.setattr(main, "_bug_report_log_path", held)
+    # Thirty synthetic accounts, derived rather than written out: every
+    # Steam-shaped literal in this file must be one of `_SYNTHETIC_IDS`.
+    accounts = [str(int(STEAM) + 100 + i) for i in range(30)]
+    volume = auto_logs._VOLUME_POOL
+
+    async def drive(auto_handler, report_handler):
+        held.reset()
+        # ONE RESERVE LOCK PER EVENT LOOP. Fifteen sections contend for
+        # it, and a contended asyncio.Lock is bound to the loop it was
+        # contended on; the next drive's loop would meet it as 'bound to
+        # a different event loop'.
+        monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", asyncio.Lock())
+        pool = _ModelPool(size=30, timeout=0.5)
+        autos, reports, tasks = [], [], []
+        for sid in accounts[:15]:
+            db = _PooledScripted({SESSION_KEY: [[{"steam_id": sid}]],
+                                  COUNT_KEY: [[_bucket(0)]],
+                                  PLAYER_KEY: [[{"id": PID}]],
+                                  INSERT_KEY: [[{"bug_number": 4242}]]})
+            db.pool = pool
+            autos.append(db)
+            tasks.append(asyncio.create_task(
+                auto_handler(_request(_body(steam_id=sid)), db)))
+        for sid in accounts[15:]:
+            db = _PooledReportSession({"FROM bug_reports": [[{"count": 0}]]})
+            db.pool = pool
+            reports.append(db)
+            tasks.append(asyncio.create_task(report_handler(
+                schemas.BugReportRequest(steam_id=sid, description="it broke",
+                                         log_text="a log"),
+                _request(), db)))
+        try:
+            # ALL THIRTY AT THE VOLUME: its four threads inside the held
+            # call and twenty-six calls queued behind them (the executor's
+            # own queue, read directly -- nothing else submits to this pool
+            # during the test).
+            await _until(lambda: held.entered == 4
+                         and volume._work_queue.qsize() == 26)
+            seen = {"inside": held.entered,
+                    "queued": volume._work_queue.qsize(),
+                    "out": pool.out,
+                    "ended": sum(1 for d in autos + reports
+                                 if d.events and d.events[-1] == "ROLLBACK")}
+            try:
+                await pool.checkout()
+            except TimeoutError:
+                seen["unrelated"] = "timed out"
+            else:
+                pool.checkin()
+                seen["unrelated"] = "served"
+        finally:
+            held.release()
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for d in autos + reports:
+            await d.close()             # get_db's close, at the request's end
+        await held.drained()
+        seen["landed"] = sum(1 for r in results if isinstance(r, dict)
+                             and r.get("log_persisted") is True)
+        seen["failed"] = [repr(r) for r in results if not isinstance(r, dict)]
+        seen["after"] = pool.out
+        return seen
+
+    live = _run(drive(auto_logs.upload_auto_log, main.submit_bug_report))
+    assert (live["inside"], live["queued"]) == (4, 26), (
+        "the thirty uploads were not all waiting at the volume when it was "
+        "read (%r), so what follows would describe some other moment"
+        % (live,))
+    assert live["out"] == 0 and live["ended"] == 30, (
+        "%d connection(s) checked out and %d of 30 transactions ended while "
+        "thirty uploads waited on the volume; every writer ends its "
+        "transaction before the wait (R7-M4)" % (live["out"], live["ended"]))
+    assert live["unrelated"] == "served", live
+    assert live["landed"] == 30 and live["failed"] == [], (
+        "the waits were meant to queue and land once the volume answered: %r"
+        % (live,))
+    assert live["after"] == 0, live
+
+    control = _run(drive(
+        _handler_mutant([(_AUTO_T1_END,
+                          "\n        if count >= AUTO_LOG_PER_STEAM_PER_DAY:\n")]),
+        _report_mutant(_PLAYER_T1_END,
+                       "\n    log_filename: str | None = None\n")))
+    assert (control["inside"], control["queued"]) == (4, 26), control
+    assert control["out"] == 30 and control["ended"] == 0, (
+        "with T1 left open across the wait the thirty were expected to hold "
+        "the whole pool; they held %d with %d transaction(s) ended, so the "
+        "reading above is not measuring retention" % (control["out"],
+                                                      control["ended"]))
+    assert control["unrelated"] == "timed out", (
+        "the round-7 shape was expected to starve an unrelated request of a "
+        "connection: %r" % (control,))
+    assert control["landed"] == 30, control
+
+    twin = _run(drive(
+        _handler_mutant([(_AUTO_T1_END,
+                          "        await _end_transaction(*(db,))\n\n"
+                          "        if count >= AUTO_LOG_PER_STEAM_PER_DAY:\n")]),
+        _report_mutant(_PLAYER_T1_END,
+                       "    await _auto_logs._end_transaction(*(db,))\n\n"
+                       "    log_filename: str | None = None\n")))
+    assert (twin["out"], twin["ended"], twin["unrelated"], twin["landed"]) == (
+        0, 30, "served", 30), (
+        "the inert twin moved the reading, so the control is reacting to the "
+        "edit rather than to the transaction being left open: %r" % (twin,))
+
+
+def test_a_second_upload_for_one_account_waits_its_turn_and_no_longer(
+        logdir, verified, monkeypatch, capsys):
+    """THE EXCLUSION THE TRANSACTION USED TO CARRY, CARRIED WITHOUT ONE.
+
+    Until round 8 the per-account advisory lock was held from the count that
+    admits an upload to its commit, inside one transaction, so a second
+    upload for the same account waited on the DATABASE -- holding a
+    connection of its own while it did. Since round 8 (R7-M4) T1 ends before
+    the volume work and the exclusion across the span is the account's TURN
+    (`_account_turn`): an asyncio lock that costs no connection, waited for
+    at most `AUTO_LOG_ACCOUNT_WAIT_S` and refused 503 past it.
+
+    Driven: the first upload is held in its directory hop, so its turn is
+    held; a second for the same account arrives. It is refused within the
+    ceiling -- not after the first has finished -- without having taken the
+    advisory lock, and with its last transaction ended before it waited.
+
+    CONTROL: the ceiling removed from the turn's wait, and the second waits
+    for as long as the first holds the volume. TWIN: the same wait with its
+    ceiling passed by keyword.
+    """
+    WAIT, HOLD = 0.3, 1.5
+    monkeypatch.setattr(auto_logs, "AUTO_LOG_ACCOUNT_WAIT_S", WAIT)
+    monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", asyncio.Lock())
+    monkeypatch.setattr(auto_logs, "_BLOB_WRITE_STARTED", [0.0])
+    monkeypatch.setattr(auto_logs, "_free_bytes", lambda directory: 10 ** 12)
+    held = _Held(main._bug_report_log_path, first_only=True)
+    monkeypatch.setattr(main, "_bug_report_log_path", held)
+    site = ("            await asyncio.wait_for(turn.lock.acquire(),\n"
+            "                                   AUTO_LOG_ACCOUNT_WAIT_S)\n")
+    real_turn = auto_logs._account_turn
+
+    async def drive():
+        held.reset()
+        monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", asyncio.Lock())
+        first_db, second_db = _ok_db(), _ok_db()
+        first = asyncio.create_task(
+            auto_logs.upload_auto_log(_request(), first_db))
+        assert await _until(lambda: held.entered == 1), (
+            "the first upload never reached the volume")
+        asyncio.get_running_loop().call_later(HOLD, held.release)
+        at = time.monotonic()
+        try:
+            second = await auto_logs.upload_auto_log(_request(), second_db)
+        except HTTPException as ex:
+            second = ex
+        waited = time.monotonic() - at
+        first = await first
+        await held.drained()
+        return first, second, waited, second_db
+
+    first, second, waited, second_db = _run(drive())
+    assert first["log_persisted"] is True, first
+    assert isinstance(second, HTTPException) and second.status_code == 503, (
+        "the second upload for the same account was answered %r" % (second,))
+    assert waited < HOLD - 0.5, (
+        "the second upload waited %.2fs: past its %ss ceiling and on into the "
+        "first upload's %ss hold" % (waited, WAIT, HOLD))
+    assert not second_db.sql_for(LOCK_KEY), (
+        "the refused upload took the advisory lock, which it must not reach "
+        "before its turn")
+    assert second_db.events[-1] == "ROLLBACK", (
+        "the refused upload waited with a transaction open: %r"
+        % (second_db.events,))
+    out = capsys.readouterr().out
+    assert ("already has an upload in flight that did not decide within "
+            "%ss" % WAIT) in out, out
+
+    monkeypatch.setattr(auto_logs, "_account_turn", _exec_mutant(
+        real_turn, site, "            await turn.lock.acquire()\n"))
+    first, second, waited, _db = _run(drive())
+    assert isinstance(second, dict) and second["log_persisted"] is True, second
+    assert waited >= HOLD - 0.1, (
+        "with no ceiling on the turn the second upload was expected to wait "
+        "out the first's hold; it waited %.2fs, so the red above is not about "
+        "the ceiling" % (waited,))
+
+    monkeypatch.setattr(auto_logs, "_account_turn", _exec_mutant(
+        real_turn, site,
+        "            await asyncio.wait_for(turn.lock.acquire(),\n"
+        "                                   timeout=AUTO_LOG_ACCOUNT_WAIT_S)\n"))
+    first, second, waited, _db = _run(drive())
+    assert isinstance(second, HTTPException) and second.status_code == 503, second
+    assert waited < HOLD - 0.5, waited
+
+
+# EVERY HOP BEFORE THE MARKED SPAN, with its ceiling: who owns the held call,
+# the ceiling's name, the site, the site with the ceiling lifted, the inert
+# twin, and the line its refusal prints (`%s` is the ceiling).
+_AUTO_PRE_SPAN_HOPS = {
+    "directory": (
+        "main", "_bug_report_log_path", "AUTO_LOG_VOLUME_WAIT_S",
+        "            path = await _hop(_VOLUME_POOL, AUTO_LOG_VOLUME_WAIT_S,\n",
+        "            path = await _hop(_VOLUME_POOL, 10 ** 6,\n",
+        "            path = await _hop(_VOLUME_POOL, float(AUTO_LOG_VOLUME_WAIT_S),\n",
+        "the blob directory could not be resolved within %ss for "),
+    "scrub": (
+        "main", "_scrub_pass_one", "AUTO_LOG_CPU_WAIT_S",
+        "            _CPU_POOL, AUTO_LOG_CPU_WAIT_S, _scrub_pass_one, log_blob)\n",
+        "            _CPU_POOL, 10 ** 6, _scrub_pass_one, log_blob)\n",
+        "            _CPU_POOL, float(AUTO_LOG_CPU_WAIT_S), _scrub_pass_one, log_blob)\n",
+        "did not finish within %ss a pass; nothing was written"),
+    "gzip": (
+        "auto_logs", "_compress_blob", "AUTO_LOG_CPU_WAIT_S",
+        "        data = await _hop(_CPU_POOL, AUTO_LOG_CPU_WAIT_S, _compress_blob,\n",
+        "        data = await _hop(_CPU_POOL, 10 ** 6, _compress_blob,\n",
+        "        data = await _hop(_CPU_POOL, float(AUTO_LOG_CPU_WAIT_S), _compress_blob,\n",
+        "did not finish within %ss a pass; nothing was written"),
+}
+
+
+@pytest.mark.parametrize("hop", sorted(_AUTO_PRE_SPAN_HOPS))
+def test_an_automatic_upload_refuses_503_when_a_hop_before_its_span_does_not_return(
+        logdir, verified, monkeypatch, capsys, hop):
+    """R7-M4: EVERY WAIT BEFORE THE MARKED SPAN HAS A CEILING, AND PAST IT
+    THE ANSWER IS THE PROMISED 503 -- not a request that never answers.
+
+    Three hops precede the span: the scrub and the gzip on the CPU pool, and
+    the blob directory's resolution on the volume pool (the hop R7-M4 named).
+    Each is held in its thread past its ceiling. The upload must answer 503
+    within the ceiling, having written nothing -- no row, no blob, no marker
+    -- and with its transaction ENDED before the wait: the last thing its
+    session did was a rollback. The two CPU hops come before admission, so
+    their refusal has not taken the advisory lock either.
+
+    CONTROL: the ceiling lifted at that one site, and the upload waits for
+    as long as the call is held and then lands. TWIN: the same ceiling
+    spelled `float(...)`.
+    """
+    owner_name, attr, ceiling, site, lifted, twin, line = _AUTO_PRE_SPAN_HOPS[hop]
+    owner = main if owner_name == "main" else auto_logs
+    HOLD, CEILING = 1.0, 0.2
+    monkeypatch.setattr(auto_logs, ceiling, CEILING)
+    monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", asyncio.Lock())
+    monkeypatch.setattr(auto_logs, "_BLOB_WRITE_STARTED", [0.0])
+    held = _Held(getattr(owner, attr))
+    monkeypatch.setattr(owner, attr, held)
+
+    async def drive(handler):
+        held.reset()
+        asyncio.get_running_loop().call_later(HOLD, held.release)
+        db = _ok_db()
+        at = time.monotonic()
+        try:
+            out = await handler(_request(), db)
+        except HTTPException as ex:
+            out = ex
+        took = time.monotonic() - at
+        await held.drained()
+        return out, took, db
+
+    out, took, db = _run(drive(auto_logs.upload_auto_log))
+    assert isinstance(out, HTTPException) and out.status_code == 503, out
+    assert took < HOLD, (
+        "the %s hop's refusal took %.2fs, past the %ss hold it was meant to "
+        "refuse inside" % (hop, took, HOLD))
+    assert line % CEILING in capsys.readouterr().out
+    assert not db.sql_for(INSERT_KEY), "a refused upload INSERTed a row"
+    assert _blobs(logdir) == [] and _markers(logdir) == [], (
+        _blobs(logdir), _markers(logdir))
+    assert db.events[-1] == "ROLLBACK", (
+        "the %s hop was waited for with a transaction open: %r"
+        % (hop, db.events))
+    if hop != "directory":
+        assert not db.sql_for(LOCK_KEY), (
+            "a refusal before admission took the advisory lock")
+
+    out, took, db = _run(drive(_handler_mutant([(site, lifted)])))
+    assert isinstance(out, dict) and out["log_persisted"] is True, (
+        "with the %s hop's ceiling lifted the upload was expected to wait and "
+        "land; it answered %r, so the refusal above is not about the ceiling"
+        % (hop, out))
+    assert took >= HOLD - 0.05, took
+
+    out, took, db = _run(drive(_handler_mutant([(site, twin)])))
+    assert isinstance(out, HTTPException) and out.status_code == 503, out
+    assert took < HOLD, took
+
+
+def test_a_player_attachment_that_does_not_store_in_time_is_filed_without_it(
+        logdir, monkeypatch, capsys):
+    """R7-M4 ON THE PLAYER'S HALF: the store's wait has a ceiling, the report
+    is still FILED, and the in-flight name outlives the answer until the last
+    worker the request started has ENDED.
+
+    The marker's stamp is held in its thread past `AUTO_LOG_VOLUME_WAIT_S`,
+    under the claim's lock -- so the removal that follows the timeout, and
+    the clear after the commit, both queue behind it and pass their own
+    ceilings too. The report must be answered with `log_persisted` false and
+    a row that NAMES the file with `log_bytes` NULL (nothing could prove the
+    file gone before the row committed); the name must still be registered
+    at the answer, because a worker of this request may yet create the
+    marker; and once the stamp is let go, the three workers finish in their
+    threads, nothing is left on the volume, and the name is released.
+
+    CONTROL: the name released at the answer whatever is still running --
+    the `if _running:` deferral removed -- and it is gone while the store is
+    still held. TWIN: the same test spelled `len(...) > 0`.
+    """
+    monkeypatch.setattr(auto_logs, "AUTO_LOG_VOLUME_WAIT_S", 0.2)
+    monkeypatch.setattr(main, "_is_admin", _no_admin)
+    monkeypatch.setattr(main, "_mark_mod_seen", _noop_mark)
+    held = _Held(auto_logs._stamp_marker)
+    monkeypatch.setattr(auto_logs, "_stamp_marker", held)
+
+    async def drive(handler):
+        held.reset()
+        db = _ReportSession({"FROM bug_reports": [[{"count": 0}]]})
+        req = schemas.BugReportRequest(steam_id=STEAM, description="it broke",
+                                       log_text="a log")
+        out = await handler(req, _request(), db)
+        report = db.added[0]
+        name = report.log_filename
+        registered_at_answer = name in auto_logs._MARKERS_IN_FLIGHT
+        drained = await held.drained()
+        released = await _until(
+            lambda: name not in auto_logs._MARKERS_IN_FLIGHT, 5.0)
+        return out, report, registered_at_answer, drained, released
+
+    out, report, registered, drained, released = _run(
+        drive(main.submit_bug_report))
+    assert out["log_persisted"] is False, out
+    assert report.log_filename and report.log_bytes is None, (
+        report.log_filename, report.log_bytes)
+    assert registered is True, (
+        "the in-flight name was released at the answer while a worker of "
+        "this request could still create its marker")
+    assert drained and released, (drained, released)
+    assert _blobs(logdir) == [] and _markers(logdir) == [], (
+        _blobs(logdir), _markers(logdir))
+    printed = capsys.readouterr().out
+    assert ("did not finish within %ss" % 0.2) in printed, printed
+    assert "was not cleared (TimeoutError)" in printed, printed
+
+    out, report, registered, drained, released = _run(drive(_report_mutant(
+        "            if _running:\n", "            if False:\n")))
+    assert registered is False, (
+        "with the deferral removed the name was expected to be released at "
+        "the answer, so the reading above is not about the deferral")
+    assert drained, drained
+
+    out, report, registered, drained, released = _run(drive(_report_mutant(
+        "            if _running:\n", "            if len(_running) > 0:\n")))
+    assert registered is True and drained and released, (
+        registered, drained, released)
+
+
+def test_a_player_attachment_whose_directory_does_not_resolve_is_filed_as_lost(
+        logdir, monkeypatch, capsys):
+    """The player's directory hop spends the ATTACHMENT'S deadline -- one
+    deadline of `AUTO_LOG_VOLUME_WAIT_S` for the directory and the store
+    together -- and past it the report is filed with the attachment
+    recorded as LOST: `log_bytes = 0`, no file named, nothing on the
+    volume, rather than the request waiting on a volume that does not
+    answer.
+
+    CONTROL: the attachment's deadline lifted, and the report waits the
+    hold out and lands with its log. (Lifting only the directory hop's
+    budget is not the control: the store after it spends the same
+    deadline, and meets it expired.) TWIN: the same deadline spelled
+    `float(...)`.
+    """
+    HOLD = 1.0
+    site = ("                attach_deadline = (time.monotonic()\n"
+            "                                   + _auto_logs.AUTO_LOG_VOLUME_WAIT_S)\n")
+    monkeypatch.setattr(auto_logs, "AUTO_LOG_VOLUME_WAIT_S", 0.2)
+    monkeypatch.setattr(main, "_is_admin", _no_admin)
+    monkeypatch.setattr(main, "_mark_mod_seen", _noop_mark)
+    held = _Held(main._bug_report_log_path)
+    monkeypatch.setattr(main, "_bug_report_log_path", held)
+
+    async def drive(handler):
+        held.reset()
+        asyncio.get_running_loop().call_later(HOLD, held.release)
+        db = _ReportSession({"FROM bug_reports": [[{"count": 0}]]})
+        req = schemas.BugReportRequest(steam_id=STEAM, description="it broke",
+                                       log_text="a log")
+        at = time.monotonic()
+        out = await handler(req, _request(), db)
+        took = time.monotonic() - at
+        await held.drained()
+        return out, db.added[0], took
+
+    out, report, took = _run(drive(main.submit_bug_report))
+    assert out["log_persisted"] is False, out
+    assert (report.log_filename, report.log_bytes) == (None, 0), (
+        report.log_filename, report.log_bytes)
+    assert took < HOLD, took
+    assert _blobs(logdir) == [] and _markers(logdir) == []
+    assert "log persistence FAILED" in capsys.readouterr().out
+
+    out, report, took = _run(drive(_report_mutant(
+        site, "                attach_deadline = (time.monotonic()\n"
+              "                                   + 10 ** 6)\n")))
+    assert out["log_persisted"] is True and took >= HOLD - 0.05, (out, took)
+
+    out, report, took = _run(drive(_report_mutant(
+        site, "                attach_deadline = (time.monotonic()\n"
+              "                                   + float(_auto_logs.AUTO_LOG_VOLUME_WAIT_S))\n")))
+    assert out["log_persisted"] is False and took < HOLD, (out, took)
+
+
+def test_a_player_attachment_whose_gzip_does_not_finish_is_filed_as_lost(
+        logdir, monkeypatch, capsys):
+    """The player's gzip is a wait on the CPU pool with its own ceiling
+    (`AUTO_LOG_CPU_WAIT_S`), and past it the report is FILED with the
+    attachment recorded as lost -- `log_bytes = 0`, no file named, nothing on
+    the volume and nothing registered -- instead of the request waiting on a
+    pass that does not finish. The gzip runs before the attachment has a
+    path, so there is nothing to remove: the line says no file was created.
+
+    The compression is held in its thread past the ceiling, and let go
+    afterwards so the worker ends before its loop closes.
+
+    CONTROL: the ceiling lifted at that one site, and the report waits the
+    hold out and lands with its log. TWIN: the same ceiling spelled
+    `float(...)`.
+    """
+    HOLD, CEILING = 1.0, 0.2
+    site = "                    _auto_logs._CPU_POOL, _auto_logs.AUTO_LOG_CPU_WAIT_S,\n"
+    monkeypatch.setattr(auto_logs, "AUTO_LOG_CPU_WAIT_S", CEILING)
+    monkeypatch.setattr(main, "_is_admin", _no_admin)
+    monkeypatch.setattr(main, "_mark_mod_seen", _noop_mark)
+    held = _Held(gzip.compress)
+
+    class _HeldGzip:
+        compress = staticmethod(held)
+        open = staticmethod(gzip.open)
+
+    monkeypatch.setattr(main, "_gzip", _HeldGzip)
+
+    async def drive(handler):
+        held.reset()
+        asyncio.get_running_loop().call_later(HOLD, held.release)
+        db = _ReportSession({"FROM bug_reports": [[{"count": 0}]]})
+        req = schemas.BugReportRequest(steam_id=STEAM, description="it broke",
+                                       log_text="a log")
+        at = time.monotonic()
+        out = await handler(req, _request(), db)
+        took = time.monotonic() - at
+        await held.drained()
+        return out, db.added[0], took
+
+    out, report, took = _run(drive(main.submit_bug_report))
+    assert held.entered == 1, held.entered
+    assert out["log_persisted"] is False, out
+    assert (report.log_filename, report.log_bytes) == (None, 0), (
+        report.log_filename, report.log_bytes)
+    assert took < HOLD, (
+        "the gzip's refusal took %.2fs, past the %ss hold it was meant to "
+        "refuse inside" % (took, HOLD))
+    assert _blobs(logdir) == [] and _markers(logdir) == [], (
+        _blobs(logdir), _markers(logdir))
+    assert not auto_logs._MARKERS_IN_FLIGHT, auto_logs._MARKERS_IN_FLIGHT
+    printed = capsys.readouterr().out
+    assert "log persistence FAILED" in printed and "no file was created" in printed, (
+        printed)
+
+    out, report, took = _run(drive(_report_mutant(
+        site, "                    _auto_logs._CPU_POOL, 10 ** 6,\n")))
+    assert out["log_persisted"] is True and took >= HOLD - 0.05, (
+        "with the gzip's ceiling lifted the report was expected to wait the "
+        "hold out and land with its log: %r after %.2fs, so the refusal above "
+        "is not about the ceiling" % (out, took))
+    assert report.log_filename and report.log_bytes, (
+        report.log_filename, report.log_bytes)
+    for p in list(logdir.iterdir()):
+        p.unlink()
+
+    out, report, took = _run(drive(_report_mutant(
+        site, "                    _auto_logs._CPU_POOL, "
+              "float(_auto_logs.AUTO_LOG_CPU_WAIT_S),\n")))
+    assert out["log_persisted"] is False and took < HOLD, (out, took)
+    assert (report.log_filename, report.log_bytes) == (None, 0), (
+        report.log_filename, report.log_bytes)
+
+
+def test_the_admin_log_readers_answer_when_the_volume_does_not(logdir, admin,
+                                                               monkeypatch,
+                                                               capsys):
+    """Both admin readers read the blob on the auto-log module's VOLUME pool,
+    since round 8, with a ceiling on the wait and their transaction ended
+    first: a volume that does not answer is a 503 on the download and a read
+    error on the detail pane, never a request that waits on it -- and never
+    one that waits holding a connection.
+
+    CONTROL: the ceiling lifted at each reader's site, and both wait the hold
+    out and serve the log. TWIN: the same ceiling spelled `float(...)`.
+    """
+    HOLD = 1.0
+    monkeypatch.setattr(auto_logs, "AUTO_LOG_VOLUME_WAIT_S", 0.2)
+    name = "%s.log.gz" % (RID,)
+    (logdir / name).write_bytes(gzip.compress(b"a stored log line"))
+    held = _Held(main._read_bug_log_sync)
+    monkeypatch.setattr(main, "_read_bug_log_sync", held)
+    row_key = "SELECT id, bug_number, log_filename, log_bytes, created_at FROM bug_reports"
+    when = datetime(2026, 9, 19, tzinfo=timezone.utc)
+    detail_row = {"id": RID, "bug_number": 41, "player_id": None,
+                  "steam_id": STEAM, "display_name": "Player",
+                  "mod_version": "1.41.0", "game_version": "1.0.0",
+                  "severity": "medium", "category": "gameplay",
+                  "description": "d", "repro_steps": None,
+                  "log_filename": name, "log_bytes": 10, "status": "open",
+                  "triage_notes": None, "created_at": when,
+                  "updated_at": None, "kind": "auto"}
+    sites = {
+        "download_bug_report_log": " " * 12,
+        "get_bug_report": " " * 16,
+    }
+
+    def site_of(reader):
+        return (sites[reader] + "_auto_logs._VOLUME_POOL, "
+                "_auto_logs.AUTO_LOG_VOLUME_WAIT_S,\n")
+
+    def edit(reader, ceiling):
+        return (sites[reader] + "_auto_logs._VOLUME_POOL, %s,\n" % ceiling)
+
+    async def drive(download, detail):
+        held.reset()
+        loop = asyncio.get_running_loop()
+        loop.call_later(HOLD, held.release)
+        ddb = Scripted({row_key: [[{"id": RID, "bug_number": 41,
+                                    "log_filename": name, "log_bytes": 10,
+                                    "created_at": when}]]})
+        at = time.monotonic()
+        try:
+            got = await download(report_id=str(RID), admin_steam_id=STEAM,
+                                 hmac_signature="s", db=ddb)
+        except HTTPException as ex:
+            got = ex
+        d_took = time.monotonic() - at
+        await held.drained()
+        held.reset()
+        loop.call_later(HOLD, held.release)
+        pdb = Scripted({DETAIL_KEY: [[detail_row]], EVENTS_KEY: [[]]})
+        at = time.monotonic()
+        pane = await detail(report_id=str(RID), admin_steam_id=STEAM,
+                            hmac_signature="s", include_log=True, db=pdb)
+        p_took = time.monotonic() - at
+        await held.drained()
+        return got, d_took, ddb, pane, p_took, pdb
+
+    got, d_took, ddb, pane, p_took, pdb = _run(drive(
+        main.download_bug_report_log, main.get_bug_report))
+    assert isinstance(got, HTTPException) and got.status_code == 503, got
+    assert d_took < HOLD and p_took < HOLD, (d_took, p_took)
+    assert ddb.events[-1] == "ROLLBACK" and len(ddb.events) == 2, (
+        "the download read its row and then waited with the transaction "
+        "open: %r" % (ddb.events,))
+    assert pane["log_text"] == "[log read error: TimeoutError]", pane["log_text"]
+    assert pdb.events[1] == "ROLLBACK" and DETAIL_KEY in pdb.events[0], (
+        "the detail pane waited with its transaction open: %r" % (pdb.events,))
+    assert ("did not return within %ss" % 0.2) in capsys.readouterr().out
+
+    got, d_took, ddb, pane, p_took, pdb = _run(drive(
+        _main_mutant("download_bug_report_log",
+                     [(site_of("download_bug_report_log"),
+                       edit("download_bug_report_log", "10 ** 6"))]),
+        _main_mutant("get_bug_report",
+                     [(site_of("get_bug_report"),
+                       edit("get_bug_report", "10 ** 6"))])))
+    assert not isinstance(got, HTTPException), got
+    assert b"a stored log line" in got.body and d_took >= HOLD - 0.05, (
+        got.body, d_took)
+    assert pane["log_text"] == "a stored log line" and p_took >= HOLD - 0.05, (
+        pane["log_text"], p_took)
+
+    got, d_took, ddb, pane, p_took, pdb = _run(drive(
+        _main_mutant("download_bug_report_log",
+                     [(site_of("download_bug_report_log"),
+                       edit("download_bug_report_log",
+                            "float(_auto_logs.AUTO_LOG_VOLUME_WAIT_S)"))]),
+        _main_mutant("get_bug_report",
+                     [(site_of("get_bug_report"),
+                       edit("get_bug_report",
+                            "float(_auto_logs.AUTO_LOG_VOLUME_WAIT_S)"))])))
+    assert isinstance(got, HTTPException) and got.status_code == 503, got
+    assert pane["log_text"] == "[log read error: TimeoutError]", pane["log_text"]
+
+
+class _InsertRefused(Scripted):
+    """The INSERT raises (`fail_on`), and the session remembers that it was
+    tried -- so a volume stub can refuse only what comes AFTER it."""
+
+    insert_tried = False
+
+    async def execute(self, statement, params=None):
+        if INSERT_KEY in " ".join(str(statement).split()):
+            self.insert_tried = True
+        return await super().execute(statement, params)
+
+
+_INSERT_ARM_CLEANUP = ("                await _end_transaction(db)\n"
+                       "                outcome = await _discard_for_refusal(own)\n"
+                       "                # ONE print statement, every outcome.")
+
+
+def test_the_admin_log_scrub_holds_no_connection_and_answers_past_its_ceiling(
+        logdir, admin, monkeypatch, capsys):
+    """R7-M4'S CLASS IN THE READERS' SCRUB. Both admin readers pass the log
+    through `_scrub_bug_log`: a regex pass, a purge probe against the
+    database, a second regex pass. Since round 8 both passes run on the CPU
+    pool under `AUTO_LOG_CPU_WAIT_S`, and the probe's transaction is ENDED
+    before pass two -- so neither reader waits on a pass with a pooled
+    connection checked out, and neither waits past the ceiling.
+
+    Pass two is held in its thread. Read while it is held, on a model of the
+    pool: NO connection is checked out by either reader, although the probe
+    ran a statement just before. Past the ceiling the download answers 503
+    and the pane reads a log read error, each well inside the hold.
+
+    CONTROL (a): the probe's `_end_transaction` removed -- the probe's
+    connection is then held across pass two, one checked out per reader.
+    CONTROL (b): the ceiling lifted at pass two -- both readers wait the hold
+    out and serve the scrubbed log. TWIN: the same two lines re-spelled.
+    """
+    HOLD, CEILING = 1.0, 0.2
+    end_site = ("    await _auto_logs._end_transaction(db)\n"
+                "    body = await _auto_logs._hop(\n")
+    pass_two = ("        _auto_logs._CPU_POOL, _auto_logs.AUTO_LOG_CPU_WAIT_S,\n"
+                "        _scrub_pass_two, body, purged, counts)\n")
+    monkeypatch.setattr(auto_logs, "AUTO_LOG_CPU_WAIT_S", CEILING)
+    # The probe only asks the database when it has something to hash with;
+    # the log names the synthetic account so it has an id to ask about.
+    monkeypatch.setattr(main, "MATCH_HMAC_SECRET", "a-test-secret")
+    name = "%s.log.gz" % (RID,)
+    (logdir / name).write_bytes(gzip.compress(
+        ("a stored log line for %s" % STEAM).encode("utf-8")))
+    held = _Held(main._scrub_pass_two)
+    monkeypatch.setattr(main, "_scrub_pass_two", held)
+    row_key = "SELECT id, bug_number, log_filename, log_bytes, created_at FROM bug_reports"
+    when = datetime(2026, 9, 19, tzinfo=timezone.utc)
+    detail_row = {"id": RID, "bug_number": 41, "player_id": None,
+                  "steam_id": STEAM, "display_name": "Player",
+                  "mod_version": "1.41.0", "game_version": "1.0.0",
+                  "severity": "medium", "category": "gameplay",
+                  "description": "d", "repro_steps": None,
+                  "log_filename": name, "log_bytes": 10, "status": "open",
+                  "triage_notes": None, "created_at": when,
+                  "updated_at": None, "kind": "auto"}
+
+    def mutant(pairs):
+        """`_scrub_bug_log` with the edits, bound into main for this drive
+        (monkeypatch undoes it at the test's end)."""
+        body = textwrap.dedent(inspect.getsource(real_scrub))
+        for anchor, replacement in pairs:
+            assert body.count(anchor) == 1, (body.count(anchor), anchor)
+            body = body.replace(anchor, replacement)
+        namespace = dict(vars(main))
+        exec(compile(body, "<mutant:_scrub_bug_log>", "exec"), namespace)
+        return namespace["_scrub_bug_log"]
+
+    real_scrub = main._scrub_bug_log
+
+    async def one(reader, db, pool, **kw):
+        held.reset()
+        task = asyncio.ensure_future(reader(report_id=str(RID),
+                                            admin_steam_id=STEAM,
+                                            hmac_signature="s", db=db, **kw))
+        at = time.monotonic()
+        entered = await _until(lambda: held.entered == 1, 5.0)
+        out_at_pass_two = pool.out
+        asyncio.get_running_loop().call_later(HOLD, held.release)
+        try:
+            got = await task
+        except HTTPException as ex:
+            got = ex
+        took = time.monotonic() - at
+        await held.drained()
+        await db.close()
+        return entered, out_at_pass_two, got, took
+
+    async def drive(scrub):
+        monkeypatch.setattr(main, "_scrub_bug_log", scrub)
+        pool = _ModelPool(size=2, timeout=0.5)
+        ddb = _PooledScripted({row_key: [[{"id": RID, "bug_number": 41,
+                                            "log_filename": name,
+                                            "log_bytes": 10,
+                                            "created_at": when}]]})
+        ddb.pool = pool
+        down = await one(main.download_bug_report_log, ddb, pool)
+        pdb = _PooledScripted({DETAIL_KEY: [[detail_row]], EVENTS_KEY: [[]]})
+        pdb.pool = pool
+        pane = await one(main.get_bug_report, pdb, pool, include_log=True)
+        return down, ddb, pane, pdb, pool.out
+
+    (d_in, d_out, got, d_took), ddb, (p_in, p_out, pane, p_took), pdb, after = \
+        _run(drive(real_scrub))
+    assert d_in and p_in, "pass two was never reached"
+    assert ddb.sql_for("deleted_steam_ids") and pdb.sql_for("deleted_steam_ids"), (
+        "the purge probe asked nothing, so the reading below would not be "
+        "about the probe's transaction")
+    assert (d_out, p_out) == (0, 0), (
+        "%d / %d connection(s) checked out while the download / the pane "
+        "waited on the scrub's second pass" % (d_out, p_out))
+    assert isinstance(got, HTTPException) and got.status_code == 503, got
+    assert pane["log_text"] == "[log read error: TimeoutError]", pane["log_text"]
+    assert d_took < HOLD and p_took < HOLD, (d_took, p_took)
+    assert after == 0, after
+    assert ("did not finish within %ss" % CEILING) in capsys.readouterr().out
+
+    (d_in, d_out, got, d_took), ddb, (p_in, p_out, pane, p_took), pdb, after = \
+        _run(drive(mutant([(end_site, "    body = await _auto_logs._hop(\n")])))
+    assert (d_out, p_out) == (1, 1), (
+        "with the probe's transaction left open the readers were expected to "
+        "hold its connection across pass two; they held %d / %d, so the "
+        "reading above is not about the ending" % (d_out, p_out))
+
+    (d_in, d_out, got, d_took), ddb, (p_in, p_out, pane, p_took), pdb, after = \
+        _run(drive(mutant([(pass_two, pass_two.replace(
+            "_auto_logs.AUTO_LOG_CPU_WAIT_S", "10 ** 6"))])))
+    assert not isinstance(got, HTTPException), got
+    assert b"a stored log line" in got.body and d_took >= HOLD - 0.05, (
+        got.body, d_took)
+    assert pane["log_text"].startswith("a stored log line") and p_took >= HOLD - 0.05, (
+        pane["log_text"], p_took)
+
+    (d_in, d_out, got, d_took), ddb, (p_in, p_out, pane, p_took), pdb, after = \
+        _run(drive(mutant([
+            (end_site, "    await _auto_logs._end_transaction(*(db,))\n"
+                       "    body = await _auto_logs._hop(\n"),
+            (pass_two, pass_two.replace(
+                "_auto_logs.AUTO_LOG_CPU_WAIT_S",
+                "float(_auto_logs.AUTO_LOG_CPU_WAIT_S)"))])))
+    assert (d_out, p_out) == (0, 0), (d_out, p_out)
+    assert isinstance(got, HTTPException) and got.status_code == 503, got
+    assert pane["log_text"] == "[log read error: TimeoutError]", pane["log_text"]
+
+
+def test_the_admin_log_scrub_answers_when_its_first_pass_does_not_finish(
+        logdir, admin, monkeypatch, capsys):
+    """THE SCRUB'S FIRST PASS HAS THE SAME CEILING AS ITS SECOND, and it too
+    is waited for with no connection checked out: both readers end their
+    read before the volume hop that comes before it, and the scrub asks the
+    database nothing until pass one has returned.
+
+    Pass one is held in its thread past `AUTO_LOG_CPU_WAIT_S`, read on a
+    model of the pool: NO connection is checked out by either reader while
+    it waits, the download answers 503 and the pane reads a log read error,
+    each well inside the hold.
+
+    CONTROL: pass one's ceiling lifted -- both readers wait the hold out and
+    serve the log. TWIN: the same ceiling spelled `float(...)`.
+    """
+    HOLD, CEILING = 1.0, 0.2
+    pass_one = ("        _auto_logs._CPU_POOL, _auto_logs.AUTO_LOG_CPU_WAIT_S,\n"
+                "        _scrub_pass_one, body)\n")
+    monkeypatch.setattr(auto_logs, "AUTO_LOG_CPU_WAIT_S", CEILING)
+    name = "%s.log.gz" % (RID,)
+    (logdir / name).write_bytes(gzip.compress(b"a stored log line"))
+    held = _Held(main._scrub_pass_one)
+    monkeypatch.setattr(main, "_scrub_pass_one", held)
+    row_key = "SELECT id, bug_number, log_filename, log_bytes, created_at FROM bug_reports"
+    when = datetime(2026, 9, 19, tzinfo=timezone.utc)
+    detail_row = {"id": RID, "bug_number": 41, "player_id": None,
+                  "steam_id": STEAM, "display_name": "Player",
+                  "mod_version": "1.41.0", "game_version": "1.0.0",
+                  "severity": "medium", "category": "gameplay",
+                  "description": "d", "repro_steps": None,
+                  "log_filename": name, "log_bytes": 10, "status": "open",
+                  "triage_notes": None, "created_at": when,
+                  "updated_at": None, "kind": "auto"}
+    real_scrub = main._scrub_bug_log
+
+    def mutant(ceiling):
+        """`_scrub_bug_log` with pass one's ceiling re-spelled, bound into
+        main for this drive (monkeypatch undoes it at the test's end)."""
+        body = textwrap.dedent(inspect.getsource(real_scrub))
+        assert body.count(pass_one) == 1, body.count(pass_one)
+        body = body.replace(pass_one, pass_one.replace(
+            "_auto_logs.AUTO_LOG_CPU_WAIT_S", ceiling))
+        namespace = dict(vars(main))
+        exec(compile(body, "<mutant:_scrub_bug_log>", "exec"), namespace)
+        return namespace["_scrub_bug_log"]
+
+    async def one(reader, db, pool, **kw):
+        held.reset()
+        task = asyncio.ensure_future(reader(report_id=str(RID),
+                                            admin_steam_id=STEAM,
+                                            hmac_signature="s", db=db, **kw))
+        at = time.monotonic()
+        entered = await _until(lambda: held.entered == 1, 5.0)
+        out_at_pass_one = pool.out
+        asyncio.get_running_loop().call_later(HOLD, held.release)
+        try:
+            got = await task
+        except HTTPException as ex:
+            got = ex
+        took = time.monotonic() - at
+        await held.drained()
+        await db.close()
+        return entered, out_at_pass_one, got, took
+
+    async def drive(scrub):
+        monkeypatch.setattr(main, "_scrub_bug_log", scrub)
+        pool = _ModelPool(size=2, timeout=0.5)
+        ddb = _PooledScripted({row_key: [[{"id": RID, "bug_number": 41,
+                                            "log_filename": name,
+                                            "log_bytes": 10,
+                                            "created_at": when}]]})
+        ddb.pool = pool
+        down = await one(main.download_bug_report_log, ddb, pool)
+        pdb = _PooledScripted({DETAIL_KEY: [[detail_row]], EVENTS_KEY: [[]]})
+        pdb.pool = pool
+        pane = await one(main.get_bug_report, pdb, pool, include_log=True)
+        return down, pane, pool.out
+
+    (d_in, d_out, got, d_took), (p_in, p_out, pane, p_took), after = _run(
+        drive(real_scrub))
+    assert d_in and p_in, "pass one was never reached"
+    assert (d_out, p_out) == (0, 0), (
+        "%d / %d connection(s) checked out while the download / the pane "
+        "waited on the scrub's first pass" % (d_out, p_out))
+    assert isinstance(got, HTTPException) and got.status_code == 503, got
+    assert pane["log_text"] == "[log read error: TimeoutError]", pane["log_text"]
+    assert d_took < HOLD and p_took < HOLD, (d_took, p_took)
+    assert after == 0, after
+    assert ("did not finish within %ss" % CEILING) in capsys.readouterr().out
+
+    (d_in, d_out, got, d_took), (p_in, p_out, pane, p_took), after = _run(
+        drive(mutant("10 ** 6")))
+    assert not isinstance(got, HTTPException), (
+        "with pass one's ceiling lifted the download was expected to wait "
+        "the hold out and serve the log; it answered %r, so the refusal "
+        "above is not about the ceiling" % (got,))
+    assert b"a stored log line" in got.body and d_took >= HOLD - 0.05, (
+        got.body, d_took)
+    assert pane["log_text"].startswith("a stored log line") and p_took >= HOLD - 0.05, (
+        pane["log_text"], p_took)
+
+    (d_in, d_out, got, d_took), (p_in, p_out, pane, p_took), after = _run(
+        drive(mutant("float(_auto_logs.AUTO_LOG_CPU_WAIT_S)")))
+    assert (d_out, p_out) == (0, 0), (d_out, p_out)
+    assert isinstance(got, HTTPException) and got.status_code == 503, got
+    assert pane["log_text"] == "[log read error: TimeoutError]", pane["log_text"]
+
+
+def test_an_insert_whose_cleanup_barrier_refuses_still_answers_503(
+        logdir, verified, monkeypatch, capsys):
+    """R7-L1: THE CLEANUP'S OWN FAILURE CANNOT TURN THE INSERT ARM INTO A 500.
+
+    The INSERT raises, and then the cleanup's directory flush -- the barrier
+    between the blob's unlink and the marker's -- refuses. In round 7 that
+    raise left the arm ahead of its rollback, its line and its 503, and the
+    client was answered 500. Now the transaction is ended FIRST and the
+    cleanup's outcome is a sentence: the answer is 503; the rollback had
+    already happened when the flush refused (four transactions ended by
+    then: T0, T1a, T1 and this arm's); the line says the removal cannot be
+    proved and names the marker the sweep will use; and the files are in
+    exactly the state that line describes -- the blob unlinked, its marker
+    kept, the in-flight name released.
+
+    CONTROL: the round-7 order -- the cleanup awaited bare, before the
+    rollback -- and the flush's OSError escapes the handler with the
+    rollback not yet taken. TWIN: the same call, parenthesised.
+
+    PART TWO: the cleanup held past its ceiling. The answer is still 503
+    within the ceiling, the line says the blob may survive, and once the
+    cleanup is let go it finishes in its thread and leaves nothing behind.
+    """
+    monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", asyncio.Lock())
+    monkeypatch.setattr(auto_logs, "_BLOB_WRITE_STARTED", [0.0])
+    monkeypatch.setattr(auto_logs, "_free_bytes", lambda directory: 10 ** 12)
+    real_flush = auto_logs._fsync_dir
+    state = {}
+
+    def refusing_flush(directory):
+        db = state["db"]
+        if db.insert_tried:
+            state["rolled_back_at_refusal"] = db.rolled_back
+            raise OSError("the directory would not flush")
+        return real_flush(directory)
+
+    monkeypatch.setattr(auto_logs, "_fsync_dir", refusing_flush)
+
+    def drive(handler):
+        db = state["db"] = _InsertRefused({COUNT_KEY: [[_bucket(0)]],
+                                           PLAYER_KEY: [[{"id": PID}]]},
+                                          fail_on=INSERT_KEY)
+        state["rolled_back_at_refusal"] = None
+        before = set(_markers(logdir))
+        try:
+            out = _run(handler(_request(), db))
+        except Exception as ex:          # noqa: BLE001 -- the control's 500
+            out = ex
+        return out, db, sorted(set(_markers(logdir)) - before)
+
+    out, db, kept = drive(auto_logs.upload_auto_log)
+    assert isinstance(out, HTTPException) and out.status_code == 503, (
+        "the INSERT arm answered %r when its cleanup barrier refused; the "
+        "promised answer is 503" % (out,))
+    assert state["rolled_back_at_refusal"] == 4, (
+        "the flush refused with %r transaction(s) ended; this arm's rollback "
+        "has to come BEFORE its cleanup" % (state["rolled_back_at_refusal"],))
+    assert _blobs(logdir) == [], "the blob's unlink came before the barrier"
+    assert len(kept) == 1, (
+        "the marker is what offers the unproved removal to the sweep, and "
+        "exactly this upload's one is kept: %r" % (kept,))
+    blob = kept[0][:-len(auto_logs._ORPHAN_MARKER_SUFFIX)]
+    assert blob not in auto_logs._MARKERS_IN_FLIGHT
+    printed = capsys.readouterr().out
+    assert ("RuntimeError; the cleanup raised OSError, so the removal cannot "
+            "be proved and the blob may SURVIVE as %s -- %s=%s"
+            % (blob, auto_logs._ORPHAN_MARKER, blob)) in printed, printed
+    (logdir / kept[0]).unlink()
+
+    out, db, kept = drive(_handler_mutant([(
+        _INSERT_ARM_CLEANUP,
+        "                gone = await _release_marked_blob_off_loop(own)\n"
+        "                await _end_transaction(db)\n"
+        "                outcome = 'blob discarded' if gone else 'kept'\n"
+        "                # ONE print statement, every outcome.")]))
+    assert isinstance(out, OSError), (
+        "the round-7 order was expected to let the barrier's OSError escape "
+        "as a 500; the handler answered %r, so the red above is not about "
+        "the order" % (out,))
+    assert state["rolled_back_at_refusal"] == 3, state
+    for m in kept:
+        (logdir / m).unlink()
+
+    out, db, kept = drive(_handler_mutant([(
+        _INSERT_ARM_CLEANUP,
+        "                await _end_transaction(db)\n"
+        "                outcome = await (_discard_for_refusal)(own)\n"
+        "                # ONE print statement, every outcome.")]))
+    assert isinstance(out, HTTPException) and out.status_code == 503, out
+    assert state["rolled_back_at_refusal"] == 4, state
+    for m in kept:
+        (logdir / m).unlink()
+    capsys.readouterr()
+
+    # PART TWO: the cleanup's wait passes its ceiling.
+    monkeypatch.setattr(auto_logs, "_fsync_dir", real_flush)
+    monkeypatch.setattr(auto_logs, "AUTO_LOG_VOLUME_WAIT_S", 0.2)
+    held = _Held(auto_logs._release_marked_blob)
+    monkeypatch.setattr(auto_logs, "_release_marked_blob", held)
+
+    async def ceiling():
+        db = _InsertRefused({COUNT_KEY: [[_bucket(0)]],
+                             PLAYER_KEY: [[{"id": PID}]]}, fail_on=INSERT_KEY)
+        at = time.monotonic()
+        try:
+            out = await auto_logs.upload_auto_log(_request(), db)
+        except HTTPException as ex:
+            out = ex
+        took = time.monotonic() - at
+        drained = await held.drained()
+        return out, took, drained
+
+    out, took, drained = _run(ceiling())
+    assert isinstance(out, HTTPException) and out.status_code == 503, out
+    assert took < 5.0 and drained, (took, drained)
+    printed = capsys.readouterr().out
+    assert ("the cleanup had not finished after 0.2s and goes on in its "
+            "thread, so the blob may SURVIVE as ") in printed, printed
+    assert _blobs(logdir) == [] and _markers(logdir) == [], (
+        "the cleanup that outlived its wait did not finish its work: %r %r"
+        % (_blobs(logdir), _markers(logdir)))
+
+
+def test_a_cleanup_past_its_ceiling_hands_the_volume_on_only_when_it_ends(
+        logdir, verified, monkeypatch, capsys):
+    """THE RESERVE LOCK IS RELEASED BY THE CLEANUP'S COMPLETION, NOT BY THE
+    END OF SOMEBODY'S WAIT FOR IT (round 8).
+
+    The write fails, so the section cleans up after itself -- and that
+    cleanup is held past its ceiling. The upload is answered 503 when the
+    ceiling passes, but the volume is NOT handed on then: a ceiling is not
+    evidence that the cleanup ran, and handing the lock on at the ceiling
+    would let the next upload measure a volume this one may still be
+    removing from (R2-M1's class, made by a timer). The lock is released
+    when the cleanup itself ends, and then without anybody waiting.
+
+    CONTROL: the release made at the end of the WAIT (`try`/`finally`), and
+    the lock is free while the cleanup is still held. TWIN: the chained
+    release with its argument parenthesised.
+    """
+    lock = asyncio.Lock()
+    monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", lock)
+    monkeypatch.setattr(auto_logs, "_BLOB_WRITE_STARTED", [0.0])
+    monkeypatch.setattr(auto_logs, "_free_bytes", lambda directory: 10 ** 12)
+    monkeypatch.setattr(auto_logs, "AUTO_LOG_VOLUME_WAIT_S", 0.2)
+
+    def refused_write(own, data):
+        raise OSError("the volume refused the write")
+
+    monkeypatch.setattr(auto_logs, "_guarded_write", refused_write)
+    held = _Held(auto_logs._release_marked_blob)
+    monkeypatch.setattr(auto_logs, "_release_marked_blob", held)
+    real_section = auto_logs._reserve_stamp_and_write
+    site = ("                gone = await _release_marked_blob_off_loop("
+            "own, then=_hand_on)\n")
+
+    async def drive(section):
+        held.reset()
+        monkeypatch.setattr(auto_logs, "_reserve_stamp_and_write", section)
+        try:
+            out = await auto_logs.upload_auto_log(_request(), _ok_db())
+        except HTTPException as ex:
+            out = ex
+        locked_at_answer = lock.locked()
+        drained = await held.drained()
+        freed = await _until(lambda: not lock.locked(), 5.0)
+        return out, locked_at_answer, drained, freed
+
+    out, locked_at_answer, drained, freed = _run(drive(real_section))
+    assert isinstance(out, HTTPException) and out.status_code == 503, out
+    assert locked_at_answer is True, (
+        "the volume was handed on while the cleanup of a failed write was "
+        "still held")
+    assert drained and freed, (
+        "the volume was never handed on after the cleanup ended")
+    assert _blobs(logdir) == [] and _markers(logdir) == []
+    printed = capsys.readouterr().out
+    assert "the volume is handed on when it ends" in printed, printed
+
+    out, locked_at_answer, drained, freed = _run(drive(_exec_mutant(
+        real_section, site,
+        "                try:\n"
+        "                    gone = await _release_marked_blob_off_loop(own)\n"
+        "                finally:\n"
+        "                    _hand_on()\n")))
+    assert locked_at_answer is False, (
+        "with the release made at the end of the wait the lock was expected "
+        "to be free at the answer, so the reading above is not about the "
+        "chaining")
+    assert drained and freed
+
+    out, locked_at_answer, drained, freed = _run(drive(_exec_mutant(
+        real_section, site,
+        "                gone = await _release_marked_blob_off_loop("
+        "own, then=(_hand_on))\n")))
+    assert locked_at_answer is True and drained and freed, (
+        locked_at_answer, drained, freed)
+
+
+def test_a_count_that_reached_the_cap_before_the_insert_refuses_and_discards(
+        logdir, verified, monkeypatch, capsys):
+    """T2 RE-READS THE COUNT UNDER THE LOCK BEFORE IT INSERTS (#208).
+
+    T1 released the advisory lock when it ended, so T2 takes it again and
+    reads the count again: the cap is a property of what the database holds
+    at the INSERT. Here the count admitted the upload in T1 and reads full
+    in T2 -- which in one process the account's turn makes impossible, and
+    across processes is exactly what this arm is for. The answer is the 429
+    with its Retry-After, no row is written, and the blob written in between
+    is discarded with its marker.
+
+    CONTROL: the re-check disabled, and the same upload is INSERTed past the
+    cap. TWIN: the same comparison, negated twice.
+    """
+    monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", asyncio.Lock())
+    monkeypatch.setattr(auto_logs, "_BLOB_WRITE_STARTED", [0.0])
+    monkeypatch.setattr(auto_logs, "_free_bytes", lambda directory: 10 ** 12)
+    site = ("            if count >= AUTO_LOG_PER_STEAM_PER_DAY:\n"
+            "                await _end_transaction(db)\n")
+    cap = auto_logs.AUTO_LOG_PER_STEAM_PER_DAY
+
+    def drive(handler):
+        db = Scripted({COUNT_KEY: [[_bucket(0)], [_bucket(0)], [_bucket(cap)]],
+                       PLAYER_KEY: [[{"id": PID}]],
+                       INSERT_KEY: [[{"bug_number": 4242}]]})
+        try:
+            out = _run(handler(_request(), db))
+        except HTTPException as ex:
+            out = ex
+        return out, db
+
+    out, db = drive(auto_logs.upload_auto_log)
+    assert isinstance(out, HTTPException) and out.status_code == 429, out
+    assert out.headers.get("Retry-After"), out.headers
+    assert not db.sql_for(INSERT_KEY), "the upload was INSERTed past the cap"
+    assert len(db.sql_for(LOCK_KEY)) == 2, (
+        "the lock was taken %d time(s); T1 and T2 each take it"
+        % len(db.sql_for(LOCK_KEY)))
+    assert _blobs(logdir) == [] and _markers(logdir) == []
+    printed = capsys.readouterr().out
+    assert "on the re-check before the INSERT" in printed, printed
+    assert "and its INSERT; blob discarded" in printed, printed
+
+    out, db = drive(_handler_mutant([(site, "            if False:\n"
+                                            "                await _end_transaction(db)\n")]))
+    assert isinstance(out, dict) and db.sql_for(INSERT_KEY), (
+        "with the re-check disabled the upload was expected to be INSERTed "
+        "past the cap: %r" % (out,))
+    for p in list(logdir.iterdir()):
+        p.unlink()
+
+    out, db = drive(_handler_mutant([(
+        site, "            if not count < AUTO_LOG_PER_STEAM_PER_DAY:\n"
+              "                await _end_transaction(db)\n")]))
+    assert isinstance(out, HTTPException) and out.status_code == 429, out
+
+
+def test_a_marker_clear_that_does_not_return_in_time_leaves_the_upload_accepted(
+        logdir, verified, monkeypatch, capsys):
+    """THE CLEAR AFTER THE COMMIT HAS A CEILING, AND PAST IT THE UPLOAD STILL
+    STANDS.
+
+    The row is committed when the clear starts, so the connection has gone
+    back and the marker is only disposition 2 of the sweep -- a marker over
+    a blob a row names, cleared on the next pass that reaches it. A 503 here
+    would tell the client to resend a log that has landed; waiting without
+    a ceiling would hold the request on a volume that does not answer. So
+    the answer is the accepted one, within the ceiling, and the line says
+    the marker was not cleared. The clear still happens, in its thread, once
+    the volume answers.
+
+    CONTROL: the ceiling lifted at the site, and the upload waits the hold
+    out. TWIN: the same ceiling spelled `float(...)`.
+    """
+    HOLD = 1.0
+    monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", asyncio.Lock())
+    monkeypatch.setattr(auto_logs, "_BLOB_WRITE_STARTED", [0.0])
+    monkeypatch.setattr(auto_logs, "_free_bytes", lambda directory: 10 ** 12)
+    monkeypatch.setattr(auto_logs, "AUTO_LOG_VOLUME_WAIT_S", 0.2)
+    held = _Held(auto_logs._clear_marker)
+    monkeypatch.setattr(auto_logs, "_clear_marker", held)
+    site = ("                await _hop_through(_VOLUME_POOL, "
+            "AUTO_LOG_VOLUME_WAIT_S,\n")
+
+    async def drive(handler):
+        held.reset()
+        asyncio.get_running_loop().call_later(HOLD, held.release)
+        at = time.monotonic()
+        out = await handler(_request(), _ok_db())
+        took = time.monotonic() - at
+        marked_at_answer = list(_markers(logdir))
+        await held.drained()
+        return out, took, marked_at_answer
+
+    out, took, marked = _run(drive(auto_logs.upload_auto_log))
+    assert out["log_persisted"] is True, out
+    assert took < HOLD, took
+    assert len(marked) == 1, marked
+    assert _markers(logdir) == [] and len(_blobs(logdir)) == 1, (
+        "the clear that outlived its wait did not finish, or took the blob: "
+        "%r %r" % (_markers(logdir), _blobs(logdir)))
+    assert "was not cleared (TimeoutError); the upload stands" in (
+        capsys.readouterr().out)
+
+    out, took, marked = _run(drive(_handler_mutant([(
+        site, "                await _hop_through(_VOLUME_POOL, 10 ** 6,\n")])))
+    assert out["log_persisted"] is True and took >= HOLD - 0.05, (out, took)
+    assert "was not cleared" not in capsys.readouterr().out
+
+    out, took, marked = _run(drive(_handler_mutant([(
+        site, "                await _hop_through(_VOLUME_POOL, "
+              "float(AUTO_LOG_VOLUME_WAIT_S),\n")])))
+    assert out["log_persisted"] is True and took < HOLD, (out, took)
+
+
+def test_a_retention_unlink_pass_that_does_not_return_in_time_deletes_no_row(
+        logdir, monkeypatch, capsys):
+    """RETENTION'S UNLINK PASS HAS A CEILING, AND PAST IT NO ROW IS DELETED.
+
+    This is the one wait on the volume made WITH a connection checked out,
+    by design: the row locks that keep two passes off one row live on the
+    pass's transaction. No upload reaches it -- the opportunistic pass runs
+    in a task of its own, on a session of its own -- and it is bounded by
+    `AUTO_LOG_SWEEP_HOP_WAIT_S`. Past the ceiling, no removal the pass made
+    can be named, so it deletes NO row: the transaction is rolled back, the
+    due rows are held out of the next sweeps, and a later pass re-reads the
+    volume.
+
+    CONTROL: the ceiling lifted at the site, and the pass waits the hold out
+    and deletes the row. TWIN: the same ceiling spelled `float(...)`.
+    """
+    HOLD = 1.0
+    monkeypatch.setattr(auto_logs, "AUTO_LOG_SWEEP_HOP_WAIT_S", 0.2)
+    held = _Held(auto_logs._unlink_due_blobs)
+    monkeypatch.setattr(auto_logs, "_unlink_due_blobs", held)
+    site = ("            _VOLUME_POOL, AUTO_LOG_SWEEP_HOP_WAIT_S, "
+            "_unlink_due_blobs, base,\n")
+
+    async def drive(prune):
+        held.reset()
+        auto_logs._PRUNE_HELD.clear()
+        (logdir / "due.log.gz").write_bytes(b"x")
+        asyncio.get_running_loop().call_later(HOLD, held.release)
+        db = Scripted({DUE_KEY: [[{"id": str(R1), "log_filename": "due.log.gz"}]],
+                       "DELETE FROM bug_reports": [[{"id": str(R1)}]]})
+        at = time.monotonic()
+        out = await prune(db)
+        took = time.monotonic() - at
+        await held.drained()
+        return out, took, db
+
+    out, took, db = _run(drive(auto_logs.prune_auto_logs))
+    assert out == {"rows": 0, "blobs": 0, "retained": 1, "undurable": 0,
+                   "due": 1, "held": 1}, out
+    assert took < HOLD, took
+    assert not db.sql_for("DELETE FROM bug_reports"), (
+        "a row was deleted over an unlink pass that did not return")
+    assert db.events[-1] == "ROLLBACK" and db.committed == 0, db.events
+    assert str(R1) in auto_logs._PRUNE_HELD
+    assert ("did not return within %ss" % 0.2) in capsys.readouterr().out
+
+    out, took, db = _run(drive(_exec_mutant(
+        auto_logs.prune_auto_logs, site,
+        "            _VOLUME_POOL, 10 ** 6, _unlink_due_blobs, base,\n")))
+    assert out["rows"] == 1 and took >= HOLD - 0.05, (out, took)
+
+    out, took, db = _run(drive(_exec_mutant(
+        auto_logs.prune_auto_logs, site,
+        "            _VOLUME_POOL, float(AUTO_LOG_SWEEP_HOP_WAIT_S), "
+        "_unlink_due_blobs, base,\n")))
+    assert out["rows"] == 0 and out["retained"] == 1 and took < HOLD, (
+        out, took)
+
+
+@pytest.mark.parametrize("hop", ["walk", "resolve"])
+def test_an_orphan_sweep_hop_that_does_not_return_in_time_removes_nothing(
+        logdir, monkeypatch, capsys, hop):
+    """THE ORPHAN SWEEP'S TWO HOPS HAVE A CEILING, AND NEITHER IS WAITED FOR
+    WITH A CONNECTION CHECKED OUT.
+
+    The walk of the directory comes before the pass's first statement, and
+    the resolution of its candidates after the pass has ended its
+    transaction. Past the ceiling the pass reports that it removed nothing
+    it can name -- the walk's position is not advanced, and a resolution
+    still running finishes in its thread -- and the next tick reads the
+    volume again.
+
+    CONTROL: the ceiling lifted at the site, and the pass waits the hold out
+    and removes the orphan. TWIN: the same ceiling spelled `float(...)`.
+    """
+    HOLD = 1.0
+    target = {"walk": "_marker_candidates",
+              "resolve": "_resolve_marker_candidates"}[hop]
+    site = {"walk": "        walked = await _hop(_VOLUME_POOL, "
+                    "AUTO_LOG_SWEEP_HOP_WAIT_S,\n",
+            "resolve": "        resolved = await _hop(_VOLUME_POOL, "
+                       "AUTO_LOG_SWEEP_HOP_WAIT_S,\n"}[hop]
+    line = {"walk": "the directory walk did not return within %ss",
+            "resolve": "unreferenced, did not return within %ss"}[hop]
+    monkeypatch.setattr(auto_logs, "AUTO_LOG_SWEEP_HOP_WAIT_S", 0.2)
+    held = _Held(getattr(auto_logs, target))
+    monkeypatch.setattr(auto_logs, target, held)
+    name = "88888888-0000-4000-8000-0000000000b1.log.gz"
+
+    async def drive(sweep):
+        held.reset()
+        auto_logs._ORPHAN_CURSOR[0] = ""
+        (logdir / name).write_bytes(b"x")
+        _mark(logdir, name, age_s=90_000)
+        asyncio.get_running_loop().call_later(HOLD, held.release)
+        db = Scripted({"COUNT(*) AS n FROM bug_reports": [[{"n": 7}]],
+                       "SELECT log_filename FROM bug_reports": [[]]})
+        at = time.monotonic()
+        out = await sweep(db, min_age_s=3600)
+        took = time.monotonic() - at
+        cursor = auto_logs._ORPHAN_CURSOR[0]
+        await held.drained()
+        return out, took, db, cursor
+
+    out, took, db, cursor = _run(drive(auto_logs.prune_orphan_blobs))
+    assert out["unlinked"] == 0 and took < HOLD, (out, took)
+    assert line % 0.2 in capsys.readouterr().out
+    if hop == "walk":
+        assert db.log == [], (
+            "the sweep issued a statement before its walk: %r" % (db.log,))
+        assert cursor == "" and out["examined"] == 0, (cursor, out)
+        assert (logdir / name).exists(), "a walk that timed out removed a file"
+    else:
+        assert db.events[-1] == "ROLLBACK", (
+            "the resolution was waited for with the transaction open: %r"
+            % (db.events,))
+
+    out, took, db, cursor = _run(drive(_exec_mutant(
+        auto_logs.prune_orphan_blobs, site,
+        site.replace("AUTO_LOG_SWEEP_HOP_WAIT_S", "10 ** 6"))))
+    assert out["unlinked"] == 1 and took >= HOLD - 0.05, (out, took)
+
+    out, took, db, cursor = _run(drive(_exec_mutant(
+        auto_logs.prune_orphan_blobs, site,
+        site.replace("AUTO_LOG_SWEEP_HOP_WAIT_S",
+                     "float(AUTO_LOG_SWEEP_HOP_WAIT_S)"))))
+    assert out["unlinked"] == 0 and took < HOLD, (out, took)
