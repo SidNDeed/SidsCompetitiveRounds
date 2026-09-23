@@ -128,6 +128,16 @@ logs-snapshot/
 !backend/tests/evidence/r15-suites-assembly-run.log
 !backend/tests/evidence/r15-residual-reach.log
 !backend/tests/evidence/r15-contract-arms.log
+# round 16
+!backend/tests/evidence/r16-suite-run.log
+!backend/tests/evidence/r16-pg-controls.log
+!backend/tests/evidence/r16-mutation-run.log
+!backend/tests/evidence/r16-citation-pin.log
+!backend/tests/evidence/r16-freeze-guard.log
+!backend/tests/evidence/r16-repin-run.log
+!backend/tests/evidence/r16-suites-assembly-run.log
+!backend/tests/evidence/r16-residual-reach.log
+!backend/tests/evidence/r16-contract-arms.log
 
 # Tool caches
 .vs/
