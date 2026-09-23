@@ -8406,6 +8406,50 @@ _FROZEN_SOURCE_SPLIT_ELEMENTS = "56062"
 # digits and hyphens, then spaces, a colon and a space.
 _R9_PROVENANCE_FIELD = re.compile(r"^([a-z][a-z0-9-]*)[ \t]*:[ \t]", re.M)
 
+# EVERY LINE IS CLASSIFIED (round-9 cold lens).  The field grammar alone let a
+# field-shaped line with a capital, a leading digit or an indent ride in the
+# record while neither verifier enumerated it.  So the record's lines are now
+# classified TOTALLY: blank; a comment (`#` at column 0); a field (above); or a
+# line of a SUPERSEDED block, which opens at a line starting `SUPERSEDED -- `,
+# closes at the next blank line, and holds only quoted `#` lines, the two
+# annotations and four-space continuations that are not field-shaped.  Any
+# other line is refused by its number.  The annotations and continuations are
+# a NAMED exemption, printed with its reason.
+_R9_PROVENANCE_BLOCK = re.compile(r"^SUPERSEDED -- ")
+_R9_PROVENANCE_ANNOTATION = re.compile(r"^  (?:WHY IT IS WRONG|CORRECT) : ")
+_R9_PROVENANCE_CONTINUATION = re.compile(r"^    \S")
+_R9_FIELD_SHAPED = re.compile(r"^[ \t]*[A-Za-z0-9_][A-Za-z0-9_-]*[ \t]*:")
+_R9_PROVENANCE_LINE_EXEMPTION = (
+    "SUPERSEDED annotations and their continuations -- prose about a quoted "
+    "passage of the sealed extract, bound by the supersession pairing; no "
+    "value in them is a field")
+
+
+def _r9_provenance_lines(record):
+    """([(line number, class)], [(line number, text)] refused).  Classes:
+    blank, comment, field, block-head, quoted, annotation, continuation."""
+    out, refused = [], []
+    block = False
+    for n, ln in enumerate(record.split(LF), 1):
+        if not ln.strip():
+            block = False
+            out.append((n, "blank"))
+        elif _R9_PROVENANCE_FIELD.match(ln):
+            out.append((n, "field"))
+        elif ln.startswith("#"):
+            out.append((n, "quoted" if block else "comment"))
+        elif _R9_PROVENANCE_BLOCK.match(ln):
+            block = True
+            out.append((n, "block-head"))
+        elif block and _R9_PROVENANCE_ANNOTATION.match(ln):
+            out.append((n, "annotation"))
+        elif (block and _R9_PROVENANCE_CONTINUATION.match(ln)
+              and not _R9_FIELD_SHAPED.match(ln)):
+            out.append((n, "continuation"))
+        else:
+            refused.append((n, ln))
+    return out, refused
+
 # THE FIELDS THIS HARNESS VERIFIES, each by a constant it records or by
 # re-derivation from the body in hand.  No field is exempt here, and the
 # coverage assertion in `_frozen_provenance_binds` refuses a record whose field
@@ -8418,15 +8462,26 @@ _R9_PROVENANCE_EXEMPT = {}
 
 
 def _r9_provenance_fields(record):
-    """The field names the record carries, in order, duplicates kept."""
-    return [m.group(1) for m in _R9_PROVENANCE_FIELD.finditer(record)]
+    """The field names the record carries, in order, duplicates kept -- read
+    from the lines the classification calls fields, and from no others."""
+    lines = record.split(LF)
+    classes, _ = _r9_provenance_lines(record)
+    return [_R9_PROVENANCE_FIELD.match(lines[n - 1]).group(1)
+            for n, c in classes if c == "field"]
 
 
 def _r9_provenance_coverage(record):
-    """None when every field is verified exactly once, else the refusal."""
+    """None when every line is classified and every field is verified exactly
+    once, else the refusal."""
+    at = "the provenance record at " + _FROZEN_PROVENANCE_REL
+    _, refused = _r9_provenance_lines(record)
+    if refused:
+        n, ln = refused[0]
+        return (at + " carries %d line(s) that are neither blank, a comment, "
+                "a field nor a SUPERSEDED block line; the first is line %d: %r"
+                % (len(refused), n, ln[:72]))
     fields = _r9_provenance_fields(record)
     dup = sorted(set(f for f in fields if fields.count(f) > 1))
-    at = "the provenance record at " + _FROZEN_PROVENANCE_REL
     if dup:
         return at + " carries a field more than once: " + ", ".join(dup)
     have = set(fields)
@@ -8454,6 +8509,18 @@ def test_r9_l9_every_provenance_field_is_verified():
     record = _FROZEN_PROVENANCE.read_text(encoding="utf-8")
     raw = _FROZEN_SERVER_EXTRACT.read_bytes().decode("utf-8")
     fields = _r9_provenance_fields(record)
+    classes, refused = _r9_provenance_lines(record)
+    tally = dict((k, sum(1 for _, c in classes if c == k)) for k in (
+        "blank", "comment", "field", "block-head", "quoted", "annotation",
+        "continuation"))
+    print("L9 PROVENANCE LINES: %d -- %s; refused %d"
+          % (len(classes) + len(refused), ", ".join(
+              "%s %d" % (k, tally[k]) for k in (
+                  "blank", "comment", "field", "block-head", "quoted",
+                  "annotation", "continuation")), len(refused)))
+    print("L9 LINE EXEMPTION: %d lines -- %s"
+          % (tally["annotation"] + tally["continuation"],
+             _R9_PROVENANCE_LINE_EXEMPTION))
     print("L9 PROVENANCE FIELDS: %d -- %s" % (len(fields), ", ".join(fields)))
     print("L9 VERIFIED BY THIS HARNESS: %d; EXEMPTIONS: %s"
           % (len(_R9_PROVENANCE_VERIFIED),
@@ -8478,6 +8545,28 @@ def test_r9_l9_every_provenance_field_is_verified():
                            + "source-lines          :", 1)
     bad, why_bad = _frozen_provenance_binds(raw, record=twice)
     assert not bad and "more than once" in why_bad, why_bad
+    # ROUND-9 COLD LENS (R9CL8): a field-shaped line the field grammar does
+    # not match is refused by its line, not carried unenumerated
+    for shaped in ("Reviewed-By           : nobody",
+                   "2nd-source            : nobody",
+                   "  reviewed-by         : nobody",
+                   "\treviewed-by : nobody"):
+        planted = record.replace("source-lines          :",
+                                 shaped + LF + "source-lines          :", 1)
+        bad, why_bad = _frozen_provenance_binds(raw, record=planted)
+        assert not bad and "neither blank" in why_bad and repr(
+            shaped[:72]) in why_bad, (shaped, why_bad)
+    correct = "  CORRECT : 38671-40545 of 56062, 1-indexed inclusive"
+    assert record.count(correct) == 1
+    inblock = record.replace(correct, "    reviewed-by : nobody" + LF + correct, 1)
+    bad, why_bad = _frozen_provenance_binds(raw, record=inblock)
+    assert not bad and "neither blank" in why_bad, why_bad
+    # TWIN: a continuation line added inside a SUPERSEDED block is prose
+    at = record.find(correct)
+    eol = record.find(LF, at)
+    cont = record[:eol] + LF + "    a further continuation line." + record[eol:]
+    ok3, why3 = _frozen_provenance_binds(raw, record=cont)
+    assert ok3, why3
     # TWIN: a comment line reworded binds nothing.  The line is one that no
     # tree control edits: the round-8 tree twin rewords the digest heading, and
     # an in-test twin on that same heading finds nothing to replace while that

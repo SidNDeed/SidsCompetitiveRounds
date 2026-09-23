@@ -25,6 +25,18 @@
 # by re-deriving it from the extract.  A field either of them does not verify
 # is a refusal naming it, and an exemption would be printed by name;
 # 886bed8-r9-freeze-verify.log is the tool's run.
+#
+# EVERY LINE IS CLASSIFIED, SO NO FIELD CAN SIT OUTSIDE THE ENUMERATION.  A
+# line of this record is exactly one of: blank; a comment, `#` at column 0; a
+# FIELD, a lower-case name of letters, digits and hyphens at column 0, then
+# spaces, a colon and a space; or a line of a SUPERSEDED block.  A block opens
+# at a line starting `SUPERSEDED -- `, closes at the next blank line, and holds
+# only quoted `#` lines, the two annotations `  WHY IT IS WRONG : ` and
+# `  CORRECT : `, and continuations indented four spaces that are not
+# field-shaped.  Both verifiers refuse any other line by its number, a name
+# before a colon with a capital, a leading digit or an indent among them, and
+# print the annotations and their continuations as a named exemption: prose
+# about a quoted passage, bound by the supersession pairing, not a field.
 
 extract-path          : backend/tests/sept16_dc_server_status_route.frozen.txt
 extract-sha256        : 69ac1970c409c232bd41396d7d767ee567e8bdf7832bf3423ff193b92663c98d
