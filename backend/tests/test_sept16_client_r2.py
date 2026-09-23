@@ -25,6 +25,8 @@ CAN do is exactly two things, and both are done deliberately:
 
 Run: python -m pytest backend/tests/test_sept16_client_r2.py -q
 """
+import bisect
+import functools
 import itertools
 import pathlib
 import re
@@ -7432,9 +7434,12 @@ _R8_DELETED_CLASSES = (
     # that lists the statuses the route accepts, and a rule that rejected the
     # word would reject those too -- and would then be relaxed by the next
     # reader.  What may not return is the COMPARISON.
-    ("the dead dc_paused predicate", "code",
-     ('== "dc_paused"', '!= "dc_paused"', '.Equals("dc_paused"',
-      '"dc_paused" ==', '"dc_paused".Equals')),
+    #
+    # ROUND 9 (L4): the five comparison spellings this row listed are replaced
+    # by the status VALUE as a complete literal in code, which every comparison
+    # form needs -- static string.Equals, case labels, `is` patterns and
+    # constants included.  See `_r9_dead_literal_hits`.
+    ("the dead dc_paused predicate", "literal", ("dc_paused",)),
 )
 
 
@@ -7458,12 +7463,17 @@ def _r8_deleted_class_hits(sources):
         for i, line in enumerate(sources[fname].split(LF), 1):
             comment = _r8_is_comment(line)
             for cls, kind, needles in _R8_DELETED_CLASSES:
-                if kind == "code" and comment:
+                if kind == "literal" or (kind == "code" and comment):
                     continue
                 for needle in needles:
                     if needle in line:
                         hits.append((cls, fname, i, line.strip()))
                         break
+    for cls, kind, needles in _R8_DELETED_CLASSES:
+        if kind == "literal":
+            for needle in needles:
+                for fname, i, text in _r9_dead_literal_hits(sources, needle):
+                    hits.append((cls, fname, i, text))
     return hits
 
 
@@ -7508,7 +7518,10 @@ def test_r8_l3_every_deleted_mechanism_class_is_rejected_across_the_whole_plugin
     # written to the tree, so nothing has to be restored afterwards.
     for cls, kind, needles in _R8_DELETED_CLASSES:
         for needle in needles:
-            if kind == "code":
+            if kind == "literal":
+                line = ("                if (string.Equals(dcStatus, " + chr(34)
+                        + needle + chr(34) + ", StringComparison.Ordinal)) { }")
+            elif kind == "code":
                 if needle.startswith("==") or needle.startswith("!="):
                     line = "                if (dcStatus " + needle + " true) { }"
                 else:
@@ -7751,4 +7764,300 @@ def test_r8_l11_the_banner_inputs_are_not_publicly_writable():
     assert not foreign, ("a banner input is written outside ApiClient.cs: "
                          + repr(foreign))
     print("L11 ROOT: 7 banner inputs declared with a private setter")
+
+
+
+# ── THE C# LEXER: comments and complete string literals, by position ───────
+#
+# Two round-9 rules need to know what a plugin byte IS -- comment, string
+# literal or code -- and a line-shape guess (`startswith("//")`) answers that
+# for whole-line comments only.  This is the smallest lexer that answers it for
+# every form the plugin uses: line and block comments, preprocessor lines, char
+# literals, regular, verbatim and raw strings, and interpolated strings whose
+# holes nest further strings (the shape `$"{(ok ? "a" : "b")}"`; ApiClient.cs
+# holds about a hundred of them).  A hole is lexed as CODE, so a literal inside
+# one is a literal in code.  It runs once per source text per process and is cached by
+# text, because this suite is re-run once per mutation control.
+_CS_START = re.compile(
+    r'//|/\*|^[ \t]*#|@\$+"|\$+@"|@"|\$+"""+|\$+"|"""+|"|' + "'", re.M)
+_CS_HOLE_START = re.compile(
+    r'//|/\*|@\$+"|\$+@"|@"|\$+"""+|\$+"|"""+|"|' + "'" + r"|[{}]")
+_CS_CHAR = re.compile(
+    r"'(?:\\(?:u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|x[0-9A-Fa-f]{1,4}|.)|[^'\\\r\n])'")
+_CS_STR = re.compile(r'"(?:[^"\\\r\n]|\\.)*"')
+_CS_VERB = re.compile(r'@"(?:[^"]|"")*"')
+_CS_INTERP_SPECIAL = re.compile(r'[\\"{}\n]')
+_CS_VINTERP_SPECIAL = re.compile(r'["{}]')
+_CS_ESC = re.compile(
+    r"\\(u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|x[0-9A-Fa-f]{1,4}|.)", re.S)
+_CS_SIMPLE_ESC = {"n": LF, "t": chr(9), "r": chr(13), "0": chr(0), "a": chr(7),
+                  "b": chr(8), "f": chr(12), "v": chr(11), "e": chr(27)}
+
+
+def _cs_unescape(raw):
+    """A regular literal's VALUE: `"dc\\u005fpaused"` is the same literal."""
+    if "\\" not in raw:
+        return raw
+
+    def one(m):
+        e = m.group(1)
+        if e[0] in "uUx" and len(e) > 1:
+            return chr(int(e[1:], 16))
+        return _CS_SIMPLE_ESC.get(e, e)
+    return _CS_ESC.sub(one, raw)
+
+
+def _cs_scan(text, pos, comments, literals, hole):
+    """Lex CODE from `pos`; inside an interpolation hole, stop at the brace
+    that closes it and return its offset."""
+    n = len(text)
+    depth = 0
+    pat = _CS_HOLE_START if hole else _CS_START
+    while True:
+        m = pat.search(text, pos)
+        if m is None:
+            return n
+        tok = m.group()
+        s = m.start()
+        if tok == "{":
+            depth += 1
+            pos = s + 1
+            continue
+        if tok == "}":
+            if depth == 0:
+                return s
+            depth -= 1
+            pos = s + 1
+            continue
+        if tok == "//":
+            e = text.find(LF, s)
+            e = n if e < 0 else e
+            comments.append((s, e))
+            pos = e
+            continue
+        if tok == "/*":
+            e = text.find("*/", s + 2)
+            e = n if e < 0 else e + 2
+            comments.append((s, e))
+            pos = e
+            continue
+        if tok.endswith("#"):
+            e = text.find(LF, s)
+            pos = n if e < 0 else e
+            continue
+        if tok == "'":
+            mm = _CS_CHAR.match(text, s)
+            pos = mm.end() if mm else s + 1
+            continue
+        dollars = tok.count("$")
+        verb = "@" in tok
+        quotes = tok.count('"')
+        if quotes >= 3:
+            start = s + len(tok)
+            e = text.find('"' * quotes, start)
+            if e < 0:
+                pos = s + 1
+                continue
+            body = text[start:e]
+            content = None if (dollars and "{" * dollars in body) else body
+            literals.append((s, e + quotes, content))
+            pos = e + quotes
+            continue
+        if not dollars:
+            mm = (_CS_VERB if verb else _CS_STR).match(text, s)
+            if mm is None:
+                pos = s + 1
+                continue
+            raw = mm.group()
+            content = (raw[2:-1].replace('""', '"') if verb
+                       else _cs_unescape(raw[1:-1]))
+            literals.append((s, mm.end(), content))
+            pos = mm.end()
+            continue
+        special = _CS_VINTERP_SPECIAL if verb else _CS_INTERP_SPECIAL
+        i = s + len(tok)
+        body_start = i
+        holes = 0
+        end = -1
+        while True:
+            mm = special.search(text, i)
+            if mm is None:
+                break
+            j = mm.start()
+            ch = text[j]
+            if ch == "\\":
+                i = j + 2
+                continue
+            if ch == LF:
+                break
+            if ch == '"':
+                if verb and text.startswith('""', j):
+                    i = j + 2
+                    continue
+                end = j + 1
+                break
+            if ch == "{":
+                if text.startswith("{{", j):
+                    i = j + 2
+                    continue
+                holes += 1
+                k = _cs_scan(text, j + 1, comments, literals, True)
+                i = k + 1
+                continue
+            i = j + 2 if text.startswith("}}", j) else j + 1
+        if end < 0:
+            pos = s + 1
+            continue
+        if holes:
+            content = None            # not a constant: it has holes
+        else:
+            raw = text[body_start:end - 1]
+            raw = raw.replace('""', '"') if verb else _cs_unescape(raw)
+            content = raw.replace("{{", "{").replace("}}", "}")
+        literals.append((s, end, content))
+        pos = end
+
+
+@functools.lru_cache(maxsize=512)
+def _cs_lex(text):
+    """(comment spans, literal spans) of one C# source.  A literal is
+    (start, end, value) with value None when it has interpolation holes."""
+    comments, literals = [], []
+    _cs_scan(text, 0, comments, literals, False)
+    comments.sort()
+    literals.sort()
+    return tuple(comments), tuple(literals)
+
+
+def _cs_span_at(spans, offset):
+    """The span in `spans` that contains `offset`, or None."""
+    i = bisect.bisect_right(spans, (offset, float("inf"), None)) - 1
+    if i >= 0 and spans[i][0] <= offset < spans[i][1]:
+        return spans[i]
+    return None
+
+
+def _cs_line(text, offset):
+    return text.count(LF, 0, offset) + 1
+
+
+# ── L4 (B10): the dead status value, rejected as a COMPLETE literal in code ─
+#
+# WHAT WAS WRONG.  The dead-predicate class was five comparison needles, and
+# `string.Equals(dcStatus, "dc_paused", StringComparison.Ordinal)` is none of
+# them -- nor is a `case` label, an `is` pattern or a constant.  A list of
+# spellings certifies the spellings it lists (#432).
+#
+# THE RULE.  No complete C# string literal in plugin CODE -- regular, verbatim,
+# raw or interpolated without holes -- has the VALUE of the dead status.  Every
+# comparison form that SPELLS the value needs that literal, so the rule rejects
+# every such form by construction.  A value assembled at run time (two literals
+# joined by `+`, an interpolation hole) spells no such literal and is outside
+# this rule; the notes carry that as a residual.  The word itself is still
+# permitted in comments and INSIDE a longer literal, which is how the client
+# names the status today.
+_R9_DEAD_STATUS = "dc_paused"
+
+
+def _r9_dead_literal_hits(sources, value=_R9_DEAD_STATUS):
+    """[(file, line, text)] for every complete literal in code whose value is
+    `value`.  Every source is lexed and every literal DECODED before it is
+    compared, so a literal spelled with an escape is the same literal."""
+    hits = []
+    for fname in sorted(sources):
+        text = sources[fname]
+        _, literals = _cs_lex(text)
+        for s, e, content in literals:
+            if content == value:
+                ln = _cs_line(text, s)
+                hits.append((fname, ln, text.split(LF)[ln - 1].strip()))
+    return hits
+
+
+def _r9_word_census(sources, value=_R9_DEAD_STATUS):
+    """[(file, line, where)] for every occurrence of the word, each classified
+    by the lexer as a comment, a longer literal, or code."""
+    out = []
+    for fname in sorted(sources):
+        text = sources[fname]
+        if value not in text:
+            continue
+        comments, literals = _cs_lex(text)
+        at = 0
+        while True:
+            o = text.find(value, at)
+            if o < 0:
+                break
+            at = o + 1
+            if _cs_span_at(comments, o):
+                where = "comment"
+            else:
+                lit = _cs_span_at(literals, o)
+                if lit is None:
+                    where = "CODE"
+                elif lit[2] == value:
+                    where = "COMPLETE LITERAL"
+                else:
+                    where = "inside a longer literal"
+            out.append((fname, _cs_line(text, o), where))
+    return out
+
+
+def test_r9_l4_the_dead_status_is_rejected_as_a_complete_literal_in_code():
+    """L4 (B10): THE DEAD PREDICATE IS A CLASS, AND THE CLASS IS ITS LITERAL.
+
+    The round-8 sweep rejected five comparison spellings.  Static
+    `string.Equals(x, "dc_paused", StringComparison.Ordinal)` was none of them,
+    so the predicate could return in that form with the sweep green.  The rule
+    now rejects the status VALUE as a complete literal anywhere in plugin code,
+    comments excluded, over every `.cs` by glob -- so every comparison form
+    that spells the value is rejected, because each one needs that literal.  A
+    value assembled at run time is outside the rule.  The word census is
+    printed with each occurrence's classification, so the permitted uses are
+    visible rather than asserted."""
+    sources = _r7_plugin_sources()
+    names = sorted(sources)
+    assert names == sorted(p.name for p in PLUGIN.glob("*.cs"))
+    hits = _r9_dead_literal_hits(sources)
+    census = _r9_word_census(sources)
+    print("L4 COMPLETE-LITERAL SWEEP: %d plugin sources, %d complete literals"
+          % (len(names), len(hits)))
+    print("L4 WORD CENSUS: %d occurrences" % len(census))
+    for fname, ln, where in census:
+        print("  L4 WORD %s:%d %s" % (fname, ln, where))
+    assert not hits, ("the dead status value is a complete literal in plugin "
+                      "code: " + repr(hits))
+    assert all(w in ("comment", "inside a longer literal")
+               for _, _, w in census), census
+    assert census, "the census found no occurrence -- the rule cannot be judged"
+
+    def probe(line):
+        return _r9_dead_literal_hits(
+            {"ZzProbe.cs": "class ZzProbe {" + LF + line + LF + "}" + LF})
+
+    q = chr(34)
+    lit = q + _R9_DEAD_STATUS + q
+    for form in (
+            "  bool a = string.Equals(dcStatus, " + lit + ", StringComparison.Ordinal);",
+            "  switch (dcStatus) { case " + lit + ": break; }",
+            "  bool b = dcStatus is " + lit + ";",
+            "  const string P = " + lit + ";",
+            "  bool c = dcStatus == " + lit + ";",
+            "  bool d = " + lit + ".Equals(dcStatus);",
+            "  int e = string.Compare(dcStatus, " + lit + ");",
+            "  bool f = StringComparer.Ordinal.Equals(dcStatus, " + lit + ");",
+            "  bool g = dcStatus == @" + lit + ";",
+            "  bool h = dcStatus == $" + lit + ";",
+            "  Log($" + q + "{(dcStatus == " + lit + " ? 1 : 0)}" + q + ");",
+            "  bool i = dcStatus == " + q + "dc\\u005fpaused" + q + ";"):
+        assert probe(form), "the sweep did not reject: " + form.strip()
+
+    for permitted in (
+            "  Log(" + q + "statuses (active, " + _R9_DEAD_STATUS
+            + ") are accepted" + q + ");",
+            "  // the old predicate compared == " + lit,
+            "  /* compared == " + lit + " */",
+            "  Log($" + q + "dc_{kind}" + q + ");",
+            "  char c = '" + q + "'; string s = " + q + "dc" + q + ";"):
+        assert not probe(permitted), "the sweep rejected: " + permitted.strip()
 
