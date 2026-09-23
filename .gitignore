@@ -138,6 +138,9 @@ logs-snapshot/
 !backend/tests/evidence/r16-suites-assembly-run.log
 !backend/tests/evidence/r16-residual-reach.log
 !backend/tests/evidence/r16-contract-arms.log
+# round 17
+!backend/tests/evidence/r17-suite-run.log
+!backend/tests/evidence/r17-repin-run.log
 
 # Tool caches
 .vs/
