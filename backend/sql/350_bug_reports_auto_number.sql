@@ -220,10 +220,14 @@ END $m350g$;
 -- So this sequence is created beside the table it is owned by, and the ALTER
 -- statements below constrain the column the guard inspected.
 --
--- MINVALUE is the full bigint floor, so the range is not a limit anybody has
--- to think about: at the published cap of 12 uploads per account per day it
--- outlasts any plausible life of this table by a margin there is no point
--- writing down.
+-- MINVALUE is -9223372036854775807, which is the configured floor and is what
+-- the shape block below asserts. It is ONE ABOVE the bigint floor
+-- (-9223372036854775808) and is written here as the value it is rather than
+-- as "the full bigint floor", because a comment that is one off from the DDL
+-- under it is the kind of claim a check then gets written against (#302).
+-- Nothing turns on the difference: at the published cap of 12 uploads per
+-- account per day this range outlasts any plausible life of this table by a
+-- margin there is no point writing down.
 CREATE SEQUENCE IF NOT EXISTS bug_reports_auto_number_seq
     AS bigint
     INCREMENT BY -1
@@ -231,6 +235,82 @@ CREATE SEQUENCE IF NOT EXISTS bug_reports_auto_number_seq
     MAXVALUE -1
     MINVALUE -9223372036854775807
     NO CYCLE;
+
+-- ── 1b. the shape this file is willing to adopt ──────────────────────────────
+--
+-- BEFORE ANYTHING ELSE TOUCHES THE SEQUENCE, and that placement is the point.
+-- CREATE SEQUENCE IF NOT EXISTS keeps a pre-existing sequence of the WRONG
+-- shape silently, so on a database where an earlier hand created something
+-- else under this name, the statement above did nothing and every line below
+-- runs against that other sequence.
+--
+-- Checking only the increment, and then spending two draws, admits a sequence
+-- that descends and is unusable for every other reason: `START -1 INCREMENT -1
+-- MINVALUE -2 MAXVALUE -1 NO CYCLE` passes both -- the two draws spend -1 and
+-- -2 -- and then EVERY real upload fails at `nextval` and answers 503 with
+-- nothing in the log naming this file. A range of two, a cycling sequence that
+-- would hand -1 out twice into a UNIQUE index, an `integer` sequence that
+-- stops four billion rows early, and a start outside its own range all behave
+-- the same way: the migration reports success and the feature cannot write.
+--
+-- WHY HERE AND NOT IN THE POST-CHECK, where these six lines were first
+-- written: `ALTER SEQUENCE ... OWNED BY` below re-validates the whole
+-- sequence, so a catalogue row whose START sits outside its own range is
+-- refused THERE, by PostgreSQL, with `START value (5) cannot be greater than
+-- MAXVALUE (-1)` -- a message that names neither this file nor the repair,
+-- and one that made that arm of the post-check unreachable. The other five
+-- shapes survive that line, because their rows are internally consistent, and
+-- were then refused only after this file had added a CHECK constraint over a
+-- sequence it was about to refuse. Asserting the shape first makes all six
+-- refusals this file's own, and each one NAMES the attribute it is about --
+-- a single "the sequence is wrong" refusal is one an operator cannot act on.
+-- The literals restate the DDL above: that is the specification.
+DO $m350s$
+DECLARE
+    v_typid     oid;
+    v_start     bigint;
+    v_increment bigint;
+    v_max       bigint;
+    v_min       bigint;
+    v_cycle     boolean;
+    -- THE CONFIGURED SHAPE, restating the CREATE SEQUENCE above. These are
+    -- the values this file installs, so they are also the values it must
+    -- refuse to adopt a different sequence over.
+    c_auto_increment CONSTANT bigint := -1;
+    c_auto_max       CONSTANT bigint := -1;
+    c_auto_min       CONSTANT bigint := -9223372036854775807;
+    -- SCOPED LIKE THE GUARD ABOVE, for the same reason (R3-M1).
+    v_autoseq CONSTANT regclass :=
+        to_regclass(quote_ident(current_schema()) || '.bug_reports_auto_number_seq');
+BEGIN
+    IF v_autoseq IS NULL THEN
+        RAISE EXCEPTION '350: schema % does not carry bug_reports_auto_number_seq after the CREATE above, so there is no shape to inspect', current_schema();
+    END IF;
+
+    SELECT seqtypid, seqstart, seqincrement, seqmax, seqmin, seqcycle
+      INTO v_typid, v_start, v_increment, v_max, v_min, v_cycle
+      FROM pg_sequence
+     WHERE seqrelid = v_autoseq;
+
+    IF v_typid IS DISTINCT FROM 'bigint'::regtype::oid THEN
+        RAISE EXCEPTION '350: bug_reports_auto_number_seq exists in schema % with data type %, not bigint; its range would run out while bug_reports.bug_number can still hold the number, and every upload past that point would 503', current_schema(), format_type(v_typid, NULL);
+    END IF;
+    IF v_increment IS DISTINCT FROM c_auto_increment THEN
+        RAISE EXCEPTION '350: bug_reports_auto_number_seq exists in schema % with increment %, not %; a sequence that does not descend by one hands out numbers into the human range, which the CHECK this file adds below then refuses -- 503s with no explanation', current_schema(), v_increment, c_auto_increment;
+    END IF;
+    IF v_max IS DISTINCT FROM c_auto_max THEN
+        RAISE EXCEPTION '350: bug_reports_auto_number_seq exists in schema % with MAXVALUE %, not %; the ceiling is what keeps every automatic number negative and out of the human range', current_schema(), v_max, c_auto_max;
+    END IF;
+    IF v_min IS DISTINCT FROM c_auto_min THEN
+        RAISE EXCEPTION '350: bug_reports_auto_number_seq exists in schema % with MINVALUE %, not %; the range this file configures is what makes exhaustion something nobody has to think about, and a shorter one exhausts into a 503 on every upload', current_schema(), v_min, c_auto_min;
+    END IF;
+    IF v_cycle THEN
+        RAISE EXCEPTION '350: bug_reports_auto_number_seq exists in schema % and CYCLES; on exhaustion it would hand out a number it has already given away, and bug_reports.bug_number is UNIQUE, so the upload would fail on the index instead of on the counter', current_schema();
+    END IF;
+    IF v_start < v_min OR v_start > v_max THEN
+        RAISE EXCEPTION '350: bug_reports_auto_number_seq exists in schema % starting at %, which is outside its own range % .. %; a restart would put it there and the next draw would fail', current_schema(), v_start, v_min, v_max;
+    END IF;
+END $m350s$;
 
 -- Owned by the column, so DROP TABLE cleans it up -- the same relationship
 -- 086 set up for the human sequence. A column may own more than one sequence;
@@ -291,6 +371,20 @@ DECLARE
     v_a         bigint;
     v_b         bigint;
     v_autos     bigint;
+    -- The sequence's catalogue row, read once and asserted attribute by
+    -- attribute below.
+    v_typid     oid;
+    v_start     bigint;
+    v_increment bigint;
+    v_max       bigint;
+    v_min       bigint;
+    v_cycle     boolean;
+    -- THE CONFIGURED SHAPE, restating the CREATE SEQUENCE above. These are
+    -- the values this file installs, so they are also the values it must
+    -- refuse to adopt a different sequence over.
+    c_auto_increment CONSTANT bigint := -1;
+    c_auto_max       CONSTANT bigint := -1;
+    c_auto_min       CONSTANT bigint := -9223372036854775807;
     -- SCOPED LIKE THE GUARDS, for the same reason: a post-check that offers
     -- rows to one schema's constraint while the ALTER above installed it on
     -- another proves nothing about the database this file just changed
@@ -321,23 +415,23 @@ BEGIN
         RAISE EXCEPTION '350: bug_reports_auto_number_negative is missing; nothing would stop an automatic upload from taking a human bug number again';
     END IF;
 
-    -- THE SEQUENCE'S SHAPE, asserted from the catalogue rather than assumed.
-    -- CREATE SEQUENCE IF NOT EXISTS keeps a pre-existing sequence of the WRONG
-    -- shape silently, so on a database where some earlier hand created an
-    -- ascending sequence under this name every automatic row would take a
-    -- POSITIVE number, collide with the human range, and be refused by the
-    -- CHECK above -- 503s with no explanation. Checking the increment is what
-    -- makes this file's re-run tell the difference (#342).
-    IF (SELECT seqincrement FROM pg_sequence
-         WHERE seqrelid = v_autoseq) >= 0 THEN
-        RAISE EXCEPTION '350: bug_reports_auto_number_seq exists in schema % but does not descend (increment %), so it would hand out positive numbers into the human range', current_schema(), (SELECT seqincrement FROM pg_sequence WHERE seqrelid = v_autoseq);
-    END IF;
+    -- The shape was asserted attribute by attribute in its own block above,
+    -- before anything in this file touched the sequence. What is read here
+    -- is the same catalogue row, for the closing NOTICE only -- so that the
+    -- line an operator sees states the shape this file ran against rather
+    -- than the shape it configured and hoped for.
+    SELECT seqtypid, seqstart, seqincrement, seqmax, seqmin, seqcycle
+      INTO v_typid, v_start, v_increment, v_max, v_min, v_cycle
+      FROM pg_sequence
+     WHERE seqrelid = v_autoseq;
+
 
     -- And that it actually yields descending negatives. Two draws, because a
-    -- single one cannot show a direction. These two numbers are spent by the
-    -- check -- which is exactly the difference between this sequence and the
-    -- human one: a gap here names nothing and nobody reads it, which is the
-    -- property being installed.
+    -- single one cannot show a direction. They are what proves the shape
+    -- above is a working sequence and not only a well-formed catalogue row.
+    -- These two numbers are spent by the check -- which is exactly the
+    -- difference between this sequence and the human one: a gap here names
+    -- nothing and nobody reads it, which is the property being installed.
     v_a := nextval(v_autoseq);
     v_b := nextval(v_autoseq);
     IF NOT (v_a < 0 AND v_b < v_a) THEN
@@ -396,8 +490,8 @@ BEGIN
     EXECUTE format('SELECT COUNT(*) FROM %s WHERE kind = ''auto''',
                    v_target::regclass::text)
        INTO v_autos;
-    RAISE NOTICE '350: in schema %, bug_reports_auto_number_seq descends (% then %); the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at %; % automatic row(s) present, all negative by construction',
-        current_schema(), v_a, v_b, v_human_after, v_autos;
+    RAISE NOTICE '350: in schema %, bug_reports_auto_number_seq is bigint, increment %, range % .. %, NO CYCLE, starting at %, and descends (% then %); the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at %; % automatic row(s) present, all negative by construction',
+        current_schema(), v_increment, v_min, v_max, v_start, v_a, v_b, v_human_after, v_autos;
 END $m350p$;
 
 COMMIT;
