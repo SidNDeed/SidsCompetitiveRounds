@@ -141,6 +141,7 @@ logs-snapshot/
 # round 17
 !backend/tests/evidence/r17-suite-run.log
 !backend/tests/evidence/r17-repin-run.log
+!backend/tests/evidence/r17-mutation-run.log
 
 # Tool caches
 .vs/
