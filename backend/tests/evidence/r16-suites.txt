@@ -1,0 +1,213 @@
+Both full suites, run SEQUENTIALLY on this seat, 2026-09-23 (round 16)
+======================================================================
+
+stdout: r16-suite-run.log
+
+Never concurrently: the two halves share this landing's local PostgreSQL
+databases, and a concurrent pair would have them fighting over the same
+scratch databases and reporting each other's failures.
+
+  opt-out  FFA_TEST_PG_OPTOUT=1, and the DSN REMOVED from the environment.
+           The live checks become skips, and the guard tests prove that only
+           an AFFIRMATIVE opt-out can do it -- a missing DSN alone cannot,
+           which is what stops the PostgreSQL half vanishing from a green run.
+  live DSN FFA_TEST_PG_DSN=...  the same suite with the live checks RUN.
+
+Instrument: backend/tests/evidence/run-both-suites.sh, committed beside this
+report and taking its DSN, its output directory and its round tag from the
+environment. The landing does not change it. The per-half pytest logs are
+written OUTSIDE the repository; the fence section below says why.
+
+== THIS ROUND IS THE LANDING ==
+The tree under test is not the lane's tip. It is main, with the lane's thirty
+commits picked onto it in order, each carrying its origin, and the places
+where main and the lane had both moved composed inside the picks rather than
+chosen between. So this pair runs MAIN'S suite with the lane's tests landed in
+it. Three kinds of difference from the lane's own run follow from that, and
+none of them is a test this round wrote:
+
+  - main's test files that arrived after the lane forked run here and did not
+    run there: test_conftest_tree_walk.py, test_ffa_departure_cause_pg.py,
+    test_ffa_leave_cause.py, test_health_card_themes_marker.py,
+    test_migration_headers.py, test_migration_reruns.py,
+    test_pc_card_themes.py, test_pc_edition_rollover.py,
+    test_pc_edition_rollover_concurrency.py, test_pc_top_card_surfaces.py
+    and test_title_ladders.py;
+  - the stack the lane was built on is not under this tree, so the test files
+    that belong only to that stack's own lanes ran there and do not run here:
+    test_a1_formation_concurrency.py, test_a1_identity_formation.py,
+    test_a1_predicate_sql.py, test_fault_paths_conservative.py and
+    test_sql_literals_have_no_phantom_binds.py;
+  - sixteen test files and conftest.py differ from the lane's copies: they
+    hold main's content -- where main changed them after the fork, or where
+    the stack beneath the lane had changed them and main never did -- with
+    the lane's own edits composed into the ones the lane's commits touch.
+
+== ONE THING IN THE ENVIRONMENT IS NEW ==
+Main's tree gates four more families of checks on a database of their own,
+each behind its own variable, and the lane's environment set none of them:
+
+  LADDER_TEST_PG_DSN         the title ladders          database rjland_ladder
+  SCR_MIGRATION_TEST_PG_DSN  migration headers, re-runs database rjland_migr
+  PC_EDITION_TEST_PG_DSN     the card edition rollover  database rjland_pced
+  BUG392_TEST_PG_DSN         the departure-cause walks  database scr_bug392
+    with BUG392_TESTS_REQUIRED set, so that family fails rather than skips
+    when its database is missing
+
+All four were set for BOTH halves and their own opt-out variables were
+removed. That is a choice about what the pair measures. The question the two
+halves answer is the lane's -- what the FFA checks do with and without their
+database -- so main's gated families are RUN in both halves rather than
+skipped in one, and the difference between the halves is still the FFA-gated
+checks and nothing else. The FFA variable names rjland_suites. Every database
+named here was created by this landing and is used by nothing else: the first
+three and rjland_suites sit on the shared local instance under this landing's
+own prefix, and scr_bug392 sits on a second, private local instance, because
+that family's guard requires exactly that name and the shared instance's copy
+of the name is not this landing's to use. The shared instance's activity view,
+read immediately before the pair started, showed no session on any database
+but the reading one.
+
+The instrument prints only its own command, so none of these four variables
+is in the verbatim block below; this section is where they are stated.
+
+== THE CAPTURE IS WRITTEN OUTSIDE THE REPOSITORY ==
+The evidence-log re-inclusion means a capture sitting in this directory is
+UNTRACKED-AND-NOT-IGNORED, which is exactly the set the fence walks. A run
+redirected straight into this directory would therefore fingerprint its own
+growing log, compare it with itself and report MOVED. The capture is copied in
+after the pair has finished.
+
+== THIS REPORT IS ITS OWN RUN'S OUTPUT ==
+The narrative above the marker is written; everything below it is the exact
+bytes of the log named in the `stdout:` header. This file is ASSEMBLED by
+backend/tests/evidence/assemble-evidence.py, which REFUSES to write it at all
+when a number in the narrative is absent from that log. Two rules decide what
+a number is -- a count next to a term a run reports in, and any integer of
+three digits or more that is not one of the typed exempt shapes -- and the
+assembler's self-test asserts both fire and both stay quiet, so a typo in
+either pattern reds rather than passing for ever.
+
+The invocation of each half is printed by the script immediately before it
+runs, and is in the verbatim block below rather than quoted up here.
+
+== THE FENCE, and the claim it is allowed to make ==
+A suite that overlaps an edit to its own tree certifies nothing, and a sentence
+saying it did not is a claim written from the one state its author had in mind.
+So the tree is fingerprinted by backend/tests/evidence/tree-fingerprint.sh at
+the start and again at the end, and the instrument RE-DERIVES its set at every
+call: `git diff --name-only HEAD` for tracked files differing from HEAD, and
+`git ls-files --others --exclude-standard` for files present but untracked. The
+paths are part of the value, so an addition or a removal moves the fingerprint
+even when every surviving file is untouched, and an unreadable path prints an
+EMPTY hash rather than being skipped. The script refuses to run at all if the
+fingerprint comes back empty.
+
+THIS ROUND'S SET IS THE SMALLEST ONE THE ORDER ALLOWS. Everything the landing
+changed in tracked files -- the thirty picks, the re-pin of the route manifest
+and the negations that admit this round's captures -- was COMMITTED before the
+controls ran, so no tracked file differs from HEAD. What the fence lists is
+the 8 paths the controls produced before this pair: their captures and
+the two reports assembled from them. Nothing the fence lists is written
+afterwards. What is written afterwards is this report and the assembly record,
+and neither can exist before the run it quotes -- which is why the directory is
+checked again, as committed, by the re-pin wrapper that runs last of all.
+
+Ignored paths stay out, by `--exclude-standard`, which is also why the
+per-half pytest logs go outside the repository.
+
+That guard is not an argument; it is run, with its negative control, in
+r16-mutation-controls.txt: each edit class is PERFORMED and the guard is
+required to notice, and no edit at all is required to leave it quiet.
+
+== the route manifest was re-pinned BEFORE this pair, and the last re-pin
+   still has to rewrite nothing ==
+The lane's rounds re-pin last and expect no row to move, because a lane round
+ships no handler change. The landing is different: every pick took main's side
+of the manifest, so the fingerprints of the handlers the lane had changed were
+main's until the manifest's own tool re-pinned them over the landed tree, once,
+in its own commit, before any evidence ran. The route-manifest gate in both
+halves below is therefore run against that re-pin. The wrapper that runs last
+of all re-pins again and reports its rewritten-row count; after that commit no
+handler moved, so the count has to be zero.
+
+== what the numbers mean ==
+The skip count in the opt-out summary IS a check, not a footnote: an opt-out
+run that skipped as few as the live run did is a live run wearing the opt-out's
+name. The two halves are two different questions, and `env -u` is what keeps
+them that way.
+
+== the difference between the halves, and it reconciles ==
+The two summary lines are in the verbatim block below, each under the command
+that produced it:
+
+  opt-out   1882 passed, 38 skipped, 5 warnings in 735.22s (0:12:15)
+  live DSN  1914 passed, 6 skipped, 5 warnings in 750.07s (0:12:30)
+
+The live half runs the FFA-gated checks the opt-out half skips, so the
+difference has to appear twice in the same two lines: the live half's surplus
+of passes and the opt-out half's surplus of skips are the same set of checks.
+Here the live half passes exactly as many more checks as the opt-out half
+skips more, and neither line carries a failure. Two numbers from two
+different columns of the same two lines agreeing is the check; a
+disagreement there would be a finding, not a rounding error.
+
+Those four figures are the assembler's subject, not decoration. Each is a count
+next to a term the run reports in, so each must appear in the log below as the
+same integer beside the same term or this file does not get written -- which is
+what the mutation control `suites-report-carries-an-underived-number`
+demonstrates by putting a figure here that no run can print.
+
+== against r15-suites.txt, named rather than copied ==
+The lane's last pair is r15-suites.txt, and the two pairs are not expected to
+agree: the test sets differ in the three ways listed at the top, so these lines
+are main's suite with the lane's tests in it, not the lane's lines plus a delta.
+No previous round's figure is quoted here, deliberately. Every number in this
+narrative has to appear in the log below it or the assembler refuses to write
+the file, and a number from a DIFFERENT run cannot.
+
+== failures in either run ==
+Neither summary line above carries a `failed` term. pytest prints one whenever
+a run has any, so its absence from a line quoted verbatim IS the zero, and it
+is re-derivable from this file alone. Both halves also returned rc=0, printed
+immediately above the line they describe.
+
+Neither summary line carries an xfailed count this round, where each of the
+lane's lines carried one. The test that was marked expected-to-fail pins a
+version floor that a batch in the stack beneath the lane introduced; that batch
+is not on main, main's copy of the file does not carry the test, so it did not
+run here -- which is neither a pass nor a failure. The gate used for these
+reports tests the TERM rather than the substring, and carries that shape and
+its negative twin as assertions that run every time it is imported.
+
+------------------------------------------------------------------------------
+THE RUN, verbatim from here down
+========== r16-suite-run.log ==========
+script    <repo>/backend/tests/evidence/run-both-suites.sh
+cwd       <repo>/backend
+python    Python 3.12.10
+capture   <repo>/backend/tests/evidence/r16-suite-run.log
+command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
+tree      8 paths differ from HEAD or are untracked; fingerprinted before and after
+  61b3e2a7ea5210b6192eb6236d54d418  backend/tests/evidence/r16-citation-pin.log
+  7fd41c146d9c4819dcf3cffbcd3b3394  backend/tests/evidence/r16-contract-arms.log
+  ea238900bc66e968c8a31c25009210fb  backend/tests/evidence/r16-freeze-guard.log
+  74ae2899fe705b08c62fbc5d4198a29b  backend/tests/evidence/r16-mutation-controls.txt
+  6256ea5bc09d5247a4b01661aa9753ce  backend/tests/evidence/r16-mutation-run.log
+  e0c0c021a0a15e1262b2e7dd52e64db8  backend/tests/evidence/r16-pg-controls.log
+  4689c3fea79dbe8b5cd19342b0ecd55d  backend/tests/evidence/r16-postgresql-controls.txt
+  cf0ea91d1e53268644b35540ea019248  backend/tests/evidence/r16-residual-reach.log
+=== opt-out started 14:25:22 ===
+command   env -u FFA_TEST_PG_DSN FFA_TEST_PG_OPTOUT=1 python -m pytest tests/ -q -p no:cacheprovider
+opt-out rc=0
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1882 passed, 38 skipped, 5 warnings in 735.22s (0:12:15)
+=== live DSN started 14:37:44 ===
+command   FFA_TEST_PG_DSN=postgresql+asyncpg://<user>@<host>:<port>/<db> python -m pytest tests/ -q -p no:cacheprovider
+dsn rc=0
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1914 passed, 6 skipped, 5 warnings in 750.07s (0:12:30)
+=== tree re-fingerprinted 14:50:21 ===
+command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
+UNCHANGED: the same 8 paths, each byte-identical to the pre-run fingerprint
+=== done 14:50:23 ===
