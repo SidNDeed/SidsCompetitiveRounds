@@ -8016,9 +8016,12 @@ def _r9_drop_clause(src, clause):
 # spellings certifies the spellings it lists (#432).
 #
 # THE RULE.  No complete C# string literal in plugin CODE -- regular, verbatim,
-# raw or interpolated without holes -- has the VALUE of the dead status.  Every
-# comparison form that SPELLS the value needs that literal, so the rule rejects
-# every such form by construction.  A value assembled at run time (two literals
+# raw or interpolated without holes -- has the VALUE of the dead status IN ANY
+# LETTER CASE.  The comparison is case-folded because a case-insensitive
+# comparison (`StringComparison.OrdinalIgnoreCase`, `ToUpperInvariant() ==`)
+# restores the predicate with a differently cased literal (round-9 cold lens).
+# A comparison form that spells the value, in any case, needs such a literal,
+# so the rule rejects those forms.  A value assembled at run time (two literals
 # joined by `+`, an interpolation hole) spells no such literal and is outside
 # this rule; the notes carry that as a residual.  The word itself is still
 # permitted in comments and INSIDE a longer literal, which is how the client
@@ -8028,41 +8031,42 @@ _R9_DEAD_STATUS = "dc_paused"
 
 def _r9_dead_literal_hits(sources, value=_R9_DEAD_STATUS):
     """[(file, line, text)] for every complete literal in code whose value is
-    `value`.  Every source is lexed and every literal DECODED before it is
-    compared, so a literal spelled with an escape is the same literal."""
+    `value` in any letter case.  Every source is lexed and every literal
+    DECODED and case-folded before it is compared, so a literal spelled with an
+    escape, or in capitals, is the same literal."""
     hits = []
+    folded = value.casefold()
     for fname in sorted(sources):
         text = sources[fname]
         _, literals = _cs_lex(text)
         for s, e, content in literals:
-            if content == value:
+            if content is not None and content.casefold() == folded:
                 ln = _cs_line(text, s)
                 hits.append((fname, ln, text.split(LF)[ln - 1].strip()))
     return hits
 
 
 def _r9_word_census(sources, value=_R9_DEAD_STATUS):
-    """[(file, line, where)] for every occurrence of the word, each classified
-    by the lexer as a comment, a longer literal, or code."""
+    """[(file, line, where)] for every occurrence of the word in any letter
+    case, each classified by the lexer as a comment, a longer literal, or
+    code."""
     out = []
+    folded = value.casefold()
+    word = re.compile(re.escape(value), re.I)
     for fname in sorted(sources):
         text = sources[fname]
-        if value not in text:
+        if not word.search(text):
             continue
         comments, literals = _cs_lex(text)
-        at = 0
-        while True:
-            o = text.find(value, at)
-            if o < 0:
-                break
-            at = o + 1
+        for m in word.finditer(text):
+            o = m.start()
             if _cs_span_at(comments, o):
                 where = "comment"
             else:
                 lit = _cs_span_at(literals, o)
                 if lit is None:
                     where = "CODE"
-                elif lit[2] == value:
+                elif lit[2] is not None and lit[2].casefold() == folded:
                     where = "COMPLETE LITERAL"
                 else:
                     where = "inside a longer literal"
@@ -8077,9 +8081,11 @@ def test_r9_l4_the_dead_status_is_rejected_as_a_complete_literal_in_code():
     `string.Equals(x, "dc_paused", StringComparison.Ordinal)` was none of them,
     so the predicate could return in that form with the sweep green.  The rule
     now rejects the status VALUE as a complete literal anywhere in plugin code,
-    comments excluded, over every `.cs` by glob -- so every comparison form
-    that spells the value is rejected, because each one needs that literal.  A
-    value assembled at run time is outside the rule.  The word census is
+    in any letter case, comments excluded, over every `.cs` by glob -- so every
+    comparison form that spells the value is rejected, because each one needs
+    such a literal.  Round 9's cold lens: an exact-case match let
+    `OrdinalIgnoreCase` against the value in capitals pass, so the literal is
+    compared case-folded.  A value assembled at run time is outside the rule.  The word census is
     printed with each occurrence's classification, so the permitted uses are
     visible rather than asserted."""
     sources = _r7_plugin_sources()
@@ -8116,7 +8122,15 @@ def test_r9_l4_the_dead_status_is_rejected_as_a_complete_literal_in_code():
             "  bool g = dcStatus == @" + lit + ";",
             "  bool h = dcStatus == $" + lit + ";",
             "  Log($" + q + "{(dcStatus == " + lit + " ? 1 : 0)}" + q + ");",
-            "  bool i = dcStatus == " + q + "dc\\u005fpaused" + q + ";"):
+            "  bool i = dcStatus == " + q + "dc\\u005fpaused" + q + ";",
+            # ROUND-9 COLD LENS (R9CL6): the value in another letter case,
+            # compared case-insensitively, is the same predicate.
+            "  bool j = string.Equals(dcStatus, " + q + _R9_DEAD_STATUS.upper()
+            + q + ", StringComparison.OrdinalIgnoreCase);",
+            "  bool k = dcStatus.ToUpperInvariant() == " + q
+            + _R9_DEAD_STATUS.upper() + q + ";",
+            "  bool l = dcStatus.Equals(" + q + _R9_DEAD_STATUS.title() + q
+            + ", StringComparison.OrdinalIgnoreCase);"):
         assert probe(form), "the sweep did not reject: " + form.strip()
 
     for permitted in (
