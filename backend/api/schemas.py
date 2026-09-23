@@ -824,6 +824,18 @@ class HealthResponse(BaseModel):
     # it has no runtime signal of its own to read (#441: a postcondition that
     # cannot fail is worse than none). Absent on any build before Phase A.
     ffa_hold_fences: int | None = None
+    # ffa_game_number: whether this build keys an FFA game on the number the
+    # lobby holds for it (main._FFA_GAME_NUMBER; 1 = the ffa_matches insert
+    # names game_number, migration 327's column, AND the prior-game lookup
+    # binds (lobby_id, game_number)). DERIVED from those two SQL literals when
+    # main is imported, never written down, so a build that lost either one
+    # reads 0 (#342). The release train's build discriminator for the rejoin
+    # live-defects batch, which adds no route and no key to a GET answer both
+    # builds serve; equal on both boxes by construction, and read by nothing
+    # else (#306). Declared without a default, so building the answer without
+    # it raises instead of silently leaving the key out. Absent on any build
+    # before that batch, which is how the train reads the old build.
+    ffa_game_number: int
     # pc_card_themes: whether this box loaded the ROUNDS card -> ink colour map
     # that the Top card badge draws its name in (main._PC_CARD_THEMES, seeded
     # by migration 333). `ready` once the map is non-empty, `empty` when the

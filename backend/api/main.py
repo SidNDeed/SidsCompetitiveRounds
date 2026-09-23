@@ -5749,6 +5749,9 @@ PC_FOLD = "v4.14"
 # their own and this constant is what says WHICH BUILD a box runs. Raise it
 # when the fences change shape, never when a caller is added.
 _FFA_HOLD_FENCES = 1
+# Its sibling _FFA_GAME_NUMBER (the /health `ffa_game_number` word) is DERIVED
+# from two SQL literals rather than written here, so it is defined after
+# submit_ffa_match, whose insert it reads.
 
 
 @app.get("/api/v1/health", response_model=HealthResponse, tags=["System"])
@@ -5762,6 +5765,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               pc_steam_render=_pc_steam_render_word(),
                               pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE),
                               ffa_hold_fences=_FFA_HOLD_FENCES,
+                              ffa_game_number=_FFA_GAME_NUMBER,
                               pc_card_themes=_pc_card_themes_word())
     except Exception:
         # Report the role even when the database is unreachable: "which box is
@@ -5771,6 +5775,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         return HealthResponse(status="degraded", database="disconnected", replica=IS_REPLICA,
                               pc_fold=PC_FOLD, pc_pool_rule=int(_PC_POOL_RULE),
                               ffa_hold_fences=_FFA_HOLD_FENCES,
+                              ffa_game_number=_FFA_GAME_NUMBER,
                               pc_card_themes=_pc_card_themes_word())
 
 
@@ -49398,6 +49403,51 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         # one number, so naming it here cannot disagree with the row, and
         # `settled_game < expected_game` holds by construction (n < n + 1).
         **_ffa_progress(_game_number, settled_game=_game_number))
+
+
+# ── The FFA game-number build marker (/health `ffa_game_number`) ──────────
+# This batch keys every FFA game on the number the lobby holds for it:
+# submit_ffa_match stores that number in ffa_matches.game_number (migration
+# 327) and asks _FFA_PRIOR_GAME_SQL about the row at (lobby_id, game_number)
+# before it settles anything. It adds no route and no key to any GET answer
+# both builds serve -- the new progress fields ride only the report answer,
+# which needs a signed report -- so this word is what tells the new build from
+# the old one. The release train asserts it on both roles and reads any value
+# but the expected one as the old build; nothing else reads it (#306).
+#
+# DERIVED, never written down (#342): 1 when the ffa_matches insert in
+# submit_ffa_match names game_number in its column list AND the prior-game
+# lookup binds both lobby_id and game_number in its WHERE; 0 when either
+# literal loses the column, which the train then reads as the old build. The
+# insert is read from the endpoint's compiled string constants, not from its
+# source text, so a comment beside either literal cannot move the value.
+_FFA_GN_INSERT_HEAD = _re.compile(r"^\s*INSERT\s+INTO\s+(\w+)\s*\(([^)]*)\)", _re.IGNORECASE)
+_FFA_GN_WHERE_BIND = _re.compile(r"\b(\w+)\s*=\s*(?:CAST\(\s*)?:\w+", _re.IGNORECASE)
+
+
+def _ffa_match_insert_literal(code) -> str:
+    """The one ffa_matches INSERT among `code`'s string constants, or ''.
+
+    None found, or more than one, is '': the marker cannot say which of two
+    statements it describes."""
+    found = [c for c in code.co_consts
+             if isinstance(c, str) and (m := _FFA_GN_INSERT_HEAD.match(c))
+             and m.group(1).lower() == "ffa_matches"]
+    return found[0] if len(found) == 1 else ""
+
+
+def _ffa_game_number_marker(insert_sql: str, lookup_sql: str) -> int:
+    """1 when the insert names game_number and the lookup binds
+    (lobby_id, game_number) in its WHERE, else 0."""
+    head = _FFA_GN_INSERT_HEAD.match(insert_sql or "")
+    columns = {c.strip().lower() for c in head.group(2).split(",")} if head else set()
+    where = (lookup_sql or "").partition("WHERE")[2]
+    bound = {m.group(1).lower() for m in _FFA_GN_WHERE_BIND.finditer(where)}
+    return int("game_number" in columns and {"lobby_id", "game_number"} <= bound)
+
+
+_FFA_GAME_NUMBER = _ffa_game_number_marker(
+    _ffa_match_insert_literal(submit_ffa_match.__code__), _FFA_PRIOR_GAME_SQL)
 
 
 _FFA_LB_SORTS = {
