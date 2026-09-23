@@ -732,6 +732,177 @@ MUTATIONS = [
         RETURNING id""")],
         [ALL_GREEN],
     ),
+    # ── round 3: the round-2 HIGH (at-most-once across the seat orders the
+    # sink accepts), closed at the class. The two new controls the brief
+    # names are M42 (the same-room replay after a void with the pair
+    # reversed) and M40 (two inserts of one game from the two orders of the
+    # pair); every other entry below covers one carrier or one sibling.
+    # Every round-3 edit keeps the line count, so no source citation moves
+    # and each kill set names only what the defect itself breaks (#712).
+    (
+        "M39-the-report-keeps-the-order-its-duo-pair-arrived-in",
+        "r3 H1 (a): the sink stops putting the duo pair in canonical order, "
+        "so a report whose pair arrives reversed is compared and stored in "
+        "that order, and the ordered key cannot conflict with the same game "
+        "stored in the other order",
+        [("    report = _ovt_canonical_duo(report)\n",
+          "    # report = _ovt_canonical_duo(report)\n")],
+        ["test_the_report_is_canonicalised_before_any_slot_comparison_or_write",
+         "test_a_report_arriving_with_its_pair_reversed_is_recorded_in_canonical_order",
+         "test_a_report_that_reaches_the_insert_anyway_is_answered_as_already_recorded"],
+    ),
+    (
+        "M39-TWIN-canonical-form-called-by-keyword",
+        "inert twin at the M39 site: the same call, its argument by keyword",
+        [("    report = _ovt_canonical_duo(report)\n",
+          "    report = _ovt_canonical_duo(report=report)\n")],
+        [ALL_GREEN],
+    ),
+    (
+        "M40-the-canonical-form-never-reorders",
+        "r3 H1 (a), the database-level control (the brief's second new "
+        "control): the helper hands every report back as it arrived, so two "
+        "inserts of one game built from the two orders of the pair carry two "
+        "different keys and both land",
+        [("    if report.duo_a.steam_id <= report.duo_b.steam_id:\n",
+          "    if True:\n")],
+        ["test_the_duo_pair_is_put_in_one_order_and_every_seat_field_travels_with_it",
+         "test_every_slot_pair_comparison_in_the_report_and_void_paths_is_accounted_for",
+         "test_a_report_arriving_with_its_pair_reversed_is_recorded_in_canonical_order",
+         "test_the_key_conflicts_on_either_order_of_the_duo_pair",
+         "test_a_report_that_reaches_the_insert_anyway_is_answered_as_already_recorded"],
+    ),
+    (
+        "M40-TWIN-canonical-comparison-written-as-its-converse",
+        "inert twin at the M40 site: the same order, written as the negated "
+        "converse comparison",
+        [("    if report.duo_a.steam_id <= report.duo_b.steam_id:\n",
+          "    if not report.duo_b.steam_id < report.duo_a.steam_id:\n")],
+        [ALL_GREEN],
+    ),
+    (
+        "M40b-a-seat-field-stays-behind-when-its-player-moves",
+        "r3 H1 (a): the pair is reordered but the two fps averages are not, "
+        "so each duo player's stored fps is the other player's",
+        [('        "duo_a_fps": report.duo_b_fps, "duo_b_fps": report.duo_a_fps,\n',
+          "        # the two fps averages stay in the seats they arrived in\n")],
+        ["test_the_duo_pair_is_put_in_one_order_and_every_seat_field_travels_with_it",
+         "test_a_report_arriving_with_its_pair_reversed_is_recorded_in_canonical_order"],
+    ),
+    (
+        "M40b-TWIN-seat-fields-listed-the-other-way-round",
+        "inert twin at the M40b site: the same two fps entries, in the other "
+        "order",
+        [('        "duo_a_fps": report.duo_b_fps, "duo_b_fps": report.duo_a_fps,\n',
+          '        "duo_b_fps": report.duo_a_fps, "duo_a_fps": report.duo_b_fps,\n')],
+        [ALL_GREEN],
+    ),
+    (
+        "M41-the-replay-check-compares-the-seats-in-order",
+        "r3 H1 (b): the replay check asks for the three players in the SAME "
+        "seats instead of as a set, so a second report of a recorded game "
+        "naming another solo is recorded again (the key cannot see it "
+        "either), and so is a room on record with its pair in the other order",
+        [("           AND ARRAY[solo_id, duo_a_id, duo_b_id] @> CAST(:trio AS uuid[])\n"
+          "           AND ARRAY[solo_id, duo_a_id, duo_b_id] <@ CAST(:trio AS uuid[])\n",
+          "           AND ARRAY[solo_id, duo_a_id, duo_b_id] = CAST(:trio AS uuid[])\n"
+          "           AND TRUE\n")],
+        ["test_every_slot_pair_comparison_in_the_report_and_void_paths_is_accounted_for",
+         "test_a_room_on_record_in_any_seat_order_is_answered_as_already_recorded",
+         "test_two_reports_of_one_room_under_two_series_take_turns_on_the_room_lock"],
+    ),
+    (
+        "M41-TWIN-set-halves-in-the-other-order",
+        "inert twin at the M41 site: the two containment halves swapped",
+        [("           AND ARRAY[solo_id, duo_a_id, duo_b_id] @> CAST(:trio AS uuid[])\n"
+          "           AND ARRAY[solo_id, duo_a_id, duo_b_id] <@ CAST(:trio AS uuid[])\n",
+          "           AND ARRAY[solo_id, duo_a_id, duo_b_id] <@ CAST(:trio AS uuid[])\n"
+          "           AND ARRAY[solo_id, duo_a_id, duo_b_id] @> CAST(:trio AS uuid[])\n")],
+        [ALL_GREEN],
+    ),
+    (
+        "M42-the-HIGH-reproduced-the-canonicalisation-removed",
+        "r3 H1, the round-2 HIGH itself (the brief's first new control): the "
+        "canonicalisation removed from BOTH places that carry it, the "
+        "canonical order before the key and the order-free form of the "
+        "replay check, so after a void the same game reported again with its "
+        "duo pair reversed misses both, is recorded a second time and paid a "
+        "second time. Either carrier alone holds this case (M39 and M41 leave "
+        "it green): the joint-carrier shape of DEV-R2-5, recorded as DEV-R3-1",
+        [("    report = _ovt_canonical_duo(report)\n",
+          "    # report = _ovt_canonical_duo(report)\n"),
+         ("           AND ARRAY[solo_id, duo_a_id, duo_b_id] @> CAST(:trio AS uuid[])\n"
+          "           AND ARRAY[solo_id, duo_a_id, duo_b_id] <@ CAST(:trio AS uuid[])\n",
+          "           AND ARRAY[solo_id, duo_a_id, duo_b_id] = CAST(:trio AS uuid[])\n"
+          "           AND TRUE\n")],
+        ["test_a_reversed_pair_replay_after_a_void_is_recorded_and_paid_once"],
+    ),
+    (
+        "M42-TWIN-both-carriers-rewritten-in-place",
+        "inert twin at the two M42 sites: the call by keyword and the set "
+        "halves swapped; both still carry it",
+        [("    report = _ovt_canonical_duo(report)\n",
+          "    report = _ovt_canonical_duo(report=report)\n"),
+         ("           AND ARRAY[solo_id, duo_a_id, duo_b_id] @> CAST(:trio AS uuid[])\n"
+          "           AND ARRAY[solo_id, duo_a_id, duo_b_id] <@ CAST(:trio AS uuid[])\n",
+          "           AND ARRAY[solo_id, duo_a_id, duo_b_id] <@ CAST(:trio AS uuid[])\n"
+          "           AND ARRAY[solo_id, duo_a_id, duo_b_id] @> CAST(:trio AS uuid[])\n")],
+        [ALL_GREEN],
+    ),
+    (
+        "M43-reports-of-one-room-stop-taking-turns",
+        "r3 H1 (b): the room lock is no longer taken (the statement still "
+        "runs, lock-free), so two reports of one room under two series ids "
+        "both run the replay check before either commits and both record; "
+        "with another solo named, no key order makes them conflict",
+        [('"SELECT pg_advisory_xact_lock(CAST(:cls AS integer), '
+          'hashtext(CAST(:room AS text)))"',
+          '"SELECT CAST(:cls AS integer), hashtext(CAST(:room AS text))"')],
+        ["test_the_report_is_canonicalised_before_any_slot_comparison_or_write",
+         "test_two_reports_of_one_room_under_two_series_take_turns_on_the_room_lock"],
+    ),
+    (
+        "M43-TWIN-room-lock-statement-respaced",
+        "inert twin at the M43 site: the same lock, its SQL spaced differently",
+        [('hashtext(CAST(:room AS text)))"', 'hashtext( CAST(:room AS text) ))"')],
+        [ALL_GREEN],
+    ),
+    (
+        "M44-the-award-reads-one-duo-seat-for-the-podium",
+        "r3 sibling sweep (#432): the award asks only whether the duo_a "
+        "player is on the podium, so the solo seat's multiplier depends on "
+        "which duo seat a podium player arrived in",
+        [("    duo_pod = (str(duo_a_id) in podium) or (str(duo_b_id) in podium)\n",
+          "    duo_pod = (str(duo_a_id) in podium)\n")],
+        ["test_every_slot_pair_comparison_in_the_report_and_void_paths_is_accounted_for",
+         "test_the_seat_award_does_not_depend_on_which_duo_seat_a_player_arrives_in"],
+    ),
+    (
+        "M44-TWIN-podium-operands-swapped",
+        "inert twin at the M44 site: the same two memberships, in the other "
+        "order",
+        [("    duo_pod = (str(duo_a_id) in podium) or (str(duo_b_id) in podium)\n",
+          "    duo_pod = (str(duo_b_id) in podium) or (str(duo_a_id) in podium)\n")],
+        [ALL_GREEN],
+    ),
+    (
+        "M45-an-unclassified-slot-comparison-joins-the-handler",
+        "r3 sibling sweep (#432), the census's own control: a new comparison "
+        "of a duo seat joins the handler (behaviour-neutral: the three "
+        "distinct players check it rides on already refuses the case), and "
+        "the sweep must notice it has not been classified",
+        [("    if len(steams) != 3:\n",
+          "    if len(steams) != 3 or report.duo_a.steam_id == report.solo.steam_id:\n")],
+        ["test_every_slot_pair_comparison_in_the_report_and_void_paths_is_accounted_for"],
+    ),
+    (
+        "M45-TWIN-a-comment-names-the-duo-seats",
+        "inert twin at the M45 site: a trailing comment naming duo_a and "
+        "duo_b, which the census must not count",
+        [("    if len(steams) != 3:\n",
+          "    if len(steams) != 3:  # solo, duo_a and duo_b must be distinct\n")],
+        [ALL_GREEN],
+    ),
     (
         "NC-unrelated-constant-in-the-same-file",
         "negative control: a 1v2 gold constant this sweep never reads",
@@ -912,7 +1083,7 @@ def main() -> int:
         if slate:
             print(f"[slate] {slate}")
         base = run_suite()
-        print(f"[baseline] {base['tail']}")
+        print(f"[baseline] {base['tail']}  [pytest exit={base['rc']}]")
         why = not_a_verdict(base, None)
         if why or base["failed"]:
             print(f"baseline is not a green verdict: "
@@ -938,7 +1109,7 @@ def main() -> int:
                     break
                 print(f"           [no verdict, attempt {attempt}] {why}")
                 print(f"           [no verdict, attempt {attempt}] "
-                      f"{res['tail']}")
+                      f"{res['tail']}  [pytest exit={res['rc']}]")
             restore()
             if why:
                 # Never ALIVE and never KILL: the run did not measure the
@@ -947,7 +1118,7 @@ def main() -> int:
                 print(f"[NOVER] {label} ({time.time() - t0:.0f}s) — "
                       f"NO VERDICT: {why}")
                 print(f"           models: {defect}")
-                print(f"           {res['tail']}")
+                print(f"           {res['tail']}  [pytest exit={res['rc']}]")
                 continue
             failed = res["failed"]
             if expect == [ALL_GREEN]:
@@ -962,7 +1133,7 @@ def main() -> int:
             print(f"[{'KILL ' if ok else 'ALIVE'}] {label} "
                   f"({time.time() - t0:.0f}s) — {detail}")
             print(f"           models: {defect}")
-            print(f"           {res['tail']}")
+            print(f"           {res['tail']}  [pytest exit={res['rc']}]")
     finally:
         restore()
 

@@ -439,7 +439,7 @@ async def _shut(session):
             pass
 
 
-async def _reset(engine):
+async def _reset(engine, schema: str = SCHEMA):
     # Take the clean slate rather than hoping for it. A test that fails
     # mid-transaction leaves a backend holding locks on these tables, and
     # PostgreSQL does not notice its client is gone until it next writes to
@@ -460,7 +460,10 @@ async def _reset(engine):
     async with engine.begin() as conn:
         # A blocked DDL must fail loudly, not hang the suite.
         await conn.execute(text("SET LOCAL lock_timeout = '15s'"))
-        for stmt in filter(None, (s.strip() for s in SCHEMA.split(";"))):
+        # `schema` is this file's horizon tables unless a case passes its
+        # own (the round-3 report-sink cases pass _sink_schema()); either
+        # way it runs HERE, behind the database-name refusal above.
+        for stmt in filter(None, (s.strip() for s in schema.split(";"))):
             await conn.execute(text(stmt))
         for sid in SIDS:
             await conn.execute(
@@ -2041,6 +2044,888 @@ def test_the_janitor_declines_a_row_the_report_sink_is_holding():
             finally:
                 await _shut(reporter)
                 await _shut(sweeper)
+        finally:
+            await engine.dispose()
+    _run(go())
+
+
+# ═════════════ round 3: one game, one record, whichever seats ═════════════
+#
+# Bug 391 round 3 answers the round-2 HIGH by number. The report sink checks
+# the three players against the series as a SET, so it accepts them in any
+# seats, while the replay key on ovt_matches is ORDERED:
+# UNIQUE (photon_room_id, solo_id, duo_a_id, duo_b_id). The same game reported
+# again with its duo pair reversed therefore missed the key and was recorded,
+# and paid, a second time. The sink now gives the pair ONE order (the players'
+# Steam ids compared ordinally, the order the client builds every report in)
+# before any comparison or write, and asks "is this game already on record?"
+# as a SET, under a lock on the room, before anything is written.
+#
+# The live cases drive the REAL handler, submit_ovt_match, end to end, on the
+# two 1v2 tables exactly as the production migrations build them: the ordered
+# key the HIGH turned on exists only there, never in a subset written by hand.
+# Every test identity is outside the real identifier space: the Steam ids are
+# this file's SIDS, and the rooms carry neither the server's issued room
+# prefix nor its hex body.
+
+SINK_ROOM = "t391-sitting"
+SINK_ROOM_B = "t391-sitting-b"
+SINK_HMAC = "t391-test-signing-key"
+# One distinct value per player for every seat-keyed field, so a field left in
+# its seat when its player moves reads as the OTHER player's value.
+SINK_FPS = dict(zip(SIDS, (41, 42, 43)))
+SINK_TIMELINE = dict(zip(SIDS, ("1,2,3", "4,5,6", "7,8,9")))
+SINK_CARD = dict(zip(SIDS, ("T391 Card One", "T391 Card Two",
+                            "T391 Card Three")))
+SINK_END_STATS = {s: "1|" + "|".join([str(11 + i)] + ["-"] * 20)
+                  for i, s in enumerate(SIDS)}
+SINK_RATING = dict(zip(SIDS, (1400.0, 1600.0, 1800.0)))
+
+SINK_PLAYERS = """
+CREATE TABLE players (
+    id UUID PRIMARY KEY,
+    steam_id VARCHAR(20) UNIQUE NOT NULL,
+    total_xp INTEGER NOT NULL DEFAULT 0,
+    gold_earned INTEGER NOT NULL DEFAULT 0
+)"""
+
+# What the sink reads or writes beside the two tables under test. NO foreign
+# keys, on purpose: the horizon cases' own reset drops `players` without
+# CASCADE, and a sink case must not leave behind a table that blocks it.
+SINK_EXTRAS = (
+    """
+CREATE TABLE ovt_match_cards (
+    id BIGSERIAL PRIMARY KEY,
+    match_id UUID NOT NULL,
+    player_id UUID NOT NULL,
+    card_name VARCHAR(64) NOT NULL,
+    pick_order SMALLINT NOT NULL DEFAULT 0
+)""",
+    """
+CREATE TABLE gold_transactions (
+    id BIGSERIAL PRIMARY KEY,
+    player_id UUID NOT NULL,
+    amount INTEGER NOT NULL,
+    reason VARCHAR(64) NOT NULL,
+    reference_id VARCHAR,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+)""",
+    """
+CREATE TABLE glicko_ratings (
+    player_id UUID PRIMARY KEY,
+    rating DOUBLE PRECISION NOT NULL
+)""",
+)
+
+
+def _sink_schema() -> str:
+    """The statements `_reset` runs for the report-sink cases, in order.
+
+    The two 1v2 tables come from the production migrations: the 1v2 schema's
+    CREATE TABLE blocks whole, then every later ADD COLUMN on either table, in
+    file order. Their SQL comments are dropped, because `_reset` splits on ';'
+    and one comment inside ovt_series carries one. Beside them go the players
+    columns the award writes and the tables in SINK_EXTRAS.
+    """
+    schema = SCHEMA_120.read_text(encoding="utf-8")
+    stmts = [f"DROP TABLE IF EXISTS {t}" for t in (
+        "ovt_match_cards", "gold_transactions", "glicko_ratings",
+        "ovt_matches", "ovt_series", "players")]
+    stmts.append(SINK_PLAYERS)
+    for table in ("ovt_series", "ovt_matches"):
+        m = re.search(r"^CREATE TABLE IF NOT EXISTS " + table + r" \(.*?^\);",
+                      schema, re.M | re.S)
+        assert m, f"the 1v2 schema no longer creates {table}"
+        stmts.append(m.group(0)[:-1])
+    added = 0
+    for path in sorted((REPO_ROOT / "backend" / "sql").glob("*.sql")):
+        for m in re.finditer(r"^ALTER TABLE\s+ovt_(?:series|matches)\s+"
+                             r"ADD COLUMN IF NOT EXISTS[^;]*;",
+                             path.read_text(encoding="utf-8"), re.M):
+            stmts.append(m.group(0)[:-1])
+            added += 1
+    # Seven today (three damage timelines, three end stats, the room rules).
+    # A count of zero would build the pre-201 table and still pass (#342).
+    assert added >= 7, added
+    stmts.extend(SINK_EXTRAS)
+    out = [re.sub(r"--[^\n]*", "", s).strip() for s in stmts]
+    assert not any(";" in s for s in out), "a statement still carries a ';'"
+    return ";\n".join(out) + ";"
+
+
+def _game_room(token: int, room: str = SINK_ROOM) -> str:
+    """A report room in the sink's grammar: "<series room>_<6 digits>_r<n>"."""
+    return f"{room}_{token:06d}_r4"
+
+
+async def _sink_ids(conn) -> dict:
+    rows = (await conn.execute(text("SELECT steam_id, id FROM players"))).all()
+    return {r.steam_id: r.id for r in rows}
+
+
+async def _sink_series(conn, seats, *, room: str = SINK_ROOM,
+                       status: str = "active", age_days: float = 0.0) -> str:
+    """A series row storing `seats`, (solo, duo_a, duo_b) Steam ids, in THAT
+    order."""
+    ids = await _sink_ids(conn)
+    sid = str(uuid.uuid4())
+    await conn.execute(text("""
+        INSERT INTO ovt_series (id, solo_id, duo_a_id, duo_b_id, status,
+                                photon_room_id, created_at)
+        VALUES (CAST(:id AS uuid), :s, :a, :b, :st, :room,
+                NOW() - make_interval(secs => CAST(:age AS double precision)))
+    """), {"id": sid, "s": ids[seats[0]], "a": ids[seats[1]],
+           "b": ids[seats[2]], "st": status, "room": room,
+           "age": age_days * 86400.0})
+    return sid
+
+
+def _sink_report(series_id: str, room: str, solo: str, duo_a: str, duo_b: str,
+                 *, solo_won: bool = True):
+    """A 1v2 report as the client builds it, SIGNED over the seats as given.
+
+    Signed over THAT order, so a report whose duo pair arrives reversed passes
+    the real signature check exactly as a report built in that order would.
+    That is what makes the canonical form's place (after the check, never
+    before it) a tested property rather than a sentence.
+    """
+    import hashlib
+    import hmac
+    import schemas
+    sr, dr, ws = (4, 2, 1) if solo_won else (2, 4, 2)
+    reporter = min(solo, duo_a, duo_b)
+
+    def seat(s):
+        return schemas.PlayerMatchData(
+            steam_id=s, display_name="t391", end_stats=SINK_END_STATS[s],
+            cards=[schemas.CardPick(card_name=SINK_CARD[s], pick_order=1,
+                                    round_number=1)])
+
+    signed = (f"{solo}:{duo_a}:{duo_b}:{sr}:{dr}:false:{reporter}:"
+              f"{room}:{ws}:{series_id}")
+    return schemas.OvtMatchReport(
+        series_id=series_id, solo=seat(solo), duo_a=seat(duo_a),
+        duo_b=seat(duo_b), solo_rounds_won=sr, duo_rounds_won=dr,
+        winner_side=ws, photon_room_id=room, reported_by_steam_id=reporter,
+        solo_fps=SINK_FPS[solo], duo_a_fps=SINK_FPS[duo_a],
+        duo_b_fps=SINK_FPS[duo_b],
+        solo_damage_timeline=SINK_TIMELINE[solo],
+        duo_a_damage_timeline=SINK_TIMELINE[duo_a],
+        duo_b_damage_timeline=SINK_TIMELINE[duo_b],
+        hmac_signature=hmac.new(SINK_HMAC.encode(), signed.encode(),
+                                hashlib.sha256).hexdigest())
+
+
+def _sink_patch(monkeypatch):
+    """The sink's three collaborators that are not what these cases judge.
+
+    The session check is the ROUTE's authentication and needs a request; the
+    podium is a 60-second cache over a leaderboard query; the signing key is
+    a test key, so the REAL signature check runs on every report. Nothing
+    that records, pays, compares or locks is replaced.
+    """
+    async def _no_session(request, steam_id, db):
+        return None
+
+    async def _no_podium(db):
+        return []
+
+    monkeypatch.setattr(main, "_check_steam_session", _no_session)
+    monkeypatch.setattr(main, "_ovt_podium_ids", _no_podium)
+    monkeypatch.setattr(main, "MATCH_HMAC_SECRET", SINK_HMAC)
+
+
+async def _submit(factory, report):
+    """One report through the REAL handler, in a session of its own."""
+    async with factory() as db:
+        return await main.submit_ovt_match(report, None, db)
+
+
+async def _ledger(engine) -> dict:
+    """Everything a report can record or pay, as one comparable value."""
+    queries = {
+        "matches": "SELECT id, series_id, photon_room_id, solo_id, duo_a_id,"
+                   " duo_b_id FROM ovt_matches",
+        "cards": "SELECT match_id, player_id, card_name FROM ovt_match_cards",
+        "players": "SELECT id, total_xp, gold_earned FROM players",
+        "gold": "SELECT player_id, amount, reason, reference_id"
+                " FROM gold_transactions",
+        "series": "SELECT id, status, solo_series_wins, duo_series_wins,"
+                  " solo_id, duo_a_id, duo_b_id, solo_xp_earned,"
+                  " duo_a_xp_earned, duo_b_xp_earned, solo_gold_earned,"
+                  " duo_a_gold_earned, duo_b_gold_earned FROM ovt_series",
+    }
+    out = {}
+    async with engine.connect() as conn:
+        for key, q in queries.items():
+            out[key] = sorted(tuple(str(v) for v in r)
+                              for r in (await conn.execute(text(q))).all())
+    return out
+
+
+async def _lock_waiters(engine, want: int, tasks, limit: float = 10.0) -> int:
+    """Poll until `want` backends on this database wait on a lock; returns
+    the count last seen.
+
+    Stops early, returning what it saw, once any task has FINISHED: a report
+    that finished did not wait, and that is the outcome the calling case
+    exists to catch. Each poll ends its transaction, because
+    pg_stat_activity is a snapshot taken once per transaction.
+    """
+    deadline = time.monotonic() + limit
+    seen = 0
+    async with engine.connect() as mon:
+        while time.monotonic() < deadline and not any(t.done() for t in tasks):
+            seen = (await mon.execute(text(
+                "SELECT count(*) FROM pg_stat_activity"
+                " WHERE datname = current_database()"
+                "   AND wait_event_type = 'Lock'"))).scalar()
+            await mon.rollback()
+            if seen >= want:
+                break
+            await asyncio.sleep(0.05)
+    return seen
+
+
+# A duo seat by name: duo_a / duo_b as a word or a prefix (duo_a_id,
+# series['duo_b_id'], report.duo_a.steam_id), and the handler's stored-slot
+# names. Not duo_avg_r, duo_wins or duo_rounds_won, which name no seat.
+_DUO_SLOT = re.compile(r"(?<![A-Za-z0-9])(?:duo_[ab]|slot_d[ab])(?![A-Za-z0-9])")
+
+
+def _slot_pair_comparisons(fn) -> list:
+    """Every comparison in `fn` (nested defs included) that reads the duo
+    pair, as (kind, source); the kind is what decides whether the result can
+    depend on the order the pair arrives in.
+
+    Two families. A Python comparison whose source names a duo seat. A WHERE
+    predicate in one of the function's SQL statements that names a duo column
+    or binds a parameter whose value names a duo seat, split on AND/OR so each
+    predicate counts once. The database's own comparison of the pair, the
+    ordered UNIQUE the INSERT relies on, lives in no function; the census case
+    pins it separately.
+    """
+    found = []
+    for node in ast.walk(fn):
+        if not (isinstance(node, ast.Compare)
+                and _DUO_SLOT.search(ast.unparse(node))):
+            continue
+        operands = [node.left, *node.comparators]
+        if all(isinstance(o, ast.Set) for o in operands):
+            kind = "set"
+        elif all(isinstance(o, ast.Tuple) for o in operands):
+            kind = "ordered"
+        elif all(isinstance(op, (ast.In, ast.NotIn)) for op in node.ops):
+            kind = "membership"
+        else:
+            kind = "scalar"
+        found.append((kind, " ".join(ast.unparse(node).split())))
+    for call in ast.walk(fn):
+        if not (isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "execute" and call.args
+                and isinstance(call.args[0], ast.Call)
+                and isinstance(call.args[0].func, ast.Name)
+                and call.args[0].func.id == "text" and call.args[0].args):
+            continue
+        lit = call.args[0].args[0]
+        sql = lit.value if isinstance(lit, ast.Constant) else ast.unparse(lit)
+        bound = set()
+        if len(call.args) > 1 and isinstance(call.args[1], ast.Dict):
+            bound = {k.value for k, v in zip(call.args[1].keys,
+                                             call.args[1].values)
+                     if isinstance(k, ast.Constant)
+                     and _DUO_SLOT.search(ast.unparse(v))}
+        for where in re.findall(
+                r"\bWHERE\b(.*?)(?=\bORDER\s+BY\b|\bGROUP\s+BY\b|\bLIMIT\b"
+                r"|\bRETURNING\b|\bFOR\s+(?:NO\s+KEY\s+)?UPDATE\b|\Z)",
+                sql, re.S | re.I):
+            for pred in re.split(r"\bAND\b|\bOR\b", where, flags=re.I):
+                if not (_DUO_SLOT.search(pred) or any(
+                        re.search(r"(?<!:):" + re.escape(k) + r"\b", pred)
+                        for k in bound)):
+                    continue
+                if "@>" in pred or "<@" in pred:
+                    kind = "containment"
+                elif re.search(r"\bIN\s*\(", pred, re.I):
+                    kind = "in-list"
+                else:
+                    kind = "sql-compare"
+                found.append((kind, " ".join(pred.split())))
+    return found
+
+
+def test_the_duo_pair_is_put_in_one_order_and_every_seat_field_travels_with_it():
+    """H1 (a): one canonical order for the duo pair, and nothing left behind.
+
+    The seat-keyed fields are DERIVED from the report model rather than listed
+    here, so a duo_a_* field added to the model later has to travel with its
+    player too, or this reds. The order is ordinal on the Steam id string, the
+    client's own sort (StringComparer.Ordinal), so the case pins it with two
+    ids whose ordinal and numeric orders disagree.
+    """
+    import schemas
+    fields = set(schemas.OvtMatchReport.model_fields)
+    seat_a = sorted(f for f in fields if f.startswith("duo_a"))
+    seat_b = sorted(f for f in fields if f.startswith("duo_b"))
+    assert [f.replace("duo_a", "duo_b", 1) for f in seat_a] == seat_b, (
+        seat_a, seat_b)
+    # A check over an empty set passes forever (#342).
+    assert {"duo_a", "duo_a_fps", "duo_a_damage_timeline"} <= set(seat_a), seat_a
+
+    lo, hi = SIDS[1], SIDS[2]
+    arrived = _sink_report(str(uuid.uuid4()), _game_room(1), SIDS[0], hi, lo)
+    canon = main._ovt_canonical_duo(arrived)
+    assert (canon.duo_a.steam_id, canon.duo_b.steam_id) == (lo, hi)
+    for fa, fb in zip(seat_a, seat_b):
+        assert getattr(canon, fa) == getattr(arrived, fb), fa
+        assert getattr(canon, fb) == getattr(arrived, fa), fb
+    for f in sorted(fields - set(seat_a) - set(seat_b)):
+        assert getattr(canon, f) == getattr(arrived, f), f
+    # A copy: the report as it arrived keeps its order...
+    assert (arrived.duo_a.steam_id, arrived.duo_b.steam_id) == (hi, lo)
+    # ...and a report already in order comes back as the SAME object.
+    assert main._ovt_canonical_duo(canon) is canon
+
+    # Ordinal, not numeric: "95..." sorts after "900..." as strings.
+    short, longer = "9500000000000391", "90000000000003912"
+    assert int(short) < int(longer) and longer < short
+    mixed = arrived.model_copy(update={
+        "duo_a": arrived.duo_a.model_copy(update={"steam_id": short}),
+        "duo_b": arrived.duo_b.model_copy(update={"steam_id": longer})})
+    assert main._ovt_canonical_duo(mixed).duo_a.steam_id == longer
+
+
+def test_the_report_is_canonicalised_before_any_slot_comparison_or_write():
+    """H1 (a): the canonical form runs BEFORE any comparison and any write,
+    and AFTER the signature check.
+
+    In the handler's straight-line body: exactly one
+    `report = _ovt_canonical_duo(report)`, after `_verify_ovt_hmac(report)`
+    (the signature covers the order the client sent, so canonicalising first
+    would refuse every report whose pair arrives reversed) and before every
+    statement that reads a duo seat or runs a database statement; nothing
+    rebinds `report` after it. Then the order the answer rests on: the series
+    row lock, the room lock, the replay check, the INSERT.
+    """
+    fn = _fn_named("submit_ovt_match")
+    body = _straightline(fn.body)
+    src = [ast.unparse(st) for st in body]
+
+    def is_canonical(st) -> bool:
+        if not (isinstance(st, ast.Assign) and len(st.targets) == 1
+                and isinstance(st.targets[0], ast.Name)
+                and st.targets[0].id == "report"
+                and isinstance(st.value, ast.Call)
+                and isinstance(st.value.func, ast.Name)
+                and st.value.func.id == "_ovt_canonical_duo"):
+            return False
+        given = list(st.value.args) + [k.value for k in st.value.keywords]
+        return [ast.unparse(a) for a in given] == ["report"]
+
+    at = [i for i, st in enumerate(body) if is_canonical(st)]
+    assert len(at) == 1, src[:8]
+    c = at[0]
+    signed = [i for i, s in enumerate(src) if "_verify_ovt_hmac(report)" in s]
+    assert signed and max(signed) < c, (signed, c)
+    for s in src[:c]:
+        assert not _DUO_SLOT.search(s), s
+        assert "db.execute" not in s and "db.add" not in s, s
+    rebinds = [n for n in ast.walk(fn)
+               if isinstance(n, (ast.Assign, ast.AugAssign, ast.AnnAssign))
+               and any(isinstance(t, ast.Name) and t.id == "report"
+                       for t in (n.targets if isinstance(n, ast.Assign)
+                                 else [n.target]))]
+    assert len(rebinds) == 1, [ast.unparse(n) for n in rebinds]
+
+    def first(needle: str) -> int:
+        hits = [i for i, s in enumerate(src) if needle in s]
+        assert hits, needle
+        return hits[0]
+
+    order = [first("FOR NO KEY UPDATE"), first("pg_advisory_xact_lock"),
+             first("CAST(:trio AS uuid[])"), first("INSERT INTO ovt_matches")]
+    assert c < order[0] and order == sorted(set(order)), (c, order)
+    lock = src[order[1]]
+    assert "OVT_REPORT_ROOM_LOCK_CLASS" in lock and "photon_room_id" in lock, lock
+
+
+def test_every_slot_pair_comparison_in_the_report_and_void_paths_is_accounted_for():
+    """Sibling sweep of the HIGH (#432): the defect is a CLASS, so the census
+    is asserted, not sampled.
+
+    Every comparison that reads the duo pair in the report path and the void
+    path, counted per function and classified by the one property that
+    matters here, whether its result can depend on which duo seat a player
+    arrives in:
+      set, membership, containment, in-list: order-free by construction;
+      ordered, scalar: order-dependent, so each must run on the canonical
+        form (the dominance case above asserts that for the handler; the
+        canonical form's own comparison is what defines it).
+    A comparison added, removed, or turned from one kind into another reds
+    here and has to be classified by hand; the notes' sweep table (section
+    10) is this table. The database's own comparison of the pair, the ordered
+    UNIQUE, is pinned too: exactly one UNIQUE over ovt_matches across the
+    migrations, in that column order.
+    """
+    from collections import Counter
+    census = {
+        "submit_ovt_match": {"set": 1, "ordered": 1, "scalar": 1,
+                             "containment": 2, "in-list": 1},
+        "_ovt_canonical_duo": {"scalar": 1},
+        "_ovt_award_seats": {"membership": 2},
+        "_ovt_horizon_candidates": {},
+        "_ovt_settle_horizon_row": {},
+        "_ovt_horizon_ranked_backlog": {},
+        "_ovt_horizon_stamped_backlog": {},
+        "_ovt_horizon_sweep_tick": {},
+        "_ovt_horizon_sweep_tick_bounded": {},
+    }
+    got = {name: dict(Counter(k for k, _ in
+                              _slot_pair_comparisons(_fn_named(name))))
+           for name in census}
+    assert got == census, got
+    assert sum(sum(kinds.values()) for kinds in got.values()) == 9, got
+
+    schema = SCHEMA_120.read_text(encoding="utf-8")
+    block = re.search(r"^CREATE TABLE IF NOT EXISTS ovt_matches \(.*?^\);",
+                      schema, re.M | re.S)
+    assert block, "the 1v2 schema no longer creates ovt_matches"
+    uniques = [" ".join(u.split()) for u in re.findall(
+        r"\bUNIQUE\s*\(([^)]*)\)", re.sub(r"--[^\n]*", "", block.group(0)))]
+    assert uniques == ["photon_room_id, solo_id, duo_a_id, duo_b_id"], uniques
+    for path in sorted((REPO_ROOT / "backend" / "sql").glob("*.sql")):
+        sql = re.sub(r"--[^\n]*", "", path.read_text(encoding="utf-8"))
+        for stmt in sql.split(";"):
+            if (re.search(r"\bUNIQUE\b", stmt, re.I)
+                    and (re.search(r"\bON\s+ovt_matches\b", stmt, re.I)
+                         or re.search(r"\bALTER\s+TABLE\s+ovt_matches\b",
+                                      stmt, re.I))):
+                raise AssertionError(f"{path.name}: another UNIQUE over "
+                                     f"ovt_matches: {stmt.strip()[:200]}")
+
+
+def test_the_seat_award_does_not_depend_on_which_duo_seat_a_player_arrives_in():
+    """Sibling sweep, the award's two slot-pair comparisons (#432).
+
+    `_ovt_award_seats` reads the duo pair to ask whether EITHER duo player is
+    on the podium (that raises the solo seat's multiplier). Called with the
+    same three players and the pair in both orders, with the podium holding
+    only the duo_b player of the first order, it must pay every player the
+    same; and the podium must actually be read (emptied, it changes the solo
+    seat's result), so an equality that held because nothing was read cannot
+    pass.
+    """
+    solo, lo, hi = (uuid.UUID(int=0x3911), uuid.UUID(int=0x3912),
+                    uuid.UUID(int=0x3913))
+
+    async def award(pid, won, mult):
+        return round(1000 * mult) + (1 if won else 0), 0
+
+    def pay(a, b, podium):
+        return _run(main._ovt_award_seats(
+            award, solo_id=solo, duo_a_id=a, duo_b_id=b, winner_side=2,
+            extra_pick=False, solo_r=1500.0, duo_avg_r=1500.0, podium=podium))
+
+    forward = pay(lo, hi, {str(hi)})
+    reverse = pay(hi, lo, {str(hi)})
+    assert forward == reverse, (forward, reverse)
+    unread = pay(lo, hi, set())
+    assert unread[0][solo] != forward[0][solo], (unread, forward)
+
+
+@live
+def test_a_reversed_pair_replay_after_a_void_is_recorded_and_paid_once(monkeypatch):
+    """THE round-2 HIGH, executed (B9, B14; brief H1).
+
+    After the horizon sweep voids a series, a late report of one of its games
+    is recorded and paid on the settled-without-play arm: the round-2 fix,
+    which must stay. The SAME game reported again, same room, with its duo
+    pair in the other order (an order the sink accepts) must be answered
+    "Already recorded" and change nothing at all: one match row, one XP award
+    and one gold delta per player for that game. Both directions run: the
+    canonical order first, and the reversed order first.
+    """
+    _sink_patch(monkeypatch)
+    lo, hi = SIDS[1], SIDS[2]
+
+    async def go():
+        engine = _engine()
+        try:
+            await _reset(engine, _sink_schema())
+            Session = async_sessionmaker(engine, expire_on_commit=False)
+            async with engine.begin() as conn:
+                ids = await _sink_ids(conn)
+                first = await _sink_series(conn, (SIDS[0], lo, hi),
+                                           age_days=20)
+                second = await _sink_series(conn, (SIDS[0], lo, hi),
+                                            room=SINK_ROOM_B, age_days=20)
+            assert await _sweep(Session) == 2
+            for sid in (first, second):
+                row = await _row(engine, sid)
+                assert (row["status"], row["invalidation_reason"]) == (
+                    "canceled", VOID_REASON), row
+            games = ((first, _game_room(391), (lo, hi)),
+                     (second, _game_room(392, SINK_ROOM_B), (hi, lo)))
+            for sid, room, pair in games:
+                paid = await _submit(Session, _sink_report(
+                    sid, room, SIDS[0], *pair))
+                assert paid.message == "Series already resolved", paid
+                assert paid.xp_gained > 0 and paid.gold_gained > 0, paid
+                before = await _ledger(engine)
+                again = await _submit(Session, _sink_report(
+                    sid, room, SIDS[0], *pair[::-1]))
+                assert again.message == "Already recorded", again
+                assert (again.xp_gained, again.gold_gained) == (0, 0), again
+                assert await _ledger(engine) == before, room
+            async with engine.connect() as conn:
+                rows = (await conn.execute(text(
+                    "SELECT id, photon_room_id FROM ovt_matches"))).all()
+                assert sorted(r.photon_room_id for r in rows) == sorted(
+                    g[1] for g in games), rows
+                for r in rows:
+                    got = (await conn.execute(text(
+                        "SELECT player_id FROM gold_transactions"
+                        " WHERE reference_id = :m AND reason = 'ovt_xp'"),
+                        {"m": str(r.id)})).scalars().all()
+                    assert sorted(map(str, got)) == sorted(
+                        map(str, ids.values())), got
+                series = (await conn.execute(text(
+                    "SELECT * FROM ovt_series"))).mappings().all()
+                balances = {p.id: (p.total_xp, p.gold_earned)
+                            for p in (await conn.execute(text(
+                                "SELECT id, total_xp, gold_earned"
+                                " FROM players"))).all()}
+            # Each balance is exactly what the two series' own ledgers say
+            # they paid, and neither tally moved: settled means final.
+            for pid, balance in balances.items():
+                owed = [(s[f"{seat}_xp_earned"], s[f"{seat}_gold_earned"])
+                        for s in series for seat in ("solo", "duo_a", "duo_b")
+                        if s[f"{seat}_id"] == pid]
+                assert len(owed) == 2, (pid, owed)
+                assert balance == tuple(map(sum, zip(*owed))), (pid, owed)
+            for s in series:
+                assert (s["solo_series_wins"], s["duo_series_wins"],
+                        s["status"]) == (0, 0, "canceled"), dict(s)
+        finally:
+            await engine.dispose()
+    _run(go())
+
+
+@live
+def test_a_report_arriving_with_its_pair_reversed_is_recorded_in_canonical_order(
+        monkeypatch, capsys):
+    """The canonical form, end to end (the sweep's canonical-form rows).
+
+    Game 1 arrives with its duo pair reversed, against a series row whose
+    queue-time order is ALSO the reversed one. It is stored with the pair in
+    canonical order, the lower Steam id in duo_a, and every seat-keyed value
+    (fps, damage timeline, end stats, card pick, rating snapshot) beside its
+    own player; the game-1 realignment writes the same order into the series
+    row. Game 2 then arrives in canonical order and meets that order: no drift
+    warning, and every seat's per-series totals equal what its player was
+    actually paid.
+    """
+    _sink_patch(monkeypatch)
+    lo, hi = SIDS[1], SIDS[2]
+
+    async def go():
+        engine = _engine()
+        try:
+            await _reset(engine, _sink_schema())
+            Session = async_sessionmaker(engine, expire_on_commit=False)
+            async with engine.begin() as conn:
+                ids = await _sink_ids(conn)
+                for s in SIDS:
+                    await conn.execute(text(
+                        "INSERT INTO glicko_ratings (player_id, rating)"
+                        " VALUES (:p, :r)"), {"p": ids[s], "r": SINK_RATING[s]})
+                sid = await _sink_series(conn, (SIDS[0], hi, lo))
+            one = await _submit(Session, _sink_report(
+                sid, _game_room(391), SIDS[0], hi, lo))
+            assert one.message == "1v2 match recorded", one
+            async with engine.connect() as conn:
+                m = (await conn.execute(text(
+                    "SELECT * FROM ovt_matches WHERE photon_room_id = :r"),
+                    {"r": _game_room(391)})).mappings().one()
+                cards = dict((await conn.execute(text(
+                    "SELECT player_id, card_name FROM ovt_match_cards"
+                    " WHERE match_id = :m"), {"m": m["id"]})).all())
+            for seat, s in (("solo", SIDS[0]), ("duo_a", lo), ("duo_b", hi)):
+                assert m[f"{seat}_id"] == ids[s], (seat, dict(m))
+                assert m[f"{seat}_fps_avg"] == SINK_FPS[s], (seat, dict(m))
+                assert m[f"{seat}_damage_timeline"] == SINK_TIMELINE[s], seat
+                assert m[f"{seat}_end_stats"] == SINK_END_STATS[s], seat
+                assert m[f"{seat}_rating_at"] == SINK_RATING[s], seat
+            assert cards == {ids[s]: SINK_CARD[s] for s in SIDS}, cards
+            row = await _row(engine, sid)
+            assert (row["solo_id"], row["duo_a_id"], row["duo_b_id"]) == (
+                ids[SIDS[0]], ids[lo], ids[hi]), row
+
+            two = await _submit(Session, _sink_report(
+                sid, _game_room(392), SIDS[0], lo, hi, solo_won=False))
+            assert two.message == "1v2 match recorded", two
+            row = await _row(engine, sid)
+            assert (row["solo_series_wins"], row["duo_series_wins"],
+                    row["status"]) == (1, 1, "active"), row
+            async with engine.connect() as conn:
+                paid = {p.id: (p.total_xp, p.gold_earned)
+                        for p in (await conn.execute(text(
+                            "SELECT id, total_xp, gold_earned"
+                            " FROM players"))).all()}
+            for seat in ("solo", "duo_a", "duo_b"):
+                assert (row[f"{seat}_xp_earned"],
+                        row[f"{seat}_gold_earned"]) == paid[row[f"{seat}_id"]], seat
+        finally:
+            await engine.dispose()
+    _run(go())
+    out = capsys.readouterr().out
+    assert out.count("slots realigned to report ordering") == 1, out
+    assert "slot ordering differs" not in out, out
+
+
+@live
+def test_a_room_on_record_in_any_seat_order_is_answered_as_already_recorded(
+        monkeypatch, capsys):
+    """The replay check is a SET, so it holds the orders no key order can.
+
+    Two members of the class the ordered key alone cannot hold, whatever
+    order the duo pair is given: (1) a second report of a recorded game with
+    ANOTHER of its three players in the solo seat, where the key's solo
+    column differs; (2) a room recorded before this round with its duo pair in
+    the other order, reported again in canonical order. Each is answered
+    exactly as a key conflict is ("Already recorded") and neither writes or
+    pays anything. (1) is also named in the log, once.
+    """
+    _sink_patch(monkeypatch)
+    lo, hi = SIDS[1], SIDS[2]
+
+    async def go():
+        engine = _engine()
+        try:
+            await _reset(engine, _sink_schema())
+            Session = async_sessionmaker(engine, expire_on_commit=False)
+            async with engine.begin() as conn:
+                ids = await _sink_ids(conn)
+                sid = await _sink_series(conn, (SIDS[0], lo, hi))
+            room = _game_room(393)
+            first = await _submit(Session, _sink_report(
+                sid, room, SIDS[0], lo, hi))
+            assert first.message == "1v2 match recorded", first
+            before = await _ledger(engine)
+            relabelled = await _submit(Session, _sink_report(
+                sid, room, lo, SIDS[0], hi, solo_won=False))
+            assert relabelled.message == "Already recorded", relabelled
+            assert await _ledger(engine) == before
+
+            legacy = _game_room(394)
+            async with engine.begin() as conn:
+                await conn.execute(text("""
+                    INSERT INTO ovt_matches (id, series_id, solo_id, duo_a_id,
+                        duo_b_id, solo_rounds_won, duo_rounds_won, winner_side,
+                        photon_room_id)
+                    VALUES (:id, CAST(:sid AS uuid), :s, :a, :b, 2, 4, 2, :room)
+                """), {"id": uuid.uuid4(), "sid": sid, "s": ids[SIDS[0]],
+                       "a": ids[hi], "b": ids[lo], "room": legacy})
+            before = await _ledger(engine)
+            replay = await _submit(Session, _sink_report(
+                sid, legacy, SIDS[0], lo, hi, solo_won=False))
+            assert replay.message == "Already recorded", replay
+            assert await _ledger(engine) == before
+        finally:
+            await engine.dispose()
+    _run(go())
+    out = capsys.readouterr().out
+    assert out.count("with a different solo seat") == 1, out
+
+
+@live
+def test_the_key_conflicts_on_either_order_of_the_duo_pair():
+    """The database-level guarantee (B9's second control; brief H1 (a), (c)).
+
+    Two inserts of ONE game in overlapping transactions, one built from each
+    order of the duo pair. After the sink's canonical form both carry the
+    same (room, solo, duo_a, duo_b), so the second WAITS on the first's
+    uncommitted key entry and fails with a unique violation when the first
+    commits: one row. The statement is the handler's own INSERT, read out of
+    submit_ovt_match, on the table the production migration builds, and that
+    table's only UNIQUE is asserted to be the ordered key this rests on.
+    """
+    from sqlalchemy.exc import IntegrityError
+    insert = _only(_sql_literals(main.submit_ovt_match), "INSERT INTO ovt_matches")
+    names = set(re.findall(r"(?<!:):(\w+)", insert))
+    lo, hi = SIDS[1], SIDS[2]
+
+    async def go():
+        engine = _engine()
+        try:
+            await _reset(engine, _sink_schema())
+            Session = async_sessionmaker(engine, expire_on_commit=False)
+            async with engine.begin() as conn:
+                ids = await _sink_ids(conn)
+                sid = await _sink_series(conn, (SIDS[0], lo, hi))
+                keys = (await conn.execute(text(
+                    "SELECT pg_get_constraintdef(oid) FROM pg_constraint"
+                    " WHERE conrelid = CAST('ovt_matches' AS regclass)"
+                    "   AND contype = 'u'"))).scalars().all()
+            assert keys == [
+                "UNIQUE (photon_room_id, solo_id, duo_a_id, duo_b_id)"], keys
+            room = _game_room(395)
+
+            def params(pair):
+                rep = main._ovt_canonical_duo(
+                    _sink_report(sid, room, SIDS[0], *pair))
+                p = dict.fromkeys(names)
+                p.update(id=uuid.uuid4(), sid=uuid.UUID(sid), room=room,
+                         solo=ids[rep.solo.steam_id],
+                         da=ids[rep.duo_a.steam_id], db=ids[rep.duo_b.steam_id],
+                         sr=rep.solo_rounds_won, dr=rep.duo_rounds_won,
+                         sp=0, dp=0, ws=rep.winner_side)
+                return p
+
+            a, b = Session(), Session()
+            try:
+                await a.execute(text(insert), params((lo, hi)))
+                late = asyncio.ensure_future(
+                    b.execute(text(insert), params((hi, lo))))
+                waited = await _lock_waiters(engine, 1, [late])
+                assert waited >= 1 and not late.done(), (
+                    "the reversed pair did not meet the first insert's key "
+                    "entry")
+                await a.commit()
+                with pytest.raises(IntegrityError):
+                    await asyncio.wait_for(late, timeout=10)
+            finally:
+                await _shut(a)
+                await _shut(b)
+            async with engine.connect() as conn:
+                n = (await conn.execute(text(
+                    "SELECT count(*) FROM ovt_matches"
+                    " WHERE photon_room_id = :r"), {"r": room})).scalar()
+            assert n == 1, n
+        finally:
+            await engine.dispose()
+    _run(go())
+
+
+@live
+def test_a_report_that_reaches_the_insert_anyway_is_answered_as_already_recorded(
+        monkeypatch):
+    """Brief H1 (c): the key-conflict arm, through the handler.
+
+    A row for this game is being inserted by another transaction and is not
+    committed, so the replay check cannot see it. The sink's report of the
+    SAME game with the duo pair reversed therefore reaches its INSERT, whose
+    canonical key is the other row's, waits on that key entry, and when the
+    other transaction commits it gets the conflict, which it answers exactly
+    as the replay check does: "Already recorded", no second row, no XP, no
+    gold.
+    """
+    _sink_patch(monkeypatch)
+    insert = _only(_sql_literals(main.submit_ovt_match), "INSERT INTO ovt_matches")
+    names = set(re.findall(r"(?<!:):(\w+)", insert))
+    lo, hi = SIDS[1], SIDS[2]
+
+    async def go():
+        engine = _engine()
+        try:
+            await _reset(engine, _sink_schema())
+            Session = async_sessionmaker(engine, expire_on_commit=False)
+            async with engine.begin() as conn:
+                ids = await _sink_ids(conn)
+                sid = await _sink_series(conn, (SIDS[0], lo, hi))
+            room = _game_room(396)
+            p = dict.fromkeys(names)
+            p.update(id=uuid.uuid4(), sid=uuid.UUID(sid), room=room,
+                     solo=ids[SIDS[0]], da=ids[lo], db=ids[hi],
+                     sr=4, dr=2, sp=0, dp=0, ws=1)
+            other = Session()
+            try:
+                await other.execute(text(insert), p)
+                before = await _ledger(engine)
+                report = asyncio.ensure_future(_submit(Session, _sink_report(
+                    sid, room, SIDS[0], hi, lo)))
+                waited = await _lock_waiters(engine, 1, [report])
+                assert waited >= 1 and not report.done(), (
+                    "the reversed report did not reach the other row's key "
+                    "entry")
+                await other.commit()
+                answer = await asyncio.wait_for(report, timeout=10)
+            finally:
+                await _shut(other)
+            assert answer.message == "Already recorded", answer
+            assert (answer.xp_gained, answer.gold_gained) == (0, 0), answer
+            after = await _ledger(engine)
+            assert [m for m in after["matches"] if m[2] == room] == [(
+                str(p["id"]), sid, room, str(ids[SIDS[0]]), str(ids[lo]),
+                str(ids[hi]))], after["matches"]
+            for key in ("cards", "players", "gold", "series"):
+                assert after[key] == before[key], key
+        finally:
+            await engine.dispose()
+    _run(go())
+
+
+@live
+def test_two_reports_of_one_room_under_two_series_take_turns_on_the_room_lock(
+        monkeypatch):
+    """The room lock (brief H1 (b)), in the race it must not lose.
+
+    One room's reports can arrive under two series ids (a continuation series
+    keeps the sitting's room), and neither series row lock serialises them.
+    Here the first report, under the voided series, is held mid-award by a
+    lock on a player row, with its match row inserted and uncommitted; the
+    second, under the continuation and naming ANOTHER solo so that no key
+    order can make the two conflict, must queue on the ROOM, and once the
+    first commits it must find that game on record: one row, the second
+    answered "Already recorded", the continuation's tally untouched.
+    """
+    _sink_patch(monkeypatch)
+    lo, hi = SIDS[1], SIDS[2]
+
+    async def go():
+        engine = _engine()
+        try:
+            await _reset(engine, _sink_schema())
+            Session = async_sessionmaker(engine, expire_on_commit=False)
+            async with engine.begin() as conn:
+                ids = await _sink_ids(conn)
+                voided = await _sink_series(conn, (SIDS[0], lo, hi),
+                                            status="canceled")
+                cont = await _sink_series(conn, (SIDS[0], lo, hi))
+            room = _game_room(397)
+            gate = min(ids.values(), key=str)
+            holder = Session()
+            tasks = []
+            try:
+                await holder.execute(text(
+                    "SELECT 1 FROM players WHERE id = :p FOR NO KEY UPDATE"),
+                    {"p": gate})
+                tasks.append(asyncio.ensure_future(_submit(
+                    Session, _sink_report(voided, room, SIDS[0], lo, hi))))
+                assert await _lock_waiters(engine, 1, tasks) >= 1
+                tasks.append(asyncio.ensure_future(_submit(
+                    Session, _sink_report(cont, room, lo, SIDS[0], hi))))
+                assert await _lock_waiters(engine, 2, tasks) >= 2, (
+                    "the second report of the room did not queue behind "
+                    "the first")
+                await holder.rollback()
+                first = await asyncio.wait_for(tasks[0], timeout=15)
+                second = await asyncio.wait_for(tasks[1], timeout=15)
+            finally:
+                await _shut(holder)
+                for t in tasks:
+                    t.cancel()
+            assert first.message == "Series already resolved", first
+            assert second.message == "Already recorded", second
+            async with engine.connect() as conn:
+                n = (await conn.execute(text(
+                    "SELECT count(*) FROM ovt_matches"
+                    " WHERE photon_room_id = :r"), {"r": room})).scalar()
+            assert n == 1, n
+            row = await _row(engine, cont)
+            assert (row["solo_series_wins"], row["duo_series_wins"]) == (
+                0, 0), row
         finally:
             await engine.dispose()
     _run(go())

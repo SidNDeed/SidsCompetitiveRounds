@@ -3739,7 +3739,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:41695 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:41809 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -3805,7 +3805,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:41605 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:41649 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -3875,7 +3875,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:41512 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:41552 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -40715,6 +40715,46 @@ async def _ovt_award_seats(award, *, solo_id, duo_a_id, duo_b_id,
     return results, labels
 
 
+# ── One order for the duo pair (bug 391 r3) ────────────────────────────────
+# The ovt_matches replay key is ORDERED —
+# UNIQUE (photon_room_id, solo_id, duo_a_id, duo_b_id) — while the report sink
+# accepts the two duo seats in either order (it checks the three players as a
+# SET against the series). With no single order for the pair, the same game
+# reported again with its duo reversed missed the key, inserted a second match
+# row and was paid a second time. The order is the players' Steam ids compared
+# ordinally: the order the client has built every 1v2 report in since the
+# report first shipped (it sorts the duo with StringComparer.Ordinal before it
+# signs), so a report built by the client comes through unchanged.
+def _ovt_canonical_duo(report):
+    """The report with its duo pair in canonical order — the SAME object when
+    it already is.
+
+    The sink applies this after the HMAC check (the signature covers the order
+    the client sent) and before any comparison or write, so everything after
+    it reads one order. Every seat-keyed field travels with its own player:
+    the two PlayerMatchData records (steam id, name, cards, end stats), the
+    two fps averages and the two damage timelines. A copy, never an in-place
+    edit, so the caller's object keeps the order it arrived in.
+    """
+    if report.duo_a.steam_id <= report.duo_b.steam_id:
+        return report
+    return report.model_copy(update={
+        "duo_a": report.duo_b, "duo_b": report.duo_a,
+        "duo_a_fps": report.duo_b_fps, "duo_b_fps": report.duo_a_fps,
+        "duo_a_damage_timeline": report.duo_b_damage_timeline,
+        "duo_b_damage_timeline": report.duo_a_damage_timeline,
+    })
+
+
+# Advisory-lock class for "one report of a given 1v2 game room at a time"
+# (bug 391 r3). The two-key form is a key space of its own, so it never meets
+# the single-key Steam-id locks elsewhere in this module. Keyed by
+# hashtext(room): the only reports that wait on each other are reports of the
+# same room — and, rarely, two rooms whose hashes collide, which costs a short
+# wait and nothing else.
+OVT_REPORT_ROOM_LOCK_CLASS = 391120
+
+
 # 1v2 podium (factor iv). Runs the SAME query shape as GET
 # /ovt/leaderboard?role=combined — same UNION ALL over ovt_matches, same
 # invalidated_at/deleted_at filters, same `games DESC, win-rate DESC` ordering,
@@ -41562,6 +41602,10 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
     await _check_steam_session(request, report.reported_by_steam_id, db)
     if not _verify_ovt_hmac(report):
         raise HTTPException(403, "Invalid 1v2 match signature")
+    # bug 391 r3: ONE order for the duo pair before any comparison and any
+    # write (see _ovt_canonical_duo). After the HMAC check on purpose: the
+    # signature covers the order the client sent.
+    report = _ovt_canonical_duo(report)
     try:
         series_uuid = UUID(report.series_id)
     except (ValueError, TypeError):
@@ -41653,6 +41697,73 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
     if {solo_id, duo_a_id, duo_b_id} != {series["solo_id"], series["duo_a_id"], series["duo_b_id"]}:
         raise HTTPException(403, "Reported players do not match the series")
 
+    # The id this report's match row gets if it is recorded. The answer to a
+    # game already on record carries it too, exactly as it always has.
+    match_id = uuid.uuid4()
+
+    async def _already_recorded():
+        """The ONE answer a second report of a game on record gets — from the
+        replay check just below and from a key conflict at the INSERT — so the
+        two can never say different things: 200, "Already recorded", the
+        series as it stands and the score from the reporter's side. Nothing
+        this report did is kept."""
+        await db.rollback()
+        # Already recorded (replay). Return the current series state idempotently.
+        s2 = (await db.execute(text("SELECT * FROM ovt_series WHERE id = :sid"), {"sid": series_uuid})).mappings().first()
+        if s2 is None:
+            raise HTTPException(404, "Series not found")
+        # Reporter-first score (learning #121) — a duo-member reporter must not
+        # see the solo-first order and read a won series as a loss.
+        rep_side_r = 1 if report.reported_by_steam_id == report.solo.steam_id else 2
+        score_r = (f"{s2['solo_series_wins']}-{s2['duo_series_wins']}" if rep_side_r == 1
+                   else f"{s2['duo_series_wins']}-{s2['solo_series_wins']}")
+        return OvtMatchResponse(
+            match_id=match_id, series_id=series_uuid, series_status=s2["status"],
+            series_score=score_r, winner_side=report.winner_side, message="Already recorded")
+
+    # ── One game, one record, whichever seat each player arrives in (bug 391 r3)
+    # The report room IS the game: it is per-game suffixed ("<room>_<token>_r<n>",
+    # held to the series room above). The set comparison above accepts every
+    # assignment of these three players to the solo seat and the two duo seats,
+    # so "is this game already on record?" must not depend on the assignment
+    # either. It is asked here, before any write, as a SET: a row for this room
+    # naming exactly these three players, in any seats, means the game is on
+    # record, and this report gets the answer a key conflict gets.
+    #
+    # Under a lock on the ROOM. The series row lock above makes reports of one
+    # series take turns, but one room's reports can also arrive under two
+    # series ids (a continuation series keeps the sitting's room), and two such
+    # reports would each find nothing committed and both record. The room lock
+    # makes this check and the INSERT below one step for every report of the
+    # room. It is taken after the series row lock, and a report holding it
+    # never waits on another series' row, so it adds no lock cycle.
+    #
+    # The ordered UNIQUE (photon_room_id, solo_id, duo_a_id, duo_b_id) stays the
+    # database's own backstop: the duo pair reaches the INSERT in canonical
+    # order, so the key conflicts on either order of the pair, and a report
+    # that gets to the INSERT anyway is answered by _already_recorded too.
+    await db.execute(text(
+        "SELECT pg_advisory_xact_lock(CAST(:cls AS integer), hashtext(CAST(:room AS text)))"
+    ), {"cls": OVT_REPORT_ROOM_LOCK_CLASS, "room": (report.photon_room_id or "")[:64]})
+    _on_record = (await db.execute(text("""
+        SELECT id, solo_id FROM ovt_matches
+         WHERE photon_room_id = :room
+           AND ARRAY[solo_id, duo_a_id, duo_b_id] @> CAST(:trio AS uuid[])
+           AND ARRAY[solo_id, duo_a_id, duo_b_id] <@ CAST(:trio AS uuid[])
+         LIMIT 1
+    """), {"room": (report.photon_room_id or "")[:64],
+           "trio": [solo_id, duo_a_id, duo_b_id]})).mappings().first()
+    if _on_record is not None:
+        if str(_on_record["solo_id"]) != str(solo_id):
+            # Not a repeat of the recorded report: the room is on record with
+            # another of these three players in the solo seat. Answered the
+            # same way, and named here, because a second account of one game
+            # is worth being able to find.
+            print(f"[OVT-REPORT] series {series_uuid}: this room is already recorded "
+                  f"as match {_on_record['id']} with a different solo seat; the report "
+                  f"is answered as already recorded and nothing is written")
+        return await _already_recorded()
+
     # Slot-identity realign (July 22 forensics): the series row's solo/duo_a/duo_b
     # is a queue-time preference; the report's is the in-game truth (team sizes).
     # When they disagree, the per-slot accumulators (solo_xp_earned, ...) and a
@@ -41660,6 +41771,9 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
     # a series, rewrite the series row's slot ids to the report's ordering —
     # under the row lock, before any accumulator applies. Mid-series drift
     # (should be impossible: sides are fixed per sitting) is logged only.
+    # The report's duo pair is in canonical order by here (bug 391 r3), so a
+    # game-1 realignment writes that order into the series row, and a later
+    # report of the sitting with the same sides meets it.
     # The slot ids the series ROW carries from here on (c3 B): the report's
     # after a game-1 realignment, the stored ones otherwise.
     slot_solo, slot_da, slot_db = series["solo_id"], series["duo_a_id"], series["duo_b_id"]
@@ -41679,8 +41793,8 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
             print(f"[OVT] WARNING: series {series_uuid} slot ordering differs from "
                   f"report mid-series (game {prior_games + 1}) — leaving as-is")
 
-    # Insert the match (dedup on the room+players unique constraint → replay no-op).
-    match_id = uuid.uuid4()
+    # Insert the match. A game already on record was answered above; the
+    # room+players UNIQUE — duo pair in canonical order — is the backstop.
     try:
         await db.execute(text("""
             INSERT INTO ovt_matches (id, series_id, solo_id, duo_a_id, duo_b_id,
@@ -41729,19 +41843,9 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
                "hmac": (report.hmac_signature or "")[:128] or None, "rep": id_by_steam.get(report.reported_by_steam_id),
                "started": report.started_at})
     except IntegrityError:
-        await db.rollback()
-        # Already recorded (replay). Return the current series state idempotently.
-        s2 = (await db.execute(text("SELECT * FROM ovt_series WHERE id = :sid"), {"sid": series_uuid})).mappings().first()
-        if s2 is None:
-            raise HTTPException(404, "Series not found")
-        # Reporter-first score (learning #121) — a duo-member reporter must not
-        # see the solo-first order and read a won series as a loss.
-        rep_side_r = 1 if report.reported_by_steam_id == report.solo.steam_id else 2
-        score_r = (f"{s2['solo_series_wins']}-{s2['duo_series_wins']}" if rep_side_r == 1
-                   else f"{s2['duo_series_wins']}-{s2['solo_series_wins']}")
-        return OvtMatchResponse(
-            match_id=match_id, series_id=series_uuid, series_status=s2["status"],
-            series_score=score_r, winner_side=report.winner_side, message="Already recorded")
+        # The key conflicted: this game is already on record (the backstop
+        # behind the replay check above).
+        return await _already_recorded()
 
     # Per-game card picks (both duo members + solo).
     for pmd, pid in ((report.solo, solo_id), (report.duo_a, duo_a_id), (report.duo_b, duo_b_id)):
@@ -41831,17 +41935,24 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
     #
     # FAILURE DIRECTION. Paying is scoped to a series settled WITHOUT play —
     # a void/cancel, where no series-completion bonus was ever paid and
-    # nothing else will ever pay this game. Double payment is impossible: the
-    # `ovt_matches` room+players UNIQUE means a replay raises IntegrityError
-    # and returns above, before any award, so no match row is ever paid twice.
+    # nothing else will ever pay this game. A game is recorded, and so paid,
+    # at most once whichever seats its players arrive in: the replay check
+    # above answers a second report of a room already on record for these
+    # three players — in ANY seats — before any write and under the room
+    # lock, and the duo pair reaches the INSERT in canonical order, so the
+    # ordered room+players UNIQUE also conflicts on either order of the pair
+    # and a report that gets that far returns above, before any award. (The
+    # key alone did not hold this: it is ordered, and the sink accepts the
+    # three players in any seats — bug 391 r3.)
     # AT MOST once, not exactly once — a match row committed by the second arm
     # below carries no award at all, deliberately, and says so. Sibling arms,
     # swept (#432): the live path and this one are the only two that pay, and
-    # both sit after the same UNIQUE. Any OTHER resolved status — by play
-    # today, an unknown word tomorrow — falls to the second arm and is NOT
-    # paid: money is the integrity bar, so the unhandled case fails toward not
-    # paying. That arm is no longer silent: it prints the match id, the status
-    # and the reason, so a skip is on the record and can be settled by hand.
+    # both sit after the same check and the same UNIQUE. Any OTHER resolved
+    # status — by play today, an unknown word tomorrow — falls to the second
+    # arm and is NOT paid: money is the integrity bar, so the unhandled case
+    # fails toward not paying. That arm is no longer silent: it prints the
+    # match id, the status and the reason, so a skip is on the record and can
+    # be settled by hand.
     #
     # BOUNDED, the same way the live arm is. "At most once per match row" is
     # not by itself a bound on what one SERIES can pay: the live arm stops
