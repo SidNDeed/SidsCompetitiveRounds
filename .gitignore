@@ -142,6 +142,10 @@ logs-snapshot/
 !backend/tests/evidence/r17-suite-run.log
 !backend/tests/evidence/r17-repin-run.log
 !backend/tests/evidence/r17-mutation-run.log
+# round 18
+!backend/tests/evidence/r18-mutation-run.log
+!backend/tests/evidence/r18-suite-run.log
+!backend/tests/evidence/r18-repin-run.log
 
 # Tool caches
 .vs/
