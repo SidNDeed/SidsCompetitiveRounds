@@ -6361,6 +6361,12 @@ def _r7_writer_lines(sources):
                     or s.startswith("//"):
                 continue
             out.append((fname, i, s))
+    # L10 (round 9): tuple and deconstruction assignment, found over the whole
+    # text so a target list that wraps a line is still one write
+    have = set((f, i) for f, i, _ in out)
+    for f, i, s in _r9_tuple_writer_lines(sources):
+        if (f, i) not in have:
+            out.append((f, i, s))
     return out
 
 
@@ -6464,11 +6470,10 @@ def test_r7_m1_b19_every_path_that_changes_a_banner_input_asks_for_the_repaint()
     assert "ApiClient.cs" in sources and len(sources) > 3, sorted(sources)
     writers = _r7_writer_lines(sources)
     assert writers, "the writer grep found nothing -- the census cannot be empty"
-    outside = []
-    for fname, lineno, text in writers:
-        if fname != "ApiClient.cs" or not any(text in span
-                                              for span in paths.values()):
-            outside.append((fname, lineno, text))
+    # L10 (round 9): a writer is inside a path when its (file, line) lies in
+    # that path's LINE SPAN, located by offset -- never because its text
+    # occurs somewhere inside one.
+    outside = _r9_writers_outside_paths(writers, api)
     assert not outside, (
         "these writers of a banner input sit outside every repaint path: "
         + repr(outside))
@@ -7735,10 +7740,7 @@ def test_r8_l11_the_census_sees_every_csharp_write_form():
         anchor, anchor + LF + "                    LastSeriesT2Wins += 0;", 1)
     writers = _r7_writer_lines(twinned)
     assert len(writers) == base + 1
-    ps = _r7_repaint_paths(twinned["ApiClient.cs"])
-    outside = [w for w in writers
-               if w[0] != "ApiClient.cs"
-               or not any(w[2] in span for span in ps.values())]
+    outside = _r9_writers_outside_paths(writers, twinned["ApiClient.cs"])
     assert not outside, ("a write inside a repaint path was counted outside it: "
                          + repr(outside))
 
@@ -8098,4 +8100,194 @@ def test_r9_l4_the_dead_status_is_rejected_as_a_complete_literal_in_code():
             "  Log($" + q + "dc_{kind}" + q + ");",
             "  char c = '" + q + "'; string s = " + q + "dc" + q + ";"):
         assert not probe(permitted), "the sweep rejected: " + permitted.strip()
+
+
+# ── L10 (B19): writers classified by WHERE they sit, tuple forms included ───
+#
+# WHAT WAS WRONG.  A writer was excused when its TEXT occurred inside any
+# permitted repaint path, so a second `LastSeriesT1Wins = 0;` anywhere else in
+# ApiClient.cs was excused by the identical valid line in the id setter.  And
+# the write grammar had no tuple or deconstruction form.
+#
+# THE RULE.  Each repaint path is located by its OFFSETS at run time and turned
+# into a line span; a writer is inside only when its (file, line) falls in one
+# of those spans.  Text equality decides nothing.
+_R9_TUPLE_WRITE = re.compile(
+    r"(?<![\w>\]])\(((?:[^();{}]|\([^();{}]*\))*)\)\s*=(?![=>])")
+_R9_TUPLE_END = re.compile(r"\)\s*=(?![=>])")
+
+
+_R9_BANNER_NAMES = "|".join(_R7_BANNER_INPUTS + (_R7_BANNER_LATCH,))
+_R9_BANNER_NAME = re.compile(r"\b(?:" + _R9_BANNER_NAMES + r")\b")
+_R9_BANNER_TARGET = re.compile(r"^(?:ApiClient\.)?(?:" + _R9_BANNER_NAMES + r")$")
+
+
+def _r9_tuple_writer_lines(sources):
+    """[(file, line, text)] for every tuple or deconstruction assignment whose
+    targets include a banner input.  A target that is itself a declaration
+    (`var x`, `int x`) declares a new local and is not a write; the match must
+    sit in code, not in a comment or a literal.  Cached per source text,
+    because the census is re-taken once per planted case."""
+    out = []
+    for fname in sorted(sources):
+        out.extend(_r9_tuple_writers_in(fname, sources[fname]))
+    return out
+
+
+@functools.lru_cache(maxsize=1024)
+def _r9_tuple_writers_in(fname, text):
+    # Every assignment whose left side ENDS in a closing parenthesis is a
+    # candidate; there are a few dozen in the whole plugin, so the search
+    # starts from them rather than from each banner-input name.
+    out = []
+    if ("LastSeries" not in text and "activeTeamSeriesId" not in text
+            and _R7_BANNER_LATCH not in text):
+        return ()
+    for end in _R9_TUPLE_END.finditer(text):
+        close = end.start()
+        depth, i, stop = 0, close, max(0, close - 600)
+        while i >= stop:
+            ch = text[i]
+            if ch == ")":
+                depth += 1
+            elif ch == "(":
+                depth -= 1
+                if depth == 0:
+                    break
+            elif ch in ";{}":
+                i = -1
+                break
+            i -= 1
+        if i < stop or depth != 0:
+            continue
+        m = _R9_TUPLE_WRITE.match(text, i)
+        if m is None or m.end(1) != close:
+            continue
+        before = text[:i].rstrip()
+        # `f(a) = ...` is not an assignment of a group, and `var (a, b) = ...`
+        # declares new locals; a typed element (`int a`) declares one and
+        # simply fails the target match
+        if (before and (before[-1].isalnum() or before[-1] in "_>]")
+                and not before.endswith("return")) or before.endswith("var"):
+            continue
+        inner = m.group(1)
+        elems = [x.strip() for x in
+                 inner.replace("(", " ").replace(")", " ").split(",")]
+        if not any(_R9_BANNER_TARGET.match(x) for x in elems):
+            continue
+        comments, literals = _cs_lex(text)
+        if _cs_span_at(comments, i) or _cs_span_at(literals, i):
+            continue
+        name = _R9_BANNER_NAME.search(text, i, close)
+        ln = _cs_line(text, name.start() if name else i)
+        out.append((fname, ln, text.split(LF)[ln - 1].strip()))
+    return tuple(out)
+
+
+def _r9_repaint_line_spans(api):
+    """{path name: (first line, last line)} for every repaint path, located by
+    OFFSET in `api` -- the same spans `_r7_repaint_paths` returns as text, which
+    the L10 test asserts character for character."""
+    spans = {}
+    a = api.find("        public static string ActiveTeamSeriesId")
+    b = api.find("        public static bool IsTeamQueuePolling", a) if a >= 0 else -1
+    spans["the id setter"] = (a, b)
+    sig = "public static void PollTeamSeriesStatusReadOnly"
+    poller = _method_body(api, sig)
+    p = api.find(sig) if poller else -1
+    r = poller.find("if (!affirmed)") if poller else -1
+    e = poller.find("return;", r) if r >= 0 else -1
+    spans["the refusal path (and the timeout)"] = (
+        (p + r, p + e + len("return;")) if (p >= 0 and r >= 0 and e >= 0)
+        else (-1, -1))
+    d = poller.find("catch (Exception ex)") if poller else -1
+    spans["the dispatch-throw path"] = ((p + d, p + len(poller))
+                                        if (p >= 0 and d >= 0) else (-1, -1))
+    sig2 = "private static void ApplySeriesStateResponse"
+    parse = _method_body(api, sig2)
+    q = api.find(sig2) if parse else -1
+    spans["the shared parse"] = (q, q + len(parse)) if q >= 0 else (-1, -1)
+    out = {}
+    for name, (s, t) in spans.items():
+        if s < 0 or t <= s:
+            out[name] = None
+            continue
+        out[name] = (_cs_line(api, s), _cs_line(api, t - 1), s, t)
+    return out
+
+
+def _r9_writers_outside_paths(writers, api):
+    """The writers whose (file, line) lies in NO repaint path's line span."""
+    spans = [v for v in _r9_repaint_line_spans(api).values() if v]
+    return [w for w in writers
+            if not (w[0] == "ApiClient.cs"
+                    and any(lo <= w[1] <= hi for lo, hi, _, _ in spans))]
+
+
+def test_r9_l10_writers_are_classified_by_source_location():
+    """L10 (B19): A WRITER IS INSIDE A PATH BY LOCATION, NEVER BY TEXT.
+
+    The round-8 census excused a writer whose text occurred in any permitted
+    span, so an identical line elsewhere in the file was excused by the valid
+    one.  Each span is now located by its offsets and turned into a line span,
+    and the spans are asserted equal, character for character, to the text
+    spans the repaint-count assertions read -- one location, two uses.  The
+    census also recognises tuple and deconstruction assignment."""
+    api = _src("ApiClient.cs")
+    text_spans = _r7_repaint_paths(api)
+    line_spans = _r9_repaint_line_spans(api)
+    assert set(text_spans) == set(line_spans), (sorted(text_spans), sorted(line_spans))
+    for name, span in line_spans.items():
+        assert span, "the span for " + name + " could not be located"
+        lo, hi, s, t = span
+        assert api[s:t] == text_spans[name], (
+            name + ": the located span is not the span the repaint count reads")
+        print("L10 SPAN %s: ApiClient.cs:%d-%d" % (name, lo, hi))
+
+    sources = _r7_plugin_sources()
+    writers = _r7_writer_lines(sources)
+    outside = _r9_writers_outside_paths(writers, api)
+    print("L10 CENSUS: %d writer lines, %d outside every span, %d tuple writers"
+          % (len(writers), len(outside), len(_r9_tuple_writer_lines(sources))))
+    assert not outside, outside
+
+    probe_at = "        public static int LastSeriesStateConfirmations = 0;"
+    assert api.count(probe_at) == 1
+
+    def planted(body):
+        m = dict(sources)
+        m["ApiClient.cs"] = api.replace(
+            probe_at, probe_at + LF + "        static void ZzProbe()" + LF
+            + "        {" + LF + body + LF + "        }", 1)
+        return m
+
+    # an identical-text duplicate of the setter's own write, outside every span
+    dup = planted("                    LastSeriesT1Wins = 0;")
+    got = _r9_writers_outside_paths(_r7_writer_lines(dup), dup["ApiClient.cs"])
+    assert len(got) == 1 and got[0][2] == "LastSeriesT1Wins = 0;", got
+    for body in ("            (LastSeriesT1Wins, LastSeriesT2Wins) = (0, 0);",
+                 "            (LastSeriesT1Wins, LastSeriesT2Wins) = ReadWins();",
+                 "            (int zz, ApiClient.LastSeriesT2Wins) = ReadWins();",
+                 "            (LastSeriesT1Wins, LastSeriesT2Wins)" + LF
+                 + "                = ReadWins();"):
+        m = planted(body)
+        got = _r9_writers_outside_paths(_r7_writer_lines(m), m["ApiClient.cs"])
+        assert len(got) == 1, (body.strip(), got)
+
+    # TWINS: the same text inside a permitted span, and tuples that only READ
+    anchor = "                    LastSeriesT1Wins = 0;"
+    setter = text_spans["the id setter"]
+    assert setter.count(anchor) == 1
+    inside = dict(sources)
+    inside["ApiClient.cs"] = api.replace(anchor, anchor + LF + anchor, 1)
+    w2 = _r7_writer_lines(inside)
+    assert len(w2) == len(writers) + 1
+    assert not _r9_writers_outside_paths(w2, inside["ApiClient.cs"])
+    for body in ("            var zz = (LastSeriesT1Wins, LastSeriesT2Wins);",
+                 "            if ((LastSeriesT1Wins, LastSeriesT2Wins) == (0, 0)) { }",
+                 "            var (LastSeriesT1Wins, zz) = ReadWins();",
+                 "            // (LastSeriesT1Wins, LastSeriesT2Wins) = (0, 0);",
+                 "            Log(" + chr(34) + "(LastSeriesT1Wins, x) = (0, 0)" + chr(34) + ");"):
+        m = planted(body)
+        assert not _r9_writers_outside_paths(_r7_writer_lines(m), m["ApiClient.cs"]), body
 
