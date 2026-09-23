@@ -1469,9 +1469,17 @@ def test_the_room_issue_clear_is_introduced_as_an_attempt_not_an_invariant():
     assert ("NO READER MAY TREAT A MARKER AS NECESSARILY YOUNGER THAN THE "
             "ROOM") in block, block
     # The positive half is not enough on its own: the block has to say what
-    # DOES carry the sweep's deleted room term, or the next reader is left
-    # with a refusal and no replacement (#331).
+    # the sweep's deleted room term rested on, or the next reader is left
+    # with a refusal and no replacement (#331). TWO sentences, because the
+    # block has now carried two different WRONG attributions for that
+    # deletion -- first this clear, then the live-game veto -- and the
+    # correct answer is neither: the term could not refuse a row.
+    assert ("WHAT MAKES THAT DELETION SAFE IS THE DELETED TERM'S OWN VACUITY"
+            in block), block
     assert "LIVE-GAME VETO" in block, block
+    # ...and the veto is priced as a bound, not offered as the replacement
+    # guarantee the previous cut made of it.
+    assert "a BOUND and not a guarantee" in block, block
     assert "swallows every exception" in block, block
 
 
@@ -1871,6 +1879,12 @@ SUPERSEDED_CLAIMS = (
     # implicit concatenation across two lines is not the string it names.
     "a marker can never be older than the room",
     "is that a marker is never older than the room",
+    # ...and the account that REPLACED the first of those, which was wrong in
+    # the other direction: it attributed the room-term deletion's safety to
+    # the live-game veto where the round's own reason is that the deleted
+    # term could not refuse a row. Two attributions for one deletion means
+    # neither was read off the code (#405), so both are named here.
+    "What carries that deletion is the sweep's LIVE-GAME VETO",
     # ...and the writer enumeration that counted three of the four.
     "Three writers end it",
 )
@@ -1920,8 +1934,10 @@ CORRECTED_CLAIMS = (
      "NO READER MAY TREAT A MARKER AS NECESSARILY YOUNGER THAN THE ROOM it "
      "would be settled against"),
     ("main.py",
-     "What carries that deletion is the sweep's LIVE-GAME VETO -- the last "
-     "read before the write -- and not this call"),
+     "WHAT MAKES THAT DELETION SAFE IS THE DELETED TERM'S OWN VACUITY"),
+    ("main.py",
+     "a BOUND and not a guarantee, since a resumed series with no live game "
+     "in evidence at the tick is outside it"),
     ("326_team_series_dc_fallback_at.sql",
      "Four writers end it: a real-totals report inside the bound, a revival "
      "funnel clearing the marker, a sweep tick after the bound, and the "

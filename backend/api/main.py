@@ -38021,11 +38021,20 @@ async def team_queue_poll(steam_id: str, request: Request,
                 # helper's own doc had to be narrowed to an attempt, and it is
                 # no truer one screen away (#351).
                 # The deferred-fallback sweep no longer consults the room clock
-                # at all (the 214 s term it used could not refuse a row). What
-                # carries that deletion is the sweep's LIVE-GAME VETO -- the
-                # last read before the write -- and not this call: a marker
-                # this call failed to clear still meets a veto that refuses to
-                # settle a row with a live game in evidence. The two funnels
+                # at all, and WHAT MAKES THAT DELETION SAFE IS THE DELETED
+                # TERM'S OWN VACUITY: the 214 s term could not refuse a row,
+                # which test_the_sweep_does_not_consult_the_room_clock sets
+                # out. It took nothing away, so nothing here replaces it --
+                # and an earlier cut of this paragraph said the clear did,
+                # while the cut that replaced it said the veto did. Two
+                # attributions for one deletion means neither was read off
+                # the code (#405). What stands between a marker this call
+                # failed to clear and a settled row is the sweep's LIVE-GAME
+                # VETO, the last read before the write, which refuses a row
+                # with a live game in evidence -- a BOUND and not a
+                # guarantee, since a resumed series with no live game in
+                # evidence at the tick is outside it. That is why this clear
+                # is attempted here at all. The two funnels
                 # that revive a series call the helper on their own path, so on
                 # today's flows this is expected to find nothing to clear --
                 # "expected", not "guaranteed": the ordering between a revival
