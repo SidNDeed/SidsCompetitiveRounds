@@ -182,9 +182,10 @@ def test_the_ladder_shop_suite_ran_every_case_and_none_failed(harness_run):
     printed = len(re.findall(r"^\[laddershop\] (PASS|FAIL) ", harness_run.stdout, re.M))
     assert printed == run, (
         "the suite declared run=%d but printed %d case lines" % (run, printed))
-    # The suite ran 38 cases on the commit that added it; the floor is that
-    # count, not one far below it (#342). Raise it when cases are added.
-    assert run >= 38, "the TitleLadderRules suite shrank to %d cases" % run
+    # The suite ran 38 cases on the commit that added it and 51 once the
+    # popup's IMGUI event shield joined it (r2); the floor is that count, not
+    # one far below it (#342). Raise it when cases are added.
+    assert run >= 51, "the TitleLadderRules suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -232,6 +233,20 @@ def test_the_ladder_shop_suite_ran_every_case_and_none_failed(harness_run):
     "not started draws an empty bar",
     "the top draws a full bar",
     "a line with no rungs: Buy, disabled, no rungs",
+    # the popup's IMGUI event shield (r2)
+    "a press inside the open popup is used and latches its button",
+    "a press outside the popup's extent passes (control)",
+    "the frame the popup closed still uses a press inside its extent",
+    "the frame after it passes a fresh press (control)",
+    "the release of a latched press is used after the popup has gone, and clears the latch",
+    "a release with no latch and no popup passes (control)",
+    "a drag of the latched button is used wherever it lands and keeps the latch",
+    "a drag of another button passes (control)",
+    "two latched buttons release one at a time",
+    "a press the shield lets through clears that button's stale latch",
+    "an IMGUI modal above the popup keeps its clicks and the latch is dropped",
+    "Layout, Repaint and keys are never used and never move the latch",
+    "a scroll and a context click inside the open popup are used and latch nothing",
 ])
 def test_the_ladder_shop_guarantees_each_have_a_case(harness_run, name):
     line = _named_case(harness_run, name, "laddershop")

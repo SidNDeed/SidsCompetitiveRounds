@@ -206,6 +206,159 @@ def test_the_popup_creates_no_canvas_and_never_touches_the_event_system():
     assert "popupGO = null;" in hide
 
 
+# ── r2 (Codex r1 M1): the popup's IMGUI event shield ─────────────────────
+#
+# The click-blocking rule is an IMGUI backdrop plus Event.Use. The popup is
+# uGUI, so its IMGUI half is TitleLaddersUI.ShieldImguiEvents:
+#   * DrawUI calls it before any draw that can take a click;
+#   * it uses pointer events exactly as TitleLadderRules.Shield decides (the
+#     harness's laddershop suite executes that decision);
+#   * every close arms it for the rest of the closing frame, whose IMGUI pass
+#     runs after the close;
+#   * a click's close runs in LateUpdate, so the pressing frame's uGUI pass
+#     still finds the popup whichever Update runs first.
+# The gate is one function that lists problems. The positive test asserts
+# none, and each mutation below must produce at least one (#391).
+
+SHIELD_CALL = "TitleLaddersUI.ShieldImguiEvents(Event.current, ImguiModalAbovePopups);"
+DRAW_UI = "public static void DrawUI()"
+POINTER_KINDS = {"MouseDown": "Press", "MouseUp": "Release", "MouseDrag": "Drag",
+                 "ScrollWheel": "Scroll", "ContextClick": "Context"}
+
+
+def _flat(text):
+    return " ".join(text.split())
+
+
+def _shield_problems(cui_src, tlu_src):
+    problems = []
+
+    draw = code_of(cui_src, DRAW_UI)
+    if draw.count(SHIELD_CALL) != 1:
+        problems.append("DrawUI does not call the shield exactly once")
+    else:
+        before = draw[draw.index("{") + 1:draw.index(SHIELD_CALL)]
+        if _flat(before) != "TickChatLockWatchdog();":
+            problems.append("DrawUI runs more than the watchdog before the shield: %r" % _flat(before))
+    cui = code_of(cui_src)
+    i = cui.find("internal static bool ImguiModalAbovePopups =>")
+    if i < 0:
+        problems.append("no ImguiModalAbovePopups")
+    else:
+        expr = _flat(cui[i:cui.index(";", i)])
+        if expr != "internal static bool ImguiModalAbovePopups => BackdroplessModalOpen || !Plugin.DataConsentAsked":
+            problems.append("the modal-above set changed: %r" % expr)
+
+    shield = _flat(code_of(tlu_src, "internal static void ShieldImguiEvents(Event ev, bool modalAbove)"))
+    for need in ("if (input == TitleLadderRules.ShieldInput.Other) return;",
+                 "if (popupGO != null) CaptureShieldExtent();",
+                 "var v = TitleLadderRules.Shield(input, ev.button, inside, popupGO != null, "
+                 "Time.frameCount == shieldClosedFrame, modalAbove, shieldLatch);",
+                 "shieldLatch = v.Latch;",
+                 "if (v.Consume) ev.Use();"):
+        if need not in shield:
+            problems.append("ShieldImguiEvents lacks %r" % need)
+    if shield.count(".Use()") != 1:
+        problems.append("ShieldImguiEvents uses an event the rules did not decide")
+
+    kinds = _flat(code_of(tlu_src, "private static TitleLadderRules.ShieldInput ShieldInputOf(EventType t)"))
+    for ev, kind in sorted(POINTER_KINDS.items()):
+        if "case EventType.%s: return TitleLadderRules.ShieldInput.%s;" % (ev, kind) not in kinds:
+            problems.append("the shield does not read %s as %s" % (ev, kind))
+    if "default: return TitleLadderRules.ShieldInput.Other;" not in kinds:
+        problems.append("an unlisted event is not Other")
+    if kinds.count("case EventType.") != len(POINTER_KINDS):
+        problems.append("the shield reads an event type that is not pointer input")
+
+    hide = code_of(tlu_src, "internal static void HidePopup()")
+    release = hide.index("popupGO = null;")
+    for need in ("CaptureShieldExtent();", "shieldClosedFrame = Time.frameCount;"):
+        if need not in hide:
+            problems.append("HidePopup lacks %r" % need)
+        elif hide.index(need) > release:
+            problems.append("HidePopup runs %r after releasing the popup" % need)
+
+    opened = _flat(code_of(tlu_src, "private static void OpenPopup(string lineId)"))
+    for need in ("popupGO.AddComponent<PopupLateClose>();",
+                 "if (ClickGuard.Claim(bd)) RequestClose();",
+                 "() => { if (Time.frameCount != popupFrame) RequestClose(); }"):
+        if need not in opened:
+            problems.append("OpenPopup lacks %r" % need)
+    if opened.count("HidePopup();") != 2:
+        problems.append("OpenPopup closes directly outside its reset and its fault path")
+    late = _flat(code_of(tlu_src, "private sealed class PopupLateClose : MonoBehaviour"))
+    if "private void LateUpdate() { if (closeRequested && popupGO == gameObject) HidePopup(); }" not in late:
+        problems.append("PopupLateClose does not run the requested close in LateUpdate")
+    req = _flat(code_of(tlu_src, "private static void RequestClose()"))
+    if "if (popupGO != null) closeRequested = true;" not in req:
+        problems.append("RequestClose does not request")
+    return problems
+
+
+def test_the_popup_has_an_imgui_event_shield_first_in_the_pass():
+    problems = _shield_problems(_plugin("CompetitiveUI.cs"), _plugin("TitleLaddersUI.cs"))
+    assert not problems, problems
+
+
+SHIELD_MUTATIONS = [
+    ("no shield call", "cui", [(SHIELD_CALL, "")]),
+    ("the shield after the spectator HUD", "cui",
+     [(SHIELD_CALL, ""), ("SpectatorHud.Draw();", "SpectatorHud.Draw();" + SHIELD_CALL)]),
+    ("a modal above loses the backdrop-less set", "cui",
+     [("ImguiModalAbovePopups => BackdroplessModalOpen || !Plugin.DataConsentAsked",
+       "ImguiModalAbovePopups => !Plugin.DataConsentAsked")]),
+    ("the verdict is never applied", "tlu", [("if (v.Consume) ev.Use();", "")]),
+    ("the closed frame is not passed", "tlu",
+     [("Time.frameCount == shieldClosedFrame, modalAbove", "false, modalAbove")]),
+    ("the latch is not kept", "tlu", [("shieldLatch = v.Latch;", "")]),
+    ("Repaint read as pointer input", "tlu",
+     [("case EventType.ContextClick:", "case EventType.Repaint: case EventType.ContextClick:")]),
+    ("a close does not arm its frame", "tlu", [("shieldClosedFrame = Time.frameCount;", "")]),
+    ("the extent captured after the release", "tlu",
+     [("            CaptureShieldExtent();\n            shieldClosedFrame", "            shieldClosedFrame"),
+      ("popupGO = null; popupBox = null;", "popupGO = null; CaptureShieldExtent(); popupBox = null;")]),
+    ("the backdrop closes at once", "tlu",
+     [("if (ClickGuard.Claim(bd)) RequestClose();", "if (ClickGuard.Claim(bd)) HidePopup();")]),
+    ("the Close button closes at once", "tlu",
+     [("if (Time.frameCount != popupFrame) RequestClose(); }", "if (Time.frameCount != popupFrame) HidePopup(); }")]),
+    ("LateUpdate never closes", "tlu",
+     [("if (closeRequested && popupGO == gameObject) HidePopup();", "")]),
+]
+
+
+@pytest.mark.parametrize("name,which,edits", SHIELD_MUTATIONS, ids=[m[0] for m in SHIELD_MUTATIONS])
+def test_the_shield_gate_can_fail(name, which, edits):
+    srcs = {"cui": _plugin("CompetitiveUI.cs"), "tlu": _plugin("TitleLaddersUI.cs")}
+    for old, new in edits:
+        assert srcs[which].count(old) == 1, (name, old)
+        srcs[which] = srcs[which].replace(old, new, 1)
+    assert _shield_problems(srcs["cui"], srcs["tlu"]), name
+
+
+def test_the_shield_probe_is_a_broadcast_lever_that_clicks_nothing():
+    """The in-game witness drives the shield with a synthetic event and only
+    READS the other two paths. It never invokes a control, and only the
+    lever (broadcast identity, see test_a_local_board_never_buys_or_wears)
+    starts it."""
+    src = _plugin("TitleLaddersUI.cs")
+    probe = code_of(src, "private sealed class ShieldProbe : MonoBehaviour")
+    for banned in ("PurchaseItem", "SetActiveTitle", "OnActionClicked", "OnWearClicked",
+                   "onClick", "Invoke(", "HidePopup(", "OpenPopup("):
+        assert banned not in probe, banned
+    assert "ShieldImguiEvents(down, above);" in probe
+    assert "RequestClose();" in probe
+    assert "NativeUI.DevTopHit(sp)" in probe
+    starts = [n for n in sorted(os.listdir(os.path.join(REPO, "plugin")))
+              if n.endswith(".cs") and "AddComponent<ShieldProbe>()" in code_of(_plugin(n))]
+    assert starts == ["TitleLaddersUI.cs"], starts
+    directive = code_of(src, "internal static void DevDirective(string directive)")
+    assert "probe = pgo.AddComponent<ShieldProbe>();" in directive
+    # The read-only raycast: it sets and toggles nothing on the input system.
+    gate = code_of(_plugin("OverlayInputGate.cs"), "internal static GameObject DevTopHit(Vector2 screenPoint)")
+    for banned in ("SetValue(es", "SetSelected", "enabled", "SetActive"):
+        assert banned not in gate, banned
+
+
 # ── L4: the button ───────────────────────────────────────────────────────
 
 def test_the_button_decides_at_click_time_and_buys_only_what_the_decision_names():

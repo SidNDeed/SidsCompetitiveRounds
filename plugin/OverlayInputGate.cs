@@ -135,6 +135,35 @@ namespace CompetitiveRounds
             }
             catch { }
         }
+
+        /// <summary>Item 12 r2, the ladder popup shield's in-game witness: the
+        /// object a uGUI click at this screen point (Input.mousePosition's
+        /// space) would land on, i.e. the first result of the current input
+        /// system's RaycastAll, which sorts its results topmost first. It only
+        /// reads: no state of the input system is set or toggled (#8). Null
+        /// when nothing is hit or nothing resolves.</summary>
+        internal static GameObject DevTopHit(Vector2 screenPoint)
+        {
+            try
+            {
+                if (!Resolve()) return null;
+                var es = pCurrent.GetValue(null);
+                if (es == null) return null;
+                var asm = tEs.Assembly;
+                var tData = asm.GetType("UnityEngine.EventSystems.PointerEventData");
+                var tResult = asm.GetType("UnityEngine.EventSystems.RaycastResult");
+                if (tData == null || tResult == null) return null;
+                var data = Activator.CreateInstance(tData, new object[] { es });
+                tData.GetProperty("position", BindingFlags.Public | BindingFlags.Instance)?.SetValue(data, screenPoint);
+                var list = (System.Collections.IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(tResult));
+                var raycastAll = tEs.GetMethod("RaycastAll", BindingFlags.Public | BindingFlags.Instance);
+                if (raycastAll == null) return null;
+                raycastAll.Invoke(es, new object[] { data, list });
+                if (list.Count == 0) return null;
+                return tResult.GetProperty("gameObject", BindingFlags.Public | BindingFlags.Instance)?.GetValue(list[0]) as GameObject;
+            }
+            catch { return null; }
+        }
     }
 
     /// <summary>While the overlay is open (or Escape just closed it this

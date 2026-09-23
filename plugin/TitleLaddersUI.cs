@@ -120,6 +120,17 @@ namespace CompetitiveRounds
         private static string popupLine;
         private static int popupFrame = -1;
 
+        // The popup's IMGUI event shield (see ShieldImguiEvents). The extent is
+        // in Input.mousePosition's space, origin bottom left. It is refreshed on
+        // every pointer event while the popup is open, and HidePopup captures
+        // it before letting the popup go, so the frame that closed the popup
+        // still knows where it was.
+        private static Rect shieldExtent;
+        private static bool shieldHaveExtent;
+        private static int shieldClosedFrame = -1;
+        private static int shieldLatch;       // one bit per mouse button whose press the shield took
+        private static bool closeRequested;   // a click asked for the close; PopupLateClose runs it
+
         private static bool buyInFlight, equipInFlight;
         private static float buyAt, equipAt;
         private static string lastMsg;
@@ -720,7 +731,8 @@ namespace CompetitiveRounds
         /// that uGUI clicks stop at, and a centred box. It owns input while it
         /// is open (CompetitiveUI.OtherModalOwnsInput), so the Shop's raw-poll
         /// rows under it are blocked, and its own controls carry
-        /// bypassModalBlock (NativeUI.MarkPopupChildrenInteractive).</summary>
+        /// bypassModalBlock (NativeUI.MarkPopupChildrenInteractive). The IMGUI
+        /// half is ShieldImguiEvents, below.</summary>
         internal static bool PopupOpen { get { return popupGO != null; } }
 
         private static void OpenPopup(string lineId)
@@ -733,12 +745,15 @@ namespace CompetitiveRounds
                 if (overlay == null) return;
                 popupLine = lineId;
                 popupFrame = Time.frameCount;
+                closeRequested = false;
                 popupGO = new GameObject("CR_TitleLadderPopup");
                 popupGO.hideFlags = HideFlags.HideAndDontSave;
                 popupGO.transform.SetParent(overlay, false);
                 var rt = popupGO.AddComponent<RectTransform>();
                 rt.anchorMin = Vector2.zero; rt.anchorMax = Vector2.one;
                 rt.offsetMin = Vector2.zero; rt.offsetMax = Vector2.zero;
+                // Runs the close a click asks for, after every Update of the frame.
+                popupGO.AddComponent<PopupLateClose>();
 
                 var bd = UIFactory.CreatePanel("BD", popupGO.transform, new Color(0f, 0f, 0f, 0.62f));
                 var bdRT = bd.GetComponent<RectTransform>();
@@ -756,7 +771,7 @@ namespace CompetitiveRounds
                 {
                     if (Time.frameCount == popupFrame) return;
                     if (popupBox != null && NativeUI.PointerOverActive(popupBox)) return;
-                    if (ClickGuard.Claim(bd)) HidePopup();
+                    if (ClickGuard.Claim(bd)) RequestClose();
                 };
 
                 popupBox = UIFactory.CreatePanel("Box", popupGO.transform, C_BOX);
@@ -802,7 +817,7 @@ namespace CompetitiveRounds
                 UIFactory.FitOneLine(popTitle);
                 UIFactory.SetFlexW((popTitle as Component)?.gameObject, 1f);
                 var close = UIFactory.CreateButton("Close", head.transform, I18n.Tr("Close"), 15f, C_WHITE, C_BTN,
-                    () => { if (Time.frameCount != popupFrame) HidePopup(); }, sizeDelta: new Vector2(120, 30));
+                    () => { if (Time.frameCount != popupFrame) RequestClose(); }, sizeDelta: new Vector2(120, 30));
                 UIFactory.AddLE(close, prefW: 120, prefH: 30, flexW: 0, flexH: 0);
 
                 popHeld = UIFactory.CreateText("Held", popupBox.transform, "", 17f, C_WHITE,
@@ -916,6 +931,12 @@ namespace CompetitiveRounds
         {
             if (popupGO == null) return;
             var go = popupGO;
+            // The shield keeps covering the popup's extent for the rest of this
+            // frame: the IMGUI pass that delivers a dismiss press runs after
+            // the close (see ShieldImguiEvents).
+            CaptureShieldExtent();
+            shieldClosedFrame = Time.frameCount;
+            closeRequested = false;
             popupGO = null; popupBox = null; popupAction = null;
             popTitle = popHeld = popCaption = popReason = popMsg = popActionTxt = null;
             popFill = null; popRows = null; popupLine = null;
@@ -924,6 +945,285 @@ namespace CompetitiveRounds
             try { UnityEngine.Object.Destroy(go); } catch { }
             Plugin.Log.LogInfo("[LADDER] popup closed");
             try { NativeUI.MarkDirty(); } catch { }
+        }
+
+        // ── the popup's IMGUI event shield, and its click-driven close ─────
+
+        /// <summary>The IMGUI half of the popup's click blocking (the rule:
+        /// an IMGUI backdrop plus Event.Use). The uGUI backdrop and the
+        /// raw-poll gate stay exactly as they are; this adds the third input
+        /// path. CompetitiveUI.DrawUI calls it first in the mod's IMGUI pass,
+        /// before anything drawn there can react to a click, so an event it
+        /// uses reaches nothing drawn after it. It paints nothing: IMGUI paints
+        /// over uGUI, and a painted backdrop would hide the popup itself.
+        ///
+        /// TitleLadderRules.Shield decides. This resolves its inputs: the
+        /// event's kind and button, whether the event lies inside the popup's
+        /// extent, whether the popup is open or closed during this frame, and
+        /// whether an IMGUI modal sits above the popup (CompetitiveUI).
+        ///
+        /// Any fault leaves the event unused. The shield never strands input
+        /// it cannot reason about.</summary>
+        internal static void ShieldImguiEvents(Event ev, bool modalAbove)
+        {
+            try
+            {
+                if (ev == null) return;
+                var input = ShieldInputOf(ev.type);
+                if (input == TitleLadderRules.ShieldInput.Other) return;
+                if (popupGO != null) CaptureShieldExtent();
+                Vector2 g = GUIUtility.GUIToScreenPoint(ev.mousePosition);   // top-left origin
+                var p = new Vector2(g.x, Screen.height - g.y);                // the extent's origin
+                bool inside = shieldHaveExtent
+                              && p.x >= shieldExtent.xMin && p.x <= shieldExtent.xMax
+                              && p.y >= shieldExtent.yMin && p.y <= shieldExtent.yMax;
+                var v = TitleLadderRules.Shield(input, ev.button, inside, popupGO != null,
+                                                Time.frameCount == shieldClosedFrame, modalAbove, shieldLatch);
+                shieldLatch = v.Latch;
+                if (v.Consume) ev.Use();
+            }
+            catch { }
+        }
+
+        private static TitleLadderRules.ShieldInput ShieldInputOf(EventType t)
+        {
+            switch (t)
+            {
+                case EventType.MouseDown: return TitleLadderRules.ShieldInput.Press;
+                case EventType.MouseUp: return TitleLadderRules.ShieldInput.Release;
+                case EventType.MouseDrag: return TitleLadderRules.ShieldInput.Drag;
+                case EventType.ScrollWheel: return TitleLadderRules.ShieldInput.Scroll;
+                case EventType.ContextClick: return TitleLadderRules.ShieldInput.Context;
+                default: return TitleLadderRules.ShieldInput.Other;
+            }
+        }
+
+        /// <summary>The popup root's rectangle as it renders now. The same
+        /// geometry the backdrop's over-the-box test uses
+        /// (NativeUI.PointerOverActive reads NativeUI.ScreenRectOf).</summary>
+        private static void CaptureShieldExtent()
+        {
+            Rect r;
+            if (popupGO != null && NativeUI.ScreenRectOf(popupGO, out r))
+            {
+                shieldExtent = r;
+                shieldHaveExtent = true;
+            }
+        }
+
+        /// <summary>The close a click asks for: the backdrop's and the Close
+        /// button's. PopupLateClose runs it in LateUpdate of the same frame,
+        /// after every Update. Whichever runs first that frame, the uGUI
+        /// input pass or the raw-poll handler that asked, the pass still finds
+        /// the backdrop and the box where they were. So the press that closes
+        /// the popup cannot start a uGUI click on a button beneath it. The
+        /// IMGUI pass of that frame runs after LateUpdate, and the shield's
+        /// closed-this-frame arm covers it.
+        ///
+        /// Every other close path (teardown, a tab switch, a replaced popup,
+        /// a line leaving the board) stays immediate through HidePopup: the
+        /// popup's gold-bearing controls must stop the moment those happen
+        /// (#369).</summary>
+        private static void RequestClose()
+        {
+            if (popupGO != null) closeRequested = true;
+        }
+
+        private sealed class PopupLateClose : MonoBehaviour
+        {
+            private void LateUpdate()
+            {
+                if (closeRequested && popupGO == gameObject) HidePopup();
+            }
+        }
+
+        // ── the shield's in-game witness (broadcast lever verb "shield") ──
+        //
+        // Synthetic mouse input does not reach this seat's game (#420), so the
+        // witness drives the real functions instead. It feeds a synthetic
+        // IMGUI event to ShieldImguiEvents, the call DrawUI makes. It asks for
+        // the close the backdrop asks for (RequestClose, run by
+        // PopupLateClose). At the same screen point it reads the other two
+        // input paths: the raw-poll gate a ClickHandler checks before it reads
+        // the mouse, and the top hit of a uGUI raycast.
+        //
+        // It clicks nothing, buys nothing and wears nothing. The point is the
+        // centre of a ladder entry's button outside the popup box, a real Shop
+        // control under the backdrop. The last stage repeats every read with
+        // the popup gone. That is the control: the same reads must then find
+        // the button.
+        private static ShieldProbe probe;
+
+        private sealed class ShieldProbe : MonoBehaviour
+        {
+            private int stage, stageFrame;
+            private float startedAt = -1f;
+            private Vector2 sp, gp;            // the point: Input space, and IMGUI space
+            private GameObject target, row;    // the entry's button beneath the point, and its row
+            private string targetName;
+            private readonly List<string> fails = new List<string>();
+            private string rawOpen, topOpen, rawAtRequest, topAtRequest, rawAfter, topAfter;
+            private bool rawOpenBlocked, topOpenOnPopup, openAtRequest, rawAtRequestBlocked, topAtRequestOnPopup;
+            private bool rawAfterLive, topAfterOnTarget;
+            private int dismissFrame = -1;
+
+            private void Update()
+            {
+                if (stage >= 99) return;
+                try
+                {
+                    if (startedAt < 0f) startedAt = Time.realtimeSinceStartup;
+                    if (Time.realtimeSinceStartup - startedAt > 10f) { Finish("timed out at stage " + stage); return; }
+                    if (Time.frameCount <= stageFrame) return;
+                    if (stage == 0)
+                    {
+                        if (!PopupOpen || popupBox == null) { Finish("no popup is open"); return; }
+                        if (!PickTarget()) { Finish("no ladder entry button lies outside the popup box"); return; }
+                        rawOpenBlocked = RawGate(out rawOpen);
+                        GameObject hit = NativeUI.DevTopHit(sp);
+                        topOpen = PathOf(hit);
+                        topOpenOnPopup = hit != null && popupGO != null && hit.transform.IsChildOf(popupGO.transform);
+                        Next(1);
+                    }
+                    else if (stage == 2)
+                    {
+                        if (!PopupOpen) { Finish("the popup closed before the dismiss"); return; }
+                        RequestClose();   // the backdrop's own dismiss; PopupLateClose runs it after every Update
+                        dismissFrame = Time.frameCount;
+                        openAtRequest = PopupOpen;
+                        rawAtRequestBlocked = RawGate(out rawAtRequest);
+                        GameObject hit = NativeUI.DevTopHit(sp);
+                        topAtRequest = PathOf(hit);
+                        topAtRequestOnPopup = hit != null && popupGO != null && hit.transform.IsChildOf(popupGO.transform);
+                        Next(3);
+                    }
+                    else if (stage == 5)
+                    {
+                        rawAfterLive = !RawGate(out rawAfter);
+                        GameObject hit = NativeUI.DevTopHit(sp);
+                        topAfter = PathOf(hit);
+                        topAfterOnTarget = hit != null && target != null && hit.transform.IsChildOf(target.transform);
+                        Next(6);
+                    }
+                }
+                catch (Exception ex) { Finish("threw at stage " + stage + ": " + ex.Message); }
+            }
+
+            private void OnGUI()
+            {
+                if (stage >= 99) return;
+                try
+                {
+                    var ev = Event.current;
+                    if (ev == null || ev.type != EventType.Repaint) return;
+                    bool above = CompetitiveUI.ImguiModalAbovePopups;
+                    if (stage == 1)
+                    {
+                        var down = Synth(EventType.MouseDown); ShieldImguiEvents(down, above);
+                        var up = Synth(EventType.MouseUp); ShieldImguiEvents(up, above);
+                        Plugin.Log.LogInfo($"[LADDER] shield probe open: point=({sp.x:0},{sp.y:0}) beneath={targetName} popupOpen={PopupOpen} imgui press={down.type} release={up.type} raw {rawOpen} ugui top={topOpen}");
+                        Expect(down.type == EventType.Used && up.type == EventType.Used, "open: an IMGUI press or release was not used");
+                        Expect(rawOpenBlocked, "open: the raw-poll path under the point is live");
+                        Expect(topOpenOnPopup, "open: the uGUI top hit is not the popup");
+                        Next(2);
+                    }
+                    else if (stage == 3)
+                    {
+                        bool sameFrame = Time.frameCount == dismissFrame;
+                        bool openNow = PopupOpen;
+                        bool closedNow = Time.frameCount == shieldClosedFrame;
+                        var down = Synth(EventType.MouseDown); ShieldImguiEvents(down, above);
+                        int latch = shieldLatch;
+                        Plugin.Log.LogInfo($"[LADDER] shield probe dismiss: frame={dismissFrame} at the request popupOpen={openAtRequest} raw {rawAtRequest} ugui top={topAtRequest} | IMGUI pass frame={Time.frameCount} popupOpen={openNow} closedThisFrame={closedNow} press={down.type} latch={latch}");
+                        Expect(sameFrame, "dismiss: the frame's IMGUI pass was not the dismiss frame's");
+                        Expect(openAtRequest && rawAtRequestBlocked && topAtRequestOnPopup, "dismiss: at the request the popup did not still hold both paths");
+                        Expect(!openNow && closedNow, "dismiss: the popup had not closed before the IMGUI pass");
+                        Expect(down.type == EventType.Used && (latch & 1) != 0, "dismiss: the press was not used and latched");
+                        Next(4);
+                    }
+                    else if (stage == 4 && Time.frameCount > stageFrame)
+                    {
+                        var up = Synth(EventType.MouseUp); ShieldImguiEvents(up, above);
+                        Plugin.Log.LogInfo($"[LADDER] shield probe release: frame={Time.frameCount} popupOpen={PopupOpen} closedThisFrame={Time.frameCount == shieldClosedFrame} release={up.type} latch={shieldLatch}");
+                        Expect(up.type == EventType.Used && (shieldLatch & 1) == 0, "release: the latched release was not used, or the latch stayed");
+                        Next(5);
+                    }
+                    else if (stage == 6)
+                    {
+                        var down = Synth(EventType.MouseDown); ShieldImguiEvents(down, above);
+                        var up = Synth(EventType.MouseUp); ShieldImguiEvents(up, above);
+                        Plugin.Log.LogInfo($"[LADDER] shield probe control: popupOpen={PopupOpen} closedThisFrame={Time.frameCount == shieldClosedFrame} imgui press={down.type} release={up.type} raw {rawAfter} ugui top={topAfter}");
+                        Expect(down.type == EventType.MouseDown && up.type == EventType.MouseUp, "control: the IMGUI press or release was used with the popup gone");
+                        Expect(rawAfterLive, "control: the raw-poll path stayed blocked with the popup gone");
+                        Expect(topAfterOnTarget, "control: the uGUI top hit is not the entry's button");
+                        Finish(null);
+                    }
+                }
+                catch (Exception ex) { Finish("threw at stage " + stage + ": " + ex.Message); }
+            }
+
+            private void Next(int s) { stage = s; stageFrame = Time.frameCount; }
+
+            private void Expect(bool ok, string what) { if (!ok) fails.Add(what); }
+
+            private Event Synth(EventType t)
+            {
+                return new Event { type = t, button = 0, mousePosition = gp };
+            }
+
+            /// <summary>The first ladder entry whose button is showing and whose
+            /// centre lies outside the popup box.</summary>
+            private bool PickTarget()
+            {
+                Rect box;
+                if (!NativeUI.ScreenRectOf(popupBox, out box)) return false;
+                foreach (var e in entries)
+                {
+                    if (e == null || e.btn == null || !e.btn.activeInHierarchy) continue;
+                    Rect b;
+                    if (!NativeUI.ScreenRectOf(e.btn, out b)) continue;
+                    Vector2 c = b.center;
+                    if (c.x < 0f || c.y < 0f || c.x > Screen.width || c.y > Screen.height) continue;
+                    if (c.x >= box.xMin && c.x <= box.xMax && c.y >= box.yMin && c.y <= box.yMax) continue;
+                    target = e.btn; row = e.root; targetName = (e.line ?? "?") + "/" + e.btn.name;
+                    sp = c; gp = new Vector2(c.x, Screen.height - c.y);
+                    return true;
+                }
+                return false;
+            }
+
+            /// <summary>ClickHandler.Update's own first gate, read for the
+            /// button and for its row. True when both would return before
+            /// reading the mouse.</summary>
+            private bool RawGate(out string text)
+            {
+                var chBtn = target != null ? target.GetComponent<ClickHandler>() : null;
+                var chRow = row != null ? row.GetComponent<ClickHandler>() : null;
+                bool btnBlocked = chBtn == null || (ClickHandler.ModalBlockInput && (!chBtn.bypassModalBlock || ClickHandler.BypassSuspended));
+                bool rowBlocked = chRow == null || (ClickHandler.ModalBlockInput && (!chRow.bypassModalBlock || ClickHandler.BypassSuspended));
+                text = $"ModalBlockInput={ClickHandler.ModalBlockInput} button={(chBtn == null ? "none" : (btnBlocked ? "blocked" : "live"))} row={(chRow == null ? "none" : (rowBlocked ? "blocked" : "live"))}";
+                return btnBlocked && rowBlocked;
+            }
+
+            private static string PathOf(GameObject go)
+            {
+                if (go == null) return "(nothing)";
+                string path = go.name;
+                var t = go.transform.parent;
+                for (int i = 0; i < 2 && t != null; i++, t = t.parent) path = t.name + "/" + path;
+                return path;
+            }
+
+            private void Finish(string abort)
+            {
+                if (stage >= 99) return;
+                if (abort != null) fails.Add(abort);
+                stage = 99;
+                Plugin.Log.LogInfo("[LADDER] shield probe verdict: "
+                                   + (fails.Count == 0 ? "PASS" : "FAIL (" + string.Join("; ", fails) + ")"));
+                if (probe == this) probe = null;
+                try { Destroy(gameObject); } catch { }
+            }
         }
 
         private static void RefreshPopup()
@@ -1088,6 +1388,9 @@ namespace CompetitiveRounds
         ///   ladder:line     open a line's popup from the board in hand.
         ///   close           close the popup.
         ///   live            drop the local board.
+        ///   shield          run the event shield's witness (ShieldProbe) on
+        ///                   the open popup; it closes the popup through the
+        ///                   backdrop's own dismiss and logs every read.
         ///
         /// The fixture is a file the operator writes on that seat; no ladder
         /// answer ships in this assembly (see the closing note).</summary>
@@ -1114,6 +1417,18 @@ namespace CompetitiveRounds
                 else if (verb == "ladder") OpenPopup(arg);
                 else if (verb == "close") HidePopup();
                 else if (verb == "live") { HidePopup(); devBoard = null; Plugin.Log.LogInfo("[LADDER] dev: local board dropped"); }
+                else if (verb == "shield")
+                {
+                    if (probe != null) Plugin.Log.LogWarning("[LADDER] dev: a shield probe is already running");
+                    else if (!PopupOpen) Plugin.Log.LogWarning("[LADDER] dev: open a line's popup before the shield probe");
+                    else
+                    {
+                        var pgo = new GameObject("CR_LadderShieldProbe");
+                        pgo.hideFlags = HideFlags.HideAndDontSave;
+                        probe = pgo.AddComponent<ShieldProbe>();
+                        Plugin.Log.LogInfo("[LADDER] shield probe: started on line " + popupLine);
+                    }
+                }
                 else Plugin.Log.LogWarning("[LADDER] dev: unknown directive " + verb);
                 if (arg.Length > 0 && (verb == "fixture" || verb == "ladder") && !PopupOpen)
                     Plugin.Log.LogWarning("[LADDER] dev: no line " + arg + " on the board");

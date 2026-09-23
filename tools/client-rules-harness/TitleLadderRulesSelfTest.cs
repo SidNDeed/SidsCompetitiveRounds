@@ -289,7 +289,75 @@ namespace CompetitiveRounds
                       empty.Label == Label.Buy && !empty.Enabled && empty.Reason == Reason.NoRungs, Show(empty));
             }
 
+            // ── E: the popup's IMGUI event shield (r2, Codex r1 M1) ────────
+            // Each guarantee has a case and a control that moves exactly the
+            // input deciding it. Arguments: input, button, inside, popupOpen,
+            // closedThisFrame, modalAbove, latch.
+            {
+                var open = Shield(ShieldInput.Press, 0, true, true, false, false, 0);
+                Check(r, "a press inside the open popup is used and latches its button",
+                      open.Consume && open.Latch == 1, ShowShield(open));
+                var outside = Shield(ShieldInput.Press, 0, false, true, false, false, 0);
+                Check(r, "a press outside the popup's extent passes (control)",
+                      !outside.Consume && outside.Latch == 0, ShowShield(outside));
+
+                var dismiss = Shield(ShieldInput.Press, 0, true, false, true, false, 0);
+                Check(r, "the frame the popup closed still uses a press inside its extent",
+                      dismiss.Consume && dismiss.Latch == 1, ShowShield(dismiss));
+                var after = Shield(ShieldInput.Press, 0, true, false, false, false, 0);
+                Check(r, "the frame after it passes a fresh press (control)",
+                      !after.Consume && after.Latch == 0, ShowShield(after));
+
+                var rel = Shield(ShieldInput.Release, 0, true, false, false, false, 1);
+                Check(r, "the release of a latched press is used after the popup has gone, and clears the latch",
+                      rel.Consume && rel.Latch == 0, ShowShield(rel));
+                var relFree = Shield(ShieldInput.Release, 0, true, false, false, false, 0);
+                Check(r, "a release with no latch and no popup passes (control)",
+                      !relFree.Consume && relFree.Latch == 0, ShowShield(relFree));
+
+                var drag = Shield(ShieldInput.Drag, 0, false, false, false, false, 1);
+                Check(r, "a drag of the latched button is used wherever it lands and keeps the latch",
+                      drag.Consume && drag.Latch == 1, ShowShield(drag));
+                var dragOther = Shield(ShieldInput.Drag, 1, false, false, false, false, 1);
+                Check(r, "a drag of another button passes (control)",
+                      !dragOther.Consume && dragOther.Latch == 1, ShowShield(dragOther));
+
+                var chord = Shield(ShieldInput.Release, 1, false, false, false, false, 3);
+                Check(r, "two latched buttons release one at a time",
+                      chord.Consume && chord.Latch == 1, ShowShield(chord));
+
+                var stale = Shield(ShieldInput.Press, 0, true, false, false, false, 1);
+                Check(r, "a press the shield lets through clears that button's stale latch",
+                      !stale.Consume && stale.Latch == 0, ShowShield(stale));
+
+                var above = Shield(ShieldInput.Press, 0, true, true, false, true, 1);
+                Check(r, "an IMGUI modal above the popup keeps its clicks and the latch is dropped",
+                      !above.Consume && above.Latch == 0, ShowShield(above));
+
+                bool others = true;
+                foreach (bool popup in new[] { true, false })
+                    foreach (bool closed in new[] { true, false })
+                        foreach (int latch in new[] { 0, 1 })
+                        {
+                            var o = Shield(ShieldInput.Other, 0, true, popup, closed, false, latch);
+                            others &= !o.Consume && o.Latch == latch;
+                        }
+                Check(r, "Layout, Repaint and keys are never used and never move the latch",
+                      others, "others=" + others);
+
+                var scroll = Shield(ShieldInput.Scroll, 0, true, true, false, false, 0);
+                var context = Shield(ShieldInput.Context, 1, true, true, false, false, 0);
+                Check(r, "a scroll and a context click inside the open popup are used and latch nothing",
+                      scroll.Consume && context.Consume && scroll.Latch == 0 && context.Latch == 0,
+                      "scroll " + ShowShield(scroll) + " / context " + ShowShield(context));
+            }
+
             return r;
+        }
+
+        private static string ShowShield(ShieldVerdict v)
+        {
+            return "consume=" + v.Consume + " latch=" + v.Latch;
         }
 
         private static void Check(SelfTestResult r, string name, bool ok, string got)

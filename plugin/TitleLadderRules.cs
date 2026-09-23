@@ -274,5 +274,67 @@ namespace CompetitiveRounds
             }
             return plan;
         }
+
+        // ── the tier popup's IMGUI event shield ─────────────────────────────
+
+        /// <summary>An IMGUI event, reduced to what the shield reads. Other is
+        /// everything that is not pointer input: Layout and Repaint, which must
+        /// never be used, and keys, which the popup does not take and which
+        /// the hotkey guards already gate while it is open.</summary>
+        internal enum ShieldInput { Other, Press, Release, Drag, Scroll, Context }
+
+        /// <summary>What the shield does with one event: whether it is used,
+        /// and the latch to keep afterwards (one bit per mouse button whose
+        /// press the shield took).</summary>
+        internal struct ShieldVerdict
+        {
+            public bool Consume;
+            public int Latch;
+        }
+
+        /// <summary>The decision behind the tier popup's IMGUI event shield.
+        /// The popup is uGUI; the shield is its IMGUI half, which the
+        /// click-blocking rule asks for (an IMGUI backdrop plus Event.Use).
+        ///
+        /// Pointer input inside the popup's extent is used while the popup is
+        /// open, and also on the frame the popup closed. A dismiss press
+        /// closes the popup before that frame's IMGUI pass sees the press,
+        /// and the press still has to reach nothing beneath the popup.
+        ///
+        /// A press the shield takes latches its button. The drag and the
+        /// release of that press are then taken wherever they land, even
+        /// after the popup has gone, so a whole dismiss click is consumed.
+        ///
+        /// An IMGUI modal drawn above the popup owns its own clicks, so the
+        /// shield stands aside and drops its latch.
+        ///
+        /// A press the shield lets through starts a new gesture and clears
+        /// that button's latch. So when a release never arrives, the latch
+        /// takes at most that button's drags and one release before its next
+        /// press clears it: the latch expires, it never blocks for good.</summary>
+        internal static ShieldVerdict Shield(ShieldInput input, int button, bool inside,
+                                             bool popupOpen, bool closedThisFrame,
+                                             bool modalAbove, int latch)
+        {
+            var v = new ShieldVerdict { Consume = false, Latch = latch };
+            if (input == ShieldInput.Other) return v;
+            if (modalAbove) { v.Latch = 0; return v; }
+            int bit = button >= 0 && button < 30 ? 1 << button : 0;
+            if (bit != 0 && (latch & bit) != 0
+                && (input == ShieldInput.Drag || input == ShieldInput.Release))
+            {
+                v.Consume = true;
+                if (input == ShieldInput.Release) v.Latch = latch & ~bit;
+                return v;
+            }
+            if ((popupOpen || closedThisFrame) && inside)
+            {
+                v.Consume = true;
+                if (input == ShieldInput.Press) v.Latch = latch | bit;
+                return v;
+            }
+            if (input == ShieldInput.Press) v.Latch = latch & ~bit;
+            return v;
+        }
     }
 }

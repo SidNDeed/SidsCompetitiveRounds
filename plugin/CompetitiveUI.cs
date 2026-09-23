@@ -331,6 +331,13 @@ namespace CompetitiveRounds
             || !Plugin.DataConsentAsked;
         private static bool AnyModalOwnsInput => OtherModalOwnsInput || NativeUI.UtilityPopupOpen;
 
+        // Item 12 r2: the IMGUI surfaces that sit ABOVE every uGUI popup and own
+        // their own clicks. The backdrop-less modals are topmost by definition
+        // (the same fact ClickHandler.BypassSuspended states below), and the
+        // consent prompt is drawn last, over everything. A popup's IMGUI event
+        // shield stands aside while one of them is up.
+        internal static bool ImguiModalAbovePopups => BackdroplessModalOpen || !Plugin.DataConsentAsked;
+
         // Sept 8 item 1: IMGUI is painted after the mod's uGUI canvases, so a page's
         // IMGUI (the search boxes, the hover graphs, the session report, the shop
         // previews, the ranked-hint callout) drew OVER the Music/Mail popup's
@@ -362,6 +369,11 @@ namespace CompetitiveRounds
             // FIRST, before anything that can throw: releases the chat input lock
             // if the box stopped rendering (bug #128 — see TickChatLockWatchdog).
             TickChatLockWatchdog();
+            // Item 12 r2: the ladder tier popup's IMGUI event shield, before
+            // every draw below that can react to a click. An event it uses
+            // reaches none of them, on the frame the popup closed as well. It
+            // paints nothing and cannot throw out of here.
+            TitleLaddersUI.ShieldImguiEvents(Event.current, ImguiModalAbovePopups);
             // Spectator blackout/HUD draws EARLY (#255): it must not be
             // starveable by a later overlay throwing, and everything after it
             // may legitimately paint on top (notifications, Tab stats, chat).

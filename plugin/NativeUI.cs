@@ -1665,6 +1665,43 @@ namespace CompetitiveRounds
             try
             {
                 if (go == null || !go.activeInHierarchy) return false;
+                float minX, minY, maxX, maxY;
+                if (!ScreenBounds(go, out minX, out minY, out maxX, out maxY)) return false;
+                Vector3 mp = Input.mousePosition;
+                return mp.x >= minX && mp.x <= maxX && mp.y >= minY && mp.y <= maxY;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Item 12 r2: the screen rectangle a control renders at, in
+        /// Input.mousePosition's space (origin bottom left). It is the geometry
+        /// PointerOverActive tests the pointer against, so the ladder popup's
+        /// IMGUI shield measures the popup's extent with the same code the
+        /// popup's backdrop uses to tell a press on its box from a press
+        /// outside it. False when there is nothing to measure.</summary>
+        internal static bool ScreenRectOf(GameObject go, out Rect r)
+        {
+            float minX, minY, maxX, maxY;
+            if (!ScreenBounds(go, out minX, out minY, out maxX, out maxY)) { r = default(Rect); return false; }
+            r = Rect.MinMaxRect(minX, minY, maxX, maxY);
+            return true;
+        }
+
+        /// <summary>Item 12 r2: the ladder shield witness's uGUI read
+        /// (EventSystemGuard.DevTopHit, read-only). It lives here so the popup's
+        /// own file keeps no reference to the input system at all.</summary>
+        internal static GameObject DevTopHit(Vector2 screenPoint) { return EventSystemGuard.DevTopHit(screenPoint); }
+
+        /// <summary>World corners -> screen, through the canvas camera when the
+        /// canvas is not Screen Space Overlay (ROUNDS' ScreenSpaceCamera canvas
+        /// needs WorldToScreenPoint), the same walk as
+        /// ClickHandler.ContainsScreenPoint.</summary>
+        private static bool ScreenBounds(GameObject go, out float minX, out float minY, out float maxX, out float maxY)
+        {
+            minX = minY = float.PositiveInfinity; maxX = maxY = float.NegativeInfinity;
+            try
+            {
+                if (go == null) return false;
                 var rt = go.GetComponent<RectTransform>();
                 if (rt == null) return false;
                 Camera cam = null;
@@ -1691,14 +1728,12 @@ namespace CompetitiveRounds
                 }
                 var corners = new Vector3[4];
                 rt.GetWorldCorners(corners);
-                float minX = float.PositiveInfinity, minY = float.PositiveInfinity, maxX = float.NegativeInfinity, maxY = float.NegativeInfinity;
                 for (int i = 0; i < 4; i++)
                 {
                     Vector3 c = cam != null ? cam.WorldToScreenPoint(corners[i]) : corners[i];
                     minX = Mathf.Min(minX, c.x); minY = Mathf.Min(minY, c.y); maxX = Mathf.Max(maxX, c.x); maxY = Mathf.Max(maxY, c.y);
                 }
-                Vector3 mp = Input.mousePosition;
-                return mp.x >= minX && mp.x <= maxX && mp.y >= minY && mp.y <= maxY;
+                return true;
             }
             catch { return false; }
         }
