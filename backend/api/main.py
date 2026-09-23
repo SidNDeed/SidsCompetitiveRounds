@@ -35211,7 +35211,8 @@ async def submit_bug_report(req: BugReportRequest, request: Request, db: AsyncSe
             report.log_filename = log_filename
             report.log_bytes = log_bytes_stored
         except Exception as ex:
-            # A LOG WAS ATTACHED AND IT IS GONE, and the row has to say so.
+            # A LOG WAS ATTACHED AND IT WAS NOT STORED, and the row has to say
+            # so -- including which of the two ways it failed.
             #
             # Falling through leaves log_filename NULL, which is the SAME
             # state as a report filed with no log at all. An admin opening the
@@ -35221,45 +35222,92 @@ async def submit_bug_report(req: BugReportRequest, request: Request, db: AsyncSe
             # below is the only record, and it is thirty thousand lines away
             # by the time anybody looks.
             #
-            # log_bytes = 0 is that marker, and it needs no schema change:
-            # log_filename stays NULL because there is genuinely nothing to
-            # download (`has_log` is derived from it and stays false), while 0
-            # is unreachable for a stored blob -- this arm only runs when a
+            # THE ROW ENCODES THREE STATES, one per thing that can have
+            # happened to the attachment, and none of them needs a schema
+            # change:
+            #
+            #   filename NULL, bytes NULL -- nothing was attached;
+            #   filename NULL, bytes 0    -- attached, lost, and NOTHING of it
+            #                                is on the volume: the partial file
+            #                                was removed and the removal is
+            #                                DURABLE;
+            #   filename SET,  bytes NULL -- attached, the write failed, and
+            #                                the partial file could NOT be
+            #                                taken off the volume, so the row
+            #                                NAMES it.
+            #
+            # 0 is unreachable for a stored blob -- this arm only runs when a
             # non-empty log_blob was sent, and gzip of anything is never zero
-            # bytes. So NULL means "none attached" and 0 means "attached and
-            # lost", which is the distinction that was missing.
+            # bytes -- so it cannot be confused with a real attachment.
             #
-            # The response already carries `log_persisted: false`, so the
-            # client half was told. This is the half nobody was told: the row.
+            # The response carries `log_persisted: false` in all three cases:
+            # it is derived from the LOCAL `log_filename`, which this arm
+            # never sets, so the client is told the log was not persisted even
+            # in the third state, where the row names a truncated file. That
+            # is the truth from the client's side and from the row's side at
+            # the same time.
             #
-            # AND THE PARTIAL FILE GOES BEFORE THE ROW COMMITS. `open()` can
-            # succeed and `write()` or `flush()` fail, which leaves a prefix
-            # of the gzip stream on the volume under a name the row will NOT
-            # carry -- log_filename stays NULL. A player-filed attachment
-            # never receives an orphan-candidate marker, so the automatic
-            # path's sweep has no way to see it, and `prune_auto_logs` walks
-            # ROWS of kind='auto' and would never name it either: nothing in
-            # this tree would ever collect it, on the volume this route is
-            # most protective of. So this arm removes what it wrote, and
-            # says whether it managed to.
+            # AND THE PARTIAL FILE GOES BEFORE THE ROW COMMITS, DURABLY.
+            # `open()` can succeed and `write()` or `flush()` fail, which
+            # leaves a prefix of the gzip stream on the volume. A player-filed
+            # attachment never receives an orphan-candidate marker, so the
+            # automatic path's sweep has no way to see it, and
+            # `prune_auto_logs` walks ROWS of kind='auto' and would never name
+            # it either. An unreferenced prefix here is therefore permanent,
+            # on the volume this route is most protective of.
+            #
+            # TWO THINGS MAKE THAT UNREACHABLE RATHER THAN UNLIKELY.
+            #
+            #   * The unlink is followed by a DIRECTORY FLUSH before the row
+            #     commits. Issuing the unlink first is a call order; an entry
+            #     removal is not durable until the directory is flushed, so a
+            #     host that stops after the commit could otherwise recover the
+            #     file with the row already saying log_bytes=0 over it -- the
+            #     same unreferenced prefix, one step later (#507).
+            #   * An unlink that RAISES anything but FileNotFoundError leaves
+            #     the file where it is, so the row KEEPS THE REFERENCE instead
+            #     of dropping it. A named file is an ordinary attachment of
+            #     this report: an admin can see it, the report's own lifecycle
+            #     governs it, and it is not a residue class no tick can reach.
+            #     log_bytes is left NULL rather than set to 0, because 0 is
+            #     the claim that nothing is on the volume and this arm cannot
+            #     make it.
+            #
+            # A flush that itself refuses is treated exactly like a refused
+            # unlink: the removal cannot be proved, so the reference stays.
             removed = "no file was created"
+            keep_reference = False
             if attempted_path is not None:
                 try:
                     os.unlink(str(attempted_path))
-                    removed = "the partial file was removed"
+                    _auto_logs._fsync_dir(_pathlib.Path(attempted_path).parent)
+                    removed = "the partial file was removed durably"
                 except FileNotFoundError:
                     removed = "no file was created"
                 except OSError as rm:
-                    # NAMED, because nothing else will find it: it carries no
-                    # marker and no row. A line an operator can grep is the
-                    # only collector this state has.
+                    # THE REFERENCE STAYS. The file may still be on the volume
+                    # and the row is now the thing that names it, so it is
+                    # referenced rather than unreachable. The operator line
+                    # says so as well, because the file is a truncated gzip
+                    # and a download of it will fail.
+                    keep_reference = True
                     removed = (f"the partial file {attempted_path.name} could "
-                               f"NOT be removed ({type(rm).__name__}) and is "
-                               f"unreferenced on the volume")
-            report.log_bytes = 0
-            print(f"[BUG-REPORT] log persistence FAILED for {report.id}: "
-                  f"{ex}; {removed}; the row is committed with log_bytes=0 to "
-                  f"record that a log was attached and could not be stored")
+                               f"NOT be removed ({type(rm).__name__}), so the "
+                               f"row now NAMES it rather than leaving it "
+                               f"unreferenced; it is a truncated gzip and will "
+                               f"not download cleanly")
+            if keep_reference:
+                report.log_filename = attempted_path.name
+                print(f"[BUG-REPORT] log persistence FAILED for {report.id}: "
+                      f"{ex}; {removed}; the row is committed naming that file "
+                      f"with log_bytes NULL, because 0 would claim the volume "
+                      f"is clean and this arm cannot claim that")
+            else:
+                report.log_bytes = 0
+                print(f"[BUG-REPORT] log persistence FAILED for {report.id}: "
+                      f"{ex}; {removed}; the row is committed with log_bytes=0 "
+                      f"to record that a log was attached and could not be "
+                      f"stored")
 
     # Seed the activity log with a "created" event so the timeline is complete.
     db.add(BugReportEvent(
