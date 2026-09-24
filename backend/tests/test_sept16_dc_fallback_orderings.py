@@ -381,41 +381,80 @@ def test_real_totals_first_then_fallback_ends_rated():
     _drive(body)
 
 
-# ── Ordering 3: both in flight, decided by a real lock wait ──────────────
+# ── Ordering 3: both in flight across a real lock wait, in BOTH orders ───
+
+
+async def _lock_waiters(Session, want, attempts=200):
+    """How many backends of this database are waiting on a lock, polled until
+    it reaches `want` or the attempts run out -- the observed count either
+    way, so a caller asserts on what the server said and not on a timer."""
+    seen = -1
+    for _ in range(attempts):
+        async with Session() as s:
+            seen = (await s.execute(text(
+                "SELECT count(*) FROM pg_stat_activity"
+                " WHERE datname = current_database()"
+                "   AND wait_event_type = 'Lock'"))).scalar()
+        if seen >= want:
+            return seen
+        await asyncio.sleep(0.05)
+    return seen
 
 
 def test_both_in_flight_across_the_lock_wait_ends_rated():
-    async def body():
+    """Both reports queue on the series lock, and BOTH arrival orders run.
+
+    A third session holds the series row, so the two reports wait on the same
+    lock. A contended row is granted to its waiters in the order they began
+    to wait: the first waiter holds the tuple lock while it waits for the
+    holder, and the second waits behind it. So the order is SET, not left to
+    chance: the second report starts only once the first is seen waiting in
+    pg_stat_activity, and each order runs on its own fresh series.
+
+    An earlier form started both at once and let the scheduler decide, so each
+    run covered one order, picked by timing. A mutation that only the
+    fallback-first order exposes was then killed on some runs and not on
+    others, and a control set whose kill set does not repeat is not a control
+    set (#753). Either order must end rated, with the rating path run once.
+    """
+    async def one_order(first):
         engine, Session, ids = await _fresh_series()
         sid = ids["sid"]
+        second = "real totals" if first == "fallback" else "fallback"
+        start = {"fallback": lambda: _fallback(Session, sid),
+                 "real totals": lambda: _real_totals(Session, sid)}
         try:
             with _harness_globals() as rated:
-                # A third session holds the series row, so BOTH reports queue
-                # on the same lock and the database, not this test, decides
-                # which of them gets it first.
                 blocker = Session()
                 await blocker.execute(
                     text("SELECT id FROM team_series WHERE id = :sid"
                          "  FOR NO KEY UPDATE"), {"sid": sid})
-                a = asyncio.create_task(_fallback(Session, sid))
-                b = asyncio.create_task(_real_totals(Session, sid))
-                await asyncio.sleep(1.0)
-                assert not a.done() and not b.done(), "neither report waited"
+                t_first = asyncio.create_task(start[first]())
+                assert await _lock_waiters(Session, 1) == 1, (
+                    first + ": the first report never queued on the lock")
+                t_second = asyncio.create_task(start[second]())
+                assert await _lock_waiters(Session, 2) == 2, (
+                    first + ": the second report never queued behind it")
                 await blocker.rollback()
                 await blocker.close()
-                fb, rt = await a, await b
+                got = {first: await t_first, second: await t_second}
 
-                # Whichever won the lock, the series is rated and the rating
-                # path ran exactly once.
+                # In either order the series is rated and the rating path ran
+                # exactly once.
                 end = await _row(Session, sid)
-                assert end["status"] == "completed", (fb, rt, dict(end))
-                assert [c["winner"] for c in rated.calls] == [2]
+                assert end["status"] == "completed", (first, got, dict(end))
+                assert [c["winner"] for c in rated.calls] == [2], first
                 # And the fallback's own answer is one of the two dispositions
                 # that cannot decide anything.
+                fb = got["fallback"]
                 assert (fb.get("status") == "deferred"
-                        or fb.get("ignored") is True), fb
+                        or fb.get("ignored") is True), (first, fb)
         finally:
             await engine.dispose()
+
+    async def body():
+        await one_order("fallback")
+        await one_order("real totals")
     _drive(body)
 
 
