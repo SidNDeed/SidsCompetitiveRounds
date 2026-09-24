@@ -6506,6 +6506,17 @@ _R7_KEY_TERMS = (
 # census asks about the OPERATION in both of its spellings (#432).
 _R7_BANNER_LATCH = "_statusPollDarkSeries"
 
+# R9-L4 (round 10): THE QUALIFIER IS PART OF THE LAYOUT.  A form that puts a
+# keyword before the name (`++`, `ref`, `out`, `Interlocked.X(ref`) used to
+# admit only the literal `ApiClient.` between them, so the same write spelled
+# `ref ApiClient` + line break + `.LastSeriesT1Wins`, or with the namespace in
+# front, was not a write.  The qualifier is now any chain of identifiers and
+# dots, with any whitespace around each dot and an optional `global::`, so a
+# write is recognised however its qualified name is spelled or wrapped.  It is
+# deliberately wide: another object's member with the same name is counted too,
+# which can only add to the census, never hide a writer from it.
+_R10_QUALIFIER = r"(?:global\s*::\s*)?(?:[A-Za-z_][A-Za-z0-9_]*\s*\.\s*)*"
+
 # Every way C# changes a value, not just `=`: compound assignment and
 # increment/decrement are writes, and the round-7 census matched neither.  `=`
 # is guarded against `==` and, because the name must sit immediately before the
@@ -6514,7 +6525,8 @@ _R7_ASSIGN = re.compile(
     r"(?:ApiClient\.)?(?:" + "|".join(_R7_BANNER_INPUTS) + r")\s*"
     r"(?:(?:\+|-|\*|/|%|\||&|\^|<<|>>|\?\?)?=(?!=)|\+\+|--)")
 _R7_PRE_INCDEC = re.compile(
-    r"(?:\+\+|--)\s*(?:ApiClient\.)?(?:" + "|".join(_R7_BANNER_INPUTS) + r")\b")
+    r"(?:\+\+|--)\s*" + _R10_QUALIFIER
+    + r"(?:" + "|".join(_R7_BANNER_INPUTS) + r")\b")
 _R7_SET_WRITE = re.compile(
     r"(?:ApiClient\.)?" + _R7_BANNER_LATCH +
     r"\s*\.\s*(?:Add|Remove|Clear|UnionWith|IntersectWith|ExceptWith|"
@@ -6534,7 +6546,8 @@ _R7_SET_WRITE = re.compile(
 # other variable by reference while merely READING a banner input is not a
 # writer here -- that is this rule's own inert twin.
 _R8_REF_OUT_WRITE = re.compile(
-    r"\b(?:ref|out)\s+(?:ApiClient\.)?(?:" + "|".join(_R7_BANNER_INPUTS) + r")\b")
+    r"\b(?:ref|out)\s+" + _R10_QUALIFIER
+    + r"(?:" + "|".join(_R7_BANNER_INPUTS) + r")\b")
 
 # The API-mediated writers, named as their own class so the rejection is
 # greppable rather than implied by the rule above.  Every one of them reaches
@@ -6542,7 +6555,7 @@ _R8_REF_OUT_WRITE = re.compile(
 # a form twice, and naming the class is what makes its absence checkable.
 _R8_API_WRITE = re.compile(
     r"\b(?:Interlocked|Volatile)\s*\.\s*\w+\s*\(\s*ref\s+"
-    r"(?:ApiClient\.)?(?:" + "|".join(_R7_BANNER_INPUTS) + r")\b")
+    + _R10_QUALIFIER + r"(?:" + "|".join(_R7_BANNER_INPUTS) + r")\b")
 
 
 def _r7_plugin_sources():
@@ -6562,70 +6575,102 @@ _R8_DECL_HEAD = re.compile(
     r"volatile|new|partial)\s+)+[A-Za-z_][A-Za-z0-9_<>\[\],.?]*\s+$")
 
 
-def _r8_declared_name_at(line):
-    """Where a banner-input identifier first appears on this line, or None."""
-    best = None
-    low = line.lower()
-    for tok in ("lastseries", "activeteamseriesid", _R7_BANNER_LATCH.lower()):
-        i = low.find(tok)
-        if i >= 0 and (best is None or i < best):
-            best = i
-    return best
+# R9-L4 (round 10): A WRITE IS A STATEMENT, NOT A PHYSICAL LINE.  The round-9
+# census applied the write grammar to each physical line on its own, so a name,
+# its operator and its value split across a line break were never one write.
+# Every form above lets the gap between its parts be any whitespace -- the
+# qualifier's dots included, since this round -- and what kept a split write
+# invisible was the per-line loop.  The same forms now
+# run over the WHOLE text of each source with its comments blanked (offsets and
+# line numbers kept), so the gap may cross any number of line breaks and a
+# comment inside it is blank space.  String literals are NOT blanked, exactly
+# as before: an interpolation hole can hold a write, so the census stays as
+# wide over literals as it was.
+#
+# A declaration is recognised on its whole STATEMENT head -- back to the
+# previous `;`, `{` or `}` -- rather than on its physical line.  The shape rule
+# is round 8's (modifiers, then a type, then the name, with no call before the
+# name), which replaced an exclusion that dropped every line carrying the word
+# `static` and so discarded the one-line static method a write can sit in
+# (R8-L11a, #441).  On the statement head, a declaration wrapped after its type
+# is still a declaration, and a write that follows a declaration's own
+# initialiser on the same line is still a write.
+_R10_WRITE_FORMS = (
+    _R7_ASSIGN, _R7_PRE_INCDEC, _R7_SET_WRITE,
+    _R8_REF_OUT_WRITE,
+    _R8_API_WRITE)
+_R10_ANY_NAME = re.compile(
+    "(?:" + "|".join(_R7_BANNER_INPUTS) + ")|" + _R7_BANNER_LATCH)
 
 
-def _r8_is_declaration(line):
-    """True when this line DECLARES a banner input rather than WRITING one.
+def _r10_blank_comments(text):
+    """`text` with every comment replaced by spaces, line breaks kept."""
+    comments, _literals = _cs_lex(text)
+    if not comments:
+        return text
+    parts, pos = [], 0
+    for s, e in comments:
+        parts.append(text[pos:s])
+        seg = text[s:e]
+        parts.append(re.sub(r"[^\n]", " ", seg) if LF in seg else " " * (e - s))
+        pos = e
+    parts.append(text[pos:])
+    return "".join(parts)
 
-    THE EXCLUSION THIS REPLACES DISCARDED THE LINE IT WAS MEASURING.  It
-    dropped any line containing the word `static`, which is true of a
-    declaration and equally true of a one-line static method, a static
-    constructor and a static initialiser -- so a write placed on such a line
-    was invisible to the census, and the control that plants exactly that
-    (R8-L11a) stayed GREEN.  A filter that throws away the line it is supposed
-    to judge is the defect class #441 names, and this is the second time this
-    round that a probe could not fire.
 
-    A declaration is recognised by SHAPE instead: modifiers, then a type, then
-    the name, with no call between the start of the line and the name.  An
-    auto-property declaration ends in an accessor block and an initialiser and
-    still matches, because everything before the NAME is still modifiers and a
-    type."""
-    at = _r8_declared_name_at(line)
-    if at is None:
+def _r10_statement_head(code, at):
+    """The statement text before offset `at`, back to the previous `;`, `{` or
+    `}`, with attribute groups removed and whitespace collapsed."""
+    j = at - 1
+    while j >= 0 and code[j] not in ";{}":
+        j -= 1
+    head = re.sub(r"\[[^\[\]]*\]", " ", code[j + 1:at])
+    return " ".join(head.split())
+
+
+def _r10_is_declaration(code, at):
+    head = _r10_statement_head(code, at)
+    if "(" in head or "=" in head:
         return False
-    head = line[:at]
-    if "(" in head:
-        return False
-    return bool(_R8_DECL_HEAD.match(head))
+    return bool(_R8_DECL_HEAD.match(head + " "))
+
+
+@functools.lru_cache(maxsize=1024)
+def _r10_scalar_writers_in(fname, text):
+    """((file, line, text), ...) for every non-tuple write of a banner input in
+    one source, found over its whole comment-blanked text."""
+    if ("LastSeries" not in text and "activeTeamSeriesId" not in text
+            and _R7_BANNER_LATCH not in text):
+        return ()
+    code = _r10_blank_comments(text)
+    lines = text.split(LF)
+    seen, out = set(), []
+    for rx in _R10_WRITE_FORMS:
+        for m in rx.finditer(code):
+            name = _R10_ANY_NAME.search(code, m.start(), m.end())
+            at = name.start() if name else m.start()
+            if _r10_is_declaration(code, at):
+                continue
+            ln = _cs_line(code, at)
+            if ln in seen:
+                continue
+            seen.add(ln)
+            out.append((fname, ln, lines[ln - 1].strip()))
+    return tuple(sorted(out, key=lambda w: w[1]))
 
 
 def _r7_writer_lines(sources):
     """Every (file, line, text) in `sources` that CHANGES a banner input.
 
     Declarations are excluded -- a field's own declaration is not a writer, and
-    it is recognised by the `static` that every one of these carries.  `sources`
-    is a {name: text} map so a control can put a writer in another file without
-    touching the tree."""
+    it is recognised by its statement head (R9-L4).  `sources` is a {name:
+    text} map so a control can put a writer in another file without touching
+    the tree.  The line reported is the line the NAME sits on."""
     if not isinstance(sources, dict):
         sources = {"ApiClient.cs": sources}
     out = []
     for fname in sorted(sources):
-        for i, line in enumerate(sources[fname].split("\n"), 1):
-            # cheap pre-filter: three substring tests over ~100 000 lines, so
-            # the three regexes below run on the handful that could match
-            if ("LastSeries" not in line and "activeTeamSeriesId" not in line
-                    and _R7_BANNER_LATCH not in line):
-                continue
-            if not (_R7_ASSIGN.search(line) or _R7_PRE_INCDEC.search(line)
-                    or _R7_SET_WRITE.search(line)
-                    or _R8_REF_OUT_WRITE.search(line)
-                    or _R8_API_WRITE.search(line)):
-                continue
-            s = line.strip()
-            if _r8_is_declaration(line) or s.startswith("///") \
-                    or s.startswith("//"):
-                continue
-            out.append((fname, i, s))
+        out.extend(_r10_scalar_writers_in(fname, sources[fname]))
     # L10 (round 9): tuple and deconstruction assignment, found over the whole
     # text so a target list that wraps a line is still one write
     have = set((f, i) for f, i, _ in out)
@@ -8414,8 +8459,6 @@ def test_r9_l4_the_dead_status_is_rejected_as_a_complete_literal_in_code():
 # declaration (`var (a, b) = ...`); `]` an indexer or attribute; a lone `>` a
 # generic argument list.  Comments between the token and the group are
 # skipped, so a comment that ends in a word decides nothing.
-_R9_TUPLE_WRITE = re.compile(
-    r"\(((?:[^();{}]|\([^();{}]*\))*)\)\s*=(?![=>])")
 _R9_TUPLE_END = re.compile(r"\)\s*=(?![=>])")
 _R9_EXPR_KEYWORDS = frozenset(("return", "else", "do", "yield", "await", "in"))
 
@@ -8452,7 +8495,7 @@ def _r9_group_starts_expression(text, i, comments):
 
 _R9_BANNER_NAMES = "|".join(_R7_BANNER_INPUTS + (_R7_BANNER_LATCH,))
 _R9_BANNER_NAME = re.compile(r"\b(?:" + _R9_BANNER_NAMES + r")\b")
-_R9_BANNER_TARGET = re.compile(r"^(?:ApiClient\.)?(?:" + _R9_BANNER_NAMES + r")$")
+_R9_BANNER_TARGET = re.compile(r"^" + _R10_QUALIFIER + r"(?:" + _R9_BANNER_NAMES + r")$")
 
 
 def _r9_tuple_writer_lines(sources):
@@ -8476,10 +8519,27 @@ def _r9_tuple_writers_in(fname, text):
     if ("LastSeries" not in text and "activeTeamSeriesId" not in text
             and _R7_BANNER_LATCH not in text):
         return ()
+    comments = literals = code = None
     for end in _R9_TUPLE_END.finditer(text):
         close = end.start()
-        depth, i, stop = 0, close, max(0, close - 600)
-        while i >= stop:
+        if comments is None:
+            comments, literals = _cs_lex(text)
+            code = _r10_blank_comments(text)
+        if _cs_span_at(comments, close) or _cs_span_at(literals, close):
+            continue
+        # R9-L4 (round 10): THE GROUP IS MATCHED BY BALANCE, WITH NO CAP.  The
+        # round-9 walk gave up 600 characters back, so a longer left side was
+        # invisible wherever it sat, and its pattern admitted one level of
+        # nesting.  The walk now runs back to the `(` that balances this `)`
+        # however far that is, stopping only at a `;`, `{` or `}` in code, and
+        # a comment or a literal inside the group is stepped over whole, so a
+        # `;` or a paren inside one cannot end the walk early.
+        depth, i = 0, close
+        while i >= 0:
+            span = _cs_span_at(comments, i) or _cs_span_at(literals, i)
+            if span is not None:
+                i = span[0] - 1
+                continue
             ch = text[i]
             if ch == ")":
                 depth += 1
@@ -8491,24 +8551,18 @@ def _r9_tuple_writers_in(fname, text):
                 i = -1
                 break
             i -= 1
-        if i < stop or depth != 0:
+        if i < 0 or depth != 0:
             continue
-        m = _R9_TUPLE_WRITE.match(text, i)
-        if m is None or m.end(1) != close:
-            continue
-        # a typed element (`int a`) declares a local and simply fails the
-        # target match
-        inner = m.group(1)
+        # every element at every depth of nesting, comments blanked; a typed
+        # element (`int a`) declares a local and simply fails the target match
+        inner = code[i + 1:close]
         elems = [x.strip() for x in
                  inner.replace("(", " ").replace(")", " ").split(",")]
         if not any(_R9_BANNER_TARGET.match(x) for x in elems):
             continue
-        comments, literals = _cs_lex(text)
-        if _cs_span_at(comments, i) or _cs_span_at(literals, i):
-            continue
         if not _r9_group_starts_expression(text, i, comments):
             continue
-        name = _R9_BANNER_NAME.search(text, i, close)
+        name = _R9_BANNER_NAME.search(code, i, close)
         ln = _cs_line(text, name.start() if name else i)
         out.append((fname, ln, text.split(LF)[ln - 1].strip()))
     return tuple(out)
@@ -8633,6 +8687,164 @@ def test_r9_l10_writers_are_classified_by_source_location():
                  "            @else(LastSeriesT1Wins, zz) = 0;"):
         m = planted(body)
         assert not _r9_writers_outside_paths(_r7_writer_lines(m), m["ApiClient.cs"]), body
+
+
+def _r10_line_census(sources):
+    """THE ROUND-9 DETECTOR, kept here only as the thing the R9-L4 cases must
+    defeat: the same write forms applied to one physical line at a time,
+    comment lines skipped.  Nothing in the census calls it."""
+    out = set()
+    for fname in sources:
+        out.update(_r10_line_census_in(fname, sources[fname]))
+    return out
+
+
+@functools.lru_cache(maxsize=256)
+def _r10_line_census_in(fname, text):
+    # Every write form contains a banner-input name or the latch, so a line
+    # without one cannot match any form; skipping it changes no result and
+    # keeps the per-case cost to the lines that can.
+    out = []
+    for i, line in enumerate(text.split(LF), 1):
+        if not _R10_ANY_NAME.search(line):
+            continue
+        if line.strip().startswith("//"):
+            continue
+        if any(rx.search(line) for rx in _R10_WRITE_FORMS):
+            out.append((fname, i))
+    return tuple(out)
+
+
+def test_r10_l4_the_writer_census_reads_statements_not_lines():
+    """R9-L4 (B19): a write split across physical lines is ONE write, and a
+    tuple left side of any length is a write.
+
+    The round-9 census tested each physical line on its own, so a name, its
+    operator and its value split across a line break were not recognised,
+    and its tuple walk gave up 600 characters before the `)` -- a longer
+    left side was invisible wherever it sat.  Each case below is planted
+    OUTSIDE every repaint span (so the census must report it outside); the
+    split scalar INSIDE the id setter's span (counted, and classified inside)
+    is the test that follows, so a control can name that half on its own.
+    The round-9 line detector is run over
+    the same split cases and must MISS them, which is the red this finding
+    names; and on the unplanted tree the new census must find every writer
+    that detector finds, so nothing it saw was lost."""
+    api = _src("ApiClient.cs")
+    sources = _r7_plugin_sources()
+    writers = _r7_writer_lines(sources)
+    old = _r10_line_census(sources)
+    new = set((f, i) for f, i, _ in writers)
+    assert old <= new, ("writers the round-9 detector found and this census "
+                        "does not: %r" % sorted(old - new))
+    print("R9-L4 CENSUS: %d writer lines (the line-at-a-time detector finds %d, "
+          "every one of them among these)" % (len(new), len(old)))
+
+    probe_at = "        public static int LastSeriesStateConfirmations = 0;"
+    assert api.count(probe_at) == 1
+
+    def planted(body):
+        m = dict(sources)
+        m["ApiClient.cs"] = api.replace(
+            probe_at, probe_at + LF + "        static void ZzProbe(int zz)" + LF
+            + "        {" + LF + body + LF + "        }", 1)
+        return m
+
+    split = (
+        "            LastSeriesT1Wins" + LF + "                = 0;",
+        "            ApiClient.LastSeriesT2Wins" + LF + "                += 1;",
+        "            LastSeriesDcDeferred /* a comment in the gap */" + LF
+        + "                = false;",
+        "            ++" + LF + "            LastSeriesT2Wins;",
+        "            LastSeriesT2Wins" + LF + "                ++;",
+        "            _statusPollDarkSeries" + LF + "                .Remove(" + chr(34)
+        + "x" + chr(34) + ");",
+        "            Interlocked.Increment(ref" + LF + "                LastSeriesT1Wins);",
+        "            zz = 0; LastSeriesT1Wins" + LF + "                = zz;",
+        "            Interlocked.Increment(ref ApiClient" + LF
+        + "                .LastSeriesT1Wins);",
+        "            ++ApiClient" + LF + "                .LastSeriesT2Wins;",
+    )
+    for body in split:
+        m = planted(body)
+        got = _r9_writers_outside_paths(_r7_writer_lines(m), m["ApiClient.cs"])
+        assert len(got) == 1, ("a split write was not seen outside every span",
+                               body, got)
+        # the planted lines shift every later line number, so the round-9
+        # detector is compared by COUNT: it must find exactly what it found
+        # on the tree, i.e. miss the split write
+        assert len(_r10_line_census(m)) == len(old), (
+            "the round-9 line detector saw a split write, so this case does "
+            "not reproduce the finding", body)
+
+    # a tuple left side LONGER than 600 characters, with the banner input at
+    # either end, nested, and with a `;` and a paren inside a literal
+    pad = ", ".join("zz%03d" % k for k in range(120))
+    long_first = "(LastSeriesT1Wins, " + pad + ")"
+    long_last = "(" + pad + ", LastSeriesT2Wins)"
+    assert len(long_first) > 600 and len(long_last) > 600
+    for body in ("            " + long_first + " = ZzMany();",
+                 "            " + long_last + LF + "                = ZzMany();",
+                 "            ((LastSeriesT1Wins, zz), (zz, (zz, zz))) = ZzNested();",
+                 "            (LastSeriesT1Wins, zz[" + chr(34) + ";)" + chr(34)
+                 + "]) = (0, 0);",
+                 "            (ApiClient" + LF + "                .LastSeriesT1Wins, zz) = (0, 0);"):
+        m = planted(body)
+        got = _r9_writers_outside_paths(_r7_writer_lines(m), m["ApiClient.cs"])
+        assert len(got) == 1, ("a tuple write was not seen", body[:80], got)
+
+    # the qualified name spelled in full on one line is the same write
+    for body in ("            System.Threading.Interlocked.Exchange(ref "
+                 "CompetitiveRounds.ApiClient.LastSeriesT1Wins, 0);",
+                 "            ++global::CompetitiveRounds.ApiClient.LastSeriesT2Wins;",
+                 "            (global::CompetitiveRounds.ApiClient.LastSeriesT1Wins, zz)"
+                 " = (0, 0);"):
+        m = planted(body)
+        got = _r9_writers_outside_paths(_r7_writer_lines(m), m["ApiClient.cs"])
+        assert len(got) == 1, ("a qualified write was not seen", body, got)
+
+    # TWINS: an ordinary single-line scalar write and an ordinary short tuple
+    # write are unaffected (one writer each, outside); a READ split across
+    # lines and a long tuple that is only READ are not writers at all
+    for body in ("            LastSeriesT1Wins = 0;",
+                 "            (LastSeriesT1Wins, LastSeriesT2Wins) = (0, 0);"):
+        m = planted(body)
+        got = _r9_writers_outside_paths(_r7_writer_lines(m), m["ApiClient.cs"])
+        assert len(got) == 1, (body, got)
+    for body in ("            bool zb = LastSeriesT1Wins" + LF + "                == 0;",
+                 "            bool zb = LastSeriesT1Wins" + LF + "                <= 0;",
+                 "            bool zb = ApiClient" + LF
+                 + "                .LastSeriesT1Wins == 0;",
+                 "            var zt = " + long_first + ";",
+                 "            // LastSeriesT1Wins" + LF + "            zz = 0;"):
+        m = planted(body)
+        assert not _r9_writers_outside_paths(_r7_writer_lines(m), m["ApiClient.cs"]), body
+
+
+def test_r10_l4_a_split_write_inside_a_span_is_counted_there():
+    """R9-L4 (B19), the in-span half: a write of a banner input split across
+    physical lines INSIDE a repaint path's span is ONE writer -- counted, and
+    classified inside that span.  The round-9 line detector does not count it,
+    so a census that reads lines reports one writer fewer than the plugin
+    carries, and every count stated from it is short by the split writes."""
+    api = _src("ApiClient.cs")
+    sources = _r7_plugin_sources()
+    writers = _r7_writer_lines(sources)
+    anchor = "                    LastSeriesT1Wins = 0;"
+    assert api.count(anchor) == 1
+    assert _r7_repaint_paths(api)["the id setter"].count(anchor) == 1
+    inside = dict(sources)
+    inside["ApiClient.cs"] = api.replace(
+        anchor, anchor + LF + "                    LastSeriesT2Wins" + LF
+        + "                        = 0;", 1)
+    w2 = _r7_writer_lines(inside)
+    assert len(w2) == len(writers) + 1, (
+        "the split write inside the id setter was not counted", len(w2), len(writers))
+    assert not _r9_writers_outside_paths(w2, inside["ApiClient.cs"]), (
+        "the split write inside the id setter was classified outside it")
+    # the round-9 line detector, over the same text, does NOT count it: the
+    # red this finding names, reproduced
+    assert len(_r10_line_census(inside)) == len(_r10_line_census(sources))
 
 
 # ── L9 (B16): every provenance field is verified, and the coverage asserted ──
