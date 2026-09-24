@@ -6498,9 +6498,13 @@ namespace CompetitiveRounds
                     // that clears this seat's per-game tallies, so the seat
                     // that carries game N is exactly the seat that holds game
                     // N's scores. The reporter election reads it at game over.
-                    clearProps[FfaMode.PropGameWitness] = FfaMode.GameNumber;
+                    // RJ-DRIFT N4 (change 7): the value is this seat's ROOM
+                    // game, or -1 when it holds none; never the counter. This
+                    // is the witness's only in-room writer.
+                    int witness = FfaNumberingRules.WitnessToPublish(FfaMode.RoomGame);
+                    clearProps[FfaMode.PropGameWitness] = witness;
                     PhotonNetwork.LocalPlayer?.SetCustomProperties(clearProps);
-                    Plugin.Log.LogInfo($"[FFA] witness published {FfaMode.PropGameWitness}={FfaMode.GameNumber}");
+                    Plugin.Log.LogInfo($"[FFA] witness published {FfaMode.PropGameWitness}={witness}");
                 }
                 catch (Exception wex)
                 {
@@ -6596,7 +6600,9 @@ namespace CompetitiveRounds
                     // someone who quit in game 2 kept collecting a result for
                     // games 3..N they were never in — part of what Sid saw as
                     // "names I did not lose to".
-                    if (kvL.Value.leftGameNumber != FfaMode.GameNumber) continue;
+                    // RJ-DRIFT N10 (change 17): stamp and "now" are both the
+                    // local game sequence.
+                    if (!FfaNumberingRules.LeftInGame(kvL.Value.leftGameNumber, FfaMode.LocalGameSeq)) continue;
                     string nm3 = AddName(kvL.Value.displayName ?? "");
                     if (nm3 != null) roster.Add(new KeyValuePair<string, int>(nm3, kvL.Value.slot));
                 }
@@ -6673,6 +6679,11 @@ namespace CompetitiveRounds
             try { frozenGame = FfaMode.FreezeReportGameNumber(); } catch { }
             Plugin.Log.LogInfo($"[FFA-REPORT] game number frozen at game over: "
                                + (frozenGame >= 0 ? frozenGame.ToString() : "none (this seat cannot file)"));
+            // RJ-DRIFT N2 (change 5): the next game's number, decided here from
+            // the snapshot just frozen (never from a later read of the
+            // property), bound to this Room object; FOLLOWED is cleared.
+            try { Plugin.Log.LogInfo(FfaMode.TakeCarry()); }
+            catch (Exception cex) { Plugin.Log.LogWarning($"[FFA-NUM] carry: {cex.Message}"); }
             try { NetworkReplicaDiagnostics.OnGameEnded(); } catch { }
             try { NetworkSeatTelemetry.OnMatchEnded("ffa-game-over"); } catch { }   // lag-332 W1
 
@@ -6794,8 +6805,10 @@ namespace CompetitiveRounds
             // has received no witness property at all falls back to the
             // merely-present electorate while its peers do not, and two seats
             // then submit. FfaReportRules.ElectReporter chooses that over
-            // nobody submitting, and FfaMode.RepublishGameWitness narrows the
-            // window by re-publishing after an adoption.
+            // nobody submitting. (RJ-DRIFT: the witness is the seat's room
+            // game, written once at its start edge, and a seat is a witness
+            // when that equals this seat's frozen F; nothing re-publishes it
+            // mid-game, since no adoption moves a room game.)
             //
             // WHAT MAKES THE DUPLICATE SURVIVABLE, precisely (the earlier
             // wording leaned on "both reports carry one key" as though it were
@@ -6916,7 +6929,9 @@ namespace CompetitiveRounds
                 // one its peers compute for it, which is the split-brain #280
                 // describes. -1 (no property) covers both the relaunched seat
                 // and a pre-1.41.0 client.
-                if (FfaMode.WitnessedGameOf(pp) >= FfaMode.GameNumber) witnessSteams.Add(sid);
+                // RJ-DRIFT N5 (change 8): a witness holds exactly this seat's
+                // frozen F as its room game; nothing when F is none.
+                if (FfaNumberingRules.IsWitness(FfaMode.WitnessedGameOf(pp), FfaMode.ReportGameSnapshot)) witnessSteams.Add(sid);
                 if (teamId == winnerTeam) winnerSteam = sid;
             }
 
@@ -6943,14 +6958,16 @@ namespace CompetitiveRounds
                     // game (server skips rating/XP). A leaver DURING this
                     // game is absent=false and still gets rated — leaving
                     // at 0 score must not dodge the loss.
-                    absent = kv.Value.leftGameNumber != FfaMode.GameNumber,
+                    // RJ-DRIFT N10 (change 17): the stamp against the local
+                    // game sequence.
+                    absent = !FfaNumberingRules.LeftInGame(kv.Value.leftGameNumber, FfaMode.LocalGameSeq),
                     // Field point total when they left — drives the server's
                     // early-leave grace (under 2 = nothing was decided yet, so
                     // no rating for them this game). Only meaningful for a
                     // leave from THIS game: a carried ghost's figure belongs to
                     // a game that already ended, so send -1 and let the server
                     // read it as "not reported".
-                    gamePointsAtLeave = (kv.Value.leftGameNumber == FfaMode.GameNumber
+                    gamePointsAtLeave = (FfaNumberingRules.LeftInGame(kv.Value.leftGameNumber, FfaMode.LocalGameSeq)
                                          ? kv.Value.gamePointsAtLeave : -1),
                     cards = FfaMode.PickHistoryFor(kv.Value.slot),
                     telemetry = null,
@@ -7030,10 +7047,10 @@ namespace CompetitiveRounds
             string lowest = FfaReportRules.ElectReporter(presentSteams, witnessSteams, out bool witnessFallback);
             if (witnessFallback && presentSteams.Count > 0)
                 Plugin.Log.LogWarning($"[FFA-REPORT] witness-fallback: no seat carries "
-                                      + $"{FfaMode.PropGameWitness}>={FfaMode.GameNumber} among {presentSteams.Count} present "
+                                      + $"{FfaMode.PropGameWitness}=={FfaMode.ReportGameSnapshot} among {presentSteams.Count} present "
                                       + "— electing on presence alone");
             else if (!witnessFallback && witnessSteams.Count < presentSteams.Count)
-                Plugin.Log.LogInfo($"[FFA-REPORT] witnesses {witnessSteams.Count}/{presentSteams.Count} for game {FfaMode.GameNumber}");
+                Plugin.Log.LogInfo($"[FFA-REPORT] witnesses {witnessSteams.Count}/{presentSteams.Count} for game {FfaMode.ReportGameSnapshot}");
             if (lowest == null) lowest = localSteamId;
             if (lowest != localSteamId)
             {
