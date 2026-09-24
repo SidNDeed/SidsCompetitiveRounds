@@ -162,7 +162,8 @@ CREATE TABLE ffa_lobbies (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     completed_at TIMESTAMPTZ,
     invalidated_at TIMESTAMPTZ,
-    invalidation_reason VARCHAR(64)
+    invalidation_reason VARCHAR(64),
+    host_player_id UUID REFERENCES players(id)
 );
 CREATE TABLE ffa_matches (
     id UUID PRIMARY KEY,
