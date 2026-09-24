@@ -2337,7 +2337,8 @@ def _r10_outcome_tokens(ra):
 # may be listed in any order (the model reads them), and a LOG CALL may stand
 # anywhere -- a `Plugin.Log.Log*` statement with no assignment, no increment,
 # no `ref` or `out` argument, and no nested call, object creation or indexer
-# in its arguments other than the allow-listed pure ones (R10-L3, below).
+# in its arguments other than the allow-listed pure ones (R10-L3 and
+# R11CL1, below, which also say what that reading does not see).
 # Any other statement is REFUSED, and a refusal fails every scenario closed.
 #
 # R10-L2 (round-10 review) -- THE SPLIT IS AT THE LAST COLON, AND ONLY THERE.
@@ -2441,13 +2442,52 @@ def _r10cl_statements(body):
 #
 # THE RULE.  The arguments are read by the C# lexer (`_cs_code_mask`): the
 # text of every literal is blanked and every interpolation hole is kept as
-# code.  Every nested invocation, every object creation and every indexer in
-# that code disqualifies the exemption, unless the invocation is one of the
-# allow-listed PURE forms below -- compile-time operators and static string
-# predicates whose result depends on their arguments alone.  A property read
-# (`ex.Message`) is not an invocation.  A disqualified log call is not set
-# aside: like any other statement it must be the next one the KNOWN SEQUENCE
-# names, and no sequence names a log call, so it is REFUSED, naming the call.
+# code.  In that code an invocation, an object creation, an indexer and the
+# other forms named below disqualify the exemption, unless the invocation is
+# one of the allow-listed PURE forms below -- compile-time operators and
+# static string predicates whose result depends on their arguments alone.  A
+# disqualified log call is not set aside: like any other statement it must be
+# the next one the KNOWN SEQUENCE names, and no sequence names a log call, so
+# it is REFUSED, naming the call.
+#
+# ROUND-11 COLD LENS (R11CL1, R11CL3) -- A CALL IS FOUND BY ITS PARENTHESIS,
+# NOT BY A NAME.  The first reading of this round found a call only where a
+# BARE name chain stood directly before `(`, so a call through `?.` or `!.`,
+# a member of a parenthesised or called expression (`(tag).M()`,
+# `nameof(a).M()`), a generic method with a nested argument list, and the
+# invocation of a parenthesised expression (`(d)()`, `(x => x)(1)`,
+# `((Func<string>)F)()`) were not seen, and the log call was set aside.  Now
+# EVERY `(` in the code is judged by the character before it, spaces skipped
+# (`_r11_opens_call`): after the end of an operand -- a letter, a digit or
+# `_`, a `)`, a `]`, a `>`, or a null-forgiving `!` that itself follows one
+# of those -- the `(` INVOKES what precedes it; after anything else (an
+# operator, a `(`, a `,`, a `?`, or the start) it opens a grouping, a cast or
+# a lambda's parameters, and the code inside it is read like the rest.  An
+# invocation is pure only when the WHOLE text it invokes (`_r11_callee`:
+# names, dots, `?`, `!` and balanced brackets, read back from the `(`) is an
+# allow-listed name and no `.` stands before that text; so a member reached
+# through any receiver that is not a bare name, the invocation of a
+# parenthesised, indexed or generic expression, and an allow-listed NAME
+# reached through a receiver (`tag?.Equals(x)`) are never pure.  The reading
+# errs toward refusal: a comparison with a parenthesised right operand
+# (`a > (b)`) and a cast before a grouping (`(int)(x)`) read as calls and are
+# refused, a closed direction.  Besides invocations, every `new`,
+# `stackalloc`, `await` and `throw`, every `[` (an indexer, an array or a
+# collection) and every `{` (an initializer, a block, a pattern or a `with`)
+# disqualifies.
+#
+# WHAT THIS READING DOES NOT SEE, so no sentence above is read as a promise
+# about it: code that a C# expression runs WITHOUT a parenthesis -- a property
+# getter (`ex.Message`, `tag?.Length`), a user-defined operator or implicit
+# conversion, and the `ToString` that a concatenation or an interpolation hole
+# calls on an operand that is not a string.  Those are not invocations here.
+# The two walked methods' log calls read a constant, locals, parameters and an
+# exception's message; a helper hidden in a getter or an operator is outside
+# this check, and the notes carry that as a residual.
+#
+# The first reading's grammar is kept below, read ONLY by
+# `_r11_impure_calls_first_pass`, so the R11CL1 test can show that it set
+# aside every form it now refuses.
 _R11_CALL = re.compile(
     r"(?<![\w.])(new\s+)?([A-Za-z_@]\w*(?:\s*\.\s*[A-Za-z_@]\w*)*)\s*"
     r"(?:<[^<>()]*>)?\s*\(")
@@ -2468,10 +2508,106 @@ def _r11_log_arg_code(stmt):
     return _cs_code_mask(m.group(1))
 
 
+# The characters that END an operand, besides a name: after one of these a
+# `(` invokes what precedes it (R11CL1).
+_R11_OPERAND_CLOSERS = ")]>"
+_R11_KEYWORDS = re.compile(r"\b(new|stackalloc|await|throw)\b")
+_R11_BRACKETS = ("[", "{", "}")
+
+
+def _r11_prev(code, i):
+    """The index of the last character before `i` that is not a space, or
+    -1."""
+    j = i - 1
+    while j >= 0 and code[j].isspace():
+        j -= 1
+    return j
+
+
+def _r11_is_operand_end(code, q):
+    """Whether `code[q]` ends an operand: a name's last character, one of
+    `_R11_OPERAND_CLOSERS`, or a null-forgiving `!` after one of those."""
+    ch = code[q]
+    if ch.isalnum() or ch in "_@":
+        return True
+    if ch in _R11_OPERAND_CLOSERS:
+        return True
+    if ch == "!":
+        r = _r11_prev(code, q)
+        return r >= 0 and (code[r].isalnum() or code[r] in "_@"
+                           or code[r] in _R11_OPERAND_CLOSERS)
+    return False
+
+
+def _r11_opens_call(code, p):
+    """Whether the `(` at `code[p]` INVOKES what precedes it (R11CL1): the
+    character before it, spaces skipped, ends an operand."""
+    q = _r11_prev(code, p)
+    return q >= 0 and _r11_is_operand_end(code, q)
+
+
+def _r11_callee(code, p):
+    """(start, text): the text the `(` at `code[p]` invokes, read back from
+    it over names, dots, `?`, `!` and balanced (), [] and <> groups."""
+    pairs = {")": "(", "]": "[", ">": "<"}
+    j = _r11_prev(code, p)
+    end = j + 1
+    while j >= 0:
+        ch = code[j]
+        if ch.isalnum() or ch in "_@.?!":
+            j -= 1
+            continue
+        if ch in pairs:
+            depth, k = 0, j
+            while k >= 0:
+                if code[k] == ch:
+                    depth += 1
+                elif code[k] == pairs[ch]:
+                    depth -= 1
+                    if depth == 0:
+                        break
+                k -= 1
+            if k < 0:
+                break
+            j = k - 1
+            continue
+        break
+    return j + 1, code[j + 1:end]
+
+
 def _r11_impure_calls(stmt):
-    """[the nested calls in a log call's arguments that this derivation cannot
-    prove pure]; [] for a log call whose arguments invoke nothing but the
-    allow-listed forms, and [] for a statement that is not a log call."""
+    """[the nested calls, creations and other forms in a log call's arguments
+    that this derivation cannot prove pure]; [] for a log call whose
+    arguments invoke nothing but the allow-listed forms, and [] for a
+    statement that is not a log call.  Every `(` is judged by what precedes
+    it (R11CL1, R11CL3), never by a name pattern."""
+    code = _r11_log_arg_code(stmt)
+    if code is None:
+        return []
+    calls = []
+    for p, ch in enumerate(code):
+        if ch != "(" or not _r11_opens_call(code, p):
+            continue
+        start, callee = _r11_callee(code, p)
+        name = re.sub(r"\s+", "", callee)
+        before = _r11_prev(code, start)
+        if name in _R11_PURE_CALLS and (before < 0 or code[before] != "."):
+            continue
+        calls.append((name or "the expression before it") + "(...)")
+    for mm in _R11_KEYWORDS.finditer(code):
+        calls.append("`" + mm.group(1) + "`")
+    for b in _R11_BRACKETS:
+        if b in code:
+            calls.append("`" + b + "` (an indexer, a creation, an initializer, "
+                         "a block or a pattern)")
+    return calls
+
+
+def _r11_impure_calls_first_pass(stmt):
+    """THE FIRST READING OF THIS ROUND, verbatim in behaviour: a call found
+    only where a bare name chain stands directly before `(`.  Kept ONLY so
+    `test_r11cl1_...` can show that it set aside every form the reading above
+    refuses; nothing else calls it."""
     code = _r11_log_arg_code(stmt)
     if code is None:
         return []
@@ -2494,7 +2630,7 @@ def _r10cl_is_log_call(stmt):
     """A log call that cannot change a local: no assignment outside a string
     or a comparison, no increment or decrement, no `ref` or `out` argument --
     each read over the arguments as CODE, interpolation holes included -- and
-    no nested call this derivation cannot prove pure (R10-L3)."""
+    no nested call this derivation cannot prove pure (R10-L3, R11CL1)."""
     code = _r11_log_arg_code(stmt)
     if code is None:
         return False
@@ -2502,6 +2638,18 @@ def _r10cl_is_log_call(stmt):
     return ("=" not in bare and "++" not in code and "--" not in code
             and not re.search(r"\b(?:ref|out)\s", code)
             and not _r11_impure_calls(stmt))
+
+
+def _r11_is_log_call_first_pass(stmt):
+    """The exemption with the FIRST reading's nested-call grammar -- kept ONLY
+    so `test_r11cl1_...` can show what that reading set aside."""
+    code = _r11_log_arg_code(stmt)
+    if code is None:
+        return False
+    bare = re.sub(r"[=!<>]=|=>", " ", code)
+    return ("=" not in bare and "++" not in code and "--" not in code
+            and not re.search(r"\b(?:ref|out)\s", code)
+            and not _r11_impure_calls_first_pass(stmt))
 
 
 def _r10cl_is_log_call_round10(stmt):
@@ -2907,6 +3055,117 @@ def test_r11_l3_a_log_call_whose_arguments_call_a_helper_is_not_set_aside():
           "round-10 reading; %d pure forms still set aside; the tree's %d log "
           "call(s) in PublishOutcome exempt" % (
               refused, len(_R11_PURE_LOG_CALLS), len(logs)))
+
+
+# ROUND-11 COLD LENS (R11CL1, R11CL3): the forms the first reading of this
+# round set aside -- a call through a receiver that is not a bare name, the
+# invocation of a parenthesised, generic or null-forgiven expression, an
+# allow-listed name reached through a receiver, an indexer after `!`, a
+# creation without parentheses and an `await` -- each concatenated and each
+# in an interpolation hole.  `Zz*` names no plugin member; the text is judged,
+# never run.
+_R11CL_FORMS = (
+    "tag?.ZzClearOutcome()", "tag!.ZzClearOutcome()", "ZzSink?.Invoke(tag)",
+    "((System.Func<string>)ZzClearOutcome)()", "(tag).ZzClearOutcome()",
+    "nameof(tag).ZzClearOutcome()", "ZzF<Dictionary<string,int>>()",
+    "(ZzDel)()", "(x => x)(1)", "ZzDel!(tag)", "tag?.Equals(OutcomeProp)",
+    "ZzSinks![OutcomeProp]", "new ZzSink { }.Text", "await ZzPending")
+# Still set aside: property reads through `?.` and a grouping, a grouping
+# with a ternary, a negated grouping, a hole, and an allow-listed operator
+# followed by a property read.
+_R11CL_PURE = (
+    '"[2v2-DC] key " + tag?.Length',
+    '"[2v2-DC] key " + (tag).Length',
+    '"[2v2-DC] key " + (tag == null ? "none" : tag)',
+    '"[2v2-DC] set " + !(tag == null)',
+    '$"[2v2-DC] key {tag?.Length}"',
+    '"[2v2-DC] key " + typeof(string).Name',
+)
+# Written with spaces around a dot: the first reading refused both, and this
+# one must too -- the second is an allow-listed NAME read after a member dot,
+# which only the no-`.`-before rule refuses.
+_R11CL_SPACED = ("tag ?. ZzClearOutcome ()",
+                 "ZzHolder. String.Equals(tag, OutcomeProp)")
+_R11CL_PUBLISH_PLANT = ('Plugin.Log.LogInfo("[2v2-DC] cleared " + '
+                        'tag?.ZzClearOutcome());')
+_R11CL_OUTCOME_PLANT = 'Plugin.Log.LogInfo("r " + s?.ZzRewrite());'
+
+
+def test_r11cl1_a_call_through_any_receiver_in_a_log_call_is_not_set_aside():
+    """R11CL1, R11CL3 (B9): a `(` after the end of an operand is a call,
+    whatever stands before it.  Every planted form was set aside by the first
+    reading of this round and is REFUSED now, naming the call; end to end, a
+    `?.` helper call planted in the publication after Tag and one planted in
+    the read after the last-colon split are refused, where the first reading
+    walked both methods; property reads, groupings and the allow-listed forms
+    are still set aside."""
+    ra = _src("RoomActors.cs")
+    tree_logs = 0
+    for sig in (_R10_PUBLISH_SIG, _R10_OUTCOME_SIG):
+        body = _method_body(ra, sig)
+        logs = [s for s in _r10cl_statements(body) if _R10CL_LOG.match(s)]
+        assert all(_r10cl_is_log_call(s) for s in logs), logs
+        tree_logs += len(logs)
+    publish, why_p = _r10_publish_model(ra)
+    assert publish is not None, why_p
+    outcome_of, why_o = _r10_outcome_model(ra)
+    assert outcome_of is not None, why_o
+
+    refused = 0
+    for form in _R11CL_FORMS:
+        found = []
+        for stmt in ('Plugin.Log.LogInfo("[2v2-DC] cleared " + %s)' % form,
+                     'Plugin.Log.LogInfo($"[2v2-DC] cleared {%s}")' % form):
+            assert _r11_is_log_call_first_pass(stmt), (
+                "the first reading did not set aside: " + stmt)
+            assert not _r10cl_is_log_call(stmt), "still set aside: " + stmt
+            calls = _r11_impure_calls(stmt)
+            assert calls, stmt
+            found.append(calls[0])
+            refused += 1
+        print("R11CL1 FORM %s : set aside by the first reading, refused now "
+              "-- concatenated: %s; in a hole: %s" % (form, found[0], found[1]))
+    for form in _R11CL_SPACED:
+        stmt = 'Plugin.Log.LogInfo("[2v2-DC] cleared " + %s)' % form
+        assert not _r11_is_log_call_first_pass(stmt), stmt
+        assert not _r10cl_is_log_call(stmt), "set aside: " + stmt
+        print("R11CL1 SPACED %s : refused by both readings -- %s"
+              % (form, _r11_impure_calls(stmt)[0]))
+    for arg in _R11CL_PURE:
+        stmt = "Plugin.Log.LogInfo(%s)" % arg
+        assert _r10cl_is_log_call(stmt), "no longer set aside: " + stmt
+        print("R11CL1 PURE %s : still set aside" % arg)
+
+    # end to end: in the publication after Tag, and in the read after the
+    # last-colon split
+    tag_line = "string tag = Tag(seriesId);"
+    j = ra.index(tag_line, ra.index(_R10_PUBLISH_SIG)) + len(tag_line)
+    pub = ra[:j] + " " + _R11CL_PUBLISH_PLANT + ra[j:]
+    k = (ra.index(_R11_SPLIT_LAST, ra.index(_R10_OUTCOME_SIG))
+         + len(_R11_SPLIT_LAST))
+    out = ra[:k] + " " + _R11CL_OUTCOME_PLANT + ra[k:]
+    walked = 0
+    for label, src, model, sig, seq in (
+            ("PublishOutcome", pub, _r10_publish_model, _R10_PUBLISH_SIG,
+             _R10CL_PUBLISH_SEQ),
+            ("OutcomeOf", out, _r10_outcome_model, _R10_OUTCOME_SIG,
+             _R10CL_OUTCOME_SEQ)):
+        stmts = _r10cl_statements(_method_body(src, sig))
+        old, why_old = _r10cl_walk(label, stmts, seq,
+                                   exempt=_r11_is_log_call_first_pass)
+        assert old is not None, "the first reading refused the walk: " + why_old
+        got, why = model(src)
+        assert got is None and "is not set aside" in why, (label, why)
+        walked += 1
+        print("R11CL1 REFUSED: " + why)
+    print("R11CL1 RECEIVERS: %d planted forms refused (%d shapes, each "
+          "concatenated and in a hole), each set aside by the first reading; "
+          "%d spaced forms refused by both readings; %d pure forms still set "
+          "aside; the tree's %d log call(s) in the two walked methods still "
+          "set aside; the ?. helper call refused end to end in %d methods, "
+          "each walked by the first reading" % (
+              refused, len(_R11CL_FORMS), len(_R11CL_SPACED), len(_R11CL_PURE),
+              tree_logs, walked))
 
 
 def test_the_dc_fallback_watch_dies_with_the_room():
