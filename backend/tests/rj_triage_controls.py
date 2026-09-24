@@ -710,6 +710,91 @@ twin("K19-twin-columns-reordered", "K19", "the team_series columns read in anoth
      [K19])
 
 
+# ── same-site twins added after campaign 1 ───────────────────────────────────
+# Campaign 1 (e1907c7) ran V5's twins as V5 words them. Several sit away from
+# their mutants' site (another line, a constant, another route), so for those
+# mutants no twin showed that editing the site itself leaves the check GREEN.
+# Each twin below rewrites a mutated site another inert way, so every mutated
+# site now has a twin of its own (#391). Appended after the first 124 plants,
+# which keep their order.
+
+D1_ENTRY = "        return resp\n\n    return await _triage_read_txn(db, read, build)\n"
+twin("K2d-twin-D1-entry-assigned", "K2d",
+     "(added; K2d-b's site) D1 enters the primitive once, its result assigned, then returned",
+     [(MAIN, D1_ENTRY, "        return resp\n\n    result = await _triage_read_txn(db, read, build)\n"
+                       "    return result\n")],
+     [K2D])
+twin("K2d-twin-V2-entry-assigned", "K2d",
+     "(added; K2d-c's site) V2 enters the primitive once, its result assigned, then returned",
+     [(MAIN, V2_BUILD + "\n    return await _triage_read_txn(db, read, build)\n",
+       V2_BUILD + "\n    result = await _triage_read_txn(db, read, build)\n    return result\n")],
+     [K2D])
+twin("K6b-twin-get", "K6b", "(added; K6b-none-as-zero's site) the capture's room read with get()",
+     [(MAIN, '        t = _triage_named(q["room"])\n', '        t = _triage_named(q.get("room"))\n')], [K6B])
+twin("K6c-twin-not-ge", "K6c", "(added; K6c-one-page-no-paging's site) the short-page test written as not >=",
+     [(MAIN, '                    if len(page) < _TRIAGE_PT3_PAGE:\n',
+       '                    if not len(page) >= _TRIAGE_PT3_PAGE:\n')], [K6C])
+twin("K6d-twin-terms-reordered", "K6d",
+     "(added; K6d-games-played-plus-one's site) the + 1 and the max's arguments written in the other order",
+     [(MAIN, "    return max(int(games_played or 0), int(highest or 0)) + 1\n",
+       "    return 1 + max(int(highest or 0), int(games_played or 0))\n")], [K6D])
+twin("K9b-twin-not-ge", "K9b", "(added; K9b-reviewed-one-page's site) the short-page test written as not >=",
+     [(MAIN, '                if len(page) < _TRIAGE_PT4_PAGE:\n                    break\n',
+       '                if not len(page) >= _TRIAGE_PT4_PAGE:\n                    break\n')], [K9B])
+twin("K12-twin-helper-select", "K12",
+     "(added; K12-helper-outside-routes's site) a new helper outside every route issuing a SELECT of the table",
+     [(MAIN, BEFORE_HANDLE_CLASS,
+       "async def _k12_helper(db):\n"
+       "    await db.execute(text(\"SELECT id FROM match_report_quarantine WHERE status = 'accepted' LIMIT 0\"))\n"
+       "\n\n" + BEFORE_HANDLE_CLASS)], [K12])
+twin("K13e-twin-bound-operands-swapped", "K13e",
+     "(added; K13e-no-hw-bound-server's site) D1's hw bound written with its operands swapped",
+     [(MAIN, "       AND q.created_at <= CAST(:hw AS timestamptz)\n",
+       "       AND CAST(:hw AS timestamptz) >= q.created_at\n")], [K13E_S])
+twin("K13f-twin-item-unpacked", "K13f",
+     "(added; the site of K13f i and ii) each message unpacked inside the loop body",
+     [(BOT, ROUND_LOOP, ROUND_LOOP.replace(
+         "    for n, (content, mkeys) in enumerate(_qdigest_messages(lines, keys, header)):\n",
+         "    for n, item in enumerate(_qdigest_messages(lines, keys, header)):\n"
+         "        content, mkeys = item\n"))],
+     [K13F1, K13F2, K13C])
+
+
+def _k15_twin(route):
+    site = BUILDS[route]
+    first, rest = site.split("\n", 1)
+    twin(f"K15-twin-{route}-helper-not-called", "K15",
+         f"(added; the K15-{route} mutants' site) the same helper planted; {route}'s build after the COMMIT "
+         "holds the helper and the statement without calling it",
+         [(MAIN, BEFORE_HANDLE_CLASS, K15_HELPER + BEFORE_HANDLE_CLASS),
+          (MAIN, site, first + "\n"
+           + f"        _k15_unused = (_k15_post_commit_write, 'session', {K15_STMTS[0][1]!r})\n" + rest)],
+         [K15])
+
+
+for _route in ("V2", "V1", "D1"):
+    _k15_twin(_route)
+twin("K15b-twin-engines-reversed", "K15b",
+     "(added; the site of the two listener mutants) the listener attached to both engines, in the other order",
+     [(DB, LISTEN, LISTEN.replace("(engine, release_engine)", "(release_engine, engine)"))], [K15B])
+SEAL_BUILD = '    with _triage_post_commit_seal("quarantine triage"):\n        return await build(rows)\n'
+twin("K15b-twin-built-then-returned", "K15b",
+     "(added; K15b-reset-before-build's site) the response built inside the sealed block, returned after it",
+     [(MAIN, SEAL_BUILD, '    with _triage_post_commit_seal("quarantine triage"):\n'
+                         '        built = await build(rows)\n    return built\n')],
+     [K15B])
+twin("K16-twin-statement-through-str", "K16",
+     "(added; the three K16 mutants' site) the fixed statement passed through str()",
+     [(MAIN, PT1_TAIL, '        "statement": str(_TRIAGE_PT1_STATEMENT),\n    }\n')], [K16])
+twin("K17-twin-first-post-concatenated", "K17",
+     "(added; K17-first-post-log-deleted's site) the first-post line written as two concatenated literals",
+     [(BOT, '        print("[QDIGEST] first post accepted")\n',
+       '        print("[QDIGEST] first post " + "accepted")\n')], [K17])
+twin("K19-twin-test-inverted", "K19",
+     "(added; K19-pt2-from-ffa-lobbies's site) the mode test inverted and its branches swapped",
+     [(MAIN, V2_GROUP_READ, '        grp = await h.read(_TRIAGE_SQL_V2_SERIES if mode != "ffa" else _TRIAGE_SQL_V2_LOBBY,'
+                            ' {"g": gid})\n')], [K19])
+
 # ── the runner ───────────────────────────────────────────────────────────────
 
 class Refused(Exception):
