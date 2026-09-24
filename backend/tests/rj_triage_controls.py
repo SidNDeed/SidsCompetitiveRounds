@@ -1,9 +1,12 @@
 """RJ-TRIAGE part 1 controls: plant each named mutation and its inert twin,
 run the named checks, put the file back, record the result.
 
-Every control of RJ-TRIAGE-DESIGN-V5 section 6.2 (K1-K19), and round 2's K20
+Every control of RJ-TRIAGE-DESIGN-V5 section 6.2 (K1-K19), round 2's K20
 (PT3's lobby-wide label gate) and K21 (K2c's capture-completion bound, whose
-site is in the test file itself), is carried below as DATA: the file, the exact
+site is in the test file itself), and round 2's K22 (a gap the idle bound
+ends answers 503), K23 (every captured way a read ends early answers 503,
+one mutant per classifier branch) and C1 controls (the collection hold), is
+carried below as DATA: the file, the exact
 text a plant replaces, the text it writes, the test nodes it must turn RED (a
 mutant) or leave GREEN (an inert twin at the same site, #391). Each plant is printed as a unified diff beside the run it
 produced, so the evidence is the diff and the failing assertion, not a
@@ -848,6 +851,190 @@ twin("K21-twin-alter-run-subtracted", "K21",
      "the same bound with the ALTER's run subtracted from the capture's offset instead of added to 5.5 s",
      [(TRIAGE_TEST, K21_SITE, '        elif cap[1] - t0 - (alter_run or 0.0) > K2C_BOUND_S:\n')],
      [K21(r) for r in ROUTES3])
+
+# ── round 2: K22, K23 and the C1 controls ────────────────────────────────────
+# Appended after the 145 plants above, which keep their order and bytes.
+# K22's mutant restores the classifier's body as it was before C2 (the first
+# link carrying any SQLSTATE decided, reached through .orig or __cause__
+# only); each K23 mutant reverts one branch of the classifier; the C1 mutants
+# undo the collection hold's acquire, its restore and its timer. Every twin
+# rewrites the same site without changing what it does.
+
+
+def K22N(kind, route):
+    return S + f"test_pg_k22_a_gap_the_idle_bound_ends_answers_503_never_500[{kind}-{route}]"
+
+
+def K23B(branch):
+    return S + f"test_pg_k23_each_classifier_branch_alone_answers_503[{branch}]"
+
+
+def K23T(error, route):
+    return S + f"test_pg_k23_twin_an_unrelated_error_leaves_the_route_as_before[{error}-{route}]"
+
+
+K23_PRIORITY = S + "test_pg_k23_a_lost_connection_outranks_a_cancelled_count"
+K23_TWINS = [K23T(e, r) for e in ("ValueError", "23505") for r in ROUTES3]
+C1_PG = [S + f"test_pg_c1_collection_is_off_from_statement_1_to_the_commit_and_restored_after[{r}]"
+         for r in ROUTES3]
+C1_TIMER = S + "test_c1_a_hold_still_taken_at_its_bound_is_released_by_its_timer"
+
+CLS_BODY = ('    todo, seen = [exc], set()\n'
+            '    gone, lost, stopped = None, False, None\n'
+            '    while todo:\n'
+            '        cur = todo.pop(0)\n'
+            '        if not isinstance(cur, BaseException) or id(cur) in seen:\n'
+            '            continue\n'
+            '        seen.add(id(cur))\n'
+            '        state = str(getattr(cur, "sqlstate", None) or "")\n'
+            '        if gone is None and (state == "25P03" or state.startswith("08")):\n'
+            '            gone = state\n'
+            '        if stopped is None and state in _TRIAGE_STATEMENT_ENDED:\n'
+            '            stopped = state\n'
+            '        lost = lost or _triage_link_lost(cur)\n'
+            '        todo.extend((getattr(cur, "orig", None), cur.__cause__, cur.__context__))\n'
+            '    if gone:\n'
+            '        return gone\n'
+            '    if lost:\n'
+            '        return "08003"\n'
+            '    return stopped\n')
+CLS_BODY_BEFORE_C2 = ('    cur, seen = exc, set()\n'
+                      '    while cur is not None and id(cur) not in seen:\n'
+                      '        seen.add(id(cur))\n'
+                      '        state = getattr(cur, "sqlstate", None)\n'
+                      '        if state:\n'
+                      '            s = str(state)\n'
+                      '            return s if s in ("57014", "55P03", "25P03") or s.startswith("08") else None\n'
+                      '        cur = getattr(cur, "orig", None) or cur.__cause__\n'
+                      '    return None\n')
+mutant("K22-classifier-before-c2", "K22",
+       "the classifier's body as before C2: the first link carrying any SQLSTATE decides, reached through .orig"
+       " or __cause__ only, so a closed connection that carries no SQLSTATE is re-raised (500)",
+       [(MAIN, CLS_BODY, CLS_BODY_BEFORE_C2)],
+       [K22N("yielding", r) for r in ROUTES3])
+twin("K22-twin-walk-as-a-for-loop", "K22",
+     "the same breadth-first walk written as a for loop over the growing list",
+     [(MAIN, "    while todo:\n        cur = todo.pop(0)\n", "    for cur in todo:\n")],
+     [K22N("yielding", r) for r in ROUTES3])
+
+EDGES = '        todo.extend((getattr(cur, "orig", None), cur.__cause__, cur.__context__))\n'
+mutant("K23-orig-edge-dropped", "K23", "the walk no longer follows .orig",
+       [(MAIN, EDGES, '        todo.extend((cur.__cause__, cur.__context__))\n')], [K23B("orig")])
+twin("K23-twin-orig-through-hasattr", "K23", ".orig followed through hasattr and the attribute",
+     [(MAIN, EDGES, '        todo.extend((cur.orig if hasattr(cur, "orig") else None, cur.__cause__, cur.__context__))\n')],
+     [K23B("orig")])
+mutant("K23-cause-edge-dropped", "K23", "the walk no longer follows __cause__",
+       [(MAIN, EDGES, '        todo.extend((getattr(cur, "orig", None), cur.__context__))\n')], [K23B("cause")])
+twin("K23-twin-cause-through-getattr", "K23", "__cause__ followed through getattr",
+     [(MAIN, EDGES, '        todo.extend((getattr(cur, "orig", None), getattr(cur, "__cause__", None), cur.__context__))\n')],
+     [K23B("cause")])
+mutant("K23-context-edge-dropped", "K23", "the walk no longer follows __context__",
+       [(MAIN, EDGES, '        todo.extend((getattr(cur, "orig", None), cur.__cause__))\n')], [K23B("context")])
+twin("K23-twin-context-through-getattr", "K23", "__context__ followed through getattr",
+     [(MAIN, EDGES, '        todo.extend((getattr(cur, "orig", None), cur.__cause__, getattr(cur, "__context__", None)))\n')],
+     [K23B("context")])
+
+GONE = '        if gone is None and (state == "25P03" or state.startswith("08")):\n'
+mutant("K23-25P03-dropped", "K23", "25P03 no longer read as a session the server ended",
+       [(MAIN, GONE, '        if gone is None and state.startswith("08"):\n')], [K23B("25P03")])
+twin("K23-twin-25P03-in-a-tuple", "K23", "25P03 matched by membership in a one-state tuple",
+     [(MAIN, GONE, '        if gone is None and (state in ("25P03",) or state.startswith("08")):\n')], [K23B("25P03")])
+mutant("K23-class-08-dropped", "K23", "a state of class 08 no longer read as a lost connection",
+       [(MAIN, GONE, '        if gone is None and state == "25P03":\n')], [K23B("class-08")])
+twin("K23-twin-class-08-by-slice", "K23", "class 08 matched by the state's first two characters",
+     [(MAIN, GONE, '        if gone is None and (state == "25P03" or state[:2] == "08"):\n')], [K23B("class-08")])
+
+ENDED = '_TRIAGE_STATEMENT_ENDED = ("57014", "55P03")   # the statement ended; the transaction is still open\n'
+mutant("K23-57014-dropped", "K23", "57014 no longer read as a statement the bound cancelled",
+       [(MAIN, ENDED, ENDED.replace('("57014", "55P03")', '("55P03",)'))], [K23B("57014")])
+twin("K23-twin-statement-states-swapped", "K23", "the two statement states listed in the other order",
+     [(MAIN, ENDED, ENDED.replace('("57014", "55P03")', '("55P03", "57014")'))], [K23B("57014")])
+mutant("K23-55P03-dropped", "K23", "55P03 no longer read as a lock wait past lock_timeout",
+       [(MAIN, ENDED, ENDED.replace('("57014", "55P03")', '("57014",)'))], [K23B("55P03")])
+twin("K23-twin-statement-states-in-a-frozenset", "K23", "the two statement states held in a frozenset",
+     [(MAIN, ENDED, ENDED.replace('("57014", "55P03")', 'frozenset({"57014", "55P03"})'))], [K23B("55P03")])
+
+INVAL = '    if getattr(link, "connection_invalidated", False) is True:\n        return True\n'
+mutant("K23-invalidated-dropped", "K23", "a link marked connection_invalidated no longer read as a lost connection",
+       [(MAIN, INVAL, "")], [K23B("connection-invalidated")])
+twin("K23-twin-invalidated-through-bool", "K23", "the mark read through bool()",
+     [(MAIN, INVAL, '    if bool(getattr(link, "connection_invalidated", False)):\n        return True\n')],
+     [K23B("connection-invalidated")])
+
+APGC = ('    if isinstance(link, _triage_apg_exc.InterfaceError) and "connection is closed" in str(link):\n'
+        '        return True\n')
+mutant("K23-asyncpg-closed-dropped", "K23",
+       "asyncpg's InterfaceError for a closed connection no longer read as a lost connection",
+       [(MAIN, APGC, "")], [K23B("asyncpg-closed")])
+twin("K23-twin-asyncpg-closed-by-find", "K23", "the message matched through str.find",
+     [(MAIN, APGC, '    if isinstance(link, _triage_apg_exc.InterfaceError) and str(link).find("connection is closed") >= 0:\n'
+                   '        return True\n')],
+     [K23B("asyncpg-closed")])
+
+PRB = ('    if isinstance(link, _triage_pending_rollback) and getattr(link, "code", None) == "8s2b":\n'
+       '        return True\n')
+mutant("K23-8s2b-dropped", "K23", "PendingRollbackError 8s2b no longer read as a lost connection",
+       [(MAIN, PRB, "")], [K23B("8s2b")])
+twin("K23-twin-8s2b-by-attribute", "K23", "the code read as the exception's attribute",
+     [(MAIN, PRB, '    if isinstance(link, _triage_pending_rollback) and link.code == "8s2b":\n        return True\n')],
+     [K23B("8s2b")])
+
+STATE_LINE = '        state = str(getattr(cur, "sqlstate", None) or "")\n'
+FOREIGN = ('        if state and not (state in _TRIAGE_STATEMENT_ENDED or state == "25P03"'
+           ' or state.startswith("08")):\n')
+mutant("K23-first-state-decides", "K23",
+       "a link carrying a SQLSTATE no bound produces ends the walk with None, as the first SQLSTATE decided"
+       " before C2",
+       [(MAIN, STATE_LINE, STATE_LINE + FOREIGN + "            return None\n")], [K23B("any-link")])
+twin("K23-twin-foreign-state-walked-past", "K23", "the same test on a foreign SQLSTATE, and the walk goes on",
+     [(MAIN, STATE_LINE, STATE_LINE + FOREIGN + "            pass   # a state no bound produces: the walk goes on\n")],
+     [K23B("any-link")])
+
+GUARD = '        if not isinstance(cur, BaseException) or id(cur) in seen:\n'
+mutant("K23-only-none-skipped", "K23",
+       "only None is skipped, so a value that is not an exception is walked and the walk itself raises",
+       [(MAIN, GUARD, '        if cur is None or id(cur) in seen:\n')], [K23B("not-an-exception")])
+twin("K23-twin-guard-with-a-class-tuple", "K23", "the guard written with a one-class tuple",
+     [(MAIN, GUARD, '        if not isinstance(cur, (BaseException,)) or id(cur) in seen:\n')],
+     [K23B("not-an-exception")])
+
+ORDER = '    if gone:\n        return gone\n    if lost:\n        return "08003"\n    return stopped\n'
+mutant("K23-cancelled-before-lost", "K23",
+       "a cancelled statement answered before a lost connection: the count's handler goes on and the view"
+       " answers 200",
+       [(MAIN, ORDER, '    if stopped:\n        return stopped\n    if gone:\n        return gone\n'
+                      '    if lost:\n        return "08003"\n    return None\n')],
+       [K23_PRIORITY])
+twin("K23-twin-order-as-one-expression", "K23", "the same order written as one expression",
+     [(MAIN, ORDER, '    return gone or ("08003" if lost else None) or stopped\n')],
+     [K23_PRIORITY])
+
+LAST = '        return "08003"\n    return stopped\n'
+mutant("K23-everything-ended", "K23",
+       "a failure no link explains answered as a lost connection (08003) instead of re-raised",
+       [(MAIN, LAST, '        return "08003"\n    return stopped or "08003"\n')], K23_TWINS)
+twin("K23-twin-none-spelled-out", "K23", "the last answer written as a conditional that still gives None",
+     [(MAIN, LAST, '        return "08003"\n    return stopped if stopped else None\n')], K23_TWINS)
+
+HOLD = "    hold.acquire()\n"
+mutant("C1-hold-not-taken", "C1", "the primitive no longer takes the collection hold before statement 1",
+       [(MAIN, HOLD, "")], C1_PG)
+twin("C1-twin-hold-taken-through-the-class", "C1", "the hold taken through the class's method",
+     [(MAIN, HOLD, "    _TriageGcHold.acquire(hold)\n")], C1_PG)
+RESTORE = '            if _triage_gc_state["depth"] == 0 and _triage_gc_state["restore"]:\n'
+mutant("C1-release-always-enables", "C1",
+       "the last release turns collection on whatever state the first acquire found",
+       [(MAIN, RESTORE, '            if _triage_gc_state["depth"] == 0:\n')], C1_PG)
+twin("C1-twin-restore-compared-with-true", "C1", "the found state compared with True",
+     [(MAIN, RESTORE, '            if _triage_gc_state["depth"] == 0 and _triage_gc_state["restore"] is True:\n')],
+     C1_PG)
+TIMER = "        self._timer = asyncio.get_running_loop().call_later(_TRIAGE_GC_HOLD_MAX_S, self.release)\n"
+mutant("C1-no-timer", "C1", "a hold is no longer bounded by its timer",
+       [(MAIN, TIMER, "        self._timer = None\n")], [C1_TIMER])
+twin("C1-twin-timer-through-a-lambda", "C1", "the timer calls release through a lambda",
+     [(MAIN, TIMER, "        self._timer = asyncio.get_running_loop().call_later(_TRIAGE_GC_HOLD_MAX_S,"
+                    " lambda: self.release())\n")],
+     [C1_TIMER])
 
 # ── the runner ───────────────────────────────────────────────────────────────
 
