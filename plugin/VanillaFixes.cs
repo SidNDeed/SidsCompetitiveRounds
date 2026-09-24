@@ -2405,8 +2405,9 @@ namespace CompetitiveRounds
 
         /// <summary>True in the Photon states where a local property merge is
         /// provably not mid-join (#287's actual invariant — see the comment in
-        /// StageCapability).</summary>
-        private static bool InIdleClientState()
+        /// StageCapability). Internal (was private) so the pre-join fence can
+        /// apply the same test to its RJ-DRIFT stage.</summary>
+        internal static bool InIdleClientState()
         {
             var st = PhotonNetwork.NetworkClientState;
             return st == Photon.Realtime.ClientState.Disconnected
@@ -2838,8 +2839,21 @@ namespace CompetitiveRounds
         }
 
         [HarmonyPrefix]
-        private static void BeforeJoin()
+        private static void BeforeJoin(object[] __args)
         {
+            // RJ-DRIFT change 16 (N11): stage the witness void and this join
+            // target's advert with the join op. The target is the first
+            // argument when it is a string: every patched overload that takes
+            // a room name takes it first (JoinRandomRoom takes none, and then
+            // no advert rides the join). The Grow stage below is unchanged.
+            try
+            {
+                string joinTarget = __args != null && __args.Length > 0 ? __args[0] as string : null;
+                bool canStage = !PhotonNetwork.InRoom && GrowNormalize.InIdleClientState();
+                FfaMode.StageJoinNumbering(joinTarget, canStage,
+                    PhotonNetwork.InRoom ? "in room" : PhotonNetwork.NetworkClientState.ToString());
+            }
+            catch (Exception ex) { VanillaFixSupport.LogError("GrowPreJoinSync(ffa-num)", ex); }
             try
             {
                 // Intent-arm code r1 find 2: the fence must also cover the
