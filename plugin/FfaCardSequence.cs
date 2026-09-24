@@ -175,7 +175,10 @@ namespace CompetitiveRounds
 
         private static string RoomKey()
         {
-            try { return (Fnv1a(PhotonNetwork.CurrentRoom?.Name ?? "") % 1000000u).ToString(); }
+            // RJ-DRIFT change 15: the derivation lives in FfaNumberingRules
+            // (the same FNV-1a, the same modulus, so the value is unchanged),
+            // where the drift gate's advert key uses it too.
+            try { return FfaNumberingRules.RoomKey(PhotonNetwork.CurrentRoom?.Name ?? "").ToString(); }
             catch { return "0"; }
         }
 
