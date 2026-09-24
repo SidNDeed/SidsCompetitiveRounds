@@ -53282,6 +53282,8 @@ async def admin_accept_quarantine(qid: str, req: _AdminQuarantineReq,
 import gc as _triage_gc
 import threading as _triage_threading
 
+import asyncpg.exceptions as _triage_apg_exc
+from sqlalchemy.exc import PendingRollbackError as _triage_pending_rollback
 from sqlalchemy.orm import configure_mappers as _triage_configure_mappers
 
 from database import post_commit_seal as _triage_post_commit_seal
@@ -53511,22 +53513,70 @@ class _TriageReadHandle:
         return await helper(self._db, *args)
 
 
+_TRIAGE_STATEMENT_ENDED = ("57014", "55P03")   # the statement ended; the transaction is still open
+
+
+def _triage_link_lost(link) -> bool:
+    """Whether one link of an exception chain reports the connection lost
+    without a SQLSTATE of its own. Three kinds do:
+      * a link SQLAlchemy marked connection_invalidated (the driver's
+        connection was already closed when SQLAlchemy handled the error);
+      * asyncpg's InterfaceError whose message says the connection is closed
+        (asyncpg raises it for a call made after it noticed the loss:
+        "connection is closed", "cannot call Transaction.commit(): the
+        underlying connection is closed");
+      * SQLAlchemy's PendingRollbackError 8s2b (it refuses to go on with a
+        connection it invalidated while a transaction was open)."""
+    if getattr(link, "connection_invalidated", False) is True:
+        return True
+    if isinstance(link, _triage_apg_exc.InterfaceError) and "connection is closed" in str(link):
+        return True
+    if isinstance(link, _triage_pending_rollback) and getattr(link, "code", None) == "8s2b":
+        return True
+    return False
+
+
 def _triage_ended_early(exc) -> str | None:
-    """The SQLSTATE of the first exception in the chain that carries one, when
-    it is a state the transaction's own bounds produce -- a statement
-    cancelled (57014), a lock wait past lock_timeout (55P03), an idle session
-    the server terminated (25P03, or class 08: asyncpg reports the closed
-    connection as 08003 in its place, and a connection lost any other way
-    reads the same) -- else None. Each of these answers 503."""
-    cur, seen = exc, set()
-    while cur is not None and id(cur) not in seen:
+    """The state in which a failed read's transaction ended early (a bound
+    ended the statement or the session, or the connection is gone), or None.
+    Every link of the exception's chain is visited, breadth first from the
+    exception itself, through each link's .orig (the driver error SQLAlchemy
+    wraps), __cause__ and __context__ (the exception being handled when this
+    one was raised); a link reached twice is visited once, and a value that
+    is not an exception is not a link. The answer is, in this order:
+      1. the SQLSTATE of the first visited link whose SQLSTATE is 25P03 (the
+         server ended the idle session) or of class 08 (the connection is
+         gone; asyncpg reports a loss it notices during a call as 08003);
+      2. "08003" when some link reports the connection lost without a
+         SQLSTATE (_triage_link_lost);
+      3. the SQLSTATE of the first visited link whose SQLSTATE is 57014 (a
+         statement cancelled at statement_timeout) or 55P03 (a lock wait past
+         lock_timeout);
+      4. None.
+    A lost connection comes before a cancelled statement because the
+    later-rated count's handler goes on after 57014 or 55P03 (the count's
+    savepoint leaves the transaction usable) and re-raises a state of class
+    08 or 25P03. In the primitive, any state answers 503 (reopen the view)
+    and None re-raises the exception."""
+    todo, seen = [exc], set()
+    gone, lost, stopped = None, False, None
+    while todo:
+        cur = todo.pop(0)
+        if not isinstance(cur, BaseException) or id(cur) in seen:
+            continue
         seen.add(id(cur))
-        state = getattr(cur, "sqlstate", None)
-        if state:
-            s = str(state)
-            return s if s in ("57014", "55P03", "25P03") or s.startswith("08") else None
-        cur = getattr(cur, "orig", None) or cur.__cause__
-    return None
+        state = str(getattr(cur, "sqlstate", None) or "")
+        if gone is None and (state == "25P03" or state.startswith("08")):
+            gone = state
+        if stopped is None and state in _TRIAGE_STATEMENT_ENDED:
+            stopped = state
+        lost = lost or _triage_link_lost(cur)
+        todo.extend((getattr(cur, "orig", None), cur.__cause__, cur.__context__))
+    if gone:
+        return gone
+    if lost:
+        return "08003"
+    return stopped
 
 
 _TRIAGE_GC_HOLD_MAX_S = 10.0   # a hold still taken this long after it began is released
@@ -53589,8 +53639,10 @@ async def _triage_read_txn(db: AsyncSession, read, build):
     post-COMMIT seal is then armed, and
     `build(rows)` computes the response from the copied values inside it; the
     seal is reset through its token when build returns or the exception
-    leaves. A read the deadline refused, or one the transaction's own bounds
-    ended, answers 503 (reopen the view); anything else is re-raised.
+    leaves. A read the deadline refused answers 503 (reopen the view), and so
+    does a failure to which _triage_ended_early assigns a state (a bound
+    ended the statement or the session, or the connection is gone); anything
+    else is re-raised.
 
     Before statement 1 the ORM mappers are configured (a no-op once they
     are) and automatic garbage collection is held off (_TriageGcHold); the
