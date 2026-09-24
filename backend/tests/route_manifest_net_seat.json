@@ -241,7 +241,7 @@
           ],
           "main",
           "admin_quarantine_triage",
-          "unpinned"
+          "75c92b61cce884c28561a9cb603e8090a48bf499"
         ],
         [
           "/api/v1/admin/quarantine/triage/{mode}/{group_id}",
@@ -250,7 +250,7 @@
           ],
           "main",
           "admin_quarantine_triage_group",
-          "unpinned"
+          "33172e874ce0e804104af50f3d2eb2e3208309d4"
         ],
         [
           "/api/v1/admin/quarantine/{qid}/accept",
@@ -574,7 +574,7 @@
           ],
           "main",
           "internal_quarantine_digest",
-          "unpinned"
+          "66d35e12ece5ed6a05f72f037816936d95300603"
         ],
         [
           "/api/v1/internal/recent-flags",
