@@ -69,13 +69,16 @@ release_session = async_sessionmaker(release_engine, class_=AsyncSession, expire
 # ── The post-COMMIT seal (quarantine triage, RJ-TRIAGE C9) ─────────────────
 # The quarantine triage routes (main.py, _triage_read_txn) read in ONE
 # READ ONLY transaction and then build their response from values copied out
-# of it. While this variable is set -- from the moment that transaction's
-# COMMIT or ROLLBACK has returned until the response is built -- the listener
-# below refuses any statement on EITHER engine before it is sent. That is the
-# request's own session (its next execute would begin a new transaction,
-# outside READ ONLY), a helper that opens its own session with async_session,
-# and the reserved pool. Only post_commit_seal sets the variable and only the
-# triage primitive calls it, so no other caller's behaviour changes.
+# of it. While this variable is set -- armed by that primitive once its COMMIT,
+# or its ROLLBACK attempt, is over, until the response is built -- the listener
+# below refuses every statement executed through EITHER engine before it is
+# sent. That covers the request's own session (its next execute would begin a
+# new transaction, outside READ ONLY), a helper that opens its own session
+# with async_session, and the reserved pool. It sees only statements executed
+# through an engine (before_cursor_execute): the pool's pre-ping on checkout
+# is not one of them and is still sent. The variable is context-local, so it
+# seals the task that armed it. Only post_commit_seal sets the variable and
+# only the triage primitive calls it, so no other caller's behaviour changes.
 _post_commit_seal: ContextVar = ContextVar("scr_post_commit_seal", default=None)
 
 # How many statements the seal has refused in this process; the triage
