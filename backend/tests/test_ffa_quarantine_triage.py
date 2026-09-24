@@ -1439,6 +1439,87 @@ def test_pg_k6c_a_201_row_lobby_is_read_whole_or_labelled_partial(monkeypatch):
     assert c["pt5"]["c2"] == main._TRIAGE_INCOMPLETE and c["pt1"]["r"] == main._TRIAGE_INCOMPLETE
 
 
+# ── K20: PT3's lobby-wide label needs every comparison to have run ────────
+# A lobby-wide label (agrees / no settled account / differs) concludes over
+# every row's comparison. Each case reads every row of the lobby (the
+# accounts are complete) with one comparison input missing: the steam-id map,
+# because the read budget runs out at that statement (K6c's technique, aimed
+# at the steam-map read), or the capture's payload, which does not validate
+# as a report. Every row then reads "not compared", and the label must name
+# the cause and make no lobby-wide statement -- over one settled row, and
+# over none. The two budget cases first read the same lobby whole, where the
+# comparison runs and the label is lobby-wide.
+
+K20_CASES = ["steam-map-unread", "payload-invalid", "no-rows-payload-invalid", "no-rows-steam-map-unread"]
+
+
+def _k20_record(line, capsys):
+    with capsys.disabled():
+        print("\n" + line)
+    path = os.environ.get("RJ_TRIAGE_PG_LOG")
+    if path:
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+
+
+@pytest.mark.parametrize("case", K20_CASES)
+def test_pg_k20_pt3_makes_no_lobby_wide_statement_unless_every_comparison_ran(case, monkeypatch, capsys):
+    n = 0 if case.startswith("no-rows") else 1
+    unread = case.endswith("steam-map-unread")
+
+    async def body():
+        async with Env(monkeypatch) as env:
+            ids = await env.seats()
+            lid = await env.lobby(games_played=n)
+            if n:
+                await env.ffa_settle(lid, 1, "K20", ACC_A, 1, 1, 10)
+            if unread:
+                q = await env.ffa_capture(lid, room("K20q", 1), ACC_B, 2, 2, 20)
+            else:
+                pl = report(lid, room("K20q", 1), steam(2), steam(2), players_of(ACC_B))
+                del pl["winner_steam_id"]          # the stored payload no longer validates as a report
+                q = await env.capture(reason="ffa_game_contradiction", group=lid, room_id=room("K20q", 1),
+                                      reporter=pid(ids, 2), player_ids=list(ids.values()), payload=pl,
+                                      created=20)
+            whole = ok(await env.v2("ffa", lid))
+            if not unread:
+                return q, whole, whole
+            orig = main._TriageReadHandle.read
+
+            async def read(self, statement, params=None):
+                if statement == main._TRIAGE_SQL_V2_STEAM_MAP:
+                    self.t0 -= 100.0          # the read deadline is reached at the steam-map read
+                return await orig(self, statement, params)
+
+            monkeypatch.setattr(main._TriageReadHandle, "read", read)
+            return q, whole, ok(await env.v2("ffa", lid))
+    q, whole, view = run(body())
+    c = cap_of(view, q)["pt3"]
+    cause = ("not compared: the steam-id map was not read within the read budget" if unread
+             else "not compared: the payload does not validate")
+    line = (f"K20-RECORD case={case} rows={n} complete={view['accounts']['complete']}"
+            f" steam_map_read={view['reads']['steam_map_read']} budget_spent={view['reads']['budget_spent']}"
+            f" verdicts={[r['verdict'] for r in c['rows']]} label={c['label']!r}")
+    if unread:
+        line += f" whole_label={cap_of(whole, q)['pt3']['label']!r}"
+    _k20_record(line, capsys)
+    # every row was read, and exactly the one comparison input is missing
+    assert view["accounts"]["complete"] is True and c["read"] == f"{n} of {n} read"
+    assert view["reads"]["steam_map_read"] is (not unread)
+    assert view["reads"]["budget_spent"] is unread
+    assert len(c["rows"]) == n and all(r["verdict"] == cause for r in c["rows"])
+    # no lobby-wide label: the cause is named instead
+    for lobby_wide in ("agrees with the settled account", "no settled account of this lobby exists",
+                       "differs from every settled account"):
+        assert not c["label"].startswith(lobby_wide), c["label"]
+    assert c["label"] == f"{cause}, so no lobby-wide statement is made ({n} of {n} rows read)"
+    if unread:
+        w = cap_of(whole, q)["pt3"]
+        assert whole["reads"]["steam_map_read"] is True and whole["reads"]["budget_spent"] is False
+        assert w["label"].startswith("differs from every settled account of this lobby (1 of 1 read)" if n
+                                     else "no settled account of this lobby exists (0 of 0 read)"), w["label"]
+
+
 # ── K6d: the expected game in the migration gap (W24) ─────────────────────
 
 def test_pg_k6d_the_migration_gap_shows_expected_six(monkeypatch):

@@ -1,10 +1,10 @@
 """RJ-TRIAGE part 1 controls: plant each named mutation and its inert twin,
 run the named checks, put the file back, record the result.
 
-Every control of RJ-TRIAGE-DESIGN-V5 section 6.2 (K1-K19) is carried below as
-DATA: the file, the exact text a plant replaces, the text it writes, the test
-nodes it must turn RED (a mutant) or leave GREEN (an inert twin at the same
-site, #391). Each plant is printed as a unified diff beside the run it
+Every control of RJ-TRIAGE-DESIGN-V5 section 6.2 (K1-K19), and round 2's K20
+(PT3's lobby-wide label gate), is carried below as DATA: the file, the exact
+text a plant replaces, the text it writes, the test nodes it must turn RED (a
+mutant) or leave GREEN (an inert twin at the same site, #391). Each plant is printed as a unified diff beside the run it
 produced, so the evidence is the diff and the failing assertion, not a
 summary line (the shape of mutation_runner.py beside this file).
 
@@ -95,6 +95,9 @@ K16 = S + "test_pg_k16_pt1_is_raw_arithmetic_with_the_fixed_statement"
 K16B = S + "test_pg_k16b_pt1_counts_settlements_by_their_receipt_time"
 K18 = S + "test_pg_k18_a_team_group_at_quota_is_listed_and_the_51st_keeps_no_row"
 K19 = S + "test_pg_k19_a_team_group_reads_its_series_and_no_lobby"
+K20 = S + "test_pg_k20_pt3_makes_no_lobby_wide_statement_unless_every_comparison_ran"
+K20_NODES = [K20 + f"[{c}]" for c in ("steam-map-unread", "payload-invalid", "no-rows-payload-invalid",
+                                      "no-rows-steam-map-unread")]
 
 K13A = B + "test_k13a_w19_c_is_announced_by_the_pass_that_reads_page_2"
 K13B = B + "test_k13b_w20_a_late_commit_is_read_by_the_first_pass_after_it_and_posted_within_the_bound"
@@ -795,6 +798,34 @@ twin("K19-twin-test-inverted", "K19",
      [(MAIN, V2_GROUP_READ, '        grp = await h.read(_TRIAGE_SQL_V2_SERIES if mode != "ffa" else _TRIAGE_SQL_V2_LOBBY,'
                             ' {"g": gid})\n')], [K19])
 
+
+# ── round 2: K20, PT3's lobby-wide label gate ────────────────────────────────
+# Appended after round 1's 141 plants, which keep their order and bytes. The
+# mutant deletes the gate's whole branch, which leaves the label block exactly
+# as it was at 6702efd.
+
+K20_GATE = ('            elif rep is None or not r["steam_read"] or any(\n'
+            '                    c["verdict"].startswith("not compared") for c in comps):\n')
+K20_BRANCH = (K20_GATE
+              + '                # The three labels below are lobby-wide conclusions over every\n'
+              + "                # row's comparison. None is issued unless the two inputs every\n"
+              + '                # comparison reads are present -- the payload as a report and the\n'
+              + "                # steam-id map, required at 0 rows too -- and no row's verdict\n"
+              + '                # reads "not compared" (so a cause added later blocks them too).\n'
+              + '                why = next((c["verdict"] for c in comps if c["verdict"].startswith("not compared")),\n'
+              + '                           "not compared: the payload does not validate" if rep is None\n'
+              + '                           else "not compared: the steam-id map was not read within the read budget")\n'
+              + '                label = f"{why}, so no lobby-wide statement is made ({len(rows)} of {n_rows} rows read)"\n')
+mutant("K20-gate-dropped", "K20",
+       "the label gate removed, as at 6702efd: rows that all read 'not compared' still get a lobby-wide label",
+       [(MAIN, K20_BRANCH, "")],
+       K20_NODES)
+twin("K20-twin-two-named-booleans", "K20",
+     "the gate written over the two named inputs alone: a row reads 'not compared' only when the payload does"
+     " not validate or the steam-id map was not read, so the any() over the verdicts adds no case at this tip",
+     [(MAIN, K20_GATE, '            elif rep is None or not r["steam_read"]:\n')],
+     K20_NODES)
+
 # ── the runner ───────────────────────────────────────────────────────────────
 
 class Refused(Exception):
@@ -895,7 +926,7 @@ def evidence_lines(output: str, limit=14):
     keep = []
     for ln in output.splitlines():
         s = ln.rstrip()
-        if (s.startswith("E ") or "K2C-VERDICT" in s or re.match(r"^(PASSED|FAILED|ERROR) ", s)
+        if (s.startswith("E ") or "K2C-VERDICT" in s or "K20-RECORD" in s or re.match(r"^(PASSED|FAILED|ERROR) ", s)
                 or re.match(r"^=+ .*(passed|failed|error).* =+$", s) or "TIMEOUT after" in s):
             keep.append(s[:600])
     return keep[:limit] + ([f"... ({len(keep) - limit} more evidence lines)"] if len(keep) > limit else [])
@@ -981,7 +1012,7 @@ def main(argv=None):
                                             f"a/{rel}", f"b/{rel}", n=1, lineterm="")
                 for ln in diff:
                     say("    " + ln)
-            if pg_log and any("k2c" in c for c in p.checks):
+            if pg_log and any(k in c for c in p.checks for k in ("k2c", "k20")):
                 with open(pg_log, "a", encoding="utf-8") as fh:
                     fh.write(f"\n== controls campaign {a.campaign}, plant {p.name} ({p.kind}, expect {p.expect}), "
                              f"HEAD {head[:7]}, {time.strftime('%H:%M:%SZ', time.gmtime())}\n")

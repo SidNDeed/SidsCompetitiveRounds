@@ -54043,6 +54043,17 @@ def _triage_group_view(mode: str, gid: str, r: dict) -> dict:
             if not complete:
                 label = (f"{len(rows)} of {n_rows} rows read before the read budget ran out; "
                          "no lobby-wide statement is made; reopen the view")
+            elif rep is None or not r["steam_read"] or any(
+                    c["verdict"].startswith("not compared") for c in comps):
+                # The three labels below are lobby-wide conclusions over every
+                # row's comparison. None is issued unless the two inputs every
+                # comparison reads are present -- the payload as a report and the
+                # steam-id map, required at 0 rows too -- and no row's verdict
+                # reads "not compared" (so a cause added later blocks them too).
+                why = next((c["verdict"] for c in comps if c["verdict"].startswith("not compared")),
+                           "not compared: the payload does not validate" if rep is None
+                           else "not compared: the steam-id map was not read within the read budget")
+                label = f"{why}, so no lobby-wide statement is made ({len(rows)} of {n_rows} rows read)"
             elif agree_at:
                 label = ("agrees with the settled account at " + ", ".join(str(m) for m in agree_at)
                          + ": consistent with a second account of that game, and with a later game "
