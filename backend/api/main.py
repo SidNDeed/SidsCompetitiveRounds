@@ -53245,6 +53245,950 @@ async def admin_accept_quarantine(qid: str, req: _AdminQuarantineReq,
     return {"status": "accepted"}
 
 
+# ── Quarantine triage: a read-only operator view (RJ-TRIAGE part 1) ────────
+# Three GET routes over match_report_quarantine: the summary (V1), one
+# group's detail (V2) and the bot's digest feed (D1). What they are built to
+# do, in one paragraph:
+#   * every read of a request runs in ONE transaction, entered exactly once
+#     through _triage_read_txn: its first statement makes the transaction
+#     REPEATABLE READ and READ ONLY, its second arms statement_timeout 2s,
+#     lock_timeout 1s and idle_in_transaction_session_timeout 1s, each
+#     transaction-local (is_local true), so the pooled connection keeps none;
+#   * no read starts once t0 + 1 s has passed (t0 = when the second statement
+#     returned); a route whose optional reads the deadline stopped says so in
+#     its response instead of guessing;
+#   * after the COMMIT (or the ROLLBACK attempt of a failed read) the
+#     post-COMMIT seal (database.post_commit_seal) refuses every statement
+#     executed through either engine until the response is built (database.py
+#     says what it does not see), and the response is computed only from
+#     values copied out of the transaction;
+#   * no route calls a lock-taking helper or writes: the lobby and the series
+#     are plain SELECTs, and the expected game is computed after the COMMIT.
+# What those settings bound -- how long the view holds its relation locks --
+# is RJ-TRIAGE-DESIGN-V5 3.1 requirement 2: at most 5 s from t0 enforced by
+# the server, plus a 0.5 s reserve for the COMMIT's own processing, which no
+# setting bounds. The controls in tests/test_ffa_quarantine_triage.py measure
+# it; nothing in this comment is a substitute for that measurement.
+# Nothing here reads PT1's difference for a decision, and no response carries
+# an accept, discard or override action: the existing routes act by id.
+
+from database import post_commit_seal as _triage_post_commit_seal
+
+_TRIAGE_READ_BUDGET_S = 1.0     # no read starts once t0 + this has passed
+# The capture's per-(mode, group) pending bound: _quarantine_report refuses
+# at `>= 50` and keeps nothing. The view only REPORTS it; a test pins the two
+# numbers together.
+_TRIAGE_QUOTA = 50
+_TRIAGE_V1_PAGE = 50            # group summaries per V1 page
+_TRIAGE_PT3_PAGE = 200          # settled rows per page of a lobby's accounts
+_TRIAGE_PT4_PAGE = 200          # reviewed twins per page
+_TRIAGE_D1_PAGE = 500           # digest rows per D1 page
+_TRIAGE_NIL_GROUP = "00000000-0000-0000-0000-000000000000"   # sort key of a row with no group
+
+_TRIAGE_UNDEFINED = "undefined: this report's key names no game"
+_TRIAGE_INCOMPLETE = "not computed: lobby read incomplete"
+_TRIAGE_NOT_WITHIN_BUDGET = "not computed within the read budget"
+_TRIAGE_REPORTER_LABEL = "reporter as claimed by the report"
+_TRIAGE_PT1_STATEMENT = (
+    "Receipt order and the report's own number. The same values arise when this capture is a "
+    "distinct later game and when it is a second account of a settled game (section 0.5, "
+    "histories X and Y). Never acceptance or override permission.")
+
+# The capture's room: the keyed column, else the room the payload names
+# (a variant row carries photon_room_id NULL). The capture stores at most 64
+# characters of it.
+_TRIAGE_ROOM_SQL = "COALESCE(q.photon_room_id, q.payload->>'photon_room_id')"
+# F3a vs F3b: does a settled row hold the capture's room (uq_ffa_match_room)?
+_TRIAGE_ROOM_HELD_SQL = (
+    "(q.mode = 'ffa' AND q.reason = 'ffa_game_contradiction' AND EXISTS ("
+    "SELECT 1 FROM ffa_matches m WHERE m.photon_room_id = LEFT(" + _TRIAGE_ROOM_SQL + ", 64)))")
+
+_TRIAGE_SQL_PENDING_BY_MODE = """
+    SELECT mode, COUNT(*) AS n
+      FROM match_report_quarantine
+     WHERE status = 'pending'
+     GROUP BY mode
+     ORDER BY mode
+"""
+_TRIAGE_SQL_OLDEST_PENDING = """
+    SELECT id, mode, group_id, created_at
+      FROM match_report_quarantine
+     WHERE status = 'pending'
+     ORDER BY created_at ASC, id ASC
+     LIMIT 1
+"""
+_TRIAGE_SQL_GROUP_COUNT = """
+    SELECT COUNT(*) AS n FROM (
+        SELECT 1 FROM match_report_quarantine
+         WHERE status = 'pending'
+         GROUP BY mode, group_id) g
+"""
+_TRIAGE_SQL_GROUPS_AT_QUOTA = """
+    SELECT mode, group_id, COUNT(*) AS n
+      FROM match_report_quarantine
+     WHERE status = 'pending' AND group_id IS NOT NULL
+     GROUP BY mode, group_id
+    HAVING COUNT(*) >= CAST(:quota AS integer)
+     ORDER BY mode, group_id
+"""
+_TRIAGE_SQL_MULTI_GROUP_SEATS = """
+    SELECT COUNT(*) AS n FROM (
+        SELECT reporter_id FROM match_report_quarantine
+         WHERE status = 'pending' AND mode = 'ffa' AND reporter_id IS NOT NULL
+         GROUP BY reporter_id
+        HAVING COUNT(DISTINCT group_id) >= 2) s
+"""
+_TRIAGE_SQL_V1_PAGE = """
+    SELECT mode, group_id, gkey, oldest, newest, pending FROM (
+        SELECT mode, group_id,
+               COALESCE(group_id, CAST(:nil AS uuid)) AS gkey,
+               MIN(created_at) AS oldest, MAX(created_at) AS newest,
+               COUNT(*) AS pending
+          FROM match_report_quarantine
+         WHERE status = 'pending'
+         GROUP BY mode, group_id) g
+     WHERE NOT CAST(:has_cursor AS boolean)
+        OR (oldest, mode, gkey) > (CAST(:c_oldest AS timestamptz), CAST(:c_mode AS varchar),
+                                   CAST(:c_gkey AS uuid))
+     ORDER BY oldest ASC, mode ASC, gkey ASC
+     LIMIT CAST(:lim AS integer)
+"""
+_TRIAGE_SQL_V1_PAGE_ROWS = f"""
+    SELECT q.mode, q.group_id, q.reason, q.reporter_id, {_TRIAGE_ROOM_HELD_SQL} AS room_held
+      FROM match_report_quarantine q
+      JOIN unnest(CAST(:modes AS varchar[]), CAST(:gkeys AS uuid[])) AS page_keys(mode, gkey)
+        ON q.mode = page_keys.mode
+       AND COALESCE(q.group_id, CAST(:nil AS uuid)) = page_keys.gkey
+     WHERE q.status = 'pending'
+"""
+_TRIAGE_SQL_V2_PENDING = f"""
+    SELECT q.id, q.mode, q.reason, q.http_status, q.group_id, q.photon_room_id,
+           {_TRIAGE_ROOM_SQL} AS room, q.reporter_id, q.player_ids,
+           q.payload::text AS payload, q.created_at,
+           EXTRACT(EPOCH FROM (now() - q.created_at)) AS age_s,
+           {_TRIAGE_ROOM_HELD_SQL} AS room_held
+      FROM match_report_quarantine q
+     WHERE q.status = 'pending' AND q.mode = CAST(:m AS varchar)
+       AND q.group_id = CAST(:g AS uuid)
+     ORDER BY q.created_at ASC, q.id ASC
+     LIMIT CAST(:lim AS integer)
+"""
+_TRIAGE_SQL_V2_LOBBY = """
+    SELECT id, status, games_played, player_count
+      FROM ffa_lobbies
+     WHERE id = CAST(:g AS uuid)
+"""
+_TRIAGE_SQL_V2_SERIES = """
+    SELECT id, status, t1_series_wins, t2_series_wins, created_at, completed_at, invalidated_at
+      FROM team_series
+     WHERE id = CAST(:g AS uuid)
+"""
+_TRIAGE_SQL_V2_ROW_COUNT = """
+    SELECT COUNT(*) AS n FROM ffa_matches WHERE lobby_id = CAST(:g AS uuid)
+"""
+_TRIAGE_SQL_V2_ROWS_PAGE = """
+    SELECT id, game_number, photon_room_id, reported_by, winner_id, game_number_source,
+           invalidated_at, created_at, ended_at
+      FROM ffa_matches
+     WHERE lobby_id = CAST(:g AS uuid)
+       AND (NOT CAST(:has_cursor AS boolean)
+            OR (game_number, id) > (CAST(:c_gn AS smallint), CAST(:c_id AS uuid)))
+     ORDER BY game_number ASC, id ASC
+     LIMIT CAST(:lim AS integer)
+"""
+# The columns of _FFA_PRIOR_VECTOR_SQL, for a whole page in one statement,
+# plus the two keys the page needs to regroup them: match_id, and player_id
+# for the roster question the arm asks first.
+_TRIAGE_SQL_V2_VECTORS = """
+    SELECT fmp.match_id, fmp.player_id, p.steam_id, fmp.rounds_won, fmp.points_total,
+           fmp.kills, fmp.left_early, fmp.absent
+      FROM ffa_match_players fmp
+      JOIN players p ON p.id = fmp.player_id
+     WHERE fmp.match_id = ANY(CAST(:ids AS uuid[]))
+"""
+# A variant's keyed twin, found by room in ANY group and ANY status -- the
+# capture's own keyed read ignores group_id, so the twin may sit elsewhere.
+_TRIAGE_SQL_V2_KEYED_TWINS = """
+    SELECT id, group_id, status, photon_room_id, review_note
+      FROM match_report_quarantine
+     WHERE mode = CAST(:m AS varchar)
+       AND photon_room_id = ANY(CAST(:rooms AS varchar[]))
+"""
+# Reviewed NULL-room rows of this group naming the same rooms: what a pending
+# variant may be a re-capture of. Keyset-paged until a short page.
+_TRIAGE_SQL_V2_REVIEWED = """
+    SELECT id, status, review_note, reviewed_at, created_at,
+           payload->>'photon_room_id' AS room, payload::text AS payload
+      FROM match_report_quarantine
+     WHERE group_id = CAST(:g AS uuid) AND mode = CAST(:m AS varchar)
+       AND photon_room_id IS NULL AND status <> 'pending'
+       AND payload->>'photon_room_id' = ANY(CAST(:rooms AS text[]))
+       AND (NOT CAST(:has_cursor AS boolean)
+            OR (created_at, id) > (CAST(:c_at AS timestamptz), CAST(:c_id AS uuid)))
+     ORDER BY created_at ASC, id ASC
+     LIMIT CAST(:lim AS integer)
+"""
+_TRIAGE_SQL_V2_STEAM_MAP = """
+    SELECT id, steam_id FROM players WHERE steam_id = ANY(CAST(:sids AS text[]))
+"""
+_TRIAGE_SQL_D1_HW = "SELECT now() AS hw"
+_TRIAGE_SQL_D1_PAGE = f"""
+    SELECT q.id, q.mode, q.group_id, q.reason, q.created_at, {_TRIAGE_ROOM_HELD_SQL} AS room_held
+      FROM match_report_quarantine q
+     WHERE q.status = 'pending'
+       AND q.created_at <= CAST(:hw AS timestamptz)
+       AND (NOT CAST(:has_cursor AS boolean)
+            OR (q.created_at, q.id) > (CAST(:c_at AS timestamptz), CAST(:c_id AS uuid)))
+     ORDER BY q.created_at ASC, q.id ASC
+     LIMIT CAST(:lim AS integer)
+"""
+
+
+class _TriageReadBudgetSpent(Exception):
+    """The handle refused to start a read: t0 + 1 s had passed."""
+
+
+class _TriageReadHandle:
+    """Runs every application read of one triage request, behind the deadline.
+
+    read() runs one statement and returns its rows copied into plain dicts.
+    run() awaits a helper that takes the session as its first argument --
+    inside a SAVEPOINT when asked, the shape admin_list_quarantine uses for
+    its later-rated count. Both check the deadline FIRST and start nothing
+    once t0 + 1 s has passed. The check is synchronous, so a stall before it
+    can only make it see a later time."""
+
+    def __init__(self, db: AsyncSession, t0: float):
+        self._db = db
+        self.t0 = t0
+        self.reads = 0
+
+    def _admit(self):
+        if time.monotonic() - self.t0 >= _TRIAGE_READ_BUDGET_S:
+            raise _TriageReadBudgetSpent()
+        self.reads += 1
+
+    async def read(self, statement: str, params: dict | None = None) -> list[dict]:
+        self._admit()
+        res = await self._db.execute(text(statement), params or {})
+        return [dict(r) for r in res.mappings().all()]
+
+    async def run(self, helper, *args, savepoint: bool = False):
+        self._admit()
+        if savepoint:
+            async with self._db.begin_nested():
+                return await helper(self._db, *args)
+        return await helper(self._db, *args)
+
+
+def _triage_ended_early(exc) -> str | None:
+    """The SQLSTATE of the first exception in the chain that carries one, when
+    it is a state the transaction's own bounds produce -- a statement
+    cancelled (57014), a lock wait past lock_timeout (55P03), an idle session
+    the server terminated (25P03, or class 08: asyncpg reports the closed
+    connection as 08003 in its place, and a connection lost any other way
+    reads the same) -- else None. Each of these answers 503."""
+    cur, seen = exc, set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        state = getattr(cur, "sqlstate", None)
+        if state:
+            s = str(state)
+            return s if s in ("57014", "55P03", "25P03") or s.startswith("08") else None
+        cur = getattr(cur, "orig", None) or cur.__cause__
+    return None
+
+
+async def _triage_read_txn(db: AsyncSession, read, build):
+    """The ONE read transaction of a quarantine triage request (C10).
+
+    Statement 1 makes the transaction REPEATABLE READ and READ ONLY; statement
+    2 arms the three timeouts transaction-locally. t0 is taken when statement
+    2 returns, and `read(h)` then runs every application read through the
+    handle. When read returns, the transaction COMMITs; when anything raises,
+    a ROLLBACK is issued (if the server already ended the session, that
+    ROLLBACK fails; the failure is printed, not raised). Either way the
+    post-COMMIT seal is then armed, and
+    `build(rows)` computes the response from the copied values inside it; the
+    seal is reset through its token when build returns or the exception
+    leaves. A read the deadline refused, or one the transaction's own bounds
+    ended, answers 503 (reopen the view); anything else is re-raised."""
+    try:
+        await db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+        await db.execute(text(
+            "SELECT set_config('statement_timeout', '2s', true),"
+            " set_config('lock_timeout', '1s', true),"
+            " set_config('idle_in_transaction_session_timeout', '1s', true)"))
+        h = _TriageReadHandle(db, time.monotonic())
+        rows = await read(h)
+        await db.commit()
+    except BaseException as exc:
+        try:
+            await db.rollback()
+        except Exception as rb:
+            print(f"[TRIAGE] rollback after a failed read did not complete: {type(rb).__name__}: {rb}")
+        with _triage_post_commit_seal("quarantine triage"):
+            if isinstance(exc, _TriageReadBudgetSpent):
+                raise HTTPException(503, "the view's required reads could not start within "
+                                         "the read budget; reopen the view") from exc
+            state = _triage_ended_early(exc)
+            if state:
+                raise HTTPException(503, f"the view's read transaction ended early ({state}); "
+                                         "reopen the view") from exc
+            raise
+    with _triage_post_commit_seal("quarantine triage"):
+        return await build(rows)
+
+
+# ── pure helpers (C4): detached values in, display values out ─────────────
+# None of these takes a session. The comparisons are the arm's own functions,
+# called, never re-implemented.
+
+_TRIAGE_FFA_FAMILIES = {
+    "ffa_room_other_lobby": "F1",
+    "ffa_replay_roster_mismatch": "F2",
+    "score_shape_mismatch": "F4",
+    "ffa_lobby_no_roster": "F6",
+    "lobby_game_limit": "F7",
+    "v1_canonical_downgrade": "F8",
+    "ffa_game_number_mismatch": "F9",
+}
+
+
+def _triage_family(mode: str, reason: str, room_held) -> str:
+    """The capture's family, by its exact reason string. lobby_game_limit is
+    an exact name, so it is decided before the lobby_ prefix (F5) is tried.
+    ffa_game_contradiction is F3a when a settled row holds the capture's
+    room, F3b otherwise. A team row's family is its series_{status} reason."""
+    reason = reason or ""
+    if mode == "team":
+        return reason
+    if reason == "ffa_game_contradiction":
+        return "F3a" if room_held else "F3b"
+    fam = _TRIAGE_FFA_FAMILIES.get(reason)
+    if fam:
+        return fam
+    if reason.startswith("lobby_"):
+        return "F5"
+    return "unclassified"
+
+
+def _triage_named(room) -> int | None:
+    """The game number the capture's key names (1..999), or None."""
+    return _ffa_named_game_number(room)
+
+
+def _triage_expected_game(games_played, highest) -> int:
+    """expected(L): the number _ffa_lock_lobby_slot would hand out after its
+    catch-up -- max(games_played, the highest game_number held by any row of
+    the lobby, invalidated rows included) + 1 -- computed, never written."""
+    return max(int(games_played or 0), int(highest or 0)) + 1
+
+
+def _triage_pt1(r, t) -> dict:
+    """PT1's one line of raw arithmetic, and the fixed statement beside it.
+
+    r = settled rows of the lobby RECEIVED (ended_at) before the capture,
+    t = the number the capture's key names. Nothing interprets d."""
+    t_txt = str(t) if t is not None else _TRIAGE_UNDEFINED
+    if t is None:
+        d = d_txt = _TRIAGE_UNDEFINED
+    elif r is None:
+        d = d_txt = _TRIAGE_INCOMPLETE
+    else:
+        d = r + 1 - t
+        d_txt = str(d)
+    r_txt = str(r) if r is not None else _TRIAGE_INCOMPLETE
+    return {
+        "r": r if r is not None else _TRIAGE_INCOMPLETE,
+        "t": t if t is not None else _TRIAGE_UNDEFINED,
+        "d": d,
+        "line": (f"rows received before this capture: {r_txt}; this report's own game "
+                 f"number: {t_txt}; r + 1 - t = {d_txt}"),
+        "statement": _TRIAGE_PT1_STATEMENT,
+    }
+
+
+def _triage_report(payload_text):
+    """The capture's payload as the report model, or None when it does not
+    validate (it is then shown, never compared)."""
+    try:
+        return FfaMatchReport.model_validate(_json.loads(payload_text))
+    except Exception:
+        return None
+
+
+def _triage_kills_form(report) -> tuple[str, bool]:
+    """The capture's own kills form, as the arm derives it: the canonical form
+    _verify_ffa_hmac verifies, and kills count as signed only under v2."""
+    form = _verify_ffa_hmac(report)
+    return (form or "unverified"), form == "v2"
+
+
+def _triage_row_verdict(report, kills_signed: bool, ids_by_steam: dict, row, row_vec) -> str:
+    """One capture against one settled row, by the arm's two questions in the
+    arm's order: the roster (set equality of player ids), then the arm's own
+    field comparison over a vector and winner built as the arm builds them."""
+    rec_ids = {v["player_id"] for v in row_vec}
+    if set(ids_by_steam.values()) != rec_ids:
+        return "ROSTER DIFFERS"
+    prior_vec = {v["steam_id"]: (int(v["rounds_won"] or 0), int(v["points_total"] or 0),
+                                 int(v["kills"] or 0), bool(v["left_early"]),
+                                 bool(v["absent"]))
+                 for v in row_vec}
+    prior_winner = next((s for s, pid in ids_by_steam.items() if pid == row["winner_id"]), None)
+    why = _ffa_report_contradiction(prior_winner, prior_vec, report, kills_signed)
+    return "AGREES" if why is None else why
+
+
+def _triage_capture_verdict(report, kills_signed: bool, ids_by_steam: dict,
+                            other, other_signed: bool, other_ids: dict) -> str:
+    """One capture against another capture: the same comparison, over a vector
+    built from the other payload the way a settlement of it would store it
+    (its absent flag is _ffa_leave_decision's union, under its own form)."""
+    if set(ids_by_steam.values()) != set(other_ids.values()):
+        return "ROSTER DIFFERS"
+    ghosts, graced, _ = _ffa_leave_decision(other, other_signed)
+    unrated = ghosts | graced
+    other_vec = {p.steam_id: (int(p.rounds_won), int(p.points_total), int(getattr(p, "kills", 0) or 0),
+                              bool(p.left_early), p.steam_id in unrated)
+                 for p in other.players}
+    why = _ffa_report_contradiction(other.winner_steam_id, other_vec, report, kills_signed)
+    return "AGREES" if why is None else why
+
+
+def _triage_recapture(payload_text: str, room, reviewed: list):
+    """The reviewed NULL-room row of the group this pending payload repeats
+    value for value (_quarantine_same_payload), or None."""
+    for rv in reviewed:
+        if rv["room"] == room and _quarantine_same_payload(rv["payload"], payload_text):
+            return rv
+    return None
+
+
+def _triage_iso(v):
+    return v.isoformat() if v is not None else None
+
+
+def _triage_str(v):
+    return str(v) if v is not None else None
+
+
+def _triage_payload_players(report) -> list[dict]:
+    return [{"steam_id": p.steam_id, "rounds_won": int(p.rounds_won), "points_total": int(p.points_total),
+             "kills": int(getattr(p, "kills", 0) or 0), "left_early": bool(p.left_early),
+             "absent": bool(getattr(p, "absent", False))}
+            for p in report.players]
+
+
+def _triage_seats(rows: list, fam_of) -> list[dict]:
+    """PT1 per seat: the pending captures grouped by (mode, group, reporter
+    as claimed by the report), counted by family."""
+    seats: dict = {}
+    for row in rows:
+        seat = (row["mode"], row["group_id"], row["reporter_id"])
+        fams = seats.setdefault(seat, {})
+        fam = fam_of(row)
+        fams[fam] = fams.get(fam, 0) + 1
+    out = []
+    for (mode, group, reporter), fams in seats.items():
+        out.append({"reporter_id": _triage_str(reporter), "reporter_label": _TRIAGE_REPORTER_LABEL,
+                    "pending": sum(fams.values()), "families": dict(sorted(fams.items()))})
+    out.sort(key=lambda s: (-s["pending"], s["reporter_id"] or ""))
+    return out
+
+
+def _triage_v1_cursor(after_oldest, after_mode, after_group):
+    parts = (after_oldest, after_mode, after_group)
+    if all(p is None for p in parts):
+        return None
+    if any(p is None for p in parts):
+        raise HTTPException(422, "a cursor needs after_oldest, after_mode and after_group together")
+    if after_oldest.tzinfo is None:
+        raise HTTPException(422, "after_oldest must carry a UTC offset")
+    return after_oldest, after_mode, after_group
+
+
+# ── V1: the summary ────────────────────────────────────────────────────────
+
+@app.get("/api/v1/admin/quarantine/triage", tags=["Admin"])
+async def admin_quarantine_triage(
+    admin_steam_id: str = Query(...),
+    hmac_signature: str = Query(None),
+    after_oldest: datetime | None = Query(None),
+    after_mode: str | None = Query(None, max_length=8),
+    after_group: UUID | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Pending quarantined reports, grouped, OLDEST group first.
+
+    The header covers every pending row: pending by mode, the oldest pending
+    row and its group, how many groups hold pending rows, and every group at
+    the capture's quota in either mode. The page holds at most 50 group
+    summaries ordered by (oldest pending created_at, mode, group id), with a
+    keyset cursor on that same tuple, so a group can never be hidden behind
+    newer ones. Admin signature target: "triage". Reads only; see the section
+    comment above for the transaction it runs in."""
+    cursor = _triage_v1_cursor(after_oldest, after_mode, after_group)
+
+    async def read(h):
+        await h.run(_require_admin, admin_steam_id, "quarantine", "triage", hmac_signature)
+        out = {
+            "by_mode": await h.read(_TRIAGE_SQL_PENDING_BY_MODE),
+            "oldest": await h.read(_TRIAGE_SQL_OLDEST_PENDING),
+            "groups_n": await h.read(_TRIAGE_SQL_GROUP_COUNT),
+            "at_quota": await h.read(_TRIAGE_SQL_GROUPS_AT_QUOTA, {"quota": _TRIAGE_QUOTA}),
+            "multi": await h.read(_TRIAGE_SQL_MULTI_GROUP_SEATS),
+        }
+        out["groups"] = await h.read(_TRIAGE_SQL_V1_PAGE, {
+            "nil": _TRIAGE_NIL_GROUP, "has_cursor": cursor is not None,
+            "c_oldest": cursor[0] if cursor else None, "c_mode": cursor[1] if cursor else None,
+            "c_gkey": str(cursor[2]) if cursor else None, "lim": _TRIAGE_V1_PAGE})
+        out["members"] = []
+        if out["groups"]:
+            out["members"] = await h.read(_TRIAGE_SQL_V1_PAGE_ROWS, {
+                "nil": _TRIAGE_NIL_GROUP,
+                "modes": [g["mode"] for g in out["groups"]],
+                "gkeys": [str(g["gkey"]) for g in out["groups"]]})
+        return out
+
+    async def build(r):
+        fam_of = lambda row: _triage_family(row["mode"], row["reason"], row["room_held"])
+        members: dict = {}
+        for m in r["members"]:
+            members.setdefault((m["mode"], m["group_id"]), []).append(m)
+        groups = []
+        for g in r["groups"]:
+            mine = members.get((g["mode"], g["group_id"]), [])
+            fams: dict = {}
+            for m in mine:
+                fams[fam_of(m)] = fams.get(fam_of(m), 0) + 1
+            entry = {
+                "mode": g["mode"], "group_id": _triage_str(g["group_id"]),
+                "pending": int(g["pending"]), "quota": _TRIAGE_QUOTA,
+                "at_quota": int(g["pending"]) >= _TRIAGE_QUOTA,
+                "families": dict(sorted(fams.items())),
+                "oldest": _triage_iso(g["oldest"]), "newest": _triage_iso(g["newest"]),
+            }
+            if g["mode"] == "ffa":
+                entry["pt1_seats"] = _triage_seats(mine, fam_of)
+            groups.append(entry)
+        last = r["groups"][-1] if len(r["groups"]) == _TRIAGE_V1_PAGE else None
+        by_mode = {row["mode"]: int(row["n"]) for row in r["by_mode"]}
+        oldest = r["oldest"][0] if r["oldest"] else None
+        return {
+            "header": {
+                "pending_by_mode": by_mode,
+                "pending_total": sum(by_mode.values()),
+                "groups_with_pending": int(r["groups_n"][0]["n"]),
+                "oldest_pending": None if oldest is None else {
+                    "id": str(oldest["id"]), "mode": oldest["mode"],
+                    "group_id": _triage_str(oldest["group_id"]),
+                    "created_at": _triage_iso(oldest["created_at"])},
+                "quota": _TRIAGE_QUOTA,
+                "groups_at_quota": [{"mode": q["mode"], "group_id": str(q["group_id"]),
+                                     "pending": int(q["n"])} for q in r["at_quota"]],
+                "seats_in_two_or_more_groups": int(r["multi"][0]["n"]),
+                "reporter_label": _TRIAGE_REPORTER_LABEL,
+            },
+            "page": {
+                "size": _TRIAGE_V1_PAGE,
+                "order": "oldest pending created_at, then mode, then group id; ascending",
+                "groups": groups,
+                "next": None if last is None else {
+                    "after_oldest": _triage_iso(last["oldest"]), "after_mode": last["mode"],
+                    "after_group": str(last["gkey"])},
+            },
+        }
+
+    return await _triage_read_txn(db, read, build)
+
+
+# ── V2: one group ─────────────────────────────────────────────────────────
+
+@app.get("/api/v1/admin/quarantine/triage/{mode}/{group_id}", tags=["Admin"])
+async def admin_quarantine_triage_group(
+    mode: str,
+    group_id: UUID,
+    admin_steam_id: str = Query(...),
+    hmac_signature: str = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """One group's pending captures, with every account the server holds for
+    its lobby beside them. mode is 'ffa' or 'team'; the admin signature
+    target is "triage:{mode}:{group}" with the group id's canonical text.
+
+    Reads, in this order and inside the read deadline: the admin check; the
+    group's pending rows (LIMIT 51: a 51st means the quota bound was
+    exceeded); the lobby or series row, a plain SELECT; for FFA, the lobby's
+    row count and then EVERY settled row with its per-player vectors, 200 per
+    page, until a short page; each variant's keyed twin and the reviewed rows
+    it may repeat; the steam-id map; each pending row's later-rated count,
+    oldest first, each inside its own SAVEPOINT. Everything the response
+    derives is computed after the COMMIT from those copied values. A read the
+    deadline stopped is reported as not read -- a lobby-wide statement is made
+    only over a complete read."""
+    if mode not in ("ffa", "team"):
+        raise HTTPException(422, "mode must be 'ffa' or 'team'")
+    gid = str(group_id)
+    target = f"triage:{mode}:{gid}"
+
+    async def read(h):
+        await h.run(_require_admin, admin_steam_id, "quarantine", target, hmac_signature)
+        pending = await h.read(_TRIAGE_SQL_V2_PENDING, {"m": mode, "g": gid, "lim": _TRIAGE_QUOTA + 1})
+        grp = await h.read(_TRIAGE_SQL_V2_LOBBY if mode == "ffa" else _TRIAGE_SQL_V2_SERIES, {"g": gid})
+        out = {"pending": pending, "group": grp[0] if grp else None,
+               "n_rows": None, "rows": [], "vectors": {}, "rows_complete": False,
+               "keyed": {}, "keyed_read": False, "reviewed": [], "reviewed_complete": False,
+               "steam": {}, "steam_read": False, "c1": {}, "budget_spent": False}
+        try:
+            if mode == "ffa":
+                out["n_rows"] = int((await h.read(_TRIAGE_SQL_V2_ROW_COUNT, {"g": gid}))[0]["n"])
+                cur = None
+                while True:
+                    page = await h.read(_TRIAGE_SQL_V2_ROWS_PAGE, {
+                        "g": gid, "has_cursor": cur is not None,
+                        "c_gn": cur[0] if cur else None, "c_id": str(cur[1]) if cur else None,
+                        "lim": _TRIAGE_PT3_PAGE})
+                    if page:
+                        vecs = await h.read(_TRIAGE_SQL_V2_VECTORS, {"ids": [str(s["id"]) for s in page]})
+                        for v in vecs:
+                            out["vectors"].setdefault(v["match_id"], []).append(v)
+                        out["rows"].extend(page)
+                    if len(page) < _TRIAGE_PT3_PAGE:
+                        out["rows_complete"] = True
+                        break
+                    cur = (page[-1]["game_number"], page[-1]["id"])
+            rooms = sorted({q["room"] for q in pending
+                            if q["photon_room_id"] is None and q["room"] is not None})
+            if rooms:
+                for k in await h.read(_TRIAGE_SQL_V2_KEYED_TWINS, {"m": mode, "rooms": rooms}):
+                    out["keyed"][k["photon_room_id"]] = k
+            out["keyed_read"] = True
+            cur = None
+            while rooms:
+                page = await h.read(_TRIAGE_SQL_V2_REVIEWED, {
+                    "g": gid, "m": mode, "rooms": rooms, "has_cursor": cur is not None,
+                    "c_at": cur[0] if cur else None, "c_id": str(cur[1]) if cur else None,
+                    "lim": _TRIAGE_PT4_PAGE})
+                out["reviewed"].extend(page)
+                if len(page) < _TRIAGE_PT4_PAGE:
+                    break
+                cur = (page[-1]["created_at"], page[-1]["id"])
+            out["reviewed_complete"] = True
+            steams = set()
+            for q in pending:
+                try:
+                    for p in (_json.loads(q["payload"]).get("players") or []):
+                        if isinstance(p, dict) and p.get("steam_id"):
+                            steams.add(str(p["steam_id"]))
+                except Exception:
+                    pass
+            if steams:
+                for row in await h.read(_TRIAGE_SQL_V2_STEAM_MAP, {"sids": sorted(steams)}):
+                    out["steam"][row["steam_id"]] = row["id"]
+            out["steam_read"] = True
+            for q in pending:   # already oldest first
+                try:
+                    out["c1"][q["id"]] = int(await h.run(
+                        _quarantine_later_rated_count, q["mode"], q["player_ids"], q["created_at"],
+                        savepoint=True))
+                except _TriageReadBudgetSpent:
+                    raise
+                except Exception as ex:
+                    # A count the statement bound cancelled inside its own
+                    # savepoint leaves the transaction usable; a session the
+                    # server ended does not, so that one still fails the view.
+                    if (_triage_ended_early(ex) or "").startswith(("08", "25")):
+                        raise
+                    print(f"[TRIAGE] later-rated count for {q['id']} not computed: {type(ex).__name__}")
+        except _TriageReadBudgetSpent:
+            out["budget_spent"] = True
+        return out
+
+    async def build(r):
+        return _triage_group_view(mode, gid, r)
+
+    return await _triage_read_txn(db, read, build)
+
+
+def _triage_group_view(mode: str, gid: str, r: dict) -> dict:
+    """V2's response, from the detached reads of one group (C4: no session)."""
+    pending = r["pending"]
+    fam_of = lambda row: _triage_family(row["mode"], row["reason"], row["room_held"])
+    fams: dict = {}
+    for q in pending:
+        fams[fam_of(q)] = fams.get(fam_of(q), 0) + 1
+    rows = r["rows"]
+    complete = bool(r["rows_complete"])
+    n_rows = r["n_rows"]
+    pt2 = {
+        "pending": len(pending), "quota": _TRIAGE_QUOTA,
+        "at_quota": len(pending) >= _TRIAGE_QUOTA,
+        "quota_bound_exceeded": len(pending) > _TRIAGE_QUOTA,
+        "families": dict(sorted(fams.items())),
+        "oldest": None if not pending else {"id": str(pending[0]["id"]),
+                                            "created_at": _triage_iso(pending[0]["created_at"])},
+        "newest": None if not pending else {"id": str(pending[-1]["id"]),
+                                            "created_at": _triage_iso(pending[-1]["created_at"])},
+    }
+    grp = r["group"]
+    if mode == "ffa":
+        pt2["cannot_say"] = ("a report the quota refused left no row; it lives only on its "
+                             "client's retry ladder")
+        if grp is None:
+            pt2["lobby"] = "lobby missing"
+        else:
+            highest = max((int(s["game_number"]) for s in rows), default=0) if complete else None
+            lobby = {"status": grp["status"], "games_played": int(grp["games_played"] or 0),
+                     "player_count": int(grp["player_count"] or 0),
+                     "highest_held_game": highest if complete else _TRIAGE_INCOMPLETE,
+                     "expected_game": (_triage_expected_game(grp["games_played"], highest)
+                                       if complete else _TRIAGE_INCOMPLETE),
+                     "migration_gap": None}
+            if complete and highest > int(grp["games_played"] or 0):
+                lobby["migration_gap"] = (
+                    f"games_played {int(grp['games_played'] or 0)}; highest held game {highest}; "
+                    f"a report would be expected at {highest + 1} (the endpoint's catch-up moves "
+                    f"the counter; this view does not)")
+            pt2["lobby"] = lobby
+    else:
+        pt2["cannot_say"] = ("a report the quota refused left no row; a team report refused at "
+                             "quota was answered a terminal 400 and dropped")
+        if grp is None:
+            pt2["series"] = "series missing"
+        else:
+            pt2["series"] = {"status": grp["status"],
+                             "score": f"{int(grp['t1_series_wins'] or 0)}-{int(grp['t2_series_wins'] or 0)}",
+                             "created_at": _triage_iso(grp["created_at"]),
+                             "completed_at": _triage_iso(grp["completed_at"]),
+                             "invalidated_at": _triage_iso(grp["invalidated_at"])}
+
+    steam = r["steam"]
+    reports, forms, ids_of = {}, {}, {}
+    for q in pending:
+        rep = _triage_report(q["payload"]) if mode == "ffa" else None
+        reports[q["id"]] = rep
+        if rep is not None:
+            forms[q["id"]] = _triage_kills_form(rep)
+            ids_of[q["id"]] = {p.steam_id: steam[p.steam_id] for p in rep.players if p.steam_id in steam}
+
+    row_view = []
+    for s in rows:
+        row_view.append({
+            "id": str(s["id"]), "game_number": int(s["game_number"]),
+            "room": s["photon_room_id"], "reported_by": _triage_str(s["reported_by"]),
+            "winner_id": _triage_str(s["winner_id"]), "game_number_source": s["game_number_source"],
+            "invalidated_at": _triage_iso(s["invalidated_at"]),
+            "created_at": _triage_iso(s["created_at"]), "ended_at": _triage_iso(s["ended_at"]),
+            "players": [{"steam_id": v["steam_id"], "rounds_won": int(v["rounds_won"] or 0),
+                         "points_total": int(v["points_total"] or 0), "kills": int(v["kills"] or 0),
+                         "left_early": bool(v["left_early"]), "absent": bool(v["absent"])}
+                        for v in r["vectors"].get(s["id"], [])]})
+    read_line = (f"{len(rows)} of {n_rows} read" if n_rows is not None else None)
+
+    captures = []
+    for q in pending:
+        t = _triage_named(q["room"])
+        cap = {"id": str(q["id"]), "reason": q["reason"], "family": fam_of(q),
+               "keyed": q["photon_room_id"] is not None, "room": q["room"],
+               "reporter_id": _triage_str(q["reporter_id"]), "reporter_label": _TRIAGE_REPORTER_LABEL,
+               "created_at": _triage_iso(q["created_at"]),
+               "named_game": t if t is not None else _TRIAGE_UNDEFINED}
+        rep = reports[q["id"]]
+        if mode == "ffa":
+            if rep is None:
+                cap["account"] = "the stored payload does not validate as a report; shown, not compared"
+            else:
+                cap["account"] = {"label": "the report's own account", "winner_steam_id": rep.winner_steam_id,
+                                  "players": _triage_payload_players(rep), "kills_form": forms[q["id"]][0],
+                                  "timeline": {"value": rep.timeline,
+                                               "label": "unsigned: outside the report's signature"}}
+            # PT1: raw receipt-order arithmetic
+            r_count = (sum(1 for s in rows if s["ended_at"] < q["created_at"]) if complete else None)
+            cap["pt1"] = _triage_pt1(r_count, t)
+            # PT3 / PT3b: every row read, nearest the named number first
+            if t is None:
+                order = sorted(rows, key=lambda s: (s["game_number"], s["id"]))
+            else:
+                order = sorted(rows, key=lambda s: (abs(int(s["game_number"]) - t), s["game_number"], s["id"]))
+            comps, agree_at = [], []
+            for s in order:
+                if rep is None:
+                    verdict = "not compared: the payload does not validate"
+                elif not r["steam_read"]:
+                    verdict = "not compared: the steam-id map was not read within the read budget"
+                else:
+                    verdict = _triage_row_verdict(rep, forms[q["id"]][1], ids_of[q["id"]], s,
+                                                  r["vectors"].get(s["id"], []))
+                if verdict == "AGREES":
+                    agree_at.append(int(s["game_number"]))
+                comps.append({"row_id": str(s["id"]), "game_number": int(s["game_number"]),
+                              "distance": (abs(int(s["game_number"]) - t) if t is not None
+                                           else _TRIAGE_UNDEFINED),
+                              "verdict": verdict})
+            others = []
+            for o in pending:
+                if o["id"] == q["id"]:
+                    continue
+                orep = reports[o["id"]]
+                if rep is None or orep is None:
+                    verdict = "not compared: a payload does not validate"
+                elif not r["steam_read"]:
+                    verdict = "not compared: the steam-id map was not read within the read budget"
+                else:
+                    verdict = _triage_capture_verdict(rep, forms[q["id"]][1], ids_of[q["id"]],
+                                                      orep, forms[o["id"]][1], ids_of[o["id"]])
+                others.append({"capture_id": str(o["id"]), "verdict": verdict})
+            if not complete:
+                label = (f"{len(rows)} of {n_rows} rows read before the read budget ran out; "
+                         "no lobby-wide statement is made; reopen the view")
+            elif agree_at:
+                label = ("agrees with the settled account at " + ", ".join(str(m) for m in agree_at)
+                         + ": consistent with a second account of that game, and with a later game "
+                           "repeating its outcome")
+            elif not rows:
+                label = "no settled account of this lobby exists (0 of 0 read)"
+            else:
+                label = (f"differs from every settled account of this lobby ({n_rows} of {n_rows} read): "
+                         "the server cannot tell a distinct game from a differing account of a settled one")
+            rep_id = q["reporter_id"]
+            same = [int(s["game_number"]) for s in order
+                    if rep_id is not None and s["reported_by"] == rep_id]
+            if same:
+                same_txt = ("the capture's claimed reporter also reported the settled rows at "
+                            + ", ".join(str(m) for m in same)
+                            + ": the planned lever's comparisons skip every such pair; check by hand")
+            elif complete:
+                same_txt = "no settled row of this lobby was reported by the capture's claimed reporter"
+            else:
+                same_txt = _TRIAGE_INCOMPLETE
+            cap["pt3"] = {"order": ("distance from the named number, then game number, then id"
+                                    if t is not None else "game number, then id (the key names no game)"),
+                          "read": read_line, "rows": comps, "captures": others, "label": label,
+                          "same_reporter": {"rows_at": same, "text": same_txt}}
+        # PT4: keyed, variant, re-capture
+        if q["photon_room_id"] is not None:
+            pt4 = {"kind": "keyed"}
+        else:
+            pt4 = {"kind": "variant"}
+            twin = r["keyed"].get(q["room"])
+            if not r["keyed_read"]:
+                pt4["variant_of"] = "not determined within the read budget"
+            elif twin is None:
+                pt4["variant_of"] = "no keyed row holds this room"
+            else:
+                pt4["variant_of"] = {"id": str(twin["id"]), "group_id": _triage_str(twin["group_id"]),
+                                     "status": twin["status"]}
+            if not r["reviewed_complete"]:
+                pt4["recapture_of"] = "re-capture status not determined"
+            else:
+                rv = _triage_recapture(q["payload"], q["room"], r["reviewed"])
+                pt4["recapture_of"] = None if rv is None else {
+                    "id": str(rv["id"]), "status": rv["status"], "review_note": rv["review_note"],
+                    "reviewed_at": _triage_iso(rv["reviewed_at"])}
+        cap["pt4"] = pt4
+        # PT5: age, and the two counts, shown beside PT3's verdict
+        c1 = r["c1"].get(q["id"])
+        pt5 = {"age_s": round(float(q["age_s"]), 3),
+               "c1": c1 if c1 is not None else _TRIAGE_NOT_WITHIN_BUDGET,
+               "c1_label": (f"Rated results for these players RECEIVED after this capture: "
+                            f"{c1 if c1 is not None else _TRIAGE_NOT_WITHIN_BUDGET}. This is what today's "
+                            "accept gate reads. Results received before the capture are not counted, "
+                            "so zero is not a safety signal.")}
+        if mode == "ffa":
+            if t is None:
+                c2 = _TRIAGE_UNDEFINED
+            elif not complete:
+                c2 = _TRIAGE_INCOMPLETE
+            else:
+                c2 = sum(1 for s in rows if int(s["game_number"]) > t)
+            pt5["c2"] = c2
+            pt5["c2_label"] = (f"Settled rows of this lobby numbered above the named number: {c2}, "
+                               "received at any time.")
+        cap["pt5"] = pt5
+        captures.append(cap)
+
+    view = {"mode": mode, "group_id": gid, "pt2": pt2, "captures": captures,
+            "reads": {"budget_spent": bool(r["budget_spent"]), "keyed_twins_read": bool(r["keyed_read"]),
+                      "reviewed_read_complete": bool(r["reviewed_complete"]),
+                      "steam_map_read": bool(r["steam_read"])}}
+    if pending:
+        view["oldest_age_s"] = round(float(pending[0]["age_s"]), 3)
+    if mode == "ffa":
+        view["pt1_seats"] = _triage_seats(pending, fam_of)
+        view["accounts"] = {"read": read_line, "complete": complete, "rows": row_view}
+    return view
+
+
+# ── D1: the digest feed for the bot ───────────────────────────────────────
+
+@app.get("/api/v1/internal/quarantine/digest", tags=["Internal"])
+async def internal_quarantine_digest(
+    hw: datetime | None = Query(None),
+    after_at: datetime | None = Query(None),
+    after_id: UUID | None = Query(None),
+    x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Pending row ids for the #scr-admin digest, one page of a pass.
+
+    A pass's first request carries no cursor: the answer fixes hw = now() of
+    its own transaction and carries the totals (pending by mode, groups,
+    groups at quota in either mode, the oldest pending row) and the first
+    page. Every later request of the pass sends back hw and the last
+    (created_at, id). A page holds pending rows with created_at <= hw ordered
+    by (created_at, id), 500 at most, each as (id, mode, group, family,
+    created_at): no payload, no names. The pass ends on a short page. Nothing
+    is stored: the durable unposted state is the row's own status."""
+    _require_internal_key(x_internal_key)
+    later = (hw, after_at, after_id)
+    if any(p is not None for p in later) and any(p is None for p in later):
+        raise HTTPException(422, "a later page needs hw, after_at and after_id together")
+    if any(p is not None and getattr(p, "tzinfo", 1) is None for p in (hw, after_at)):
+        raise HTTPException(422, "hw and after_at must carry a UTC offset")
+    first = hw is None
+
+    async def read(h):
+        out = {"totals": None}
+        if first:
+            out["hw"] = (await h.read(_TRIAGE_SQL_D1_HW))[0]["hw"]
+            out["totals"] = {
+                "by_mode": await h.read(_TRIAGE_SQL_PENDING_BY_MODE),
+                "groups_n": await h.read(_TRIAGE_SQL_GROUP_COUNT),
+                "at_quota": await h.read(_TRIAGE_SQL_GROUPS_AT_QUOTA, {"quota": _TRIAGE_QUOTA}),
+                "oldest": await h.read(_TRIAGE_SQL_OLDEST_PENDING),
+            }
+        else:
+            out["hw"] = hw
+        out["rows"] = await h.read(_TRIAGE_SQL_D1_PAGE, {
+            "hw": out["hw"], "has_cursor": not first,
+            "c_at": after_at, "c_id": str(after_id) if after_id else None, "lim": _TRIAGE_D1_PAGE})
+        return out
+
+    async def build(r):
+        resp = {"hw": _triage_iso(r["hw"]), "page_size": _TRIAGE_D1_PAGE,
+                "rows": [{"id": str(q["id"]), "mode": q["mode"], "group": _triage_str(q["group_id"]),
+                          "family": _triage_family(q["mode"], q["reason"], q["room_held"]),
+                          "created_at": _triage_iso(q["created_at"])} for q in r["rows"]]}
+        t = r["totals"]
+        if t is not None:
+            by_mode = {row["mode"]: int(row["n"]) for row in t["by_mode"]}
+            oldest = t["oldest"][0] if t["oldest"] else None
+            resp["totals"] = {
+                "pending": sum(by_mode.values()), "by_mode": by_mode,
+                "groups": int(t["groups_n"][0]["n"]), "quota": _TRIAGE_QUOTA,
+                "at_quota": [{"mode": q["mode"], "group": str(q["group_id"]), "pending": int(q["n"])}
+                             for q in t["at_quota"]],
+                "oldest": None if oldest is None else {
+                    "id": str(oldest["id"]), "mode": oldest["mode"],
+                    "group": _triage_str(oldest["group_id"]),
+                    "created_at": _triage_iso(oldest["created_at"])}}
+        return resp
+
+    return await _triage_read_txn(db, read, build)
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # SPECTATOR MODE (Aug 6 item 13, design §6 — migration 194)
 #
