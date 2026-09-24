@@ -903,6 +903,34 @@ MUTATIONS = [
           "    if len(steams) != 3:  # solo, duo_a and duo_b must be distinct\n")],
         [ALL_GREEN],
     ),
+    # ── round 4: the round-3 HIGH (a report from another room that moved
+    # another of the three players into the solo seat after a recorded game
+    # was logged and recorded), closed by refusing it before any write. M46
+    # disables the refusal, which restores the old log-and-record branch; its
+    # twin writes the same condition behind an inert conjunct. Both keep the
+    # line count, as every round-3 edit does.
+    (
+        "M46-a-mid-series-solo-change-is-recorded-again",
+        "r4 H1, the round-3 HIGH itself: the refusal of a report whose solo "
+        "seat differs from the series' after a recorded game is disabled, so "
+        "the report falls through to the old log-and-record branch; a report "
+        "from another room moving a duo member into the solo seat then "
+        "advances the tally, pays the winner's bonus to the new solo and the "
+        "winner's pack to the stored one, and on a series settled without "
+        "play it is paid as a late game under that split",
+        [('        elif solo_id != series["solo_id"]:\n',
+          '        elif False and solo_id != series["solo_id"]:\n')],
+        ["test_a_report_moving_a_player_into_the_solo_seat_mid_series_is_refused",
+         "test_a_settled_series_refuses_a_report_moving_the_solo_seat_too"],
+    ),
+    (
+        "M46-TWIN-the-refusal-condition-behind-an-inert-conjunct",
+        "inert twin at the M46 site: the same condition behind a conjunct "
+        "that is always true",
+        [('        elif solo_id != series["solo_id"]:\n',
+          '        elif True and solo_id != series["solo_id"]:\n')],
+        [ALL_GREEN],
+    ),
     (
         "NC-unrelated-constant-in-the-same-file",
         "negative control: a 1v2 gold constant this sweep never reads",

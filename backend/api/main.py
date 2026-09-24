@@ -3739,7 +3739,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:41809 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:41837 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -41769,8 +41769,8 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
     # When they disagree, the per-slot accumulators (solo_xp_earned, ...) and a
     # future ranked replay would credit the wrong player. On the FIRST match of
     # a series, rewrite the series row's slot ids to the report's ordering —
-    # under the row lock, before any accumulator applies. Mid-series drift
-    # (should be impossible: sides are fixed per sitting) is logged only.
+    # under the row lock, before any accumulator applies. From then on the
+    # series' solo-versus-duo split is fixed: see the refusal below (bug 391 r4).
     # The report's duo pair is in canonical order by here (bug 391 r3), so a
     # game-1 realignment writes that order into the series row, and a later
     # report of the sitting with the same sides meets it.
@@ -41789,7 +41789,35 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
             print(f"[OVT] series {series_uuid} slots realigned to report ordering "
                   f"(solo={report.solo.steam_id})")
             slot_solo, slot_da, slot_db = solo_id, duo_a_id, duo_b_id
+        elif solo_id != series["solo_id"]:
+            # ONE solo-versus-duo split per series (bug 391 r4). The series has
+            # a recorded game, and that game fixed who plays alone; this report
+            # puts another of the same three players in the solo seat. Nothing
+            # on the server moves a series' seats after its first game (the
+            # realignment above is the only UPDATE of these three columns, and
+            # a continuation series copies them), so the series has no place
+            # for a game under another split. Recorded, it would be counted and
+            # paid under a split the series never had (the tally and the awards
+            # read the report's seats, the pack recipients the stored ones), so
+            # it is refused HERE: before the INSERT and before any award, as the
+            # set check above refuses a report naming other players. A room
+            # already on record for these three players never gets this far:
+            # the replay check above answers it as that game.
+            print(f"[OVT-REPORT] series {series_uuid}: report refused, nothing written: "
+                  f"it names solo {solo_id} with duo {duo_a_id}, {duo_b_id}; the series "
+                  f"holds solo {series['solo_id']} with duo {series['duo_a_id']}, "
+                  f"{series['duo_b_id']} and has {prior_games} recorded game(s); a "
+                  f"series keeps one solo-versus-duo split for every game")
+            await db.rollback()
+            raise HTTPException(403, "Reported solo seat does not match the series")
         else:
+            # The series' own split, its duo pair stored in the other order.
+            # With the canonical form above, a series row holds its pair in
+            # ordinal order from its first game on, so this is only a row whose
+            # first game was recorded before that and did not leave it in that
+            # order (every client since v1.31.0 sends it). The game is recorded
+            # and paid by player id; the stored order is left as it is, so
+            # this game's two duo-seat ledger columns follow the report.
             print(f"[OVT] WARNING: series {series_uuid} slot ordering differs from "
                   f"report mid-series (game {prior_games + 1}) — leaving as-is")
 

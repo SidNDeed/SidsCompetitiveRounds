@@ -2929,3 +2929,196 @@ def test_two_reports_of_one_room_under_two_series_take_turns_on_the_room_lock(
         finally:
             await engine.dispose()
     _run(go())
+
+
+# ═════════════ round 4: one solo-versus-duo split per series ═════════════
+#
+# Bug 391 round 4 answers the round-3 HIGH by number. A series' first
+# recorded game fixes who plays alone: the realignment that adopts a report's
+# seats runs only while the series has no game on record, and nothing moves
+# the seats after it. A later report from ANOTHER room that put another of
+# the three players in the solo seat used to be logged and recorded anyway,
+# so the tally, the awards and the pack recipients each read a different
+# split. The sink now refuses that report, with the handler's own 403 shape,
+# before anything is written. (A room already on record for these three
+# players is the replay check's, round 3: it never reaches the refusal.)
+#
+# A case that completes a series needs the two tables a completion writes
+# beside the sink's own: glicko_ratings_1v2 (per-player series counts) and
+# ovt_queue (whose rows the completion locks and clears). Both come whole
+# from the production 1v2 migration, minus their comments and their foreign
+# key to players, which is dropped for the reason SINK_EXTRAS carries none:
+# the horizon cases' reset drops players without CASCADE.
+
+SINK_COMPLETION_TABLES = ("glicko_ratings_1v2", "ovt_queue")
+
+
+def _sink_schema_to_completion() -> str:
+    """`_sink_schema()` plus the two tables a series completion writes.
+
+    Their DROPs run first, so a leftover copy of either can never hold
+    `players` in place when the sink schema drops it.
+    """
+    schema = re.sub(r"--[^\n]*", "", SCHEMA_120.read_text(encoding="utf-8"))
+    creates = []
+    for table in SINK_COMPLETION_TABLES:
+        m = re.search(r"^CREATE TABLE IF NOT EXISTS " + table + r" \(.*?^\);",
+                      schema, re.M | re.S)
+        assert m, f"the 1v2 schema no longer creates {table}"
+        block, n = re.subn(
+            r"\s+REFERENCES\s+players\(id\)\s+ON\s+DELETE\s+CASCADE", "",
+            m.group(0)[:-1])
+        # Exactly the one key to players, gone: a count of zero would mean the
+        # migration changed and this copy silently kept its key (#342).
+        assert n == 1 and "REFERENCES" not in block, (table, n)
+        creates.append(block.strip())
+    drops = [f"DROP TABLE IF EXISTS {t}" for t in SINK_COMPLETION_TABLES]
+    return (";\n".join(drops) + ";\n" + _sink_schema() + "\n"
+            + ";\n".join(creates) + ";")
+
+
+def _record_pack_grants(monkeypatch) -> list:
+    """The earned-pack grant, RECORDED rather than run.
+
+    What these cases judge is whether the grant is called and for whom. Its
+    own tables are not in this schema, and the handler runs it in a savepoint
+    that prints a failure and carries on, which would hide a call rather than
+    show one. Everything that records, pays, compares or locks still runs.
+    """
+    grants = []
+
+    async def _grant(db, **kw):
+        grants.append((kw["mode"], str(kw["series_id"]),
+                       sorted(str(p) for p in kw["winner_ids"])))
+        return []
+
+    monkeypatch.setattr(main, "_pc_grant_earned_packs", _grant)
+    return grants
+
+
+@live
+def test_a_report_moving_a_player_into_the_solo_seat_mid_series_is_refused(
+        monkeypatch, capsys):
+    """THE round-3 HIGH, executed (B9, B14; brief H1).
+
+    Game 1 is recorded with the stored solo winning, 1-0. A report from ANOTHER
+    room then puts a duo member in the solo seat and reports another solo win.
+    Recorded, it would complete the series 2-0 as the stored solo's win, pay
+    the winner's series bonus to the new solo and give the winner's pack to
+    the stored one. It must be refused with the handler's own 403 before
+    anything is written: the same match rows, cards, tallies, seat ledger,
+    balances and gold rows, and no pack grant, named once in the log with both
+    splits. The refusal does not block the series: the same room reported with
+    the series' own split is then recorded, completes it 2-0, and pays the
+    winner's bonus and pack to the stored solo alone.
+    """
+    _sink_patch(monkeypatch)
+    grants = _record_pack_grants(monkeypatch)
+    solo, lo, hi = SIDS
+
+    async def go():
+        engine = _engine()
+        try:
+            await _reset(engine, _sink_schema_to_completion())
+            Session = async_sessionmaker(engine, expire_on_commit=False)
+            async with engine.begin() as conn:
+                ids = await _sink_ids(conn)
+                sid = await _sink_series(conn, (solo, lo, hi))
+            one = await _submit(Session, _sink_report(
+                sid, _game_room(401), solo, lo, hi))
+            assert one.message == "1v2 match recorded", one
+            row = await _row(engine, sid)
+            assert (row["solo_series_wins"], row["duo_series_wins"],
+                    row["status"]) == (1, 0, "active"), row
+
+            before = await _ledger(engine)
+            with pytest.raises(main.HTTPException) as refused:
+                await _submit(Session, _sink_report(
+                    sid, _game_room(402), lo, solo, hi))
+            assert refused.value.status_code == 403, refused.value
+            assert refused.value.detail == (
+                "Reported solo seat does not match the series"), refused.value
+            assert await _ledger(engine) == before
+            assert grants == [], grants
+
+            two = await _submit(Session, _sink_report(
+                sid, _game_room(402), solo, lo, hi))
+            assert two.series_status == "completed", two
+            row = await _row(engine, sid)
+            assert (row["solo_series_wins"], row["duo_series_wins"],
+                    row["status"], row["winner_side"]) == (
+                2, 0, "completed", 1), row
+            assert grants == [("ovt", sid, [str(ids[solo])])], grants
+            async with engine.connect() as conn:
+                bonus = (await conn.execute(text(
+                    "SELECT reason, player_id FROM gold_transactions"
+                    " WHERE reference_id = :s"), {"s": sid})).all()
+            assert sorted((r.reason, str(r.player_id)) for r in bonus) == sorted(
+                [("ovt_series_win", str(ids[solo])),
+                 ("ovt_series_loss", str(ids[lo])),
+                 ("ovt_series_loss", str(ids[hi]))]), bonus
+            return ids
+        finally:
+            await engine.dispose()
+    ids = _run(go())
+    out = capsys.readouterr().out
+    refusals = [ln for ln in out.splitlines()
+                if "report refused, nothing written" in ln]
+    assert len(refusals) == 1, out
+    assert f"it names solo {ids[lo]} with duo " in refusals[0], refusals
+    assert f"the series holds solo {ids[solo]} with duo " in refusals[0], refusals
+    assert "leaving as-is" not in out, out
+
+
+@live
+def test_a_settled_series_refuses_a_report_moving_the_solo_seat_too(
+        monkeypatch, capsys):
+    """The same refusal on the other arm that pays a game (#432: the class).
+
+    A series settled without play still records and pays each late game (the
+    round-2 fix). Once it holds a recorded game, a report from another room
+    naming another solo would be paid there under a split the series never
+    had. The refusal sits before the status branch, so it holds on this arm
+    too: 403, nothing written, no pack grant. The series' own split from the
+    same room is then recorded and paid as a late game, the tally untouched.
+    """
+    _sink_patch(monkeypatch)
+    grants = _record_pack_grants(monkeypatch)
+    solo, lo, hi = SIDS
+
+    async def go():
+        engine = _engine()
+        try:
+            await _reset(engine, _sink_schema_to_completion())
+            Session = async_sessionmaker(engine, expire_on_commit=False)
+            async with engine.begin() as conn:
+                sid = await _sink_series(conn, (solo, lo, hi),
+                                         status="canceled")
+            one = await _submit(Session, _sink_report(
+                sid, _game_room(403), solo, lo, hi))
+            assert one.message == "Series already resolved", one
+            assert one.xp_gained > 0 and one.gold_gained > 0, one
+
+            before = await _ledger(engine)
+            with pytest.raises(main.HTTPException) as refused:
+                await _submit(Session, _sink_report(
+                    sid, _game_room(404), hi, solo, lo, solo_won=False))
+            assert refused.value.status_code == 403, refused.value
+            assert refused.value.detail == (
+                "Reported solo seat does not match the series"), refused.value
+            assert await _ledger(engine) == before
+
+            two = await _submit(Session, _sink_report(
+                sid, _game_room(404), solo, lo, hi, solo_won=False))
+            assert two.message == "Series already resolved", two
+            assert two.xp_gained > 0, two
+            row = await _row(engine, sid)
+            assert (row["solo_series_wins"], row["duo_series_wins"],
+                    row["status"]) == (0, 0, "canceled"), row
+            assert grants == [], grants
+        finally:
+            await engine.dispose()
+    _run(go())
+    out = capsys.readouterr().out
+    assert sum("report refused, nothing written" in ln
+               for ln in out.splitlines()) == 1, out
