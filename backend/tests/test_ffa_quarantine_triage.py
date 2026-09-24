@@ -615,6 +615,31 @@ def test_pg_k1_the_three_routes_write_nothing(monkeypatch):
     assert before == after
 
 
+async def _warm_route(env, route, lid):
+    """One untimed call of the route a timed test is about to hold, made
+    before any timing starts and through database.py's engine (never the
+    case's own); only its status and duration are kept, as a detail line.
+    Measured over the control campaigns: the first route call of a pytest
+    process spent 0.375-0.484 s between t0 and its first lock on a watched
+    relation, where every later call, each on a new engine, spent
+    0.000-0.063 s; a statement-timing probe put the gap just before the
+    process's first ORM statement, the admin check's SELECT of admin_users.
+    The process pays it once; inside a hold it is spent from the route's 1 s
+    read budget. Case (i) holds the route 0.55 s after its second read, and
+    a cold V1 answered 503 there."""
+    started = time.monotonic()
+    if route == "V1":
+        status = (await env.v1()).status_code
+    elif route == "V2":
+        status = (await env.v2("ffa", lid)).status_code
+    elif route == "D1":
+        status = (await env.d1()).status_code
+    else:
+        status = await _k2c_primitive(async_sessionmaker(database.engine, expire_on_commit=False))
+    return (f"warm-up (untimed, database.py's engine): {route} answered {status}"
+            f" in {time.monotonic() - started:.3f} s")
+
+
 # ── K2: no lock of the view delays a capture, on every route ──────────────
 
 @pytest.mark.parametrize("route", ["V1", "V2", "D1"])
@@ -624,11 +649,14 @@ def test_pg_k2_a_capture_commits_while_the_route_is_open(route, monkeypatch):
     group runs on a second connection meanwhile; it must COMMIT within that
     hold. The hold lasts at most 0.7 s -- the route's own 1 s idle bound
     would end a longer one -- so the commit is asked for while the route is
-    still open, inside V5's 2 s."""
+    still open, inside V5's 2 s. The route is first called once, untimed
+    (_warm_route), so the hold is not also spent on the process's first-call
+    cost."""
     async def body():
         async with Env(monkeypatch) as env:
             w = await walk_w1(env, "K2")
             ids = await env.seats()
+            await _warm_route(env, route, w["lid"])
             state = {"n": 0, "held": None, "task": None}
             orig_read, orig_run = main._TriageReadHandle.read, main._TriageReadHandle.run
 
@@ -854,6 +882,9 @@ def _k2c_verdict(case, route, box):
         verdict, why = "NO_VERDICT", [f"the observer stopped at {rel(cover)}, before t0+{K2C_WATCH_S}"]
     elif not alter_waited:
         verdict, why = "NO_VERDICT", ["the ALTER was never seen queued behind the route"]
+    elif case == "i" and box.get("status") != 200:
+        verdict, why = "NO_VERDICT", [f"case (i) is the normal path and the route answered {box.get('status')},"
+                                       " so it never reached the COMMIT after which SHOW is read"]
     else:
         if held_after:
             why.append(f"route held {held_after[0]['route']} at {rel(held_after[0]['tick'])}")
@@ -948,6 +979,8 @@ async def _k2c_case(case, route, monkeypatch, capsys):
     sent = []
     async with Env(monkeypatch) as env:
         fx = await _k2c_fixture(env)
+        detail.append(await _warm_route(env, route, fx["l1"]))
+        capsys.readouterr()      # what the untimed call printed is not this case's
         eng = create_async_engine(dsn, pool_size=1, max_overflow=0, pool_pre_ping=True,
                                   connect_args={"server_settings": dict.fromkeys(K2C_TIMEOUTS, "0")})
         pid_box, t0_box, base_box = {}, {}, {}
