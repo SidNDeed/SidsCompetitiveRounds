@@ -7639,18 +7639,185 @@ def test_r7cl_c4_the_banner_input_census_sees_every_write_form_and_every_source(
 # a configuration read as unchanged.  A row whose evidence is a careful reading
 # is the defect L1 named one row over, so the row now has a check that can go
 # red, on both lanes and on the build configuration.
-_R7_B18_DC_SKELETON = "{}:{}:{}:dc"
+#
+# R9-L3 (round 10): THE ROLES THEMSELVES, IN ORDER.  The round-7 check reduced
+# every placeholder of both canonicals to an identical `{}` and compared the
+# skeletons, which proves the COUNT of the parts and the literal tail and
+# nothing about which value sits in which position: a server-only swap of the
+# reporter and the series stayed green.  The two lanes spell the same values
+# with different identifiers, so the identifiers are not compared either.
+# What binds a position on one lane to the same position on the other is the
+# WIRE: the client puts each signed value into the request under a name, and
+# the server reads that name into the variable its verifier signs.  So each
+# lane's canonical is read back to the ORDERED tuple of the request names its
+# positions carry, and each request name to the role the contract gives it.
+# A position whose expression is not a bare value the request carries -- a
+# transformed or renamed expression -- has no role and refuses.
+_R10_DC_ROLES = ("reporter", "series", "disconnected-player", "dc")
+_R10_WIRE_ROLE = {"reporter_steam_id": "reporter", "series_id": "series",
+                  "dc_player_steam_id": "disconnected-player"}
+_R10_DC_ROUTE = re.compile(
+    r'@app\.post\("(/api/v1/team/series/\{[A-Za-z_]\w*\}/report-dc)"')
+_R10_BARE = re.compile(r"^[A-Za-z_]\w*$")
 
 
-def _r7_skeleton(expr):
-    """An interpolated string with every placeholder reduced to `{}`.
+def _r10_canonical_positions(canonical):
+    """(the stripped hole expressions in order, why).  The canonical must be
+    exactly `{a}:{b}:{c}:dc` -- three holes, colons between, the literal tail
+    `dc` as the fourth part -- and every hole a BARE name."""
+    parts = re.split(r"(\{[^{}]*\})", canonical)
+    holes = [p[1:-1].strip() for p in parts if p.startswith("{")]
+    lits = [p for p in parts if not p.startswith("{")]
+    if len(holes) != 3 or lits != ["", ":", ":", ":dc"]:
+        return None, "the canonical is not three positions and the dc tail: " + canonical
+    for h in holes:
+        if not _R10_BARE.match(h):
+            return None, "a position carries a transformed expression: " + h
+    return holes, ""
 
-    The two lanes spell the same four fields with different identifiers --
-    `reporterSteamId` here, `steam_id` there -- so comparing the raw strings
-    would compare naming conventions.  What the wire contract fixes is the
-    ORDER and the COUNT of the parts and the literal tail, and that is what
-    survives this reduction."""
-    return re.sub(r"\{[^{}]*\}", "{}", expr)
+
+def _r10_roles_of(wires):
+    roles = []
+    for w in wires:
+        if w not in _R10_WIRE_ROLE:
+            return None, "a position carries a request name no role owns: " + str(w)
+        roles.append(_R10_WIRE_ROLE[w])
+    if len(set(roles)) != len(roles):
+        return None, "one role fills two positions: " + repr(roles)
+    return tuple(roles) + ("dc",), ""
+
+
+def _r10_py_params(sig_text):
+    """[(name, wire name)] of a Python def's parameters, `alias=` honoured."""
+    out = []
+    depth, cur, parts = 0, "", []
+    for ch in sig_text:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    parts.append(cur)
+    for p in parts:
+        p = p.strip()
+        if not p or p.startswith("*"):
+            continue
+        name = re.match(r"([A-Za-z_]\w*)", p).group(1)
+        alias = re.search(r'alias\s*=\s*"([^"]+)"', p)
+        out.append((name, alias.group(1) if alias else name))
+    return out
+
+
+def _r10_py_def(server, head):
+    """(parameter text, body text) of the top-level def starting at `head`."""
+    i = server.find(head)
+    if i < 0:
+        return None, None
+    j = server.find("(", i)
+    depth, k = 0, j
+    while k < len(server):
+        if server[k] == "(":
+            depth += 1
+        elif server[k] == ")":
+            depth -= 1
+            if depth == 0:
+                break
+        k += 1
+    colon = server.find(":" + LF, k)
+    if colon < 0:
+        return None, None
+    # the body ends at the next line that starts in column 0
+    m = re.search(r"^\S", server[colon + 2:], re.M)
+    end = colon + 2 + m.start() if m else len(server)
+    return server[j + 1:k], server[colon + 1:end]
+
+
+def _r10_server_dc_roles(server):
+    """(ordered role tuple, why) of the server lane's DC canonical, bound
+    through the verifier's parameters, the route's call and the route's own
+    request names."""
+    vparams, vbody = _r10_py_def(server, "def _verify_team_dc_hmac(")
+    if vparams is None:
+        return None, "the DC verifier could not be found"
+    vnames = [n for n, _ in _r10_py_params(vparams)]
+    cans = re.findall(r'f"([^"]*)"\.encode\(\)', vbody)
+    if len(cans) != 1:
+        return None, "the verifier signs %d f-strings, not one" % len(cans)
+    holes, why = _r10_canonical_positions(cans[0])
+    if holes is None:
+        return None, why
+    route = _R10_DC_ROUTE.search(server)
+    if route is None:
+        return None, "the report-dc route could not be found"
+    m = re.search(r"async def ([A-Za-z_]\w*)\(", server[route.end():])
+    rparams, rbody = _r10_py_def(server, server[route.end() + m.start():
+                                                route.end() + m.end()])
+    if rparams is None:
+        return None, "the report-dc route's def could not be read"
+    wire_of = dict(_r10_py_params(rparams))
+    calls = re.findall(r"_verify_team_dc_hmac\(([^()]*)\)", rbody)
+    if len(calls) != 1:
+        return None, "the route calls the DC verifier %d times, not once" % len(calls)
+    args = [a.strip() for a in calls[0].split(",")]
+    if len(args) != len(vnames):
+        return None, "the route passes %d values to %d parameters" % (len(args), len(vnames))
+    wires = []
+    for h in holes:
+        if h not in vnames:
+            return None, "a position names no verifier parameter: " + h
+        a = args[vnames.index(h)]
+        if not _R10_BARE.match(a) or a not in wire_of:
+            return None, "the route passes a value it did not read from the request: " + a
+        wires.append(wire_of[a])
+    return _r10_roles_of(wires)
+
+
+def _r10_client_dc_roles(api, server):
+    """(ordered role tuple, why) of this lane's DC canonical, bound through the
+    request names ReportTeamSeriesDc puts each signed value under.  The path
+    position is named by the SERVER route's own template, aligned segment for
+    segment with the client's."""
+    body = _method_body(api, "public static void ReportTeamSeriesDc(")
+    if not body:
+        return None, "ReportTeamSeriesDc's own text could not be delimited"
+    cans = re.findall(r'ComputeHmacHex\(\$"([^"]*)"\)', body)
+    if len(cans) != 1:
+        return None, "the report signs %d canonicals, not one" % len(cans)
+    holes, why = _r10_canonical_positions(cans[0])
+    if holes is None:
+        return None, why
+    wire_of = {}
+    for key, ident in re.findall(
+            r"[?&]([a-z_]+)=\{UnityWebRequest\.EscapeURL\(\s*([A-Za-z_]\w*)\s*\)\}",
+            body):
+        if ident in wire_of:
+            return None, "one value is sent under two request names: " + ident
+        wire_of[ident] = key
+    route = _R10_DC_ROUTE.search(server or "")
+    path = re.search(r'\$"\{baseUrl\}(/api/v1/team/series/\{[^{}"]*\}/report-dc)"', body)
+    if route is None or path is None:
+        return None, "the report-dc path could not be aligned between the lanes"
+    ct, st = path.group(1).split("/"), route.group(1).split("/")
+    if len(ct) != len(st):
+        return None, "the two report-dc paths have different shapes"
+    for c, s in zip(ct, st):
+        if c.startswith("{") and s.startswith("{"):
+            ident = c[1:-1].strip()
+            if ident in wire_of:
+                return None, "one value is sent under two request names: " + ident
+            wire_of[ident] = s[1:-1]
+        elif c != s:
+            return None, "the two report-dc paths differ at " + c
+    wires = []
+    for h in holes:
+        if h not in wire_of:
+            return None, "a signed value the request never carries: " + h
+        wires.append(wire_of[h])
+    return _r10_roles_of(wires)
 
 
 def _r7_b18_client_canonicals(api):
@@ -7671,9 +7838,13 @@ def test_r7_b18_the_dc_canonical_is_one_contract_on_both_lanes_and_the_build_gat
       * the client signs the DC report over the four-field canonical, in
         EXACTLY ONE place -- a second signing site is how the two ends come to
         disagree one release later;
-      * the SERVER LANE's own copy reduces to the same skeleton, read out of
-        that tree rather than described from this one (#341, #444, #635: two
-        halves of one contract are grepped for the same literals);
+      * both lanes' canonicals carry the SAME ORDERED ROLES -- reporter,
+        series, disconnected player, dc -- each position bound to its role
+        through the request name that carries it, the server's read out of
+        the frozen extract rather than described from this lane (#341, #444,
+        #635: two halves of one contract are grepped for the same literals).
+        Round 7 compared placeholder skeletons, which proves the count and
+        not the order (R9-L3);
       * the csproj still carries `DebugType=none` and `Deterministic`, which
         are what keep the build from embedding a local path in every release
         assembly.  Nothing in the pre-commit privacy guard validates them, so a
@@ -7693,24 +7864,25 @@ def test_r7_b18_the_dc_canonical_is_one_contract_on_both_lanes_and_the_build_gat
     csproj = (PLUGIN / "CompetitiveRounds.csproj").read_text(encoding="utf-8")
 
     def claim(api_text, server_text, csproj_text):
-        c = _r7_b18_client_canonicals(api_text)
-        if len(c) != 1 or _r7_skeleton(c[0]) != _R7_B18_DC_SKELETON:
+        if len(_r7_b18_client_canonicals(api_text)) != 1:
             return False
-        s = _r7_b18_server_canonicals(server_text)
-        if len(s) != 1 or _r7_skeleton(s[0]) != _R7_B18_DC_SKELETON:
+        if len(_r7_b18_server_canonicals(server_text)) != 1:
+            return False
+        if _r10_client_dc_roles(api_text, server_text)[0] != _R10_DC_ROLES:
+            return False
+        if _r10_server_dc_roles(server_text)[0] != _R10_DC_ROLES:
             return False
         return ("<DebugType>none</DebugType>" in csproj_text
                 and "<Deterministic>true</Deterministic>" in csproj_text)
 
     assert claim(api, server, csproj), (
-        "client canonicals: %r; server canonicals: %r"
-        % (_r7_b18_client_canonicals(api), _r7_b18_server_canonicals(server)))
+        "client roles: %r; server roles: %r"
+        % (_r10_client_dc_roles(api, server), _r10_server_dc_roles(server)))
 
-    # CONTROL 1 -- a fifth field on the client half
-    bad_api = api.replace(
-        'ComputeHmacHex($"{reporterSteamId}:{seriesId}:{dcPlayerSteamId}:dc")',
-        'ComputeHmacHex($"{reporterSteamId}:{seriesId}:{dcPlayerSteamId}:{roomId}:dc")',
-        1)
+    # CONTROL 1 -- a fifth field on the client half, found by the canonical's
+    # shape so whitespace inside a hole does not move the control
+    bad_api = re.sub(r'(ComputeHmacHex\(\$"[^"]*)(:dc"\))', r"\1:{roomId}\2",
+                     api, count=1)
     assert bad_api != api, "the client signing site's spelling moved"
     assert not claim(bad_api, server, csproj), (
         "the claim survives a fifth field on the client half")
@@ -7734,6 +7906,89 @@ def test_r7_b18_the_dc_canonical_is_one_contract_on_both_lanes_and_the_build_gat
     assert claim(api + LF + "// an unrelated comment line" + LF,
                  server + LF + "# an unrelated comment line" + LF,
                  csproj + LF + "<!-- an unrelated comment -->" + LF)
+
+
+def test_r10_l3_the_dc_roles_are_bound_in_order_on_both_lanes():
+    """R9-L3 (B18): the ordered roles of the DC canonical -- reporter, series,
+    disconnected player, dc -- are read back on BOTH lanes and compared as a
+    tuple, and the check REJECTS a permutation, one role used in place of
+    another, and a transformed or renamed expression standing in for a role.
+
+    The FIRST assertion is the tree itself, on both lanes: a role mutation
+    planted in the client source reddens THIS line and nothing before it.
+    The server half is the hash-verified frozen extract, which no tree
+    control may edit (its digest is the binding), so the server-side
+    rejections are exercised here on the text in memory."""
+    api = _src("ApiClient.cs")
+    server, how = _server_lane_main()
+    assert server and _frozen_identity_holds(how), how
+    got_c, why_c = _r10_client_dc_roles(api, server)
+    got_s, why_s = _r10_server_dc_roles(server)
+    assert got_c == _R10_DC_ROLES, "client roles %r -- %s" % (got_c, why_c)
+    assert got_s == _R10_DC_ROLES, "server roles %r -- %s" % (got_s, why_s)
+    print("R9-L3 ROLES: client %s | server %s" % (" ".join(got_c), " ".join(got_s)))
+
+    can_c = _r7_b18_client_canonicals(api)[0]
+    can_s = _r7_b18_server_canonicals(server)[0]
+    hc = _r10_canonical_positions(can_c)[0]
+    hs = _r10_canonical_positions(can_s)[0]
+
+    def with_c(holes):
+        new = "{" + "}:{".join(holes) + "}:dc"
+        return api.replace('ComputeHmacHex($"' + can_c + '")',
+                           'ComputeHmacHex($"' + new + '")', 1)
+
+    def with_s(holes):
+        new = "{" + "}:{".join(holes) + "}:dc"
+        return server.replace('f"' + can_s + '".encode()', 'f"' + new + '".encode()', 1)
+
+    # THE REMOVED REDUCTION IS BLIND TO EVERY CASE BELOW: each one keeps the
+    # count of placeholders and the tail, so `{}`-skeletons stay equal.  That
+    # is the RED the round-9 review named; the role tuple is what rejects them.
+    def skeleton(expr):
+        return re.sub(r"\{[^{}]*\}", "{}", expr)
+
+    swapped_s = [hs[1], hs[0], hs[2]]
+    rejected = {
+        "server permutation": (api, with_s(swapped_s)),
+        "server duplicate": (api, with_s([hs[0], hs[0], hs[2]])),
+        "server transformed": (api, with_s([hs[0] + ".lower()", hs[1], hs[2]])),
+        "server renamed": (api, with_s(["sid", hs[1], hs[2]])),
+        "server call-site permutation": (api, server.replace(
+            "_verify_team_dc_hmac(reporter_steam_id, series_id,",
+            "_verify_team_dc_hmac(series_id, reporter_steam_id,", 1)),
+        "client permutation": (with_c([hc[1], hc[0], hc[2]]), server),
+        "client duplicate": (with_c([hc[0], hc[1], hc[0]]), server),
+        "client transformed": (with_c([hc[0] + ".ToLowerInvariant()", hc[1], hc[2]]), server),
+        "client renamed": (with_c(["reporterId", hc[1], hc[2]]), server),
+    }
+    for label, (a, s) in rejected.items():
+        assert (a, s) != (api, server), label + ": the planted change did not apply"
+        c_ok = _r10_client_dc_roles(a, s)[0] == _R10_DC_ROLES
+        s_ok = _r10_server_dc_roles(s)[0] == _R10_DC_ROLES
+        assert not (c_ok and s_ok), label + ": the role check did not reject it"
+        if label in ("server permutation", "server duplicate", "client permutation",
+                     "client duplicate"):
+            ca = _r7_b18_client_canonicals(a)[0]
+            sa = _r7_b18_server_canonicals(s)[0]
+            assert skeleton(ca) == skeleton(can_c) and skeleton(sa) == skeleton(can_s), (
+                label + ": the skeleton reduction was not blind here")
+
+    # TWINS: whitespace inside a hole and a comment beside the signing site
+    # keep every role and its position
+    spaced_c = api.replace('ComputeHmacHex($"' + can_c + '")',
+                           'ComputeHmacHex($"' + can_c.replace("{", "{ ").replace("}", " }")
+                           + '")', 1)
+    spaced_s = server.replace('f"' + can_s + '".encode()',
+                              'f"' + can_s.replace("{", "{ ").replace("}", " }")
+                              + '".encode()', 1)
+    assert spaced_c != api and spaced_s != server
+    assert _r10_client_dc_roles(spaced_c, spaced_s)[0] == _R10_DC_ROLES
+    assert _r10_server_dc_roles(spaced_s)[0] == _R10_DC_ROLES
+    commented = server.replace('f"' + can_s + '".encode(),',
+                               'f"' + can_s + '".encode(),  # the canonical', 1)
+    assert commented != server
+    assert _r10_server_dc_roles(commented)[0] == _R10_DC_ROLES
 
 
 # ══ ROUND 8: the eleven LOW findings of the round-7 review, by number ════════
