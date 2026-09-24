@@ -8602,6 +8602,21 @@ def test_r8_l11_the_banner_inputs_are_not_publicly_writable():
 # holds about a hundred of them).  A hole is lexed as CODE, so a literal inside
 # one is a literal in code.  It runs once per source text per process and is cached by
 # text, because this suite is re-run once per mutation control.
+#
+# R10-L4 (round-10 review) -- THE HOLES OF A RAW INTERPOLATED STRING ARE CODE
+# TOO.  Round 10 consumed a raw string (`"""..."""`, `$"""..."""`,
+# `$$"""..."""`) whole, and when it was interpolated it recorded the literal
+# with no value and never lexed its holes, so a complete literal inside one
+# (`$"""{(s == "<the status>" ? 1 : 0)}"""`) was invisible to every sweep that
+# reads the lexer.  A raw string with N dollars opens a hole at a run of N
+# braces (a longer run's first braces are text) and closes it at N braces;
+# each hole is now lexed as CODE, exactly as the holes of `$"..."` and
+# `$@"..."` always were, so a literal inside it is a literal in code.  A raw
+# literal without holes has its VALUE computed by the language's rule (a
+# multi-line one loses its first and last line breaks and the closing line's
+# indentation), so a complete literal written across lines compares as the
+# value it spells.  `_cs_code_mask` exposes the same lexing as a mask of what
+# is code, holes included, for the log-call exemption (R10-L3).
 _CS_START = re.compile(
     r'//|/\*|^[ \t]*#|@\$+"|\$+@"|@"|\$+"""+|\$+"|"""+|"|' + "'", re.M)
 _CS_HOLE_START = re.compile(
@@ -8631,9 +8646,62 @@ def _cs_unescape(raw):
     return _CS_ESC.sub(one, raw)
 
 
-def _cs_scan(text, pos, comments, literals, hole):
+def _cs_raw_close(text, start, quotes, dollars, comments, literals, holes):
+    """(offset of the closing quote run, number of holes) of the raw string
+    whose body begins at `start`, or (-1, 0) when it never closes (R10-L4).
+    With `dollars` > 0 a run of at least that many braces opens a hole after
+    the run; the hole is lexed as CODE by `_cs_scan` and closed by that many
+    braces."""
+    n = len(text)
+    i, found = start, 0
+    close = '"' * quotes
+    while i < n:
+        if text.startswith(close, i):
+            return i, found
+        ch = text[i]
+        if dollars and ch == "{":
+            j = i
+            while j < n and text[j] == "{":
+                j += 1
+            if j - i < dollars:
+                i = j                      # fewer braces than dollars: text
+                continue
+            found += 1
+            k = _cs_scan(text, j, comments, literals, True, holes)
+            if holes is not None:
+                holes.append((j, k))
+            i = k
+            m = 0
+            while i < n and text[i] == "}" and m < dollars:
+                i += 1
+                m += 1
+            continue
+        i += 1
+    return -1, 0
+
+
+def _cs_raw_value(body):
+    """The VALUE of a raw literal without holes (R10-L4): a single-line one is
+    its body; a multi-line one loses the line break after its opening quotes
+    and before its closing line, and every content line loses the closing
+    line's indentation."""
+    if LF not in body:
+        return body
+    lines = body.split(LF)
+    if lines[0].strip() or lines[-1].strip():
+        return body
+    indent = lines[-1]
+    out = []
+    for ln in lines[1:-1]:
+        ln = ln.rstrip(chr(13))
+        out.append(ln[len(indent):] if ln.startswith(indent) else ln.lstrip(" " + chr(9)))
+    return LF.join(out)
+
+
+def _cs_scan(text, pos, comments, literals, hole, spans=None):
     """Lex CODE from `pos`; inside an interpolation hole, stop at the brace
-    that closes it and return its offset."""
+    that closes it and return its offset.  `spans`, when given, receives the
+    (start, end) of every interpolation hole lexed, in any string form."""
     n = len(text)
     depth = 0
     pat = _CS_HOLE_START if hole else _CS_START
@@ -8678,12 +8746,12 @@ def _cs_scan(text, pos, comments, literals, hole):
         quotes = tok.count('"')
         if quotes >= 3:
             start = s + len(tok)
-            e = text.find('"' * quotes, start)
+            e, found = _cs_raw_close(text, start, quotes, dollars, comments,
+                                     literals, spans)
             if e < 0:
                 pos = s + 1
                 continue
-            body = text[start:e]
-            content = None if (dollars and "{" * dollars in body) else body
+            content = None if found else _cs_raw_value(text[start:e])
             literals.append((s, e + quotes, content))
             pos = e + quotes
             continue
@@ -8725,7 +8793,9 @@ def _cs_scan(text, pos, comments, literals, hole):
                     i = j + 2
                     continue
                 holes += 1
-                k = _cs_scan(text, j + 1, comments, literals, True)
+                k = _cs_scan(text, j + 1, comments, literals, True, spans)
+                if spans is not None:
+                    spans.append((j + 1, k))
                 i = k + 1
                 continue
             i = j + 2 if text.startswith("}}", j) else j + 1
@@ -8751,6 +8821,24 @@ def _cs_lex(text):
     comments.sort()
     literals.sort()
     return tuple(comments), tuple(literals)
+
+
+def _cs_code_mask(text):
+    """`text` with every comment and the TEXT of every literal blanked to
+    spaces, and every interpolation hole -- of `$"..."`, `$@"..."` and raw
+    interpolated strings alike -- kept as the code it is (R10-L3, R10-L4).
+    Line breaks are kept, so offsets and line numbers are unchanged."""
+    comments, literals, spans = [], [], []
+    _cs_scan(text, 0, comments, literals, False, spans)
+    events = ([(s, e, False) for s, e in comments]
+              + [(s, e, False) for s, e, _c in literals]
+              + [(s, e, True) for s, e in spans])
+    events.sort(key=lambda t: (t[0], t[0] - t[1]))
+    keep = [True] * len(text)
+    for s, e, code in events:
+        for k in range(s, min(e, len(text))):
+            keep[k] = code
+    return "".join(c if keep[k] or c == LF else " " for k, c in enumerate(text))
 
 
 def _cs_span_at(spans, offset):
@@ -8920,6 +9008,61 @@ def test_r9_l4_the_dead_status_is_rejected_as_a_complete_literal_in_code():
             "  Log($" + q + "dc_{kind}" + q + ");",
             "  char c = '" + q + "'; string s = " + q + "dc" + q + ";"):
         assert not probe(permitted), "the sweep rejected: " + permitted.strip()
+
+
+def test_r11_l4_the_holes_of_a_raw_interpolated_string_are_swept():
+    """R10-L4 (B10): the holes of a raw interpolated string are lexed as CODE,
+    so a complete dead-status literal inside one is a complete literal in
+    code, and a multi-line raw literal compares as the value it spells.
+    Round 10 consumed a raw string whole and recorded an interpolated one
+    with no value, so every form below was invisible to the sweep."""
+    q = chr(34)
+    q3, q4 = q * 3, q * 4
+    lit = q + _R9_DEAD_STATUS + q
+    cmp_hole = "(dcStatus == " + lit + " ? 1 : 0)"
+
+    def probe(body):
+        return _r9_dead_literal_hits(
+            {"ZzProbe.cs": "class ZzProbe {" + LF + body + LF + "}" + LF})
+
+    red = {
+        "a one-dollar raw hole": "  Log($" + q3 + "{" + cmp_hole + "}" + q3 + ");",
+        "a two-dollar raw hole": "  Log($$" + q3 + "{{" + cmp_hole + "}}" + q3 + ");",
+        "a two-dollar raw hole after a text brace":
+            "  Log($$" + q3 + "{ {{" + cmp_hole + "}} }" + q3 + ");",
+        "a multi-line raw hole": "  Log($" + q3 + LF + "      state {" + cmp_hole
+            + "}" + LF + "      " + q3 + ");",
+        "a four-quote raw hole": "  Log($" + q4 + "{" + cmp_hole + "}" + q4 + ");",
+        "a raw literal in a regular hole": "  Log($" + q + "{(dcStatus == " + q3
+            + _R9_DEAD_STATUS + q3 + " ? 1 : 0)}" + q + ");",
+        "a multi-line raw literal": "  bool a = dcStatus == " + q3 + LF + "      "
+            + _R9_DEAD_STATUS + LF + "      " + q3 + ";",
+        "a raw hole inside a raw hole": "  Log($" + q3 + "{Wrap($" + q3 + "{"
+            + cmp_hole + "}" + q3 + ")}" + q3 + ");",
+    }
+    for label, body in red.items():
+        hits = probe(body)
+        assert hits, "the sweep did not reject " + label + ": " + body.strip()
+        print("R10-L4 REJECTED %s: %s" % (label, hits[0][2]))
+
+    inert = {
+        "an inert one-dollar raw hole": "  Log($" + q3 + "{dcStatus.Length}" + q3 + ");",
+        "an inert two-dollar raw hole": "  Log($$" + q3 + "{{dcStatus}} {x}" + q3 + ");",
+        "the word inside a longer raw literal": "  Log(" + q3 + "statuses (active, "
+            + _R9_DEAD_STATUS + ") are accepted" + q3 + ");",
+        "the word as raw text around a hole": "  Log($" + q3 + _R9_DEAD_STATUS
+            + " {n}" + q3 + ");",
+        "a multi-line raw literal holding more than the word": "  Log(" + q3 + LF
+            + "      " + _R9_DEAD_STATUS + LF + "      and more" + LF + "      " + q3 + ");",
+    }
+    for label, body in inert.items():
+        assert not probe(body), "the sweep rejected " + label + ": " + body.strip()
+
+    # the holes are CODE to the mask as well (the log-call exemption reads it)
+    masked = _cs_code_mask("Log($" + q3 + "{Zz(1)} text" + q3 + ");")
+    assert "Zz(1)" in masked and "text" not in masked, masked
+    print("R10-L4 RAW HOLES: %d forms rejected, %d inert forms accepted"
+          % (len(red), len(inert)))
 
 
 # ── L10 (B19): writers classified by WHERE they sit, tuple forms included ───
