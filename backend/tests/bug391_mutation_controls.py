@@ -457,9 +457,9 @@ MUTATIONS = [
         "M25-a-source-citation-goes-one-line-stale",
         "r2 finding 11 / B7: a line pin reaches a neighbouring statement, so "
         "following it conceals the regression it was written to catch",
-        [('PIN main.py:3844 "SELECT status FROM ovt_series '
+        [('PIN main.py:3964 "SELECT status FROM ovt_series '
           'WHERE id = CAST(:sid AS uuid)"',
-          'PIN main.py:3845 "SELECT status FROM ovt_series '
+          'PIN main.py:3965 "SELECT status FROM ovt_series '
           'WHERE id = CAST(:sid AS uuid)"')],
         ["test_every_bug391_source_citation_resolves_to_what_it_names"],
     ),
@@ -671,9 +671,9 @@ MUTATIONS = [
         "r2 finding 11: the pin names a line that really does carry the "
         "anchor, but two other lines carry it too, so the citation can drift "
         "onto either of them and still resolve",
-        [('PIN main.py:3844 "SELECT status FROM ovt_series '
+        [('PIN main.py:3964 "SELECT status FROM ovt_series '
           'WHERE id = CAST(:sid AS uuid)"',
-          'PIN main.py:3845 " FOR NO KEY UPDATE SKIP LOCKED"')],
+          'PIN main.py:3965 " FOR NO KEY UPDATE SKIP LOCKED"')],
         ["test_every_bug391_source_citation_resolves_to_what_it_names"],
     ),
     (
