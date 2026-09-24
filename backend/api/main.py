@@ -53263,7 +53263,14 @@ async def admin_accept_quarantine(qid: str, req: _AdminQuarantineReq,
 #     says what it does not see), and the response is computed only from
 #     values copied out of the transaction;
 #   * no route calls a lock-taking helper or writes: the lobby and the series
-#     are plain SELECTs, and the expected game is computed after the COMMIT.
+#     are plain SELECTs, and the expected game is computed after the COMMIT;
+#   * automatic garbage collection is held off from before the first
+#     statement until the COMMIT or the ROLLBACK attempt returns
+#     (_TriageGcHold), and the ORM mappers are configured before the first
+#     statement: a collection pass, or the mappers' first configuration,
+#     would otherwise sit between two statements, where the server counts
+#     it against the 1 s idle bound. Every value a response derives from
+#     the rows is computed after the COMMIT.
 # What those settings bound -- how long the view holds its relation locks --
 # is RJ-TRIAGE-DESIGN-V5 3.1 requirement 2: at most 5 s from t0 enforced by
 # the server, plus a 0.5 s reserve for the COMMIT's own processing, which no
@@ -53271,6 +53278,11 @@ async def admin_accept_quarantine(qid: str, req: _AdminQuarantineReq,
 # it; nothing in this comment is a substitute for that measurement.
 # Nothing here reads PT1's difference for a decision, and no response carries
 # an accept, discard or override action: the existing routes act by id.
+
+import gc as _triage_gc
+import threading as _triage_threading
+
+from sqlalchemy.orm import configure_mappers as _triage_configure_mappers
 
 from database import post_commit_seal as _triage_post_commit_seal
 
@@ -53428,8 +53440,26 @@ _TRIAGE_SQL_V2_REVIEWED = """
      ORDER BY created_at ASC, id ASC
      LIMIT CAST(:lim AS integer)
 """
+# The players the pending payloads name, extracted by the server from the
+# same rows in the same snapshot (payload is JSONB): every string steam_id,
+# other than the empty one, of an object in the payload's "players" array.
+# A payload that validates as a report carries only string steam_ids
+# (FfaPlayerEntry.steam_id is a str field; pydantic refuses any other
+# value for it), and the view looks up only a validated report's players,
+# so the map holds every entry the view reads, and no payload is parsed
+# between two statements of the transaction.
 _TRIAGE_SQL_V2_STEAM_MAP = """
-    SELECT id, steam_id FROM players WHERE steam_id = ANY(CAST(:sids AS text[]))
+    SELECT pl.id, pl.steam_id
+      FROM players pl
+     WHERE pl.steam_id IN (
+           SELECT e.p->>'steam_id'
+             FROM (SELECT jsonb_array_elements(q.payload->'players') AS p
+                     FROM match_report_quarantine q
+                    WHERE q.id = ANY(CAST(:ids AS uuid[]))
+                      AND jsonb_typeof(q.payload->'players') = 'array') e
+            WHERE jsonb_typeof(e.p) = 'object'
+              AND jsonb_typeof(e.p->'steam_id') = 'string'
+              AND e.p->>'steam_id' <> '')
 """
 _TRIAGE_SQL_D1_HW = "SELECT now() AS hw"
 _TRIAGE_SQL_D1_PAGE = f"""
@@ -53499,6 +53529,54 @@ def _triage_ended_early(exc) -> str | None:
     return None
 
 
+_TRIAGE_GC_HOLD_MAX_S = 10.0   # a hold still taken this long after it began is released
+_triage_gc_lock = _triage_threading.Lock()
+_triage_gc_state = {"depth": 0, "restore": False}
+
+
+class _TriageGcHold:
+    """Automatic garbage collection held off for one read transaction.
+
+    A collection pass runs wherever an allocation crosses the collector's
+    threshold, so one can land between two statements of the transaction,
+    and a full pass over a large heap outlasts the 1 s idle-in-transaction
+    bound (measured: a 1.2 s pass inside a triage transaction in the test
+    process, which the server then ended). acquire() is called before the
+    first statement and release() when the COMMIT or the ROLLBACK attempt
+    returns. The collector's switch is process-wide, so the holds are
+    counted under a lock: overlapping requests nest, and the last release
+    restores the state the first acquire found. A hold is bounded: a timer
+    releases it _TRIAGE_GC_HOLD_MAX_S after acquire, so a transaction that
+    never returns cannot keep collection off. release() is idempotent. An
+    explicit gc.collect() is not held off; nothing in the transaction calls
+    one."""
+
+    def __init__(self):
+        self._held = False
+        self._timer = None
+
+    def acquire(self):
+        with _triage_gc_lock:
+            if _triage_gc_state["depth"] == 0:
+                _triage_gc_state["restore"] = _triage_gc.isenabled()
+                _triage_gc.disable()
+            _triage_gc_state["depth"] += 1
+            self._held = True
+        self._timer = asyncio.get_running_loop().call_later(_TRIAGE_GC_HOLD_MAX_S, self.release)
+
+    def release(self):
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+        with _triage_gc_lock:
+            if not self._held:
+                return
+            self._held = False
+            _triage_gc_state["depth"] -= 1
+            if _triage_gc_state["depth"] == 0 and _triage_gc_state["restore"]:
+                _triage_gc.enable()
+
+
 async def _triage_read_txn(db: AsyncSession, read, build):
     """The ONE read transaction of a quarantine triage request (C10).
 
@@ -53512,7 +53590,17 @@ async def _triage_read_txn(db: AsyncSession, read, build):
     `build(rows)` computes the response from the copied values inside it; the
     seal is reset through its token when build returns or the exception
     leaves. A read the deadline refused, or one the transaction's own bounds
-    ended, answers 503 (reopen the view); anything else is re-raised."""
+    ended, answers 503 (reopen the view); anything else is re-raised.
+
+    Before statement 1 the ORM mappers are configured (a no-op once they
+    are) and automatic garbage collection is held off (_TriageGcHold); the
+    hold is released when the COMMIT, or the ROLLBACK attempt, returns.
+    So neither the mappers' first configuration nor, while the hold lasts,
+    an automatic collection pass runs between two statements of the
+    transaction."""
+    _triage_configure_mappers()
+    hold = _TriageGcHold()
+    hold.acquire()
     try:
         await db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
         await db.execute(text(
@@ -53522,11 +53610,14 @@ async def _triage_read_txn(db: AsyncSession, read, build):
         h = _TriageReadHandle(db, time.monotonic())
         rows = await read(h)
         await db.commit()
+        hold.release()
     except BaseException as exc:
         try:
             await db.rollback()
         except Exception as rb:
             print(f"[TRIAGE] rollback after a failed read did not complete: {type(rb).__name__}: {rb}")
+        finally:
+            hold.release()
         with _triage_post_commit_seal("quarantine triage"):
             if isinstance(exc, _TriageReadBudgetSpent):
                 raise HTTPException(503, "the view's required reads could not start within "
@@ -53824,8 +53915,10 @@ async def admin_quarantine_triage_group(
     row count and then EVERY settled row with its per-player vectors, 200 per
     page, until a short page; each variant's keyed twin and the reviewed rows
     it may repeat; the steam-id map; each pending row's later-rated count,
-    oldest first, each inside its own SAVEPOINT. Everything the response
-    derives is computed after the COMMIT from those copied values. A read the
+    oldest first, each inside its own SAVEPOINT. The read keeps each
+    statement's rows as received; everything the response derives, the
+    per-row vectors, the keyed twins by room and the steam-id map included,
+    is computed after the COMMIT from those copied values. A read the
     deadline stopped is reported as not read -- a lobby-wide statement is made
     only over a complete read."""
     if mode not in ("ffa", "team"):
@@ -53838,9 +53931,9 @@ async def admin_quarantine_triage_group(
         pending = await h.read(_TRIAGE_SQL_V2_PENDING, {"m": mode, "g": gid, "lim": _TRIAGE_QUOTA + 1})
         grp = await h.read(_TRIAGE_SQL_V2_LOBBY if mode == "ffa" else _TRIAGE_SQL_V2_SERIES, {"g": gid})
         out = {"pending": pending, "group": grp[0] if grp else None,
-               "n_rows": None, "rows": [], "vectors": {}, "rows_complete": False,
-               "keyed": {}, "keyed_read": False, "reviewed": [], "reviewed_complete": False,
-               "steam": {}, "steam_read": False, "c1": {}, "budget_spent": False}
+               "n_rows": None, "rows": [], "vectors": [], "rows_complete": False,
+               "keyed": [], "keyed_read": False, "reviewed": [], "reviewed_complete": False,
+               "steam": [], "steam_read": False, "c1": {}, "budget_spent": False}
         try:
             if mode == "ffa":
                 out["n_rows"] = int((await h.read(_TRIAGE_SQL_V2_ROW_COUNT, {"g": gid}))[0]["n"])
@@ -53851,9 +53944,8 @@ async def admin_quarantine_triage_group(
                         "c_gn": cur[0] if cur else None, "c_id": str(cur[1]) if cur else None,
                         "lim": _TRIAGE_PT3_PAGE})
                     if page:
-                        vecs = await h.read(_TRIAGE_SQL_V2_VECTORS, {"ids": [str(s["id"]) for s in page]})
-                        for v in vecs:
-                            out["vectors"].setdefault(v["match_id"], []).append(v)
+                        out["vectors"].extend(await h.read(
+                            _TRIAGE_SQL_V2_VECTORS, {"ids": [str(s["id"]) for s in page]}))
                         out["rows"].extend(page)
                     if len(page) < _TRIAGE_PT3_PAGE:
                         out["rows_complete"] = True
@@ -53863,7 +53955,7 @@ async def admin_quarantine_triage_group(
                             if q["photon_room_id"] is None and q["room"] is not None})
             if rooms:
                 for k in await h.read(_TRIAGE_SQL_V2_KEYED_TWINS, {"m": mode, "rooms": rooms}):
-                    out["keyed"][k["photon_room_id"]] = k
+                    out["keyed"].append(k)
             out["keyed_read"] = True
             cur = None
             while rooms:
@@ -53876,17 +53968,8 @@ async def admin_quarantine_triage_group(
                     break
                 cur = (page[-1]["created_at"], page[-1]["id"])
             out["reviewed_complete"] = True
-            steams = set()
-            for q in pending:
-                try:
-                    for p in (_json.loads(q["payload"]).get("players") or []):
-                        if isinstance(p, dict) and p.get("steam_id"):
-                            steams.add(str(p["steam_id"]))
-                except Exception:
-                    pass
-            if steams:
-                for row in await h.read(_TRIAGE_SQL_V2_STEAM_MAP, {"sids": sorted(steams)}):
-                    out["steam"][row["steam_id"]] = row["id"]
+            if mode == "ffa" and pending:
+                out["steam"] = await h.read(_TRIAGE_SQL_V2_STEAM_MAP, {"ids": [str(q["id"]) for q in pending]})
             out["steam_read"] = True
             for q in pending:   # already oldest first
                 try:
@@ -53914,6 +53997,13 @@ async def admin_quarantine_triage_group(
 
 def _triage_group_view(mode: str, gid: str, r: dict) -> dict:
     """V2's response, from the detached reads of one group (C4: no session)."""
+    # The read kept each statement's rows as received; the three lookups the
+    # view reads are derived here, after the COMMIT.
+    vectors: dict = {}
+    for v in r["vectors"]:
+        vectors.setdefault(v["match_id"], []).append(v)
+    r = {**r, "vectors": vectors, "keyed": {k["photon_room_id"]: k for k in r["keyed"]},
+         "steam": {row["steam_id"]: row["id"] for row in r["steam"]}}
     pending = r["pending"]
     fam_of = lambda row: _triage_family(row["mode"], row["reason"], row["room_held"])
     fams: dict = {}
