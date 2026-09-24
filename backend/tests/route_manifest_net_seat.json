@@ -376,7 +376,7 @@
           ],
           "main",
           "submit_bug_report",
-          "d327ee9647acd3d18b0fe92f8ad018257c092945"
+          "860fcd1aa67ace0c998e98f741fa4fbc13f69c09"
         ],
         [
           "/api/v1/bug-reports/events/recent",
@@ -403,7 +403,7 @@
           ],
           "main",
           "get_bug_report",
-          "9ed51383d8430f996dfe5ecb575d911fb2d52605"
+          "c4c36bbaa61f36f89776910d3b5e7f2ba101a4bc"
         ],
         [
           "/api/v1/bug-reports/{report_id}/comment",
@@ -421,7 +421,7 @@
           ],
           "main",
           "download_bug_report_log",
-          "b5ea49bf6168428c24306b0567936031c88f29b2"
+          "b372d8fa74ec438e37060cf9bc7635f69483adba"
         ],
         [
           "/api/v1/bug-reports/{report_id}/status",
@@ -3299,7 +3299,7 @@
           ],
           "auto_logs",
           "upload_auto_log",
-          "a353a1d2e29ee91450ab39593af325ac7f225c40"
+          "96a8bd631bb9cca27d23b872c85965eac795fe0f"
         ],
         [
           "/api/v1/internal/logs/auto/prune",
@@ -3308,7 +3308,7 @@
           ],
           "auto_logs",
           "run_auto_log_prune",
-          "24fbd27c9672ebcce8223f8f9e58cae2c86a9148"
+          "e5c5bbb020dc0050a1c2bcf0b111c318a74e3b4e"
         ]
       ]
     }
@@ -3341,7 +3341,7 @@
       [
         "main",
         "lifespan",
-        "56cda581aa6f114730a8d4ef2148e27195726bfa"
+        "697edc84e729dbdf5ca0ca81047f04771575e9ba"
       ]
     ]
   },
