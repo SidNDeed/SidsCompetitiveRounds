@@ -235,6 +235,24 @@
           "9a5be64d99a8fef1330ce2ca0a0fdde122a94f3e"
         ],
         [
+          "/api/v1/admin/quarantine/triage",
+          [
+            "GET"
+          ],
+          "main",
+          "admin_quarantine_triage",
+          "unpinned"
+        ],
+        [
+          "/api/v1/admin/quarantine/triage/{mode}/{group_id}",
+          [
+            "GET"
+          ],
+          "main",
+          "admin_quarantine_triage_group",
+          "unpinned"
+        ],
+        [
           "/api/v1/admin/quarantine/{qid}/accept",
           [
             "POST"
@@ -548,6 +566,15 @@
           "main",
           "internal_linked_players",
           "f65ccbb237d88abf1b447c7d8e18f7b19b7b40d9"
+        ],
+        [
+          "/api/v1/internal/quarantine/digest",
+          [
+            "GET"
+          ],
+          "main",
+          "internal_quarantine_digest",
+          "unpinned"
         ],
         [
           "/api/v1/internal/recent-flags",
@@ -3657,6 +3684,9 @@
     "GET /api/v1/admin/quarantine -> main.admin_list_quarantine",
     "POST /api/v1/admin/quarantine/{qid}/discard -> main.admin_discard_quarantine",
     "POST /api/v1/admin/quarantine/{qid}/accept -> main.admin_accept_quarantine",
+    "GET /api/v1/admin/quarantine/triage -> main.admin_quarantine_triage",
+    "GET /api/v1/admin/quarantine/triage/{mode}/{group_id} -> main.admin_quarantine_triage_group",
+    "GET /api/v1/internal/quarantine/digest -> main.internal_quarantine_digest",
     "POST /api/v1/spectate/participant-attest -> main.spectate_participant_attest",
     "POST /api/v1/spectate/close -> main.spectate_close",
     "GET /api/v1/spectate/games -> main.spectate_games",
