@@ -4,7 +4,10 @@ Uses SQLAlchemy async with asyncpg for PostgreSQL.
 """
 
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 
 DATABASE_URL = os.getenv(
@@ -61,6 +64,52 @@ release_engine = create_async_engine(
 )
 
 release_session = async_sessionmaker(release_engine, class_=AsyncSession, expire_on_commit=False)
+
+
+# ── The post-COMMIT seal (quarantine triage, RJ-TRIAGE C9) ─────────────────
+# The quarantine triage routes (main.py, _triage_read_txn) read in ONE
+# READ ONLY transaction and then build their response from values copied out
+# of it. While this variable is set -- from the moment that transaction's
+# COMMIT or ROLLBACK has returned until the response is built -- the listener
+# below refuses any statement on EITHER engine before it is sent. That is the
+# request's own session (its next execute would begin a new transaction,
+# outside READ ONLY), a helper that opens its own session with async_session,
+# and the reserved pool. Only post_commit_seal sets the variable and only the
+# triage primitive calls it, so no other caller's behaviour changes.
+_post_commit_seal: ContextVar = ContextVar("scr_post_commit_seal", default=None)
+
+# How many statements the seal has refused in this process; the triage
+# controls assert it stays 0 on every route they run.
+post_commit_seal_stats = {"refused": 0}
+
+
+class PostCommitSealed(RuntimeError):
+    """A statement was issued after a triage read transaction had ended."""
+
+
+@contextmanager
+def post_commit_seal(owner: str):
+    """Seal both engines for the body of the with-block, then unseal through
+    the token, whether the body returns or raises."""
+    token = _post_commit_seal.set(owner)
+    try:
+        yield
+    finally:
+        _post_commit_seal.reset(token)
+
+
+def _refuse_sealed_statement(conn, cursor, statement, parameters, context, executemany):
+    owner = _post_commit_seal.get()
+    if owner is not None:
+        post_commit_seal_stats["refused"] += 1
+        first = (statement or "").split(None, 1)[:1]
+        raise PostCommitSealed(
+            f"{owner}: a statement ({first[0] if first else 'empty'}) was issued after "
+            "the read transaction ended; it was not sent")
+
+
+for _sealed_engine in (engine, release_engine):
+    event.listen(_sealed_engine.sync_engine, "before_cursor_execute", _refuse_sealed_statement)
 
 
 async def get_release_db():
