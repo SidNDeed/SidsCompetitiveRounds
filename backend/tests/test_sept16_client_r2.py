@@ -2205,14 +2205,16 @@ def test_the_dc_outcome_property_is_scoped_to_the_series_it_describes():
 # extract parses the id as a UUID, and parsing says nothing about generation.
 #
 # THE CHECK.  The key, the read and the publication are MODELLED FROM THE C#
-# TEXT at run time.  Each statement form the derivation recognises maps to one
-# Python operation, and a form it does not recognise REFUSES rather than
-# guessing, so the scenarios below run through what the source does now: a
-# tag that truncates at a length the derivation reads (`.Substring(0, N)`,
-# directly or behind a length test) reddens the scenario it breaks, and a read
-# whose key comparison is not ONE whole-key equality -- a prefix comparison
-# among them -- is a form the derivation refuses, which fails every scenario
-# closed.
+# TEXT at run time.  Tag is walked statement by statement: each form the
+# derivation recognises maps to one Python operation, and a form it does not
+# recognise REFUSES rather than guessing, so a tag that truncates at a length
+# the derivation reads (`.Substring(0, N)`, directly or behind a length test)
+# reddens the scenario it breaks.  OutcomeOf and PublishOutcome are walked
+# the same way, against the method's KNOWN SEQUENCE of statements (R10CL5,
+# below): every statement of each is accounted for, and any statement outside
+# that sequence -- a read whose key comparison is not ONE whole-key equality,
+# a prefix pre-comparison, a reassignment that shortens the key after Tag --
+# is refused, which fails every scenario closed.
 _R10_TAG_SIG = "private static string Tag(string seriesId)"
 _R10_OUTCOME_SIG = "internal static string OutcomeOf(PhotonPlayer actor, string seriesId)"
 _R10_PUBLISH_SIG = "internal static void PublishOutcome(string seriesId, string outcome)"
@@ -2316,34 +2318,164 @@ def _r10_outcome_tokens(ra):
     return toks
 
 
+# ── R10CL5 (round-10 cold lens): EVERY statement of the read and of the
+# publication is accounted for ───────────────────────────────────────────────
+#
+# WHAT WAS WRONG.  Round 10 walked Tag statement by statement, but judged
+# OutcomeOf and PublishOutcome by the PRESENCE of a few known statements.  A
+# statement placed after `string tag = Tag(seriesId);` that shortened the key
+# again -- in the read, in the publication, or as a prefix pre-comparison
+# before the whole-key equality -- left every presence check true, and the
+# scenarios, built from the whole-id Tag, stayed green while the C# compared
+# eight characters again.
+#
+# THE CHECK.  Each method's text is cut into statements and block braces by a
+# small C# statement reader (comments dropped; string and character literals
+# kept whole; a `;` or a brace outside parentheses ends a statement) and the
+# sequence must equal the method's KNOWN SEQUENCE below, statement for
+# statement, in order.  The freedoms are exactly three: the value is split at
+# its last colon or at its first (the model reads which), the four outcome
+# tokens may be listed in any order (the model reads them), and a LOG CALL may
+# stand anywhere -- a `Plugin.Log.Log*` statement with no assignment, no
+# increment, and no `ref` or `out` argument, which cannot change a local.
+# Any other statement is REFUSED, and a refusal fails every scenario closed.
+_R10CL_LOG = re.compile(r"^Plugin\.Log\.Log(?:Info|Warning|Error)\((.*)\)$")
+_R10CL_SPLIT = {"int i = s.LastIndexOf(':')": "last", "int i = s.IndexOf(':')": "first"}
+_R10CL_TOKENS = re.compile(
+    r'^return \(o == (\w+) \|\| o == (\w+) \|\| o == (\w+) \|\| o == (\w+)\) \? o : ""$')
+_R10CL_OUTCOME_SEQ = (
+    _R10_OUTCOME_SIG, "{", "try", "{",
+    "string tag = Tag(seriesId)",
+    'if (actor == null || tag.Length == 0) return ""',
+    "var props = actor.CustomProperties",
+    'if (props == null) return ""',
+    "object v",
+    'if (!props.TryGetValue(OutcomeProp, out v)) return ""',
+    "string s = v as string",
+    'if (string.IsNullOrEmpty(s)) return ""',
+    "<split>",
+    'if (i <= 0 || i + 1 >= s.Length) return ""',
+    'if (!string.Equals(s.Substring(0, i), tag, StringComparison.Ordinal)) return ""',
+    "string o = s.Substring(i + 1)",
+    "<tokens>",
+    "}", "catch", "{", 'return ""', "}", "}")
+_R10CL_PUBLISH_SEQ = (
+    _R10_PUBLISH_SIG, "{", "try", "{",
+    "string tag = Tag(seriesId)",
+    "if (tag.Length == 0 || string.IsNullOrEmpty(outcome)) return",
+    "var local = PhotonNetwork.LocalPlayer",
+    "if (local == null || !PhotonNetwork.InRoom) return",
+    'local.SetCustomProperties(new ExitGames.Client.Photon.Hashtable '
+    '{ { OutcomeProp, tag + ":" + outcome } })',
+    "}", "catch (Exception ex)", "{", "}", "}")
+
+
+def _r10cl_statements(body):
+    """[statement, or "{" / "}"] of one C# method's text: comments dropped,
+    string and character literals kept whole, whitespace collapsed, and a `;`
+    or a brace outside parentheses ending a statement."""
+    out, cur, i, n, paren = [], [], 0, len(body), 0
+    while i < n:
+        ch = body[i]
+        if body.startswith("//", i):
+            j = body.find(LF, i)
+            i = n if j < 0 else j
+            continue
+        if body.startswith("/*", i):
+            j = body.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        if ch in "\"'":
+            j = i + 1
+            while j < n and body[j] != ch:
+                j += 2 if body[j] == "\\" else 1
+            cur.append(body[i:j + 1])
+            i = j + 1
+            continue
+        if ch == "(":
+            paren += 1
+        elif ch == ")":
+            paren -= 1
+        if paren == 0 and ch in ";{}":
+            s = " ".join("".join(cur).split())
+            if s:
+                out.append(s)
+            if ch != ";":
+                out.append(ch)
+            cur = []
+            i += 1
+            continue
+        cur.append(ch)
+        i += 1
+    s = " ".join("".join(cur).split())
+    if s:
+        out.append(s)
+    return out
+
+
+def _r10cl_is_log_call(stmt):
+    """A log call that cannot change a local: no assignment outside a string
+    or a comparison, no increment or decrement, no `ref` or `out` argument."""
+    m = _R10CL_LOG.match(stmt)
+    if m is None:
+        return False
+    code = re.sub(r'"(?:[^"\\]|\\.)*"', '""', m.group(1))
+    code = re.sub(r"'(?:[^'\\]|\\.)*'", "''", code)
+    bare = re.sub(r"[=!<>]=|=>", " ", code)
+    return ("=" not in bare and "++" not in code and "--" not in code
+            and not re.search(r"\b(?:ref|out)\s", code))
+
+
+def _r10cl_walk(name, stmts, sequence):
+    """(slots, why): `stmts` walked against the KNOWN SEQUENCE, log calls set
+    aside.  Every statement must be the next one the sequence names; one that
+    is not is REFUSED, never skipped."""
+    slots, k, logs = {}, 0, 0
+    for s in stmts:
+        if _r10cl_is_log_call(s):
+            logs += 1
+            continue
+        want = sequence[k] if k < len(sequence) else None
+        if want == "<split>" and s in _R10CL_SPLIT:
+            slots["split"] = _R10CL_SPLIT[s]
+            k += 1
+            continue
+        if want == "<tokens>" and _R10CL_TOKENS.match(s):
+            slots["tokens"] = _R10CL_TOKENS.match(s).groups()
+            k += 1
+            continue
+        if want is not None and s == want:
+            k += 1
+            continue
+        return None, ("a statement %s carries that this derivation does not "
+                      "know: %s" % (name, s))
+    if k != len(sequence):
+        return None, "%s lacks a statement this derivation requires: %s" % (
+            name, sequence[k])
+    slots["statements"] = len(stmts) - logs
+    slots["logs"] = logs
+    return slots, ""
+
+
 def _r10_outcome_model(ra):
-    """(outcome_of(prop, series), why) derived from OutcomeOf's text and Tag's."""
+    """(outcome_of(prop, series), why) derived from OutcomeOf's text and Tag's:
+    every statement of OutcomeOf accounted for (R10CL5)."""
     tag, why = _r10_tag_model(ra)
     if tag is None:
         return None, why
     body = _method_body(ra, _R10_OUTCOME_SIG)
     if not body:
         return None, "OutcomeOf's own text could not be delimited"
-    code = _r10_code_only(body)
-    if code.count("string tag = Tag(seriesId);") != 1:
-        return None, "OutcomeOf does not take its key from Tag exactly once"
-    last = code.count("int i = s.LastIndexOf(':');")
-    first = code.count("int i = s.IndexOf(':');")
-    if last + first != 1:
-        return None, "OutcomeOf's split of the value is not one known form"
-    if code.count('if (i <= 0 || i + 1 >= s.Length) return "";') != 1:
-        return None, "OutcomeOf's empty-part guard is not one known form"
-    exact = code.count('if (!string.Equals(s.Substring(0, i), tag, '
-                       'StringComparison.Ordinal)) return "";')
-    if exact != 1 or "StartsWith" in code or "Substring(0, i), tag.Substring" in code:
-        return None, "OutcomeOf's key comparison is not ONE whole-key equality"
+    slots, why = _r10cl_walk("OutcomeOf", _r10cl_statements(body), _R10CL_OUTCOME_SEQ)
+    if slots is None:
+        return None, why
     toks = _r10_outcome_tokens(ra)
     if toks is None:
         return None, "an outcome token constant could not be read"
-    if ("OutcomeSent || o == OutcomeAnswered" not in code
-            or "o == OutcomeFailed || o == OutcomeUnknown" not in code):
+    if sorted(slots["tokens"]) != sorted(_R10_OUTCOME_CONSTS):
         return None, "OutcomeOf's token set is not the four known tokens"
     allowed = set(toks.values())
+    last = slots["split"] == "last"
 
     def outcome_of(prop, series):
         t = tag(series)
@@ -2359,17 +2491,18 @@ def _r10_outcome_model(ra):
 
 
 def _r10_publish_model(ra):
-    """(publish(series, outcome) -> the value written, why)."""
+    """(publish(series, outcome) -> the value written, why): every statement
+    of PublishOutcome accounted for (R10CL5)."""
     tag, why = _r10_tag_model(ra)
     if tag is None:
         return None, why
     body = _method_body(ra, _R10_PUBLISH_SIG)
     if not body:
         return None, "PublishOutcome's own text could not be delimited"
-    code = _r10_code_only(body)
-    if (code.count("string tag = Tag(seriesId);") != 1
-            or code.count('{ OutcomeProp, tag + ":" + outcome }') != 1):
-        return None, "PublishOutcome does not write tag:outcome from Tag exactly once"
+    slots, why = _r10cl_walk("PublishOutcome", _r10cl_statements(body),
+                             _R10CL_PUBLISH_SEQ)
+    if slots is None:
+        return None, why
     return (lambda series, outcome: (tag(series) + ":" + outcome)
             if tag(series) else None), ""
 
@@ -2440,6 +2573,102 @@ def test_r10_m1b_a_watch_armed_for_one_series_never_reads_another_series_value()
         # and read back under A, the value is A's own
         assert outcome_of(publish(a, "no"), a) == "no"
         assert fallback(outcome_of(publish(a, "no"), a), False) == "post"
+
+
+# The statements the round-10 cold lens planted, each AFTER the whole-id Tag
+# and each shortening the key again (R10CL5).  They are planted in memory
+# here; the controls runner plants the same forms in the tree.
+_R10CL_RETRUNCATE = "tag = tag.Length > 8 ? tag.Substring(0, 8) : tag;"
+_R10CL_PRECOMPARE = ("if (string.CompareOrdinal(s, 0, tag, 0, 8) == 0) "
+                     "{ s = tag + s.Substring(i); i = tag.Length; }")
+
+
+def _r10cl_presence_only(ra):
+    """The round-10 presence reading this check replaced, kept ONLY to show
+    that it accepted every planted form: True when each statement it looked
+    for is present and the two spellings it excluded are absent."""
+    ob = _r10_code_only(_method_body(ra, _R10_OUTCOME_SIG))
+    pb = _r10_code_only(_method_body(ra, _R10_PUBLISH_SIG))
+    return (ob.count("string tag = Tag(seriesId);") == 1
+            and ob.count("int i = s.LastIndexOf(':');") == 1
+            and ob.count('if (!string.Equals(s.Substring(0, i), tag, '
+                         'StringComparison.Ordinal)) return "";') == 1
+            and "StartsWith" not in ob
+            and "Substring(0, i), tag.Substring" not in ob
+            and pb.count("string tag = Tag(seriesId);") == 1
+            and pb.count('{ OutcomeProp, tag + ":" + outcome }') == 1)
+
+
+def test_r10cl5_every_statement_of_the_read_and_the_publication_is_accounted_for():
+    """R10CL5: the read and the publication are derived statement by
+    statement.  A statement that shortens the key after Tag -- in the read, in
+    the publication, or as a prefix pre-comparison before the whole-key
+    equality -- is REFUSED, and the presence reading it replaced accepted each
+    one."""
+    ra = _src("RoomActors.cs")
+    out_at = ra.index(_R10_OUTCOME_SIG)
+    pub_at = ra.index(_R10_PUBLISH_SIG)
+    tag_line = "string tag = Tag(seriesId);"
+    cmp_line = ('if (!string.Equals(s.Substring(0, i), tag, '
+                'StringComparison.Ordinal)) return "";')
+
+    def after(src, at, anchor, planted):
+        """`src` with `planted` inserted after the first `anchor` from `at`."""
+        j = src.index(anchor, at) + len(anchor)
+        return src[:j] + " " + planted + src[j:]
+
+    def before(src, at, anchor, planted):
+        j = src.index(anchor, at)
+        return src[:j] + planted + " " + src[j:]
+
+    planted = {
+        "the key shortened again in the read": after(
+            ra, out_at, tag_line, _R10CL_RETRUNCATE),
+        "the key shortened again in the publication": after(
+            ra, pub_at, tag_line, _R10CL_RETRUNCATE),
+        "a prefix pre-comparison before the whole-key equality": before(
+            ra, out_at, cmp_line, _R10CL_PRECOMPARE),
+    }
+    for label, src in planted.items():
+        assert src != ra, label + ": the plant did not land"
+        o, why_o = _r10_outcome_model(src)
+        p, why_p = _r10_publish_model(src)
+        refused = [w for w in (why_o, why_p) if w]
+        assert (o is None or p is None) and refused, (
+            label + ": the derivation ACCEPTED a statement that shortens the key")
+        assert all("does not know" in w for w in refused), (label, refused)
+        assert _r10cl_presence_only(src), (
+            label + ": the removed presence reading was not blind here")
+
+    # TWINS, in the test: a comment and a blank line inside the read, extra
+    # whitespace inside the publication's value, and a reworded log message
+    # change no statement, and are accepted.
+    twins = {
+        "a comment beside the key": after(
+            ra, out_at, tag_line, "// the key is the whole id" + LF),
+        "whitespace inside the published value": ra.replace(
+            '{ OutcomeProp, tag + ":" + outcome }',
+            '{ OutcomeProp,  tag + ":"  +  outcome }', 1),
+        "a reworded log line": ra.replace(
+            "read their next move from it", "read their next step from it", 1),
+    }
+    for label, src in twins.items():
+        assert src != ra, label + ": the twin did not land"
+        o, why_o = _r10_outcome_model(src)
+        p, why_p = _r10_publish_model(src)
+        assert o is not None and p is not None, (label, why_o, why_p)
+
+    oslots, _w = _r10cl_walk("OutcomeOf", _r10cl_statements(
+        _method_body(ra, _R10_OUTCOME_SIG)), _R10CL_OUTCOME_SEQ)
+    pslots, _w = _r10cl_walk("PublishOutcome", _r10cl_statements(
+        _method_body(ra, _R10_PUBLISH_SIG)), _R10CL_PUBLISH_SEQ)
+    assert oslots is not None and pslots is not None
+    print("R10CL5 STATEMENTS: OutcomeOf %d accounted (%d log call(s)), "
+          "PublishOutcome %d accounted (%d log call(s)); planted forms refused "
+          "%d/%d, and the removed presence reading accepted each; twins "
+          "accepted %d/%d" % (oslots["statements"], oslots["logs"],
+                              pslots["statements"], pslots["logs"],
+                              len(planted), len(planted), len(twins), len(twins)))
 
 
 def test_the_dc_fallback_watch_dies_with_the_room():
