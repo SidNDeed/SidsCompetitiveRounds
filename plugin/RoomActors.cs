@@ -1085,15 +1085,25 @@ namespace CompetitiveRounds
         private static string _watchOutcome = "";
         private static bool _watchGone, _watchSettled, _watchHeldLogged, _watchWaitLogged;
 
-        /// <summary>The series tag that scopes an outcome value. A `cr_dcr`
+        /// <summary>The series tag that scopes an outcome value: the WHOLE
+        /// series id, trimmed and lower-cased, never a prefix of it. A `cr_dcr`
         /// written for the PREVIOUS series must never read as an answer about
         /// this one — the property is retained on the actor and a sitting can run
-        /// several series.</summary>
+        /// several series.
+        ///
+        /// <para>The tag used to be the first eight characters, so two distinct
+        /// series ids sharing those eight carried the same tag: a retained `ok`
+        /// from the earlier series stood this watch down, and a retained `no`
+        /// fired it, about a series that value never described. Nothing the
+        /// server does makes a shared prefix impossible — its route parses the
+        /// id as a UUID, and parsing says nothing about how the id was
+        /// generated — so the whole id is the key. Two ids give the same tag
+        /// only when they differ in letter case or surrounding whitespace, which
+        /// is the same id.</para></summary>
         private static string Tag(string seriesId)
         {
             if (string.IsNullOrEmpty(seriesId)) return "";
-            string s = seriesId.Trim().ToLowerInvariant();
-            return s.Length <= 8 ? s : s.Substring(0, 8);
+            return seriesId.Trim().ToLowerInvariant();
         }
 
         /// <summary>Elected seat only: announce where its own report has got to.
@@ -1125,7 +1135,12 @@ namespace CompetitiveRounds
 
         /// <summary>This actor's announced outcome FOR THIS SERIES, or "" when it
         /// has announced nothing about it. Anything unparseable, or tagged with
-        /// another series, is "" — never a terminal answer.</summary>
+        /// another series, is "" — never a terminal answer. The tag compared is
+        /// the whole series id (see <see cref="Tag"/>), so a value published for
+        /// a different series that only shares a prefix with this one is "" as
+        /// well. The value is split at its LAST colon: no outcome token carries
+        /// one, so everything before it is the tag exactly as it was
+        /// published.</summary>
         internal static string OutcomeOf(PhotonPlayer actor, string seriesId)
         {
             try
@@ -1138,7 +1153,7 @@ namespace CompetitiveRounds
                 if (!props.TryGetValue(OutcomeProp, out v)) return "";
                 string s = v as string;
                 if (string.IsNullOrEmpty(s)) return "";
-                int i = s.IndexOf(':');
+                int i = s.LastIndexOf(':');
                 if (i <= 0 || i + 1 >= s.Length) return "";
                 if (!string.Equals(s.Substring(0, i), tag, StringComparison.Ordinal)) return "";
                 string o = s.Substring(i + 1);

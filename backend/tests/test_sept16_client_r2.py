@@ -2164,22 +2164,23 @@ def test_the_dc_outcome_property_is_scoped_to_the_series_it_describes():
     assert "OutcomeSent || o == OutcomeAnswered" in body
     assert "o == OutcomeFailed || o == OutcomeUnknown" in body
 
-    # the model of the same rule, including the three ways it must answer ""
-    def outcome_of(prop, series):
-        tag = series[:8].lower()
-        if not prop or ":" not in prop:
-            return ""
-        head, _, rest = prop.partition(":")
-        if head != tag or rest not in ("send", "ok", "no", "unk"):
-            return ""
-        return rest
-
-    assert outcome_of("abcdef12:ok", "ABCDEF12-1111") == "ok"
-    assert outcome_of("99999999:ok", "abcdef12-1111") == ""      # a previous series
-    assert outcome_of("abcdef12:maybe", "abcdef12-1111") == ""   # unrecognised
-    assert outcome_of("", "abcdef12-1111") == ""
+    # the model of the same rule, including the three ways it must answer "".
+    # It is DERIVED from the source (_r10_outcome_model), never typed here: the
+    # hand-written model this replaced keyed on the first eight characters of
+    # the series id and so certified the truncation it should have rejected
+    # (per the round-9 review, R9-M1).
+    outcome_of, why = _r10_outcome_model(ra)
+    assert outcome_of is not None, why
+    publish, why = _r10_publish_model(ra)
+    assert publish is not None, why
+    series = "abcdef12-1111-4111-8111-111111111111"
+    previous = "99999999-1111-4111-8111-111111111111"
+    assert outcome_of(publish(series, "ok"), series.upper()) == "ok"
+    assert outcome_of(publish(previous, "ok"), series) == ""    # a previous series
+    assert outcome_of(publish(series, "maybe"), series) == ""   # unrecognised
+    assert outcome_of("", series) == ""
     # and the watch treats "" as NOT terminal while the seat is still present
-    assert fallback(outcome_of("99999999:no", "abcdef12"), False) == "nothing"
+    assert fallback(outcome_of(publish(previous, "no"), series), False) == "nothing"
 
     def claim(s):
         b = _method_body(s, "internal static string OutcomeOf(PhotonPlayer actor, string seriesId)")
@@ -2190,6 +2191,255 @@ def test_the_dc_outcome_property_is_scoped_to_the_series_it_describes():
         _mutate(ra, "if (!string.Equals(s.Substring(0, i), tag, StringComparison.Ordinal)) return " + '""' + ";",
                 "// any series' answer will do", "outcome scope"),
         "DC outcome series scope")
+
+
+# ── R9-M1 (round 10): the cr_dcr key is the WHOLE series identity ──────────
+#
+# WHAT WAS WRONG.  Tag() kept the first eight characters of the normalized
+# series id and OutcomeOf() compared only that, so two distinct ids sharing
+# eight characters had one key: a value retained on the elected seat from the
+# earlier series answered for the later one -- an old `ok` stood the watch down
+# and an old `no` fired it.  The model in the test above keyed the same way
+# (`series[:8].lower()`), so it certified the truncation instead of rejecting
+# it.  Nothing on the server lane makes a shared prefix impossible: the frozen
+# extract parses the id as a UUID, and parsing says nothing about generation.
+#
+# THE CHECK.  The key, the read and the publication are MODELLED FROM THE C#
+# TEXT at run time.  Each statement form the derivation recognises maps to one
+# Python operation, and a form it does not recognise REFUSES rather than
+# guessing, so the scenarios below run through what the source does now: a
+# tag that truncates at a length the derivation reads (`.Substring(0, N)`,
+# directly or behind a length test) reddens the scenario it breaks, and a read
+# whose key comparison is not ONE whole-key equality -- a prefix comparison
+# among them -- is a form the derivation refuses, which fails every scenario
+# closed.
+_R10_TAG_SIG = "private static string Tag(string seriesId)"
+_R10_OUTCOME_SIG = "internal static string OutcomeOf(PhotonPlayer actor, string seriesId)"
+_R10_PUBLISH_SIG = "internal static void PublishOutcome(string seriesId, string outcome)"
+_R10_OUTCOME_CONSTS = ("OutcomeSent", "OutcomeAnswered", "OutcomeFailed",
+                       "OutcomeUnknown")
+_R10_CHAIN_STEP = re.compile(
+    r"\.(?:(Trim)\(\)|(ToLowerInvariant)\(\)|(ToUpperInvariant)\(\)"
+    r"|Substring\(0,\s*(\d+)\)"
+    r'|Replace\("((?:[^"\\]|\\.)*)",\s*"((?:[^"\\]|\\.)*)"\))')
+
+
+def _r10_code_only(body):
+    """A method's text with its // comments removed, one statement per `;`."""
+    lines = [ln.split("//", 1)[0] for ln in body.split(LF)]
+    return " ".join(" ".join(lines).split())
+
+
+def _r10_chain(expr, env):
+    """A Python function for `<name>(.step)*`, or (None, why)."""
+    m = re.match(r"^([A-Za-z_]\w*)", expr)
+    if m is None or m.group(1) not in env:
+        return None, "the chain does not start at a known value: " + expr
+    base = env[m.group(1)]
+    steps, pos = [], m.end()
+    while pos < len(expr):
+        s = _R10_CHAIN_STEP.match(expr, pos)
+        if s is None:
+            return None, "an unrecognised step in: " + expr
+        steps.append(s.groups())
+        pos = s.end()
+
+    def run(v):
+        v = base(v)
+        for trim, low, up, n, old, new in steps:
+            if trim:
+                v = v.strip()
+            elif low:
+                v = v.lower()
+            elif up:
+                v = v.upper()
+            elif n is not None:
+                v = v[:int(n)]
+            else:
+                v = v.replace(old, new)
+        return v
+    return run, ""
+
+
+def _r10_tag_model(ra):
+    """(tag function, why) derived from Tag's own text; (None, why) when any
+    statement in it is not a form this derivation knows."""
+    body = _method_body(ra, _R10_TAG_SIG)
+    if not body:
+        return None, "Tag's own text could not be delimited"
+    code = _r10_code_only(body)
+    inner = code[code.find("{") + 1:code.rfind("}")]
+    env = {"seriesId": lambda v: v}
+    guard = False
+    result = None
+    for stmt in [x.strip() for x in inner.split(";") if x.strip()]:
+        if stmt == 'if (string.IsNullOrEmpty(seriesId)) return ""':
+            guard = True
+            continue
+        m = re.match(r"^string\s+([A-Za-z_]\w*)\s*=\s*(.+)$", stmt)
+        if m:
+            fn, why = _r10_chain(m.group(2).strip(), env)
+            if fn is None:
+                return None, why
+            env[m.group(1)] = fn
+            continue
+        m = re.match(r"^return\s+([A-Za-z_]\w*)\.Length\s*<=\s*(\d+)\s*\?\s*"
+                     r"([A-Za-z_]\w*)\s*:\s*(.+)$", stmt)
+        if m and m.group(1) == m.group(3) and m.group(1) in env:
+            fn, why = _r10_chain(m.group(4).strip(), env)
+            if fn is None:
+                return None, why
+            keep, cap, name = env[m.group(1)], int(m.group(2)), m.group(1)
+            result = (lambda v, keep=keep, cap=cap, fn=fn:
+                      keep(v) if len(keep(v)) <= cap else fn(v))
+            continue
+        m = re.match(r"^return\s+(.+)$", stmt)
+        if m and result is None:
+            fn, why = _r10_chain(m.group(1).strip(), env)
+            if fn is None:
+                return None, why
+            result = fn
+            continue
+        return None, "a statement Tag carries that this derivation does not know: " + stmt
+    if not guard or result is None:
+        return None, "Tag lacks its empty-id guard or its return"
+    return (lambda v, result=result: "" if not v else result(v)), ""
+
+
+def _r10_outcome_tokens(ra):
+    toks = {}
+    for name in _R10_OUTCOME_CONSTS:
+        m = re.search(r'internal const string ' + name + r' = "([^"]*)";', ra)
+        if m is None:
+            return None
+        toks[name] = m.group(1)
+    return toks
+
+
+def _r10_outcome_model(ra):
+    """(outcome_of(prop, series), why) derived from OutcomeOf's text and Tag's."""
+    tag, why = _r10_tag_model(ra)
+    if tag is None:
+        return None, why
+    body = _method_body(ra, _R10_OUTCOME_SIG)
+    if not body:
+        return None, "OutcomeOf's own text could not be delimited"
+    code = _r10_code_only(body)
+    if code.count("string tag = Tag(seriesId);") != 1:
+        return None, "OutcomeOf does not take its key from Tag exactly once"
+    last = code.count("int i = s.LastIndexOf(':');")
+    first = code.count("int i = s.IndexOf(':');")
+    if last + first != 1:
+        return None, "OutcomeOf's split of the value is not one known form"
+    if code.count('if (i <= 0 || i + 1 >= s.Length) return "";') != 1:
+        return None, "OutcomeOf's empty-part guard is not one known form"
+    exact = code.count('if (!string.Equals(s.Substring(0, i), tag, '
+                       'StringComparison.Ordinal)) return "";')
+    if exact != 1 or "StartsWith" in code or "Substring(0, i), tag.Substring" in code:
+        return None, "OutcomeOf's key comparison is not ONE whole-key equality"
+    toks = _r10_outcome_tokens(ra)
+    if toks is None:
+        return None, "an outcome token constant could not be read"
+    if ("OutcomeSent || o == OutcomeAnswered" not in code
+            or "o == OutcomeFailed || o == OutcomeUnknown" not in code):
+        return None, "OutcomeOf's token set is not the four known tokens"
+    allowed = set(toks.values())
+
+    def outcome_of(prop, series):
+        t = tag(series)
+        if not prop or not t:
+            return ""
+        i = prop.rfind(":") if last else prop.find(":")
+        if i <= 0 or i + 1 >= len(prop):
+            return ""
+        if prop[:i] != t:
+            return ""
+        return prop[i + 1:] if prop[i + 1:] in allowed else ""
+    return outcome_of, ""
+
+
+def _r10_publish_model(ra):
+    """(publish(series, outcome) -> the value written, why)."""
+    tag, why = _r10_tag_model(ra)
+    if tag is None:
+        return None, why
+    body = _method_body(ra, _R10_PUBLISH_SIG)
+    if not body:
+        return None, "PublishOutcome's own text could not be delimited"
+    code = _r10_code_only(body)
+    if (code.count("string tag = Tag(seriesId);") != 1
+            or code.count('{ OutcomeProp, tag + ":" + outcome }') != 1):
+        return None, "PublishOutcome does not write tag:outcome from Tag exactly once"
+    return (lambda series, outcome: (tag(series) + ":" + outcome)
+            if tag(series) else None), ""
+
+
+# Two VALID, DISTINCT series ids per pair, sharing a prefix of the stated
+# length -- eight is the length the removed truncation kept; the longer ones
+# make a truncation at ANY length red, not only at eight.
+_R10_PREFIX_PAIRS = (
+    ("3f2a9c1e-0b6d-4e5f-8a7b-1c2d3e4f5a60", "3f2a9c1e-9d8c-4b7a-9f6e-5d4c3b2a1f09"),
+    ("3f2a9c1e-0b6d-4e5f-8a7b-1c2d3e4f5a60", "3f2a9c1e-0b6d-4e5f-8a7b-1c2d3e4f5a61"),
+    ("0000000000000000-aaaa", "0000000000000000-bbbb"),
+)
+
+
+def _r10_m1_models():
+    ra = _src("RoomActors.cs")
+    tag, why = _r10_tag_model(ra)
+    assert tag is not None, why
+    outcome_of, why = _r10_outcome_model(ra)
+    assert outcome_of is not None, why
+    publish, why = _r10_publish_model(ra)
+    assert publish is not None, why
+    # THE OPERATION, counted inside each FUNCTION span, never file-wide: the
+    # key is taken from Tag once in each user.  Tag's own text is judged by
+    # the scenarios that run the model derived from it, not by a spelling.
+    assert _method_body(ra, _R10_OUTCOME_SIG).count("Tag(seriesId)") == 1
+    assert _method_body(ra, _R10_PUBLISH_SIG).count("Tag(seriesId)") == 1
+    return tag, outcome_of, publish
+
+
+def test_r10_m1a_two_series_sharing_a_prefix_keep_distinct_keys():
+    """R9-M1, control a: two distinct series ids sharing a prefix, published
+    in sequence on the elected seat, stay two keys -- neither series reads the
+    other's value, and the later value is read only under its own series."""
+    tag, outcome_of, publish = _r10_m1_models()
+    for a, b in _R10_PREFIX_PAIRS:
+        assert a != b and a[:8] == b[:8]
+        assert tag(a) != tag(b), (
+            "two distinct series ids sharing a prefix have ONE key: %r" % tag(a))
+        prop = publish(a, "ok")                   # series A's answer
+        assert outcome_of(prop, a) == "ok"
+        assert outcome_of(prop, b) == "", (
+            "series B read series A's retained 'ok' as its own answer")
+        prop = publish(b, "no")                   # then series B's, in sequence
+        assert outcome_of(prop, b) == "no"
+        assert outcome_of(prop, a) == "", (
+            "series A read series B's 'no' as its own answer")
+
+    # TWIN, in the test: the SAME id in another letter case or with surrounding
+    # whitespace is the same series and keeps one key.
+    a = _R10_PREFIX_PAIRS[0][0]
+    assert tag(a) == tag(a.upper()) == tag("  " + a + " ")
+    assert outcome_of(publish(a.upper(), "ok"), a) == "ok"
+
+
+def test_r10_m1b_a_watch_armed_for_one_series_never_reads_another_series_value():
+    """R9-M1, control b: the elected seat still carries the value it published
+    for series A when the watch arms for series B, which shares A's prefix.
+    Arming latches OutcomeOf(elected, B), so B must read NOTHING -- a stale
+    `ok` would stand the watch down and a stale `no` would fire it."""
+    tag, outcome_of, publish = _r10_m1_models()
+    for a, b in _R10_PREFIX_PAIRS:
+        for stale in ("ok", "no", "unk", "send"):
+            latched = outcome_of(publish(a, stale), b)   # arm under B
+            assert latched == "", (
+                "armed for series B, the watch latched series A's %r" % stale)
+            assert fallback(latched, False) == "nothing"
+        # and read back under A, the value is A's own
+        assert outcome_of(publish(a, "no"), a) == "no"
+        assert fallback(outcome_of(publish(a, "no"), a), False) == "post"
 
 
 def test_the_dc_fallback_watch_dies_with_the_room():
