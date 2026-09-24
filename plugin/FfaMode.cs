@@ -388,50 +388,24 @@ namespace CompetitiveRounds
             return -1;
         }
 
-        /// <summary>Re-advertise this seat's witness under the game number it
-        /// holds RIGHT NOW. The witness is published once per game, in the same
-        /// op as the card clear (GameStateWatcher's FFA match-start hook), and
-        /// that is still the only site that publishes it FIRST. This is the
-        /// re-stamp: a drift adoption moves gameNumber forward mid-phase, and
-        /// without it the prop keeps advertising the game the seat entered the
-        /// phase under. The election reads `witness &gt;= GameNumber`, so every
-        /// adopted seat would fail its own witness test — and when they have
-        /// all adopted, the electorate is empty and the election falls back to
-        /// presence, which is the exact hole the witness exists to close.
-        ///
-        /// Reads gameNumber live rather than taking it as a parameter: the
-        /// adoption sites assign gameNumber and then call this, so a parameter
-        /// would be a second copy of the value with nothing forcing it to
-        /// agree.</summary>
-        internal static void RepublishGameWitness(string why)
-        {
-            try
-            {
-                if (gameNumber < 0 || !PhotonNetwork.InRoom) return;
-                var h = new ExitGames.Client.Photon.Hashtable();
-                h[PropGameWitness] = gameNumber;
-                PhotonNetwork.LocalPlayer?.SetCustomProperties(h);
-                Plugin.Log.LogInfo($"[FFA] witness re-published {PropGameWitness}={gameNumber} ({why})");
-            }
-            catch (Exception ex)
-            {
-                // Same failure direction as the first publish: this seat drops
-                // out of the witness electorate, which the election's fallback
-                // covers. Logged because it is what to look for in a sitting
-                // that reports witness-fallback after a drift line.
-                Plugin.Log.LogWarning($"[FFA] witness re-publish failed ({why}): {ex.Message}");
-            }
-        }
+        // RJ-DRIFT change 10: the witness has ONE in-room writer, the start
+        // edge (GameStateWatcher's FFA match-start hook), which publishes this
+        // seat's room game (N4). The old mid-phase re-stamp is gone: it
+        // re-published the local counter after a drift adoption, and the
+        // election now compares a witness with the frozen room number (N5),
+        // not with a counter, so there is nothing for a re-stamp to repair.
 
         /// <summary>The game number the HOST last published in the room's
         /// pick-cycle property, or -1 when it is absent or unreadable.
         ///
         /// This is the one game number every seat in the room can read the
-        /// same value of. Each seat's own `GameNumber` is a local counter that
-        /// drift adoption moves independently, so two seats can hold different
-        /// numbers for the same game — which is fine for anything local and
-        /// wrong for anything that has to MATCH across seats. The report id is
-        /// the second kind: see FfaReportRules.ReportRoomId.</summary>
+        /// same value of. Each seat's own `GameNumber` is the pick protocol's
+        /// LOCAL expectation, which drift adoption moves; under the drift gate
+        /// G no consumer that must MATCH across seats reads it (RJ-DRIFT N7,
+        /// N12, N13), and with G off only the pick expectation and the card
+        /// and spawn seeds do, exactly as before. The report id is keyed from
+        /// the room's frozen number instead: see FfaReportRules.ReportRoomId
+        /// and FreezeReportGameNumber below.</summary>
         internal static int PublishedGameNumber()
         {
             try
@@ -469,7 +443,7 @@ namespace CompetitiveRounds
         /// direction is a second settlement of a game that already paid out.
         /// The integrity bar decides it — a wrong number must never gain
         /// settlement power.</summary>
-        internal static int ReportGameSnapshot { get { return _reportGame.Frozen; } }
+        internal static int ReportGameSnapshot { get { return _reportGame.Frozen(PhotonNetwork.CurrentRoom); } }
 
         /// <summary>The snapshot itself lives in FfaReportRules, where the
         /// client-rules harness RUNS it: holding it as a bare int here left
@@ -483,19 +457,375 @@ namespace CompetitiveRounds
         /// Returns what is held so the caller logs the value that will be
         /// keyed — which, if this ever fires twice in one game, is the FIRST
         /// one (see GameKeySnapshot: the later call is by definition past the
-        /// edge, and the host may have rolled the property by then).</summary>
+        /// edge, and the host may have rolled the property by then).
+        ///
+        /// RJ-DRIFT N1 (change 4). The value frozen is F: the CANDIDATE (this
+        /// seat's own confirmed cr_ffa_cyc write as master while its ticket is
+        /// valid, else the property read back) when HELD accepts it, else
+        /// none. HELD accepts a candidate that the ending master or a present
+        /// advertising fighter holds as its room game; it never supplies a
+        /// number. The candidate is stored with F under the same arm and the
+        /// same first-write rule, so the carry at the edge never re-reads the
+        /// property (N2). Ungated.</summary>
         internal static int FreezeReportGameNumber()
         {
-            return _reportGame.Freeze(PublishedGameNumber());
+            var room = PhotonNetwork.CurrentRoom;
+            int cand = CandidateNow(out _freezeByTicket);
+            bool held = HeldNow(cand, out _freezeHeldVerdict);
+            int f = held ? cand : FfaNumberingRules.NoGame;
+            return _reportGame.Freeze(f, cand, room);
         }
 
         /// <summary>Clear the snapshot at the START of a game, so game N's
         /// number can never key game N+1. The key is composed synchronously at
         /// game over, so nothing legitimate reads it after this point. This is
-        /// also what re-arms the write-once freeze for the next game.</summary>
+        /// also what re-arms the write-once freeze for the next game.
+        ///
+        /// RJ-DRIFT N0 (change 14): the clear also ARMS the snapshot in the
+        /// current Room object. A seat with no start edge in the Room object
+        /// it is in (a mid-game entrant, a seat back from a drop, a fresh
+        /// process) freezes nothing and cannot file.</summary>
         internal static void ClearReportGameNumber()
         {
-            _reportGame.Clear();
+            _reportGame.Clear(PhotonNetwork.CurrentRoom);
+        }
+
+        // ── RJ-DRIFT: the room-derived game number (design V4 §2, §4) ──
+        //
+        // gameNumber stays the pick protocol's LOCAL expectation. The numbers
+        // every seat must agree on come from the state below. It is derived
+        // from the room (the host's cr_ffa_cyc write, the witnesses, the
+        // adverts) and bound to the Room OBJECT it was derived in: PUN makes a
+        // fresh Room object per entry, so a value bound to one entry is void in
+        // the next, even under the same room name. The rules are the pure
+        // functions in FfaNumberingRules, which the client-rules harness runs.
+
+        /// <summary>N10: the local game sequence. The old counter's lifecycle
+        /// (0 at declaration, reset on room leave and on a Room-object change,
+        /// +1 at every start edge), never re-anchored and never adopted: the
+        /// leaver stamp and the report body compare against it.</summary>
+        private static int localGameSeq = 0;
+        internal static int LocalGameSeq => localGameSeq;
+
+        /// <summary>N3: this seat's room game (RG) and the Room object of the
+        /// start that set it.</summary>
+        private static int roomGame = FfaNumberingRules.NoGame;
+        private static object roomGameRoom;
+        /// <summary>Whether this seat held an RG at this game's start. The froze
+        /// log line only.</summary>
+        private static bool heldRoomGameAtStart;
+
+        /// <summary>N2: the next game's number, decided at this game's edge and
+        /// bound to the Room object the edge ran in.</summary>
+        private static int carry = FfaNumberingRules.NoGame;
+        private static object carryRoom;
+
+        /// <summary>The Room object of this seat's previous start, for N3's
+        /// continuation and first-start tests. Cleared on room leave.</summary>
+        private static object startedInRoom;
+
+        /// <summary>N14: the Room object of this seat's last start, kept beside
+        /// lastGameRoomName. Not cleared on room leave, so a start in another
+        /// Room object is recognised whichever teardown path ran.</summary>
+        private static object lastGameRoom;
+
+        /// <summary>N1's ticket: this seat's own confirmed cr_ffa_cyc write as
+        /// master. Valid only in the Room object it was armed in, after this
+        /// seat's last start edge, with no master switch since.</summary>
+        private static int ticketGame = FfaNumberingRules.NoGame;
+        private static object ticketRoom;
+        private static bool ticketArmedAfterStart;
+
+        /// <summary>N12: the identity this seat took from a live cycle, bound to
+        /// the Room object it was taken in; cleared at every start edge.</summary>
+        private static int acquiredGame = FfaNumberingRules.NoGame;
+        private static object acquiredRoom;
+
+        /// <summary>N15: this seat followed a numberless master in its current
+        /// game. Cleared at its edge (N2), read then cleared at its next start
+        /// (N3), cleared on room leave.</summary>
+        private static bool followed;
+        private static object followedRoom;
+
+        /// <summary>N6: the gate latched at this seat's start edge, bound to
+        /// that start's Room object.</summary>
+        private static bool gateLatch;
+        private static object gateLatchRoom;
+
+        /// <summary>N9: the join target and its key, written together by
+        /// RecordAdvertTarget and by nothing else.</summary>
+        private static string advertTarget;
+        private static int advertKey = FfaNumberingRules.NoGame;
+
+        /// <summary>The phase identity FfaLocalPickUI publishes under. Set at
+        /// the phase entry and at every identity change, alongside the
+        /// counter where the counter moves too. Kept apart from gameNumber
+        /// because the numberless master's opener (N12(e)) sets the phase
+        /// identity and must not assign the counter.</summary>
+        private static int phaseGame, phaseCycle;
+
+        // Log-once latches, per game (reset at the start edge).
+        private static bool numLogLivePointsCand, numLogLivePointsDecline;
+        // The last freeze's inputs, for the froze line.
+        private static bool _freezeByTicket;
+        private static string _freezeHeldVerdict = "no";
+
+        private const string PropRoomAdvert = "cr_ffa_rg";
+
+        /// <summary>RG in the current Room object, else none.</summary>
+        internal static int RoomGame
+        {
+            get
+            {
+                return FfaNumberingRules.SameIncarnation(roomGameRoom, PhotonNetwork.CurrentRoom)
+                    ? roomGame : FfaNumberingRules.NoGame;
+            }
+        }
+
+        private static int AcquiredGameHere
+        {
+            get
+            {
+                return FfaNumberingRules.SameIncarnation(acquiredRoom, PhotonNetwork.CurrentRoom)
+                    ? acquiredGame : FfaNumberingRules.NoGame;
+            }
+        }
+
+        private static void SetAcquired(int game)
+        {
+            acquiredGame = game;
+            acquiredRoom = PhotonNetwork.CurrentRoom;
+        }
+
+        private static void ClearTicket()
+        {
+            ticketGame = FfaNumberingRules.NoGame;
+            ticketRoom = null;
+            ticketArmedAfterStart = false;
+        }
+
+        /// <summary>Arm the ticket. Called only when WriteCycleProp returned
+        /// true (#428: arm only on a confirmed send).</summary>
+        private static void ArmTicket(int game)
+        {
+            ticketGame = game;
+            ticketRoom = PhotonNetwork.CurrentRoom;
+            ticketArmedAfterStart = true;
+        }
+
+        /// <summary>Change 3: a master switch invalidates the ticket. Called
+        /// from Plugin.OnMasterClientSwitched.</summary>
+        internal static void OnMasterClientSwitched()
+        {
+            ClearTicket();
+        }
+
+        /// <summary>N1's candidate now: the valid ticket's game, else the
+        /// property read back, else none.</summary>
+        private static int CandidateNow(out bool byTicket)
+        {
+            bool valid = ticketGame >= 1 && ticketArmedAfterStart
+                         && FfaNumberingRules.SameIncarnation(ticketRoom, PhotonNetwork.CurrentRoom);
+            int cand = FfaNumberingRules.Candidate(valid, ticketGame, PublishedGameNumber());
+            byTicket = valid && cand == ticketGame;
+            return cand;
+        }
+
+        /// <summary>A player's cr_ffa_rg as a string, or null.</summary>
+        private static string AdvertOf(Photon.Realtime.Player p)
+        {
+            try
+            {
+                var props = p != null ? p.CustomProperties : null;
+                object v;
+                if (props != null && props.TryGetValue(PropRoomAdvert, out v)) return v as string;
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>The ending master's room game as this seat sees it: its own
+        /// RG on the master (it cannot see its own witness before the echo,
+        /// #428), else the master's witness. present is false when Photon has
+        /// no master client.</summary>
+        private static int MasterGameNow(out bool present)
+        {
+            if (PhotonNetwork.IsMasterClient) { present = true; return RoomGame; }
+            var m = PhotonNetwork.MasterClient;
+            present = m != null;
+            return present ? WitnessedGameOf(m) : FfaNumberingRules.NoGame;
+        }
+
+        /// <summary>N1's HELD over the room as this seat sees it: the ending
+        /// master's room game, and the room game of every active fighter whose
+        /// advert names this room (the local RG for this seat, the witness for
+        /// a peer).</summary>
+        private static bool HeldNow(int candidate, out string verdict)
+        {
+            bool masterPresent;
+            int masterGame = MasterGameNow(out masterPresent);
+            var fighterGames = new List<int>();
+            try
+            {
+                string want = FfaNumberingRules.AdvertValue(
+                    FfaNumberingRules.RoomKey(PhotonNetwork.CurrentRoom?.Name ?? ""));
+                foreach (var p in RoomActors.ActiveFighters())
+                {
+                    if (p == null || AdvertOf(p) != want) continue;
+                    fighterGames.Add(p.IsLocal ? RoomGame : WitnessedGameOf(p));
+                }
+            }
+            catch { }
+            return FfaNumberingRules.HeldByRoom(candidate, GateNow(), masterPresent, masterGame,
+                                                fighterGames, out verdict);
+        }
+
+        /// <summary>N6 evaluated now over every active fighter's advert, the
+        /// local seat's own included (its staged pre-join merge).</summary>
+        private static bool DriftGateNow()
+        {
+            try
+            {
+                var room = PhotonNetwork.CurrentRoom;
+                if (room == null) return false;
+                var peers = new List<string>();
+                foreach (var p in RoomActors.OtherActiveFighters())
+                    peers.Add(AdvertOf(p));
+                return FfaNumberingRules.DriftGate(AdvertOf(PhotonNetwork.LocalPlayer), peers,
+                                                   FfaNumberingRules.RoomKey(room.Name ?? ""));
+            }
+            catch { return false; }
+        }
+
+        /// <summary>G: the latch of this seat's start edge in the current Room
+        /// object, else evaluated per read (a seat with no start edge here).</summary>
+        internal static bool GateNow()
+        {
+            return FfaNumberingRules.SameIncarnation(gateLatchRoom, PhotonNetwork.CurrentRoom)
+                ? gateLatch : DriftGateNow();
+        }
+
+        /// <summary>Change 5 (N2), called at the game-over edge right after the
+        /// freeze: decide the next game's number from the stored snapshot and
+        /// bind it to the current Room object; clear FOLLOWED. Returns the
+        /// froze log line.</summary>
+        internal static string TakeCarry()
+        {
+            var room = PhotonNetwork.CurrentRoom;
+            int f = _reportGame.Frozen(room);
+            int cand = _reportGame.Candidate(room);
+            int field = PublishedGameNumber();
+            bool masterPresent;
+            int masterGame = MasterGameNow(out masterPresent);
+            int c = FfaNumberingRules.CarryAfterGameOver(f, cand, field, masterPresent, masterGame,
+                                                         heldRoomGameAtStart);
+            carry = c;
+            carryRoom = c >= 1 ? room : null;
+            bool fol = followed && FfaNumberingRules.SameIncarnation(followedRoom, room);
+            followed = false;
+            followedRoom = null;
+            return FfaNumberingRules.FrozeLine(f, cand, _freezeByTicket, _freezeHeldVerdict, GateNow(), c,
+                                               field, heldRoomGameAtStart, fol);
+        }
+
+        /// <summary>Change 11 (N9): record the join target and its key
+        /// together. The key comes from the TARGET, never from the room the
+        /// seat is in when it records. A null target records nothing.</summary>
+        internal static void RecordAdvertTarget(string target)
+        {
+            if (target == null) return;
+            advertTarget = target;
+            advertKey = FfaNumberingRules.StagedAdvertKey(target, PhotonNetwork.CurrentRoom?.Name);
+        }
+
+        /// <summary>Change 16 (N11), called from the pre-join fence with the
+        /// join's first argument when it is a string: stage the witness void
+        /// and the advert for exactly this target as one local merge. canStage
+        /// is the fence's own "not in a room and idle" test; a refused stage
+        /// is logged (P15), never retried in the room.</summary>
+        internal static void StageJoinNumbering(string joinTarget, bool canStage, string state)
+        {
+            if (!canStage)
+            {
+                Plugin.Log.LogWarning($"[FFA-NUM] advert/witness stage refused (state={state})");
+                return;
+            }
+            var local = PhotonNetwork.LocalPlayer;
+            if (local == null)
+            {
+                Plugin.Log.LogWarning("[FFA-NUM] advert/witness stage refused (state=no local player)");
+                return;
+            }
+            string advert = FfaNumberingRules.AdvertAtJoin(advertTarget, advertKey, joinTarget);
+            var h = new ExitGames.Client.Photon.Hashtable();
+            h[PropGameWitness] = FfaNumberingRules.WitnessAtJoin(WitnessedGameOf(local));
+            h[PropRoomAdvert] = advert;   // null deletes the key
+            local.SetCustomProperties(h);
+            Plugin.Log.LogInfo("[FFA-NUM] advert staged target=" + (joinTarget != null ? NonceForLog(joinTarget) : "none")
+                               + " key=" + (advert != null ? advertKey.ToString() : "none"));
+        }
+
+        /// <summary>N12(a): LIVE over this seat's view of the room.</summary>
+        private static bool LiveNow(int g, int c)
+        {
+            if (g < 1) return false;
+            bool resultPresent = ReadCycleResult(g, c) != null;
+            float dl;
+            bool known = TryReadSharedDeadline(g, c, out dl);
+            return FfaNumberingRules.LiveCycle(g, resultPresent, known, dl, Time.realtimeSinceStartup);
+        }
+
+        /// <summary>N15, evaluated at the manifest-wait entry and at every
+        /// change of the field. Sets FOLLOWED when it holds; logs once per
+        /// phase.</summary>
+        private static bool EvaluateFollow(bool gate, int rgNow, ref bool logged)
+        {
+            if (!gate) return false;
+            bool masterPresent;
+            int mw = MasterGameNow(out masterPresent);
+            bool f = FfaNumberingRules.FollowsHost(PhotonNetwork.IsMasterClient, masterPresent, mw, rgNow);
+            if (f)
+            {
+                followed = true;
+                followedRoom = PhotonNetwork.CurrentRoom;
+                if (!logged)
+                {
+                    logged = true;
+                    Plugin.Log.LogInfo("[FFA-NUM] follow host g=" + FfaNumberingRules.N(PublishedGameNumber())
+                                       + " (master W=" + mw + ", own RG=" + rgNow + ")");
+                }
+            }
+            return f;
+        }
+
+        /// <summary>N13(a), on the master at each point: RG, else the
+        /// candidate, else declined. G, HELD and the counter reach the log
+        /// only. One log line per game for a send from the candidate and one
+        /// for a decline.</summary>
+        private static int LivePointsGameNow()
+        {
+            int rg = RoomGame;
+            bool byTicket;
+            int cand = CandidateNow(out byTicket);
+            string verdict;
+            bool held = HeldNow(cand, out verdict);
+            bool gate = GateNow();
+            int lp = FfaNumberingRules.LivePointsGame(gate, rg, cand, held, gameNumber);
+            if (lp < 1)
+            {
+                if (!numLogLivePointsDecline)
+                {
+                    numLogLivePointsDecline = true;
+                    Plugin.Log.LogInfo("[FFA-NUM] live points declined: no candidate counter=" + gameNumber);
+                }
+            }
+            else if (rg < 1 && !numLogLivePointsCand)
+            {
+                numLogLivePointsCand = true;
+                Plugin.Log.LogInfo("[FFA-NUM] live points from candidate g=" + lp + " held=" + (held ? "yes" : "no")
+                                   + " G=" + (gate ? "1" : "0"));
+            }
+            return lp;
         }
 
         // ── Score access ──
@@ -1213,22 +1543,69 @@ namespace CompetitiveRounds
             // target-5 defaults over a target-7 lobby, split the rules, and
             // get the report quarantined as score_shape_mismatch (review r1
             // find 1, HIGH). Counters and Leavers only.
+            //
+            // RJ-DRIFT N14 (change 6): the test is on the Room OBJECT, not the
+            // name. A leave and a rejoin of the same room name between two poll
+            // samples (Plugin.OnLeftRoom records it) reaches neither leave path,
+            // and a name test cannot see it; PUN's fresh Room object per entry
+            // can. The reset is the one an ordinary leave already applies.
+            object roomObj = PhotonNetwork.CurrentRoom;
+            ClearTicket();   // change 3: a ticket is valid only after this seat's last start edge
             try
             {
                 string roomNow = PhotonNetwork.CurrentRoom?.Name ?? "";
-                if (roomNow != lastGameRoomName)
+                if (FfaNumberingRules.RoomObjectChanged(lastGameRoom, roomObj, lastGameRoomName, roomNow))
                 {
-                    if (gameNumber != 0)
-                    {
+                    if (gameNumber != 0 || localGameSeq != 0)
                         Plugin.Log.LogWarning($"[FFA-DRIFT] stale game counter {gameNumber} carried from '{NonceForLog(lastGameRoomName)}' into '{NonceForLog(roomNow)}' — reset (missed OnRoomLeft?)");
-                        gameNumber = 0;
-                        Leavers.Clear();
-                    }
+                    gameNumber = 0;
+                    localGameSeq = 0;
+                    Leavers.Clear();
+                    acquiredGame = FfaNumberingRules.NoGame;
+                    acquiredRoom = null;
+                    Plugin.Log.LogInfo("[FFA-NUM] room object changed: counter and sequence reset");
+                    lastGameRoom = roomObj;
                     lastGameRoomName = roomNow;
                 }
             }
             catch { }
-            gameNumber++;
+            // ACQUIRED is per start edge (N12).
+            acquiredGame = FfaNumberingRules.NoGame;
+            acquiredRoom = null;
+            // N6: the gate, latched for this game before N7 reads it.
+            gateLatch = DriftGateNow();
+            gateLatchRoom = roomObj;
+            // N3 + N7: this game's room game and the counter. The previous
+            // start's RG and FOLLOWED count only when that start was in this
+            // Room object.
+            {
+                bool carryHere = FfaNumberingRules.SameIncarnation(carryRoom, roomObj);
+                bool prevHere = FfaNumberingRules.SameIncarnation(startedInRoom, roomObj);
+                int prevRG = prevHere ? roomGame : FfaNumberingRules.NoGame;
+                bool followedPrev = followed && FfaNumberingRules.SameIncarnation(followedRoom, roomObj);
+                bool cycleAbsent = ReadRawRoomProp(PropCycle) == null;
+                int cycleGameAtStart = PublishedGameNumber();
+                int rg, nextCounter;
+                FfaNumberingRules.StartNumbers(carryHere, carry, prevHere, prevRG, followedPrev, !prevHere,
+                                               cycleAbsent, cycleGameAtStart, gateLatch, gameNumber,
+                                               out rg, out nextCounter);
+                string src = FfaNumberingRules.StartSourceLabel(carryHere, carry, prevHere, prevRG, followedPrev,
+                                                                !prevHere, cycleAbsent, rg);
+                carry = FfaNumberingRules.NoGame;   // consumed (or void: bound to another Room object)
+                carryRoom = null;
+                roomGame = rg;
+                roomGameRoom = roomObj;
+                heldRoomGameAtStart = rg >= 1;
+                startedInRoom = roomObj;
+                followed = false;                   // read above; cleared after it is read (N3)
+                followedRoom = null;
+                gameNumber = nextCounter;           // N7: RG under G, else counter + 1 (today's)
+                localGameSeq++;                     // N10
+                numLogLivePointsCand = false;
+                numLogLivePointsDecline = false;
+                Plugin.Log.LogInfo(FfaNumberingRules.StartLine(rg, src, gateLatch, gameNumber, localGameSeq)
+                                   + " field=" + cycleGameAtStart);
+            }
             cycleNumber = 0;
             points.Clear(); rounds.Clear(); pointsTotal.Clear(); kills.Clear();
             // Per-game, same lifetime as kills (bug #127/#130 telemetry).
@@ -1249,7 +1626,8 @@ namespace CompetitiveRounds
                 // Their leave belongs to a game that is over. Carrying the old
                 // field total forward would hand the NEXT game's report a
                 // grace figure for a game they were never in; the report only
-                // sends it for leftGameNumber == GameNumber anyway, and -1
+                // sends it for a leave stamped in this game (LeftInGame against
+                // the N10 sequence) anyway, and -1
                 // keeps the in-memory record honest if that ever changes.
                 kv.Value.gamePointsAtLeave = -1;
             }
@@ -1271,7 +1649,15 @@ namespace CompetitiveRounds
             // loaded card pool. Every client does this, so a mixed-pool room
             // fails the gate on every seat uniformly.
             try { FfaCardSequence.PublishCapabilityWithHash(); } catch { }
-            try { FfaCardSequence.MasterPublishSeed(gameNumber); } catch { }
+            // RJ-DRIFT N13(b) (change 19): under G the start-edge seed keys the
+            // room game, and with no RG it is skipped: the first pick phase
+            // publishes it under the phase identity. G off: the counter, today's.
+            try
+            {
+                int seedGame = FfaNumberingRules.StartSeedGame(GateNow(), RoomGame, gameNumber);
+                if (seedGame >= 1) FfaCardSequence.MasterPublishSeed(seedGame);
+            }
+            catch { }
             LocalOffers.Clear();
             // §8 settings banner during load-in — reads the statics the
             // engine itself runs on, AFTER the latch, so it cannot disagree
@@ -1317,6 +1703,18 @@ namespace CompetitiveRounds
             catch { }
             matchStartRealtime = 0f;
             gameNumber = 0;
+            // RJ-DRIFT: the numbering state bound to the room being left
+            // (N3, N10, N15, the ticket). ACQUIRED, the G latch and the snapshot
+            // are void in any other Room object by their binding.
+            localGameSeq = 0;
+            carry = FfaNumberingRules.NoGame;
+            carryRoom = null;
+            ClearTicket();
+            roomGame = FfaNumberingRules.NoGame;
+            roomGameRoom = null;
+            followed = false;
+            followedRoom = null;
+            startedInRoom = null;
             ClearPendingLocalPick();
             points.Clear(); rounds.Clear(); pointsTotal.Clear(); kills.Clear();
             // Per-game, same lifetime as kills (bug #127/#130 telemetry).
@@ -1360,7 +1758,9 @@ namespace CompetitiveRounds
                 roundsWon = RoundsFor(teamId),
                 pointsTotal = PointsTotalFor(teamId),
                 kills = KillsFor(teamId),
-                leftGameNumber = gameNumber,
+                // RJ-DRIFT N10 (change 17): stamped from the local game
+                // sequence, which N7 never re-anchors.
+                leftGameNumber = FfaNumberingRules.LeaverStampSource(localGameSeq, gameNumber),
                 gamePointsAtLeave = TotalPointsScored(),
             };
             Plugin.Log.LogInfo($"[FFA] leaver recorded: {steamId} slot={teamId} r={RoundsFor(teamId)} "
@@ -1672,9 +2072,14 @@ namespace CompetitiveRounds
                         // FIELD, not the leader's tally — sum everyone.
                         int scored = 0;
                         foreach (var kv in pointsTotal) scored += kv.Value;
-                        ApiClient.PostFfaLivePoints(ApiClient.ActiveFfaLobbyId,
-                                                    MatchTracker.LocalSteamId,
-                                                    gameNumber, scored);
+                        // RJ-DRIFT N13(a) (change 19): the room game, else the
+                        // candidate every seat freezes; declined only when
+                        // this master holds neither. Ungated.
+                        int lpGame = LivePointsGameNow();
+                        if (lpGame >= 1)
+                            ApiClient.PostFfaLivePoints(ApiClient.ActiveFfaLobbyId,
+                                                        MatchTracker.LocalSteamId,
+                                                        lpGame, scored);
                     }
                 }
                 catch { }
@@ -1998,7 +2403,9 @@ namespace CompetitiveRounds
             // stranded the room when a third player reconnected inside the
             // window: the decider saw >=3 and stood down, but nothing
             // restarted the aborted game.
-            if (gameNumber > 1)
+            // RJ-DRIFT N10 (change 17): "not this room's first game" reads the
+            // local game sequence, which N7's re-anchor never moves.
+            if (localGameSeq > 1)
             {
                 float waitUntil = Time.realtimeSinceStartup + 4f;
                 int remaining0 = RoomCount();
@@ -2100,6 +2507,9 @@ namespace CompetitiveRounds
         {
             cycleNumber++;
             int cycle = cycleNumber;
+            // Provisional: the phase identity is settled at the manifest-wait
+            // entry below (RJ-DRIFT change 18), in this same frame and before
+            // anything reads it.
             int game = gameNumber;
             float phaseStart = Time.realtimeSinceStartup;
             // Room nonce CAPTURED once here, never re-sampled at publish time.
@@ -2159,20 +2569,99 @@ namespace CompetitiveRounds
                 (g, c) => g > game || (g == game && c > cycle);
             string rawCycleAtEntry = ReadRawRoomProp(PropCycle);
 
-            if (PhotonNetwork.IsMasterClient)
-                SetRoomProp(PropCycle, $"{game}:{cycle}:{string.Join(",", pickerIds)}");
+            // ── RJ-DRIFT change 18: the phase identity (N12, N15, N12(e)) ──
+            // G off: the counter, exactly as before. Under G: the room game
+            // unless following a numberless host (N15); else the identity this
+            // seat already acquired in this Room object; else a LIVE field;
+            // else none, and a numberless master opens the namespace itself.
+            // No seat keys its counter under G, and a seat with no identity
+            // makes no keyed read (N12(d)).
+            bool gate = GateNow();
+            int rgNow = RoomGame;
+            bool followLogged = false, noIdentityLogged = false;
+            bool follow = EvaluateFollow(gate, rgNow, ref followLogged);
+            List<int> manifest = null;
+            {
+                int acq = AcquiredGameHere;
+                var entryField = ParseCycleProp(rawCycleAtEntry);
+                int liveGame = entryField != null && LiveNow(entryField.Item1, entryField.Item2)
+                    ? entryField.Item1 : FfaNumberingRules.NoGame;
+                game = FfaNumberingRules.PickIdentitySource(gate, rgNow, follow, acq, liveGame, gameNumber);
+                bool regime = FfaNumberingRules.LiveRegime(gate, rgNow, follow, acq);
+                if (FfaNumberingRules.TakesLiveAtEntry(regime, game, liveGame))
+                {
+                    // N12(b): the live field, taken exactly as the manifest-prop
+                    // adoption below assigns it.
+                    cycle = entryField.Item2;
+                    gameNumber = game;
+                    cycleNumber = cycle;
+                    manifest = entryField.Item3;
+                    SetAcquired(game);
+                    Plugin.Log.LogInfo($"[FFA-NUM] pick identity acquired {game}:{cycle} at entry (live field)");
+                }
+                else if (game < 1 && PhotonNetwork.IsMasterClient)
+                {
+                    // N12(e): a numberless master with no live value opens the
+                    // namespace: the room constant 1 at the game's first opening
+                    // draw, else the field's game with the next cycle. It sets
+                    // the phase identity only: neither the counter nor ACQUIRED.
+                    bool openingDraw = roundWinnerTeam < 0 && cycleNumber == 1;
+                    int oc;
+                    game = FfaNumberingRules.MasterOpenerGame(openingDraw,
+                        entryField != null ? entryField.Item1 : FfaNumberingRules.NoGame,
+                        entryField != null ? entryField.Item2 : 0, out oc);
+                    cycle = oc;
+                    Plugin.Log.LogInfo($"[FFA-NUM] pick identity opener {game}:{cycle} (numberless master, counter={gameNumber})");
+                }
+                else if (game < 1)
+                {
+                    noIdentityLogged = true;
+                    Plugin.Log.LogInfo("[FFA-NUM] pick identity none: waiting for a live cycle");
+                }
+            }
+            phaseGame = game;
+            phaseCycle = cycle;
+
+            if (PhotonNetwork.IsMasterClient && game >= 1)
+            {
+                // Change 2: the ticket arms only on a confirmed send (#428).
+                if (WriteCycleProp($"{game}:{cycle}:{string.Join(",", pickerIds)}")) ArmTicket(game);
+            }
 
             // Wait for the manifest (all clients, incl. master reading its own write).
-            List<int> manifest = null;
-            while (Time.realtimeSinceStartup - phaseStart < ManifestWaitSeconds)
+            while (manifest == null && Time.realtimeSinceStartup - phaseStart < ManifestWaitSeconds)
             {
-                manifest = ReadCycleManifest(game, cycle);
-                if (manifest != null) break;
+                if (game >= 1)
+                {
+                    manifest = ReadCycleManifest(game, cycle);
+                    if (manifest != null) break;
+                }
                 string rawNow = ReadRawRoomProp(PropCycle);
                 if (rawNow != null && rawNow != rawCycleAtEntry)
                 {
                     var adopted = ParseCycleProp(rawNow);
-                    if (adopted != null && aheadOfLocal(adopted.Item1, adopted.Item2))
+                    // N15 is re-evaluated on every change: the master can change
+                    // inside a phase.
+                    bool followNow = EvaluateFollow(gate, rgNow, ref followLogged);
+                    bool regimeNow = FfaNumberingRules.LiveRegime(gate, rgNow, followNow, AcquiredGameHere);
+                    if (adopted != null && regimeNow && LiveNow(adopted.Item1, adopted.Item2))
+                    {
+                        // N12(c): a LIVE value, taken without the ahead test
+                        // (that test compares against a counter this seat does
+                        // not hold as a number).
+                        Plugin.Log.LogInfo($"[FFA-NUM] pick identity acquired {adopted.Item1}:{adopted.Item2} on change (was {game}:{cycle})");
+                        game = adopted.Item1;
+                        cycle = adopted.Item2;
+                        gameNumber = game;
+                        cycleNumber = cycle;
+                        manifest = adopted.Item3;
+                        SetAcquired(game);
+                        phaseGame = game;
+                        phaseCycle = cycle;
+                        RepublishLocalPickFor(phaseNonce, game, cycle);
+                        break;
+                    }
+                    if (adopted != null && !regimeNow && game >= 1 && aheadOfLocal(adopted.Item1, adopted.Item2))
                     {
                         Plugin.Log.LogWarning($"[FFA-DRIFT] peer {game}:{cycle} -> {adopted.Item1}:{adopted.Item2} room={NonceForLog(phaseNonce)} evidence=manifest-prop");
                         game = adopted.Item1;
@@ -2180,6 +2669,8 @@ namespace CompetitiveRounds
                         gameNumber = game;
                         cycleNumber = cycle;
                         manifest = adopted.Item3;
+                        phaseGame = game;
+                        phaseCycle = cycle;
                         // Nothing has been published this early (the pick UI
                         // starts below), so this is a no-op today — kept so the
                         // rule "every adoption re-stamps" holds at EVERY site
@@ -2193,25 +2684,26 @@ namespace CompetitiveRounds
                         // the adopted identity already. If any of them ever
                         // moves above this loop, this site must funnel too.
                         RepublishLocalPickFor(phaseNonce, game, cycle);
-                        // The witness prop is NOT one of the funnel's locals:
-                        // it was written at game start, under the number this
-                        // seat held then, and the reporter election compares it
-                        // against the number the seat holds at game over. Both
-                        // adoption sites re-stamp it — this one cannot reach
-                        // the funnel by design, so the call has to be here too.
-                        RepublishGameWitness("manifest-prop adoption");
                         break;
                     }
                 }
                 // Master migration: if the original master died before
                 // publishing, the new master publishes.
-                if (PhotonNetwork.IsMasterClient && Time.realtimeSinceStartup - phaseStart > 2f)
-                    SetRoomProp(PropCycle, $"{game}:{cycle}:{string.Join(",", pickerIds)}");
+                if (PhotonNetwork.IsMasterClient && game >= 1 && Time.realtimeSinceStartup - phaseStart > 2f)
+                {
+                    if (WriteCycleProp($"{game}:{cycle}:{string.Join(",", pickerIds)}")) ArmTicket(game);
+                }
+                if (game < 1 && !noIdentityLogged)
+                {
+                    noIdentityLogged = true;
+                    Plugin.Log.LogInfo("[FFA-NUM] pick identity none: waiting for a live cycle");
+                }
                 yield return null;
             }
             // No timeout adoption from the (possibly stale) cached prop —
             // see the §8c decision comment above (round-3 find N6).
-            if (manifest == null)
+            // N12(d): a seat with no identity substitutes nothing here.
+            if (manifest == null && game >= 1)
             {
                 Plugin.Log.LogWarning($"[FFA] pick cycle {cycle}: no manifest after {ManifestWaitSeconds}s — using local picker set");
                 manifest = pickerIds;
@@ -2226,15 +2718,18 @@ namespace CompetitiveRounds
             // which can skew ITS OWN indexes only — candidates are private,
             // picks travel by name, so nothing desyncs beyond that screen's
             // fairness for this game.
-            try { FfaCardSequence.MasterPublishSeed(game); } catch { }
-            // Poll the latch to ITS OWN verdict (round-4 find F2: a 3s caller
-            // ceiling truncated the latch's 8s pending budget — a property
-            // arriving at 3.2s still split shared/private). LatchForGame owns
-            // the deadline (it latches fallback at 8s of pending); the 12s
-            // caller ceiling is only a belt against a throwing latch, above
-            // the 8s budget by construction. Normal case resolves <1s; the
-            // pick window is ~25s.
+            // N12(d): with no identity there is no seed publish, no latch and no
+            // ConsumeOffers (its draw indices lag on this screen only).
+            if (game >= 1)
             {
+                try { FfaCardSequence.MasterPublishSeed(game); } catch { }
+                // Poll the latch to ITS OWN verdict (round-4 find F2: a 3s caller
+                // ceiling truncated the latch's 8s pending budget — a property
+                // arriving at 3.2s still split shared/private). LatchForGame owns
+                // the deadline (it latches fallback at 8s of pending); the 12s
+                // caller ceiling is only a belt against a throwing latch, above
+                // the 8s budget by construction. Normal case resolves <1s; the
+                // pick window is ~25s.
                 float latchWait = Time.realtimeSinceStartup;
                 while (true)
                 {
@@ -2248,12 +2743,12 @@ namespace CompetitiveRounds
                     if (latched || Time.realtimeSinceStartup - latchWait > 12f) break;
                     yield return null;
                 }
+                try { FfaCardSequence.ConsumeOffers(manifest); } catch { }
             }
-            try { FfaCardSequence.ConsumeOffers(manifest); } catch { }
 
-            // Local player picks?
+            // Local player picks? (N12(d): never without an identity.)
             var localPlayer = LocalPlayer();
-            bool iPick = localPlayer != null && manifest.Contains(localPlayer.PlayerID);
+            bool iPick = game >= 1 && manifest != null && localPlayer != null && manifest.Contains(localPlayer.PlayerID);
             Coroutine localUi = null;
             if (iPick)
                 localUi = gm.StartCoroutine(FfaLocalPickUI(gm, localPlayer, game, cycle, phaseNonce));
@@ -2340,6 +2835,8 @@ namespace CompetitiveRounds
                 cycle = newCycle;
                 gameNumber = newGame;
                 cycleNumber = newCycle;
+                phaseGame = newGame;
+                phaseCycle = newCycle;
                 if (newManifest != null) manifest = newManifest;
                 if (asMaster)
                 {
@@ -2349,15 +2846,14 @@ namespace CompetitiveRounds
                     // from the abandoned identity would close the window on a
                     // set nobody agreed to.
                     manifest = pickerIds;
-                    SetRoomProp(PropCycle, $"{newGame}:{newCycle}:{string.Join(",", pickerIds)}");
+                    // Change 2: the ticket arms only on a confirmed send.
+                    if (WriteCycleProp($"{newGame}:{newCycle}:{string.Join(",", pickerIds)}")) ArmTicket(newGame);
                 }
                 RepublishLocalPickFor(phaseNonce, newGame, newCycle);
-                // Witness re-stamp: see RepublishGameWitness. Not one of the
-                // locals catalogued above because it is not a local — it is a
-                // replicated property written at game start, and an adoption
-                // is the only thing that can make it disagree with the number
-                // this seat now holds.
-                RepublishGameWitness("pick-phase adoption");
+                // The witness is not re-stamped here (RJ-DRIFT change 10): it is
+                // this seat's room game, written once at the start edge, and
+                // the election compares it with the frozen room number, never
+                // with the counter an adoption moves.
                 adoptedAt = Time.realtimeSinceStartup;
                 lastGotCount = 0;
                 lastPublishedPhotonDeadline = -1.0;   // force a republish under the new key
@@ -2379,8 +2875,12 @@ namespace CompetitiveRounds
             }
             while (true)
             {
-                result = ReadCycleResult(game, cycle);
-                if (result != null) break;
+                // N12(d): no keyed read without an identity.
+                if (game >= 1)
+                {
+                    result = ReadCycleResult(game, cycle);
+                    if (result != null) break;
+                }
                 float now = Time.realtimeSinceStartup;
                 if (now - lastCollect > 0.25f)   // prop-table reads throttled
                 {
@@ -2407,7 +2907,20 @@ namespace CompetitiveRounds
                         // the master-only detector can't help.
                         string rawNow = ReadRawRoomProp(PropCycle);
                         var np = rawNow != rawCycleAtResultEntry ? ParseCycleProp(rawNow) : null;
-                        if (np != null && (np.Item1 > game || (np.Item1 == game && np.Item2 > cycle)))
+                        // RJ-DRIFT N15 re-evaluated on this change, then N12(c):
+                        // a seat in the live regime takes a LIVE value without
+                        // the ahead test; every other seat keeps it.
+                        bool followNow = np != null && EvaluateFollow(gate, rgNow, ref followLogged);
+                        bool regimeNow = np != null
+                            && FfaNumberingRules.LiveRegime(gate, rgNow, followNow, AcquiredGameHere);
+                        if (regimeNow && LiveNow(np.Item1, np.Item2))
+                        {
+                            Plugin.Log.LogInfo($"[FFA-NUM] pick identity acquired {np.Item1}:{np.Item2} on change (was {game}:{cycle})");
+                            SetAcquired(np.Item1);
+                            adoptIdentity(np.Item1, np.Item2, np.Item3, false, rawNow);
+                        }
+                        else if (np != null && !regimeNow && game >= 1
+                                 && (np.Item1 > game || (np.Item1 == game && np.Item2 > cycle)))
                         {
                             Plugin.Log.LogWarning($"[FFA-DRIFT] peer {game}:{cycle} -> {np.Item1}:{np.Item2} room={NonceForLog(phaseNonce)} evidence=cycle-prop-change");
                             // The funnel also re-stamps the local pick — THE
@@ -2423,7 +2936,10 @@ namespace CompetitiveRounds
                             adoptIdentity(np.Item1, np.Item2, np.Item3, false, rawNow);
                         }
                     }
-                    var got = CollectPicks(manifest, game, cycle);
+                    // N12(d): no pick collection without an identity.
+                    var got = game >= 1 && manifest != null
+                        ? CollectPicks(manifest, game, cycle)
+                        : new Dictionary<int, string>();
                     if (got.Count > lastGotCount)
                     {
                         lastGotCount = got.Count;
@@ -2475,7 +2991,7 @@ namespace CompetitiveRounds
                         // the fallback for an old-version master that never
                         // publishes one (auto-pick then uses the LONG lead —
                         // see AutoPickLeadFallbackSeconds).
-                        float shared = ReadSharedDeadline(game, cycle);
+                        float shared = game >= 1 ? ReadSharedDeadline(game, cycle) : -1f;
                         if (shared > 0f) { deadline = shared; pickDeadlineShared = true; }
                     }
                     pickDeadlineRealtime = deadline;
@@ -2581,7 +3097,9 @@ namespace CompetitiveRounds
             // that orphaned a real pick — and the printed identity is what
             // tells them apart in one grep. Before this, diagnosing bug 214
             // needed a full-log reconstruction plus two SQL queries.
-            if (result.Count < manifest.Count)
+            // manifest is null only on a seat that ended the phase with no
+            // identity (RJ-DRIFT N12(d): it bailed cardless).
+            if (manifest != null && result.Count < manifest.Count)
             {
                 var orphaned = manifest.Where(pid => !result.ContainsKey(pid)).ToList();
                 Plugin.Log.LogWarning($"[FFA-DRIFT] cycle {cycle} applied {result.Count}/{manifest.Count} — no card for pid(s) {string.Join(",", orphaned)} (identity {game}:{cycle} room={NonceForLog(phaseNonce)})");
@@ -2674,6 +3192,26 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] SetRoomProp {key}: {ex.Message}"); }
         }
 
+        /// <summary>RJ-DRIFT change 2: SetRoomProp's body for cr_ffa_cyc, but
+        /// returning SetCustomProperties' own bool (false from the catch).
+        /// SetRoomProp stays void. The three cr_ffa_cyc writes go through here
+        /// and arm N1's ticket only on true (#428: arm only on a confirmed
+        /// send).</summary>
+        private static bool WriteCycleProp(string value)
+        {
+            try
+            {
+                var h = new ExitGames.Client.Photon.Hashtable();
+                h[PropCycle] = value;
+                return PhotonNetwork.CurrentRoom.SetCustomProperties(h);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[FFA] SetRoomProp {PropCycle}: {ex.Message}");
+                return false;
+            }
+        }
+
         private static string ReadRawRoomProp(string key)
         {
             try
@@ -2764,6 +3302,27 @@ namespace CompetitiveRounds
 
         /// <summary>Any client: the master's published deadline converted to
         /// local realtime, or -1 when absent/stale (old-version master).</summary>
+        /// <summary>RJ-DRIFT N12(a): the shared deadline of (game, cycle) as
+        /// local realtime, with whether one is published at all. A past
+        /// deadline can convert to a negative local time, so presence is
+        /// reported apart from the value.</summary>
+        private static bool TryReadSharedDeadline(int game, int cycle, out float localDeadline)
+        {
+            localDeadline = 0f;
+            try
+            {
+                var props = PhotonNetwork.CurrentRoom?.CustomProperties;
+                if (props == null || !props.ContainsKey(PropDeadline)) return false;
+                var parts = (props[PropDeadline] as string ?? "").Split(new[] { ':' }, 3);
+                if (parts.Length != 3) return false;
+                if (int.Parse(parts[0]) != game || int.Parse(parts[1]) != cycle) return false;
+                double photonDl = double.Parse(parts[2], System.Globalization.CultureInfo.InvariantCulture);
+                localDeadline = Time.realtimeSinceStartup + (float)(photonDl - PhotonNetwork.Time);
+                return true;
+            }
+            catch { return false; }
+        }
+
         private static float ReadSharedDeadline(int game, int cycle)
         {
             try
@@ -3080,11 +3639,15 @@ namespace CompetitiveRounds
             //   adoption AFTER we publish -> RepublishLocalPickFor re-stamps;
             //   adoption BEFORE we publish -> a by-value capture would write
             //     into a namespace nobody collects, so read it live here.
-            // gameNumber/cycleNumber are updated at EVERY adoption site
-            // alongside the caller's locals, so they ARE this phase's current
-            // identity. The caller stops this coroutine before the next phase
-            // starts, so they can never belong to a later one.
-            int pubGame = gameNumber, pubCycle = cycleNumber;
+            // phaseGame/phaseCycle are updated at the phase entry and at EVERY
+            // identity change alongside the caller's locals, so they ARE this
+            // phase's current identity. The caller stops this coroutine before
+            // the next phase starts, so they can never belong to a later one.
+            // (RJ-DRIFT: they replaced gameNumber/cycleNumber here because the
+            // numberless master's opener sets the identity without assigning
+            // the counter, N12(e); read from the counter, that master's own
+            // pick would land in a namespace nobody collects.)
+            int pubGame = phaseGame, pubCycle = phaseCycle;
             try
             {
                 // Fenced on the phase's CAPTURED nonce, never a live re-sample:
@@ -3610,7 +4173,9 @@ namespace CompetitiveRounds
                     hash = (hash ^ (byte)(ch & 0xFF)) * 16777619u;
                     hash = (hash ^ (byte)(ch >> 8)) * 16777619u;
                 }
-                MixSeedInt(ref hash, gameNumber);
+                // RJ-DRIFT N8 (change 9): under G the host's field (1 when
+                // absent), a room value; otherwise the counter, today's.
+                MixSeedInt(ref hash, FfaNumberingRules.SpawnSeedGame(GateNow(), PublishedGameNumber(), gameNumber));
                 for (int slot = 0; slot < 10; slot++)
                 {
                     MixSeedInt(ref hash, RoundsFor(slot));

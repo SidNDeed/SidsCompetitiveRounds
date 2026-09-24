@@ -276,6 +276,26 @@ namespace CompetitiveRounds
             return liveGame >= 1 ? liveGame : NoGame;
         }
 
+        /// <summary>N12/N15's regime: under G, a seat with no ACQUIRED identity
+        /// in this Room object that holds no RG, or holds one while following
+        /// a numberless host. Such a seat takes a LIVE field at the
+        /// manifest-wait entry (N12(b)) and on every change of the field
+        /// (N12(c)) without the ahead test; every other seat keeps the pin's
+        /// ahead-only adoption. One function, called by FfaPickPhase and by
+        /// the walk model alike.</summary>
+        internal static bool LiveRegime(bool gate, int roomGame, bool followHost, int acquiredGame)
+        {
+            return gate && acquiredGame < 1 && (roomGame < 1 || followHost);
+        }
+
+        /// <summary>N12(b): at the entry, a seat in the regime whose phase
+        /// identity is the live field's game takes that field (game, cycle,
+        /// counter, manifest) and records it as ACQUIRED.</summary>
+        internal static bool TakesLiveAtEntry(bool regime, int identity, int liveGame)
+        {
+            return regime && liveGame >= 1 && identity == liveGame;
+        }
+
         /// <summary>A numberless master with no live value opens a namespace:
         /// 1:1 at the opening draw; after a point the field's game and cycle +
         /// 1 (1:1 when the field is absent). The caller assigns neither the
