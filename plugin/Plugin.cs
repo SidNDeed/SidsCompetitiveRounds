@@ -4248,6 +4248,9 @@ namespace CompetitiveRounds
             // so any unconsumed map-scale publish ticket dies here — before
             // the spectator-transfer block below, which can return early.
             try { FfaMapScale.OnMasterClientSwitched(); } catch { }
+            // RJ-DRIFT change 3: a handoff invalidates N1's ticket (this
+            // seat's memory of its own confirmed cr_ffa_cyc write).
+            try { FfaMode.OnMasterClientSwitched(); } catch { }
             // Master authority must never rest on a spectator (design §3.6):
             // simulation ownership on a client with no characters and no
             // stake. Photon assigns the LOWEST ActorNumber, and spectators

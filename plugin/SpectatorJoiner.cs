@@ -206,6 +206,12 @@ namespace CompetitiveRounds
                             return;
                         }
                         Plugin.Log?.LogInfo("[SPECTATE] connected to master — joining room");
+                        // RJ-DRIFT change 20 (N9): record this join's own
+                        // target, so the pre-join fence stages THIS room's
+                        // advert with the JoinRoom below. The check above
+                        // already requires PendingRoom == room.
+                        FfaMode.RecordAdvertTarget(
+                            FfaNumberingRules.SpectatorAdvertTarget(SpectatorSession.PendingRoom, room));
                         // r2 find 1: own the op BEFORE dispatch; a refused
                         // send settles immediately (no op left the client).
                         NoteJoinIssued();

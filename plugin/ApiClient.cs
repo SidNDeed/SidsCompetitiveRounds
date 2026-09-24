@@ -17373,6 +17373,10 @@ namespace CompetitiveRounds
                             prejoin[FfaCardSequence.CapabilityProp] = FfaCardSequence.FeatureLevel;
                             if (PhotonNetwork.LocalPlayer != null)
                                 PhotonNetwork.LocalPlayer.SetCustomProperties(prejoin);
+                            // RJ-DRIFT change 11 (N9): record the join target
+                            // and its key together; the pre-join fence stages
+                            // the advert for exactly this target.
+                            FfaMode.RecordAdvertTarget(room);
                         }
                         catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] pre-join SetCustomProperties: {ex.Message}"); }
                         try { NametagStyler.PublishToPhoton(); } catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] pre-join nametag publish: {ex.Message}"); }
