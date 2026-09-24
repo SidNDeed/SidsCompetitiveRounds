@@ -797,6 +797,29 @@ async def _hold_staggered(url, base_box, ready, n=10, step=0.9, wait_cap=20.0):
     return released
 
 
+async def _hold_capture_key(url, group, t0_box, ready, release_s, wait_cap=20.0):
+    """K21's holder, in case (iv)'s shape: its own connection takes the
+    capture's advisory key -- mrq:<group>, the key _quarantine_report takes
+    before its first read of the table -- and releases it release_s after t0,
+    so the capture commits at a known offset from t0. The routes take no
+    advisory key (K2d), so none of the route's reads waits on it."""
+    c = await _pg(url)
+    try:
+        await c.execute("BEGIN")
+        await c.execute("SELECT pg_advisory_xact_lock(hashtext('mrq:' || CAST($1 AS text)))", str(group))
+        ready.set()
+        start = time.monotonic()
+        while "t0" not in t0_box and time.monotonic() - start < wait_cap:
+            await asyncio.sleep(0.005)
+        delay = t0_box.get("t0", time.monotonic()) + release_s - time.monotonic()
+        if delay > 0:
+            await asyncio.sleep(delay)
+        await c.execute("COMMIT")
+        return time.monotonic()
+    finally:
+        await c.close()
+
+
 async def _alter(url):
     c = await _pg(url)
     try:
@@ -890,7 +913,9 @@ def _k2c_verdict(case, route, box):
             why.append(f"route held {held_after[0]['route']} at {rel(held_after[0]['tick'])}")
         if cap[0] != "recorded" or cap[1] is None:
             why.append(f"capture outcome {cap[0]!r}")
-        elif cap[1] - t0 > K2C_BOUND_S + (alter_run or 0.0) + 0.5:
+        # K2c's bar: the capture commits within 5.5 s of t0 plus the ALTER's
+        # own run, with no slack past that (round 2, L2); K21 is its control.
+        elif cap[1] - t0 > K2C_BOUND_S + (alter_run or 0.0):
             why.append(f"capture committed at {rel(cap[1])}, past 5.5 s + the ALTER's run")
         want = ("0", "0", "0")
         if tuple(box.get("show_before") or ()) != want or tuple(box.get("show_after") or ()) != want:
@@ -970,7 +995,7 @@ def _server_log_lines(pid_):
     return ["server log: " + ln for ln in hits[-6:]] or [f"server log: no line for backend {pid_} in the last 300 s"]
 
 
-async def _k2c_case(case, route, monkeypatch, capsys):
+async def _k2c_case(case, route, monkeypatch, capsys, capture_key_until=None, out=None):
     dsn = require_pg()
     url = make_url(dsn)
     box = {"show_before": None, "show_after": None}
@@ -1004,6 +1029,12 @@ async def _k2c_case(case, route, monkeypatch, capsys):
                 threads["holder"] = _Thread("k2c-holder", lambda: _hold_staggered(url, base_box, ready))
                 threads["holder"].start()
                 assert ready.wait(15), "the staggered holder never took its ten locks"
+            if capture_key_until is not None:
+                key_ready = threading.Event()
+                threads["key"] = _Thread("k21-key", lambda: _hold_capture_key(
+                    url, fx["capture_kw"]["group_id"], t0_box, key_ready, capture_key_until))
+                threads["key"].start()
+                assert key_ready.wait(15), "the K21 holder never took the capture's advisory key"
             threads["alter"] = _Thread("k2c-alter", lambda: _alter(url))
             threads["capture"] = _Thread("k2c-capture", lambda: _capture_elsewhere(dsn, fx["capture_kw"]))
             orig_ended = main._triage_ended_early
@@ -1095,7 +1126,7 @@ async def _k2c_case(case, route, monkeypatch, capsys):
                 box["status"] = resp.status_code
                 detail.append(f"response {resp.status_code}: {resp.text[:160]}")
             box["route_end"] = time.monotonic()
-            for name in ("alter", "capture", "holder", "observer"):
+            for name in ("alter", "capture", "holder", "key", "observer"):
                 th = threads.get(name)
                 if th is not None and th.ident is not None:
                     th.join(45)
@@ -1112,6 +1143,10 @@ async def _k2c_case(case, route, monkeypatch, capsys):
                 box["capture"] = threads["capture"].result
                 if threads["capture"].error is not None:
                     detail.append(f"capture error: {threads['capture'].error!r}")
+            if "key" in threads:
+                box["key_released"] = threads["key"].result
+                if threads["key"].error is not None:
+                    detail.append(f"K21 holder error: {threads['key'].error!r}")
             box["show_after"] = await _k2c_show(maker)
         finally:
             await eng.dispose()
@@ -1137,6 +1172,13 @@ async def _k2c_case(case, route, monkeypatch, capsys):
         detail.append("the failed read, as the route saw it: " + " <- ".join(chain))
     if case == "ii":
         detail.extend(_server_log_lines(box.get("route_pid")))
+    if capture_key_until is not None:
+        kr = box.get("key_released")
+        kr_rel = None if kr is None or t0 is None else round(kr - t0, 3)
+        detail.append(f"K21: the capture's advisory key (mrq:<its group>) was held from before t0; released at "
+                      f"{kr_rel} s from t0, planned {capture_key_until:.3f} s")
+        if out is not None:
+            out["key_released"] = kr_rel
     verdict, line = _k2c_verdict(case, route, box)
     _k2c_record(line, detail, capsys)
     return verdict, line
@@ -1148,6 +1190,47 @@ def test_pg_k2c_relation_locks_released_within_5_5s_of_t0(case, route, monkeypat
     if verdict == "NO_VERDICT":
         pytest.fail("NO VERDICT (not a pass): " + line)
     assert verdict == "PASS", line
+
+
+# ── K21: a capture committing past K2c's bound is a FAIL (round 2, L2) ─────
+# K2c's verdict fails a capture that commits later than 5.5 s from t0 plus
+# the ALTER's own run, with no slack past that. Case (i) on each route, with
+# the capture's advisory key held by _hold_capture_key until K21_PAST_S past
+# 5.5 s: the capture commits just after the key's release, inside the 0.5 s
+# that 6702efd's verdict still passed. A case is evidence only when that
+# premise held; otherwise it is NO VERDICT, never a pass.
+
+K21_PAST_S = 0.2
+
+
+@pytest.mark.parametrize("route", ["V1", "V2", "D1"])
+def test_pg_k21_a_capture_committing_past_the_bound_is_a_fail(route, monkeypatch, capsys):
+    seen = {}
+    verdict, line = run(_k2c_case("i", route, monkeypatch, capsys,
+                                  capture_key_until=K2C_BOUND_S + K21_PAST_S, out=seen))
+    head, _, why = line.partition(" why=")
+    f = dict(re.findall(r"(\w+)=(\S*)", head))
+    num = (lambda v: None if v in (None, "None") else float(v))
+    done, alter_run, released = num(f.get("capture_done")), num(f.get("alter_run")) or 0.0, seen.get("key_released")
+    past = None if done is None else round(done - K2C_BOUND_S - alter_run, 3)
+    _k2c_record(f"K21-RECORD route={route} planned_release={K2C_BOUND_S + K21_PAST_S:.3f}"
+                f" key_released={released} capture_done={f.get('capture_done')} alter_run={f.get('alter_run')}"
+                f" past_bound={past} verdict={verdict}", [], capsys)
+    premise = []
+    if f.get("status") != "200":
+        premise.append(f"the route answered {f.get('status')}")
+    if f.get("held_after_bound") != "0":
+        premise.append("the route held a relation lock past the bound")
+    if f.get("capture") != "recorded" or done is None:
+        premise.append(f"capture outcome {f.get('capture')}")
+    elif released is None or done < released:
+        premise.append(f"the capture committed at {done}, not after the key's release at {released}")
+    elif not 0.0 < past < 0.5:
+        premise.append(f"the capture committed {past} s past the bound, outside (0, 0.5)")
+    if verdict == "NO_VERDICT" or premise:
+        pytest.fail("NO VERDICT (not a pass): " + "; ".join(premise or ["K2c gave no verdict"]) + ": " + line)
+    assert verdict == "FAIL", line
+    assert why == f"capture committed at {f['capture_done']}, past 5.5 s + the ALTER's run", line
 
 
 # ── K2d: one primitive per route (static, per function span, #432) ─────────

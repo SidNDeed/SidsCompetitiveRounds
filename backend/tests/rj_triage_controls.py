@@ -2,7 +2,8 @@
 run the named checks, put the file back, record the result.
 
 Every control of RJ-TRIAGE-DESIGN-V5 section 6.2 (K1-K19), and round 2's K20
-(PT3's lobby-wide label gate), is carried below as DATA: the file, the exact
+(PT3's lobby-wide label gate) and K21 (K2c's capture-completion bound, whose
+site is in the test file itself), is carried below as DATA: the file, the exact
 text a plant replaces, the text it writes, the test nodes it must turn RED (a
 mutant) or leave GREEN (an inert twin at the same site, #391). Each plant is printed as a unified diff beside the run it
 produced, so the evidence is the diff and the failing assertion, not a
@@ -826,6 +827,28 @@ twin("K20-twin-two-named-booleans", "K20",
      [(MAIN, K20_GATE, '            elif rep is None or not r["steam_read"]:\n')],
      K20_NODES)
 
+# ── round 2: K21, K2c's capture-completion bound ─────────────────────────────
+# The site is K2c's own verdict line in the test file. The mutant restores
+# 6702efd's 0.5 s of slack past 5.5 s + the ALTER's run; the twin writes the
+# same bound with the ALTER's run on the other side of the comparison.
+
+TRIAGE_TEST = "backend/tests/test_ffa_quarantine_triage.py"
+
+
+def K21(route):
+    return S + f"test_pg_k21_a_capture_committing_past_the_bound_is_a_fail[{route}]"
+
+
+K21_SITE = '        elif cap[1] - t0 > K2C_BOUND_S + (alter_run or 0.0):\n'
+mutant("K21-old-slack-restored", "K21",
+       "6702efd's 0.5 s of slack restored: a capture committing 0.2 s past 5.5 s + the ALTER's run reads PASS",
+       [(TRIAGE_TEST, K21_SITE, '        elif cap[1] - t0 > K2C_BOUND_S + (alter_run or 0.0) + 0.5:\n')],
+       [K21(r) for r in ROUTES3])
+twin("K21-twin-alter-run-subtracted", "K21",
+     "the same bound with the ALTER's run subtracted from the capture's offset instead of added to 5.5 s",
+     [(TRIAGE_TEST, K21_SITE, '        elif cap[1] - t0 - (alter_run or 0.0) > K2C_BOUND_S:\n')],
+     [K21(r) for r in ROUTES3])
+
 # ── the runner ───────────────────────────────────────────────────────────────
 
 class Refused(Exception):
@@ -926,7 +949,8 @@ def evidence_lines(output: str, limit=14):
     keep = []
     for ln in output.splitlines():
         s = ln.rstrip()
-        if (s.startswith("E ") or "K2C-VERDICT" in s or "K20-RECORD" in s or re.match(r"^(PASSED|FAILED|ERROR) ", s)
+        if (s.startswith("E ") or "K2C-VERDICT" in s or "K20-RECORD" in s or "K21-RECORD" in s
+                or re.match(r"^(PASSED|FAILED|ERROR) ", s)
                 or re.match(r"^=+ .*(passed|failed|error).* =+$", s) or "TIMEOUT after" in s):
             keep.append(s[:600])
     return keep[:limit] + ([f"... ({len(keep) - limit} more evidence lines)"] if len(keep) > limit else [])
@@ -1012,7 +1036,7 @@ def main(argv=None):
                                             f"a/{rel}", f"b/{rel}", n=1, lineterm="")
                 for ln in diff:
                     say("    " + ln)
-            if pg_log and any(k in c for c in p.checks for k in ("k2c", "k20")):
+            if pg_log and any(k in c for c in p.checks for k in ("k2c", "k20", "k21")):
                 with open(pg_log, "a", encoding="utf-8") as fh:
                     fh.write(f"\n== controls campaign {a.campaign}, plant {p.name} ({p.kind}, expect {p.expect}), "
                              f"HEAD {head[:7]}, {time.strftime('%H:%M:%SZ', time.gmtime())}\n")
