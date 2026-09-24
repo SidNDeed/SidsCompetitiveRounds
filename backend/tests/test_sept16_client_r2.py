@@ -2333,14 +2333,29 @@ def _r10_outcome_tokens(ra):
 # small C# statement reader (comments dropped; string and character literals
 # kept whole; a `;` or a brace outside parentheses ends a statement) and the
 # sequence must equal the method's KNOWN SEQUENCE below, statement for
-# statement, in order.  The freedoms are exactly three: the value is split at
-# its last colon or at its first (the model reads which), the four outcome
-# tokens may be listed in any order (the model reads them), and a LOG CALL may
-# stand anywhere -- a `Plugin.Log.Log*` statement with no assignment, no
-# increment, and no `ref` or `out` argument, which cannot change a local.
+# statement, in order.  The freedoms are exactly two: the four outcome tokens
+# may be listed in any order (the model reads them), and a LOG CALL may stand
+# anywhere -- a `Plugin.Log.Log*` statement with no assignment, no increment,
+# no `ref` or `out` argument, and no nested call, object creation or indexer
+# in its arguments other than the allow-listed pure ones (R10-L3, below).
 # Any other statement is REFUSED, and a refusal fails every scenario closed.
+#
+# R10-L2 (round-10 review) -- THE SPLIT IS AT THE LAST COLON, AND ONLY THERE.
+# Round 10 modelled either split as a freedom: `LastIndexOf` or `IndexOf`,
+# the model reading which.  The whole series id is the key (R9-M1) and the
+# read must recover it exactly as it was published, so the value is split at
+# its LAST colon; a first-colon split takes a shorter key whenever the id
+# carries a colon, which is the truncation class R9-M1 closed.  The
+# first-colon statement is therefore a REFUSED statement, not a modelled one,
+# and `test_r11_l2_...` proves it with an identity carrying two colons, where
+# the two split points select different keys.
 _R10CL_LOG = re.compile(r"^Plugin\.Log\.Log(?:Info|Warning|Error)\((.*)\)$")
-_R10CL_SPLIT = {"int i = s.LastIndexOf(':')": "last", "int i = s.IndexOf(':')": "first"}
+_R10CL_SPLIT = {"int i = s.LastIndexOf(':')": "last"}
+# The round-10 table, kept ONLY so `test_r11_l2_...` can show that it
+# ACCEPTED the first-colon statement; the walk reads it only when that test
+# hands it in.
+_R10CL_SPLIT_ROUND10 = {"int i = s.LastIndexOf(':')": "last",
+                        "int i = s.IndexOf(':')": "first"}
 _R10CL_TOKENS = re.compile(
     r'^return \(o == (\w+) \|\| o == (\w+) \|\| o == (\w+) \|\| o == (\w+)\) \? o : ""$')
 _R10CL_OUTCOME_SEQ = (
@@ -2413,9 +2428,87 @@ def _r10cl_statements(body):
     return out
 
 
+# ── R10-L3 (round-10 review): a log call is exempt only when its ARGUMENTS
+# call nothing this derivation cannot prove pure ──────────────────────────────
+#
+# WHAT WAS WRONG.  The exemption read the log statement's own top-level text:
+# no `=`, no `++` or `--`, no `ref` or `out`.  A value-returning helper called
+# INSIDE the arguments -- `Plugin.Log.LogInfo("x" + Clear())` -- was invisible
+# to it, and a helper can change state (clear or rewrite OutcomeProp) as a
+# side effect, so the walk set the whole statement aside.  Its literal
+# blanking also blanked the holes of an interpolated string, so a call or an
+# assignment written in `$"{...}"` was invisible as well.
+#
+# THE RULE.  The arguments are read by the C# lexer (`_cs_code_mask`): the
+# text of every literal is blanked and every interpolation hole is kept as
+# code.  Every nested invocation, every object creation and every indexer in
+# that code disqualifies the exemption, unless the invocation is one of the
+# allow-listed PURE forms below -- compile-time operators and static string
+# predicates whose result depends on their arguments alone.  A property read
+# (`ex.Message`) is not an invocation.  A disqualified log call is not set
+# aside: like any other statement it must be the next one the KNOWN SEQUENCE
+# names, and no sequence names a log call, so it is REFUSED, naming the call.
+_R11_CALL = re.compile(
+    r"(?<![\w.])(new\s+)?([A-Za-z_@]\w*(?:\s*\.\s*[A-Za-z_@]\w*)*)\s*"
+    r"(?:<[^<>()]*>)?\s*\(")
+_R11_NEW = re.compile(r"(?<![\w.])new\s*[\[{(]")
+_R11_INDEXER = re.compile(r"[\w\])]\s*\??\[")
+_R11_PURE_CALLS = frozenset((
+    "nameof", "typeof", "sizeof", "default", "checked", "unchecked",
+    "string.IsNullOrEmpty", "string.IsNullOrWhiteSpace", "string.Equals",
+    "String.IsNullOrEmpty", "String.IsNullOrWhiteSpace", "String.Equals"))
+
+
+def _r11_log_arg_code(stmt):
+    """The arguments of a log call as CODE -- literal text blanked, every
+    interpolation hole kept -- or None when `stmt` is not a log call."""
+    m = _R10CL_LOG.match(stmt)
+    if m is None:
+        return None
+    return _cs_code_mask(m.group(1))
+
+
+def _r11_impure_calls(stmt):
+    """[the nested calls in a log call's arguments that this derivation cannot
+    prove pure]; [] for a log call whose arguments invoke nothing but the
+    allow-listed forms, and [] for a statement that is not a log call."""
+    code = _r11_log_arg_code(stmt)
+    if code is None:
+        return []
+    calls = []
+    for mm in _R11_CALL.finditer(code):
+        name = re.sub(r"\s+", "", mm.group(2))
+        if mm.group(1):
+            calls.append("new " + name + "(...)")
+        elif name not in _R11_PURE_CALLS:
+            calls.append(name + "(...)")
+    for mm in _R11_NEW.finditer(code):
+        if not _R11_CALL.match(code, mm.start()):
+            calls.append("an object or array creation")
+    if _R11_INDEXER.search(code):
+        calls.append("an indexer")
+    return calls
+
+
 def _r10cl_is_log_call(stmt):
     """A log call that cannot change a local: no assignment outside a string
-    or a comparison, no increment or decrement, no `ref` or `out` argument."""
+    or a comparison, no increment or decrement, no `ref` or `out` argument --
+    each read over the arguments as CODE, interpolation holes included -- and
+    no nested call this derivation cannot prove pure (R10-L3)."""
+    code = _r11_log_arg_code(stmt)
+    if code is None:
+        return False
+    bare = re.sub(r"[=!<>]=|=>", " ", code)
+    return ("=" not in bare and "++" not in code and "--" not in code
+            and not re.search(r"\b(?:ref|out)\s", code)
+            and not _r11_impure_calls(stmt))
+
+
+def _r10cl_is_log_call_round10(stmt):
+    """THE ROUND-10 EXEMPTION, verbatim in behaviour: the statement's own text
+    only, with every string literal blanked whole.  Kept ONLY so
+    `test_r11_l3_...` can show that it exempted a nested state-changing call;
+    nothing else calls it."""
     m = _R10CL_LOG.match(stmt)
     if m is None:
         return False
@@ -2426,18 +2519,27 @@ def _r10cl_is_log_call(stmt):
             and not re.search(r"\b(?:ref|out)\s", code))
 
 
-def _r10cl_walk(name, stmts, sequence):
+def _r10cl_walk(name, stmts, sequence, split=None, exempt=None):
     """(slots, why): `stmts` walked against the KNOWN SEQUENCE, log calls set
     aside.  Every statement must be the next one the sequence names; one that
-    is not is REFUSED, never skipped."""
+    is not is REFUSED, never skipped.  `split` and `exempt` default to this
+    round's split table and log-call exemption; only the R10-L2 and R10-L3
+    tests hand in the round-10 ones, to show what those accepted."""
+    split = _R10CL_SPLIT if split is None else split
+    exempt = _r10cl_is_log_call if exempt is None else exempt
     slots, k, logs = {}, 0, 0
     for s in stmts:
-        if _r10cl_is_log_call(s):
+        if exempt(s):
             logs += 1
             continue
+        nested = _r11_impure_calls(s) if exempt is _r10cl_is_log_call else []
+        if nested:
+            return None, ("a log call in %s is not set aside: %s -- its "
+                          "arguments call %s, which this derivation cannot "
+                          "prove pure (R10-L3)" % (name, s, ", ".join(nested)))
         want = sequence[k] if k < len(sequence) else None
-        if want == "<split>" and s in _R10CL_SPLIT:
-            slots["split"] = _R10CL_SPLIT[s]
+        if want == "<split>" and s in split:
+            slots["split"] = split[s]
             k += 1
             continue
         if want == "<tokens>" and _R10CL_TOKENS.match(s):
@@ -2457,16 +2559,18 @@ def _r10cl_walk(name, stmts, sequence):
     return slots, ""
 
 
-def _r10_outcome_model(ra):
+def _r10_outcome_model(ra, split=None):
     """(outcome_of(prop, series), why) derived from OutcomeOf's text and Tag's:
-    every statement of OutcomeOf accounted for (R10CL5)."""
+    every statement of OutcomeOf accounted for (R10CL5).  `split` is handed in
+    only by `test_r11_l2_...`, to derive what the round-10 table accepted."""
     tag, why = _r10_tag_model(ra)
     if tag is None:
         return None, why
     body = _method_body(ra, _R10_OUTCOME_SIG)
     if not body:
         return None, "OutcomeOf's own text could not be delimited"
-    slots, why = _r10cl_walk("OutcomeOf", _r10cl_statements(body), _R10CL_OUTCOME_SEQ)
+    slots, why = _r10cl_walk("OutcomeOf", _r10cl_statements(body), _R10CL_OUTCOME_SEQ,
+                             split=split)
     if slots is None:
         return None, why
     toks = _r10_outcome_tokens(ra)
@@ -2669,6 +2773,140 @@ def test_r10cl5_every_statement_of_the_read_and_the_publication_is_accounted_for
           "accepted %d/%d" % (oslots["statements"], oslots["logs"],
                               pslots["statements"], pslots["logs"],
                               len(planted), len(planted), len(twins), len(twins)))
+
+
+# ── R10-L2 and R10-L3 (round-10 review), in memory ─────────────────────────
+# An identity carrying colons: the two split points select different keys
+# here and nowhere in the prefix pairs above.
+_R11_COLON_IDS = ("srv:3f2a9c1e", "srv:3f2a9c1e:2", "a:b")
+_R11_SPLIT_LAST = "int i = s.LastIndexOf(':');"
+_R11_SPLIT_FIRST = "int i = s.IndexOf(':');"
+
+
+def test_r11_l2_the_read_is_split_at_the_last_colon_and_only_there():
+    """R10-L2 (B9): the walk REQUIRES the last-colon split.  With the
+    first-colon statement in its place the round-10 split table accepted the
+    read and derived a model that took a shorter key -- for an identity
+    carrying a colon, the series' own published answer read as nothing --
+    and this round's table refuses the statement, naming it."""
+    ra = _src("RoomActors.cs")
+    body = _method_body(ra, _R10_OUTCOME_SIG)
+    assert body.count(_R11_SPLIT_LAST) == 1, (
+        "OutcomeOf does not carry the last-colon split exactly once")
+    assert body.count(_R11_SPLIT_FIRST) == 0
+    publish, why_p = _r10_publish_model(ra)
+    assert publish is not None, why_p
+    outcome_of, why = _r10_outcome_model(ra)
+    assert outcome_of is not None, why
+    for sid in _R11_COLON_IDS:
+        prop = publish(sid, "ok")
+        assert prop.count(":") >= 2, prop
+        assert outcome_of(prop, sid) == "ok", (
+            "the series' own answer did not read back under its colon-carrying "
+            "id: %r" % prop)
+    out_at = ra.index(_R10_OUTCOME_SIG)
+    j = ra.index(_R11_SPLIT_LAST, out_at)
+    first = ra[:j] + _R11_SPLIT_FIRST + ra[j + len(_R11_SPLIT_LAST):]
+    assert first != ra
+
+    # the round-10 table ACCEPTED the first-colon statement, and its model
+    # took the shorter key
+    old, why_old = _r10_outcome_model(first, split=_R10CL_SPLIT_ROUND10)
+    assert old is not None, (
+        "the round-10 table did not accept the first-colon split: " + why_old)
+    wrong = [(sid, publish(sid, "ok")) for sid in _R11_COLON_IDS
+             if old(publish(sid, "ok"), sid) != "ok"]
+    assert len(wrong) == len(_R11_COLON_IDS), wrong
+    sid, prop = wrong[0]
+    print("R10-L2 ROUND-10 TABLE: accepted %r; key taken %r, published under "
+          "%r -- the series' own answer read as %r" % (
+              _R11_SPLIT_FIRST, prop[:prop.find(":")], prop[:prop.rfind(":")],
+              old(prop, sid)))
+
+    # this round's table REFUSES it, naming the statement
+    new, why_new = _r10_outcome_model(first)
+    assert new is None and "does not know" in why_new, why_new
+    assert _R11_SPLIT_FIRST.rstrip(";") in why_new, why_new
+    print("R10-L2 REFUSED: " + why_new)
+
+    # TWIN, in the test: a comment after the last-colon statement changes no
+    # statement and is accepted
+    twin = ra[:j + len(_R11_SPLIT_LAST)] + "  // the last colon" + ra[
+        j + len(_R11_SPLIT_LAST):]
+    t, why_t = _r10_outcome_model(twin)
+    assert t is not None, why_t
+    print("R10-L2 LAST-COLON SPLIT: required; %d colon-carrying ids read back "
+          "their own answer; the first-colon statement refused" % len(
+              _R11_COLON_IDS))
+
+
+# The planted forms: a log call whose arguments call a helper that could
+# rewrite or clear the published value, in every place an argument can call
+# one.  `ZzClearOutcome` names no plugin member; the text is judged, never run.
+_R11_PLANTED_LOG_CALLS = (
+    'Plugin.Log.LogInfo("[2v2-DC] cleared " + ZzClearOutcome(tag));',
+    'Plugin.Log.LogInfo($"[2v2-DC] cleared {ZzClearOutcome(tag)}");',
+    'Plugin.Log.LogInfo("[2v2-DC] cleared " + new ZzSink(tag).Text);',
+    'Plugin.Log.LogInfo("[2v2-DC] cleared " + ZzSinks[OutcomeProp]);',
+    'Plugin.Log.LogInfo("[2v2-DC] cleared " + tag.ZzClear());',
+)
+# The exempt shape: literals, property reads and the allow-listed pure forms.
+_R11_PURE_LOG_CALLS = (
+    'Plugin.Log.LogInfo("[2v2-DC] cleared");',
+    'Plugin.Log.LogInfo("[2v2-DC] key " + nameof(OutcomeProp) + " " + tag.Length);',
+    'Plugin.Log.LogInfo($"[2v2-DC] empty {string.IsNullOrEmpty(tag)}");',
+    'Plugin.Log.LogInfo("[2v2-DC] a call written in text: ZzClearOutcome(tag)");',
+)
+
+
+def test_r11_l3_a_log_call_whose_arguments_call_a_helper_is_not_set_aside():
+    """R10-L3 (B9): a log call is set aside only when its ARGUMENTS call
+    nothing this derivation cannot prove pure.  Each planted helper call --
+    concatenated, in an interpolation hole, an object creation, an indexer, a
+    method on a local -- was exempted by the round-10 reading and is REFUSED
+    now, naming the call; a log call of literals, property reads and the
+    allow-listed pure forms is still set aside."""
+    ra = _src("RoomActors.cs")
+    pub_at = ra.index(_R10_PUBLISH_SIG)
+    tag_line = "string tag = Tag(seriesId);"
+    j = ra.index(tag_line, pub_at) + len(tag_line)
+
+    def plant(line):
+        return ra[:j] + " " + line + ra[j:]
+
+    body = _method_body(ra, _R10_PUBLISH_SIG)
+    stmts = _r10cl_statements(body)
+    logs = [s for s in stmts if _R10CL_LOG.match(s)]
+    assert logs and all(_r10cl_is_log_call(s) for s in logs), logs
+    slots, why = _r10cl_walk("PublishOutcome", stmts, _R10CL_PUBLISH_SEQ)
+    assert slots is not None, why
+
+    refused = 0
+    for line in _R11_PLANTED_LOG_CALLS:
+        src = plant(line)
+        stmt = line.rstrip(";")
+        assert _r10cl_is_log_call_round10(stmt), (
+            "the round-10 reading did not exempt: " + line)
+        pb = _r10cl_statements(_method_body(src, _R10_PUBLISH_SIG))
+        old, _w = _r10cl_walk("PublishOutcome", pb, _R10CL_PUBLISH_SEQ,
+                              exempt=_r10cl_is_log_call_round10)
+        assert old is not None, "the round-10 walk refused: " + line
+        assert not _r10cl_is_log_call(stmt), "still exempt: " + line
+        assert _r11_impure_calls(stmt), line
+        p, why_p = _r10_publish_model(src)
+        assert p is None and "is not set aside" in why_p, (line, why_p)
+        refused += 1
+        print("R10-L3 REFUSED: " + why_p)
+
+    for line in _R11_PURE_LOG_CALLS:
+        stmt = line.rstrip(";")
+        assert _r10cl_is_log_call(stmt), "no longer exempt: " + line
+        p, why_p = _r10_publish_model(plant(line))
+        assert p is not None, (line, why_p)
+    print("R10-L3 NESTED CALLS: %d planted forms refused, each exempted by the "
+          "round-10 reading; %d pure forms still set aside; the tree's %d log "
+          "call(s) in PublishOutcome exempt" % (
+              refused, len(_R11_PURE_LOG_CALLS), len(logs)))
 
 
 def test_the_dc_fallback_watch_dies_with_the_room():
